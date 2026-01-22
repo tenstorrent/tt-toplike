@@ -1,0 +1,86 @@
+[package]
+name = "tt-toplike-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Tenstorrent"]
+license = "Apache-2.0"
+description = "Real-time hardware monitoring for Tenstorrent silicon (Rust implementation)"
+
+# Multiple binaries - TUI and GUI frontends
+[[bin]]
+name = "tt-toplike-tui"
+path = "src/bin/tui.rs"
+required-features = ["tui"]
+
+[[bin]]
+name = "tt-toplike-gui"
+path = "src/bin/gui.rs"
+required-features = ["gui"]
+
+# Default binary (TUI)
+[lib]
+name = "tt_toplike_rs"
+path = "src/lib.rs"
+
+[dependencies]
+# Tenstorrent hardware access (PRIMARY - using all-smi maintained fork)
+all-smi-luwen-core = { version = "0.2.0", optional = true }  # Luwen core types
+all-smi-luwen-if = { version = "0.7.9", optional = true }  # Luwen interface library
+all-smi-luwen-ref = { version = "0.7.9", optional = true }  # Reference PCI communication
+
+# TUI framework (optional - only needed for TUI frontend)
+ratatui = { version = "0.28", default-features = true, optional = true }
+crossterm = { version = "0.28", features = ["event-stream"], optional = true }
+
+# GUI framework (optional - only needed for GUI frontend)
+iced = { version = "0.13", features = ["canvas", "tokio"], optional = true }
+
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+tokio-util = "0.7"
+
+# JSON parsing (for JSON backend fallback)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# CLI parsing
+clap = { version = "4.5", features = ["derive", "cargo"] }
+
+# System monitoring
+sysinfo = "0.32"
+procfs = { version = "0.17", optional = true }  # Linux-specific
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Time utilities
+chrono = { version = "0.4", features = ["serde"] }
+
+# Math utilities
+num-traits = "0.2"
+
+# Configuration
+toml = "0.8"
+
+[dev-dependencies]
+# Testing
+mockall = "0.13"
+pretty_assertions = "1.4"
+tempfile = "3.13"
+
+[features]
+default = ["tui", "json-backend", "luwen-backend", "linux-procfs"]
+
+# Frontend features
+tui = ["ratatui", "crossterm"]  # Terminal UI with Ratatui
+gui = ["iced"]                  # Native GUI with iced
+
+# Backend features
+luwen-backend = ["all-smi-luwen-core", "all-smi-luwen-if", "all-smi-luwen-ref"]   # Direct hardware access (PRIMARY)
+json-backend = []               # Subprocess tt-smi + JSON (FALLBACK)
+linux-procfs = ["procfs"]       # Enhanced Linux process detection
