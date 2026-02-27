@@ -13,7 +13,7 @@ use crate::cli::{BackendType, Cli};
 use crate::error::TTTopError;
 use crate::ui::colors;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -78,7 +78,9 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
         e
     )))?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+    // Note: Mouse capture disabled - we don't use mouse events and they were causing
+    // performance issues (faster animation when mousing over the terminal)
+    execute!(stdout, EnterAlternateScreen)
         .map_err(|e| TTTopError::Terminal(e.to_string()))?;
 
     // Disable stderr output to prevent log corruption in TUI
@@ -98,8 +100,7 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     disable_raw_mode().map_err(|e| TTTopError::Terminal(e.to_string()))?;
     execute!(
         terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
+        LeaveAlternateScreen
     )
     .map_err(|e| TTTopError::Terminal(e.to_string()))?;
     terminal
@@ -119,6 +120,10 @@ fn run_app(
 ) -> Result<(), TTTopError> {
     let update_interval = Duration::from_millis(cli.interval);
     let mut last_update = Instant::now();
+
+    // UI refresh rate: 60 FPS for smooth animations and responsive input
+    // This is independent of backend update rate
+    let ui_poll_rate = Duration::from_millis(16); // ~60 FPS
 
     // UI state
     let mut display_mode = DisplayMode::Normal;
@@ -173,12 +178,10 @@ fn run_app(
             })
             .map_err(|e| TTTopError::Terminal(e.to_string()))?;
 
-        // Handle input with timeout
-        let timeout = update_interval
-            .checked_sub(last_update.elapsed())
-            .unwrap_or(Duration::from_millis(0));
-
-        if event::poll(timeout).map_err(|e| TTTopError::Terminal(e.to_string()))? {
+        // Handle input with fixed UI poll rate (60 FPS)
+        // This provides smooth animations and responsive keyboard input
+        // regardless of backend update interval
+        if event::poll(ui_poll_rate).map_err(|e| TTTopError::Terminal(e.to_string()))? {
             if let Event::Key(key) = event::read().map_err(|e| TTTopError::Terminal(e.to_string()))? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {

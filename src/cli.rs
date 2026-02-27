@@ -304,6 +304,7 @@ mod tests {
             timeout: 5000,
             visualize: false,
             workload: false,
+            print: false,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Auto);
@@ -329,6 +330,7 @@ mod tests {
             timeout: 5000,
             visualize: false,
             workload: false,
+            print: false,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Mock);
@@ -350,6 +352,7 @@ mod tests {
             timeout: 5000,
             visualize: false,
             workload: false,
+            print: false,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Json);
@@ -371,6 +374,7 @@ mod tests {
             timeout: 5000,
             visualize: false,
             workload: false,
+            print: false,
         };
 
         assert!(cli.should_monitor_device(0));
@@ -396,6 +400,7 @@ mod tests {
             timeout: 5000,
             visualize: false,
             workload: false,
+            print: false,
         };
 
         assert_eq!(verbose_cli.log_level(), log::LevelFilter::Debug);
@@ -414,6 +419,7 @@ mod tests {
             timeout: 5000,
             visualize: false,
             workload: false,
+            print: false,
         };
 
         assert_eq!(quiet_cli.log_level(), log::LevelFilter::Off);
@@ -435,6 +441,7 @@ mod tests {
             timeout: 5000,
             visualize: false,
             workload: false,
+            print: false,
         };
 
         assert!(cli.validate().is_err());
@@ -456,6 +463,7 @@ mod tests {
             timeout: 5000,
             visualize: false,
             workload: false,
+            print: false,
         };
 
         assert_eq!(auto_cli.backend_name(), "Auto-detect");
@@ -474,6 +482,7 @@ mod tests {
             timeout: 5000,
             visualize: false,
             workload: false,
+            print: false,
         };
 
         assert_eq!(mock_cli.backend_name(), "Mock");

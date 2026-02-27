@@ -285,7 +285,7 @@ mod tests {
     fn test_sysfs_backend_with_config() {
         let config = BackendConfig::default().with_interval(50);
         let backend = SysfsBackend::with_config(config);
-        assert_eq!(backend.config.interval_ms, 50);
+        assert_eq!(backend.config.update_interval_ms, 50);
     }
 
     // Note: Actual device detection tests require real hardware or mocked filesystem

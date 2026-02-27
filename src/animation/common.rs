@@ -87,9 +87,54 @@ pub const PHOSPHOR_CHARS: [char; 7] = ['·', '░', '▒', '▓', '█', '▓', 
 /// Particle characters for data flow
 pub const PARTICLE_CHARS: [char; 6] = ['·', '○', '◎', '◉', '●', '✦'];
 
+// ========================================
+// MEMORY CASTLE CHARACTER SETS (CP437 ANSI Art)
+// ========================================
+
+/// Castle door/gate characters (heavy box drawing)
+/// Used for DDR channel gates in Greyskull castle theme
+pub const DOOR_CHARS: [char; 4] = ['╔', '╗', '╚', '╝'];
+
+/// Castle wall characters (box drawing)
+pub const WALL_CHARS: [char; 4] = ['═', '║', '─', '│'];
+
+/// Castle window characters (progression from empty to solid)
+/// Used for L1 SRAM Tensix cores in castle towers
+pub const WINDOW_CHARS: [char; 5] = ['□', '▫', '▪', '▪', '■'];
+
+/// Shelf character for L2 cache (great hall shelves)
+pub const SHELF_CHAR: char = '═';
+
+/// Portal/wormhole characters (circular, swirling)
+/// Used for Wormhole architecture portal nexus theme
+pub const PORTAL_CHARS: [char; 6] = ['◯', '◎', '◉', '⊚', '⊛', '◉'];
+
+/// Accretion disk characters (rotating phases)
+/// Used for Blackhole architecture event horizon theme
+pub const ACCRETION_CHARS: [char; 4] = ['◐', '◑', '◒', '◓'];
+
+/// Singularity characters (gravitational intensity)
+/// Used for Blackhole L1 SRAM cores near event horizon
+pub const SINGULARITY_CHARS: [char; 5] = ['·', '∘', '○', '●', '◉'];
+
 /// Map value to standard block character
 pub fn value_to_block_char(value: f32) -> char {
     value_to_char_intensity(value, &BLOCK_CHARS)
+}
+
+/// Map value to castle window character (for Greyskull theme)
+pub fn value_to_window_char(value: f32) -> char {
+    value_to_char_intensity(value, &WINDOW_CHARS)
+}
+
+/// Map value to singularity character (for Blackhole theme)
+pub fn value_to_singularity_char(value: f32) -> char {
+    value_to_char_intensity(value, &SINGULARITY_CHARS)
+}
+
+/// Map value to portal character (for Wormhole theme)
+pub fn value_to_portal_char(value: f32) -> char {
+    value_to_char_intensity(value, &PORTAL_CHARS)
 }
 
 /// Linear interpolation between two values
@@ -277,5 +322,23 @@ mod tests {
         let (x, y) = lissajous(0.0, 1.0, 1.0, 0.0);
         assert!(x.abs() < 0.01);  // Should be near origin at t=0
         assert!(y.abs() < 0.01);
+    }
+
+    #[test]
+    fn test_castle_window_chars() {
+        assert_eq!(value_to_window_char(0.0), '□');  // Empty window
+        assert_eq!(value_to_window_char(1.0), '■');  // Solid window
+    }
+
+    #[test]
+    fn test_singularity_chars() {
+        assert_eq!(value_to_singularity_char(0.0), '·');  // Far from singularity
+        assert_eq!(value_to_singularity_char(1.0), '◉');  // At event horizon
+    }
+
+    #[test]
+    fn test_portal_chars() {
+        assert_eq!(value_to_portal_char(0.0), '◯');  // Closed portal
+        assert_eq!(value_to_portal_char(1.0), '◉');  // Open portal
     }
 }

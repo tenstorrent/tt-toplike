@@ -204,7 +204,24 @@ mod tests {
     #[test]
     fn test_mock_backend_always_works() {
         let config = BackendConfig::default();
-        let cli = Cli::default();
+
+        // Create a mock Cli instance for testing
+        let cli = Cli {
+            backend: BackendType::Mock,
+            mock: true,
+            json: false,
+            tt_smi_path: std::path::PathBuf::from("tt-smi"),
+            interval: 100,
+            devices: None,
+            verbose: false,
+            quiet: false,
+            mock_devices: 3,
+            max_errors: 10,
+            timeout: 5000,
+            visualize: false,
+            workload: false,
+            print: false,
+        };
 
         let result = create_backend(BackendType::Mock, config, &cli);
         assert!(result.is_ok());
