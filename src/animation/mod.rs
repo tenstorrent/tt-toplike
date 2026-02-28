@@ -15,11 +15,13 @@
 //! No fake animations that move regardless of hardware state.
 
 pub mod baseline;
-pub mod starfield;
 pub mod common;
+pub mod memory_flow;
+pub mod starfield;
 pub mod tron_grid;
 
 pub use baseline::AdaptiveBaseline;
-pub use starfield::{HardwareStarfield, Star, MemoryPlanet, DataStream};
-pub use tron_grid::TronGrid;
 pub use common::*;
+pub use memory_flow::MemoryFlowVis;
+pub use starfield::{DataStream, HardwareStarfield, MemoryPlanet, Star};
+pub use tron_grid::TronGrid;

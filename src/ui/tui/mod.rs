@@ -7,7 +7,7 @@
 //! - Normal mode: Traditional table view with real-time telemetry
 //! - Visualization mode: Hardware-responsive starfield animation
 
-use crate::animation::{HardwareStarfield, TronGrid};
+use crate::animation::{HardwareStarfield, MemoryFlowVis, TronGrid};
 use crate::backend::{factory, BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
 use crate::error::TTTopError;
@@ -37,6 +37,8 @@ enum DisplayMode {
     Starfield,
     /// TRON Grid mode (neon topology with randomization)
     TronGrid,
+    /// Memory Flow Topology (full-screen DRAM motion visualization)
+    MemoryFlow,
 }
 
 /// Run the TUI application
@@ -129,6 +131,7 @@ fn run_app(
     let mut display_mode = DisplayMode::Normal;
     let mut starfield: Option<HardwareStarfield> = None;
     let mut tron_grid: Option<TronGrid> = None;
+    let mut memory_flow: Option<MemoryFlowVis> = None;
 
     loop {
         // Initialize or update visualizations
@@ -154,6 +157,15 @@ fn run_app(
                     tg.update(backend);
                 }
             }
+            DisplayMode::MemoryFlow => {
+                if memory_flow.is_none() {
+                    // Create new MemoryFlow visualization
+                    memory_flow = Some(MemoryFlowVis::new(size.width as usize, size.height as usize));
+                }
+                if let Some(ref mut mf) = memory_flow {
+                    mf.update(backend);
+                }
+            }
             DisplayMode::Normal => {
                 // Normal mode doesn't need special init
             }
@@ -172,6 +184,11 @@ fn run_app(
                     DisplayMode::TronGrid => {
                         if let Some(ref tg) = tron_grid {
                             ui_tron_grid(f, tg, backend);
+                        }
+                    }
+                    DisplayMode::MemoryFlow => {
+                        if let Some(ref mf) = memory_flow {
+                            ui_memory_flow(f, mf, backend);
                         }
                     }
                 }
@@ -194,9 +211,10 @@ fn run_app(
                         }
                     }
                     KeyCode::Char('v') => {
-                        // Cycle through visualization modes (with randomization)
+                        // Cycle through visualization modes
                         display_mode = match display_mode {
-                            DisplayMode::Normal => DisplayMode::Starfield,
+                            DisplayMode::Normal => DisplayMode::MemoryFlow,
+                            DisplayMode::MemoryFlow => DisplayMode::Starfield,
                             DisplayMode::Starfield => {
                                 // Randomize TRON Grid on each activation
                                 tron_grid = None;
@@ -204,7 +222,7 @@ fn run_app(
                             }
                             DisplayMode::TronGrid => DisplayMode::Normal,
                         };
-                        log::info!("Switched to {:?} mode (randomized)", display_mode);
+                        log::info!("Switched to {:?} mode", display_mode);
                     }
                     KeyCode::Char('b') => {
                         // Switch to next backend
@@ -222,6 +240,9 @@ fn run_app(
                                 }
                                 if let DisplayMode::TronGrid = display_mode {
                                     tron_grid = None;
+                                }
+                                if let DisplayMode::MemoryFlow = display_mode {
+                                    memory_flow = None;
                                 }
                             }
                             Err(e) => {
@@ -721,6 +742,24 @@ fn ui_tron_grid(
 
     // Render TRON Grid footer
     render_tron_grid_footer(f, chunks[2]);
+}
+
+/// Render Memory Flow visualization (full-screen DRAM motion)
+fn ui_memory_flow(
+    f: &mut Frame,
+    memory_flow: &MemoryFlowVis,
+    backend: &Box<dyn TelemetryBackend>,
+) {
+    // Full-screen layout - no chrome, just the visualization
+    let flow_lines = memory_flow.render(backend);
+
+    let flow_widget = Paragraph::new(flow_lines)
+        .block(
+            Block::default()
+                .borders(Borders::NONE) // No borders for full-screen effect
+        );
+
+    f.render_widget(flow_widget, f.area());
 }
 
 /// Render TRON Grid mode header with device info
