@@ -1,0 +1,28 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo lock for libraries (keep for binaries)
+# Cargo.lock is kept for this project since it's a binary
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local configuration
+.claude/settings.local.json
+
+# Debug and log files
+*.log
+debug/
+tmp/
+
+# System files
+Thumbs.db
+.Spotlight-V100
+.Trashes
