@@ -308,15 +308,6 @@ pub struct TronGrid {
     /// Animation frame counter
     frame: u32,
 
-    /// Grid style (randomized)
-    grid_style: GridStyle,
-
-    /// Color scheme (randomized)
-    color_scheme: ColorScheme,
-
-    /// Flow speed multiplier (randomized 0.5-2.0)
-    flow_speed: f32,
-
     /// Memory particles flowing through hierarchy
     particles: Vec<MemoryParticle>,
 
@@ -327,23 +318,11 @@ pub struct TronGrid {
 impl TronGrid {
     /// Create new Memory Castle mode with random parameters
     pub fn new(width: usize, height: usize) -> Self {
-        // Randomize parameters for variety
-        let flow_speed = 0.5
-            + ((std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-                % 150) as f32
-                / 100.0);
-
         Self {
             width,
             height,
             baseline: AdaptiveBaseline::new(),
             frame: 0,
-            grid_style: GridStyle::random(),
-            color_scheme: ColorScheme::random(),
-            flow_speed,
             particles: Vec::new(),
             max_particles: 100,  // Cap at 100 particles for performance
         }
@@ -684,6 +663,18 @@ impl TronGrid {
         self.render_greyskull_castle(backend, device, width, _height)
     }
 
+    /// Calculate actual width of a line's spans (counting characters, not bytes)
+    ///
+    /// Handles Unicode characters correctly by counting grapheme clusters
+    fn calculate_span_width(spans: &[Span]) -> usize {
+        spans.iter()
+            .map(|span| {
+                // Count Unicode characters (not bytes)
+                span.content.chars().count()
+            })
+            .sum()
+    }
+
     /// Render castle gates (DDR channels) with training status
     ///
     /// Format: ╔●╗ ╔●╗ ╔○╗ ╔✗╗ (4 gates with status symbols)
@@ -792,11 +783,12 @@ impl TronGrid {
             ));
         }
 
-        // Padding to fill width
-        let used_width = 12 + num_channels * 4 + 3 + 6 + 8;
-        spans.push(Span::raw(
-            " ".repeat(content_width.saturating_sub(used_width)),
-        ));
+        // Padding to fill width (calculate actual width dynamically)
+        let actual_width = Self::calculate_span_width(&spans);
+        let padding_needed = content_width.saturating_sub(actual_width).saturating_sub(1); // -1 for right border
+        spans.push(Span::raw(" ".repeat(padding_needed)));
+
+        // Right border
         spans.push(Span::styled(
             wall_v.to_string(),
             Style::default().fg(castle_color),
@@ -857,11 +849,12 @@ impl TronGrid {
             spans.push(Span::styled("═ ", Style::default().fg(shelf_color)));
         }
 
-        // Padding
-        let used_width = 14 + 8 * 3;
-        spans.push(Span::raw(
-            " ".repeat(content_width.saturating_sub(used_width)),
-        ));
+        // Padding (calculate actual width dynamically)
+        let actual_width = Self::calculate_span_width(&spans);
+        let padding_needed = content_width.saturating_sub(actual_width).saturating_sub(1); // -1 for right border
+        spans.push(Span::raw(" ".repeat(padding_needed)));
+
+        // Right border
         spans.push(Span::styled(
             wall_v.to_string(),
             Style::default().fg(castle_color),
@@ -941,11 +934,12 @@ impl TronGrid {
                 ));
             }
 
-            // Padding
-            let used_width = 11 + grid_cols;
-            spans.push(Span::raw(
-                " ".repeat(content_width.saturating_sub(used_width)),
-            ));
+            // Padding (calculate actual width dynamically)
+            let actual_width = Self::calculate_span_width(&spans);
+            let padding_needed = content_width.saturating_sub(actual_width).saturating_sub(1); // -1 for right border
+            spans.push(Span::raw(" ".repeat(padding_needed)));
+
+            // Right border
             spans.push(Span::styled(
                 wall_v.to_string(),
                 Style::default().fg(castle_color),

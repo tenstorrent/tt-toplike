@@ -28,7 +28,8 @@ use std::path::{Path, PathBuf};
 ///
 /// Reads telemetry from `/sys/class/hwmon/hwmon*` entries
 pub struct SysfsBackend {
-    /// Backend configuration
+    /// Backend configuration (reserved for future use)
+    #[allow(dead_code)]
     config: BackendConfig,
 
     /// Detected devices with their hwmon paths

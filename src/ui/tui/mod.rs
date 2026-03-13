@@ -365,7 +365,7 @@ fn render_devices(f: &mut Frame, area: Rect, backend: &Box<dyn TelemetryBackend>
         let arch = device.architecture.abbrev().to_string();
 
         // Power
-        let (power_str, power_style) = if let Some(t) = telem {
+        let (power_str, _power_style) = if let Some(t) = telem {
             let power = t.power_w();
             (
                 format!("{:.1}W", power),
@@ -376,7 +376,7 @@ fn render_devices(f: &mut Frame, area: Rect, backend: &Box<dyn TelemetryBackend>
         };
 
         // Temperature
-        let (temp_str, temp_style) = if let Some(t) = telem {
+        let (temp_str, _temp_style) = if let Some(t) = telem {
             let temp = t.temp_c();
             (
                 format!("{:.1}°C", temp),
@@ -408,7 +408,7 @@ fn render_devices(f: &mut Frame, area: Rect, backend: &Box<dyn TelemetryBackend>
         };
 
         // ARC Health
-        let (health_str, health_style) = if let Some(s) = smbus {
+        let (health_str, _health_style) = if let Some(s) = smbus {
             let healthy = s.is_arc0_healthy();
             (
                 if healthy { "✓ Healthy" } else { "✗ Failed" },

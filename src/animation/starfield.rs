@@ -11,7 +11,7 @@
 //! - No fake animations - everything driven by real hardware state
 
 use crate::backend::TelemetryBackend;
-use crate::models::{Architecture, Device};
+use crate::models::Device;
 use crate::animation::AdaptiveBaseline;
 use crate::ui::colors;
 use ratatui::style::Color;

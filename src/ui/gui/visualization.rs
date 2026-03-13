@@ -340,25 +340,28 @@ impl canvas::Program<(), Theme> for DashboardVisualization {
             let width = bounds.width;
             let height = bounds.height;
 
-            // Calculate layout sections
-            let header_height = 60.0;
-            let ddr_section_height = 120.0;
-            let memory_section_height = 200.0;
-            let metrics_section_y = header_height + ddr_section_height + memory_section_height + 20.0;
+            // Calculate layout sections using percentage-based heights for better scaling
+            let header_height = height * 0.10;      // 10% for header
+            let ddr_section_height = height * 0.25;  // 25% for DDR channels
+            let memory_section_height = height * 0.35; // 35% for memory hierarchy
+            let metrics_section_height = height * 0.25; // 25% for metrics
+            // 5% left for spacing
+
+            let ddr_y = header_height;
+            let memory_y = ddr_y + ddr_section_height;
+            let metrics_y = memory_y + memory_section_height;
 
             // === HEADER: Device Info ===
             self.draw_header(frame, width, header_height);
 
             // === DDR CHANNELS ===
-            self.draw_ddr_channels(frame, width, header_height, ddr_section_height);
+            self.draw_ddr_channels(frame, width, ddr_y, ddr_section_height);
 
             // === MEMORY HIERARCHY ===
-            self.draw_memory_hierarchy(frame, width, header_height + ddr_section_height + 10.0, memory_section_height);
+            self.draw_memory_hierarchy(frame, width, memory_y, memory_section_height);
 
             // === METRICS GAUGES ===
-            if metrics_section_y < height - 150.0 {
-                self.draw_metrics_gauges(frame, width, metrics_section_y, height - metrics_section_y - 20.0);
-            }
+            self.draw_metrics_gauges(frame, width, metrics_y, metrics_section_height);
 
             // === ANIMATED BORDER ===
             self.draw_animated_border(frame, bounds);

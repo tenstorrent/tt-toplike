@@ -39,7 +39,7 @@ pub mod luwen;  // Luwen backend for direct hardware access
 pub mod sysfs;  // Sysfs backend for Linux hwmon sensors (non-invasive)
 pub mod factory;  // Backend factory for dynamic creation and switching
 
-use crate::error::{BackendError, BackendResult};
+use crate::error::BackendResult;
 use crate::models::{Device, Telemetry, SmbusTelemetry};
 
 /// Common interface for all telemetry backends

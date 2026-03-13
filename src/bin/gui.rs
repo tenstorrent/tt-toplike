@@ -468,12 +468,14 @@ impl TTTopGUI {
     /// Starfield visualization view
     fn view_starfield(&self) -> Element<Message> {
         if let Some(starfield) = self.starfields.get(self.selected_device) {
-            // Render starfield to terminal grid
-            let mut grid = TerminalGrid::new(120, 40);
+            // Render starfield to terminal grid with larger size for better window filling
+            // Increased from 120x40 to 160x60 for better scaling
+            let mut grid = TerminalGrid::new(160, 60);
             starfield.render_to_grid(&mut grid);
 
-            // Create terminal canvas
-            let canvas: Element<Message> = Element::from(terminal_canvas::view(grid, 10.0, 20.0))
+            // Create terminal canvas with smaller font/cell size for better scaling
+            // Reduced from 10.0x20.0 to 8.0x16.0 for more compact display
+            let canvas: Element<Message> = Element::from(terminal_canvas::view(grid, 8.0, 16.0))
                 .map(|_| Message::Tick);
 
             // Wrap in container for layout
