@@ -16,12 +16,12 @@
 
 pub mod baseline;
 pub mod common;
+pub mod memory_castle;
 pub mod memory_flow;
 pub mod starfield;
-pub mod tron_grid;
 
 pub use baseline::AdaptiveBaseline;
 pub use common::*;
+pub use memory_castle::MemoryCastle;
 pub use memory_flow::MemoryFlowVis;
 pub use starfield::{DataStream, HardwareStarfield, MemoryPlanet, Star};
-pub use tron_grid::TronGrid;

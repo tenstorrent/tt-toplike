@@ -114,12 +114,12 @@ pub struct GridChars {
     pub cross: char,
 }
 
-/// Color scheme for TRON grid (randomized)
+/// Color scheme for castle visualization
 #[derive(Debug, Clone, Copy)]
 pub enum ColorScheme {
-    /// Classic blue (TRON 1982)
+    /// Classic blue
     ClassicBlue,
-    /// Orange (TRON Legacy)
+    /// Orange
     Orange,
     /// Cyan/Magenta (cyberpunk)
     Cyberpunk,
@@ -297,7 +297,7 @@ pub enum CastleTheme {
 }
 
 /// Memory Castle visualization mode
-pub struct TronGrid {
+pub struct MemoryCastle {
     /// Display dimensions
     width: usize,
     height: usize,
@@ -315,7 +315,7 @@ pub struct TronGrid {
     max_particles: usize,
 }
 
-impl TronGrid {
+impl MemoryCastle {
     /// Create new Memory Castle mode with random parameters
     pub fn new(width: usize, height: usize) -> Self {
         Self {
@@ -549,7 +549,7 @@ impl TronGrid {
         )];
 
         let title = format!(" ⚔ CASTLE OF GREYSKULL {} ⚔ ", device.index);
-        let title_len = title.len();
+        let title_len = title.chars().count();  // Count characters, not bytes (emoji are multi-byte)
         top_line.push(Span::styled(
             title,
             Style::default()
@@ -601,7 +601,7 @@ impl TronGrid {
             " ⚡ {:.1}W │ 🌡 {:.0}°C │ ⚙ {:.1}A │ Particles: {} ",
             power, temp, current, self.particles.len()
         );
-        let stats_len = stats.len();
+        let stats_len = stats.chars().count();  // Count characters, not bytes (emoji are multi-byte)
         let mut stats_line = vec![Span::styled(
             wall_v.to_string(),
             Style::default().fg(stone_dark),
@@ -1008,8 +1008,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tron_grid_creation() {
-        let grid = TronGrid::new(80, 24);
+    fn test_memory_castle_creation() {
+        let grid = MemoryCastle::new(80, 24);
         assert_eq!(grid.mode_name(), "Memory Castle");
         assert_eq!(grid.width, 80);
         assert_eq!(grid.height, 24);
@@ -1022,19 +1022,19 @@ mod tests {
         use crate::models::Architecture;
 
         assert_eq!(
-            TronGrid::get_castle_theme(Architecture::Grayskull),
+            MemoryCastle::get_castle_theme(Architecture::Grayskull),
             CastleTheme::Greyskull
         );
         assert_eq!(
-            TronGrid::get_castle_theme(Architecture::Wormhole),
+            MemoryCastle::get_castle_theme(Architecture::Wormhole),
             CastleTheme::PortalNexus
         );
         assert_eq!(
-            TronGrid::get_castle_theme(Architecture::Blackhole),
+            MemoryCastle::get_castle_theme(Architecture::Blackhole),
             CastleTheme::EventHorizon
         );
         assert_eq!(
-            TronGrid::get_castle_theme(Architecture::Unknown),
+            MemoryCastle::get_castle_theme(Architecture::Unknown),
             CastleTheme::Greyskull
         ); // Default
     }
@@ -1147,13 +1147,13 @@ mod tests {
 
         // Test title padding calculation
         let title = " Device 0: GS ";
-        let title_len = title.len();
+        let title_len = title.chars().count();  // Use chars().count() for Unicode safety
         let padding = content_width.saturating_sub(title_len);
         assert_eq!(padding + title_len, content_width, "Title + padding should equal content_width");
 
         // Test stats line padding
         let stats = " Power: 43.2W │ Temp: 67.0°C │ Current: 19.4A ";
-        let stats_len = stats.len();
+        let stats_len = stats.chars().count();  // Use chars().count() for Unicode safety
         let padding = content_width.saturating_sub(stats_len);
         assert!(padding + stats_len <= content_width, "Stats + padding should not exceed content_width");
     }

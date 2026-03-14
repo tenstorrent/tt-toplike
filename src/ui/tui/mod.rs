@@ -7,7 +7,7 @@
 //! - Normal mode: Traditional table view with real-time telemetry
 //! - Visualization mode: Hardware-responsive starfield animation
 
-use crate::animation::{HardwareStarfield, MemoryFlowVis, TronGrid};
+use crate::animation::{HardwareStarfield, MemoryFlowVis, MemoryCastle};
 use crate::backend::{factory, BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
 use crate::error::TTTopError;
@@ -35,8 +35,8 @@ enum DisplayMode {
     Normal,
     /// Hardware-responsive starfield visualization (original)
     Starfield,
-    /// TRON Grid mode (neon topology with randomization)
-    TronGrid,
+    /// Memory Castle mode (architectural memory hierarchy visualization)
+    MemoryCastle,
     /// Memory Flow Topology (full-screen DRAM motion visualization)
     MemoryFlow,
 }
@@ -130,7 +130,7 @@ fn run_app(
     // UI state
     let mut display_mode = DisplayMode::Normal;
     let mut starfield: Option<HardwareStarfield> = None;
-    let mut tron_grid: Option<TronGrid> = None;
+    let mut memory_castle: Option<MemoryCastle> = None;
     let mut memory_flow: Option<MemoryFlowVis> = None;
 
     loop {
@@ -148,12 +148,12 @@ fn run_app(
                     sf.update_from_telemetry(backend);
                 }
             }
-            DisplayMode::TronGrid => {
-                if tron_grid.is_none() {
-                    // Create new TronGrid with random parameters
-                    tron_grid = Some(TronGrid::new(size.width as usize, size.height as usize));
+            DisplayMode::MemoryCastle => {
+                if memory_castle.is_none() {
+                    // Create new MemoryCastle with random parameters
+                    memory_castle = Some(MemoryCastle::new(size.width as usize, size.height as usize));
                 }
-                if let Some(ref mut tg) = tron_grid {
+                if let Some(ref mut tg) = memory_castle {
                     tg.update(backend);
                 }
             }
@@ -181,9 +181,9 @@ fn run_app(
                             ui_visualization(f, sf, backend);
                         }
                     }
-                    DisplayMode::TronGrid => {
-                        if let Some(ref tg) = tron_grid {
-                            ui_tron_grid(f, tg, backend);
+                    DisplayMode::MemoryCastle => {
+                        if let Some(ref tg) = memory_castle {
+                            ui_memory_castle(f, tg, backend);
                         }
                     }
                     DisplayMode::MemoryFlow => {
@@ -216,11 +216,11 @@ fn run_app(
                             DisplayMode::Normal => DisplayMode::MemoryFlow,
                             DisplayMode::MemoryFlow => DisplayMode::Starfield,
                             DisplayMode::Starfield => {
-                                // Randomize TRON Grid on each activation
-                                tron_grid = None;
-                                DisplayMode::TronGrid
+                                // Randomize Memory Castle on each activation
+                                memory_castle = None;
+                                DisplayMode::MemoryCastle
                             }
-                            DisplayMode::TronGrid => DisplayMode::Normal,
+                            DisplayMode::MemoryCastle => DisplayMode::Normal,
                         };
                         log::info!("Switched to {:?} mode", display_mode);
                     }
@@ -238,8 +238,8 @@ fn run_app(
                                 if let DisplayMode::Starfield = display_mode {
                                     starfield = None;
                                 }
-                                if let DisplayMode::TronGrid = display_mode {
-                                    tron_grid = None;
+                                if let DisplayMode::MemoryCastle = display_mode {
+                                    memory_castle = None;
                                 }
                                 if let DisplayMode::MemoryFlow = display_mode {
                                     memory_flow = None;
@@ -706,10 +706,10 @@ fn render_visualization_footer(f: &mut Frame, area: Rect) {
     f.render_widget(footer, area);
 }
 
-/// Render TRON Grid mode (full-screen neon topology)
-fn ui_tron_grid(
+/// Render Memory Castle mode (full-screen architectural memory hierarchy)
+fn ui_memory_castle(
     f: &mut Frame,
-    tron_grid: &TronGrid,
+    memory_castle: &MemoryCastle,
     backend: &Box<dyn TelemetryBackend>,
 ) {
     // Create layout with header and content
@@ -717,31 +717,31 @@ fn ui_tron_grid(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),  // Header
-            Constraint::Min(0),     // TRON Grid content
+            Constraint::Min(0),     // Memory Castle content
             Constraint::Length(3),  // Footer
         ])
         .split(f.area());
 
-    // Render TRON Grid header
-    render_tron_grid_header(f, chunks[0], backend);
+    // Render Memory Castle header
+    render_memory_castle_header(f, chunks[0], backend);
 
-    // Render TRON Grid content
-    let tron_lines = tron_grid.render(backend);
+    // Render Memory Castle content
+    let castle_lines = memory_castle.render(backend);
 
-    let tron_widget = Paragraph::new(tron_lines)
+    let castle_widget = Paragraph::new(castle_lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(colors::PRIMARY))
-                .title(" TRON Grid - Neon Hardware Topology ")
+                .title(" Memory Castle - Hardware Memory Hierarchy ")
                 .title_alignment(Alignment::Center),
         );
 
-    f.render_widget(tron_widget, chunks[1]);
+    f.render_widget(castle_widget, chunks[1]);
 
-    // Render TRON Grid footer
-    render_tron_grid_footer(f, chunks[2]);
+    // Render Memory Castle footer
+    render_memory_castle_footer(f, chunks[2]);
 }
 
 /// Render Memory Flow visualization (full-screen DRAM motion)
@@ -762,8 +762,8 @@ fn ui_memory_flow(
     f.render_widget(flow_widget, f.area());
 }
 
-/// Render TRON Grid mode header with device info
-fn render_tron_grid_header<B: TelemetryBackend>(
+/// Render Memory Castle mode header with device info
+fn render_memory_castle_header<B: TelemetryBackend>(
     f: &mut Frame,
     area: Rect,
     backend: &B,
@@ -792,7 +792,7 @@ fn render_tron_grid_header<B: TelemetryBackend>(
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(colors::PRIMARY))
-                .title(" ⚡ TRON Grid Mode ⚡ ")
+                .title(" 🏰 Memory Castle Mode 🏰 ")
                 .title_alignment(Alignment::Center),
         )
         .alignment(Alignment::Center);
@@ -800,8 +800,8 @@ fn render_tron_grid_header<B: TelemetryBackend>(
     f.render_widget(header, area);
 }
 
-/// Render TRON Grid mode footer with controls
-fn render_tron_grid_footer(f: &mut Frame, area: Rect) {
+/// Render Memory Castle mode footer with controls
+fn render_memory_castle_footer(f: &mut Frame, area: Rect) {
     let footer_text = vec![Line::from(vec![
         Span::styled("Grid: ", Style::default().fg(colors::TEXT_SECONDARY)),
         Span::styled("Neon Topology ", Style::default().fg(colors::PRIMARY)),
