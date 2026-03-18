@@ -458,6 +458,16 @@ impl MemoryCastle {
         }
     }
 
+    /// Calculate display width of spans (accounting for Unicode/emoji width)
+    fn calculate_span_width(spans: &[Span]) -> usize {
+        spans.iter().map(|span| {
+            // Count actual display width (emoji like 🏰 are 2 columns)
+            span.content.chars().map(|c| {
+                if c as u32 > 0x1F300 { 2 } else { 1 }  // Emoji are 2 columns wide
+            }).sum::<usize>()
+        }).sum()
+    }
+
     /// Render header with device info
     fn render_header(
         &self,
@@ -466,6 +476,7 @@ impl MemoryCastle {
         smbus: Option<&crate::models::SmbusTelemetry>,
     ) -> Line<'static> {
         let mut spans = Vec::new();
+        let max_width = self.width.min(120);
 
         // Title
         spans.push(Span::styled(
@@ -535,6 +546,13 @@ impl MemoryCastle {
         // Particle count
         spans.push(Span::raw(format!(" │ Particles: {} ", self.particles.len())));
 
+        // Calculate current width and add padding to match separator
+        let current_width = Self::calculate_span_width(&spans);
+        if current_width < max_width {
+            let padding = " ".repeat(max_width - current_width);
+            spans.push(Span::raw(padding));
+        }
+
         Line::from(spans)
     }
 
@@ -549,7 +567,7 @@ impl MemoryCastle {
 
     /// Render footer with legend
     fn render_footer(&self) -> Line<'static> {
-        Line::from(vec![
+        let mut spans = vec![
             Span::raw("  "),
             Span::styled("Particles: ", Style::default().fg(Color::Rgb(150, 150, 150))),
             Span::styled("○◉ ", Style::default().fg(Color::Rgb(100, 200, 255))),
@@ -564,6 +582,16 @@ impl MemoryCastle {
             Span::raw("Trails │ "),
             Span::styled("⚡※☼♦◊ ", Style::default().fg(Color::Rgb(180, 150, 200))),
             Span::raw("Glyphs"),
-        ])
+        ];
+
+        // Calculate current width and add padding to match separator
+        let max_width = self.width.min(120);
+        let current_width = Self::calculate_span_width(&spans);
+        if current_width < max_width {
+            let padding = " ".repeat(max_width - current_width);
+            spans.push(Span::raw(padding));
+        }
+
+        Line::from(spans)
     }
 }
