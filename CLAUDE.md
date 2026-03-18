@@ -313,33 +313,56 @@ $ cargo build --bin tt-toplike-tui --features tui
 
 ### Border Alignment Fix (March 18, 2026 - Later)
 
-**Problem**: Header and footer text extended beyond separator borders, breaking visual alignment (see ~/Pictures/castle-issue.png).
+**Problem**: Header and footer text extended beyond separator borders, breaking visual alignment (see ~/Pictures/castle-issue.png, still-off.png).
 
-**Root Cause**: Separator used `self.width.min(120)` but header/footer had no width constraint, causing overflow.
+**Root Causes**:
+1. Incorrect emoji width detection - characters like ⚡ (U+26A1) and ⚙ (U+2699) were counted as 1 column instead of 2
+2. Missing left padding - canvas content had `"  "` prefix but header/separator didn't
+3. Inconsistent width calculations across components
 
-**Solution**:
-- Added `calculate_span_width()` helper that accounts for Unicode/emoji width (🏰 = 2 columns)
-- Both header and footer now calculate their width and pad to match separator width
-- Ensures clean border alignment at any terminal width
+**Solution - Three-Part Fix**:
 
-**Code Added** (src/animation/memory_castle.rs):
+**1. Enhanced Unicode Width Detection**:
 ```rust
 fn calculate_span_width(spans: &[Span]) -> usize {
     spans.iter().map(|span| {
         span.content.chars().map(|c| {
-            if c as u32 > 0x1F300 { 2 } else { 1 }  // Emoji are 2 columns
+            let code = c as u32;
+            // Wide characters: emoji, symbols
+            if (0x1F300..=0x1F9FF).contains(&code)   // Emoji blocks
+                || (0x2600..=0x26FF).contains(&code)  // Misc symbols (⚡⚙☼※)
+                || (0x2700..=0x27BF).contains(&code)  // Dingbats
+                || code == 0x25C6  // ◆
+                || code == 0x25CB  // ○
+                || code == 0x25CF  // ●
+                // ... more cases
+            { 2 } else { 1 }
         }).sum::<usize>()
     }).sum()
 }
+```
 
-// In render_header() and render_footer():
-let current_width = Self::calculate_span_width(&spans);
-if current_width < max_width {
-    spans.push(Span::raw(" ".repeat(max_width - current_width)));
+**2. Consistent Left Padding**:
+- Header: Added `spans.push(Span::raw("  "))` at start
+- Separator: Changed to `vec![Span::raw("  "), Span::styled("═".repeat(...))]`
+- Footer: Already had padding (kept)
+
+**3. Adjusted Width Calculations**:
+```rust
+let max_width = self.width.min(120);
+let content_width = max_width.saturating_sub(2);  // Account for left padding
+
+// In header/footer:
+let current_width = Self::calculate_span_width(&spans) - 2;  // Subtract initial "  "
+if current_width < content_width {
+    spans.push(Span::raw(" ".repeat(content_width - current_width)));
 }
 ```
 
-**Result**: ✅ Perfect border alignment - header, separator, content, footer all match
+**Result**: ✅ Perfect border alignment - all elements now:
+- Start with 2-space left padding
+- Use consistent width calculations (118 content + 2 padding = 120 total)
+- Properly measure emoji/Unicode characters
 
 ---
 
