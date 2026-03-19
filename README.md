@@ -1,10 +1,13 @@
 # TT-Toplike-RS 🦀
 
-Real-time hardware monitoring for Tenstorrent silicon, written in Rust.
+Have fun monitoring your Tenstorrent hardware. Written in Rust.
+
+
+![3 visualizers](/assets/tt-toplike-rs.png "Screenshot of 3 simultaneous visualizers")
 
 ## Project Status
 
-**Status**: 🎉 **Production Ready** (12 phases complete)
+**Status**: 🎉 **Read for fun** (12 phases complete)
 **Latest**: Sysfs backend for non-invasive monitoring of active hardware
 
 ### Completed ✅
