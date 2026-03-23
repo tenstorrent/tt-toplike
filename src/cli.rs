@@ -42,11 +42,17 @@ use std::path::PathBuf;
     # Use JSON backend with custom tt-smi path
     tt-toplike-rs --json --tt-smi-path /usr/local/bin/tt-smi
 
-    # Auto-detect backend (tries JSON first, falls back to mock)
-    tt-toplike-rs --backend auto
+    # Launch directly in Arcade mode
+    tt-toplike-rs --mode arcade
 
-    # Verbose logging with 50ms update interval
-    tt-toplike-rs -v --interval 50
+    # Launch in Memory Castle mode with verbose logging
+    tt-toplike-rs --mode castle -v
+
+    # Starfield visualization with fast refresh
+    tt-toplike-rs --mode starfield --interval 50
+
+    # Memory Flow topology view
+    tt-toplike-rs --mode flow
 
     # Monitor specific devices only
     tt-toplike-rs --devices 0,2,4
@@ -118,6 +124,13 @@ pub struct Cli {
     #[arg(long, default_value = "5000")]
     pub timeout: u64,
 
+    /// Launch directly into specific visualization mode
+    ///
+    /// Skip the normal table view and start in a specific mode.
+    /// Available modes: normal, starfield, castle, flow, arcade
+    #[arg(short = 'm', long, value_enum)]
+    pub mode: Option<VisualizationMode>,
+
     /// Launch directly into visualization mode
     ///
     /// Skip the main monitor and show hardware-responsive animations.
@@ -157,6 +170,27 @@ pub enum BackendType {
     /// Use Sysfs backend (Linux hwmon sensors, non-invasive)
     #[cfg(target_os = "linux")]
     Sysfs,
+}
+
+/// Visualization mode selection
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum VisualizationMode {
+    /// Normal table view with telemetry
+    Normal,
+
+    /// Hardware-responsive starfield (Tensix cores as stars)
+    Starfield,
+
+    /// Memory Castle (DDR → L2 → L1 → Tensix hierarchy)
+    #[value(alias = "memory")]
+    Castle,
+
+    /// Memory Flow Topology (full-screen DRAM motion)
+    #[value(alias = "topology")]
+    Flow,
+
+    /// Arcade mode (unified visualization with hero character)
+    Arcade,
 }
 
 impl Cli {

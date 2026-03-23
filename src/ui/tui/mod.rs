@@ -137,8 +137,18 @@ fn run_app(
     #[cfg(feature = "linux-procfs")]
     let process_update_interval = Duration::from_secs(2);
 
-    // UI state
-    let mut display_mode = DisplayMode::Normal;
+    // UI state - initialize from CLI --mode option if provided
+    let mut display_mode = if let Some(mode) = cli.mode {
+        match mode {
+            crate::cli::VisualizationMode::Normal => DisplayMode::Normal,
+            crate::cli::VisualizationMode::Starfield => DisplayMode::Starfield,
+            crate::cli::VisualizationMode::Castle => DisplayMode::MemoryCastle,
+            crate::cli::VisualizationMode::Flow => DisplayMode::MemoryFlow,
+            crate::cli::VisualizationMode::Arcade => DisplayMode::Arcade,
+        }
+    } else {
+        DisplayMode::Normal
+    };
     let mut starfield: Option<HardwareStarfield> = None;
     let mut memory_castle: Option<MemoryCastle> = None;
     let mut memory_flow: Option<MemoryFlowVis> = None;
@@ -196,6 +206,13 @@ fn run_app(
         // Draw UI based on mode
         terminal
             .draw(|f| {
+                // Clear frame with transparent background (respects terminal's background)
+                // This prevents background color artifacts in tmux
+                f.render_widget(
+                    Block::default().style(Style::default().bg(Color::Reset)),
+                    f.size(),
+                );
+
                 match display_mode {
                     #[cfg(feature = "linux-procfs")]
                     DisplayMode::Normal => ui(f, backend, cli, &process_monitor),
