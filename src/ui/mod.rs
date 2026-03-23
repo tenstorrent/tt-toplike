@@ -18,6 +18,10 @@ pub mod tui;
 #[cfg(feature = "gui")]
 pub mod gui;
 
+// egui implementation (requires "egui" feature)
+#[cfg(feature = "egui")]
+pub mod egui;
+
 // Re-export run_tui for convenience
 #[cfg(feature = "tui")]
 pub use tui::run_tui;

@@ -17,6 +17,11 @@ name = "tt-toplike-gui"
 path = "src/bin/gui.rs"
 required-features = ["gui"]
 
+[[bin]]
+name = "tt-toplike-egui"
+path = "src/bin/egui.rs"
+required-features = ["egui"]
+
 # Default binary (TUI)
 [lib]
 name = "tt_toplike_rs"
@@ -38,6 +43,10 @@ crossterm = { version = "0.29", features = ["event-stream"], optional = true }
 # NOTE: Staying on 0.13 for now - 0.14 has breaking API changes (application builder)
 # TODO: Migrate to iced 0.14 API when time permits
 iced = { version = "0.13", features = ["canvas", "tokio"], optional = true }
+
+# egui framework (optional - lightweight dashboard)
+eframe = { version = "0.33", optional = true }  # egui application framework
+egui_plot = { version = "0.34", optional = true }  # Plotting for egui
 
 # Async runtime
 tokio = { version = "1.49", features = ["full"] }
@@ -67,6 +76,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Math utilities
 num-traits = "0.2"
+rand = "0.8"  # For particle effects
 
 # Configuration
 toml = "0.8"
@@ -84,7 +94,8 @@ default = ["tui", "json-backend", "linux-procfs"]
 
 # Frontend features
 tui = ["ratatui", "crossterm"]  # Terminal UI with Ratatui
-gui = ["iced"]                  # Native GUI with iced
+gui = ["iced"]                  # Native GUI with iced (legacy)
+egui = ["eframe", "egui_plot"]  # Lightweight egui dashboard
 
 # Backend features
 # IMPORTANT: luwen-backend is OPTIONAL and must be explicitly enabled

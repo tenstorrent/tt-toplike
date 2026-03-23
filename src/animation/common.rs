@@ -53,6 +53,45 @@ pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
     )
 }
 
+/// Convert RGB color space to HSV
+///
+/// # Arguments
+///
+/// * `r` - Red (0-255)
+/// * `g` - Green (0-255)
+/// * `b` - Blue (0-255)
+///
+/// # Returns
+///
+/// Tuple of (hue, saturation, value) where:
+/// - hue: 0.0-360.0 degrees
+/// - saturation: 0.0-1.0
+/// - value: 0.0-1.0
+pub fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+    let r = r as f32 / 255.0;
+    let g = g as f32 / 255.0;
+    let b = b as f32 / 255.0;
+
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+
+    let hue = if delta == 0.0 {
+        0.0
+    } else if max == r {
+        60.0 * (((g - b) / delta) % 6.0)
+    } else if max == g {
+        60.0 * (((b - r) / delta) + 2.0)
+    } else {
+        60.0 * (((r - g) / delta) + 4.0)
+    };
+
+    let saturation = if max == 0.0 { 0.0 } else { delta / max };
+    let value = max;
+
+    (if hue < 0.0 { hue + 360.0 } else { hue }, saturation, value)
+}
+
 /// Map temperature to hue for psychedelic color cycling
 ///
 /// Cold temps (0°C) → Cyan (180°)

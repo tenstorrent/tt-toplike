@@ -177,15 +177,21 @@ pub struct MemoryFlowVis {
 }
 
 impl MemoryFlowVis {
-    /// Create new Memory Flow visualization
+    /// Create new Memory Flow visualization with full density (200 particles)
     pub fn new(width: usize, height: usize) -> Self {
+        Self::new_with_density(width, height, 200)
+    }
+
+    /// Create new Memory Flow visualization with custom particle density
+    /// For Arcade mode, use lower value (100 particles) for better performance
+    pub fn new_with_density(width: usize, height: usize, max_particles: usize) -> Self {
         Self {
             width,
             height,
             baseline: AdaptiveBaseline::new(),
             frame: 0,
             particles: Vec::new(),
-            max_particles: 200, // More particles for better flow visualization
+            max_particles,
             core_heat: vec![0.0; 16 * 14], // Max size (Blackhole)
             grid_rows: 0,
             grid_cols: 0,

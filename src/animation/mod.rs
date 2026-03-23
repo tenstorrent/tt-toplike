@@ -14,12 +14,14 @@
 //! The key philosophy: **Every visual element is informationally meaningful**.
 //! No fake animations that move regardless of hardware state.
 
+pub mod arcade;
 pub mod baseline;
 pub mod common;
 pub mod memory_castle;
 pub mod memory_flow;
 pub mod starfield;
 
+pub use arcade::ArcadeVisualization;
 pub use baseline::AdaptiveBaseline;
 pub use common::*;
 pub use memory_castle::MemoryCastle;

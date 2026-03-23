@@ -12,7 +12,7 @@
 //! Inspired by roguelike dungeons (NetHack, DCSS), where every character and color
 //! has meaning, and the dungeon is alive with activity.
 
-use crate::animation::{AdaptiveBaseline, hsv_to_rgb, temp_to_hue};
+use crate::animation::{AdaptiveBaseline, hsv_to_rgb, rgb_to_hsv, temp_to_hue};
 use crate::backend::TelemetryBackend;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -55,11 +55,13 @@ pub struct MemoryParticle {
     pub particle_type: ParticleType,
     /// Trail positions (last N positions for trail effect)
     pub trail: Vec<(f32, f32)>,
+    /// Source device index (for multi-chip visualization)
+    pub source_device: usize,
 }
 
 impl MemoryParticle {
     /// Create new particle at DDR entry
-    pub fn new(ddr_channel: usize, power_change: f32, temp: f32, frame: u32) -> Self {
+    pub fn new(ddr_channel: usize, power_change: f32, temp: f32, frame: u32, source_device: usize) -> Self {
         // Randomize particle type based on frame counter
         let particle_type = match frame % 4 {
             0 => ParticleType::Read,
@@ -91,6 +93,7 @@ impl MemoryParticle {
             ttl,
             particle_type,
             trail: Vec::with_capacity(8),
+            source_device,
         }
     }
 
@@ -208,14 +211,20 @@ pub struct MemoryCastle {
 }
 
 impl MemoryCastle {
-    /// Create new Memory Dungeon
+    /// Create new Memory Dungeon with full density (600 particles)
     pub fn new(width: usize, height: usize) -> Self {
+        Self::new_with_density(width, height, 600, 30)
+    }
+
+    /// Create new Memory Dungeon with custom density
+    /// For Arcade mode, use lower values (300 particles, 15 glyphs) for better performance
+    pub fn new_with_density(width: usize, height: usize, max_particles: usize, glyph_count: usize) -> Self {
         // Generate environmental glyphs (torches, runes, etc.)
         let mut environment = Vec::new();
         let glyph_chars = ['⚡', '※', '☼', '♦', '◊', '▲', '▼', '◄', '►', '⚬', '⊙', '⊕'];
 
         // Place glyphs pseudo-randomly
-        for i in 0..30 {
+        for i in 0..glyph_count {
             let x = (i * 17 + 7) % (width.saturating_sub(4));
             let y = (i * 23 + 13) % (height.saturating_sub(6));
             let char_idx = (i * 11) % glyph_chars.len();
@@ -229,7 +238,7 @@ impl MemoryCastle {
             baseline: AdaptiveBaseline::new(),
             frame: 0,
             particles: Vec::new(),
-            max_particles: 600,  // Much more particles for dense animation
+            max_particles,
             environment,
         }
     }
@@ -270,7 +279,7 @@ impl MemoryCastle {
                     if self.particles.len() < self.max_particles {
                         let num_channels = device.architecture.memory_channels();
                         let channel = (self.frame as usize * 7 + device.index * 3 + self.particles.len()) % num_channels;
-                        self.particles.push(MemoryParticle::new(channel, power_change, temp, self.frame));
+                        self.particles.push(MemoryParticle::new(channel, power_change, temp, self.frame, device.index));
                     }
                 }
             }
@@ -294,7 +303,13 @@ impl MemoryCastle {
             return lines;
         }
 
-        // For now, render first device
+        // Multi-device mode: render side-by-side columns
+        let num_devices = devices.len();
+        if num_devices > 1 {
+            return self.render_multi_device(backend);
+        }
+
+        // Single device mode: use full width (original behavior)
         let device = &devices[0];
         let telem = backend.telemetry(0);
         let smbus = backend.smbus_telemetry(0);
@@ -396,6 +411,159 @@ impl MemoryCastle {
         // === FOOTER ===
         lines.push(self.render_separator());
         lines.push(self.render_footer());
+
+        lines
+    }
+
+    /// Render multi-device side-by-side view
+    fn render_multi_device<B: TelemetryBackend>(&self, backend: &B) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        let devices = backend.devices();
+        let num_devices = devices.len().min(4);  // Max 4 devices
+
+        // Calculate column width for each device
+        let col_width = (self.width.saturating_sub(2)) / num_devices;  // Leave 2 chars padding
+
+        // === GLOBAL HEADER ===
+        let header_spans: Vec<Span> = devices.iter().take(num_devices).enumerate().map(|(idx, device)| {
+            let telem = backend.telemetry(device.index);
+            let power = telem.map(|t| t.power_w()).unwrap_or(0.0);
+            let temp = telem.map(|t| t.temp_c()).unwrap_or(0.0);
+
+            // Color-code each device by hue shift
+            let hue = (idx as f32 * 90.0) % 360.0;
+            let color = hsv_to_rgb(hue, 0.8, 0.9);
+
+            let device_info = format!(" Dev{} {:.0}W {:.0}°C ", idx, power, temp);
+            let padding_needed = col_width.saturating_sub(device_info.len());
+            let padding = " ".repeat(padding_needed / 2);
+
+            vec![
+                Span::styled(padding.clone(), Style::default()),
+                Span::styled(device_info, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(padding, Style::default()),
+            ]
+        }).flatten().collect();
+
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("─".repeat(self.width.saturating_sub(2)), Style::default().fg(Color::Rgb(100, 100, 120))),
+        ]));
+        lines.push(Line::from(header_spans));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("─".repeat(self.width.saturating_sub(2)), Style::default().fg(Color::Rgb(100, 100, 120))),
+        ]));
+
+        // === CANVAS ===
+        let canvas_height = self.height.saturating_sub(6);  // Reserve for header/footer
+
+        for row in 0..canvas_height {
+            let mut spans = Vec::new();
+            spans.push(Span::raw("  "));  // Left padding
+
+            // Render each device column
+            for (dev_idx, device) in devices.iter().take(num_devices).enumerate() {
+                let x_offset = dev_idx * col_width;
+                let hue_shift = (dev_idx as f32 * 90.0) % 360.0;
+
+                let telem = backend.telemetry(device.index);
+                let power = telem.map(|t| t.power_w()).unwrap_or(0.0);
+                let temp = telem.map(|t| t.temp_c()).unwrap_or(0.0);
+                let current = telem.map(|t| t.current_a()).unwrap_or(0.0);
+                let power_change = self.baseline.power_change(device.index, power);
+                let current_change = self.baseline.current_change(device.index, current);
+
+                // Render this device's column
+                for col in 0..col_width {
+                    let global_col = x_offset + col;
+
+                    // Determine layer
+                    let y_ratio = row as f32 / canvas_height as f32;
+                    let layer = if y_ratio < 0.15 { 0 } else if y_ratio < 0.40 { 1 } else if y_ratio < 0.70 { 2 } else { 3 };
+
+                    // Check for particles from this device in this position
+                    let mut found_particle = false;
+                    for particle in &self.particles {
+                        if particle.source_device != device.index {
+                            continue;  // Skip particles from other devices
+                        }
+
+                        let px = particle.x as usize;
+                        let py = (canvas_height as f32 - particle.y) as usize;
+
+                        if px == global_col && py == row && py < canvas_height {
+                            let particle_char = particle.get_char();
+                            let mut particle_hue = particle.hue + hue_shift;  // Apply device hue shift
+                            if particle_hue > 360.0 { particle_hue -= 360.0; }
+                            let particle_color = hsv_to_rgb(particle_hue, 0.9, particle.intensity);
+                            spans.push(Span::styled(
+                                particle_char.to_string(),
+                                Style::default().fg(particle_color).add_modifier(Modifier::BOLD)
+                            ));
+                            found_particle = true;
+                            break;
+                        }
+
+                        // Check trail
+                        if !found_particle {
+                            for (tx, ty) in &particle.trail {
+                                let trail_x = *tx as usize;
+                                let trail_y = (canvas_height as f32 - ty) as usize;
+                                if trail_x == global_col && trail_y == row && trail_y < canvas_height {
+                                    let mut trail_hue = particle.hue + hue_shift;
+                                    if trail_hue > 360.0 { trail_hue -= 360.0; }
+                                    let trail_color = hsv_to_rgb(trail_hue, 0.5, particle.intensity * 0.5);
+                                    spans.push(Span::styled("·", Style::default().fg(trail_color)));
+                                    found_particle = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if found_particle { break; }
+                    }
+
+                    if !found_particle {
+                        // No particle, render background with device hue shift
+                        let bg_span = self.render_background(layer, global_col, row, power_change, current_change, temp);
+
+                        // Apply hue shift to background colors
+                        if let Some(fg) = bg_span.style.fg {
+                            if let Color::Rgb(r, g, b) = fg {
+                                // Convert to HSV, shift hue, convert back
+                                let hsv = rgb_to_hsv(r, g, b);
+                                let mut new_hue = hsv.0 + hue_shift;
+                                if new_hue > 360.0 { new_hue -= 360.0; }
+                                let shifted_color = hsv_to_rgb(new_hue, hsv.1, hsv.2);
+                                spans.push(Span::styled(bg_span.content, Style::default().fg(shifted_color)));
+                            } else {
+                                spans.push(bg_span);
+                            }
+                        } else {
+                            spans.push(bg_span);
+                        }
+                    }
+                }
+
+                // Column separator
+                if dev_idx < num_devices - 1 {
+                    spans.push(Span::styled("│", Style::default().fg(Color::Rgb(80, 80, 100))));
+                }
+            }
+
+            lines.push(Line::from(spans));
+        }
+
+        // === FOOTER ===
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("─".repeat(self.width.saturating_sub(2)), Style::default().fg(Color::Rgb(100, 100, 120))),
+        ]));
+        let footer_text = format!("Showing {} devices side-by-side │ Particles color-coded by device", num_devices);
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(footer_text, Style::default().fg(Color::Rgb(160, 160, 160))),
+        ]));
 
         lines
     }

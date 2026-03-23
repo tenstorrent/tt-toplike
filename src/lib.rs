@@ -41,6 +41,10 @@ pub mod backend;
 pub mod animation;
 pub mod logging;
 
+// Process monitoring (Linux-only)
+#[cfg(feature = "linux-procfs")]
+pub mod workload;
+
 // CLI module - shared by both TUI and GUI
 pub mod cli;
 

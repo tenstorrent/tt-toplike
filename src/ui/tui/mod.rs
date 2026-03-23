@@ -7,7 +7,7 @@
 //! - Normal mode: Traditional table view with real-time telemetry
 //! - Visualization mode: Hardware-responsive starfield animation
 
-use crate::animation::{HardwareStarfield, MemoryFlowVis, MemoryCastle};
+use crate::animation::{ArcadeVisualization, HardwareStarfield, MemoryFlowVis, MemoryCastle};
 use crate::backend::{factory, BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
 use crate::error::TTTopError;
@@ -39,6 +39,8 @@ enum DisplayMode {
     MemoryCastle,
     /// Memory Flow Topology (full-screen DRAM motion visualization)
     MemoryFlow,
+    /// Arcade mode (unified visualization with all three modes + hero character)
+    Arcade,
 }
 
 /// Run the TUI application
@@ -127,11 +129,20 @@ fn run_app(
     // This is independent of backend update rate
     let ui_poll_rate = Duration::from_millis(16); // ~60 FPS
 
+    // Process monitoring (Linux-only, update every 2 seconds)
+    #[cfg(feature = "linux-procfs")]
+    let mut process_monitor = crate::workload::ProcessMonitor::new();
+    #[cfg(feature = "linux-procfs")]
+    let mut last_process_update = Instant::now();
+    #[cfg(feature = "linux-procfs")]
+    let process_update_interval = Duration::from_secs(2);
+
     // UI state
     let mut display_mode = DisplayMode::Normal;
     let mut starfield: Option<HardwareStarfield> = None;
     let mut memory_castle: Option<MemoryCastle> = None;
     let mut memory_flow: Option<MemoryFlowVis> = None;
+    let mut arcade: Option<ArcadeVisualization> = None;
 
     loop {
         // Initialize or update visualizations
@@ -166,6 +177,17 @@ fn run_app(
                     mf.update(backend);
                 }
             }
+            DisplayMode::Arcade => {
+                if arcade.is_none() {
+                    // Create new Arcade visualization
+                    let mut arc = ArcadeVisualization::new(size.width as usize, size.height as usize);
+                    arc.initialize_from_devices(backend.devices());
+                    arcade = Some(arc);
+                }
+                if let Some(ref mut arc) = arcade {
+                    arc.update(backend);
+                }
+            }
             DisplayMode::Normal => {
                 // Normal mode doesn't need special init
             }
@@ -175,6 +197,9 @@ fn run_app(
         terminal
             .draw(|f| {
                 match display_mode {
+                    #[cfg(feature = "linux-procfs")]
+                    DisplayMode::Normal => ui(f, backend, cli, &process_monitor),
+                    #[cfg(not(feature = "linux-procfs"))]
                     DisplayMode::Normal => ui(f, backend, cli),
                     DisplayMode::Starfield => {
                         if let Some(ref sf) = starfield {
@@ -189,6 +214,11 @@ fn run_app(
                     DisplayMode::MemoryFlow => {
                         if let Some(ref mf) = memory_flow {
                             ui_memory_flow(f, mf, backend);
+                        }
+                    }
+                    DisplayMode::Arcade => {
+                        if let Some(ref arc) = arcade {
+                            ui_arcade(f, arc, backend);
                         }
                     }
                 }
@@ -220,9 +250,20 @@ fn run_app(
                                 memory_castle = None;
                                 DisplayMode::MemoryCastle
                             }
-                            DisplayMode::MemoryCastle => DisplayMode::Normal,
+                            DisplayMode::MemoryCastle => {
+                                // Reset Arcade on each activation
+                                arcade = None;
+                                DisplayMode::Arcade
+                            }
+                            DisplayMode::Arcade => DisplayMode::Normal,
                         };
                         log::info!("Switched to {:?} mode", display_mode);
+                    }
+                    KeyCode::Char('a') | KeyCode::Char('A') => {
+                        // Jump directly to Arcade mode
+                        arcade = None; // Reset arcade to reinitialize
+                        display_mode = DisplayMode::Arcade;
+                        log::info!("Switched directly to Arcade mode");
                     }
                     KeyCode::Char('b') => {
                         // Switch to next backend
@@ -244,6 +285,9 @@ fn run_app(
                                 if let DisplayMode::MemoryFlow = display_mode {
                                     memory_flow = None;
                                 }
+                                if let DisplayMode::Arcade = display_mode {
+                                    arcade = None;
+                                }
                             }
                             Err(e) => {
                                 log::error!("Failed to switch backend: {}", e);
@@ -262,10 +306,67 @@ fn run_app(
             }
             last_update = Instant::now();
         }
+
+        // Update process monitor (every 2 seconds to avoid overhead)
+        #[cfg(feature = "linux-procfs")]
+        if last_process_update.elapsed() >= process_update_interval {
+            process_monitor.update();
+            last_process_update = Instant::now();
+        }
     }
 }
 
-/// Render the UI
+/// Render the UI (with process monitoring on Linux)
+#[cfg(feature = "linux-procfs")]
+fn ui(
+    f: &mut Frame,
+    backend: &Box<dyn TelemetryBackend>,
+    cli: &Cli,
+    process_monitor: &crate::workload::ProcessMonitor,
+) {
+    // Adapt layout based on whether we have processes to display
+    let chunks = if process_monitor.has_any_processes() {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),      // Header
+                Constraint::Min(8),         // Device list
+                Constraint::Length(6),      // Process list (NEW)
+                Constraint::Length(6),      // Messages
+                Constraint::Length(3),      // Footer
+            ])
+            .split(f.area())
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),      // Header
+                Constraint::Min(10),        // Device list (more space when no processes)
+                Constraint::Length(6),      // Messages
+                Constraint::Length(3),      // Footer
+            ])
+            .split(f.area())
+    };
+
+    // Render header
+    render_header(f, chunks[0], backend);
+
+    // Render device list
+    render_devices(f, chunks[1], backend, cli);
+
+    // Render process list if we have processes
+    if process_monitor.has_any_processes() {
+        render_processes(f, chunks[2], backend, process_monitor);
+        render_messages(f, chunks[3]);
+        render_footer(f, chunks[4], &backend.backend_info());
+    } else {
+        render_messages(f, chunks[2]);
+        render_footer(f, chunks[3], &backend.backend_info());
+    }
+}
+
+/// Render the UI (without process monitoring on non-Linux platforms)
+#[cfg(not(feature = "linux-procfs"))]
 fn ui(f: &mut Frame, backend: &Box<dyn TelemetryBackend>, cli: &Cli) {
     // Create layout
     let chunks = Layout::default()
@@ -481,6 +582,205 @@ fn render_devices(f: &mut Frame, area: Rect, backend: &Box<dyn TelemetryBackend>
     f.render_widget(table, area);
 }
 
+/// Render process list showing which processes are using Tenstorrent devices
+#[cfg(feature = "linux-procfs")]
+fn render_processes(
+    f: &mut Frame,
+    area: Rect,
+    backend: &Box<dyn TelemetryBackend>,
+    process_monitor: &crate::workload::ProcessMonitor,
+) {
+    let mut process_lines = Vec::new();
+
+    // Iterate through devices and show processes
+    for device in backend.devices() {
+        if let Some(processes) = process_monitor.get_processes_for_device(device.index) {
+            // Device header
+            let device_line = Line::from(vec![
+                Span::styled(
+                    format!("Device {}: ", device.index),
+                    Style::default()
+                        .fg(Color::Rgb(120, 150, 255))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "{} process{}",
+                        processes.len(),
+                        if processes.len() == 1 { "" } else { "es" }
+                    ),
+                    Style::default().fg(colors::TEXT_SECONDARY),
+                ),
+            ]);
+            process_lines.push(device_line);
+
+            // Process list (show up to 2 per device to save space)
+            for (i, proc) in processes.iter().take(2).enumerate() {
+                let is_last = i == processes.len().min(2) - 1 && processes.len() <= 2;
+                let prefix = if is_last { "└─" } else { "├─" };
+
+                let proc_line = Line::from(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled(prefix, Style::default().fg(Color::Rgb(100, 100, 120))),
+                    Span::styled(
+                        format!(" {} ", proc.name),
+                        Style::default()
+                            .fg(Color::Rgb(80, 220, 200))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("[{}] ", proc.pid),
+                        Style::default().fg(colors::TEXT_SECONDARY),
+                    ),
+                    Span::styled(
+                        &proc.cmdline,
+                        Style::default().fg(Color::Rgb(200, 200, 220)),
+                    ),
+                ]);
+                process_lines.push(proc_line);
+
+                // Show hugepages info if present
+                if proc.hugepages_1g > 0 || proc.hugepages_2m > 0 {
+                    let hugepages_str = if proc.hugepages_1g > 0 && proc.hugepages_2m > 0 {
+                        format!(
+                            "(hugepages: {} x 1GB, {} x 2MB)",
+                            proc.hugepages_1g, proc.hugepages_2m
+                        )
+                    } else if proc.hugepages_1g > 0 {
+                        format!("(hugepages: {} x 1GB)", proc.hugepages_1g)
+                    } else {
+                        format!("(hugepages: {} x 2MB)", proc.hugepages_2m)
+                    };
+
+                    let hugepages_line = Line::from(vec![
+                        Span::styled("     ", Style::default()),
+                        Span::styled(
+                            hugepages_str,
+                            Style::default()
+                                .fg(Color::Rgb(150, 120, 180))
+                                .add_modifier(Modifier::ITALIC),
+                        ),
+                    ]);
+                    process_lines.push(hugepages_line);
+                }
+            }
+
+            // Show "and N more" if there are more processes
+            if processes.len() > 2 {
+                let more_line = Line::from(vec![
+                    Span::styled("    ", Style::default()),
+                    Span::styled(
+                        format!("└─ and {} more...", processes.len() - 2),
+                        Style::default()
+                            .fg(colors::TEXT_SECONDARY)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                ]);
+                process_lines.push(more_line);
+            }
+        }
+    }
+
+    // Show shared processes (using hugepages but no specific device file)
+    let shared = process_monitor.get_shared_processes();
+    if !shared.is_empty() {
+        let shared_line = Line::from(vec![
+            Span::styled(
+                "Shared: ",
+                Style::default()
+                    .fg(Color::Rgb(150, 120, 180))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "{} process{}",
+                    shared.len(),
+                    if shared.len() == 1 { "" } else { "es" }
+                ),
+                Style::default().fg(colors::TEXT_SECONDARY),
+            ),
+        ]);
+        process_lines.push(shared_line);
+
+        for (i, proc) in shared.iter().take(2).enumerate() {
+            let is_last = i == shared.len().min(2) - 1 && shared.len() <= 2;
+            let prefix = if is_last { "└─" } else { "├─" };
+
+            let proc_line = Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(prefix, Style::default().fg(Color::Rgb(100, 100, 120))),
+                Span::styled(
+                    format!(" {} ", proc.name),
+                    Style::default()
+                        .fg(Color::Rgb(150, 120, 180))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("[{}] ", proc.pid),
+                    Style::default().fg(colors::TEXT_SECONDARY),
+                ),
+                Span::styled(&proc.cmdline, Style::default().fg(Color::Rgb(200, 200, 220))),
+            ]);
+            process_lines.push(proc_line);
+
+            // Show hugepages info
+            if proc.hugepages_1g > 0 || proc.hugepages_2m > 0 {
+                let hugepages_str = if proc.hugepages_1g > 0 && proc.hugepages_2m > 0 {
+                    format!(
+                        "(hugepages: {} x 1GB, {} x 2MB)",
+                        proc.hugepages_1g, proc.hugepages_2m
+                    )
+                } else if proc.hugepages_1g > 0 {
+                    format!("(hugepages: {} x 1GB)", proc.hugepages_1g)
+                } else {
+                    format!("(hugepages: {} x 2MB)", proc.hugepages_2m)
+                };
+
+                let hugepages_line = Line::from(vec![
+                    Span::styled("     ", Style::default()),
+                    Span::styled(
+                        hugepages_str,
+                        Style::default()
+                            .fg(Color::Rgb(150, 120, 180))
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                ]);
+                process_lines.push(hugepages_line);
+            }
+        }
+
+        if shared.len() > 2 {
+            let more_line = Line::from(vec![
+                Span::styled("    ", Style::default()),
+                Span::styled(
+                    format!("└─ and {} more...", shared.len() - 2),
+                    Style::default()
+                        .fg(colors::TEXT_SECONDARY)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]);
+            process_lines.push(more_line);
+        }
+    }
+
+    // Render as paragraph
+    let paragraph = Paragraph::new(process_lines)
+        .block(
+            Block::default()
+                .title(" 🔧 Hardware Usage ")
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(
+                    Style::default()
+                        .fg(Color::Rgb(255, 200, 100))
+                        .add_modifier(Modifier::BOLD),
+                ),
+        )
+        .style(Style::default().fg(colors::TEXT_PRIMARY));
+
+    f.render_widget(paragraph, area);
+}
+
 /// Render footer with keyboard shortcuts and backend info
 fn render_footer(f: &mut Frame, area: Rect, backend_info: &str) {
     let footer_text = vec![Line::from(vec![
@@ -498,6 +798,11 @@ fn render_footer(f: &mut Frame, area: Rect, backend_info: &str) {
             .fg(Color::Rgb(80, 220, 200))  // Bright teal
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
         Span::styled(" visualize  ", Style::default().fg(Color::Rgb(160, 160, 160))),
+        Span::styled(" │ ", Style::default().fg(Color::Rgb(150, 120, 180))),  // Purple separator
+        Span::styled(" A ", Style::default()
+            .fg(Color::Rgb(255, 100, 255))  // Bright magenta
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled(" arcade  ", Style::default().fg(Color::Rgb(160, 160, 160))),
         Span::styled(" │ ", Style::default().fg(Color::Rgb(150, 120, 180))),  // Purple separator
         Span::styled(" b ", Style::default()
             .fg(Color::Rgb(150, 220, 100))  // Bright green
@@ -620,9 +925,15 @@ fn ui_visualization(
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(colors::PRIMARY))
-                .title(" Hardware-Responsive Starfield ")
-                .title_alignment(Alignment::Center),
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default()
+                    .fg(Color::Rgb(100, 200, 255))  // Bright cyan
+                    .add_modifier(Modifier::BOLD))
+                .title(" ✧ Hardware-Responsive Starfield ")
+                .title_alignment(Alignment::Center)
+                .title_style(Style::default()
+                    .fg(Color::Rgb(150, 220, 255))
+                    .add_modifier(Modifier::BOLD)),
         );
 
     f.render_widget(starfield_widget, chunks[1]);
@@ -647,31 +958,38 @@ fn render_visualization_header<B: TelemetryBackend>(
 
     let header_text = vec![Line::from(vec![
         Span::styled(
-            " TT-Toplike-RS ",
+            " 🌌 STARFIELD ",
             Style::default()
-                .fg(colors::PRIMARY)
+                .fg(Color::Rgb(150, 220, 255))  // Bright cyan
                 .add_modifier(Modifier::BOLD),
         ),
+        Span::styled(" │ ", Style::default().fg(Color::Rgb(80, 80, 100))),
         Span::styled(
-            format!("│ {} ", backend.backend_info()),
-            Style::default().fg(colors::TEXT_SECONDARY),
+            format!(" {} ", backend.backend_info()),
+            Style::default().fg(Color::Rgb(200, 200, 220)),
         ),
+        Span::styled(" │ ", Style::default().fg(Color::Rgb(80, 80, 100))),
         Span::styled(
-            format!("│ {} ", status),
+            format!(" {} ", status),
             Style::default().fg(status_color).add_modifier(Modifier::BOLD),
         ),
     ])];
 
     let header = Paragraph::new(header_text)
-        .style(Style::default().bg(colors::BACKGROUND))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(colors::PRIMARY))
-                .title(" 🌌 Visualization Mode ")
-                .title_alignment(Alignment::Left),
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default()
+                    .fg(Color::Rgb(100, 200, 255))
+                    .add_modifier(Modifier::BOLD))
+                .title(" ✧ Visualization Mode ")
+                .title_alignment(Alignment::Left)
+                .title_style(Style::default()
+                    .fg(Color::Rgb(255, 200, 100))  // Orange
+                    .add_modifier(Modifier::BOLD)),
         )
-        .alignment(Alignment::Left);
+        .alignment(Alignment::Center);
 
     f.render_widget(header, area);
 }
@@ -679,27 +997,31 @@ fn render_visualization_header<B: TelemetryBackend>(
 /// Render visualization mode footer with legend
 fn render_visualization_footer(f: &mut Frame, area: Rect) {
     let footer_text = vec![Line::from(vec![
-        Span::styled("Stars: ", Style::default().fg(colors::TEXT_SECONDARY)),
-        Span::styled("Tensix Cores ", Style::default().fg(colors::PRIMARY)),
-        Span::styled("│ ", Style::default().fg(colors::TEXT_SECONDARY)),
-        Span::styled("Planets: ", Style::default().fg(colors::TEXT_SECONDARY)),
-        Span::styled("Memory (L1/L2/DDR) ", Style::default().fg(colors::WARNING)),
-        Span::styled("│ ", Style::default().fg(colors::TEXT_SECONDARY)),
-        Span::styled("Color: ", Style::default().fg(colors::TEXT_SECONDARY)),
-        Span::styled("Temperature ", Style::default().fg(colors::ERROR)),
-        Span::styled("│ ", Style::default().fg(colors::TEXT_SECONDARY)),
-        Span::styled(" v ", Style::default().fg(colors::SUCCESS).add_modifier(Modifier::BOLD)),
-        Span::styled("exit viz", Style::default().fg(colors::TEXT_SECONDARY)),
+        Span::styled("Stars: ", Style::default().fg(Color::Rgb(160, 160, 160))),
+        Span::styled("Tensix Cores ", Style::default().fg(Color::Rgb(100, 200, 255))),
+        Span::styled("│ ", Style::default().fg(Color::Rgb(100, 100, 120))),
+        Span::styled("Planets: ", Style::default().fg(Color::Rgb(160, 160, 160))),
+        Span::styled("Memory (L1/L2/DDR) ", Style::default().fg(Color::Rgb(255, 200, 100))),
+        Span::styled("│ ", Style::default().fg(Color::Rgb(100, 100, 120))),
+        Span::styled("Color: ", Style::default().fg(Color::Rgb(160, 160, 160))),
+        Span::styled("Temperature ", Style::default().fg(Color::Rgb(255, 100, 100))),
+        Span::styled("│ ", Style::default().fg(Color::Rgb(100, 100, 120))),
+        Span::styled(" v ", Style::default().fg(Color::Rgb(80, 220, 200)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled("cycle", Style::default().fg(Color::Rgb(160, 160, 160))),
     ])];
 
     let footer = Paragraph::new(footer_text)
-        .style(Style::default().bg(colors::BACKGROUND))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(colors::BORDER))
-                .title(" Legend ")
-                .title_alignment(Alignment::Left),
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default()
+                    .fg(Color::Rgb(100, 100, 120)))
+                .title(" ⌨  Controls ")
+                .title_alignment(Alignment::Left)
+                .title_style(Style::default()
+                    .fg(Color::Rgb(150, 120, 180))
+                    .add_modifier(Modifier::BOLD)),
         )
         .alignment(Alignment::Center);
 
@@ -733,9 +1055,14 @@ fn ui_memory_castle(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(colors::PRIMARY))
-                .title(" Memory Castle - Hardware Memory Hierarchy ")
-                .title_alignment(Alignment::Center),
+                .border_style(Style::default()
+                    .fg(Color::Rgb(255, 150, 200))  // Bright pink
+                    .add_modifier(Modifier::BOLD))
+                .title(" 🏰 Memory Castle - Hardware Memory Hierarchy ")
+                .title_alignment(Alignment::Center)
+                .title_style(Style::default()
+                    .fg(Color::Rgb(255, 180, 220))
+                    .add_modifier(Modifier::BOLD)),
         );
 
     f.render_widget(castle_widget, chunks[1]);
@@ -750,16 +1077,41 @@ fn ui_memory_flow(
     memory_flow: &MemoryFlowVis,
     backend: &Box<dyn TelemetryBackend>,
 ) {
-    // Full-screen layout - no chrome, just the visualization
+    // Create layout with header, content, and footer
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),  // Header
+            Constraint::Min(0),     // Flow content
+            Constraint::Length(3),  // Footer
+        ])
+        .split(f.area());
+
+    // Render Memory Flow header
+    render_memory_flow_header(f, chunks[0], backend);
+
+    // Render Memory Flow content
     let flow_lines = memory_flow.render(backend);
 
     let flow_widget = Paragraph::new(flow_lines)
         .block(
             Block::default()
-                .borders(Borders::NONE) // No borders for full-screen effect
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default()
+                    .fg(Color::Rgb(150, 255, 150))  // Bright green
+                    .add_modifier(Modifier::BOLD))
+                .title(" 🌊 Memory Flow - NoC & DDR Activity ")
+                .title_alignment(Alignment::Center)
+                .title_style(Style::default()
+                    .fg(Color::Rgb(180, 255, 180))
+                    .add_modifier(Modifier::BOLD)),
         );
 
-    f.render_widget(flow_widget, f.area());
+    f.render_widget(flow_widget, chunks[1]);
+
+    // Render Memory Flow footer
+    render_memory_flow_footer(f, chunks[2]);
 }
 
 /// Render Memory Castle mode header with device info
@@ -770,30 +1122,36 @@ fn render_memory_castle_header<B: TelemetryBackend>(
 ) {
     let header_text = vec![Line::from(vec![
         Span::styled(
-            " TT-Toplike-RS ",
+            " 🏰 MEMORY CASTLE ",
             Style::default()
-                .fg(colors::PRIMARY)
+                .fg(Color::Rgb(255, 180, 220))  // Bright pink
                 .add_modifier(Modifier::BOLD),
         ),
+        Span::styled(" │ ", Style::default().fg(Color::Rgb(80, 80, 100))),
         Span::styled(
-            format!("│ {} ", backend.backend_info()),
-            Style::default().fg(colors::TEXT_SECONDARY),
+            format!(" {} ", backend.backend_info()),
+            Style::default().fg(Color::Rgb(200, 200, 220)),
         ),
+        Span::styled(" │ ", Style::default().fg(Color::Rgb(80, 80, 100))),
         Span::styled(
-            format!("│ {} devices ", backend.device_count()),
-            Style::default().fg(colors::SUCCESS).add_modifier(Modifier::BOLD),
+            format!(" {} devices ", backend.device_count()),
+            Style::default().fg(Color::Rgb(80, 220, 200)).add_modifier(Modifier::BOLD),
         ),
     ])];
 
     let header = Paragraph::new(header_text)
-        .style(Style::default().bg(colors::BACKGROUND))
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(colors::PRIMARY))
-                .title(" 🏰 Memory Castle Mode 🏰 ")
-                .title_alignment(Alignment::Center),
+                .border_style(Style::default()
+                    .fg(Color::Rgb(255, 150, 200))
+                    .add_modifier(Modifier::BOLD))
+                .title(" 🏰 Memory Hierarchy Visualization ")
+                .title_alignment(Alignment::Center)
+                .title_style(Style::default()
+                    .fg(Color::Rgb(255, 200, 100))
+                    .add_modifier(Modifier::BOLD)),
         )
         .alignment(Alignment::Center);
 
@@ -803,28 +1161,401 @@ fn render_memory_castle_header<B: TelemetryBackend>(
 /// Render Memory Castle mode footer with controls
 fn render_memory_castle_footer(f: &mut Frame, area: Rect) {
     let footer_text = vec![Line::from(vec![
-        Span::styled("Grid: ", Style::default().fg(colors::TEXT_SECONDARY)),
-        Span::styled("Neon Topology ", Style::default().fg(colors::PRIMARY)),
-        Span::styled("│ ", Style::default().fg(colors::TEXT_SECONDARY)),
-        Span::styled("Nodes: ", Style::default().fg(colors::TEXT_SECONDARY)),
-        Span::styled("Tensix Cores ", Style::default().fg(colors::WARNING)),
-        Span::styled("│ ", Style::default().fg(colors::TEXT_SECONDARY)),
-        Span::styled("Color: ", Style::default().fg(colors::TEXT_SECONDARY)),
-        Span::styled("Activity + Temp ", Style::default().fg(colors::ERROR)),
-        Span::styled("│ ", Style::default().fg(colors::TEXT_SECONDARY)),
-        Span::styled(" v ", Style::default().fg(colors::SUCCESS).add_modifier(Modifier::BOLD)),
-        Span::styled("randomize", Style::default().fg(colors::TEXT_SECONDARY)),
+        Span::styled("Particles: ", Style::default().fg(Color::Rgb(160, 160, 160))),
+        Span::styled("○◉ Read □■ Write ◇◆ Hit ●⬤ Miss ", Style::default().fg(Color::Rgb(255, 180, 220))),
+        Span::styled("│ ", Style::default().fg(Color::Rgb(100, 100, 120))),
+        Span::styled("Layers: ", Style::default().fg(Color::Rgb(160, 160, 160))),
+        Span::styled("DDR→L2→L1→Tensix ", Style::default().fg(Color::Rgb(255, 200, 100))),
+        Span::styled("│ ", Style::default().fg(Color::Rgb(100, 100, 120))),
+        Span::styled(" v ", Style::default().fg(Color::Rgb(80, 220, 200)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled("cycle", Style::default().fg(Color::Rgb(160, 160, 160))),
     ])];
 
     let footer = Paragraph::new(footer_text)
-        .style(Style::default().bg(colors::BACKGROUND))
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(colors::BORDER))
-                .title(" Legend ")
-                .title_alignment(Alignment::Left),
+                .border_style(Style::default()
+                    .fg(Color::Rgb(100, 100, 120)))
+                .title(" ⌨  Controls ")
+                .title_alignment(Alignment::Left)
+                .title_style(Style::default()
+                    .fg(Color::Rgb(150, 120, 180))
+                    .add_modifier(Modifier::BOLD)),
+        )
+        .alignment(Alignment::Center);
+
+    f.render_widget(footer, area);
+}
+
+/// Render Memory Flow mode header with device info
+fn render_memory_flow_header<B: TelemetryBackend>(
+    f: &mut Frame,
+    area: Rect,
+    backend: &B,
+) {
+    let header_text = vec![Line::from(vec![
+        Span::styled(
+            " 🌊 MEMORY FLOW ",
+            Style::default()
+                .fg(Color::Rgb(180, 255, 180))  // Bright green
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" │ ", Style::default().fg(Color::Rgb(80, 80, 100))),
+        Span::styled(
+            format!(" {} ", backend.backend_info()),
+            Style::default().fg(Color::Rgb(200, 200, 220)),
+        ),
+        Span::styled(" │ ", Style::default().fg(Color::Rgb(80, 80, 100))),
+        Span::styled(
+            format!(" {} devices ", backend.device_count()),
+            Style::default().fg(Color::Rgb(80, 220, 200)).add_modifier(Modifier::BOLD),
+        ),
+    ])];
+
+    let header = Paragraph::new(header_text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default()
+                    .fg(Color::Rgb(150, 255, 150))
+                    .add_modifier(Modifier::BOLD))
+                .title(" 🌊 NoC & DDR Visualization ")
+                .title_alignment(Alignment::Center)
+                .title_style(Style::default()
+                    .fg(Color::Rgb(255, 200, 100))
+                    .add_modifier(Modifier::BOLD)),
+        )
+        .alignment(Alignment::Center);
+
+    f.render_widget(header, area);
+}
+
+/// Render Memory Flow mode footer with controls
+fn render_memory_flow_footer(f: &mut Frame, area: Rect) {
+    let footer_text = vec![Line::from(vec![
+        Span::styled("Flow: ", Style::default().fg(Color::Rgb(160, 160, 160))),
+        Span::styled("NoC Particles ", Style::default().fg(Color::Rgb(180, 255, 180))),
+        Span::styled("│ ", Style::default().fg(Color::Rgb(100, 100, 120))),
+        Span::styled("DDR: ", Style::default().fg(Color::Rgb(160, 160, 160))),
+        Span::styled("Channel Activity ", Style::default().fg(Color::Rgb(255, 200, 100))),
+        Span::styled("│ ", Style::default().fg(Color::Rgb(100, 100, 120))),
+        Span::styled("Color: ", Style::default().fg(Color::Rgb(160, 160, 160))),
+        Span::styled("Temperature + Traffic ", Style::default().fg(Color::Rgb(255, 100, 100))),
+        Span::styled("│ ", Style::default().fg(Color::Rgb(100, 100, 120))),
+        Span::styled(" v ", Style::default().fg(Color::Rgb(80, 220, 200)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled("cycle", Style::default().fg(Color::Rgb(160, 160, 160))),
+    ])];
+
+    let footer = Paragraph::new(footer_text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default()
+                    .fg(Color::Rgb(100, 100, 120)))
+                .title(" ⌨  Controls ")
+                .title_alignment(Alignment::Left)
+                .title_style(Style::default()
+                    .fg(Color::Rgb(150, 120, 180))
+                    .add_modifier(Modifier::BOLD)),
+        )
+        .alignment(Alignment::Center);
+
+    f.render_widget(footer, area);
+}
+
+/// Render Arcade mode with btop++-inspired layout
+fn ui_arcade(
+    f: &mut Frame,
+    arcade: &ArcadeVisualization,
+    backend: &Box<dyn TelemetryBackend>,
+) {
+    // Create main layout: Header | Content | Footer
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),  // Header
+            Constraint::Min(10),    // Content
+            Constraint::Length(3),  // Footer
+        ])
+        .split(f.area());
+
+    // Render header
+    render_arcade_header(f, main_chunks[0], backend);
+
+    // Split content: Top (Starfield) | Bottom (Castle+Flow + Table)
+    let content_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(40),  // Starfield (top 40%)
+            Constraint::Percentage(60),  // Bottom area
+        ])
+        .split(main_chunks[1]);
+
+    // Render starfield (full width)
+    render_arcade_starfield(f, content_chunks[0], arcade, backend);
+
+    // Split bottom: Castle (top) | Flow (bottom) - both full width
+    let viz_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(50),  // Memory Castle
+            Constraint::Percentage(50),  // Memory Flow
+        ])
+        .split(content_chunks[1]);
+
+    // Render visualizations (full width now!)
+    render_arcade_castle(f, viz_chunks[0], arcade, backend);
+    render_arcade_flow(f, viz_chunks[1], arcade, backend);
+
+    // Render footer
+    render_arcade_footer(f, main_chunks[2], backend);
+}
+
+/// Render Arcade mode header
+fn render_arcade_header(f: &mut Frame, area: Rect, backend: &Box<dyn TelemetryBackend>) {
+    let device_count = backend.devices().len();
+
+    let header_text = vec![Line::from(vec![
+        Span::styled(
+            " 🎮 ARCADE MODE ",
+            Style::default()
+                .fg(Color::Rgb(255, 100, 255))  // Bright magenta (btop++ style)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" │ ", Style::default().fg(Color::Rgb(80, 80, 100))),
+        Span::styled(
+            format!(" {} Device{} ", device_count, if device_count == 1 { "" } else { "s" }),
+            Style::default().fg(Color::Rgb(100, 220, 255)),  // Bright cyan
+        ),
+        Span::styled(" │ ", Style::default().fg(Color::Rgb(80, 80, 100))),
+        Span::styled(
+            format!(" {} ", backend.backend_info()),
+            Style::default().fg(Color::Rgb(150, 220, 100)),  // Bright green
+        ),
+    ])];
+
+    let header = Paragraph::new(header_text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default()
+                    .fg(Color::Rgb(100, 150, 255))  // Bright blue border
+                    .add_modifier(Modifier::BOLD))
+                .title(" ⚡ Enhanced Layout ")
+                .title_alignment(Alignment::Left)
+                .title_style(Style::default()
+                    .fg(Color::Rgb(255, 200, 100))  // Orange title
+                    .add_modifier(Modifier::BOLD)),
+        )
+        .alignment(Alignment::Center);
+
+    f.render_widget(header, area);
+}
+
+/// Render starfield section
+fn render_arcade_starfield(
+    f: &mut Frame,
+    area: Rect,
+    arcade: &ArcadeVisualization,
+    _backend: &Box<dyn TelemetryBackend>,
+) {
+    let starfield_lines = arcade.starfield.render();
+
+    let starfield_widget = Paragraph::new(starfield_lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Rgb(100, 200, 255)))  // Cyan
+                .title(" ✧ STARFIELD ")
+                .title_alignment(Alignment::Center)
+                .title_style(Style::default()
+                    .fg(Color::Rgb(150, 220, 255))
+                    .add_modifier(Modifier::BOLD)),
+        );
+
+    f.render_widget(starfield_widget, area);
+}
+
+/// Render memory castle section
+fn render_arcade_castle(
+    f: &mut Frame,
+    area: Rect,
+    arcade: &ArcadeVisualization,
+    backend: &Box<dyn TelemetryBackend>,
+) {
+    let castle_lines = arcade.memory_castle.render(backend);
+
+    let castle_widget = Paragraph::new(castle_lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Rgb(255, 150, 200)))  // Pink
+                .title(" 🏰 MEMORY CASTLE ")
+                .title_alignment(Alignment::Center)
+                .title_style(Style::default()
+                    .fg(Color::Rgb(255, 180, 220))
+                    .add_modifier(Modifier::BOLD)),
+        );
+
+    f.render_widget(castle_widget, area);
+}
+
+/// Render memory flow section
+fn render_arcade_flow(
+    f: &mut Frame,
+    area: Rect,
+    arcade: &ArcadeVisualization,
+    backend: &Box<dyn TelemetryBackend>,
+) {
+    let flow_lines = arcade.memory_flow.render(backend);
+
+    let flow_widget = Paragraph::new(flow_lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Rgb(150, 255, 150)))  // Green
+                .title(" 🌊 MEMORY FLOW ")
+                .title_alignment(Alignment::Center)
+                .title_style(Style::default()
+                    .fg(Color::Rgb(180, 255, 180))
+                    .add_modifier(Modifier::BOLD)),
+        );
+
+    f.render_widget(flow_widget, area);
+}
+
+/// Render device table (standard toplike display)
+/// Currently unused - kept for potential future use
+#[allow(dead_code)]
+fn render_arcade_devices(f: &mut Frame, area: Rect, backend: &Box<dyn TelemetryBackend>) {
+    let devices = backend.devices();
+
+    // Build device rows
+    let mut rows = Vec::new();
+    for device in devices {
+        if let Some(telemetry) = backend.telemetry(device.index) {
+            let power = telemetry.power.unwrap_or(0.0);
+            let temp = telemetry.asic_temperature.unwrap_or(0.0);
+            let current = telemetry.current.unwrap_or(0.0);
+            let voltage = telemetry.voltage.unwrap_or(0.0);
+            let aiclk = telemetry.aiclk.unwrap_or(0);
+
+            // Color-code temperature
+            let temp_color = colors::temp_color(temp);
+            let power_color = colors::power_color(power);
+
+            rows.push(Row::new(vec![
+                format!("{}", device.index),
+                format!("{:?}", device.architecture).chars().take(2).collect::<String>(),  // GS/WH/BH
+                format!("{:.1}W", power),
+                format!("{:.0}°C", temp),
+                format!("{:.1}A", current),
+                format!("{:.2}V", voltage),
+                format!("{}MHz", aiclk),
+            ])
+            .style(Style::default().fg(Color::Rgb(200, 200, 220)))
+            .height(1));
+        }
+    }
+
+    // Create table
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(3),   // ID
+            Constraint::Length(3),   // Arch
+            Constraint::Length(8),   // Power
+            Constraint::Length(7),   // Temp
+            Constraint::Length(7),   // Current
+            Constraint::Length(7),   // Voltage
+            Constraint::Length(8),   // AICLK
+        ],
+    )
+    .header(
+        Row::new(vec!["ID", "Arc", "Power", "Temp", "Curr", "Volt", "AICLK"])
+            .style(Style::default()
+                .fg(Color::Rgb(150, 220, 255))
+                .add_modifier(Modifier::BOLD))
+            .height(1),
+    )
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default()
+                .fg(Color::Rgb(255, 200, 100))  // Orange
+                .add_modifier(Modifier::BOLD))
+            .title(" 📊 DEVICES ")
+            .title_alignment(Alignment::Center)
+            .title_style(Style::default()
+                .fg(Color::Rgb(255, 220, 150))
+                .add_modifier(Modifier::BOLD)),
+    )
+    .column_spacing(1);
+
+    f.render_widget(table, area);
+}
+
+/// Render arcade footer
+fn render_arcade_footer(f: &mut Frame, area: Rect, backend: &Box<dyn TelemetryBackend>) {
+    // Get hero stats from first device
+    let (power, temp, current) = if let Some(device) = backend.devices().first() {
+        if let Some(telem) = backend.telemetry(device.index) {
+            (
+                telem.power.unwrap_or(0.0),
+                telem.asic_temperature.unwrap_or(25.0),
+                telem.current.unwrap_or(0.0),
+            )
+        } else {
+            (0.0, 25.0, 0.0)
+        }
+    } else {
+        (0.0, 25.0, 0.0)
+    };
+
+    let temp_hue = crate::animation::temp_to_hue(temp);
+    let hero_color = crate::animation::hsv_to_rgb(temp_hue, 1.0, 1.0);
+
+    let footer_text = vec![Line::from(vec![
+        Span::styled(" A ", Style::default()
+            .fg(Color::Rgb(255, 100, 255))
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled(" arcade ", Style::default().fg(Color::Rgb(160, 160, 160))),
+        Span::styled(" │ ", Style::default().fg(Color::Rgb(100, 100, 120))),
+        Span::styled(" v ", Style::default()
+            .fg(Color::Rgb(100, 220, 255))
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled(" cycle ", Style::default().fg(Color::Rgb(160, 160, 160))),
+        Span::styled(" │ ", Style::default().fg(Color::Rgb(100, 100, 120))),
+        Span::styled(" Hero: ", Style::default().fg(Color::Rgb(180, 180, 180))),
+        Span::styled("@", Style::default()
+            .fg(hero_color)
+            .add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!(" │ P:{:.1}W T:{:.0}°C I:{:.1}A ", power, temp, current),
+            Style::default().fg(Color::Rgb(150, 220, 200)),
+        ),
+    ])];
+
+    let footer = Paragraph::new(footer_text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Rgb(100, 150, 255)))
+                .title(" ⌨  Controls ")
+                .title_alignment(Alignment::Left)
+                .title_style(Style::default()
+                    .fg(Color::Rgb(150, 200, 255))
+                    .add_modifier(Modifier::BOLD)),
         )
         .alignment(Alignment::Center);
 
