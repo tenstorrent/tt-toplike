@@ -939,6 +939,7 @@ fn ui_visualization(
     let starfield_lines = starfield.render();
 
     let starfield_widget = Paragraph::new(starfield_lines)
+        .style(Style::default().bg(Color::Reset))  // Transparent background for tmux
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -950,7 +951,8 @@ fn ui_visualization(
                 .title_alignment(Alignment::Center)
                 .title_style(Style::default()
                     .fg(Color::Rgb(150, 220, 255))
-                    .add_modifier(Modifier::BOLD)),
+                    .add_modifier(Modifier::BOLD))
+                .style(Style::default().bg(Color::Reset)),  // Transparent block background
         );
 
     f.render_widget(starfield_widget, chunks[1]);
@@ -1068,6 +1070,7 @@ fn ui_memory_castle(
     let castle_lines = memory_castle.render(backend);
 
     let castle_widget = Paragraph::new(castle_lines)
+        .style(Style::default().bg(Color::Reset))  // Transparent background for tmux
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -1079,7 +1082,8 @@ fn ui_memory_castle(
                 .title_alignment(Alignment::Center)
                 .title_style(Style::default()
                     .fg(Color::Rgb(255, 180, 220))
-                    .add_modifier(Modifier::BOLD)),
+                    .add_modifier(Modifier::BOLD))
+                .style(Style::default().bg(Color::Reset)),  // Transparent block background
         );
 
     f.render_widget(castle_widget, chunks[1]);
@@ -1111,6 +1115,7 @@ fn ui_memory_flow(
     let flow_lines = memory_flow.render(backend);
 
     let flow_widget = Paragraph::new(flow_lines)
+        .style(Style::default().bg(Color::Reset))  // Transparent background for tmux
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -1122,7 +1127,8 @@ fn ui_memory_flow(
                 .title_alignment(Alignment::Center)
                 .title_style(Style::default()
                     .fg(Color::Rgb(180, 255, 180))
-                    .add_modifier(Modifier::BOLD)),
+                    .add_modifier(Modifier::BOLD))
+                .style(Style::default().bg(Color::Reset)),  // Transparent block background
         );
 
     f.render_widget(flow_widget, chunks[1]);
@@ -1384,6 +1390,7 @@ fn render_arcade_starfield(
     let starfield_lines = arcade.starfield.render();
 
     let starfield_widget = Paragraph::new(starfield_lines)
+        .style(Style::default().bg(Color::Reset))  // Transparent background for tmux
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -1393,7 +1400,8 @@ fn render_arcade_starfield(
                 .title_alignment(Alignment::Center)
                 .title_style(Style::default()
                     .fg(Color::Rgb(150, 220, 255))
-                    .add_modifier(Modifier::BOLD)),
+                    .add_modifier(Modifier::BOLD))
+                .style(Style::default().bg(Color::Reset)),  // Transparent block background
         );
 
     f.render_widget(starfield_widget, area);
@@ -1409,6 +1417,7 @@ fn render_arcade_castle(
     let castle_lines = arcade.memory_castle.render(backend);
 
     let castle_widget = Paragraph::new(castle_lines)
+        .style(Style::default().bg(Color::Reset))  // Transparent background for tmux
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -1418,7 +1427,8 @@ fn render_arcade_castle(
                 .title_alignment(Alignment::Center)
                 .title_style(Style::default()
                     .fg(Color::Rgb(255, 180, 220))
-                    .add_modifier(Modifier::BOLD)),
+                    .add_modifier(Modifier::BOLD))
+                .style(Style::default().bg(Color::Reset)),  // Transparent block background
         );
 
     f.render_widget(castle_widget, area);
@@ -1434,6 +1444,7 @@ fn render_arcade_flow(
     let flow_lines = arcade.memory_flow.render(backend);
 
     let flow_widget = Paragraph::new(flow_lines)
+        .style(Style::default().bg(Color::Reset))  // Transparent background for tmux
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -1443,7 +1454,8 @@ fn render_arcade_flow(
                 .title_alignment(Alignment::Center)
                 .title_style(Style::default()
                     .fg(Color::Rgb(180, 255, 180))
-                    .add_modifier(Modifier::BOLD)),
+                    .add_modifier(Modifier::BOLD))
+                .style(Style::default().bg(Color::Reset)),  // Transparent block background
         );
 
     f.render_widget(flow_widget, area);
