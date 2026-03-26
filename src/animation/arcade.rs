@@ -20,7 +20,8 @@ use crate::animation::{
     hsv_to_rgb, temp_to_hue, lerp, PARTICLE_CHARS,
 };
 use crate::backend::TelemetryBackend;
-use ratatui::style::{Color, Modifier, Style};
+use crate::ui::colors;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 /// Hero character trail entry
@@ -262,24 +263,24 @@ impl ArcadeVisualization {
             Span::styled(
                 "  🎮 ARCADE MODE ",
                 Style::default()
-                    .fg(Color::Rgb(220, 240, 255))
+                    .fg(colors::rgb(220, 240, 255))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "│",
-                Style::default().fg(Color::Rgb(150, 120, 180)),
+                Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(150, 120, 180)),
             ),
             Span::styled(
                 format!(" {} Device{} ", device_count, if device_count == 1 { "" } else { "s" }),
-                Style::default().fg(Color::Rgb(80, 220, 200)),
+                Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(80, 220, 200)),
             ),
             Span::styled(
                 "│",
-                Style::default().fg(Color::Rgb(150, 120, 180)),
+                Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(150, 120, 180)),
             ),
             Span::styled(
                 " Press 'v' to cycle modes ",
-                Style::default().fg(Color::Rgb(160, 160, 160)),
+                Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(160, 160, 160)),
             ),
         ])
     }
@@ -303,7 +304,7 @@ impl ArcadeVisualization {
             Span::styled(
                 format!(" {} ", label),
                 Style::default()
-                    .fg(Color::Rgb(220, 240, 255))
+                    .fg(colors::rgb(220, 240, 255))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -336,7 +337,7 @@ impl ArcadeVisualization {
             Span::styled(
                 "  Hero: ",
                 Style::default()
-                    .fg(Color::Rgb(160, 160, 160)),
+                    .fg(colors::rgb(160, 160, 160)),
             ),
             Span::styled(
                 "@",
@@ -346,15 +347,15 @@ impl ArcadeVisualization {
             ),
             Span::styled(
                 format!(" │ P:{:.1}W T:{:.1}°C I:{:.1}A ", power, temp, current),
-                Style::default().fg(Color::Rgb(160, 160, 160)),
+                Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(160, 160, 160)),
             ),
             Span::styled(
                 "│ Trail: ",
-                Style::default().fg(Color::Rgb(160, 160, 160)),
+                Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(160, 160, 160)),
             ),
             Span::styled(
                 PARTICLE_CHARS.iter().collect::<String>(),
-                Style::default().fg(Color::Rgb(80, 220, 200)),
+                Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(80, 220, 200)),
             ),
         ])
     }
@@ -415,7 +416,7 @@ impl ArcadeVisualization {
                     .map(|(char_idx, &ch)| {
                         let abs_col = span_idx * 10 + char_idx; // Approximate column
                         if abs_col == col {
-                            Span::styled(trail_char.to_string(), Style::default().fg(trail_color))
+                            Span::styled(trail_char.to_string(), Style::default().bg(colors::rgb(0, 0, 0)).fg(trail_color))
                         } else {
                             Span::styled(ch.to_string(), span.style)
                         }

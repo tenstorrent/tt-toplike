@@ -7,6 +7,7 @@
 //! - ARC health rendering
 
 use ratatui::style::Color;
+use crate::ui::colors;
 
 /// Convert HSV color space to RGB
 ///
@@ -46,7 +47,7 @@ pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
         (c, 0.0, x)
     };
 
-    Color::Rgb(
+    colors::rgb(
         ((r + m) * 255.0) as u8,
         ((g + m) * 255.0) as u8,
         ((b + m) * 255.0) as u8,
@@ -201,6 +202,7 @@ pub fn wrap_phase(phase: f32) -> f32 {
 }
 
 /// 16-color ANSI palette (BBS-era aesthetic)
+/// Note: Uses Color::Rgb directly since const arrays can't use runtime functions
 pub const ANSI_PALETTE: [Color; 16] = [
     Color::Rgb(0, 0, 0),         // 0: Black
     Color::Rgb(255, 100, 100),   // 1: Red
@@ -268,9 +270,9 @@ pub fn arc_health_header(arc_health: &[(usize, bool)]) -> String {
 /// Solid colors for ARC health status
 pub fn arc_health_color(is_healthy: bool, _frame: u32) -> Color {
     if is_healthy {
-        Color::Rgb(80, 220, 100)  // Bright green (healthy)
+        colors::rgb(80, 220, 100)  // Bright green (healthy)
     } else {
-        Color::Rgb(255, 100, 100)  // Solid bright red (no blinking)
+        colors::rgb(255, 100, 100)  // Solid bright red (no blinking)
     }
 }
 

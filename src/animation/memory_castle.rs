@@ -14,6 +14,7 @@
 
 use crate::animation::{AdaptiveBaseline, hsv_to_rgb, rgb_to_hsv, temp_to_hue};
 use crate::backend::TelemetryBackend;
+use crate::ui::colors;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -386,18 +387,18 @@ impl MemoryCastle {
                 if let Some(p) = particle_here.first() {
                     spans.push(Span::styled(
                         p.get_char().to_string(),
-                        Style::default().fg(p.get_color()).add_modifier(Modifier::BOLD),
+                        Style::default().bg(colors::rgb(0, 0, 0)).fg(p.get_color()).add_modifier(Modifier::BOLD),
                     ));
                 } else if let Some((trail_char, trail_color)) = trail_here {
                     spans.push(Span::styled(
                         trail_char.to_string(),
-                        Style::default().fg(trail_color),
+                        Style::default().bg(colors::rgb(0, 0, 0)).fg(trail_color),
                     ));
                 } else if let Some((_, _, ch, hue)) = glyph_here {
                     let glyph_color = hsv_to_rgb(*hue, 0.4, 0.3);
                     spans.push(Span::styled(
                         ch.to_string(),
-                        Style::default().fg(glyph_color),
+                        Style::default().bg(colors::rgb(0, 0, 0)).fg(glyph_color),
                     ));
                 } else {
                     // Background based on layer
@@ -440,19 +441,19 @@ impl MemoryCastle {
 
             vec![
                 Span::styled(padding.clone(), Style::default()),
-                Span::styled(device_info, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(device_info, Style::default().bg(colors::rgb(0, 0, 0)).fg(color).add_modifier(Modifier::BOLD)),
                 Span::styled(padding, Style::default()),
             ]
         }).flatten().collect();
 
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled("─".repeat(self.width.saturating_sub(2)), Style::default().fg(Color::Rgb(100, 100, 120))),
+            Span::styled("─".repeat(self.width.saturating_sub(2)), Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(100, 100, 120))),
         ]));
         lines.push(Line::from(header_spans));
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled("─".repeat(self.width.saturating_sub(2)), Style::default().fg(Color::Rgb(100, 100, 120))),
+            Span::styled("─".repeat(self.width.saturating_sub(2)), Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(100, 100, 120))),
         ]));
 
         // === CANVAS ===
@@ -499,7 +500,7 @@ impl MemoryCastle {
                             let particle_color = hsv_to_rgb(particle_hue, 0.9, particle.intensity);
                             spans.push(Span::styled(
                                 particle_char.to_string(),
-                                Style::default().fg(particle_color).add_modifier(Modifier::BOLD)
+                                Style::default().bg(colors::rgb(0, 0, 0)).fg(particle_color).add_modifier(Modifier::BOLD)
                             ));
                             found_particle = true;
                             break;
@@ -514,7 +515,7 @@ impl MemoryCastle {
                                     let mut trail_hue = particle.hue + hue_shift;
                                     if trail_hue > 360.0 { trail_hue -= 360.0; }
                                     let trail_color = hsv_to_rgb(trail_hue, 0.5, particle.intensity * 0.5);
-                                    spans.push(Span::styled("·", Style::default().fg(trail_color)));
+                                    spans.push(Span::styled("·", Style::default().bg(colors::rgb(0, 0, 0)).fg(trail_color)));
                                     found_particle = true;
                                     break;
                                 }
@@ -535,7 +536,7 @@ impl MemoryCastle {
                                 let mut new_hue = hsv.0 + hue_shift;
                                 if new_hue > 360.0 { new_hue -= 360.0; }
                                 let shifted_color = hsv_to_rgb(new_hue, hsv.1, hsv.2);
-                                spans.push(Span::styled(bg_span.content, Style::default().fg(shifted_color)));
+                                spans.push(Span::styled(bg_span.content, Style::default().bg(colors::rgb(0, 0, 0)).fg(shifted_color)));
                             } else {
                                 spans.push(bg_span);
                             }
@@ -547,7 +548,7 @@ impl MemoryCastle {
 
                 // Column separator
                 if dev_idx < num_devices - 1 {
-                    spans.push(Span::styled("│", Style::default().fg(Color::Rgb(80, 80, 100))));
+                    spans.push(Span::styled("│", Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(80, 80, 100))));
                 }
             }
 
@@ -557,12 +558,12 @@ impl MemoryCastle {
         // === FOOTER ===
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled("─".repeat(self.width.saturating_sub(2)), Style::default().fg(Color::Rgb(100, 100, 120))),
+            Span::styled("─".repeat(self.width.saturating_sub(2)), Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(100, 100, 120))),
         ]));
         let footer_text = format!("Showing {} devices side-by-side │ Particles color-coded by device", num_devices);
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(footer_text, Style::default().fg(Color::Rgb(160, 160, 160))),
+            Span::styled(footer_text, Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(160, 160, 160))),
         ]));
 
         lines
@@ -576,9 +577,9 @@ impl MemoryCastle {
                 if col % 12 == 0 {
                     let activity = ((self.frame as f32 * 0.1 + col as f32 * 0.5).sin() + 1.0) / 2.0 * current_change;
                     let color = hsv_to_rgb(270.0, 0.6, 0.3 + activity * 0.3);
-                    Span::styled("║".to_string(), Style::default().fg(color))
+                    Span::styled("║".to_string(), Style::default().bg(colors::rgb(0, 0, 0)).fg(color))
                 } else if row % 3 == 0 {
-                    Span::styled("═".to_string(), Style::default().fg(Color::Rgb(80, 60, 100)))
+                    Span::styled("═".to_string(), Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(80, 60, 100)))
                 } else {
                     Span::raw(" ")
                 }
@@ -588,10 +589,10 @@ impl MemoryCastle {
                 if (col % 15 == 0 || col % 15 == 14) && row % 4 < 3 {
                     let activity = ((self.frame as f32 * 0.08 + col as f32 * 0.3).cos() + 1.0) / 2.0 * current_change;
                     let color = hsv_to_rgb(45.0, 0.7, 0.4 + activity * 0.4);
-                    Span::styled("│".to_string(), Style::default().fg(color))
+                    Span::styled("│".to_string(), Style::default().bg(colors::rgb(0, 0, 0)).fg(color))
                 } else if row % 4 == 0 && col % 15 < 14 {
                     let color = hsv_to_rgb(45.0, 0.5, 0.3);
-                    Span::styled("─".to_string(), Style::default().fg(color))
+                    Span::styled("─".to_string(), Style::default().bg(colors::rgb(0, 0, 0)).fg(color))
                 } else {
                     Span::raw(" ")
                 }
@@ -601,10 +602,10 @@ impl MemoryCastle {
                 if (col + row) % 8 == 0 {
                     let activity = ((self.frame as f32 * 0.12 + col as f32 * 0.4 + row as f32 * 0.3).sin() + 1.0) / 2.0 * power_change;
                     let color = hsv_to_rgb(180.0, 0.6, 0.4 + activity * 0.4);
-                    Span::styled("◇".to_string(), Style::default().fg(color))
+                    Span::styled("◇".to_string(), Style::default().bg(colors::rgb(0, 0, 0)).fg(color))
                 } else if col % 10 == 0 {
                     let color = hsv_to_rgb(180.0, 0.4, 0.3);
-                    Span::styled("│".to_string(), Style::default().fg(color))
+                    Span::styled("│".to_string(), Style::default().bg(colors::rgb(0, 0, 0)).fg(color))
                 } else {
                     Span::raw(" ")
                 }
@@ -617,7 +618,7 @@ impl MemoryCastle {
                     let hue = temp_to_hue(temp);
                     let color = hsv_to_rgb(hue, 0.7 + activity * 0.3, 0.5 + activity * 0.5);
                     let ch = if activity > 0.7 { '▓' } else if activity > 0.4 { '▒' } else { '░' };
-                    Span::styled(ch.to_string(), Style::default().fg(color))
+                    Span::styled(ch.to_string(), Style::default().bg(colors::rgb(0, 0, 0)).fg(color))
                 } else {
                     Span::raw(" ")
                 }
@@ -641,7 +642,7 @@ impl MemoryCastle {
         spans.push(Span::styled(
             " 🏰 MEMORY DUNGEON ",
             Style::default()
-                .fg(Color::Rgb(220, 180, 255))
+                .fg(colors::rgb(220, 180, 255))
                 .add_modifier(Modifier::BOLD),
         ));
 
@@ -650,7 +651,7 @@ impl MemoryCastle {
         // Device info
         spans.push(Span::styled(
             format!("Device {}: {} ", device.index, device.architecture.abbrev()),
-            Style::default().fg(Color::Rgb(180, 200, 255)),
+            Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(180, 200, 255)),
         ));
 
         spans.push(Span::raw("│ "));
@@ -659,15 +660,15 @@ impl MemoryCastle {
         if let Some(t) = telem {
             let temp = t.temp_c();
             let temp_color = if temp > 80.0 {
-                Color::Rgb(255, 100, 100)
+                colors::rgb(255, 100, 100)
             } else if temp > 65.0 {
-                Color::Rgb(255, 180, 100)
+                colors::rgb(255, 180, 100)
             } else {
-                Color::Rgb(100, 220, 100)
+                colors::rgb(100, 220, 100)
             };
             spans.push(Span::styled(
                 format!("🌡 {:.1}°C ", temp),
-                Style::default().fg(temp_color),
+                Style::default().bg(colors::rgb(0, 0, 0)).fg(temp_color),
             ));
 
             spans.push(Span::raw("│ "));
@@ -675,7 +676,7 @@ impl MemoryCastle {
             // Power
             spans.push(Span::styled(
                 format!("⚡ {:.1}W ", t.power_w()),
-                Style::default().fg(Color::Rgb(255, 220, 100)),
+                Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(255, 220, 100)),
             ));
 
             spans.push(Span::raw("│ "));
@@ -683,7 +684,7 @@ impl MemoryCastle {
             // Current
             spans.push(Span::styled(
                 format!("⚙ {:.1}A ", t.current_a()),
-                Style::default().fg(Color::Rgb(100, 180, 255)),
+                Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(100, 180, 255)),
             ));
         }
 
@@ -691,14 +692,14 @@ impl MemoryCastle {
         if let Some(s) = smbus {
             let healthy = s.is_arc0_healthy();
             let arc_color = if healthy {
-                Color::Rgb(100, 255, 100)
+                colors::rgb(100, 255, 100)
             } else {
-                Color::Rgb(255, 100, 100)
+                colors::rgb(255, 100, 100)
             };
             spans.push(Span::raw("│ ARC: "));
             spans.push(Span::styled(
                 if healthy { "●" } else { "○" },
-                Style::default().fg(arc_color),
+                Style::default().bg(colors::rgb(0, 0, 0)).fg(arc_color),
             ));
         }
 
@@ -714,7 +715,7 @@ impl MemoryCastle {
             Span::raw("  "),
             Span::styled(
                 "─".repeat(100),  // Simple, looks good at any width
-                Style::default().fg(Color::Rgb(80, 80, 100)),
+                Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(80, 80, 100)),
             ),
         ])
     }
@@ -723,18 +724,18 @@ impl MemoryCastle {
     fn render_footer(&self) -> Line<'static> {
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("Particles: ", Style::default().fg(Color::Rgb(150, 150, 150))),
-            Span::styled("○◉ ", Style::default().fg(Color::Rgb(100, 200, 255))),
+            Span::styled("Particles: ", Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(150, 150, 150))),
+            Span::styled("○◉ ", Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(100, 200, 255))),
             Span::raw("Read │ "),
-            Span::styled("□■ ", Style::default().fg(Color::Rgb(255, 180, 100))),
+            Span::styled("□■ ", Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(255, 180, 100))),
             Span::raw("Write │ "),
-            Span::styled("◇◆ ", Style::default().fg(Color::Rgb(100, 255, 200))),
+            Span::styled("◇◆ ", Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(100, 255, 200))),
             Span::raw("CacheHit │ "),
-            Span::styled("●⬤ ", Style::default().fg(Color::Rgb(255, 100, 100))),
+            Span::styled("●⬤ ", Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(255, 100, 100))),
             Span::raw("Miss │ "),
-            Span::styled("·•▪ ", Style::default().fg(Color::Rgb(120, 120, 120))),
+            Span::styled("·•▪ ", Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(120, 120, 120))),
             Span::raw("Trails │ "),
-            Span::styled("⚡※☼♦◊ ", Style::default().fg(Color::Rgb(180, 150, 200))),
+            Span::styled("⚡※☼♦◊ ", Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(180, 150, 200))),
             Span::raw("Glyphs"),
         ])
     }

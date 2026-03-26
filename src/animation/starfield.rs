@@ -132,10 +132,10 @@ impl MemoryPlanet {
     /// Get color for this memory level
     pub fn get_color(&self) -> Color {
         match self.level {
-            0 => colors::INFO,        // L1 - blue
-            1 => colors::WARNING,     // L2 - yellow/orange
-            2 => colors::ERROR,       // DDR - red/magenta
-            _ => colors::TEXT_SECONDARY,
+            0 => colors::rgb(100, 180, 255),   // L1 - blue (was colors::INFO)
+            1 => colors::rgb(255, 180, 100),   // L2 - orange (was colors::WARNING)
+            2 => colors::rgb(255, 100, 100),   // DDR - red (was colors::ERROR)
+            _ => colors::rgb(160, 160, 160),   // Fallback grey
         }
     }
 }
@@ -532,8 +532,8 @@ impl HardwareStarfield {
         use ratatui::text::{Line, Span};
         use ratatui::style::Style;
 
-        // Create blank canvas
-        let mut canvas: Vec<Vec<(char, Color)>> = vec![vec![(' ', colors::TEXT_SECONDARY); self.width]; self.height];
+        // Create blank canvas with explicit black background
+        let mut canvas: Vec<Vec<(char, Color)>> = vec![vec![(' ', colors::rgb(0, 0, 0)); self.width]; self.height];
 
         // Render stars
         for star in &self.stars {
@@ -565,12 +565,13 @@ impl HardwareStarfield {
         for row in canvas {
             let mut spans = Vec::new();
             let mut current_text = String::new();
-            let mut current_color = colors::TEXT_SECONDARY;
+            let mut current_color = colors::rgb(0, 0, 0);
 
             for (ch, color) in row {
                 if color != current_color {
                     // Push accumulated text with previous color
                     if !current_text.is_empty() {
+                        // Only set foreground color - let widget background show through
                         spans.push(Span::styled(
                             current_text.clone(),
                             Style::default().fg(current_color)
@@ -584,6 +585,7 @@ impl HardwareStarfield {
 
             // Push final span
             if !current_text.is_empty() {
+                // Only set foreground color - let widget background show through
                 spans.push(Span::styled(
                     current_text,
                     Style::default().fg(current_color)
@@ -608,7 +610,15 @@ impl HardwareStarfield {
         // Helper function to convert Ratatui Color to Iced Color
         fn ratatui_to_iced(color: Color) -> IcedColor {
             match color {
-                Color::Rgb(r, g, b) => IcedColor::from_rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0),
+                Color::Rgb(r, g, b) | Color::Indexed(_) => {
+                    // For Indexed colors, we'd need a lookup table, but for simplicity
+                    // just use a default color. The pattern match here is mainly for Rgb.
+                    if let Color::Rgb(r, g, b) = color {
+                        IcedColor::from_rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
+                    } else {
+                        IcedColor::from_rgb(0.8, 0.8, 0.8)
+                    }
+                }
                 Color::Reset => IcedColor::from_rgb(0.8, 0.8, 0.8),
                 _ => IcedColor::from_rgb(0.8, 0.8, 0.8),
             }

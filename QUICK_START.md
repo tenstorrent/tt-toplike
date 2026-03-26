@@ -154,7 +154,11 @@ pkill tt-toplike-tui
 ```
 
 ### tmux Background Colors
-Already fixed in v0.1.0! Uses transparent backgrounds.
+Fixed in v0.1.0! Features:
+- Transparent backgrounds throughout
+- **256-color fallback** when in tmux (auto-detected)
+- Fixes grey backgrounds in macOS Terminal.app via SSH + tmux
+- RGB → 256-color conversion using 6×6×6 palette cube
 
 ### No Hardware Detected
 ```bash

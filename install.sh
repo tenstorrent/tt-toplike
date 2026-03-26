@@ -1,43 +1,56 @@
 #!/bin/bash
-# Install script for tt-toplike-rs with Arcade mode
+# Install script for tt-toplike-rs with multi-chip support and 256-color tmux compatibility
 
 set -e
 
-echo "🎮 Installing tt-toplike-rs with Arcade Mode"
-echo "=============================================="
+echo "🎮 Installing tt-toplike-rs (TUI + GUI)"
+echo "========================================"
 echo ""
 
 cd ~/code/tt-toplike-rs
 
-# Build
+# Build TUI
 echo "Building TUI binary..."
 cargo build --release --bin tt-toplike-tui --features tui
 
-# Install
+# Build GUI
+echo "Building GUI binary..."
+cargo build --release --bin tt-toplike-egui --features egui
+
+# Install both
 echo "Installing to ~/.local/bin/..."
-mkdir -p ~/.local/bin
-cp target/release/tt-toplike-tui ~/.local/bin/tt-toplike-tui
-chmod +x ~/.local/bin/tt-toplike-tui
+cargo install --path . --bin tt-toplike-tui --features tui --force --root ~/.local
+cargo install --path . --bin tt-toplike-egui --features egui --force --root ~/.local
 
 echo ""
 echo "✅ Installation complete!"
 echo ""
-echo "📍 Installed to: ~/.local/bin/tt-toplike-tui"
+echo "📍 Installed binaries:"
+echo "  • ~/.local/bin/tt-toplike-tui (2.3 MB)"
+echo "  • ~/.local/bin/tt-toplike-egui (16 MB)"
 echo ""
-echo "🎯 Usage:"
+echo "🎯 Quick Start:"
+echo "  # Mock backend"
 echo "  tt-toplike-tui --mock --mock-devices 4"
-echo "  Then press 'A' to enter Arcade mode V2!"
 echo ""
-echo "✨ Features:"
-echo "  • Starfield: Full width (40% height)"
-echo "  • Bottom: Castle + Flow (left) | Device table (right)"
-echo "  • Multi-chip: Memory Castle shows all 4 devices side-by-side!"
-echo "  • btop++-inspired colors and crispness"
-echo "  • Always see metrics + visualizations together!"
+echo "  # Launch directly into modes:"
+echo "  tt-toplike-tui --mode arcade"
+echo "  tt-toplike-tui --mode castle"
+echo "  tt-toplike-tui --mode starfield"
+echo "  tt-toplike-tui --mode flow"
+echo ""
+echo "✨ New Features:"
+echo "  • 256-color fallback for tmux (fixes macOS Terminal.app via SSH)"
+echo "  • Multi-chip Memory Castle (side-by-side view for 2-4 devices)"
+echo "  • --mode CLI flag for direct visualization launch"
+echo "  • Improved contrast and btop++-inspired colors"
 echo ""
 echo "⌨️  Keyboard shortcuts:"
-echo "  A/a - Jump to Arcade mode (V2 layout!)"
 echo "  v   - Cycle visualization modes"
-echo "  b   - Switch backend"
+echo "  b   - Switch backend (Sysfs → JSON → Mock)"
 echo "  q   - Quit"
+echo ""
+echo "🔧 Tmux Color Fix:"
+echo "  Colors automatically use 256-color palette in tmux"
+echo "  Fixes grey backgrounds in Terminal.app on macOS via SSH"
 echo ""

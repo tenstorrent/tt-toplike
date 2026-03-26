@@ -25,6 +25,7 @@
 use crate::animation::AdaptiveBaseline;
 use crate::backend::TelemetryBackend;
 use crate::models::Architecture;
+use crate::ui::colors;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::f32;
@@ -340,7 +341,7 @@ impl MemoryFlowVis {
         spans.push(Span::styled(
             "DDR IN:  ",
             Style::default()
-                .fg(Color::Rgb(100, 180, 255))
+                .fg(colors::rgb(100, 180, 255))
                 .add_modifier(Modifier::BOLD),
         ));
 
@@ -358,14 +359,14 @@ impl MemoryFlowVis {
             let empty = channel_width.saturating_sub(filled);
 
             let color = if ch_activity > 0.7 {
-                Color::Rgb(255, 200, 100)
+                colors::rgb(255, 200, 100)
             } else if ch_activity > 0.4 {
-                Color::Rgb(100, 180, 255)
+                colors::rgb(100, 180, 255)
             } else {
-                Color::Rgb(80, 120, 160)
+                colors::rgb(80, 120, 160)
             };
 
-            spans.push(Span::styled("═".repeat(filled), Style::default().fg(color)));
+            spans.push(Span::styled("═".repeat(filled), Style::default().bg(colors::rgb(0, 0, 0)).fg(color)));
             spans.push(Span::raw("·".repeat(empty)));
         }
 
@@ -446,7 +447,7 @@ impl MemoryFlowVis {
 
                     spans.push(Span::styled(
                         core_char.to_string(),
-                        Style::default().fg(color),
+                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
                     ));
                 } else {
                     // Outside core area - empty space
@@ -472,7 +473,7 @@ impl MemoryFlowVis {
         spans.push(Span::styled(
             "DDR OUT: ",
             Style::default()
-                .fg(Color::Rgb(255, 180, 100))
+                .fg(colors::rgb(255, 180, 100))
                 .add_modifier(Modifier::BOLD),
         ));
 
@@ -489,14 +490,14 @@ impl MemoryFlowVis {
             let empty = channel_width.saturating_sub(filled);
 
             let color = if ch_activity > 0.7 {
-                Color::Rgb(255, 150, 100)
+                colors::rgb(255, 150, 100)
             } else if ch_activity > 0.4 {
-                Color::Rgb(200, 140, 80)
+                colors::rgb(200, 140, 80)
             } else {
-                Color::Rgb(120, 100, 60)
+                colors::rgb(120, 100, 60)
             };
 
-            spans.push(Span::styled("═".repeat(filled), Style::default().fg(color)));
+            spans.push(Span::styled("═".repeat(filled), Style::default().bg(colors::rgb(0, 0, 0)).fg(color)));
             spans.push(Span::raw("·".repeat(empty)));
         }
 
@@ -526,7 +527,7 @@ impl MemoryFlowVis {
         Line::from(vec![Span::styled(
             stats,
             Style::default()
-                .fg(Color::Rgb(200, 200, 220))
+                .fg(colors::rgb(200, 200, 220))
                 .add_modifier(Modifier::DIM),
         )])
     }
