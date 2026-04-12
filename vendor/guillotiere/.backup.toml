@@ -1,0 +1,5 @@
+target_dir = "backups/dev/guillotiere"
+default = "sync"
+exclude = [
+    "target"
+]

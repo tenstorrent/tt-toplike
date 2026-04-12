@@ -1,0 +1,13 @@
+tt-toplike-rs (0.1.0) noble; urgency=medium
+
+  * Initial Debian packaging for Ubuntu 24.04 (Noble Numbat).
+  * Ships two binary packages:
+    - tt-toplike: TUI monitoring tool (tt-toplike-tui binary)
+    - tt-toplike-egui: GPU-accelerated egui dashboard
+  * Safe-by-default backend chain: sysfs → json → mock (Luwen never
+    auto-detected; use --backend luwen only when hardware is idle).
+  * Visualization modes: --mode arcade|castle|starfield|flow|normal
+  * Recommends tt-smi (TT PPA) for JSON backend; tenstorrent-dkms for sysfs.
+  * Crates vendored under vendor/ for reproducible offline builds.
+
+ -- Tenstorrent <software@tenstorrent.com>  Thu, 10 Apr 2026 00:00:00 +0000

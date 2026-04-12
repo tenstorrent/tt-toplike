@@ -1,0 +1,26 @@
+[package]
+name = "drm-fourcc"
+version = "2.2.0"
+authors = ["Daniel Franklin <daniel@danielzfranklin.org>"]
+edition = "2018"
+license = "MIT"
+description = "Provides an enum with every valid Direct Rendering Manager (DRM) format fourcc"
+repository = "https://github.com/danielzfranklin/drm-fourcc-rs"
+keywords = ["drm", "fourcc", "linux"]
+categories = ["os::linux-apis"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+default = ["std"]
+# Adds `Error` impls for the Unrecognized types.
+std = []
+# Re-build the bindings based on the headers on your machine. Should not be necessary
+build_bindings = ["regex", "bindgen"]
+
+[dependencies]
+serde = { version = "1.0.125", optional = true, features = ["derive"] }
+
+[build-dependencies]
+regex = { version = "1.4.3", optional = true }
+bindgen = { version = "0.57.0", optional = true }

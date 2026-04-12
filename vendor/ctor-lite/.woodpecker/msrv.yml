@@ -1,0 +1,26 @@
+when:
+- event: push
+  branch: main
+- event: pull_request
+
+matrix:
+  RUST_VERSION:
+   - "1.36.0"
+
+steps:
+  msrv:
+    image: rust
+    commands:
+     - cargo install cargo-hack
+     - rustup default ${RUST_VERSION}
+     - rm Cargo.lock
+     - cargo hack build --no-dev-deps
+    environment:
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CARGO_NET_RETRY: "10"
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+      RUSTFLAGS: "-D warnings"
+      RUSTDOCFLAGS: "-D warnings"
+      RUSTUP_MAX_RETRIES: "10" 
