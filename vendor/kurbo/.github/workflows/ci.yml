@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  rustfmt:
+    runs-on: ubuntu-latest
+    name: cargo fmt
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "stable"
+          components: rustfmt
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+  test-stable:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macOS-latest, windows-2019, ubuntu-latest]
+    name: cargo clippy+test
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "stable"
+          components: clippy
+
+      - run: rustup target add thumbv7m-none-eabi
+
+      - name: cargo clippy
+        run: cargo clippy --all-features --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --all-features
+
+      - name: Build with no default features
+        # Use no-std target to ensure we don't link to std.
+        run: cargo build --no-default-features --features libm --target thumbv7m-none-eabi
+
+      - name: cargo test --features=serde
+        run: cargo test --features=serde
+
+  test-stable-wasm:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macOS-latest, windows-2019, ubuntu-latest]
+
+    name: cargo clippy+test (wasm32)
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "stable"
+          target: wasm32-unknown-unknown
+          components: clippy
+
+      - name: cargo clippy
+        run: cargo clippy --all-features --all-targets --target wasm32-unknown-unknown -- -D warnings
+
+      # TODO: Find a way to make tests work. Until then the tests are merely compiled.
+      - name: cargo test compile
+        run: cargo test --all-features --no-run --target wasm32-unknown-unknown
+
+  test-msrv:
+    runs-on: ubuntu-latest
+    name: cargo test msrv
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: install msrv toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.65"
+
+      - name: cargo test
+        run: cargo test --all-features
+
+  test-nightly:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macOS-latest, windows-2019, ubuntu-latest]
+    name: cargo test nightly
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: install nightly toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "nightly"
+
+      - name: cargo test
+        run: cargo test --all-features
+
+  check-docs:
+    name: Docs
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macOS-latest, windows-2019, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: install stable toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "stable"
+
+      - name: cargo doc
+        run: cargo doc --all-features --document-private-items

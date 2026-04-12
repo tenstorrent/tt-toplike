@@ -104,3 +104,25 @@ egui = ["eframe", "egui_plot"]  # Lightweight egui dashboard
 luwen-backend = ["all-smi-luwen-core", "all-smi-luwen-if", "all-smi-luwen-ref"]   # Direct hardware access (EXPLICIT ONLY)
 json-backend = []               # Subprocess tt-smi + JSON (SAFE)
 linux-procfs = ["procfs"]       # Enhanced Linux process detection
+
+# ── Debian packaging metadata (used by `cargo deb` for quick developer .debs)
+# For PPA/official builds use dpkg-buildpackage via build-deb.sh instead.
+[package.metadata.deb]
+name = "tt-toplike"
+maintainer = "Tenstorrent <software@tenstorrent.com>"
+copyright = "2026, Tenstorrent Inc."
+license-file = ["LICENSE", "3"]
+# $auto expands to dh_shlibdeps-style detected library deps at build time
+depends = "$auto"
+recommends = "tt-smi, tenstorrent-dkms"
+suggests = "tt-toplike-egui, tenstorrent-tools"
+section = "utils"
+priority = "optional"
+# Build with safe defaults — no Luwen, no iced GUI
+features = ["tui", "json-backend", "linux-procfs"]
+assets = [
+  # Binary renamed: tt-toplike-tui → tt-toplike (shorter, global name)
+  ["target/release/tt-toplike-tui", "usr/bin/tt-toplike", "755"],
+  ["README.md", "usr/share/doc/tt-toplike/README.md", "644"],
+  ["QUICK_START.md", "usr/share/doc/tt-toplike/QUICK_START.md", "644"],
+]

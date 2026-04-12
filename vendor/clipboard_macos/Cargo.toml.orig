@@ -1,0 +1,22 @@
+[package]
+name = "clipboard_macos"
+version = "0.1.1"
+authors = ["Héctor Ramón Jiménez <hector0193@gmail.com>"]
+edition = "2018"
+description = "A library to obtain access to the macOS clipboard"
+license = "Apache-2.0"
+repository = "https://github.com/hecrj/window_clipboard"
+documentation = "https://docs.rs/clipboard_macos"
+keywords = ["clipboard", "macos"]
+
+[package.metadata.docs.rs]
+default-target = "x86_64-apple-darwin"
+
+[dependencies]
+objc2 = "0.5.1"
+objc2-foundation = { version = "0.2.0", features = [
+    "NSArray",
+    "NSString",
+    "NSURL",
+] }
+objc2-app-kit = { version = "0.2.0", features = ["NSPasteboard"] }

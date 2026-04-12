@@ -1,0 +1,10 @@
+[package]
+name = "dconf_rs"
+license = "MIT"
+version = "0.3.0"
+authors = ["Kyle Corry <kylecorry31@gmail.com>"]
+description = "A Rust API for interacting with dconf."
+readme = "README.md"
+repository = "https://github.com/kylecorry31/dconf_rs"
+
+[dependencies]

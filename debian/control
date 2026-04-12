@@ -1,0 +1,46 @@
+Source: tt-toplike-rs
+Section: utils
+Priority: optional
+Maintainer: Tenstorrent <software@tenstorrent.com>
+Build-Depends: debhelper-compat (= 13), rustc (>= 1.75), cargo
+Standards-Version: 4.6.2
+Homepage: https://github.com/tenstorrent/tt-toplike-rs
+Rules-Requires-Root: no
+
+Package: tt-toplike
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Recommends: tt-smi, tenstorrent-dkms
+Suggests: tt-toplike-egui, tenstorrent-tools
+Description: Real-time hardware monitoring TUI for Tenstorrent silicon
+ tt-toplike is a terminal-based monitoring tool for Tenstorrent hardware
+ (Grayskull, Wormhole, Blackhole). Multiple visualization modes provide
+ psychedelic real-time views of hardware telemetry:
+ .
+  - arcade: unified split-screen with all three visualizations
+  - castle: memory hierarchy (DDR channels, L2 cache, Tensix cores)
+  - starfield: Tensix cores as stars (brightness = power, colour = temp)
+  - flow: NoC particles and DDR perimeter animation
+  - normal: traditional telemetry table
+ .
+ Uses safe, non-invasive backends by default. Direct hardware access via
+ Luwen (PCI BAR0) is available only via --backend luwen and should never
+ be used while workloads are running.
+ .
+ Backend auto-detection order:
+  - sysfs:  Linux hwmon sensors — zero interference, no permissions needed
+  - json:   tt-smi subprocess (requires tt-smi package from TT PPA)
+  - mock:   simulated telemetry, no hardware required
+
+Package: tt-toplike-egui
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Recommends: tt-toplike, libvulkan1 | libgl1
+Description: Psychedelic egui dashboard for Tenstorrent hardware monitoring
+ A GPU-accelerated egui companion dashboard to tt-toplike. Features 150
+ animated particles, a TRON grid overlay, cyberpunk-themed real-time charts,
+ and a process monitoring panel.
+ .
+ Requires a Vulkan or OpenGL-capable GPU and a graphical display (Wayland
+ or X11). Not suitable for headless / server installs — use tt-toplike
+ (the TUI) for those environments.

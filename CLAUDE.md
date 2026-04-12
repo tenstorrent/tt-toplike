@@ -6,6 +6,77 @@ This document tracks the development of tt-toplike-rs, a Rust implementation of 
 
 ---
 
+## Phase 20: Debian Packaging (April 10, 2026)
+
+**User Request**: Build Debian packaging similar to tt-local-generator, leveraging lessons learned there, adapted for the Rust ecosystem and Tenstorrent PPA context.
+
+### What Was Implemented
+
+**Package structure** (two binary packages from one source):
+- `tt-toplike` — TUI monitoring tool (`tt-toplike-tui` binary, ~2.3 MB)
+- `tt-toplike-egui` — GPU-accelerated egui dashboard (~16 MB, optional)
+
+**Key design decisions**:
+1. **Safe defaults in build**: `--features tui,json-backend,linux-procfs` — no Luwen (PCI BAR0), no iced. Mirrors Phase 14 safe-by-default principle.
+2. **Offline/reproducible builds**: `cargo vendor vendor/` + `--frozen` in debian/rules. Critical for Debian build daemons (no network access).
+3. **TT PPA integration**: `Recommends: tt-smi, tenstorrent-dkms` — pulls in the TT stack naturally without requiring it.
+4. **Binary renamed**: `tt-toplike-tui` → `/usr/bin/tt-toplike` (cleaner global name).
+5. **Separate egui package**: Headless/server TT machines don't need Vulkan/GL deps.
+6. **dual-mode metadata**: `[package.metadata.deb]` in Cargo.toml for `cargo deb` quick iteration; full `debian/` for PPA-grade `dpkg-buildpackage`.
+
+### Files Created
+
+| File | Purpose |
+|------|---------|
+| `debian/control` | Two binary packages + build deps (rustc ≥ 1.75, cargo, debhelper-compat 13) |
+| `debian/rules` | `dh_auto_build` runs `cargo build --release --frozen` for both binaries |
+| `debian/changelog` | Initial 0.1.0 entry targeting Ubuntu Noble (24.04) |
+| `debian/copyright` | Apache-2.0 machine-readable copyright |
+| `build-deb.sh` | Developer helper: vendors crates, writes `.cargo/config.toml`, runs `dpkg-buildpackage` |
+| `.gitignore` additions | Excludes debian/ build artifacts and generated `.cargo/config.toml` |
+| `Cargo.toml` additions | `[package.metadata.deb]` section for `cargo deb` |
+
+### Build Flow
+
+```bash
+# One-time or after Cargo.lock changes:
+./build-deb.sh          # vendors + builds both .deb packages
+
+# Quick re-build (vendor/ already present):
+./build-deb.sh --quick
+
+# Install and verify:
+sudo dpkg -i ../tt-toplike_0.1.0_amd64.deb
+tt-toplike --mode arcade
+tt-toplike --backend sysfs
+```
+
+### Lessons Applied from tt-local-generator
+
+- `Rules-Requires-Root: no` — no reason to run as root during build
+- `debhelper-compat = 13` via Build-Depends (not separate compat file)
+- `DEB_BUILD_OPTIONS = nocheck` — skip tests in build (hardware not available in build env)
+- Verbose output: `DH_VERBOSE = 1`
+- Binary named for its global role (`tt-toplike`) not its build artifact name (`tt-toplike-tui`)
+- Recommends/Suggests chain into the TT PPA ecosystem
+
+### Key Difference from tt-local-generator
+
+tt-local-generator is Python (no compile step). For Rust:
+- `dh_auto_build` must call `cargo build --release`
+- Deps must be vendored before build (offline requirement)
+- Build takes 1–5 min (vs seconds for Python)
+- `CARGO_HOME` and `CARGO_TARGET_DIR` isolated to `debian/` to avoid polluting developer environment
+- `${shlibs:Depends}` handles C library deps automatically (Rust binaries link only libgcc/libc)
+
+### Vendor Size Estimate
+
+The `vendor/` directory (all crates including ratatui, eframe, tokio, serde, etc.) will be approximately 50–100 MB. This is committed to git alongside the source for reproducible builds. Large, but correct for Debian packaging of Rust projects.
+
+---
+
+---
+
 ## Phase 19: Multi-Chip Memory Castle Visualization (March 20, 2026)
 
 **Problem**: Memory Castle only visualized device[0] even though the system has 4 Blackhole chips. Users couldn't see activity across all devices or compare workload distribution.

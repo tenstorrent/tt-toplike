@@ -1,0 +1,20 @@
+name: Test
+on: [push, pull_request]
+jobs:
+  all:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macOS-latest]
+        rust: [stable, beta]
+    steps:
+    - uses: hecrj/setup-rust-action@v1
+      with:
+        rust-version: ${{ matrix.rust }}
+    - uses: actions/checkout@master
+    - name: Run tests
+      run: cargo test --verbose
+    - name: Add Wasm target
+      run: rustup target add wasm32-unknown-unknown
+    - name: Run tests on Wasm
+      run: cargo build --verbose --target wasm32-unknown-unknown

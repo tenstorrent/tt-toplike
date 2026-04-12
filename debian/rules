@@ -1,0 +1,88 @@
+#!/usr/bin/make -f
+# debian/rules — debhelper build rules for tt-toplike-rs
+#
+# This is a Rust project. The build step compiles two release binaries:
+#   - tt-toplike-tui  (installed as /usr/bin/tt-toplike)
+#   - tt-toplike-egui (installed as /usr/bin/tt-toplike-egui)
+#
+# OFFLINE BUILD: crates are vendored under vendor/ and .cargo/config.toml
+# redirects cargo to that directory. Run build-deb.sh to vendor first.
+# The --frozen flag enforces that no network fetches happen at build time.
+#
+# Build-time environment variables:
+#   CARGO_HOME        — isolated per-build cargo home (no ~/.cargo pollution)
+#   CARGO_TARGET_DIR  — build artefacts stay inside the debian/ tree
+#   CARGO_NET_OFFLINE — belt-and-suspenders network guard
+
+export DH_VERBOSE = 1
+
+# nocheck: skip cargo test (requires hardware or mock setup; CI has its own)
+# nostrip: NOT set — let debhelper strip Rust release binaries (saves ~30%)
+export DEB_BUILD_OPTIONS = nocheck
+
+# Isolate cargo state from the developer's own ~/.cargo to avoid accidental
+# registry or index pollution in either direction during packaging builds.
+export CARGO_HOME = $(CURDIR)/debian/.cargo
+export CARGO_TARGET_DIR = $(CURDIR)/debian/target
+
+# Fail loudly if cargo tries to fetch anything. Crates must be vendored.
+export CARGO_NET_OFFLINE = true
+
+%:
+	dh $@
+
+# ── Clean ─────────────────────────────────────────────────────────────────────
+override_dh_clean:
+	# dh_clean's compat-13 behaviour runs a project-wide find that deletes
+	# *.orig files.  That sweep destroys Cargo.toml.orig files inside vendor/
+	# which cargo requires for checksum verification with --frozen.
+	# dh_clean -k (keep-backup-files) was removed in compat 12, so we
+	# replicate dh_clean's safe actions manually and skip the *.orig sweep.
+	rm -f debian/debhelper-build-stamp
+	rm -rf debian/.debhelper/
+	rm -f debian/tt-toplike.substvars debian/tt-toplike-egui.substvars debian/files
+	rm -rf debian/tt-toplike/ debian/tt-toplike-egui/ debian/tmp/
+
+# ── Compile ───────────────────────────────────────────────────────────────────
+override_dh_auto_build:
+	# TUI: safe default features — no luwen, no iced GUI
+	cargo build --release --frozen \
+	    --bin tt-toplike-tui \
+	    --features tui,json-backend,linux-procfs
+
+	# egui dashboard: separate binary, separate feature set
+	cargo build --release --frozen \
+	    --bin tt-toplike-egui \
+	    --features egui,json-backend
+
+# ── Install ───────────────────────────────────────────────────────────────────
+override_dh_auto_install:
+	# ── tt-toplike (TUI) ──────────────────────────────────────────────────
+	install -d debian/tt-toplike/usr/bin
+	install -d debian/tt-toplike/usr/share/doc/tt-toplike
+
+	# Binary renamed: tt-toplike-tui → tt-toplike (shorter, friendlier)
+	install -m 755 debian/target/release/tt-toplike-tui \
+	    debian/tt-toplike/usr/bin/tt-toplike
+
+	install -m 644 README.md QUICK_START.md \
+	    debian/tt-toplike/usr/share/doc/tt-toplike/
+
+	# ── tt-toplike-egui (GUI dashboard) ───────────────────────────────────
+	install -d debian/tt-toplike-egui/usr/bin
+	install -d debian/tt-toplike-egui/usr/share/doc/tt-toplike-egui
+
+	install -m 755 debian/target/release/tt-toplike-egui \
+	    debian/tt-toplike-egui/usr/bin/tt-toplike-egui
+
+	install -m 644 README.md \
+	    debian/tt-toplike-egui/usr/share/doc/tt-toplike-egui/
+
+# ── Skip tests ────────────────────────────────────────────────────────────────
+# Tests need live hardware or a configured mock backend. They run in CI
+# where hardware is available — not needed for the packaging build step.
+override_dh_auto_test:
+
+# ── Stripping ─────────────────────────────────────────────────────────────────
+# Default dh_strip handles Rust release binaries correctly.
+# Nothing to override — letting debhelper do its job here.

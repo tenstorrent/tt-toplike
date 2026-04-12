@@ -1,0 +1,90 @@
+[package]
+name = "gpu-allocator"
+version = "0.25.0"
+authors = ["Traverse Research <opensource@traverseresearch.nl>"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Memory allocator for GPU memory in Vulkan and DirectX 12"
+categories = ["rendering", "rendering::graphics-api"]
+homepage = "https://github.com/Traverse-Research/gpu-allocator"
+repository = "https://github.com/Traverse-Research/gpu-allocator"
+keywords = ["vulkan", "memory", "allocator"]
+documentation = "https://docs.rs/gpu-allocator/"
+rust-version = "1.65"
+
+include = [
+    "/README.md",
+    "/LICENSE-*",
+    "/src",
+    "/examples",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+log = "0.4"
+thiserror = "1.0"
+presser = { version = "0.3" }
+# Only needed for vulkan.  Disable all default features as good practice,
+# such as the ability to link/load a Vulkan library.
+ash = { version = ">=0.34, <=0.37", optional = true, default-features = false, features = ["debug"] }
+# Only needed for visualizer.
+egui = { version = "0.24", optional = true, default-features = false }
+egui_extras = { version = "0.24", optional = true, default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+# Only needed for public-winapi interop helpers
+winapi = { version = "0.3.9", features = ["d3d12", "winerror", "impl-default", "impl-debug"], optional = true }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = ">=0.51,<=0.52"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+]
+optional = true
+
+[dev-dependencies]
+# Enable the "loaded" feature to be able to access the Vulkan entrypoint.
+ash = { version = ">=0.34,<=0.37", default-features = false, features = ["debug", "loaded"] }
+env_logger = "0.10"
+
+[target.'cfg(windows)'.dev-dependencies]
+winapi = { version = "0.3.9", features = ["d3d12", "d3d12sdklayers", "dxgi1_6", "winerror", "impl-default", "impl-debug", "winuser", "windowsx", "libloaderapi"] }
+
+[target.'cfg(windows)'.dev-dependencies.windows]
+version = ">=0.51,<=0.52"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+]
+
+[[example]]
+name = "vulkan-buffer"
+required-features = ["vulkan", "ash/loaded"]
+
+[[example]]
+name = "d3d12-buffer"
+required-features = ["d3d12", "public-winapi"]
+
+[[example]]
+name = "d3d12-buffer-winrs"
+required-features = ["d3d12"]
+
+[features]
+visualizer = ["egui", "egui_extras"]
+vulkan = ["ash"]
+d3d12 = ["windows"]
+# Expose helper functionality for winapi types to interface with gpu-allocator, which is primarily windows-rs driven
+public-winapi = ["dep:winapi"]
+
+default = ["d3d12", "vulkan"]

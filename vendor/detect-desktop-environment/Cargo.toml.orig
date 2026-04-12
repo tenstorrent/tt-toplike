@@ -1,0 +1,19 @@
+[package]
+name = "detect-desktop-environment"
+version = "0.2.0"
+authors = ["Charles Samborski <demurgos@demurgos.net>"]
+description = "Autodetect the desktop environment"
+documentation = "https://github.com/demurgos/detect-desktop-environment"
+homepage = "https://github.com/demurgos/detect-desktop-environment"
+repository = "https://github.com/demurgos/detect-desktop-environment"
+readme = "./README.md"
+keywords = ["desktop-environment", "detect", "env"]
+license = "MIT"
+
+[lib]
+name = "detect_desktop_environment"
+path = "src/lib.rs"
+
+[[bin]]
+name = "detect-desktop-environment"
+path = "src/main.rs"

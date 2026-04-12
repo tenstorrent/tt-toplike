@@ -1,0 +1,21 @@
+[package]
+name = "ctor-lite"
+version = "0.1.2"
+edition = "2018"
+rust-version = "1.36.0"
+description = "Run code at program startup or shutdown"
+authors = ["John Nunley <dev@notgull.net>"]
+repository = "https://codeberg.org/notgull/ctor-lite"
+homepage = "https://codeberg.org/notgull/ctor-lite"
+license = "MIT OR Apache-2.0"
+categories = []
+keywords = ["ctor", "macros"]
+
+[features]
+default = ["std"]
+alloc = []
+std = ["alloc"]
+
+[dev-dependencies]
+macro_rules_attribute = "0.2.0"
+rustix = { version = "0.38.34", features = ["stdio"], default-features = false }
