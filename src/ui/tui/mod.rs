@@ -169,7 +169,9 @@ fn run_app(
         match display_mode {
             DisplayMode::Starfield => {
                 if starfield.is_none() {
-                    let mut sf = HardwareStarfield::new(size.width as usize, size.height as usize);
+                    let content_h = (size.height as usize).saturating_sub(8);
+                    let content_w = (size.width as usize).saturating_sub(2);
+                    let mut sf = HardwareStarfield::new(content_w, content_h);
                     sf.initialize_from_devices(backend.devices());
                     starfield = Some(sf);
                 }

@@ -350,6 +350,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Auto);
@@ -376,6 +377,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Mock);
@@ -398,6 +400,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Json);
@@ -420,6 +423,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         assert!(cli.should_monitor_device(0));
@@ -446,6 +450,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         assert_eq!(verbose_cli.log_level(), log::LevelFilter::Debug);
@@ -465,6 +470,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         assert_eq!(quiet_cli.log_level(), log::LevelFilter::Off);
@@ -487,6 +493,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         assert!(cli.validate().is_err());
@@ -509,6 +516,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         assert_eq!(auto_cli.backend_name(), "Auto-detect");
@@ -528,6 +536,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         assert_eq!(mock_cli.backend_name(), "Mock");

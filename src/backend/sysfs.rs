@@ -24,6 +24,16 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Valid sysfs file paths for each sensor type on one device.
+/// Populated once during `init()` so `update()` never retries missing paths.
+#[derive(Default)]
+struct SensorPaths {
+    temperature: Option<PathBuf>, // tempN_input (millicelsius)
+    voltage:     Option<PathBuf>, // inN_input   (millivolts)
+    power:       Option<PathBuf>, // powerN_input (microwatts)
+    current:     Option<PathBuf>, // currN_input  (milliamperes)
+}
+
 /// Sysfs sensor backend implementation
 ///
 /// Reads telemetry from `/sys/class/hwmon/hwmon*` entries
@@ -37,6 +47,9 @@ pub struct SysfsBackend {
 
     /// Mapping of device index to hwmon directory path
     hwmon_paths: HashMap<usize, PathBuf>,
+
+    /// Cached valid sensor file paths per device — populated in init().
+    sensor_paths: HashMap<usize, SensorPaths>,
 
     /// Cached telemetry data (per device index)
     telemetry_cache: HashMap<usize, Telemetry>,
@@ -54,6 +67,7 @@ impl SysfsBackend {
             config,
             devices: Vec::new(),
             hwmon_paths: HashMap::new(),
+            sensor_paths: HashMap::new(),
             telemetry_cache: HashMap::new(),
         }
     }
@@ -152,60 +166,61 @@ impl SysfsBackend {
         None
     }
 
-    /// Read temperature from hwmon sensor (returns Celsius)
-    fn read_temperature(&self, hwmon_path: &Path) -> Option<f32> {
-        // Try common temperature input patterns: temp1_input, temp2_input, etc.
+    /// Find valid sensor file paths for one hwmon device.
+    /// Called once in `init()` so `update()` can read directly without retrying.
+    fn discover_sensor_paths(hwmon_path: &Path) -> SensorPaths {
+        let mut paths = SensorPaths::default();
+
         for i in 1..=8 {
-            let temp_path = hwmon_path.join(format!("temp{}_input", i));
-            if let Ok(content) = fs::read_to_string(&temp_path) {
-                if let Ok(millicelsius) = content.trim().parse::<i32>() {
-                    return Some(millicelsius as f32 / 1000.0); // Convert mC to C
-                }
+            if paths.temperature.is_none() {
+                let p = hwmon_path.join(format!("temp{}_input", i));
+                if p.exists() { paths.temperature = Some(p); }
+            }
+            if paths.power.is_none() {
+                let p = hwmon_path.join(format!("power{}_input", i));
+                if p.exists() { paths.power = Some(p); }
+            }
+            if paths.current.is_none() {
+                let p = hwmon_path.join(format!("curr{}_input", i));
+                if p.exists() { paths.current = Some(p); }
             }
         }
-        None
-    }
-
-    /// Read voltage from hwmon sensor (returns Volts)
-    fn read_voltage(&self, hwmon_path: &Path) -> Option<f32> {
-        // Try common voltage input patterns: in0_input, in1_input, etc.
         for i in 0..=8 {
-            let volt_path = hwmon_path.join(format!("in{}_input", i));
-            if let Ok(content) = fs::read_to_string(&volt_path) {
-                if let Ok(millivolts) = content.trim().parse::<i32>() {
-                    return Some(millivolts as f32 / 1000.0); // Convert mV to V
-                }
+            if paths.voltage.is_none() {
+                let p = hwmon_path.join(format!("in{}_input", i));
+                if p.exists() { paths.voltage = Some(p); }
             }
         }
-        None
+
+        paths
     }
 
-    /// Read power from hwmon sensor (returns Watts)
-    fn read_power(&self, hwmon_path: &Path) -> Option<f32> {
-        // Try common power input patterns: power1_input, power2_input, etc.
-        for i in 1..=8 {
-            let power_path = hwmon_path.join(format!("power{}_input", i));
-            if let Ok(content) = fs::read_to_string(&power_path) {
-                if let Ok(microwatts) = content.trim().parse::<i64>() {
-                    return Some(microwatts as f32 / 1_000_000.0); // Convert µW to W
-                }
-            }
-        }
-        None
+    /// Read a millicelsius sysfs file and convert to Celsius.
+    fn read_temperature_path(path: &Path) -> Option<f32> {
+        fs::read_to_string(path).ok().and_then(|s| {
+            s.trim().parse::<i32>().ok().map(|mc| mc as f32 / 1000.0)
+        })
     }
 
-    /// Read current from hwmon sensor (returns Amperes)
-    fn read_current(&self, hwmon_path: &Path) -> Option<f32> {
-        // Try common current input patterns: curr1_input, curr2_input, etc.
-        for i in 1..=8 {
-            let curr_path = hwmon_path.join(format!("curr{}_input", i));
-            if let Ok(content) = fs::read_to_string(&curr_path) {
-                if let Ok(milliamps) = content.trim().parse::<i32>() {
-                    return Some(milliamps as f32 / 1000.0); // Convert mA to A
-                }
-            }
-        }
-        None
+    /// Read a millivolt sysfs file and convert to Volts.
+    fn read_voltage_path(path: &Path) -> Option<f32> {
+        fs::read_to_string(path).ok().and_then(|s| {
+            s.trim().parse::<i32>().ok().map(|mv| mv as f32 / 1000.0)
+        })
+    }
+
+    /// Read a microwatt sysfs file and convert to Watts.
+    fn read_power_path(path: &Path) -> Option<f32> {
+        fs::read_to_string(path).ok().and_then(|s| {
+            s.trim().parse::<i64>().ok().map(|uw| uw as f32 / 1_000_000.0)
+        })
+    }
+
+    /// Read a milliampere sysfs file and convert to Amperes.
+    fn read_current_path(path: &Path) -> Option<f32> {
+        fs::read_to_string(path).ok().and_then(|s| {
+            s.trim().parse::<i32>().ok().map(|ma| ma as f32 / 1000.0)
+        })
     }
 }
 
@@ -217,17 +232,32 @@ impl Default for SysfsBackend {
 
 impl TelemetryBackend for SysfsBackend {
     fn init(&mut self) -> BackendResult<()> {
-        self.detect_devices()
+        self.detect_devices()?;
+        // Cache valid sensor paths so update() never retries missing indices.
+        for (device_idx, hwmon_path) in &self.hwmon_paths {
+            let paths = Self::discover_sensor_paths(hwmon_path);
+            self.sensor_paths.insert(*device_idx, paths);
+        }
+        Ok(())
     }
 
     fn update(&mut self) -> BackendResult<()> {
-        for (device_idx, hwmon_path) in &self.hwmon_paths {
-            let temperature = self.read_temperature(hwmon_path);
-            let voltage = self.read_voltage(hwmon_path);
-            let power = self.read_power(hwmon_path);
-            let current = self.read_current(hwmon_path);
+        for device_idx in 0..self.devices.len() {
+            let paths = match self.sensor_paths.get(&device_idx) {
+                Some(p) => p,
+                None => continue,
+            };
 
-            // If power and voltage available but not current, calculate it
+            let temperature = paths.temperature.as_deref()
+                .and_then(Self::read_temperature_path);
+            let voltage = paths.voltage.as_deref()
+                .and_then(Self::read_voltage_path);
+            let power = paths.power.as_deref()
+                .and_then(Self::read_power_path);
+            let current = paths.current.as_deref()
+                .and_then(Self::read_current_path);
+
+            // If power and voltage available but not current, calculate it.
             let calculated_current = match (power, current, voltage) {
                 (Some(p), None, Some(v)) if v > 0.0 => Some(p / v),
                 _ => current,
@@ -239,11 +269,11 @@ impl TelemetryBackend for SysfsBackend {
                 current: calculated_current,
                 power,
                 asic_temperature: temperature,
-                aiclk: None, // Not available via hwmon
-                heartbeat: None, // Not available via hwmon
+                aiclk: None,
+                heartbeat: None,
             };
 
-            self.telemetry_cache.insert(*device_idx, telemetry);
+            self.telemetry_cache.insert(device_idx, telemetry);
         }
 
         Ok(())

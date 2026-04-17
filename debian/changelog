@@ -1,3 +1,22 @@
+tt-toplike-rs (0.4.1) noble; urgency=medium
+
+  * tt-toplike-app: fix VT100 pending-wrap (deferred auto-wrap) in the PTY
+    screen renderer.  Characters printed at the last column now correctly defer
+    the row advance until the next printable byte; escape sequences (cursor
+    moves, SGR) issued between two printable characters no longer displace the
+    cursor onto the wrong row, eliminating the garbled line-break artefacts.
+  * Drop tt-toplike-egui package; replaced by tt-toplike-app which hosts
+    tt-toplike-tui inside a PTY window (eframe) instead of reimplementing the
+    visualizations in egui widgets.
+  * HybridBackend: direct subprocess polling (no shell wrapper) with arc-swap
+    for lock-free SMBUS snapshot delivery to the render thread.
+  * EMA smoothing now handles hex-format SMBUS values ("0x10e7a", "0x3e80")
+    via try_parse_numeric(); previously all hex fields were silently skipped.
+  * Starfield initialised with content-area dimensions so stars are centred
+    in the visible widget, not in the full terminal buffer.
+
+ -- Tenstorrent <software@tenstorrent.com>  Thu, 17 Apr 2026 00:00:00 +0000
+
 tt-toplike-rs (0.4.0) noble; urgency=medium
 
   * HybridBackend: sysfs provides real-time core metrics (temp, power, voltage)

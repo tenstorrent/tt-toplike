@@ -246,6 +246,26 @@ pub struct SmbusTelemetry {
     pub eth_debug_status1: Option<String>,
 }
 
+/// Parse a string as u32, accepting both "0x1A2B" hex and plain decimal.
+fn parse_hex_or_dec(s: &str) -> Option<u32> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse().ok()
+    }
+}
+
+/// Same as `parse_hex_or_dec` but for u64 (DDR_STATUS is 32+ bits wide).
+fn parse_hex_or_dec_64(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse().ok()
+    }
+}
+
 impl SmbusTelemetry {
     /// Create a new empty SmbusTelemetry instance
     pub fn new() -> Self {
@@ -302,36 +322,39 @@ impl SmbusTelemetry {
         }
     }
 
-    /// Parse DDR speed as integer (MT/s)
+    /// Parse DDR speed as integer (MT/s).
+    /// Accepts both decimal ("16000") and hex ("0x3e80") strings.
     pub fn ddr_speed_mts(&self) -> Option<u32> {
-        self.ddr_speed.as_ref()?.parse().ok()
+        parse_hex_or_dec(self.ddr_speed.as_deref()?)
     }
 
-    /// Parse DDR status as bitmask
-    /// Each 2 bits represent one channel's state:
-    /// - 00 (0): untrained
-    /// - 01 (1): training
-    /// - 10 (2): trained
-    /// - 11 (3): error
-    pub fn ddr_status_bitmask(&self) -> Option<u32> {
-        self.ddr_status.as_ref()?.parse().ok()
+    /// Parse DDR status as bitmask.
+    /// Each 4-bit nibble represents one channel's state:
+    /// - 0: untrained, 1: training, 2/5: trained, F: error
+    /// Accepts both decimal and hex ("0x55555555") strings.
+    pub fn ddr_status_bitmask(&self) -> Option<u64> {
+        parse_hex_or_dec_64(self.ddr_status.as_deref()?)
     }
 
-    /// Check if specific DDR channel is trained
+    /// Check if specific DDR channel is trained.
     ///
-    /// Returns true if the channel's status is "trained" (2).
+    /// tt-smi DDR_STATUS is a 32-bit value where each 4-bit nibble encodes one
+    /// channel: 0x5 means trained on Blackhole hardware.  Channels 0-7 occupy
+    /// nibbles 0-7 (bits 3:0, 7:4, … 31:28).
     pub fn is_ddr_channel_trained(&self, channel: usize) -> bool {
-        if let Some(status_mask) = self.ddr_status_bitmask() {
-            let channel_status = (status_mask >> (channel * 2)) & 0b11;
-            channel_status == 2  // 2 = trained
+        if let Some(status) = self.ddr_status_bitmask() {
+            let nibble = (status >> (channel * 4)) & 0xF;
+            // 0x5 = trained on Blackhole; legacy 2-bit encoding: 2 = trained
+            nibble == 0x5 || nibble == 2
         } else {
             false
         }
     }
 
-    /// Get ARC0 health as integer (heartbeat counter)
+    /// Get ARC0 health as integer (heartbeat counter).
+    /// Accepts both decimal and hex ("0x10e7a") strings.
     pub fn arc0_health_value(&self) -> Option<u32> {
-        self.arc0_health.as_ref()?.parse().ok()
+        parse_hex_or_dec(self.arc0_health.as_deref()?)
     }
 
     /// Check if ARC0 firmware is healthy (heartbeat > 0)
@@ -380,13 +403,14 @@ mod tests {
     #[test]
     fn test_smbus_telemetry() {
         let mut smbus = SmbusTelemetry::new();
-        smbus.ddr_speed = Some("6400".to_string());
-        smbus.ddr_status = Some("255".to_string());  // All channels trained
-        smbus.arc0_health = Some("42".to_string());
+        // Real tt-smi values: DDR_SPEED is hex, arc0_health (TIMER_HEARTBEAT) is hex
+        smbus.ddr_speed   = Some("0x3e80".to_string()); // 0x3e80 = 16000 MT/s
+        smbus.ddr_status  = Some("0x55555555".to_string());
+        smbus.arc0_health = Some("0x10e7a".to_string()); // non-zero → healthy
 
-        assert_eq!(smbus.ddr_speed_mts(), Some(6400));
-        assert_eq!(smbus.ddr_status_bitmask(), Some(255));
-        assert_eq!(smbus.arc0_health_value(), Some(42));
+        assert_eq!(smbus.ddr_speed_mts(), Some(16000));
+        assert_eq!(smbus.ddr_status_bitmask(), Some(0x55555555_u64));
+        assert_eq!(smbus.arc0_health_value(), Some(0x10e7a));
         assert!(smbus.is_arc0_healthy());
     }
 
@@ -394,20 +418,22 @@ mod tests {
     fn test_ddr_channel_status() {
         let mut smbus = SmbusTelemetry::new();
 
-        // All channels trained: 10 10 10 10 = 0b10101010 = 170 (for 4 channels)
-        smbus.ddr_status = Some("170".to_string());
+        // Blackhole DDR_STATUS: 4-bit nibble per channel, 0x5 = trained.
+        // "0x55555555" → 8 channels, all trained.
+        smbus.ddr_status = Some("0x55555555".to_string());
+        for ch in 0..8 {
+            assert!(smbus.is_ddr_channel_trained(ch), "ch {} should be trained", ch);
+        }
 
+        // Channel 0 nibble = 0x0 (untrained), rest 0x5 (trained) → 0x55555550
+        smbus.ddr_status = Some("0x55555550".to_string());
+        assert!(!smbus.is_ddr_channel_trained(0), "ch 0 should be untrained");
+        for ch in 1..8 {
+            assert!(smbus.is_ddr_channel_trained(ch), "ch {} should be trained", ch);
+        }
+
+        // Legacy decimal string with nibble value 2 still counts as trained.
+        smbus.ddr_status = Some("2".to_string()); // decimal 2 → nibble 0 = 2 = trained
         assert!(smbus.is_ddr_channel_trained(0));
-        assert!(smbus.is_ddr_channel_trained(1));
-        assert!(smbus.is_ddr_channel_trained(2));
-        assert!(smbus.is_ddr_channel_trained(3));
-
-        // Channel 0 untrained, rest trained: 10 10 10 00 = 0b10101000 = 168
-        smbus.ddr_status = Some("168".to_string());
-
-        assert!(!smbus.is_ddr_channel_trained(0));
-        assert!(smbus.is_ddr_channel_trained(1));
-        assert!(smbus.is_ddr_channel_trained(2));
-        assert!(smbus.is_ddr_channel_trained(3));
     }
 }

@@ -11,7 +11,7 @@ Package: tt-toplike
 Architecture: amd64
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Recommends: tt-smi, tenstorrent-dkms
-Suggests: tt-toplike-egui, tenstorrent-tools
+Suggests: tt-toplike-app, tenstorrent-tools
 Description: Real-time hardware monitoring TUI for Tenstorrent silicon
  tt-toplike is a terminal-based monitoring tool for Tenstorrent hardware
  (Grayskull, Wormhole, Blackhole). Multiple visualization modes provide
@@ -28,19 +28,24 @@ Description: Real-time hardware monitoring TUI for Tenstorrent silicon
  be used while workloads are running.
  .
  Backend auto-detection order:
+  - hybrid: sysfs real-time + tt-smi SMBUS enrichment (preferred)
   - sysfs:  Linux hwmon sensors — zero interference, no permissions needed
   - json:   tt-smi subprocess (requires tt-smi package from TT PPA)
   - mock:   simulated telemetry, no hardware required
 
-Package: tt-toplike-egui
+Package: tt-toplike-app
 Architecture: amd64
-Depends: ${shlibs:Depends}, ${misc:Depends}
-Recommends: tt-toplike, libvulkan1 | libgl1
-Description: Psychedelic egui dashboard for Tenstorrent hardware monitoring
- A GPU-accelerated egui companion dashboard to tt-toplike. Features 150
- animated particles, a TRON grid overlay, cyberpunk-themed real-time charts,
- and a process monitoring panel.
+Depends: ${shlibs:Depends}, ${misc:Depends}, tt-toplike
+Recommends: libvulkan1 | libgl1
+Description: Native window host for tt-toplike (PTY terminal)
+ tt-toplike-app opens a native graphical window (eframe/egui) that hosts
+ tt-toplike-tui inside a PTY. The TUI runs as a child process; its VT output
+ is parsed and rendered by a custom VT100 state machine so the full-colour,
+ animated TUI visualizations appear in a proper desktop window.
  .
- Requires a Vulkan or OpenGL-capable GPU and a graphical display (Wayland
- or X11). Not suitable for headless / server installs — use tt-toplike
- (the TUI) for those environments.
+ Keyboard input is forwarded to the PTY child as ANSI escape sequences.
+ The window resizes the PTY on geometry changes so the TUI always fills the
+ available space.
+ .
+ Requires a graphical display (Wayland or X11) and Vulkan or OpenGL.
+ Not suitable for headless / server installs.

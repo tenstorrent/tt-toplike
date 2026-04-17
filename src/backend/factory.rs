@@ -204,21 +204,23 @@ mod tests {
 
     #[test]
     fn test_next_backend_cycle() {
-        // Test that cycling goes through all backends and loops back
+        // Full Linux cycle: Hybrid → Sysfs → Json → Luwen → Mock → Hybrid
         #[cfg(target_os = "linux")]
         {
-            let start = BackendType::Sysfs;
-            let b1 = next_backend(start);
-            assert!(matches!(b1, BackendType::Json));
+            let b1 = next_backend(BackendType::Hybrid);
+            assert!(matches!(b1, BackendType::Sysfs));
 
             let b2 = next_backend(b1);
-            assert!(matches!(b2, BackendType::Luwen));
+            assert!(matches!(b2, BackendType::Json));
 
             let b3 = next_backend(b2);
-            assert!(matches!(b3, BackendType::Mock));
+            assert!(matches!(b3, BackendType::Luwen));
 
             let b4 = next_backend(b3);
-            assert!(matches!(b4, BackendType::Sysfs));
+            assert!(matches!(b4, BackendType::Mock));
+
+            let b5 = next_backend(b4);
+            assert!(matches!(b5, BackendType::Hybrid));
         }
     }
 
@@ -242,6 +244,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         let result = create_backend(BackendType::Mock, config, &cli);

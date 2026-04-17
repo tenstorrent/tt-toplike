@@ -68,8 +68,13 @@ pub struct Screen {
     cursor_col: usize,
     cursor_row: usize,
     pen: Pen,
-    /// Saved cursor for ESC 7 / ESC 8
-    saved_cursor: (usize, usize),
+    /// Saved cursor for ESC 7 / ESC 8 — stores (col, row, pending_wrap).
+    saved_cursor: (usize, usize, bool),
+    /// Deferred auto-wrap: set when the last printed character landed on the
+    /// final column.  The actual wrap (col→0, row+1) is deferred until the
+    /// *next* printable character so that escape sequences (cursor moves, SGR)
+    /// issued immediately after a full row are not displaced onto the wrong row.
+    pending_wrap: bool,
 }
 
 impl Screen {
@@ -81,7 +86,8 @@ impl Screen {
             cursor_col: 0,
             cursor_row: 0,
             pen: Pen::default(),
-            saved_cursor: (0, 0),
+            saved_cursor: (0, 0, false),
+            pending_wrap: false,
         }
     }
 
@@ -94,6 +100,7 @@ impl Screen {
         }
         self.cursor_col = self.cursor_col.min(cols.saturating_sub(1));
         self.cursor_row = self.cursor_row.min(rows.saturating_sub(1));
+        self.pending_wrap = false;
     }
 
     /// Scroll up: remove top line, push blank at bottom.
@@ -245,9 +252,11 @@ fn apply_sgr(pen: &mut Pen, params: &Params) {
 
 impl Perform for Screen {
     fn print(&mut self, c: char) {
-        self.set_cell(self.cursor_row, self.cursor_col, c);
-        self.cursor_col += 1;
-        if self.cursor_col >= self.cols {
+        // Perform the deferred wrap that was set when the previous character
+        // landed on the last column.  Escape sequences between two printable
+        // characters cancel the pending wrap (they move the cursor themselves).
+        if self.pending_wrap {
+            self.pending_wrap = false;
             self.cursor_col = 0;
             self.cursor_row += 1;
             if self.cursor_row >= self.rows {
@@ -255,12 +264,24 @@ impl Perform for Screen {
                 self.cursor_row = self.rows - 1;
             }
         }
+        self.set_cell(self.cursor_row, self.cursor_col, c);
+        if self.cursor_col + 1 >= self.cols {
+            // At the last column: defer the wrap so subsequent escape sequences
+            // still see the cursor on this row.
+            self.pending_wrap = true;
+        } else {
+            self.cursor_col += 1;
+        }
     }
 
     fn execute(&mut self, byte: u8) {
         match byte {
-            b'\r' => self.cursor_col = 0,
+            b'\r' => {
+                self.cursor_col = 0;
+                self.pending_wrap = false;
+            }
             b'\n' => {
+                self.pending_wrap = false;
                 self.cursor_row += 1;
                 if self.cursor_row >= self.rows {
                     self.scroll_up();
@@ -268,7 +289,7 @@ impl Perform for Screen {
                 }
             }
             0x08 => {
-                // Backspace
+                self.pending_wrap = false;
                 if self.cursor_col > 0 {
                     self.cursor_col -= 1;
                 }
@@ -284,19 +305,28 @@ impl Perform for Screen {
 
         match action {
             // Cursor up
-            'A' => self.cursor_row = self.cursor_row.saturating_sub(p1.max(1)),
+            'A' => {
+                self.pending_wrap = false;
+                self.cursor_row = self.cursor_row.saturating_sub(p1.max(1));
+            }
             // Cursor down
             'B' => {
+                self.pending_wrap = false;
                 self.cursor_row = (self.cursor_row + p1.max(1)).min(self.rows.saturating_sub(1));
             }
             // Cursor forward
             'C' => {
+                self.pending_wrap = false;
                 self.cursor_col = (self.cursor_col + p1.max(1)).min(self.cols.saturating_sub(1));
             }
             // Cursor back
-            'D' => self.cursor_col = self.cursor_col.saturating_sub(p1.max(1)),
+            'D' => {
+                self.pending_wrap = false;
+                self.cursor_col = self.cursor_col.saturating_sub(p1.max(1));
+            }
             // Cursor position (1-based)
             'H' | 'f' => {
+                self.pending_wrap = false;
                 self.cursor_row = p1.saturating_sub(1).min(self.rows.saturating_sub(1));
                 self.cursor_col = p2.saturating_sub(1).min(self.cols.saturating_sub(1));
                 if p1 == 0 { self.cursor_row = 0; }
@@ -363,12 +393,15 @@ impl Perform for Screen {
             }
             // SGR
             'm' => apply_sgr(&mut self.pen, params),
-            // Save / restore cursor (private sequences handled elsewhere)
-            's' if intermediates.is_empty() => self.saved_cursor = (self.cursor_col, self.cursor_row),
+            // Save / restore cursor (ANSI SC/RC, no intermediate)
+            's' if intermediates.is_empty() => {
+                self.saved_cursor = (self.cursor_col, self.cursor_row, self.pending_wrap);
+            }
             'u' if intermediates.is_empty() => {
-                let (c, r) = self.saved_cursor;
+                let (c, r, pw) = self.saved_cursor;
                 self.cursor_col = c.min(self.cols.saturating_sub(1));
                 self.cursor_row = r.min(self.rows.saturating_sub(1));
+                self.pending_wrap = pw;
             }
             _ => {}
         }
@@ -376,11 +409,12 @@ impl Perform for Screen {
 
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
         match byte {
-            b'7' => self.saved_cursor = (self.cursor_col, self.cursor_row),
+            b'7' => self.saved_cursor = (self.cursor_col, self.cursor_row, self.pending_wrap),
             b'8' => {
-                let (c, r) = self.saved_cursor;
+                let (c, r, pw) = self.saved_cursor;
                 self.cursor_col = c.min(self.cols.saturating_sub(1));
                 self.cursor_row = r.min(self.rows.saturating_sub(1));
+                self.pending_wrap = pw;
             }
             b'M' => {
                 // Reverse index (scroll down)

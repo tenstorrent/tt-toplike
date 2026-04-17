@@ -32,13 +32,14 @@
 //! ```
 
 pub mod mock;
-pub mod json;  // JSON backend for tt-smi subprocess
+pub mod json;          // JSON backend for tt-smi subprocess
+pub mod smbus_smooth;  // EMA smoothing for numeric SMBUS fields
 #[cfg(feature = "luwen-backend")]
 pub mod luwen;  // Luwen backend for direct hardware access
 #[cfg(target_os = "linux")]
 pub mod sysfs;  // Sysfs backend for Linux hwmon sensors (non-invasive)
 #[cfg(target_os = "linux")]
-pub mod hybrid;  // Hybrid backend: sysfs real-time + background JSON enrichment
+pub mod hybrid;  // Hybrid backend: sysfs real-time + streaming JSON enrichment
 pub mod factory;  // Backend factory for dynamic creation and switching
 
 use crate::error::BackendResult;
