@@ -7,7 +7,7 @@
   <meta name="description" content="Watch inference happen. A psychedelic, htop-inspired terminal monitor for Tenstorrent Blackhole and Wormhole hardware — Tensix cores, DRAM channels, NoC traffic, all rendered live in ASCII.">
   <meta property="og:title" content="tt-toplike — Tenstorrent Hardware Monitor">
   <meta property="og:description" content="Watch inference happen. DRAM motion, Tensix activity, and chip topology — live in your terminal.">
-  <meta property="og:image" content="assets/screenshot.png">
+  <meta property="og:image" content="assets/tt-toplike-arcade-active.png">
   <style>
     /* ── Reset & base ─────────────────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -249,7 +249,8 @@
       position: relative;
     }
 
-    .hero-screenshot img {
+    .hero-screenshot img,
+    .hero-screenshot video {
       width: 100%;
       height: auto;
       border-radius: 10px;
@@ -704,9 +705,12 @@
     </div>
 
     <div class="hero-screenshot">
-      <img src="assets/screenshot.png"
-           alt="tt-toplike running in arcade mode — four Blackhole chips rendered as Tensix star grids with DRAM channels and particle flows"
-           loading="eager">
+      <video autoplay muted loop playsinline
+             poster="assets/tt-toplike-arcade-active.png"
+             aria-label="tt-toplike arcade mode — four Blackhole chips under inference load, showing Tensix starfield, memory castle, and NoC flow">
+        <source src="assets/tt-toplike-arcade.webm" type="video/webm">
+        <img src="assets/tt-toplike-arcade-active.png" alt="tt-toplike arcade mode under inference load">
+      </video>
     </div>
 
   </div>
@@ -907,22 +911,22 @@
 
   <div class="gallery-grid">
     <div class="gallery-item wide">
-      <img src="assets/screenshot.png"
-           alt="tt-toplike arcade mode — four Blackhole devices with Tensix core grids, DRAM channels, and particle flows"
+      <img src="assets/tt-toplike-arcade-active.png"
+           alt="tt-toplike arcade mode — four Blackhole chips at 58–66W under live inference load, showing Tensix starfield, memory castle particle hierarchy, and NoC flow"
            loading="lazy">
-      <span class="gallery-caption">Arcade mode — 4× Blackhole, live inference load</span>
+      <span class="gallery-caption">Arcade mode — 4× Blackhole at 58–66W, live LLM inference</span>
     </div>
     <div class="gallery-item">
-      <img src="assets/screenshot2.png"
-           alt="tt-toplike starfield mode — Tensix cores as stars with memory hierarchy planets"
+      <img src="assets/tt-toplike-with-info-with-activity.png"
+           alt="tt-toplike info mode — hardware telemetry table with process detection showing python3 and tt-smi under active inference load"
            loading="lazy">
-      <span class="gallery-caption">Starfield mode — Tensix cores as stars</span>
+      <span class="gallery-caption">Info mode — 4× Blackhole, 58–66W, workload detection</span>
     </div>
     <div class="gallery-item">
-      <img src="assets/arcade.png"
-           alt="tt-toplike — memory castle and flow visualization"
+      <img src="assets/tt-toplike-rs.png"
+           alt="tt-toplike multi-window view showing starfield and memory castle visualizations simultaneously"
            loading="lazy">
-      <span class="gallery-caption">Memory Castle + Flow — particle hierarchy</span>
+      <span class="gallery-caption">Multi-window — starfield + memory castle side-by-side</span>
     </div>
   </div>
 </section>
