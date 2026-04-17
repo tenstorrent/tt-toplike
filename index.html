@@ -1,0 +1,1237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tt-toplike — Real-Time Tenstorrent Hardware Monitoring</title>
+  <meta name="description" content="Watch inference happen. A psychedelic, htop-inspired terminal monitor for Tenstorrent Blackhole and Wormhole hardware — Tensix cores, DRAM channels, NoC traffic, all rendered live in ASCII.">
+  <meta property="og:title" content="tt-toplike — Tenstorrent Hardware Monitor">
+  <meta property="og:description" content="Watch inference happen. DRAM motion, Tensix activity, and chip topology — live in your terminal.">
+  <meta property="og:image" content="assets/screenshot.png">
+  <style>
+    /* ── Reset & base ─────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg0:        #070d14;
+      --bg1:        #0a1420;
+      --bg2:        #0d2035;
+      --bg3:        #1a2a3a;
+      --border:     rgba(50, 147, 178, 0.18);
+      --border-hi:  rgba(50, 147, 178, 0.45);
+      --teal:       #4fd1c5;
+      --teal-dim:   #2c9a92;
+      --teal-glow:  rgba(79, 209, 197, 0.18);
+      --pink:       #ec96b8;
+      --yellow:     #f4c471;
+      --green:      #68d391;
+      --red:        #fc8181;
+      --blue:       #63b3ed;
+      --text:       #e8f0f2;
+      --muted:      #607d8b;
+      --muted2:     #4a6070;
+      --mono:       'JetBrains Mono', 'Fira Mono', 'Cascadia Code', monospace;
+      --sans:       -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg0);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 16px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: var(--teal); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* ── Layout helpers ───────────────────────────────────────────────────── */
+    .edge {
+      padding-left:  clamp(1.25rem, 6vw, 7rem);
+      padding-right: clamp(1.25rem, 6vw, 7rem);
+    }
+
+    .section {
+      padding-top: 5rem;
+      padding-bottom: 5rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .section:last-of-type { border-bottom: none; }
+
+    .section-label {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--teal-dim);
+      margin-bottom: 0.5rem;
+    }
+
+    .section-heading {
+      font-size: clamp(1.65rem, 3vw, 2.6rem);
+      font-weight: 300;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      margin-bottom: 0.85rem;
+      line-height: 1.2;
+    }
+
+    .section-sub {
+      font-size: 1.05rem;
+      color: var(--muted);
+      max-width: 56rem;
+      line-height: 1.7;
+      margin-bottom: 3rem;
+    }
+
+    code {
+      font-family: var(--mono);
+      background: rgba(79, 209, 197, 0.08);
+      border: 1px solid var(--border);
+      padding: 0.12em 0.4em;
+      border-radius: 4px;
+      font-size: 0.88em;
+    }
+
+    /* ── Nav ──────────────────────────────────────────────────────────────── */
+    .topnav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(7, 13, 20, 0.9);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      padding: 0.9rem clamp(1.25rem, 6vw, 7rem);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+
+    .topnav-brand {
+      font-family: var(--mono);
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--teal);
+      letter-spacing: 0.02em;
+    }
+
+    .topnav-links {
+      display: flex;
+      gap: 1.75rem;
+      list-style: none;
+    }
+
+    .topnav-links a {
+      font-size: 0.875rem;
+      color: var(--muted);
+      transition: color 0.12s;
+    }
+    .topnav-links a:hover { color: var(--text); text-decoration: none; }
+
+    /* ── Hero ─────────────────────────────────────────────────────────────── */
+    .hero {
+      background:
+        radial-gradient(ellipse 120% 80% at 70% 50%, #0d2c3f 0%, #081520 50%, #070d14 100%);
+      padding-top: 5.5rem;
+      padding-bottom: 5rem;
+      border-bottom: 1px solid var(--border);
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* subtle scan-line texture */
+    .hero::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 3px,
+        rgba(79, 209, 197, 0.015) 3px,
+        rgba(79, 209, 197, 0.015) 4px
+      );
+      pointer-events: none;
+    }
+
+    .hero-inner {
+      display: grid;
+      grid-template-columns: 1fr 1.6fr;
+      gap: 5rem;
+      align-items: center;
+      position: relative;
+    }
+
+    .hero-eyebrow {
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: var(--teal-dim);
+      margin-bottom: 1rem;
+    }
+
+    .hero-title {
+      font-size: clamp(2.4rem, 4.5vw, 4.2rem);
+      font-weight: 300;
+      letter-spacing: -0.03em;
+      line-height: 1.05;
+      color: var(--text);
+      margin-bottom: 1.25rem;
+    }
+
+    .hero-title .accent { color: var(--teal); }
+    .hero-title .accent2 { color: var(--pink); }
+
+    .hero-tagline {
+      font-size: 1.1rem;
+      line-height: 1.7;
+      color: var(--muted);
+      margin-bottom: 2.25rem;
+      max-width: 38rem;
+    }
+
+    .hero-cta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.85rem;
+      align-items: center;
+    }
+
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.75rem 1.75rem;
+      background: var(--teal);
+      color: #070d14;
+      font-weight: 700;
+      font-size: 0.95rem;
+      border-radius: 6px;
+      transition: background 0.15s, box-shadow 0.15s;
+    }
+    .btn-primary:hover {
+      background: #81e6d9;
+      text-decoration: none;
+      box-shadow: 0 0 0 3px var(--teal-glow), 0 6px 24px rgba(79,209,197,0.3);
+    }
+
+    .btn-secondary {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.75rem 1.5rem;
+      border: 1px solid var(--border-hi);
+      color: var(--teal);
+      font-size: 0.95rem;
+      border-radius: 6px;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .btn-secondary:hover {
+      background: var(--teal-glow);
+      border-color: var(--teal);
+      text-decoration: none;
+    }
+
+    .hero-meta {
+      margin-top: 1.5rem;
+      font-size: 0.8rem;
+      color: var(--muted2);
+      font-family: var(--mono);
+    }
+    .hero-meta span { color: var(--muted); }
+
+    .hero-screenshot {
+      position: relative;
+    }
+
+    .hero-screenshot img {
+      width: 100%;
+      height: auto;
+      border-radius: 10px;
+      border: 1px solid var(--border-hi);
+      box-shadow:
+        0 0 0 1px rgba(79, 209, 197, 0.1),
+        0 40px 100px rgba(0, 0, 0, 0.8),
+        0 8px 32px rgba(0, 0, 0, 0.5),
+        0 0 80px rgba(79, 209, 197, 0.08);
+      display: block;
+    }
+
+    /* glow halo behind the screenshot */
+    .hero-screenshot::before {
+      content: '';
+      position: absolute;
+      inset: -30px;
+      background: radial-gradient(ellipse at center, rgba(79, 209, 197, 0.07) 0%, transparent 70%);
+      pointer-events: none;
+      border-radius: 50%;
+      z-index: -1;
+    }
+
+    /* ── Video section ────────────────────────────────────────────────────── */
+    .video-wrap {
+      position: relative;
+      aspect-ratio: 16 / 9;
+      border-radius: 10px;
+      overflow: hidden;
+      border: 1px solid var(--border-hi);
+      box-shadow: 0 32px 80px rgba(0, 0, 0, 0.7), 0 0 60px rgba(79, 209, 197, 0.06);
+    }
+
+    .video-wrap iframe {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: none;
+    }
+
+    /* ── Features grid ────────────────────────────────────────────────────── */
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1.25rem;
+    }
+
+    .feature-card {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.75rem;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .feature-card:hover {
+      border-color: var(--teal-dim);
+      box-shadow: 0 0 0 1px rgba(79, 209, 197, 0.1), 0 4px 24px rgba(0,0,0,0.4);
+    }
+
+    .feature-icon {
+      font-size: 1.6rem;
+      margin-bottom: 0.75rem;
+      line-height: 1;
+    }
+    .feature-title {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 0.5rem;
+    }
+    .feature-desc {
+      font-size: 0.875rem;
+      color: var(--muted);
+      line-height: 1.65;
+    }
+
+    /* ── Inspiration / history ────────────────────────────────────────────── */
+    .inspiration-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 2.5rem;
+      align-items: start;
+    }
+
+    .inspiration-copy p {
+      font-size: 1.05rem;
+      color: var(--muted);
+      line-height: 1.75;
+      margin-bottom: 1.25rem;
+    }
+    .inspiration-copy p:last-child { margin-bottom: 0; }
+
+    .inspiration-copy strong { color: var(--text); font-weight: 600; }
+
+    .lineage-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .lineage-item {
+      display: flex;
+      gap: 1rem;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      transition: border-color 0.12s;
+    }
+    .lineage-item:hover { border-color: var(--border-hi); }
+
+    .lineage-era {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      color: var(--teal-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding-top: 0.2rem;
+      flex-shrink: 0;
+      width: 4rem;
+    }
+
+    .lineage-body {}
+    .lineage-name {
+      font-weight: 600;
+      color: var(--text);
+      font-size: 0.95rem;
+      margin-bottom: 0.2rem;
+    }
+    .lineage-desc {
+      font-size: 0.82rem;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    /* ── Gallery (screenshots) ────────────────────────────────────────────── */
+    .gallery-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1.25rem;
+    }
+
+    .gallery-item {
+      position: relative;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      background: var(--bg2);
+    }
+
+    .gallery-item.wide { grid-column: 1 / -1; }
+
+    .gallery-item img {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    .gallery-caption {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      padding: 0.6rem 0.85rem;
+      background: linear-gradient(transparent, rgba(7, 13, 20, 0.88));
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      color: rgba(232, 240, 242, 0.7);
+      pointer-events: none;
+    }
+
+    /* ── Install ──────────────────────────────────────────────────────────── */
+    .install-block {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 2rem 2.25rem;
+      max-width: 62rem;
+    }
+
+    .install-row {
+      display: flex;
+      gap: 0.85rem;
+      margin-bottom: 1.5rem;
+      align-items: flex-start;
+    }
+    .install-row:last-child { margin-bottom: 0; }
+
+    .install-num {
+      flex-shrink: 0;
+      width: 1.7rem;
+      height: 1.7rem;
+      border-radius: 50%;
+      background: rgba(79, 209, 197, 0.12);
+      border: 1px solid rgba(79, 209, 197, 0.35);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--mono);
+      font-size: 0.76rem;
+      color: var(--teal);
+      margin-top: 0.15rem;
+    }
+
+    .install-body { flex: 1; }
+
+    .install-body p {
+      font-size: 0.93rem;
+      color: var(--text);
+      margin-bottom: 0.65rem;
+      line-height: 1.6;
+    }
+
+    .install-body p:last-child { margin-bottom: 0; }
+
+    .cmd-wrap {
+      position: relative;
+      margin-top: 0.5rem;
+    }
+
+    .cmd {
+      display: block;
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.85rem 3.5rem 0.85rem 1rem;
+      font-family: var(--mono);
+      font-size: 0.84rem;
+      color: var(--text);
+      overflow-x: auto;
+      white-space: pre;
+    }
+
+    .cmd-copy {
+      position: absolute;
+      top: 0.55rem;
+      right: 0.55rem;
+      padding: 0.22rem 0.55rem;
+      background: rgba(79, 209, 197, 0.1);
+      border: 1px solid rgba(79, 209, 197, 0.25);
+      border-radius: 4px;
+      font-size: 0.7rem;
+      font-family: var(--sans);
+      color: var(--teal);
+      cursor: pointer;
+      transition: background 0.12s;
+    }
+    .cmd-copy:hover { background: rgba(79, 209, 197, 0.2); }
+
+    /* ── Modes ────────────────────────────────────────────────────────────── */
+    .modes-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1.25rem;
+    }
+
+    .mode-card {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.65rem 1.75rem;
+      transition: border-color 0.15s;
+    }
+    .mode-card:hover { border-color: var(--border-hi); }
+
+    .mode-key {
+      display: inline-block;
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      padding: 0.15em 0.55em;
+      background: rgba(79, 209, 197, 0.08);
+      border: 1px solid var(--border-hi);
+      border-radius: 4px;
+      color: var(--teal);
+      margin-bottom: 0.6rem;
+    }
+
+    .mode-title {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 0.5rem;
+    }
+
+    .mode-desc {
+      font-size: 0.875rem;
+      color: var(--muted);
+      line-height: 1.65;
+    }
+
+    /* ── Dram manifesto block ─────────────────────────────────────────────── */
+    .manifesto {
+      background:
+        radial-gradient(ellipse 100% 120% at 30% 60%, rgba(79, 209, 197, 0.06) 0%, transparent 65%),
+        var(--bg1);
+      border: 1px solid var(--border-hi);
+      border-radius: 14px;
+      padding: clamp(2rem, 4vw, 4rem);
+      max-width: 64rem;
+      margin: 0 auto;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .manifesto::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 3px,
+        rgba(79, 209, 197, 0.012) 3px,
+        rgba(79, 209, 197, 0.012) 4px
+      );
+      pointer-events: none;
+    }
+
+    .manifesto blockquote {
+      font-size: clamp(1.25rem, 2.2vw, 1.85rem);
+      font-weight: 300;
+      line-height: 1.6;
+      color: var(--text);
+      letter-spacing: -0.01em;
+      position: relative;
+    }
+
+    .manifesto blockquote em { color: var(--teal); font-style: normal; }
+    .manifesto blockquote strong { color: var(--pink); font-weight: 600; }
+
+    /* ── Footer ───────────────────────────────────────────────────────────── */
+    .footer {
+      background: var(--bg1);
+      border-top: 1px solid var(--border);
+      padding: 2.5rem clamp(1.25rem, 6vw, 7rem);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1.5rem;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .footer-brand {
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      color: var(--muted2);
+    }
+    .footer-brand span { color: var(--muted); }
+
+    .footer-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1.5rem;
+      list-style: none;
+    }
+    .footer-links a {
+      font-size: 0.85rem;
+      color: var(--muted);
+      transition: color 0.12s;
+    }
+    .footer-links a:hover { color: var(--teal); text-decoration: none; }
+
+    /* ── Animated terminal ascii header ──────────────────────────────────── */
+    .ascii-hero {
+      font-family: var(--mono);
+      font-size: clamp(0.45rem, 1vw, 0.75rem);
+      line-height: 1.25;
+      color: var(--teal);
+      opacity: 0.25;
+      pointer-events: none;
+      user-select: none;
+      white-space: pre;
+      margin-bottom: 1.5rem;
+      letter-spacing: 0.05em;
+    }
+
+    /* ── Responsive ───────────────────────────────────────────────────────── */
+    @media (max-width: 1023px) {
+      .hero-inner { grid-template-columns: 1fr; gap: 3.5rem; }
+      .hero-screenshot { max-width: 820px; margin: 0 auto; }
+      .features-grid { grid-template-columns: repeat(2, 1fr); }
+      .inspiration-grid { grid-template-columns: 1fr; }
+      .modes-grid { grid-template-columns: 1fr; }
+      .gallery-grid { grid-template-columns: 1fr; }
+      .gallery-item.wide { grid-column: auto; }
+    }
+
+    @media (max-width: 639px) {
+      .hero { padding-top: 3rem; padding-bottom: 3rem; }
+      .section { padding-top: 3rem; padding-bottom: 3rem; }
+      .features-grid { grid-template-columns: 1fr; }
+      .topnav-links { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Nav ────────────────────────────────────────────────────────────────── -->
+<nav class="topnav">
+  <span class="topnav-brand">tt-toplike</span>
+  <ul class="topnav-links">
+    <li><a href="#visuals">Visuals</a></li>
+    <li><a href="#modes">Modes</a></li>
+    <li><a href="#inspiration">Inspiration</a></li>
+    <li><a href="#install">Install</a></li>
+    <li><a href="https://github.com/tsingletaryTT/tt-toplike-rs" target="_blank" rel="noopener">GitHub</a></li>
+  </ul>
+</nav>
+
+<!-- ── Hero ───────────────────────────────────────────────────────────────── -->
+<section class="hero edge">
+  <div class="hero-inner">
+
+    <div>
+      <div class="ascii-hero">·∘○◉●◉○∘·  ·∘○◉●◉○∘·  ·∘○◉●
+◉●◉○∘·      ·∘○◉●◉○∘·
+·∘○◉         ●◉○∘·∘○◉●
+◉●∘·  ·∘○◉●◉○∘·  ·∘○◉</div>
+
+      <p class="hero-eyebrow">Tenstorrent Hardware Monitor · v0.4.1 · Rust</p>
+
+      <h1 class="hero-title">
+        Watch<br>
+        <span class="accent">inference</span><br>
+        <span class="accent2">happen.</span>
+      </h1>
+
+      <p class="hero-tagline">
+        A psychedelic, ASCII-native terminal monitor for Tenstorrent Blackhole and Wormhole silicon.
+        Tensix cores pulse with real power consumption. DRAM channels reveal their training state.
+        NoC traffic flows as living particle streams. Every pixel earns its place.
+      </p>
+
+      <div class="hero-cta">
+        <a class="btn-primary" href="#install">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M8 1v9M4 7l4 4 4-4M2 13h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Install via apt
+        </a>
+        <a class="btn-secondary" href="https://github.com/tsingletaryTT/tt-toplike-rs" target="_blank" rel="noopener">
+          View on GitHub →
+        </a>
+      </div>
+
+      <p class="hero-meta">
+        <span>Rust 2021 · MIT/Apache-2.0 · Debian package available</span>
+        &nbsp;·&nbsp; works on N150, N300, P150, P300, QB2
+      </p>
+    </div>
+
+    <div class="hero-screenshot">
+      <img src="assets/screenshot.png"
+           alt="tt-toplike running in arcade mode — four Blackhole chips rendered as Tensix star grids with DRAM channels and particle flows"
+           loading="eager">
+    </div>
+
+  </div>
+</section>
+
+<!-- ── Video ───────────────────────────────────────────────────────────────── -->
+<section class="section edge" id="video">
+  <p class="section-label">See it live</p>
+  <h2 class="section-heading">Hardware monitoring as performance art</h2>
+  <p class="section-sub">
+    Four Blackhole chips, idle and under inference load, rendered simultaneously.
+    Watch the Tensix cores brighten as power climbs, DRAM channels report training state,
+    and the NoC particle stream shifts with real traffic.
+  </p>
+
+  <div class="video-wrap">
+    <iframe
+      src="https://www.youtube.com/embed/FjSnf_DxqlY"
+      title="tt-toplike — Tenstorrent hardware monitor in action"
+      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
+      allowfullscreen
+      loading="lazy">
+    </iframe>
+  </div>
+</section>
+
+<!-- ── Manifesto ──────────────────────────────────────────────────────────── -->
+<section class="section edge" id="why">
+  <div class="manifesto">
+    <blockquote>
+      You put four Blackhole chips in a rack.<br>
+      You fire up an LLM inference job.<br>
+      And then — nothing. A blinking cursor. A log file.<br><br>
+      We wanted to <em>see it.</em>
+      Watch the <strong>DRAM channels train</strong> one by one at boot.
+      Watch Tensix cores <em>light up</em> when the attention heads fire.
+      See the <strong>NoC traffic</strong> as a river of particles moving between chiplets.
+      Watch the temperature blush orange as the workload grows.<br><br>
+      Not numbers in a table.
+      Not a dashboard with gauges.
+      <em>A living picture</em> of inference in motion.
+    </blockquote>
+  </div>
+</section>
+
+<!-- ── Features ───────────────────────────────────────────────────────────── -->
+<section class="section edge" id="visuals">
+  <p class="section-label">What you see</p>
+  <h2 class="section-heading">Every pixel earns its place</h2>
+  <p class="section-sub">
+    There are no decorative animations. Every visual element is driven by real telemetry
+    from the hardware — if it's moving, something changed on the chip.
+  </p>
+
+  <div class="features-grid">
+    <div class="feature-card">
+      <div class="feature-icon">✦</div>
+      <p class="feature-title">Tensix Core Grid</p>
+      <p class="feature-desc">
+        Each star in the starfield is a real Tensix core. Its brightness tracks power
+        consumption relative to the learned idle baseline. Its color shifts from cool
+        cyan through yellow to hot red as temperature rises. The twinkle rate follows
+        current draw. 224 cores on Blackhole, every one individually represented.
+      </p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">▓</div>
+      <p class="feature-title">DRAM Channel Status</p>
+      <p class="feature-desc">
+        The DDR training bitmask from SMBUS telemetry is parsed per-channel and rendered
+        in real time: ○ untrained, ◐ training (animated), ● trained, ✗ error.
+        On Blackhole that's 12 channels — you can watch them come up one by one
+        during the boot sequence.
+      </p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">◆</div>
+      <p class="feature-title">Memory Hierarchy</p>
+      <p class="feature-desc">
+        The Memory Dungeon renders all four levels simultaneously: DDR at the base,
+        L2 cache banks in the middle, L1 SRAM cores above, Tensix compute at the top.
+        Four distinct particle types — Read ○◉, Write □■, CacheHit ◇◆, Miss ●⬤ —
+        flow upward as real transactions complete.
+      </p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">∿</div>
+      <p class="feature-title">NoC Particle Flow</p>
+      <p class="feature-desc">
+        The Memory Flow visualization maps the Network-on-Chip as a 2D field.
+        Particles stream between the DDR perimeter and the Tensix core array,
+        their density proportional to traffic, their color to temperature.
+        Watch the flow change as inference shifts attention layers.
+      </p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">◈</div>
+      <p class="feature-title">Inter-Chip Topology</p>
+      <p class="feature-desc">
+        On multi-chip systems (T3K, QB2) the board topology is rendered with
+        Ethernet link status, PCIe health, and chip-to-chip connections shown
+        as a live graph. Power differentials between chips are reflected in
+        connection brightness — you can see which die is pulling harder.
+      </p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">@</div>
+      <p class="feature-title">Arcade Hero</p>
+      <p class="feature-desc">
+        Arcade mode places a roguelike hero character at the intersection of
+        power (vertical) and current (horizontal). Its color is temperature.
+        It leaves a trail of recent positions. It's your avatar inside the chip —
+        moving through DDR, L2, L1, and Tensix as the workload climbs.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ── Modes ──────────────────────────────────────────────────────────────── -->
+<section class="section edge" id="modes">
+  <p class="section-label">Visualization modes</p>
+  <h2 class="section-heading">Press <code>v</code> to cycle</h2>
+  <p class="section-sub">
+    Each mode is a different lens on the same live hardware data.
+    All modes support multi-device layouts — up to four chips side-by-side.
+  </p>
+
+  <div class="modes-grid">
+    <div class="mode-card">
+      <span class="mode-key">normal</span>
+      <p class="mode-title">Telemetry Table</p>
+      <p class="mode-desc">
+        Classical htop-style table: power, temperature, current, voltage, AICLK,
+        ARC firmware health per device. Color-coded with progressive gradients.
+        Backend switcher (<code>b</code>) cycles Sysfs → JSON → Luwen live.
+      </p>
+    </div>
+    <div class="mode-card">
+      <span class="mode-key">starfield</span>
+      <p class="mode-title">Tensix Starfield</p>
+      <p class="mode-desc">
+        The original visualization — Tensix cores as stars, memory hierarchy as
+        orbiting planets, data flow streams between devices. Learns each device's
+        idle baseline over the first 20 frames; all activity shown relative to that
+        learned state so any hardware looks alive, from 5W idle to 150W inference.
+      </p>
+    </div>
+    <div class="mode-card">
+      <span class="mode-key">castle</span>
+      <p class="mode-title">Memory Castle</p>
+      <p class="mode-desc">
+        A roguelike dungeon of memory hierarchy. 600 particles fill the screen,
+        flowing from DDR at the bottom up through L2, L1, and into Tensix compute.
+        30 environmental glyphs (⚡ ※ ☼ ◊) populate the dungeon atmosphere.
+        Adaptive spawning surges with power activity.
+      </p>
+    </div>
+    <div class="mode-card">
+      <span class="mode-key">flow</span>
+      <p class="mode-title">Memory Flow</p>
+      <p class="mode-desc">
+        The NoC as a particle system. DDR channels ring the perimeter;
+        the Tensix core grid fills the center. Particle density tracks traffic,
+        color tracks temperature, speed tracks current draw.
+        Most meditative mode — watch the inference rhythm emerge.
+      </p>
+    </div>
+    <div class="mode-card">
+      <span class="mode-key">arcade</span>
+      <p class="mode-title">Arcade Mode</p>
+      <p class="mode-desc">
+        All three visualizations stacked vertically with animated separator bands.
+        Starfield on top, Memory Castle in the middle, Memory Flow below.
+        A hero character (<code>@</code>) navigates the chip in real time.
+        Maximum information density — the full picture at once.
+      </p>
+    </div>
+    <div class="mode-card">
+      <span class="mode-key">topology</span>
+      <p class="mode-title">Board Topology</p>
+      <p class="mode-desc">
+        On multi-chip boards, renders the physical chip layout with Ethernet
+        and PCIe connections. Link status, firmware health, and per-chip
+        temperature shown as a live graph. Immediately shows which chip
+        is hot, which link is down, or which die is carrying the load.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ── Gallery ────────────────────────────────────────────────────────────── -->
+<section class="section edge" id="gallery">
+  <p class="section-label">Screenshots</p>
+  <h2 class="section-heading">Real hardware, real data</h2>
+  <p class="section-sub">
+    All screenshots taken on Blackhole hardware. No mock data.
+  </p>
+
+  <div class="gallery-grid">
+    <div class="gallery-item wide">
+      <img src="assets/screenshot.png"
+           alt="tt-toplike arcade mode — four Blackhole devices with Tensix core grids, DRAM channels, and particle flows"
+           loading="lazy">
+      <span class="gallery-caption">Arcade mode — 4× Blackhole, live inference load</span>
+    </div>
+    <div class="gallery-item">
+      <img src="assets/screenshot2.png"
+           alt="tt-toplike starfield mode — Tensix cores as stars with memory hierarchy planets"
+           loading="lazy">
+      <span class="gallery-caption">Starfield mode — Tensix cores as stars</span>
+    </div>
+    <div class="gallery-item">
+      <img src="assets/arcade.png"
+           alt="tt-toplike — memory castle and flow visualization"
+           loading="lazy">
+      <span class="gallery-caption">Memory Castle + Flow — particle hierarchy</span>
+    </div>
+  </div>
+</section>
+
+<!-- ── Inspiration ────────────────────────────────────────────────────────── -->
+<section class="section edge" id="inspiration">
+  <p class="section-label">Lineage & inspiration</p>
+  <h2 class="section-heading">Standing on the shoulders of<br>beautiful tools</h2>
+  <p class="section-sub">
+    Every design decision in tt-toplike traces back to something that came before it —
+    a game, a tool, a film, an art installation. Here's the direct lineage.
+  </p>
+
+  <div class="inspiration-grid">
+
+    <div class="inspiration-copy">
+      <p>
+        It started with a question: why does every hardware monitoring tool look like a 1995 spreadsheet?
+        The hardware underneath is doing something genuinely spectacular —
+        <strong>billions of SRAM operations per second, twelve DDR channels training in parallel,
+        a mesh network-on-chip routing inference tokens across 224 Tensix cores</strong> —
+        and the best we offer the operator is a table of numbers that refreshes every five seconds.
+      </p>
+      <p>
+        The Python ancestor of this tool (<code>tt-top</code>) proved the concept:
+        a terminal can be a window into the chip. tt-toplike-rs reimplements that vision in Rust,
+        pushing the frame rate to 100ms, adding the adaptive baseline system that makes every
+        machine look alive regardless of its power envelope, and extending the visualization
+        language to cover things tt-top never attempted — DRAM training state, inter-chip topology,
+        the full memory hierarchy rendered as a living dungeon.
+      </p>
+      <p>
+        The design vocabulary draws from a very specific set of predecessors.
+        Not dashboards. Not Grafana panels.
+        <strong>Games, art tools, and the terminal programs that dared to be beautiful.</strong>
+      </p>
+    </div>
+
+    <ul class="lineage-list">
+      <li class="lineage-item">
+        <span class="lineage-era">1982</span>
+        <div class="lineage-body">
+          <p class="lineage-name">Missile Command &amp; Yar's Revenge</p>
+          <p class="lineage-desc">
+            Atari 2600 titles that proved a handful of pixels could carry enormous
+            urgency. The particle systems in Memory Castle and Memory Flow inherit
+            their kinetic grammar — objects with velocity, brief lives, and color
+            that means something — directly from these two games.
+          </p>
+        </div>
+      </li>
+      <li class="lineage-item">
+        <span class="lineage-era">1982</span>
+        <div class="lineage-body">
+          <p class="lineage-name">TRON (film)</p>
+          <p class="lineage-desc">
+            The visual metaphor of a human navigating the interior of a computer
+            is the animating concept behind Arcade Mode. The grid aesthetic,
+            the glowing wireframes, the sense that the machine has interior
+            geography worth exploring — all TRON. The TRON Grid visualization
+            mode is a direct homage.
+          </p>
+        </div>
+      </li>
+      <li class="lineage-item">
+        <span class="lineage-era">1993</span>
+        <div class="lineage-body">
+          <p class="lineage-name">NetHack / Dungeon Crawl Stone Soup</p>
+          <p class="lineage-desc">
+            Roguelikes proved that ASCII art could have depth, atmosphere,
+            and meaning. The Memory Castle visualization treats each character
+            on screen as a semantic glyph — ○◉ are reads, □■ are writes,
+            ◇◆ are cache hits. The dungeon aesthetic (layers, particles,
+            environmental glyphs) comes directly from this tradition.
+          </p>
+        </div>
+      </li>
+      <li class="lineage-item">
+        <span class="lineage-era">2004</span>
+        <div class="lineage-body">
+          <p class="lineage-name">htop</p>
+          <p class="lineage-desc">
+            The invention of the modern terminal monitor. Colored bars,
+            real-time updates, a layout that made the CPU visible. tt-toplike
+            inherits htop's fundamental premise — the terminal is a legitimate
+            UI, not a fallback — and extends it from CPU threads to an entire
+            AI accelerator chip.
+          </p>
+        </div>
+      </li>
+      <li class="lineage-item">
+        <span class="lineage-era">2009</span>
+        <div class="lineage-body">
+          <p class="lineage-name">Logstalgia</p>
+          <p class="lineage-desc">
+            A web-server log visualizer that renders HTTP requests as a
+            Pong-style particle game. The insight: <strong>any time-series data
+            can be a particle system</strong>. Every DRAM transaction, every
+            cache miss, every NoC packet is an event with a source, a destination,
+            and a brief existence — exactly what Logstalgia taught us to see.
+          </p>
+        </div>
+      </li>
+      <li class="lineage-item">
+        <span class="lineage-era">2020</span>
+        <div class="lineage-body">
+          <p class="lineage-name">btop++</p>
+          <p class="lineage-desc">
+            The modern heir to htop — richer colors, smoother animations,
+            more information per pixel. The vibrant color palette in tt-toplike
+            (deep blue-gray backgrounds, bright teal accents, psychedelic
+            HSV cycling) is a direct response to btop++'s proof that terminal
+            tools can look genuinely beautiful.
+          </p>
+        </div>
+      </li>
+    </ul>
+
+  </div>
+</section>
+
+<!-- ── Foundation ─────────────────────────────────────────────────────────── -->
+<section class="section edge" id="foundation">
+  <p class="section-label">Technical foundation</p>
+  <h2 class="section-heading">Built on safe defaults and live telemetry</h2>
+  <p class="section-sub">
+    tt-toplike is a Rust library with multiple frontends — a TUI binary, a PTY-hosted
+    native window, and a hybrid backend that streams telemetry from tt-smi without
+    ever touching PCI BAR0 while a workload is running.
+  </p>
+
+  <div class="features-grid">
+    <div class="feature-card">
+      <div class="feature-icon">🛡</div>
+      <p class="feature-title">Non-Invasive by Default</p>
+      <p class="feature-desc">
+        The default backend chain is Sysfs → JSON (tt-smi subprocess) → Mock.
+        Direct PCI access via Luwen is only attempted when <code>--backend luwen</code>
+        is passed explicitly. You can monitor an LLM inference job without
+        any risk of disturbing the hardware state.
+      </p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">⚡</div>
+      <p class="feature-title">Streaming SMBUS at 1.5s</p>
+      <p class="feature-desc">
+        The HybridBackend spawns a persistent <code>tt-smi</code> subprocess that loops
+        every 1.5 seconds, writing RS-delimited JSON records to a pipe. A reader thread
+        parses each record and deposits it via an Arc-swap pointer — zero mutex
+        contention on the render path, no 5-second polling surge.
+      </p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">〜</div>
+      <p class="feature-title">EMA Smoothing</p>
+      <p class="feature-desc">
+        Numeric SMBUS fields (temperature, power, clock frequencies) are blended
+        through an exponential moving average (α=0.25) as each new snapshot arrives.
+        Hard value jumps are distributed across ~4 frames, eliminating the visual
+        discontinuity that makes monitoring tools feel choppy.
+      </p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🖥</div>
+      <p class="feature-title">tt-toplike-app</p>
+      <p class="feature-desc">
+        A native egui window that hosts the full TUI inside a PTY — no terminal
+        emulator needed, no font configuration, no rendering artifacts. Launches
+        <code>tt-toplike-tui</code> as a child process, implements a complete
+        VT100/VT220 screen renderer including deferred auto-wrap, and draws each
+        cell via egui with full color fidelity.
+      </p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🔀</div>
+      <p class="feature-title">Live Backend Switching</p>
+      <p class="feature-desc">
+        Press <code>b</code> in the TUI to cycle backends without restarting.
+        The visualization state is preserved; only the data source changes.
+        Useful for comparing Sysfs sensor readings against full SMBUS telemetry
+        side-by-side during the same session.
+      </p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">📦</div>
+      <p class="feature-title">Debian Package</p>
+      <p class="feature-desc">
+        Ships as two Debian packages: <code>tt-toplike</code> (the TUI,
+        ~750 KB stripped) and <code>tt-toplike-app</code> (the native window,
+        ~4 MB with egui). All crates are vendored for offline reproducible builds.
+        Recommends <code>tt-smi</code> and <code>tenstorrent-dkms</code> from
+        the Tenstorrent PPA.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ── Install ────────────────────────────────────────────────────────────── -->
+<section class="section edge" id="install">
+  <p class="section-label">Get started</p>
+  <h2 class="section-heading">Install</h2>
+  <p class="section-sub">
+    Grab the Debian package for the fastest path. Or build from source with Cargo.
+  </p>
+
+  <div class="install-block">
+    <div class="install-row">
+      <span class="install-num">1</span>
+      <div class="install-body">
+        <p>Download the latest release packages from GitHub:</p>
+        <div class="cmd-wrap">
+          <code class="cmd" id="cmd1">gh release download --repo tsingletaryTT/tt-toplike-rs --pattern '*.deb'</code>
+          <button class="cmd-copy" data-target="cmd1">Copy</button>
+        </div>
+      </div>
+    </div>
+    <div class="install-row">
+      <span class="install-num">2</span>
+      <div class="install-body">
+        <p>Install both packages:</p>
+        <div class="cmd-wrap">
+          <code class="cmd" id="cmd2">sudo dpkg -i tt-toplike_*.deb tt-toplike-app_*.deb</code>
+          <button class="cmd-copy" data-target="cmd2">Copy</button>
+        </div>
+      </div>
+    </div>
+    <div class="install-row">
+      <span class="install-num">3</span>
+      <div class="install-body">
+        <p>Run with mock hardware to verify — or on real Tenstorrent silicon:</p>
+        <div class="cmd-wrap">
+          <code class="cmd" id="cmd3">tt-toplike --mock --mock-devices 4        # no hardware needed
+tt-toplike                             # auto-detects real hardware
+tt-toplike --mode arcade               # start in arcade mode
+tt-toplike-app                         # native window (PTY-hosted TUI)</code>
+          <button class="cmd-copy" data-target="cmd3">Copy</button>
+        </div>
+      </div>
+    </div>
+    <div class="install-row">
+      <span class="install-num">4</span>
+      <div class="install-body">
+        <p>
+          Or build from source (requires Rust 1.75+):
+        </p>
+        <div class="cmd-wrap">
+          <code class="cmd" id="cmd4">git clone https://github.com/tsingletaryTT/tt-toplike-rs
+cd tt-toplike-rs
+cargo build --release --bin tt-toplike-tui --features tui
+./target/release/tt-toplike-tui --mock --mock-devices 4</code>
+          <button class="cmd-copy" data-target="cmd4">Copy</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="margin-top: 2rem; display: flex; gap: 1.5rem; flex-wrap: wrap; font-size: 0.88rem;">
+    <span style="color: var(--muted);">Keyboard shortcuts:</span>
+    <span><code>v</code> <span style="color:var(--muted)">cycle viz mode</span></span>
+    <span><code>b</code> <span style="color:var(--muted)">switch backend</span></span>
+    <span><code>q</code> / <code>ESC</code> <span style="color:var(--muted)">quit</span></span>
+    <span><code>r</code> <span style="color:var(--muted)">force refresh</span></span>
+  </div>
+</section>
+
+<!-- ── Footer ─────────────────────────────────────────────────────────────── -->
+<footer class="footer">
+  <div class="footer-brand">
+    tt-toplike-rs &nbsp;<span>· Real-time monitoring for Tenstorrent silicon · Apache-2.0</span>
+  </div>
+  <ul class="footer-links">
+    <li><a href="https://github.com/tsingletaryTT/tt-toplike-rs" target="_blank" rel="noopener">GitHub</a></li>
+    <li><a href="https://github.com/tsingletaryTT/tt-toplike-rs/releases" target="_blank" rel="noopener">Releases</a></li>
+    <li><a href="https://github.com/tsingletaryTT/tt-toplike-rs/issues" target="_blank" rel="noopener">Issues</a></li>
+    <li><a href="https://tenstorrent.com" target="_blank" rel="noopener">Tenstorrent</a></li>
+  </ul>
+</footer>
+
+<script>
+(function () {
+  /* ── Copy buttons ── */
+  document.querySelectorAll('.cmd-copy').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var el = document.getElementById(btn.dataset.target);
+      if (!el) return;
+      var text = el.textContent.trim();
+      var orig = btn.textContent;
+      var p = navigator.clipboard && navigator.clipboard.writeText
+        ? navigator.clipboard.writeText(text)
+        : new Promise(function (res, rej) {
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+            document.body.appendChild(ta);
+            ta.focus(); ta.select();
+            document.execCommand('copy') ? res() : rej();
+            document.body.removeChild(ta);
+          });
+      p.then(function () {
+        btn.textContent = 'Copied!';
+        setTimeout(function () { btn.textContent = orig; }, 2000);
+      }).catch(function () {
+        btn.textContent = 'Failed';
+        setTimeout(function () { btn.textContent = orig; }, 2000);
+      });
+    });
+  });
+}());
+</script>
+
+</body>
+</html>
