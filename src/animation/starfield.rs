@@ -272,24 +272,30 @@ impl HardwareStarfield {
         let device_spacing = self.width / num_devices.max(1);
 
         for (device_idx, device) in devices.iter().enumerate() {
-            // Calculate center position for this device
+            // Calculate center position for this device (horizontal only)
             let device_center_x = (device_idx * device_spacing) + (device_spacing / 2);
-            let device_center_y = self.height / 2;
 
             // Get Tensix grid dimensions for this architecture
             let (grid_rows, grid_cols) = device.architecture.tensix_grid();
 
-            // Calculate star spacing to fit grid within device region
-            let star_spacing_x = (device_spacing.saturating_sub(10)) / grid_cols.max(1);
-            let star_spacing_y = (self.height.saturating_sub(10)) / grid_rows.max(1);
+            // Star spacing fills the full content height and device width.
+            // Using height/grid_rows (not height-10) so the grid reaches both
+            // edges with only a half-cell margin — no large blank area at top.
+            let star_spacing_x = (device_spacing.saturating_sub(4)) / grid_cols.max(1);
+            let star_spacing_y = self.height / grid_rows.max(1);
+
+            // Half-cell offset so the first star sits centred in its cell.
+            let x_start = device_center_x.saturating_sub(grid_cols * star_spacing_x / 2);
+            let y_start = star_spacing_y / 2;
+
+            // Planets orbit the true geometric centre of the star grid.
+            let device_center_y = y_start + (grid_rows / 2) * star_spacing_y;
 
             // Create stars for each Tensix core
             for row in 0..grid_rows {
                 for col in 0..grid_cols {
-                    let x = device_center_x.saturating_sub(grid_cols * star_spacing_x / 2)
-                        + col * star_spacing_x;
-                    let y = device_center_y.saturating_sub(grid_rows * star_spacing_y / 2)
-                        + row * star_spacing_y;
+                    let x = x_start + col * star_spacing_x;
+                    let y = y_start + row * star_spacing_y;
 
                     // Ensure within bounds
                     if x < self.width && y < self.height {
