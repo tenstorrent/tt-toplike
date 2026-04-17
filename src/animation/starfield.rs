@@ -13,8 +13,10 @@
 use crate::backend::TelemetryBackend;
 use crate::models::Device;
 use crate::animation::AdaptiveBaseline;
+use crate::animation::topology::{BoardTopology, sync_score};
 use crate::ui::colors;
 use ratatui::style::Color;
+use std::collections::HashMap;
 use std::f32;
 
 /// Character progression for star brightness levels
@@ -23,8 +25,7 @@ const STAR_CHARS: [char; 5] = ['·', '∘', '○', '◉', '●'];
 /// Character progression for memory planet intensity
 const PLANET_CHARS: [char; 5] = ['·', '░', '▒', '▓', '█'];
 
-/// Character progression for data flow intensity
-const FLOW_CHARS: [char; 4] = ['▹', '▸', '▷', '▶'];
+// FLOW_CHARS removed: DataStream now uses topology-aware '─' (intra-board) / '═' (inter-board).
 
 /// A single star representing a Tensix core
 #[derive(Debug, Clone)]
@@ -155,18 +156,25 @@ pub struct DataStream {
     /// Target device index
     pub to_device: usize,
 
-    /// Flow intensity (0.0 to 1.0)
+    /// Flow intensity / sync score (0.0 to 1.0)
     pub intensity: f32,
 
     /// Animation offset
     pub offset: f32,
+
+    /// Whether both endpoints are on the same physical board.
+    /// Intra-board streams use `─` and are always-on (floor 0.2).
+    /// Inter-board streams use `═` and only appear when both sides are active.
+    pub intra_board: bool,
 }
 
 impl DataStream {
-    /// Get the character to render based on intensity
+    /// Get the character to render based on topology.
+    ///
+    /// `─` for intra-board links (always visible, even when idle).
+    /// `═` for inter-board links (heavier, only shown when active).
     pub fn get_char(&self) -> char {
-        let idx = (self.intensity * (FLOW_CHARS.len() - 1) as f32) as usize;
-        FLOW_CHARS[idx.min(FLOW_CHARS.len() - 1)]
+        if self.intra_board { '─' } else { '═' }
     }
 }
 
@@ -192,6 +200,15 @@ pub struct HardwareStarfield {
 
     /// Display height in characters
     height: usize,
+
+    /// Board topology (set once after backend init).
+    /// Drives stream character selection and intra-board floor.
+    board_topology: Option<BoardTopology>,
+
+    /// Snapshot of per-device baseline-relative power change,
+    /// updated each frame by `update_from_telemetry`.
+    /// Used by stream rendering to compute `sync_score`.
+    device_activity: HashMap<usize, f32>,
 }
 
 impl HardwareStarfield {
@@ -210,7 +227,29 @@ impl HardwareStarfield {
             frame: 0,
             width,
             height,
+            board_topology: None,
+            device_activity: HashMap::new(),
         }
+    }
+
+    /// Install board topology for topology-aware stream rendering.
+    ///
+    /// Call this once after backend initialisation when SMBUS `board_id`
+    /// data may be available.  Safe to call at any point — the change
+    /// takes effect on the next `update_from_telemetry` call.
+    pub fn set_topology(&mut self, topology: BoardTopology) {
+        self.board_topology = Some(topology);
+        // Re-tag all existing streams so they don't need a full reinit.
+        if let Some(ref topo) = self.board_topology {
+            for stream in &mut self.streams {
+                stream.intra_board = topo.same_board(stream.from_device, stream.to_device);
+            }
+        }
+    }
+
+    /// Access the current board topology, if set.
+    pub fn topology(&self) -> Option<&BoardTopology> {
+        self.board_topology.as_ref()
     }
 
     /// Initialize stars and planets from device topology
@@ -358,7 +397,12 @@ impl HardwareStarfield {
                     let from_x = (from_idx * device_spacing) + (device_spacing / 2);
                     let to_x = (to_idx * device_spacing) + (device_spacing / 2);
 
-                    // Create streams along the path
+                    // Determine topology relationship for this stream pair.
+                    let intra = self.board_topology.as_ref()
+                        .map(|t| t.same_board(from_idx, to_idx))
+                        .unwrap_or(false);
+
+                    // Create stream segments along the horizontal path.
                     let num_steps = ((to_x - from_x) / 5).max(1);
                     for step in 0..num_steps {
                         let x = from_x + (to_x - from_x) * step / num_steps;
@@ -372,6 +416,7 @@ impl HardwareStarfield {
                                 to_device: to_idx,
                                 intensity: 0.0,
                                 offset: step as f32 / num_steps as f32,
+                                intra_board: intra,
                             });
                         }
                     }
@@ -389,15 +434,20 @@ impl HardwareStarfield {
     ///
     /// * `backend` - Backend providing telemetry data
     pub fn update_from_telemetry<B: TelemetryBackend>(&mut self, backend: &B) {
-        // Update baseline learning
+        // Update baseline learning and snapshot per-device activity.
         for device in backend.devices() {
             if let Some(telem) = backend.telemetry(device.index) {
                 let power = telem.power_w();
                 let current = telem.current_a();
                 let temp = telem.temp_c();
-                let aiclk = telem.aiclk_mhz() as f32;  // Convert u32 to f32
+                let aiclk = telem.aiclk_mhz() as f32;
 
                 self.baseline.update(device.index, power, current, temp, aiclk);
+
+                // Cache baseline-relative power change for stream sync_score.
+                let activity = self.baseline.power_change(device.index, power)
+                    .max(0.0).min(1.0);
+                self.device_activity.insert(device.index, activity);
             }
         }
 
@@ -440,8 +490,13 @@ impl HardwareStarfield {
 
                 star.brightness = (base_brightness + twinkle).clamp(0.0, 1.0);
 
-                // Color from temperature
-                star.color = colors::temp_color(temp);
+                // Color: full 360° rainbow cycling driven by temp + time + core position.
+                // Each core starts at a different phase so the grid shows a colour wave.
+                use crate::animation::{hsv_to_rgb, temp_to_hue};
+                let hue = (temp_to_hue(temp)
+                    + self.frame as f32 * 2.0
+                    + star.core_idx as f32 * 2.7) % 360.0;
+                star.color = hsv_to_rgb(hue, 1.0, 1.0);
             }
         }
 
@@ -472,7 +527,16 @@ impl HardwareStarfield {
                     _ => 0.0,
                 };
 
-                planet.color = planet.get_color();
+                // Planets: each memory level cycles through its own hue range,
+                // per-channel offset spreads the colours so they aren't all in sync.
+                use crate::animation::hsv_to_rgb as _hsv;
+                let planet_hue = match planet.level {
+                    0 => (240.0 + self.frame as f32 * 1.5 + planet.channel_idx as f32 * 90.0) % 360.0,
+                    1 => (120.0 + self.frame as f32 * 1.0 + planet.channel_idx as f32 * 45.0) % 360.0,
+                    _ => (self.frame as f32 * 2.5 + planet.channel_idx as f32 * 30.0) % 360.0,
+                };
+                let planet_value = 0.6 + planet.activity * 0.4;
+                planet.color = _hsv(planet_hue, 1.0, planet_value);
 
                 // Orbital motion - planets orbit around device center
                 // Different levels orbit at different speeds
@@ -504,20 +568,17 @@ impl HardwareStarfield {
             }
         }
 
-        // Update data flow streams based on power differentials
+        // Update data flow streams using sync_score (geometric mean of both
+        // chips' activity).  This remains non-zero even when both chips are
+        // equally loaded — solving the "equal-load streams go dark" problem
+        // that the old abs(power_diff)/50 formula had.
         for stream in &mut self.streams {
-            let from_power = backend.telemetry(stream.from_device)
-                .map(|t| t.power_w())
-                .unwrap_or(0.0);
-            let to_power = backend.telemetry(stream.to_device)
-                .map(|t| t.power_w())
-                .unwrap_or(0.0);
+            let act_a = *self.device_activity.get(&stream.from_device).unwrap_or(&0.0);
+            let act_b = *self.device_activity.get(&stream.to_device).unwrap_or(&0.0);
 
-            // Flow intensity based on power differential
-            let power_diff = (from_power - to_power).abs();
-            stream.intensity = (power_diff / 50.0).min(1.0);
+            stream.intensity = sync_score(act_a, act_b, stream.intra_board);
 
-            // Animate flow
+            // Animate flow offset.
             stream.offset = (stream.offset + 0.1) % 1.0;
         }
 
@@ -549,13 +610,31 @@ impl HardwareStarfield {
             }
         }
 
-        // Render data streams
+        // Render data streams using topology-aware thresholds and colors.
+        //
+        // Intra-board (─): always-on floor of 0.2 from sync_score, use board hue.
+        // Inter-board (═): visible when intensity ≥ 0.05, use rainbow sweep.
         for stream in &self.streams {
-            if stream.intensity > 0.1 {
-                let show = ((stream.offset * 10.0) as u32 + self.frame / 2) % 3 == 0;
-                if show && stream.x < self.width && stream.y < self.height {
-                    canvas[stream.y][stream.x] = (stream.get_char(), colors::PRIMARY);
-                }
+            // Threshold: intra-board always shown (floor ≥ 0.2), inter-board only when active.
+            let threshold = if stream.intra_board { 0.05 } else { 0.05 };
+            if stream.intensity < threshold {
+                continue;
+            }
+            let show = ((stream.offset * 10.0) as u32 + self.frame / 2) % 3 == 0;
+            if show && stream.x < self.width && stream.y < self.height {
+                use crate::animation::hsv_to_rgb;
+                let stream_hue = if stream.intra_board {
+                    // Use the board hue for intra-board links.
+                    self.board_topology.as_ref()
+                        .map(|t| t.board_hue(stream.from_device))
+                        .unwrap_or(200.0)
+                } else {
+                    // Full rainbow sweep for inter-board links.
+                    (self.frame as f32 * 3.0 + stream.offset * 360.0) % 360.0
+                };
+                let value = 0.5 + stream.intensity * 0.5;
+                let stream_color = hsv_to_rgb(stream_hue, 0.9, value);
+                canvas[stream.y][stream.x] = (stream.get_char(), stream_color);
             }
         }
 
@@ -644,13 +723,22 @@ impl HardwareStarfield {
             }
         }
 
-        // Render data streams
+        // Render data streams (topology-aware, same logic as render()).
         for stream in &self.streams {
-            if stream.intensity > 0.1 {
-                let show = ((stream.offset * 10.0) as u32 + self.frame / 2) % 3 == 0;
-                if show && stream.x < self.width && stream.y < self.height {
-                    canvas[stream.y][stream.x] = (stream.get_char(), colors::PRIMARY);
-                }
+            if stream.intensity < 0.05 {
+                continue;
+            }
+            let show = ((stream.offset * 10.0) as u32 + self.frame / 2) % 3 == 0;
+            if show && stream.x < self.width && stream.y < self.height {
+                use crate::animation::hsv_to_rgb;
+                let stream_hue = if stream.intra_board {
+                    self.board_topology.as_ref()
+                        .map(|t| t.board_hue(stream.from_device))
+                        .unwrap_or(200.0)
+                } else {
+                    (self.frame as f32 * 3.0 + stream.offset * 360.0) % 360.0
+                };
+                canvas[stream.y][stream.x] = (stream.get_char(), hsv_to_rgb(stream_hue, 0.9, 0.8));
             }
         }
 
@@ -714,6 +802,9 @@ mod tests {
             brightness: 0.0,
             color: colors::PRIMARY,
             phase: 0.0,
+            depth: 1.0,
+            phase2: 0.0,
+            sparkle: 0.0,
         };
 
         assert_eq!(star.get_char(), '·'); // Dimmest
@@ -735,6 +826,9 @@ mod tests {
             channel_idx: 0,
             activity: 0.5,
             color: colors::INFO,
+            angle: 0.0,
+            radius: 10.0,
+            pulse: 0.0,
         };
         assert_eq!(l1_planet.get_char(), '◆'); // L1 diamond
 
@@ -746,7 +840,21 @@ mod tests {
             channel_idx: 0,
             activity: 0.5,
             color: colors::WARNING,
+            angle: 0.0,
+            radius: 10.0,
+            pulse: 0.0,
         };
         assert_eq!(l2_planet.get_char(), '◇'); // L2 outline diamond
+    }
+
+    #[test]
+    fn test_data_stream_chars() {
+        let intra = DataStream { x: 0, y: 0, from_device: 0, to_device: 1,
+            intensity: 0.5, offset: 0.0, intra_board: true };
+        assert_eq!(intra.get_char(), '─');
+
+        let inter = DataStream { x: 0, y: 0, from_device: 0, to_device: 2,
+            intensity: 0.5, offset: 0.0, intra_board: false };
+        assert_eq!(inter.get_char(), '═');
     }
 }

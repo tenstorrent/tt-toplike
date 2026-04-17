@@ -1,3 +1,55 @@
+tt-toplike-rs (0.4.0) noble; urgency=medium
+
+  * HybridBackend: sysfs provides real-time core metrics (temp, power, voltage)
+    while tt-smi is polled every 5 seconds in a background thread to populate
+    SMBUS telemetry (DDR status, ARC health, board IDs). Zero blocking on the
+    main render loop. Exposed as --backend hybrid; falls back to sysfs-only if
+    tt-smi is absent.
+  * BoardTopology: groups chips by SMBUS board_id (fallback to consecutive-index
+    pairs when board_ids are unavailable). Exposes same_board(), board_hue(),
+    board_label(). Hue palette: blue-cyan (200°), orange (20°), magenta (290°),
+    green (110°).
+  * sync_score(): geometric mean (a*b).sqrt() replaces abs(power_diff)/50 for
+    inter-chip stream intensity. Intra-board pairs carry a 0.2 floor so links
+    between on-board chips are always visible even under equal load.
+  * Starfield board-aware streams: intra-board streams use ─ and board hue;
+    inter-board use ═ and full rainbow sweep. Intensity driven by sync_score.
+  * Memory Castle board separators: ║ in amber-gold (RGB 200,160,60) at board
+    boundaries; │ in dim grey within the same board. Board label row added above
+    per-device headers when ≥ 2 boards detected.
+  * Arcade header topology diagram: one-line diagram shows chip blocks with
+    activity bars (█▓▒░·), ←→ for intra-board links, ═══ for inter-board.
+    Header expands to 4 rows when device_count ≥ 2 to accommodate diagram.
+  * ArcadeVisualization.initialize_topology() wires topology into starfield and
+    memory castle sub-visualizations at startup.
+  * Auto-detect order updated: Hybrid → Sysfs → JSON → Mock (when both sysfs and
+    tt-smi are reachable, Hybrid is preferred).
+
+ -- Tenstorrent <software@tenstorrent.com>  Thu, 16 Apr 2026 00:00:00 +0000
+
+tt-toplike-rs (0.3.0) noble; urgency=medium
+
+  * Full rainbow color cycling in Memory Castle: particle hues now sweep the
+    complete 360° spectrum (was limited to 0-180°, producing only yellows and
+    oranges). All four particle types (Read/Write/CacheHit/Miss) cycle together
+    as a tetrad offset by 90°.
+  * Background layers in Memory Castle now animate: DDR, L2, L1, and Tensix
+    layer hues drift continuously rather than being hardcoded static colors.
+  * Trail brightness raised from near-black (val ≤ 0.3) to visible ribbons;
+    glyphs lifted from saturation 0.4/value 0.3 to 0.9/0.62 with hue animation.
+  * Arcade mode @-hero now actually rendered on screen: overlay_hero() was a
+    deliberate no-op (TODO comment); replaced with splice_char() implementation
+    that places @ and its temperature-colored trail into the composite canvas.
+  * Memory Flow DDR channel bars now grounded in SMBUS training status:
+    trained channels show real current/power utilization bars, training channels
+    animate with ◐◑/◒◓ spinners, untrained show dim outlines. Removed the
+    synthetic frame-counter scan that implied per-channel data it didn't have.
+  * Added README section: "How visualizations are grounded in hardware activity"
+    covering LLM inference vs video generation patterns, idle baseline activity,
+    and the tt-smi -r reset light show sequence.
+
+ -- Tenstorrent <software@tenstorrent.com>  Wed, 16 Apr 2026 00:00:00 +0000
+
 tt-toplike-rs (0.1.0) noble; urgency=medium
 
   * Initial Debian packaging for Ubuntu 24.04 (Noble Numbat).

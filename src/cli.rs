@@ -170,6 +170,15 @@ pub enum BackendType {
     /// Use Sysfs backend (Linux hwmon sensors, non-invasive)
     #[cfg(target_os = "linux")]
     Sysfs,
+
+    /// Use Hybrid backend (sysfs real-time + background JSON enrichment from tt-smi)
+    ///
+    /// Best default for Linux systems: sysfs provides fast non-invasive core metrics
+    /// (temp, power, voltage) while tt-smi is polled every 5s in the background for
+    /// richer SMBUS data (DDR status, ARC health, board IDs).
+    /// Falls back to sysfs-only if tt-smi is unavailable.
+    #[cfg(target_os = "linux")]
+    Hybrid,
 }
 
 /// Visualization mode selection
@@ -279,6 +288,8 @@ impl Cli {
             BackendType::Luwen => "Luwen (Direct HW)",
             #[cfg(target_os = "linux")]
             BackendType::Sysfs => "Sysfs (hwmon sensors)",
+            #[cfg(target_os = "linux")]
+            BackendType::Hybrid => "Hybrid (sysfs + tt-smi cache)",
         }
     }
 

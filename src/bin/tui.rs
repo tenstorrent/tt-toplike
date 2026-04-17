@@ -144,6 +144,20 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        #[cfg(target_os = "linux")]
+        BackendType::Hybrid => {
+            log::info!("Initializing HybridBackend (sysfs + background tt-smi cache)");
+            let mut backend = tt_toplike_rs::backend::hybrid::HybridBackend::with_config(
+                cli.tt_smi_path.to_string_lossy().to_string(),
+                config,
+            );
+            run_with_backend(&mut backend, &cli);
+        }
+        #[cfg(not(target_os = "linux"))]
+        BackendType::Hybrid => {
+            eprintln!("Error: Hybrid backend only available on Linux");
+            std::process::exit(1);
+        }
     }
 }
 

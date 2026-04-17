@@ -12,6 +12,9 @@ use crate::backend::json::JSONBackend;
 #[cfg(target_os = "linux")]
 use crate::backend::sysfs::SysfsBackend;
 
+#[cfg(target_os = "linux")]
+use crate::backend::hybrid::HybridBackend;
+
 #[cfg(feature = "luwen-backend")]
 use crate::backend::luwen::LuwenBackend;
 
@@ -73,29 +76,43 @@ pub fn create_backend(
         BackendType::Sysfs => Err(BackendError::Initialization(
             "Sysfs backend only available on Linux".to_string(),
         )),
+        #[cfg(target_os = "linux")]
+        BackendType::Hybrid => {
+            let tt_smi_path = cli.tt_smi_path.to_string_lossy().to_string();
+            let mut backend = HybridBackend::with_config(tt_smi_path, config);
+            backend.init()?;
+            Ok(Box::new(backend))
+        }
+        #[cfg(not(target_os = "linux"))]
+        BackendType::Hybrid => Err(BackendError::Initialization(
+            "Hybrid backend only available on Linux".to_string(),
+        )),
     }
 }
 
 /// Auto-detect backend (tries backends in order until one succeeds)
 ///
 /// SAFE MODE: Never tries Luwen backend (invasive, requires PCI BAR0 access)
-/// Order: Sysfs (hwmon) → JSON (tt-smi) → Mock
-/// Use --backend luwen explicitly if you need direct hardware access
+/// Order: Hybrid (sysfs + background JSON) → JSON (tt-smi) → Mock
+/// Use --backend luwen explicitly if you need direct hardware access.
+/// Use --backend sysfs if you want sysfs-only without any JSON background thread.
 fn create_auto_backend(config: BackendConfig, cli: &Cli) -> BackendResult<Box<dyn TelemetryBackend>> {
     log::info!("Auto-detecting backend (safe mode - skipping Luwen)...");
 
-    // Try Sysfs backend first (hwmon sensors - SAFEST, non-invasive)
+    // Try Hybrid backend first on Linux (sysfs + optional background JSON enrichment).
+    // Hybrid always succeeds if hwmon devices are present; it runs sysfs-only when
+    // tt-smi is absent. This replaces the old Sysfs-first auto-detect.
     #[cfg(target_os = "linux")]
     {
-        log::info!("Trying Sysfs backend (hwmon sensors - safest, non-invasive)...");
-        if let Ok(backend) = create_backend(BackendType::Sysfs, config.clone(), cli) {
-            log::info!("Sysfs backend initialized successfully");
+        log::info!("Trying Hybrid backend (sysfs + background JSON enrichment)...");
+        if let Ok(backend) = create_backend(BackendType::Hybrid, config.clone(), cli) {
+            log::info!("Hybrid backend initialized successfully");
             return Ok(backend);
         }
-        log::warn!("Sysfs backend failed, trying JSON backend");
+        log::warn!("Hybrid backend failed (no hwmon devices?), trying JSON backend");
     }
 
-    // Try JSON backend (tt-smi subprocess - safe)
+    // Try JSON backend (tt-smi subprocess - safe, works without hwmon)
     log::info!("Trying JSON backend (tt-smi subprocess)...");
     if let Ok(backend) = create_backend(BackendType::Json, config.clone(), cli) {
         log::info!("JSON backend initialized successfully");
@@ -113,9 +130,13 @@ fn create_auto_backend(config: BackendConfig, cli: &Cli) -> BackendResult<Box<dy
 
 /// Get the next backend in the cycle
 ///
-/// Cycle order: Sysfs → JSON → Luwen → Mock → Sysfs
+/// Cycle order (Linux): Hybrid → Sysfs → JSON → Luwen → Mock → Hybrid
+/// Cycle order (other): JSON → Luwen → Mock → JSON
 pub fn next_backend(current: BackendType) -> BackendType {
     match current {
+        #[cfg(target_os = "linux")]
+        BackendType::Hybrid => BackendType::Sysfs,
+
         #[cfg(target_os = "linux")]
         BackendType::Sysfs => BackendType::Json,
         #[cfg(not(target_os = "linux"))]
@@ -130,14 +151,14 @@ pub fn next_backend(current: BackendType) -> BackendType {
 
         BackendType::Mock => {
             #[cfg(target_os = "linux")]
-            return BackendType::Sysfs;
+            return BackendType::Hybrid;
             #[cfg(not(target_os = "linux"))]
             return BackendType::Json;
         }
 
         BackendType::Auto => {
             #[cfg(target_os = "linux")]
-            return BackendType::Sysfs;
+            return BackendType::Hybrid;
             #[cfg(not(target_os = "linux"))]
             return BackendType::Json;
         }

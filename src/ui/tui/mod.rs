@@ -200,6 +200,10 @@ fn run_app(
                     // Create new Arcade visualization
                     let mut arc = ArcadeVisualization::new(size.width as usize, size.height as usize);
                     arc.initialize_from_devices(backend.devices());
+                    // Build board topology from SMBUS board_id data so the
+                    // header diagram, stream characters, and castle separators
+                    // are all topology-aware from the first frame.
+                    arc.initialize_topology(backend);
                     arcade = Some(arc);
                 }
                 if let Some(ref mut arc) = arcade {
@@ -1309,18 +1313,20 @@ fn ui_arcade(
     arcade: &ArcadeVisualization,
     backend: &Box<dyn TelemetryBackend>,
 ) {
-    // Create main layout: Header | Content | Footer
+    // Create main layout: Header (4 lines incl. topology diagram) | Content | Footer.
+    // Guard: keep header at 3 when device_count < 2 (no topology row needed).
+    let header_height = if backend.devices().len() >= 2 { 4 } else { 3 };
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Header
-            Constraint::Min(10),    // Content
-            Constraint::Length(3),  // Footer
+            Constraint::Length(header_height), // Header
+            Constraint::Min(10),               // Content
+            Constraint::Length(3),             // Footer
         ])
         .split(f.area());
 
-    // Render header
-    render_arcade_header(f, main_chunks[0], backend);
+    // Render header (passes arcade for topology diagram)
+    render_arcade_header(f, main_chunks[0], arcade, backend);
 
     // Split content: Top (Starfield) | Bottom (Castle+Flow + Table)
     let content_chunks = Layout::default()
@@ -1352,10 +1358,13 @@ fn ui_arcade(
 }
 
 /// Render Arcade mode header
-fn render_arcade_header(f: &mut Frame, area: Rect, backend: &Box<dyn TelemetryBackend>) {
+///
+/// When `arcade` has topology set (device_count ≥ 2), the header block gets an
+/// extra line with the topology diagram: `[BH0 ██░ 16W 43°C] ←→ [BH1 …] ═══ [BH2 …]`
+fn render_arcade_header(f: &mut Frame, area: Rect, arcade: &ArcadeVisualization, backend: &Box<dyn TelemetryBackend>) {
     let device_count = backend.devices().len();
 
-    let header_text = vec![Line::from(vec![
+    let mut header_text = vec![Line::from(vec![
         Span::styled(
             " 🎮 ARCADE MODE ",
             Style::default()
@@ -1374,6 +1383,13 @@ fn render_arcade_header(f: &mut Frame, area: Rect, backend: &Box<dyn TelemetryBa
         ),
     ])];
 
+    // Topology diagram — only when ≥ 2 devices.
+    if device_count >= 2 {
+        if let Some(diagram) = arcade.topology_diagram_line(backend) {
+            header_text.push(diagram);
+        }
+    }
+
     let header = Paragraph::new(header_text)
         .block(
             Block::default()
@@ -1388,7 +1404,7 @@ fn render_arcade_header(f: &mut Frame, area: Rect, backend: &Box<dyn TelemetryBa
                     .fg(colors::rgb(255, 200, 100))  // Orange title
                     .add_modifier(Modifier::BOLD)),
         )
-        .alignment(Alignment::Center);
+        .alignment(Alignment::Left);
 
     f.render_widget(header, area);
 }

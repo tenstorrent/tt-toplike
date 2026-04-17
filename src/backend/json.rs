@@ -444,6 +444,102 @@ impl TelemetryBackend for JSONBackend {
     }
 }
 
+/// Run tt-smi -s and return SMBUS telemetry for all devices.
+///
+/// This is a best-effort helper for HybridBackend's background refresh thread.
+/// Returns an empty map on any error — callers should handle the no-data case gracefully.
+pub(crate) fn fetch_smbus_snapshot(tt_smi_path: &str) -> HashMap<usize, SmbusTelemetry> {
+    use std::collections::HashMap as HM;
+
+    let output = match Command::new(tt_smi_path)
+        .args(["-s"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            log::debug!("fetch_smbus_snapshot: tt-smi exited with {}", o.status);
+            return HM::new();
+        }
+        Err(e) => {
+            log::debug!("fetch_smbus_snapshot: failed to run tt-smi: {}", e);
+            return HM::new();
+        }
+    };
+
+    let json_str = String::from_utf8_lossy(&output.stdout);
+    let helper = JSONBackend::new(tt_smi_path);
+    let devices = match helper.parse_json(&json_str) {
+        Ok(d) => d,
+        Err(e) => {
+            log::debug!("fetch_smbus_snapshot: parse error: {}", e);
+            return HM::new();
+        }
+    };
+
+    let mut result = HM::new();
+    for dev in devices {
+        let idx = dev.index.unwrap_or(0);
+        if let Some(smbus_json) = dev.smbus {
+            let smbus = SmbusTelemetry {
+                ddr_speed: smbus_json.ddr_speed,
+                ddr_status: smbus_json.ddr_status,
+                arc0_health: smbus_json.arc0_health,
+                arc1_health: smbus_json.arc1_health,
+                arc2_health: smbus_json.arc2_health,
+                arc3_health: smbus_json.arc3_health,
+                arc0_fw_version: smbus_json.arc0_fw_version,
+                board_id: smbus_json.board_id,
+                device_id: smbus_json.device_id,
+                enum_version: None,
+                arc1_fw_version: None,
+                arc2_fw_version: None,
+                arc3_fw_version: None,
+                eth_fw_version: None,
+                m3_bl_fw_version: None,
+                m3_app_fw_version: None,
+                spibootrom_fw_version: None,
+                tt_flash_version: None,
+                aiclk: None,
+                axiclk: None,
+                arcclk: None,
+                asic_temperature: None,
+                vreg_temperature: None,
+                board_temperature: None,
+                asic_tmon0: None,
+                asic_tmon1: None,
+                vcore: None,
+                tdp: None,
+                tdc: None,
+                throttler: None,
+                vdd_limits: None,
+                thm_limits: None,
+                input_power: None,
+                board_power_limit: None,
+                mvddq_power: None,
+                fan_speed: None,
+                faults: None,
+                pcie_status: None,
+                eth_status0: None,
+                eth_status1: None,
+                eth_debug_status0: None,
+                eth_debug_status1: None,
+                aux_status: None,
+                gddr_train_temp0: None,
+                gddr_train_temp1: None,
+                therm_trip_count: None,
+                boot_date: None,
+                rt_seconds: None,
+                wh_fw_date: None,
+            };
+            result.insert(idx, smbus);
+        }
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
