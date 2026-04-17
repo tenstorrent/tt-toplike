@@ -7,8 +7,7 @@
 #   3. Runs dpkg-buildpackage to produce signed-off .deb files
 #
 # Usage:
-#   ./build-deb.sh           # build both tt-toplike and tt-toplike-egui
-#   ./build-deb.sh --tui     # build only tt-toplike (TUI)
+#   ./build-deb.sh           # build tt-toplike and tt-toplike-app
 #   ./build-deb.sh --quick   # skip re-vendoring (vendor/ already present)
 #
 # Output: ../tt-toplike_*.deb and ../tt-toplike-egui_*.deb
@@ -112,8 +111,7 @@ echo ""
 echo "✅ Build complete!"
 echo ""
 echo "📦 Packages produced:"
-ls -lh ../tt-toplike_*.deb ../tt-toplike-egui_*.deb 2>/dev/null || \
-    find .. -maxdepth 1 -name 'tt-toplike*.deb' -exec ls -lh {} \;
+find .. -maxdepth 1 -name 'tt-toplike*.deb' -exec ls -lh {} \;
 
 echo ""
 echo "🔍 Inspect a package:"
