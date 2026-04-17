@@ -446,11 +446,17 @@ impl TelemetryBackend for JSONBackend {
 
 /// Run tt-smi -s and return SMBUS telemetry for all devices.
 ///
-/// This is a best-effort helper for HybridBackend's background refresh thread.
-/// Returns an empty map on any error — callers should handle the no-data case gracefully.
+/// Blocking call — callers must run this from a background thread, NOT the
+/// render loop. The function is intentionally simple (no extra thread spawn)
+/// so there's no OS scheduler overhead on the calling thread.
+///
+/// If tt-smi isn't installed or returns non-zero, returns an empty map.
+/// Callers should handle the no-data case gracefully.
 pub(crate) fn fetch_smbus_snapshot(tt_smi_path: &str) -> HashMap<usize, SmbusTelemetry> {
     use std::collections::HashMap as HM;
 
+    // Direct blocking call — this is fine because we're always called from
+    // HybridBackend's background refresh thread, never from the render loop.
     let output = match Command::new(tt_smi_path)
         .args(["-s"])
         .stdout(Stdio::piped())

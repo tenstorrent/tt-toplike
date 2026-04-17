@@ -29,7 +29,7 @@ use crate::backend::json;
 use crate::error::{BackendError, BackendResult};
 use crate::models::{Device, SmbusTelemetry, Telemetry};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -52,6 +52,15 @@ pub struct HybridBackend {
 
     /// Background thread writes here; main thread reads via smbus_snapshot.
     smbus_cache: Arc<Mutex<HashMap<usize, SmbusTelemetry>>>,
+
+    /// Incremented by the background thread after each successful tt-smi refresh.
+    /// The main thread compares this against `smbus_snapshot_generation` before
+    /// doing the expensive clone — ensures we only copy new data, not every frame.
+    smbus_generation: Arc<AtomicU64>,
+
+    /// The generation number reflected in `smbus_snapshot`. When this differs
+    /// from `smbus_generation`, `update()` re-clones the cache.
+    smbus_snapshot_generation: u64,
 
     /// Tells the background thread to stop cleanly.
     stop_flag: Arc<AtomicBool>,
@@ -78,6 +87,8 @@ impl HybridBackend {
             tt_smi_path: tt_smi_path.into(),
             smbus_snapshot: HashMap::new(),
             smbus_cache: Arc::new(Mutex::new(HashMap::new())),
+            smbus_generation: Arc::new(AtomicU64::new(0)),
+            smbus_snapshot_generation: 0,
             stop_flag: Arc::new(AtomicBool::new(false)),
             refresh_handle: Mutex::new(None),
             json_refresh_interval: Duration::from_secs(DEFAULT_JSON_REFRESH_SECS),
@@ -108,30 +119,49 @@ impl TelemetryBackend for HybridBackend {
             self.sysfs.device_count()
         );
 
-        // ── 2. Best-effort initial SMBUS load ─────────────────────────────────
+        // ── 2. Best-effort initial SMBUS load (with startup timeout) ─────────
         //
-        // Run tt-smi synchronously once at startup so the first frame already
-        // has DDR status and board IDs. If this fails we just run sysfs-only.
-        let initial = json::fetch_smbus_snapshot(&self.tt_smi_path);
+        // We want SMBUS data (board IDs, DDR status) available on the very first
+        // render frame. Run tt-smi once synchronously, but bound it to
+        // INIT_TT_SMI_TIMEOUT_SECS so a slow binary doesn't delay the TUI.
+        //
+        // We spawn a thread here — but only ONCE at startup, not on every refresh
+        // cycle. The background refresh thread calls fetch_smbus_snapshot() as a
+        // plain blocking call because it's already off the render thread.
+        let initial = {
+            use std::sync::mpsc;
+            const INIT_TT_SMI_TIMEOUT_SECS: u64 = 3;
+            let (tx, rx) = mpsc::channel();
+            let path = self.tt_smi_path.clone();
+            thread::spawn(move || { let _ = tx.send(json::fetch_smbus_snapshot(&path)); });
+            rx.recv_timeout(Duration::from_secs(INIT_TT_SMI_TIMEOUT_SECS))
+                .unwrap_or_default()
+        };
+
         if initial.is_empty() {
             log::warn!(
                 "HybridBackend: tt-smi produced no SMBUS data on startup — \
-                 running in sysfs-only mode (no DDR status, no board IDs)"
+                 running in sysfs-only mode (no DDR status, no board IDs). \
+                 Background thread will retry every {}s.",
+                DEFAULT_JSON_REFRESH_SECS
             );
-            return Ok(());
+            // Still start the background thread — tt-smi may become available later.
+        } else {
+            log::info!(
+                "HybridBackend: SMBUS data loaded for {} device(s)",
+                initial.len()
+            );
+            // Copy into both the snapshot (for immediate use) and the shared cache.
+            // Set generation to 1 so the first update() doesn't redundantly re-clone.
+            self.smbus_snapshot = initial.clone();
+            *self.smbus_cache.lock().unwrap() = initial;
+            self.smbus_generation.store(1, Ordering::Release);
+            self.smbus_snapshot_generation = 1;
         }
-
-        log::info!(
-            "HybridBackend: SMBUS data loaded for {} device(s)",
-            initial.len()
-        );
-
-        // Copy into both the snapshot (for immediate use) and the shared cache.
-        self.smbus_snapshot = initial.clone();
-        *self.smbus_cache.lock().unwrap() = initial;
 
         // ── 3. Start background refresh thread ────────────────────────────────
         let smbus_cache = Arc::clone(&self.smbus_cache);
+        let smbus_generation = Arc::clone(&self.smbus_generation);
         let stop_flag = Arc::clone(&self.stop_flag);
         let tt_smi_path = self.tt_smi_path.clone();
         let interval = self.json_refresh_interval;
@@ -153,11 +183,17 @@ impl TelemetryBackend for HybridBackend {
                         continue;
                     }
 
-                    let mut cache = smbus_cache.lock().unwrap();
-                    for (idx, smbus) in data {
-                        cache.insert(idx, smbus);
-                    }
-                    log::debug!("HybridBackend: SMBUS cache refreshed ({} entries)", cache.len());
+                    {
+                        let mut cache = smbus_cache.lock().unwrap();
+                        for (idx, smbus) in data {
+                            cache.insert(idx, smbus);
+                        }
+                        log::debug!("HybridBackend: SMBUS cache refreshed ({} entries)", cache.len());
+                    } // lock released before bumping generation
+
+                    // Bump generation *after* releasing the lock so the main
+                    // thread knows new data is ready and can re-acquire cheaply.
+                    smbus_generation.fetch_add(1, Ordering::Release);
                 }
                 log::debug!("HybridBackend: background refresh thread exiting");
             })
@@ -171,12 +207,20 @@ impl TelemetryBackend for HybridBackend {
         // Fast path: sysfs only — completes in microseconds.
         self.sysfs.update()?;
 
-        // Non-blocking drain of background cache into our owned snapshot.
-        // try_lock avoids blocking if the background thread is writing; we
-        // simply keep using the previous snapshot in that case.
-        if let Ok(cache) = self.smbus_cache.try_lock() {
-            if !cache.is_empty() {
-                self.smbus_snapshot.clone_from(&*cache);
+        // Check generation counter first (cheap atomic load, no lock).
+        // If the background thread hasn't produced new data since our last
+        // snapshot, skip the clone entirely — this is the common case on every
+        // frame between 5-second tt-smi refreshes.
+        let current_gen = self.smbus_generation.load(Ordering::Acquire);
+        if current_gen != self.smbus_snapshot_generation {
+            // New data available — try to grab the lock.  try_lock() is
+            // non-blocking: if the background thread is currently inserting
+            // (should take <1ms), we defer until next frame.
+            if let Ok(cache) = self.smbus_cache.try_lock() {
+                if !cache.is_empty() {
+                    self.smbus_snapshot.clone_from(&*cache);
+                    self.smbus_snapshot_generation = current_gen;
+                }
             }
         }
 
