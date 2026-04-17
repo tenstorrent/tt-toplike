@@ -16,7 +16,7 @@
 //! - BOLD white character for maximum visibility
 
 use crate::animation::{
-    AdaptiveBaseline, HardwareStarfield, MemoryCastle, MemoryFlowVis,
+    AdaptiveBaseline, HardwareStarfield, MemoryCastle, MemoryFlowVis, BoardTopology,
     hsv_to_rgb, temp_to_hue, lerp, PARTICLE_CHARS,
 };
 use crate::backend::TelemetryBackend;
@@ -60,6 +60,9 @@ pub struct ArcadeVisualization {
     castle_end: usize,
     flow_start: usize,
     flow_end: usize,
+
+    /// Board topology — used to render the header topology diagram line.
+    board_topology: Option<BoardTopology>,
 }
 
 impl ArcadeVisualization {
@@ -108,12 +111,103 @@ impl ArcadeVisualization {
             castle_end,
             flow_start,
             flow_end,
+            board_topology: None,
         }
     }
 
     /// Initialize from devices (called once after creation)
     pub fn initialize_from_devices(&mut self, devices: &[crate::models::Device]) {
         self.starfield.initialize_from_devices(devices);
+    }
+
+    /// Build and install board topology from live SMBUS data.
+    ///
+    /// Call this once after backend init.  Propagates topology to all
+    /// sub-visualizations so the header diagram, stream characters, and
+    /// column separators are all topology-aware in the same frame.
+    pub fn initialize_topology<B: TelemetryBackend>(&mut self, backend: &B) {
+        use crate::animation::topology::BoardTopology;
+        let board_ids: Vec<Option<String>> = backend.devices().iter()
+            .map(|d| backend.smbus_telemetry(d.index)
+                .and_then(|s| s.board_id.clone()))
+            .collect();
+        let topo = BoardTopology::from_devices_with_ids(backend.devices(), &board_ids);
+
+        // Push topology to sub-visualizations.
+        self.starfield.set_topology(topo.clone());
+        self.memory_castle.set_topology(topo.clone());
+        self.board_topology = Some(topo);
+    }
+
+    /// Render a one-line topology diagram for the arcade header.
+    ///
+    /// Example output:
+    /// `[BH0 ██░ 16W 43°C] ←→ [BH1 ██░ 14W 42°C]  ═══  [BH2 ██░ 12W 45°C] ←→ [BH3 ██░ 18W 42°C]`
+    ///
+    /// Returns `None` when device count < 2 or no topology is available.
+    pub fn topology_diagram_line<B: TelemetryBackend>(&self, backend: &B) -> Option<Line<'static>> {
+        if backend.devices().len() < 2 {
+            return None;
+        }
+
+        let topo = self.board_topology.as_ref()?;
+        let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
+        let num_boards = topo.boards.len();
+
+        for (b_idx, board) in topo.boards.iter().enumerate() {
+            let board_color = hsv_to_rgb(board.hue, 0.85, 0.9);
+
+            // Render each chip in this board.
+            for (c_idx, &chip_idx) in board.chips.iter().enumerate() {
+                let device = backend.devices().get(chip_idx);
+                let telem = backend.telemetry(chip_idx);
+
+                let power = telem.map(|t| t.power_w()).unwrap_or(0.0);
+                let temp  = telem.map(|t| t.temp_c()).unwrap_or(25.0);
+
+                // Activity bar (3 chars): ██░, ▓▒░, etc.
+                let act = (power / 80.0).clamp(0.0, 1.0);
+                let bar: String = (0..3).map(|i| {
+                    let threshold = (i + 1) as f32 / 3.0;
+                    if act >= threshold { '█' } else if act >= threshold - 0.17 { '▓' } else { '░' }
+                }).collect();
+
+                let arch_label = device.map(|d| {
+                    match d.architecture {
+                        crate::models::Architecture::Blackhole  => "BH",
+                        crate::models::Architecture::Wormhole   => "WH",
+                        crate::models::Architecture::Grayskull  => "GS",
+                        crate::models::Architecture::Unknown    => "?",
+                    }
+                }).unwrap_or("?");
+
+                let chip_text = format!("[{}{} {} {:.0}W {:.0}°C]",
+                    arch_label, chip_idx, bar, power, temp);
+
+                let chip_color = hsv_to_rgb(
+                    (board.hue + chip_idx as f32 * 15.0) % 360.0, 0.9, 0.9,
+                );
+                spans.push(Span::styled(chip_text, Style::default().fg(chip_color)));
+
+                // Intra-board link between chips on the same board.
+                if c_idx + 1 < board.chips.len() {
+                    spans.push(Span::styled(
+                        " ←→ ",
+                        Style::default().fg(board_color).add_modifier(Modifier::BOLD),
+                    ));
+                }
+            }
+
+            // Inter-board link between boards.
+            if b_idx + 1 < num_boards {
+                spans.push(Span::styled(
+                    "  ═══  ",
+                    Style::default().fg(colors::rgb(200, 160, 60)).add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+
+        Some(Line::from(spans))
     }
 
     /// Update all visualizations and hero position from telemetry
@@ -212,8 +306,13 @@ impl ArcadeVisualization {
     pub fn render<B: TelemetryBackend>(&self, backend: &B) -> Vec<Line<'static>> {
         let mut lines = Vec::with_capacity(self.height);
 
-        // Render header
+        // Render header (3 lines always, topology diagram as 4th when available).
         lines.push(self.render_header(backend));
+        if let Some(diagram) = self.topology_diagram_line(backend) {
+            lines.push(diagram);
+        } else {
+            lines.push(Line::from("")); // Placeholder keeps layout stable.
+        }
         lines.push(Line::from("")); // Spacing
         lines.push(Line::from("")); // Spacing
 
@@ -360,118 +459,79 @@ impl ArcadeVisualization {
         ])
     }
 
-    /// Overlay hero character and trail onto the rendered canvas
+    /// Splice a single styled character into an existing line at a given column.
+    ///
+    /// Flattens all spans to a character vector, swaps the character at `col`,
+    /// then rebuilds as [before, styled_char, after].  Span styling on other
+    /// characters on the same row is lost, which is acceptable — the hero and
+    /// trail are meant to be the most visible elements on screen.
+    fn splice_char(lines: &mut Vec<Line<'static>>, row: usize, col: usize, ch: char, style: Style) {
+        if row >= lines.len() { return; }
+        let content: String = lines[row].spans.iter().map(|s| s.content.as_ref()).collect();
+        let chars: Vec<char> = content.chars().collect();
+        if col >= chars.len() { return; }
+        let before: String = chars[..col].iter().collect();
+        let after: String = chars[col + 1..].iter().collect();
+        lines[row] = Line::from(vec![
+            Span::raw(before),
+            Span::styled(ch.to_string(), style),
+            Span::raw(after),
+        ]);
+    }
+
+    /// Overlay hero character and trail onto the rendered canvas.
+    ///
+    /// Trail is drawn first (oldest positions first) so the hero `@` always
+    /// sits on top.  Both trail and hero are spliced character-by-character
+    /// into the already-rendered lines.
     fn overlay_hero<B: TelemetryBackend>(
         &self,
-        lines: Vec<Line<'static>>,
-        _backend: &B,
+        mut lines: Vec<Line<'static>>,
+        backend: &B,
     ) -> Vec<Line<'static>> {
-        // Hero overlay is complex and can cause panics when trying to modify
-        // arbitrary Line structures with multiple Spans.
-        // For now, skip overlay and just return the composite canvas.
-        // The hero status is shown in the footer instead.
-        // TODO: Implement proper overlay by rendering to a character grid first,
-        // then converting to styled Lines.
-        lines
-    }
+        let temp = backend
+            .devices()
+            .first()
+            .and_then(|d| backend.telemetry(d.index))
+            .map(|t| t.temp_c())
+            .unwrap_or(25.0);
 
-    /// Render a single trail character
-    fn render_trail_char(&self, lines: &mut [Line<'static>], pos: &TrailPosition, temp: f32) {
-        let row = pos.y as usize;
-        let col = pos.x as usize;
+        let hue = temp_to_hue(temp);
 
-        if row >= lines.len() || col >= self.width {
-            return;
+        // Draw trail (oldest → newest so hero overwrites everything)
+        for pos in &self.hero_trail {
+            let row = pos.y as usize;
+            let col = pos.x as usize;
+
+            let fade = 1.0 - (pos.age as f32 / 20.0);
+            let fade_exp = fade * fade; // Exponential: rapid initial fade, lingering tail
+
+            let trail_char = match pos.age {
+                0..=4  => '○',
+                5..=9  => '◦',
+                10..=14 => '•',
+                _      => '·',
+            };
+
+            let color = hsv_to_rgb(hue, 0.7 * fade_exp, (0.55 * fade_exp).max(0.05));
+            let style = Style::default().fg(color);
+            Self::splice_char(&mut lines, row, col, trail_char, style);
         }
 
-        // Fade out based on age (exponential fade)
-        let fade = 1.0 - (pos.age as f32 / 20.0);
-        let fade_exp = fade * fade; // Exponential fade
-
-        // Trail character based on age
-        let trail_char = match pos.age {
-            0..=4 => '○',
-            5..=9 => '◦',
-            10..=14 => '•',
-            _ => '·',
-        };
-
-        // Trail color (temperature-based but dimmed)
-        let hue = temp_to_hue(temp);
-        let saturation = 0.5 * fade_exp;
-        let value = 0.4 * fade_exp;
-        let trail_color = hsv_to_rgb(hue, saturation, value);
-
-        // Replace character at position
-        let line = &lines[row];
-        let spans: Vec<Span> = line
-            .spans
-            .iter()
-            .enumerate()
-            .flat_map(|(span_idx, span)| {
-                let chars: Vec<char> = span.content.chars().collect();
-                chars
-                    .iter()
-                    .enumerate()
-                    .map(|(char_idx, &ch)| {
-                        let abs_col = span_idx * 10 + char_idx; // Approximate column
-                        if abs_col == col {
-                            Span::styled(trail_char.to_string(), Style::default().bg(colors::rgb(0, 0, 0)).fg(trail_color))
-                        } else {
-                            Span::styled(ch.to_string(), span.style)
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-
-        lines[row] = Line::from(spans);
-    }
-
-    /// Render hero character
-    fn render_hero_char(&self, lines: &mut [Line<'static>], temp: f32, heartbeat: u32) {
+        // Draw hero character (overwrites trail at current position)
         let row = self.hero_y as usize;
         let col = self.hero_x as usize;
 
-        if row >= lines.len() || col >= self.width {
-            return;
-        }
-
-        // Hero character (classic roguelike '@')
-        let hero_char = '@';
-
-        // Hero color (temperature-based, full saturation, pulsing brightness)
-        let hue = temp_to_hue(temp);
-        let saturation = 1.0;
-        let pulse = ((heartbeat % 60) as f32 / 60.0 * std::f32::consts::PI * 2.0).sin();
-        let value = 0.85 + pulse * 0.15; // Pulse between 0.85 and 1.0
-        let hero_color = hsv_to_rgb(hue, saturation, value);
-
-        // Hero has BOLD modifier for maximum visibility
+        // Brightness pulses with the frame counter (heartbeat effect)
+        let pulse = ((self.frame % 60) as f32 / 60.0 * std::f32::consts::PI * 2.0).sin();
+        let value = 0.85 + pulse * 0.15;
+        let hero_color = hsv_to_rgb(hue, 1.0, value);
         let hero_style = Style::default()
             .fg(hero_color)
             .add_modifier(Modifier::BOLD);
 
-        // Replace character at hero position (simplified - just prepend/append)
-        // Note: This is a simplified overlay. For pixel-perfect positioning,
-        // we'd need to track exact column offsets across all spans.
-        let line = &lines[row];
-        let content: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        Self::splice_char(&mut lines, row, col, '@', hero_style);
 
-        if col < content.len() {
-            let mut new_content = content.chars().collect::<Vec<_>>();
-            new_content[col] = hero_char;
-            let content_str: String = new_content.iter().collect();
-
-            // Reconstruct line with hero character highlighted
-            let before: String = content_str.chars().take(col).collect();
-            let after: String = content_str.chars().skip(col + 1).collect();
-
-            lines[row] = Line::from(vec![
-                Span::raw(before),
-                Span::styled(hero_char.to_string(), hero_style),
-                Span::raw(after),
-            ]);
-        }
+        lines
     }
 }

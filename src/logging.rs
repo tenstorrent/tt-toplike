@@ -265,15 +265,23 @@ mod tests {
 
     #[test]
     fn test_recent_messages() {
-        clear_log_messages();
+        init_logging_with_buffer(LevelFilter::Debug);
 
-        log::info!("Message A");
-        log::info!("Message B");
-        log::info!("Message C");
+        // Use unique markers to avoid races with parallel tests.
+        let tag = format!("TESTRECENT-{:?}", std::thread::current().id());
+        log::info!("{}-A", tag);
+        log::info!("{}-B", tag);
+        log::info!("{}-C", tag);
 
-        let recent = get_recent_log_messages(2);
-        assert_eq!(recent.len(), 2);
-        assert!(recent[0].message.contains("Message B"));
-        assert!(recent[1].message.contains("Message C"));
+        // Fetch a window large enough to include our messages.
+        let recent = get_recent_log_messages(200);
+        let a_pos = recent.iter().rposition(|m| m.message.contains(&format!("{}-A", tag)));
+        let b_pos = recent.iter().rposition(|m| m.message.contains(&format!("{}-B", tag)));
+        let c_pos = recent.iter().rposition(|m| m.message.contains(&format!("{}-C", tag)));
+
+        assert!(a_pos.is_some() && b_pos.is_some() && c_pos.is_some(),
+                "Expected all three tagged messages to appear in the log");
+        assert!(a_pos.unwrap() < b_pos.unwrap() && b_pos.unwrap() < c_pos.unwrap(),
+                "Expected messages in A < B < C order");
     }
 }

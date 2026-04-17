@@ -170,6 +170,15 @@ pub enum BackendType {
     /// Use Sysfs backend (Linux hwmon sensors, non-invasive)
     #[cfg(target_os = "linux")]
     Sysfs,
+
+    /// Use Hybrid backend (sysfs real-time + background JSON enrichment from tt-smi)
+    ///
+    /// Best default for Linux systems: sysfs provides fast non-invasive core metrics
+    /// (temp, power, voltage) while tt-smi is polled every 5s in the background for
+    /// richer SMBUS data (DDR status, ARC health, board IDs).
+    /// Falls back to sysfs-only if tt-smi is unavailable.
+    #[cfg(target_os = "linux")]
+    Hybrid,
 }
 
 /// Visualization mode selection
@@ -279,6 +288,8 @@ impl Cli {
             BackendType::Luwen => "Luwen (Direct HW)",
             #[cfg(target_os = "linux")]
             BackendType::Sysfs => "Sysfs (hwmon sensors)",
+            #[cfg(target_os = "linux")]
+            BackendType::Hybrid => "Hybrid (sysfs + tt-smi cache)",
         }
     }
 
@@ -339,6 +350,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Auto);
@@ -365,6 +377,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Mock);
@@ -387,6 +400,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Json);
@@ -409,6 +423,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         assert!(cli.should_monitor_device(0));
@@ -435,6 +450,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         assert_eq!(verbose_cli.log_level(), log::LevelFilter::Debug);
@@ -454,6 +470,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         assert_eq!(quiet_cli.log_level(), log::LevelFilter::Off);
@@ -476,6 +493,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         assert!(cli.validate().is_err());
@@ -498,6 +516,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         assert_eq!(auto_cli.backend_name(), "Auto-detect");
@@ -517,6 +536,7 @@ mod tests {
             visualize: false,
             workload: false,
             print: false,
+            mode: None,
         };
 
         assert_eq!(mock_cli.backend_name(), "Mock");

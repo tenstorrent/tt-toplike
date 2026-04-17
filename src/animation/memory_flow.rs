@@ -84,13 +84,15 @@ impl MemoryFlowParticle {
             channel,
             speed: 0.01 + (current / 100.0) * 0.03,
             intensity: 0.7 + pseudo_rand * 0.3,
-            hue: 180.0 - (temp * 1.8), // Cyan to red
+            // Full 360° hue cycling: frame-driven + per-channel spread.
+            // Reads get the "forward" arc; writes get the opposite arc (+180°).
+            hue: (frame as f32 * 3.0 + channel as f32 * 30.0) % 360.0,
             ttl: 120,
         }
     }
 
     /// Create a new write particle (Core → DDR)
-    pub fn new_write(channel: usize, current: f32, temp: f32, frame: u32) -> Self {
+    pub fn new_write(channel: usize, current: f32, _temp: f32, frame: u32) -> Self {
         let channel_pos = (channel as f32 + 0.5) / 12.0;
 
         // Deterministic "randomness" based on channel and frame
@@ -105,7 +107,8 @@ impl MemoryFlowParticle {
             channel,
             speed: 0.01 + (current / 100.0) * 0.03,
             intensity: 0.7 + pseudo_rand * 0.3,
-            hue: 120.0 - (temp * 1.2), // Green to orange
+            // Writes offset 180° from reads so they visually counter-rotate.
+            hue: (180.0 + frame as f32 * 3.0 + channel as f32 * 30.0) % 360.0,
             ttl: 120,
         }
     }
@@ -146,7 +149,7 @@ impl MemoryFlowParticle {
     pub fn get_color(&self) -> Color {
         use crate::animation::hsv_to_rgb;
         let value = 0.6 + self.intensity * 0.4;
-        hsv_to_rgb(self.hue, 0.9, value)
+        hsv_to_rgb(self.hue, 1.0, value)  // Full saturation for maximum vibrancy
     }
 }
 
@@ -307,8 +310,10 @@ impl MemoryFlowVis {
         let ddr_channels = device.architecture.memory_channels();
         let grid_height = self.height.saturating_sub(6); // Leave room for DDR + stats
 
+        let smbus = backend.smbus_telemetry(device.index);
+
         // Top DDR channels (sources)
-        lines.push(self.render_ddr_channels_top(ddr_channels, telem));
+        lines.push(self.render_ddr_channels_top(ddr_channels, telem, smbus));
         lines.push(Line::from("")); // Spacing
 
         // Core grid with particles
@@ -319,7 +324,7 @@ impl MemoryFlowVis {
         lines.push(Line::from("")); // Spacing
 
         // Bottom DDR channels (sinks)
-        lines.push(self.render_ddr_channels_bottom(ddr_channels, telem));
+        lines.push(self.render_ddr_channels_bottom(ddr_channels, telem, smbus));
 
         // Stats line
         lines.push(self.render_stats(device, telem));
@@ -327,11 +332,40 @@ impl MemoryFlowVis {
         lines
     }
 
-    /// Render top DDR channels (sources)
+    /// Parse the SMBUS DDR status bitmask into per-channel training state.
+    ///
+    /// The bitmask encodes 4 bits per channel:
+    ///   0x0 → untrained/idle
+    ///   0x1 → currently training
+    ///   0x2 → fully trained (normal operation)
+    ///   other → error / unknown
+    ///
+    /// Returns a Vec<u8> of length `num_channels`, one nibble per channel.
+    fn parse_ddr_status(smbus: Option<&crate::models::SmbusTelemetry>, num_channels: usize) -> Vec<u8> {
+        let raw = smbus
+            .and_then(|s| s.ddr_status.as_ref())
+            .and_then(|s| {
+                let s = s.trim_start_matches("0x").trim_start_matches("0X");
+                u64::from_str_radix(s, 16).ok()
+            })
+            .unwrap_or(0);
+
+        (0..num_channels)
+            .map(|i| ((raw >> (4 * i)) & 0xF) as u8)
+            .collect()
+    }
+
+    /// Render top DDR channels (sources).
+    ///
+    /// Bar height is driven by total current draw (real signal).
+    /// Per-channel state comes from the SMBUS DDR training status bitmask —
+    /// trained channels show full utilization bars, training channels animate,
+    /// untrained channels show a dim outline only.  No synthetic scanning.
     fn render_ddr_channels_top(
         &self,
         num_channels: usize,
         telem: Option<&crate::models::Telemetry>,
+        smbus: Option<&crate::models::SmbusTelemetry>,
     ) -> Line<'static> {
         let mut spans = Vec::new();
 
@@ -346,28 +380,38 @@ impl MemoryFlowVis {
         ));
 
         let channel_width = (self.width.saturating_sub(15)) / num_channels.max(1);
+        let channel_status = Self::parse_ddr_status(smbus, num_channels);
 
         for ch in 0..num_channels {
-            // Show activity as bar
-            let ch_activity = if (self.frame / 10) as usize % num_channels == ch {
-                utilization
-            } else {
-                utilization * 0.5
-            };
+            let status = channel_status.get(ch).copied().unwrap_or(0);
 
-            let filled = (ch_activity * channel_width as f32) as usize;
-            let empty = channel_width.saturating_sub(filled);
-
-            let color = if ch_activity > 0.7 {
-                colors::rgb(255, 200, 100)
-            } else if ch_activity > 0.4 {
-                colors::rgb(100, 180, 255)
-            } else {
-                colors::rgb(80, 120, 160)
-            };
-
-            spans.push(Span::styled("═".repeat(filled), Style::default().bg(colors::rgb(0, 0, 0)).fg(color)));
-            spans.push(Span::raw("·".repeat(empty)));
+            match status {
+                2 => {
+                    // Trained — show real utilization bar
+                    let filled = (utilization * channel_width as f32) as usize;
+                    let empty = channel_width.saturating_sub(filled);
+                    let color = if utilization > 0.7 {
+                        colors::rgb(255, 200, 100)
+                    } else if utilization > 0.4 {
+                        colors::rgb(100, 180, 255)
+                    } else {
+                        colors::rgb(80, 150, 200)
+                    };
+                    spans.push(Span::styled("═".repeat(filled), Style::default().bg(colors::rgb(0, 0, 0)).fg(color)));
+                    spans.push(Span::styled("·".repeat(empty), Style::default().fg(colors::rgb(40, 40, 60))));
+                }
+                1 => {
+                    // Training — animate with alternating characters
+                    let anim = if (self.frame / 4) % 2 == 0 { '◐' } else { '◑' };
+                    let bar = anim.to_string().repeat(channel_width.max(1));
+                    spans.push(Span::styled(bar, Style::default().fg(colors::rgb(80, 220, 220))));
+                }
+                _ => {
+                    // Untrained / error — dim outline
+                    let color = if status > 2 { colors::rgb(180, 60, 60) } else { colors::rgb(50, 50, 70) };
+                    spans.push(Span::styled("─".repeat(channel_width), Style::default().fg(color)));
+                }
+            }
         }
 
         Line::from(spans)
@@ -438,10 +482,12 @@ impl MemoryFlowVis {
                         '·'
                     };
 
-                    // Temperature-based color
+                    // Color: full 360° cycling. Temp anchors the base hue; time
+                    // slowly drifts it through the entire spectrum. High heat
+                    // boosts saturation and value for a glowing effect.
                     use crate::animation::{hsv_to_rgb, temp_to_hue};
-                    let hue = temp_to_hue(temp);
-                    let saturation = 0.5 + heat * 0.5;
+                    let hue = (temp_to_hue(temp) + self.frame as f32 * 1.5) % 360.0;
+                    let saturation = 0.7 + heat * 0.3;
                     let value = 0.3 + heat * 0.7;
                     let color = hsv_to_rgb(hue, saturation, value);
 
@@ -459,11 +505,16 @@ impl MemoryFlowVis {
         Line::from(spans)
     }
 
-    /// Render bottom DDR channels (sinks)
+    /// Render bottom DDR channels (sinks).
+    ///
+    /// Bar height uses power draw (complementary to the top bar's current).
+    /// Training status from SMBUS controls which channels are active —
+    /// same logic as the top bar, warm colour palette to distinguish direction.
     fn render_ddr_channels_bottom(
         &self,
         num_channels: usize,
         telem: Option<&crate::models::Telemetry>,
+        smbus: Option<&crate::models::SmbusTelemetry>,
     ) -> Line<'static> {
         let mut spans = Vec::new();
 
@@ -478,27 +529,37 @@ impl MemoryFlowVis {
         ));
 
         let channel_width = (self.width.saturating_sub(15)) / num_channels.max(1);
+        let channel_status = Self::parse_ddr_status(smbus, num_channels);
 
         for ch in 0..num_channels {
-            let ch_activity = if (self.frame as usize / 10 + num_channels / 2) % num_channels == ch {
-                utilization
-            } else {
-                utilization * 0.5
-            };
+            let status = channel_status.get(ch).copied().unwrap_or(0);
 
-            let filled = (ch_activity * channel_width as f32) as usize;
-            let empty = channel_width.saturating_sub(filled);
-
-            let color = if ch_activity > 0.7 {
-                colors::rgb(255, 150, 100)
-            } else if ch_activity > 0.4 {
-                colors::rgb(200, 140, 80)
-            } else {
-                colors::rgb(120, 100, 60)
-            };
-
-            spans.push(Span::styled("═".repeat(filled), Style::default().bg(colors::rgb(0, 0, 0)).fg(color)));
-            spans.push(Span::raw("·".repeat(empty)));
+            match status {
+                2 => {
+                    // Trained — warm palette (power-driven, write direction)
+                    let filled = (utilization * channel_width as f32) as usize;
+                    let empty = channel_width.saturating_sub(filled);
+                    let color = if utilization > 0.7 {
+                        colors::rgb(255, 150, 80)
+                    } else if utilization > 0.4 {
+                        colors::rgb(210, 130, 70)
+                    } else {
+                        colors::rgb(150, 100, 60)
+                    };
+                    spans.push(Span::styled("═".repeat(filled), Style::default().bg(colors::rgb(0, 0, 0)).fg(color)));
+                    spans.push(Span::styled("·".repeat(empty), Style::default().fg(colors::rgb(40, 30, 20))));
+                }
+                1 => {
+                    // Training — animate with alternating characters
+                    let anim = if (self.frame / 4) % 2 == 0 { '◒' } else { '◓' };
+                    let bar = anim.to_string().repeat(channel_width.max(1));
+                    spans.push(Span::styled(bar, Style::default().fg(colors::rgb(220, 180, 80))));
+                }
+                _ => {
+                    let color = if status > 2 { colors::rgb(180, 60, 60) } else { colors::rgb(50, 40, 30) };
+                    spans.push(Span::styled("─".repeat(channel_width), Style::default().fg(color)));
+                }
+            }
         }
 
         Line::from(spans)

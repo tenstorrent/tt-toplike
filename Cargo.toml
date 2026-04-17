@@ -1,6 +1,6 @@
 [package]
 name = "tt-toplike-rs"
-version = "0.1.0"
+version = "0.4.1"
 edition = "2021"
 authors = ["Tenstorrent"]
 license = "Apache-2.0"
@@ -21,6 +21,11 @@ required-features = ["gui"]
 name = "tt-toplike-egui"
 path = "src/bin/egui.rs"
 required-features = ["egui"]
+
+[[bin]]
+name = "tt-toplike-app"
+path = "src/bin/app.rs"
+required-features = ["app"]
 
 # Default binary (TUI)
 [lib]
@@ -47,6 +52,10 @@ iced = { version = "0.13", features = ["canvas", "tokio"], optional = true }
 # egui framework (optional - lightweight dashboard)
 eframe = { version = "0.33", optional = true }  # egui application framework
 egui_plot = { version = "0.34", optional = true }  # Plotting for egui
+
+# Terminal app (optional - PTY-hosted TUI window)
+portable-pty = { version = "0.9.0", optional = true }  # PTY spawn + resize
+vte = { version = "0.13", optional = true }             # ANSI/VT parser (alacritty)
 
 # Async runtime
 tokio = { version = "1.49", features = ["full"] }
@@ -81,6 +90,12 @@ rand = "0.8"  # For particle effects
 # Configuration
 toml = "0.8"
 
+# Lock-free atomic Arc swap — eliminates mutex contention on the render path
+arc-swap = "1.7"
+
+# Path resolution — resolves bare program names via PATH at startup
+which = "7"
+
 [dev-dependencies]
 # Testing
 mockall = "0.13"
@@ -96,6 +111,7 @@ default = ["tui", "json-backend", "linux-procfs"]
 tui = ["ratatui", "crossterm"]  # Terminal UI with Ratatui
 gui = ["iced"]                  # Native GUI with iced (legacy)
 egui = ["eframe", "egui_plot"]  # Lightweight egui dashboard
+app = ["eframe", "egui_plot", "portable-pty", "vte"]  # Native terminal window
 
 # Backend features
 # IMPORTANT: luwen-backend is OPTIONAL and must be explicitly enabled

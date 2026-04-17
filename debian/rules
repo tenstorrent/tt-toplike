@@ -3,7 +3,7 @@
 #
 # This is a Rust project. The build step compiles two release binaries:
 #   - tt-toplike-tui  (installed as /usr/bin/tt-toplike)
-#   - tt-toplike-egui (installed as /usr/bin/tt-toplike-egui)
+#   - tt-toplike-app  (installed as /usr/bin/tt-toplike-app)
 #
 # OFFLINE BUILD: crates are vendored under vendor/ and .cargo/config.toml
 # redirects cargo to that directory. Run build-deb.sh to vendor first.
@@ -40,8 +40,8 @@ override_dh_clean:
 	# replicate dh_clean's safe actions manually and skip the *.orig sweep.
 	rm -f debian/debhelper-build-stamp
 	rm -rf debian/.debhelper/
-	rm -f debian/tt-toplike.substvars debian/tt-toplike-egui.substvars debian/files
-	rm -rf debian/tt-toplike/ debian/tt-toplike-egui/ debian/tmp/
+	rm -f debian/tt-toplike.substvars debian/tt-toplike-app.substvars debian/files
+	rm -rf debian/tt-toplike/ debian/tt-toplike-app/ debian/tmp/
 
 # ── Compile ───────────────────────────────────────────────────────────────────
 override_dh_auto_build:
@@ -50,10 +50,10 @@ override_dh_auto_build:
 	    --bin tt-toplike-tui \
 	    --features tui,json-backend,linux-procfs
 
-	# egui dashboard: separate binary, separate feature set
+	# Native window app: PTY-hosted TUI in an eframe window
 	cargo build --release --frozen \
-	    --bin tt-toplike-egui \
-	    --features egui,json-backend
+	    --bin tt-toplike-app \
+	    --features app,json-backend
 
 # ── Install ───────────────────────────────────────────────────────────────────
 override_dh_auto_install:
@@ -68,15 +68,15 @@ override_dh_auto_install:
 	install -m 644 README.md QUICK_START.md \
 	    debian/tt-toplike/usr/share/doc/tt-toplike/
 
-	# ── tt-toplike-egui (GUI dashboard) ───────────────────────────────────
-	install -d debian/tt-toplike-egui/usr/bin
-	install -d debian/tt-toplike-egui/usr/share/doc/tt-toplike-egui
+	# ── tt-toplike-app (native window) ────────────────────────────────────
+	install -d debian/tt-toplike-app/usr/bin
+	install -d debian/tt-toplike-app/usr/share/doc/tt-toplike-app
 
-	install -m 755 debian/target/release/tt-toplike-egui \
-	    debian/tt-toplike-egui/usr/bin/tt-toplike-egui
+	install -m 755 debian/target/release/tt-toplike-app \
+	    debian/tt-toplike-app/usr/bin/tt-toplike-app
 
 	install -m 644 README.md \
-	    debian/tt-toplike-egui/usr/share/doc/tt-toplike-egui/
+	    debian/tt-toplike-app/usr/share/doc/tt-toplike-app/
 
 # ── Skip tests ────────────────────────────────────────────────────────────────
 # Tests need live hardware or a configured mock backend. They run in CI

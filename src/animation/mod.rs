@@ -20,6 +20,7 @@ pub mod common;
 pub mod memory_castle;
 pub mod memory_flow;
 pub mod starfield;
+pub mod topology;
 
 pub use arcade::ArcadeVisualization;
 pub use baseline::AdaptiveBaseline;
@@ -27,3 +28,4 @@ pub use common::*;
 pub use memory_castle::MemoryCastle;
 pub use memory_flow::MemoryFlowVis;
 pub use starfield::{DataStream, HardwareStarfield, MemoryPlanet, Star};
+pub use topology::{BoardTopology, sync_score};

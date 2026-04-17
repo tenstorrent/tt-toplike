@@ -13,6 +13,7 @@
 //! has meaning, and the dungeon is alive with activity.
 
 use crate::animation::{AdaptiveBaseline, hsv_to_rgb, rgb_to_hsv, temp_to_hue};
+use crate::animation::topology::BoardTopology;
 use crate::backend::TelemetryBackend;
 use crate::ui::colors;
 use ratatui::style::{Color, Modifier, Style};
@@ -90,7 +91,10 @@ impl MemoryParticle {
             layer: 0,
             target_layer: 3,  // All particles aim for Tensix
             intensity: power_change.max(0.2).min(1.0),
-            hue: temp_to_hue(temp) + (frame % 60) as f32,  // Vary hue slightly
+            // Full 360° rainbow sweep: temp biases the starting hue, frame drives rapid
+            // cycling so particles born at different times span the whole spectrum.
+            // At 10 FPS, frame * 5.0 completes a full rainbow every ~72 frames (~7s).
+            hue: (temp_to_hue(temp) + frame as f32 * 5.0) % 360.0,
             ttl,
             particle_type,
             trail: Vec::with_capacity(8),
@@ -122,17 +126,20 @@ impl MemoryParticle {
 
     /// Get color for this particle
     pub fn get_color(&self) -> Color {
-        let (base_hue, saturation_boost) = match self.particle_type {
-            ParticleType::Read => (self.hue, 0.2),       // Original hue
-            ParticleType::Write => (self.hue + 60.0, 0.3),  // Shift toward orange
-            ParticleType::CacheHit => (180.0, 0.4),      // Cyan
-            ParticleType::CacheMiss => (0.0, 0.5),       // Red
+        // All four types use self.hue (which sweeps the full rainbow over time), just
+        // offset by 90° increments so the four types always form a tetrad — distinct
+        // but all cycling together. Saturation is pinned at 1.0 for maximum vividness.
+        let base_hue = match self.particle_type {
+            ParticleType::Read     => self.hue,
+            ParticleType::Write    => (self.hue +  90.0) % 360.0,
+            ParticleType::CacheHit => (self.hue + 180.0) % 360.0,
+            ParticleType::CacheMiss => (self.hue + 270.0) % 360.0,
         };
 
         hsv_to_rgb(
-            base_hue % 360.0,
-            0.7 + saturation_boost,
-            0.6 + self.intensity * 0.4
+            base_hue,
+            1.0,
+            (0.72 + self.intensity * 0.28).min(1.0),
         )
     }
 
@@ -146,20 +153,22 @@ impl MemoryParticle {
         }
     }
 
-    /// Get trail color (dimmer version)
+    /// Get trail color (dimmer, same hue family as particle head)
     pub fn get_trail_color(&self, age: usize) -> Color {
-        let (base_hue, _) = match self.particle_type {
-            ParticleType::Read => (self.hue, 0.0),
-            ParticleType::Write => (self.hue + 60.0, 0.0),
-            ParticleType::CacheHit => (180.0, 0.0),
-            ParticleType::CacheMiss => (0.0, 0.0),
+        // Mirror the same 90° offsets used in get_color so trails read as the same hue
+        let base_hue = match self.particle_type {
+            ParticleType::Read     => self.hue,
+            ParticleType::Write    => (self.hue +  90.0) % 360.0,
+            ParticleType::CacheHit => (self.hue + 180.0) % 360.0,
+            ParticleType::CacheMiss => (self.hue + 270.0) % 360.0,
         };
 
+        // Trails were near-black (val ≤ 0.3). Raise floor so they're visible ribbons.
         let fade = (8 - age.min(8)) as f32 / 8.0;
         hsv_to_rgb(
-            base_hue % 360.0,
-            0.5,
-            0.3 * fade * self.intensity
+            base_hue,
+            0.85,
+            (0.62 * fade * self.intensity).max(0.08),
         )
     }
 
@@ -209,6 +218,9 @@ pub struct MemoryCastle {
     max_particles: usize,
     /// Environmental glyphs (x, y, char, hue)
     environment: Vec<(usize, usize, char, f32)>,
+    /// Board topology for topology-aware column separators and board labels.
+    /// `║` is used at board boundaries; `│` between chips on the same board.
+    board_topology: Option<BoardTopology>,
 }
 
 impl MemoryCastle {
@@ -241,7 +253,17 @@ impl MemoryCastle {
             particles: Vec::new(),
             max_particles,
             environment,
+            board_topology: None,
         }
+    }
+
+    /// Install board topology for topology-aware multi-device rendering.
+    ///
+    /// Once set, `render_multi_device` uses `║` between chips on different
+    /// boards and `│` between chips that share a board, and adds a board
+    /// label row above the per-device header.
+    pub fn set_topology(&mut self, topology: BoardTopology) {
+        self.board_topology = Some(topology);
     }
 
     /// Update animation state
@@ -395,7 +417,9 @@ impl MemoryCastle {
                         Style::default().bg(colors::rgb(0, 0, 0)).fg(trail_color),
                     ));
                 } else if let Some((_, _, ch, hue)) = glyph_here {
-                    let glyph_color = hsv_to_rgb(*hue, 0.4, 0.3);
+                    // Glyphs were near-invisible (sat 0.4, val 0.3). Raise both and
+                    // let their hue drift with frame so they shimmer as background accents.
+                    let glyph_color = hsv_to_rgb((*hue + self.frame as f32 * 1.8) % 360.0, 0.9, 0.62);
                     spans.push(Span::styled(
                         ch.to_string(),
                         Style::default().bg(colors::rgb(0, 0, 0)).fg(glyph_color),
@@ -426,13 +450,55 @@ impl MemoryCastle {
         let col_width = (self.width.saturating_sub(2)) / num_devices;  // Leave 2 chars padding
 
         // === GLOBAL HEADER ===
+
+        // Top separator.
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("─".repeat(self.width.saturating_sub(2)), Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(100, 100, 120))),
+        ]));
+
+        // Board-label row: shows board names spanning their combined chip columns.
+        // Only rendered when topology is known and there are ≥2 boards.
+        if let Some(ref topo) = self.board_topology {
+            if topo.boards.len() >= 2 {
+                let mut board_label_spans = vec![Span::raw("  ")];
+                for (b_idx, board) in topo.boards.iter().enumerate() {
+                    let board_chips_in_view = board.chips.iter()
+                        .filter(|&&c| c < num_devices)
+                        .count();
+                    if board_chips_in_view == 0 {
+                        continue;
+                    }
+                    let board_col_w = col_width * board_chips_in_view;
+                    let label = format!("─ {} ", board.label);
+                    let trail_width = board_col_w.saturating_sub(label.len() + 2);
+                    let board_color = hsv_to_rgb(board.hue, 0.8, 0.85);
+                    board_label_spans.push(Span::styled(
+                        format!("┌{}{}", label, "─".repeat(trail_width)),
+                        Style::default().bg(colors::rgb(0, 0, 0)).fg(board_color).add_modifier(Modifier::BOLD),
+                    ));
+                    // Inter-board boundary marker (except last board).
+                    if b_idx < topo.boards.len() - 1 {
+                        board_label_spans.push(Span::styled(
+                            "╫",
+                            Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(200, 160, 60)),
+                        ));
+                    }
+                }
+                lines.push(Line::from(board_label_spans));
+            }
+        }
+
+        // Per-device header row.
         let header_spans: Vec<Span> = devices.iter().take(num_devices).enumerate().map(|(idx, device)| {
             let telem = backend.telemetry(device.index);
             let power = telem.map(|t| t.power_w()).unwrap_or(0.0);
             let temp = telem.map(|t| t.temp_c()).unwrap_or(0.0);
 
-            // Color-code each device by hue shift
-            let hue = (idx as f32 * 90.0) % 360.0;
+            // Use board hue if topology known, else 90° per-device hue.
+            let hue = self.board_topology.as_ref()
+                .map(|t| t.board_hue(device.index))
+                .unwrap_or((idx as f32 * 90.0) % 360.0);
             let color = hsv_to_rgb(hue, 0.8, 0.9);
 
             let device_info = format!(" Dev{} {:.0}W {:.0}°C ", idx, power, temp);
@@ -446,10 +512,6 @@ impl MemoryCastle {
             ]
         }).flatten().collect();
 
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("─".repeat(self.width.saturating_sub(2)), Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(100, 100, 120))),
-        ]));
         lines.push(Line::from(header_spans));
         lines.push(Line::from(vec![
             Span::raw("  "),
@@ -514,7 +576,7 @@ impl MemoryCastle {
                                 if trail_x == global_col && trail_y == row && trail_y < canvas_height {
                                     let mut trail_hue = particle.hue + hue_shift;
                                     if trail_hue > 360.0 { trail_hue -= 360.0; }
-                                    let trail_color = hsv_to_rgb(trail_hue, 0.5, particle.intensity * 0.5);
+                                    let trail_color = hsv_to_rgb(trail_hue, 0.85, (particle.intensity * 0.65).max(0.08));
                                     spans.push(Span::styled("·", Style::default().bg(colors::rgb(0, 0, 0)).fg(trail_color)));
                                     found_particle = true;
                                     break;
@@ -546,9 +608,19 @@ impl MemoryCastle {
                     }
                 }
 
-                // Column separator
+                // Column separator: thick ║ between boards, thin │ within same board.
                 if dev_idx < num_devices - 1 {
-                    spans.push(Span::styled("│", Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(80, 80, 100))));
+                    let next_device_idx = devices.get(dev_idx + 1).map(|d| d.index).unwrap_or(dev_idx + 1);
+                    let cross_board = self.board_topology.as_ref()
+                        .map(|t| !t.same_board(device.index, next_device_idx))
+                        .unwrap_or(false);
+                    if cross_board {
+                        // Inter-board boundary: amber-gold thick separator.
+                        spans.push(Span::styled("║", Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(200, 160, 60))));
+                    } else {
+                        // Intra-board: muted thin separator.
+                        spans.push(Span::styled("│", Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(80, 80, 100))));
+                    }
                 }
             }
 
@@ -570,53 +642,67 @@ impl MemoryCastle {
     }
 
     /// Render background character for a layer
+    ///
+    /// Each layer's hue now drifts continuously with the frame counter so the
+    /// background itself cycles through the full spectrum rather than being
+    /// pinned to a static palette.  Saturation and value are also raised so
+    /// the structural elements are visible without competing with particles.
     fn render_background(&self, layer: usize, col: usize, row: usize, power_change: f32, current_change: f32, temp: f32) -> Span<'static> {
+        let f = self.frame as f32;
         match layer {
             0 => {
-                // DDR: vertical walls with gates
+                // DDR: vertical walls — hue drifts through blues/purples/pinks
                 if col % 12 == 0 {
-                    let activity = ((self.frame as f32 * 0.1 + col as f32 * 0.5).sin() + 1.0) / 2.0 * current_change;
-                    let color = hsv_to_rgb(270.0, 0.6, 0.3 + activity * 0.3);
+                    let activity = ((f * 0.1 + col as f32 * 0.5).sin() + 1.0) / 2.0 * current_change;
+                    let hue = (210.0 + f * 0.9) % 360.0;
+                    let color = hsv_to_rgb(hue, 0.9, 0.45 + activity * 0.45);
                     Span::styled("║".to_string(), Style::default().bg(colors::rgb(0, 0, 0)).fg(color))
                 } else if row % 3 == 0 {
-                    Span::styled("═".to_string(), Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(80, 60, 100)))
+                    let hue = (200.0 + f * 0.7) % 360.0;
+                    let color = hsv_to_rgb(hue, 0.75, 0.38);
+                    Span::styled("═".to_string(), Style::default().bg(colors::rgb(0, 0, 0)).fg(color))
                 } else {
                     Span::raw(" ")
                 }
             }
             1 => {
-                // L2: staging rooms with boxes
+                // L2: staging rooms — hue sweeps the full spectrum slowly (was stuck at 45°)
                 if (col % 15 == 0 || col % 15 == 14) && row % 4 < 3 {
-                    let activity = ((self.frame as f32 * 0.08 + col as f32 * 0.3).cos() + 1.0) / 2.0 * current_change;
-                    let color = hsv_to_rgb(45.0, 0.7, 0.4 + activity * 0.4);
+                    let activity = ((f * 0.08 + col as f32 * 0.3).cos() + 1.0) / 2.0 * current_change;
+                    let hue = (f * 0.6) % 360.0;
+                    let color = hsv_to_rgb(hue, 0.9, 0.5 + activity * 0.42);
                     Span::styled("│".to_string(), Style::default().bg(colors::rgb(0, 0, 0)).fg(color))
                 } else if row % 4 == 0 && col % 15 < 14 {
-                    let color = hsv_to_rgb(45.0, 0.5, 0.3);
+                    let hue = (f * 0.6 + 30.0) % 360.0;
+                    let color = hsv_to_rgb(hue, 0.8, 0.38);
                     Span::styled("─".to_string(), Style::default().bg(colors::rgb(0, 0, 0)).fg(color))
                 } else {
                     Span::raw(" ")
                 }
             }
             2 => {
-                // L1: cache vaults with diamonds
+                // L1: cache vaults — hue cycles through greens/teals/blues
                 if (col + row) % 8 == 0 {
-                    let activity = ((self.frame as f32 * 0.12 + col as f32 * 0.4 + row as f32 * 0.3).sin() + 1.0) / 2.0 * power_change;
-                    let color = hsv_to_rgb(180.0, 0.6, 0.4 + activity * 0.4);
+                    let activity = ((f * 0.12 + col as f32 * 0.4 + row as f32 * 0.3).sin() + 1.0) / 2.0 * power_change;
+                    let hue = (130.0 + f * 0.7) % 360.0;
+                    let color = hsv_to_rgb(hue, 0.9, 0.5 + activity * 0.42);
                     Span::styled("◇".to_string(), Style::default().bg(colors::rgb(0, 0, 0)).fg(color))
                 } else if col % 10 == 0 {
-                    let color = hsv_to_rgb(180.0, 0.4, 0.3);
+                    let hue = (130.0 + f * 0.7 + 15.0) % 360.0;
+                    let color = hsv_to_rgb(hue, 0.75, 0.38);
                     Span::styled("│".to_string(), Style::default().bg(colors::rgb(0, 0, 0)).fg(color))
                 } else {
                     Span::raw(" ")
                 }
             }
             3 => {
-                // Tensix: compute cores with blocks
+                // Tensix: compute cores — temp biases hue but frame still cycles it
                 if (col % 4 == 0 || col % 4 == 3) && row % 3 < 2 {
-                    let wave = ((self.frame as f32 * 0.1 + col as f32 * 0.5 + row as f32 * 0.4).sin() + 1.0) / 2.0;
+                    let wave = ((f * 0.1 + col as f32 * 0.5 + row as f32 * 0.4).sin() + 1.0) / 2.0;
                     let activity = (power_change * 0.7 + wave * 0.3).max(0.0).min(1.0);
-                    let hue = temp_to_hue(temp);
-                    let color = hsv_to_rgb(hue, 0.7 + activity * 0.3, 0.5 + activity * 0.5);
+                    // temp_to_hue gives 0-180°; adding frame cycle extends it to full 360°
+                    let hue = (temp_to_hue(temp) + f * 2.5) % 360.0;
+                    let color = hsv_to_rgb(hue, (0.88 + activity * 0.12).min(1.0), (0.58 + activity * 0.42).min(1.0));
                     let ch = if activity > 0.7 { '▓' } else if activity > 0.4 { '▒' } else { '░' };
                     Span::styled(ch.to_string(), Style::default().bg(colors::rgb(0, 0, 0)).fg(color))
                 } else {

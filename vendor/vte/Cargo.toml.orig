@@ -1,0 +1,33 @@
+[package]
+authors = ["Joe Wilm <joe@jwilm.com>", "Christian Duerr <contact@christianduerr.com>"]
+description = "Parser for implementing terminal emulators"
+repository = "https://github.com/alacritty/vte"
+documentation = "https://docs.rs/vte/"
+keywords = ["ansi", "vte", "parser", "terminal"]
+categories = ["parsing", "no-std"]
+exclude = ["/.travis.yml"]
+readme = "README.md"
+license = "Apache-2.0 OR MIT"
+version = "0.13.1"
+name = "vte"
+edition = "2021"
+rust-version = "1.62.1"
+
+[dependencies]
+arrayvec = { version = "0.7.2", default-features = false, optional = true }
+bitflags = { version = "2.3.3", default-features = false, optional = true }
+cursor-icon = { version = "1.0.0", default-features = false, optional = true }
+log = { version = "0.4.17", optional = true }
+serde = { version = "1.0.160", features = ["derive"], optional = true }
+utf8parse = { version = "0.2.0", path = "utf8parse" }
+vte_generate_state_changes = { version = "0.1.0", path = "vte_generate_state_changes" }
+
+[features]
+ansi = ["log", "cursor-icon", "bitflags"]
+default = ["no_std"]
+nightly = ["utf8parse/nightly"]
+no_std = ["arrayvec"]
+serde = ["dep:serde"]
+
+[workspace]
+members = ["utf8parse", "vte_generate_state_changes"]
