@@ -1,7 +1,7 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: tt-toplike-rs
+Upstream-Name: tt-toplike
 Upstream-Contact: Tenstorrent <software@tenstorrent.com>
-Source: https://github.com/tenstorrent/tt-toplike-rs
+Source: https://github.com/tenstorrent/tt-toplike
 
 Files: *
 Copyright: 2026 Tenstorrent Inc.

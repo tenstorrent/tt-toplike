@@ -1,4 +1,4 @@
-tt-toplike-rs (0.4.1) noble; urgency=medium
+tt-toplike (0.4.1) noble; urgency=medium
 
   * tt-toplike-app: fix VT100 pending-wrap (deferred auto-wrap) in the PTY
     screen renderer.  Characters printed at the last column now correctly defer
@@ -17,7 +17,7 @@ tt-toplike-rs (0.4.1) noble; urgency=medium
 
  -- Tenstorrent <software@tenstorrent.com>  Thu, 17 Apr 2026 00:00:00 +0000
 
-tt-toplike-rs (0.4.0) noble; urgency=medium
+tt-toplike (0.4.0) noble; urgency=medium
 
   * HybridBackend: sysfs provides real-time core metrics (temp, power, voltage)
     while tt-smi is polled every 5 seconds in a background thread to populate
@@ -46,7 +46,7 @@ tt-toplike-rs (0.4.0) noble; urgency=medium
 
  -- Tenstorrent <software@tenstorrent.com>  Thu, 16 Apr 2026 00:00:00 +0000
 
-tt-toplike-rs (0.3.0) noble; urgency=medium
+tt-toplike (0.3.0) noble; urgency=medium
 
   * Full rainbow color cycling in Memory Castle: particle hues now sweep the
     complete 360° spectrum (was limited to 0-180°, producing only yellows and
@@ -69,7 +69,7 @@ tt-toplike-rs (0.3.0) noble; urgency=medium
 
  -- Tenstorrent <software@tenstorrent.com>  Wed, 16 Apr 2026 00:00:00 +0000
 
-tt-toplike-rs (0.1.0) noble; urgency=medium
+tt-toplike (0.1.0) noble; urgency=medium
 
   * Initial Debian packaging for Ubuntu 24.04 (Noble Numbat).
   * Ships two binary packages:

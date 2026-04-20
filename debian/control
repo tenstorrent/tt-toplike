@@ -1,10 +1,10 @@
-Source: tt-toplike-rs
+Source: tt-toplike
 Section: utils
 Priority: optional
 Maintainer: Tenstorrent <software@tenstorrent.com>
 Build-Depends: debhelper-compat (= 13), rustc (>= 1.75), cargo
 Standards-Version: 4.6.2
-Homepage: https://github.com/tenstorrent/tt-toplike-rs
+Homepage: https://github.com/tenstorrent/tt-toplike
 Rules-Requires-Root: no
 
 Package: tt-toplike

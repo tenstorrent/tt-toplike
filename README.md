@@ -1,4 +1,4 @@
-# TT-Toplike-RS 🦀
+# tt-toplike 🦀
 
 Real-time hardware monitoring for Tenstorrent silicon (Grayskull, Wormhole, Blackhole). Written in Rust.
 
@@ -6,7 +6,7 @@ Real-time hardware monitoring for Tenstorrent silicon (Grayskull, Wormhole, Blac
 
 ![Arcade mode — 4× Blackhole under inference load](assets/tt-toplike-arcade-active.png)
 
-**[🌐 Project site](https://tsingletarytt.github.io/tt-toplike-rs/) · [📦 Releases](https://github.com/tsingletaryTT/tt-toplike-rs/releases)**
+**[🌐 Project site](https://tenstorrent.github.io/tt-toplike/) · [📦 Releases](https://github.com/tenstorrent/tt-toplike/releases)**
 
 ## How visualizations are grounded in hardware activity
 
