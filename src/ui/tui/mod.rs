@@ -265,8 +265,17 @@ fn run_app(
         // This provides smooth animations and responsive keyboard input
         // regardless of backend update interval
         if event::poll(ui_poll_rate).map_err(|e| TTTopError::Terminal(e.to_string()))? {
-            if let Event::Key(key) = event::read().map_err(|e| TTTopError::Terminal(e.to_string()))? {
-                match key.code {
+            match event::read().map_err(|e| TTTopError::Terminal(e.to_string()))? {
+            Event::Resize(_, _) => {
+                // Drop all size-dependent visualizations so they reinitialize
+                // at the new dimensions on the next loop iteration.
+                starfield = None;
+                memory_castle = None;
+                memory_flow = None;
+                arcade = None;
+                terminal.clear().ok();
+            }
+            Event::Key(key) => match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {
                         return Ok(());
                     }
@@ -332,7 +341,8 @@ fn run_app(
                     }
                     _ => {}
                 }
-            }
+            _ => {}
+            } // end match event::read()
         }
 
         // Update backend data
