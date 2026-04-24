@@ -1,3 +1,13 @@
+tt-toplike (0.4.2) noble; urgency=medium
+
+  * CI: add release workflow (build .deb packages on v* tags, upload to GitHub
+    Releases, update gh-pages version badge and download command).
+  * CI: add test workflow (cargo test + zero-warnings build on PRs and main).
+  * Fix dead code warnings: remove unused _in_tmux detection, unused _temp
+    parameter from MemoryFlowVis constructors, and dead fetch_smbus_snapshot.
+
+ -- Tenstorrent <software@tenstorrent.com>  Fri, 24 Apr 2026 00:00:00 +0000
+
 tt-toplike (0.4.1) noble; urgency=medium
 
   * tt-toplike-app: fix VT100 pending-wrap (deferred auto-wrap) in the PTY
