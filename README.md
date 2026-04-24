@@ -107,8 +107,8 @@ sudo apt install devscripts debhelper rustc cargo
 ./build-deb.sh
 
 # Install the produced packages
-sudo dpkg -i ../tt-toplike_0.4.1_amd64.deb
-sudo dpkg -i ../tt-toplike-app_0.4.1_amd64.deb   # optional
+sudo dpkg -i ../tt-toplike_*_amd64.deb
+sudo dpkg -i ../tt-toplike-app_*_amd64.deb   # optional
 
 # Verify
 tt-toplike --mock --mock-devices 4
@@ -224,8 +224,8 @@ sudo apt install tt-toplike tt-smi tenstorrent-dkms
 ./build-deb.sh --quick
 
 # Inspect the packages
-dpkg-deb --info ../tt-toplike_0.4.1_amd64.deb
-dpkg-deb --contents ../tt-toplike_0.4.1_amd64.deb
+dpkg-deb --info ../tt-toplike_*_amd64.deb
+dpkg-deb --contents ../tt-toplike_*_amd64.deb
 ```
 
 The `vendor/` directory (~80 MB) is committed to git for reproducible offline builds. The `debian/rules` uses `--frozen` to enforce no network fetches at build time, matching Debian build daemon behavior.
