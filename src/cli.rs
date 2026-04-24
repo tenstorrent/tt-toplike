@@ -32,7 +32,7 @@ use std::path::PathBuf;
 
 /// Real-time hardware monitoring for Tenstorrent silicon
 ///
-/// TT-Toplike-RS provides beautiful, hardware-responsive visualizations
+/// tt-toplike provides beautiful, hardware-responsive visualizations
 /// for Tenstorrent AI accelerators with information density comparable to htop.
 #[derive(Parser, Debug)]
 #[command(name = "tt-toplike")]

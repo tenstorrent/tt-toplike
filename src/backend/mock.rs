@@ -32,7 +32,7 @@ use std::collections::HashMap;
 /// # Example
 ///
 /// ```rust,no_run
-/// use tt_toplike_rs::backend::{TelemetryBackend, mock::MockBackend};
+/// use tt_toplike::backend::{TelemetryBackend, mock::MockBackend};
 ///
 /// // Create mock backend with 2 devices
 /// let mut backend = MockBackend::new(2);

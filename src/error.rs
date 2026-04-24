@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 
-//! Error types for tt-toplike-rs
+//! Error types for tt-toplike
 //!
 //! This module defines all error types used throughout the application.
 //! We use thiserror for ergonomic error definition with automatic Display impl.
@@ -10,7 +10,7 @@
 use std::io;
 use thiserror::Error;
 
-/// Main error type for tt-toplike-rs
+/// Main error type for tt-toplike
 ///
 /// All errors in the application should eventually resolve to this type.
 /// This provides a single, comprehensive error handling interface.

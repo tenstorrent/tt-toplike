@@ -16,7 +16,7 @@
 //! ## Usage
 //!
 //! ```rust,no_run
-//! use tt_toplike_rs::backend::{TelemetryBackend, json::JSONBackend};
+//! use tt_toplike::backend::{TelemetryBackend, json::JSONBackend};
 //!
 //! let mut backend = JSONBackend::new("tt-smi");
 //! backend.init()?;

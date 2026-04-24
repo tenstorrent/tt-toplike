@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 
-//! TT-Toplike-RS - Terminal User Interface
+//! tt-toplike - Terminal User Interface
 //!
 //! This binary provides a beautiful terminal-based interface for monitoring
 //! Tenstorrent hardware using Ratatui and Crossterm.
@@ -37,7 +37,7 @@ fn main() {
     init_logging(cli.log_level());
 
     // Print startup banner
-    println!("🦀 TT-Toplike-RS v{}", env!("CARGO_PKG_VERSION"));
+    println!("🦀 tt-toplike v{}", env!("CARGO_PKG_VERSION"));
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("Backend: {}", cli.backend_name());
     println!("Update Interval: {}ms", cli.interval);

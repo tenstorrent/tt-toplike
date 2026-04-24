@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 
-//! TT-Toplike-RS - Core Library
+//! tt-toplike - Core Library
 //!
 //! This library provides the core functionality for monitoring Tenstorrent hardware,
 //! including backend abstractions, telemetry models, and visualization utilities.

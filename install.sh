@@ -3,11 +3,18 @@
 
 set -e
 
+# Resolve to the directory containing this script so the script works
+# regardless of where the user clones the repo.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ ! -f "$SCRIPT_DIR/Cargo.toml" ]; then
+    echo "Error: could not find Cargo.toml next to install.sh" >&2
+    exit 1
+fi
+cd "$SCRIPT_DIR"
+
 echo "🎮 Installing tt-toplike (TUI + GUI)"
 echo "========================================"
 echo ""
-
-cd ~/code/tt-toplike-rs 2>/dev/null || cd ~/code/tt-toplike
 
 # Build TUI
 echo "Building TUI binary..."

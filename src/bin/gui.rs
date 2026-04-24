@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 
-//! TT-Toplike-RS - Native GUI Application
+//! tt-toplike - Native GUI Application
 //!
 //! This binary provides a native Wayland/X11 GUI for monitoring Tenstorrent hardware
 //! using the iced framework.
@@ -695,7 +695,7 @@ fn main() -> iced::Result {
     init_logging(cli.log_level());
 
     // Print startup info to console
-    println!("🦀 TT-Toplike-RS GUI v{}", env!("CARGO_PKG_VERSION"));
+    println!("🦀 tt-toplike GUI v{}", env!("CARGO_PKG_VERSION"));
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("Backend: {}", cli.backend_name());
     println!("✨ Features:");

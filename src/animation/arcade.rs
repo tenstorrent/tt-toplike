@@ -91,13 +91,15 @@ impl ArcadeVisualization {
         // Region boundaries must match the actual render() output.
         // render() pushes 4 lines before starfield content (header + topology
         // placeholder + 2 spacing lines).  It also inserts separators:
-        //   +1  mid-starfield label (inserted at starfield_lines.len()/2)
+        //   +1  mid-starfield label (only when starfield_height > 0)
         //   +1  starfield → castle separator
         //   +1  castle → flow separator
         // overlay_hero() indexes into lines[] by hero_y, so these must match.
         let starfield_start = 4;
         let starfield_end = starfield_start + starfield_height;
-        let castle_start = starfield_end + 2; // mid-sep + starfield→castle sep
+        // Mid-starfield separator is only emitted when the starfield loop runs.
+        let mid_sep = if starfield_height > 0 { 1 } else { 0 };
+        let castle_start = starfield_end + mid_sep + 1; // +1 = starfield→castle sep
         let castle_end = castle_start + castle_height;
         let flow_start = castle_end + 1;      // castle→flow sep
         let flow_end = flow_start + flow_height;
