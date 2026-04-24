@@ -1,3 +1,11 @@
+tt-toplike (0.4.3) noble; urgency=medium
+
+  * Fix release CI: pass -d to dpkg-buildpackage so the Build-Depends check
+    is skipped when Rust toolchain is provided by rustup (dtolnay) rather
+    than apt, preventing false "unmet build dependencies" failures.
+
+ -- Tenstorrent <software@tenstorrent.com>  Fri, 24 Apr 2026 00:00:00 +0000
+
 tt-toplike (0.4.2) noble; urgency=medium
 
   * CI: add release workflow (build .deb packages on v* tags, upload to GitHub
