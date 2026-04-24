@@ -4,7 +4,7 @@
 
 //! Animation module for hardware-responsive visualizations
 //!
-//! This module provides the animation systems that make tt-toplike-rs special:
+//! This module provides the animation systems that make tt-toplike special:
 //! - Adaptive baseline learning that makes visualizations sensitive to any hardware
 //! - Hardware-responsive starfield where every pixel reflects real telemetry
 //! - Memory hierarchy "planets" showing L1/L2/DDR activity

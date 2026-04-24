@@ -1,4 +1,4 @@
-# TT-Toplike-RS Quick Start
+# tt-toplike Quick Start
 
 **Version**: 0.1.0
 **Installed**: March 23, 2026
@@ -183,7 +183,7 @@ Report issue with:
 - `~/.local/bin/tt-toplike-tui` (2.3 MB)
 - `~/.local/bin/tt-toplike-egui` (16 MB)
 
-**Source**: `~/code/tt-toplike-rs/`
+**Source**: `~/code/tt-toplike/`
 
 **Test Scripts**:
 - `test-modes.sh` - Test all 5 modes
@@ -194,7 +194,7 @@ Report issue with:
 ## Build from Source
 
 ```bash
-cd ~/code/tt-toplike-rs
+cd ~/code/tt-toplike
 
 # TUI
 cargo build --release --bin tt-toplike-tui --features tui

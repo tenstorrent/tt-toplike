@@ -127,7 +127,7 @@ impl canvas::Program<()> for TerminalCanvas {
 /// # Example
 ///
 /// ```rust,no_run
-/// use tt_toplike_rs::ui::gui::{TerminalGrid, terminal_canvas};
+/// use tt_toplike::ui::gui::{TerminalGrid, terminal_canvas};
 /// use iced::Color;
 ///
 /// let mut grid = TerminalGrid::new(80, 24);

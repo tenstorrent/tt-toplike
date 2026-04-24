@@ -5798,7 +5798,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tt-toplike-rs"
+name = "tt-toplike"
 version = "0.4.1"
 dependencies = [
  "all-smi-luwen-core",

@@ -1,10 +1,11 @@
 [package]
-name = "tt-toplike-rs"
+name = "tt-toplike"
 version = "0.4.1"
 edition = "2021"
 authors = ["Tenstorrent"]
 license = "Apache-2.0"
-description = "Real-time hardware monitoring for Tenstorrent silicon (Rust implementation)"
+description = "Real-time hardware monitoring for Tenstorrent silicon"
+repository = "https://github.com/tenstorrent/tt-toplike"
 
 # Multiple binaries - TUI and GUI frontends
 [[bin]]
@@ -29,7 +30,7 @@ required-features = ["app"]
 
 # Default binary (TUI)
 [lib]
-name = "tt_toplike_rs"
+name = "tt_toplike"
 path = "src/lib.rs"
 
 [dependencies]

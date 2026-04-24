@@ -309,7 +309,7 @@ src/
 
 ## License
 
-Apache 2.0 - Same as tt-toplike-rs project
+Apache 2.0 - Same as tt-toplike project
 
 ## Credits
 

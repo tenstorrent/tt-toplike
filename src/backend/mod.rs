@@ -5,7 +5,7 @@
 //! Backend adapters for telemetry data sources
 //!
 //! This module provides a trait-based abstraction for different telemetry backends.
-//! This allows tt-toplike-rs to support multiple data sources:
+//! This allows tt-toplike to support multiple data sources:
 //!
 //! - **MockBackend**: Generates fake data for testing and development
 //! - **JSONBackend**: Spawns tt-smi subprocess and parses JSON snapshots
@@ -65,7 +65,7 @@ use crate::models::{Device, Telemetry, SmbusTelemetry};
 /// ## Example
 ///
 /// ```rust,no_run
-/// use tt_toplike_rs::backend::{TelemetryBackend, mock::MockBackend};
+/// use tt_toplike::backend::{TelemetryBackend, mock::MockBackend};
 ///
 /// let mut backend = MockBackend::new(2); // 2 mock devices
 /// backend.init()?;

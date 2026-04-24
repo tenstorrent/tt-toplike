@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 
-//! TT-Toplike-RS - Native GUI Application
+//! tt-toplike - Native GUI Application
 //!
 //! This binary provides a native Wayland/X11 GUI for monitoring Tenstorrent hardware
 //! using the iced framework.
@@ -20,7 +20,7 @@ use iced::{
 };
 use std::time::Duration;
 
-use tt_toplike_rs::{
+use tt_toplike::{
     backend::{factory, BackendConfig, TelemetryBackend, mock::MockBackend, json::JSONBackend},
     cli::{Cli, BackendType},
     init_logging,
@@ -30,7 +30,7 @@ use tt_toplike_rs::{
 };
 
 #[cfg(feature = "luwen-backend")]
-use tt_toplike_rs::backend::luwen::LuwenBackend;
+use tt_toplike::backend::luwen::LuwenBackend;
 
 /// Display view modes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -521,7 +521,7 @@ impl TTTopGUI {
 
     /// Messages view - display recent log messages
     fn view_messages(&self) -> Element<Message> {
-        use tt_toplike_rs::logging::get_recent_log_messages;
+        use tt_toplike::logging::get_recent_log_messages;
 
         // Get recent log messages (last 5)
         let messages = get_recent_log_messages(5);
@@ -625,7 +625,7 @@ fn create_backend(cli: &Cli) -> Box<dyn TelemetryBackend> {
             #[cfg(target_os = "linux")]
             {
                 log::info!("Trying Sysfs backend (hwmon sensors - safest, non-invasive)...");
-                let mut sysfs_backend = tt_toplike_rs::backend::sysfs::SysfsBackend::with_config(config.clone());
+                let mut sysfs_backend = tt_toplike::backend::sysfs::SysfsBackend::with_config(config.clone());
 
                 if sysfs_backend.init().is_ok() {
                     log::info!("Sysfs backend initialized successfully");
@@ -656,7 +656,7 @@ fn create_backend(cli: &Cli) -> Box<dyn TelemetryBackend> {
             #[cfg(target_os = "linux")]
             {
                 log::info!("Creating Sysfs backend");
-                Box::new(tt_toplike_rs::backend::sysfs::SysfsBackend::with_config(config))
+                Box::new(tt_toplike::backend::sysfs::SysfsBackend::with_config(config))
             }
             #[cfg(not(target_os = "linux"))]
             {
@@ -695,7 +695,7 @@ fn main() -> iced::Result {
     init_logging(cli.log_level());
 
     // Print startup info to console
-    println!("🦀 TT-Toplike-RS GUI v{}", env!("CARGO_PKG_VERSION"));
+    println!("🦀 tt-toplike GUI v{}", env!("CARGO_PKG_VERSION"));
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("Backend: {}", cli.backend_name());
     println!("✨ Features:");

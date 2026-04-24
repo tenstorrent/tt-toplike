@@ -43,7 +43,7 @@ sudo systemctl restart sshd
 
 ## Solution 2: Automatic Fallback (Now Built-in!)
 
-As of this commit, tt-toplike-rs automatically detects if true color is supported and falls back to 256-color palette when needed:
+As of this commit, tt-toplike automatically detects if true color is supported and falls back to 256-color palette when needed:
 
 - **With COLORTERM=truecolor**: Full 24-bit RGB colors (smooth gradients)
 - **Without COLORTERM**: 256-color indexed palette (still colorful!)

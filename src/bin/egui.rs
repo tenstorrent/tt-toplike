@@ -9,18 +9,18 @@
 
 use clap::Parser;
 use eframe::egui;
-use tt_toplike_rs::backend::{factory, BackendConfig};
-use tt_toplike_rs::cli::{BackendType, Cli};
-use tt_toplike_rs::ui::egui::DashboardApp;
+use tt_toplike::backend::{factory, BackendConfig};
+use tt_toplike::cli::{BackendType, Cli};
+use tt_toplike::ui::egui::DashboardApp;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse CLI arguments
     let cli = Cli::parse();
 
     // Initialize logging
-    tt_toplike_rs::init_logging(cli.log_level());
+    tt_toplike::init_logging(cli.log_level());
 
-    log::info!("🦀 TT-Toplike-RS egui Dashboard");
+    log::info!("🦀 tt-toplike egui Dashboard");
     log::info!("Backend: {:?}", cli.effective_backend());
 
     // Create backend config
@@ -42,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configure native options
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("TT-Toplike-RS Dashboard")
+            .with_title("tt-toplike Dashboard")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([800.0, 600.0]),
         ..Default::default()
@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Run the application
     eframe::run_native(
-        "TT-Toplike-RS",
+        "tt-toplike",
         native_options,
         Box::new(|_cc| Ok(Box::new(app))),
     )?;

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 
-//! TT-Toplike-RS - Core Library
+//! tt-toplike - Core Library
 //!
 //! This library provides the core functionality for monitoring Tenstorrent hardware,
 //! including backend abstractions, telemetry models, and visualization utilities.
@@ -23,7 +23,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use tt_toplike_rs::backend::{BackendConfig, mock::MockBackend, TelemetryBackend};
+//! use tt_toplike::backend::{BackendConfig, mock::MockBackend, TelemetryBackend};
 //!
 //! let mut backend = MockBackend::with_config(2, BackendConfig::default());
 //! backend.init().expect("Failed to initialize backend");

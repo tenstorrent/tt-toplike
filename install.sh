@@ -1,13 +1,20 @@
 #!/bin/bash
-# Install script for tt-toplike-rs with multi-chip support and 256-color tmux compatibility
+# Install script for tt-toplike with multi-chip support and 256-color tmux compatibility
 
 set -e
 
-echo "🎮 Installing tt-toplike-rs (TUI + GUI)"
+# Resolve to the directory containing this script so the script works
+# regardless of where the user clones the repo.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ ! -f "$SCRIPT_DIR/Cargo.toml" ]; then
+    echo "Error: could not find Cargo.toml next to install.sh" >&2
+    exit 1
+fi
+cd "$SCRIPT_DIR"
+
+echo "🎮 Installing tt-toplike (TUI + GUI)"
 echo "========================================"
 echo ""
-
-cd ~/code/tt-toplike-rs
 
 # Build TUI
 echo "Building TUI binary..."

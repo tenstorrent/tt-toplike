@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 
-//! TT-Toplike-RS - Default Entry Point
+//! tt-toplike - Default Entry Point
 //!
 //! This is a convenience wrapper that launches the TUI by default.
 //! For specific frontends, use the dedicated binaries:
