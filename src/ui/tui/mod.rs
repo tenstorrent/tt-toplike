@@ -144,10 +144,6 @@ fn run_app(
     #[cfg(feature = "linux-procfs")]
     let process_update_interval = Duration::from_secs(2);
 
-    // Detect if we're in tmux (helps with rendering issues on macOS Terminal.app)
-    let _in_tmux = std::env::var("TMUX").is_ok() ||
-                   std::env::var("TERM").unwrap_or_default().contains("screen");
-
     // UI state - initialize from CLI --mode option if provided
     let mut display_mode = if let Some(mode) = cli.mode {
         match mode {

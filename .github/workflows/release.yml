@@ -16,6 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install packaging prerequisites
         run: |
           sudo apt-get update
@@ -31,14 +34,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          # Create the release if it doesn't exist yet (e.g. bare tag push).
-          # --verify-tag ensures the tag exists before creating the release.
-          gh release create "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes \
-            --verify-tag \
-            || true   # already exists — that's fine
+
+          # Create the release only if it doesn't already exist.
+          # Using an explicit view check avoids masking unrelated errors
+          # (auth failures, API errors) that || true would silently swallow.
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists."
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes \
+              --verify-tag
+          fi
 
           gh release upload "$GITHUB_REF_NAME" \
             "../tt-toplike_${VERSION}_amd64.deb" \
@@ -46,27 +54,30 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
-      - name: Update project site with new version and repo
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # Check out gh-pages as a sibling directory so the main checkout
+      # (and its git remote) is untouched. The actions/checkout token
+      # is used automatically — no need to embed it in a URL.
+      - name: Check out gh-pages branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages
+
+      - name: Update project site with new version
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          REPO="${GITHUB_REPOSITORY}"   # tenstorrent/tt-toplike
+          REPO="${GITHUB_REPOSITORY}"
 
-          # Clone just the gh-pages branch into a temp dir
-          git clone --depth 1 --branch gh-pages \
-            "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" \
-            /tmp/gh-pages
-
-          # Update version badge in hero eyebrow
+          # Update version badge in hero eyebrow line
           sed -i "s|Tenstorrent Hardware Monitor · v[0-9]*\.[0-9]*\.[0-9]* · Rust|Tenstorrent Hardware Monitor · v${VERSION} · Rust|g" \
-            /tmp/gh-pages/index.html
+            gh-pages/index.html
 
-          # Update the gh release download command (repo URL + version if pinned)
-          sed -i "s|gh release download --repo [^ ]* --pattern '\*\.deb'|gh release download --repo ${REPO} --pattern '*.deb'|g" \
-            /tmp/gh-pages/index.html
+          # Update only the --repo argument of the gh release download command,
+          # regardless of how --pattern is quoted in the source file.
+          sed -Ei "s|(gh release download )--repo [^ ]*|\1--repo ${REPO}|g" \
+            gh-pages/index.html
 
-          cd /tmp/gh-pages
+          cd gh-pages
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name  "github-actions[bot]"
 

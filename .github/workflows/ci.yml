@@ -14,10 +14,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Run library tests
-        run: cargo test --lib --features tui
+        run: cargo test --locked --lib --features tui
 
       - name: Build TUI binary (zero warnings)
-        run: cargo build --bin tt-toplike-tui --features tui
+        run: cargo build --locked --bin tt-toplike-tui --features tui
         env:
           RUSTFLAGS: -D warnings
