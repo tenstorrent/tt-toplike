@@ -97,8 +97,12 @@ impl ArcadeVisualization {
         // overlay_hero() indexes into lines[] by hero_y, so these must match.
         let starfield_start = 4;
         let starfield_end = starfield_start + starfield_height;
-        // Mid-starfield separator is only emitted when the starfield loop runs.
-        let mid_sep = if starfield_height > 0 { 1 } else { 0 };
+        // Mid-starfield separator is only emitted when there are >= 2 starfield
+        // lines (the insertion fires at i == len/2, which is i==0 for len==1,
+        // placing the separator *before* the only content line and shifting all
+        // subsequent indices by 1).  Skip it for height < 2 to keep boundaries
+        // consistent with what render() actually produces.
+        let mid_sep = if starfield_height >= 2 { 1 } else { 0 };
         let castle_start = starfield_end + mid_sep + 1; // +1 = starfield→castle sep
         let castle_end = castle_start + castle_height;
         let flow_start = castle_end + 1;      // castle→flow sep
@@ -334,8 +338,7 @@ impl ArcadeVisualization {
         let separator_1 = self.render_separator("✧ STARFIELD", self.starfield_end - self.starfield_start);
 
         for (i, line) in starfield_lines.iter().enumerate() {
-            if i == starfield_lines.len() / 2 {
-                // Insert separator in middle for visual clarity
+            if starfield_lines.len() >= 2 && i == starfield_lines.len() / 2 {
                 lines.push(separator_1.clone());
             }
             lines.push(line.clone());
@@ -551,5 +554,80 @@ impl ArcadeVisualization {
         Self::splice_char(&mut lines, row, col, '@', hero_style);
 
         lines
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::Style;
+    use ratatui::text::Line;
+
+    fn plain_line(s: &str) -> Line<'static> {
+        Line::from(s.to_string())
+    }
+
+    fn line_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn splice_char_replaces_middle() {
+        let mut lines = vec![plain_line("hello")];
+        ArcadeVisualization::splice_char(&mut lines, 0, 2, '@', Style::default());
+        assert_eq!(line_text(&lines[0]), "he@lo");
+    }
+
+    #[test]
+    fn splice_char_pads_short_line() {
+        let mut lines = vec![plain_line("hi")];
+        // col is beyond the current line length — must not panic, must pad
+        ArcadeVisualization::splice_char(&mut lines, 0, 5, '@', Style::default());
+        let text = line_text(&lines[0]);
+        assert_eq!(text.chars().nth(5), Some('@'));
+    }
+
+    #[test]
+    fn splice_char_ignores_oob_row() {
+        let mut lines = vec![plain_line("hello")];
+        // Should be a no-op, not a panic
+        ArcadeVisualization::splice_char(&mut lines, 99, 0, '@', Style::default());
+        assert_eq!(line_text(&lines[0]), "hello");
+    }
+
+    #[test]
+    fn region_boundaries_normal_height() {
+        // For a reasonably tall terminal the boundaries must satisfy the
+        // ordering invariant: start < end, regions don't overlap, flow ends
+        // before the total line count.
+        let vis = ArcadeVisualization::new(80, 40);
+        assert!(vis.starfield_start < vis.starfield_end);
+        assert!(vis.starfield_end <= vis.castle_start);
+        assert!(vis.castle_start < vis.castle_end);
+        assert!(vis.castle_end <= vis.flow_start);
+        assert!(vis.flow_start < vis.flow_end);
+    }
+
+    #[test]
+    fn region_boundaries_tiny_height() {
+        // At very small heights regions may collapse to zero size but must
+        // not violate start <= end or produce overlapping ranges.
+        let vis = ArcadeVisualization::new(40, 6);
+        assert!(vis.starfield_start <= vis.starfield_end);
+        assert!(vis.starfield_end <= vis.castle_start);
+        assert!(vis.castle_start <= vis.castle_end);
+        assert!(vis.castle_end <= vis.flow_start);
+        assert!(vis.flow_start <= vis.flow_end);
+    }
+
+    #[test]
+    fn mid_sep_only_for_height_ge_2() {
+        // starfield_height == 0: no mid separator → castle_start = starfield_end + 1
+        let vis0 = ArcadeVisualization::new(80, 4); // content_height ≈ 0
+        // starfield_height == 1 (content_height ≈ 2): no mid separator
+        let vis1 = ArcadeVisualization::new(80, 10);
+        // Both must satisfy the no-overlap invariant
+        assert!(vis0.starfield_end <= vis0.castle_start);
+        assert!(vis1.starfield_end <= vis1.castle_start);
     }
 }

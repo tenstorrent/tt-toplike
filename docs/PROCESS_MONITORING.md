@@ -1,6 +1,6 @@
 # Process Monitoring
 
-tt-toplike-rs detects which processes are using Tenstorrent hardware by scanning `/proc/[pid]/fd/` for open device file descriptors and checking memory mappings for hugepages.
+tt-toplike detects which processes are using Tenstorrent hardware by scanning `/proc/[pid]/fd/` for open device file descriptors and checking memory mappings for hugepages.
 
 ## What It Shows
 

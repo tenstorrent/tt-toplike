@@ -242,8 +242,8 @@ impl MemoryCastle {
 
         // Place glyphs pseudo-randomly
         for i in 0..glyph_count {
-            let x = (i * 17 + 7) % (width.saturating_sub(4));
-            let y = (i * 23 + 13) % (height.saturating_sub(6));
+            let x = (i * 17 + 7) % (width.saturating_sub(4).max(1));
+            let y = (i * 23 + 13) % (height.saturating_sub(6).max(1));
             let char_idx = (i * 11) % glyph_chars.len();
             let hue = (i * 37) as f32 % 360.0;
             environment.push((x + 2, y + 3, glyph_chars[char_idx], hue));
