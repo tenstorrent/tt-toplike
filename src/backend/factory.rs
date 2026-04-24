@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! Backend Factory - Dynamic backend creation and switching
 //!
 //! This module provides functionality to create and switch between different

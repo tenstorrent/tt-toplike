@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! Backend adapters for telemetry data sources
 //!
 //! This module provides a trait-based abstraction for different telemetry backends.

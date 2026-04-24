@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! Sysfs sensor backend for reading hardware telemetry via Linux hwmon
 //!
 //! This backend provides a non-invasive fallback by reading sensor data directly

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! TT-Toplike-RS - Core Library
 //!
 //! This library provides the core functionality for monitoring Tenstorrent hardware,

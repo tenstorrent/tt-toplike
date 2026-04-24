@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! Memory Flow Topology Visualization
 //!
 //! Full-screen visualization of memory hierarchy and data flow through the chip.

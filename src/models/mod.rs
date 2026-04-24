@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! Data models for Tenstorrent hardware telemetry
 //!
 //! This module contains all data structures representing hardware information,
