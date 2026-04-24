@@ -688,7 +688,7 @@
     <li><a href="#modes">Modes</a></li>
     <li><a href="#inspiration">Inspiration</a></li>
     <li><a href="#install">Install</a></li>
-    <li><a href="https://github.com/tsingletaryTT/tt-toplike-rs" target="_blank" rel="noopener">GitHub</a></li>
+    <li><a href="https://github.com/tenstorrent/tt-toplike" target="_blank" rel="noopener">GitHub</a></li>
   </ul>
 </nav>
 
@@ -723,7 +723,7 @@
           </svg>
           Install via apt
         </a>
-        <a class="btn-secondary" href="https://github.com/tsingletaryTT/tt-toplike-rs" target="_blank" rel="noopener">
+        <a class="btn-secondary" href="https://github.com/tenstorrent/tt-toplike" target="_blank" rel="noopener">
           View on GitHub →
         </a>
       </div>
@@ -985,7 +985,7 @@
       </p>
       <p>
         The Python ancestor of this tool (<code>tt-top</code>) proved the concept:
-        a terminal can be a window into the chip. tt-toplike-rs reimplements that vision in Rust,
+        a terminal can be a window into the chip. tt-toplike reimplements that vision in Rust,
         pushing the frame rate to 100ms, adding the adaptive baseline system that makes every
         machine look alive regardless of its power envelope, and extending the visualization
         language to cover things tt-top never attempted — DRAM training state, inter-chip topology,
@@ -1171,7 +1171,7 @@
       <div class="install-body">
         <p>Download the latest release packages from GitHub:</p>
         <div class="cmd-wrap">
-          <code class="cmd" id="cmd1">gh release download --repo tsingletaryTT/tt-toplike-rs --pattern '*.deb'</code>
+          <code class="cmd" id="cmd1">gh release download --repo tenstorrent/tt-toplike --pattern '*.deb'</code>
           <button class="cmd-copy" data-target="cmd1">Copy</button>
         </div>
       </div>
@@ -1206,8 +1206,8 @@ tt-toplike-app                         # native window (PTY-hosted TUI)</code>
           Or build from source (requires Rust 1.75+):
         </p>
         <div class="cmd-wrap">
-          <code class="cmd" id="cmd4">git clone https://github.com/tsingletaryTT/tt-toplike-rs
-cd tt-toplike-rs
+          <code class="cmd" id="cmd4">git clone https://github.com/tenstorrent/tt-toplike
+cd tt-toplike
 cargo build --release --bin tt-toplike-tui --features tui
 ./target/release/tt-toplike-tui --mock --mock-devices 4</code>
           <button class="cmd-copy" data-target="cmd4">Copy</button>
@@ -1228,12 +1228,12 @@ cargo build --release --bin tt-toplike-tui --features tui
 <!-- ── Footer ─────────────────────────────────────────────────────────────── -->
 <footer class="footer">
   <div class="footer-brand">
-    tt-toplike-rs &nbsp;<span>· Real-time monitoring for Tenstorrent silicon · Apache-2.0</span>
+    tt-toplike &nbsp;<span>· Real-time monitoring for Tenstorrent silicon · Apache-2.0</span>
   </div>
   <ul class="footer-links">
-    <li><a href="https://github.com/tsingletaryTT/tt-toplike-rs" target="_blank" rel="noopener">GitHub</a></li>
-    <li><a href="https://github.com/tsingletaryTT/tt-toplike-rs/releases" target="_blank" rel="noopener">Releases</a></li>
-    <li><a href="https://github.com/tsingletaryTT/tt-toplike-rs/issues" target="_blank" rel="noopener">Issues</a></li>
+    <li><a href="https://github.com/tenstorrent/tt-toplike" target="_blank" rel="noopener">GitHub</a></li>
+    <li><a href="https://github.com/tenstorrent/tt-toplike/releases" target="_blank" rel="noopener">Releases</a></li>
+    <li><a href="https://github.com/tenstorrent/tt-toplike/issues" target="_blank" rel="noopener">Issues</a></li>
     <li><a href="https://tenstorrent.com" target="_blank" rel="noopener">Tenstorrent</a></li>
   </ul>
 </footer>
