@@ -100,11 +100,14 @@ echo ""
 #   -us -uc  — unsigned source/changes (skip GPG for local builds)
 #   -b       — binary-only build (don't produce .dsc / .tar.gz source pkg)
 #   -jauto   — parallel jobs (auto-detect CPU count)
+#   -d       — skip Build-Depends check; CI installs tools directly so we don't
+#              need dpkg to verify them (avoids failures when rustc/cargo come
+#              from rustup rather than apt)
 echo "🔨 Building .deb packages with dpkg-buildpackage..."
 echo "   (This will take 1–5 minutes for release compilation)"
 echo ""
 
-dpkg-buildpackage -us -uc -b -jauto
+dpkg-buildpackage -us -uc -b -jauto -d
 
 # ── Step 4: Show results ───────────────────────────────────────────────────────
 echo ""
