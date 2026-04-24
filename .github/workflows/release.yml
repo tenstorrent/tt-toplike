@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # upload release assets and push gh-pages
+
+jobs:
+  build-deb:
+    name: Build .deb packages
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packaging prerequisites
+        run: sudo apt-get install -y --no-install-recommends debhelper
+
+      - name: Build .deb packages
+        run: ./build-deb.sh --quick
+
+      - name: Upload packages to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release upload "$GITHUB_REF_NAME" \
+            "../tt-toplike_${VERSION}_amd64.deb" \
+            "../tt-toplike-app_${VERSION}_amd64.deb" \
+            --repo "$GITHUB_REPOSITORY"
+
+      - name: Update project site with new version and repo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          REPO="${GITHUB_REPOSITORY}"   # tenstorrent/tt-toplike
+
+          # Clone just the gh-pages branch into a temp dir
+          git clone --depth 1 --branch gh-pages \
+            "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" \
+            /tmp/gh-pages
+
+          # Update version badge in hero eyebrow
+          sed -i "s|Tenstorrent Hardware Monitor · v[0-9]*\.[0-9]*\.[0-9]* · Rust|Tenstorrent Hardware Monitor · v${VERSION} · Rust|g" \
+            /tmp/gh-pages/index.html
+
+          # Update the gh release download command (repo URL + version if pinned)
+          sed -i "s|gh release download --repo [^ ]* --pattern '\*\.deb'|gh release download --repo ${REPO} --pattern '*.deb'|g" \
+            /tmp/gh-pages/index.html
+
+          cd /tmp/gh-pages
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name  "github-actions[bot]"
+
+          if git diff --quiet; then
+            echo "No site changes needed."
+          else
+            git add index.html
+            git commit -m "site: bump to ${GITHUB_REF_NAME}"
+            git push origin gh-pages
+          fi
