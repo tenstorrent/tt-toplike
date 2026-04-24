@@ -17,20 +17,34 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install packaging prerequisites
-        run: sudo apt-get install -y --no-install-recommends debhelper
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            devscripts \
+            debhelper
 
       - name: Build .deb packages
         run: ./build-deb.sh --quick
 
-      - name: Upload packages to release
+      - name: Ensure release exists, then upload packages
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          # Create the release if it doesn't exist yet (e.g. bare tag push).
+          # --verify-tag ensures the tag exists before creating the release.
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag \
+            || true   # already exists — that's fine
+
           gh release upload "$GITHUB_REF_NAME" \
             "../tt-toplike_${VERSION}_amd64.deb" \
             "../tt-toplike-app_${VERSION}_amd64.deb" \
-            --repo "$GITHUB_REPOSITORY"
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
 
       - name: Update project site with new version and repo
         env:
