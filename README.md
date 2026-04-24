@@ -248,6 +248,21 @@ cargo test
 cargo build --bin tt-toplike-tui --features tui    # zero warnings
 ```
 
+## Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on:
+
+- Reporting bugs via GitHub Issues
+- Suggesting new features
+- Submitting pull requests
+
+Pull requests are typically reviewed weekly. Please follow the project's coding standards and ensure tests pass before submitting.
+
 ## License
 
-Apache-2.0 — Tenstorrent
+This project is licensed under multiple licenses:
+
+- **Code**: [Apache License 2.0](LICENSE) - Overall license for this project, except where specified. See [LICENSE_understanding.txt](LICENSE_understanding.txt) for clarification on how this license applies.
+- **Documentation and Images**: [Creative Commons Attribution 4.0 International (CC-BY)](LICENSE-DOCS) - Applies to all documentation files in the `docs/` directory and image files in the `assets/` directory.
+
+By contributing to this project, you agree that your contributions will be licensed under the same terms.

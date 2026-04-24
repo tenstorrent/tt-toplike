@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! Animation module for hardware-responsive visualizations
 //!
 //! This module provides the animation systems that make tt-toplike-rs special:

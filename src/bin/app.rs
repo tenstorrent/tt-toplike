@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! tt-toplike-app — native terminal window that hosts tt-toplike-tui as a PTY child.
 //!
 //! Architecture:

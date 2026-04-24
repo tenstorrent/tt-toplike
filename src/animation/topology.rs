@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! Board topology detection and visualization helpers
 //!
 //! This module groups Tenstorrent chips into boards and provides helpers that

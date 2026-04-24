@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! Hybrid backend: sysfs real-time metrics + persistent streaming tt-smi enrichment
 //!
 //! This backend combines the strengths of the Sysfs and JSON backends:

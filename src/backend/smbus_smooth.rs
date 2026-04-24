@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! EMA smoothing for numeric SMBUS telemetry fields.
 //!
 //! When a fresh SMBUS snapshot arrives (every ~1.5 s in streaming mode), numeric
