@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # upload release assets and push gh-pages
+
+jobs:
+  build-deb:
+    name: Build .deb packages
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install packaging prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            devscripts \
+            debhelper
+
+      - name: Build .deb packages
+        run: ./build-deb.sh --quick
+
+      - name: Ensure release exists, then upload packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          # Create the release only if it doesn't already exist.
+          # Using an explicit view check avoids masking unrelated errors
+          # (auth failures, API errors) that || true would silently swallow.
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists."
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes \
+              --verify-tag
+          fi
+
+          gh release upload "$GITHUB_REF_NAME" \
+            ../tt-toplike_*_amd64.deb \
+            ../tt-toplike-app_*_amd64.deb \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+      # Check out gh-pages as a sibling directory so the main checkout
+      # (and its git remote) is untouched. The actions/checkout token
+      # is used automatically — no need to embed it in a URL.
+      - name: Check out gh-pages branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages
+
+      - name: Update project site with new version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          REPO="${GITHUB_REPOSITORY}"
+
+          # Update version badge in hero eyebrow line
+          sed -i "s|Tenstorrent Hardware Monitor · v[0-9]*\.[0-9]*\.[0-9]* · Rust|Tenstorrent Hardware Monitor · v${VERSION} · Rust|g" \
+            gh-pages/index.html
+
+          # Update only the --repo argument of the gh release download command,
+          # regardless of how --pattern is quoted in the source file.
+          sed -Ei "s|(gh release download )--repo [^ ]*|\1--repo ${REPO}|g" \
+            gh-pages/index.html
+
+          cd gh-pages
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name  "github-actions[bot]"
+
+          if git diff --quiet; then
+            echo "No site changes needed."
+          else
+            git add index.html
+            git commit -m "site: bump to ${GITHUB_REF_NAME}"
+            git push origin gh-pages
+          fi

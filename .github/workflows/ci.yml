@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run library tests
+        run: cargo test --locked --lib --features tui
+
+      - name: Build TUI binary (zero warnings)
+        run: cargo build --locked --bin tt-toplike-tui --features tui
+        env:
+          RUSTFLAGS: -D warnings
