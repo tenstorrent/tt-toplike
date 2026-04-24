@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! egui-based Dashboard Entry Point
 //!
 //! Lightweight real-time monitoring dashboard using egui.

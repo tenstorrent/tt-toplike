@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! Arcade Mode - Unified Psychedelic Visualization
 //!
 //! Combines all three visualizations (Starfield, Memory Castle, Memory Flow) into a single

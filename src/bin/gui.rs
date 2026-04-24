@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! TT-Toplike-RS - Native GUI Application
 //!
 //! This binary provides a native Wayland/X11 GUI for monitoring Tenstorrent hardware

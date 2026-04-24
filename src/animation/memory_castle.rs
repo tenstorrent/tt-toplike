@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! Memory Dungeon - Roguelike visualization of memory hierarchy
 //!
 //! A dynamic, full-screen ASCII visualization showing memory flowing through the hardware hierarchy:

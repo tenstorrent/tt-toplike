@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! Luwen backend for direct hardware access
 //!
 //! This backend uses the official Tenstorrent luwen library to communicate

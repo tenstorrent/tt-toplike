@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! Mock backend for testing and development
 //!
 //! Generates realistic fake telemetry data without requiring actual hardware.

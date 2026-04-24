@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! Terminal Canvas - Renders a character grid with monospace font
 //!
 //! This widget renders a TerminalGrid using iced's canvas API,

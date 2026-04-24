@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! Logging infrastructure with message buffering
 //!
 //! This module provides a custom log implementation that captures log messages
