@@ -49,8 +49,8 @@ jobs:
           fi
 
           gh release upload "$GITHUB_REF_NAME" \
-            "../tt-toplike_${VERSION}_amd64.deb" \
-            "../tt-toplike-app_${VERSION}_amd64.deb" \
+            ../tt-toplike_*_amd64.deb \
+            ../tt-toplike-app_*_amd64.deb \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
