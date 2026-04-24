@@ -8,19 +8,19 @@
 //!
 //! ```bash
 //! # Use mock backend for testing
-//! tt-toplike-rs --mock
+//! tt-toplike --mock
 //!
 //! # Use JSON backend with custom tt-smi path
-//! tt-toplike-rs --json --tt-smi-path /usr/local/bin/tt-smi
+//! tt-toplike --json --tt-smi-path /usr/local/bin/tt-smi
 //!
 //! # Auto-detect backend (tries JSON, falls back to mock)
-//! tt-toplike-rs --backend auto
+//! tt-toplike --backend auto
 //!
 //! # Verbose output with 50ms update interval
-//! tt-toplike-rs -v --interval 50
+//! tt-toplike -v --interval 50
 //!
 //! # Monitor specific devices only
-//! tt-toplike-rs --devices 0,2,4
+//! tt-toplike --devices 0,2,4
 //! ```
 
 use clap::{Parser, ValueEnum};
@@ -31,34 +31,34 @@ use std::path::PathBuf;
 /// TT-Toplike-RS provides beautiful, hardware-responsive visualizations
 /// for Tenstorrent AI accelerators with information density comparable to htop.
 #[derive(Parser, Debug)]
-#[command(name = "tt-toplike-rs")]
+#[command(name = "tt-toplike")]
 #[command(author = "Tenstorrent")]
 #[command(version)]
 #[command(about = "Real-time hardware monitoring for Tenstorrent silicon", long_about = None)]
 #[command(after_help = "EXAMPLES:
     # Use mock backend for testing
-    tt-toplike-rs --mock
+    tt-toplike --mock
 
     # Use JSON backend with custom tt-smi path
-    tt-toplike-rs --json --tt-smi-path /usr/local/bin/tt-smi
+    tt-toplike --json --tt-smi-path /usr/local/bin/tt-smi
 
     # Launch directly in Arcade mode
-    tt-toplike-rs --mode arcade
+    tt-toplike --mode arcade
 
     # Launch in Memory Castle mode with verbose logging
-    tt-toplike-rs --mode castle -v
+    tt-toplike --mode castle -v
 
     # Starfield visualization with fast refresh
-    tt-toplike-rs --mode starfield --interval 50
+    tt-toplike --mode starfield --interval 50
 
     # Memory Flow topology view
-    tt-toplike-rs --mode flow
+    tt-toplike --mode flow
 
     # Monitor specific devices only
-    tt-toplike-rs --devices 0,2,4
+    tt-toplike --devices 0,2,4
 
     # Quiet mode (no logs, only TUI)
-    tt-toplike-rs -q
+    tt-toplike -q
 ")]
 pub struct Cli {
     /// Backend selection

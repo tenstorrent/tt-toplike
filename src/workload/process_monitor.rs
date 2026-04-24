@@ -40,7 +40,7 @@ pub struct ProcessInfo {
 /// # Example
 ///
 /// ```no_run
-/// use tt_toplike_rs::workload::ProcessMonitor;
+/// use tt_toplike::workload::ProcessMonitor;
 ///
 /// let mut monitor = ProcessMonitor::new();
 /// monitor.update();

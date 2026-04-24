@@ -10,14 +10,14 @@
 //! - Adaptive baseline learning for universal hardware sensitivity
 //! - Dark-mode optimized color palette
 
-use tt_toplike_rs::{
+use tt_toplike::{
     backend::{BackendConfig, TelemetryBackend, mock::MockBackend, json::JSONBackend},
     cli::{Cli, BackendType},
     init_logging,
 };
 
 #[cfg(feature = "luwen-backend")]
-use tt_toplike_rs::backend::luwen::LuwenBackend;
+use tt_toplike::backend::luwen::LuwenBackend;
 
 fn main() {
     // Parse command-line arguments
@@ -75,7 +75,7 @@ fn main() {
             #[cfg(target_os = "linux")]
             {
                 println!("🔍 Trying Sysfs backend (hwmon sensors - safest, non-invasive)...");
-                let mut sysfs_backend = tt_toplike_rs::backend::sysfs::SysfsBackend::with_config(config.clone());
+                let mut sysfs_backend = tt_toplike::backend::sysfs::SysfsBackend::with_config(config.clone());
 
                 match sysfs_backend.init() {
                     Ok(_) => {
@@ -119,7 +119,7 @@ fn main() {
             #[cfg(target_os = "linux")]
             {
                 log::info!("Initializing Sysfs backend");
-                let mut backend = tt_toplike_rs::backend::sysfs::SysfsBackend::with_config(config);
+                let mut backend = tt_toplike::backend::sysfs::SysfsBackend::with_config(config);
                 run_with_backend(&mut backend, &cli);
             }
             #[cfg(not(target_os = "linux"))]
@@ -147,7 +147,7 @@ fn main() {
         #[cfg(target_os = "linux")]
         BackendType::Hybrid => {
             log::info!("Initializing HybridBackend (sysfs + background tt-smi cache)");
-            let mut backend = tt_toplike_rs::backend::hybrid::HybridBackend::with_config(
+            let mut backend = tt_toplike::backend::hybrid::HybridBackend::with_config(
                 cli.tt_smi_path.to_string_lossy().to_string(),
                 config,
             );
@@ -190,7 +190,7 @@ fn run_with_backend<B: TelemetryBackend>(backend: &mut B, cli: &Cli) {
     }
 
     // Launch TUI (TUI will create its own backend)
-    if let Err(e) = tt_toplike_rs::ui::run_tui(cli) {
+    if let Err(e) = tt_toplike::ui::run_tui(cli) {
         eprintln!("TUI error: {}", e);
         std::process::exit(1);
     }

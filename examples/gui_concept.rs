@@ -7,8 +7,8 @@ use iced::{
 };
 
 // Your existing backend trait works perfectly!
-use tt_toplike_rs::backend::TelemetryBackend;
-use tt_toplike_rs::models::{Device, Telemetry};
+use tt_toplike::backend::TelemetryBackend;
+use tt_toplike::models::{Device, Telemetry};
 
 struct TTTopGUI {
     backend: Box<dyn TelemetryBackend>,

@@ -86,7 +86,7 @@ impl log::Log for BufferedLogger {
 ///
 /// ```rust,no_run
 /// use log::LevelFilter;
-/// use tt_toplike_rs::logging::init_logging_with_buffer;
+/// use tt_toplike::logging::init_logging_with_buffer;
 ///
 /// init_logging_with_buffer(LevelFilter::Info);
 /// log::info!("Application started");
@@ -124,7 +124,7 @@ pub fn init_logging_with_buffer(level: LevelFilter) {
 /// # Example
 ///
 /// ```rust,no_run
-/// use tt_toplike_rs::logging::get_log_messages;
+/// use tt_toplike::logging::get_log_messages;
 ///
 /// for msg in get_log_messages() {
 ///     println!("[{}] {}: {}", msg.timestamp, msg.level, msg.message);
@@ -150,7 +150,7 @@ pub fn get_log_messages() -> Vec<LogMessage> {
 /// # Example
 ///
 /// ```rust,no_run
-/// use tt_toplike_rs::logging::get_recent_log_messages;
+/// use tt_toplike::logging::get_recent_log_messages;
 ///
 /// // Get last 10 messages
 /// for msg in get_recent_log_messages(10) {
@@ -204,7 +204,7 @@ pub fn get_log_message_count() -> usize {
 /// # Example
 ///
 /// ```rust,no_run
-/// use tt_toplike_rs::logging::disable_stderr;
+/// use tt_toplike::logging::disable_stderr;
 ///
 /// // Before entering TUI alternate screen
 /// disable_stderr();
@@ -221,7 +221,7 @@ pub fn disable_stderr() {
 /// # Example
 ///
 /// ```rust,no_run
-/// use tt_toplike_rs::logging::enable_stderr;
+/// use tt_toplike::logging::enable_stderr;
 ///
 /// // After exiting TUI alternate screen
 /// enable_stderr();

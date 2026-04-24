@@ -5,16 +5,16 @@
 
 use clap::Parser;
 use eframe::egui;
-use tt_toplike_rs::backend::{factory, BackendConfig};
-use tt_toplike_rs::cli::{BackendType, Cli};
-use tt_toplike_rs::ui::egui::DashboardApp;
+use tt_toplike::backend::{factory, BackendConfig};
+use tt_toplike::cli::{BackendType, Cli};
+use tt_toplike::ui::egui::DashboardApp;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse CLI arguments
     let cli = Cli::parse();
 
     // Initialize logging
-    tt_toplike_rs::init_logging(cli.log_level());
+    tt_toplike::init_logging(cli.log_level());
 
     log::info!("🦀 TT-Toplike-RS egui Dashboard");
     log::info!("Backend: {:?}", cli.effective_backend());

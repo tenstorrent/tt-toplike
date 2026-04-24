@@ -1,5 +1,5 @@
 #!/usr/bin/make -f
-# debian/rules — debhelper build rules for tt-toplike-rs
+# debian/rules — debhelper build rules for tt-toplike
 #
 # This is a Rust project. The build step compiles two release binaries:
 #   - tt-toplike-tui  (installed as /usr/bin/tt-toplike)

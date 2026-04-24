@@ -1,5 +1,5 @@
 #!/bin/bash
-# build-deb.sh — build Debian packages for tt-toplike-rs
+# build-deb.sh — build Debian packages for tt-toplike
 #
 # This script handles the full packaging flow:
 #   1. Vendors all crate dependencies into vendor/ (required for offline builds)
@@ -47,7 +47,7 @@ for cmd in cargo dpkg-buildpackage dh; do
 done
 
 echo "╔══════════════════════════════════════════╗"
-echo "║  tt-toplike-rs Debian package builder    ║"
+echo "║  tt-toplike Debian package builder       ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 

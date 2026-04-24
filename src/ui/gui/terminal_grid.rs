@@ -71,7 +71,7 @@ impl TerminalGrid {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use tt_toplike_rs::ui::gui::terminal_grid::TerminalGrid;
+    /// use tt_toplike::ui::gui::terminal_grid::TerminalGrid;
     ///
     /// let grid = TerminalGrid::new(80, 24);  // Classic terminal size
     /// ```

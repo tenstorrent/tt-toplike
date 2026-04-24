@@ -1,13 +1,13 @@
 #!/bin/bash
-# Install script for tt-toplike-rs with multi-chip support and 256-color tmux compatibility
+# Install script for tt-toplike with multi-chip support and 256-color tmux compatibility
 
 set -e
 
-echo "🎮 Installing tt-toplike-rs (TUI + GUI)"
+echo "🎮 Installing tt-toplike (TUI + GUI)"
 echo "========================================"
 echo ""
 
-cd ~/code/tt-toplike-rs
+cd ~/code/tt-toplike-rs 2>/dev/null || cd ~/code/tt-toplike
 
 # Build TUI
 echo "Building TUI binary..."

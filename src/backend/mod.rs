@@ -61,7 +61,7 @@ use crate::models::{Device, Telemetry, SmbusTelemetry};
 /// ## Example
 ///
 /// ```rust,no_run
-/// use tt_toplike_rs::backend::{TelemetryBackend, mock::MockBackend};
+/// use tt_toplike::backend::{TelemetryBackend, mock::MockBackend};
 ///
 /// let mut backend = MockBackend::new(2); // 2 mock devices
 /// backend.init()?;
