@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! JSON backend for tt-smi subprocess integration
 //!
 //! This backend runs tt-smi in snapshot mode and parses its JSON output.

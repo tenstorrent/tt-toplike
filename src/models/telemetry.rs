@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! Telemetry data structures
 //!
 //! Contains structures for representing hardware telemetry data from

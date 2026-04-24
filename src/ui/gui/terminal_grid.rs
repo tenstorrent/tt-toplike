@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! Terminal Grid - Character-based display buffer
 //!
 //! This module provides a terminal emulator grid for rendering ASCII art

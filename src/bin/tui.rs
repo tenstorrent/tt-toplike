@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! TT-Toplike-RS - Terminal User Interface
 //!
 //! This binary provides a beautiful terminal-based interface for monitoring

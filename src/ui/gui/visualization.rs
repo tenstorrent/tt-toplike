@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! GPU-accelerated visualizations for the GUI
 //!
 //! This module provides Canvas-based hardware-responsive visualizations

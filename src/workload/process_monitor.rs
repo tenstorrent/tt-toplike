@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+
 //! Process monitoring for Tenstorrent device usage
 //!
 //! This module provides functionality to detect which processes are currently
