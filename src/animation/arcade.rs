@@ -84,11 +84,18 @@ impl ArcadeVisualization {
         let castle_height = bottom_height / 2;
         let flow_height = bottom_height - castle_height;
 
-        let starfield_start = 3; // After header
+        // Region boundaries must match the actual render() output.
+        // render() pushes 4 lines before starfield content (header + topology
+        // placeholder + 2 spacing lines).  It also inserts separators:
+        //   +1  mid-starfield label (inserted at starfield_lines.len()/2)
+        //   +1  starfield → castle separator
+        //   +1  castle → flow separator
+        // overlay_hero() indexes into lines[] by hero_y, so these must match.
+        let starfield_start = 4;
         let starfield_end = starfield_start + starfield_height;
-        let castle_start = starfield_end;
+        let castle_start = starfield_end + 2; // mid-sep + starfield→castle sep
         let castle_end = castle_start + castle_height;
-        let flow_start = castle_end;
+        let flow_start = castle_end + 1;      // castle→flow sep
         let flow_end = flow_start + flow_height;
 
         Self {
@@ -468,8 +475,13 @@ impl ArcadeVisualization {
     fn splice_char(lines: &mut Vec<Line<'static>>, row: usize, col: usize, ch: char, style: Style) {
         if row >= lines.len() { return; }
         let content: String = lines[row].spans.iter().map(|s| s.content.as_ref()).collect();
-        let chars: Vec<char> = content.chars().collect();
-        if col >= chars.len() { return; }
+        let mut chars: Vec<char> = content.chars().collect();
+        // Pad with spaces so the hero is always visible even when the rendered
+        // line is shorter than col (common under high-current load where
+        // target_x approaches width-1 but content lines are not right-padded).
+        while chars.len() <= col {
+            chars.push(' ');
+        }
         let before: String = chars[..col].iter().collect();
         let after: String = chars[col + 1..].iter().collect();
         lines[row] = Line::from(vec![
