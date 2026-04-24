@@ -82,26 +82,37 @@ The full reset-to-stable cycle typically takes 10–15 seconds. tt-toplike's saf
 
 ## Installation
 
-### Debian / Ubuntu (recommended)
-
-Pre-built `.deb` packages are produced by `build-deb.sh` and can be installed directly:
+### Debian / Ubuntu — download pre-built packages (easiest)
 
 ```bash
-# Build packages (requires cargo, debhelper, rustc ≥ 1.75)
-./build-deb.sh
+# Download the latest release packages
+gh release download --repo tenstorrent/tt-toplike --pattern '*.deb'
 
 # Install
-sudo dpkg -i ../tt-toplike_0.3.0_amd64.deb         # TUI monitor
-sudo dpkg -i ../tt-toplike-egui_0.3.0_amd64.deb    # egui dashboard (optional)
+sudo dpkg -i tt-toplike_*_amd64.deb         # TUI monitor
+sudo dpkg -i tt-toplike-app_*_amd64.deb     # native window (optional, needs display)
 
 # Verify
 tt-toplike --mock --mock-devices 4
 tt-toplike --mode arcade
 ```
 
-**Prerequisites** (one-time):
+### Debian / Ubuntu — build from the debian/ tree
+
 ```bash
+# Prerequisites (one-time)
 sudo apt install devscripts debhelper rustc cargo
+
+# Full build (vendors crates, then dpkg-buildpackage)
+./build-deb.sh
+
+# Install the produced packages
+sudo dpkg -i ../tt-toplike_0.4.1_amd64.deb
+sudo dpkg -i ../tt-toplike-app_0.4.1_amd64.deb   # optional
+
+# Verify
+tt-toplike --mock --mock-devices 4
+tt-toplike --mode arcade
 ```
 
 The build vendors all crate dependencies into `vendor/` so the package builds offline (no network access needed at build time). Run `./build-deb.sh --quick` to skip re-vendoring when `vendor/` is already present.
@@ -112,8 +123,8 @@ The build vendors all crate dependencies into `vendor/` so the package builds of
 # TUI only (safe defaults — no Luwen, no GUI)
 cargo build --release --bin tt-toplike-tui --features tui,json-backend,linux-procfs
 
-# egui dashboard
-cargo build --release --bin tt-toplike-egui --features egui,json-backend
+# Native window app (PTY-hosted TUI in an eframe window)
+cargo build --release --bin tt-toplike-app --features app,json-backend
 
 # Everything
 cargo build --release --all-features
@@ -162,7 +173,7 @@ tt-toplike --devices 0,2
 - **Memory Castle** — roguelike dungeon with 600 particles representing DDR→L2→L1→Tensix memory hierarchy; 4 particle types (Read/Write/CacheHit/Miss) with trails
 - **Memory Flow** — NoC particles flowing across DDR channels
 - **Arcade** — all three visualizations simultaneously, with a `@` hero character driven by real telemetry (X = current, Y = power, color = temperature)
-- **egui Dashboard** — GPU-accelerated psychedelic dashboard with animated charts, TRON grid overlay, and cyberpunk aesthetic
+- **tt-toplike-app** — native desktop window hosting the full TUI in a PTY (GPU-accelerated via eframe; Wayland/X11)
 
 ### Backend System (Safe by Default)
 
@@ -192,9 +203,9 @@ Memory Castle and Arcade modes automatically detect multiple devices and render 
 The `tt-toplike` package integrates with the Tenstorrent PPA ecosystem:
 
 ```
-tt-toplike Recommends → tt-smi          (required for JSON backend)
+tt-toplike Recommends → tt-smi           (required for JSON backend)
 tt-toplike Recommends → tenstorrent-dkms (required for sysfs hwmon driver)
-tt-toplike Suggests   → tt-toplike-egui  (optional GPU dashboard)
+tt-toplike Suggests   → tt-toplike-app   (optional native window, needs display)
 tt-toplike Suggests   → tenstorrent-tools
 ```
 
@@ -213,13 +224,8 @@ sudo apt install tt-toplike tt-smi tenstorrent-dkms
 ./build-deb.sh --quick
 
 # Inspect the packages
-dpkg-deb --info ../tt-toplike_0.3.0_amd64.deb
-dpkg-deb --contents ../tt-toplike_0.3.0_amd64.deb
-
-# Or use cargo-deb for quick developer iteration
-cargo install cargo-deb
-cargo deb                                          # builds tt-toplike TUI
-cargo deb --bin tt-toplike-egui --features egui   # builds egui package
+dpkg-deb --info ../tt-toplike_0.4.1_amd64.deb
+dpkg-deb --contents ../tt-toplike_0.4.1_amd64.deb
 ```
 
 The `vendor/` directory (~80 MB) is committed to git for reproducible offline builds. The `debian/rules` uses `--frozen` to enforce no network fetches at build time, matching Debian build daemon behavior.
@@ -228,7 +234,7 @@ The `vendor/` directory (~80 MB) is committed to git for reproducible offline bu
 
 ```
 ┌─────────────────────────────────┐
-│   tt-toplike (TUI / egui)       │
+│   tt-toplike (TUI / app)        │
 └───────────────┬─────────────────┘
                 │
         ┌───────┴───────┐
