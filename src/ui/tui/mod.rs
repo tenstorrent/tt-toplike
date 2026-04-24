@@ -24,7 +24,7 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Row, Table},
     Frame, Terminal,
@@ -145,8 +145,8 @@ fn run_app(
     let process_update_interval = Duration::from_secs(2);
 
     // Detect if we're in tmux (helps with rendering issues on macOS Terminal.app)
-    let in_tmux = std::env::var("TMUX").is_ok() ||
-                  std::env::var("TERM").unwrap_or_default().contains("screen");
+    let _in_tmux = std::env::var("TMUX").is_ok() ||
+                   std::env::var("TERM").unwrap_or_default().contains("screen");
 
     // UI state - initialize from CLI --mode option if provided
     let mut display_mode = if let Some(mode) = cli.mode {
@@ -233,7 +233,7 @@ fn run_app(
                 // Clear frame with explicit black background for tmux compatibility
                 f.render_widget(
                     Block::default().style(Style::default().bg(colors::rgb(0, 0, 0))),
-                    f.size(),
+                    f.area(),
                 );
 
                 match display_mode {
@@ -1521,10 +1521,6 @@ fn render_arcade_devices(f: &mut Frame, area: Rect, backend: &Box<dyn TelemetryB
             let current = telemetry.current.unwrap_or(0.0);
             let voltage = telemetry.voltage.unwrap_or(0.0);
             let aiclk = telemetry.aiclk.unwrap_or(0);
-
-            // Color-code temperature
-            let temp_color = colors::temp_color(temp);
-            let power_color = colors::power_color(power);
 
             rows.push(Row::new(vec![
                 format!("{}", device.index),

@@ -548,6 +548,7 @@ pub(crate) fn parse_smbus_from_json(json_str: &str) -> HashMap<usize, SmbusTelem
 /// render loop. Falls back to `parse_smbus_from_json` for the actual parsing.
 ///
 /// If tt-smi isn't installed or returns non-zero, returns an empty map.
+#[allow(dead_code)]
 pub(crate) fn fetch_smbus_snapshot(tt_smi_path: &str) -> HashMap<usize, SmbusTelemetry> {
     let output = match Command::new(tt_smi_path)
         .args(["-s"])

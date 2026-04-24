@@ -72,7 +72,7 @@ pub struct MemoryFlowParticle {
 
 impl MemoryFlowParticle {
     /// Create a new read particle (DDR → Core)
-    pub fn new_read(channel: usize, current: f32, temp: f32, frame: u32) -> Self {
+    pub fn new_read(channel: usize, current: f32, _temp: f32, frame: u32) -> Self {
         // Start at DDR channel position (top edge)
         let channel_pos = (channel as f32 + 0.5) / 12.0; // Normalize 0-1
 
