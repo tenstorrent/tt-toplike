@@ -100,11 +100,22 @@ echo ""
 #   -us -uc  — unsigned source/changes (skip GPG for local builds)
 #   -b       — binary-only build (don't produce .dsc / .tar.gz source pkg)
 #   -jauto   — parallel jobs (auto-detect CPU count)
+#   -d       — skip Build-Depends check; used in CI where the Rust toolchain
+#              comes from rustup (dtolnay) rather than apt, so dpkg's apt-based
+#              dep checker would falsely report rustc/cargo as missing
 echo "🔨 Building .deb packages with dpkg-buildpackage..."
 echo "   (This will take 1–5 minutes for release compilation)"
 echo ""
 
-dpkg-buildpackage -us -uc -b -jauto
+# In CI the Rust toolchain is provided by rustup, not apt, so dpkg's
+# Build-Depends check would fail. Skip it there; keep it for local builds
+# so missing packaging deps are caught early.
+SKIP_DEP_FLAG=""
+if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+    SKIP_DEP_FLAG="-d"
+fi
+
+dpkg-buildpackage -us -uc -b -jauto $SKIP_DEP_FLAG
 
 # ── Step 4: Show results ───────────────────────────────────────────────────────
 echo ""
