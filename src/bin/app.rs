@@ -14,7 +14,7 @@
 //! (one job per row) for low overhead.  Keyboard events are encoded to ANSI
 //! escape sequences and written back to the PTY master.
 
-use eframe::egui::{self, Color32, FontId, Key, Modifiers, RichText, TextStyle};
+use eframe::egui::{self, Color32, FontId, Key, Modifiers, RichText};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -447,7 +447,7 @@ impl Perform for Screen {
 struct PtyState {
     screen: Screen,
     parser: Parser,
-    /// Pending bytes to write to PTY master (from keyboard/mouse events).
+    #[allow(dead_code)] // reserved for future buffered keyboard input
     input_queue: Vec<u8>,
     child_exited: bool,
 }
@@ -487,8 +487,8 @@ fn which_tui() -> Option<PathBuf> {
 
 /// Encode an egui Key + Modifiers into ANSI bytes written to the PTY.
 fn encode_key(key: Key, modifiers: Modifiers) -> Option<Vec<u8>> {
-    let ctrl = modifiers.ctrl;
     let shift = modifiers.shift;
+    let _ctrl = modifiers.ctrl;
     Some(match key {
         Key::Enter => b"\r".to_vec(),
         Key::Escape => b"\x1b".to_vec(),
@@ -533,7 +533,11 @@ impl TermApp {
         let cell_h: f32 = font_size * 1.25;
 
         // Determine terminal size from available viewport.
-        let vp = cc.egui_ctx.input(|i| i.screen_rect());
+        let vp = cc.egui_ctx.input(|i| {
+            i.viewport().inner_rect
+                .or(i.viewport().outer_rect)
+                .unwrap_or(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)))
+        });
         let cols = ((vp.width() / cell_w) as u16).max(80);
         let rows = ((vp.height() / cell_h) as u16).max(24);
 
