@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write   # upload release assets and push gh-pages
@@ -30,6 +31,7 @@ jobs:
         run: ./build-deb.sh --quick
 
       - name: Ensure release exists, then upload packages
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -58,12 +60,14 @@ jobs:
       # (and its git remote) is untouched. The actions/checkout token
       # is used automatically — no need to embed it in a URL.
       - name: Check out gh-pages branch
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/checkout@v4
         with:
           ref: gh-pages
           path: gh-pages
 
       - name: Update project site with new version
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           REPO="${GITHUB_REPOSITORY}"
