@@ -36,7 +36,7 @@ debian/tt-toplike-egui/
 
 # Debug and log files
 *.log
-debug/
+/debug/
 tmp/
 
 # System files
