@@ -243,15 +243,16 @@ mod tests {
     fn test_log_buffer() {
         init_logging_with_buffer(LevelFilter::Debug);
 
-        log::info!("Test message 1");
-        log::warn!("Test message 2");
-        log::error!("Test message 3");
+        // Use a unique tag so this test is robust against parallel test runs
+        // that may call clear_log_messages() concurrently (e.g. test_buffer_limit).
+        let tag = format!("TESTBUF-{:?}", std::thread::current().id());
+        log::info!("{}-1", tag);
+        log::warn!("{}-2", tag);
+        log::error!("{}-3", tag);
 
         let messages = get_log_messages();
-        assert!(messages.len() >= 3);
-
-        // Check that messages are captured
-        assert!(messages.iter().any(|m| m.message.contains("Test message")));
+        assert!(messages.iter().filter(|m| m.message.contains(&tag)).count() >= 3,
+            "Expected all 3 tagged messages in the log buffer");
     }
 
     #[test]
