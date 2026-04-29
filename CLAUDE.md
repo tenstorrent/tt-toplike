@@ -6,6 +6,47 @@ This document tracks the development of tt-toplike-rs, a Rust implementation of 
 
 ---
 
+## Phase 21: Hardware Plurality — Single-Chip Cards + Multi-Distro .deb (April 29, 2026)
+
+**Issues resolved**: #9 (Ubuntu 22.04 support), #10 (Board 0/1 label wrong for single-chip cards)
+
+### Single-chip card topology detection (Issue #10)
+
+The topology fallback (`from_devices()`) was hard-coding `chips_per_board = 2`, so 4× p150a cards
+were grouped as "Board 0 → [Dev0, Dev1]" / "Board 1 → [Dev2, Dev3]".  The board concept doesn't
+apply to independent PCIe cards.
+
+**Fix** — `src/animation/topology.rs`:
+- Added `is_single_chip_card()`: p150/n150/e75/e150 → 1 chip per board; p300/n300 → 2.
+- `from_devices()` now reads board_type to choose chips_per_board; all-single-chip → each device
+  gets its own Board entry.
+- Added `has_multi_chip_boards()`: `false` when every board has exactly one chip.
+
+**Visualization changes**:
+- Memory Castle board-label row: now conditioned on `has_multi_chip_boards()` instead of `boards.len() >= 2` — labels are suppressed for independent PCIe cards.
+- Column separators: `║` (amber, board boundary) only shown when `has_multi_chip_boards()` is true; standalone cards always use `│` (thin, equal-weight).
+- Arcade topology diagram: `←→` / `═══` connectors suppressed for standalone cards; chips shown with space gap instead.
+
+### Fleet grid for 32+ chips (Issue #10 follow-on)
+
+`render_multi_device()` previously hard-capped at 4 devices.  Now auto-scales:
+- Threshold: `(width - 2) / 20` chips fit in side-by-side mode.
+- Beyond threshold: `render_fleet_grid()` — compact 2D table, dynamic column count
+  (`max(1, min(4, (width-4)/38))`), 1 char per chip, color-coded by temperature.
+- Arcade topology diagram: ≤8 chips → detailed format; >8 chips → compact mini-bar (1 char/chip, color = temp, char = power level); capped at 64 chips with "+N more" suffix.
+
+### Multi-distro .deb release (Issue #9)
+
+The binary compiled on ubuntu-24.04 required `libc6 >= 2.39`; Ubuntu 22.04 ships 2.35.
+
+**Fix** — `.github/workflows/release.yml`:
+- `build-deb` job converted to a matrix: `{noble, ubuntu-24.04}` and `{jammy, ubuntu-22.04}`.
+- Jammy job patches `debian/changelog` suite field in-place (`noble → jammy`) before building.
+- Output files renamed with suite suffix before upload (`tt-toplike_0.4.x_amd64_noble.deb` / `..._jammy.deb`) so both coexist in the GitHub Release.
+- `update-site` extracted to its own job that runs once after both matrix jobs succeed.
+
+---
+
 ## Phase 20: Debian Packaging (April 10, 2026)
 
 **User Request**: Build Debian packaging similar to tt-local-generator, leveraging lessons learned there, adapted for the Rust ecosystem and Tenstorrent PPA context.

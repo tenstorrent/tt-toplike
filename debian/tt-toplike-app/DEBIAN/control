@@ -1,9 +1,9 @@
 Package: tt-toplike-app
 Source: tt-toplike
-Version: 0.4.1
+Version: 0.5.0
 Architecture: amd64
 Maintainer: Tenstorrent <software@tenstorrent.com>
-Installed-Size: 12265
+Installed-Size: 12267
 Depends: libc6 (>= 2.39), libgcc-s1 (>= 4.2), tt-toplike
 Recommends: libvulkan1 | libgl1
 Section: utils

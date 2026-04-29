@@ -605,8 +605,8 @@ fn create_backend(cli: &Cli) -> Box<dyn TelemetryBackend> {
 
     match backend_type {
         BackendType::Mock => {
-            log::info!("Creating MockBackend with {} devices", cli.mock_devices);
-            Box::new(MockBackend::with_config(cli.mock_devices, config))
+            log::info!("Creating MockBackend with {} devices", cli.effective_mock_devices());
+            Box::new(MockBackend::with_config(cli.effective_mock_devices(), config))
         }
         BackendType::Json => {
             log::info!("Creating JSONBackend with tt-smi path: {:?}", cli.tt_smi_path);
@@ -650,7 +650,7 @@ fn create_backend(cli: &Cli) -> Box<dyn TelemetryBackend> {
             // Last resort: Mock backend (for testing without hardware)
             log::warn!("No hardware backends available, using mock backend");
             log::info!("Tip: Use --backend luwen for direct hardware access (requires PCI permissions)");
-            Box::new(MockBackend::with_config(cli.mock_devices, config))
+            Box::new(MockBackend::with_config(cli.effective_mock_devices(), config))
         }
         BackendType::Sysfs => {
             #[cfg(target_os = "linux")]
@@ -720,7 +720,7 @@ fn main() -> iced::Result {
         Err(e) => {
             eprintln!("Failed to initialize backend: {}", e);
             eprintln!("Falling back to mock backend");
-            let mut mock = MockBackend::with_config(cli.mock_devices, config.clone());
+            let mut mock = MockBackend::with_config(cli.effective_mock_devices(), config.clone());
             mock.init().expect("Mock backend should always succeed");
             Box::new(mock) as Box<dyn TelemetryBackend>
         }

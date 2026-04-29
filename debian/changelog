@@ -1,3 +1,18 @@
+tt-toplike (0.5.0) noble; urgency=medium
+
+  * Fix arcade separator borders: use unicode-width display columns instead of
+    byte length so emoji labels (🏰, 🌊, ✧) don't truncate the ─ run on each
+    side; odd remainders distributed right so total always fills terminal width.
+  * Fix starfield centering: span-based formula (grid_rows-1)*spacing ensures
+    the dot grid is centered on its geometric midpoint in all panel sizes,
+    including small arcade panels where height < grid_rows.
+  * Fix arcade topology: board brackets [ ] now wrap the whole board including
+    the ←→ intra-board link, making multi-chip carrier boards read as
+    contained units separated by ═══.
+  * Add --mock N shorthand: --mock 32 now equivalent to --mock --mock-devices 32.
+
+ -- Tenstorrent <software@tenstorrent.com>  Tue, 29 Apr 2026 00:00:00 +0000
+
 tt-toplike (0.4.3) noble; urgency=medium
 
   * Fix release CI: pass -d to dpkg-buildpackage so the Build-Depends check

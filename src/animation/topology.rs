@@ -17,9 +17,16 @@
 //! ## Board detection
 //!
 //! Primary method: group chips by matching `SmbusTelemetry.board_id` string.
-//! Fallback (when any board_id is missing): consecutive index pairs — chips
-//! (0,1) share a board, (2,3) share a board, etc.  Using the fallback for the
-//! whole system (rather than mixing methods) ensures consistent grouping.
+//! Fallback (when any board_id is missing): board type-aware grouping.
+//!
+//! Single-chip PCIe cards (p150, n150, e75, e150) get `chips_per_board = 1` —
+//! each card is its own independent unit with no on-board sibling.
+//! Multi-chip carrier boards (p300, n300) get `chips_per_board = 2`.
+//! Mixed or unknown fleets default to 2 (conservative).
+//!
+//! When every board has exactly one chip (`has_multi_chip_boards() == false`)
+//! callers should suppress board-label rows and intra/inter-board link
+//! decorations — the "board" concept doesn't apply to independent PCIe cards.
 //!
 //! ## sync_score
 //!
@@ -123,13 +130,23 @@ impl BoardTopology {
         Self::from_devices(devices)
     }
 
-    /// Build topology using consecutive-index pairing fallback.
+    /// Build topology using board-type-aware consecutive grouping fallback.
     ///
-    /// Chips 0+1 → board 0, chips 2+3 → board 1, etc.
-    /// Works for any number of devices including odd counts (last board may
-    /// have only one chip).
+    /// Reads `board_type` on each device to determine how many chips share a
+    /// physical carrier board:
+    ///
+    /// - Single-chip cards (p150, n150, e75, e150): `chips_per_board = 1`
+    /// - Dual-chip carriers (p300, n300): `chips_per_board = 2`
+    /// - Mixed or unknown: `chips_per_board = 2` (conservative)
+    ///
+    /// When all devices are single-chip cards, each device gets its own Board
+    /// entry so `has_multi_chip_boards()` returns `false` and visualizations
+    /// can suppress board-level decorations.
     pub fn from_devices(devices: &[Device]) -> Self {
-        let chips_per_board = 2;
+        let all_single_chip = !devices.is_empty()
+            && devices.iter().all(|d| is_single_chip_card(&d.board_type));
+        let chips_per_board = if all_single_chip { 1 } else { 2 };
+
         let n = devices.len();
         let num_boards = (n + chips_per_board - 1) / chips_per_board;
 
@@ -138,16 +155,33 @@ impl BoardTopology {
                 let start = b * chips_per_board;
                 let end = (start + chips_per_board).min(n);
                 let chips: Vec<usize> = devices[start..end].iter().map(|d| d.index).collect();
-                Board {
-                    label: format!("board-{}", b),
-                    chips,
-                    hue: BASE_HUES[b % BASE_HUES.len()],
-                }
+                // For single-chip cards, use the board_type in the label; for
+                // multi-chip carriers, use the generic "board-N" form.
+                let label = if chips_per_board == 1 {
+                    let bt = devices[start].board_type.to_lowercase();
+                    if bt.is_empty() || bt == "unknown" {
+                        format!("card-{}", b)
+                    } else {
+                        format!("{}-{}", bt.trim_end_matches('a').trim_end_matches('c'), b)
+                    }
+                } else {
+                    format!("board-{}", b)
+                };
+                Board { label, chips, hue: BASE_HUES[b % BASE_HUES.len()] }
             })
             .collect();
 
         let inter = inter_board_links(boards.len());
         Self { boards, inter_board_links: inter }
+    }
+
+    /// Returns `true` when at least one board contains more than one chip.
+    ///
+    /// `false` means every device is a standalone single-chip card.
+    /// Visualizations use this to suppress board-label rows and
+    /// intra/inter-board link decorations that have no meaning in that case.
+    pub fn has_multi_chip_boards(&self) -> bool {
+        self.boards.iter().any(|b| b.chips.len() > 1)
     }
 
     /// Returns `true` when devices `a` and `b` are on the same board.
@@ -184,6 +218,19 @@ impl BoardTopology {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Returns `true` when `board_type` names a known single-chip PCIe card.
+///
+/// Known single-chip product families:
+/// - p150 (Blackhole), n150 (Wormhole), e75 / e150 (Grayskull)
+///
+/// Dual-chip carrier families (p300, n300) return `false`.
+/// Unknown strings return `false` (conservative: assume multi-chip).
+fn is_single_chip_card(board_type: &str) -> bool {
+    let lower = board_type.to_lowercase();
+    lower.contains("p150") || lower.contains("n150")
+        || lower.contains("e75") || lower.contains("e150")
+}
 
 /// Build a full mesh of inter-board links for `num_boards` boards.
 ///
@@ -230,28 +277,35 @@ mod tests {
     use super::*;
     use crate::models::Architecture;
 
-    fn make_devices(n: usize) -> Vec<Device> {
+    fn make_devices_typed(n: usize, board_type: &str) -> Vec<Device> {
         (0..n).map(|i| Device {
             index: i,
-            board_type: "p300c".to_string(),
+            board_type: board_type.to_string(),
             bus_id: format!("0000:0{}:00.0", i),
             coords: String::new(),
             architecture: Architecture::Blackhole,
         }).collect()
     }
 
+    fn make_devices(n: usize) -> Vec<Device> {
+        make_devices_typed(n, "p300c")
+    }
+
+    // ── Dual-chip carrier boards (p300c) ──────────────────────────────────────
+
     #[test]
-    fn test_index_pair_fallback_4_chips() {
+    fn test_p300c_pairs_4_chips() {
         let devices = make_devices(4);
         let topo = BoardTopology::from_devices(&devices);
         assert_eq!(topo.boards.len(), 2);
         assert_eq!(topo.boards[0].chips, vec![0, 1]);
         assert_eq!(topo.boards[1].chips, vec![2, 3]);
         assert_eq!(topo.inter_board_links, vec![(0, 1)]);
+        assert!(topo.has_multi_chip_boards());
     }
 
     #[test]
-    fn test_same_board() {
+    fn test_p300c_same_board() {
         let devices = make_devices(4);
         let topo = BoardTopology::from_devices(&devices);
         assert!(topo.same_board(0, 1));
@@ -260,8 +314,54 @@ mod tests {
         assert!(!topo.same_board(1, 3));
     }
 
+    // ── Single-chip PCIe cards (p150a) ────────────────────────────────────────
+
     #[test]
-    fn test_id_grouping() {
+    fn test_p150a_each_chip_is_its_own_board() {
+        let devices = make_devices_typed(4, "p150a");
+        let topo = BoardTopology::from_devices(&devices);
+        // Each card gets its own board — no pairing.
+        assert_eq!(topo.boards.len(), 4);
+        for (b, board) in topo.boards.iter().enumerate() {
+            assert_eq!(board.chips, vec![b], "board {} should contain only chip {}", b, b);
+        }
+        // No chip shares a board with another.
+        assert!(!topo.same_board(0, 1));
+        assert!(!topo.same_board(2, 3));
+        // has_multi_chip_boards is false → board-label row should be suppressed.
+        assert!(!topo.has_multi_chip_boards());
+    }
+
+    #[test]
+    fn test_single_chip_families() {
+        for bt in &["p150a", "p150c", "n150", "e75", "e150"] {
+            let devices = make_devices_typed(2, bt);
+            let topo = BoardTopology::from_devices(&devices);
+            assert_eq!(topo.boards.len(), 2, "board_type '{}' should give 1 chip/board", bt);
+            assert!(!topo.has_multi_chip_boards(), "board_type '{}' should not have multi-chip boards", bt);
+        }
+    }
+
+    #[test]
+    fn test_mixed_fleet_defaults_to_pairing() {
+        // Mixed fleet: conservative — treats as multi-chip carrier.
+        let mut devices = make_devices_typed(2, "p300c");
+        devices.push(Device {
+            index: 2,
+            board_type: "p150a".to_string(),
+            bus_id: "0000:03:00.0".to_string(),
+            coords: String::new(),
+            architecture: Architecture::Blackhole,
+        });
+        let topo = BoardTopology::from_devices(&devices);
+        // Not all single-chip → chips_per_board = 2
+        assert!(topo.has_multi_chip_boards());
+    }
+
+    // ── SMBUS ID-based grouping ───────────────────────────────────────────────
+
+    #[test]
+    fn test_id_grouping_p300c() {
         let devices = make_devices(4);
         let ids = vec![
             Some("p300c-abc".to_string()),
@@ -271,10 +371,25 @@ mod tests {
         ];
         let topo = BoardTopology::from_devices_with_ids(&devices, &ids);
         assert_eq!(topo.boards.len(), 2);
-        // Chips with matching IDs grouped together
         assert!(topo.same_board(0, 1));
         assert!(topo.same_board(2, 3));
         assert!(!topo.same_board(0, 2));
+        assert!(topo.has_multi_chip_boards());
+    }
+
+    #[test]
+    fn test_id_grouping_p150a_all_distinct_ids() {
+        // 4× p150a with distinct SMBUS board IDs → 4 standalone boards.
+        let devices = make_devices_typed(4, "p150a");
+        let ids = vec![
+            Some("p150a-aaa".to_string()),
+            Some("p150a-bbb".to_string()),
+            Some("p150a-ccc".to_string()),
+            Some("p150a-ddd".to_string()),
+        ];
+        let topo = BoardTopology::from_devices_with_ids(&devices, &ids);
+        assert_eq!(topo.boards.len(), 4);
+        assert!(!topo.has_multi_chip_boards());
     }
 
     #[test]
@@ -287,7 +402,7 @@ mod tests {
             Some("p300c-def".to_string()),
         ];
         let topo = BoardTopology::from_devices_with_ids(&devices, &ids);
-        // Falls back to index-pair grouping
+        // Falls back to type-aware grouping (p300c → chips_per_board=2)
         assert_eq!(topo.boards[0].chips, vec![0, 1]);
         assert_eq!(topo.boards[1].chips, vec![2, 3]);
     }

@@ -1,193 +1,137 @@
 # tt-toplike Quick Start
 
-**Version**: 0.1.0
-**Installed**: March 23, 2026
-**Location**: `~/.local/bin/`
+**Version**: 0.5.0
+**Last Updated**: April 29, 2026
 
 ---
 
 ## Launch Modes
 
-### 🎮 Arcade Mode (Unified Visualization)
+### Arcade Mode (Unified Visualization)
 ```bash
-tt-toplike-tui --mode arcade
-tt-toplike-tui -m arcade
+tt-toplike --mode arcade
+tt-toplike -m arcade
 ```
-- Hero character (@) that moves with telemetry
-- All three visualizations in split screen
-- 30/40/30 layout (Starfield/Castle/Flow)
+- All three visualizations stacked: Starfield (top) / Memory Castle (middle) / Memory Flow (bottom)
+- Hero character (`@`) that moves with live telemetry (X = current, Y = power, color = temperature)
+- Topology diagram in the header: chip-to-chip links shown for carrier boards (p300/n300), suppressed for independent PCIe cards (p150a/n150)
+- >8 chips: compact mini-bar (one character per chip) instead of the detailed diagram
 
-### 🏰 Memory Castle (DDR Hierarchy)
+### Memory Castle (DDR Hierarchy)
 ```bash
-tt-toplike-tui --mode castle
-tt-toplike-tui -m memory      # alias
+tt-toplike --mode castle
 ```
-- DDR channels with training status
-- L2 cache visualization (8 banks)
-- L1 SRAM compressed grid
-- Tensix core activity
+- Side-by-side per-device columns (scales dynamically with terminal width)
+- Fleet grid automatically switches in for large chip counts (32+)
+- Board grouping (`║` separators) only shown for dual-chip carrier boards; p150a and similar single-chip cards show as independent columns with `│`
+- 600 particles per device: Read ○◉ / Write □■ / CacheHit ◇◆ / Miss ●⬤, with trails
 
-### 🌌 Starfield (Tensix Cores)
+### Starfield (Tensix Cores)
 ```bash
-tt-toplike-tui --mode starfield
+tt-toplike --mode starfield
 ```
-- Stars = Tensix cores (brightness = power)
-- Color = temperature
-- Twinkle rate = current draw
-- Memory hierarchy planets
+- Stars = Tensix cores (brightness = power, color = temperature, twinkle = current)
+- Memory hierarchy planets orbiting each device cluster
 
-### 🌊 Memory Flow (DRAM Motion)
+### Memory Flow (NoC)
 ```bash
-tt-toplike-tui --mode flow
-tt-toplike-tui -m topology    # alias
+tt-toplike --mode flow
 ```
-- Full-screen DRAM visualization
-- NoC particles
-- DDR channel perimeter
-- Heat map center
+- Particles stream between the DDR perimeter and Tensix core grid
+- Density = traffic, color = temperature, speed = current draw
 
-### 📋 Normal (Table View)
+### Normal (Table View)
 ```bash
-tt-toplike-tui --mode normal
-tt-toplike-tui               # default
+tt-toplike               # default
+tt-toplike --mode normal
 ```
-- Traditional table view
-- Real-time telemetry
-- Process monitoring (Linux)
+- Classical htop-style table with color-coded power/temp/current/voltage/AICLK/ARC health
 
 ---
 
 ## Backend Options
 
-### Auto-detect (Safe Mode)
-```bash
-tt-toplike-tui --mode arcade
-```
-Tries: Sysfs → JSON → Mock (never Luwen)
+### Auto-detect (Safe Mode — default)
+Tries: **Sysfs → JSON → Mock** (Luwen is never auto-detected)
 
 ### Sysfs (Non-invasive)
 ```bash
-tt-toplike-tui --mode arcade --backend sysfs
+tt-toplike --backend sysfs
 ```
-- Linux hwmon sensors
-- Zero interference with running workloads
-- Works during LLM inference
-
-### Mock (Testing)
-```bash
-tt-toplike-tui --mode arcade --mock --mock-devices 4
-```
-- No hardware required
-- Simulated telemetry
+- Reads Linux hwmon (`/sys/class/hwmon/`)
+- Zero interference with running workloads — safe during LLM inference
 
 ### JSON (tt-smi)
 ```bash
-tt-toplike-tui --mode arcade --backend json
+tt-toplike --backend json
 ```
-- Subprocess wrapper
-- Requires tt-smi installed
+- Runs `tt-smi -s` as a subprocess
+- Requires `tt-smi` installed
+
+### Mock (Testing)
+```bash
+tt-toplike --mock --mock-devices 4
+```
+- No hardware required; simulated telemetry
+
+### Luwen (Direct PCI — explicit only)
+```bash
+tt-toplike --backend luwen
+```
+- Direct PCI BAR0 access — ⚠️ may disrupt running workloads
+- Never used in auto-detect; must be requested explicitly
 
 ---
 
 ## Common Commands
 
-### Arcade with Real Hardware
 ```bash
-tt-toplike-tui --mode arcade --backend sysfs
-```
-
-### Memory Castle with Fast Refresh
-```bash
-tt-toplike-tui --mode castle --interval 50
-```
-
-### Starfield with Verbose Logging
-```bash
-tt-toplike-tui --mode starfield -v
-```
-
-### Memory Flow with Specific Devices
-```bash
-tt-toplike-tui --mode flow --devices 0,2
-```
-
-### Normal Mode (Default)
-```bash
-tt-toplike-tui
+tt-toplike --mode arcade --backend sysfs    # arcade on real hardware (safe)
+tt-toplike --mode castle --interval 50      # castle at 50ms refresh
+tt-toplike --mode starfield -v              # starfield with verbose log
+tt-toplike --mode flow --devices 0,2       # flow, devices 0 and 2 only
+tt-toplike --mock --mock-devices 8          # 8-device mock (shows fleet grid)
+tt-toplike --mock --mock-devices 32         # 32-device mock (fleet grid + mini-bar)
 ```
 
 ---
 
-## Keyboard Shortcuts (In TUI)
+## Keyboard Shortcuts (in TUI)
 
-- `v` - Cycle visualization modes
-- `b` - Switch backend (Sysfs → JSON → Luwen → Mock)
-- `q` or `ESC` - Quit
-- `r` - Force refresh
+| Key | Action |
+|-----|--------|
+| `v` | Cycle visualization modes |
+| `b` | Cycle backend live (Sysfs → JSON → Luwen → Mock) |
+| `q` / `ESC` | Quit |
+| `r` | Force refresh |
 
 ---
 
-## Psychedelic egui Dashboard
+## Native Window App
 
-### Launch GUI
 ```bash
-tt-toplike-egui --mock --mock-devices 4
+tt-toplike-app            # PTY-hosted TUI in a native eframe window
+tt-toplike-app --mock --mock-devices 4
 ```
-
-### Features
-- 150 animated particles with glow
-- TRON grid overlay
-- Cyberpunk theme (neon colors)
-- Rainbow title bar
-- 4 psychedelic graphs
-- Process monitoring panel
-- 60 FPS animation
 
 ---
 
 ## Troubleshooting
 
-### "Text file busy"
+### No hardware detected
 ```bash
-pkill tt-toplike-tui
-# Then retry command
+ls /sys/class/hwmon/       # check hwmon entries
+tt-toplike --mock --mock-devices 2   # verify binary works
 ```
 
-### tmux Background Colors
-Fixed in v0.1.0! Features:
-- Transparent backgrounds throughout
-- **256-color fallback** when in tmux (auto-detected)
-- Fixes grey backgrounds in macOS Terminal.app via SSH + tmux
-- RGB → 256-color conversion using 6×6×6 palette cube
+### tmux / SSH terminal colors
+tt-toplike uses `Color::Reset` backgrounds throughout — no grey boxes.
+For best results, ensure your terminal emulator supports 24-bit color.
 
-### No Hardware Detected
-```bash
-# Check hwmon
-ls /sys/class/hwmon/
-
-# Try mock backend
-tt-toplike-tui --mock --mock-devices 2
-```
-
-### Temperature Readings Off
-Report issue with:
-- Backend used: `--backend sysfs|json|luwen`
-- Expected vs actual values
-- Visualization mode
-
----
-
-## Files
-
-**Binaries**:
-- `~/.local/bin/tt-toplike-tui` (2.3 MB)
-- `~/.local/bin/tt-toplike-egui` (16 MB)
-
-**Source**: `~/code/tt-toplike/`
-
-**Test Scripts**:
-- `test-modes.sh` - Test all 5 modes
-- `test-egui.sh` - Test GUI dashboard
+### Board labels look wrong
+If you have independent PCIe cards (p150a, n150) and see "Board 0 → [Dev0, Dev1]"
+groupings, make sure you're running v0.5.0 or later. The fix auto-detects
+`chips_per_board` from the hardware's `board_type` field.
 
 ---
 
@@ -196,20 +140,9 @@ Report issue with:
 ```bash
 cd ~/code/tt-toplike
 
-# TUI
-cargo build --release --bin tt-toplike-tui --features tui
-cargo install --path . --bin tt-toplike-tui --features tui --force
+# TUI (safe defaults — no Luwen, no GUI)
+cargo build --release --bin tt-toplike-tui --features tui,json-backend,linux-procfs
 
-# GUI
-cargo build --release --bin tt-toplike-egui --features egui
-cargo install --path . --bin tt-toplike-egui --features egui --force
-
-# Copy to .local/bin
-cp ~/.cargo/bin/tt-toplike-tui ~/.local/bin/
-cp ~/.cargo/bin/tt-toplike-egui ~/.local/bin/
+# Native window app
+cargo build --release --bin tt-toplike-app --features app,json-backend
 ```
-
----
-
-**Last Updated**: March 23, 2026
-**Status**: ✅ Installed and ready to use!

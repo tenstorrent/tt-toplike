@@ -282,18 +282,21 @@ impl HardwareStarfield {
             // Get Tensix grid dimensions for this architecture
             let (grid_rows, grid_cols) = device.architecture.tensix_grid();
 
-            // Star spacing fills the full content height and device width.
-            // Using height/grid_rows (not height-10) so the grid reaches both
-            // edges with only a half-cell margin — no large blank area at top.
-            let star_spacing_x = (device_spacing.saturating_sub(4)) / grid_cols.max(1);
-            let star_spacing_y = self.height / grid_rows.max(1);
+            // Cell spacing: at least 1 so no rows/cols collapse in small panels
+            // (arcade starfield can be as few as 8 rows).
+            let star_spacing_x = ((device_spacing.saturating_sub(2)) / grid_cols.max(1)).max(1);
+            let star_spacing_y = (self.height / grid_rows.max(1)).max(1);
 
-            // Half-cell offset so the first star sits centred in its cell.
-            let x_start = device_center_x.saturating_sub(grid_cols * star_spacing_x / 2);
-            let y_start = star_spacing_y / 2;
+            // Span = distance from the first dot to the last dot (dot-center to dot-center).
+            // Centering the span gives equal whitespace above/below and left/right of the grid.
+            let grid_span_x = (grid_cols.saturating_sub(1)) * star_spacing_x;
+            let grid_span_y = (grid_rows.saturating_sub(1)) * star_spacing_y;
 
-            // Planets orbit the true geometric centre of the star grid.
-            let device_center_y = y_start + (grid_rows / 2) * star_spacing_y;
+            let x_start = device_center_x.saturating_sub(grid_span_x / 2);
+            let y_start = (self.height.saturating_sub(grid_span_y)) / 2;
+
+            // Planets orbit the geometric centre of the star grid.
+            let device_center_y = y_start + grid_span_y / 2;
 
             // Create stars for each Tensix core
             for row in 0..grid_rows {
