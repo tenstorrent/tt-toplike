@@ -843,10 +843,13 @@
       <div class="feature-icon">◈</div>
       <p class="feature-title">Inter-Chip Topology</p>
       <p class="feature-desc">
-        On multi-chip systems (T3K, QB2) the board topology is rendered with
-        Ethernet link status, PCIe health, and chip-to-chip connections shown
-        as a live graph. Power differentials between chips are reflected in
-        connection brightness — you can see which die is pulling harder.
+        Hardware topology is auto-detected from <code>board_type</code>.
+        Dual-chip carrier boards (p300, n300, QB2) show board groupings with
+        <code>═══</code> / <code>←→</code> inter-chip links.
+        Independent PCIe cards (p150a, n150) display as equal-weight columns
+        with no spurious board labels — the board concept is suppressed entirely.
+        Scales from 2 to 32+ chips: side-by-side columns up to terminal width,
+        then a compact fleet grid with one power bar per chip.
       </p>
     </div>
     <div class="feature-card">
@@ -868,7 +871,7 @@
   <h2 class="section-heading">Press <code>v</code> to cycle</h2>
   <p class="section-sub">
     Each mode is a different lens on the same live hardware data.
-    All modes support multi-device layouts — up to four chips side-by-side.
+    All modes support multi-device layouts that scale with your terminal width and chip count.
   </p>
 
   <div class="modes-grid">
@@ -1169,9 +1172,16 @@
     <div class="install-row">
       <span class="install-num">1</span>
       <div class="install-body">
-        <p>Download the latest release packages from GitHub:</p>
+        <p>
+          Download the packages that match your Ubuntu version.
+          Two variants ship per release:
+          <code>_noble.deb</code> for Ubuntu 24.04+,
+          <code>_jammy.deb</code> for Ubuntu 22.04+.
+        </p>
         <div class="cmd-wrap">
-          <code class="cmd" id="cmd1">gh release download --repo tenstorrent/tt-toplike --pattern '*.deb'</code>
+          <code class="cmd" id="cmd1">SUITE=$(. /etc/os-release && echo "$UBUNTU_CODENAME")
+[ "$SUITE" = "noble" ] || SUITE="jammy"
+gh release download --repo tenstorrent/tt-toplike --pattern "*_amd64_${SUITE}.deb"</code>
           <button class="cmd-copy" data-target="cmd1">Copy</button>
         </div>
       </div>
@@ -1181,7 +1191,7 @@
       <div class="install-body">
         <p>Install both packages:</p>
         <div class="cmd-wrap">
-          <code class="cmd" id="cmd2">sudo dpkg -i tt-toplike_*.deb tt-toplike-app_*.deb</code>
+          <code class="cmd" id="cmd2">sudo dpkg -i tt-toplike_*_amd64_${SUITE}.deb tt-toplike-app_*_amd64_${SUITE}.deb</code>
           <button class="cmd-copy" data-target="cmd2">Copy</button>
         </div>
       </div>
