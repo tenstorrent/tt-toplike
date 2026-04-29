@@ -559,4 +559,42 @@ mod tests {
 
         assert_eq!(mock_cli.backend_name(), "Mock");
     }
+
+    fn mock_cli_with(mock: Option<usize>, mock_devices: usize) -> Cli {
+        Cli {
+            backend: BackendType::Auto,
+            mock,
+            json: false,
+            tt_smi_path: PathBuf::from("tt-smi"),
+            interval: 100,
+            devices: None,
+            verbose: false,
+            quiet: false,
+            mock_devices,
+            max_errors: 10,
+            timeout: 5000,
+            visualize: false,
+            workload: false,
+            print: false,
+            mode: None,
+        }
+    }
+
+    #[test]
+    fn test_effective_mock_devices() {
+        // mock=None: falls back to mock_devices default
+        assert_eq!(mock_cli_with(None, 3).effective_mock_devices(), 3);
+
+        // mock=Some(0): sentinel for bare --mock, falls back to mock_devices
+        assert_eq!(mock_cli_with(Some(0), 3).effective_mock_devices(), 3);
+
+        // mock=Some(0) with custom mock_devices: still falls back to that value
+        assert_eq!(mock_cli_with(Some(0), 8).effective_mock_devices(), 8);
+
+        // mock=Some(N > 0): inline count takes precedence over mock_devices
+        assert_eq!(mock_cli_with(Some(32), 3).effective_mock_devices(), 32);
+
+        // mock=Some(1): edge — 1 > 0 so inline count wins
+        assert_eq!(mock_cli_with(Some(1), 5).effective_mock_devices(), 1);
+    }
 }

@@ -295,9 +295,11 @@ impl ArcadeVisualization {
             spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
 
             // Faint board-boundary marker for multi-chip boards only.
+            // Use device.index (hardware ID), not chip_idx (vector position) —
+            // same_board() queries by hardware index, not array slot.
             if topo.has_multi_chip_boards() && chip_idx + 1 < bar_n {
-                let next_idx = chip_idx + 1;
-                if !topo.same_board(chip_idx, next_idx) {
+                let next_device = &devices[chip_idx + 1];
+                if !topo.same_board(device.index, next_device.index) {
                     spans.push(Span::styled("|", Style::default().fg(colors::rgb(100, 90, 60))));
                 }
             }
