@@ -84,13 +84,23 @@ The full reset-to-stable cycle typically takes 10–15 seconds. tt-toplike's saf
 
 ### Debian / Ubuntu — download pre-built packages (easiest)
 
+Each release ships two variants. Pick the one that matches your Ubuntu version:
+
+| Package suffix | Ubuntu version | glibc requirement |
+|---------------|----------------|-------------------|
+| `_noble.deb`  | 24.04 (Noble) and newer | libc6 ≥ 2.39 |
+| `_jammy.deb`  | 22.04 (Jammy) and newer | libc6 ≥ 2.35 |
+
 ```bash
-# Download the latest release packages
-gh release download --repo tenstorrent/tt-toplike --pattern '*.deb'
+# Detect your Ubuntu version and download the matching packages
+SUITE=$(. /etc/os-release && echo "$UBUNTU_CODENAME")
+[ "$SUITE" = "noble" ] || SUITE="jammy"   # fall back to jammy on anything older
+
+gh release download --repo tenstorrent/tt-toplike --pattern "*_amd64_${SUITE}.deb"
 
 # Install
-sudo dpkg -i tt-toplike_*_amd64.deb         # TUI monitor
-sudo dpkg -i tt-toplike-app_*_amd64.deb     # native window (optional, needs display)
+sudo dpkg -i tt-toplike_*_amd64_${SUITE}.deb         # TUI monitor
+sudo dpkg -i tt-toplike-app_*_amd64_${SUITE}.deb     # native window (optional, needs display)
 
 # Verify
 tt-toplike --mock --mock-devices 4
@@ -196,7 +206,16 @@ Luwen is only accessible with `--backend luwen` and never used in auto-detect, p
 
 ### Multi-Chip Visualization
 
-Memory Castle and Arcade modes automatically detect multiple devices and render side-by-side with per-device color coding (hue shift per device). Particle density reflects real power differentials (e.g. 12W vs 18W across 4 Blackhole chips).
+Memory Castle and Arcade modes automatically detect multiple devices and scale the layout based on chip count and terminal width:
+
+- **Side-by-side columns** — when chip count fits in the terminal (threshold: `terminal_width / 20`). Each device gets a column with full particle hierarchy and per-device color coding (hue-shifted per chip).
+- **Fleet grid** — for larger chip counts (32+, or any count that won't fit side-by-side). Compact 2-row cells, dynamic column count, one power bar and temperature per chip.
+
+Arcade mode topology header adapts similarly: detailed chip diagram for ≤ 8 chips, compact mini-bar (one character per chip, colored by temperature) for larger fleets.
+
+**Single-chip PCIe cards** (p150a, n150, e75, e150) are handled correctly: the board concept is suppressed and each card is shown as an independent chip. Dual-chip carrier boards (p300, n300, QB2) show board grouping with `║` separators and `←→` intra-board links. The distinction is auto-detected from `board_type` — no configuration needed.
+
+Particle density reflects real power differentials (e.g. 12W vs 18W across 4 Blackhole chips).
 
 ## Tenstorrent PPA Integration
 

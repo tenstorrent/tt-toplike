@@ -446,9 +446,19 @@ impl MemoryCastle {
 
     /// Render multi-device side-by-side view
     fn render_multi_device<B: TelemetryBackend>(&self, backend: &B) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
         let devices = backend.devices();
-        let num_devices = devices.len().min(4);  // Max 4 devices
+
+        // Each side-by-side column needs at least 20 chars to be readable.
+        // Beyond that threshold we switch to a compact fleet-grid view that
+        // scales to any number of chips without wrapping off-screen.
+        const MIN_CHIP_COL_WIDTH: usize = 20;
+        let max_side_by_side = ((self.width.saturating_sub(2)) / MIN_CHIP_COL_WIDTH).max(1);
+        if devices.len() > max_side_by_side {
+            return self.render_fleet_grid(backend);
+        }
+
+        let mut lines = Vec::new();
+        let num_devices = devices.len();
 
         // Calculate column width for each device
         let col_width = (self.width.saturating_sub(2)) / num_devices;  // Leave 2 chars padding
@@ -461,12 +471,14 @@ impl MemoryCastle {
             Span::styled("─".repeat(self.width.saturating_sub(2)), Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(100, 100, 120))),
         ]));
 
-        // Board-label row: shows board names spanning their combined chip columns.
-        // Only rendered when topology is known and there are ≥2 boards.
+        // Board-label row: one address label per multi-chip carrier board, left-aligned
+        // inside each board's column span.  No box-drawing, no cross character — those
+        // all had unicode-width math issues and made the row look broken.
+        // Suppressed for standalone single-chip cards (has_multi_chip_boards() == false).
         if let Some(ref topo) = self.board_topology {
-            if topo.boards.len() >= 2 {
+            if topo.has_multi_chip_boards() {
                 let mut board_label_spans = vec![Span::raw("  ")];
-                for (b_idx, board) in topo.boards.iter().enumerate() {
+                for board in topo.boards.iter() {
                     let board_chips_in_view = board.chips.iter()
                         .filter(|&&c| c < num_devices)
                         .count();
@@ -474,20 +486,14 @@ impl MemoryCastle {
                         continue;
                     }
                     let board_col_w = col_width * board_chips_in_view;
-                    let label = format!("─ {} ", board.label);
-                    let trail_width = board_col_w.saturating_sub(label.len() + 2);
-                    let board_color = hsv_to_rgb(board.hue, 0.8, 0.85);
+                    let board_color = hsv_to_rgb(board.hue, 0.7, 0.75);
+                    // Show address if non-empty; pad the rest of the column with spaces.
+                    let label = if board.label.is_empty() { String::new() } else { format!(" {}", board.label) };
+                    let padding = board_col_w.saturating_sub(label.len());
                     board_label_spans.push(Span::styled(
-                        format!("┌{}{}", label, "─".repeat(trail_width)),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(board_color).add_modifier(Modifier::BOLD),
+                        format!("{}{}", label, " ".repeat(padding)),
+                        Style::default().bg(colors::rgb(0, 0, 0)).fg(board_color),
                     ));
-                    // Inter-board boundary marker (except last board).
-                    if b_idx < topo.boards.len() - 1 {
-                        board_label_spans.push(Span::styled(
-                            "╫",
-                            Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(200, 160, 60)),
-                        ));
-                    }
                 }
                 lines.push(Line::from(board_label_spans));
             }
@@ -612,17 +618,19 @@ impl MemoryCastle {
                     }
                 }
 
-                // Column separator: thick ║ between boards, thin │ within same board.
+                // Column separator between adjacent chip columns.
+                // ║ (amber) at multi-chip board boundaries, │ (dim) otherwise.
+                // For standalone single-chip cards, all separators are thin │.
                 if dev_idx < num_devices - 1 {
                     let next_device_idx = devices.get(dev_idx + 1).map(|d| d.index).unwrap_or(dev_idx + 1);
-                    let cross_board = self.board_topology.as_ref()
-                        .map(|t| !t.same_board(device.index, next_device_idx))
+                    let is_board_boundary = self.board_topology.as_ref()
+                        .map(|t| t.has_multi_chip_boards() && !t.same_board(device.index, next_device_idx))
                         .unwrap_or(false);
-                    if cross_board {
-                        // Inter-board boundary: amber-gold thick separator.
+                    if is_board_boundary {
+                        // Inter-board boundary on a multi-chip carrier: amber thick separator.
                         spans.push(Span::styled("║", Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(200, 160, 60))));
                     } else {
-                        // Intra-board: muted thin separator.
+                        // Intra-board or standalone cards: muted thin separator.
                         spans.push(Span::styled("│", Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(80, 80, 100))));
                     }
                 }
@@ -640,6 +648,115 @@ impl MemoryCastle {
         lines.push(Line::from(vec![
             Span::raw("  "),
             Span::styled(footer_text, Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(160, 160, 160))),
+        ]));
+
+        lines
+    }
+
+    /// Fleet-grid view for large chip counts (> max_side_by_side).
+    ///
+    /// Lays chips out in a compact two-dimensional grid — each cell shows a
+    /// short power bar and live metrics.  Column count scales with terminal
+    /// width so the display is useful on anything from 80 to 320 columns.
+    ///
+    /// Each cell is 35 chars wide; columns are separated by " │ " (3 chars).
+    /// Grid column count: `max(1, min(4, (width - 4) / 38))`.
+    fn render_fleet_grid<B: TelemetryBackend>(&self, backend: &B) -> Vec<Line<'static>> {
+        use crate::animation::common::temp_to_hue;
+
+        let devices = backend.devices();
+        let n = devices.len();
+
+        // Dynamic column count: each cell + separator ≈ 38 chars.
+        let grid_cols = ((self.width.saturating_sub(4)) / 38).max(1).min(4);
+
+        // Arch summary for the header.
+        let arch_summary = {
+            let bh = devices.iter().filter(|d| matches!(d.architecture, crate::models::Architecture::Blackhole)).count();
+            let wh = devices.iter().filter(|d| matches!(d.architecture, crate::models::Architecture::Wormhole)).count();
+            let gs = devices.iter().filter(|d| matches!(d.architecture, crate::models::Architecture::Grayskull)).count();
+            let mut parts: Vec<String> = Vec::new();
+            if bh > 0 { parts.push(format!("{}× Blackhole", bh)); }
+            if wh > 0 { parts.push(format!("{}× Wormhole", wh)); }
+            if gs > 0 { parts.push(format!("{}× Grayskull", gs)); }
+            parts.join(", ")
+        };
+
+        let sep_style  = Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(100, 100, 120));
+        let hdr_style  = Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(220, 240, 255)).add_modifier(Modifier::BOLD);
+        let col_sep    = Span::styled(" │ ", Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(80, 80, 100)));
+
+        let mut lines = Vec::new();
+
+        // Header
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("─".repeat(self.width.saturating_sub(2)), sep_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("🏰 Fleet View  ·  {} chips ({})", n, arch_summary), hdr_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("─".repeat(self.width.saturating_sub(2)), sep_style),
+        ]));
+
+        // Grid rows (row-major)
+        let grid_rows = (n + grid_cols - 1) / grid_cols;
+        for row in 0..grid_rows {
+            let mut spans = vec![Span::raw("  ")];
+            for col in 0..grid_cols {
+                let chip_idx = row * grid_cols + col;
+                if chip_idx >= n { break; }
+
+                let device = &devices[chip_idx];
+                let telem  = backend.telemetry(device.index);
+                let power  = telem.map(|t| t.power_w()).unwrap_or(0.0);
+                let temp   = telem.map(|t| t.temp_c()).unwrap_or(25.0);
+
+                // 12-char power bar (each block ≈ 6.7 W up to 80 W)
+                let filled = ((power / 80.0) * 12.0).clamp(0.0, 12.0) as usize;
+                let bar: String = (0..12).map(|i| if i < filled { '█' } else { '░' }).collect();
+
+                let hue       = temp_to_hue(temp);
+                let bar_color = hsv_to_rgb(hue, 0.9, 0.85);
+                let idx_color = hsv_to_rgb((chip_idx as f32 * 40.0) % 360.0, 0.6, 0.75);
+                let arch_str  = device.architecture.abbrev();
+
+                // "Dev  0 BH ████████░░░░ 16.1W 43.2°C"
+                spans.push(Span::styled(
+                    format!("Dev {:2} {} ", device.index, arch_str),
+                    Style::default().bg(colors::rgb(0, 0, 0)).fg(idx_color),
+                ));
+                spans.push(Span::styled(
+                    bar,
+                    Style::default().bg(colors::rgb(0, 0, 0)).fg(bar_color).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    format!(" {:5.1}W {:5.1}°C", power, temp),
+                    Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(180, 180, 180)),
+                ));
+
+                // Column separator (not after the last column in a row)
+                if col + 1 < grid_cols && (row * grid_cols + col + 1) < n {
+                    spans.push(col_sep.clone());
+                }
+            }
+            lines.push(Line::from(spans));
+        }
+
+        // Footer
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("─".repeat(self.width.saturating_sub(2)), sep_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("{} chips total │ switch to normal view with 'v'", n),
+                Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(140, 140, 140)),
+            ),
         ]));
 
         lines

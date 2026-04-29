@@ -57,8 +57,8 @@ fn main() {
 
     match backend_type {
         BackendType::Mock => {
-            log::info!("Initializing MockBackend with {} devices", cli.mock_devices);
-            let mut backend = MockBackend::with_config(cli.mock_devices, config);
+            log::info!("Initializing MockBackend with {} devices", cli.effective_mock_devices());
+            let mut backend = MockBackend::with_config(cli.effective_mock_devices(), config);
             run_with_backend(&mut backend, &cli);
         }
         BackendType::Json => {
@@ -116,7 +116,7 @@ fn main() {
             // Last resort: Mock backend (for testing without hardware)
             println!("⚠ No hardware backends available, using mock backend");
             println!("💡 Tip: Use --backend luwen for direct hardware access (requires PCI permissions)");
-            let mut mock_backend = MockBackend::with_config(cli.mock_devices, config);
+            let mut mock_backend = MockBackend::with_config(cli.effective_mock_devices(), config);
             run_with_backend(&mut mock_backend, &cli);
         }
         BackendType::Sysfs => {

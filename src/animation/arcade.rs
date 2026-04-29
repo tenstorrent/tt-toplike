@@ -27,6 +27,7 @@ use crate::backend::TelemetryBackend;
 use crate::ui::colors;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 /// Hero character trail entry
 #[derive(Debug, Clone)]
@@ -158,55 +159,65 @@ impl ArcadeVisualization {
 
     /// Render a one-line topology diagram for the arcade header.
     ///
-    /// Example output:
-    /// `[BH0 ██░ 16W 43°C] ←→ [BH1 ██░ 14W 42°C]  ═══  [BH2 ██░ 12W 45°C] ←→ [BH3 ██░ 18W 42°C]`
+    /// **≤ 8 chips** — detailed format:
+    /// `[BH0 ██░ 16W 43°C] ←→ [BH1 ██░ 14W 42°C]  ═══  [BH2 ██░ 12W 45°C] …`
+    ///
+    /// **> 8 chips** — compact mini-bar (one character per chip, color = temp):
+    /// `32× BH  [░▒▓█░░░░▒▓█░░▒▓█░░▒▓█▒░░░░▒▓█░▒]`
     ///
     /// Returns `None` when device count < 2 or no topology is available.
     pub fn topology_diagram_line<B: TelemetryBackend>(&self, backend: &B) -> Option<Line<'static>> {
-        if backend.devices().len() < 2 {
+        let devices = backend.devices();
+        if devices.len() < 2 {
             return None;
         }
 
         let topo = self.board_topology.as_ref()?;
+        let has_multi = topo.has_multi_chip_boards();
+
+        // Compact mini-bar path for large chip counts.
+        if devices.len() > 8 {
+            return Some(self.topology_minibar_line(backend, topo));
+        }
+
+        // Detailed path for small chip counts.
+        //
+        // Layout for multi-chip boards:   [BH2 ██░ 16W ←→ BH3 ██░ 14W]  ═══  [BH0 ██░ 12W ←→ BH1 ██░ 18W]
+        // Layout for single-chip cards:   [BH0 ██░ 15W]  [BH1 ██░ 12W]  [BH2 ██░ 13W]  [BH3 ██░ 18W]
+        //
+        // The [ ] now wraps the whole board so the ←→ intra-chip link sits visually
+        // inside the board container and ═══ clearly connects two distinct units.
         let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
         let num_boards = topo.boards.len();
 
         for (b_idx, board) in topo.boards.iter().enumerate() {
             let board_color = hsv_to_rgb(board.hue, 0.85, 0.9);
 
-            // Render each chip in this board.
+            // Opening board bracket in board color.
+            spans.push(Span::styled("[", Style::default().fg(board_color)));
+
             for (c_idx, &chip_idx) in board.chips.iter().enumerate() {
-                let device = backend.devices().get(chip_idx);
-                let telem = backend.telemetry(chip_idx);
+                let device = devices.get(chip_idx);
+                let telem  = backend.telemetry(chip_idx);
+                let power  = telem.map(|t| t.power_w()).unwrap_or(0.0);
+                let temp   = telem.map(|t| t.temp_c()).unwrap_or(25.0);
 
-                let power = telem.map(|t| t.power_w()).unwrap_or(0.0);
-                let temp  = telem.map(|t| t.temp_c()).unwrap_or(25.0);
-
-                // Activity bar (3 chars): ██░, ▓▒░, etc.
                 let act = (power / 80.0).clamp(0.0, 1.0);
                 let bar: String = (0..3).map(|i| {
                     let threshold = (i + 1) as f32 / 3.0;
                     if act >= threshold { '█' } else if act >= threshold - 0.17 { '▓' } else { '░' }
                 }).collect();
 
-                let arch_label = device.map(|d| {
-                    match d.architecture {
-                        crate::models::Architecture::Blackhole  => "BH",
-                        crate::models::Architecture::Wormhole   => "WH",
-                        crate::models::Architecture::Grayskull  => "GS",
-                        crate::models::Architecture::Unknown    => "?",
-                    }
-                }).unwrap_or("?");
-
-                let chip_text = format!("[{}{} {} {:.0}W {:.0}°C]",
+                let arch_label = device.map(|d| d.architecture.abbrev()).unwrap_or("?");
+                // No individual brackets — the chip is inside the board's [ ].
+                let chip_text = format!("{}{} {} {:.0}W {:.0}°C",
                     arch_label, chip_idx, bar, power, temp);
-
                 let chip_color = hsv_to_rgb(
                     (board.hue + chip_idx as f32 * 15.0) % 360.0, 0.9, 0.9,
                 );
                 spans.push(Span::styled(chip_text, Style::default().fg(chip_color)));
 
-                // Intra-board link between chips on the same board.
+                // Intra-board link sits inside the board bracket.
                 if c_idx + 1 < board.chips.len() {
                     spans.push(Span::styled(
                         " ←→ ",
@@ -215,16 +226,95 @@ impl ArcadeVisualization {
                 }
             }
 
-            // Inter-board link between boards.
+            // Closing board bracket.
+            spans.push(Span::styled("]", Style::default().fg(board_color)));
+
+            // Inter-board separator.
             if b_idx + 1 < num_boards {
-                spans.push(Span::styled(
-                    "  ═══  ",
-                    Style::default().fg(colors::rgb(200, 160, 60)).add_modifier(Modifier::BOLD),
-                ));
+                if has_multi {
+                    // Multi-chip carrier boards: Ethernet/PCIe bridge between units.
+                    spans.push(Span::styled(
+                        "  ═══  ",
+                        Style::default().fg(colors::rgb(200, 160, 60)).add_modifier(Modifier::BOLD),
+                    ));
+                } else {
+                    // Independent PCIe cards: two spaces, no structural link implied.
+                    spans.push(Span::raw("  "));
+                }
             }
         }
 
         Some(Line::from(spans))
+    }
+
+    /// Compact mini-bar topology line used when chip count > 8.
+    ///
+    /// Each chip is represented by a single character (power level) coloured
+    /// by temperature.  Fits any chip count in a single terminal line.
+    fn topology_minibar_line<B: TelemetryBackend>(&self, backend: &B, topo: &crate::animation::topology::BoardTopology) -> Line<'static> {
+        use crate::animation::common::temp_to_hue;
+
+        let devices = backend.devices();
+        let n = devices.len();
+
+        // Architecture summary for the label.
+        let bh = devices.iter().filter(|d| matches!(d.architecture, crate::models::Architecture::Blackhole)).count();
+        let wh = devices.iter().filter(|d| matches!(d.architecture, crate::models::Architecture::Wormhole)).count();
+        let gs = devices.iter().filter(|d| matches!(d.architecture, crate::models::Architecture::Grayskull)).count();
+        let arch_str = match (bh, wh, gs) {
+            (b, 0, 0) => format!("{}× BH", b),
+            (0, w, 0) => format!("{}× WH", w),
+            (0, 0, g) => format!("{}× GS", g),
+            _ => format!("{} chips", n),
+        };
+
+        let mut spans: Vec<Span<'static>> = vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("{}  [", arch_str),
+                Style::default().fg(colors::rgb(180, 180, 200)).add_modifier(Modifier::BOLD),
+            ),
+        ];
+
+        // One char per chip.  Cap display at 64 to avoid overflowing very wide
+        // terminals; chips beyond that get a "+N" suffix.
+        const MAX_BAR_CHIPS: usize = 64;
+        let bar_n = n.min(MAX_BAR_CHIPS);
+
+        for chip_idx in 0..bar_n {
+            let device = &devices[chip_idx];
+            let telem  = backend.telemetry(device.index);
+            let power  = telem.map(|t| t.power_w()).unwrap_or(0.0);
+            let temp   = telem.map(|t| t.temp_c()).unwrap_or(25.0);
+
+            let act = (power / 80.0).clamp(0.0, 1.0);
+            let ch  = if act > 0.75 { '█' } else if act > 0.50 { '▓' } else if act > 0.25 { '▒' } else { '░' };
+
+            let hue   = temp_to_hue(temp);
+            let color = hsv_to_rgb(hue, 0.85, 0.85 + act * 0.15);
+            spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
+
+            // Faint board-boundary marker for multi-chip boards only.
+            // Use device.index (hardware ID), not chip_idx (vector position) —
+            // same_board() queries by hardware index, not array slot.
+            if topo.has_multi_chip_boards() && chip_idx + 1 < bar_n {
+                let next_device = &devices[chip_idx + 1];
+                if !topo.same_board(device.index, next_device.index) {
+                    spans.push(Span::styled("|", Style::default().fg(colors::rgb(100, 90, 60))));
+                }
+            }
+        }
+
+        spans.push(Span::styled("]", Style::default().fg(colors::rgb(180, 180, 200)).add_modifier(Modifier::BOLD)));
+
+        if n > MAX_BAR_CHIPS {
+            spans.push(Span::styled(
+                format!(" +{}", n - MAX_BAR_CHIPS),
+                Style::default().fg(colors::rgb(140, 140, 140)),
+            ));
+        }
+
+        Line::from(spans)
     }
 
     /// Update all visualizations and hero position from telemetry
@@ -406,12 +496,15 @@ impl ArcadeVisualization {
         let hue = (self.frame as f32 * 2.0) % 360.0;
         let separator_color = hsv_to_rgb(hue, 0.6, 0.8);
 
-        let label_width = label.len() + 2; // " label "
-        let line_width = (self.width.saturating_sub(label_width)) / 2;
+        // Use display width (columns) not byte length — emoji like 🏰 are 2 columns wide.
+        let label_display_width = UnicodeWidthStr::width(label) + 2; // " label "
+        let remaining = self.width.saturating_sub(label_display_width);
+        let left_width = remaining / 2;
+        let right_width = remaining - left_width; // absorbs odd remainder so total == self.width
 
         Line::from(vec![
             Span::styled(
-                "─".repeat(line_width),
+                "─".repeat(left_width),
                 Style::default()
                     .fg(separator_color)
                     .add_modifier(Modifier::BOLD),
@@ -423,7 +516,7 @@ impl ArcadeVisualization {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "─".repeat(line_width),
+                "─".repeat(right_width),
                 Style::default()
                     .fg(separator_color)
                     .add_modifier(Modifier::BOLD),

@@ -69,9 +69,12 @@ pub struct Cli {
     #[arg(short, long, value_enum, default_value = "auto")]
     pub backend: BackendType,
 
-    /// Use mock backend (shortcut for --backend mock)
-    #[arg(long, conflicts_with = "json")]
-    pub mock: bool,
+    /// Use mock backend with an optional chip count (shortcut for --backend mock)
+    ///
+    /// `--mock` alone uses the --mock-devices count (default 3).
+    /// `--mock N` is shorthand for `--mock --mock-devices N` — e.g. `--mock 32`.
+    #[arg(long, conflicts_with = "json", num_args(0..=1), default_missing_value = "0")]
+    pub mock: Option<usize>,
 
     /// Use JSON backend (shortcut for --backend json)
     #[arg(long, conflicts_with = "mock")]
@@ -222,7 +225,7 @@ impl Cli {
         let mut cli = Self::parse();
 
         // Handle shortcut flags
-        if cli.mock {
+        if cli.mock.is_some() {
             cli.backend = BackendType::Mock;
         } else if cli.json {
             cli.backend = BackendType::Json;
@@ -235,12 +238,23 @@ impl Cli {
     ///
     /// This resolves the --mock and --json shortcut flags into the actual backend type.
     pub fn effective_backend(&self) -> BackendType {
-        if self.mock {
+        if self.mock.is_some() {
             BackendType::Mock
         } else if self.json {
             BackendType::Json
         } else {
             self.backend
+        }
+    }
+
+    /// Get the number of mock devices to create.
+    ///
+    /// `--mock N` takes precedence over `--mock-devices N`.
+    /// `--mock` alone (or not specified) falls back to `--mock-devices` (default 3).
+    pub fn effective_mock_devices(&self) -> usize {
+        match self.mock {
+            Some(n) if n > 0 => n,   // --mock 32  → use the inline count
+            _ => self.mock_devices,  // --mock / --mock-devices / default
         }
     }
 
@@ -322,7 +336,7 @@ impl Cli {
         }
 
         // Warn if mock-devices specified with non-mock backend
-        if self.effective_backend() != BackendType::Mock && self.mock_devices != 3 {
+        if self.effective_backend() != BackendType::Mock && self.mock_devices != 3 && self.mock.is_none() {
             eprintln!(
                 "Warning: --mock-devices ignored when not using mock backend"
             );
@@ -341,7 +355,7 @@ mod tests {
         // Simulate default args
         let cli = Cli {
             backend: BackendType::Auto,
-            mock: false,
+            mock: None,
             json: false,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
@@ -368,7 +382,7 @@ mod tests {
     fn test_mock_shortcut() {
         let cli = Cli {
             backend: BackendType::Auto,
-            mock: true,
+            mock: Some(0),
             json: false,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
@@ -391,7 +405,7 @@ mod tests {
     fn test_json_shortcut() {
         let cli = Cli {
             backend: BackendType::Auto,
-            mock: false,
+            mock: None,
             json: true,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
@@ -414,7 +428,7 @@ mod tests {
     fn test_device_filtering() {
         let cli = Cli {
             backend: BackendType::Auto,
-            mock: false,
+            mock: None,
             json: false,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
@@ -441,7 +455,7 @@ mod tests {
     fn test_verbose_quiet() {
         let verbose_cli = Cli {
             backend: BackendType::Auto,
-            mock: false,
+            mock: None,
             json: false,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
@@ -461,7 +475,7 @@ mod tests {
 
         let quiet_cli = Cli {
             backend: BackendType::Auto,
-            mock: false,
+            mock: None,
             json: false,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
@@ -484,7 +498,7 @@ mod tests {
     fn test_luwen_validation() {
         let cli = Cli {
             backend: BackendType::Luwen,
-            mock: false,
+            mock: None,
             json: false,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
@@ -507,7 +521,7 @@ mod tests {
     fn test_backend_names() {
         let auto_cli = Cli {
             backend: BackendType::Auto,
-            mock: false,
+            mock: None,
             json: false,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
@@ -527,7 +541,7 @@ mod tests {
 
         let mock_cli = Cli {
             backend: BackendType::Mock,
-            mock: true,
+            mock: Some(0),
             json: false,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
@@ -544,5 +558,43 @@ mod tests {
         };
 
         assert_eq!(mock_cli.backend_name(), "Mock");
+    }
+
+    fn mock_cli_with(mock: Option<usize>, mock_devices: usize) -> Cli {
+        Cli {
+            backend: BackendType::Auto,
+            mock,
+            json: false,
+            tt_smi_path: PathBuf::from("tt-smi"),
+            interval: 100,
+            devices: None,
+            verbose: false,
+            quiet: false,
+            mock_devices,
+            max_errors: 10,
+            timeout: 5000,
+            visualize: false,
+            workload: false,
+            print: false,
+            mode: None,
+        }
+    }
+
+    #[test]
+    fn test_effective_mock_devices() {
+        // mock=None: falls back to mock_devices default
+        assert_eq!(mock_cli_with(None, 3).effective_mock_devices(), 3);
+
+        // mock=Some(0): sentinel for bare --mock, falls back to mock_devices
+        assert_eq!(mock_cli_with(Some(0), 3).effective_mock_devices(), 3);
+
+        // mock=Some(0) with custom mock_devices: still falls back to that value
+        assert_eq!(mock_cli_with(Some(0), 8).effective_mock_devices(), 8);
+
+        // mock=Some(N > 0): inline count takes precedence over mock_devices
+        assert_eq!(mock_cli_with(Some(32), 3).effective_mock_devices(), 32);
+
+        // mock=Some(1): edge — 1 > 0 so inline count wins
+        assert_eq!(mock_cli_with(Some(1), 5).effective_mock_devices(), 1);
     }
 }

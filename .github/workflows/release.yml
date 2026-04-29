@@ -10,9 +10,29 @@ permissions:
   contents: write   # upload release assets and push gh-pages
 
 jobs:
+  # ── Build .deb packages for each supported Ubuntu suite ────────────────────
+  #
+  # We run a separate job per suite so each binary links against the glibc
+  # version shipped with that Ubuntu release:
+  #   noble (24.04) → libc6 >= 2.39
+  #   jammy (22.04) → libc6 >= 2.35  (also installs on 24.04)
+  #
+  # The jammy job patches debian/changelog in-place to change the target
+  # suite from "noble" to "jammy" before building.  The resulting .deb files
+  # are renamed with a suite suffix before upload so both can coexist in the
+  # same GitHub Release.
   build-deb:
-    name: Build .deb packages
-    runs-on: ubuntu-24.04
+    name: Build .deb (${{ matrix.suite }})
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false   # if one suite fails, still publish the other
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            suite:  noble
+          - runner: ubuntu-22.04
+            suite:  jammy
 
     steps:
       - uses: actions/checkout@v4
@@ -26,21 +46,42 @@ jobs:
             rustc \
             cargo
 
+      # For non-noble suites: patch the first changelog entry's suite name so
+      # dpkg-buildpackage targets the correct distribution.  This is a
+      # transient in-tree edit — it never gets committed.
+      - name: Patch changelog suite (${{ matrix.suite }})
+        if: matrix.suite != 'noble'
+        run: sed -i "1s/) noble;/) ${{ matrix.suite }};/" debian/changelog
+
       - name: Build .deb packages
         run: ./build-deb.sh --quick
+
+      # Rename output files to include the suite so both variants can be
+      # uploaded to the same GitHub Release without overwriting each other.
+      # dpkg-buildpackage always writes to the parent directory.
+      - name: Rename packages with suite suffix
+        run: |
+          SUITE="${{ matrix.suite }}"
+          for deb in ../tt-toplike*.deb; do
+            # e.g. ../tt-toplike_0.4.3_amd64.deb
+            #   → ../tt-toplike_0.4.3_amd64_noble.deb
+            newname="${deb%.deb}_${SUITE}.deb"
+            mv "$deb" "$newname"
+            echo "Renamed: $(basename "$deb") → $(basename "$newname")"
+          done
 
       - name: Ensure release exists, then upload packages
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          SUITE="${{ matrix.suite }}"
 
           # Create the release only if it doesn't already exist.
-          # Using an explicit view check avoids masking unrelated errors
-          # (auth failures, API errors) that || true would silently swallow.
+          # Matrix jobs race here; the losing job will see the release already
+          # created by the winner and skip straight to upload — that's fine.
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $GITHUB_REF_NAME already exists."
+            echo "Release $GITHUB_REF_NAME already exists — skipping create."
           else
             gh release create "$GITHUB_REF_NAME" \
               --repo "$GITHUB_REPOSITORY" \
@@ -50,23 +91,32 @@ jobs:
           fi
 
           gh release upload "$GITHUB_REF_NAME" \
-            ../tt-toplike_*_amd64.deb \
-            ../tt-toplike-app_*_amd64.deb \
+            ../tt-toplike_*_amd64_${SUITE}.deb \
+            ../tt-toplike-app_*_amd64_${SUITE}.deb \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
+  # ── Update gh-pages site (runs once after all suite builds succeed) ─────────
+  update-site:
+    name: Update project site
+    runs-on: ubuntu-24.04
+    needs: build-deb
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - uses: actions/checkout@v4
+
       # Check out gh-pages as a sibling directory so the main checkout
-      # (and its git remote) is untouched. The actions/checkout token
-      # is used automatically — no need to embed it in a URL.
+      # (and its git remote) is untouched.
       - name: Check out gh-pages branch
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/checkout@v4
         with:
           ref: gh-pages
           path: gh-pages
 
       - name: Update project site with new version
-        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           REPO="${GITHUB_REPOSITORY}"

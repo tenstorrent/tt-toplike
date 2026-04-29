@@ -5799,7 +5799,7 @@ dependencies = [
 
 [[package]]
 name = "tt-toplike"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "all-smi-luwen-core",
  "all-smi-luwen-if",
@@ -5829,6 +5829,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "unicode-width 0.1.14",
  "vte",
  "which",
 ]

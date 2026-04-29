@@ -37,7 +37,7 @@ pub fn create_backend(
             create_auto_backend(config, cli)
         }
         BackendType::Mock => {
-            let mut backend = MockBackend::with_config(cli.mock_devices, config);
+            let mut backend = MockBackend::with_config(cli.effective_mock_devices(), config);
             backend.init()?;
             Ok(Box::new(backend))
         }
@@ -127,7 +127,7 @@ fn create_auto_backend(config: BackendConfig, cli: &Cli) -> BackendResult<Box<dy
     // Fallback to mock backend (always succeeds)
     log::info!("No hardware backends available, using mock backend");
     log::info!("Tip: Use --backend luwen for direct hardware access (requires PCI permissions)");
-    let mut backend = MockBackend::with_config(cli.mock_devices, config);
+    let mut backend = MockBackend::with_config(cli.effective_mock_devices(), config);
     backend.init()?;
     Ok(Box::new(backend))
 }
@@ -235,7 +235,7 @@ mod tests {
         // Create a mock Cli instance for testing
         let cli = Cli {
             backend: BackendType::Mock,
-            mock: true,
+            mock: Some(0),
             json: false,
             tt_smi_path: std::path::PathBuf::from("tt-smi"),
             interval: 100,
