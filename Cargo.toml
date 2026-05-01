@@ -98,6 +98,10 @@ arc-swap = "1.7"
 # Path resolution — resolves bare program names via PATH at startup
 which = "7"
 
+[target.'cfg(unix)'.dependencies]
+# libc: used for kill(2) syscall in the Insights screen kill panel
+libc = "0.2"
+
 [dev-dependencies]
 # Testing
 mockall = "0.13"

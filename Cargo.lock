@@ -5813,6 +5813,7 @@ dependencies = [
  "egui_plot",
  "env_logger",
  "iced",
+ "libc",
  "log",
  "mockall",
  "num-traits",
