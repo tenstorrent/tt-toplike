@@ -27,7 +27,7 @@ pub struct TelemetrySample {
 pub struct PowerTrend {
     /// W/s (positive = rising). Zero when fewer than 2 samples.
     pub slope:       f32,
-    /// Standard deviation of power in last 10 samples.
+    /// Standard deviation (not raw variance) of power in last 10 samples.
     pub variance:    f32,
     /// True when last 8 samples are monotonically rising.
     pub is_rising:   bool,
@@ -120,6 +120,8 @@ pub struct InferenceEngine {
     /// 30-sample rolling window per device index.
     pub history:  HashMap<usize, VecDeque<TelemetrySample>>,
     /// Last seen ARC health counters for stall detection.
+    /// Updated by `ingest()` after reading SMBUS arc health values;
+    /// compared against current values in `classify()` to detect frozen counters.
     pub prev_arc: HashMap<usize, [Option<u32>; 4]>,
     /// Shared adaptive baseline (learns idle power/current/temp).
     pub baseline: AdaptiveBaseline,
