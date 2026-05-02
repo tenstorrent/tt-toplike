@@ -16,11 +16,15 @@ use crate::backend::{factory, BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
 use crate::error::TTTopError;
 use crate::ui::colors;
+#[cfg(feature = "linux-procfs")]
+use crate::workload::{InferenceEngine, ProcessMonitor};
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+#[cfg(unix)]
+use libc;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -32,12 +36,23 @@ use ratatui::{
 use std::io::{self, IsTerminal};
 use std::time::{Duration, Instant};
 
+/// Pending kill confirmation state.
+#[cfg(feature = "linux-procfs")]
+#[derive(Debug, Clone)]
+struct KillConfirmState {
+    pid:    i32,
+    name:   String,
+    signal: i32,   // libc::SIGTERM (15) or libc::SIGKILL (9)
+}
+
 /// UI display mode
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum DisplayMode {
-    /// Normal table view with telemetry
-    Normal,
-    /// Hardware-responsive starfield visualization (original)
+    /// Insights screen (human-readable inference per chip + process panel)
+    Insights,
+    /// Raw telemetry table (old Normal mode, now secondary)
+    Table,
+    /// Hardware-responsive starfield visualization
     Starfield,
     /// Memory Castle mode (architectural memory hierarchy visualization)
     MemoryCastle,
@@ -147,20 +162,28 @@ fn run_app(
     // UI state - initialize from CLI --mode option if provided
     let mut display_mode = if let Some(mode) = cli.mode {
         match mode {
-            crate::cli::VisualizationMode::Normal => DisplayMode::Normal,
+            crate::cli::VisualizationMode::Normal    => DisplayMode::Table,  // old Normal → Table
             crate::cli::VisualizationMode::Starfield => DisplayMode::Starfield,
-            crate::cli::VisualizationMode::Castle => DisplayMode::MemoryCastle,
-            crate::cli::VisualizationMode::Flow => DisplayMode::MemoryFlow,
-            crate::cli::VisualizationMode::Arcade => DisplayMode::Arcade,
+            crate::cli::VisualizationMode::Castle    => DisplayMode::MemoryCastle,
+            crate::cli::VisualizationMode::Flow      => DisplayMode::MemoryFlow,
+            crate::cli::VisualizationMode::Arcade    => DisplayMode::Arcade,
         }
     } else {
-        DisplayMode::Normal
+        DisplayMode::Insights   // default is now Insights
     };
     let mut starfield: Option<HardwareStarfield> = None;
     let mut memory_castle: Option<MemoryCastle> = None;
     let mut memory_flow: Option<MemoryFlowVis> = None;
     let mut arcade: Option<ArcadeVisualization> = None;
     let mut prev_display_mode = display_mode;
+
+    // Insights mode state
+    #[cfg(feature = "linux-procfs")]
+    let mut inference_engine = InferenceEngine::new();
+    #[cfg(feature = "linux-procfs")]
+    let mut process_cursor: usize = 0;
+    #[cfg(feature = "linux-procfs")]
+    let mut kill_confirm: Option<KillConfirmState> = None;
 
     loop {
         // Initialize or update visualizations
@@ -212,8 +235,20 @@ fn run_app(
                     arc.update(backend);
                 }
             }
-            DisplayMode::Normal => {
-                // Normal mode doesn't need special init
+            DisplayMode::Insights => {
+                // Ingest latest telemetry into InferenceEngine each frame
+                #[cfg(feature = "linux-procfs")]
+                for device in backend.devices() {
+                    let idx = device.index;
+                    let power   = backend.telemetry(idx).map(|t| t.power_w()).unwrap_or(0.0);
+                    let temp    = backend.telemetry(idx).map(|t| t.temp_c()).unwrap_or(0.0);
+                    let current = backend.telemetry(idx).map(|t| t.current_a()).unwrap_or(0.0);
+                    let aiclk   = backend.telemetry(idx).and_then(|t| t.aiclk);
+                    inference_engine.ingest(idx, power, temp, current, aiclk);
+                }
+            }
+            DisplayMode::Table => {
+                // Table mode doesn't need special init
             }
         }
 
@@ -233,10 +268,18 @@ fn run_app(
                 );
 
                 match display_mode {
-                    #[cfg(feature = "linux-procfs")]
-                    DisplayMode::Normal => ui(f, backend, cli, &process_monitor),
-                    #[cfg(not(feature = "linux-procfs"))]
-                    DisplayMode::Normal => ui(f, backend, cli),
+                    DisplayMode::Insights => {
+                        #[cfg(feature = "linux-procfs")]
+                        render_insights(f, backend, &inference_engine, &process_monitor, process_cursor, kill_confirm.as_ref(), cli);
+                        #[cfg(not(feature = "linux-procfs"))]
+                        render_insights_no_procfs(f, backend, &crate::workload::InferenceEngine::new());
+                    }
+                    DisplayMode::Table => {
+                        #[cfg(feature = "linux-procfs")]
+                        ui(f, backend, cli, &process_monitor);
+                        #[cfg(not(feature = "linux-procfs"))]
+                        ui(f, backend, cli);
+                    }
                     DisplayMode::Starfield => {
                         if let Some(ref sf) = starfield {
                             ui_visualization(f, sf, backend);
@@ -276,7 +319,17 @@ fn run_app(
                 terminal.clear().ok();
             }
             Event::Key(key) => match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => {
+                    KeyCode::Char('q') => {
+                        return Ok(());
+                    }
+                    KeyCode::Esc => {
+                        #[cfg(feature = "linux-procfs")]
+                        if kill_confirm.is_some() {
+                            kill_confirm = None;
+                        } else {
+                            return Ok(());
+                        }
+                        #[cfg(not(feature = "linux-procfs"))]
                         return Ok(());
                     }
                     KeyCode::Char('r') => {
@@ -288,8 +341,9 @@ fn run_app(
                     KeyCode::Char('v') => {
                         // Cycle through visualization modes
                         display_mode = match display_mode {
-                            DisplayMode::Normal => DisplayMode::MemoryFlow,
-                            DisplayMode::MemoryFlow => DisplayMode::Starfield,
+                            DisplayMode::Insights    => DisplayMode::Table,
+                            DisplayMode::Table       => DisplayMode::MemoryFlow,
+                            DisplayMode::MemoryFlow  => DisplayMode::Starfield,
                             DisplayMode::Starfield => {
                                 // Randomize Memory Castle on each activation
                                 memory_castle = None;
@@ -300,7 +354,7 @@ fn run_app(
                                 arcade = None;
                                 DisplayMode::Arcade
                             }
-                            DisplayMode::Arcade => DisplayMode::Normal,
+                            DisplayMode::Arcade => DisplayMode::Insights,
                         };
                         log::info!("Switched to {:?} mode", display_mode);
                     }
@@ -338,6 +392,55 @@ fn run_app(
                                 log::error!("Failed to switch backend: {}", e);
                             }
                         }
+                    }
+                    // Insights-mode navigation and kill
+                    #[cfg(feature = "linux-procfs")]
+                    KeyCode::Up if display_mode == DisplayMode::Insights => {
+                        if kill_confirm.is_none() {
+                            process_cursor = process_cursor.saturating_sub(1);
+                        }
+                    }
+                    #[cfg(feature = "linux-procfs")]
+                    KeyCode::Down if display_mode == DisplayMode::Insights => {
+                        if kill_confirm.is_none() {
+                            let max = flat_process_list(&process_monitor).len().saturating_sub(1);
+                            process_cursor = (process_cursor + 1).min(max);
+                        }
+                    }
+                    #[cfg(feature = "linux-procfs")]
+                    KeyCode::Char('k') if display_mode == DisplayMode::Insights => {
+                        if kill_confirm.is_none() {
+                            if let Some(proc) = flat_process_list(&process_monitor).get(process_cursor) {
+                                kill_confirm = Some(KillConfirmState {
+                                    pid: proc.pid,
+                                    name: proc.name.clone(),
+                                    signal: libc::SIGTERM,
+                                });
+                            }
+                        }
+                    }
+                    #[cfg(feature = "linux-procfs")]
+                    KeyCode::Char('K') if display_mode == DisplayMode::Insights => {
+                        if kill_confirm.is_none() {
+                            if let Some(proc) = flat_process_list(&process_monitor).get(process_cursor) {
+                                kill_confirm = Some(KillConfirmState {
+                                    pid: proc.pid,
+                                    name: proc.name.clone(),
+                                    signal: libc::SIGKILL,
+                                });
+                            }
+                        }
+                    }
+                    #[cfg(feature = "linux-procfs")]
+                    KeyCode::Char('y') | KeyCode::Enter if display_mode == DisplayMode::Insights => {
+                        if let Some(ref kc) = kill_confirm {
+                            let _ = crate::workload::process_monitor::kill_pid(kc.pid, kc.signal);
+                            kill_confirm = None;
+                        }
+                    }
+                    #[cfg(feature = "linux-procfs")]
+                    KeyCode::Char('n') if display_mode == DisplayMode::Insights => {
+                        kill_confirm = None;
                     }
                     _ => {}
                 }
@@ -1626,4 +1729,119 @@ fn render_arcade_footer(f: &mut Frame, area: Rect, backend: &Box<dyn TelemetryBa
         .alignment(Alignment::Center);
 
     f.render_widget(footer, area);
+}
+
+/// Truncate a string to at most `max` characters (by char count, not bytes).
+fn truncate(s: &str, max: usize) -> &str {
+    let mut end = 0;
+    let mut count = 0;
+    for c in s.chars() {
+        if count >= max { break; }
+        end += c.len_utf8();
+        count += 1;
+    }
+    &s[..end]
+}
+
+/// Flatten all processes into one ordered Vec for cursor navigation.
+#[cfg(feature = "linux-procfs")]
+fn flat_process_list<'a>(pm: &'a ProcessMonitor) -> Vec<&'a crate::workload::ProcessInfo> {
+    let mut all: Vec<&'a crate::workload::ProcessInfo> = Vec::new();
+    for idx in 0..32 {
+        if let Some(procs) = pm.get_processes_for_device(idx) {
+            for p in procs {
+                if !all.iter().any(|existing| existing.pid == p.pid) {
+                    all.push(p);
+                }
+            }
+        }
+    }
+    for p in pm.get_shared_processes() {
+        if !all.iter().any(|existing| existing.pid == p.pid) {
+            all.push(p);
+        }
+    }
+    all
+}
+
+/// Render Insights screen (full layout — implemented by Task 8/9 helpers below).
+#[cfg(feature = "linux-procfs")]
+fn render_insights(
+    f: &mut Frame,
+    backend: &Box<dyn TelemetryBackend>,
+    engine: &InferenceEngine,
+    pm: &ProcessMonitor,
+    cursor: usize,
+    kill_confirm: Option<&KillConfirmState>,
+    _cli: &Cli,
+) {
+    let area = f.area();
+    let devices = backend.devices();
+    let n = devices.len().max(1);
+
+    // Layout: header(3) | cards(4*n) | process panel (min 3) | footer(1)
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length((4 * n) as u16),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    render_header(f, chunks[0], backend);
+    render_device_cards(f, chunks[1], backend, engine);
+    render_process_panel(f, chunks[2], pm, &flat_process_list(pm), cursor, kill_confirm);
+    render_insights_footer(f, chunks[3], kill_confirm);
+}
+
+/// Stub Insights render for non-linux-procfs builds.
+#[cfg(not(feature = "linux-procfs"))]
+fn render_insights_no_procfs(
+    f: &mut Frame,
+    backend: &Box<dyn TelemetryBackend>,
+    engine: &crate::workload::InferenceEngine,
+) {
+    let _ = (f, backend, engine);
+}
+
+/// Render borderless device cards — 3 content lines + 1 blank per device.
+/// Stub — full implementation in Task 8.
+#[cfg(feature = "linux-procfs")]
+fn render_device_cards(
+    f: &mut Frame,
+    area: Rect,
+    backend: &Box<dyn TelemetryBackend>,
+    engine: &InferenceEngine,
+) {
+    // stub — replaced in Task 8
+    let _ = (f, area, backend, engine);
+}
+
+/// Render the process panel with cursor, device mapping, and kill confirmation.
+/// Stub — full implementation in Task 9.
+#[cfg(feature = "linux-procfs")]
+fn render_process_panel(
+    f: &mut Frame,
+    area: Rect,
+    pm: &ProcessMonitor,
+    procs: &[&crate::workload::ProcessInfo],
+    cursor: usize,
+    kill_confirm: Option<&KillConfirmState>,
+) {
+    // stub — replaced in Task 9
+    let _ = (f, area, pm, procs, cursor, kill_confirm);
+}
+
+/// One-line footer for Insights mode.
+/// Stub — full implementation in Task 9.
+#[cfg(feature = "linux-procfs")]
+fn render_insights_footer(
+    f: &mut Frame,
+    area: Rect,
+    kill_confirm: Option<&KillConfirmState>,
+) {
+    // stub — replaced in Task 9
+    let _ = (f, area, kill_confirm);
 }
