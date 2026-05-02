@@ -119,10 +119,6 @@ pub fn state_color(state: DeviceInferenceState) -> Color {
 pub struct InferenceEngine {
     /// 30-sample rolling window per device index.
     pub history:  HashMap<usize, VecDeque<TelemetrySample>>,
-    /// Last seen ARC health counters for stall detection.
-    /// Updated by `ingest()` after reading SMBUS arc health values;
-    /// compared against current values in `classify()` to detect frozen counters.
-    pub prev_arc: HashMap<usize, [Option<u32>; 4]>,
     /// Shared adaptive baseline (learns idle power/current/temp).
     pub baseline: AdaptiveBaseline,
 }
@@ -132,7 +128,6 @@ impl InferenceEngine {
     pub fn new() -> Self {
         Self {
             history:  HashMap::new(),
-            prev_arc: HashMap::new(),
             baseline: AdaptiveBaseline::new(),
         }
     }
@@ -201,7 +196,7 @@ impl InferenceEngine {
         let eth0_err = smbus.map(|s| is_eth_status_error(s.eth_status0.as_deref())).unwrap_or(false);
         let eth1_err = smbus.map(|s| is_eth_status_error(s.eth_status1.as_deref())).unwrap_or(false);
         let has_faults = smbus.map(|s| {
-            matches!(s.faults.as_deref(), Some(f) if f != "0" && f != "0x0" && !f.is_empty())
+            matches!(s.faults.as_deref(), Some(f) if f != "0" && f != "0x0" && f != "0X0" && !f.is_empty())
         }).unwrap_or(false);
 
         // Baseline power (for bar fallback)
@@ -408,7 +403,7 @@ impl InferenceEngine {
         let tdp_field = tdp_w.map(|tdp| {
             let pct = ((power / tdp) * 100.0).round() as u32;
             format!("{:3}% TDP", pct)
-        }).unwrap_or_else(|| "--- TDP".to_string());
+        }).unwrap_or_else(|| " --- TDP".to_string());
         let detail = format!("{:<8}  {:<14}  {}",
             trend_word, pattern_word, tdp_field);
 
@@ -420,12 +415,17 @@ impl InferenceEngine {
     }
 
     fn unknown_result(&self) -> InferenceResult {
+        // Headline must match the 32-char width produced by build_result:
+        //   power_str(6) + "   "(3) + temp_str(7) + "  "(2) + clk_str(7) + "  "(2) + delta_str(5)
+        //   "  ---W"      + "   "   + "  ---°C"   + "  "   + "  ---  "   + "  "   + "  ---"
+        let headline = "  ---W     ---\u{00B0}C    ---      ---".to_string();
+        debug_assert_eq!(headline.chars().count(), 32, "unknown_result headline must be 32 chars");
         InferenceResult {
             state: DeviceInferenceState::Unclear,
             confidence: Confidence::Low,
             label: "INSCRUTABLE",
             label_color: Color::DarkGray,
-            headline: "  ---W     ---\u{00B0}C    ---    ---".to_string(),
+            headline,
             detail: "--------  who can say      --- TDP".to_string(),
             power_pct_of_tdp: None,
             power_pct_baseline: 0.0,
