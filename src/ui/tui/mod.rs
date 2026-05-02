@@ -23,7 +23,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-#[cfg(unix)]
+#[cfg(feature = "linux-procfs")]
 use libc;
 use ratatui::{
     backend::CrosstermBackend,
