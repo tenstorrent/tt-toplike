@@ -545,6 +545,15 @@ fn pattern_vocabulary(state: DeviceInferenceState) -> &'static str {
     }
 }
 
+/// Produce a `width`-character power bar using `█` (filled) and `░` (empty).
+///
+/// `fraction` — 0.0..=1.0 fill fraction (clamped).
+pub fn render_power_bar(fraction: f32, width: usize) -> String {
+    let filled = (fraction.clamp(0.0, 1.0) * width as f32).round() as usize;
+    let empty  = width.saturating_sub(filled);
+    format!("{}{}", "█".repeat(filled), "░".repeat(empty))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -689,5 +698,26 @@ mod tests {
         assert!(!is_eth_status_error(Some("0")));
         assert!(!is_eth_status_error(Some("0x0")));
         assert!(!is_eth_status_error(None));
+    }
+
+    #[test]
+    fn power_bar_full_tdp() {
+        let bar = render_power_bar(1.0, 20);
+        assert_eq!(bar.chars().count(), 20);
+        assert!(bar.chars().all(|c| c == '█'));
+    }
+
+    #[test]
+    fn power_bar_half() {
+        let bar = render_power_bar(0.5, 20);
+        assert_eq!(bar.chars().count(), 20);
+        let filled: usize = bar.chars().filter(|&c| c == '█').count();
+        assert_eq!(filled, 10);
+    }
+
+    #[test]
+    fn power_bar_zero() {
+        let bar = render_power_bar(0.0, 20);
+        assert!(bar.chars().all(|c| c == '░'));
     }
 }
