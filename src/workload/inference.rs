@@ -121,20 +121,31 @@ pub struct InferenceEngine {
     pub history:  HashMap<usize, VecDeque<TelemetrySample>>,
     /// Shared adaptive baseline (learns idle power/current/temp).
     pub baseline: AdaptiveBaseline,
+    /// Last observed ARC health counter values per device.
+    arc_snapshots: HashMap<usize, [Option<u32>; 4]>,
+    /// How many consecutive frames the ARC counters have been identical.
+    /// Resets to 0 when any counter changes. Stall declared above ~30 frames.
+    arc_stall_frames: HashMap<usize, u32>,
 }
 
 impl InferenceEngine {
     /// Create a new engine with empty history.
     pub fn new() -> Self {
         Self {
-            history:  HashMap::new(),
-            baseline: AdaptiveBaseline::new(),
+            history:          HashMap::new(),
+            baseline:         AdaptiveBaseline::new(),
+            arc_snapshots:    HashMap::new(),
+            arc_stall_frames: HashMap::new(),
         }
     }
 
     /// Push a new telemetry sample for `device_idx` into the rolling history.
     ///
-    /// Also updates the shared `AdaptiveBaseline` for this device.
+    /// Also updates the shared `AdaptiveBaseline` and ARC stall tracking for this device.
+    ///
+    /// `arc_health` — current parsed ARC counter values, or `None` if not available.
+    /// The engine compares them across frames; stall is only declared after ~30
+    /// consecutive frames of identical counters (~3 s at 10 Hz).
     pub fn ingest(
         &mut self,
         device_idx: usize,
@@ -142,6 +153,7 @@ impl InferenceEngine {
         temp: f32,
         current: f32,
         aiclk: Option<u32>,
+        arc_health: Option<[Option<u32>; 4]>,
     ) {
         // Update baseline (learns idle state over first 20 samples)
         self.baseline.update(device_idx, power, current, temp, aiclk.unwrap_or(0) as f32);
@@ -155,6 +167,34 @@ impl InferenceEngine {
         while deque.len() > 30 {
             deque.pop_front();
         }
+
+        // Track ARC counter stall state across frames.
+        // ARC firmware (TIMER_HEARTBEAT) updates at ~1 Hz; we poll at ~10 Hz.
+        // Comparing consecutive frames would always look "frozen", so we only
+        // declare a real stall after 30 consecutive frames with the same value.
+        match arc_health {
+            Some(current_counts) => {
+                let stall_count = self.arc_stall_frames.entry(device_idx).or_insert(0);
+                if let Some(prev) = self.arc_snapshots.get(&device_idx) {
+                    let any_counter_unchanged = prev.iter().zip(current_counts.iter()).any(|(p, c)| {
+                        matches!((p, c), (Some(pv), Some(cv)) if pv == cv)
+                    });
+                    if any_counter_unchanged {
+                        *stall_count = stall_count.saturating_add(1);
+                    } else {
+                        *stall_count = 0;
+                    }
+                } else {
+                    // First time we see this device's counters — not stalled yet.
+                    *stall_count = 0;
+                }
+                self.arc_snapshots.insert(device_idx, current_counts);
+            }
+            None => {
+                // No ARC data available — clear stall counter so we don't false-positive.
+                self.arc_stall_frames.insert(device_idx, 0);
+            }
+        }
     }
 
     /// Classify the current state of `device_idx`.
@@ -162,13 +202,14 @@ impl InferenceEngine {
     /// # Arguments
     /// * `device_idx` — device index (0-based)
     /// * `smbus` — optional SMBUS telemetry for richer classification
-    /// * `arc_counters` — optional prev [arc0..arc3] health counter values (for stall detection)
     /// * `device_count` — total number of devices (for FabricDegraded check)
+    ///
+    /// ARC stall detection uses internal cross-frame tracking updated via `ingest()`,
+    /// not a caller-supplied snapshot, to avoid false positives from slow counter updates.
     pub fn classify(
         &self,
         device_idx: usize,
         smbus: Option<&crate::models::telemetry::SmbusTelemetry>,
-        arc_counters: Option<&[Option<u32>; 4]>,
         device_count: usize,
     ) -> InferenceResult {
         let history = match self.history.get(&device_idx) {
@@ -211,26 +252,12 @@ impl InferenceEngine {
 
         // ── Priority-ordered classification ──────────────────────────────
 
-        // 1. Stalled — ARC health counters frozen
-        let stalled = {
-            let arc_frozen = arc_counters.map(|prev| {
-                let current_counts = smbus.map(|s| parse_arc_health_counters([
-                    s.arc0_health.clone(), s.arc1_health.clone(),
-                    s.arc2_health.clone(), s.arc3_health.clone(),
-                ]));
-                match current_counts {
-                    Some(cur) => {
-                        // Stalled if ANY counter that previously existed hasn't moved
-                        prev.iter().zip(cur.iter()).any(|(p, c)| {
-                            matches!((p, c), (Some(pv), Some(cv)) if pv == cv)
-                        })
-                    }
-                    None => false,
-                }
-            }).unwrap_or(false);
-            arc_frozen
-        };
-        if stalled {
+        // 1. Stalled — ARC health counters unchanged for ≥30 consecutive frames (~3 s).
+        // The counter (TIMER_HEARTBEAT) updates at ~1 Hz; at 10 Hz polling it is naturally
+        // identical across ~10 consecutive frames.  We only declare a real stall after
+        // 30 frames so brief polling coincidences don't trigger this.
+        let arc_stall_frames = self.arc_stall_frames.get(&device_idx).copied().unwrap_or(0);
+        if arc_stall_frames >= 30 {
             return self.build_result(
                 DeviceInferenceState::Stalled, Confidence::High,
                 power, temp, aiclk, power_change,
@@ -585,7 +612,7 @@ mod tests {
         // 30 samples all at 15W, 50°C, current 10A
         let powers = vec![15.0_f32; 30];
         let eng = engine_with_history(&powers, 50.0, 10.0);
-        let result = eng.classify(0, None, None, 1);
+        let result = eng.classify(0, None, 1);
         assert_eq!(result.state, DeviceInferenceState::Idle);
     }
 
@@ -597,7 +624,7 @@ mod tests {
         for s in eng.history.get_mut(&0).unwrap().iter_mut() {
             s.temp = 83.5;
         }
-        let result = eng.classify(0, None, None, 1);
+        let result = eng.classify(0, None, 1);
         assert_eq!(result.state, DeviceInferenceState::ThermalStress);
     }
 
@@ -608,7 +635,7 @@ mod tests {
             .map(|i| if i % 2 == 0 { 10.0 } else { 40.0 })
             .collect();
         let eng = engine_with_history(&powers, 55.0, 15.0);
-        let result = eng.classify(0, None, None, 1);
+        let result = eng.classify(0, None, 1);
         // Should match Thinking (high variance, active)
         assert_eq!(result.state, DeviceInferenceState::Thinking);
     }

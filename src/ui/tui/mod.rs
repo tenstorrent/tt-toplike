@@ -239,12 +239,18 @@ fn run_app(
                 // Ingest latest telemetry into InferenceEngine each frame
                 #[cfg(feature = "linux-procfs")]
                 for device in backend.devices() {
-                    let idx = device.index;
+                    use crate::workload::inference::parse_arc_health_counters;
+                    let idx     = device.index;
                     let power   = backend.telemetry(idx).map(|t| t.power_w()).unwrap_or(0.0);
                     let temp    = backend.telemetry(idx).map(|t| t.temp_c()).unwrap_or(0.0);
                     let current = backend.telemetry(idx).map(|t| t.current_a()).unwrap_or(0.0);
                     let aiclk   = backend.telemetry(idx).and_then(|t| t.aiclk);
-                    inference_engine.ingest(idx, power, temp, current, aiclk);
+                    // Parse ARC health counters for stall detection (tracked across frames inside the engine).
+                    let arc_health = backend.smbus_telemetry(idx).map(|s| parse_arc_health_counters([
+                        s.arc0_health.clone(), s.arc1_health.clone(),
+                        s.arc2_health.clone(), s.arc3_health.clone(),
+                    ]));
+                    inference_engine.ingest(idx, power, temp, current, aiclk, arc_health);
                 }
             }
             DisplayMode::Table => {
@@ -1814,7 +1820,7 @@ fn render_device_cards(
     backend: &Box<dyn TelemetryBackend>,
     engine: &InferenceEngine,
 ) {
-    use crate::workload::inference::{parse_arc_health_counters, render_power_bar};
+    use crate::workload::inference::render_power_bar;
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
 
@@ -1825,12 +1831,10 @@ fn render_device_cards(
         let idx = device.index;
         let smbus = backend.smbus_telemetry(idx);
 
-        // Classify current device state using the inference engine.
-        let arc_counts = smbus.map(|s| parse_arc_health_counters([
-            s.arc0_health.clone(), s.arc1_health.clone(),
-            s.arc2_health.clone(), s.arc3_health.clone(),
-        ]));
-        let result = engine.classify(idx, smbus, arc_counts.as_ref(), devices.len());
+        // Classify current device state. ARC stall detection uses the engine's
+        // internal cross-frame counter tracking (updated via ingest()), so we
+        // don't pass a snapshot here.
+        let result = engine.classify(idx, smbus, devices.len());
 
         // ── Line 1: device identity ───────────────────────────────────────
         let board_type = device.board_type.as_str();
