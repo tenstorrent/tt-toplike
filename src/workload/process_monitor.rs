@@ -14,6 +14,8 @@
 
 use procfs::process::{FDTarget, Process};
 use std::collections::HashMap;
+#[cfg(unix)]
+use libc;
 
 /// Information about a process using Tenstorrent devices
 #[derive(Debug, Clone)]
@@ -235,5 +237,48 @@ impl ProcessMonitor {
 impl Default for ProcessMonitor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Send a signal to a process by PID.
+///
+/// Returns `Ok(())` on success, or an `io::Error` with the OS error on failure.
+/// Common errors: `ESRCH` (no such process), `EPERM` (permission denied).
+#[cfg(unix)]
+pub fn kill_pid(pid: i32, signal: libc::c_int) -> std::io::Result<()> {
+    let ret = unsafe { libc::kill(pid, signal) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kill_pid_invalid_returns_error() {
+        // PID 1 (init/systemd) is owned by root — a non-root process always gets EPERM.
+        // We use SIGTERM rather than a zero signal so the real libc::kill() path is exercised.
+        // On CI running as root, skip because kill(1, SIGTERM) would succeed (and be dangerous).
+        if unsafe { libc::getuid() } == 0 {
+            return; // running as root — skip to avoid killing init
+        }
+        let result = kill_pid(1, libc::SIGTERM);
+        assert!(result.is_err(), "kill_pid(1, SIGTERM) should fail for non-root (EPERM)");
+        let err = result.unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EPERM));
+    }
+
+    #[test]
+    fn kill_pid_nonexistent_returns_error() {
+        // PID i32::MAX is virtually guaranteed to not exist.
+        let result = kill_pid(i32::MAX, libc::SIGTERM);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // Expected: ESRCH (no such process)
+        assert_eq!(err.raw_os_error(), Some(libc::ESRCH));
     }
 }
