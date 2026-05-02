@@ -254,7 +254,7 @@ pub fn kill_pid(pid: i32, signal: libc::c_int) -> std::io::Result<()> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
