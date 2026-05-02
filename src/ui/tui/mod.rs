@@ -1910,7 +1910,6 @@ fn render_device_cards(
 }
 
 /// Render the process panel with cursor, device mapping, and kill confirmation.
-/// Stub — full implementation in Task 9.
 #[cfg(feature = "linux-procfs")]
 fn render_process_panel(
     f: &mut Frame,
@@ -1920,18 +1919,121 @@ fn render_process_panel(
     cursor: usize,
     kill_confirm: Option<&KillConfirmState>,
 ) {
-    // stub — replaced in Task 9
-    let _ = (f, area, pm, procs, cursor, kill_confirm);
+    use ratatui::style::{Color, Style};
+    use ratatui::text::{Line, Span};
+
+    let _ = pm; // pm available for future expansion
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Separator rule
+    let rule_width = area.width.saturating_sub(4) as usize;
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("─".repeat(rule_width), Style::default().fg(Color::DarkGray)),
+    ]));
+
+    // Section label
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("Processes", Style::default().fg(Color::Gray)),
+    ]));
+
+    if procs.is_empty() {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "nothing is feeding the chips right now",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    } else {
+        let clamped_cursor = cursor.min(procs.len().saturating_sub(1));
+
+        for (i, proc) in procs.iter().enumerate() {
+            let selected = i == clamped_cursor;
+            let cursor_char = if selected { "▶" } else { " " };
+
+            let name    = format!("{:<12}", truncate(&proc.name, 12));
+            let cmdline = format!("{:<32}", truncate(&proc.cmdline, 32));
+            let pid     = format!("{:>7}", proc.pid);
+            let devices = if proc.device_indices.is_empty() {
+                "shared    ".to_string()
+            } else {
+                let dev_str = proc.device_indices.iter()
+                    .map(|d| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("{:<10}", format!("Dev {}", dev_str))
+            };
+
+            let row_color    = if selected { Color::White } else { Color::Gray };
+            let cursor_color = if selected { Color::Yellow } else { Color::DarkGray };
+
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(cursor_char, Style::default().fg(cursor_color)),
+                Span::raw(" "),
+                Span::styled(name,    Style::default().fg(row_color)),
+                Span::raw("  "),
+                Span::styled(cmdline, Style::default().fg(Color::DarkGray)),
+                Span::raw("  "),
+                Span::styled(pid,     Style::default().fg(Color::Cyan)),
+                Span::raw("  "),
+                Span::styled(devices, Style::default().fg(Color::Blue)),
+            ]));
+        }
+    }
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, area);
 }
 
-/// One-line footer for Insights mode.
-/// Stub — full implementation in Task 9.
+/// One-line footer for Insights mode: kill confirmation when pending, hints otherwise.
 #[cfg(feature = "linux-procfs")]
 fn render_insights_footer(
     f: &mut Frame,
     area: Rect,
     kill_confirm: Option<&KillConfirmState>,
 ) {
-    // stub — replaced in Task 9
-    let _ = (f, area, kill_confirm);
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+
+    let line = if let Some(kc) = kill_confirm {
+        let verb  = if kc.signal == libc::SIGTERM { "silence" } else { "destroy" };
+        let adverb = if kc.signal == libc::SIGTERM { "yes, gently" } else { "yes, hard" };
+        let name_short = truncate(&kc.name, 12);
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("{} {} (PID {})?", verb, name_short, kc.pid),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+            Span::styled("y", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+            Span::styled(adverb, Style::default().fg(Color::Green)),
+            Span::raw("    "),
+            Span::styled("n", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::raw("  nevermind"),
+        ])
+    } else {
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("\u{2191}\u{2193}", Style::default().fg(Color::White)),
+            Span::raw("  move"),
+            Span::raw("  \u{00B7}  "),
+            Span::styled("k", Style::default().fg(Color::Yellow)),
+            Span::raw("  silence"),
+            Span::raw("  \u{00B7}  "),
+            Span::styled("K", Style::default().fg(Color::Red)),
+            Span::raw("  destroy"),
+            Span::raw("  \u{00B7}  "),
+            Span::styled("v", Style::default().fg(Color::Cyan)),
+            Span::raw("  next view"),
+            Span::raw("  \u{00B7}  "),
+            Span::styled("q", Style::default().fg(Color::DarkGray)),
+            Span::raw("  leave"),
+        ])
+    };
+
+    let para = Paragraph::new(line);
+    f.render_widget(para, area);
 }
