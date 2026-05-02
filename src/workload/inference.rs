@@ -141,3 +141,179 @@ impl InferenceEngine {
 impl Default for InferenceEngine {
     fn default() -> Self { Self::new() }
 }
+
+/// Compute rolling-window statistics for the most recent 10 power samples.
+pub fn compute_power_trend(history: &VecDeque<TelemetrySample>) -> PowerTrend {
+    let n = history.len().min(10);
+    if n < 2 {
+        return PowerTrend::default();
+    }
+
+    // Take last `n` samples.
+    let samples: Vec<f32> = history.iter().rev().take(n).map(|s| s.power).collect();
+    // `samples[0]` = most recent, `samples[n-1]` = oldest in window.
+
+    let peak = samples.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+
+    // Standard deviation over last 10 samples.
+    let mean = samples.iter().sum::<f32>() / n as f32;
+    let variance = (samples.iter().map(|&p| (p - mean).powi(2)).sum::<f32>() / n as f32).sqrt();
+
+    // Slope: simple linear regression across time.
+    // x = 0..n-1 (oldest to newest); we reversed above so flip.
+    let xs: Vec<f32> = (0..n).map(|i| i as f32).collect();
+    let ys: Vec<f32> = samples.iter().rev().cloned().collect(); // oldest first
+    let x_mean = xs.iter().sum::<f32>() / n as f32;
+    let y_mean = ys.iter().sum::<f32>() / n as f32;
+    let num: f32 = xs.iter().zip(ys.iter()).map(|(&x, &y)| (x - x_mean) * (y - y_mean)).sum();
+    let den: f32 = xs.iter().map(|&x| (x - x_mean).powi(2)).sum();
+    let slope = if den > 0.0 { num / den } else { 0.0 };
+
+    // Monotone checks over last 8 samples.
+    let check_n = n.min(8);
+    let recent: Vec<f32> = history.iter().rev().take(check_n).map(|s| s.power).collect();
+    let is_rising  = recent.windows(2).all(|w| w[0] >= w[1]); // [0]=newer, [1]=older
+    let is_falling = recent.windows(2).all(|w| w[0] <= w[1]);
+
+    PowerTrend { slope, variance, is_rising, is_falling, peak }
+}
+
+/// Parse a TDP string (decimal watts or hex) into watts.
+/// Returns `None` if the string is absent, zero, or unparseable.
+pub fn parse_tdp_watts(tdp: Option<&str>) -> Option<f32> {
+    let s = tdp?.trim();
+    let raw = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).ok()? as f32
+    } else {
+        s.parse::<f32>().ok()?
+    };
+    if raw > 0.0 { Some(raw) } else { None }
+}
+
+/// Parse all four ARC health counter strings into `[Option<u32>; 4]`.
+pub fn parse_arc_health_counters(raw: [Option<String>; 4]) -> [Option<u32>; 4] {
+    raw.map(|opt| {
+        opt.as_deref().and_then(|s| {
+            let s = s.trim();
+            if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                u32::from_str_radix(hex, 16).ok()
+            } else {
+                s.parse().ok()
+            }
+        })
+    })
+}
+
+/// True if the throttler register indicates throttling is active.
+/// "0", "0x0", "", or None → not throttling.
+pub fn is_throttler_active(throttler: Option<&str>) -> bool {
+    match throttler {
+        None | Some("") | Some("0") | Some("0x0") | Some("0X0") => false,
+        Some(_) => true,
+    }
+}
+
+/// True if an eth_status register indicates link/fabric errors.
+/// "0", "0x0", "", or None → no error.
+pub fn is_eth_status_error(eth_status: Option<&str>) -> bool {
+    match eth_status {
+        None | Some("") | Some("0") | Some("0x0") | Some("0X0") => false,
+        Some(_) => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_sample(power: f32) -> TelemetrySample {
+        TelemetrySample { power, temp: 50.0, current: 10.0, aiclk: Some(1000), timestamp: Instant::now() }
+    }
+
+    #[test]
+    fn power_trend_rising() {
+        let samples: VecDeque<TelemetrySample> = (0..10)
+            .map(|i| make_sample(10.0 + i as f32))
+            .collect();
+        let trend = compute_power_trend(&samples);
+        assert!(trend.is_rising, "monotonically increasing should be rising");
+        assert!(!trend.is_falling);
+        assert!(trend.slope > 0.0);
+    }
+
+    #[test]
+    fn power_trend_falling() {
+        let samples: VecDeque<TelemetrySample> = (0..10)
+            .map(|i| make_sample(20.0 - i as f32))
+            .collect();
+        let trend = compute_power_trend(&samples);
+        assert!(trend.is_falling);
+        assert!(!trend.is_rising);
+    }
+
+    #[test]
+    fn power_trend_variance_stable() {
+        let samples: VecDeque<TelemetrySample> = (0..10)
+            .map(|_| make_sample(15.0))
+            .collect();
+        let trend = compute_power_trend(&samples);
+        assert!(trend.variance < 0.01, "constant power has near-zero variance");
+    }
+
+    #[test]
+    fn power_trend_variance_volatile() {
+        let samples: VecDeque<TelemetrySample> = (0..10)
+            .enumerate()
+            .map(|(i, _)| make_sample(if i % 2 == 0 { 10.0 } else { 30.0 }))
+            .collect();
+        let trend = compute_power_trend(&samples);
+        assert!(trend.variance > 5.0, "alternating ±10W should have high variance");
+    }
+
+    #[test]
+    fn parse_tdp_watts_decimal() {
+        assert_eq!(parse_tdp_watts(Some("300")), Some(300.0_f32));
+    }
+
+    #[test]
+    fn parse_tdp_watts_hex() {
+        assert_eq!(parse_tdp_watts(Some("0x12c")), Some(300.0_f32));
+    }
+
+    #[test]
+    fn parse_tdp_watts_none() {
+        assert_eq!(parse_tdp_watts(None), None);
+    }
+
+    #[test]
+    fn parse_arc_health_zero_is_stalled() {
+        let counters = parse_arc_health_counters([
+            Some("0".to_string()), None, None, None
+        ]);
+        assert_eq!(counters[0], Some(0));
+    }
+
+    #[test]
+    fn parse_arc_health_hex() {
+        let counters = parse_arc_health_counters([
+            Some("0x10e7a".to_string()), None, None, None
+        ]);
+        assert_eq!(counters[0], Some(0x10e7a));
+    }
+
+    #[test]
+    fn throttler_active() {
+        assert!(is_throttler_active(Some("0x1")));
+        assert!(!is_throttler_active(Some("0")));
+        assert!(!is_throttler_active(Some("0x0")));
+        assert!(!is_throttler_active(None));
+    }
+
+    #[test]
+    fn eth_status_error() {
+        assert!(is_eth_status_error(Some("0x1")));
+        assert!(!is_eth_status_error(Some("0")));
+        assert!(!is_eth_status_error(Some("0x0")));
+        assert!(!is_eth_status_error(None));
+    }
+}
