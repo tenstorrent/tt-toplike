@@ -257,6 +257,7 @@ pub struct GddrTempPair(pub [f32; 4]);
 
 /// Unpack a GDDR_X_Y_TEMP hex string (e.g. "0x262a2c2c") into four °C values.
 /// Bytes are extracted little-endian: byte0=LSB is temps[0].
+/// Returns None if the string is empty, `"N/A"`, or not a valid hex value.
 pub fn unpack_gddr_temps(s: &str) -> Option<GddrTempPair> {
     let s = s.trim();
     if s.is_empty() || s == "N/A" { return None; }
@@ -270,10 +271,16 @@ pub fn unpack_gddr_temps(s: &str) -> Option<GddrTempPair> {
     ]))
 }
 
-/// Returns true if the Tensix column `col` (0-indexed among the 14 Tensix columns
-/// on Blackhole) is harvested. Bit N clear → column N is harvested.
+/// Number of Tensix columns in the Blackhole chip grid that can be harvested.
+/// This bitmask field (ENABLED_TENSIX_COL) is Blackhole-specific.
+pub const BH_TENSIX_COL_COUNT: usize = 14;
+
+/// Returns true if the Tensix column `col` (0-indexed among the BH_TENSIX_COL_COUNT
+/// Blackhole Tensix columns) is harvested. Bit N clear → column N is harvested.
+/// Always returns false for col >= BH_TENSIX_COL_COUNT (Blackhole-specific field;
+/// Wormhole uses a different topology mechanism handled in chip_portrait.rs).
 pub fn tensix_col_harvested(enabled_tensix_col: u32, col: usize) -> bool {
-    if col >= 14 { return false; }
+    if col >= BH_TENSIX_COL_COUNT { return false; }
     (enabled_tensix_col >> col) & 1 == 0
 }
 
