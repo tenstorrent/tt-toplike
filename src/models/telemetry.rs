@@ -250,6 +250,51 @@ pub struct SmbusTelemetry {
     pub eth_debug_status1: Option<String>,
 }
 
+/// Four temperature readings packed into one GDDR_X_Y_TEMP hex register.
+/// Byte 0 (LSB) = first temp, byte 3 (MSB) = fourth temp.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GddrTempPair(pub [f32; 4]);
+
+/// Unpack a GDDR_X_Y_TEMP hex string (e.g. "0x262a2c2c") into four °C values.
+/// Bytes are extracted little-endian: byte0=LSB is temps[0].
+pub fn unpack_gddr_temps(s: &str) -> Option<GddrTempPair> {
+    let s = s.trim();
+    if s.is_empty() || s == "N/A" { return None; }
+    let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
+    let v = u32::from_str_radix(hex, 16).ok()?;
+    Some(GddrTempPair([
+        ((v >> 0)  & 0xFF) as f32,
+        ((v >> 8)  & 0xFF) as f32,
+        ((v >> 16) & 0xFF) as f32,
+        ((v >> 24) & 0xFF) as f32,
+    ]))
+}
+
+/// Returns true if the Tensix column `col` (0-indexed among the 14 Tensix columns
+/// on Blackhole) is harvested. Bit N clear → column N is harvested.
+pub fn tensix_col_harvested(enabled_tensix_col: u32, col: usize) -> bool {
+    if col >= 14 { return false; }
+    (enabled_tensix_col >> col) & 1 == 0
+}
+
+/// Firmware bundle + component firmware versions (from tt-smi 5.2.0 `firmwares` block).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FirmwaresInfo {
+    pub fw_bundle_version: Option<String>,
+    pub eth_fw:            Option<String>,
+    pub cm_fw:             Option<String>,
+    pub gddr_fw:           Option<String>,
+}
+
+/// Per-device thermal/power limits (from tt-smi 5.2.0 `limits` block).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeviceLimits {
+    pub tdp_limit:  Option<f32>,
+    pub tdc_limit:  Option<f32>,
+    pub asic_fmax:  Option<u32>,
+    pub thm_limit:  Option<f32>,
+}
+
 /// Parse a string as u32, accepting both "0x1A2B" hex and plain decimal.
 fn parse_hex_or_dec(s: &str) -> Option<u32> {
     let s = s.trim();
@@ -439,5 +484,51 @@ mod tests {
         // Legacy decimal string with nibble value 2 still counts as trained.
         smbus.ddr_status = Some("2".to_string()); // decimal 2 → nibble 0 = 2 = trained
         assert!(smbus.is_ddr_channel_trained(0));
+    }
+
+    // ── GddrTempPair ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_gddr_temp_unpack_normal() {
+        // 0x262a2c2c → bytes LE: 0x2c, 0x2c, 0x2a, 0x26 → [44.0, 44.0, 42.0, 38.0]
+        let pair = unpack_gddr_temps("0x262a2c2c").unwrap();
+        assert_eq!(pair.0, [44.0_f32, 44.0, 42.0, 38.0]);
+    }
+
+    #[test]
+    fn test_gddr_temp_unpack_zero() {
+        let pair = unpack_gddr_temps("0x00000000").unwrap();
+        assert_eq!(pair.0, [0.0_f32, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_gddr_temp_unpack_na() {
+        assert!(unpack_gddr_temps("N/A").is_none());
+        assert!(unpack_gddr_temps("").is_none());
+    }
+
+    // ── tensix_col_harvested ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_harvesting_col_all_active() {
+        // 0x3FFF = all 14 bits set → no harvesting
+        for col in 0..14_usize {
+            assert!(!tensix_col_harvested(0x3FFF, col),
+                "col {} should be active", col);
+        }
+    }
+
+    #[test]
+    fn test_harvesting_col_col0_harvested() {
+        // bit 0 clear → col 0 harvested
+        assert!(tensix_col_harvested(0x3FFE, 0));
+        assert!(!tensix_col_harvested(0x3FFE, 1));
+    }
+
+    #[test]
+    fn test_harvesting_col_all_harvested() {
+        for col in 0..14_usize {
+            assert!(tensix_col_harvested(0x0000, col));
+        }
     }
 }
