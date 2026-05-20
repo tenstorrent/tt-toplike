@@ -461,11 +461,13 @@ impl SmbusTelemetry {
     }
 
     /// Compute the maximum temperature across all populated GDDR temp pairs.
+    /// Prefer this over the raw `max_gddr_temp` field when that field is `None`
+    /// (older tt-smi versions don't expose MAX_GDDR_TEMP directly).
     pub fn max_gddr_temp_computed(&self) -> Option<f32> {
         let max = self.gddr_temps.iter()
             .filter_map(|pair| pair.as_ref())
             .flat_map(|pair| pair.0.iter().copied())
-            .filter(|&t| t > 0.0)
+            .filter(|&t| t > 0.0)  // 0.0 = unpopulated slot; hardware never reports 0°C for live GDDR
             .fold(f32::NEG_INFINITY, f32::max);
         if max == f32::NEG_INFINITY { None } else { Some(max) }
     }
