@@ -130,6 +130,10 @@ impl SysfsBackend {
                         bus_id: bus_id.clone(),
                         coords: String::new(),
                         architecture,
+                        firmwares: None,
+                        limits: None,
+                        pcie_speed: None,
+                        pcie_width: None,
                     };
 
                     self.devices.push(device);
