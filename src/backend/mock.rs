@@ -277,6 +277,18 @@ impl MockBackend {
             boot_date: Some("2026-01-11".to_string()),
             rt_seconds: Some((self.update_count * 100).to_string()), // Runtime in seconds
             wh_fw_date: Some("2026-01-01".to_string()),
+
+            // New tt-smi 5.2.0 fields — initialize to None in mock
+            gddr_temps:         [None; 4],
+            max_gddr_temp:      None,
+            gddr_corr_errs:     [None; 4],
+            gddr_uncorr_errs:   None,
+            harvesting_state:   None,
+            eth_live_status:    None,
+            enabled_eth:        None,
+            enabled_gddr:       None,
+            enabled_l2cpu:      None,
+            enabled_tensix_col: None,
         }
     }
 
