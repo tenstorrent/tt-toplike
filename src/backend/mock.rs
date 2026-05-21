@@ -24,6 +24,19 @@ use crate::models::{Architecture, Device, SmbusTelemetry, Telemetry};
 use chrono::Utc;
 use std::collections::HashMap;
 
+/// Pre-defined mock hardware scenarios for testing at various scales.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MockScenario {
+    /// Default: cycles GS/WH/BH by device index (existing behavior).
+    Mixed,
+    /// Single Galaxy: 32 Blackhole chips.
+    Galaxy,
+    /// Quad Galaxy: 128 Blackhole chips across 4 Galaxy systems.
+    QuadGalaxy,
+    /// Pure Wormhole cluster: 32 WH chips.
+    WormholeCluster,
+}
+
 /// Mock backend that generates fake telemetry data
 ///
 /// Creates a configurable number of virtual devices and generates
@@ -48,6 +61,9 @@ use std::collections::HashMap;
 pub struct MockBackend {
     /// Number of mock devices to create
     device_count: usize,
+
+    /// Scenario controlling device count and architecture.
+    scenario: MockScenario,
 
     /// List of mock devices
     devices: Vec<Device>,
@@ -86,6 +102,7 @@ impl MockBackend {
     pub fn new(device_count: usize) -> Self {
         Self {
             device_count,
+            scenario: MockScenario::Mixed,
             devices: Vec::new(),
             telemetry: HashMap::new(),
             smbus_telemetry: HashMap::new(),
@@ -100,10 +117,32 @@ impl MockBackend {
     pub fn with_config(device_count: usize, config: BackendConfig) -> Self {
         Self {
             device_count,
+            scenario: MockScenario::Mixed,
             devices: Vec::new(),
             telemetry: HashMap::new(),
             smbus_telemetry: HashMap::new(),
             config,
+            update_count: 0,
+            base_power: HashMap::new(),
+            base_temp: HashMap::new(),
+        }
+    }
+
+    /// Create mock backend with a predefined hardware scenario.
+    pub fn with_scenario(scenario: MockScenario) -> Self {
+        let device_count = match scenario {
+            MockScenario::Mixed => 6,
+            MockScenario::Galaxy => 32,
+            MockScenario::QuadGalaxy => 128,
+            MockScenario::WormholeCluster => 32,
+        };
+        Self {
+            device_count,
+            scenario,
+            devices: Vec::new(),
+            telemetry: HashMap::new(),
+            smbus_telemetry: HashMap::new(),
+            config: BackendConfig::default(),
             update_count: 0,
             base_power: HashMap::new(),
             base_temp: HashMap::new(),
@@ -115,23 +154,32 @@ impl MockBackend {
         self.devices.clear();
 
         for idx in 0..self.device_count {
-            // Cycle through architectures: GS, WH, BH, GS, WH, BH, ...
-            let (board_type, bus_id) = match idx % 3 {
-                0 => (
-                    "e150".to_string(),
-                    format!("0000:0{}:00.0", idx + 1),
-                ), // Grayskull
-                1 => (
-                    "n150".to_string(),
-                    format!("0000:0{}:00.0", idx + 1),
-                ), // Wormhole
-                _ => (
-                    "p150".to_string(),
-                    format!("0000:0{}:00.0", idx + 1),
-                ), // Blackhole
+            let board_type = match self.scenario {
+                MockScenario::Galaxy | MockScenario::QuadGalaxy => "p150a".to_string(),
+                MockScenario::WormholeCluster => "n150".to_string(),
+                MockScenario::Mixed => match idx % 3 {
+                    0 => "e150".to_string(),
+                    1 => "n150".to_string(),
+                    _ => "p150".to_string(),
+                },
             };
+            let bus_id = format!("0000:{:02x}:00.0", (idx % 256) + 1);
+            let mut device = Device::new(idx, board_type, bus_id,
+                format!("({},{})", idx / 8, idx % 8));
 
-            let device = Device::new(idx, board_type, bus_id, format!("({},{})", idx / 4, idx % 4));
+            // Populate firmwares and limits for all scenarios
+            device.firmwares = Some(crate::models::telemetry::FirmwaresInfo {
+                fw_bundle_version: Some("fw_pack-19.9.0".to_string()),
+                eth_fw: Some("6.16.0.0".to_string()),
+                cm_fw: Some("v80.15.0.0".to_string()),
+                gddr_fw: Some("1.37".to_string()),
+            });
+            device.limits = Some(crate::models::telemetry::DeviceLimits {
+                tdp_limit: Some(300.0),
+                tdc_limit: Some(40.0),
+                asic_fmax: Some(800),
+                thm_limit: Some(105.0),
+            });
 
             self.devices.push(device);
         }
@@ -213,6 +261,26 @@ impl MockBackend {
             .map(|ch| 2u32 << (ch * 2)) // 2 = trained state
             .sum();
 
+        // Deterministic "random" harvesting for QuadGalaxy: device idx % 17 == 0 harvests col 0
+        let enabled_tensix_col = if self.scenario == MockScenario::QuadGalaxy && device_idx % 17 == 0 {
+            Some(0x3FFE_u32) // col 0 harvested
+        } else {
+            Some(0x3FFF_u32) // all 14 cols active
+        };
+
+        // GDDR temps: base 38-44°C with sinusoidal variation
+        let t_base = 38.0_f32 + (device_idx % 4) as f32 * 2.0;
+        let t_var = ((self.update_count as f32 * 0.1).sin() * 4.0).abs();
+
+        // ETH live status: ~75% ports live (alternating bit pattern)
+        let eth_live = 0xAAAAAAAAAAAAAAAA_u64;
+
+        let harvesting_state = if self.scenario == MockScenario::QuadGalaxy && device_idx % 17 == 0 {
+            Some(1_u32)
+        } else {
+            Some(0_u32)
+        };
+
         SmbusTelemetry {
             board_id: Some(format!("BOARD_{:04}", device_idx)),
             enum_version: Some("1.0".to_string()),
@@ -278,17 +346,22 @@ impl MockBackend {
             rt_seconds: Some((self.update_count * 100).to_string()), // Runtime in seconds
             wh_fw_date: Some("2026-01-01".to_string()),
 
-            // New tt-smi 5.2.0 fields — initialize to None in mock
-            gddr_temps:         [None; 4],
-            max_gddr_temp:      None,
+            // tt-smi 5.2.0 fields
+            gddr_temps:         [
+                Some(crate::models::telemetry::GddrTempPair([t_base + t_var, t_base + t_var + 2.0, t_base + t_var + 4.0, t_base + t_var + 6.0])),
+                Some(crate::models::telemetry::GddrTempPair([t_base + t_var, t_base + t_var + 2.0, t_base + t_var + 4.0, t_base + t_var + 6.0])),
+                Some(crate::models::telemetry::GddrTempPair([t_base + t_var, t_base + t_var + 2.0, t_base + t_var + 4.0, t_base + t_var + 6.0])),
+                Some(crate::models::telemetry::GddrTempPair([t_base + t_var, t_base + t_var + 2.0, t_base + t_var + 4.0, t_base + t_var + 6.0])),
+            ],
+            max_gddr_temp:      Some(t_base + t_var + 6.0),
             gddr_corr_errs:     [None; 4],
             gddr_uncorr_errs:   None,
-            harvesting_state:   None,
-            eth_live_status:    None,
+            harvesting_state,
+            eth_live_status:    Some(eth_live),
             enabled_eth:        None,
             enabled_gddr:       None,
             enabled_l2cpu:      None,
-            enabled_tensix_col: None,
+            enabled_tensix_col,
         }
     }
 
@@ -456,5 +529,79 @@ mod tests {
     fn test_mock_backend_zero_devices() {
         let mut backend = MockBackend::new(0);
         assert!(backend.init().is_err()); // Should fail
+    }
+
+    #[test]
+    fn test_galaxy_mock_has_32_devices() {
+        let mut b = MockBackend::with_scenario(MockScenario::Galaxy);
+        b.init().unwrap();
+        assert_eq!(b.devices().len(), 32);
+        assert!(b.devices().iter().all(|d| d.architecture == Architecture::Blackhole));
+    }
+
+    #[test]
+    fn test_quad_galaxy_mock_has_128_devices() {
+        let mut b = MockBackend::with_scenario(MockScenario::QuadGalaxy);
+        b.init().unwrap();
+        assert_eq!(b.devices().len(), 128);
+        assert!(b.devices().iter().all(|d| d.architecture == Architecture::Blackhole));
+    }
+
+    #[test]
+    fn test_wormhole_cluster_mock() {
+        let mut b = MockBackend::with_scenario(MockScenario::WormholeCluster);
+        b.init().unwrap();
+        assert_eq!(b.devices().len(), 32);
+        assert!(b.devices().iter().all(|d| d.architecture == Architecture::Wormhole));
+    }
+
+    #[test]
+    fn test_mock_firmwares_populated() {
+        let mut b = MockBackend::with_scenario(MockScenario::Galaxy);
+        b.init().unwrap();
+        for d in b.devices() {
+            assert!(d.firmwares.is_some(), "device {} missing firmwares", d.index);
+            assert!(d.firmwares.as_ref().unwrap().fw_bundle_version.is_some());
+        }
+    }
+
+    #[test]
+    fn test_mock_limits_populated() {
+        let mut b = MockBackend::with_scenario(MockScenario::Galaxy);
+        b.init().unwrap();
+        for d in b.devices() {
+            assert!(d.limits.is_some(), "device {} missing limits", d.index);
+            assert_eq!(d.limits.as_ref().unwrap().tdp_limit, Some(300.0_f32));
+        }
+    }
+
+    #[test]
+    fn test_mock_gddr_temps_valid_range() {
+        let mut b = MockBackend::with_scenario(MockScenario::Galaxy);
+        b.init().unwrap();
+        for idx in 0..b.devices().len() {
+            if let Some(smbus) = b.smbus_telemetry(idx) {
+                for pair in smbus.gddr_temps.iter().flatten() {
+                    for &t in pair.0.iter() {
+                        assert!(t >= 0.0 && t <= 100.0,
+                            "GDDR temp {} out of range for dev {}", t, idx);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_mock_quad_galaxy_some_harvesting() {
+        let mut b = MockBackend::with_scenario(MockScenario::QuadGalaxy);
+        b.init().unwrap();
+        // At least some devices should have non-full enabled_tensix_col (harvested cols)
+        let any_harvested = b.devices().iter().any(|d| {
+            b.smbus_telemetry(d.index)
+                .and_then(|s| s.enabled_tensix_col)
+                .map(|v| v != 0x3FFF)
+                .unwrap_or(false)
+        });
+        assert!(any_harvested, "QuadGalaxy mock should have some harvested columns");
     }
 }
