@@ -2158,8 +2158,8 @@ fn render_device_panels(
 
         // Power row
         let power_w_val = telemetry.map(|t| t.power_w()).unwrap_or(0.0);
-        let tdp = backend.devices().iter().find(|d| d.index == idx)
-            .and_then(|d| d.limits.as_ref())
+        // Use device directly — avoid redundant backend.devices() lookup.
+        let tdp = device.limits.as_ref()
             .and_then(|l| l.tdp_limit)
             .unwrap_or(300.0);
         let power_frac = (power_w_val / tdp).min(1.0);
@@ -2214,8 +2214,8 @@ fn render_device_panels(
 
         // ASIC temp row
         let asic_temp = telemetry.map(|t| t.temp_c()).unwrap_or(0.0);
-        let thm_limit = backend.devices().iter().find(|d| d.index == idx)
-            .and_then(|d| d.limits.as_ref())
+        // Use device directly — avoid redundant backend.devices() lookup.
+        let thm_limit = device.limits.as_ref()
             .and_then(|l| l.thm_limit)
             .unwrap_or(105.0);
         let temp_color = crate::ui::colors::temp_color(asic_temp);
@@ -2238,15 +2238,16 @@ fn render_device_panels(
         }
 
         // Firmware row
-        let fw_ver = backend.devices().iter()
-            .find(|d| d.index == idx)
-            .and_then(|d| d.firmwares.as_ref())
+        // Use device directly — avoid redundant backend.devices() lookup.
+        let fw_ver = device.firmwares.as_ref()
             .and_then(|fw| fw.fw_bundle_version.as_deref())
             .unwrap_or("—");
         let fw_short = fw_ver.trim_start_matches("fw_pack-");
+        // content_w is 30; "FW" label takes 8 chars, leaving 22 for the version string.
+        let fw_display = &fw_short[..fw_short.len().min(22)];
         stat_lines.push(Line::from(vec![
             Span::styled(format!("{:<8}", "FW"), Style::default().fg(Color::DarkGray)),
-            Span::styled(fw_short.to_string(), Style::default().fg(Color::White)),
+            Span::styled(fw_display.to_string(), Style::default().fg(Color::White)),
         ]));
 
         // Pad to panel_h-1 rows, then bottom separator
@@ -2301,9 +2302,13 @@ fn render_grid_mode(
         width: area.width, height: area.height.saturating_sub(1),
     };
 
-    let (p_cols, p_rows) = portrait_dims(devices[0].architecture);
-    let cell_w = (p_cols as u16) + 2; // left-border + content + 1-char gap
-    let cell_h = (p_rows as u16) + 2; // label row + content + bottom-border row
+    // Use first device's arch for uniform grid layout math. All cells must have
+    // the same width and height so the tiled grid lines up correctly. Mixed-arch
+    // systems will use per-device dims only for the inner rendering (label, portrait,
+    // bottom border) while the grid stride stays based on the first device.
+    let (grid_cell_cols, grid_cell_rows) = portrait_dims(devices[0].architecture);
+    let cell_w = (grid_cell_cols as u16) + 2; // left-border + content + 1-char gap
+    let cell_h = (grid_cell_rows as u16) + 2; // label row + content + bottom-border row
 
     let cols_per_row = (grid_area.width / cell_w).max(1) as usize;
     let rows_visible = (grid_area.height / cell_h).max(1) as usize;
@@ -2319,6 +2324,10 @@ fn render_grid_mode(
         let idx = device.index;
         let telemetry = backend.telemetry(idx);
         let smbus     = backend.smbus_telemetry(idx);
+
+        // Per-device portrait dimensions — may differ in mixed-arch fleets.
+        // These drive the inner label, portrait, and bottom-border geometry.
+        let (p_cols, p_rows) = portrait_dims(device.architecture);
 
         // Left border
         let border_rect = Rect { x: cell_x, y: cell_y, width: 1, height: cell_h };
