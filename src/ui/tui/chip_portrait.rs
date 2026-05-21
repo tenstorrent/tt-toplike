@@ -60,11 +60,15 @@ use ratatui::{
 };
 
 /// Map chip-level power fraction to a Tensix activity character.
+///
+/// The minimum return value is `'░'` — idle non-harvested cells are rendered
+/// with the lowest-intensity block character so the heatmap color remains
+/// visible. Harvested cells bypass this function and use `'·'` directly in
+/// `build_portrait_rows`.
 fn tensix_char(activity: f32) -> char {
     if      activity >= 0.75 { '▓' }
     else if activity >= 0.40 { '▒' }
-    else if activity >= 0.05 { '░' }
-    else                     { '·' }
+    else                     { '░' }  // minimum floor — harvested cells use '·' directly
 }
 
 #[cfg(feature = "tui")]
@@ -73,6 +77,51 @@ fn gddr_color(temp_c: f32) -> Color {
     if      temp_c > 70.0 { Color::Red }
     else if temp_c > 50.0 { Color::Yellow }
     else                  { Color::Cyan }
+}
+
+/// Linear interpolation between two RGB triples. `t` is clamped to [0, 1].
+pub(crate) fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
+    let t = t.clamp(0.0, 1.0);
+    [
+        (a[0] as f32 + (b[0] as f32 - a[0] as f32) * t) as u8,
+        (a[1] as f32 + (b[1] as f32 - a[1] as f32) * t) as u8,
+        (a[2] as f32 + (b[2] as f32 - a[2] as f32) * t) as u8,
+    ]
+}
+
+/// Temperature-to-RGB for Tensix cells (ASIC temperature heatmap).
+///
+/// ≤40°C → teal #4FD1C5, 40–65°C → lerp to gold #F4C471,
+/// 65–80°C → lerp to red #FF6B6B, >80°C → red.
+pub(crate) fn tensix_temp_rgb(temp_c: f32) -> [u8; 3] {
+    const TEAL: [u8; 3] = [79, 209, 197];
+    const GOLD: [u8; 3] = [244, 196, 113];
+    const RED:  [u8; 3] = [255, 107, 107];
+    if temp_c <= 40.0 {
+        TEAL
+    } else if temp_c <= 65.0 {
+        lerp_rgb(TEAL, GOLD, (temp_c - 40.0) / 25.0)
+    } else if temp_c <= 80.0 {
+        lerp_rgb(GOLD, RED, (temp_c - 65.0) / 15.0)
+    } else {
+        RED
+    }
+}
+
+/// Temperature-to-RGB for DRAM cells (GDDR temperature heatmap).
+///
+/// ≤40°C → blue #3B82F6, 40–60°C → lerp to amber #F4C471, >60°C → lerp to red #FF6B6B.
+pub(crate) fn dram_temp_rgb(temp_c: f32) -> [u8; 3] {
+    const BLUE:  [u8; 3] = [59, 130, 246];
+    const AMBER: [u8; 3] = [244, 196, 113];
+    const RED:   [u8; 3] = [255, 107, 107];
+    if temp_c <= 40.0 {
+        BLUE
+    } else if temp_c <= 60.0 {
+        lerp_rgb(BLUE, AMBER, (temp_c - 40.0) / 20.0)
+    } else {
+        lerp_rgb(AMBER, RED, (temp_c - 60.0) / 20.0)
+    }
 }
 
 /// Map chip column → 0-indexed Tensix column for Blackhole harvesting mask.
@@ -554,5 +603,71 @@ mod tests {
         let terminal_w = 20_u16;
         let cells = (terminal_w / cell_w).max(1);
         assert_eq!(cells, 1, "very narrow terminal should still show 1 cell");
+    }
+
+    // ── Color helpers ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_lerp_rgb_midpoint() {
+        let result = lerp_rgb([0, 0, 0], [100, 200, 100], 0.5);
+        assert_eq!(result, [50, 100, 50]);
+    }
+
+    #[test]
+    fn test_lerp_rgb_clamp() {
+        // t outside [0,1] must clamp
+        let a = lerp_rgb([10, 20, 30], [90, 80, 70], -1.0);
+        assert_eq!(a, [10, 20, 30]);
+        let b = lerp_rgb([10, 20, 30], [90, 80, 70], 2.0);
+        assert_eq!(b, [90, 80, 70]);
+    }
+
+    #[test]
+    fn test_tensix_temp_rgb_cold() {
+        // ≤40°C → teal #4FD1C5
+        let [r, g, b] = tensix_temp_rgb(20.0);
+        assert_eq!([r, g, b], [79, 209, 197]);
+    }
+
+    #[test]
+    fn test_tensix_temp_rgb_hot() {
+        // >80°C → red #FF6B6B
+        let [r, g, b] = tensix_temp_rgb(90.0);
+        assert_eq!([r, g, b], [255, 107, 107]);
+    }
+
+    #[test]
+    fn test_tensix_temp_rgb_midrange() {
+        // exactly 65°C → gold #F4C471
+        let [r, g, b] = tensix_temp_rgb(65.0);
+        assert_eq!([r, g, b], [244, 196, 113]);
+    }
+
+    #[test]
+    fn test_dram_temp_rgb_cold() {
+        // ≤40°C → blue #3B82F6
+        let [r, g, b] = dram_temp_rgb(30.0);
+        assert_eq!([r, g, b], [59, 130, 246]);
+    }
+
+    #[test]
+    fn test_dram_temp_rgb_hot() {
+        // >60°C → approaching red
+        let [r, g, b] = dram_temp_rgb(80.0);
+        // should be warmer than amber
+        assert!(r > 200, "hot DRAM should have high red channel");
+    }
+
+    #[test]
+    fn test_tensix_char_idle_non_harvested_is_floor() {
+        // activity=0.0 → minimum '░' (not '·')
+        assert_eq!(tensix_char(0.0), '░');
+        assert_eq!(tensix_char(0.04), '░');
+    }
+
+    #[test]
+    fn test_tensix_char_active() {
+        assert_eq!(tensix_char(0.40), '▒');
+        assert_eq!(tensix_char(0.75), '▓');
     }
 }
