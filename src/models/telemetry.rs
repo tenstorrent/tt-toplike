@@ -335,7 +335,7 @@ pub struct DeviceLimits {
 }
 
 /// Parse a string as u32, accepting both "0x1A2B" hex and plain decimal.
-fn parse_hex_or_dec(s: &str) -> Option<u32> {
+pub(crate) fn parse_hex_or_dec(s: &str) -> Option<u32> {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         u32::from_str_radix(hex, 16).ok()
@@ -345,7 +345,7 @@ fn parse_hex_or_dec(s: &str) -> Option<u32> {
 }
 
 /// Same as `parse_hex_or_dec` but for u64 (DDR_STATUS is 32+ bits wide).
-fn parse_hex_or_dec_64(s: &str) -> Option<u64> {
+pub(crate) fn parse_hex_or_dec_64(s: &str) -> Option<u64> {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         u64::from_str_radix(hex, 16).ok()

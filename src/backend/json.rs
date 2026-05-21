@@ -72,6 +72,10 @@ struct TTSMIDeviceRaw {
     pub board_info: Option<BoardInfoJSON>,
     pub telemetry: Option<TelemetryJSON>,
     pub smbus_telem: Option<SmbusTelemetryJSON>,
+    /// Firmware bundle + component versions (tt-smi 5.2.0+).
+    pub firmwares: Option<serde_json::Value>,
+    /// Thermal/power limits (tt-smi 5.2.0+).
+    pub limits: Option<serde_json::Value>,
 }
 
 /// Board info from tt-smi
@@ -105,6 +109,10 @@ struct TTSMIDeviceJSON {
 
     /// SMBUS telemetry (DDR, ARC, firmware, etc.)
     pub smbus: Option<SmbusTelemetryJSON>,
+    /// Firmware bundle + component versions (tt-smi 5.2.0+).
+    pub firmwares: Option<serde_json::Value>,
+    /// Thermal/power limits (tt-smi 5.2.0+).
+    pub limits: Option<serde_json::Value>,
 }
 
 /// Core telemetry JSON structure
@@ -189,6 +197,36 @@ struct SmbusTelemetryJSON {
     pub vdd_limits: Option<String>,
     #[serde(rename = "THM_LIMIT_SHUTDOWN")]
     pub thm_limit_shutdown: Option<String>,
+    #[serde(rename = "GDDR_0_1_TEMP")]
+    pub gddr_0_1_temp: Option<String>,
+    #[serde(rename = "GDDR_2_3_TEMP")]
+    pub gddr_2_3_temp: Option<String>,
+    #[serde(rename = "GDDR_4_5_TEMP")]
+    pub gddr_4_5_temp: Option<String>,
+    #[serde(rename = "GDDR_6_7_TEMP")]
+    pub gddr_6_7_temp: Option<String>,
+    #[serde(rename = "MAX_GDDR_TEMP")]
+    pub max_gddr_temp: Option<String>,
+    #[serde(rename = "GDDR_0_1_CORR_ERRS")]
+    pub gddr_0_1_corr_errs: Option<String>,
+    #[serde(rename = "GDDR_2_3_CORR_ERRS")]
+    pub gddr_2_3_corr_errs: Option<String>,
+    #[serde(rename = "GDDR_4_5_CORR_ERRS")]
+    pub gddr_4_5_corr_errs: Option<String>,
+    #[serde(rename = "GDDR_6_7_CORR_ERRS")]
+    pub gddr_6_7_corr_errs: Option<String>,
+    #[serde(rename = "GDDR_UNCORR_ERRS")]
+    pub gddr_uncorr_errs: Option<String>,
+    #[serde(rename = "HARVESTING_STATE")]
+    pub harvesting_state: Option<String>,
+    #[serde(rename = "ETH_LIVE_STATUS")]
+    pub eth_live_status: Option<String>,
+    #[serde(rename = "ENABLED_ETH")]
+    pub enabled_eth: Option<String>,
+    #[serde(rename = "ENABLED_GDDR")]
+    pub enabled_gddr: Option<String>,
+    #[serde(rename = "ENABLED_L2CPU")]
+    pub enabled_l2cpu: Option<String>,
 }
 
 /// JSON backend that runs tt-smi in snapshot mode
@@ -334,6 +372,8 @@ impl JSONBackend {
                             coords: board_info.and_then(|b| b.coords.clone()),
                             telemetry: raw.telemetry,
                             smbus: raw.smbus_telem,
+                            firmwares: raw.firmwares,
+                            limits: raw.limits,
                         }
                     })
                     .collect();
@@ -369,6 +409,12 @@ impl JSONBackend {
         )))
     }
 
+    /// Test-only: expose update_from_json for white-box testing.
+    #[cfg(test)]
+    pub fn update_from_json_pub(&mut self, devices: Vec<TTSMIDeviceJSON>) -> BackendResult<()> {
+        self.update_from_json(devices)
+    }
+
     /// Update internal state from parsed JSON devices
     fn update_from_json(&mut self, json_devices: Vec<TTSMIDeviceJSON>) -> BackendResult<()> {
         for json_dev in json_devices {
@@ -380,7 +426,17 @@ impl JSONBackend {
                 let bus_id = json_dev.bus_id.clone().unwrap_or_else(|| format!("0000:0{}:00.0", idx + 1));
                 let coords = json_dev.coords.clone().unwrap_or_else(|| format!("({},{})", idx / 4, idx % 4));
 
-                let device = Device::new(idx, board_type, bus_id, coords);
+                // Parse firmwares and limits blocks (tt-smi 5.2.0+), falling back to
+                // None for older snapshots that don't include these keys.
+                let firmwares = json_dev.firmwares.as_ref().and_then(|v| {
+                    serde_json::from_value::<crate::models::telemetry::FirmwaresInfo>(v.clone()).ok()
+                });
+                let limits = json_dev.limits.as_ref().and_then(|v| {
+                    serde_json::from_value::<crate::models::telemetry::DeviceLimits>(v.clone()).ok()
+                });
+                let mut device = Device::new(idx, board_type, bus_id, coords);
+                device.firmwares = firmwares;
+                device.limits = limits;
                 self.devices.push(device);
             }
 
@@ -514,6 +570,38 @@ fn smbus_from_json_fields(smbus_json: SmbusTelemetryJSON) -> SmbusTelemetry {
         board_power_limit: smbus_json.board_power_limit,
         therm_trip_count: smbus_json.therm_trip_count,
         vdd_limits:       smbus_json.vdd_limits,
+        // ── GDDR temperatures (tt-smi 5.2.0+) ──────────────────────────────────
+        gddr_temps: [
+            smbus_json.gddr_0_1_temp.as_deref().and_then(crate::models::telemetry::unpack_gddr_temps),
+            smbus_json.gddr_2_3_temp.as_deref().and_then(crate::models::telemetry::unpack_gddr_temps),
+            smbus_json.gddr_4_5_temp.as_deref().and_then(crate::models::telemetry::unpack_gddr_temps),
+            smbus_json.gddr_6_7_temp.as_deref().and_then(crate::models::telemetry::unpack_gddr_temps),
+        ],
+        max_gddr_temp: smbus_json.max_gddr_temp.as_deref()
+            .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s))
+            .map(|v| v as f32),
+        // ── GDDR error counters (tt-smi 5.2.0+) ────────────────────────────────
+        gddr_corr_errs: [
+            smbus_json.gddr_0_1_corr_errs.as_deref().and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
+            smbus_json.gddr_2_3_corr_errs.as_deref().and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
+            smbus_json.gddr_4_5_corr_errs.as_deref().and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
+            smbus_json.gddr_6_7_corr_errs.as_deref().and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
+        ],
+        gddr_uncorr_errs: smbus_json.gddr_uncorr_errs.as_deref()
+            .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
+        // ── Harvesting / enabled bitmasks (tt-smi 5.2.0+) ──────────────────────
+        harvesting_state: smbus_json.harvesting_state.as_deref()
+            .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
+        eth_live_status: smbus_json.eth_live_status.as_deref()
+            .and_then(|s| crate::models::telemetry::parse_hex_or_dec_64(s)),
+        enabled_eth: smbus_json.enabled_eth.as_deref()
+            .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
+        enabled_gddr: smbus_json.enabled_gddr.as_deref()
+            .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
+        enabled_l2cpu: smbus_json.enabled_l2cpu.as_deref()
+            .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
+        enabled_tensix_col: smbus_json.enabled_tensix_col.as_deref()
+            .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
         ..SmbusTelemetry::default()
     }
 }
@@ -679,5 +767,133 @@ mod tests {
         let json = r#"{"devices": [{"index": 0}, {"index": 1}]}"#;
         let devices = backend.parse_json(json).expect("parse failed");
         assert_eq!(devices.len(), 2);
+    }
+
+    // ── tt-smi 5.2.0 snapshot with firmwares, limits, and new SMBUS fields ────
+
+    const TTSMI_52_JSON: &str = r#"{
+        "device_info": [{
+            "board_info": {
+                "board_type": "p150a",
+                "bus_id": "0000:01:00.0",
+                "coords": "(0,0)"
+            },
+            "telemetry": {
+                "voltage": "0.85",
+                "current": "30.0",
+                "power": "145.0",
+                "aiclk": "800",
+                "asic_temperature": "52.0",
+                "heartbeat": "1234"
+            },
+            "smbus_telem": {
+                "BOARD_ID_HIGH": "0x461",
+                "BOARD_ID_LOW": "0x31924062",
+                "DDR_STATUS": "0x55555555",
+                "DDR_SPEED": "0x3e80",
+                "TIMER_HEARTBEAT": "0x10e7a",
+                "AICLK": "0x320",
+                "AXICLK": "0x3c0",
+                "ARCCLK": "0x320",
+                "VCORE": "0x2cf",
+                "TDP": "0x10",
+                "TDC": "0x17",
+                "ASIC_TEMPERATURE": "0x22",
+                "VREG_TEMPERATURE": "0x1e",
+                "BOARD_TEMPERATURE": "0x1a",
+                "ETH_FW_VERSION": "0x10900",
+                "DM_APP_FW_VERSION": "0x176300",
+                "DM_BL_FW_VERSION": "0x0",
+                "FLASH_BUNDLE_VERSION": "0x13076300",
+                "CM_FW_VERSION": "0x1d6300",
+                "FAN_SPEED": "0x0",
+                "FAN_RPM": "0x75a",
+                "PCIE_USAGE": "0x4",
+                "BOARD_POWER_LIMIT": "0x226",
+                "THERM_TRIP_COUNT": "0x0",
+                "VDD_LIMITS": "0x38402bc",
+                "THM_LIMIT_SHUTDOWN": "0x6e",
+                "TT_FLASH_VERSION": null,
+                "GDDR_0_1_TEMP": "0x262a2c2c",
+                "GDDR_2_3_TEMP": "0x28282a2a",
+                "GDDR_4_5_TEMP": "0x24262828",
+                "GDDR_6_7_TEMP": "0x22242626",
+                "MAX_GDDR_TEMP": "0x2c",
+                "HARVESTING_STATE": "0x0",
+                "ETH_LIVE_STATUS": "0x00000000000000FF",
+                "ENABLED_ETH": "0xFF",
+                "ENABLED_GDDR": "0xFF",
+                "ENABLED_L2CPU": "0x0",
+                "ENABLED_TENSIX_COL": "0x3FFF"
+            },
+            "firmwares": {
+                "fw_bundle_version": "fw_pack-19.9.0",
+                "eth_fw": "6.16.0.0",
+                "cm_fw": "v80.15.0.0",
+                "gddr_fw": "1.37"
+            },
+            "limits": {
+                "tdp_limit": 300.0,
+                "tdc_limit": 40.0,
+                "asic_fmax": 800,
+                "thm_limit": 105.0
+            }
+        }]
+    }"#;
+
+    #[test]
+    fn test_52_gddr_temps_parsed() {
+        let result = parse_smbus_from_json(TTSMI_52_JSON);
+        let smbus = result.get(&0).expect("device 0 missing");
+        // GDDR_0_1_TEMP "0x262a2c2c" → bytes LE: 0x2c, 0x2c, 0x2a, 0x26 → [44, 44, 42, 38]
+        let pair = smbus.gddr_temps[0].expect("gddr_temps[0] missing");
+        assert_eq!(pair.0, [44.0_f32, 44.0, 42.0, 38.0]);
+        assert!(smbus.max_gddr_temp.is_some());
+    }
+
+    #[test]
+    fn test_52_eth_live_status_parsed() {
+        let result = parse_smbus_from_json(TTSMI_52_JSON);
+        let smbus = result.get(&0).expect("device 0 missing");
+        assert_eq!(smbus.eth_live_status, Some(0xFF_u64));
+    }
+
+    #[test]
+    fn test_52_harvesting_state_parsed() {
+        let result = parse_smbus_from_json(TTSMI_52_JSON);
+        let smbus = result.get(&0).expect("device 0 missing");
+        assert_eq!(smbus.harvesting_state, Some(0_u32));
+        assert_eq!(smbus.enabled_tensix_col, Some(0x3FFF_u32));
+    }
+
+    #[test]
+    fn test_52_firmwares_block_parsed() {
+        let mut b = JSONBackend::new("");
+        let json_devs = b.parse_json(TTSMI_52_JSON).unwrap();
+        b.update_from_json_pub(json_devs).unwrap();
+        let dev = &b.devices()[0];
+        let fw = dev.firmwares.as_ref().expect("firmwares missing");
+        assert_eq!(fw.fw_bundle_version.as_deref(), Some("fw_pack-19.9.0"));
+        assert_eq!(fw.eth_fw.as_deref(), Some("6.16.0.0"));
+    }
+
+    #[test]
+    fn test_52_limits_block_parsed() {
+        let mut b = JSONBackend::new("");
+        let json_devs = b.parse_json(TTSMI_52_JSON).unwrap();
+        b.update_from_json_pub(json_devs).unwrap();
+        let dev = &b.devices()[0];
+        let lim = dev.limits.as_ref().expect("limits missing");
+        assert_eq!(lim.tdp_limit, Some(300.0_f32));
+        assert_eq!(lim.asic_fmax, Some(800_u32));
+    }
+
+    #[test]
+    fn test_old_format_still_parses_ok() {
+        // Existing pre-5.2 snapshot (no GDDR fields) must still parse without error.
+        let result = parse_smbus_from_json(REAL_TTSMI_JSON);
+        let smbus = result.get(&0).expect("device 0 missing");
+        assert!(smbus.gddr_temps.iter().all(|t| t.is_none()),
+            "old format should leave gddr_temps as None");
     }
 }
