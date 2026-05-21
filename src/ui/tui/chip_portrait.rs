@@ -102,7 +102,7 @@ fn wh_eth_port(col: usize, row: usize) -> usize {
 ///
 /// # Width guarantee
 /// Each returned String is exactly `portrait_dims(arch).0` Unicode characters wide.
-/// Only single-column chars are used: ▓ ▒ ░ · D ● P (all width-1 per unicode-width crate).
+/// Only single-column chars are used: ▓ ▒ ░ · ▪ ● ╋ (all width-1 per unicode-width crate).
 /// The inner loop pushes exactly one char per column — no more, no less.
 pub fn build_portrait_rows(
     device: &Device,
@@ -127,7 +127,7 @@ pub fn build_portrait_rows(
             };
 
             let ch = match core_type {
-                CoreType::Pcie => 'P',
+                CoreType::Pcie => '╋',
 
                 CoreType::Eth => {
                     let port = match device.architecture {
@@ -141,7 +141,7 @@ pub fn build_portrait_rows(
                     if live { '●' } else { '·' }
                 }
 
-                CoreType::Dram => 'D',
+                CoreType::Dram => '▪',
 
                 CoreType::Tensix => {
                     // BH only: check harvesting mask via tensix column index
@@ -454,11 +454,11 @@ mod tests {
         let smbus  = make_smbus(Architecture::Blackhole);
         let telem  = make_telemetry();
         let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0);
-        // row 0 col 1 (non-ETH, non-PCIe) should be 'D'
+        // row 0 col 1 (non-ETH, non-PCIe) should be '▪'
         let row0_chars: Vec<char> = rows[0].chars().collect();
-        assert_eq!(row0_chars[1], 'D', "BH row=0 col=1 should be DRAM 'D'");
+        assert_eq!(row0_chars[1], '▪', "BH row=0 col=1 should be DRAM '▪'");
         let row11_chars: Vec<char> = rows[11].chars().collect();
-        assert_eq!(row11_chars[1], 'D', "BH row=11 col=1 should be DRAM 'D'");
+        assert_eq!(row11_chars[1], '▪', "BH row=11 col=1 should be DRAM '▪'");
     }
 
     #[test]
@@ -467,10 +467,10 @@ mod tests {
         let smbus  = make_smbus(Architecture::Blackhole);
         let telem  = make_telemetry();
         let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0);
-        // col 8, non-DRAM rows (1-10) should be 'P'
+        // col 8, non-DRAM rows (1-10) should be '╋'
         for row_idx in 1..11 {
             let chars: Vec<char> = rows[row_idx].chars().collect();
-            assert_eq!(chars[8], 'P', "BH PCIe col=8 row={} should be 'P'", row_idx);
+            assert_eq!(chars[8], '╋', "BH PCIe col=8 row={} should be '╋'", row_idx);
         }
     }
 
