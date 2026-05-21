@@ -21,6 +21,7 @@
 use crate::backend::{BackendConfig, TelemetryBackend};
 use crate::error::{BackendError, BackendResult};
 use crate::models::{Architecture, Device, SmbusTelemetry, Telemetry};
+use crate::models::telemetry::{FirmwaresInfo, DeviceLimits, GddrTempPair};
 use chrono::Utc;
 use std::collections::HashMap;
 
@@ -129,6 +130,17 @@ impl MockBackend {
     }
 
     /// Create mock backend with a predefined hardware scenario.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use tt_toplike::backend::mock::{MockBackend, MockScenario};
+    /// use tt_toplike::backend::TelemetryBackend;
+    ///
+    /// let mut backend = MockBackend::with_scenario(MockScenario::Galaxy);
+    /// backend.init().unwrap(); // still required
+    /// assert_eq!(backend.devices().len(), 32);
+    /// ```
     pub fn with_scenario(scenario: MockScenario) -> Self {
         let device_count = match scenario {
             MockScenario::Mixed => 6,
@@ -168,13 +180,13 @@ impl MockBackend {
                 format!("({},{})", idx / 8, idx % 8));
 
             // Populate firmwares and limits for all scenarios
-            device.firmwares = Some(crate::models::telemetry::FirmwaresInfo {
+            device.firmwares = Some(FirmwaresInfo {
                 fw_bundle_version: Some("fw_pack-19.9.0".to_string()),
                 eth_fw: Some("6.16.0.0".to_string()),
                 cm_fw: Some("v80.15.0.0".to_string()),
                 gddr_fw: Some("1.37".to_string()),
             });
-            device.limits = Some(crate::models::telemetry::DeviceLimits {
+            device.limits = Some(DeviceLimits {
                 tdp_limit: Some(300.0),
                 tdc_limit: Some(40.0),
                 asic_fmax: Some(800),
@@ -234,17 +246,17 @@ impl MockBackend {
         let voltage = 0.85 + self.random_noise(0.02);
         let current = power / voltage;
 
-        // AICLK varies 900-1200 MHz
-        let aiclk_base = 1000 + (device_idx * 50) as i32;
+        // AICLK varies 900-1200 MHz; use modulo to keep base in range for any device count
+        let aiclk_base = 900 + ((device_idx % 7) * 43) as i32; // 900..1100 range, cycles per 7 devices
         let aiclk_variation = (time_factor.cos() * 100.0) as i32;
-        let aiclk = (aiclk_base + aiclk_variation).max(0) as u32;
+        let aiclk = (aiclk_base + aiclk_variation).clamp(900, 1200) as u32;
 
         Telemetry {
             voltage: Some(voltage),
             current: Some(current),
             power: Some(power),
             asic_temperature: Some(temperature),
-            aiclk: Some(aiclk.clamp(900, 1200)),
+            aiclk: Some(aiclk),
             heartbeat: Some(1), // Always healthy in mock
             timestamp: Utc::now(),
         }
@@ -262,7 +274,8 @@ impl MockBackend {
             .sum();
 
         // Deterministic "random" harvesting for QuadGalaxy: device idx % 17 == 0 harvests col 0
-        let enabled_tensix_col = if self.scenario == MockScenario::QuadGalaxy && device_idx % 17 == 0 {
+        let is_harvested = self.scenario == MockScenario::QuadGalaxy && device_idx % 17 == 0;
+        let enabled_tensix_col = if is_harvested {
             Some(0x3FFE_u32) // col 0 harvested
         } else {
             Some(0x3FFF_u32) // all 14 cols active
@@ -275,7 +288,7 @@ impl MockBackend {
         // ETH live status: ~75% ports live (alternating bit pattern)
         let eth_live = 0xAAAAAAAAAAAAAAAA_u64;
 
-        let harvesting_state = if self.scenario == MockScenario::QuadGalaxy && device_idx % 17 == 0 {
+        let harvesting_state = if is_harvested {
             Some(1_u32)
         } else {
             Some(0_u32)
@@ -348,10 +361,10 @@ impl MockBackend {
 
             // tt-smi 5.2.0 fields
             gddr_temps:         [
-                Some(crate::models::telemetry::GddrTempPair([t_base + t_var, t_base + t_var + 2.0, t_base + t_var + 4.0, t_base + t_var + 6.0])),
-                Some(crate::models::telemetry::GddrTempPair([t_base + t_var, t_base + t_var + 2.0, t_base + t_var + 4.0, t_base + t_var + 6.0])),
-                Some(crate::models::telemetry::GddrTempPair([t_base + t_var, t_base + t_var + 2.0, t_base + t_var + 4.0, t_base + t_var + 6.0])),
-                Some(crate::models::telemetry::GddrTempPair([t_base + t_var, t_base + t_var + 2.0, t_base + t_var + 4.0, t_base + t_var + 6.0])),
+                Some(GddrTempPair([t_base + t_var, t_base + t_var + 2.0, t_base + t_var + 4.0, t_base + t_var + 6.0])),
+                Some(GddrTempPair([t_base + t_var, t_base + t_var + 2.0, t_base + t_var + 4.0, t_base + t_var + 6.0])),
+                Some(GddrTempPair([t_base + t_var, t_base + t_var + 2.0, t_base + t_var + 4.0, t_base + t_var + 6.0])),
+                Some(GddrTempPair([t_base + t_var, t_base + t_var + 2.0, t_base + t_var + 4.0, t_base + t_var + 6.0])),
             ],
             max_gddr_temp:      Some(t_base + t_var + 6.0),
             gddr_corr_errs:     [None; 4],
@@ -370,8 +383,7 @@ impl MockBackend {
         use std::collections::hash_map::RandomState;
         use std::hash::{BuildHasher, Hash, Hasher};
 
-        // Simple deterministic "random" based on update count
-        // (not cryptographically secure, just for variation)
+        // Non-deterministic noise via OS-seeded hasher; update_count seeds additional spread
         let mut hasher = RandomState::new().build_hasher();
         self.update_count.hash(&mut hasher);
         let hash = hasher.finish();
