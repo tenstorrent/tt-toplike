@@ -162,10 +162,11 @@ pub fn build_portrait_rows(
             line.push(ch);
         }
 
-        // Width invariant: exactly `cols` chars pushed above.
+        // Width invariant: exactly `cols` terminal display columns pushed above.
         debug_assert_eq!(
-            line.chars().count(), cols,
-            "portrait row {} width {} ≠ expected {}", row, line.chars().count(), cols
+            unicode_width::UnicodeWidthStr::width(line.as_str()), cols,
+            "portrait row {} terminal width {} ≠ expected {}", row,
+            unicode_width::UnicodeWidthStr::width(line.as_str()), cols
         );
 
         result.push(line);
@@ -227,7 +228,6 @@ pub fn build_portrait_lines<'a>(
                     Style::default().fg(Color::Yellow),
                 (CoreType::Tensix, _) =>
                     Style::default().fg(Color::DarkGray),
-                _ => Style::default(),
             };
 
             spans.push(Span::styled(ch.to_string(), style));
