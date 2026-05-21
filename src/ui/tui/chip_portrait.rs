@@ -449,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bh_dram_rows_show_d() {
+    fn test_bh_dram_rows_show_block() {
         let device = make_device(Architecture::Blackhole);
         let smbus  = make_smbus(Architecture::Blackhole);
         let telem  = make_telemetry();
@@ -462,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bh_pcie_shows_p() {
+    fn test_bh_pcie_shows_cross() {
         let device = make_device(Architecture::Blackhole);
         let smbus  = make_smbus(Architecture::Blackhole);
         let telem  = make_telemetry();
