@@ -497,4 +497,62 @@ mod tests {
         let chars: Vec<char> = rows[0].chars().collect();
         assert_eq!(chars[0], '·', "ETH down should show '·'");
     }
+
+    // ── Layout math ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_insights_panel_width_bh() {
+        // BH portrait outer = 1+17 = 18. Gap = 1. Stats outer = 1+30 = 31.
+        let (cols, _) = portrait_dims(Architecture::Blackhole);
+        let portrait_outer = cols as u16 + 1;
+        let gap = 1_u16;
+        let stats_outer = 31_u16;
+        let total = portrait_outer + gap + stats_outer;
+        assert_eq!(total, 50, "BH Insights panel width should be 50 chars");
+    }
+
+    #[test]
+    fn test_insights_panel_width_wh() {
+        let (cols, _) = portrait_dims(Architecture::Wormhole);
+        let portrait_outer = cols as u16 + 1;
+        let gap = 1_u16;
+        let stats_outer = 31_u16;
+        let total = portrait_outer + gap + stats_outer;
+        assert_eq!(total, 43, "WH Insights panel width should be 43 chars");
+    }
+
+    #[test]
+    fn test_grid_cell_width_bh() {
+        // Grid cell = portrait_cols + 2 (left-border + 1 gap)
+        let (cols, _) = portrait_dims(Architecture::Blackhole);
+        let cell_w = cols as u16 + 2;
+        assert_eq!(cell_w, 19, "BH grid cell width should be 19 chars");
+    }
+
+    #[test]
+    fn test_grid_cell_width_wh() {
+        let (cols, _) = portrait_dims(Architecture::Wormhole);
+        let cell_w = cols as u16 + 2;
+        assert_eq!(cell_w, 12, "WH grid cell width should be 12 chars");
+    }
+
+    #[test]
+    fn test_grid_cells_per_row_80_col_bh() {
+        // At 80 columns, BH cells (19 wide) → 80/19 = 4 cells per row
+        let (cols, _) = portrait_dims(Architecture::Blackhole);
+        let cell_w = cols as u16 + 2;
+        let terminal_w = 80_u16;
+        let cells = terminal_w / cell_w;
+        assert_eq!(cells, 4, "80-col terminal should fit 4 BH cells per row");
+    }
+
+    #[test]
+    fn test_grid_cells_per_row_20_col_minimum() {
+        // At 20 columns (very narrow), clamped to 1 cell minimum
+        let (cols, _) = portrait_dims(Architecture::Blackhole);
+        let cell_w = cols as u16 + 2;
+        let terminal_w = 20_u16;
+        let cells = (terminal_w / cell_w).max(1);
+        assert_eq!(cells, 1, "very narrow terminal should still show 1 cell");
+    }
 }
