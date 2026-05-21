@@ -11,6 +11,8 @@
 //! - Normal mode: Traditional table view with real-time telemetry
 //! - Visualization mode: Hardware-responsive starfield animation
 
+pub mod chip_portrait;
+
 use crate::animation::{ArcadeVisualization, HardwareStarfield, MemoryFlowVis, MemoryCastle};
 use crate::backend::{factory, BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
