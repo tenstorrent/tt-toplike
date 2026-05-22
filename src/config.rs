@@ -142,4 +142,29 @@ mod tests {
         let merged = base.merge(overrides);
         assert!((merged.sensitivity - 2.5).abs() < f32::EPSILON);
     }
+
+    #[test]
+    fn test_portrait_max_particles_normal() {
+        let cfg = AnimConfig::from_profile(AnimationProfile::Normal);
+        // 32 * 1.0 = 32
+        assert_eq!(cfg.portrait_max_particles(), 32);
+    }
+
+    #[test]
+    fn test_portrait_max_particles_paranoid() {
+        let cfg = AnimConfig::from_profile(AnimationProfile::Paranoid);
+        // 32 * 3.0 = 96
+        assert_eq!(cfg.portrait_max_particles(), 96);
+    }
+
+    #[test]
+    fn test_toml_override_max_particles_scale() {
+        let toml = r#"max_particles_scale = 1.5"#;
+        let overrides: AnimConfigOverrides = toml::from_str(toml).unwrap();
+        let base = AnimConfig::from_profile(AnimationProfile::Normal);
+        let merged = base.merge(overrides);
+        // 600 * 1.5 = 900
+        assert_eq!(merged.castle_max_particles(), 900);
+        assert!((merged.max_particles_scale - 1.5).abs() < f32::EPSILON);
+    }
 }
