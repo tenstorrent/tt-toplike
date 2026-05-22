@@ -2170,14 +2170,24 @@ fn render_device_panels(
             Color::DarkGray
         };
 
-        // ── Left: portrait with border ────────────────────────────────────────
-        let left_border_rect = Rect { x: panel_rect.x, y: panel_rect.y, width: 1, height: panel_h };
-        let border_lines: Vec<Line> = (0..panel_h as usize).map(|r| {
-            let ch = if r == 0 { "╔" } else if r == panel_h as usize - 1 { "╚" } else { "║" };
-            Line::from(Span::styled(ch, Style::default().fg(border_color)))
-        }).collect();
-        f.render_widget(Paragraph::new(border_lines), left_border_rect);
+        // ── Header rule: arch name + dev index + fixed-width temp ────────────
+        // {:>3} right-justifies the temperature to exactly 3 chars, so the rule
+        // never changes width when temp crosses 99→100°C.
+        let arch_name  = device.architecture.name().to_uppercase();
+        let temp_i     = telemetry.map(|t| t.temp_c() as i32).unwrap_or(0);
+        let board_trim = &device.board_type[..device.board_type.len().min(7)];
+        let label      = format!("── {} · D{} · {} ·{:>3}°C ", arch_name, idx, board_trim, temp_i);
+        let trail      = (panel_w as usize).saturating_sub(label.chars().count());
+        let header_text = format!("{}{}", label, "─".repeat(trail));
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                header_text,
+                Style::default().fg(border_color).add_modifier(Modifier::BOLD),
+            ))),
+            Rect { x: panel_rect.x, y: panel_rect.y, width: panel_w, height: 1 },
+        );
 
+        // ── Portrait (1-col left margin, no box border) ───────────────────────
         let portrait_rect = Rect {
             x: panel_rect.x + 1,
             y: panel_rect.y + 1,
@@ -2185,34 +2195,35 @@ fn render_device_panels(
             height: panel_h.saturating_sub(2),
         };
         if let Some(telem) = telemetry {
-            // Retrieve the live particle list for this device (empty slice if absent).
             let particles = portrait_particles.get(&idx).map(|v| v.as_slice()).unwrap_or(&[]);
             render_chip_portrait(f, portrait_rect, device, telem, smbus, particles);
         }
 
-        // ── Right: stats sidebar ──────────────────────────────────────────────
+        // ── Footer hairline ───────────────────────────────────────────────────
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "─".repeat(panel_w as usize),
+                Style::default().fg(Color::DarkGray),
+            ))),
+            Rect { x: panel_rect.x, y: panel_rect.y + panel_h - 1, width: panel_w, height: 1 },
+        );
+
+        // ── Right: stats sidebar (║ for interior rows; header/footer are rules) ─
         let stats_x = panel_rect.x + portrait_w + gap_col;
-        let stats_border_rect = Rect { x: stats_x, y: panel_rect.y, width: 1, height: panel_h };
-        let stats_border: Vec<Line> = (0..panel_h as usize).map(|r| {
-            let ch = if r == 0 { "╔" } else if r == panel_h as usize - 1 { "╚" } else { "║" };
-            Line::from(Span::styled(ch, Style::default().fg(border_color)))
-        }).collect();
+        let interior_h = panel_h.saturating_sub(2); // rows between header and footer
+        let stats_border_rect = Rect { x: stats_x, y: panel_rect.y + 1, width: 1, height: interior_h };
+        let stats_border: Vec<Line> = (0..interior_h as usize)
+            .map(|_| Line::from(Span::styled("║", Style::default().fg(border_color))))
+            .collect();
         f.render_widget(Paragraph::new(stats_border), stats_border_rect);
 
         let content_x = stats_x + 1;
         let content_w = stats_w.saturating_sub(1);
-        let content_rect = Rect { x: content_x, y: panel_rect.y, width: content_w, height: panel_h };
+        let content_rect = Rect { x: content_x, y: panel_rect.y + 1, width: content_w, height: interior_h };
 
         let mut stat_lines: Vec<Line> = Vec::new();
-
-        // Title row
-        let arch_short = device.architecture.abbrev();
-        let title = format!("Dev {:2}  {} {}", idx, arch_short,
-            &device.board_type[..device.board_type.len().min(8)]);
-        stat_lines.push(Line::from(Span::styled(
-            format!("{:<28}", &title[..title.len().min(28)]),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
-        )));
+        // Arch name, device index, and temperature live in the header rule above.
+        // Stats sidebar starts directly with telemetry data.
 
         // Power row
         let power_w_val = telemetry.map(|t| t.power_w()).unwrap_or(0.0);
@@ -2308,14 +2319,10 @@ fn render_device_panels(
             Span::styled(fw_display.to_string(), Style::default().fg(Color::White)),
         ]));
 
-        // Pad to panel_h-1 rows, then bottom separator
-        while stat_lines.len() < panel_h as usize - 1 {
+        // Pad to fill all interior rows (footer hairline is the visual bottom).
+        while stat_lines.len() < interior_h as usize {
             stat_lines.push(Line::raw(""));
         }
-        stat_lines.push(Line::from(Span::styled(
-            "═".repeat(content_w as usize),
-            Style::default().fg(Color::DarkGray),
-        )));
 
         f.render_widget(Paragraph::new(stat_lines), content_rect);
     }
