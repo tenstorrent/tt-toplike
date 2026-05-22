@@ -71,13 +71,6 @@ fn tensix_char(activity: f32) -> char {
     else                     { '░' }  // minimum floor — harvested cells use '·' directly
 }
 
-#[cfg(feature = "tui")]
-/// Temperature-based color for DRAM cells.
-fn gddr_color(temp_c: f32) -> Color {
-    if      temp_c > 70.0 { Color::Red }
-    else if temp_c > 50.0 { Color::Yellow }
-    else                  { Color::Cyan }
-}
 
 /// Linear interpolation between two RGB triples. `t` is clamped to [0, 1].
 pub(crate) fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
@@ -228,10 +221,11 @@ pub fn build_portrait_rows(
 /// Build portrait rows as styled Ratatui Lines for actual rendering.
 ///
 /// Color scheme:
-/// - Tensix ▓: Cyan  ▒: Yellow  ░: DarkGray  ·(harvested): DarkGray+DIM
-/// - DRAM D: Cyan/Yellow/Red by GDDR temperature
+/// - Tensix ░▒▓: ASIC temperature heatmap (teal→gold→red)
+/// - Tensix ·(harvested): DarkGray+DIM
+/// - DRAM ▪: GDDR temperature heatmap (blue→amber→red)
 /// - ETH ●(live): Green  ·(down): DarkGray
-/// - PCIe P: Blue
+/// - PCIe ╋: Amber RGB(244,196,113)
 pub fn build_portrait_lines<'a>(
     device: &Device,
     telemetry: &Telemetry,
@@ -241,14 +235,20 @@ pub fn build_portrait_lines<'a>(
     let rows_strs = build_portrait_rows(device, telemetry, smbus, tick);
     let (cols, _) = portrait_dims(device.architecture);
 
-    // Per-column DRAM temperature color (BH: index into gddr_temps array)
+    // Pre-compute ASIC temp → Tensix heatmap color (same for all Tensix cells on this chip)
+    let asic_temp = telemetry.temp_c();
+    let [tr, tg, tb] = tensix_temp_rgb(asic_temp);
+    let tensix_color = Color::Rgb(tr, tg, tb);
+
+    // Per-column DRAM temperature color via GDDR temp interpolation
     let dram_color_for_col = |col: usize| -> Color {
         let pair_idx = (col / 4).min(3);
         let temp = smbus
             .and_then(|s| s.gddr_temps.get(pair_idx).and_then(|p| p.as_ref()))
             .map(|p| p.0.iter().copied().fold(f32::NEG_INFINITY, f32::max))
             .unwrap_or(0.0);
-        gddr_color(temp)
+        let [r, g, b] = dram_temp_rgb(temp);
+        Color::Rgb(r, g, b)
     };
 
     rows_strs.into_iter().enumerate().map(|(row, row_str)| {
@@ -261,22 +261,23 @@ pub fn build_portrait_lines<'a>(
             };
 
             let style = match (core_type, ch) {
+                // PCIe: amber (same gold as hot-Tensix anchor)
                 (CoreType::Pcie, _) =>
-                    Style::default().fg(Color::Blue),
+                    Style::default().fg(Color::Rgb(244, 196, 113)),
+                // ETH: green when live, dim gray when down
                 (CoreType::Eth, '●') =>
                     Style::default().fg(Color::Green),
                 (CoreType::Eth, _) =>
                     Style::default().fg(Color::DarkGray),
+                // DRAM: blue→amber→red by per-column GDDR temperature
                 (CoreType::Dram, _) =>
                     Style::default().fg(dram_color_for_col(col)),
+                // Tensix harvested ('·'): dim gray, no heatmap
                 (CoreType::Tensix, '·') =>
                     Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
-                (CoreType::Tensix, '▓') =>
-                    Style::default().fg(Color::Cyan),
-                (CoreType::Tensix, '▒') =>
-                    Style::default().fg(Color::Yellow),
+                // Tensix non-harvested (░▒▓): ASIC temperature heatmap color
                 (CoreType::Tensix, _) =>
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(tensix_color),
             };
 
             spans.push(Span::styled(ch.to_string(), style));
@@ -652,10 +653,14 @@ mod tests {
 
     #[test]
     fn test_dram_temp_rgb_hot() {
-        // >60°C → approaching red
         let [r, g, b] = dram_temp_rgb(80.0);
-        // should be warmer than amber
-        assert!(r > 200, "hot DRAM should have high red channel");
+        assert_eq!([r, g, b], [255, 107, 107], "80°C DRAM should be full red");
+    }
+
+    #[test]
+    fn test_dram_temp_rgb_boundary() {
+        let [r, g, b] = dram_temp_rgb(60.0);
+        assert_eq!([r, g, b], [244, 196, 113], "60°C DRAM should be amber");
     }
 
     #[test]
@@ -669,5 +674,15 @@ mod tests {
     fn test_tensix_char_active() {
         assert_eq!(tensix_char(0.40), '▒');
         assert_eq!(tensix_char(0.75), '▓');
+    }
+
+    #[test]
+    fn test_build_portrait_lines_floor_char() {
+        let device = make_device(Architecture::Blackhole);
+        let smbus  = make_smbus(Architecture::Blackhole);
+        let telem  = Telemetry { power: Some(1.0), asic_temperature: Some(20.0), ..Telemetry::new() };
+        let rows   = build_portrait_rows(&device, &telem, Some(&smbus), 0);
+        let ch = rows[1].chars().nth(1).unwrap();
+        assert_eq!(ch, '░', "idle non-harvested Tensix should show '░' floor");
     }
 }
