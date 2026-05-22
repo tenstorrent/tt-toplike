@@ -22,6 +22,158 @@ pub fn portrait_dims(arch: Architecture) -> (usize, usize) {
     }
 }
 
+/// A single animated data-transfer particle in the chip portrait.
+#[derive(Clone)]
+pub struct Particle {
+    /// Portrait column (0..portrait_cols)
+    pub col: u8,
+    /// 0.0 = DRAM row boundary, 1.0 = opposite DRAM row boundary.
+    /// Reads advance toward 1.0; writes retreat toward 0.0.
+    pub progress: f32,
+    /// true = spawned at row 0 (top DRAM row), false = row (portrait_rows-1)
+    pub from_top: bool,
+    pub kind: ParticleKind,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum ParticleKind {
+    /// Teal: DRAM→Tensix read. Spawned at progress=0.0, travels to 1.0.
+    Read,
+    /// Pink: Tensix→DRAM write. Spawned at random interior progress, retreats to 0.0.
+    Write,
+}
+
+/// Map a particle's `progress` to a display character.
+/// Same lookup for both Read and Write — progress alone determines appearance.
+pub fn particle_char(progress: f32) -> char {
+    if      progress < 0.15 { '·' }
+    else if progress < 0.40 { '∘' }
+    else                     { '○' }
+}
+
+/// Return the max aiclk (MHz) for the given architecture, used to normalise speed.
+fn max_aiclk(arch: Architecture) -> f32 {
+    match arch {
+        Architecture::Blackhole => 1000.0,
+        Architecture::Wormhole  => 800.0,
+        _                       => 700.0,
+    }
+}
+
+/// Pick a random trained DRAM column for the given architecture.
+///
+/// Uses `ddr_status` bitmask (bit i set = DRAM col index i is trained) and
+/// `tick` as a cheap deterministic seed — no `rand` dependency.
+///
+/// Returns `None` when no trained columns exist.
+pub fn trained_random_col(
+    ddr_status: u64,
+    portrait_cols: usize,
+    arch: Architecture,
+    tick: u64,
+) -> Option<usize> {
+    // Collect trained DRAM chip columns
+    let dram_cols: Vec<usize> = (0..portrait_cols)
+        .filter(|&c| {
+            let is_dram = match arch {
+                Architecture::Blackhole => core_type_bh(c, 0) == CoreType::Dram,
+                _                       => core_type_wh(c, 1) == CoreType::Dram,
+            };
+            if !is_dram { return false; }
+            // Map chip column to a DRAM channel bit index (0-based among DRAM cols)
+            let dram_idx = (0..c)
+                .filter(|&cc| match arch {
+                    Architecture::Blackhole => core_type_bh(cc, 0) == CoreType::Dram,
+                    _                       => core_type_wh(cc, 1) == CoreType::Dram,
+                })
+                .count();
+            (ddr_status >> dram_idx) & 1 == 1
+        })
+        .collect();
+
+    if dram_cols.is_empty() { return None; }
+
+    // Cheap hash of tick to pick a column
+    let idx = ((tick.wrapping_mul(0x9e37_79b9_7f4a_7c15)) >> 32) as usize % dram_cols.len();
+    Some(dram_cols[idx])
+}
+
+/// Advance particle positions and spawn new ones for a single device.
+///
+/// # Arguments
+/// * `particles` – mutable particle list for this device
+/// * `telemetry` – current telemetry snapshot
+/// * `smbus` – SMBUS data (for ddr_status bitmask and aiclk)
+/// * `arch` – chip architecture (BH / WH / GS)
+/// * `baseline` – per-device adaptive baseline (updated in place)
+/// * `device_idx` – index within the baseline
+/// * `tick` – monotonic frame counter used as PRNG seed
+/// * `max_particles` – ceiling from AnimConfig
+pub fn tick_particles(
+    particles: &mut Vec<Particle>,
+    telemetry: &crate::models::Telemetry,
+    smbus: Option<&crate::models::SmbusTelemetry>,
+    arch: Architecture,
+    baseline: &mut crate::animation::baseline::AdaptiveBaseline,
+    device_idx: usize,
+    tick: u64,
+    max_particles: usize,
+) {
+    let power  = telemetry.power_w();
+    // aiclk_mhz() returns u32 — cast to f32 for normalisation
+    let aiclk  = telemetry.aiclk_mhz() as f32;
+    let aiclk_norm = (aiclk / max_aiclk(arch)).clamp(0.0, 1.0);
+
+    // Update baseline with current reading (current and temp not available here; pass 0.0)
+    baseline.update(device_idx, power, 0.0, 0.0, aiclk);
+
+    let power_change = baseline.power_change(device_idx, power).max(0.0);
+
+    // Speed: lerp 1/12 → 1/5 as aiclk_norm rises (12 ticks/cross at idle, 5 at max)
+    let speed = 1.0_f32 / 12.0 + (1.0 / 5.0 - 1.0 / 12.0) * aiclk_norm;
+
+    let (portrait_cols, _portrait_rows) = portrait_dims(arch);
+    let ddr_status = smbus.and_then(|s| s.ddr_status_bitmask()).unwrap_or(u64::MAX);
+
+    // 1. Advance existing particles; drop expired ones.
+    particles.retain_mut(|p| match p.kind {
+        ParticleKind::Read  => { p.progress += speed; p.progress < 1.0 }
+        ParticleKind::Write => { p.progress -= speed; p.progress > 0.0 }
+    });
+
+    if particles.len() >= max_particles { return; }
+
+    // 2. Spawn reads (when power is above idle baseline)
+    let read_budget = (power_change * 8.0) as u32;
+    if read_budget > 0 {
+        let interval = 8 / read_budget.max(1) + 1;
+        if tick % interval as u64 == 0 {
+            if let Some(col) = trained_random_col(ddr_status, portrait_cols, arch, tick) {
+                let from_top = (tick % 2) == 0;
+                particles.push(Particle { col: col as u8, progress: 0.0, from_top, kind: ParticleKind::Read });
+            }
+        }
+    }
+
+    // 3. Spawn writes only when power is ≥25% above idle baseline (active writing)
+    let write_power = (power_change - 0.25).max(0.0);
+    if write_power > 0.0 && particles.len() < max_particles {
+        let write_budget = (write_power * 6.0) as u32;
+        if write_budget > 0 {
+            let interval = 6 / write_budget.max(1) + 1;
+            if tick % interval as u64 == 0 {
+                let seed = tick.wrapping_add(37);
+                if let Some(col) = trained_random_col(ddr_status, portrait_cols, arch, seed) {
+                    let from_top = (tick % 3) != 0;
+                    // Write particles start in the interior and retreat outward
+                    let progress = 0.2 + ((tick % 7) as f32) * 0.08;
+                    particles.push(Particle { col: col as u8, progress, from_top, kind: ParticleKind::Write });
+                }
+            }
+        }
+    }
+}
+
 /// Classification of a single core cell in the chip grid.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CoreType {
@@ -684,5 +836,57 @@ mod tests {
         let rows   = build_portrait_rows(&device, &telem, Some(&smbus), 0);
         let ch = rows[1].chars().nth(1).unwrap();
         assert_eq!(ch, '░', "idle non-harvested Tensix should show '░' floor");
+    }
+
+    // ── Particle system ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_particle_read_advances() {
+        let mut p = Particle { col: 3, progress: 0.0, from_top: true, kind: ParticleKind::Read };
+        let speed = 0.1;
+        p.progress += speed;
+        assert!((p.progress - 0.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_particle_write_retreats() {
+        let mut p = Particle { col: 3, progress: 0.5, from_top: true, kind: ParticleKind::Write };
+        let speed = 0.1;
+        p.progress -= speed;
+        assert!((p.progress - 0.4).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_particle_char_dot() {
+        assert_eq!(particle_char(0.05), '·');
+    }
+
+    #[test]
+    fn test_particle_char_ring() {
+        assert_eq!(particle_char(0.25), '∘');
+    }
+
+    #[test]
+    fn test_particle_char_circle() {
+        assert_eq!(particle_char(0.5), '○');
+    }
+
+    #[test]
+    fn test_trained_random_col_bh_returns_dram_col() {
+        let (cols, _) = portrait_dims(Architecture::Blackhole);
+        let ddr_status: u64 = u64::MAX; // all trained
+        let result = trained_random_col(ddr_status, cols, Architecture::Blackhole, 42);
+        assert!(result.is_some(), "should return a column when all trained");
+        let col = result.unwrap();
+        // Col must be a DRAM col in BH: core_type_bh(col, 0) == Dram
+        let ct = core_type_bh(col, 0);
+        assert_eq!(ct, CoreType::Dram, "col {} should be a DRAM col", col);
+    }
+
+    #[test]
+    fn test_trained_random_col_none_when_no_trained() {
+        let (cols, _) = portrait_dims(Architecture::Blackhole);
+        let result = trained_random_col(0u64, cols, Architecture::Blackhole, 42);
+        assert!(result.is_none(), "should return None when no trained columns");
     }
 }
