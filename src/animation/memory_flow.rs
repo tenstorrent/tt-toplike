@@ -206,6 +206,15 @@ impl MemoryFlowVis {
         }
     }
 
+    /// Set the animation sensitivity multiplier.
+    ///
+    /// Delegates directly to the internal `AdaptiveBaseline`. Higher values make
+    /// particle density and flow speed respond to smaller hardware fluctuations.
+    /// 1.0 = Normal, 5.0 = Paranoid, 0.2 = AnomaliesOnly.
+    pub fn set_sensitivity(&mut self, sensitivity: f32) {
+        self.baseline.sensitivity = sensitivity;
+    }
+
     /// Update from telemetry
     pub fn update<B: TelemetryBackend>(&mut self, backend: &B) {
         self.frame += 1;

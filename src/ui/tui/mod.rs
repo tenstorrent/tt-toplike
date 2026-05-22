@@ -151,6 +151,13 @@ fn run_app(
     let update_interval = Duration::from_millis(cli.interval);
     let mut last_update = Instant::now();
 
+    // Build animation config from CLI --profile flag, merged with any user config file overrides.
+    // sensitivity is read at viz construction time and applied to the viz's internal AdaptiveBaseline.
+    let anim_cfg = {
+        use crate::config::{AnimConfig, load_config_overrides};
+        AnimConfig::from_profile(cli.profile).merge(load_config_overrides())
+    };
+
     // UI refresh rate: 60 FPS for smooth animations and responsive input
     // This is independent of backend update rate
     let ui_poll_rate = Duration::from_millis(16); // ~60 FPS
@@ -200,6 +207,7 @@ fn run_app(
                     let content_w = (size.width as usize).saturating_sub(2);
                     let mut sf = HardwareStarfield::new(content_w, content_h);
                     sf.initialize_from_devices(backend.devices());
+                    sf.set_sensitivity(anim_cfg.sensitivity);
                     starfield = Some(sf);
                 }
                 if let Some(ref mut sf) = starfield {
@@ -209,7 +217,9 @@ fn run_app(
             DisplayMode::MemoryCastle => {
                 if memory_castle.is_none() {
                     // Create new MemoryCastle with random parameters
-                    memory_castle = Some(MemoryCastle::new(size.width as usize, size.height as usize));
+                    let mut mc = MemoryCastle::new(size.width as usize, size.height as usize);
+                    mc.set_sensitivity(anim_cfg.sensitivity);
+                    memory_castle = Some(mc);
                 }
                 if let Some(ref mut tg) = memory_castle {
                     tg.update(backend);
@@ -218,7 +228,9 @@ fn run_app(
             DisplayMode::MemoryFlow => {
                 if memory_flow.is_none() {
                     // Create new MemoryFlow visualization
-                    memory_flow = Some(MemoryFlowVis::new(size.width as usize, size.height as usize));
+                    let mut mf = MemoryFlowVis::new(size.width as usize, size.height as usize);
+                    mf.set_sensitivity(anim_cfg.sensitivity);
+                    memory_flow = Some(mf);
                 }
                 if let Some(ref mut mf) = memory_flow {
                     mf.update(backend);

@@ -261,6 +261,15 @@ impl MemoryCastle {
         }
     }
 
+    /// Set the animation sensitivity multiplier.
+    ///
+    /// Delegates directly to the internal `AdaptiveBaseline`. Higher values make
+    /// the particle animation respond to smaller hardware fluctuations.
+    /// 1.0 = Normal, 5.0 = Paranoid, 0.2 = AnomaliesOnly.
+    pub fn set_sensitivity(&mut self, sensitivity: f32) {
+        self.baseline.sensitivity = sensitivity;
+    }
+
     /// Install board topology for topology-aware multi-device rendering.
     ///
     /// Once set, `render_multi_device` uses `║` between chips on different

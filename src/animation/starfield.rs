@@ -236,6 +236,15 @@ impl HardwareStarfield {
         }
     }
 
+    /// Set the animation sensitivity multiplier.
+    ///
+    /// Delegates directly to the internal `AdaptiveBaseline`. Higher values make
+    /// star brightness and twinkle respond to smaller hardware fluctuations.
+    /// 1.0 = Normal, 5.0 = Paranoid, 0.2 = AnomaliesOnly.
+    pub fn set_sensitivity(&mut self, sensitivity: f32) {
+        self.baseline.sensitivity = sensitivity;
+    }
+
     /// Install board topology for topology-aware stream rendering.
     ///
     /// Call this once after backend initialisation when SMBUS `board_id`

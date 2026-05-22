@@ -173,6 +173,16 @@ pub struct AdaptiveBaseline {
 
     /// Overall system baseline established flag
     all_established: bool,
+
+    /// Sensitivity multiplier applied to all power_change/current_change/temp_change outputs.
+    ///
+    /// 1.0 = Normal (default).
+    /// 5.0 = Paranoid — responds to the slightest hardware flicker.
+    /// 0.2 = AnomaliesOnly — suppresses minor fluctuations, shows only large spikes.
+    ///
+    /// This is applied at *output* time (not during baseline learning), so the
+    /// learned baseline is always unaffected and can be re-tuned at any time.
+    pub sensitivity: f32,
 }
 
 impl AdaptiveBaseline {
@@ -181,6 +191,7 @@ impl AdaptiveBaseline {
         Self {
             device_baselines: HashMap::new(),
             all_established: false,
+            sensitivity: 1.0,
         }
     }
 
@@ -241,27 +252,30 @@ impl AdaptiveBaseline {
         self.device_baselines.get(&device_idx)
     }
 
-    /// Get relative power change for a device
+    /// Get relative power change for a device, scaled by `self.sensitivity`.
+    ///
+    /// A sensitivity of 2.0 makes a 10% hardware increase appear as a 20% change
+    /// to the visualization, creating more reactive animation at lower workloads.
     pub fn power_change(&self, device_idx: usize, current_power: f32) -> f32 {
         self.device_baselines
             .get(&device_idx)
-            .map(|b| b.power_change(current_power))
+            .map(|b| b.power_change(current_power) * self.sensitivity)
             .unwrap_or(0.0)
     }
 
-    /// Get relative current change for a device
+    /// Get relative current change for a device, scaled by `self.sensitivity`.
     pub fn current_change(&self, device_idx: usize, current_current: f32) -> f32 {
         self.device_baselines
             .get(&device_idx)
-            .map(|b| b.current_change(current_current))
+            .map(|b| b.current_change(current_current) * self.sensitivity)
             .unwrap_or(0.0)
     }
 
-    /// Get relative temperature change for a device
+    /// Get relative temperature change for a device, scaled by `self.sensitivity`.
     pub fn temp_change(&self, device_idx: usize, current_temp: f32) -> f32 {
         self.device_baselines
             .get(&device_idx)
-            .map(|b| b.temp_change(current_temp))
+            .map(|b| b.temp_change(current_temp) * self.sensitivity)
             .unwrap_or(0.0)
     }
 
@@ -363,5 +377,25 @@ mod tests {
         // Test workload detection
         assert!(!baseline.workload_detected(0, 55.0, 22.0)); // 10% increase - below threshold
         assert!(baseline.workload_detected(0, 65.0, 26.0));  // 30% increase - above threshold
+    }
+
+    #[test]
+    fn test_default_sensitivity_is_one() {
+        let b = AdaptiveBaseline::new();
+        assert!((b.sensitivity - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_sensitivity_scales_power_change() {
+        let mut b = AdaptiveBaseline::new();
+        b.sensitivity = 2.0;
+        // Feed 20 samples of 10.0W to establish baseline
+        for _ in 0..20 {
+            b.update(0, 10.0, 1.0, 50.0, 800.0);
+        }
+        // At 2× sensitivity, a 10% power increase should appear as a 20% change
+        let raw_change = b.power_change(0, 11.0); // 10% above baseline
+        assert!((raw_change - 0.2).abs() < 0.01,
+            "expected ~0.2 with sensitivity=2.0, got {}", raw_change);
     }
 }
