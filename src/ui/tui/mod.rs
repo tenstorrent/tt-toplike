@@ -2101,7 +2101,7 @@ fn render_kill_dialog(f: &mut Frame, area: Rect, kc: &KillConfirmState) {
     let name_short = truncate(&kc.name, 14);
     let dev_label  = format!("Dev {}", kc.device_idx);
 
-    let title_pad  = content_w.saturating_sub("╔ Kill process? ".len());
+    let title_pad  = content_w.saturating_sub("╔ Kill process? ".chars().count());
     let bottom_pad = content_w;
 
     let lines: Vec<Line> = vec![
