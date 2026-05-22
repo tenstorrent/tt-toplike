@@ -339,14 +339,6 @@ fn run_app(
                     f.area(),
                 );
 
-                // Tick counter used by render_grid_mode (for border color and other per-frame
-                // effects that don't need mutable state).  Portrait-specific ticking is done
-                // above, outside the draw closure, using the portrait_tick counter.
-                let tick = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64 / 16;
-
                 match display_mode {
                     DisplayMode::Insights => {
                         #[cfg(feature = "linux-procfs")]
@@ -355,7 +347,7 @@ fn run_app(
                         render_insights_no_procfs(f, backend, &crate::workload::InferenceEngine::new());
                     }
                     DisplayMode::Grid => {
-                        render_grid_mode(f, backend, tick);
+                        render_grid_mode(f, backend);
                     }
                     DisplayMode::Table => {
                         #[cfg(feature = "linux-procfs")]
@@ -1923,107 +1915,6 @@ fn render_insights_no_procfs(
     let _ = (f, backend, engine);
 }
 
-/// Render borderless device cards — 3 content lines + 1 blank per device.
-#[cfg(feature = "linux-procfs")]
-fn render_device_cards(
-    f: &mut Frame,
-    area: Rect,
-    backend: &Box<dyn TelemetryBackend>,
-    engine: &InferenceEngine,
-) {
-    use crate::workload::inference::render_power_bar;
-    use ratatui::style::{Color, Modifier, Style};
-    use ratatui::text::{Line, Span};
-
-    let devices = backend.devices();
-    let mut lines: Vec<Line> = Vec::new();
-
-    for device in devices.iter() {
-        let idx = device.index;
-        let smbus = backend.smbus_telemetry(idx);
-
-        // Classify current device state. ARC stall detection uses the engine's
-        // internal cross-frame counter tracking (updated via ingest()), so we
-        // don't pass a snapshot here.
-        let result = engine.classify(idx, smbus, devices.len());
-
-        // ── Line 1: device identity ───────────────────────────────────────
-        let board_type = device.board_type.as_str();
-        let arch = format!("{:?}", device.architecture);
-        let board_short = &board_type[..board_type.len().min(5)];
-        let arch_short  = &arch[..arch.len().min(9)];
-        let line1 = Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Dev ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:<2}", idx),           Style::default().fg(Color::White)),
-            Span::raw("  "),
-            Span::styled(format!("{:<5}", board_short),   Style::default().fg(Color::Gray)),
-            Span::raw("  "),
-            Span::styled(format!("{:<9}", arch_short),    Style::default().fg(Color::Gray)),
-        ]);
-
-        // ── Line 2: status + metrics ──────────────────────────────────────
-        let label_padded = format!("{:<16}", result.label);
-        let confidence_mod = match result.confidence {
-            crate::workload::Confidence::High   => Modifier::BOLD,
-            crate::workload::Confidence::Medium => Modifier::empty(),
-            crate::workload::Confidence::Low    => Modifier::DIM,
-        };
-        let power   = backend.telemetry(idx).map(|t| t.power_w()).unwrap_or(0.0);
-        let temp    = backend.telemetry(idx).map(|t| t.temp_c()).unwrap_or(0.0);
-        let aiclk   = backend.telemetry(idx).and_then(|t| t.aiclk);
-        let power_change = engine.baseline.power_change(idx, power);
-
-        let power_str = if power > 0.0 { format!("{:5.1}W", power) }
-                        else { "  ---W".to_string() };
-        let temp_str  = if temp > 0.0  { format!("{:5.1}\u{00B0}C", temp) }
-                        else { "  ---\u{00B0}C".to_string() };
-        let clk_str   = aiclk.map(|c| format!("{:4}MHz", c))
-                             .unwrap_or_else(|| "  ---   ".to_string());
-        let delta_str = format!("{:+4.0}%", power_change * 100.0);
-
-        let line2 = Line::from(vec![
-            Span::raw("  "),
-            Span::styled(label_padded,
-                Style::default().fg(result.label_color).add_modifier(confidence_mod)),
-            Span::raw(" "),
-            Span::styled(power_str,  Style::default().fg(Color::White)),
-            Span::raw("   "),
-            Span::styled(temp_str,   Style::default().fg(crate::ui::colors::temp_color(temp))),
-            Span::raw("  "),
-            Span::styled(clk_str,    Style::default().fg(Color::Cyan)),
-            Span::raw("  "),
-            Span::styled(delta_str,  Style::default().fg(
-                if power_change > 0.3 { Color::Yellow }
-                else if power_change < -0.1 { Color::Cyan }
-                else { Color::DarkGray }
-            )),
-        ]);
-
-        // ── Line 3: power bar + interpretation ────────────────────────────
-        let bar_frac = result.power_pct_of_tdp.unwrap_or(result.power_pct_baseline);
-        let bar = render_power_bar(bar_frac, 20);
-        let bar_color = if bar_frac > 0.85 { Color::Red }
-            else if bar_frac > 0.60 { Color::Yellow }
-            else { Color::Green };
-
-        let line3 = Line::from(vec![
-            Span::raw("  "),
-            Span::styled(bar,              Style::default().fg(bar_color)),
-            Span::raw("  "),
-            Span::raw(result.detail.clone()),
-        ]);
-
-        lines.push(line1);
-        lines.push(line2);
-        lines.push(line3);
-        lines.push(Line::raw(""));
-    }
-
-    let para = Paragraph::new(lines);
-    f.render_widget(para, area);
-}
-
 /// Render the process panel with cursor, device mapping, and kill confirmation.
 #[cfg(feature = "linux-procfs")]
 fn render_process_panel(
@@ -2437,7 +2328,6 @@ fn render_device_panels(
 fn render_grid_mode(
     f: &mut Frame,
     backend: &Box<dyn TelemetryBackend>,
-    _tick: u64,
 ) {
     use crate::ui::tui::chip_portrait::{portrait_dims, render_chip_portrait};
     use ratatui::style::{Color, Modifier, Style};
