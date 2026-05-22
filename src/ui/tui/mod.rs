@@ -188,6 +188,16 @@ fn run_app(
     let mut arcade: Option<ArcadeVisualization> = None;
     let mut prev_display_mode = display_mode;
 
+    // Portrait particle state — per-device particle list keyed by device index,
+    // a shared AdaptiveBaseline (one entry per device), and a monotonic tick counter.
+    // Particles are ticked on every Insights-mode draw frame so the animation runs
+    // at the full UI rate (~60 FPS) independently of the backend update interval.
+    let mut portrait_particles: std::collections::HashMap<usize, Vec<crate::ui::tui::chip_portrait::Particle>> =
+        std::collections::HashMap::new();
+    let mut portrait_baseline = crate::animation::baseline::AdaptiveBaseline::new();
+    portrait_baseline.sensitivity = anim_cfg.sensitivity;
+    let mut portrait_tick: u64 = 0;
+
     // Insights mode state
     #[cfg(feature = "linux-procfs")]
     let mut inference_engine = InferenceEngine::new();
@@ -286,6 +296,30 @@ fn run_app(
             prev_display_mode = display_mode;
         }
 
+        // Tick portrait particles once per UI frame when on the Insights screen.
+        // This must happen *before* the immutable borrow inside terminal.draw().
+        if display_mode == DisplayMode::Insights {
+            use crate::ui::tui::chip_portrait::tick_particles;
+            portrait_tick = portrait_tick.wrapping_add(1);
+            let devices_snapshot: Vec<_> = backend.devices().to_vec();
+            for device in &devices_snapshot {
+                let plist = portrait_particles.entry(device.index).or_default();
+                if let Some(telem) = backend.telemetry(device.index) {
+                    let smbus = backend.smbus_telemetry(device.index);
+                    tick_particles(
+                        plist,
+                        telem,
+                        smbus,
+                        device.architecture,
+                        &mut portrait_baseline,
+                        device.index,
+                        portrait_tick,
+                        anim_cfg.portrait_max_particles(),
+                    );
+                }
+            }
+        }
+
         // Draw UI based on mode
         terminal
             .draw(|f| {
@@ -295,8 +329,9 @@ fn run_app(
                     f.area(),
                 );
 
-                // Compute a tick counter (frame number at ~60 FPS) for chip portrait animation.
-                // Each tick = ~16 ms (one UI frame). Used by render_device_panels and render_grid_mode.
+                // Tick counter used by render_grid_mode (for border color and other per-frame
+                // effects that don't need mutable state).  Portrait-specific ticking is done
+                // above, outside the draw closure, using the portrait_tick counter.
                 let tick = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -305,7 +340,7 @@ fn run_app(
                 match display_mode {
                     DisplayMode::Insights => {
                         #[cfg(feature = "linux-procfs")]
-                        render_insights(f, backend, &inference_engine, &process_monitor, process_cursor, kill_confirm.as_ref(), cli, tick);
+                        render_insights(f, backend, &inference_engine, &process_monitor, process_cursor, kill_confirm.as_ref(), cli, &portrait_particles);
                         #[cfg(not(feature = "linux-procfs"))]
                         render_insights_no_procfs(f, backend, &crate::workload::InferenceEngine::new());
                     }
@@ -1830,6 +1865,9 @@ fn device_panels_height(
 }
 
 /// Render Insights screen (full layout — implemented by Task 8/9 helpers below).
+///
+/// `portrait_particles` maps device index → live particle list, threaded through
+/// to `render_device_panels` → `render_chip_portrait` for the particle overlay.
 #[cfg(feature = "linux-procfs")]
 fn render_insights(
     f: &mut Frame,
@@ -1839,7 +1877,7 @@ fn render_insights(
     cursor: usize,
     kill_confirm: Option<&KillConfirmState>,
     _cli: &Cli,
-    tick: u64,
+    portrait_particles: &std::collections::HashMap<usize, Vec<crate::ui::tui::chip_portrait::Particle>>,
 ) {
     let area = f.area();
     let devices = backend.devices();
@@ -1856,7 +1894,7 @@ fn render_insights(
         .split(area);
 
     render_header(f, chunks[0], backend);
-    render_device_panels(f, chunks[1], backend, engine, tick);
+    render_device_panels(f, chunks[1], backend, engine, portrait_particles);
     render_process_panel(f, chunks[2], pm, &flat_process_list(pm), cursor, kill_confirm);
     render_insights_footer(f, chunks[3], kill_confirm);
     // Kill modal overlays the full screen when active
@@ -2166,15 +2204,19 @@ fn render_kill_dialog(f: &mut Frame, area: Rect, kc: &KillConfirmState) {
 ///
 /// Width math (Wormhole):
 ///   Total = (1 + 10) + 1 + 31 = 43 chars
+///
+/// `portrait_particles` maps device index → live particle list.  Passed down to
+/// `render_chip_portrait` so the particle overlay appears on each portrait.
+/// The border color is derived from ASIC temperature via `tensix_temp_rgb`.
 #[cfg(feature = "linux-procfs")]
 fn render_device_panels(
     f: &mut Frame,
     area: Rect,
     backend: &Box<dyn TelemetryBackend>,
     _engine: &crate::workload::InferenceEngine,
-    tick: u64,
+    portrait_particles: &std::collections::HashMap<usize, Vec<crate::ui::tui::chip_portrait::Particle>>,
 ) {
-    use crate::ui::tui::chip_portrait::{portrait_dims, render_chip_portrait};
+    use crate::ui::tui::chip_portrait::{portrait_dims, render_chip_portrait, tensix_temp_rgb};
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
     use ratatui::widgets::Paragraph;
@@ -2217,11 +2259,21 @@ fn render_device_panels(
 
         let panel_rect = Rect { x: x_offset, y: y_offset, width: panel_w, height: panel_h };
 
+        // Derive border color from ASIC temperature — teal when cool, gold when
+        // warm, red when hot — using the same `tensix_temp_rgb` heatmap as the
+        // Tensix cells in the portrait itself, giving visual continuity.
+        let border_color = if let Some(telem) = telemetry {
+            let [r, g, b] = tensix_temp_rgb(telem.temp_c());
+            Color::Rgb(r, g, b)
+        } else {
+            Color::DarkGray
+        };
+
         // ── Left: portrait with border ────────────────────────────────────────
         let left_border_rect = Rect { x: panel_rect.x, y: panel_rect.y, width: 1, height: panel_h };
         let border_lines: Vec<Line> = (0..panel_h as usize).map(|r| {
             let ch = if r == 0 { "╔" } else if r == panel_h as usize - 1 { "╚" } else { "║" };
-            Line::from(Span::styled(ch, Style::default().fg(Color::DarkGray)))
+            Line::from(Span::styled(ch, Style::default().fg(border_color)))
         }).collect();
         f.render_widget(Paragraph::new(border_lines), left_border_rect);
 
@@ -2232,7 +2284,9 @@ fn render_device_panels(
             height: panel_h.saturating_sub(2),
         };
         if let Some(telem) = telemetry {
-            render_chip_portrait(f, portrait_rect, device, telem, smbus, tick);
+            // Retrieve the live particle list for this device (empty slice if absent).
+            let particles = portrait_particles.get(&idx).map(|v| v.as_slice()).unwrap_or(&[]);
+            render_chip_portrait(f, portrait_rect, device, telem, smbus, particles);
         }
 
         // ── Right: stats sidebar ──────────────────────────────────────────────
@@ -2240,7 +2294,7 @@ fn render_device_panels(
         let stats_border_rect = Rect { x: stats_x, y: panel_rect.y, width: 1, height: panel_h };
         let stats_border: Vec<Line> = (0..panel_h as usize).map(|r| {
             let ch = if r == 0 { "╔" } else if r == panel_h as usize - 1 { "╚" } else { "║" };
-            Line::from(Span::styled(ch, Style::default().fg(Color::DarkGray)))
+            Line::from(Span::styled(ch, Style::default().fg(border_color)))
         }).collect();
         f.render_widget(Paragraph::new(stats_border), stats_border_rect);
 
@@ -2373,7 +2427,7 @@ fn render_device_panels(
 fn render_grid_mode(
     f: &mut Frame,
     backend: &Box<dyn TelemetryBackend>,
-    tick: u64,
+    _tick: u64,
 ) {
     use crate::ui::tui::chip_portrait::{portrait_dims, render_chip_portrait};
     use ratatui::style::{Color, Modifier, Style};
@@ -2450,13 +2504,13 @@ fn render_grid_mode(
             label_rect,
         );
 
-        // Portrait
+        // Portrait (Grid mode does not have portrait particle state — pass empty slice)
         let portrait_rect = Rect {
             x: cell_x + 1, y: cell_y + 1,
             width: p_cols as u16, height: p_rows as u16,
         };
         if let Some(telem) = telemetry {
-            render_chip_portrait(f, portrait_rect, device, telem, smbus, tick);
+            render_chip_portrait(f, portrait_rect, device, telem, smbus, &[]);
         }
 
         // Bottom border (left-side only: ╚ + ═ repeated, no right-cap ╝)

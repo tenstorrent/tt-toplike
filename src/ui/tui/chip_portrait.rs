@@ -378,13 +378,20 @@ pub fn build_portrait_rows(
 /// - DRAM ▪: GDDR temperature heatmap (blue→amber→red)
 /// - ETH ●(live): Green  ·(down): DarkGray
 /// - PCIe ╋: Amber RGB(244,196,113)
+///
+/// # Particle overlay
+/// After the base span grid is built, a second pass iterates `particles` and
+/// overwrites Tensix cells with the particle character and color.  ETH (`●`),
+/// PCIe (`╋`), and DRAM (`▪`) cells are **never** overwritten.
+/// When two particles land on the same cell, Write wins over Read.
 pub fn build_portrait_lines<'a>(
     device: &Device,
     telemetry: &Telemetry,
     smbus: Option<&SmbusTelemetry>,
-    tick: u64,
+    particles: &[Particle],
 ) -> Vec<Line<'a>> {
-    let rows_strs = build_portrait_rows(device, telemetry, smbus, tick);
+    // tick parameter is no longer needed; build_portrait_rows accepts it but we pass 0.
+    let rows_strs = build_portrait_rows(device, telemetry, smbus, 0);
     let (cols, _) = portrait_dims(device.architecture);
 
     // Pre-compute ASIC temp → Tensix heatmap color (same for all Tensix cells on this chip)
@@ -403,7 +410,8 @@ pub fn build_portrait_lines<'a>(
         Color::Rgb(r, g, b)
     };
 
-    rows_strs.into_iter().enumerate().map(|(row, row_str)| {
+    // ── Pass 1: build base span grid (Vec<Vec<Span>>) ────────────────────────
+    let mut grid: Vec<Vec<Span<'a>>> = rows_strs.into_iter().enumerate().map(|(row, row_str)| {
         let mut spans: Vec<Span<'a>> = Vec::with_capacity(cols);
 
         for (col, ch) in row_str.chars().enumerate() {
@@ -435,8 +443,58 @@ pub fn build_portrait_lines<'a>(
             spans.push(Span::styled(ch.to_string(), style));
         }
 
-        Line::from(spans)
-    }).collect()
+        spans
+    }).collect();
+
+    // ── Pass 2: particle overlay ─────────────────────────────────────────────
+    // Only Tensix cells can be overwritten. Write particles win over Read.
+    let (portrait_cols, portrait_rows) = portrait_dims(device.architecture);
+
+    for p in particles {
+        let col = p.col as usize;
+        if col >= portrait_cols { continue; }
+
+        // Map progress [0, 1] to a row within the appropriate half of the portrait.
+        // Particles that enter from the top travel downward into the interior rows;
+        // particles entering from the bottom travel upward into the interior rows.
+        // The traversal covers half the portrait height so reads from the top DRAM
+        // row and writes toward the bottom DRAM row don't overlap each other.
+        let portrait_row = if p.from_top {
+            (p.progress * (portrait_rows as f32 / 2.0)) as usize
+        } else {
+            portrait_rows.saturating_sub(1)
+                .saturating_sub((p.progress * (portrait_rows as f32 / 2.0)) as usize)
+        };
+        if portrait_row >= portrait_rows { continue; }
+
+        // Only overwrite Tensix cells — ETH, PCIe, and DRAM cells are never touched.
+        let core_type = match device.architecture {
+            Architecture::Blackhole => core_type_bh(col, portrait_row),
+            _                       => core_type_wh(col, portrait_row),
+        };
+        if core_type != CoreType::Tensix { continue; }
+
+        let ch = particle_char(p.progress);
+        let color = match p.kind {
+            ParticleKind::Read  => Color::Rgb(79, 209, 197),  // teal
+            ParticleKind::Write => Color::Rgb(236, 150, 184), // pink
+        };
+
+        // Write wins over Read: only overwrite if this is a Write, or if the cell
+        // does not already hold a particle glyph.
+        let existing_content = grid[portrait_row][col].content.as_ref();
+        let existing_is_particle = matches!(existing_content, "·" | "∘" | "○");
+        // Note: "·" is also used for harvested Tensix cells and down ETH ports,
+        // but we already guarded on core_type == Tensix above, so here "·" means
+        // either an idle Tensix cell or a small particle dot — both are safe to
+        // overwrite for Read. Write always wins regardless.
+        if matches!(p.kind, ParticleKind::Write) || !existing_is_particle {
+            grid[portrait_row][col] = Span::styled(ch.to_string(), Style::default().fg(color));
+        }
+    }
+
+    // ── Convert grid rows to Lines ───────────────────────────────────────────
+    grid.into_iter().map(Line::from).collect()
 }
 
 #[cfg(feature = "tui")]
@@ -444,13 +502,17 @@ pub fn build_portrait_lines<'a>(
 ///
 /// Returns the sub-Rect actually used (`portrait_cols × portrait_rows`).
 /// The caller must allocate at least `portrait_dims(arch)` space in the area.
+///
+/// `particles` is the live particle list for this device (may be empty).
+/// The particle overlay is applied on top of the base heatmap — Tensix cells
+/// only; ETH/PCIe/DRAM cells are never overwritten.
 pub fn render_chip_portrait(
     f: &mut Frame,
     area: Rect,
     device: &Device,
     telemetry: &Telemetry,
     smbus: Option<&SmbusTelemetry>,
-    tick: u64,
+    particles: &[Particle],
 ) -> Rect {
     let (cols, rows) = portrait_dims(device.architecture);
     let used = Rect {
@@ -460,7 +522,7 @@ pub fn render_chip_portrait(
         height: (rows as u16).min(area.height),
     };
 
-    let lines = build_portrait_lines(device, telemetry, smbus, tick);
+    let lines = build_portrait_lines(device, telemetry, smbus, particles);
     let para = Paragraph::new(lines);
     f.render_widget(para, used);
 
@@ -836,6 +898,54 @@ mod tests {
         let rows   = build_portrait_rows(&device, &telem, Some(&smbus), 0);
         let ch = rows[1].chars().nth(1).unwrap();
         assert_eq!(ch, '░', "idle non-harvested Tensix should show '░' floor");
+    }
+
+    // ── Particle overlay in build_portrait_lines ─────────────────────────────
+
+    #[test]
+    fn test_build_portrait_lines_particle_overlay() {
+        let device = make_device(Architecture::Blackhole);
+        let smbus  = make_smbus(Architecture::Blackhole);
+        let telem  = make_telemetry();
+
+        // Spawn a Read particle at column 1 (BH DRAM col), from_top=true, progress=0.5
+        // At progress=0.5 the particle is at portrait_row = (0.5 * 12/2) as usize = 3
+        let particles = vec![Particle {
+            col: 1,
+            progress: 0.5,
+            from_top: true,
+            kind: ParticleKind::Read,
+        }];
+
+        let lines = build_portrait_lines(&device, &telem, Some(&smbus), &particles);
+
+        // Row 3, col 1 should be '○' (progress ≥ 0.40)
+        let line = &lines[3];
+        // Collect chars from spans
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let chars: Vec<char> = text.chars().collect();
+        assert_eq!(chars[1], '○', "particle at (col=1, row=3) should be '○', got '{}'", chars[1]);
+    }
+
+    #[test]
+    fn test_build_portrait_lines_particle_no_overwrite_dram() {
+        let device = make_device(Architecture::Blackhole);
+        let smbus  = make_smbus(Architecture::Blackhole);
+        let telem  = make_telemetry();
+
+        // Place a Read particle that would land on row 0 (DRAM row in BH, col 1)
+        // BH row 0 col 1 is a DRAM cell — particle must NOT overwrite it
+        let particles = vec![Particle {
+            col: 1,
+            progress: 0.0, // progress 0.0 → row 0 (DRAM row)
+            from_top: true,
+            kind: ParticleKind::Read,
+        }];
+
+        let lines = build_portrait_lines(&device, &telem, Some(&smbus), &particles);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let chars: Vec<char> = text.chars().collect();
+        assert_eq!(chars[1], '▪', "DRAM cell must not be overwritten by particle");
     }
 
     // ── Particle system ───────────────────────────────────────────────────────
