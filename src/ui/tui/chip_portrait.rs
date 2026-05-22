@@ -242,33 +242,36 @@ pub(crate) fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
 /// ≤40°C → teal #4FD1C5, 40–65°C → lerp to gold #F4C471,
 /// 65–80°C → lerp to red #FF6B6B, >80°C → red.
 pub(crate) fn tensix_temp_rgb(temp_c: f32) -> [u8; 3] {
-    const TEAL: [u8; 3] = [79, 209, 197];
-    const GOLD: [u8; 3] = [244, 196, 113];
-    const RED:  [u8; 3] = [255, 107, 107];
+    // Teal → violet → pink → red. Gold/amber removed — typical operating temps
+    // (40-65°C) now land in the violet range rather than brown/orange.
+    const TEAL:   [u8; 3] = [79, 209, 197];
+    const VIOLET: [u8; 3] = [160, 120, 255];
+    const PINK:   [u8; 3] = [236, 150, 184];
+    const RED:    [u8; 3] = [255, 80,  80 ];
     if temp_c <= 40.0 {
         TEAL
     } else if temp_c <= 65.0 {
-        lerp_rgb(TEAL, GOLD, (temp_c - 40.0) / 25.0)
+        lerp_rgb(TEAL, VIOLET, (temp_c - 40.0) / 25.0)
     } else if temp_c <= 80.0 {
-        lerp_rgb(GOLD, RED, (temp_c - 65.0) / 15.0)
+        lerp_rgb(VIOLET, PINK, (temp_c - 65.0) / 15.0)
     } else {
-        RED
+        lerp_rgb(PINK, RED, ((temp_c - 80.0) / 10.0).min(1.0))
     }
 }
 
 /// Temperature-to-RGB for DRAM cells (GDDR temperature heatmap).
 ///
-/// ≤40°C → blue #3B82F6, 40–60°C → lerp to amber #F4C471, >60°C → lerp to red #FF6B6B.
+/// ≤40°C → cyan, 40–60°C → purple, >60°C → pink. Amber removed.
 pub(crate) fn dram_temp_rgb(temp_c: f32) -> [u8; 3] {
-    const BLUE:  [u8; 3] = [59, 130, 246];
-    const AMBER: [u8; 3] = [244, 196, 113];
-    const RED:   [u8; 3] = [255, 107, 107];
+    const CYAN:   [u8; 3] = [0,   210, 255];
+    const PURPLE: [u8; 3] = [140, 100, 240];
+    const PINK:   [u8; 3] = [236, 150, 184];
     if temp_c <= 40.0 {
-        BLUE
+        CYAN
     } else if temp_c <= 60.0 {
-        lerp_rgb(BLUE, AMBER, (temp_c - 40.0) / 20.0)
+        lerp_rgb(CYAN, PURPLE, (temp_c - 40.0) / 20.0)
     } else {
-        lerp_rgb(AMBER, RED, (temp_c - 60.0) / 20.0)
+        lerp_rgb(PURPLE, PINK, ((temp_c - 60.0) / 25.0).min(1.0))
     }
 }
 
@@ -424,12 +427,12 @@ pub fn build_portrait_lines<'a>(
             };
 
             let style = match (core_type, ch) {
-                // PCIe: amber (same gold as hot-Tensix anchor)
+                // PCIe: indigo spine
                 (CoreType::Pcie, _) =>
-                    Style::default().fg(Color::Rgb(244, 196, 113)),
-                // ETH: green when live, dim gray when down
+                    Style::default().fg(Color::Rgb(150, 120, 255)),
+                // ETH: cyan when live, dim gray when down
                 (CoreType::Eth, '●') =>
-                    Style::default().fg(Color::Green),
+                    Style::default().fg(Color::Rgb(79, 209, 197)),
                 (CoreType::Eth, _) =>
                     Style::default().fg(Color::DarkGray),
                 // DRAM: blue→amber→red by per-column GDDR temperature
@@ -849,35 +852,37 @@ mod tests {
 
     #[test]
     fn test_tensix_temp_rgb_hot() {
-        // >80°C → red #FF6B6B
+        // >80°C → lerp pink→red; at 90°C that's lerp([236,150,184],[255,80,80], 1.0)
         let [r, g, b] = tensix_temp_rgb(90.0);
-        assert_eq!([r, g, b], [255, 107, 107]);
+        assert_eq!([r, g, b], [255, 80, 80]);
     }
 
     #[test]
     fn test_tensix_temp_rgb_midrange() {
-        // exactly 65°C → gold #F4C471
+        // exactly 65°C → boundary of teal→violet range → full violet [160,120,255]
         let [r, g, b] = tensix_temp_rgb(65.0);
-        assert_eq!([r, g, b], [244, 196, 113]);
+        assert_eq!([r, g, b], [160, 120, 255]);
     }
 
     #[test]
     fn test_dram_temp_rgb_cold() {
-        // ≤40°C → blue #3B82F6
+        // ≤40°C → cyan [0, 210, 255]
         let [r, g, b] = dram_temp_rgb(30.0);
-        assert_eq!([r, g, b], [59, 130, 246]);
+        assert_eq!([r, g, b], [0, 210, 255]);
     }
 
     #[test]
     fn test_dram_temp_rgb_hot() {
-        let [r, g, b] = dram_temp_rgb(80.0);
-        assert_eq!([r, g, b], [255, 107, 107], "80°C DRAM should be full red");
+        // 85°C → lerp(purple, pink, 1.0) = full pink [236,150,184]
+        let [r, g, b] = dram_temp_rgb(85.0);
+        assert_eq!([r, g, b], [236, 150, 184], "85°C DRAM should be full pink");
     }
 
     #[test]
     fn test_dram_temp_rgb_boundary() {
+        // 60°C → end of cyan→purple range → full purple [140,100,240]
         let [r, g, b] = dram_temp_rgb(60.0);
-        assert_eq!([r, g, b], [244, 196, 113], "60°C DRAM should be amber");
+        assert_eq!([r, g, b], [140, 100, 240], "60°C DRAM should be purple");
     }
 
     #[test]

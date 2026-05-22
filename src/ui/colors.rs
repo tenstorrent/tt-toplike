@@ -149,33 +149,30 @@ pub const INFO: Color = Color::Rgb(100, 180, 255); // Bright blue
 /// # Returns
 ///
 /// Color based on temperature range (optimized for dark terminals):
-/// - <45°C: Bright cyan (cool)
-/// - 45-65°C: Bright green-yellow (normal)
-/// - 65-80°C: Bright orange (warm)
-/// - >80°C: Bright red (hot)
+/// - <45°C: Cyan (cool)
+/// - 45-65°C: Violet (normal)
+/// - 65-80°C: Pink (warm)
+/// - >80°C: Red (hot)
 pub fn temp_color(temp_c: f32) -> Color {
-    // Use 256-color mode in tmux (fixes macOS Terminal.app rendering issues)
     if supports_true_color() {
-        // Use full RGB spectrum for smooth gradients
         if temp_c < 45.0 {
-            Color::Rgb(80, 220, 220)  // Bright cyan
+            Color::Rgb(79, 209, 197)   // Teal-cyan
         } else if temp_c < 65.0 {
-            Color::Rgb(150, 220, 100)  // Bright green-yellow
+            Color::Rgb(160, 120, 255)  // Violet
         } else if temp_c < 80.0 {
-            Color::Rgb(255, 180, 100)  // Bright orange
+            Color::Rgb(236, 150, 184)  // Pink
         } else {
-            Color::Rgb(255, 100, 100)  // Bright red
+            Color::Rgb(255, 80, 80)    // Red
         }
     } else {
-        // Fall back to 256-color indexed palette
         if temp_c < 45.0 {
-            Color::Indexed(51)   // Cyan (256-color palette)
+            Color::Indexed(51)   // Cyan
         } else if temp_c < 65.0 {
-            Color::Indexed(226)  // Yellow (256-color palette)
+            Color::Indexed(135)  // Violet (256-color palette)
         } else if temp_c < 80.0 {
-            Color::Indexed(214)  // Orange (256-color palette)
+            Color::Indexed(218)  // Pink (256-color palette)
         } else {
-            Color::Indexed(196)  // Red (256-color palette)
+            Color::Indexed(196)  // Red
         }
     }
 }
@@ -192,33 +189,30 @@ pub fn temp_color(temp_c: f32) -> Color {
 /// # Returns
 ///
 /// Color based on power range (optimized for dark terminals):
-/// - <50W: Bright teal (low)
-/// - 50-100W: Bright blue (medium)
-/// - 100-150W: Bright orange (high)
-/// - >150W: Bright red (very high)
+/// - <50W: Teal (low)
+/// - 50-100W: Violet (medium)
+/// - 100-150W: Pink (high)
+/// - >150W: Red (very high)
 pub fn power_color(power_w: f32) -> Color {
-    // Use 256-color mode in tmux (fixes macOS Terminal.app rendering issues)
     if supports_true_color() {
-        // Use full RGB spectrum
         if power_w < 50.0 {
-            Color::Rgb(80, 220, 200)  // Bright teal
+            Color::Rgb(79, 209, 197)   // Teal
         } else if power_w < 100.0 {
-            Color::Rgb(100, 180, 255)  // Bright blue
+            Color::Rgb(160, 120, 255)  // Violet
         } else if power_w < 150.0 {
-            Color::Rgb(255, 180, 100)  // Bright orange
+            Color::Rgb(236, 150, 184)  // Pink
         } else {
-            Color::Rgb(255, 100, 100)  // Bright red
+            Color::Rgb(255, 80, 80)    // Red
         }
     } else {
-        // Fall back to 256-color indexed palette
         if power_w < 50.0 {
-            Color::Indexed(51)   // Cyan (256-color palette)
+            Color::Indexed(51)   // Cyan
         } else if power_w < 100.0 {
-            Color::Indexed(75)   // Blue (256-color palette)
+            Color::Indexed(135)  // Violet
         } else if power_w < 150.0 {
-            Color::Indexed(214)  // Orange (256-color palette)
+            Color::Indexed(218)  // Pink
         } else {
-            Color::Indexed(196)  // Red (256-color palette)
+            Color::Indexed(196)  // Red
         }
     }
 }

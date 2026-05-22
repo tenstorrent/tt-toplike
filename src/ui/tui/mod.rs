@@ -54,8 +54,6 @@ enum DisplayMode {
     Insights,
     /// Full-screen grid of chip portraits for all devices.
     Grid,
-    /// Raw telemetry table (old Normal mode, now secondary)
-    Table,
     /// Hardware-responsive starfield visualization
     Starfield,
     /// Memory Castle mode (architectural memory hierarchy visualization)
@@ -170,10 +168,34 @@ fn run_app(
     #[cfg(feature = "linux-procfs")]
     let process_update_interval = Duration::from_secs(2);
 
+    // Host CPU / RAM monitoring — sampled alongside the process monitor.
+    // sysinfo needs two calls separated in time to compute meaningful CPU%;
+    // we call it twice at init (with a tiny sleep) so the first frame shows
+    // real data rather than zeros.
+    #[cfg(feature = "linux-procfs")]
+    let (mut sys_monitor, mut host_cpu_pct, mut host_mem_used, mut host_mem_total) = {
+        use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
+        let mut s = System::new_with_specifics(
+            RefreshKind::nothing()
+                .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
+                .with_memory(MemoryRefreshKind::everything()),
+        );
+        s.refresh_cpu_usage();
+        s.refresh_memory();
+        // A brief pause lets the kernel accumulate CPU ticks for a real sample.
+        std::thread::sleep(Duration::from_millis(200));
+        s.refresh_cpu_usage();
+        s.refresh_memory();
+        let cpu  = s.global_cpu_usage();
+        let used = s.used_memory();
+        let tot  = s.total_memory();
+        (s, cpu, used, tot)
+    };
+
     // UI state - initialize from CLI --mode option if provided
     let mut display_mode = if let Some(mode) = cli.mode {
         match mode {
-            crate::cli::VisualizationMode::Normal    => DisplayMode::Table,  // old Normal → Table
+            crate::cli::VisualizationMode::Normal    => DisplayMode::Insights,
             crate::cli::VisualizationMode::Starfield => DisplayMode::Starfield,
             crate::cli::VisualizationMode::Castle    => DisplayMode::MemoryCastle,
             crate::cli::VisualizationMode::Flow      => DisplayMode::MemoryFlow,
@@ -302,9 +324,6 @@ fn run_app(
             DisplayMode::Grid => {
                 // Grid mode doesn't need special init
             }
-            DisplayMode::Table => {
-                // Table mode doesn't need special init
-            }
         }
 
         // Clear terminal when switching modes to remove artifacts
@@ -349,18 +368,12 @@ fn run_app(
                 match display_mode {
                     DisplayMode::Insights => {
                         #[cfg(feature = "linux-procfs")]
-                        render_insights(f, backend, &inference_engine, &process_monitor, process_cursor, kill_confirm.as_ref(), cli, &portrait_particles, fleet_cursor, fleet_zoom_start);
+                        render_insights(f, backend, &inference_engine, &process_monitor, process_cursor, kill_confirm.as_ref(), cli, &portrait_particles, fleet_cursor, fleet_zoom_start, host_cpu_pct, host_mem_used, host_mem_total);
                         #[cfg(not(feature = "linux-procfs"))]
                         render_insights_no_procfs(f, backend, &crate::workload::InferenceEngine::new());
                     }
                     DisplayMode::Grid => {
                         render_grid_mode(f, backend);
-                    }
-                    DisplayMode::Table => {
-                        #[cfg(feature = "linux-procfs")]
-                        ui(f, backend, cli, &process_monitor);
-                        #[cfg(not(feature = "linux-procfs"))]
-                        ui(f, backend, cli);
                     }
                     DisplayMode::Starfield => {
                         if let Some(ref sf) = starfield {
@@ -430,8 +443,7 @@ fn run_app(
                         // Grid mode is intentionally excluded — the Insights screen
                         // already is the chip-portrait grid.
                         display_mode = match display_mode {
-                            DisplayMode::Insights | DisplayMode::Grid => DisplayMode::Table,
-                            DisplayMode::Table       => DisplayMode::MemoryFlow,
+                            DisplayMode::Insights | DisplayMode::Grid => DisplayMode::MemoryFlow,
                             DisplayMode::MemoryFlow  => DisplayMode::Starfield,
                             DisplayMode::Starfield => {
                                 // Randomize Memory Castle on each activation
@@ -603,90 +615,18 @@ fn run_app(
             last_update = Instant::now();
         }
 
-        // Update process monitor (every 2 seconds to avoid overhead)
+        // Update process monitor + host stats (every 2 seconds to avoid overhead)
         #[cfg(feature = "linux-procfs")]
         if last_process_update.elapsed() >= process_update_interval {
             process_monitor.update();
+            sys_monitor.refresh_cpu_usage();
+            sys_monitor.refresh_memory();
+            host_cpu_pct  = sys_monitor.global_cpu_usage();
+            host_mem_used  = sys_monitor.used_memory();
+            host_mem_total = sys_monitor.total_memory();
             last_process_update = Instant::now();
         }
     }
-}
-
-/// Render the UI (with process monitoring on Linux)
-#[cfg(feature = "linux-procfs")]
-fn ui(
-    f: &mut Frame,
-    backend: &Box<dyn TelemetryBackend>,
-    cli: &Cli,
-    process_monitor: &crate::workload::ProcessMonitor,
-) {
-    // Adapt layout based on whether we have processes to display
-    let chunks = if process_monitor.has_any_processes() {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),      // Header
-                Constraint::Min(8),         // Device list
-                Constraint::Length(6),      // Process list (NEW)
-                Constraint::Length(6),      // Messages
-                Constraint::Length(3),      // Footer
-            ])
-            .split(f.area())
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),      // Header
-                Constraint::Min(10),        // Device list (more space when no processes)
-                Constraint::Length(6),      // Messages
-                Constraint::Length(3),      // Footer
-            ])
-            .split(f.area())
-    };
-
-    // Render header
-    render_header(f, chunks[0], backend);
-
-    // Render device list
-    render_devices(f, chunks[1], backend, cli);
-
-    // Render process list if we have processes
-    if process_monitor.has_any_processes() {
-        render_processes(f, chunks[2], backend, process_monitor);
-        render_messages(f, chunks[3]);
-        render_footer(f, chunks[4], &backend.backend_info());
-    } else {
-        render_messages(f, chunks[2]);
-        render_footer(f, chunks[3], &backend.backend_info());
-    }
-}
-
-/// Render the UI (without process monitoring on non-Linux platforms)
-#[cfg(not(feature = "linux-procfs"))]
-fn ui(f: &mut Frame, backend: &Box<dyn TelemetryBackend>, cli: &Cli) {
-    // Create layout
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),      // Header
-            Constraint::Min(10),        // Content (device list)
-            Constraint::Length(6),      // Messages (log display)
-            Constraint::Length(3),      // Footer
-        ])
-        .split(f.area());
-
-    // Render header
-    render_header(f, chunks[0], backend);
-
-    // Render device list
-    render_devices(f, chunks[1], backend, cli);
-
-    // Render messages
-    render_messages(f, chunks[2]);
-
-    // Render footer
-    let backend_info = backend.backend_info();
-    render_footer(f, chunks[3], &backend_info);
 }
 
 /// Render header with app title and status
@@ -736,464 +676,6 @@ fn render_header(f: &mut Frame, area: Rect, backend: &Box<dyn TelemetryBackend>)
     f.render_widget(header, area);
 }
 
-/// Render device list with telemetry
-fn render_devices(f: &mut Frame, area: Rect, backend: &Box<dyn TelemetryBackend>, cli: &Cli) {
-    let mut rows = Vec::new();
-
-    // Header row
-    let header_style = Style::default()
-        .fg(colors::PRIMARY)
-        .add_modifier(Modifier::BOLD);
-
-    // Data rows
-    for device in backend.devices() {
-        // Apply device filter
-        if !cli.should_monitor_device(device.index) {
-            continue;
-        }
-
-        let telem = backend.telemetry(device.index);
-        let smbus = backend.smbus_telemetry(device.index);
-
-        // Device name
-        let name = format!("{}", device.name());
-
-        // Architecture
-        let arch = device.architecture.abbrev().to_string();
-
-        // Power
-        let (power_str, _power_style) = if let Some(t) = telem {
-            let power = t.power_w();
-            (
-                format!("{:.1}W", power),
-                Style::default().fg(colors::power_color(power)),
-            )
-        } else {
-            ("N/A".to_string(), Style::default().fg(colors::TEXT_SECONDARY))
-        };
-
-        // Temperature
-        let (temp_str, _temp_style) = if let Some(t) = telem {
-            let temp = t.temp_c();
-            (
-                format!("{:.1}°C", temp),
-                Style::default().fg(colors::temp_color(temp)),
-            )
-        } else {
-            ("N/A".to_string(), Style::default().fg(colors::TEXT_SECONDARY))
-        };
-
-        // Current
-        let current_str = if let Some(t) = telem {
-            format!("{:.1}A", t.current_a())
-        } else {
-            "N/A".to_string()
-        };
-
-        // Voltage
-        let voltage_str = if let Some(t) = telem {
-            format!("{:.2}V", t.voltage.unwrap_or(0.0))
-        } else {
-            "N/A".to_string()
-        };
-
-        // AICLK
-        let aiclk_str = if let Some(t) = telem {
-            format!("{}MHz", t.aiclk_mhz())
-        } else {
-            "N/A".to_string()
-        };
-
-        // ARC Health
-        let (health_str, _health_style) = if let Some(s) = smbus {
-            let healthy = s.is_arc0_healthy();
-            (
-                if healthy { "✓ Healthy" } else { "✗ Failed" },
-                Style::default().fg(colors::health_color(healthy)),
-            )
-        } else {
-            ("Unknown", Style::default().fg(colors::TEXT_SECONDARY))
-        };
-
-        rows.push(
-            Row::new(vec![
-                name,
-                arch,
-                power_str,
-                temp_str,
-                current_str,
-                voltage_str,
-                aiclk_str,
-                health_str.to_string(),
-            ])
-            .style(Style::default().fg(colors::TEXT_PRIMARY))
-            .height(1),
-        );
-
-        // Apply color to specific cells
-        // (Ratatui doesn't support per-cell styling in the simple way, so we use styled text)
-    }
-
-    let widths = [
-        Constraint::Length(15), // Name
-        Constraint::Length(6),  // Arch
-        Constraint::Length(8),  // Power
-        Constraint::Length(8),  // Temp
-        Constraint::Length(8),  // Current
-        Constraint::Length(8),  // Voltage
-        Constraint::Length(10), // AICLK
-        Constraint::Length(12), // Health
-    ];
-
-    let table = Table::new(rows, widths)
-        .header(
-            Row::new(vec![
-                "Device",
-                "Arch",
-                "Power",
-                "Temp",
-                "Current",
-                "Voltage",
-                "AICLK",
-                "ARC Health",
-            ])
-            .style(header_style)
-            .height(1),
-        )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)  // Rounded borders
-                .border_style(Style::default()
-                    .fg(colors::rgb(56, 178, 172))  // Teal borders
-                    .add_modifier(Modifier::BOLD))
-                .title(" ⚡ Hardware Telemetry ")
-                .title_alignment(Alignment::Left)
-                .title_style(Style::default()
-                    .fg(colors::rgb(102, 126, 234))  // Purple-blue title
-                    .add_modifier(Modifier::BOLD)),
-        )
-        .column_spacing(2);  // More spacing for readability
-
-    f.render_widget(table, area);
-}
-
-/// Render process list showing which processes are using Tenstorrent devices
-#[cfg(feature = "linux-procfs")]
-fn render_processes(
-    f: &mut Frame,
-    area: Rect,
-    backend: &Box<dyn TelemetryBackend>,
-    process_monitor: &crate::workload::ProcessMonitor,
-) {
-    let mut process_lines = Vec::new();
-
-    // Iterate through devices and show processes
-    for device in backend.devices() {
-        if let Some(processes) = process_monitor.get_processes_for_device(device.index) {
-            // Device header
-            let device_line = Line::from(vec![
-                Span::styled(
-                    format!("Device {}: ", device.index),
-                    Style::default()
-                        .fg(colors::rgb(120, 150, 255))
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(
-                        "{} process{}",
-                        processes.len(),
-                        if processes.len() == 1 { "" } else { "es" }
-                    ),
-                    Style::default().fg(colors::TEXT_SECONDARY),
-                ),
-            ]);
-            process_lines.push(device_line);
-
-            // Process list (show up to 2 per device to save space)
-            for (i, proc) in processes.iter().take(2).enumerate() {
-                let is_last = i == processes.len().min(2) - 1 && processes.len() <= 2;
-                let prefix = if is_last { "└─" } else { "├─" };
-
-                let proc_line = Line::from(vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(prefix, Style::default().fg(colors::rgb(100, 100, 120))),
-                    Span::styled(
-                        format!(" {} ", proc.name),
-                        Style::default()
-                            .fg(colors::rgb(80, 220, 200))
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("[{}] ", proc.pid),
-                        Style::default().fg(colors::TEXT_SECONDARY),
-                    ),
-                    Span::styled(
-                        &proc.cmdline,
-                        Style::default().fg(colors::rgb(200, 200, 220)),
-                    ),
-                ]);
-                process_lines.push(proc_line);
-
-                // Show hugepages info if present
-                if proc.hugepages_1g > 0 || proc.hugepages_2m > 0 {
-                    let hugepages_str = if proc.hugepages_1g > 0 && proc.hugepages_2m > 0 {
-                        format!(
-                            "(hugepages: {} x 1GB, {} x 2MB)",
-                            proc.hugepages_1g, proc.hugepages_2m
-                        )
-                    } else if proc.hugepages_1g > 0 {
-                        format!("(hugepages: {} x 1GB)", proc.hugepages_1g)
-                    } else {
-                        format!("(hugepages: {} x 2MB)", proc.hugepages_2m)
-                    };
-
-                    let hugepages_line = Line::from(vec![
-                        Span::styled("     ", Style::default()),
-                        Span::styled(
-                            hugepages_str,
-                            Style::default()
-                                .fg(colors::rgb(150, 120, 180))
-                                .add_modifier(Modifier::ITALIC),
-                        ),
-                    ]);
-                    process_lines.push(hugepages_line);
-                }
-            }
-
-            // Show "and N more" if there are more processes
-            if processes.len() > 2 {
-                let more_line = Line::from(vec![
-                    Span::styled("    ", Style::default()),
-                    Span::styled(
-                        format!("└─ and {} more...", processes.len() - 2),
-                        Style::default()
-                            .fg(colors::TEXT_SECONDARY)
-                            .add_modifier(Modifier::ITALIC),
-                    ),
-                ]);
-                process_lines.push(more_line);
-            }
-        }
-    }
-
-    // Show shared processes (using hugepages but no specific device file)
-    let shared = process_monitor.get_shared_processes();
-    if !shared.is_empty() {
-        let shared_line = Line::from(vec![
-            Span::styled(
-                "Shared: ",
-                Style::default()
-                    .fg(colors::rgb(150, 120, 180))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(
-                    "{} process{}",
-                    shared.len(),
-                    if shared.len() == 1 { "" } else { "es" }
-                ),
-                Style::default().fg(colors::TEXT_SECONDARY),
-            ),
-        ]);
-        process_lines.push(shared_line);
-
-        for (i, proc) in shared.iter().take(2).enumerate() {
-            let is_last = i == shared.len().min(2) - 1 && shared.len() <= 2;
-            let prefix = if is_last { "└─" } else { "├─" };
-
-            let proc_line = Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(prefix, Style::default().fg(colors::rgb(100, 100, 120))),
-                Span::styled(
-                    format!(" {} ", proc.name),
-                    Style::default()
-                        .fg(colors::rgb(150, 120, 180))
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("[{}] ", proc.pid),
-                    Style::default().fg(colors::TEXT_SECONDARY),
-                ),
-                Span::styled(&proc.cmdline, Style::default().fg(colors::rgb(200, 200, 220))),
-            ]);
-            process_lines.push(proc_line);
-
-            // Show hugepages info
-            if proc.hugepages_1g > 0 || proc.hugepages_2m > 0 {
-                let hugepages_str = if proc.hugepages_1g > 0 && proc.hugepages_2m > 0 {
-                    format!(
-                        "(hugepages: {} x 1GB, {} x 2MB)",
-                        proc.hugepages_1g, proc.hugepages_2m
-                    )
-                } else if proc.hugepages_1g > 0 {
-                    format!("(hugepages: {} x 1GB)", proc.hugepages_1g)
-                } else {
-                    format!("(hugepages: {} x 2MB)", proc.hugepages_2m)
-                };
-
-                let hugepages_line = Line::from(vec![
-                    Span::styled("     ", Style::default()),
-                    Span::styled(
-                        hugepages_str,
-                        Style::default()
-                            .fg(colors::rgb(150, 120, 180))
-                            .add_modifier(Modifier::ITALIC),
-                    ),
-                ]);
-                process_lines.push(hugepages_line);
-            }
-        }
-
-        if shared.len() > 2 {
-            let more_line = Line::from(vec![
-                Span::styled("    ", Style::default()),
-                Span::styled(
-                    format!("└─ and {} more...", shared.len() - 2),
-                    Style::default()
-                        .fg(colors::TEXT_SECONDARY)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            ]);
-            process_lines.push(more_line);
-        }
-    }
-
-    // Render as paragraph
-    let paragraph = Paragraph::new(process_lines)
-        .block(
-            Block::default()
-                .title(" 🔧 Hardware Usage ")
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(
-                    Style::default()
-                        .fg(colors::rgb(255, 200, 100))
-                        .add_modifier(Modifier::BOLD),
-                ),
-        )
-        .style(Style::default().fg(colors::TEXT_PRIMARY));
-
-    f.render_widget(paragraph, area);
-}
-
-/// Render footer with keyboard shortcuts and backend info
-fn render_footer(f: &mut Frame, area: Rect, backend_info: &str) {
-    let footer_text = vec![Line::from(vec![
-        Span::styled(" q ", Style::default()
-            .fg(colors::rgb(255, 100, 100))  // Bright red
-            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
-        Span::styled(" quit  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(" │ ", Style::default().fg(colors::rgb(150, 120, 180))),  // Purple separator
-        Span::styled(" r ", Style::default()
-            .fg(colors::rgb(100, 180, 255))  // Bright blue
-            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
-        Span::styled(" refresh  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(" │ ", Style::default().fg(colors::rgb(150, 120, 180))),  // Purple separator
-        Span::styled(" v ", Style::default()
-            .fg(colors::rgb(80, 220, 200))  // Bright teal
-            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
-        Span::styled(" visualize  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(" │ ", Style::default().fg(colors::rgb(150, 120, 180))),  // Purple separator
-        Span::styled(" A ", Style::default()
-            .fg(colors::rgb(255, 100, 255))  // Bright magenta
-            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
-        Span::styled(" arcade  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(" │ ", Style::default().fg(colors::rgb(150, 120, 180))),  // Purple separator
-        Span::styled(" b ", Style::default()
-            .fg(colors::rgb(150, 220, 100))  // Bright green
-            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
-        Span::styled(" backend  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(" │ ", Style::default().fg(colors::rgb(150, 120, 180))),  // Purple separator
-        Span::styled(" ESC ", Style::default()
-            .fg(colors::rgb(255, 200, 100))  // Bright orange
-            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
-        Span::styled(" exit", Style::default().fg(colors::rgb(160, 160, 160))),
-    ])];
-
-    let title = format!(" ⌨  Keyboard Controls │ Backend: {} ", backend_info);
-
-    let footer = Paragraph::new(footer_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)  // Rounded borders
-                .border_style(Style::default()
-                    .fg(colors::rgb(102, 126, 234))  // Purple-blue borders
-                    .add_modifier(Modifier::BOLD))
-                .title(title)
-                .title_alignment(Alignment::Left)
-                .title_style(Style::default()
-                    .fg(colors::rgb(56, 178, 172))  // Teal title
-                    .add_modifier(Modifier::BOLD)),
-        )
-        .alignment(Alignment::Center);
-
-    f.render_widget(footer, area);
-}
-
-/// Render recent log messages
-fn render_messages(f: &mut Frame, area: Rect) {
-    use crate::logging::get_recent_log_messages;
-
-    // Get recent log messages (last 5)
-    let messages = get_recent_log_messages(5);
-
-    // Create text lines with color-coded log levels
-    let mut lines = Vec::new();
-    for msg in messages.iter().rev() {
-        let level_color = match msg.level {
-            log::Level::Error => colors::rgb(255, 100, 100),   // Bright red
-            log::Level::Warn => colors::rgb(255, 180, 100),    // Bright orange
-            log::Level::Info => colors::rgb(100, 180, 255),    // Bright blue
-            log::Level::Debug => colors::rgb(150, 150, 150),   // Gray
-            log::Level::Trace => colors::rgb(100, 100, 100),   // Dim gray
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("[{}] ", msg.timestamp),
-                Style::default().fg(colors::rgb(160, 160, 160)),
-            ),
-            Span::styled(
-                format!("{:5} ", msg.level.to_string()),
-                Style::default().fg(level_color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                &msg.message,
-                Style::default().fg(colors::rgb(220, 220, 220)),
-            ),
-        ]));
-    }
-
-    // Show helpful text if no messages
-    if lines.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "No log messages yet",
-                Style::default().fg(colors::rgb(100, 100, 100)).add_modifier(Modifier::ITALIC),
-            ),
-        ]));
-    }
-
-    let messages_widget = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default()
-                    .fg(colors::rgb(80, 220, 200))  // Teal borders
-                    .add_modifier(Modifier::BOLD))
-                .title(" 📋 Recent Messages ")
-                .title_alignment(Alignment::Left)
-                .title_style(Style::default()
-                    .fg(colors::rgb(102, 126, 234))  // Purple-blue title
-                    .add_modifier(Modifier::BOLD)),
-        )
-        .wrap(ratatui::widgets::Wrap { trim: true });
-
-    f.render_widget(messages_widget, area);
-}
 
 /// Render visualization mode (full-screen starfield)
 fn ui_visualization(
@@ -1970,6 +1452,9 @@ fn render_insights(
     portrait_particles: &std::collections::HashMap<usize, Vec<crate::ui::tui::chip_portrait::Particle>>,
     fleet_cursor: usize,
     fleet_zoom_start: Option<usize>,
+    host_cpu_pct: f32,
+    host_mem_used: u64,
+    host_mem_total: u64,
 ) {
     let area = f.area();
     let devices = backend.devices();
@@ -1995,7 +1480,7 @@ fn render_insights(
 
     render_header(f, chunks[0], backend);
     render_device_panels(f, chunks[1], backend, engine, portrait_particles, fleet_cursor, fleet_zoom_start);
-    render_process_panel(f, chunks[2], pm, &flat_process_list(pm), cursor, kill_confirm);
+    render_process_panel(f, chunks[2], pm, &flat_process_list(pm), cursor, kill_confirm, host_cpu_pct, host_mem_used, host_mem_total);
     render_insights_footer(f, chunks[3], kill_confirm, devices.len() >= FLEET_DEVICE_THRESHOLD, fleet_zoom_start.is_some());
     // Kill modal overlays the full screen when active
     if let Some(ref kc) = kill_confirm {
@@ -2013,6 +1498,44 @@ fn render_insights_no_procfs(
     let _ = (f, backend, engine);
 }
 
+/// Render a btop-style horizontal bar: `[████████░░░░░░░░]  42%`.
+///
+/// `filled` is a fraction in [0, 1]; `bar_width` is the inner glyph count.
+/// Returns a `Vec<Span>` ready to append to a `Line`.
+#[cfg(feature = "linux-procfs")]
+fn host_bar_spans(label: &str, filled: f32, bar_width: usize, value_str: &str, bar_color: ratatui::style::Color) -> Vec<Span<'static>> {
+    use ratatui::style::{Color, Style};
+    use ratatui::text::Span;
+
+    let filled_count = ((filled.clamp(0.0, 1.0) * bar_width as f32).round() as usize).min(bar_width);
+    let empty_count  = bar_width - filled_count;
+
+    let bar_filled = "█".repeat(filled_count);
+    let bar_empty  = "░".repeat(empty_count);
+
+    vec![
+        Span::styled(label.to_string(),  Style::default().fg(Color::Gray)),
+        Span::styled(" [".to_string(),   Style::default().fg(Color::DarkGray)),
+        Span::styled(bar_filled,         Style::default().fg(bar_color)),
+        Span::styled(bar_empty,          Style::default().fg(Color::DarkGray)),
+        Span::styled("] ".to_string(),   Style::default().fg(Color::DarkGray)),
+        Span::styled(value_str.to_string(), Style::default().fg(bar_color)),
+    ]
+}
+
+/// Pick a color for a bar value in [0, 1]: teal → yellow → red.
+#[cfg(feature = "linux-procfs")]
+fn bar_color(frac: f32) -> ratatui::style::Color {
+    use ratatui::style::Color;
+    if frac < 0.5 {
+        Color::Rgb(80, 220, 200)   // teal
+    } else if frac < 0.8 {
+        Color::Rgb(255, 200, 80)   // yellow-orange
+    } else {
+        Color::Rgb(255, 80,  80)   // red
+    }
+}
+
 /// Render the process panel with cursor, device mapping, and kill confirmation.
 #[cfg(feature = "linux-procfs")]
 fn render_process_panel(
@@ -2022,6 +1545,9 @@ fn render_process_panel(
     procs: &[&crate::workload::ProcessInfo],
     cursor: usize,
     _kill_confirm: Option<&KillConfirmState>,
+    host_cpu_pct: f32,
+    host_mem_used: u64,
+    host_mem_total: u64,
 ) {
     use ratatui::style::{Color, Style};
     use ratatui::text::{Line, Span};
@@ -2035,6 +1561,44 @@ fn render_process_panel(
         Span::raw("  "),
         Span::styled("─".repeat(rule_width), Style::default().fg(Color::DarkGray)),
     ]));
+
+    // Host CPU / RAM bars — displayed above the process list so they're always visible
+    // even when the list is empty.  Bar width is fixed at 20 glyphs to keep it compact.
+    {
+        const BAR_W: usize = 20;
+
+        let cpu_frac = (host_cpu_pct / 100.0).clamp(0.0, 1.0);
+        let cpu_val  = format!("{:>4.1}%", host_cpu_pct.clamp(0.0, 100.0));
+        let cpu_color = bar_color(cpu_frac);
+        let mut cpu_spans = vec![Span::raw("  ")];
+        cpu_spans.extend(host_bar_spans("CPU", cpu_frac, BAR_W, &cpu_val, cpu_color));
+
+        let mem_frac = if host_mem_total > 0 {
+            (host_mem_used as f64 / host_mem_total as f64) as f32
+        } else {
+            0.0
+        };
+        // Display in GiB with one decimal place.
+        let gib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        let mem_val = format!("{:.1}/{:.1}G", gib(host_mem_used), gib(host_mem_total));
+        let mem_color = bar_color(mem_frac);
+        let mut mem_spans: Vec<Span> = vec![Span::raw("  ")];
+        mem_spans.extend(host_bar_spans("RAM", mem_frac, BAR_W, &mem_val, mem_color));
+
+        // Lay CPU and RAM on the same row, separated by a few spaces,
+        // if the area is wide enough; otherwise separate rows.
+        let wide_enough = area.width >= 80;
+        if wide_enough {
+            let mut row_spans = vec![Span::raw("  ")];
+            row_spans.extend(host_bar_spans("CPU", cpu_frac, BAR_W, &cpu_val, cpu_color));
+            row_spans.push(Span::raw("     "));
+            row_spans.extend(host_bar_spans("RAM", mem_frac, BAR_W, &mem_val, mem_color));
+            lines.push(Line::from(row_spans));
+        } else {
+            lines.push(Line::from(cpu_spans));
+            lines.push(Line::from(mem_spans));
+        }
+    }
 
     // Section label
     lines.push(Line::from(vec![
@@ -2055,20 +1619,30 @@ fn render_process_panel(
 
         for (i, proc) in procs.iter().enumerate() {
             let selected = i == clamped_cursor;
-            let cursor_char = if selected { "▶" } else { " " };
+            // Use ">" (guaranteed 1-column width) rather than "▶" (ambiguous
+            // Unicode width — some terminals render it as 2 columns, shifting
+            // all subsequent spans on the selected row 1 char to the right).
+            let cursor_char = if selected { ">" } else { " " };
 
             let name    = format!("{:<12}", truncate(&proc.name, 12));
             let cmdline = format!("{:<32}", truncate(&proc.cmdline, 32));
             let pid     = format!("{:>7}", proc.pid);
-            let devices = if proc.device_indices.is_empty() {
-                "shared    ".to_string()
+
+            // Device column: build raw string then *truncate* to column width.
+            // format!("{:<N}", s) pads but never truncates; without an explicit
+            // truncation step a process holding 4+ devices overflows the column
+            // and misaligns everything to the right.
+            const DEV_W: usize = 10;
+            let dev_raw = if proc.device_indices.is_empty() {
+                "shared".to_string()
             } else {
                 let dev_str = proc.device_indices.iter()
                     .map(|d| d.to_string())
                     .collect::<Vec<_>>()
                     .join(",");
-                format!("{:<10}", format!("Dev {}", dev_str))
+                format!("D{}", dev_str)
             };
+            let devices = format!("{:<width$}", truncate(&dev_raw, DEV_W), width = DEV_W);
 
             let row_color    = if selected { Color::White } else { Color::Gray };
             let cursor_color = if selected { Color::Yellow } else { Color::DarkGray };
@@ -2115,7 +1689,7 @@ fn render_insights_footer(
             Span::raw("  page"),
             dot.clone(),
             Span::styled("Esc", Style::default().fg(Color::Cyan)),
-            Span::raw("  back to galaxy"),
+            Span::raw("  back to overview"),
             dot.clone(),
             Span::styled("v", Style::default().fg(Color::Cyan)),
             Span::raw("  next view"),

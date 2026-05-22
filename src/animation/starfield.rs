@@ -213,6 +213,18 @@ pub struct HardwareStarfield {
     /// updated each frame by `update_from_telemetry`.
     /// Used by stream rendering to compute `sync_score`.
     device_activity: HashMap<usize, f32>,
+
+    /// Per-device temperature (°C) — populated by update_from_telemetry.
+    /// Used by the fleet heat-map renderer when device count is too large for
+    /// individual star grids.
+    device_temps: HashMap<usize, f32>,
+
+    /// Per-device power (W) — populated by update_from_telemetry.
+    device_powers: HashMap<usize, f32>,
+
+    /// Number of devices the starfield was last initialised with.
+    /// Controls fleet-mode threshold check in render().
+    device_count: usize,
 }
 
 impl HardwareStarfield {
@@ -233,6 +245,9 @@ impl HardwareStarfield {
             height,
             board_topology: None,
             device_activity: HashMap::new(),
+            device_temps: HashMap::new(),
+            device_powers: HashMap::new(),
+            device_count: 0,
         }
     }
 
@@ -277,7 +292,15 @@ impl HardwareStarfield {
         self.planets.clear();
 
         let num_devices = devices.len();
+        self.device_count = num_devices;
         if num_devices == 0 {
+            return;
+        }
+
+        // Fleet galaxy mode: 32+ devices can't be individually resolved at usable
+        // terminal widths.  Fleet render() draws a galaxy-style heat-map instead —
+        // skip star init so individual stars aren't rendered degenerate.
+        if num_devices >= 32 {
             return;
         }
 
@@ -470,6 +493,10 @@ impl HardwareStarfield {
                 let activity = self.baseline.power_change(device.index, power)
                     .max(0.0).min(1.0);
                 self.device_activity.insert(device.index, activity);
+
+                // Cache raw temp/power for fleet heat-map rendering.
+                self.device_temps.insert(device.index, temp);
+                self.device_powers.insert(device.index, power);
             }
         }
 
@@ -611,9 +638,125 @@ impl HardwareStarfield {
     /// Render the starfield to Ratatui Lines
     ///
     /// Returns a vector of Ratatui Line structures with proper styling.
+    /// Galaxy fleet renderer — active when device_count >= 32.
+    ///
+    /// Renders chips as individual stars (`·∘○◉●`) coloured by temperature and
+    /// animated by power, set against a sparse starfield background.  The result
+    /// looks like a galaxy cluster: each Tenstorrent chip is a star whose colour
+    /// and brightness encode its current thermal/power state.
+    ///
+    /// Layout: chips are arranged in a tight grid with 2-char spacing (star + gap)
+    /// so the field fills the width.  Remaining rows are filled with faint
+    /// background stars for depth.
+    fn render_fleet_heatmap(&self) -> Vec<ratatui::text::Line<'static>> {
+        use ratatui::text::{Line, Span};
+        use ratatui::style::{Modifier, Style};
+        use crate::animation::hsv_to_rgb;
+        use crate::animation::common::temp_to_hue;
+
+        // Star characters in ascending brightness order.
+        const STAR_CHARS: [char; 5] = ['·', '∘', '○', '◉', '●'];
+
+        // Each chip cell = 2 chars: the star glyph + 1 space gap.
+        let cell_w: usize = 2;
+        let chips_per_row = (self.width / cell_w).max(1);
+        let chip_rows = (self.device_count + chips_per_row - 1) / chips_per_row;
+
+        // Vertical centering: place chip grid in the upper two-thirds.
+        let top_pad = (self.height.saturating_sub(chip_rows + 2)) / 3;
+        let _grid_end = top_pad + chip_rows + 1; // +1 for header row
+
+        let mut lines: Vec<ratatui::text::Line<'static>> = Vec::with_capacity(self.height);
+
+        for row in 0..self.height {
+            // ── Header row (one row above chip grid) ───────────────────────
+            if row == top_pad && top_pad > 0 {
+                let label = format!(" ✦ Galaxy Fleet — {} chips · ·=cool ●=active ● =hot ", self.device_count);
+                lines.push(Line::from(vec![Span::styled(
+                    label,
+                    Style::default()
+                        .fg(colors::rgb(79, 209, 197))
+                        .add_modifier(Modifier::BOLD),
+                )]));
+                continue;
+            }
+
+            let chip_row = row.wrapping_sub(top_pad + 1);
+            if row <= top_pad || chip_row >= chip_rows {
+                // ── Background nebula rows ──────────────────────────────────
+                // Scatter faint background stars pseudo-randomly for depth.
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                let mut text = String::with_capacity(self.width);
+                for col in 0..self.width {
+                    // Hash position + frame for a slowly drifting starfield.
+                    let seed = ((col * 7 + row * 13 + self.frame as usize * 3)
+                        .wrapping_mul(2654435761)) & 0xFFFF;
+                    let ch = if seed < 80 { '·' } else { ' ' };
+                    text.push(ch);
+                }
+                spans.push(Span::styled(
+                    text,
+                    Style::default().fg(colors::rgb(30, 30, 60)),
+                ));
+                lines.push(Line::from(spans));
+                continue;
+            }
+
+            // ── Chip row ────────────────────────────────────────────────────
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for col in 0..chips_per_row {
+                let dev_idx = chip_row * chips_per_row + col;
+                if dev_idx >= self.device_count {
+                    // Pad remainder with faint background stars.
+                    let seed = ((col * 11 + row * 17 + self.frame as usize)
+                        .wrapping_mul(2654435761)) & 0xFFFF;
+                    let ch = if seed < 100 { '·' } else { ' ' };
+                    spans.push(Span::styled(
+                        format!("{} ", ch),
+                        Style::default().fg(colors::rgb(30, 30, 60)),
+                    ));
+                    continue;
+                }
+
+                let temp  = *self.device_temps.get(&dev_idx).unwrap_or(&45.0);
+                let power = *self.device_powers.get(&dev_idx).unwrap_or(&0.0);
+                let act   = *self.device_activity.get(&dev_idx).unwrap_or(&0.0);
+
+                // Twinkle: use frame + device_idx to give each star a different phase.
+                let phase = (self.frame as f32 * 0.15 + dev_idx as f32 * 0.7).sin();
+                let twinkle = phase * 0.15; // ±15% brightness jitter
+                let brightness = (act + 0.4 + twinkle).clamp(0.0, 1.0);
+
+                // Pick star character by brightness.
+                let star_idx = (brightness * (STAR_CHARS.len() - 1) as f32) as usize;
+                let star_ch = STAR_CHARS[star_idx.min(STAR_CHARS.len() - 1)];
+
+                // Colour via temperature hue (same ramp as portraits).
+                let hue = temp_to_hue(temp);
+                let sat = 0.7 + act * 0.3;
+                let val = 0.5 + (power / 150.0_f32).min(0.5);
+                let color = hsv_to_rgb(hue, sat.min(1.0), val.min(1.0));
+
+                let modifier = if act > 0.7 { Modifier::BOLD } else { Modifier::empty() };
+                spans.push(Span::styled(
+                    format!("{} ", star_ch),
+                    Style::default().fg(color).add_modifier(modifier),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+
+        lines
+    }
+
     pub fn render(&self) -> Vec<ratatui::text::Line<'static>> {
         use ratatui::text::{Line, Span};
         use ratatui::style::Style;
+
+        // Galaxy fleet mode: 32+ devices switch to a macro galaxy heat-map view.
+        if self.device_count >= 32 {
+            return self.render_fleet_heatmap();
+        }
 
         // Create blank canvas with explicit black background
         let mut canvas: Vec<Vec<(char, Color)>> = vec![vec![(' ', colors::rgb(0, 0, 0)); self.width]; self.height];
