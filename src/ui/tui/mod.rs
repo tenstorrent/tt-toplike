@@ -32,7 +32,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph, Row, Table},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Row, Table},
     Frame, Terminal,
 };
 use std::io::{self, IsTerminal};
@@ -42,9 +42,9 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "linux-procfs")]
 #[derive(Debug, Clone)]
 struct KillConfirmState {
-    pid:    i32,
-    name:   String,
-    signal: i32,   // libc::SIGTERM (15) or libc::SIGKILL (9)
+    pid:        i32,
+    name:       String,
+    device_idx: usize,
 }
 
 /// UI display mode
@@ -440,29 +440,35 @@ fn run_app(
                         if kill_confirm.is_none() {
                             if let Some(proc) = flat_process_list(&process_monitor).get(process_cursor) {
                                 kill_confirm = Some(KillConfirmState {
-                                    pid: proc.pid,
-                                    name: proc.name.clone(),
-                                    signal: libc::SIGTERM,
+                                    pid:        proc.pid,
+                                    name:       proc.name.clone(),
+                                    device_idx: proc.device_indices.first().copied().unwrap_or(0),
                                 });
                             }
                         }
                     }
                     #[cfg(feature = "linux-procfs")]
                     KeyCode::Char('K') if display_mode == DisplayMode::Insights => {
-                        if kill_confirm.is_none() {
-                            if let Some(proc) = flat_process_list(&process_monitor).get(process_cursor) {
-                                kill_confirm = Some(KillConfirmState {
-                                    pid: proc.pid,
-                                    name: proc.name.clone(),
-                                    signal: libc::SIGKILL,
-                                });
-                            }
+                        if let Some(ref kc) = kill_confirm {
+                            // Inside dialog: SIGKILL and close
+                            let _ = crate::workload::process_monitor::kill_pid(kc.pid, libc::SIGKILL);
+                            kill_confirm = None;
+                        } else if let Some(proc) = flat_process_list(&process_monitor).get(process_cursor) {
+                            // Outside dialog: SIGKILL immediately
+                            let _ = crate::workload::process_monitor::kill_pid(proc.pid, libc::SIGKILL);
                         }
                     }
                     #[cfg(feature = "linux-procfs")]
-                    KeyCode::Char('y') | KeyCode::Enter if display_mode == DisplayMode::Insights => {
+                    KeyCode::Enter if display_mode == DisplayMode::Insights => {
                         if let Some(ref kc) = kill_confirm {
-                            let _ = crate::workload::process_monitor::kill_pid(kc.pid, kc.signal);
+                            let _ = crate::workload::process_monitor::kill_pid(kc.pid, libc::SIGTERM);
+                            kill_confirm = None;
+                        }
+                    }
+                    #[cfg(feature = "linux-procfs")]
+                    KeyCode::Char('y') if display_mode == DisplayMode::Insights => {
+                        if let Some(ref kc) = kill_confirm {
+                            let _ = crate::workload::process_monitor::kill_pid(kc.pid, libc::SIGTERM);
                             kill_confirm = None;
                         }
                     }
@@ -1838,6 +1844,10 @@ fn render_insights(
     render_device_panels(f, chunks[1], backend, engine, tick);
     render_process_panel(f, chunks[2], pm, &flat_process_list(pm), cursor, kill_confirm);
     render_insights_footer(f, chunks[3], kill_confirm);
+    // Kill modal overlays the full screen when active
+    if let Some(ref kc) = kill_confirm {
+        render_kill_dialog(f, area, kc);
+    }
 }
 
 /// Stub Insights render for non-linux-procfs builds.
@@ -1959,7 +1969,7 @@ fn render_process_panel(
     pm: &ProcessMonitor,
     procs: &[&crate::workload::ProcessInfo],
     cursor: usize,
-    kill_confirm: Option<&KillConfirmState>,
+    _kill_confirm: Option<&KillConfirmState>,
 ) {
     use ratatui::style::{Color, Style};
     use ratatui::text::{Line, Span};
@@ -2030,57 +2040,104 @@ fn render_process_panel(
     f.render_widget(para, area);
 }
 
-/// One-line footer for Insights mode: kill confirmation when pending, hints otherwise.
+/// One-line footer for Insights mode: always shows nav hints.
+/// The kill confirmation is now handled by the modal dialog (`render_kill_dialog`).
 #[cfg(feature = "linux-procfs")]
 fn render_insights_footer(
     f: &mut Frame,
     area: Rect,
-    kill_confirm: Option<&KillConfirmState>,
+    _kill_confirm: Option<&KillConfirmState>,
 ) {
+    use ratatui::style::{Color, Style};
+    use ratatui::text::{Line, Span};
+
+    let line = Line::from(vec![
+        Span::raw("  "),
+        Span::styled("\u{2191}\u{2193}", Style::default().fg(Color::White)),
+        Span::raw("  move"),
+        Span::raw("  \u{00B7}  "),
+        Span::styled("k", Style::default().fg(Color::Yellow)),
+        Span::raw("  silence"),
+        Span::raw("  \u{00B7}  "),
+        Span::styled("K", Style::default().fg(Color::Red)),
+        Span::raw("  destroy now"),
+        Span::raw("  \u{00B7}  "),
+        Span::styled("v", Style::default().fg(Color::Cyan)),
+        Span::raw("  next view"),
+        Span::raw("  \u{00B7}  "),
+        Span::styled("g", Style::default().fg(Color::Cyan)),
+        Span::raw("  grid"),
+        Span::raw("  \u{00B7}  "),
+        Span::styled("q", Style::default().fg(Color::DarkGray)),
+        Span::raw("  leave"),
+    ]);
+
+    f.render_widget(Paragraph::new(line), area);
+}
+
+/// Render a centered kill-confirmation modal dialog over the current frame.
+/// Uses `Clear` to erase the background, then draws a left-border-only dialog
+/// (no right-side border characters per CLAUDE.md).
+#[cfg(feature = "linux-procfs")]
+fn render_kill_dialog(f: &mut Frame, area: Rect, kc: &KillConfirmState) {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
 
-    let line = if let Some(kc) = kill_confirm {
-        let verb  = if kc.signal == libc::SIGTERM { "silence" } else { "destroy" };
-        let adverb = if kc.signal == libc::SIGTERM { "yes, gently" } else { "yes, hard" };
-        let name_short = truncate(&kc.name, 12);
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(format!("{} {} (PID {})?", verb, name_short, kc.pid),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw("  "),
-            Span::styled("y", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::raw("  "),
-            Span::styled(adverb, Style::default().fg(Color::Green)),
-            Span::raw("    "),
-            Span::styled("n", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            Span::raw("  nevermind"),
-        ])
-    } else {
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("\u{2191}\u{2193}", Style::default().fg(Color::White)),
-            Span::raw("  move"),
-            Span::raw("  \u{00B7}  "),
-            Span::styled("k", Style::default().fg(Color::Yellow)),
-            Span::raw("  silence"),
-            Span::raw("  \u{00B7}  "),
-            Span::styled("K", Style::default().fg(Color::Red)),
-            Span::raw("  destroy"),
-            Span::raw("  \u{00B7}  "),
-            Span::styled("v", Style::default().fg(Color::Cyan)),
-            Span::raw("  next view"),
-            Span::raw("  \u{00B7}  "),
-            Span::styled("g", Style::default().fg(Color::Cyan)),
-            Span::raw("  grid"),
-            Span::raw("  \u{00B7}  "),
-            Span::styled("q", Style::default().fg(Color::DarkGray)),
-            Span::raw("  leave"),
-        ])
+    const DIALOG_W: u16 = 42;
+    const DIALOG_H: u16 = 8;
+
+    let x = area.x.saturating_add((area.width.saturating_sub(DIALOG_W)) / 2);
+    let y = area.y.saturating_add((area.height.saturating_sub(DIALOG_H)) / 2);
+    let dialog_rect = Rect {
+        x,
+        y,
+        width:  DIALOG_W.min(area.width),
+        height: DIALOG_H.min(area.height),
     };
 
-    let para = Paragraph::new(line);
-    f.render_widget(para, area);
+    f.render_widget(Clear, dialog_rect);
+
+    let content_w = (DIALOG_W.saturating_sub(1)) as usize; // ║ takes 1 col
+    let name_short = truncate(&kc.name, 14);
+    let dev_label  = format!("Dev {}", kc.device_idx);
+
+    let title_pad  = content_w.saturating_sub("╔ Kill process? ".len());
+    let bottom_pad = content_w;
+
+    let lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled("╔ Kill process? ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled("═".repeat(title_pad), Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(vec![
+            Span::styled("║  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(name_short.to_string(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" · PID {} · {}", kc.pid, dev_label), Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(Span::styled("║", Style::default().fg(Color::DarkGray))),
+        Line::from(vec![
+            Span::styled("║  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("enter", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled("    silence  (SIGTERM)", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("║  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("K", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled("        destroy  (SIGKILL)", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("║  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("n · esc", Style::default().fg(Color::Gray)),
+            Span::styled("  cancel", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(Span::styled("║", Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled(
+            format!("╚{}", "═".repeat(bottom_pad)),
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    f.render_widget(Paragraph::new(lines), dialog_rect);
 }
 
 /// Render Insights device panels — one per device, each with a chip portrait on the
