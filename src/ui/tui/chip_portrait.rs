@@ -87,7 +87,10 @@ pub fn trained_random_col(
                     _                       => core_type_wh(cc, 1) == CoreType::Dram,
                 })
                 .count();
-            (ddr_status >> dram_idx) & 1 == 1
+            // DDR_STATUS nibble encoding: each 4-bit nibble = one channel.
+            // 0x5 = trained (BH), 2 = trained (legacy WH/GS). Raw bit check is wrong.
+            let nibble = (ddr_status >> (dram_idx * 4)) & 0xF;
+            nibble == 0x5 || nibble == 2
         })
         .collect();
 
@@ -984,7 +987,8 @@ mod tests {
     #[test]
     fn test_trained_random_col_bh_returns_dram_col() {
         let (cols, _) = portrait_dims(Architecture::Blackhole);
-        let ddr_status: u64 = u64::MAX; // all trained
+        // 0x5555... = all nibbles are 0x5 = BH trained encoding
+        let ddr_status: u64 = 0x5555_5555_5555_5555;
         let result = trained_random_col(ddr_status, cols, Architecture::Blackhole, 42);
         assert!(result.is_some(), "should return a column when all trained");
         let col = result.unwrap();
