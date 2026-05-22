@@ -1792,6 +1792,22 @@ fn flat_process_list<'a>(pm: &'a ProcessMonitor) -> Vec<&'a crate::workload::Pro
     all
 }
 
+/// Compute the vertical space required for the device panel grid at the given terminal width.
+#[cfg(feature = "linux-procfs")]
+fn device_panels_height(
+    devices: &[crate::models::Device],
+    area_width: u16,
+) -> u16 {
+    use crate::ui::tui::chip_portrait::portrait_dims;
+    let n = devices.len().max(1);
+    let arch = devices.first().map(|d| d.architecture).unwrap_or(crate::models::Architecture::Blackhole);
+    let (portrait_cols, _) = portrait_dims(arch);
+    let panel_w = portrait_cols as u16 + 33; // left-border(1) + portrait + gap(1) + stats(31)
+    let cols_per_row = (area_width / panel_w).max(1) as usize;
+    let row_count = (n + cols_per_row - 1) / cols_per_row;
+    (row_count as u16) * 15 // panel_h(14) + inter-row gap(1)
+}
+
 /// Render Insights screen (full layout — implemented by Task 8/9 helpers below).
 #[cfg(feature = "linux-procfs")]
 fn render_insights(
@@ -1806,14 +1822,13 @@ fn render_insights(
 ) {
     let area = f.area();
     let devices = backend.devices();
-    let n = devices.len().max(1);
 
-    // Layout: header(3) | cards(15*n, 14 rows per panel + 1 gap) | process panel (min 3) | footer(1)
+    // Layout: header(3) | cards(grid height) | process panel (min 3) | footer(1)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Length((15 * n) as u16),
+            Constraint::Length(device_panels_height(devices, area.width)),
             Constraint::Min(3),
             Constraint::Length(1),
         ])
@@ -2096,23 +2111,39 @@ fn render_device_panels(
     if devices.is_empty() { return; }
 
     let panel_h: u16 = 14; // portrait 12 rows + 1 title row + 1 bottom border row
-    let gap_col: u16 = 1;
+    let gap_col:      u16 = 1;
+    let inter_col_gap: u16 = 1;
+    let inter_row_gap: u16 = 1;
 
-    let mut y_offset = area.y;
+    // Compute panel width from first device's architecture (uniform grid).
+    // All panels get the same allocated width so grid columns align.
+    let (portrait_cols_first, _) = portrait_dims(devices[0].architecture);
+    let portrait_w_first = portrait_cols_first as u16 + 1; // +1 for left border ║
+    let stats_w          = 31_u16;                          // 1 border + 30 content
+    let panel_w          = portrait_w_first + gap_col + stats_w;
 
-    for device in devices.iter() {
+    let cols_per_row = (area.width / panel_w).max(1) as usize;
+
+    for (panel_idx, device) in devices.iter().enumerate() {
+        let col_idx = (panel_idx % cols_per_row) as u16;
+        let row_idx = (panel_idx / cols_per_row) as u16;
+
+        let x_offset = area.x + col_idx * (panel_w + inter_col_gap);
+        let y_offset = area.y + row_idx * (panel_h + inter_row_gap);
+
+        // Skip panels that overflow the allocated area vertically or horizontally
         if y_offset + panel_h > area.y + area.height { break; }
+        if x_offset + panel_w > area.x + area.width  { continue; }
 
         let idx = device.index;
         let telemetry = backend.telemetry(idx);
         let smbus     = backend.smbus_telemetry(idx);
 
+        // Per-device portrait dims (may differ in mixed-arch systems)
         let (portrait_cols, _portrait_rows) = portrait_dims(device.architecture);
         let portrait_w = portrait_cols as u16 + 1; // +1 for left border ║
-        let stats_w    = 31_u16;                    // 1 border + 30 content
-        let panel_w    = (portrait_w + gap_col + stats_w).min(area.width);
 
-        let panel_rect = Rect { x: area.x, y: y_offset, width: panel_w, height: panel_h };
+        let panel_rect = Rect { x: x_offset, y: y_offset, width: panel_w, height: panel_h };
 
         // ── Left: portrait with border ────────────────────────────────────────
         let left_border_rect = Rect { x: panel_rect.x, y: panel_rect.y, width: 1, height: panel_h };
@@ -2260,8 +2291,6 @@ fn render_device_panels(
         )));
 
         f.render_widget(Paragraph::new(stat_lines), content_rect);
-
-        y_offset += panel_h + 1;
     }
 }
 
