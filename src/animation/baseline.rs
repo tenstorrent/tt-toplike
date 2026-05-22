@@ -293,9 +293,16 @@ impl AdaptiveBaseline {
         0.0
     }
 
-    /// Check if workload is detected (>20% activity increase)
+    /// Returns true if any device shows significant hardware activity above idle baseline.
     ///
-    /// Returns true if any device shows >20% increase in power or current.
+    /// The comparison is made against sensitivity-adjusted change values returned by
+    /// [`Self::power_change`] and [`Self::current_change`].  At higher sensitivity profiles
+    /// (e.g. `paranoid` with sensitivity=5.0), smaller real hardware changes will satisfy
+    /// the 0.20 threshold, so workload detection becomes more reactive.  At lower profiles
+    /// (e.g. `anomalies_only` with sensitivity=0.2), only large swings trigger detection.
+    ///
+    /// The raw hardware threshold the user likely expects is therefore `0.20 / sensitivity`.
+    /// For example, at sensitivity=5.0 a 4% hardware power increase will be detected.
     pub fn workload_detected(&self, device_idx: usize, current_power: f32, current_current: f32) -> bool {
         if !self.is_established() {
             return false;

@@ -241,6 +241,9 @@ fn run_app(
                     // Create new Arcade visualization
                     let mut arc = ArcadeVisualization::new(size.width as usize, size.height as usize);
                     arc.initialize_from_devices(backend.devices());
+                    // Forward sensitivity so --profile paranoid (or any non-default profile)
+                    // takes effect inside Arcade just like it does in the standalone modes.
+                    arc.set_sensitivity(anim_cfg.sensitivity);
                     // Build board topology from SMBUS board_id data so the
                     // header diagram, stream characters, and castle separators
                     // are all topology-aware from the first frame.

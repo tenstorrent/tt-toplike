@@ -133,6 +133,18 @@ impl ArcadeVisualization {
         }
     }
 
+    /// Propagate a sensitivity multiplier to all three sub-visualizations.
+    ///
+    /// Must be called after construction if a non-default sensitivity profile is in use
+    /// (e.g. `--profile paranoid`).  Without this call, `ArcadeVisualization` would
+    /// silently stay at sensitivity=1.0 while the individual standalone modes
+    /// (Starfield, MemoryCastle, MemoryFlow) correctly use the configured value.
+    pub fn set_sensitivity(&mut self, s: f32) {
+        self.starfield.set_sensitivity(s);
+        self.memory_castle.set_sensitivity(s);
+        self.memory_flow.set_sensitivity(s);
+    }
+
     /// Initialize from devices (called once after creation)
     pub fn initialize_from_devices(&mut self, devices: &[crate::models::Device]) {
         self.starfield.initialize_from_devices(devices);
