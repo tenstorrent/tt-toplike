@@ -167,4 +167,25 @@ mod tests {
         assert_eq!(merged.castle_max_particles(), 900);
         assert!((merged.max_particles_scale - 1.5).abs() < f32::EPSILON);
     }
+
+    #[test]
+    fn test_anomalies_only_castle_particles() {
+        let cfg = AnimConfig::from_profile(AnimationProfile::AnomaliesOnly);
+        // 600 * 0.5 = 300
+        assert_eq!(cfg.castle_max_particles(), 300);
+    }
+
+    #[test]
+    fn test_hyper_flow_particles() {
+        let cfg = AnimConfig::from_profile(AnimationProfile::Hyper);
+        // 200 * 2.0 = 400
+        assert_eq!(cfg.flow_max_particles(), 400);
+    }
+
+    #[test]
+    fn test_relaxed_portrait_particles() {
+        let cfg = AnimConfig::from_profile(AnimationProfile::Relaxed);
+        // 32 * 0.75 = 24
+        assert_eq!(cfg.portrait_max_particles(), 24);
+    }
 }

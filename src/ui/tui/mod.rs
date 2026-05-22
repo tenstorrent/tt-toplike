@@ -226,8 +226,14 @@ fn run_app(
             }
             DisplayMode::MemoryCastle => {
                 if memory_castle.is_none() {
-                    // Create new MemoryCastle with random parameters
-                    let mut mc = MemoryCastle::new(size.width as usize, size.height as usize);
+                    // Create new MemoryCastle with density scaled by animation profile
+                    let glyph_count = ((30.0 * anim_cfg.max_particles_scale) as usize).max(5);
+                    let mut mc = MemoryCastle::new_with_density(
+                        size.width as usize,
+                        size.height as usize,
+                        anim_cfg.castle_max_particles(),
+                        glyph_count,
+                    );
                     mc.set_sensitivity(anim_cfg.sensitivity);
                     memory_castle = Some(mc);
                 }
@@ -237,8 +243,12 @@ fn run_app(
             }
             DisplayMode::MemoryFlow => {
                 if memory_flow.is_none() {
-                    // Create new MemoryFlow visualization
-                    let mut mf = MemoryFlowVis::new(size.width as usize, size.height as usize);
+                    // Create new MemoryFlow visualization with density scaled by animation profile
+                    let mut mf = MemoryFlowVis::new_with_density(
+                        size.width as usize,
+                        size.height as usize,
+                        anim_cfg.flow_max_particles(),
+                    );
                     mf.set_sensitivity(anim_cfg.sensitivity);
                     memory_flow = Some(mf);
                 }
