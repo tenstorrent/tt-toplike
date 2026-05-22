@@ -92,6 +92,9 @@ rand = "0.8"  # For particle effects
 # Configuration
 toml = "0.8"
 
+# Platform config/data directories (used by AnimConfig to locate ~/.config/tt-toplike/config.toml)
+dirs = "6"
+
 # Lock-free atomic Arc swap — eliminates mutex contention on the render path
 arc-swap = "1.7"
 

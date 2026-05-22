@@ -138,6 +138,14 @@ pub struct Cli {
     #[arg(short = 'm', long, value_enum)]
     pub mode: Option<VisualizationMode>,
 
+    /// Animation sensitivity preset
+    ///
+    /// Controls how responsive visualizations are to hardware activity.
+    /// anomalies-only = nearly still except spikes; paranoid = every fluctuation visible.
+    /// User can further tune thresholds in ~/.config/tt-toplike/config.toml.
+    #[arg(long, value_enum, default_value = "normal")]
+    pub profile: crate::config::AnimationProfile,
+
     /// Launch directly into visualization mode
     ///
     /// Skip the main monitor and show hardware-responsive animations.
@@ -369,6 +377,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            profile: crate::config::AnimationProfile::Normal,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Auto);
@@ -396,6 +405,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            profile: crate::config::AnimationProfile::Normal,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Mock);
@@ -419,6 +429,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            profile: crate::config::AnimationProfile::Normal,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Json);
@@ -442,6 +453,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            profile: crate::config::AnimationProfile::Normal,
         };
 
         assert!(cli.should_monitor_device(0));
@@ -469,6 +481,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            profile: crate::config::AnimationProfile::Normal,
         };
 
         assert_eq!(verbose_cli.log_level(), log::LevelFilter::Debug);
@@ -489,6 +502,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            profile: crate::config::AnimationProfile::Normal,
         };
 
         assert_eq!(quiet_cli.log_level(), log::LevelFilter::Off);
@@ -512,6 +526,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            profile: crate::config::AnimationProfile::Normal,
         };
 
         assert!(cli.validate().is_err());
@@ -535,6 +550,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            profile: crate::config::AnimationProfile::Normal,
         };
 
         assert_eq!(auto_cli.backend_name(), "Auto-detect");
@@ -555,6 +571,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            profile: crate::config::AnimationProfile::Normal,
         };
 
         assert_eq!(mock_cli.backend_name(), "Mock");
@@ -577,6 +594,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            profile: crate::config::AnimationProfile::Normal,
         }
     }
 
