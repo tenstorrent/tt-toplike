@@ -1803,7 +1803,7 @@ fn device_panels_height(
     let arch = devices.first().map(|d| d.architecture).unwrap_or(crate::models::Architecture::Blackhole);
     let (portrait_cols, _) = portrait_dims(arch);
     let panel_w = portrait_cols as u16 + 33; // left-border(1) + portrait + gap(1) + stats(31)
-    let cols_per_row = (area_width / panel_w).max(1) as usize;
+    let cols_per_row = ((area_width + 1) / (panel_w + 1)).max(1) as usize;
     let row_count = (n + cols_per_row - 1) / cols_per_row;
     (row_count as u16) * 15 // panel_h(14) + inter-row gap(1)
 }
@@ -2122,7 +2122,7 @@ fn render_device_panels(
     let stats_w          = 31_u16;                          // 1 border + 30 content
     let panel_w          = portrait_w_first + gap_col + stats_w;
 
-    let cols_per_row = (area.width / panel_w).max(1) as usize;
+    let cols_per_row = ((area.width + 1) / (panel_w + 1)).max(1) as usize;
 
     for (panel_idx, device) in devices.iter().enumerate() {
         let col_idx = (panel_idx % cols_per_row) as u16;
