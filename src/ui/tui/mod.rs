@@ -206,6 +206,13 @@ fn run_app(
     #[cfg(feature = "linux-procfs")]
     let mut kill_confirm: Option<KillConfirmState> = None;
 
+    // Fleet navigation state (Insights with 32+ devices).
+    // fleet_cursor: which device cell is highlighted in the galaxy overview.
+    // fleet_zoom_start: when Some(n), show portrait grid for devices [n..n+PAGE_SIZE]
+    //                   instead of the compact fleet map.
+    let mut fleet_cursor: usize = 0;
+    let mut fleet_zoom_start: Option<usize> = None;
+
     loop {
         // Initialize or update visualizations
         let size = terminal.size().map_err(|e| TTTopError::Terminal(e.to_string()))?;
@@ -342,7 +349,7 @@ fn run_app(
                 match display_mode {
                     DisplayMode::Insights => {
                         #[cfg(feature = "linux-procfs")]
-                        render_insights(f, backend, &inference_engine, &process_monitor, process_cursor, kill_confirm.as_ref(), cli, &portrait_particles);
+                        render_insights(f, backend, &inference_engine, &process_monitor, process_cursor, kill_confirm.as_ref(), cli, &portrait_particles, fleet_cursor, fleet_zoom_start);
                         #[cfg(not(feature = "linux-procfs"))]
                         render_insights_no_procfs(f, backend, &crate::workload::InferenceEngine::new());
                     }
@@ -398,14 +405,19 @@ fn run_app(
                         return Ok(());
                     }
                     KeyCode::Esc => {
-                        #[cfg(feature = "linux-procfs")]
-                        if kill_confirm.is_some() {
-                            kill_confirm = None;
+                        if fleet_zoom_start.is_some() {
+                            // Zoom out from portrait drill-down back to galaxy overview.
+                            fleet_zoom_start = None;
                         } else {
+                            #[cfg(feature = "linux-procfs")]
+                            if kill_confirm.is_some() {
+                                kill_confirm = None;
+                            } else {
+                                return Ok(());
+                            }
+                            #[cfg(not(feature = "linux-procfs"))]
                             return Ok(());
                         }
-                        #[cfg(not(feature = "linux-procfs"))]
-                        return Ok(());
                     }
                     KeyCode::Char('r') => {
                         // Force refresh
@@ -414,10 +426,11 @@ fn run_app(
                         }
                     }
                     KeyCode::Char('v') => {
-                        // Cycle through visualization modes
+                        // Cycle through visualization modes.
+                        // Grid mode is intentionally excluded — the Insights screen
+                        // already is the chip-portrait grid.
                         display_mode = match display_mode {
-                            DisplayMode::Insights    => DisplayMode::Grid,
-                            DisplayMode::Grid        => DisplayMode::Table,
+                            DisplayMode::Insights | DisplayMode::Grid => DisplayMode::Table,
                             DisplayMode::Table       => DisplayMode::MemoryFlow,
                             DisplayMode::MemoryFlow  => DisplayMode::Starfield,
                             DisplayMode::Starfield => {
@@ -473,18 +486,73 @@ fn run_app(
                             }
                         }
                     }
-                    // Insights-mode navigation and kill
-                    #[cfg(feature = "linux-procfs")]
+                    // Insights-mode navigation, fleet drill-down, and kill
                     KeyCode::Up if display_mode == DisplayMode::Insights => {
-                        if kill_confirm.is_none() {
-                            process_cursor = process_cursor.saturating_sub(1);
+                        let n = backend.devices().len();
+                        if n >= FLEET_DEVICE_THRESHOLD && fleet_zoom_start.is_none() {
+                            // Move cursor up one row in the galaxy overview.
+                            let cells_per_row = (size.width / FLEET_CELL_W).max(1) as usize;
+                            fleet_cursor = fleet_cursor.saturating_sub(cells_per_row);
+                        } else {
+                            // Normal process-list navigation.
+                            #[cfg(feature = "linux-procfs")]
+                            if kill_confirm.is_none() {
+                                process_cursor = process_cursor.saturating_sub(1);
+                            }
                         }
                     }
-                    #[cfg(feature = "linux-procfs")]
                     KeyCode::Down if display_mode == DisplayMode::Insights => {
-                        if kill_confirm.is_none() {
-                            let max = flat_process_list(&process_monitor).len().saturating_sub(1);
-                            process_cursor = (process_cursor + 1).min(max);
+                        let n = backend.devices().len();
+                        if n >= FLEET_DEVICE_THRESHOLD && fleet_zoom_start.is_none() {
+                            let cells_per_row = (size.width / FLEET_CELL_W).max(1) as usize;
+                            fleet_cursor = (fleet_cursor + cells_per_row).min(n.saturating_sub(1));
+                        } else {
+                            #[cfg(feature = "linux-procfs")]
+                            if kill_confirm.is_none() {
+                                let max = flat_process_list(&process_monitor).len().saturating_sub(1);
+                                process_cursor = (process_cursor + 1).min(max);
+                            }
+                        }
+                    }
+                    KeyCode::Left if display_mode == DisplayMode::Insights => {
+                        let n = backend.devices().len();
+                        if n >= FLEET_DEVICE_THRESHOLD {
+                            if let Some(start) = fleet_zoom_start {
+                                // Page back in zoomed portrait view.
+                                fleet_zoom_start = Some(start.saturating_sub(FLEET_PAGE_SIZE));
+                                fleet_cursor = fleet_zoom_start.unwrap();
+                            } else {
+                                // Move cursor left one cell.
+                                fleet_cursor = fleet_cursor.saturating_sub(1);
+                            }
+                        }
+                    }
+                    KeyCode::Right if display_mode == DisplayMode::Insights => {
+                        let n = backend.devices().len();
+                        if n >= FLEET_DEVICE_THRESHOLD {
+                            if let Some(start) = fleet_zoom_start {
+                                // Page forward in zoomed portrait view.
+                                let new = (start + FLEET_PAGE_SIZE).min(n.saturating_sub(1));
+                                fleet_zoom_start = Some(new);
+                                fleet_cursor = new;
+                            } else {
+                                fleet_cursor = (fleet_cursor + 1).min(n.saturating_sub(1));
+                            }
+                        }
+                    }
+                    KeyCode::Enter if display_mode == DisplayMode::Insights => {
+                        let n = backend.devices().len();
+                        if n >= FLEET_DEVICE_THRESHOLD && fleet_zoom_start.is_none() {
+                            // Zoom into portrait view for the page containing cursor.
+                            let page_start = (fleet_cursor / FLEET_PAGE_SIZE) * FLEET_PAGE_SIZE;
+                            fleet_zoom_start = Some(page_start);
+                        } else {
+                            // Kill-dialog confirmation.
+                            #[cfg(feature = "linux-procfs")]
+                            if let Some(ref kc) = kill_confirm {
+                                let _ = crate::workload::process_monitor::kill_pid(kc.pid, libc::SIGTERM);
+                                kill_confirm = None;
+                            }
                         }
                     }
                     #[cfg(feature = "linux-procfs")]
@@ -508,13 +576,6 @@ fn run_app(
                         } else if let Some(proc) = flat_process_list(&process_monitor).get(process_cursor) {
                             // Outside dialog: SIGKILL immediately
                             let _ = crate::workload::process_monitor::kill_pid(proc.pid, libc::SIGKILL);
-                        }
-                    }
-                    #[cfg(feature = "linux-procfs")]
-                    KeyCode::Enter if display_mode == DisplayMode::Insights => {
-                        if let Some(ref kc) = kill_confirm {
-                            let _ = crate::workload::process_monitor::kill_pid(kc.pid, libc::SIGTERM);
-                            kill_confirm = None;
                         }
                     }
                     #[cfg(feature = "linux-procfs")]
@@ -1850,7 +1911,25 @@ fn flat_process_list<'a>(pm: &'a ProcessMonitor) -> Vec<&'a crate::workload::Pro
     all
 }
 
+/// Cell width used in fleet compact mode (see `render_device_panels`).
+/// 3 chars: temperature block glyph (1) + space (1) + separator (1).
+const FLEET_CELL_W: u16 = 3;
+
+/// Fleet compact mode activates at this device count (matching the starfield galaxy mode).
+/// At 32+ devices the full-portrait grid almost always overflows a standard terminal.
+const FLEET_DEVICE_THRESHOLD: usize = 32;
+
+/// How many devices to show per page in the portrait drill-down (zoom) view.
+/// Kept well below FLEET_DEVICE_THRESHOLD so the zoomed slice always renders as portraits.
+const FLEET_PAGE_SIZE: usize = 16;
+
+/// Height cap for the panel area in fleet mode.
+const FLEET_HEIGHT_THRESHOLD: u16 = 30; // lines; beyond this we switch to compact cells
+
 /// Compute the vertical space required for the device panel grid at the given terminal width.
+///
+/// When the device count is large enough that full portraits would overflow the screen
+/// we switch to a compact fleet heat-map (one coloured cell per device).
 #[cfg(feature = "linux-procfs")]
 fn device_panels_height(
     devices: &[crate::models::Device],
@@ -1858,6 +1937,15 @@ fn device_panels_height(
 ) -> u16 {
     use crate::ui::tui::chip_portrait::portrait_dims;
     let n = devices.len().max(1);
+
+    // Fleet mode at 32+ devices (same threshold as starfield galaxy mode).
+    if n >= FLEET_DEVICE_THRESHOLD {
+        let cells_per_row = (area_width / FLEET_CELL_W).max(1) as usize;
+        let cell_rows = (n + cells_per_row - 1) / cells_per_row;
+        // 2 rows per cell-row (cell line + label line), +1 for header
+        return (cell_rows as u16 * 2 + 1).min(FLEET_HEIGHT_THRESHOLD);
+    }
+
     let arch = devices.first().map(|d| d.architecture).unwrap_or(crate::models::Architecture::Blackhole);
     let (portrait_cols, _) = portrait_dims(arch);
     let panel_w = portrait_cols as u16 + 33; // left-border(1) + portrait + gap(1) + stats(31)
@@ -1880,25 +1968,35 @@ fn render_insights(
     kill_confirm: Option<&KillConfirmState>,
     _cli: &Cli,
     portrait_particles: &std::collections::HashMap<usize, Vec<crate::ui::tui::chip_portrait::Particle>>,
+    fleet_cursor: usize,
+    fleet_zoom_start: Option<usize>,
 ) {
     let area = f.area();
     let devices = backend.devices();
+
+    // When zoomed in, the panel height is based on the slice, not the full list.
+    let panel_devices: &[crate::models::Device] = if let Some(start) = fleet_zoom_start {
+        let end = (start + FLEET_PAGE_SIZE).min(devices.len());
+        &devices[start..end]
+    } else {
+        devices
+    };
 
     // Layout: header(3) | cards(grid height) | process panel (min 3) | footer(1)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Length(device_panels_height(devices, area.width)),
+            Constraint::Length(device_panels_height(panel_devices, area.width)),
             Constraint::Min(3),
             Constraint::Length(1),
         ])
         .split(area);
 
     render_header(f, chunks[0], backend);
-    render_device_panels(f, chunks[1], backend, engine, portrait_particles);
+    render_device_panels(f, chunks[1], backend, engine, portrait_particles, fleet_cursor, fleet_zoom_start);
     render_process_panel(f, chunks[2], pm, &flat_process_list(pm), cursor, kill_confirm);
-    render_insights_footer(f, chunks[3], kill_confirm);
+    render_insights_footer(f, chunks[3], kill_confirm, devices.len() >= FLEET_DEVICE_THRESHOLD, fleet_zoom_start.is_some());
     // Kill modal overlays the full screen when active
     if let Some(ref kc) = kill_confirm {
         render_kill_dialog(f, area, kc);
@@ -2001,30 +2099,69 @@ fn render_insights_footer(
     f: &mut Frame,
     area: Rect,
     _kill_confirm: Option<&KillConfirmState>,
+    in_fleet: bool,
+    in_zoom: bool,
 ) {
     use ratatui::style::{Color, Style};
     use ratatui::text::{Line, Span};
 
-    let line = Line::from(vec![
-        Span::raw("  "),
-        Span::styled("\u{2191}\u{2193}", Style::default().fg(Color::White)),
-        Span::raw("  move"),
-        Span::raw("  \u{00B7}  "),
-        Span::styled("k", Style::default().fg(Color::Yellow)),
-        Span::raw("  silence"),
-        Span::raw("  \u{00B7}  "),
-        Span::styled("K", Style::default().fg(Color::Red)),
-        Span::raw("  destroy now"),
-        Span::raw("  \u{00B7}  "),
-        Span::styled("v", Style::default().fg(Color::Cyan)),
-        Span::raw("  next view"),
-        Span::raw("  \u{00B7}  "),
-        Span::styled("g", Style::default().fg(Color::Cyan)),
-        Span::raw("  grid"),
-        Span::raw("  \u{00B7}  "),
-        Span::styled("q", Style::default().fg(Color::DarkGray)),
-        Span::raw("  leave"),
-    ]);
+    let dot = Span::raw("  \u{00B7}  ");
+
+    let line = if in_zoom {
+        // Zoomed portrait view — show paging hints.
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("← →", Style::default().fg(Color::White)),
+            Span::raw("  page"),
+            dot.clone(),
+            Span::styled("Esc", Style::default().fg(Color::Cyan)),
+            Span::raw("  back to galaxy"),
+            dot.clone(),
+            Span::styled("v", Style::default().fg(Color::Cyan)),
+            Span::raw("  next view"),
+            dot.clone(),
+            Span::styled("q", Style::default().fg(Color::DarkGray)),
+            Span::raw("  leave"),
+        ])
+    } else if in_fleet {
+        // Galaxy overview — show navigation + drill-down hints.
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("←↑↓→", Style::default().fg(Color::White)),
+            Span::raw("  navigate"),
+            dot.clone(),
+            Span::styled("Enter", Style::default().fg(Color::Green)),
+            Span::raw("  zoom in"),
+            dot.clone(),
+            Span::styled("v", Style::default().fg(Color::Cyan)),
+            Span::raw("  next view"),
+            dot.clone(),
+            Span::styled("q", Style::default().fg(Color::DarkGray)),
+            Span::raw("  leave"),
+        ])
+    } else {
+        // Normal portrait grid.
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("\u{2191}\u{2193}", Style::default().fg(Color::White)),
+            Span::raw("  move"),
+            dot.clone(),
+            Span::styled("k", Style::default().fg(Color::Yellow)),
+            Span::raw("  silence"),
+            dot.clone(),
+            Span::styled("K", Style::default().fg(Color::Red)),
+            Span::raw("  destroy now"),
+            dot.clone(),
+            Span::styled("v", Style::default().fg(Color::Cyan)),
+            Span::raw("  next view"),
+            dot.clone(),
+            Span::styled("g", Style::default().fg(Color::Cyan)),
+            Span::raw("  grid"),
+            dot.clone(),
+            Span::styled("q", Style::default().fg(Color::DarkGray)),
+            Span::raw("  leave"),
+        ])
+    };
 
     f.render_widget(Paragraph::new(line), area);
 }
@@ -2094,6 +2231,126 @@ fn render_kill_dialog(f: &mut Frame, area: Rect, kc: &KillConfirmState) {
     f.render_widget(Paragraph::new(lines), dialog_rect);
 }
 
+/// Compact fleet heat-map for Insights when device count is large.
+///
+/// Each device is rendered as a single coloured block glyph (`░▒▓█`) with a
+/// 2-line layout: top line = coloured blocks, bottom line = device index labels.
+/// Colour encodes ASIC temperature via the same `tensix_temp_rgb` ramp used
+/// by the full portrait; block density encodes relative power.
+/// `cursor` is the currently highlighted device index — that cell is shown with
+/// a bright white `◉` instead of the normal block glyph so the user can see
+/// where Enter will zoom them in.  Press Enter to drill down to portrait view.
+#[cfg(feature = "linux-procfs")]
+fn render_fleet_heatmap_panel(
+    f: &mut Frame,
+    area: Rect,
+    backend: &Box<dyn TelemetryBackend>,
+    cursor: usize,
+) {
+    use crate::ui::tui::chip_portrait::tensix_temp_rgb;
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::Paragraph;
+
+    let devices = backend.devices();
+    if devices.is_empty() { return; }
+
+    let cells_per_row = (area.width / FLEET_CELL_W).max(1) as usize;
+    let n = devices.len();
+
+    // Clamp cursor to valid device range.
+    let cursor = cursor.min(n.saturating_sub(1));
+    // Which page (FLEET_PAGE_SIZE block) does the cursor land on?
+    let cursor_page_start = (cursor / FLEET_PAGE_SIZE) * FLEET_PAGE_SIZE;
+
+    // Header line — include hint for drill-down.
+    let header = Line::from(vec![Span::styled(
+        format!(
+            " Fleet — {} devices · ←↑↓→ navigate · Enter zoom · temp=colour power=density ",
+            n
+        ),
+        Style::default()
+            .fg(colors::rgb(79, 209, 197))
+            .add_modifier(Modifier::BOLD),
+    )]);
+
+    let mut lines: Vec<Line> = vec![header];
+    let mut y: u16 = area.y + 1; // +1 for header
+
+    // Highlight bar: which cells belong to the cursor's page?
+    let page_end = (cursor_page_start + FLEET_PAGE_SIZE).min(n);
+
+    let row_count = (n + cells_per_row - 1) / cells_per_row;
+    for row in 0..row_count {
+        if y + 1 >= area.y + area.height { break; }
+
+        let mut block_spans: Vec<Span<'static>> = Vec::new();
+        let mut label_spans: Vec<Span<'static>> = Vec::new();
+
+        for col in 0..cells_per_row {
+            let dev_idx = row * cells_per_row + col;
+            if dev_idx >= n { break; }
+
+            let device = &devices[dev_idx];
+            let telem  = backend.telemetry(device.index);
+
+            let temp  = telem.map(|t| t.temp_c()).unwrap_or(45.0);
+            let power = telem.map(|t| t.power_w()).unwrap_or(0.0);
+
+            let [r, g, b] = tensix_temp_rgb(temp);
+            let base_color = Color::Rgb(r, g, b);
+
+            let is_cursor = dev_idx == cursor;
+            let in_page   = dev_idx >= cursor_page_start && dev_idx < page_end;
+
+            let (block_char, cell_style) = if is_cursor {
+                // Cursor cell: bright marker
+                ('◉', Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED))
+            } else if in_page {
+                // Page bracket: same glyph but dimmer highlight tint
+                let power_frac = (power / 150.0).min(1.0);
+                let ch = match (power_frac * 4.0) as u32 {
+                    0 => '░', 1 => '▒', 2 => '▓', _ => '█',
+                };
+                (ch, Style::default().fg(base_color).add_modifier(Modifier::BOLD))
+            } else {
+                // Normal cell
+                let power_frac = (power / 150.0).min(1.0);
+                let ch = match (power_frac * 4.0) as u32 {
+                    0 => '░', 1 => '▒', 2 => '▓', _ => '█',
+                };
+                (ch, Style::default().fg(base_color))
+            };
+
+            // Cell = block + 2 spaces (FLEET_CELL_W = 3)
+            block_spans.push(Span::styled(
+                format!("{:width$}", block_char, width = FLEET_CELL_W as usize),
+                cell_style,
+            ));
+
+            // Index label: bright for cursor/page, dim otherwise
+            let label = format!("{:<width$}", device.index, width = FLEET_CELL_W as usize);
+            let label_style = if is_cursor {
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+            } else if in_page {
+                Style::default().fg(colors::rgb(130, 130, 160))
+            } else {
+                Style::default().fg(colors::rgb(80, 80, 100))
+            };
+            label_spans.push(Span::styled(label, label_style));
+        }
+
+        lines.push(Line::from(block_spans));
+        lines.push(Line::from(label_spans));
+        y += 2;
+    }
+
+    let widget = Paragraph::new(lines);
+    f.render_widget(widget, area);
+}
+
 /// Render Insights device panels — one per device, each with a chip portrait on the
 /// left and a stats sidebar on the right.
 ///
@@ -2109,6 +2366,10 @@ fn render_kill_dialog(f: &mut Frame, area: Rect, kc: &KillConfirmState) {
 /// `portrait_particles` maps device index → live particle list.  Passed down to
 /// `render_chip_portrait` so the particle overlay appears on each portrait.
 /// The border color is derived from ASIC temperature via `tensix_temp_rgb`.
+/// When device count is large enough that full portraits would overflow the terminal,
+/// dispatches to `render_fleet_heatmap_panel` instead.
+/// `fleet_cursor` and `fleet_zoom_start` control galaxy-overview cursor highlighting
+/// and portrait drill-down zoom respectively.
 #[cfg(feature = "linux-procfs")]
 fn render_device_panels(
     f: &mut Frame,
@@ -2116,19 +2377,66 @@ fn render_device_panels(
     backend: &Box<dyn TelemetryBackend>,
     _engine: &crate::workload::InferenceEngine,
     portrait_particles: &std::collections::HashMap<usize, Vec<crate::ui::tui::chip_portrait::Particle>>,
+    fleet_cursor: usize,
+    fleet_zoom_start: Option<usize>,
 ) {
     use crate::ui::tui::chip_portrait::{portrait_dims, render_chip_portrait, tensix_temp_rgb};
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
     use ratatui::widgets::Paragraph;
 
-    let devices = backend.devices();
-    if devices.is_empty() { return; }
+    let all_devices = backend.devices();
+    if all_devices.is_empty() { return; }
 
     let panel_h: u16 = 14; // portrait 12 rows + 1 title row + 1 bottom border row
     let gap_col:      u16 = 1;
     let inter_col_gap: u16 = 1;
     let inter_row_gap: u16 = 1;
+
+    // Fleet galaxy mode at 32+ devices (matching starfield threshold).
+    // Skip this when a zoom slice is active — zoomed view always shows portraits.
+    if all_devices.len() >= FLEET_DEVICE_THRESHOLD && fleet_zoom_start.is_none() {
+        render_fleet_heatmap_panel(f, area, backend, fleet_cursor);
+        return;
+    }
+
+    // Determine which slice of devices to render.
+    // Zoomed view: FLEET_PAGE_SIZE devices starting at fleet_zoom_start.
+    // Normal view: all devices (< FLEET_DEVICE_THRESHOLD).
+    let devices: &[crate::models::Device] = if let Some(start) = fleet_zoom_start {
+        let end = (start + FLEET_PAGE_SIZE).min(all_devices.len());
+        &all_devices[start..end]
+    } else {
+        all_devices
+    };
+
+    // Zoom banner — shown above the portrait grid when a subset is displayed.
+    let (area, zoom_used_rows) = if fleet_zoom_start.is_some() {
+        let banner_h: u16 = 1;
+        let start = fleet_zoom_start.unwrap();
+        let end = (start + FLEET_PAGE_SIZE).min(all_devices.len()).saturating_sub(1);
+        let total = all_devices.len();
+        let banner_text = format!(
+            " ▶ Zoomed: chips {}–{} of {}   ← → page   Esc to zoom out ",
+            start, end, total,
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                banner_text,
+                Style::default()
+                    .fg(Color::Rgb(79, 209, 197))
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            Rect { x: area.x, y: area.y, width: area.width, height: banner_h },
+        );
+        (
+            Rect { x: area.x, y: area.y + banner_h, width: area.width, height: area.height.saturating_sub(banner_h) },
+            banner_h,
+        )
+    } else {
+        (area, 0)
+    };
+    let _ = zoom_used_rows;
 
     // Compute panel width from first device's architecture (uniform grid).
     // All panels get the same allocated width so grid columns align.
@@ -2173,10 +2481,19 @@ fn render_device_panels(
         // ── Header rule: arch name + dev index + fixed-width temp ────────────
         // {:>3} right-justifies the temperature to exactly 3 chars, so the rule
         // never changes width when temp crosses 99→100°C.
+        // board_type is omitted when it duplicates the architecture name (e.g.
+        // sysfs backend sets board_type="blackhole" from the hwmon driver name).
+        // It is shown when it carries distinct product info (e.g. "p300c" from JSON).
         let arch_name  = device.architecture.name().to_uppercase();
         let temp_i     = telemetry.map(|t| t.temp_c() as i32).unwrap_or(0);
-        let board_trim = &device.board_type[..device.board_type.len().min(7)];
-        let label      = format!("── {} · D{} · {} ·{:>3}°C ", arch_name, idx, board_trim, temp_i);
+        let board_raw  = device.board_type.to_lowercase();
+        let arch_lower = device.architecture.name().to_lowercase();
+        let label = if !board_raw.is_empty() && board_raw != arch_lower && board_raw != "unknown" {
+            let board_trim = &device.board_type[..device.board_type.len().min(7)];
+            format!("── {} · D{} · {} ·{:>3}°C ", arch_name, idx, board_trim, temp_i)
+        } else {
+            format!("── {} · D{} ·{:>3}°C ", arch_name, idx, temp_i)
+        };
         let trail      = (panel_w as usize).saturating_sub(label.chars().count());
         let header_text = format!("{}{}", label, "─".repeat(trail));
         f.render_widget(
@@ -2234,9 +2551,10 @@ fn render_device_panels(
         let power_frac = (power_w_val / tdp).min(1.0);
         let bar_filled = (power_frac * 10.0) as usize;
         let power_bar: String = (0..10).map(|i| if i < bar_filled { '█' } else { '░' }).collect();
-        let power_color = if power_frac > 0.85 { Color::Red }
-                         else if power_frac > 0.6 { Color::Yellow }
-                         else { Color::Green };
+        let power_color = if power_frac > 0.85 { Color::Rgb(255, 80, 80) }
+                         else if power_frac > 0.6 { Color::Rgb(236, 150, 184) }
+                         else if power_frac > 0.3 { Color::Rgb(160, 120, 255) }
+                         else { Color::Rgb(79, 209, 197) };
         stat_lines.push(Line::from(vec![
             Span::styled(format!("{:<8}", "Power"), Style::default().fg(Color::DarkGray)),
             Span::styled(power_bar, Style::default().fg(power_color)),
@@ -2254,7 +2572,8 @@ fn render_device_panels(
         let eth_dots: String = (0..eth_total.min(8)).map(|i| {
             if (eth_live_mask >> i) & 1 == 1 { '●' } else { '·' }
         }).collect();
-        let eth_color = if eth_live_count == eth_total { Color::Green } else { Color::Yellow };
+        let eth_color = if eth_live_count == eth_total { Color::Rgb(79, 209, 197) }
+                       else { Color::Rgb(236, 150, 184) };
         stat_lines.push(Line::from(vec![
             Span::styled(format!("{:<8}", "ETH"), Style::default().fg(Color::DarkGray)),
             Span::styled(format!("{:<8}", eth_dots), Style::default().fg(eth_color)),
@@ -2271,9 +2590,9 @@ fn render_device_panels(
             if !temps.is_empty() {
                 let t_min = temps.iter().copied().fold(f32::INFINITY, f32::min);
                 let t_max = temps.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                let max_color = if t_max > 70.0 { Color::Red }
-                               else if t_max > 50.0 { Color::Yellow }
-                               else { Color::Cyan };
+                let max_color = if t_max > 70.0 { Color::Rgb(255, 80, 80) }
+                               else if t_max > 50.0 { Color::Rgb(236, 150, 184) }
+                               else { Color::Rgb(79, 209, 197) };
                 stat_lines.push(Line::from(vec![
                     Span::styled(format!("{:<8}", "GDDR T"), Style::default().fg(Color::DarkGray)),
                     Span::styled(format!("{:.0}°→{:.0}°C", t_min, t_max), Style::default().fg(max_color)),
