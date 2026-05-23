@@ -19,7 +19,7 @@ use crate::cli::{BackendType, Cli};
 use crate::error::TTTopError;
 use crate::ui::colors;
 #[cfg(feature = "linux-procfs")]
-use crate::workload::{InferenceEngine, ProcessMonitor};
+use crate::workload::{InferenceEngine, InferenceServerProbe, ProcessMonitor, ServingMetrics};
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
@@ -224,6 +224,10 @@ fn run_app(
     #[cfg(feature = "linux-procfs")]
     let mut inference_engine = InferenceEngine::new();
     #[cfg(feature = "linux-procfs")]
+    let mut inference_probe = InferenceServerProbe::new();
+    #[cfg(feature = "linux-procfs")]
+    let mut serving_metrics: std::collections::HashMap<i32, ServingMetrics> = std::collections::HashMap::new();
+    #[cfg(feature = "linux-procfs")]
     let mut process_cursor: usize = 0;
     #[cfg(feature = "linux-procfs")]
     let mut kill_confirm: Option<KillConfirmState> = None;
@@ -354,7 +358,7 @@ fn run_app(
                 match display_mode {
                     DisplayMode::Insights => {
                         #[cfg(feature = "linux-procfs")]
-                        render_insights(f, backend, &inference_engine, &process_monitor, process_cursor, kill_confirm.as_ref(), cli, &portrait_particles, fleet_cursor, fleet_zoom_start, host_cpu_pct, host_mem_used, host_mem_total);
+                        render_insights(f, backend, &inference_engine, &process_monitor, process_cursor, kill_confirm.as_ref(), cli, &portrait_particles, fleet_cursor, fleet_zoom_start, host_cpu_pct, host_mem_used, host_mem_total, &serving_metrics);
                         #[cfg(not(feature = "linux-procfs"))]
                         render_insights_no_procfs(f, backend, &crate::workload::InferenceEngine::new());
                     }
@@ -622,6 +626,10 @@ fn run_app(
         #[cfg(feature = "linux-procfs")]
         if last_process_update.elapsed() >= process_update_interval {
             process_monitor.update();
+            // Probe inference servers — runs at same 2s cadence to avoid hammering
+            // HTTP endpoints on every backend tick.
+            let flat = flat_process_list(&process_monitor);
+            serving_metrics = inference_probe.update(&flat);
             sys_monitor.refresh_cpu_usage();
             sys_monitor.refresh_memory();
             host_cpu_pct  = sys_monitor.global_cpu_usage();
@@ -1402,6 +1410,7 @@ fn render_insights(
     host_cpu_pct: f32,
     host_mem_used: u64,
     host_mem_total: u64,
+    serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
 ) {
     let area = f.area();
     let devices = backend.devices();
@@ -1427,7 +1436,7 @@ fn render_insights(
 
     render_header(f, chunks[0], backend);
     render_device_panels(f, chunks[1], backend, engine, portrait_particles, fleet_cursor, fleet_zoom_start);
-    render_process_panel(f, chunks[2], pm, &flat_process_list(pm), cursor, kill_confirm, host_cpu_pct, host_mem_used, host_mem_total);
+    render_process_panel(f, chunks[2], pm, &flat_process_list(pm), cursor, kill_confirm, host_cpu_pct, host_mem_used, host_mem_total, serving_metrics);
     render_insights_footer(f, chunks[3], kill_confirm, devices.len() >= FLEET_DEVICE_THRESHOLD, fleet_zoom_start.is_some());
     // Kill modal overlays the full screen when active
     if let Some(ref kc) = kill_confirm {
@@ -1495,6 +1504,7 @@ fn render_process_panel(
     host_cpu_pct: f32,
     host_mem_used: u64,
     host_mem_total: u64,
+    serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
 ) {
     use ratatui::style::{Color, Style};
     use ratatui::text::{Line, Span};
@@ -1606,6 +1616,57 @@ fn render_process_panel(
                 Span::raw("  "),
                 Span::styled(devices, Style::default().fg(Color::Blue)),
             ]));
+
+            // If this is a known TT inference server, append a metrics summary row.
+            if let Some(sm) = serving_metrics.get(&proc.pid) {
+                let mut spans: Vec<Span> = vec![
+                    Span::raw("       "),
+                    Span::styled(
+                        format!("[{}] ", sm.flavour.label()),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(
+                        if sm.swap_in_progress { "loading" }
+                        else if sm.is_ready    { "ready"   }
+                        else                   { "init"    },
+                        Style::default().fg(
+                            if sm.is_ready { Color::Green } else { Color::Yellow }
+                        ),
+                    ),
+                ];
+
+                // Collect the interesting metric snippets, space-separated.
+                let mut parts: Vec<String> = Vec::new();
+
+                if let Some(ref model) = sm.model_id {
+                    let short = model.rsplit('/').next().unwrap_or(model.as_str());
+                    parts.push(format!("model={}", truncate(short, 24)));
+                }
+                if let Some(tps) = sm.generation_tps {
+                    parts.push(format!("{:.0}tok/s", tps));
+                }
+                if let Some(rif) = sm.requests_in_flight {
+                    parts.push(format!("{}req", rif));
+                }
+                if let Some(kv) = sm.kv_cache_utilization {
+                    parts.push(format!("kv={:.0}%", kv * 100.0));
+                }
+                if let Some(ttft) = sm.ttft_p50 {
+                    parts.push(format!("ttft={:.0}ms", ttft * 1000.0));
+                }
+                if let Some(ref mesh) = sm.mesh_device {
+                    parts.push(format!("mesh={}", mesh));
+                }
+
+                if !parts.is_empty() {
+                    spans.push(Span::styled(
+                        format!("  {}", parts.join("  ")),
+                        Style::default().fg(Color::Gray),
+                    ));
+                }
+
+                lines.push(Line::from(spans));
+            }
         }
     }
 
