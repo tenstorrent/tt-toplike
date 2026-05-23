@@ -478,7 +478,7 @@ impl HardwareStarfield {
     /// # Arguments
     ///
     /// * `backend` - Backend providing telemetry data
-    pub fn update_from_telemetry<B: TelemetryBackend>(&mut self, backend: &B) {
+    pub fn update_from_telemetry(&mut self, backend: &dyn TelemetryBackend) {
         // Update baseline learning and snapshot per-device activity.
         for device in backend.devices() {
             if let Some(telem) = backend.telemetry(device.index) {

@@ -467,31 +467,48 @@ pub fn compute_power_trend(history: &VecDeque<TelemetrySample>) -> PowerTrend {
         return PowerTrend::default();
     }
 
-    // Take last `n` samples.
-    let samples: Vec<f32> = history.iter().rev().take(n).map(|s| s.power).collect();
-    // `samples[0]` = most recent, `samples[n-1]` = oldest in window.
+    // Single pass over `n` most-recent samples (index 0 = most recent).
+    // Accumulate sum, sum-of-squares, peak, and Σ(x*y) for linear regression.
+    // x = 0..n-1 where 0 is the OLDEST sample (reversed order vs iteration).
+    let nf = n as f32;
+    let x_mean = (nf - 1.0) / 2.0; // closed-form mean of 0..n-1
+    let mut sum = 0.0_f32;
+    let mut sum_sq = 0.0_f32;
+    let mut peak = f32::NEG_INFINITY;
+    let mut xy_cov = 0.0_f32; // Σ (x - x_mean)(y - y_mean)  — built after mean is known
 
-    let peak = samples.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    for (rev_i, sample) in history.iter().rev().take(n).enumerate() {
+        let p = sample.power;
+        sum += p;
+        sum_sq += p * p;
+        peak = peak.max(p);
+        // x for this sample in oldest-first order is (n-1) - rev_i
+        let x = (n - 1 - rev_i) as f32;
+        xy_cov += (x - x_mean) * p; // y_mean subtracted below after computing mean
+    }
 
-    // Standard deviation over last 10 samples.
-    let mean = samples.iter().sum::<f32>() / n as f32;
-    let variance = (samples.iter().map(|&p| (p - mean).powi(2)).sum::<f32>() / n as f32).sqrt();
+    let mean = sum / nf;
+    let variance = ((sum_sq / nf) - mean * mean).max(0.0).sqrt();
 
-    // Slope: simple linear regression across time.
-    // x = 0..n-1 (oldest to newest); we reversed above so flip.
-    let xs: Vec<f32> = (0..n).map(|i| i as f32).collect();
-    let ys: Vec<f32> = samples.iter().rev().cloned().collect(); // oldest first
-    let x_mean = xs.iter().sum::<f32>() / n as f32;
-    let y_mean = ys.iter().sum::<f32>() / n as f32;
-    let num: f32 = xs.iter().zip(ys.iter()).map(|(&x, &y)| (x - x_mean) * (y - y_mean)).sum();
-    let den: f32 = xs.iter().map(|&x| (x - x_mean).powi(2)).sum();
-    let slope = if den > 0.0 { num / den } else { 0.0 };
+    // Σ(x - x_mean)*y: since Σ(x - x_mean) = 0, the y_mean cross-term vanishes,
+    // so xy_cov is already the correct OLS numerator.
+    // Denominator is closed-form: Σ(i - (n-1)/2)² for i=0..n-1 = n(n²-1)/12.
+    let den = nf * (nf * nf - 1.0) / 12.0;
+    let slope = if den > 0.0 { xy_cov / den } else { 0.0 };
 
-    // Monotone checks over last 8 samples.
+    // Monotone checks — iterate directly, no allocation.
     let check_n = n.min(8);
-    let recent: Vec<f32> = history.iter().rev().take(check_n).map(|s| s.power).collect();
-    let is_rising  = recent.windows(2).all(|w| w[0] >= w[1]); // [0]=newer, [1]=older
-    let is_falling = recent.windows(2).all(|w| w[0] <= w[1]);
+    let mut prev = f32::NAN;
+    let mut is_rising  = true;
+    let mut is_falling = true;
+    for sample in history.iter().rev().take(check_n) {
+        if !prev.is_nan() {
+            // sample.power is older; prev is newer
+            if sample.power > prev { is_rising  = false; }
+            if sample.power < prev { is_falling = false; }
+        }
+        prev = sample.power;
+    }
 
     PowerTrend { slope, variance, is_rising, is_falling, peak }
 }

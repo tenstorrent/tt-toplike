@@ -235,7 +235,7 @@ impl AdaptiveBaseline {
         self.device_baselines
             .values()
             .map(|b| b.progress())
-            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .min_by(|a, b| a.total_cmp(b))
             .unwrap_or(0.0)
     }
 
@@ -280,19 +280,6 @@ impl AdaptiveBaseline {
     }
 
     /// Get maximum activity level across all devices
-    ///
-    /// Returns the highest relative change (power or current) across all devices.
-    /// Useful for determining system-wide workload detection.
-    pub fn max_activity(&self) -> f32 {
-        if !self.is_established() {
-            return 0.0;
-        }
-
-        // We'll need current telemetry to calculate this properly
-        // For now, return 0.0 as placeholder
-        0.0
-    }
-
     /// Returns true if any device shows significant hardware activity above idle baseline.
     ///
     /// The comparison is made against sensitivity-adjusted change values returned by

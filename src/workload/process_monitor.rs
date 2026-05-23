@@ -232,6 +232,11 @@ impl ProcessMonitor {
     pub fn has_any_processes(&self) -> bool {
         !self.device_processes.is_empty() || !self.shared_processes.is_empty()
     }
+
+    /// Iterate over device indices that have at least one associated process.
+    pub fn device_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.device_processes.keys().copied()
+    }
 }
 
 impl Default for ProcessMonitor {

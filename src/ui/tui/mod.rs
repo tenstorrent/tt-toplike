@@ -32,7 +32,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Row, Table},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
     Frame, Terminal,
 };
 use std::io::{self, IsTerminal};
@@ -304,22 +304,8 @@ fn run_app(
                 }
             }
             DisplayMode::Insights => {
-                // Ingest latest telemetry into InferenceEngine each frame
-                #[cfg(feature = "linux-procfs")]
-                for device in backend.devices() {
-                    use crate::workload::inference::parse_arc_health_counters;
-                    let idx     = device.index;
-                    let power   = backend.telemetry(idx).map(|t| t.power_w()).unwrap_or(0.0);
-                    let temp    = backend.telemetry(idx).map(|t| t.temp_c()).unwrap_or(0.0);
-                    let current = backend.telemetry(idx).map(|t| t.current_a()).unwrap_or(0.0);
-                    let aiclk   = backend.telemetry(idx).and_then(|t| t.aiclk);
-                    // Parse ARC health counters for stall detection (tracked across frames inside the engine).
-                    let arc_health = backend.smbus_telemetry(idx).map(|s| parse_arc_health_counters([
-                        s.arc0_health.clone(), s.arc1_health.clone(),
-                        s.arc2_health.clone(), s.arc3_health.clone(),
-                    ]));
-                    inference_engine.ingest(idx, power, temp, current, aiclk, arc_health);
-                }
+                // Ingestion now happens in the backend update block (runs at ~10 Hz,
+                // not 60 FPS), so nothing to do here.
             }
             DisplayMode::Grid => {
                 // Grid mode doesn't need special init
@@ -613,6 +599,23 @@ fn run_app(
                 log::warn!("Update failed: {}", e);
             }
             last_update = Instant::now();
+
+            // Ingest fresh telemetry into InferenceEngine — runs at backend rate (~10 Hz),
+            // not at the UI render rate (60 FPS), so ARC stall counters don't oversaturate.
+            #[cfg(feature = "linux-procfs")]
+            for device in backend.devices() {
+                use crate::workload::inference::parse_arc_health_counters;
+                let idx     = device.index;
+                let power   = backend.telemetry(idx).map(|t| t.power_w()).unwrap_or(0.0);
+                let temp    = backend.telemetry(idx).map(|t| t.temp_c()).unwrap_or(0.0);
+                let current = backend.telemetry(idx).map(|t| t.current_a()).unwrap_or(0.0);
+                let aiclk   = backend.telemetry(idx).and_then(|t| t.aiclk);
+                let arc_health = backend.smbus_telemetry(idx).map(|s| parse_arc_health_counters([
+                    s.arc0_health.clone(), s.arc1_health.clone(),
+                    s.arc2_health.clone(), s.arc3_health.clone(),
+                ]));
+                inference_engine.ingest(idx, power, temp, current, aiclk, arc_health);
+            }
         }
 
         // Update process monitor + host stats (every 2 seconds to avoid overhead)
@@ -630,7 +633,7 @@ fn run_app(
 }
 
 /// Render header with app title and status
-fn render_header(f: &mut Frame, area: Rect, backend: &Box<dyn TelemetryBackend>) {
+fn render_header(f: &mut Frame, area: Rect, backend: &dyn TelemetryBackend) {
     let header_text = vec![Line::from(vec![
         Span::styled(
             "🦀 TT-TOPLIKE-RS ",
@@ -681,7 +684,7 @@ fn render_header(f: &mut Frame, area: Rect, backend: &Box<dyn TelemetryBackend>)
 fn ui_visualization(
     f: &mut Frame,
     starfield: &HardwareStarfield,
-    backend: &Box<dyn TelemetryBackend>,
+    backend: &dyn TelemetryBackend,
 ) {
     // Create layout with header and content
     let chunks = Layout::default()
@@ -723,11 +726,11 @@ fn ui_visualization(
 }
 
 /// Render visualization mode header with baseline status
-fn render_visualization_header<B: TelemetryBackend>(
+fn render_visualization_header(
     f: &mut Frame,
     area: Rect,
     starfield: &HardwareStarfield,
-    backend: &B,
+    backend: &dyn TelemetryBackend,
 ) {
     let status = starfield.baseline_status();
     let status_color = if starfield.is_baseline_established() {
@@ -812,7 +815,7 @@ fn render_visualization_footer(f: &mut Frame, area: Rect) {
 fn ui_memory_castle(
     f: &mut Frame,
     memory_castle: &MemoryCastle,
-    backend: &Box<dyn TelemetryBackend>,
+    backend: &dyn TelemetryBackend,
 ) {
     // Create layout with header and content
     let chunks = Layout::default()
@@ -857,7 +860,7 @@ fn ui_memory_castle(
 fn ui_memory_flow(
     f: &mut Frame,
     memory_flow: &MemoryFlowVis,
-    backend: &Box<dyn TelemetryBackend>,
+    backend: &dyn TelemetryBackend,
 ) {
     // Create layout with header, content, and footer
     let chunks = Layout::default()
@@ -899,10 +902,10 @@ fn ui_memory_flow(
 }
 
 /// Render Memory Castle mode header with device info
-fn render_memory_castle_header<B: TelemetryBackend>(
+fn render_memory_castle_header(
     f: &mut Frame,
     area: Rect,
-    backend: &B,
+    backend: &dyn TelemetryBackend,
 ) {
     let header_text = vec![Line::from(vec![
         Span::styled(
@@ -974,10 +977,10 @@ fn render_memory_castle_footer(f: &mut Frame, area: Rect) {
 }
 
 /// Render Memory Flow mode header with device info
-fn render_memory_flow_header<B: TelemetryBackend>(
+fn render_memory_flow_header(
     f: &mut Frame,
     area: Rect,
-    backend: &B,
+    backend: &dyn TelemetryBackend,
 ) {
     let header_text = vec![Line::from(vec![
         Span::styled(
@@ -1055,7 +1058,7 @@ fn render_memory_flow_footer(f: &mut Frame, area: Rect) {
 fn ui_arcade(
     f: &mut Frame,
     arcade: &ArcadeVisualization,
-    backend: &Box<dyn TelemetryBackend>,
+    backend: &dyn TelemetryBackend,
 ) {
     // Create main layout: Header (4 lines incl. topology diagram) | Content | Footer.
     // Guard: keep header at 3 when device_count < 2 (no topology row needed).
@@ -1105,7 +1108,7 @@ fn ui_arcade(
 ///
 /// When `arcade` has topology set (device_count ≥ 2), the header block gets an
 /// extra line with the topology diagram: `[BH0 ██░ 16W 43°C] ←→ [BH1 …] ═══ [BH2 …]`
-fn render_arcade_header(f: &mut Frame, area: Rect, arcade: &ArcadeVisualization, backend: &Box<dyn TelemetryBackend>) {
+fn render_arcade_header(f: &mut Frame, area: Rect, arcade: &ArcadeVisualization, backend: &dyn TelemetryBackend) {
     let device_count = backend.devices().len();
 
     let mut header_text = vec![Line::from(vec![
@@ -1158,7 +1161,7 @@ fn render_arcade_starfield(
     f: &mut Frame,
     area: Rect,
     arcade: &ArcadeVisualization,
-    _backend: &Box<dyn TelemetryBackend>,
+    _backend: &dyn TelemetryBackend,
 ) {
     let starfield_lines = arcade.starfield.render();
 
@@ -1185,7 +1188,7 @@ fn render_arcade_castle(
     f: &mut Frame,
     area: Rect,
     arcade: &ArcadeVisualization,
-    backend: &Box<dyn TelemetryBackend>,
+    backend: &dyn TelemetryBackend,
 ) {
     let castle_lines = arcade.memory_castle.render(backend);
 
@@ -1212,7 +1215,7 @@ fn render_arcade_flow(
     f: &mut Frame,
     area: Rect,
     arcade: &ArcadeVisualization,
-    backend: &Box<dyn TelemetryBackend>,
+    backend: &dyn TelemetryBackend,
 ) {
     let flow_lines = arcade.memory_flow.render(backend);
 
@@ -1237,73 +1240,9 @@ fn render_arcade_flow(
 /// Render device table (standard toplike display)
 /// Currently unused - kept for potential future use
 #[allow(dead_code)]
-fn render_arcade_devices(f: &mut Frame, area: Rect, backend: &Box<dyn TelemetryBackend>) {
-    let devices = backend.devices();
-
-    // Build device rows
-    let mut rows = Vec::new();
-    for device in devices {
-        if let Some(telemetry) = backend.telemetry(device.index) {
-            let power = telemetry.power.unwrap_or(0.0);
-            let temp = telemetry.asic_temperature.unwrap_or(0.0);
-            let current = telemetry.current.unwrap_or(0.0);
-            let voltage = telemetry.voltage.unwrap_or(0.0);
-            let aiclk = telemetry.aiclk.unwrap_or(0);
-
-            rows.push(Row::new(vec![
-                format!("{}", device.index),
-                format!("{:?}", device.architecture).chars().take(2).collect::<String>(),  // GS/WH/BH
-                format!("{:.1}W", power),
-                format!("{:.0}°C", temp),
-                format!("{:.1}A", current),
-                format!("{:.2}V", voltage),
-                format!("{}MHz", aiclk),
-            ])
-            .style(Style::default().fg(colors::rgb(200, 200, 220)))
-            .height(1));
-        }
-    }
-
-    // Create table
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(3),   // ID
-            Constraint::Length(3),   // Arch
-            Constraint::Length(8),   // Power
-            Constraint::Length(7),   // Temp
-            Constraint::Length(7),   // Current
-            Constraint::Length(7),   // Voltage
-            Constraint::Length(8),   // AICLK
-        ],
-    )
-    .header(
-        Row::new(vec!["ID", "Arc", "Power", "Temp", "Curr", "Volt", "AICLK"])
-            .style(Style::default()
-                .fg(colors::rgb(150, 220, 255))
-                .add_modifier(Modifier::BOLD))
-            .height(1),
-    )
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default()
-                .fg(colors::rgb(255, 200, 100))  // Orange
-                .add_modifier(Modifier::BOLD))
-            .title(" 📊 DEVICES ")
-            .title_alignment(Alignment::Center)
-            .title_style(Style::default()
-                .fg(colors::rgb(255, 220, 150))
-                .add_modifier(Modifier::BOLD)),
-    )
-    .column_spacing(1);
-
-    f.render_widget(table, area);
-}
 
 /// Render arcade footer
-fn render_arcade_footer(f: &mut Frame, area: Rect, backend: &Box<dyn TelemetryBackend>) {
+fn render_arcade_footer(f: &mut Frame, area: Rect, backend: &dyn TelemetryBackend) {
     // Get hero stats from first device
     let (power, temp, current) = if let Some(device) = backend.devices().first() {
         if let Some(telem) = backend.telemetry(device.index) {
@@ -1372,24 +1311,32 @@ fn truncate(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-/// Flatten all processes into one ordered Vec for cursor navigation.
+/// Flatten all processes into one stable-sorted Vec for cursor navigation.
+/// Uses a HashSet to dedup by PID in O(n) instead of O(n²) scan.
 #[cfg(feature = "linux-procfs")]
 fn flat_process_list<'a>(pm: &'a ProcessMonitor) -> Vec<&'a crate::workload::ProcessInfo> {
+    use std::collections::HashSet;
+    let mut seen: HashSet<i32> = HashSet::new();
     let mut all: Vec<&'a crate::workload::ProcessInfo> = Vec::new();
-    for idx in 0..32 {
+
+    // Iterate only over devices that actually have processes.
+    let mut device_indices: Vec<usize> = pm.device_indices().collect();
+    device_indices.sort_unstable(); // deterministic order
+    for idx in device_indices {
         if let Some(procs) = pm.get_processes_for_device(idx) {
             for p in procs {
-                if !all.iter().any(|existing| existing.pid == p.pid) {
+                if seen.insert(p.pid) {
                     all.push(p);
                 }
             }
         }
     }
     for p in pm.get_shared_processes() {
-        if !all.iter().any(|existing| existing.pid == p.pid) {
+        if seen.insert(p.pid) {
             all.push(p);
         }
     }
+    all.sort_unstable_by_key(|p| p.pid);
     all
 }
 
@@ -1443,7 +1390,7 @@ fn device_panels_height(
 #[cfg(feature = "linux-procfs")]
 fn render_insights(
     f: &mut Frame,
-    backend: &Box<dyn TelemetryBackend>,
+    backend: &dyn TelemetryBackend,
     engine: &InferenceEngine,
     pm: &ProcessMonitor,
     cursor: usize,
@@ -1492,7 +1439,7 @@ fn render_insights(
 #[cfg(not(feature = "linux-procfs"))]
 fn render_insights_no_procfs(
     f: &mut Frame,
-    backend: &Box<dyn TelemetryBackend>,
+    backend: &dyn TelemetryBackend,
     engine: &crate::workload::InferenceEngine,
 ) {
     let _ = (f, backend, engine);
@@ -1818,7 +1765,7 @@ fn render_kill_dialog(f: &mut Frame, area: Rect, kc: &KillConfirmState) {
 fn render_fleet_heatmap_panel(
     f: &mut Frame,
     area: Rect,
-    backend: &Box<dyn TelemetryBackend>,
+    backend: &dyn TelemetryBackend,
     cursor: usize,
 ) {
     use crate::ui::tui::chip_portrait::tensix_temp_rgb;
@@ -1948,7 +1895,7 @@ fn render_fleet_heatmap_panel(
 fn render_device_panels(
     f: &mut Frame,
     area: Rect,
-    backend: &Box<dyn TelemetryBackend>,
+    backend: &dyn TelemetryBackend,
     _engine: &crate::workload::InferenceEngine,
     portrait_particles: &std::collections::HashMap<usize, Vec<crate::ui::tui::chip_portrait::Particle>>,
     fleet_cursor: usize,
@@ -2143,14 +2090,22 @@ fn render_device_panels(
             _                                       => 4,
         };
         let eth_live_count = eth_live_mask.count_ones();
-        let eth_dots: String = (0..eth_total.min(8)).map(|i| {
+        // Show up to 16 port dots; append "+N" suffix for larger port counts (BH=24, WH=20).
+        const ETH_DOT_CAP: u32 = 16;
+        let dots_shown = eth_total.min(ETH_DOT_CAP);
+        let eth_dots: String = (0..dots_shown).map(|i| {
             if (eth_live_mask >> i) & 1 == 1 { '●' } else { '·' }
         }).collect();
+        let eth_suffix = if eth_total > ETH_DOT_CAP {
+            format!("+{}", eth_total - ETH_DOT_CAP)
+        } else {
+            String::new()
+        };
         let eth_color = if eth_live_count == eth_total { Color::Rgb(79, 209, 197) }
                        else { Color::Rgb(236, 150, 184) };
         stat_lines.push(Line::from(vec![
             Span::styled(format!("{:<8}", "ETH"), Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:<8}", eth_dots), Style::default().fg(eth_color)),
+            Span::styled(format!("{}{}", eth_dots, eth_suffix), Style::default().fg(eth_color)),
             Span::styled(format!(" {}/{} live", eth_live_count, eth_total), Style::default().fg(Color::White)),
         ]));
 
@@ -2227,7 +2182,7 @@ fn render_device_panels(
 /// Only fully fitting cells are rendered — no partial cells or right overflow.
 fn render_grid_mode(
     f: &mut Frame,
-    backend: &Box<dyn TelemetryBackend>,
+    backend: &dyn TelemetryBackend,
 ) {
     use crate::ui::tui::chip_portrait::{portrait_dims, render_chip_portrait};
     use ratatui::style::{Color, Modifier, Style};
