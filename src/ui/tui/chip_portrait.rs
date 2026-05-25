@@ -379,11 +379,11 @@ pub fn build_portrait_rows(
 /// Build portrait rows as styled Ratatui Lines for actual rendering.
 ///
 /// Color scheme:
-/// - Tensix ░▒▓: ASIC temperature heatmap (teal→gold→red)
+/// - Tensix ░▒▓: ASIC temperature heatmap (teal→violet→pink→red)
 /// - Tensix ·(harvested): DarkGray+DIM
-/// - DRAM ▪: GDDR temperature heatmap (blue→amber→red)
-/// - ETH ●(live): Green  ·(down): DarkGray
-/// - PCIe ╋: Amber RGB(244,196,113)
+/// - DRAM ▪: GDDR temperature heatmap (cyan→purple→pink)
+/// - ETH ●(live): Cyan RGB(79,209,197)  ·(down): DarkGray
+/// - PCIe ╋: Indigo RGB(150,120,255)
 ///
 /// # Particle overlay
 /// After the base span grid is built, a second pass iterates `particles` and

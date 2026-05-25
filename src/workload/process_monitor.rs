@@ -265,16 +265,17 @@ mod tests {
 
     #[test]
     fn kill_pid_invalid_returns_error() {
-        // PID 1 (init/systemd) is owned by root — a non-root process always gets EPERM.
-        // We use SIGTERM rather than a zero signal so the real libc::kill() path is exercised.
-        // On CI running as root, skip because kill(1, SIGTERM) would succeed (and be dangerous).
+        // PID 1 (init/systemd) is owned by root.
+        // Signal 0 is a pure permission check — no signal is delivered — so this is safe
+        // in containers and CI regardless of whether the test runner is root.
+        let result = kill_pid(1, 0);
         if unsafe { libc::getuid() } == 0 {
-            return; // running as root — skip to avoid killing init
+            // As root, signal 0 to any existing PID succeeds.
+            assert!(result.is_ok(), "kill_pid(1, 0) should succeed for root");
+        } else {
+            assert!(result.is_err(), "kill_pid(1, 0) should fail for non-root (EPERM)");
+            assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EPERM));
         }
-        let result = kill_pid(1, libc::SIGTERM);
-        assert!(result.is_err(), "kill_pid(1, SIGTERM) should fail for non-root (EPERM)");
-        let err = result.unwrap_err();
-        assert_eq!(err.raw_os_error(), Some(libc::EPERM));
     }
 
     #[test]

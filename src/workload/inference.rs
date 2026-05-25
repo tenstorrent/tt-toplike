@@ -8,7 +8,6 @@
 //! variance, temperature, AICLK, throttler registers, and ARC health.
 
 use crate::animation::baseline::AdaptiveBaseline;
-use ratatui::style::Color;
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
@@ -70,8 +69,10 @@ pub struct InferenceResult {
     pub confidence:         Confidence,
     /// Bold ALL-CAPS label, max 16 chars.
     pub label:              &'static str,
-    /// Ratatui color for the label.
-    pub label_color:        Color,
+    /// RGB color for the label.  Convert to `ratatui::style::Color::Rgb(r, g, b)`
+    /// in the TUI layer; kept as a plain tuple here to avoid an unconditional
+    /// ratatui dependency in the workload crate.
+    pub label_color:        (u8, u8, u8),
     /// Fixed-format metrics line: `"18.0W   62.1°C  1100MHz   +50%"`
     pub headline:           String,
     /// Fixed-format interpretation line: `"humming   rivers of data   24% TDP"`
@@ -83,20 +84,21 @@ pub struct InferenceResult {
 }
 
 /// State and label table (matches spec § State display).
-const STATE_META: &[(DeviceInferenceState, &str, Color)] = &[
-    (DeviceInferenceState::Stalled,        "GONE SILENT",     Color::Red),
-    (DeviceInferenceState::HardwareFault,  "IN DISTRESS",     Color::Red),
-    (DeviceInferenceState::ThermalStress,  "SCORCHING",       Color::Rgb(255, 80, 0)),
-    (DeviceInferenceState::Throttling,     "REINED IN",       Color::Rgb(255, 140, 0)),
-    (DeviceInferenceState::FabricDegraded, "LOST THE THREAD", Color::Rgb(255, 140, 0)),
-    (DeviceInferenceState::MaxedOut,       "BURNING BRIGHT",  Color::Rgb(220, 60, 0)),
-    (DeviceInferenceState::WarmingUp,      "AWAKENING",       Color::Yellow),
-    (DeviceInferenceState::CoolingDown,    "EXHALING",        Color::Cyan),
-    (DeviceInferenceState::Thinking,       "DREAMING DEEP",   Color::Rgb(160, 80, 255)),
-    (DeviceInferenceState::Generating,     "CONJURING",       Color::Green),
-    (DeviceInferenceState::MovingData,     "IN FULL FLOW",    Color::Blue),
-    (DeviceInferenceState::Idle,           "BREATHING",       Color::DarkGray),
-    (DeviceInferenceState::Unclear,        "INSCRUTABLE",     Color::Rgb(160, 160, 40)),
+/// Colors are stored as `(r, g, b)` tuples; convert to `Color::Rgb(r,g,b)` in the TUI layer.
+const STATE_META: &[(DeviceInferenceState, &str, (u8, u8, u8))] = &[
+    (DeviceInferenceState::Stalled,        "GONE SILENT",     (205,   0,   0)),
+    (DeviceInferenceState::HardwareFault,  "IN DISTRESS",     (205,   0,   0)),
+    (DeviceInferenceState::ThermalStress,  "SCORCHING",       (255,  80,   0)),
+    (DeviceInferenceState::Throttling,     "REINED IN",       (255, 140,   0)),
+    (DeviceInferenceState::FabricDegraded, "LOST THE THREAD", (255, 140,   0)),
+    (DeviceInferenceState::MaxedOut,       "BURNING BRIGHT",  (220,  60,   0)),
+    (DeviceInferenceState::WarmingUp,      "AWAKENING",       (205, 205,   0)),
+    (DeviceInferenceState::CoolingDown,    "EXHALING",        (  0, 205, 205)),
+    (DeviceInferenceState::Thinking,       "DREAMING DEEP",   (160,  80, 255)),
+    (DeviceInferenceState::Generating,     "CONJURING",       (  0, 205,   0)),
+    (DeviceInferenceState::MovingData,     "IN FULL FLOW",    (  0,   0, 205)),
+    (DeviceInferenceState::Idle,           "BREATHING",       ( 85,  85,  85)),
+    (DeviceInferenceState::Unclear,        "INSCRUTABLE",     (160, 160,  40)),
 ];
 
 /// Return the ALL-CAPS label string for a given state.
@@ -107,12 +109,14 @@ pub fn state_label(state: DeviceInferenceState) -> &'static str {
         .unwrap_or("UNKNOWN")
 }
 
-/// Return the ratatui display color for a given state.
-pub fn state_color(state: DeviceInferenceState) -> Color {
+/// Return the RGB color `(r, g, b)` for a given state.
+///
+/// In the TUI layer, convert with `ratatui::style::Color::Rgb(r, g, b)`.
+pub fn state_color(state: DeviceInferenceState) -> (u8, u8, u8) {
     STATE_META.iter()
         .find(|(s, _, _)| *s == state)
         .map(|(_, _, c)| *c)
-        .unwrap_or(Color::White)
+        .unwrap_or((205, 205, 205))
 }
 
 /// Maintains rolling history and classifies hardware state per device.
@@ -176,10 +180,13 @@ impl InferenceEngine {
             Some(current_counts) => {
                 let stall_count = self.arc_stall_frames.entry(device_idx).or_insert(0);
                 if let Some(prev) = self.arc_snapshots.get(&device_idx) {
-                    let any_counter_unchanged = prev.iter().zip(current_counts.iter()).any(|(p, c)| {
+                    // A true stall means ALL counters are frozen (none changed).
+                    // Using .any() would trigger on normal slow-updating ARC counters;
+                    // .all() only fires when every counter has been stuck for this frame.
+                    let all_counters_frozen = prev.iter().zip(current_counts.iter()).all(|(p, c)| {
                         matches!((p, c), (Some(pv), Some(cv)) if pv == cv)
                     });
-                    if any_counter_unchanged {
+                    if all_counters_frozen {
                         *stall_count = stall_count.saturating_add(1);
                     } else {
                         *stall_count = 0;
@@ -451,7 +458,7 @@ impl InferenceEngine {
             state: DeviceInferenceState::Unclear,
             confidence: Confidence::Low,
             label: "INSCRUTABLE",
-            label_color: Color::DarkGray,
+            label_color: (85, 85, 85),
             headline,
             detail: "--------  who can say      --- TDP".to_string(),
             power_pct_of_tdp: None,

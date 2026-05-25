@@ -159,6 +159,15 @@ impl InferenceServerProbe {
     fn probe_process(&mut self, proc: &ProcessInfo) -> Option<ServingMetrics> {
         let (flavour, port_hint) = classify_cmdline(&proc.cmdline)?;
 
+        // vLLM processes are only counted when VLLM_TARGET_DEVICE=tt; otherwise
+        // they're not running on Tenstorrent hardware and we skip them entirely.
+        if flavour == ServerFlavour::VllmTt {
+            let target_device = read_proc_env(proc.pid, "VLLM_TARGET_DEVICE");
+            if target_device.as_deref() != Some("tt") {
+                return None;
+            }
+        }
+
         // Resolve port: prefer cmdline hint, fall back to net/tcp scan.
         let port = port_hint
             .or_else(|| find_listen_port_from_proc(proc.pid))
@@ -199,9 +208,6 @@ fn classify_cmdline(cmdline: &str) -> Option<(ServerFlavour, Option<u16>)> {
         let port = extract_port_arg(cmdline, &["--port", "-p"]);
         return Some((ServerFlavour::PromptServer, port));
     }
-    // vLLM only when VLLM_TARGET_DEVICE=tt (checked via environ later).
-    // Accept the cmdline "vllm" binary as a candidate here; flavour may be
-    // downgraded to Unknown if the env check fails.
     if cmd.contains("vllm") || cmd.contains("vllm_entrypoints") {
         let port = extract_port_arg(cmdline, &["--port"]);
         return Some((ServerFlavour::VllmTt, port));
@@ -333,9 +339,12 @@ fn http_get(port: u16, path: &str) -> Option<String> {
     let mut body = String::new();
     let mut reader = BufReader::new(stream);
 
-    // Drain headers.
+    // Drain headers.  BufRead::lines() strips \n but leaves \r, so an HTTP
+    // blank-line separator arrives as "\r" rather than "".  Trim it before
+    // the is_empty() check so we actually detect the header/body boundary.
     let mut in_headers = true;
     for line in (&mut reader).lines().flatten() {
+        let line = line.trim_end_matches('\r').to_owned();
         if in_headers {
             if line.is_empty() { in_headers = false; }
             continue;
