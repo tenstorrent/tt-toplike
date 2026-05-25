@@ -520,7 +520,7 @@ impl MemoryCastle {
                 .unwrap_or((idx as f32 * 90.0) % 360.0);
             let color = hsv_to_rgb(hue, 0.8, 0.9);
 
-            let device_info = format!(" Dev{} {:.0}W {:.0}°C ", idx, power, temp);
+            let device_info = format!(" Dev{:<2} {:>3.0}W {:>3.0}°C ", idx, power, temp);
             let padding_needed = col_width.saturating_sub(device_info.len());
             let padding = " ".repeat(padding_needed / 2);
 
