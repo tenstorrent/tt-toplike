@@ -2,11 +2,13 @@
 
 Real-time hardware monitoring for Tenstorrent silicon (Grayskull, Wormhole, Blackhole). Written in Rust.
 
-<video src="assets/tt-toplike-arcade.webm" autoplay muted loop playsinline poster="assets/tt-toplike-arcade-active.png" width="100%">
-  <img src="assets/tt-toplike-arcade-active.png" alt="Arcade mode — 4× Blackhole under inference load" width="100%" />
-</video>
+<img src="assets/tt-toplike-arcade.gif" alt="Arcade mode — 4× Blackhole under LLM inference load" width="100%" />
 
 **[📖 Docs](https://docs.tenstorrent.com/tt-toplike) · [📦 Releases](https://github.com/tenstorrent/tt-toplike/releases) · [🌐 Project site](https://tenstorrent.github.io/tt-toplike/)**
+
+<img src="assets/tt-toplike-insights.png" alt="Insights mode — 4× Blackhole chips during live LLM inference" width="100%" />
+
+*Insights screen — split-panel view of all 4 Blackhole chips captured during live inference. Each panel shows chip portrait, live power (58–77W), temperature, DDR training status, and accuracy trend.*
 
 ## How visualizations are grounded in hardware activity
 
