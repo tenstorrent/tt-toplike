@@ -230,10 +230,59 @@ impl ProcessMonitor {
     pub fn has_any_processes(&self) -> bool {
         !self.device_processes.is_empty() || !self.shared_processes.is_empty()
     }
+
+    /// Iterate over device indices that have at least one associated process.
+    pub fn device_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.device_processes.keys().copied()
+    }
 }
 
 impl Default for ProcessMonitor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Send a signal to a process by PID.
+///
+/// Returns `Ok(())` on success, or an `io::Error` with the OS error on failure.
+/// Common errors: `ESRCH` (no such process), `EPERM` (permission denied).
+#[cfg(unix)]
+pub fn kill_pid(pid: i32, signal: libc::c_int) -> std::io::Result<()> {
+    let ret = unsafe { libc::kill(pid, signal) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kill_pid_invalid_returns_error() {
+        // PID 1 (init/systemd) is owned by root.
+        // Signal 0 is a pure permission check — no signal is delivered — so this is safe
+        // in containers and CI regardless of whether the test runner is root.
+        let result = kill_pid(1, 0);
+        if unsafe { libc::getuid() } == 0 {
+            // As root, signal 0 to any existing PID succeeds.
+            assert!(result.is_ok(), "kill_pid(1, 0) should succeed for root");
+        } else {
+            assert!(result.is_err(), "kill_pid(1, 0) should fail for non-root (EPERM)");
+            assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EPERM));
+        }
+    }
+
+    #[test]
+    fn kill_pid_nonexistent_returns_error() {
+        // PID i32::MAX is virtually guaranteed to not exist.
+        let result = kill_pid(i32::MAX, libc::SIGTERM);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // Expected: ESRCH (no such process)
+        assert_eq!(err.raw_os_error(), Some(libc::ESRCH));
     }
 }

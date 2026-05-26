@@ -249,6 +249,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            profile: crate::config::AnimationProfile::Normal,
         };
 
         let result = create_backend(BackendType::Mock, config, &cli);

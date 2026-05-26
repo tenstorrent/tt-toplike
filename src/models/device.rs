@@ -110,6 +110,18 @@ pub struct Device {
     /// Device coordinates (if part of multi-device system)
     /// Format: "(rack, shelf, chip)" or "(x, y)"
     pub coords: String,
+
+    /// Firmware versions from tt-smi `firmwares` block (None on older tt-smi).
+    pub firmwares: Option<crate::models::telemetry::FirmwaresInfo>,
+
+    /// Thermal/power limits from tt-smi `limits` block (None on older tt-smi).
+    pub limits: Option<crate::models::telemetry::DeviceLimits>,
+
+    /// PCIe link speed (e.g. "16.0 GT/s"), from board_info.
+    pub pcie_speed: Option<String>,
+
+    /// PCIe link width (e.g. 16), from board_info.
+    pub pcie_width: Option<u8>,
 }
 
 impl Device {
@@ -125,6 +137,10 @@ impl Device {
             bus_id,
             architecture,
             coords,
+            firmwares: None,
+            limits: None,
+            pcie_speed: None,
+            pcie_width: None,
         }
     }
 
@@ -201,5 +217,14 @@ mod tests {
         assert_eq!(device.name(), "Wormhole-0");
         assert!(device.is_wormhole());
         assert!(!device.is_grayskull());
+    }
+
+    #[test]
+    fn test_device_new_fields_default_none() {
+        let d = Device::new(0, "p150a".to_string(), "0000:01:00.0".to_string(), "(0,0)".to_string());
+        assert!(d.firmwares.is_none());
+        assert!(d.limits.is_none());
+        assert!(d.pcie_speed.is_none());
+        assert!(d.pcie_width.is_none());
     }
 }

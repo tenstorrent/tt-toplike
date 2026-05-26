@@ -133,6 +133,18 @@ impl ArcadeVisualization {
         }
     }
 
+    /// Propagate a sensitivity multiplier to all three sub-visualizations.
+    ///
+    /// Must be called after construction if a non-default sensitivity profile is in use
+    /// (e.g. `--profile paranoid`).  Without this call, `ArcadeVisualization` would
+    /// silently stay at sensitivity=1.0 while the individual standalone modes
+    /// (Starfield, MemoryCastle, MemoryFlow) correctly use the configured value.
+    pub fn set_sensitivity(&mut self, s: f32) {
+        self.starfield.set_sensitivity(s);
+        self.memory_castle.set_sensitivity(s);
+        self.memory_flow.set_sensitivity(s);
+    }
+
     /// Initialize from devices (called once after creation)
     pub fn initialize_from_devices(&mut self, devices: &[crate::models::Device]) {
         self.starfield.initialize_from_devices(devices);
@@ -143,7 +155,7 @@ impl ArcadeVisualization {
     /// Call this once after backend init.  Propagates topology to all
     /// sub-visualizations so the header diagram, stream characters, and
     /// column separators are all topology-aware in the same frame.
-    pub fn initialize_topology<B: TelemetryBackend>(&mut self, backend: &B) {
+    pub fn initialize_topology(&mut self, backend: &dyn TelemetryBackend) {
         use crate::animation::topology::BoardTopology;
         let board_ids: Vec<Option<String>> = backend.devices().iter()
             .map(|d| backend.smbus_telemetry(d.index)
@@ -166,7 +178,7 @@ impl ArcadeVisualization {
     /// `32× BH  [░▒▓█░░░░▒▓█░░▒▓█░░▒▓█▒░░░░▒▓█░▒]`
     ///
     /// Returns `None` when device count < 2 or no topology is available.
-    pub fn topology_diagram_line<B: TelemetryBackend>(&self, backend: &B) -> Option<Line<'static>> {
+    pub fn topology_diagram_line(&self, backend: &dyn TelemetryBackend) -> Option<Line<'static>> {
         let devices = backend.devices();
         if devices.len() < 2 {
             return None;
@@ -251,7 +263,7 @@ impl ArcadeVisualization {
     ///
     /// Each chip is represented by a single character (power level) coloured
     /// by temperature.  Fits any chip count in a single terminal line.
-    fn topology_minibar_line<B: TelemetryBackend>(&self, backend: &B, topo: &crate::animation::topology::BoardTopology) -> Line<'static> {
+    fn topology_minibar_line(&self, backend: &dyn TelemetryBackend, topo: &crate::animation::topology::BoardTopology) -> Line<'static> {
         use crate::animation::common::temp_to_hue;
 
         let devices = backend.devices();
@@ -318,7 +330,7 @@ impl ArcadeVisualization {
     }
 
     /// Update all visualizations and hero position from telemetry
-    pub fn update<B: TelemetryBackend>(&mut self, backend: &B) {
+    pub fn update(&mut self, backend: &dyn TelemetryBackend) {
         self.frame = self.frame.wrapping_add(1);
 
         // Update sub-visualizations
@@ -410,7 +422,7 @@ impl ArcadeVisualization {
     }
 
     /// Render the complete Arcade visualization
-    pub fn render<B: TelemetryBackend>(&self, backend: &B) -> Vec<Line<'static>> {
+    pub fn render(&self, backend: &dyn TelemetryBackend) -> Vec<Line<'static>> {
         let mut lines = Vec::with_capacity(self.height);
 
         // Render header (3 lines always, topology diagram as 4th when available).
@@ -461,7 +473,7 @@ impl ArcadeVisualization {
     }
 
     /// Render header for Arcade mode
-    fn render_header<B: TelemetryBackend>(&self, backend: &B) -> Line<'static> {
+    fn render_header(&self, backend: &dyn TelemetryBackend) -> Line<'static> {
         let device_count = backend.devices().len();
 
         Line::from(vec![
@@ -525,7 +537,7 @@ impl ArcadeVisualization {
     }
 
     /// Render footer with legend and hero status
-    fn render_footer<B: TelemetryBackend>(&self, backend: &B) -> Line<'static> {
+    fn render_footer(&self, backend: &dyn TelemetryBackend) -> Line<'static> {
         // Get telemetry for hero status
         let (power, temp, current) = if let Some(device) = backend.devices().first() {
             if let Some(telem) = backend.telemetry(device.index) {
@@ -598,10 +610,10 @@ impl ArcadeVisualization {
     /// Trail is drawn first (oldest positions first) so the hero `@` always
     /// sits on top.  Both trail and hero are spliced character-by-character
     /// into the already-rendered lines.
-    fn overlay_hero<B: TelemetryBackend>(
+    fn overlay_hero(
         &self,
         mut lines: Vec<Line<'static>>,
-        backend: &B,
+        backend: &dyn TelemetryBackend,
     ) -> Vec<Line<'static>> {
         let temp = backend
             .devices()

@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
-//! Workload detection and process monitoring
-//!
-//! This module provides functionality to detect which processes are using
-//! Tenstorrent hardware devices. It scans the `/proc` filesystem to find
-//! processes with open file descriptors to `/dev/tenstorrent/*` devices
-//! and processes using hugepages or Tenstorrent-related memory mappings.
+//! Workload detection, process monitoring, and inference classification.
 
 #[cfg(feature = "linux-procfs")]
 pub mod process_monitor;
+pub mod inference;
+#[cfg(feature = "linux-procfs")]
+pub mod serving;
 
 #[cfg(feature = "linux-procfs")]
 pub use process_monitor::{ProcessInfo, ProcessMonitor};
+pub use inference::{
+    Confidence, DeviceInferenceState, InferenceEngine, InferenceResult, PowerTrend,
+    TelemetrySample, state_label, state_color,
+};
+#[cfg(feature = "linux-procfs")]
+pub use serving::{InferenceServerProbe, ServingMetrics, ServerFlavour};

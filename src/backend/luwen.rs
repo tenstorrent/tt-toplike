@@ -127,6 +127,10 @@ impl LuwenBackend {
                 bus_id,
                 coords: String::new(),  // Coordinates not provided by luwen-if
                 architecture,
+                firmwares: None,
+                limits: None,
+                pcie_speed: None,
+                pcie_width: None,
             };
 
             self.devices.push(device);

@@ -261,6 +261,15 @@ impl MemoryCastle {
         }
     }
 
+    /// Set the animation sensitivity multiplier.
+    ///
+    /// Delegates directly to the internal `AdaptiveBaseline`. Higher values make
+    /// the particle animation respond to smaller hardware fluctuations.
+    /// 1.0 = Normal, 5.0 = Paranoid, 0.2 = AnomaliesOnly.
+    pub fn set_sensitivity(&mut self, sensitivity: f32) {
+        self.baseline.sensitivity = sensitivity;
+    }
+
     /// Install board topology for topology-aware multi-device rendering.
     ///
     /// Once set, `render_multi_device` uses `║` between chips on different
@@ -271,7 +280,7 @@ impl MemoryCastle {
     }
 
     /// Update animation state
-    pub fn update<B: TelemetryBackend>(&mut self, backend: &B) {
+    pub fn update(&mut self, backend: &dyn TelemetryBackend) {
         self.frame = self.frame.wrapping_add(1);
 
         // Update baseline for each device
@@ -322,7 +331,7 @@ impl MemoryCastle {
     }
 
     /// Render the Memory Dungeon
-    pub fn render<B: TelemetryBackend>(&self, backend: &B) -> Vec<Line<'static>> {
+    pub fn render(&self, backend: &dyn TelemetryBackend) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
 
         let devices = backend.devices();
@@ -445,7 +454,7 @@ impl MemoryCastle {
     }
 
     /// Render multi-device side-by-side view
-    fn render_multi_device<B: TelemetryBackend>(&self, backend: &B) -> Vec<Line<'static>> {
+    fn render_multi_device(&self, backend: &dyn TelemetryBackend) -> Vec<Line<'static>> {
         let devices = backend.devices();
 
         // Each side-by-side column needs at least 20 chars to be readable.
@@ -511,7 +520,7 @@ impl MemoryCastle {
                 .unwrap_or((idx as f32 * 90.0) % 360.0);
             let color = hsv_to_rgb(hue, 0.8, 0.9);
 
-            let device_info = format!(" Dev{} {:.0}W {:.0}°C ", idx, power, temp);
+            let device_info = format!(" Dev{:<2} {:>3.0}W {:>3.0}°C ", idx, power, temp);
             let padding_needed = col_width.saturating_sub(device_info.len());
             let padding = " ".repeat(padding_needed / 2);
 
@@ -661,7 +670,7 @@ impl MemoryCastle {
     ///
     /// Each cell is 35 chars wide; columns are separated by " │ " (3 chars).
     /// Grid column count: `max(1, min(4, (width - 4) / 38))`.
-    fn render_fleet_grid<B: TelemetryBackend>(&self, backend: &B) -> Vec<Line<'static>> {
+    fn render_fleet_grid(&self, backend: &dyn TelemetryBackend) -> Vec<Line<'static>> {
         use crate::animation::common::temp_to_hue;
 
         let devices = backend.devices();

@@ -284,6 +284,10 @@ mod tests {
             bus_id: format!("0000:0{}:00.0", i),
             coords: String::new(),
             architecture: Architecture::Blackhole,
+            firmwares: None,
+            limits: None,
+            pcie_speed: None,
+            pcie_width: None,
         }).collect()
     }
 
@@ -352,6 +356,10 @@ mod tests {
             bus_id: "0000:03:00.0".to_string(),
             coords: String::new(),
             architecture: Architecture::Blackhole,
+            firmwares: None,
+            limits: None,
+            pcie_speed: None,
+            pcie_width: None,
         });
         let topo = BoardTopology::from_devices(&devices);
         // Not all single-chip → chips_per_board = 2

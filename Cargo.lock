@@ -5799,7 +5799,7 @@ dependencies = [
 
 [[package]]
 name = "tt-toplike"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "all-smi-luwen-core",
  "all-smi-luwen-if",
@@ -5809,10 +5809,12 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
+ "dirs 6.0.0",
  "eframe",
  "egui_plot",
  "env_logger",
  "iced",
+ "libc",
  "log",
  "mockall",
  "num-traits",

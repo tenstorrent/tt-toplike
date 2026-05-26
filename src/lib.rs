@@ -52,6 +52,9 @@ pub mod workload;
 // CLI module - shared by both TUI and GUI
 pub mod cli;
 
+// Animation configuration: profiles and user-tunable thresholds
+pub mod config;
+
 // UI module - contains both TUI and GUI implementations
 pub mod ui;
 

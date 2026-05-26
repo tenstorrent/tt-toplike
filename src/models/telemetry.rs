@@ -248,10 +248,94 @@ pub struct SmbusTelemetry {
 
     /// Ethernet debug status 1
     pub eth_debug_status1: Option<String>,
+
+    /// GDDR temperature pairs (4 registers × 4 bytes each).
+    /// Index 0 = GDDR_0_1_TEMP, 1 = GDDR_2_3_TEMP, 2 = GDDR_4_5_TEMP, 3 = GDDR_6_7_TEMP.
+    pub gddr_temps: [Option<GddrTempPair>; 4],
+
+    /// Maximum GDDR temperature across all channels (°C), from MAX_GDDR_TEMP field.
+    pub max_gddr_temp: Option<f32>,
+
+    /// GDDR correctable error counts per pair register.
+    pub gddr_corr_errs: [Option<u32>; 4],
+
+    /// GDDR uncorrectable error count.
+    pub gddr_uncorr_errs: Option<u32>,
+
+    /// HARVESTING_STATE bitmask (non-zero means some cores harvested).
+    pub harvesting_state: Option<u32>,
+
+    /// ETH_LIVE_STATUS bitmask: bit N set → ETH port N has a live link.
+    pub eth_live_status: Option<u64>,
+
+    /// ENABLED_ETH bitmask.
+    pub enabled_eth: Option<u32>,
+
+    /// ENABLED_GDDR bitmask.
+    pub enabled_gddr: Option<u32>,
+
+    /// ENABLED_L2CPU bitmask.
+    pub enabled_l2cpu: Option<u32>,
+
+    /// ENABLED_TENSIX_COL: 14-bit mask, one bit per Tensix column (Blackhole).
+    /// Bit N clear → Tensix column N is harvested.
+    pub enabled_tensix_col: Option<u32>,
+}
+
+/// Four temperature readings packed into one GDDR_X_Y_TEMP hex register.
+/// Byte 0 (LSB) = first temp, byte 3 (MSB) = fourth temp.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GddrTempPair(pub [f32; 4]);
+
+/// Unpack a GDDR_X_Y_TEMP hex string (e.g. "0x262a2c2c") into four °C values.
+/// Bytes are extracted little-endian: byte0=LSB is temps[0].
+/// Returns None if the string is empty, `"N/A"`, or not a valid hex value.
+pub fn unpack_gddr_temps(s: &str) -> Option<GddrTempPair> {
+    let s = s.trim();
+    if s.is_empty() || s == "N/A" { return None; }
+    let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
+    let v = u32::from_str_radix(hex, 16).ok()?;
+    Some(GddrTempPair([
+        ((v >> 0)  & 0xFF) as f32,
+        ((v >> 8)  & 0xFF) as f32,
+        ((v >> 16) & 0xFF) as f32,
+        ((v >> 24) & 0xFF) as f32,
+    ]))
+}
+
+/// Number of Tensix columns in the Blackhole chip grid that can be harvested.
+/// This bitmask field (ENABLED_TENSIX_COL) is Blackhole-specific.
+pub const BH_TENSIX_COL_COUNT: usize = 14;
+
+/// Returns true if the Tensix column `col` (0-indexed among the BH_TENSIX_COL_COUNT
+/// Blackhole Tensix columns) is harvested. Bit N clear → column N is harvested.
+/// Always returns false for col >= BH_TENSIX_COL_COUNT (Blackhole-specific field;
+/// Wormhole uses a different topology mechanism handled in chip_portrait.rs).
+pub fn tensix_col_harvested(enabled_tensix_col: u32, col: usize) -> bool {
+    if col >= BH_TENSIX_COL_COUNT { return false; }
+    (enabled_tensix_col >> col) & 1 == 0
+}
+
+/// Firmware bundle + component firmware versions (from tt-smi 5.2.0 `firmwares` block).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FirmwaresInfo {
+    pub fw_bundle_version: Option<String>,
+    pub eth_fw:            Option<String>,
+    pub cm_fw:             Option<String>,
+    pub gddr_fw:           Option<String>,
+}
+
+/// Per-device thermal/power limits (from tt-smi 5.2.0 `limits` block).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeviceLimits {
+    pub tdp_limit:  Option<f32>,
+    pub tdc_limit:  Option<f32>,
+    pub asic_fmax:  Option<u32>,
+    pub thm_limit:  Option<f32>,
 }
 
 /// Parse a string as u32, accepting both "0x1A2B" hex and plain decimal.
-fn parse_hex_or_dec(s: &str) -> Option<u32> {
+pub(crate) fn parse_hex_or_dec(s: &str) -> Option<u32> {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         u32::from_str_radix(hex, 16).ok()
@@ -261,7 +345,7 @@ fn parse_hex_or_dec(s: &str) -> Option<u32> {
 }
 
 /// Same as `parse_hex_or_dec` but for u64 (DDR_STATUS is 32+ bits wide).
-fn parse_hex_or_dec_64(s: &str) -> Option<u64> {
+pub(crate) fn parse_hex_or_dec_64(s: &str) -> Option<u64> {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         u64::from_str_radix(hex, 16).ok()
@@ -323,6 +407,16 @@ impl SmbusTelemetry {
             aux_status: None,
             eth_debug_status0: None,
             eth_debug_status1: None,
+            gddr_temps:        [None; 4],
+            max_gddr_temp:     None,
+            gddr_corr_errs:    [None; 4],
+            gddr_uncorr_errs:  None,
+            harvesting_state:  None,
+            eth_live_status:   None,
+            enabled_eth:       None,
+            enabled_gddr:      None,
+            enabled_l2cpu:     None,
+            enabled_tensix_col: None,
         }
     }
 
@@ -364,6 +458,18 @@ impl SmbusTelemetry {
     /// Check if ARC0 firmware is healthy (heartbeat > 0)
     pub fn is_arc0_healthy(&self) -> bool {
         self.arc0_health_value().unwrap_or(0) > 0
+    }
+
+    /// Compute the maximum temperature across all populated GDDR temp pairs.
+    /// Prefer this over the raw `max_gddr_temp` field when that field is `None`
+    /// (older tt-smi versions don't expose MAX_GDDR_TEMP directly).
+    pub fn max_gddr_temp_computed(&self) -> Option<f32> {
+        let max = self.gddr_temps.iter()
+            .filter_map(|pair| pair.as_ref())
+            .flat_map(|pair| pair.0.iter().copied())
+            .filter(|&t| t > 0.0)  // 0.0 = unpopulated slot; hardware never reports 0°C for live GDDR
+            .fold(f32::NEG_INFINITY, f32::max);
+        if max == f32::NEG_INFINITY { None } else { Some(max) }
     }
 }
 
@@ -439,5 +545,70 @@ mod tests {
         // Legacy decimal string with nibble value 2 still counts as trained.
         smbus.ddr_status = Some("2".to_string()); // decimal 2 → nibble 0 = 2 = trained
         assert!(smbus.is_ddr_channel_trained(0));
+    }
+
+    // ── GddrTempPair ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_gddr_temp_unpack_normal() {
+        // 0x262a2c2c → bytes LE: 0x2c, 0x2c, 0x2a, 0x26 → [44.0, 44.0, 42.0, 38.0]
+        let pair = unpack_gddr_temps("0x262a2c2c").unwrap();
+        assert_eq!(pair.0, [44.0_f32, 44.0, 42.0, 38.0]);
+    }
+
+    #[test]
+    fn test_gddr_temp_unpack_zero() {
+        let pair = unpack_gddr_temps("0x00000000").unwrap();
+        assert_eq!(pair.0, [0.0_f32, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_gddr_temp_unpack_na() {
+        assert!(unpack_gddr_temps("N/A").is_none());
+        assert!(unpack_gddr_temps("").is_none());
+    }
+
+    // ── tensix_col_harvested ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_harvesting_col_all_active() {
+        // 0x3FFF = all 14 bits set → no harvesting
+        for col in 0..14_usize {
+            assert!(!tensix_col_harvested(0x3FFF, col),
+                "col {} should be active", col);
+        }
+    }
+
+    #[test]
+    fn test_harvesting_col_col0_harvested() {
+        // bit 0 clear → col 0 harvested
+        assert!(tensix_col_harvested(0x3FFE, 0));
+        assert!(!tensix_col_harvested(0x3FFE, 1));
+    }
+
+    #[test]
+    fn test_harvesting_col_all_harvested() {
+        for col in 0..14_usize {
+            assert!(tensix_col_harvested(0x0000, col));
+        }
+    }
+
+    #[test]
+    fn test_smbus_telemetry_new_fields_default_none() {
+        let s = SmbusTelemetry::new();
+        assert!(s.gddr_temps.iter().all(|t| t.is_none()));
+        assert!(s.max_gddr_temp.is_none());
+        assert!(s.harvesting_state.is_none());
+        assert!(s.eth_live_status.is_none());
+        assert!(s.enabled_tensix_col.is_none());
+    }
+
+    #[test]
+    fn test_smbus_gddr_max_temp() {
+        let mut s = SmbusTelemetry::new();
+        s.gddr_temps[0] = Some(GddrTempPair([38.0, 42.0, 44.0, 44.0]));
+        s.gddr_temps[1] = Some(GddrTempPair([50.0, 52.0, 48.0, 46.0]));
+        let max = s.max_gddr_temp_computed();
+        assert_eq!(max, Some(52.0_f32));
     }
 }

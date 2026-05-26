@@ -1,6 +1,6 @@
 [package]
 name = "tt-toplike"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 authors = ["Tenstorrent"]
 license = "Apache-2.0"
@@ -92,11 +92,18 @@ rand = "0.8"  # For particle effects
 # Configuration
 toml = "0.8"
 
+# Platform config/data directories (used by AnimConfig to locate ~/.config/tt-toplike/config.toml)
+dirs = "6"
+
 # Lock-free atomic Arc swap — eliminates mutex contention on the render path
 arc-swap = "1.7"
 
 # Path resolution — resolves bare program names via PATH at startup
 which = "7"
+
+[target.'cfg(unix)'.dependencies]
+# libc: used for kill(2) syscall in the Insights screen kill panel
+libc = "0.2"
 
 [dev-dependencies]
 # Testing

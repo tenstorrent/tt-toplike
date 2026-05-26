@@ -27,6 +27,7 @@ use crate::models::{Architecture, Device, SmbusTelemetry, Telemetry};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Valid sysfs file paths for each sensor type on one device.
 /// Populated once during `init()` so `update()` never retries missing paths.
@@ -77,8 +78,18 @@ impl SysfsBackend {
     }
 
     /// Scan /sys/class/hwmon/ for Tenstorrent devices
+    ///
+    /// Clears existing state before scanning so that calling init() twice does not
+    /// double-count devices. This happens in practice when the tui.rs binary pre-probes
+    /// the backend and then run_with_backend() calls init() a second time.
     fn detect_devices(&mut self) -> BackendResult<()> {
         log::info!("SysfsBackend: Scanning /sys/class/hwmon/");
+
+        // Clear any previously discovered state so repeated init() calls are idempotent.
+        self.devices.clear();
+        self.hwmon_paths.clear();
+        self.sensor_paths.clear();
+        self.telemetry_cache.clear();
 
         let hwmon_base = Path::new("/sys/class/hwmon");
         if !hwmon_base.exists() {
@@ -130,6 +141,10 @@ impl SysfsBackend {
                         bus_id: bus_id.clone(),
                         coords: String::new(),
                         architecture,
+                        firmwares: None,
+                        limits: None,
+                        pcie_speed: None,
+                        pcie_width: None,
                     };
 
                     self.devices.push(device);
@@ -147,6 +162,86 @@ impl SysfsBackend {
 
         log::info!("SysfsBackend: Found {} devices", self.devices.len());
         Ok(())
+    }
+
+    /// Try to enrich device board_type from `tt-smi -s` output.
+    ///
+    /// The hwmon driver only exposes the chip architecture name (e.g. "blackhole"),
+    /// not the board SKU (e.g. "p300c"). This runs tt-smi once at init and matches
+    /// devices by PCI bus_id to fill in the real product name. Fails silently if
+    /// tt-smi is unavailable or its output cannot be parsed.
+    ///
+    /// Only tt-smi v4+ is used. Earlier versions access hardware invasively via
+    /// direct PCI reads, which can disrupt running workloads. v4+ switched to a
+    /// safe snapshot mode that reads from the kernel driver.
+    fn try_enrich_board_types_from_tt_smi(&mut self) {
+        // Gate on tt-smi major version >= 4 before calling -s.
+        // `tt-smi --version` prints just the version string, e.g. "5.2.0".
+        let ver_out = match Command::new("tt-smi").arg("--version").output() {
+            Ok(o) if o.status.success() => o,
+            _ => return, // tt-smi not found or --version failed
+        };
+        let ver_str = String::from_utf8_lossy(&ver_out.stdout);
+        let major: u32 = ver_str.trim()
+            .split('.')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if major < 4 {
+            log::warn!(
+                "SysfsBackend: tt-smi version {} is < 4 — skipping board-type enrichment \
+                 to avoid invasive PCI access",
+                ver_str.trim()
+            );
+            return;
+        }
+
+        #[derive(serde::Deserialize)]
+        struct BoardInfo { bus_id: Option<String>, board_type: Option<String> }
+        #[derive(serde::Deserialize)]
+        struct RawDev { board_info: Option<BoardInfo> }
+        #[derive(serde::Deserialize)]
+        struct Snapshot { device_info: Option<Vec<RawDev>> }
+
+        let output = Command::new("tt-smi").arg("-s").output();
+        let output = match output {
+            Ok(o) if o.status.success() => o,
+            _ => return, // tt-smi not available — silently skip
+        };
+        let json = match std::str::from_utf8(&output.stdout) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let snapshot: Snapshot = match serde_json::from_str(json) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let raw_devs = match snapshot.device_info {
+            Some(d) => d,
+            None => return,
+        };
+
+        // Build a map: normalized bus_id → board_type
+        let mut sku_by_bus: HashMap<String, String> = HashMap::new();
+        for raw in raw_devs {
+            if let Some(bi) = raw.board_info {
+                if let (Some(bus), Some(bt)) = (bi.bus_id, bi.board_type) {
+                    let bus_norm = bus.trim().to_lowercase();
+                    if !bus_norm.is_empty() && !bt.is_empty() {
+                        sku_by_bus.insert(bus_norm, bt);
+                    }
+                }
+            }
+        }
+        if sku_by_bus.is_empty() { return; }
+
+        for device in &mut self.devices {
+            let bus_norm = device.bus_id.trim().to_lowercase();
+            if let Some(sku) = sku_by_bus.get(&bus_norm) {
+                device.board_type = sku.clone();
+            }
+        }
+        log::info!("SysfsBackend: enriched board types from tt-smi");
     }
 
     /// Extract PCI address from hwmon device path
@@ -237,6 +332,9 @@ impl Default for SysfsBackend {
 impl TelemetryBackend for SysfsBackend {
     fn init(&mut self) -> BackendResult<()> {
         self.detect_devices()?;
+        // Attempt to replace generic arch names (e.g. "blackhole") with real
+        // board SKUs (e.g. "p300c") using a one-shot tt-smi -s call.
+        self.try_enrich_board_types_from_tt_smi();
         // Cache valid sensor paths so update() never retries missing indices.
         for (device_idx, hwmon_path) in &self.hwmon_paths {
             let paths = Self::discover_sensor_paths(hwmon_path);
