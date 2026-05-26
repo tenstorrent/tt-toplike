@@ -412,7 +412,8 @@
 
     .gallery-item.wide { grid-column: 1 / -1; }
 
-    .gallery-item img {
+    .gallery-item img,
+    .gallery-item video {
       width: 100%;
       height: auto;
       display: block;
@@ -942,27 +943,29 @@
   <p class="section-label">Screenshots</p>
   <h2 class="section-heading">Real hardware, real data</h2>
   <p class="section-sub">
-    All screenshots taken on Blackhole hardware. No mock data.
+    Captured on Blackhole hardware during live LLM inference. No mock data.
   </p>
 
   <div class="gallery-grid">
     <div class="gallery-item wide">
+      <video autoplay muted loop playsinline
+             aria-label="tt-toplike Insights screen — four Blackhole chips at 58–77W under live LLM inference, showing chip portraits with real-time power and temperature">
+        <source src="assets/tt-toplike-insights.webm" type="video/webm">
+        <img src="assets/tt-toplike-with-info-with-activity.png" alt="tt-toplike Insights screen with four Blackhole chips under inference load">
+      </video>
+      <span class="gallery-caption">Insights mode — 4× Blackhole at 58–77W, live LLM inference</span>
+    </div>
+    <div class="gallery-item">
       <img src="assets/tt-toplike-arcade-active.png"
            alt="tt-toplike arcade mode — four Blackhole chips at 58–66W under live inference load, showing Tensix starfield, memory castle particle hierarchy, and NoC flow"
            loading="lazy">
       <span class="gallery-caption">Arcade mode — 4× Blackhole at 58–66W, live LLM inference</span>
     </div>
     <div class="gallery-item">
-      <img src="assets/tt-toplike-with-info-with-activity.png"
-           alt="tt-toplike info mode — hardware telemetry table with process detection showing python3 and tt-smi under active inference load"
-           loading="lazy">
-      <span class="gallery-caption">Info mode — 4× Blackhole, 58–66W, workload detection</span>
-    </div>
-    <div class="gallery-item">
       <img src="assets/tt-toplike-rs.png"
-           alt="tt-toplike multi-window view showing starfield and memory castle visualizations simultaneously"
+           alt="tt-toplike fleet grid — 64 simulated devices in compact multi-chip layout"
            loading="lazy">
-      <span class="gallery-caption">Multi-window — starfield + memory castle side-by-side</span>
+      <span class="gallery-caption">Fleet grid — 64-device compact layout</span>
     </div>
   </div>
 </section>
