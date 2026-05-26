@@ -82,9 +82,12 @@ pub fn trained_random_col(
         }
     };
 
-    // Collect trained DRAM chip columns
+    // Collect trained DRAM chip columns.
+    // DDR_STATUS is a 32-bit value with one 4-bit nibble per channel (nibbles 0-7 = channels 0-7).
+    // BH has 12 physical DRAM channels but DDR_STATUS only encodes 8; cap at 8 so we never
+    // read nibbles 8-11 which are outside the defined DDR_STATUS bit range.
     let max_channels = match arch {
-        Architecture::Blackhole => 12usize,
+        Architecture::Blackhole => 8usize,
         Architecture::Wormhole  => 8,
         _                       => 8,
     };
