@@ -72,23 +72,31 @@ pub fn trained_random_col(
     arch: Architecture,
     tick: u64,
 ) -> Option<usize> {
+    // BH: DRAM rows include col 8 (PCIe) because row-0 DRAM check fires before PCIe
+    // check in core_type_bh.  Exclude it explicitly so PCIe is never picked.
+    let is_dram_col = |c: usize| -> bool {
+        match arch {
+            Architecture::Blackhole => c != 8 && core_type_bh(c, 0) == CoreType::Dram,
+            Architecture::Wormhole  => core_type_wh(c, 1) == CoreType::Dram,
+            _                       => false, // GS/Unknown: no DRAM cells in portrait
+        }
+    };
+
     // Collect trained DRAM chip columns
+    let max_channels = match arch {
+        Architecture::Blackhole => 12usize,
+        Architecture::Wormhole  => 8,
+        _                       => 8,
+    };
     let dram_cols: Vec<usize> = (0..portrait_cols)
         .filter(|&c| {
-            let is_dram = match arch {
-                Architecture::Blackhole => core_type_bh(c, 0) == CoreType::Dram,
-                _                       => core_type_wh(c, 1) == CoreType::Dram,
-            };
-            if !is_dram { return false; }
-            // Map chip column to a DRAM channel bit index (0-based among DRAM cols)
-            let dram_idx = (0..c)
-                .filter(|&cc| match arch {
-                    Architecture::Blackhole => core_type_bh(cc, 0) == CoreType::Dram,
-                    _                       => core_type_wh(cc, 1) == CoreType::Dram,
-                })
-                .count();
+            if !is_dram_col(c) { return false; }
+            // Map chip column to a DRAM channel bit index (0-based among DRAM cols).
+            // Cap at max_channels to avoid reading undefined nibbles beyond DDR_STATUS.
+            let dram_idx = (0..c).filter(|&cc| is_dram_col(cc)).count();
+            if dram_idx >= max_channels { return false; }
             // DDR_STATUS nibble encoding: each 4-bit nibble = one channel.
-            // 0x5 = trained (BH), 2 = trained (legacy WH/GS). Raw bit check is wrong.
+            // 0x5 = trained (BH), 2 = trained (legacy WH/GS).
             let nibble = (ddr_status >> (dram_idx * 4)) & 0xF;
             nibble == 0x5 || nibble == 2
         })
@@ -323,7 +331,8 @@ pub fn build_portrait_rows(
         for col in 0..cols {
             let core_type = match device.architecture {
                 Architecture::Blackhole => core_type_bh(col, row),
-                _                       => core_type_wh(col, row),
+                Architecture::Wormhole  => core_type_wh(col, row),
+                _                       => CoreType::Tensix, // GS/Unknown: no ETH/DRAM/PCIe cells
             };
 
             let ch = match core_type {
@@ -423,7 +432,8 @@ pub fn build_portrait_lines<'a>(
         for (col, ch) in row_str.chars().enumerate() {
             let core_type = match device.architecture {
                 Architecture::Blackhole => core_type_bh(col, row),
-                _                       => core_type_wh(col, row),
+                Architecture::Wormhole  => core_type_wh(col, row),
+                _                       => CoreType::Tensix,
             };
 
             let style = match (core_type, ch) {
@@ -476,7 +486,8 @@ pub fn build_portrait_lines<'a>(
         // Only overwrite Tensix cells — ETH, PCIe, and DRAM cells are never touched.
         let core_type = match device.architecture {
             Architecture::Blackhole => core_type_bh(col, portrait_row),
-            _                       => core_type_wh(col, portrait_row),
+            Architecture::Wormhole  => core_type_wh(col, portrait_row),
+            _                       => CoreType::Tensix,
         };
         if core_type != CoreType::Tensix { continue; }
 

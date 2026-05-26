@@ -180,13 +180,19 @@ impl InferenceEngine {
             Some(current_counts) => {
                 let stall_count = self.arc_stall_frames.entry(device_idx).or_insert(0);
                 if let Some(prev) = self.arc_snapshots.get(&device_idx) {
-                    // A true stall means ALL counters are frozen (none changed).
-                    // Using .any() would trigger on normal slow-updating ARC counters;
-                    // .all() only fires when every counter has been stuck for this frame.
-                    let all_counters_frozen = prev.iter().zip(current_counts.iter()).all(|(p, c)| {
-                        matches!((p, c), (Some(pv), Some(cv)) if pv == cv)
-                    });
-                    if all_counters_frozen {
+                    // Declare frozen when at least one (Some, Some) pair exists and
+                    // *every* observed pair is unchanged.  None-None pairs (counter not
+                    // populated by this backend) are treated as "not observed" and don't
+                    // break the frozen condition, which lets stall detection work even
+                    // when only TIMER_HEARTBEAT/arc0 is available.
+                    let has_observed = prev.iter().zip(current_counts.iter())
+                        .any(|(p, c)| matches!((p, c), (Some(_), Some(_))));
+                    let all_observed_frozen = prev.iter().zip(current_counts.iter())
+                        .all(|(p, c)| match (p, c) {
+                            (Some(pv), Some(cv)) => pv == cv,
+                            _ => true, // absent — doesn't break the frozen claim
+                        });
+                    if has_observed && all_observed_frozen {
                         *stall_count = stall_count.saturating_add(1);
                     } else {
                         *stall_count = 0;
@@ -556,12 +562,28 @@ pub fn is_throttler_active(throttler: Option<&str>) -> bool {
 }
 
 /// True if an eth_status register indicates link/fabric errors.
-/// "0", "0x0", "", or None → no error.
+///
+/// Parsing rules (applied in order):
+/// 1. None / "" → no error.
+/// 2. Hex-prefixed ("0x…"/"0X…"): parse as u64; non-zero → error.
+/// 3. All-decimal string: parse as u64; non-zero → error.
+/// 4. Known-good human-readable values ("LinkUp", "OK", …) → no error.
+/// 5. Any other non-numeric string → error (conservative default).
 pub fn is_eth_status_error(eth_status: Option<&str>) -> bool {
-    match eth_status {
-        None | Some("") | Some("0") | Some("0x0") | Some("0X0") => false,
-        Some(_) => true,
+    let s = match eth_status {
+        None | Some("") => return false,
+        Some(s) => s.trim(),
+    };
+    // Hex register value
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        return u64::from_str_radix(hex, 16).map_or(true, |v| v != 0);
     }
+    // Decimal register value
+    if let Ok(v) = s.parse::<u64>() {
+        return v != 0;
+    }
+    // Human-readable status strings from some backends
+    !matches!(s, "LinkUp" | "link_up" | "UP" | "OK" | "ok")
 }
 
 /// Map power trend to an 8-char evocative word.
@@ -745,10 +767,24 @@ mod tests {
 
     #[test]
     fn eth_status_error() {
+        // Numeric hex — non-zero is error
         assert!(is_eth_status_error(Some("0x1")));
-        assert!(!is_eth_status_error(Some("0")));
+        assert!(is_eth_status_error(Some("0xFF")));
         assert!(!is_eth_status_error(Some("0x0")));
+        assert!(!is_eth_status_error(Some("0X0")));
+        // Numeric decimal
+        assert!(!is_eth_status_error(Some("0")));
+        assert!(is_eth_status_error(Some("1")));
+        // Empty / None
+        assert!(!is_eth_status_error(Some("")));
         assert!(!is_eth_status_error(None));
+        // Known-good human-readable strings
+        assert!(!is_eth_status_error(Some("LinkUp")));
+        assert!(!is_eth_status_error(Some("OK")));
+        assert!(!is_eth_status_error(Some("ok")));
+        // Unknown strings → conservative error
+        assert!(is_eth_status_error(Some("LinkDown")));
+        assert!(is_eth_status_error(Some("ERROR")));
     }
 
     #[test]

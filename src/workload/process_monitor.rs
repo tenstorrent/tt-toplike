@@ -14,8 +14,6 @@
 
 use procfs::process::{FDTarget, Process};
 use std::collections::HashMap;
-#[cfg(unix)]
-use libc;
 
 /// Information about a process using Tenstorrent devices
 #[derive(Debug, Clone)]

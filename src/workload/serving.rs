@@ -272,23 +272,51 @@ fn read_proc_env(pid: i32, key: &str) -> Option<String> {
     None
 }
 
-/// Scan `/proc/PID/net/tcp` for a port the process is listening on (LISTEN state).
-/// Returns the first local port in LISTEN state (0A hex).
+/// Collect the set of socket inodes from `/proc/PID/fd/` symlinks.
+///
+/// Each open socket produces a symlink like `socket:[1234567]`.  Returns an
+/// empty set on any I/O error so callers degrade gracefully.
+fn pid_socket_inodes(pid: i32) -> std::collections::HashSet<u64> {
+    let mut inodes = std::collections::HashSet::new();
+    let fd_dir = format!("/proc/{}/fd", pid);
+    let Ok(dir) = std::fs::read_dir(&fd_dir) else { return inodes; };
+    for entry in dir.flatten() {
+        if let Ok(target) = std::fs::read_link(entry.path()) {
+            let s = target.to_string_lossy();
+            if let Some(inner) = s.strip_prefix("socket:[").and_then(|t| t.strip_suffix(']')) {
+                if let Ok(inode) = inner.parse::<u64>() {
+                    inodes.insert(inode);
+                }
+            }
+        }
+    }
+    inodes
+}
+
+/// Scan `/proc/PID/net/tcp` for a LISTEN port owned by this PID.
+///
+/// `/proc/PID/net/tcp` is the network-namespace view and can contain sockets
+/// from other processes in the same namespace.  We cross-reference the socket
+/// inode column against the PID's open file-descriptors so only PID-owned
+/// sockets are considered.
 fn find_listen_port_from_proc(pid: i32) -> Option<u16> {
+    let owned = pid_socket_inodes(pid);
+
     let path = format!("/proc/{}/net/tcp", pid);
     let f = std::fs::File::open(&path).ok()?;
     for line in BufReader::new(f).lines().flatten().skip(1) {
         let cols: Vec<&str> = line.split_whitespace().collect();
-        if cols.len() < 4 { continue; }
-        // col[3] is state: "0A" = LISTEN
-        if cols[3] != "0A" { continue; }
-        // col[1] is "local_address" in format "AABBCCDD:PORT" (little-endian)
+        // /proc/net/tcp columns: sl local_addr rem_addr state … inode (col 9)
+        if cols.len() < 10 { continue; }
+        if cols[3] != "0A" { continue; } // 0A = LISTEN
+        // Verify inode belongs to this PID
+        let Ok(inode) = cols[9].parse::<u64>() else { continue };
+        if !owned.is_empty() && !owned.contains(&inode) { continue; }
+        // Extract port from "AABBCCDD:PORT" (hex, little-endian address)
         let local = cols[1];
         if let Some(colon) = local.find(':') {
             let port_hex = &local[colon + 1..];
             if let Ok(port) = u16::from_str_radix(port_hex, 16) {
-                // Skip localhost-only listeners that are clearly not public servers
-                // (e.g. port < 1024 or > 65000). Common inference ports are 8000–9000.
                 if port >= 1024 {
                     return Some(port);
                 }
