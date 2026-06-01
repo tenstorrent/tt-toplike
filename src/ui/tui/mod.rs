@@ -1352,6 +1352,10 @@ fn flat_process_list<'a>(pm: &'a ProcessMonitor) -> Vec<&'a crate::workload::Pro
 /// 3 chars: temperature block glyph (1) + space (1) + separator (1).
 const FLEET_CELL_W: u16 = 3;
 
+/// Column gap between adjacent device panel columns in the portrait grid.
+/// Used by both `panel_layout` and `render_device_panels` — single source of truth.
+const PANEL_INTER_COL_GAP: u16 = 1;
+
 /// Fleet compact mode activates at this device count (matching the starfield galaxy mode).
 /// At 32+ devices the full-portrait grid almost always overflows a standard terminal.
 const FLEET_DEVICE_THRESHOLD: usize = 32;
@@ -1362,6 +1366,28 @@ const FLEET_PAGE_SIZE: usize = 16;
 
 /// Height cap for the panel area in fleet mode.
 const FLEET_HEIGHT_THRESHOLD: u16 = 30; // lines; beyond this we switch to compact cells
+
+/// Shared panel layout calculation used by both `device_panels_height` and
+/// `render_device_panels`.  Returns `(stats_w, gap_col, cols_per_row)`.
+///
+/// Single source of truth so the two callers can never diverge on gap or
+/// compact-mode threshold.
+#[cfg(feature = "linux-procfs")]
+fn panel_layout(n: usize, portrait_w: u16, area_width: u16) -> (u16, u16, usize) {
+    let balanced_cols = ((n as f64).sqrt().ceil() as usize).max(1);
+    let full_panel_w  = portrait_w + 1 + 31; // gap=1, stats_w=31
+    let cols_u16      = balanced_cols as u16;
+    let full_row_w    = cols_u16 * full_panel_w + (cols_u16.saturating_sub(1)) * PANEL_INTER_COL_GAP;
+    let (stats_w, gap_col) = if full_row_w <= area_width {
+        (31_u16, 1_u16)
+    } else {
+        (19_u16, 0_u16)
+    };
+    let panel_w: u16  = portrait_w + gap_col + stats_w;
+    let max_cols_fit = ((area_width + 1) / (panel_w + 1)).max(1) as usize;
+    let cols_per_row = max_cols_fit.min(balanced_cols);
+    (stats_w, gap_col, cols_per_row)
+}
 
 /// Compute the vertical space required for the device panel grid at the given terminal width.
 ///
@@ -1385,18 +1411,9 @@ fn device_panels_height(
 
     let arch = devices.first().map(|d| d.architecture).unwrap_or(crate::models::Architecture::Blackhole);
     let (portrait_cols, _) = portrait_dims(arch);
-    let portrait_w = portrait_cols as u16 + 1; // left-border(1) + portrait
+    let portrait_w = portrait_cols as u16 + 1;
 
-    // Mirror render_device_panels compact logic exactly: check if balanced_cols
-    // (not all n) full-width panels fit in one row.
-    let balanced_cols = ((n as f64).sqrt().ceil() as usize).max(1);
-    let full_panel_w  = portrait_w + 1 + 31;
-    let cols_u16      = balanced_cols as u16;
-    let full_row_w    = cols_u16 * full_panel_w + (cols_u16 - 1);
-    let panel_w = if full_row_w <= area_width { full_panel_w } else { portrait_w + 0 + 19 };
-
-    let max_cols_fit = ((area_width + 1) / (panel_w + 1)).max(1) as usize;
-    let cols_per_row = max_cols_fit.min(balanced_cols);
+    let (_, _, cols_per_row) = panel_layout(n, portrait_w, area_width);
     let row_count = (n + cols_per_row - 1) / cols_per_row;
     (row_count as u16) * 15 // panel_h(14) + inter-row gap(1)
 }
@@ -1989,7 +2006,6 @@ fn render_device_panels(
     if all_devices.is_empty() { return; }
 
     let panel_h: u16 = 14; // portrait 12 rows + 1 title row + 1 bottom border row
-    let inter_col_gap: u16 = 1;
     let inter_row_gap: u16 = 1;
 
     // Fleet galaxy mode at 32+ devices (matching starfield threshold).
@@ -2041,43 +2057,19 @@ fn render_device_panels(
     // All panels get the same allocated width so grid columns align.
     //
     // Compact mode: when the full-width layout (stats_w=31, gap=1) would require
-    // more than one row to show all devices, try compact (stats_w=19, gap=0).
-    // The portrait itself is never scaled — only the stats sidebar shrinks.
-    // Compact saves ~12 cols per panel: BH full=50 → compact=37, WH full=43 → compact=30.
     let (portrait_cols_first, _) = portrait_dims(devices[0].architecture);
     let portrait_w_first = portrait_cols_first as u16 + 1; // +1 for left border ║
-    let n = devices.len() as u16;
-    let n_usize = n as usize;
+    let n_usize = devices.len();
 
-    // Balanced column count: ceil(sqrt(n)) so 4→2, 9→3, 16→4, etc.
-    // Compact decision must use this — not n — as the row width to check.
-    // On a 160-wide terminal with 4 BH chips: balanced_cols=2, full 2-col row
-    // needs 101 cols → fits → use full mode. Checking all 4 (203 cols) would
-    // wrongly trigger compact even though we never render more than 2 per row.
-    let balanced_cols = ((n_usize as f64).sqrt().ceil() as usize).max(1);
-
-    let (stats_w, gap_col) = {
-        let full_panel_w = portrait_w_first + 1 + 31; // gap=1, stats_w=31
-        let cols_u16 = balanced_cols as u16;
-        let full_row_w = cols_u16 * full_panel_w + (cols_u16 - 1) * inter_col_gap;
-        if full_row_w <= area.width {
-            (31_u16, 1_u16) // balanced columns fit at full width
-        } else {
-            (19_u16, 0_u16) // tight — compact sidebar, no gap
-        }
-    };
+    let (stats_w, gap_col, cols_per_row) = panel_layout(n_usize, portrait_w_first, area.width);
     let compact = stats_w < 31;
-
     let panel_w = portrait_w_first + gap_col + stats_w;
-
-    let max_cols_fit = ((area.width + 1) / (panel_w + 1)).max(1) as usize;
-    let cols_per_row = max_cols_fit.min(balanced_cols);
 
     for (panel_idx, device) in devices.iter().enumerate() {
         let col_idx = (panel_idx % cols_per_row) as u16;
         let row_idx = (panel_idx / cols_per_row) as u16;
 
-        let x_offset = area.x + col_idx * (panel_w + inter_col_gap);
+        let x_offset = area.x + col_idx * (panel_w + PANEL_INTER_COL_GAP);
         let y_offset = area.y + row_idx * (panel_h + inter_row_gap);
 
         // Skip panels that overflow the allocated area vertically or horizontally
@@ -2203,57 +2195,62 @@ fn render_device_panels(
         }
 
         // ETH row — use ENABLED_ETH as the denominator (ports provisioned by
-        // firmware) rather than the architectural maximum.  On your p300c cards
-        // ENABLED_ETH=0x3edf (14 ports enabled) while the chip has 24 total;
-        // showing 0/24 looks broken whereas 0/14 is accurate.
-        let eth_live_mask  = smbus.and_then(|s| s.eth_live_status).unwrap_or(0);
+        // firmware) rather than the architectural maximum.  On p300c cards
+        // ENABLED_ETH=0x3edf gives 14 enabled ports; showing 0/24 looks broken.
+        //
+        // Fallback hierarchy:
+        //   1. SMBUS present + ENABLED_ETH > 0  → use enabled count (accurate)
+        //   2. SMBUS present + ENABLED_ETH = 0  → show live/? (transient or no ports)
+        //   3. SMBUS absent entirely             → fall back to arch max (no data yet)
+        let eth_live_mask    = smbus.and_then(|s| s.eth_live_status).unwrap_or(0);
         let eth_enabled_mask = smbus.and_then(|s| s.enabled_eth).unwrap_or(0);
-        let eth_live_count = eth_live_mask.count_ones();
-        // If ENABLED_ETH not available, fall back to architectural maximum.
-        let eth_total: u32 = if eth_enabled_mask > 0 {
-            eth_enabled_mask.count_ones()
+        let eth_live_count   = eth_live_mask.count_ones();
+        let eth_total: Option<u32> = if eth_enabled_mask > 0 {
+            Some(eth_enabled_mask.count_ones())
+        } else if smbus.is_some() {
+            None  // SMBUS present but ENABLED_ETH zero — don't invent a total
         } else {
-            match device.architecture {
+            // No SMBUS data yet — show architectural max so the row isn't empty
+            Some(match device.architecture {
                 crate::models::Architecture::Blackhole => 24,
                 crate::models::Architecture::Wormhole  => 20,
                 _                                       => 4,
-            }
+            })
         };
-        let eth_color = if eth_live_count == eth_total && eth_total > 0 {
-            Color::Rgb(79, 209, 197)   // teal — all provisioned ports live
-        } else if eth_live_count > 0 {
-            Color::Rgb(244, 196, 113)  // yellow — partial
-        } else {
-            Color::Rgb(96, 125, 139)   // muted gray — none live (normal at rest)
+        let eth_total_display = eth_total.map(|t| t.to_string()).unwrap_or_else(|| "?".to_string());
+        let eth_color = match eth_total {
+            Some(t) if eth_live_count == t && t > 0 => Color::Rgb(79, 209, 197), // teal — all live
+            _ if eth_live_count > 0                 => Color::Rgb(244, 196, 113), // yellow — partial
+            _                                        => Color::Rgb(96, 125, 139), // muted gray — none live
         };
         if compact {
             stat_lines.push(Line::from(vec![
                 Span::styled("E ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    format!("{}/{}", eth_live_count, eth_total),
+                    format!("{}/{}", eth_live_count, eth_total_display),
                     Style::default().fg(eth_color),
                 ),
             ]));
         } else {
-            // Dot map over enabled ports only — one dot per enabled port, up to 16.
             const ETH_DOT_CAP: u32 = 16;
-            let dots_shown = eth_total.min(ETH_DOT_CAP);
-            // Map dot index → original port bit position within enabled mask.
-            let enabled_bits: Vec<u32> = (0..32)
-                .filter(|&b| (eth_enabled_mask >> b) & 1 == 1)
-                .collect();
+            let dots_shown = eth_total.unwrap_or(ETH_DOT_CAP).min(ETH_DOT_CAP);
+            // Dot map: iterate enabled bits when available, else live bits.
+            let enabled_bits: Vec<u32> = if eth_enabled_mask > 0 {
+                (0..32).filter(|&b| (eth_enabled_mask >> b) & 1 == 1).collect()
+            } else {
+                (0..dots_shown).collect()
+            };
             let eth_dots: String = enabled_bits.iter().take(dots_shown as usize).map(|&bit| {
                 if (eth_live_mask >> bit) & 1 == 1 { '●' } else { '·' }
             }).collect();
-            let eth_suffix = if eth_total > ETH_DOT_CAP {
-                format!("+{}", eth_total - ETH_DOT_CAP)
-            } else {
-                String::new()
+            let eth_suffix = match eth_total {
+                Some(t) if t > ETH_DOT_CAP => format!("+{}", t - ETH_DOT_CAP),
+                _                           => String::new(),
             };
             stat_lines.push(Line::from(vec![
                 Span::styled(format!("{:<8}", "ETH"), Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{}{}", eth_dots, eth_suffix), Style::default().fg(eth_color)),
-                Span::styled(format!(" {}/{} live", eth_live_count, eth_total), Style::default().fg(Color::White)),
+                Span::styled(format!(" {}/{} live", eth_live_count, eth_total_display), Style::default().fg(Color::White)),
             ]));
         }
 

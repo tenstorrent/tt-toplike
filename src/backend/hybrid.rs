@@ -206,15 +206,14 @@ impl TelemetryBackend for HybridBackend {
                         .output()
                     {
                         Ok(out) if out.status.success() => {
-                            let json = String::from_utf8_lossy(&out.stdout);
-                            let data = json::parse_smbus_from_json(&json);
-                            if !data.is_empty() {
-                                // Parse firmware/limits metadata from the same snapshot.
-                                let meta = json::parse_device_meta_from_json(&json);
-                                if !meta.is_empty() {
-                                    device_meta_shared.store(Arc::new(meta));
+                            let json_str = String::from_utf8_lossy(&out.stdout);
+                            // Single parse pass — extracts SMBUS and firmware/limits together.
+                            let snapshot = json::parse_snapshot(&json_str);
+                            if !snapshot.smbus.is_empty() {
+                                if !snapshot.meta.is_empty() {
+                                    device_meta_shared.store(Arc::new(snapshot.meta));
                                 }
-                                smbus_shared.store(Arc::new(data));
+                                smbus_shared.store(Arc::new(snapshot.smbus));
                                 smbus_generation.fetch_add(1, Ordering::Release);
                                 log::debug!("HybridBackend: SMBUS snapshot updated");
                             } else {
@@ -275,16 +274,13 @@ impl TelemetryBackend for HybridBackend {
             self.smbus_ema.retain(|k, _| self.smbus_latest.contains_key(k));
 
             // Enrich sysfs device list with firmwares/limits from JSON snapshot.
-            // Sysfs never provides these; they only come from tt-smi.
+            // Always overwrite (not just when None) so a firmware upgrade applied
+            // while the tool is running is reflected without restarting.
             let meta = self.device_meta_shared.load_full();
             for device in self.sysfs.devices_mut() {
                 if let Some((fw, lim)) = meta.get(&device.index) {
-                    if device.firmwares.is_none() {
-                        device.firmwares = fw.clone();
-                    }
-                    if device.limits.is_none() {
-                        device.limits = lim.clone();
-                    }
+                    if fw.is_some() { device.firmwares = fw.clone(); }
+                    if lim.is_some() { device.limits   = lim.clone(); }
                 }
             }
         }

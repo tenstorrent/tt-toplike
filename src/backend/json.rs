@@ -611,38 +611,32 @@ fn smbus_from_json_fields(smbus_json: SmbusTelemetryJSON) -> SmbusTelemetry {
 /// Pure parsing — no subprocess spawn. Called from the HybridBackend reader
 /// thread after reading a complete RS-delimited record from the pipe.
 /// Returns an empty map if parsing fails or no SMBUS fields are present.
-pub(crate) fn parse_smbus_from_json(json_str: &str) -> HashMap<usize, SmbusTelemetry> {
+/// Parse result from a single tt-smi JSON snapshot, extracting both SMBUS
+/// telemetry and device metadata (firmwares, limits) in one pass.
+pub(crate) struct ParsedSnapshot {
+    pub smbus: HashMap<usize, SmbusTelemetry>,
+    pub meta:  HashMap<usize, (Option<crate::models::telemetry::FirmwaresInfo>, Option<crate::models::telemetry::DeviceLimits>)>,
+}
+
+/// Parse a tt-smi JSON snapshot once and extract both SMBUS telemetry and
+/// device metadata.  Replaces the previous two-function pattern that parsed
+/// the same JSON document twice per background poll cycle.
+pub(crate) fn parse_snapshot(json_str: &str) -> ParsedSnapshot {
     let helper = JSONBackend::new("");
     let devices = match helper.parse_json(json_str) {
         Ok(d) => d,
         Err(e) => {
-            log::debug!("parse_smbus_from_json: parse error: {}", e);
-            return HashMap::new();
+            log::debug!("parse_snapshot: parse error: {}", e);
+            return ParsedSnapshot { smbus: HashMap::new(), meta: HashMap::new() };
         }
     };
-    let mut result = HashMap::new();
+    let mut smbus_map = HashMap::new();
+    let mut meta_map  = HashMap::new();
     for dev in devices {
         let idx = dev.index.unwrap_or(0);
         if let Some(smbus_json) = dev.smbus {
-            result.insert(idx, smbus_from_json_fields(smbus_json));
+            smbus_map.insert(idx, smbus_from_json_fields(smbus_json));
         }
-    }
-    result
-}
-
-/// Parse per-device firmware and limits metadata from a tt-smi JSON snapshot.
-/// Used by HybridBackend to enrich the sysfs device list with firmware versions.
-pub(crate) fn parse_device_meta_from_json(
-    json_str: &str,
-) -> HashMap<usize, (Option<crate::models::telemetry::FirmwaresInfo>, Option<crate::models::telemetry::DeviceLimits>)> {
-    let helper = JSONBackend::new("");
-    let devices = match helper.parse_json(json_str) {
-        Ok(d) => d,
-        Err(_) => return HashMap::new(),
-    };
-    let mut result = HashMap::new();
-    for dev in devices {
-        let idx = dev.index.unwrap_or(0);
         let firmwares = dev.firmwares.as_ref().and_then(|v| {
             serde_json::from_value::<crate::models::telemetry::FirmwaresInfo>(v.clone()).ok()
         });
@@ -650,10 +644,15 @@ pub(crate) fn parse_device_meta_from_json(
             serde_json::from_value::<crate::models::telemetry::DeviceLimits>(v.clone()).ok()
         });
         if firmwares.is_some() || limits.is_some() {
-            result.insert(idx, (firmwares, limits));
+            meta_map.insert(idx, (firmwares, limits));
         }
     }
-    result
+    ParsedSnapshot { smbus: smbus_map, meta: meta_map }
+}
+
+/// Kept for any external callers; delegates to parse_snapshot.
+pub(crate) fn parse_smbus_from_json(json_str: &str) -> HashMap<usize, SmbusTelemetry> {
+    parse_snapshot(json_str).smbus
 }
 
 #[cfg(test)]

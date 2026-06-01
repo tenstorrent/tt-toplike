@@ -702,7 +702,7 @@ mod tests {
         let device  = make_device(Architecture::Blackhole);
         let smbus   = make_smbus(Architecture::Blackhole);
         let telem   = make_telemetry();
-        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0);
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         assert_eq!(rows.len(), 12, "BH must have 12 rows");
         for (i, row) in rows.iter().enumerate() {
             let w = UnicodeWidthStr::width(row.as_str());
@@ -716,7 +716,7 @@ mod tests {
         let device  = make_device(Architecture::Wormhole);
         let smbus   = make_smbus(Architecture::Wormhole);
         let telem   = make_telemetry();
-        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0);
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         assert_eq!(rows.len(), 12, "WH must have 12 rows");
         for (i, row) in rows.iter().enumerate() {
             let w = UnicodeWidthStr::width(row.as_str());
@@ -743,7 +743,7 @@ mod tests {
         let device = make_device(Architecture::Blackhole);
         let smbus  = make_smbus(Architecture::Blackhole);
         let telem  = make_telemetry();
-        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0);
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         // col 0 should be '●' (ETH live) in all rows
         for row in &rows {
             let chars: Vec<char> = row.chars().collect();
@@ -757,7 +757,7 @@ mod tests {
         let device = make_device(Architecture::Blackhole);
         let smbus  = make_smbus(Architecture::Blackhole);
         let telem  = make_telemetry();
-        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0);
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         // row 0 col 1 (non-ETH, non-PCIe) should be '▪'
         let row0_chars: Vec<char> = rows[0].chars().collect();
         assert_eq!(row0_chars[1], '▪', "BH row=0 col=1 should be DRAM '▪'");
@@ -770,7 +770,7 @@ mod tests {
         let device = make_device(Architecture::Blackhole);
         let smbus  = make_smbus(Architecture::Blackhole);
         let telem  = make_telemetry();
-        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0);
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         // col 8, non-DRAM rows (1-10) should be '╋'
         for row_idx in 1..11 {
             let chars: Vec<char> = rows[row_idx].chars().collect();
@@ -785,7 +785,7 @@ mod tests {
         smbus.enabled_tensix_col = Some(0x3FFE); // bit 0 clear → Tensix col 0 harvested
         // BH Tensix col 0 = chip col 1 (first non-ETH col)
         let telem = make_telemetry();
-        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0);
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         // chip col 1, row 1 (Tensix area) should be '·' (harvested)
         let chars: Vec<char> = rows[1].chars().collect();
         assert_eq!(chars[1], '·', "harvested col should show '·', got '{}'", chars[1]);
@@ -797,7 +797,7 @@ mod tests {
         let mut smbus = make_smbus(Architecture::Blackhole);
         smbus.eth_live_status = Some(0x0); // all ETH down
         let telem = make_telemetry();
-        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0);
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         let chars: Vec<char> = rows[0].chars().collect();
         assert_eq!(chars[0], '·', "ETH down should show '·'");
     }
@@ -921,15 +921,18 @@ mod tests {
 
     #[test]
     fn test_tensix_char_idle_non_harvested_is_floor() {
-        // activity=0.0 → minimum '░' (not '·')
-        assert_eq!(tensix_char(0.0), '░');
-        assert_eq!(tensix_char(0.04), '░');
+        // activity=0.0, power_change=0.0 → combined=0.0 → minimum '░' (not '·')
+        assert_eq!(tensix_char(0.0, 0.0), '░');
+        assert_eq!(tensix_char(0.04, 0.0), '░');
     }
 
     #[test]
     fn test_tensix_char_active() {
-        assert_eq!(tensix_char(0.40), '▒');
-        assert_eq!(tensix_char(0.75), '▓');
+        // Thresholds: combined >= 0.25 → '▒', >= 0.60 → '▓'
+        assert_eq!(tensix_char(0.25, 0.0), '▒');
+        assert_eq!(tensix_char(0.60, 0.0), '▓');
+        // power_change lifts the floor: activity=0.0, power_change=0.5 → combined=0.25 → '▒'
+        assert_eq!(tensix_char(0.0, 0.5), '▒');
     }
 
     #[test]
@@ -937,7 +940,7 @@ mod tests {
         let device = make_device(Architecture::Blackhole);
         let smbus  = make_smbus(Architecture::Blackhole);
         let telem  = Telemetry { power: Some(1.0), asic_temperature: Some(20.0), ..Telemetry::new() };
-        let rows   = build_portrait_rows(&device, &telem, Some(&smbus), 0);
+        let rows   = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         let ch = rows[1].chars().nth(1).unwrap();
         assert_eq!(ch, '░', "idle non-harvested Tensix should show '░' floor");
     }
@@ -959,7 +962,7 @@ mod tests {
             kind: ParticleKind::Read,
         }];
 
-        let lines = build_portrait_lines(&device, &telem, Some(&smbus), &particles);
+        let lines = build_portrait_lines(&device, &telem, Some(&smbus), &particles, 0.0);
 
         // Row 3, col 1 should be '○' (progress ≥ 0.40)
         let line = &lines[3];
@@ -984,7 +987,7 @@ mod tests {
             kind: ParticleKind::Read,
         }];
 
-        let lines = build_portrait_lines(&device, &telem, Some(&smbus), &particles);
+        let lines = build_portrait_lines(&device, &telem, Some(&smbus), &particles, 0.0);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         let chars: Vec<char> = text.chars().collect();
         assert_eq!(chars[1], '▪', "DRAM cell must not be overwritten by particle");
