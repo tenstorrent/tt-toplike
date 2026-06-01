@@ -909,6 +909,23 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_snapshot_meta() {
+        // Verify the HybridBackend code path: parse_snapshot() must extract
+        // both SMBUS telemetry and firmware/limits metadata in one pass.
+        let snap = parse_snapshot(TTSMI_52_JSON);
+        // SMBUS path unchanged
+        let smbus = snap.smbus.get(&0).expect("SMBUS for device 0 missing");
+        assert!(smbus.eth_live_status.is_some(), "eth_live_status should be populated");
+        // Meta path (used by HybridBackend, not covered by other tests)
+        let (fw, lim) = snap.meta.get(&0).expect("meta for device 0 missing");
+        let fw = fw.as_ref().expect("firmwares should be Some");
+        assert_eq!(fw.fw_bundle_version.as_deref(), Some("fw_pack-19.9.0"),
+            "parse_snapshot fw_bundle_version mismatch");
+        let lim = lim.as_ref().expect("limits should be Some");
+        assert_eq!(lim.tdp_limit, Some(300.0_f32), "parse_snapshot tdp_limit mismatch");
+    }
+
+    #[test]
     fn test_old_format_still_parses_ok() {
         // Existing pre-5.2 snapshot (no GDDR fields) must still parse without error.
         let result = parse_smbus_from_json(REAL_TTSMI_JSON);

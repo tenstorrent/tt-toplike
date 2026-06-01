@@ -2449,3 +2449,54 @@ fn render_grid_mode(
         );
     }
 }
+
+#[cfg(feature = "linux-procfs")]
+#[cfg(test)]
+mod tests {
+    use super::panel_layout;
+
+    // BH portrait_w = 17 cols + 1 border = 18.
+    const BH_PORTRAIT_W: u16 = 18;
+
+    #[test]
+    fn panel_layout_4_chips_full_mode_at_160_cols() {
+        // 160-wide terminal: balanced=2, full 2-col row = 2*50+1 = 101 ≤ 160 → full mode.
+        let (stats_w, gap_col, cols_per_row) = panel_layout(4, BH_PORTRAIT_W, 160);
+        assert_eq!(stats_w, 31, "should be full mode");
+        assert_eq!(gap_col, 1);
+        assert_eq!(cols_per_row, 2, "4 chips → 2×2 grid");
+    }
+
+    #[test]
+    fn panel_layout_4_chips_compact_mode_at_80_cols() {
+        // 80-wide terminal: full 2-col row = 101 > 80 → compact mode.
+        let (stats_w, gap_col, cols_per_row) = panel_layout(4, BH_PORTRAIT_W, 80);
+        assert_eq!(stats_w, 19, "should be compact mode");
+        assert_eq!(gap_col, 0);
+        assert_eq!(cols_per_row, 2, "compact panels (37 cols) still fit 2 per row");
+    }
+
+    #[test]
+    fn panel_layout_4_chips_very_narrow_single_column() {
+        // 37-wide terminal: compact panel = 37 cols; cols_per_row must be 1 (not 0).
+        let (stats_w, _, cols_per_row) = panel_layout(4, BH_PORTRAIT_W, 37);
+        assert_eq!(stats_w, 19, "compact at very narrow width");
+        assert_eq!(cols_per_row, 1, "only one panel fits at 37 cols");
+    }
+
+    #[test]
+    fn panel_layout_1_chip_always_full() {
+        // Single chip: balanced=1, full row = 1*50 = 50; fits at most terminals.
+        let (stats_w, _, cols_per_row) = panel_layout(1, BH_PORTRAIT_W, 120);
+        assert_eq!(stats_w, 31);
+        assert_eq!(cols_per_row, 1);
+    }
+
+    #[test]
+    fn panel_layout_9_chips_3x3_grid() {
+        // 9 chips: balanced=ceil(sqrt(9))=3; full 3-col row = 3*50+2 = 152.
+        let (stats_w, _, cols_per_row) = panel_layout(9, BH_PORTRAIT_W, 160);
+        assert_eq!(stats_w, 31);
+        assert_eq!(cols_per_row, 3, "9 chips → 3×3 grid");
+    }
+}

@@ -276,6 +276,12 @@ impl TelemetryBackend for HybridBackend {
             // Enrich sysfs device list with firmwares/limits from JSON snapshot.
             // Always overwrite (not just when None) so a firmware upgrade applied
             // while the tool is running is reflected without restarting.
+            //
+            // Note: device_meta_shared is only stored when the snapshot contains
+            // non-empty meta (reader thread, line above). If a degraded snapshot
+            // omits the firmwares block, the previously stored values are retained
+            // rather than reverting to None — intentional, since firmware versions
+            // don't regress and a momentary ARC issue shouldn't blank the FW row.
             let meta = self.device_meta_shared.load_full();
             for device in self.sysfs.devices_mut() {
                 if let Some((fw, lim)) = meta.get(&device.index) {
