@@ -75,6 +75,10 @@ pub struct HybridBackend {
     /// with a single lock-free atomic operation.
     smbus_shared: Arc<ArcSwap<HashMap<usize, SmbusTelemetry>>>,
 
+    /// Per-device firmware + limits metadata from the same JSON snapshot.
+    /// Populated by the reader thread; update() copies it into sysfs devices.
+    device_meta_shared: Arc<ArcSwap<HashMap<usize, (Option<crate::models::telemetry::FirmwaresInfo>, Option<crate::models::telemetry::DeviceLimits>)>>>,
+
     /// The render thread's private view of the latest background snapshot.
     /// Updated via `Arc::clone()` — one atomic ref-count increment, zero
     /// heap allocations — when the generation counter indicates new data.
@@ -113,10 +117,12 @@ impl HybridBackend {
     /// Create a new Hybrid backend with explicit configuration.
     pub fn with_config(tt_smi_path: impl Into<String>, _config: BackendConfig) -> Self {
         let empty: Arc<HashMap<usize, SmbusTelemetry>> = Arc::new(HashMap::new());
+        let empty_meta: Arc<HashMap<usize, (Option<crate::models::telemetry::FirmwaresInfo>, Option<crate::models::telemetry::DeviceLimits>)>> = Arc::new(HashMap::new());
         Self {
             sysfs: SysfsBackend::new(),
             tt_smi_path: tt_smi_path.into(),
             smbus_shared: Arc::new(ArcSwap::from(Arc::clone(&empty))),
+            device_meta_shared: Arc::new(ArcSwap::from(Arc::clone(&empty_meta))),
             smbus_latest: Arc::clone(&empty),
             smbus_generation: Arc::new(AtomicU64::new(0)),
             smbus_snapshot_gen: 0,
@@ -172,9 +178,10 @@ impl TelemetryBackend for HybridBackend {
         // init() does NOT wait for the first record — the first render shows sysfs
         // data instantly, and SMBUS fields (board IDs, DDR status, etc.) populate
         // within ~1–2 s as the background thread completes its first poll.
-        let smbus_shared     = Arc::clone(&self.smbus_shared);
-        let smbus_generation = Arc::clone(&self.smbus_generation);
-        let stop_flag        = Arc::clone(&self.stop_flag);
+        let smbus_shared      = Arc::clone(&self.smbus_shared);
+        let device_meta_shared = Arc::clone(&self.device_meta_shared);
+        let smbus_generation  = Arc::clone(&self.smbus_generation);
+        let stop_flag         = Arc::clone(&self.stop_flag);
 
         let handle = thread::Builder::new()
             .name("hybrid-smbus-reader".to_string())
@@ -202,6 +209,11 @@ impl TelemetryBackend for HybridBackend {
                             let json = String::from_utf8_lossy(&out.stdout);
                             let data = json::parse_smbus_from_json(&json);
                             if !data.is_empty() {
+                                // Parse firmware/limits metadata from the same snapshot.
+                                let meta = json::parse_device_meta_from_json(&json);
+                                if !meta.is_empty() {
+                                    device_meta_shared.store(Arc::new(meta));
+                                }
                                 smbus_shared.store(Arc::new(data));
                                 smbus_generation.fetch_add(1, Ordering::Release);
                                 log::debug!("HybridBackend: SMBUS snapshot updated");
@@ -261,6 +273,20 @@ impl TelemetryBackend for HybridBackend {
             // Remove devices that disappeared from the new snapshot.
             self.smbus_blended.retain(|k, _| self.smbus_latest.contains_key(k));
             self.smbus_ema.retain(|k, _| self.smbus_latest.contains_key(k));
+
+            // Enrich sysfs device list with firmwares/limits from JSON snapshot.
+            // Sysfs never provides these; they only come from tt-smi.
+            let meta = self.device_meta_shared.load_full();
+            for device in self.sysfs.devices_mut() {
+                if let Some((fw, lim)) = meta.get(&device.index) {
+                    if device.firmwares.is_none() {
+                        device.firmwares = fw.clone();
+                    }
+                    if device.limits.is_none() {
+                        device.limits = lim.clone();
+                    }
+                }
+            }
         }
 
         // ── Apply EMA blend every frame ───────────────────────────────────────

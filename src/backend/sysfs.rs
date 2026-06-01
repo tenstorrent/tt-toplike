@@ -329,6 +329,14 @@ impl Default for SysfsBackend {
     }
 }
 
+impl SysfsBackend {
+    /// Mutable access to the device list — used by HybridBackend to enrich
+    /// sysfs devices with firmware/limits data obtained from the JSON snapshot.
+    pub(crate) fn devices_mut(&mut self) -> &mut [Device] {
+        &mut self.devices
+    }
+}
+
 impl TelemetryBackend for SysfsBackend {
     fn init(&mut self) -> BackendResult<()> {
         self.detect_devices()?;

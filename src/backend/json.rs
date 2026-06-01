@@ -630,6 +630,32 @@ pub(crate) fn parse_smbus_from_json(json_str: &str) -> HashMap<usize, SmbusTelem
     result
 }
 
+/// Parse per-device firmware and limits metadata from a tt-smi JSON snapshot.
+/// Used by HybridBackend to enrich the sysfs device list with firmware versions.
+pub(crate) fn parse_device_meta_from_json(
+    json_str: &str,
+) -> HashMap<usize, (Option<crate::models::telemetry::FirmwaresInfo>, Option<crate::models::telemetry::DeviceLimits>)> {
+    let helper = JSONBackend::new("");
+    let devices = match helper.parse_json(json_str) {
+        Ok(d) => d,
+        Err(_) => return HashMap::new(),
+    };
+    let mut result = HashMap::new();
+    for dev in devices {
+        let idx = dev.index.unwrap_or(0);
+        let firmwares = dev.firmwares.as_ref().and_then(|v| {
+            serde_json::from_value::<crate::models::telemetry::FirmwaresInfo>(v.clone()).ok()
+        });
+        let limits = dev.limits.as_ref().and_then(|v| {
+            serde_json::from_value::<crate::models::telemetry::DeviceLimits>(v.clone()).ok()
+        });
+        if firmwares.is_some() || limits.is_some() {
+            result.insert(idx, (firmwares, limits));
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
