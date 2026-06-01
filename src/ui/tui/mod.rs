@@ -2196,7 +2196,7 @@ fn render_device_panels(
 
         // ETH row — use ENABLED_ETH as the denominator (ports provisioned by
         // firmware) rather than the architectural maximum.  On p300c cards
-        // ENABLED_ETH=0x3edf gives 14 enabled ports; showing 0/24 looks broken.
+        // ENABLED_ETH=0x3edf gives 12 enabled ports; showing 0/24 looks broken.
         //
         // Fallback hierarchy:
         //   1. SMBUS present + ENABLED_ETH > 0  → use enabled count (accurate)

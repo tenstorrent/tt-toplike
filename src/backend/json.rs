@@ -606,11 +606,6 @@ fn smbus_from_json_fields(smbus_json: SmbusTelemetryJSON) -> SmbusTelemetry {
     }
 }
 
-/// Parse a complete tt-smi JSON snapshot string into SMBUS telemetry.
-///
-/// Pure parsing — no subprocess spawn. Called from the HybridBackend reader
-/// thread after reading a complete RS-delimited record from the pipe.
-/// Returns an empty map if parsing fails or no SMBUS fields are present.
 /// Parse result from a single tt-smi JSON snapshot, extracting both SMBUS
 /// telemetry and device metadata (firmwares, limits) in one pass.
 pub(crate) struct ParsedSnapshot {
