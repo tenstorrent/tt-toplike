@@ -650,7 +650,7 @@ pub(crate) fn parse_snapshot(json_str: &str) -> ParsedSnapshot {
     ParsedSnapshot { smbus: smbus_map, meta: meta_map }
 }
 
-/// Kept for any external callers; delegates to parse_snapshot.
+#[cfg(test)]
 pub(crate) fn parse_smbus_from_json(json_str: &str) -> HashMap<usize, SmbusTelemetry> {
     parse_snapshot(json_str).smbus
 }
