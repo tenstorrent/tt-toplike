@@ -587,13 +587,12 @@ impl MemoryFlowVis {
         let current = telem.map(|t| t.current_a()).unwrap_or(0.0);
 
         let stats = format!(
-            " {} | Particles: {} | Power: {:.1}W | Temp: {:.0}°C | Current: {:.1}A | Frame: {}",
+            " {} | Particles: {:3} | Power: {:5.1}W | Temp: {:3.0}°C | Current: {:5.1}A",
             device.architecture.abbrev(),
             self.particles.len(),
             power,
             temp,
-            current,
-            self.frame
+            current
         );
 
         Line::from(vec![Span::styled(

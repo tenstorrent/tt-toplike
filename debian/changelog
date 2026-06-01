@@ -1,3 +1,18 @@
+tt-toplike (0.6.0) noble; urgency=medium
+
+  * Fix static-width number formatting: all telemetry values in arcade, TUI
+    footer, memory castle, and memory flow stats bars now use minimum-width
+    format specifiers (e.g. {:5.1}) so the string length never changes as
+    values cross digit boundaries, eliminating layout jitter.
+  * Insights compact mode: when all device panels would not fit side-by-side
+    at full width (stats_w=31, gap=1), automatically switch to compact layout
+    (stats_w=19, gap=0). Four Blackhole cards now fit in 151 columns instead
+    of 203. Portrait art is never scaled; only the stats sidebar shrinks.
+    Compact sidebar shows power bar+value, ETH count, and ASIC temp; GDDR,
+    fan, and firmware rows reappear when space allows.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sun, 01 Jun 2026 00:00:00 +0000
+
 tt-toplike (0.5.0) noble; urgency=medium
 
   * Fix arcade separator borders: use unicode-width display columns instead of

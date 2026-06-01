@@ -222,7 +222,7 @@ impl ArcadeVisualization {
 
                 let arch_label = device.map(|d| d.architecture.abbrev()).unwrap_or("?");
                 // No individual brackets — the chip is inside the board's [ ].
-                let chip_text = format!("{}{} {} {:.0}W {:.0}°C",
+                let chip_text = format!("{}{} {} {:3.0}W {:3.0}°C",
                     arch_label, chip_idx, bar, power, temp);
                 let chip_color = hsv_to_rgb(
                     (board.hue + chip_idx as f32 * 15.0) % 360.0, 0.9, 0.9,
@@ -566,7 +566,7 @@ impl ArcadeVisualization {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!(" │ P:{:.1}W T:{:.1}°C I:{:.1}A ", power, temp, current),
+                format!(" │ P:{:5.1}W T:{:5.1}°C I:{:5.1}A ", power, temp, current),
                 Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(160, 160, 160)),
             ),
             Span::styled(
