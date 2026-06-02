@@ -1,4 +1,4 @@
-tt-toplike (0.6.0) noble; urgency=medium
+tt-toplike (0.6.1) noble; urgency=medium
 
   * Fix static-width number formatting: all telemetry values in arcade, TUI
     footer, memory castle, and memory flow stats bars now use minimum-width
