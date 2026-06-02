@@ -157,7 +157,18 @@ pub fn tick_particles(
 
     if particles.len() >= max_particles { return; }
 
-    // 2. Spawn reads (when power is above idle baseline)
+    // 2. Heartbeat: one read particle every ~20 ticks regardless of power_change.
+    // aiclk_norm scales the rate (faster clock → more frequent heartbeat) so the
+    // chip feels alive even at idle baseline. This is the minimum animation floor.
+    let heartbeat_interval = (20.0 / (0.5 + aiclk_norm * 0.5)).round() as u64;
+    if tick % heartbeat_interval == 0 {
+        if let Some(col) = trained_random_col(ddr_status, portrait_cols, arch, tick.wrapping_mul(3)) {
+            let from_top = (tick / heartbeat_interval) % 2 == 0;
+            particles.push(Particle { col: col as u8, progress: 0.0, from_top, kind: ParticleKind::Read });
+        }
+    }
+
+    // 3. Spawn reads (when power is above idle baseline)
     let read_budget = (power_change * 8.0) as u32;
     if read_budget > 0 {
         let interval = 8 / read_budget.max(1) + 1;
@@ -169,7 +180,7 @@ pub fn tick_particles(
         }
     }
 
-    // 3. Spawn writes only when power is ≥25% above idle baseline (active writing)
+    // 4. Spawn writes only when power is ≥25% above idle baseline (active writing)
     let write_power = (power_change - 0.25).max(0.0);
     if write_power > 0.0 && particles.len() < max_particles {
         let write_budget = (write_power * 6.0) as u32;
@@ -227,13 +238,20 @@ use ratatui::{
 
 /// Map chip-level power fraction to a Tensix activity character.
 ///
-/// The minimum return value is `'░'` — idle non-harvested cells are rendered
-/// with the lowest-intensity block character so the heatmap color remains
-/// visible. Harvested cells bypass this function and use `'·'` directly in
-/// `build_portrait_rows`.
-fn tensix_char(activity: f32) -> char {
-    if      activity >= 0.75 { '▓' }
-    else if activity >= 0.40 { '▒' }
+/// `activity`     – raw power fraction (power_w / TDP).
+/// `power_change` – relative change above idle baseline (from AdaptiveBaseline).
+///
+/// The combined value lifts the floor so that even an idle chip (low absolute
+/// power, zero change) renders `▒` on some cells rather than a flat `░` grid.
+/// This ensures the heatmap color is always readable and the portrait has life
+/// even when the chip is sitting at its baseline.
+fn tensix_char(activity: f32, power_change: f32) -> char {
+    // Blend raw activity with baseline-change so small fluctuations register.
+    // A chip at 15W / 300W TDP (5%) that is exactly at baseline scores 0.10
+    // after blending; a chip with a 20% power_change above baseline scores 0.30.
+    let combined = (activity + power_change * 0.5).min(1.0);
+    if      combined >= 0.60 { '▓' }
+    else if combined >= 0.25 { '▒' }
     else                     { '░' }  // minimum floor — harvested cells use '·' directly
 }
 
@@ -320,6 +338,7 @@ pub fn build_portrait_rows(
     telemetry: &Telemetry,
     smbus: Option<&SmbusTelemetry>,
     _tick: u64,
+    power_change: f32,
 ) -> Vec<String> {
     let (cols, rows) = portrait_dims(device.architecture);
 
@@ -367,7 +386,7 @@ pub fn build_portrait_rows(
                     } else {
                         false
                     };
-                    if harvested { '·' } else { tensix_char(activity) }
+                    if harvested { '·' } else { tensix_char(activity, power_change) }
                 }
             };
 
@@ -407,9 +426,9 @@ pub fn build_portrait_lines<'a>(
     telemetry: &Telemetry,
     smbus: Option<&SmbusTelemetry>,
     particles: &[Particle],
+    power_change: f32,
 ) -> Vec<Line<'a>> {
-    // tick parameter is no longer needed; build_portrait_rows accepts it but we pass 0.
-    let rows_strs = build_portrait_rows(device, telemetry, smbus, 0);
+    let rows_strs = build_portrait_rows(device, telemetry, smbus, 0, power_change);
     let (cols, _) = portrait_dims(device.architecture);
 
     // Pre-compute ASIC temp → Tensix heatmap color (same for all Tensix cells on this chip)
@@ -533,6 +552,7 @@ pub fn render_chip_portrait(
     telemetry: &Telemetry,
     smbus: Option<&SmbusTelemetry>,
     particles: &[Particle],
+    power_change: f32,
 ) -> Rect {
     let (cols, rows) = portrait_dims(device.architecture);
     let used = Rect {
@@ -542,7 +562,7 @@ pub fn render_chip_portrait(
         height: (rows as u16).min(area.height),
     };
 
-    let lines = build_portrait_lines(device, telemetry, smbus, particles);
+    let lines = build_portrait_lines(device, telemetry, smbus, particles, power_change);
     let para = Paragraph::new(lines);
     f.render_widget(para, used);
 
@@ -682,7 +702,7 @@ mod tests {
         let device  = make_device(Architecture::Blackhole);
         let smbus   = make_smbus(Architecture::Blackhole);
         let telem   = make_telemetry();
-        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0);
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         assert_eq!(rows.len(), 12, "BH must have 12 rows");
         for (i, row) in rows.iter().enumerate() {
             let w = UnicodeWidthStr::width(row.as_str());
@@ -696,7 +716,7 @@ mod tests {
         let device  = make_device(Architecture::Wormhole);
         let smbus   = make_smbus(Architecture::Wormhole);
         let telem   = make_telemetry();
-        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0);
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         assert_eq!(rows.len(), 12, "WH must have 12 rows");
         for (i, row) in rows.iter().enumerate() {
             let w = UnicodeWidthStr::width(row.as_str());
@@ -709,7 +729,7 @@ mod tests {
         use unicode_width::UnicodeWidthStr;
         let device = make_device(Architecture::Blackhole);
         let telem  = make_telemetry();
-        let rows = build_portrait_rows(&device, &telem, None, 0);
+        let rows = build_portrait_rows(&device, &telem, None, 0, 0.0);
         for (i, row) in rows.iter().enumerate() {
             assert_eq!(UnicodeWidthStr::width(row.as_str()), 17,
                 "BH row {} overflowed without smbus", i);
@@ -723,7 +743,7 @@ mod tests {
         let device = make_device(Architecture::Blackhole);
         let smbus  = make_smbus(Architecture::Blackhole);
         let telem  = make_telemetry();
-        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0);
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         // col 0 should be '●' (ETH live) in all rows
         for row in &rows {
             let chars: Vec<char> = row.chars().collect();
@@ -737,7 +757,7 @@ mod tests {
         let device = make_device(Architecture::Blackhole);
         let smbus  = make_smbus(Architecture::Blackhole);
         let telem  = make_telemetry();
-        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0);
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         // row 0 col 1 (non-ETH, non-PCIe) should be '▪'
         let row0_chars: Vec<char> = rows[0].chars().collect();
         assert_eq!(row0_chars[1], '▪', "BH row=0 col=1 should be DRAM '▪'");
@@ -750,7 +770,7 @@ mod tests {
         let device = make_device(Architecture::Blackhole);
         let smbus  = make_smbus(Architecture::Blackhole);
         let telem  = make_telemetry();
-        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0);
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         // col 8, non-DRAM rows (1-10) should be '╋'
         for row_idx in 1..11 {
             let chars: Vec<char> = rows[row_idx].chars().collect();
@@ -765,7 +785,7 @@ mod tests {
         smbus.enabled_tensix_col = Some(0x3FFE); // bit 0 clear → Tensix col 0 harvested
         // BH Tensix col 0 = chip col 1 (first non-ETH col)
         let telem = make_telemetry();
-        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0);
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         // chip col 1, row 1 (Tensix area) should be '·' (harvested)
         let chars: Vec<char> = rows[1].chars().collect();
         assert_eq!(chars[1], '·', "harvested col should show '·', got '{}'", chars[1]);
@@ -777,7 +797,7 @@ mod tests {
         let mut smbus = make_smbus(Architecture::Blackhole);
         smbus.eth_live_status = Some(0x0); // all ETH down
         let telem = make_telemetry();
-        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0);
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         let chars: Vec<char> = rows[0].chars().collect();
         assert_eq!(chars[0], '·', "ETH down should show '·'");
     }
@@ -901,15 +921,18 @@ mod tests {
 
     #[test]
     fn test_tensix_char_idle_non_harvested_is_floor() {
-        // activity=0.0 → minimum '░' (not '·')
-        assert_eq!(tensix_char(0.0), '░');
-        assert_eq!(tensix_char(0.04), '░');
+        // activity=0.0, power_change=0.0 → combined=0.0 → minimum '░' (not '·')
+        assert_eq!(tensix_char(0.0, 0.0), '░');
+        assert_eq!(tensix_char(0.04, 0.0), '░');
     }
 
     #[test]
     fn test_tensix_char_active() {
-        assert_eq!(tensix_char(0.40), '▒');
-        assert_eq!(tensix_char(0.75), '▓');
+        // Thresholds: combined >= 0.25 → '▒', >= 0.60 → '▓'
+        assert_eq!(tensix_char(0.25, 0.0), '▒');
+        assert_eq!(tensix_char(0.60, 0.0), '▓');
+        // power_change lifts the floor: activity=0.0, power_change=0.5 → combined=0.25 → '▒'
+        assert_eq!(tensix_char(0.0, 0.5), '▒');
     }
 
     #[test]
@@ -917,7 +940,7 @@ mod tests {
         let device = make_device(Architecture::Blackhole);
         let smbus  = make_smbus(Architecture::Blackhole);
         let telem  = Telemetry { power: Some(1.0), asic_temperature: Some(20.0), ..Telemetry::new() };
-        let rows   = build_portrait_rows(&device, &telem, Some(&smbus), 0);
+        let rows   = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         let ch = rows[1].chars().nth(1).unwrap();
         assert_eq!(ch, '░', "idle non-harvested Tensix should show '░' floor");
     }
@@ -939,7 +962,7 @@ mod tests {
             kind: ParticleKind::Read,
         }];
 
-        let lines = build_portrait_lines(&device, &telem, Some(&smbus), &particles);
+        let lines = build_portrait_lines(&device, &telem, Some(&smbus), &particles, 0.0);
 
         // Row 3, col 1 should be '○' (progress ≥ 0.40)
         let line = &lines[3];
@@ -964,7 +987,7 @@ mod tests {
             kind: ParticleKind::Read,
         }];
 
-        let lines = build_portrait_lines(&device, &telem, Some(&smbus), &particles);
+        let lines = build_portrait_lines(&device, &telem, Some(&smbus), &particles, 0.0);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         let chars: Vec<char> = text.chars().collect();
         assert_eq!(chars[1], '▪', "DRAM cell must not be overwritten by particle");

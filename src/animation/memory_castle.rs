@@ -883,7 +883,7 @@ impl MemoryCastle {
                 colors::rgb(100, 220, 100)
             };
             spans.push(Span::styled(
-                format!("🌡 {:.1}°C ", temp),
+                format!("🌡 {:5.1}°C ", temp),
                 Style::default().bg(colors::rgb(0, 0, 0)).fg(temp_color),
             ));
 
@@ -891,7 +891,7 @@ impl MemoryCastle {
 
             // Power
             spans.push(Span::styled(
-                format!("⚡ {:.1}W ", t.power_w()),
+                format!("⚡ {:5.1}W ", t.power_w()),
                 Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(255, 220, 100)),
             ));
 
@@ -899,7 +899,7 @@ impl MemoryCastle {
 
             // Current
             spans.push(Span::styled(
-                format!("⚙ {:.1}A ", t.current_a()),
+                format!("⚙ {:5.1}A ", t.current_a()),
                 Style::default().bg(colors::rgb(0, 0, 0)).fg(colors::rgb(100, 180, 255)),
             ));
         }

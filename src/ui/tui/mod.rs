@@ -358,7 +358,7 @@ fn run_app(
                 match display_mode {
                     DisplayMode::Insights => {
                         #[cfg(feature = "linux-procfs")]
-                        render_insights(f, backend, &inference_engine, &process_monitor, process_cursor, kill_confirm.as_ref(), cli, &portrait_particles, fleet_cursor, fleet_zoom_start, host_cpu_pct, host_mem_used, host_mem_total, &serving_metrics);
+                        render_insights(f, backend, &inference_engine, &process_monitor, process_cursor, kill_confirm.as_ref(), cli, &portrait_particles, &portrait_baseline, fleet_cursor, fleet_zoom_start, host_cpu_pct, host_mem_used, host_mem_total, &serving_metrics);
                         #[cfg(not(feature = "linux-procfs"))]
                         render_insights_no_procfs(f, backend, &crate::workload::InferenceEngine::new());
                     }
@@ -1285,7 +1285,7 @@ fn render_arcade_footer(f: &mut Frame, area: Rect, backend: &dyn TelemetryBacken
             .fg(hero_color)
             .add_modifier(Modifier::BOLD)),
         Span::styled(
-            format!(" │ P:{:.1}W T:{:.0}°C I:{:.1}A ", power, temp, current),
+            format!(" │ P:{:5.1}W T:{:3.0}°C I:{:5.1}A ", power, temp, current),
             Style::default().fg(colors::rgb(150, 220, 200)),
         ),
     ])];
@@ -1352,6 +1352,10 @@ fn flat_process_list<'a>(pm: &'a ProcessMonitor) -> Vec<&'a crate::workload::Pro
 /// 3 chars: temperature block glyph (1) + space (1) + separator (1).
 const FLEET_CELL_W: u16 = 3;
 
+/// Column gap between adjacent device panel columns in the portrait grid.
+/// Used by both `panel_layout` and `render_device_panels` — single source of truth.
+const PANEL_INTER_COL_GAP: u16 = 1;
+
 /// Fleet compact mode activates at this device count (matching the starfield galaxy mode).
 /// At 32+ devices the full-portrait grid almost always overflows a standard terminal.
 const FLEET_DEVICE_THRESHOLD: usize = 32;
@@ -1362,6 +1366,28 @@ const FLEET_PAGE_SIZE: usize = 16;
 
 /// Height cap for the panel area in fleet mode.
 const FLEET_HEIGHT_THRESHOLD: u16 = 30; // lines; beyond this we switch to compact cells
+
+/// Shared panel layout calculation used by both `device_panels_height` and
+/// `render_device_panels`.  Returns `(stats_w, gap_col, cols_per_row)`.
+///
+/// Single source of truth so the two callers can never diverge on gap or
+/// compact-mode threshold.
+#[cfg(feature = "linux-procfs")]
+fn panel_layout(n: usize, portrait_w: u16, area_width: u16) -> (u16, u16, usize) {
+    let balanced_cols = ((n as f64).sqrt().ceil() as usize).max(1);
+    let full_panel_w  = portrait_w + 1 + 31; // gap=1, stats_w=31
+    let cols_u16      = balanced_cols as u16;
+    let full_row_w    = cols_u16 * full_panel_w + (cols_u16.saturating_sub(1)) * PANEL_INTER_COL_GAP;
+    let (stats_w, gap_col) = if full_row_w <= area_width {
+        (31_u16, 1_u16)
+    } else {
+        (19_u16, 0_u16)
+    };
+    let panel_w: u16  = portrait_w + gap_col + stats_w;
+    let max_cols_fit = ((area_width + PANEL_INTER_COL_GAP) / (panel_w + PANEL_INTER_COL_GAP)).max(1) as usize;
+    let cols_per_row = max_cols_fit.min(balanced_cols);
+    (stats_w, gap_col, cols_per_row)
+}
 
 /// Compute the vertical space required for the device panel grid at the given terminal width.
 ///
@@ -1385,8 +1411,9 @@ fn device_panels_height(
 
     let arch = devices.first().map(|d| d.architecture).unwrap_or(crate::models::Architecture::Blackhole);
     let (portrait_cols, _) = portrait_dims(arch);
-    let panel_w = portrait_cols as u16 + 33; // left-border(1) + portrait + gap(1) + stats(31)
-    let cols_per_row = ((area_width + 1) / (panel_w + 1)).max(1) as usize;
+    let portrait_w = portrait_cols as u16 + 1;
+
+    let (_, _, cols_per_row) = panel_layout(n, portrait_w, area_width);
     let row_count = (n + cols_per_row - 1) / cols_per_row;
     (row_count as u16) * 15 // panel_h(14) + inter-row gap(1)
 }
@@ -1405,6 +1432,7 @@ fn render_insights(
     kill_confirm: Option<&KillConfirmState>,
     _cli: &Cli,
     portrait_particles: &std::collections::HashMap<usize, Vec<crate::ui::tui::chip_portrait::Particle>>,
+    portrait_baseline: &crate::animation::baseline::AdaptiveBaseline,
     fleet_cursor: usize,
     fleet_zoom_start: Option<usize>,
     host_cpu_pct: f32,
@@ -1423,19 +1451,25 @@ fn render_insights(
         devices
     };
 
-    // Layout: header(3) | cards(grid height) | process panel (min 3) | footer(1)
+    // Layout: header(3) | cards(exact height) | process panel (remainder) | footer(1)
+    //
+    // Cards use Constraint::Length so they always get the exact height needed to
+    // show all chip panels (including a 2×2 grid when 4 chips don't fit in one row).
+    // The process panel takes whatever remains; it may be zero on very short terminals
+    // but the chip panels are never truncated.
+    let cards_h = device_panels_height(panel_devices, area.width);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Length(device_panels_height(panel_devices, area.width)),
-            Constraint::Min(3),
+            Constraint::Length(cards_h),
+            Constraint::Min(0),
             Constraint::Length(1),
         ])
         .split(area);
 
     render_header(f, chunks[0], backend);
-    render_device_panels(f, chunks[1], backend, engine, portrait_particles, fleet_cursor, fleet_zoom_start);
+    render_device_panels(f, chunks[1], backend, engine, portrait_particles, &portrait_baseline, fleet_cursor, fleet_zoom_start);
     render_process_panel(f, chunks[2], pm, &flat_process_list(pm), cursor, kill_confirm, host_cpu_pct, host_mem_used, host_mem_total, serving_metrics);
     render_insights_footer(f, chunks[3], kill_confirm, devices.len() >= FLEET_DEVICE_THRESHOLD, fleet_zoom_start.is_some());
     // Kill modal overlays the full screen when active
@@ -1959,6 +1993,7 @@ fn render_device_panels(
     backend: &dyn TelemetryBackend,
     _engine: &crate::workload::InferenceEngine,
     portrait_particles: &std::collections::HashMap<usize, Vec<crate::ui::tui::chip_portrait::Particle>>,
+    portrait_baseline: &crate::animation::baseline::AdaptiveBaseline,
     fleet_cursor: usize,
     fleet_zoom_start: Option<usize>,
 ) {
@@ -1971,8 +2006,6 @@ fn render_device_panels(
     if all_devices.is_empty() { return; }
 
     let panel_h: u16 = 14; // portrait 12 rows + 1 title row + 1 bottom border row
-    let gap_col:      u16 = 1;
-    let inter_col_gap: u16 = 1;
     let inter_row_gap: u16 = 1;
 
     // Fleet galaxy mode at 32+ devices (matching starfield threshold).
@@ -2022,18 +2055,21 @@ fn render_device_panels(
 
     // Compute panel width from first device's architecture (uniform grid).
     // All panels get the same allocated width so grid columns align.
+    //
+    // Compact mode: when the full-width layout (stats_w=31, gap=1) would require
     let (portrait_cols_first, _) = portrait_dims(devices[0].architecture);
     let portrait_w_first = portrait_cols_first as u16 + 1; // +1 for left border ║
-    let stats_w          = 31_u16;                          // 1 border + 30 content
-    let panel_w          = portrait_w_first + gap_col + stats_w;
+    let n_usize = devices.len();
 
-    let cols_per_row = ((area.width + 1) / (panel_w + 1)).max(1) as usize;
+    let (stats_w, gap_col, cols_per_row) = panel_layout(n_usize, portrait_w_first, area.width);
+    let compact = stats_w < 31;
+    let panel_w = portrait_w_first + gap_col + stats_w;
 
     for (panel_idx, device) in devices.iter().enumerate() {
         let col_idx = (panel_idx % cols_per_row) as u16;
         let row_idx = (panel_idx / cols_per_row) as u16;
 
-        let x_offset = area.x + col_idx * (panel_w + inter_col_gap);
+        let x_offset = area.x + col_idx * (panel_w + PANEL_INTER_COL_GAP);
         let y_offset = area.y + row_idx * (panel_h + inter_row_gap);
 
         // Skip panels that overflow the allocated area vertically or horizontally
@@ -2095,7 +2131,8 @@ fn render_device_panels(
         };
         if let Some(telem) = telemetry {
             let particles = portrait_particles.get(&idx).map(|v| v.as_slice()).unwrap_or(&[]);
-            render_chip_portrait(f, portrait_rect, device, telem, smbus, particles);
+            let power_change = portrait_baseline.power_change(idx, telem.power_w()).max(0.0);
+            render_chip_portrait(f, portrait_rect, device, telem, smbus, particles, power_change);
         }
 
         // ── Footer hairline ───────────────────────────────────────────────────
@@ -2108,6 +2145,10 @@ fn render_device_panels(
         );
 
         // ── Right: stats sidebar (║ for interior rows; header/footer are rules) ─
+        // When compact=true the sidebar is narrower (stats_w=19) so all panels
+        // fit in a single row.  Core rows (power, ETH, temp, FW) are always shown;
+        // secondary rows (GDDR temps, fan RPM) are omitted and label prefixes/bars
+        // are shortened to fit the reduced width.
         let stats_x = panel_rect.x + portrait_w + gap_col;
         let interior_h = panel_h.saturating_sub(2); // rows between header and footer
         let stats_border_rect = Rect { x: stats_x, y: panel_rect.y + 1, width: 1, height: interior_h };
@@ -2131,62 +2172,114 @@ fn render_device_panels(
             .and_then(|l| l.tdp_limit)
             .unwrap_or(300.0);
         let power_frac = (power_w_val / tdp).min(1.0);
-        let bar_filled = (power_frac * 10.0) as usize;
-        let power_bar: String = (0..10).map(|i| if i < bar_filled { '█' } else { '░' }).collect();
         let power_color = if power_frac > 0.85 { Color::Rgb(255, 80, 80) }
                          else if power_frac > 0.6 { Color::Rgb(236, 150, 184) }
                          else if power_frac > 0.3 { Color::Rgb(160, 120, 255) }
                          else { Color::Rgb(79, 209, 197) };
-        stat_lines.push(Line::from(vec![
-            Span::styled(format!("{:<8}", "Power"), Style::default().fg(Color::DarkGray)),
-            Span::styled(power_bar, Style::default().fg(power_color)),
-            Span::styled(format!(" {:5.0}W", power_w_val), Style::default().fg(Color::White)),
-        ]));
-
-        // ETH row
-        let eth_live_mask = smbus.and_then(|s| s.eth_live_status).unwrap_or(0);
-        let eth_total: u32 = match device.architecture {
-            crate::models::Architecture::Blackhole => 24,
-            crate::models::Architecture::Wormhole  => 20,
-            _                                       => 4,
-        };
-        let eth_live_count = eth_live_mask.count_ones();
-        // Show up to 16 port dots; append "+N" suffix for larger port counts (BH=24, WH=20).
-        const ETH_DOT_CAP: u32 = 16;
-        let dots_shown = eth_total.min(ETH_DOT_CAP);
-        let eth_dots: String = (0..dots_shown).map(|i| {
-            if (eth_live_mask >> i) & 1 == 1 { '●' } else { '·' }
-        }).collect();
-        let eth_suffix = if eth_total > ETH_DOT_CAP {
-            format!("+{}", eth_total - ETH_DOT_CAP)
+        if compact {
+            // Compact: "⚡ bar(6) val" — fits in 18 chars total.
+            let bar_filled = (power_frac * 6.0) as usize;
+            let power_bar: String = (0..6).map(|i| if i < bar_filled { '█' } else { '░' }).collect();
+            stat_lines.push(Line::from(vec![
+                Span::styled("⚡", Style::default().fg(Color::DarkGray)),
+                Span::styled(power_bar, Style::default().fg(power_color)),
+                Span::styled(format!(" {:5.0}W", power_w_val), Style::default().fg(Color::White)),
+            ]));
         } else {
-            String::new()
-        };
-        let eth_color = if eth_live_count == eth_total { Color::Rgb(79, 209, 197) }
-                       else { Color::Rgb(236, 150, 184) };
-        stat_lines.push(Line::from(vec![
-            Span::styled(format!("{:<8}", "ETH"), Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{}{}", eth_dots, eth_suffix), Style::default().fg(eth_color)),
-            Span::styled(format!(" {}/{} live", eth_live_count, eth_total), Style::default().fg(Color::White)),
-        ]));
+            let bar_filled = (power_frac * 10.0) as usize;
+            let power_bar: String = (0..10).map(|i| if i < bar_filled { '█' } else { '░' }).collect();
+            stat_lines.push(Line::from(vec![
+                Span::styled(format!("{:<8}", "Power"), Style::default().fg(Color::DarkGray)),
+                Span::styled(power_bar, Style::default().fg(power_color)),
+                Span::styled(format!(" {:5.0}W", power_w_val), Style::default().fg(Color::White)),
+            ]));
+        }
 
-        // GDDR temp row
-        if let Some(s) = smbus {
-            let temps: Vec<f32> = s.gddr_temps.iter()
-                .filter_map(|p| p.as_ref())
-                .flat_map(|p| p.0.iter().copied())
-                .filter(|&t| t > 0.0)
-                .collect();
-            if !temps.is_empty() {
-                let t_min = temps.iter().copied().fold(f32::INFINITY, f32::min);
-                let t_max = temps.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                let max_color = if t_max > 70.0 { Color::Rgb(255, 80, 80) }
-                               else if t_max > 50.0 { Color::Rgb(236, 150, 184) }
-                               else { Color::Rgb(79, 209, 197) };
-                stat_lines.push(Line::from(vec![
-                    Span::styled(format!("{:<8}", "GDDR T"), Style::default().fg(Color::DarkGray)),
-                    Span::styled(format!("{:.0}°→{:.0}°C", t_min, t_max), Style::default().fg(max_color)),
-                ]));
+        // ETH row — use ENABLED_ETH as the denominator (ports provisioned by
+        // firmware) rather than the architectural maximum.  On p300c cards
+        // ENABLED_ETH=0x3edf gives 12 enabled ports; showing 0/24 looks broken.
+        //
+        // Fallback hierarchy:
+        //   1. SMBUS present + ENABLED_ETH > 0  → use enabled count (accurate)
+        //   2. SMBUS present + ENABLED_ETH = 0  → show live/? (transient or no ports)
+        //   3. SMBUS absent entirely             → fall back to arch max (no data yet)
+        let eth_live_mask    = smbus.and_then(|s| s.eth_live_status).unwrap_or(0);
+        let eth_enabled_mask = smbus.and_then(|s| s.enabled_eth).unwrap_or(0);
+        // Count only ports that are both enabled and live to prevent impossible
+        // displays like "15/14 live" if ETH_LIVE_STATUS has bits outside ENABLED_ETH.
+        let eth_live_count = if eth_enabled_mask > 0 {
+            (eth_live_mask & eth_enabled_mask as u64).count_ones()
+        } else {
+            eth_live_mask.count_ones()
+        };
+        let eth_total: Option<u32> = if eth_enabled_mask > 0 {
+            Some(eth_enabled_mask.count_ones())
+        } else if smbus.is_some() {
+            None  // SMBUS present but ENABLED_ETH zero — don't invent a total
+        } else {
+            // No SMBUS data yet — show architectural max so the row isn't empty
+            Some(match device.architecture {
+                crate::models::Architecture::Blackhole => 24,
+                crate::models::Architecture::Wormhole  => 20,
+                _                                       => 4,
+            })
+        };
+        let eth_total_display = eth_total.map(|t| t.to_string()).unwrap_or_else(|| "?".to_string());
+        let eth_color = match eth_total {
+            Some(t) if eth_live_count == t && t > 0 => Color::Rgb(79, 209, 197), // teal — all live
+            _ if eth_live_count > 0                 => Color::Rgb(244, 196, 113), // yellow — partial
+            _                                        => Color::Rgb(96, 125, 139), // muted gray — none live
+        };
+        if compact {
+            stat_lines.push(Line::from(vec![
+                Span::styled("E ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{}/{}", eth_live_count, eth_total_display),
+                    Style::default().fg(eth_color),
+                ),
+            ]));
+        } else {
+            const ETH_DOT_CAP: u32 = 16;
+            let dots_shown = eth_total.unwrap_or(ETH_DOT_CAP).min(ETH_DOT_CAP);
+            // Dot map: iterate enabled bits when available, else live bits.
+            let enabled_bits: Vec<u32> = if eth_enabled_mask > 0 {
+                (0..32).filter(|&b| (eth_enabled_mask >> b) & 1 == 1).collect()
+            } else {
+                (0..dots_shown).collect()
+            };
+            let eth_dots: String = enabled_bits.iter().take(dots_shown as usize).map(|&bit| {
+                if (eth_live_mask >> bit) & 1 == 1 { '●' } else { '·' }
+            }).collect();
+            let eth_suffix = match eth_total {
+                Some(t) if t > ETH_DOT_CAP => format!("+{}", t - ETH_DOT_CAP),
+                _                           => String::new(),
+            };
+            stat_lines.push(Line::from(vec![
+                Span::styled(format!("{:<8}", "ETH"), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{}{}", eth_dots, eth_suffix), Style::default().fg(eth_color)),
+                Span::styled(format!(" {}/{} live", eth_live_count, eth_total_display), Style::default().fg(Color::White)),
+            ]));
+        }
+
+        // GDDR temp row (full mode only — too wide for compact)
+        if !compact {
+            if let Some(s) = smbus {
+                let temps: Vec<f32> = s.gddr_temps.iter()
+                    .filter_map(|p| p.as_ref())
+                    .flat_map(|p| p.0.iter().copied())
+                    .filter(|&t| t > 0.0)
+                    .collect();
+                if !temps.is_empty() {
+                    let t_min = temps.iter().copied().fold(f32::INFINITY, f32::min);
+                    let t_max = temps.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let max_color = if t_max > 70.0 { Color::Rgb(255, 80, 80) }
+                                   else if t_max > 50.0 { Color::Rgb(236, 150, 184) }
+                                   else { Color::Rgb(79, 209, 197) };
+                    stat_lines.push(Line::from(vec![
+                        Span::styled(format!("{:<8}", "GDDR T"), Style::default().fg(Color::DarkGray)),
+                        Span::styled(format!("{:.0}°→{:.0}°C", t_min, t_max), Style::default().fg(max_color)),
+                    ]));
+                }
             }
         }
 
@@ -2197,36 +2290,56 @@ fn render_device_panels(
             .and_then(|l| l.thm_limit)
             .unwrap_or(105.0);
         let temp_color = crate::ui::colors::temp_color(asic_temp);
-        stat_lines.push(Line::from(vec![
-            Span::styled(format!("{:<8}", "Temp"), Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:.1}°C", asic_temp), Style::default().fg(temp_color)),
-            Span::styled(format!(" (lim {:.0}°C)", thm_limit), Style::default().fg(Color::DarkGray)),
-        ]));
+        if compact {
+            // Compact: "T 42.1°C" — omit limit annotation.
+            stat_lines.push(Line::from(vec![
+                Span::styled("T ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:.1}°C", asic_temp), Style::default().fg(temp_color)),
+            ]));
+        } else {
+            stat_lines.push(Line::from(vec![
+                Span::styled(format!("{:<8}", "Temp"), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:.1}°C", asic_temp), Style::default().fg(temp_color)),
+                Span::styled(format!(" (lim {:.0}°C)", thm_limit), Style::default().fg(Color::DarkGray)),
+            ]));
+        }
 
-        // Fan RPM row
-        if let Some(rpm_str) = smbus.and_then(|s| s.fan_speed.as_deref()) {
-            if let Ok(rpm) = rpm_str.trim().parse::<u32>() {
-                if rpm > 0 {
-                    stat_lines.push(Line::from(vec![
-                        Span::styled(format!("{:<8}", "Fan"), Style::default().fg(Color::DarkGray)),
-                        Span::styled(format!("{} RPM", rpm), Style::default().fg(Color::White)),
-                    ]));
+        // Fan RPM row (full mode only)
+        if !compact {
+            if let Some(rpm_str) = smbus.and_then(|s| s.fan_speed.as_deref()) {
+                if let Ok(rpm) = rpm_str.trim().parse::<u32>() {
+                    if rpm > 0 {
+                        stat_lines.push(Line::from(vec![
+                            Span::styled(format!("{:<8}", "Fan"), Style::default().fg(Color::DarkGray)),
+                            Span::styled(format!("{} RPM", rpm), Style::default().fg(Color::White)),
+                        ]));
+                    }
                 }
             }
         }
 
-        // Firmware row
-        // Use device directly — avoid redundant backend.devices() lookup.
-        let fw_ver = device.firmwares.as_ref()
-            .and_then(|fw| fw.fw_bundle_version.as_deref())
-            .unwrap_or("—");
-        let fw_short = fw_ver.trim_start_matches("fw_pack-");
-        // content_w is 30; "FW" label takes 8 chars, leaving 22 for the version string.
-        let fw_display = &fw_short[..fw_short.len().min(22)];
-        stat_lines.push(Line::from(vec![
-            Span::styled(format!("{:<8}", "FW"), Style::default().fg(Color::DarkGray)),
-            Span::styled(fw_display.to_string(), Style::default().fg(Color::White)),
-        ]));
+        // Firmware row — shown in both full and compact mode.
+        {
+            let fw_ver = device.firmwares.as_ref()
+                .and_then(|fw| fw.fw_bundle_version.as_deref())
+                .unwrap_or("—");
+            let fw_short = fw_ver.trim_start_matches("fw_pack-");
+            if compact {
+                // Compact: "F " + up to 16 chars (content_w=18).
+                let fw_display = &fw_short[..fw_short.len().min(16)];
+                stat_lines.push(Line::from(vec![
+                    Span::styled("F ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(fw_display.to_string(), Style::default().fg(Color::White)),
+                ]));
+            } else {
+                // content_w is 30; "FW" label takes 8 chars, leaving 22 for the version string.
+                let fw_display = &fw_short[..fw_short.len().min(22)];
+                stat_lines.push(Line::from(vec![
+                    Span::styled(format!("{:<8}", "FW"), Style::default().fg(Color::DarkGray)),
+                    Span::styled(fw_display.to_string(), Style::default().fg(Color::White)),
+                ]));
+            }
+        }
 
         // Pad to fill all interior rows (footer hairline is the visual bottom).
         while stat_lines.len() < interior_h as usize {
@@ -2326,7 +2439,7 @@ fn render_grid_mode(
             width: p_cols as u16, height: p_rows as u16,
         };
         if let Some(telem) = telemetry {
-            render_chip_portrait(f, portrait_rect, device, telem, smbus, &[]);
+            render_chip_portrait(f, portrait_rect, device, telem, smbus, &[], 0.0);
         }
 
         // Bottom border (left-side only: ╚ + ═ repeated, no right-cap ╝)
@@ -2341,5 +2454,56 @@ fn render_grid_mode(
             ))),
             bottom_rect,
         );
+    }
+}
+
+#[cfg(feature = "linux-procfs")]
+#[cfg(test)]
+mod tests {
+    use super::panel_layout;
+
+    // BH portrait_w = 17 cols + 1 border = 18.
+    const BH_PORTRAIT_W: u16 = 18;
+
+    #[test]
+    fn panel_layout_4_chips_full_mode_at_160_cols() {
+        // 160-wide terminal: balanced=2, full 2-col row = 2*50+1 = 101 ≤ 160 → full mode.
+        let (stats_w, gap_col, cols_per_row) = panel_layout(4, BH_PORTRAIT_W, 160);
+        assert_eq!(stats_w, 31, "should be full mode");
+        assert_eq!(gap_col, 1);
+        assert_eq!(cols_per_row, 2, "4 chips → 2×2 grid");
+    }
+
+    #[test]
+    fn panel_layout_4_chips_compact_mode_at_80_cols() {
+        // 80-wide terminal: full 2-col row = 101 > 80 → compact mode.
+        let (stats_w, gap_col, cols_per_row) = panel_layout(4, BH_PORTRAIT_W, 80);
+        assert_eq!(stats_w, 19, "should be compact mode");
+        assert_eq!(gap_col, 0);
+        assert_eq!(cols_per_row, 2, "compact panels (37 cols) still fit 2 per row");
+    }
+
+    #[test]
+    fn panel_layout_4_chips_very_narrow_single_column() {
+        // 37-wide terminal: compact panel = 37 cols; cols_per_row must be 1 (not 0).
+        let (stats_w, _, cols_per_row) = panel_layout(4, BH_PORTRAIT_W, 37);
+        assert_eq!(stats_w, 19, "compact at very narrow width");
+        assert_eq!(cols_per_row, 1, "only one panel fits at 37 cols");
+    }
+
+    #[test]
+    fn panel_layout_1_chip_always_full() {
+        // Single chip: balanced=1, full row = 1*50 = 50; fits at most terminals.
+        let (stats_w, _, cols_per_row) = panel_layout(1, BH_PORTRAIT_W, 120);
+        assert_eq!(stats_w, 31);
+        assert_eq!(cols_per_row, 1);
+    }
+
+    #[test]
+    fn panel_layout_9_chips_3x3_grid() {
+        // 9 chips: balanced=ceil(sqrt(9))=3; full 3-col row = 3*50+2 = 152.
+        let (stats_w, _, cols_per_row) = panel_layout(9, BH_PORTRAIT_W, 160);
+        assert_eq!(stats_w, 31);
+        assert_eq!(cols_per_row, 3, "9 chips → 3×3 grid");
     }
 }
