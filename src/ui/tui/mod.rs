@@ -1384,7 +1384,7 @@ fn panel_layout(n: usize, portrait_w: u16, area_width: u16) -> (u16, u16, usize)
         (19_u16, 0_u16)
     };
     let panel_w: u16  = portrait_w + gap_col + stats_w;
-    let max_cols_fit = ((area_width + 1) / (panel_w + 1)).max(1) as usize;
+    let max_cols_fit = ((area_width + PANEL_INTER_COL_GAP) / (panel_w + PANEL_INTER_COL_GAP)).max(1) as usize;
     let cols_per_row = max_cols_fit.min(balanced_cols);
     (stats_w, gap_col, cols_per_row)
 }
@@ -2146,8 +2146,9 @@ fn render_device_panels(
 
         // ── Right: stats sidebar (║ for interior rows; header/footer are rules) ─
         // When compact=true the sidebar is narrower (stats_w=19) so all panels
-        // fit in a single row.  All telemetry values are still shown; only the
-        // label prefix and bar width are reduced.
+        // fit in a single row.  Core rows (power, ETH, temp, FW) are always shown;
+        // secondary rows (GDDR temps, fan RPM) are omitted and label prefixes/bars
+        // are shortened to fit the reduced width.
         let stats_x = panel_rect.x + portrait_w + gap_col;
         let interior_h = panel_h.saturating_sub(2); // rows between header and footer
         let stats_border_rect = Rect { x: stats_x, y: panel_rect.y + 1, width: 1, height: interior_h };
@@ -2204,7 +2205,13 @@ fn render_device_panels(
         //   3. SMBUS absent entirely             → fall back to arch max (no data yet)
         let eth_live_mask    = smbus.and_then(|s| s.eth_live_status).unwrap_or(0);
         let eth_enabled_mask = smbus.and_then(|s| s.enabled_eth).unwrap_or(0);
-        let eth_live_count   = eth_live_mask.count_ones();
+        // Count only ports that are both enabled and live to prevent impossible
+        // displays like "15/14 live" if ETH_LIVE_STATUS has bits outside ENABLED_ETH.
+        let eth_live_count = if eth_enabled_mask > 0 {
+            (eth_live_mask & eth_enabled_mask as u64).count_ones()
+        } else {
+            eth_live_mask.count_ones()
+        };
         let eth_total: Option<u32> = if eth_enabled_mask > 0 {
             Some(eth_enabled_mask.count_ones())
         } else if smbus.is_some() {
