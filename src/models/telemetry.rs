@@ -449,6 +449,24 @@ impl SmbusTelemetry {
         }
     }
 
+    /// Firmware-reported measured power in Watts from the SMBUS TDP register.
+    ///
+    /// Despite the name ("Thermal Design Power"), SMBUS TDP on BH/WH is a
+    /// real-time measurement, not a limit.  tt-smi exposes it verbatim as
+    /// `telemetry.power`.  Use this in preference to sysfs `power1_input`
+    /// when available — the firmware-reported value covers all power domains
+    /// (Tensix VDD + GDDR), whereas the hwmon driver may only expose vcore.
+    pub fn tdp_watts(&self) -> Option<f32> {
+        parse_hex_or_dec(self.tdp.as_deref()?).map(|v| v as f32)
+    }
+
+    /// Firmware-reported measured current in Amperes from the SMBUS TDC register.
+    ///
+    /// Same caveat as `tdp_watts` — real-time measurement, not a limit.
+    pub fn tdc_amperes(&self) -> Option<f32> {
+        parse_hex_or_dec(self.tdc.as_deref()?).map(|v| v as f32)
+    }
+
     /// Get ARC0 health as integer (heartbeat counter).
     /// Accepts both decimal and hex ("0x10e7a") strings.
     pub fn arc0_health_value(&self) -> Option<u32> {

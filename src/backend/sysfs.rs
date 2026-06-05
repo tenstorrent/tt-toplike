@@ -335,6 +335,18 @@ impl SysfsBackend {
     pub(crate) fn devices_mut(&mut self) -> &mut [Device] {
         &mut self.devices
     }
+
+    /// Mutable access to a cached telemetry entry — used by HybridBackend to
+    /// overlay firmware-reported TDP/TDC values on top of the hwmon reading.
+    pub(crate) fn telemetry_cache_mut(&mut self, device_idx: usize) -> Option<&mut Telemetry> {
+        self.telemetry_cache.get_mut(&device_idx)
+    }
+
+    /// Insert a telemetry entry directly into the cache — test helper only.
+    #[cfg(test)]
+    pub(crate) fn insert_telemetry_for_test(&mut self, device_idx: usize, telem: Telemetry) {
+        self.telemetry_cache.insert(device_idx, telem);
+    }
 }
 
 impl TelemetryBackend for SysfsBackend {
