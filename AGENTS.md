@@ -1308,7 +1308,7 @@ Every 2-3 lines of explanation make the code immediately understandable to futur
 
 ### Inspiration
 - Python tt-top: `/home/ttuser/tt-top/`
-- Plan document: `~/.agent/plans/resilient-singing-globe.md`
+- Plan document: `~/.claude/plans/resilient-singing-globe.md`
 
 ### Rust Libraries
 - [Ratatui](https://github.com/ratatui/ratatui)
