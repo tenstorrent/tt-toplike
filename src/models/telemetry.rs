@@ -456,15 +456,33 @@ impl SmbusTelemetry {
     /// `telemetry.power`.  Use this in preference to sysfs `power1_input`
     /// when available — the firmware-reported value covers all power domains
     /// (Tensix VDD + GDDR), whereas the hwmon driver may only expose vcore.
+    ///
+    /// Parses as f32 (hex or decimal) so EMA-blended values like "16.0" are
+    /// handled correctly.  Returns `None` for zero or negative readings —
+    /// firmware never reports ≤ 0 W for a live device, so those are treated
+    /// as "not available" to avoid overwriting a valid sysfs reading with 0.
     pub fn tdp_watts(&self) -> Option<f32> {
-        parse_hex_or_dec(self.tdp.as_deref()?).map(|v| v as f32)
+        let s = self.tdp.as_deref()?.trim();
+        let v: f32 = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            u32::from_str_radix(hex, 16).ok()? as f32
+        } else {
+            s.parse().ok()?
+        };
+        if v > 0.0 { Some(v) } else { None }
     }
 
     /// Firmware-reported measured current in Amperes from the SMBUS TDC register.
     ///
     /// Same caveat as `tdp_watts` — real-time measurement, not a limit.
+    /// Parses as f32 and returns `None` for non-positive values.
     pub fn tdc_amperes(&self) -> Option<f32> {
-        parse_hex_or_dec(self.tdc.as_deref()?).map(|v| v as f32)
+        let s = self.tdc.as_deref()?.trim();
+        let v: f32 = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            u32::from_str_radix(hex, 16).ok()? as f32
+        } else {
+            s.parse().ok()?
+        };
+        if v > 0.0 { Some(v) } else { None }
     }
 
     /// Get ARC0 health as integer (heartbeat counter).

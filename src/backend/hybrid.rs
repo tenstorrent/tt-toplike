@@ -433,10 +433,7 @@ mod tests {
 
         let mut backend = HybridBackend::new("tt-smi");
 
-        // Simulate sysfs reporting vcore-only readings (hwmon power1_input).
-        // Insert via the public update path: populate the cache through the
-        // sysfs sensor_paths stub so update() writes a known entry.
-        // Easier: use the internal map directly via the test-only helper below.
+        // Seed sysfs cache with vcore-only readings (mimics hwmon power1_input).
         backend.sysfs.insert_telemetry_for_test(0, Telemetry {
             power:   Some(19.0),  // hwmon vcore-only — will be overwritten
             current: Some(26.0),  // hwmon vcore current — will be overwritten
@@ -454,13 +451,10 @@ mod tests {
             ..SmbusTelemetry::default()
         });
 
-        // Drive the overlay logic directly.
-        for (idx, smbus) in &backend.smbus_blended {
-            if let Some(telem) = backend.sysfs.telemetry_cache_mut(*idx) {
-                if let Some(w) = smbus.tdp_watts() { telem.power = Some(w); }
-                if let Some(a) = smbus.tdc_amperes() { telem.current = Some(a); }
-            }
-        }
+        // Exercise the real update() path.  sysfs.update() is a no-op when
+        // `devices` is empty, so the cache entry seeded above is preserved and
+        // the overlay runs through the production code path.
+        backend.update().expect("update should not fail");
 
         let telem = backend.sysfs.telemetry(0).unwrap();
         assert_eq!(telem.power,   Some(40.0), "power must be SMBUS TDP, not hwmon vcore");
