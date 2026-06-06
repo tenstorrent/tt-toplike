@@ -1784,7 +1784,7 @@ fn render_insights_footer(
 
 /// Render a centered kill-confirmation modal dialog over the current frame.
 /// Uses `Clear` to erase the background, then draws a left-border-only dialog
-/// (no right-side border characters per CLAUDE.md).
+/// (no right-side border characters per AGENTS.md).
 #[cfg(feature = "linux-procfs")]
 fn render_kill_dialog(f: &mut Frame, area: Rect, kc: &KillConfirmState) {
     use ratatui::style::{Color, Modifier, Style};

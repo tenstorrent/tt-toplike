@@ -152,13 +152,13 @@ GraySkull (10×12) is rendered the same as Wormhole for now (no ETH, no GDDR —
 
 ### 2.3 Portrait dimensions and character-spacing math
 
-**CRITICAL**: All sizing must be verified to never overflow the bounding box. The portrait is purely text — no border chars on the right edge, per CLAUDE.md.
+**CRITICAL**: All sizing must be verified to never overflow the bounding box. The portrait is purely text — no border chars on the right edge, per AGENTS.md.
 
 **Blackhole portrait**: 17 cols × 12 rows = **17 chars wide, 12 chars tall** (no internal padding between cells).
 
 **Wormhole portrait**: 10 cols × 12 rows = **10 chars wide, 12 chars tall**.
 
-**With left border** (per CLAUDE.md, left/bottom only):
+**With left border** (per AGENTS.md, left/bottom only):
 - A bordered Blackhole portrait inner width = 17 chars.
 - Outer box = `╔══` (17 `═` chars wide) + newline, then 12 body rows `║` + 17 chars + newline, then `╚══` (17 `═` chars wide) + newline.
 - Total outer width = 1 (border char) + 17 (content) = **18 chars**.
@@ -175,7 +175,7 @@ GraySkull (10×12) is rendered the same as Wormhole for now (no ETH, no GDDR —
 - Number of visible rows = `terminal_height / cell_height`, floored to a minimum of 1.
 - No right-border characters ever emitted on portrait cells — the gap space serves as visual separation.
 
-**Why no right border**: Terminal emulators use variable-width fonts for box-drawing chars in some configs; right-border chars at column N can wrap if the terminal is even 1 char narrower than expected. Left border only per CLAUDE.md convention.
+**Why no right border**: Terminal emulators use variable-width fonts for box-drawing chars in some configs; right-border chars at column N can wrap if the terminal is even 1 char narrower than expected. Left border only per AGENTS.md convention.
 
 ### 2.4 Activity calculation
 - Use the existing `BaselineLearner` to compute a per-core activity ratio: `current_power / baseline_power` (clamped 0.0–1.0).
