@@ -31,7 +31,7 @@
 //! }
 //! ```
 use crate::core::alignment;
-use crate::core::event;
+use crate::core::border;
 use crate::core::layout;
 use crate::core::mouse;
 use crate::core::renderer;
@@ -39,9 +39,10 @@ use crate::core::text;
 use crate::core::touch;
 use crate::core::widget;
 use crate::core::widget::tree::{self, Tree};
+use crate::core::window;
 use crate::core::{
-    Border, Clipboard, Color, Element, Event, Layout, Length, Pixels,
-    Rectangle, Shell, Size, Theme, Widget,
+    Background, Border, Clipboard, Color, Element, Event, Layout, Length,
+    Pixels, Rectangle, Shell, Size, Theme, Widget,
 };
 
 /// A toggler widget.
@@ -76,7 +77,6 @@ use crate::core::{
 ///     }
 /// }
 /// ```
-#[allow(missing_debug_implementations)]
 pub struct Toggler<
     'a,
     Message,
@@ -93,12 +93,13 @@ pub struct Toggler<
     size: f32,
     text_size: Option<Pixels>,
     text_line_height: text::LineHeight,
-    text_alignment: alignment::Horizontal,
+    text_alignment: text::Alignment,
     text_shaping: text::Shaping,
     text_wrapping: text::Wrapping,
     spacing: f32,
     font: Option<Renderer::Font>,
     class: Theme::Class<'a>,
+    last_status: Option<Status>,
 }
 
 impl<'a, Message, Theme, Renderer> Toggler<'a, Message, Theme, Renderer>
@@ -126,12 +127,13 @@ where
             size: Self::DEFAULT_SIZE,
             text_size: None,
             text_line_height: text::LineHeight::default(),
-            text_alignment: alignment::Horizontal::Left,
+            text_alignment: text::Alignment::Default,
             text_shaping: text::Shaping::default(),
             text_wrapping: text::Wrapping::default(),
             spacing: Self::DEFAULT_SIZE / 2.0,
             font: None,
             class: Theme::default(),
+            last_status: None,
         }
     }
 
@@ -193,8 +195,11 @@ where
     }
 
     /// Sets the horizontal alignment of the text of the [`Toggler`]
-    pub fn text_alignment(mut self, alignment: alignment::Horizontal) -> Self {
-        self.text_alignment = alignment;
+    pub fn text_alignment(
+        mut self,
+        alignment: impl Into<text::Alignment>,
+    ) -> Self {
+        self.text_alignment = alignment.into();
         self
     }
 
@@ -243,8 +248,8 @@ where
     }
 }
 
-impl<'a, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for Toggler<'a, Message, Theme, Renderer>
+impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for Toggler<'_, Message, Theme, Renderer>
 where
     Theme: Catalog,
     Renderer: text::Renderer,
@@ -265,7 +270,7 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         tree: &mut Tree,
         renderer: &Renderer,
         limits: &layout::Limits,
@@ -274,28 +279,34 @@ where
 
         layout::next_to_each_other(
             &limits,
-            self.spacing,
+            if self.label.is_some() {
+                self.spacing
+            } else {
+                0.0
+            },
             |_| layout::Node::new(Size::new(2.0 * self.size, self.size)),
             |limits| {
                 if let Some(label) = self.label.as_deref() {
                     let state = tree
-                    .state
-                    .downcast_mut::<widget::text::State<Renderer::Paragraph>>();
+                        .state
+                        .downcast_mut::<widget::text::State<Renderer::Paragraph>>();
 
                     widget::text::layout(
                         state,
                         renderer,
                         limits,
-                        self.width,
-                        Length::Shrink,
                         label,
-                        self.text_line_height,
-                        self.text_size,
-                        self.font,
-                        self.text_alignment,
-                        alignment::Vertical::Top,
-                        self.text_shaping,
-                        self.text_wrapping,
+                        widget::text::Format {
+                            width: self.width,
+                            height: Length::Shrink,
+                            line_height: self.text_line_height,
+                            size: self.text_size,
+                            font: self.font,
+                            align_x: self.text_alignment,
+                            align_y: alignment::Vertical::Top,
+                            shaping: self.text_shaping,
+                            wrapping: self.text_wrapping,
+                        },
                     )
                 } else {
                     layout::Node::new(Size::ZERO)
@@ -304,19 +315,19 @@ where
         )
     }
 
-    fn on_event(
+    fn update(
         &mut self,
-        _state: &mut Tree,
-        event: Event,
+        _tree: &mut Tree,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         _renderer: &Renderer,
         _clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         _viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
         let Some(on_toggle) = &self.on_toggle else {
-            return event::Status::Ignored;
+            return;
         };
 
         match event {
@@ -326,19 +337,39 @@ where
 
                 if mouse_over {
                     shell.publish(on_toggle(!self.is_toggled));
-
-                    event::Status::Captured
-                } else {
-                    event::Status::Ignored
+                    shell.capture_event();
                 }
             }
-            _ => event::Status::Ignored,
+            _ => {}
+        }
+
+        let current_status = if self.on_toggle.is_none() {
+            Status::Disabled {
+                is_toggled: self.is_toggled,
+            }
+        } else if cursor.is_over(layout.bounds()) {
+            Status::Hovered {
+                is_toggled: self.is_toggled,
+            }
+        } else {
+            Status::Active {
+                is_toggled: self.is_toggled,
+            }
+        };
+
+        if let Event::Window(window::Event::RedrawRequested(_now)) = event {
+            self.last_status = Some(current_status);
+        } else if self
+            .last_status
+            .is_some_and(|status| status != current_status)
+        {
+            shell.request_redraw();
         }
     }
 
     fn mouse_interaction(
         &self,
-        _state: &Tree,
+        _tree: &Tree,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         _viewport: &Rectangle,
@@ -360,20 +391,20 @@ where
         tree: &Tree,
         renderer: &mut Renderer,
         theme: &Theme,
-        style: &renderer::Style,
+        defaults: &renderer::Style,
         layout: Layout<'_>,
-        cursor: mouse::Cursor,
+        _cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        /// Makes sure that the border radius of the toggler looks good at every size.
-        const BORDER_RADIUS_RATIO: f32 = 32.0 / 13.0;
-
-        /// The space ratio between the background Quad and the Toggler bounds, and
-        /// between the background Quad and foreground Quad.
-        const SPACE_RATIO: f32 = 0.05;
-
         let mut children = layout.children();
         let toggler_layout = children.next().unwrap();
+
+        let style = theme.style(
+            &self.class,
+            self.last_status.unwrap_or(Status::Disabled {
+                is_toggled: self.is_toggled,
+            }),
+        );
 
         if self.label.is_some() {
             let label_layout = children.next().unwrap();
@@ -382,46 +413,26 @@ where
 
             crate::text::draw(
                 renderer,
-                style,
-                label_layout,
-                state.0.raw(),
-                crate::text::Style::default(),
+                defaults,
+                label_layout.bounds(),
+                state.raw(),
+                crate::text::Style {
+                    color: style.text_color,
+                },
                 viewport,
             );
         }
 
         let bounds = toggler_layout.bounds();
-        let is_mouse_over = cursor.is_over(layout.bounds());
-
-        let status = if self.on_toggle.is_none() {
-            Status::Disabled
-        } else if is_mouse_over {
-            Status::Hovered {
-                is_toggled: self.is_toggled,
-            }
-        } else {
-            Status::Active {
-                is_toggled: self.is_toggled,
-            }
-        };
-
-        let style = theme.style(&self.class, status);
-
-        let border_radius = bounds.height / BORDER_RADIUS_RATIO;
-        let space = SPACE_RATIO * bounds.height;
-
-        let toggler_background_bounds = Rectangle {
-            x: bounds.x + space,
-            y: bounds.y + space,
-            width: bounds.width - (2.0 * space),
-            height: bounds.height - (2.0 * space),
-        };
+        let border_radius = style
+            .border_radius
+            .unwrap_or_else(|| border::Radius::new(bounds.height / 2.0));
 
         renderer.fill_quad(
             renderer::Quad {
-                bounds: toggler_background_bounds,
+                bounds,
                 border: Border {
-                    radius: border_radius.into(),
+                    radius: border_radius,
                     width: style.background_border_width,
                     color: style.background_border_color,
                 },
@@ -430,23 +441,24 @@ where
             style.background,
         );
 
+        let padding = (style.padding_ratio * bounds.height).round();
         let toggler_foreground_bounds = Rectangle {
             x: bounds.x
                 + if self.is_toggled {
-                    bounds.width - 2.0 * space - (bounds.height - (4.0 * space))
+                    bounds.width - bounds.height + padding
                 } else {
-                    2.0 * space
+                    padding
                 },
-            y: bounds.y + (2.0 * space),
-            width: bounds.height - (4.0 * space),
-            height: bounds.height - (4.0 * space),
+            y: bounds.y + padding,
+            width: bounds.height - (2.0 * padding),
+            height: bounds.height - (2.0 * padding),
         };
 
         renderer.fill_quad(
             renderer::Quad {
                 bounds: toggler_foreground_bounds,
                 border: Border {
-                    radius: border_radius.into(),
+                    radius: border_radius,
                     width: style.foreground_border_width,
                     color: style.foreground_border_color,
                 },
@@ -485,24 +497,35 @@ pub enum Status {
         is_toggled: bool,
     },
     /// The [`Toggler`] is disabled.
-    Disabled,
+    Disabled {
+        /// Indicates whether the [`Toggler`] is toggled.
+        is_toggled: bool,
+    },
 }
 
 /// The appearance of a toggler.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Style {
     /// The background [`Color`] of the toggler.
-    pub background: Color,
+    pub background: Background,
     /// The width of the background border of the toggler.
     pub background_border_width: f32,
     /// The [`Color`] of the background border of the toggler.
     pub background_border_color: Color,
     /// The foreground [`Color`] of the toggler.
-    pub foreground: Color,
+    pub foreground: Background,
     /// The width of the foreground border of the toggler.
     pub foreground_border_width: f32,
     /// The [`Color`] of the foreground border of the toggler.
     pub foreground_border_color: Color,
+    /// The text [`Color`] of the toggler.
+    pub text_color: Option<Color>,
+    /// The border radius of the toggler.
+    ///
+    /// If `None`, the toggler will be perfectly round.
+    pub border_radius: Option<border::Radius>,
+    /// The ratio of separation between the background and the toggle in relative height.
+    pub padding_ratio: f32,
 }
 
 /// The theme catalog of a [`Toggler`].
@@ -541,18 +564,24 @@ pub fn default(theme: &Theme, status: Status) -> Style {
     let background = match status {
         Status::Active { is_toggled } | Status::Hovered { is_toggled } => {
             if is_toggled {
-                palette.primary.strong.color
+                palette.primary.base.color
             } else {
                 palette.background.strong.color
             }
         }
-        Status::Disabled => palette.background.weak.color,
+        Status::Disabled { is_toggled } => {
+            if is_toggled {
+                palette.background.strong.color
+            } else {
+                palette.background.weak.color
+            }
+        }
     };
 
     let foreground = match status {
         Status::Active { is_toggled } => {
             if is_toggled {
-                palette.primary.strong.text
+                palette.primary.base.text
             } else {
                 palette.background.base.color
             }
@@ -561,21 +590,24 @@ pub fn default(theme: &Theme, status: Status) -> Style {
             if is_toggled {
                 Color {
                     a: 0.5,
-                    ..palette.primary.strong.text
+                    ..palette.primary.base.text
                 }
             } else {
                 palette.background.weak.color
             }
         }
-        Status::Disabled => palette.background.base.color,
+        Status::Disabled { .. } => palette.background.weakest.color,
     };
 
     Style {
-        background,
-        foreground,
+        background: background.into(),
+        foreground: foreground.into(),
         foreground_border_width: 0.0,
         foreground_border_color: Color::TRANSPARENT,
         background_border_width: 0.0,
         background_border_color: Color::TRANSPARENT,
+        text_color: None,
+        border_radius: None,
+        padding_ratio: 0.1,
     }
 }

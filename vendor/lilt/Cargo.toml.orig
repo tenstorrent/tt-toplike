@@ -1,0 +1,24 @@
+[package]
+name = "lilt"
+version = "0.8.1"
+edition = "2024"
+description = " A simple library for running interruptable, transition based animations as a function of time."
+repository = "https://github.com/cyypherus/lilt"
+license = "MIT"
+keywords = ["animation", "interpolation"]
+authors = ["cyypherus"]
+
+[lib]
+crate-type = ["lib"]
+
+[features]
+test-api = []
+
+[dev-dependencies]
+insta = "1.42.1"
+public-api = "0.43.0"
+rustdoc-json = "0.9.4"
+rustup-toolchain = "0.1.9"
+
+[dependencies]
+web-time = "1.1.0"

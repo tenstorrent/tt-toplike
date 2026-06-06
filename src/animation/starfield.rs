@@ -854,14 +854,11 @@ impl HardwareStarfield {
         // Helper function to convert Ratatui Color to Iced Color
         fn ratatui_to_iced(color: Color) -> IcedColor {
             match color {
-                Color::Rgb(r, g, b) | Color::Indexed(_) => {
-                    // For Indexed colors, we'd need a lookup table, but for simplicity
-                    // just use a default color. The pattern match here is mainly for Rgb.
-                    if let Color::Rgb(r, g, b) = color {
-                        IcedColor::from_rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
-                    } else {
-                        IcedColor::from_rgb(0.8, 0.8, 0.8)
-                    }
+                Color::Rgb(r, g, b) => {
+                    IcedColor::from_rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
+                }
+                Color::Indexed(_) => {
+                    IcedColor::from_rgb(0.8, 0.8, 0.8)
                 }
                 Color::Reset => IcedColor::from_rgb(0.8, 0.8, 0.8),
                 _ => IcedColor::from_rgb(0.8, 0.8, 0.8),

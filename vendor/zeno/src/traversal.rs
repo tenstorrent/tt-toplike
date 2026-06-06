@@ -78,27 +78,27 @@ where
             match self.segments.next()?.borrow() {
                 End(closed) => {
                     self.is_first = true;
-                    return Some(Vertex::End(self.prev_dir, self.prev_point, *closed));
+                    Some(Vertex::End(self.prev_dir, self.prev_point, *closed))
                 }
                 segment => {
                     let (start, in_dir, out_dir, end) = get_components(segment);
                     self.prev_dir = out_dir;
                     self.prev_point = end;
-                    return Some(Vertex::Start(start, in_dir));
+                    Some(Vertex::Start(start, in_dir))
                 }
             }
         } else {
             match self.segments.next()?.borrow() {
                 End(closed) => {
                     self.is_first = true;
-                    return Some(Vertex::End(self.prev_dir, self.prev_point, *closed));
+                    Some(Vertex::End(self.prev_dir, self.prev_point, *closed))
                 }
                 segment => {
                     let (start, in_dir, out_dir, end) = get_components(segment);
                     let prev_dir = self.prev_dir;
                     self.prev_dir = out_dir;
                     self.prev_point = end;
-                    return Some(Vertex::Middle(prev_dir, start, in_dir));
+                    Some(Vertex::Middle(prev_dir, start, in_dir))
                 }
             }
         }
@@ -137,7 +137,7 @@ impl<D> Walk<D>
 where
     D: Iterator<Item = Command> + Clone,
 {
-    /// Creates a new iterator like type that steps along a path by abitrary distances.
+    /// Creates a new iterator like type that steps along a path by arbitrary distances.
     pub fn new(data: impl PathData<Commands = D>) -> Self {
         let data = data.commands();
         Self {
@@ -156,7 +156,7 @@ impl<D> Walk<TransformCommands<D>>
 where
     D: Iterator<Item = Command> + Clone,
 {
-    /// Creates a new iterator like type that steps along a transformed path by abitrary distances.
+    /// Creates a new iterator like type that steps along a transformed path by arbitrary distances.
     pub fn with_transform(data: impl PathData<Commands = D>, transform: Transform) -> Self {
         let data = data.commands();
         let data = TransformCommands { data, transform };
@@ -224,7 +224,7 @@ where
     }
 
     fn next_segment(&mut self) -> Option<Segment> {
-        while let Some(s) = self.iter.next() {
+        for s in self.iter.by_ref() {
             match s {
                 Segment::End(..) => continue,
                 _ => return Some(s),

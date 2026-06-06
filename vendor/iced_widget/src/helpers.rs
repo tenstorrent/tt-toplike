@@ -4,18 +4,17 @@ use crate::checkbox::{self, Checkbox};
 use crate::combo_box::{self, ComboBox};
 use crate::container::{self, Container};
 use crate::core;
+use crate::core::theme;
 use crate::core::widget::operation::{self, Operation};
 use crate::core::window;
-use crate::core::{Element, Length, Pixels, Widget};
+use crate::core::{Element, Length, Size, Widget};
+use crate::float::{self, Float};
 use crate::keyed;
 use crate::overlay;
 use crate::pane_grid::{self, PaneGrid};
 use crate::pick_list::{self, PickList};
 use crate::progress_bar::{self, ProgressBar};
 use crate::radio::{self, Radio};
-use crate::rule::{self, Rule};
-use crate::runtime::task::{self, Task};
-use crate::runtime::Action;
 use crate::scrollable::{self, Scrollable};
 use crate::slider::{self, Slider};
 use crate::text::{self, Text};
@@ -24,10 +23,14 @@ use crate::text_input::{self, TextInput};
 use crate::toggler::{self, Toggler};
 use crate::tooltip::{self, Tooltip};
 use crate::vertical_slider::{self, VerticalSlider};
-use crate::{Column, MouseArea, Row, Space, Stack, Themer};
+use crate::{
+    Column, Grid, MouseArea, Pin, Responsive, Row, Sensor, Space, Stack, Themer,
+};
 
 use std::borrow::Borrow;
 use std::ops::RangeInclusive;
+
+pub use crate::table::table;
 
 /// Creates a [`Column`] with the given children.
 ///
@@ -110,6 +113,19 @@ macro_rules! stack {
     );
 }
 
+/// Creates a [`Grid`] with the given children.
+///
+/// [`Grid`]: crate::Grid
+#[macro_export]
+macro_rules! grid {
+    () => (
+        $crate::Grid::new()
+    );
+    ($($x:expr),+ $(,)?) => (
+        $crate::Grid::with_children([$($crate::core::Element::from($x)),+])
+    );
+}
+
 /// Creates a new [`Text`] widget with the provided content.
 ///
 /// [`Text`]: core::widget::Text
@@ -167,7 +183,7 @@ macro_rules! text {
 /// # pub type Element<'a, Message> = iced_widget::core::Element<'a, Message, iced_widget::Theme, iced_widget::Renderer>;
 /// use iced::font;
 /// use iced::widget::{rich_text, span};
-/// use iced::{color, Font};
+/// use iced::{color, never, Font};
 ///
 /// #[derive(Debug, Clone)]
 /// enum Message {
@@ -177,9 +193,10 @@ macro_rules! text {
 /// fn view(state: &State) -> Element<'_, Message> {
 ///     rich_text![
 ///         span("I am red!").color(color!(0xff0000)),
-///         " ",
+///         span(" "),
 ///         span("And I am bold!").font(Font { weight: font::Weight::Bold, ..Font::default() }),
 ///     ]
+///     .on_link_click(never)
 ///     .size(20)
 ///     .into()
 /// }
@@ -187,7 +204,7 @@ macro_rules! text {
 #[macro_export]
 macro_rules! rich_text {
     () => (
-        $crate::Column::new()
+        $crate::text::Rich::new()
     );
     ($($x:expr),+ $(,)?) => (
         $crate::text::Rich::from_iter([$($crate::text::Span::from($x)),+])
@@ -232,10 +249,10 @@ where
 ///
 /// This is equivalent to:
 /// ```rust,no_run
-/// # use iced_widget::core::Length;
+/// # use iced_widget::core::Length::Fill;
 /// # use iced_widget::Container;
 /// # fn container<A>(x: A) -> Container<'static, ()> { unreachable!() }
-/// let centered = container("Centered!").center(Length::Fill);
+/// let center = container("Center!").center(Fill);
 /// ```
 ///
 /// [`Container`]: crate::Container
@@ -247,6 +264,198 @@ where
     Renderer: core::Renderer,
 {
     container(content).center(Length::Fill)
+}
+
+/// Creates a new [`Container`] that fills all the available space
+/// horizontally and centers its contents inside.
+///
+/// This is equivalent to:
+/// ```rust,no_run
+/// # use iced_widget::core::Length::Fill;
+/// # use iced_widget::Container;
+/// # fn container<A>(x: A) -> Container<'static, ()> { unreachable!() }
+/// let center_x = container("Horizontal Center!").center_x(Fill);
+/// ```
+///
+/// [`Container`]: crate::Container
+pub fn center_x<'a, Message, Theme, Renderer>(
+    content: impl Into<Element<'a, Message, Theme, Renderer>>,
+) -> Container<'a, Message, Theme, Renderer>
+where
+    Theme: container::Catalog + 'a,
+    Renderer: core::Renderer,
+{
+    container(content).center_x(Length::Fill)
+}
+
+/// Creates a new [`Container`] that fills all the available space
+/// vertically and centers its contents inside.
+///
+/// This is equivalent to:
+/// ```rust,no_run
+/// # use iced_widget::core::Length::Fill;
+/// # use iced_widget::Container;
+/// # fn container<A>(x: A) -> Container<'static, ()> { unreachable!() }
+/// let center_y = container("Vertical Center!").center_y(Fill);
+/// ```
+///
+/// [`Container`]: crate::Container
+pub fn center_y<'a, Message, Theme, Renderer>(
+    content: impl Into<Element<'a, Message, Theme, Renderer>>,
+) -> Container<'a, Message, Theme, Renderer>
+where
+    Theme: container::Catalog + 'a,
+    Renderer: core::Renderer,
+{
+    container(content).center_y(Length::Fill)
+}
+
+/// Creates a new [`Container`] that fills all the available space
+/// horizontally and right-aligns its contents inside.
+///
+/// This is equivalent to:
+/// ```rust,no_run
+/// # use iced_widget::core::Length::Fill;
+/// # use iced_widget::Container;
+/// # fn container<A>(x: A) -> Container<'static, ()> { unreachable!() }
+/// let right = container("Right!").align_right(Fill);
+/// ```
+///
+/// [`Container`]: crate::Container
+pub fn right<'a, Message, Theme, Renderer>(
+    content: impl Into<Element<'a, Message, Theme, Renderer>>,
+) -> Container<'a, Message, Theme, Renderer>
+where
+    Theme: container::Catalog + 'a,
+    Renderer: core::Renderer,
+{
+    container(content).align_right(Length::Fill)
+}
+
+/// Creates a new [`Container`] that fills all the available space
+/// and aligns its contents inside to the right center.
+///
+/// This is equivalent to:
+/// ```rust,no_run
+/// # use iced_widget::core::Length::Fill;
+/// # use iced_widget::Container;
+/// # fn container<A>(x: A) -> Container<'static, ()> { unreachable!() }
+/// let right_center = container("Bottom Center!").align_right(Fill).center_y(Fill);
+/// ```
+///
+/// [`Container`]: crate::Container
+pub fn right_center<'a, Message, Theme, Renderer>(
+    content: impl Into<Element<'a, Message, Theme, Renderer>>,
+) -> Container<'a, Message, Theme, Renderer>
+where
+    Theme: container::Catalog + 'a,
+    Renderer: core::Renderer,
+{
+    container(content)
+        .align_right(Length::Fill)
+        .center_y(Length::Fill)
+}
+
+/// Creates a new [`Container`] that fills all the available space
+/// vertically and bottom-aligns its contents inside.
+///
+/// This is equivalent to:
+/// ```rust,no_run
+/// # use iced_widget::core::Length::Fill;
+/// # use iced_widget::Container;
+/// # fn container<A>(x: A) -> Container<'static, ()> { unreachable!() }
+/// let bottom = container("Bottom!").align_bottom(Fill);
+/// ```
+///
+/// [`Container`]: crate::Container
+pub fn bottom<'a, Message, Theme, Renderer>(
+    content: impl Into<Element<'a, Message, Theme, Renderer>>,
+) -> Container<'a, Message, Theme, Renderer>
+where
+    Theme: container::Catalog + 'a,
+    Renderer: core::Renderer,
+{
+    container(content).align_bottom(Length::Fill)
+}
+
+/// Creates a new [`Container`] that fills all the available space
+/// and aligns its contents inside to the bottom center.
+///
+/// This is equivalent to:
+/// ```rust,no_run
+/// # use iced_widget::core::Length::Fill;
+/// # use iced_widget::Container;
+/// # fn container<A>(x: A) -> Container<'static, ()> { unreachable!() }
+/// let bottom_center = container("Bottom Center!").center_x(Fill).align_bottom(Fill);
+/// ```
+///
+/// [`Container`]: crate::Container
+pub fn bottom_center<'a, Message, Theme, Renderer>(
+    content: impl Into<Element<'a, Message, Theme, Renderer>>,
+) -> Container<'a, Message, Theme, Renderer>
+where
+    Theme: container::Catalog + 'a,
+    Renderer: core::Renderer,
+{
+    container(content)
+        .center_x(Length::Fill)
+        .align_bottom(Length::Fill)
+}
+
+/// Creates a new [`Container`] that fills all the available space
+/// and aligns its contents inside to the bottom right corner.
+///
+/// This is equivalent to:
+/// ```rust,no_run
+/// # use iced_widget::core::Length::Fill;
+/// # use iced_widget::Container;
+/// # fn container<A>(x: A) -> Container<'static, ()> { unreachable!() }
+/// let bottom_right = container("Bottom!").align_right(Fill).align_bottom(Fill);
+/// ```
+///
+/// [`Container`]: crate::Container
+pub fn bottom_right<'a, Message, Theme, Renderer>(
+    content: impl Into<Element<'a, Message, Theme, Renderer>>,
+) -> Container<'a, Message, Theme, Renderer>
+where
+    Theme: container::Catalog + 'a,
+    Renderer: core::Renderer,
+{
+    container(content)
+        .align_right(Length::Fill)
+        .align_bottom(Length::Fill)
+}
+
+/// Creates a new [`Pin`] widget with the given content.
+///
+/// A [`Pin`] widget positions its contents at some fixed coordinates inside of its boundaries.
+///
+/// # Example
+/// ```no_run
+/// # mod iced { pub mod widget { pub use iced_widget::*; } pub use iced_widget::core::Length::Fill; }
+/// # pub type State = ();
+/// # pub type Element<'a, Message> = iced_widget::core::Element<'a, Message, iced_widget::Theme, iced_widget::Renderer>;
+/// use iced::widget::pin;
+/// use iced::Fill;
+///
+/// enum Message {
+///     // ...
+/// }
+///
+/// fn view(state: &State) -> Element<'_, Message> {
+///     pin("This text is displayed at coordinates (50, 50)!")
+///         .x(50)
+///         .y(50)
+///         .into()
+/// }
+/// ```
+pub fn pin<'a, Message, Theme, Renderer>(
+    content: impl Into<Element<'a, Message, Theme, Renderer>>,
+) -> Pin<'a, Message, Theme, Renderer>
+where
+    Renderer: core::Renderer,
+{
+    Pin::new(content)
 }
 
 /// Creates a new [`Column`] with the given children.
@@ -336,6 +545,16 @@ where
     Row::with_children(children)
 }
 
+/// Creates a new [`Grid`] from an iterator.
+pub fn grid<'a, Message, Theme, Renderer>(
+    children: impl IntoIterator<Item = Element<'a, Message, Theme, Renderer>>,
+) -> Grid<'a, Message, Theme, Renderer>
+where
+    Renderer: core::Renderer,
+{
+    Grid::with_children(children)
+}
+
 /// Creates a new [`Stack`] with the given children.
 ///
 /// [`Stack`]: crate::Stack
@@ -363,19 +582,18 @@ where
     Theme: 'a,
     Renderer: core::Renderer + 'a,
 {
-    use crate::core::event::{self, Event};
     use crate::core::layout::{self, Layout};
     use crate::core::mouse;
     use crate::core::renderer;
     use crate::core::widget::tree::{self, Tree};
-    use crate::core::{Rectangle, Shell, Size};
+    use crate::core::{Event, Rectangle, Shell, Size};
 
     struct Opaque<'a, Message, Theme, Renderer> {
         content: Element<'a, Message, Theme, Renderer>,
     }
 
-    impl<'a, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-        for Opaque<'a, Message, Theme, Renderer>
+    impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+        for Opaque<'_, Message, Theme, Renderer>
     where
         Renderer: core::Renderer,
     {
@@ -404,12 +622,12 @@ where
         }
 
         fn layout(
-            &self,
+            &mut self,
             tree: &mut Tree,
             renderer: &Renderer,
             limits: &layout::Limits,
         ) -> layout::Node {
-            self.content.as_widget().layout(tree, renderer, limits)
+            self.content.as_widget_mut().layout(tree, renderer, limits)
         }
 
         fn draw(
@@ -428,46 +646,40 @@ where
         }
 
         fn operate(
-            &self,
-            state: &mut Tree,
+            &mut self,
+            tree: &mut Tree,
             layout: Layout<'_>,
             renderer: &Renderer,
             operation: &mut dyn operation::Operation,
         ) {
             self.content
-                .as_widget()
-                .operate(state, layout, renderer, operation);
+                .as_widget_mut()
+                .operate(tree, layout, renderer, operation);
         }
 
-        fn on_event(
+        fn update(
             &mut self,
-            state: &mut Tree,
-            event: Event,
+            tree: &mut Tree,
+            event: &Event,
             layout: Layout<'_>,
             cursor: mouse::Cursor,
             renderer: &Renderer,
             clipboard: &mut dyn core::Clipboard,
             shell: &mut Shell<'_, Message>,
             viewport: &Rectangle,
-        ) -> event::Status {
+        ) {
             let is_mouse_press = matches!(
                 event,
                 core::Event::Mouse(mouse::Event::ButtonPressed(_))
             );
 
-            if let core::event::Status::Captured =
-                self.content.as_widget_mut().on_event(
-                    state, event, layout, cursor, renderer, clipboard, shell,
-                    viewport,
-                )
-            {
-                return event::Status::Captured;
-            }
+            self.content.as_widget_mut().update(
+                tree, event, layout, cursor, renderer, clipboard, shell,
+                viewport,
+            );
 
             if is_mouse_press && cursor.is_over(layout.bounds()) {
-                event::Status::Captured
-            } else {
-                event::Status::Ignored
+                shell.capture_event();
             }
         }
 
@@ -496,8 +708,9 @@ where
         fn overlay<'b>(
             &'b mut self,
             state: &'b mut core::widget::Tree,
-            layout: core::Layout<'_>,
+            layout: core::Layout<'b>,
             renderer: &Renderer,
+            viewport: &Rectangle,
             translation: core::Vector,
         ) -> Option<core::overlay::Element<'b, Message, Theme, Renderer>>
         {
@@ -505,6 +718,7 @@ where
                 state,
                 layout,
                 renderer,
+                viewport,
                 translation,
             )
         }
@@ -530,22 +744,22 @@ where
     Theme: 'a,
     Renderer: core::Renderer + 'a,
 {
-    use crate::core::event::{self, Event};
     use crate::core::layout::{self, Layout};
     use crate::core::mouse;
     use crate::core::renderer;
     use crate::core::widget::tree::{self, Tree};
-    use crate::core::{Rectangle, Shell, Size};
+    use crate::core::{Event, Rectangle, Shell, Size};
 
     struct Hover<'a, Message, Theme, Renderer> {
         base: Element<'a, Message, Theme, Renderer>,
         top: Element<'a, Message, Theme, Renderer>,
         is_top_focused: bool,
         is_top_overlay_active: bool,
+        is_hovered: bool,
     }
 
-    impl<'a, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-        for Hover<'a, Message, Theme, Renderer>
+    impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+        for Hover<'_, Message, Theme, Renderer>
     where
         Renderer: core::Renderer,
     {
@@ -571,18 +785,18 @@ where
         }
 
         fn layout(
-            &self,
+            &mut self,
             tree: &mut Tree,
             renderer: &Renderer,
             limits: &layout::Limits,
         ) -> layout::Node {
-            let base = self.base.as_widget().layout(
+            let base = self.base.as_widget_mut().layout(
                 &mut tree.children[0],
                 renderer,
                 limits,
             );
 
-            let top = self.top.as_widget().layout(
+            let top = self.top.as_widget_mut().layout(
                 &mut tree.children[1],
                 renderer,
                 &layout::Limits::new(Size::ZERO, base.size()),
@@ -633,35 +847,39 @@ where
         }
 
         fn operate(
-            &self,
+            &mut self,
             tree: &mut Tree,
             layout: Layout<'_>,
             renderer: &Renderer,
             operation: &mut dyn operation::Operation,
         ) {
-            let children = [&self.base, &self.top]
+            let children = [&mut self.base, &mut self.top]
                 .into_iter()
                 .zip(layout.children().zip(&mut tree.children));
 
             for (child, (layout, tree)) in children {
-                child.as_widget().operate(tree, layout, renderer, operation);
+                child
+                    .as_widget_mut()
+                    .operate(tree, layout, renderer, operation);
             }
         }
 
-        fn on_event(
+        fn update(
             &mut self,
             tree: &mut Tree,
-            event: Event,
+            event: &Event,
             layout: Layout<'_>,
             cursor: mouse::Cursor,
             renderer: &Renderer,
             clipboard: &mut dyn core::Clipboard,
             shell: &mut Shell<'_, Message>,
             viewport: &Rectangle,
-        ) -> event::Status {
+        ) {
             let mut children = layout.children().zip(&mut tree.children);
             let (base_layout, base_tree) = children.next().unwrap();
             let (top_layout, top_tree) = children.next().unwrap();
+
+            let is_hovered = cursor.is_over(layout.bounds());
 
             if matches!(event, Event::Window(window::Event::RedrawRequested(_)))
             {
@@ -678,46 +896,50 @@ where
                     operation::Outcome::Some(count) => count.focused.is_some(),
                     _ => false,
                 };
+
+                self.is_hovered = is_hovered;
+            } else if is_hovered != self.is_hovered {
+                shell.request_redraw();
             }
 
-            let top_status = if matches!(
+            let is_visible =
+                is_hovered || self.is_top_focused || self.is_top_overlay_active;
+
+            if matches!(
                 event,
                 Event::Mouse(
                     mouse::Event::CursorMoved { .. }
                         | mouse::Event::ButtonReleased(_)
                 )
-            ) || cursor.is_over(layout.bounds())
-                || self.is_top_focused
-                || self.is_top_overlay_active
+            ) || is_visible
             {
-                self.top.as_widget_mut().on_event(
-                    top_tree,
-                    event.clone(),
-                    top_layout,
-                    cursor,
-                    renderer,
-                    clipboard,
-                    shell,
-                    viewport,
-                )
-            } else {
-                event::Status::Ignored
+                let redraw_request = shell.redraw_request();
+
+                self.top.as_widget_mut().update(
+                    top_tree, event, top_layout, cursor, renderer, clipboard,
+                    shell, viewport,
+                );
+
+                // Ignore redraw requests of invisible content
+                if !is_visible {
+                    Shell::replace_redraw_request(shell, redraw_request);
+                }
+
+                if shell.is_event_captured() {
+                    return;
+                }
             };
 
-            if top_status == event::Status::Captured {
-                return top_status;
-            }
-
-            self.base.as_widget_mut().on_event(
+            self.base.as_widget_mut().update(
                 base_tree,
-                event.clone(),
+                event,
                 base_layout,
                 cursor,
                 renderer,
                 clipboard,
                 shell,
                 viewport,
-            )
+            );
         }
 
         fn mouse_interaction(
@@ -744,8 +966,9 @@ where
         fn overlay<'b>(
             &'b mut self,
             tree: &'b mut core::widget::Tree,
-            layout: core::Layout<'_>,
+            layout: core::Layout<'b>,
             renderer: &Renderer,
+            viewport: &Rectangle,
             translation: core::Vector,
         ) -> Option<core::overlay::Element<'b, Message, Theme, Renderer>>
         {
@@ -757,6 +980,7 @@ where
                         tree,
                         layout,
                         renderer,
+                        viewport,
                         translation,
                     )
                 });
@@ -777,7 +1001,23 @@ where
         top: top.into(),
         is_top_focused: false,
         is_top_overlay_active: false,
+        is_hovered: false,
     })
+}
+
+/// Creates a new [`Sensor`] widget.
+///
+/// A [`Sensor`] widget can generate messages when its contents are shown,
+/// hidden, or resized.
+///
+/// It can even notify you with anticipation at a given distance!
+pub fn sensor<'a, Message, Theme, Renderer>(
+    content: impl Into<Element<'a, Message, Theme, Renderer>>,
+) -> Sensor<'a, (), Message, Theme, Renderer>
+where
+    Renderer: core::Renderer,
+{
+    Sensor::new(content)
 }
 
 /// Creates a new [`Scrollable`] with the provided content.
@@ -789,7 +1029,7 @@ where
 /// # mod iced { pub mod widget { pub use iced_widget::*; } }
 /// # pub type State = ();
 /// # pub type Element<'a, Message> = iced_widget::core::Element<'a, Message, iced_widget::Theme, iced_widget::Renderer>;
-/// use iced::widget::{column, scrollable, vertical_space};
+/// use iced::widget::{column, scrollable, space};
 ///
 /// enum Message {
 ///     // ...
@@ -798,7 +1038,7 @@ where
 /// fn view(state: &State) -> Element<'_, Message> {
 ///     scrollable(column![
 ///         "Scroll me!",
-///         vertical_space().height(3000),
+///         space().height(3000),
 ///         "You did it!",
 ///     ]).into()
 /// }
@@ -808,7 +1048,7 @@ pub fn scrollable<'a, Message, Theme, Renderer>(
 ) -> Scrollable<'a, Message, Theme, Renderer>
 where
     Theme: scrollable::Catalog + 'a,
-    Renderer: core::Renderer,
+    Renderer: core::text::Renderer,
 {
     Scrollable::new(content)
 }
@@ -932,10 +1172,11 @@ where
 /// # pub type Element<'a, Message> = iced_widget::core::Element<'a, Message, iced_widget::Theme, iced_widget::Renderer>;
 /// use iced::font;
 /// use iced::widget::{rich_text, span};
-/// use iced::{color, Font};
+/// use iced::{color, never, Font};
 ///
 /// #[derive(Debug, Clone)]
 /// enum Message {
+///     LinkClicked(&'static str),
 ///     // ...
 /// }
 ///
@@ -945,13 +1186,14 @@ where
 ///         span(" "),
 ///         span("And I am bold!").font(Font { weight: font::Weight::Bold, ..Font::default() }),
 ///     ])
+///     .on_link_click(never)
 ///     .size(20)
 ///     .into()
 /// }
 /// ```
-pub fn rich_text<'a, Link, Theme, Renderer>(
+pub fn rich_text<'a, Link, Message, Theme, Renderer>(
     spans: impl AsRef<[text::Span<'a, Link, Renderer::Font>]> + 'a,
-) -> text::Rich<'a, Link, Theme, Renderer>
+) -> text::Rich<'a, Link, Message, Theme, Renderer>
 where
     Link: Clone + 'static,
     Theme: text::Catalog + 'a,
@@ -975,7 +1217,7 @@ where
 /// # pub type Element<'a, Message> = iced_widget::core::Element<'a, Message, iced_widget::Theme, iced_widget::Renderer>;
 /// use iced::font;
 /// use iced::widget::{rich_text, span};
-/// use iced::{color, Font};
+/// use iced::{color, never, Font};
 ///
 /// #[derive(Debug, Clone)]
 /// enum Message {
@@ -988,6 +1230,7 @@ where
 ///         " ",
 ///         span("And I am bold!").font(Font { weight: font::Weight::Bold, ..Font::default() }),
 ///     ]
+///     .on_link_click(never)
 ///     .size(20)
 ///     .into()
 /// }
@@ -1020,7 +1263,8 @@ pub use crate::markdown::view as markdown;
 /// }
 ///
 /// fn view(state: &State) -> Element<'_, Message> {
-///     checkbox("Toggle me!", state.is_checked)
+///     checkbox(state.is_checked)
+///         .label("Toggle me!")
 ///         .on_toggle(Message::CheckboxToggled)
 ///         .into()
 /// }
@@ -1035,14 +1279,13 @@ pub use crate::markdown::view as markdown;
 /// ```
 /// ![Checkbox drawn by `iced_wgpu`](https://github.com/iced-rs/iced/blob/7760618fb112074bc40b148944521f312152012a/docs/images/checkbox.png?raw=true)
 pub fn checkbox<'a, Message, Theme, Renderer>(
-    label: impl Into<String>,
     is_checked: bool,
 ) -> Checkbox<'a, Message, Theme, Renderer>
 where
     Theme: checkbox::Catalog + 'a,
     Renderer: core::text::Renderer,
 {
-    Checkbox::new(label, is_checked)
+    Checkbox::new(is_checked)
 }
 
 /// Creates a new [`Radio`].
@@ -1498,70 +1741,12 @@ where
     ComboBox::new(state, placeholder, selection, on_selected)
 }
 
-/// Creates a new [`Space`] widget that fills the available
-/// horizontal space.
+/// Creates some empty [`Space`] with no size.
 ///
-/// This can be useful to separate widgets in a [`Row`].
-pub fn horizontal_space() -> Space {
-    Space::with_width(Length::Fill)
-}
-
-/// Creates a new [`Space`] widget that fills the available
-/// vertical space.
-///
-/// This can be useful to separate widgets in a [`Column`].
-pub fn vertical_space() -> Space {
-    Space::with_height(Length::Fill)
-}
-
-/// Creates a horizontal [`Rule`] with the given height.
-///
-/// # Example
-/// ```no_run
-/// # mod iced { pub mod widget { pub use iced_widget::*; } }
-/// # pub type State = ();
-/// # pub type Element<'a, Message> = iced_widget::core::Element<'a, Message, iced_widget::Theme, iced_widget::Renderer>;
-/// use iced::widget::horizontal_rule;
-///
-/// #[derive(Clone)]
-/// enum Message {
-///     // ...,
-/// }
-///
-/// fn view(state: &State) -> Element<'_, Message> {
-///     horizontal_rule(2).into()
-/// }
-/// ```
-pub fn horizontal_rule<'a, Theme>(height: impl Into<Pixels>) -> Rule<'a, Theme>
-where
-    Theme: rule::Catalog + 'a,
-{
-    Rule::horizontal(height)
-}
-
-/// Creates a vertical [`Rule`] with the given width.
-///
-/// # Example
-/// ```no_run
-/// # mod iced { pub mod widget { pub use iced_widget::*; } }
-/// # pub type State = ();
-/// # pub type Element<'a, Message> = iced_widget::core::Element<'a, Message, iced_widget::Theme, iced_widget::Renderer>;
-/// use iced::widget::vertical_rule;
-///
-/// #[derive(Clone)]
-/// enum Message {
-///     // ...,
-/// }
-///
-/// fn view(state: &State) -> Element<'_, Message> {
-///     vertical_rule(2).into()
-/// }
-/// ```
-pub fn vertical_rule<'a, Theme>(width: impl Into<Pixels>) -> Rule<'a, Theme>
-where
-    Theme: rule::Catalog + 'a,
-{
-    Rule::vertical(width)
+/// This is considered the "identity" widget. It will take
+/// no space and do nothing.
+pub fn space() -> Space {
+    Space::new()
 }
 
 /// Creates a new [`ProgressBar`].
@@ -1664,30 +1849,43 @@ where
 ///
 /// Useful for showing some love to your favorite GUI library in your "About" screen,
 /// for instance.
-#[cfg(feature = "svg")]
 pub fn iced<'a, Message, Theme, Renderer>(
-    text_size: impl Into<Pixels>,
+    text_size: impl Into<core::Pixels>,
 ) -> Element<'a, Message, Theme, Renderer>
 where
     Message: 'a,
-    Renderer: core::Renderer
-        + core::text::Renderer<Font = core::Font>
-        + core::svg::Renderer
-        + 'a,
-    Theme: text::Catalog + crate::svg::Catalog + 'a,
+    Renderer: core::Renderer + core::text::Renderer<Font = core::Font> + 'a,
+    Theme: text::Catalog + container::Catalog + 'a,
+    <Theme as container::Catalog>::Class<'a>:
+        From<container::StyleFn<'a, Theme>>,
+    <Theme as text::Catalog>::Class<'a>: From<text::StyleFn<'a, Theme>>,
 {
-    use crate::core::{Alignment, Font};
-    use crate::svg;
-    use once_cell::sync::Lazy;
-
-    static LOGO: Lazy<svg::Handle> = Lazy::new(|| {
-        svg::Handle::from_memory(include_bytes!("../assets/iced-logo.svg"))
-    });
+    use crate::core::border;
+    use crate::core::color;
+    use crate::core::gradient;
+    use crate::core::{Alignment, Color, Font, Radians};
 
     let text_size = text_size.into();
 
     row![
-        svg(LOGO.clone()).width(text_size * 1.3),
+        container(
+            text(Renderer::ICED_LOGO)
+                .line_height(1.0)
+                .size(text_size)
+                .font(Renderer::ICON_FONT)
+                .color(Color::WHITE)
+        )
+        .padding(text_size * 0.15)
+        .style(move |_| container::Style {
+            background: Some(
+                gradient::Linear::new(Radians::PI / 4.0)
+                    .add_stop(0.0, color!(0x0033ff))
+                    .add_stop(1.0, color!(0x1177ff))
+                    .into()
+            ),
+            border: border::rounded(border::radius(text_size * 0.4)),
+            ..container::Style::default()
+        }),
         text("iced").size(text_size).font(Font::MONOSPACE)
     ]
     .spacing(text_size.0 / 3.0)
@@ -1808,17 +2006,7 @@ where
     crate::Shader::new(program)
 }
 
-/// Focuses the previous focusable widget.
-pub fn focus_previous<T>() -> Task<T> {
-    task::effect(Action::widget(operation::focusable::focus_previous()))
-}
-
-/// Focuses the next focusable widget.
-pub fn focus_next<T>() -> Task<T> {
-    task::effect(Action::widget(operation::focusable::focus_next()))
-}
-
-/// A container intercepting mouse events.
+/// Creates a new [`MouseArea`].
 pub fn mouse_area<'a, Message, Theme, Renderer>(
     widget: impl Into<Element<'a, Message, Theme, Renderer>>,
 ) -> MouseArea<'a, Message, Theme, Renderer>
@@ -1829,22 +2017,15 @@ where
 }
 
 /// A widget that applies any `Theme` to its contents.
-pub fn themer<'a, Message, OldTheme, NewTheme, Renderer>(
-    new_theme: NewTheme,
-    content: impl Into<Element<'a, Message, NewTheme, Renderer>>,
-) -> Themer<
-    'a,
-    Message,
-    OldTheme,
-    NewTheme,
-    impl Fn(&OldTheme) -> NewTheme,
-    Renderer,
->
+pub fn themer<'a, Message, Theme, Renderer>(
+    theme: Option<Theme>,
+    content: impl Into<Element<'a, Message, Theme, Renderer>>,
+) -> Themer<'a, Message, Theme, Renderer>
 where
+    Theme: theme::Base,
     Renderer: core::Renderer,
-    NewTheme: Clone,
 {
-    Themer::new(move |_| new_theme.clone(), content)
+    Themer::new(theme, content)
 }
 
 /// Creates a [`PaneGrid`] with the given [`pane_grid::State`] and view function.
@@ -1897,4 +2078,30 @@ where
     Renderer: core::Renderer,
 {
     PaneGrid::new(state, view)
+}
+
+/// Creates a new [`Float`] widget with the given content.
+pub fn float<'a, Message, Theme, Renderer>(
+    content: impl Into<Element<'a, Message, Theme, Renderer>>,
+) -> Float<'a, Message, Theme, Renderer>
+where
+    Theme: float::Catalog,
+    Renderer: core::Renderer,
+{
+    Float::new(content)
+}
+
+/// Creates a new [`Responsive`] widget with a closure that produces its
+/// contents.
+///
+/// The `view` closure will receive the maximum available space for
+/// the [`Responsive`] during layout. You can use this [`Size`] to
+/// conditionally build the contents.
+pub fn responsive<'a, Message, Theme, Renderer>(
+    f: impl Fn(Size) -> Element<'a, Message, Theme, Renderer> + 'a,
+) -> Responsive<'a, Message, Theme, Renderer>
+where
+    Renderer: core::Renderer,
+{
+    Responsive::new(f)
 }

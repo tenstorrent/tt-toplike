@@ -52,15 +52,15 @@ use std::ops::RangeInclusive;
 ///     progress_bar(0.0..=100.0, state.progress).into()
 /// }
 /// ```
-#[allow(missing_debug_implementations)]
 pub struct ProgressBar<'a, Theme = crate::Theme>
 where
     Theme: Catalog,
 {
     range: RangeInclusive<f32>,
     value: f32,
-    width: Length,
-    height: Option<Length>,
+    length: Length,
+    girth: Length,
+    is_vertical: bool,
     class: Theme::Class<'a>,
 }
 
@@ -68,8 +68,8 @@ impl<'a, Theme> ProgressBar<'a, Theme>
 where
     Theme: Catalog,
 {
-    /// The default height of a [`ProgressBar`].
-    pub const DEFAULT_HEIGHT: f32 = 30.0;
+    /// The default girth of a [`ProgressBar`].
+    pub const DEFAULT_GIRTH: f32 = 30.0;
 
     /// Creates a new [`ProgressBar`].
     ///
@@ -80,21 +80,30 @@ where
         ProgressBar {
             value: value.clamp(*range.start(), *range.end()),
             range,
-            width: Length::Fill,
-            height: None,
+            length: Length::Fill,
+            girth: Length::from(Self::DEFAULT_GIRTH),
+            is_vertical: false,
             class: Theme::default(),
         }
     }
 
     /// Sets the width of the [`ProgressBar`].
-    pub fn width(mut self, width: impl Into<Length>) -> Self {
-        self.width = width.into();
+    pub fn length(mut self, length: impl Into<Length>) -> Self {
+        self.length = length.into();
         self
     }
 
     /// Sets the height of the [`ProgressBar`].
-    pub fn height(mut self, height: impl Into<Length>) -> Self {
-        self.height = Some(height.into());
+    pub fn girth(mut self, girth: impl Into<Length>) -> Self {
+        self.girth = girth.into();
+        self
+    }
+
+    /// Turns the [`ProgressBar`] into a vertical [`ProgressBar`].
+    ///
+    /// By default, a [`ProgressBar`] is horizontal.
+    pub fn vertical(mut self) -> Self {
+        self.is_vertical = true;
         self
     }
 
@@ -115,37 +124,49 @@ where
         self.class = class.into();
         self
     }
+
+    fn width(&self) -> Length {
+        if self.is_vertical {
+            self.girth
+        } else {
+            self.length
+        }
+    }
+
+    fn height(&self) -> Length {
+        if self.is_vertical {
+            self.length
+        } else {
+            self.girth
+        }
+    }
 }
 
-impl<'a, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for ProgressBar<'a, Theme>
+impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for ProgressBar<'_, Theme>
 where
     Theme: Catalog,
     Renderer: core::Renderer,
 {
     fn size(&self) -> Size<Length> {
         Size {
-            width: self.width,
-            height: self.height.unwrap_or(Length::Fixed(Self::DEFAULT_HEIGHT)),
+            width: self.width(),
+            height: self.height(),
         }
     }
 
     fn layout(
-        &self,
+        &mut self,
         _tree: &mut Tree,
         _renderer: &Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        layout::atomic(
-            limits,
-            self.width,
-            self.height.unwrap_or(Length::Fixed(Self::DEFAULT_HEIGHT)),
-        )
+        layout::atomic(limits, self.width(), self.height())
     }
 
     fn draw(
         &self,
-        _state: &Tree,
+        _tree: &Tree,
         renderer: &mut Renderer,
         theme: &Theme,
         _style: &renderer::Style,
@@ -156,11 +177,16 @@ where
         let bounds = layout.bounds();
         let (range_start, range_end) = self.range.clone().into_inner();
 
-        let active_progress_width = if range_start >= range_end {
+        let length = if self.is_vertical {
+            bounds.height
+        } else {
+            bounds.width
+        };
+
+        let active_progress_length = if range_start >= range_end {
             0.0
         } else {
-            bounds.width * (self.value - range_start)
-                / (range_end - range_start)
+            length * (self.value - range_start) / (range_end - range_start)
         };
 
         let style = theme.style(&self.class);
@@ -174,13 +200,23 @@ where
             style.background,
         );
 
-        if active_progress_width > 0.0 {
+        if active_progress_length > 0.0 {
+            let bounds = if self.is_vertical {
+                Rectangle {
+                    y: bounds.y + bounds.height - active_progress_length,
+                    height: active_progress_length,
+                    ..bounds
+                }
+            } else {
+                Rectangle {
+                    width: active_progress_length,
+                    ..bounds
+                }
+            };
+
             renderer.fill_quad(
                 renderer::Quad {
-                    bounds: Rectangle {
-                        width: active_progress_width,
-                        ..bounds
-                    },
+                    bounds,
                     border: Border {
                         color: Color::TRANSPARENT,
                         ..style.border
@@ -208,7 +244,7 @@ where
 }
 
 /// The appearance of a progress bar.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Style {
     /// The [`Background`] of the progress bar.
     pub background: Background,
@@ -251,10 +287,7 @@ impl Catalog for Theme {
 pub fn primary(theme: &Theme) -> Style {
     let palette = theme.extended_palette();
 
-    styled(
-        palette.background.strong.color,
-        palette.primary.strong.color,
-    )
+    styled(palette.background.strong.color, palette.primary.base.color)
 }
 
 /// The secondary style of a [`ProgressBar`].
@@ -272,6 +305,13 @@ pub fn success(theme: &Theme) -> Style {
     let palette = theme.extended_palette();
 
     styled(palette.background.strong.color, palette.success.base.color)
+}
+
+/// The warning style of a [`ProgressBar`].
+pub fn warning(theme: &Theme) -> Style {
+    let palette = theme.extended_palette();
+
+    styled(palette.background.strong.color, palette.warning.base.color)
 }
 
 /// The danger style of a [`ProgressBar`].

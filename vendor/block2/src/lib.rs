@@ -24,144 +24,38 @@
 //! [`fn` item]: https://doc.rust-lang.org/reference/types/function-item.html
 //!
 //!
-//! ## External functions using blocks
+//! ## Using blocks
 //!
-//! To declare external functions or methods that takes blocks, use
-//! `&Block<dyn Fn(Params) -> R>` or `Option<&Block<dyn Fn(Args) -> R>>`,
-//! where `Params` is the parameter types, and `R` is the return type.
-//!
-//! In the next few examples, we're going to work with a function
-//! `check_addition`, that takes as parameter a block that adds two integers,
-//! and checks that the addition is correct.
-//!
-//! Such a function could be written in C like in the following.
-//!
-//! ```objc
-//! #include <cassert>
-//! #include <stdint.h>
-//! #include <Block.h>
-//!
-//! void check_addition(int32_t (^block)(int32_t, int32_t)) {
-//!     assert(block(5, 8) == 13);
-//! }
-//! ```
-//!
-//! An `extern "C" { ... }` declaration for that function would then be:
-//!
-//! ```
-//! use block2::Block;
-//!
-//! extern "C" {
-//!     fn check_addition(block: &Block<dyn Fn(i32, i32) -> i32>);
-//! }
-//! ```
-//!
-//! This can similarly be done inside external methods declared with
-//! [`objc2::extern_methods!`].
-//!
-//! ```
-//! use block2::Block;
-//! use objc2::extern_methods;
-//! #
-//! # use objc2::ClassType;
-//! # objc2::extern_class!(
-//! #     struct MyClass;
-//! #
-//! #     unsafe impl ClassType for MyClass {
-//! #         type Super = objc2::runtime::NSObject;
-//! #         type Mutability = objc2::mutability::InteriorMutable;
-//! #         const NAME: &'static str = "NSObject";
-//! #     }
-//! # );
-//!
-//! extern_methods!(
-//!     unsafe impl MyClass {
-//!         #[method(checkAddition:)]
-//!         pub fn checkAddition(&self, block: &Block<dyn Fn(i32, i32) -> i32>);
-//!     }
-//! );
-//! ```
-//!
-//! If the function/method allowed passing `NULL` blocks, the type would be
-//! `Option<&Block<dyn Fn(i32, i32) -> i32>>` instead.
-//!
-//!
-//! ## Invoking blocks
-//!
-//! We can also define the external function in Rust, and expose it to
-//! Objective-C. To do this, we can use [`Block::call`] to invoke the block
-//! inside the function.
-//!
-//! ```
-//! use block2::Block;
-//!
-//! #[no_mangle]
-//! extern "C" fn check_addition(block: &Block<dyn Fn(i32, i32) -> i32>) {
-//!     assert_eq!(block.call((5, 8)), 13);
-//! }
-//! ```
-//!
-//! Note the extra parentheses in the `call` method, since the arguments must
-//! be passed as a tuple.
-//!
-//!
-//! ## Creating blocks
-//!
-//! Creating a block to pass to Objective-C can be done with [`RcBlock`] or
-//! [`StackBlock`], depending on if you want to move the block to the heap,
-//! or let the callee decide if it needs to do that.
-//!
-//! To call such a function / method, we could create a new block from a
-//! closure using [`RcBlock::new`].
+//! You can create a new block from a closure using [`RcBlock::new`]. This can
+//! then be used to call functions or Objective-C methods that takes a block:
 //!
 //! ```
 //! use block2::RcBlock;
 //! #
-//! # extern "C" fn check_addition(block: &block2::Block<dyn Fn(i32, i32) -> i32>) {
-//! #     assert_eq!(block.call((5, 8)), 13);
-//! # }
-//!
-//! let block = RcBlock::new(|a, b| a + b);
-//! check_addition(&block);
-//! ```
-//!
-//! This creates the block on the heap. If the external function you're
-//! calling is not going to copy the block, it may be more performant if you
-//! construct a [`StackBlock`] directly, using [`StackBlock::new`].
-//!
-//! Note that this requires that the closure is [`Clone`], as the external
-//! code is allowed to copy the block to the heap in the future.
-//!
-//! ```
-//! use block2::StackBlock;
+//! # struct ExampleObject;
 //! #
-//! # extern "C" fn check_addition(block: &block2::Block<dyn Fn(i32, i32) -> i32>) {
-//! #     assert_eq!(block.call((5, 8)), 13);
+//! # impl ExampleObject {
+//! #     fn someMethod(&self, block: &block2::Block<dyn Fn(i32, i32) -> i32>) {
+//! #         assert_eq!(block.call((5, 8)), 18);
+//! #     }
 //! # }
-//!
-//! let block = StackBlock::new(|a, b| a + b);
-//! check_addition(&block);
-//! ```
-//!
-//! As an optimization, if your closure doesn't capture any variables (as in
-//! the above examples), you can use the [`global_block!`] macro to create a
-//! static block.
-//!
-//! ```
-//! use block2::global_block;
 //! #
-//! # extern "C" fn check_addition(block: &block2::Block<dyn Fn(i32, i32) -> i32>) {
-//! #     assert_eq!(block.call((5, 8)), 13);
-//! # }
+//! # let obj = ExampleObject;
 //!
-//! global_block! {
-//!     static BLOCK = |a: i32, b: i32| -> i32 {
-//!         a + b
-//!     };
-//! }
-//!
-//! check_addition(&BLOCK);
+//! let val = 5;
+//! let block = RcBlock::new(move |a, b| a + b + val);
+//! obj.someMethod(&block);
 //! ```
+//!
+//!
+//! ## My block isn't being run?
+//!
+//! Most of the time, blocks are used to do asynchronous work; but just like
+//! futures in Rust don't do anything unless polled, a lot of Apple APIs won't
+//! call your block unless a [run loop][run_loop] is active, see that link for
+//! more information on how to do so.
+//!
+//! [run_loop]: objc2::topics::run_loop
 //!
 //!
 //! ## Lifetimes
@@ -206,10 +100,170 @@
 //! ## Mutability
 //!
 //! Blocks are generally assumed to be shareable, and as such can only very
-//! rarely be made mutable. In particular, there is no good way to prevent
-//! re-entrancy.
+//! rarely be made mutable.
 //!
-//! You will likely have to use interior mutability instead.
+//! You will likely have to use interior mutability helpers like [`RefCell`]
+//! or [`Cell`] instead, see below.
+//!
+//! [`RefCell`]: core::cell::RefCell
+//! [`Cell`]: core::cell::Cell
+//!
+//!
+//! ### Transforming [`FnMut`] to a block
+//!
+//! Mutable closures differs from immutable ones in part in that they need to
+//! avoid re-entrancy.
+//!
+//! The below example transforms [`FnMut`] to [`Fn`] using a [`RefCell`]. We
+//! do not include this function as part of the public API of `block2`, as the
+//! specifics are very dependent on your use-case, and can be optimized with
+//! e.g. a [`Cell`] if your closure is [`Copy`] or if you do not care about
+//! unwind safety, or with [`UnsafeCell`] if you are able to unsafely
+//! guarantee the absence of re-entrancy.
+//!
+//! [`UnsafeCell`]: core::cell::UnsafeCell
+//!
+//! ```
+//! use std::cell::RefCell;
+//! use block2::RcBlock;
+//!
+//! fn fnmut_to_fn(closure: impl FnMut()) -> impl Fn() {
+//!     let cell = RefCell::new(closure);
+//!
+//!     move || {
+//!         let mut closure = cell.try_borrow_mut().expect("re-entrant call");
+//!         (closure)()
+//!     }
+//! }
+//!
+//! let mut x = 0;
+//! let b = RcBlock::new(fnmut_to_fn(|| {
+//!     x += 1;
+//! }));
+//! b.call(());
+//! b.call(());
+//! drop(b);
+//! assert_eq!(x, 2);
+//! ```
+//!
+//!
+//! ### Transforming [`FnOnce`] to a block
+//!
+//! [`FnOnce`] is similar to [`FnMut`] in that we must protect against
+//! re-entrancy, with the addition that it can also only be called once.
+//!
+//! Ensuring that it can be called once can be done by taking the closure
+//! out of an [`Option`] as shown in the example below. We can use [`Cell`]
+//! instead of [`RefCell`] here, since we never need to put the closure "back"
+//! for later use (like we need to do with `FnMut` above).
+//!
+//! In certain cases you may be able to do micro-optimizations, namely to use
+//! a [`ManuallyDrop`], if you wanted to optimize with the assumption that the
+//! block is always called, or [`unwrap_unchecked`] if you wanted to optimize
+//! with the assumption that it is only called once.
+//!
+//! [`Cell`]: core::cell::Cell
+//! [`ManuallyDrop`]: core::mem::ManuallyDrop
+//! [`unwrap_unchecked`]: core::option::Option::unwrap_unchecked
+//!
+//! ```
+//! use std::cell::Cell;
+//! use block2::RcBlock;
+//!
+//! fn fnonce_to_fn(closure: impl FnOnce()) -> impl Fn() {
+//!     let cell = Cell::new(Some(closure));
+//!     move || {
+//!         let closure = cell.take().expect("called twice");
+//!         closure()
+//!     }
+//! }
+//!
+//! let v = vec![1, 2, 3];
+//! let b = RcBlock::new(fnonce_to_fn(move || {
+//!     drop(v);
+//! }));
+//! b.call(());
+//! ```
+//!
+//!
+//! ## External functions using blocks
+//!
+//! To declare external functions or methods that takes blocks, use
+//! `&Block<dyn Fn(Params) -> R>` or `Option<&Block<dyn Fn(Args) -> R>>`,
+//! where `Params` is the parameter types, and `R` is the return type.
+//!
+//! For this example, consider the function `check_addition` which takes a
+//! single parameter, namely a block that adds two integers, and then checks
+//! that the addition is correct.
+//!
+//! Such a function could be written in C like in the following.
+//!
+//! ```objc
+//! #include <cassert>
+//! #include <stdint.h>
+//! #include <Block.h>
+//!
+//! void check_addition(int32_t (^block)(int32_t, int32_t)) {
+//!     assert(block(5, 8) == 13);
+//! }
+//! ```
+//!
+//! An `extern "C" { ... }` declaration for that function would then be:
+//!
+//! ```
+//! use block2::Block;
+//!
+//! extern "C" {
+//!     fn check_addition(block: &Block<dyn Fn(i32, i32) -> i32>);
+//! }
+//! ```
+//!
+//! This can similarly be done for Objcective-C methods declared with
+//! [`objc2::extern_methods!`] (though most of the time, the [framework
+//! crates][framework-crates] will take care of that for you).
+//!
+//! ```
+//! use block2::Block;
+//! use objc2::extern_methods;
+//! #
+//! # use objc2::ClassType;
+//! # objc2::extern_class!(
+//! #     #[unsafe(super(objc2::runtime::NSObject))]
+//! #     #[name = "NSObject"]
+//! #     struct MyClass;
+//! # );
+//!
+//! impl MyClass {
+//!     extern_methods!(
+//!         #[unsafe(method(checkAddition:))]
+//!         pub fn checkAddition(&self, block: &Block<dyn Fn(i32, i32) -> i32>);
+//!     );
+//! }
+//! ```
+//!
+//! If the function/method allows passing `NULL` blocks, the type should be
+//! `Option<&Block<dyn Fn(i32, i32) -> i32>>` instead.
+//!
+//! [framework-crates]: objc2::topics::about_generated
+//!
+//!
+//! ## Invoking blocks
+//!
+//! We can also define the external function in Rust, and expose it to
+//! Objective-C. To do this, we can use [`Block::call`] to invoke the block
+//! inside the function.
+//!
+//! ```
+//! use block2::Block;
+//!
+//! #[no_mangle]
+//! extern "C" fn check_addition(block: &Block<dyn Fn(i32, i32) -> i32>) {
+//!     assert_eq!(block.call((5, 8)), 13);
+//! }
+//! ```
+//!
+//! Note the extra parentheses in the `call` method, since the arguments must
+//! be passed as a tuple.
 //!
 //!
 //! ## Specifying a runtime
@@ -220,13 +274,10 @@
 //! account when linking.
 //!
 //! You can choose the desired runtime by using the relevant cargo feature
-//! flags, see the following sections (you might have to disable the default
-//! `"apple"` feature first).
+//! flags, see the following sections.
 //!
 //!
 //! ### Apple's [`libclosure`](https://github.com/apple-oss-distributions/libclosure)
-//!
-//! - Feature flag: `apple`.
 //!
 //! This is the most common and most sophisticated runtime, and it has quite a
 //! lot more features than the specification mandates.
@@ -300,19 +351,22 @@
 //! [flag]: https://clang.llvm.org/docs/ClangCommandLineReference.html#cmdoption-clang-fblocks
 
 #![no_std]
+#![allow(rustdoc::broken_intra_doc_links)] // FIXME link to objc2::topics
 #![warn(missing_docs)]
+#![warn(missing_debug_implementations)]
 #![warn(clippy::missing_errors_doc)]
 #![warn(clippy::missing_panics_doc)]
 // Update in Cargo.toml as well.
-#![doc(html_root_url = "https://docs.rs/block2/0.5.1")]
-#![cfg_attr(docsrs, feature(doc_auto_cfg, doc_cfg_hide))]
-#![cfg_attr(docsrs, doc(cfg_hide(doc)))]
+#![doc(html_root_url = "https://docs.rs/block2/0.6.2")]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(feature = "unstable-coerce-pointee", feature(derive_coerce_pointee))]
+
+#[cfg(not(feature = "alloc"))]
+compile_error!("The `alloc` feature currently must be enabled.");
 
 extern crate alloc;
+#[cfg(feature = "std")]
 extern crate std;
-
-#[cfg(not(feature = "std"))]
-compile_error!("The `std` feature currently must be enabled.");
 
 #[cfg(all(
     not(docsrs),
@@ -323,7 +377,7 @@ compile_error!("The `std` feature currently must be enabled.");
         feature = "unstable-objfw",
     ))
 ))]
-compile_error!("A runtime must be selected");
+compile_error!("`block2` only works on Apple platforms. Pass `--target aarch64-apple-darwin` or similar to compile for macOS.\n(If you're absolutely certain that you want to use `block2` on Linux/Windows, you can specify that with the `gnustep-x-y`/`compiler-rt` Cargo features instead).");
 
 #[cfg(any(
     all(feature = "compiler-rt", feature = "gnustep-1-7"),
@@ -369,6 +423,7 @@ extern crate objc2 as _;
 mod abi;
 mod block;
 mod debug;
+mod encoding;
 pub mod ffi;
 mod global;
 mod rc_block;
@@ -379,7 +434,7 @@ pub use self::block::Block;
 pub use self::global::GlobalBlock;
 pub use self::rc_block::RcBlock;
 pub use self::stack::StackBlock;
-pub use self::traits::{BlockFn, IntoBlock};
+pub use self::traits::{BlockFn, IntoBlock, ManualBlockEncoding};
 
 /// Deprecated alias for a `'static` `StackBlock`.
 #[deprecated = "renamed to `StackBlock`"]
@@ -393,3 +448,9 @@ pub type ConcreteBlock<A, R, Closure> = StackBlock<'static, A, R, Closure>;
 // just using `Box`, `Rc` or `Arc`, and since `__block` variables are
 // basically never exposed as part of a (public) function's API, we won't
 // implement such a thing yet.
+
+/// Helper type to allow changing [`Block`] in the future without affecting
+/// framework crates.
+///
+/// Tracked in [#572](https://github.com/madsmtm/objc2/issues/572).
+pub type DynBlock<F> = crate::Block<F>;

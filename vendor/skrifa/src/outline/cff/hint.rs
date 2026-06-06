@@ -20,7 +20,7 @@ const MAX_HINTS: usize = 96;
 
 // One bit per stem hint
 // <https://gitlab.freedesktop.org/freetype/freetype/-/blob/80a507a6b8e3d2906ad2c8ba69329bd2fb2a85ef/src/psaux/pshints.h#L80>
-const HINT_MASK_SIZE: usize = (MAX_HINTS + 7) / 8;
+const HINT_MASK_SIZE: usize = MAX_HINTS.div_ceil(8);
 
 // Constant for hint adjustment and em box hint placement.
 // <https://gitlab.freedesktop.org/freetype/freetype/-/blob/80a507a6b8e3d2906ad2c8ba69329bd2fb2a85ef/src/psaux/psblues.h#L114>
@@ -143,12 +143,7 @@ impl HintState {
         let mut zone_ix = 0usize;
         // Copy blues and other blues to a combined array of top and bottom zones.
         for blue in params.blues.values().iter().take(MAX_BLUES) {
-            // FreeType loads blues as integers and then expands to 16.16
-            // at initialization. We load them as 16.16 so floor them here
-            // to ensure we match.
-            // <https://gitlab.freedesktop.org/freetype/freetype/-/blob/80a507a6b8e3d2906ad2c8ba69329bd2fb2a85ef/src/psaux/psblues.c#L190>
-            let bottom = blue.0.floor();
-            let top = blue.1.floor();
+            let (bottom, top) = *blue;
             let zone_height = top - bottom;
             if zone_height < Fixed::ZERO {
                 // Reject zones with negative height
@@ -173,8 +168,7 @@ impl HintState {
             zone_ix += 1;
         }
         for blue in params.other_blues.values().iter().take(MAX_OTHER_BLUES) {
-            let bottom = blue.0.floor();
-            let top = blue.1.floor();
+            let (bottom, top) = *blue;
             let zone_height = top - bottom;
             if zone_height < Fixed::ZERO {
                 // Reject zones with negative height
@@ -267,19 +261,22 @@ impl HintState {
     ///
     /// See <https://gitlab.freedesktop.org/freetype/freetype/-/blob/80a507a6b8e3d2906ad2c8ba69329bd2fb2a85ef/src/psaux/psblues.c#L465>
     fn capture(&self, bottom_edge: &mut Hint, top_edge: &mut Hint) -> bool {
+        // We use some wrapping arithmetic on this value below to avoid panics
+        // on overflow and match FreeType's behavior
+        // See <https://github.com/googlefonts/fontations/issues/1193>
         let fuzz = self.blue_fuzz;
         let mut captured = false;
         let mut adjustment = Fixed::ZERO;
         for zone in self.zones() {
             if zone.is_bottom
                 && bottom_edge.is_bottom()
-                && (zone.cs_bottom_edge - fuzz) <= bottom_edge.cs_coord
-                && bottom_edge.cs_coord <= (zone.cs_top_edge + fuzz)
+                && zone.cs_bottom_edge.wrapping_sub(fuzz) <= bottom_edge.cs_coord
+                && bottom_edge.cs_coord <= zone.cs_top_edge.wrapping_add(fuzz)
             {
                 // Bottom edge captured by bottom zone.
                 adjustment = if self.suppress_overshoot {
                     zone.ds_flat_edge
-                } else if zone.cs_top_edge - bottom_edge.cs_coord >= self.blue_shift {
+                } else if zone.cs_top_edge.wrapping_sub(bottom_edge.cs_coord) >= self.blue_shift {
                     // Guarantee minimum of 1 pixel overshoot
                     bottom_edge
                         .ds_coord
@@ -294,13 +291,13 @@ impl HintState {
             }
             if !zone.is_bottom
                 && top_edge.is_top()
-                && (zone.cs_bottom_edge - fuzz) <= top_edge.cs_coord
-                && top_edge.cs_coord <= (zone.cs_top_edge + fuzz)
+                && zone.cs_bottom_edge.wrapping_sub(fuzz) <= top_edge.cs_coord
+                && top_edge.cs_coord <= zone.cs_top_edge.wrapping_add(fuzz)
             {
                 // Top edge captured by top zone.
                 adjustment = if self.suppress_overshoot {
                     zone.ds_flat_edge
-                } else if top_edge.cs_coord - zone.cs_bottom_edge >= self.blue_shift {
+                } else if top_edge.cs_coord.wrapping_sub(zone.cs_bottom_edge) >= self.blue_shift {
                     // Guarantee minimum of 1 pixel overshoot
                     top_edge
                         .ds_coord
@@ -1014,7 +1011,7 @@ impl<'a, S: CommandSink> HintingSink<'a, S> {
     }
 }
 
-impl<'a, S: CommandSink> CommandSink for HintingSink<'a, S> {
+impl<S: CommandSink> CommandSink for HintingSink<'_, S> {
     fn hstem(&mut self, min: Fixed, max: Fixed) {
         self.add_stem(min, max);
     }
@@ -1045,6 +1042,18 @@ impl<'a, S: CommandSink> CommandSink for HintingSink<'a, S> {
             Fixed::ZERO,
             false,
         );
+    }
+
+    fn clear_hints(&mut self) {
+        // This resets all hinting state that is derived from accumulated
+        // stem hints.
+        // This is used when evaluating the implied SEAC operator which
+        // processes a base char followed by an accent char and expects
+        // hinting state to be fresh for each.
+        self.stem_count = 0;
+        self.map = HintMap::new(self.state.scale);
+        self.initial_map = HintMap::new(self.state.scale);
+        self.mask = HintMask::all();
     }
 
     fn move_to(&mut self, x: Fixed, y: Fixed) {
@@ -1105,9 +1114,8 @@ mod tests {
     use read_fonts::{tables::postscript::charstring::CommandSink, types::F2Dot14, FontRef};
 
     use super::{
-        super::OutlinesCommon, BlueZone, Blues, Fixed, Hint, HintMap, HintMask, HintParams,
-        HintState, HintingSink, StemHint, GHOST_BOTTOM, GHOST_TOP, HINT_MASK_SIZE, LOCKED,
-        PAIR_BOTTOM, PAIR_TOP,
+        BlueZone, Blues, Fixed, Hint, HintMap, HintMask, HintParams, HintState, HintingSink,
+        StemHint, GHOST_BOTTOM, GHOST_TOP, HINT_MASK_SIZE, LOCKED, PAIR_BOTTOM, PAIR_TOP,
     };
 
     fn make_hint_state() -> HintState {
@@ -1303,8 +1311,7 @@ mod tests {
     #[test]
     fn hint_mapping() {
         let font = FontRef::new(font_test_data::CANTARELL_VF_TRIMMED).unwrap();
-        let base = OutlinesCommon::new(&font).unwrap();
-        let cff_font = super::super::Outlines::new(&base).unwrap();
+        let cff_font = super::super::Outlines::new(&font).unwrap();
         let state = cff_font
             .subfont(0, Some(8.0), &[F2Dot14::from_f32(-1.0); 2])
             .unwrap()

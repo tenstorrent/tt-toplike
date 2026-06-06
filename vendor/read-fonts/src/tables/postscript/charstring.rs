@@ -2,8 +2,9 @@
 
 use super::{BlendState, Error, Index, Stack};
 use crate::{
+    tables::{cff::Cff, postscript::StringId},
     types::{Fixed, Point},
-    Cursor,
+    Cursor, FontData, FontRead,
 };
 
 /// Maximum nesting depth for subroutine calls.
@@ -39,6 +40,8 @@ pub trait CommandSink {
     /// Bitmask defining the counter hints that should be made active for the
     /// commands that follow.
     fn counter_mask(&mut self, mask: &[u8]) {}
+    /// Clear accumulated stem hints and all data derived from them.
+    fn clear_hints(&mut self) {}
 }
 
 /// Evaluates the given charstring and emits the resulting commands to the
@@ -54,13 +57,22 @@ pub trait CommandSink {
 /// `Error::MissingBlendState` will be returned if a blend operator is
 /// present.
 pub fn evaluate(
-    charstring_data: &[u8],
+    cff_data: &[u8],
+    charstrings: Index,
     global_subrs: Index,
     subrs: Option<Index>,
     blend_state: Option<BlendState>,
+    charstring_data: &[u8],
     sink: &mut impl CommandSink,
 ) -> Result<(), Error> {
-    let mut evaluator = Evaluator::new(global_subrs, subrs, blend_state, sink);
+    let mut evaluator = Evaluator::new(
+        cff_data,
+        charstrings,
+        global_subrs,
+        subrs,
+        blend_state,
+        sink,
+    );
     evaluator.evaluate(charstring_data, 0)?;
     Ok(())
 }
@@ -68,6 +80,8 @@ pub fn evaluate(
 /// Transient state for evaluating a charstring and handling recursive
 /// subroutine calls.
 struct Evaluator<'a, S> {
+    cff_data: &'a [u8],
+    charstrings: Index<'a>,
     global_subrs: Index<'a>,
     subrs: Option<Index<'a>>,
     blend_state: Option<BlendState<'a>>,
@@ -86,12 +100,16 @@ where
     S: CommandSink,
 {
     fn new(
+        cff_data: &'a [u8],
+        charstrings: Index<'a>,
         global_subrs: Index<'a>,
         subrs: Option<Index<'a>>,
         blend_state: Option<BlendState<'a>>,
         sink: &'a mut S,
     ) -> Self {
         Self {
+            cff_data,
+            charstrings,
             global_subrs,
             subrs,
             blend_state,
@@ -126,9 +144,13 @@ where
                     self.stack.push(num)?;
                 }
                 _ => {
-                    let operator = Operator::read(&mut cursor, b0)?;
-                    if !self.evaluate_operator(operator, &mut cursor, nesting_depth)? {
-                        break;
+                    // FreeType ignores reserved (unknown) operators.
+                    // See <https://gitlab.freedesktop.org/freetype/freetype/-/blob/80a507a6b8e3d2906ad2c8ba69329bd2fb2a85ef/src/psaux/psintrp.c#L703>
+                    // and fontations issue <https://github.com/googlefonts/fontations/issues/1680>
+                    if let Ok(operator) = Operator::read(&mut cursor, b0) {
+                        if !self.evaluate_operator(operator, &mut cursor, nesting_depth)? {
+                            break;
+                        }
                     }
                 }
             }
@@ -195,11 +217,12 @@ where
                 return Ok(false);
             }
             // End the current charstring
-            // TODO: handle implied 'seac' operator
             // Spec: <https://adobe-type-tools.github.io/font-tech-notes/pdfs/5177.Type2.pdf#page=21>
             // FT: <https://gitlab.freedesktop.org/freetype/freetype/-/blob/80a507a6b8e3d2906ad2c8ba69329bd2fb2a85ef/src/psaux/psintrp.c#L2463>
             EndChar => {
-                if !self.stack.is_empty() && !self.have_read_width {
+                if self.stack.len() == 4 || self.stack.len() == 5 && !self.have_read_width {
+                    self.handle_seac(nesting_depth)?;
+                } else if !self.stack.is_empty() && !self.have_read_width {
                     self.have_read_width = true;
                     self.stack.clear();
                 }
@@ -266,7 +289,7 @@ where
                     i += 2;
                 }
                 self.stem_count += len / 2;
-                let count = (self.stem_count + 7) / 8;
+                let count = self.stem_count.div_ceil(8);
                 let mask = cursor.read_array::<u8>(count)?;
                 if operator == HintMask {
                     self.sink.hint_mask(mask);
@@ -361,7 +384,8 @@ where
                     self.y += self.stack.get_fixed(0)?;
                     self.stack_ix = 1;
                 }
-                while self.coords_remaining() > 0 {
+                // We need at least 4 coordinates to emit these curves
+                while self.coords_remaining() >= 4 {
                     self.emit_curves([DxY, DxDy, DxY])?;
                 }
                 self.reset_stack();
@@ -447,8 +471,56 @@ where
         Ok(true)
     }
 
+    /// See `endchar` in Appendix C at <https://adobe-type-tools.github.io/font-tech-notes/pdfs/5177.Type2.pdf#page=35>
+    fn handle_seac(&mut self, nesting_depth: u32) -> Result<(), Error> {
+        // handle implied seac operator
+        let cff = Cff::read(FontData::new(self.cff_data))?;
+        let charset = cff.charset(0)?.ok_or(Error::MissingCharset)?;
+        let seac_to_gid = |code: i32| {
+            let code: u8 = code.try_into().ok()?;
+            let sid = *super::encoding::STANDARD_ENCODING.get(code as usize)?;
+            charset.glyph_id(StringId::new(sid as u16)).ok()
+        };
+        let accent_code = self.stack.pop_i32()?;
+        let accent_gid = seac_to_gid(accent_code).ok_or(Error::InvalidSeacCode(accent_code))?;
+        let base_code = self.stack.pop_i32()?;
+        let base_gid = seac_to_gid(base_code).ok_or(Error::InvalidSeacCode(base_code))?;
+        let dy = self.stack.pop_fixed()?;
+        let dx = self.stack.pop_fixed()?;
+        if !self.stack.is_empty() && !self.have_read_width {
+            self.stack.pop_i32()?;
+            self.have_read_width = true;
+        }
+        // The accent must be evaluated first to match FreeType but the
+        // base should be placed at the current position, so save it
+        let x = self.x;
+        let y = self.y;
+        self.x = dx;
+        self.y = dy;
+        let accent_charstring = self.charstrings.get(accent_gid.to_u32() as usize)?;
+        // FreeType calls cf2_interpT2CharString for each component
+        // which uses a fresh set of stem hints. Since our hinter is in
+        // a separate crate, we signal this through the sink. Also
+        // reset our own stem count so we read the correct number of
+        // bytes for each hint mask instruction.
+        // See <https://gitlab.freedesktop.org/freetype/freetype/-/blob/80a507a6b8e3d2906ad2c8ba69329bd2fb2a85ef/src/psaux/psintrp.c#L1443>
+        // and <https://gitlab.freedesktop.org/freetype/freetype/-/blob/80a507a6b8e3d2906ad2c8ba69329bd2fb2a85ef/src/psaux/psintrp.c#L540>
+        self.sink.clear_hints();
+        self.stem_count = 0;
+        self.evaluate(accent_charstring, nesting_depth + 1)?;
+        self.x = x;
+        self.y = y;
+        let base_charstring = self.charstrings.get(base_gid.to_u32() as usize)?;
+        self.sink.clear_hints();
+        self.stem_count = 0;
+        self.evaluate(base_charstring, nesting_depth + 1)
+    }
+
     fn coords_remaining(&self) -> usize {
-        self.stack.len() - self.stack_ix
+        // This is overly defensive to avoid overflow but in the case of
+        // broken fonts, just return 0 when stack_ix > stack_len to prevent
+        // potential runaway while loops in the evaluator if this wraps
+        self.stack.len().saturating_sub(self.stack_ix)
     }
 
     fn emit_curves<const N: usize>(&mut self, modes: [PointMode; N]) -> Result<(), Error> {
@@ -704,10 +776,12 @@ mod tests {
         let blend_state = BlendState::new(store, coords, 0).unwrap();
         let mut commands = CaptureCommandSink::default();
         evaluate(
-            charstring,
+            &[],
+            Index::Empty,
             global_subrs,
             None,
             Some(blend_state),
+            charstring,
             &mut commands,
         )
         .unwrap();
@@ -782,7 +856,16 @@ mod tests {
         let global_subrs = Index::new(&empty_index_bytes, false).unwrap();
         use Command::*;
         let mut commands = CaptureCommandSink::default();
-        evaluate(charstring, global_subrs, None, None, &mut commands).unwrap();
+        evaluate(
+            &[],
+            Index::Empty,
+            global_subrs,
+            None,
+            None,
+            charstring,
+            &mut commands,
+        )
+        .unwrap();
         // Expected results from extracted glyph data in
         // font-test-data/test_data/extracted/charstring_path_ops-glyphs.txt
         // --------------------------------------------------------------------
@@ -1010,5 +1093,48 @@ mod tests {
             LineTo(Fixed::from_i32(-203), Fixed::from_i32(-855)),
         ];
         assert_eq!(&commands.0, expected);
+    }
+
+    /// Fuzzer caught subtract with overflow
+    /// <https://g-issues.oss-fuzz.com/issues/383609770>
+    #[test]
+    fn coords_remaining_avoid_overflow() {
+        // Test case:
+        // Evaluate HHCURVETO operator with 2 elements on the stack
+        let mut commands = CaptureCommandSink::default();
+        let mut evaluator =
+            Evaluator::new(&[], Index::Empty, Index::Empty, None, None, &mut commands);
+        evaluator.stack.push(0).unwrap();
+        evaluator.stack.push(0).unwrap();
+        let mut cursor = FontData::new(&[]).cursor();
+        // Just don't panic
+        let _ = evaluator.evaluate_operator(Operator::HhCurveTo, &mut cursor, 0);
+    }
+
+    #[test]
+    fn ignore_reserved_operators() {
+        let charstring = &[
+            0u8, // reserved
+            32,  // push -107
+            22,  // hmoveto
+            2,   // reserved
+        ];
+        let empty_index_bytes = [0u8; 8];
+        let global_subrs = Index::new(&empty_index_bytes, false).unwrap();
+        let mut commands = CaptureCommandSink::default();
+        evaluate(
+            &[],
+            Index::Empty,
+            global_subrs,
+            None,
+            None,
+            charstring,
+            &mut commands,
+        )
+        .unwrap();
+        assert_eq!(
+            commands.0,
+            [Command::MoveTo(Fixed::from_i32(-107), Fixed::ZERO)]
+        );
     }
 }

@@ -2,13 +2,20 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
+
 use core::{cmp, fmt};
+
+#[cfg(not(feature = "std"))]
+use core_maths::CoreFloat;
 use unicode_segmentation::UnicodeSegmentation;
 
+#[cfg(feature = "swash")]
+use crate::Color;
+
 use crate::{
-    Affinity, Attrs, AttrsList, BidiParagraphs, BorrowedWithFontSystem, BufferLine, Color, Cursor,
+    Affinity, Align, Attrs, AttrsList, BidiParagraphs, BorrowedWithFontSystem, BufferLine, Cursor,
     FontSystem, LayoutCursor, LayoutGlyph, LayoutLine, LineEnding, LineIter, Motion, Scroll,
-    ShapeBuffer, ShapeLine, Shaping, Wrap,
+    ShapeLine, Shaping, Wrap,
 };
 
 /// A line of visible text for rendering
@@ -32,46 +39,45 @@ pub struct LayoutRun<'a> {
     pub line_w: f32,
 }
 
-impl<'a> LayoutRun<'a> {
+impl LayoutRun<'_> {
     /// Return the pixel span `Some((x_left, x_width))` of the highlighted area between `cursor_start`
     /// and `cursor_end` within this run, or None if the cursor range does not intersect this run.
     /// This may return widths of zero if `cursor_start == cursor_end`, if the run is empty, or if the
     /// region's left start boundary is the same as the cursor's end boundary or vice versa.
+    #[allow(clippy::missing_panics_doc)]
     pub fn highlight(&self, cursor_start: Cursor, cursor_end: Cursor) -> Option<(f32, f32)> {
         let mut x_start = None;
         let mut x_end = None;
         let rtl_factor = if self.rtl { 1. } else { 0. };
         let ltr_factor = 1. - rtl_factor;
-        for glyph in self.glyphs.iter() {
+        for glyph in self.glyphs {
             let cursor = self.cursor_from_glyph_left(glyph);
             if cursor >= cursor_start && cursor <= cursor_end {
                 if x_start.is_none() {
-                    x_start = Some(glyph.x + glyph.w * rtl_factor);
+                    x_start = Some(glyph.x + glyph.w.mul_add(rtl_factor, 0.0));
                 }
-                x_end = Some(glyph.x + glyph.w * rtl_factor);
+                x_end = Some(glyph.x + glyph.w.mul_add(rtl_factor, 0.0));
             }
             let cursor = self.cursor_from_glyph_right(glyph);
             if cursor >= cursor_start && cursor <= cursor_end {
                 if x_start.is_none() {
-                    x_start = Some(glyph.x + glyph.w * ltr_factor);
+                    x_start = Some(glyph.x + glyph.w.mul_add(ltr_factor, 0.0));
                 }
-                x_end = Some(glyph.x + glyph.w * ltr_factor);
+                x_end = Some(glyph.x + glyph.w.mul_add(ltr_factor, 0.0));
             }
         }
-        if let Some(x_start) = x_start {
+        x_start.map(|x_start| {
             let x_end = x_end.expect("end of cursor not found");
             let (x_start, x_end) = if x_start < x_end {
                 (x_start, x_end)
             } else {
                 (x_end, x_start)
             };
-            Some((x_start, x_end - x_start))
-        } else {
-            None
-        }
+            (x_start, x_end - x_start)
+        })
     }
 
-    fn cursor_from_glyph_left(&self, glyph: &LayoutGlyph) -> Cursor {
+    const fn cursor_from_glyph_left(&self, glyph: &LayoutGlyph) -> Cursor {
         if self.rtl {
             Cursor::new_with_affinity(self.line_i, glyph.end, Affinity::Before)
         } else {
@@ -79,7 +85,7 @@ impl<'a> LayoutRun<'a> {
         }
     }
 
-    fn cursor_from_glyph_right(&self, glyph: &LayoutGlyph) -> Cursor {
+    const fn cursor_from_glyph_right(&self, glyph: &LayoutGlyph) -> Cursor {
         if self.rtl {
             Cursor::new_with_affinity(self.line_i, glyph.start, Affinity::After)
         } else {
@@ -99,7 +105,7 @@ pub struct LayoutRunIter<'b> {
 }
 
 impl<'b> LayoutRunIter<'b> {
-    pub fn new(buffer: &'b Buffer) -> Self {
+    pub const fn new(buffer: &'b Buffer) -> Self {
         Self {
             buffer,
             line_i: buffer.scroll.line,
@@ -115,8 +121,8 @@ impl<'b> Iterator for LayoutRunIter<'b> {
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(line) = self.buffer.lines.get(self.line_i) {
-            let shape = line.shape_opt().as_ref()?;
-            let layout = line.layout_opt().as_ref()?;
+            let shape = line.shape_opt()?;
+            let layout = line.layout_opt()?;
             while let Some(layout_line) = layout.get(self.layout_i) {
                 self.layout_i += 1;
 
@@ -130,12 +136,12 @@ impl<'b> Iterator for LayoutRunIter<'b> {
                 let centering_offset = (line_height - glyph_height) / 2.0;
                 let line_y = line_top + centering_offset + layout_line.max_ascent;
                 if let Some(height) = self.buffer.height_opt {
-                    if line_y > height {
+                    if line_y - layout_line.max_ascent > height {
                         return None;
                     }
                 }
                 self.line_top += line_height;
-                if line_y < 0.0 {
+                if line_y + layout_line.max_descent < 0.0 {
                     continue;
                 }
 
@@ -202,7 +208,7 @@ impl fmt::Display for Metrics {
 /// A buffer of text that is shaped and laid out
 #[derive(Debug)]
 pub struct Buffer {
-    /// [BufferLine]s (or paragraphs) of text in the buffer
+    /// [`BufferLine`]s (or paragraphs) of text in the buffer
     pub lines: Vec<BufferLine>,
     metrics: Metrics,
     width_opt: Option<f32>,
@@ -213,9 +219,6 @@ pub struct Buffer {
     wrap: Wrap,
     monospace_width: Option<f32>,
     tab_width: u16,
-
-    /// Scratch buffer for shaping and laying out.
-    scratch: ShapeBuffer,
 }
 
 impl Clone for Buffer {
@@ -230,7 +233,6 @@ impl Clone for Buffer {
             wrap: self.wrap,
             monospace_width: self.monospace_width,
             tab_width: self.tab_width,
-            scratch: ShapeBuffer::default(),
         }
     }
 }
@@ -257,7 +259,6 @@ impl Buffer {
             scroll: Scroll::default(),
             redraw: false,
             wrap: Wrap::WordOrGlyph,
-            scratch: ShapeBuffer::default(),
             monospace_width: None,
             tab_width: 8,
         }
@@ -270,7 +271,7 @@ impl Buffer {
     /// Will panic if `metrics.line_height` is zero.
     pub fn new(font_system: &mut FontSystem, metrics: Metrics) -> Self {
         let mut buffer = Self::new_empty(metrics);
-        buffer.set_text(font_system, "", Attrs::new(), Shaping::Advanced);
+        buffer.set_text(font_system, "", &Attrs::new(), Shaping::Advanced, None);
         buffer
     }
 
@@ -278,7 +279,7 @@ impl Buffer {
     pub fn borrow_with<'a>(
         &'a mut self,
         font_system: &'a mut FontSystem,
-    ) -> BorrowedWithFontSystem<'a, Buffer> {
+    ) -> BorrowedWithFontSystem<'a, Self> {
         BorrowedWithFontSystem {
             inner: self,
             font_system,
@@ -292,8 +293,7 @@ impl Buffer {
         for line in &mut self.lines {
             if line.shape_opt().is_some() {
                 line.reset_layout();
-                line.layout_in_buffer(
-                    &mut self.scratch,
+                line.layout(
                     font_system,
                     self.metrics.font_size,
                     self.width_opt,
@@ -311,6 +311,7 @@ impl Buffer {
     }
 
     /// Shape lines until cursor, also scrolling to include cursor in view
+    #[allow(clippy::missing_panics_doc)]
     pub fn shape_until_cursor(
         &mut self,
         font_system: &mut FontSystem,
@@ -329,11 +330,11 @@ impl Buffer {
             let layout = self
                 .line_layout(font_system, layout_cursor.line)
                 .expect("shape_until_cursor failed to scroll forwards");
-            for layout_i in 0..layout_cursor.layout {
+            (0..layout_cursor.layout).for_each(|layout_i| {
                 layout_y += layout[layout_i]
                     .line_height_opt
                     .unwrap_or(metrics.line_height);
-            }
+            });
             layout_y
                 + layout[layout_cursor.layout]
                     .line_height_opt
@@ -349,17 +350,24 @@ impl Buffer {
         } else if let Some(height) = self.height_opt {
             // Adjust scroll forwards if cursor is after it
             let mut line_i = layout_cursor.line;
-            while line_i > self.scroll.line {
-                line_i -= 1;
-                let layout = self
-                    .line_layout(font_system, line_i)
-                    .expect("shape_until_cursor failed to scroll forwards");
-                for layout_line in layout.iter() {
-                    total_height += layout_line.line_height_opt.unwrap_or(metrics.line_height);
-                }
+            if line_i <= self.scroll.line {
+                // This is a single line that may wrap
                 if total_height > height + self.scroll.vertical {
-                    self.scroll.line = line_i;
                     self.scroll.vertical = total_height - height;
+                }
+            } else {
+                while line_i > self.scroll.line {
+                    line_i -= 1;
+                    let layout = self
+                        .line_layout(font_system, line_i)
+                        .expect("shape_until_cursor failed to scroll forwards");
+                    for layout_line in layout {
+                        total_height += layout_line.line_height_opt.unwrap_or(metrics.line_height);
+                    }
+                    if total_height > height + self.scroll.vertical {
+                        self.scroll.line = line_i;
+                        self.scroll.vertical = total_height - height;
+                    }
                 }
             }
         }
@@ -374,18 +382,16 @@ impl Buffer {
         if let Some(layout_cursor) = self.layout_cursor(font_system, cursor) {
             if let Some(layout_lines) = self.line_layout(font_system, layout_cursor.line) {
                 if let Some(layout_line) = layout_lines.get(layout_cursor.layout) {
-                    let (x_min, x_max) = if let Some(glyph) = layout_line
+                    let (x_min, x_max) = layout_line
                         .glyphs
                         .get(layout_cursor.glyph)
                         .or_else(|| layout_line.glyphs.last())
-                    {
-                        //TODO: use code from cursor_glyph_opt?
-                        let x_a = glyph.x;
-                        let x_b = glyph.x + glyph.w;
-                        (x_a.min(x_b), x_a.max(x_b))
-                    } else {
-                        (0.0, 0.0)
-                    };
+                        .map_or((0.0, 0.0), |glyph| {
+                            //TODO: use code from cursor_glyph_opt?
+                            let x_a = glyph.x;
+                            let x_b = glyph.x + glyph.w;
+                            (x_a.min(x_b), x_a.max(x_b))
+                        });
                     if x_min < self.scroll.horizontal {
                         self.scroll.horizontal = x_min;
                         self.redraw = true;
@@ -402,6 +408,7 @@ impl Buffer {
     }
 
     /// Shape lines until scroll
+    #[allow(clippy::missing_panics_doc)]
     pub fn shape_until_scroll(&mut self, font_system: &mut FontSystem, prune: bool) {
         let metrics = self.metrics;
         let old_scroll = self.scroll;
@@ -413,7 +420,7 @@ impl Buffer {
                     let line_i = self.scroll.line - 1;
                     if let Some(layout) = self.line_layout(font_system, line_i) {
                         let mut layout_height = 0.0;
-                        for layout_line in layout.iter() {
+                        for layout_line in layout {
                             layout_height +=
                                 layout_line.line_height_opt.unwrap_or(metrics.line_height);
                         }
@@ -445,24 +452,22 @@ impl Buffer {
                     if prune {
                         self.lines[line_i].reset_shaping();
                         continue;
-                    } else {
-                        break;
                     }
+                    break;
                 }
 
                 let mut layout_height = 0.0;
                 let layout = self
                     .line_layout(font_system, line_i)
                     .expect("shape_until_scroll invalid line");
-                for layout_line in layout.iter() {
+                for layout_line in layout {
                     let line_height = layout_line.line_height_opt.unwrap_or(metrics.line_height);
                     layout_height += line_height;
                     total_height += line_height;
                 }
 
                 // Adjust scroll.vertical to be smaller by moving scroll.line forwards
-                //TODO: do we want to adjust it exactly to a layout line?
-                if line_i == self.scroll.line && layout_height < self.scroll.vertical {
+                if line_i == self.scroll.line && layout_height <= self.scroll.vertical {
                     self.scroll.line += 1;
                     self.scroll.vertical -= layout_height;
                 }
@@ -521,7 +526,7 @@ impl Buffer {
         line_i: usize,
     ) -> Option<&ShapeLine> {
         let line = self.lines.get_mut(line_i)?;
-        Some(line.shape_in_buffer(&mut self.scratch, font_system, self.tab_width))
+        Some(line.shape(font_system, self.tab_width))
     }
 
     /// Lay out the provided line index and return the result
@@ -531,8 +536,7 @@ impl Buffer {
         line_i: usize,
     ) -> Option<&[LayoutLine]> {
         let line = self.lines.get_mut(line_i)?;
-        Some(line.layout_in_buffer(
-            &mut self.scratch,
+        Some(line.layout(
             font_system,
             self.metrics.font_size,
             self.width_opt,
@@ -543,7 +547,7 @@ impl Buffer {
     }
 
     /// Get the current [`Metrics`]
-    pub fn metrics(&self) -> Metrics {
+    pub const fn metrics(&self) -> Metrics {
         self.metrics
     }
 
@@ -557,7 +561,7 @@ impl Buffer {
     }
 
     /// Get the current [`Wrap`]
-    pub fn wrap(&self) -> Wrap {
+    pub const fn wrap(&self) -> Wrap {
         self.wrap
     }
 
@@ -571,7 +575,7 @@ impl Buffer {
     }
 
     /// Get the current `monospace_width`
-    pub fn monospace_width(&self) -> Option<f32> {
+    pub const fn monospace_width(&self) -> Option<f32> {
         self.monospace_width
     }
 
@@ -589,7 +593,7 @@ impl Buffer {
     }
 
     /// Get the current `tab_width`
-    pub fn tab_width(&self) -> u16 {
+    pub const fn tab_width(&self) -> u16 {
         self.tab_width
     }
 
@@ -602,11 +606,9 @@ impl Buffer {
         if tab_width != self.tab_width {
             self.tab_width = tab_width;
             // Shaping must be reset when tab width is changed
-            for line in self.lines.iter_mut() {
-                if line.shape_opt().is_some() {
-                    if line.text().contains('\t') {
-                        line.reset_shaping();
-                    }
+            for line in &mut self.lines {
+                if line.shape_opt().is_some() && line.text().contains('\t') {
+                    line.reset_shaping();
                 }
             }
             self.redraw = true;
@@ -615,7 +617,7 @@ impl Buffer {
     }
 
     /// Get the current buffer dimensions (width, height)
-    pub fn size(&self) -> (Option<f32>, Option<f32>) {
+    pub const fn size(&self) -> (Option<f32>, Option<f32>) {
         (self.width_opt, self.height_opt)
     }
 
@@ -658,7 +660,7 @@ impl Buffer {
     }
 
     /// Get the current scroll location
-    pub fn scroll(&self) -> Scroll {
+    pub const fn scroll(&self) -> Scroll {
         self.scroll
     }
 
@@ -675,8 +677,9 @@ impl Buffer {
         &mut self,
         font_system: &mut FontSystem,
         text: &str,
-        attrs: Attrs,
+        attrs: &Attrs,
         shaping: Shaping,
+        alignment: Option<Align>,
     ) {
         self.lines.clear();
         for (range, ending) in LineIter::new(text) {
@@ -687,14 +690,29 @@ impl Buffer {
                 shaping,
             ));
         }
-        if self.lines.is_empty() {
+
+        // Ensure there is an ending line with no line ending
+        if self
+            .lines
+            .last()
+            .map(|line| line.ending())
+            .unwrap_or_default()
+            != LineEnding::None
+        {
             self.lines.push(BufferLine::new(
                 "",
-                LineEnding::default(),
+                LineEnding::None,
                 AttrsList::new(attrs),
                 shaping,
             ));
         }
+
+        if alignment.is_some() {
+            self.lines.iter_mut().for_each(|line| {
+                line.set_align(alignment);
+            });
+        }
+
         self.scroll = Scroll::default();
         self.shape_until_scroll(font_system, false);
     }
@@ -709,27 +727,26 @@ impl Buffer {
     /// buffer.set_rich_text(
     ///     &mut font_system,
     ///     [
-    ///         ("hello, ", attrs),
-    ///         ("cosmic\ntext", attrs.family(Family::Monospace)),
+    ///         ("hello, ", attrs.clone()),
+    ///         ("cosmic\ntext", attrs.clone().family(Family::Monospace)),
     ///     ],
-    ///     attrs,
+    ///     &attrs,
     ///     Shaping::Advanced,
+    ///     None,
     /// );
     /// ```
     pub fn set_rich_text<'r, 's, I>(
         &mut self,
         font_system: &mut FontSystem,
         spans: I,
-        default_attrs: Attrs,
+        default_attrs: &Attrs,
         shaping: Shaping,
+        alignment: Option<Align>,
     ) where
         I: IntoIterator<Item = (&'s str, Attrs<'r>)>,
     {
-        self.lines.clear();
-
-        let mut attrs_list = AttrsList::new(default_attrs);
-        let mut line_string = String::new();
         let mut end = 0;
+        // TODO: find a way to cache this string and vec for reuse
         let (string, spans_data): (String, Vec<_>) = spans
             .into_iter()
             .map(|(s, attrs)| {
@@ -753,15 +770,31 @@ impl Buffer {
         //TODO: set this based on information from spans
         let line_ending = LineEnding::default();
 
+        let mut line_count = 0;
+        let mut attrs_list = self
+            .lines
+            .get_mut(line_count)
+            .map_or_else(|| AttrsList::new(&Attrs::new()), BufferLine::reclaim_attrs)
+            .reset(default_attrs);
+        let mut line_string = self
+            .lines
+            .get_mut(line_count)
+            .map(BufferLine::reclaim_text)
+            .unwrap_or_default();
+
         loop {
             let (Some(line_range), Some((attrs, span_range))) = (&maybe_line, &maybe_span) else {
                 // this is reached only if this text is empty
-                self.lines.push(BufferLine::new(
+                if self.lines.len() == line_count {
+                    self.lines.push(BufferLine::empty());
+                }
+                self.lines[line_count].reset_new(
                     String::new(),
                     line_ending,
                     AttrsList::new(default_attrs),
                     shaping,
-                ));
+                );
+                line_count += 1;
                 break;
             };
 
@@ -775,7 +808,7 @@ impl Buffer {
                 let text_end = line_string.len();
                 // Only add attrs if they don't match the defaults
                 if *attrs != attrs_list.defaults() {
-                    attrs_list.add_span(text_start..text_end, *attrs);
+                    attrs_list.add_span(text_start..text_end, attrs);
                 }
             }
 
@@ -790,21 +823,46 @@ impl Buffer {
                 maybe_line = lines_iter.next();
                 if maybe_line.is_some() {
                     // finalize this line and start a new line
-                    let prev_attrs_list =
-                        core::mem::replace(&mut attrs_list, AttrsList::new(default_attrs));
-                    let prev_line_string = core::mem::take(&mut line_string);
-                    let buffer_line =
-                        BufferLine::new(prev_line_string, line_ending, prev_attrs_list, shaping);
-                    self.lines.push(buffer_line);
+                    let next_attrs_list = self
+                        .lines
+                        .get_mut(line_count + 1)
+                        .map_or_else(|| AttrsList::new(&Attrs::new()), BufferLine::reclaim_attrs)
+                        .reset(default_attrs);
+                    let next_line_string = self
+                        .lines
+                        .get_mut(line_count + 1)
+                        .map(BufferLine::reclaim_text)
+                        .unwrap_or_default();
+                    let prev_attrs_list = core::mem::replace(&mut attrs_list, next_attrs_list);
+                    let prev_line_string = core::mem::replace(&mut line_string, next_line_string);
+                    if self.lines.len() == line_count {
+                        self.lines.push(BufferLine::empty());
+                    }
+                    self.lines[line_count].reset_new(
+                        prev_line_string,
+                        line_ending,
+                        prev_attrs_list,
+                        shaping,
+                    );
+                    line_count += 1;
                 } else {
                     // finalize the final line
-                    let buffer_line =
-                        BufferLine::new(line_string, line_ending, attrs_list, shaping);
-                    self.lines.push(buffer_line);
+                    if self.lines.len() == line_count {
+                        self.lines.push(BufferLine::empty());
+                    }
+                    self.lines[line_count].reset_new(line_string, line_ending, attrs_list, shaping);
+                    line_count += 1;
                     break;
                 }
             }
         }
+
+        // Discard excess lines now that we have reused as much of the existing allocations as possible.
+        self.lines.truncate(line_count);
+
+        self.lines.iter_mut().for_each(|line| {
+            line.set_align(alignment);
+        });
 
         self.scroll = Scroll::default();
 
@@ -812,7 +870,7 @@ impl Buffer {
     }
 
     /// True if a redraw is needed
-    pub fn redraw(&self) -> bool {
+    pub const fn redraw(&self) -> bool {
         self.redraw
     }
 
@@ -822,7 +880,7 @@ impl Buffer {
     }
 
     /// Get the visible layout runs for rendering and other tasks
-    pub fn layout_runs(&self) -> LayoutRunIter {
+    pub fn layout_runs(&self) -> LayoutRunIter<'_> {
         LayoutRunIter::new(self)
     }
 
@@ -947,14 +1005,16 @@ impl Buffer {
                     },
                 };
 
-                let (new_index, new_affinity) = match layout_line.glyphs.get(layout_cursor.glyph) {
-                    Some(glyph) => (glyph.start, Affinity::After),
-                    None => match layout_line.glyphs.last() {
-                        Some(glyph) => (glyph.end, Affinity::Before),
-                        //TODO: is this correct?
-                        None => (0, Affinity::After),
-                    },
-                };
+                let (new_index, new_affinity) =
+                    layout_line.glyphs.get(layout_cursor.glyph).map_or_else(
+                        || {
+                            layout_line
+                                .glyphs
+                                .last()
+                                .map_or((0, Affinity::After), |glyph| (glyph.end, Affinity::Before))
+                        },
+                        |glyph| (glyph.start, Affinity::After),
+                    );
 
                 if cursor.line != layout_cursor.line
                     || cursor.index != new_index
@@ -1053,7 +1113,7 @@ impl Buffer {
                     layout_cursor.layout -= 1;
                 } else if layout_cursor.line > 0 {
                     layout_cursor.line -= 1;
-                    layout_cursor.layout = usize::max_value();
+                    layout_cursor.layout = usize::MAX;
                 }
 
                 if let Some(cursor_x) = cursor_x_opt {
@@ -1115,14 +1175,13 @@ impl Buffer {
                 cursor.index = line
                     .text()
                     .char_indices()
-                    .filter_map(|(i, c)| if c.is_whitespace() { None } else { Some(i) })
-                    .next()
+                    .find_map(|(i, c)| if c.is_whitespace() { None } else { Some(i) })
                     .unwrap_or(0);
                 cursor_x_opt = None;
             }
             Motion::End => {
                 let mut layout_cursor = self.layout_cursor(font_system, cursor)?;
-                layout_cursor.glyph = usize::max_value();
+                layout_cursor.glyph = usize::MAX;
                 #[allow(unused_assignments)]
                 {
                     (cursor, cursor_x_opt) = self.cursor_motion(
@@ -1209,7 +1268,7 @@ impl Buffer {
                         .unicode_word_indices()
                         .map(|(i, word)| i + word.len())
                         .find(|&i| i > cursor.index)
-                        .unwrap_or(line.text().len());
+                        .unwrap_or_else(|| line.text().len());
                 } else if cursor.line + 1 < self.lines.len() {
                     cursor.line += 1;
                     cursor.index = 0;
@@ -1266,7 +1325,7 @@ impl Buffer {
                 cursor_x_opt = None;
             }
             Motion::BufferEnd => {
-                cursor.line = self.lines.len() - 1;
+                cursor.line = self.lines.len().saturating_sub(1);
                 cursor.index = self.lines.get(cursor.line)?.text().len();
                 cursor_x_opt = None;
             }
@@ -1296,13 +1355,9 @@ impl Buffer {
         F: FnMut(i32, i32, u32, u32, Color),
     {
         for run in self.layout_runs() {
-            for glyph in run.glyphs.iter() {
+            for glyph in run.glyphs {
                 let physical_glyph = glyph.physical((0., 0.), 1.0);
-
-                let glyph_color = match glyph.color_opt {
-                    Some(some) => some,
-                    None => color,
-                };
+                let glyph_color = glyph.color_opt.map_or(color, |some| some);
 
                 cache.with_pixels(
                     font_system,
@@ -1323,7 +1378,7 @@ impl Buffer {
     }
 }
 
-impl<'a> BorrowedWithFontSystem<'a, Buffer> {
+impl BorrowedWithFontSystem<'_, Buffer> {
     /// Shape lines until cursor, also scrolling to include cursor in view
     pub fn shape_until_cursor(&mut self, cursor: Cursor, prune: bool) {
         self.inner
@@ -1379,9 +1434,21 @@ impl<'a> BorrowedWithFontSystem<'a, Buffer> {
             .set_metrics_and_size(self.font_system, metrics, width_opt, height_opt);
     }
 
+    /// Set tab width (number of spaces between tab stops)
+    pub fn set_tab_width(&mut self, tab_width: u16) {
+        self.inner.set_tab_width(self.font_system, tab_width);
+    }
+
     /// Set text of buffer, using provided attributes for each line by default
-    pub fn set_text(&mut self, text: &str, attrs: Attrs, shaping: Shaping) {
-        self.inner.set_text(self.font_system, text, attrs, shaping);
+    pub fn set_text(
+        &mut self,
+        text: &str,
+        attrs: &Attrs,
+        shaping: Shaping,
+        alignment: Option<Align>,
+    ) {
+        self.inner
+            .set_text(self.font_system, text, attrs, shaping, alignment);
     }
 
     /// Set text of buffer, using an iterator of styled spans (pairs of text and attributes)
@@ -1390,23 +1457,29 @@ impl<'a> BorrowedWithFontSystem<'a, Buffer> {
     /// # use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
     /// # let mut font_system = FontSystem::new();
     /// let mut buffer = Buffer::new_empty(Metrics::new(32.0, 44.0));
-    /// let mut buffer = buffer.borrow_with(&mut font_system);
     /// let attrs = Attrs::new().family(Family::Serif);
     /// buffer.set_rich_text(
+    ///     &mut font_system,
     ///     [
-    ///         ("hello, ", attrs),
-    ///         ("cosmic\ntext", attrs.family(Family::Monospace)),
+    ///         ("hello, ", attrs.clone()),
+    ///         ("cosmic\ntext", attrs.clone().family(Family::Monospace)),
     ///     ],
-    ///     attrs,
+    ///     &attrs,
     ///     Shaping::Advanced,
+    ///     None,
     /// );
     /// ```
-    pub fn set_rich_text<'r, 's, I>(&mut self, spans: I, default_attrs: Attrs, shaping: Shaping)
-    where
+    pub fn set_rich_text<'r, 's, I>(
+        &mut self,
+        spans: I,
+        default_attrs: &Attrs,
+        shaping: Shaping,
+        alignment: Option<Align>,
+    ) where
         I: IntoIterator<Item = (&'s str, Attrs<'r>)>,
     {
         self.inner
-            .set_rich_text(self.font_system, spans, default_attrs, shaping);
+            .set_rich_text(self.font_system, spans, default_attrs, shaping, alignment);
     }
 
     /// Apply a [`Motion`] to a [`Cursor`]

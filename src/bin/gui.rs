@@ -678,6 +678,21 @@ fn create_backend(cli: &Cli) -> Box<dyn TelemetryBackend> {
                 std::process::exit(1);
             }
         }
+        BackendType::Hybrid => {
+            // Hybrid is the best available backend on Linux: sysfs for real-time
+            // metrics + background tt-smi polling for SMBUS data.
+            #[cfg(target_os = "linux")]
+            {
+                use tt_toplike::backend::hybrid::HybridBackend;
+                log::info!("Creating HybridBackend");
+                Box::new(HybridBackend::new(&*cli.tt_smi_path.to_string_lossy()))
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                eprintln!("Error: Hybrid backend only available on Linux");
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -726,13 +741,23 @@ fn main() -> iced::Result {
         }
     };
 
-    // Run iced application
+    // iced 0.14: the boot closure must be Fn (called once, but typed as Fn).
+    // Wrap the backend in Option so we can take() it on the first (and only) call.
+    let backend_cell = std::cell::Cell::new(Some(backend));
+    let cli_cell = std::cell::Cell::new(Some(cli));
+    let config_boot = config.clone();
+
     iced::application(
-        "TT-Toplike - Tenstorrent Hardware Monitor",
+        move || {
+            let b = backend_cell.take().expect("boot called more than once");
+            let c = cli_cell.take().expect("boot called more than once");
+            TTTopGUI::new(b, backend_type, config_boot.clone(), c)
+        },
         TTTopGUI::update,
         TTTopGUI::view,
     )
+    .title(TTTopGUI::title)
     .subscription(TTTopGUI::subscription)
     .theme(TTTopGUI::theme)
-    .run_with(move || TTTopGUI::new(backend, backend_type, config, cli))
+    .run()
 }

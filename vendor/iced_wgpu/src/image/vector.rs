@@ -6,6 +6,7 @@ use resvg::tiny_skia;
 use resvg::usvg;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::fs;
+use std::panic;
 use std::sync::Arc;
 
 /// Entry in cache corresponding to an svg handle
@@ -94,17 +95,18 @@ impl Cache {
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
+        belt: &mut wgpu::util::StagingBelt,
         handle: &svg::Handle,
         color: Option<Color>,
-        [width, height]: [f32; 2],
+        size: Size,
         scale: f32,
         atlas: &mut Atlas,
     ) -> Option<&atlas::Entry> {
         let id = handle.id();
 
         let (width, height) = (
-            (scale * width).ceil() as u32,
-            (scale * height).ceil() as u32,
+            (scale * size.width).ceil() as u32,
+            (scale * size.height).ceil() as u32,
         );
 
         let color = color.map(Color::into_rgba8);
@@ -153,7 +155,18 @@ impl Cache {
                     tiny_skia::Transform::default()
                 };
 
-                resvg::render(tree, transform, &mut img.as_mut());
+                // SVG rendering can panic on malformed or complex vectors.
+                // We catch panics to prevent crashes and continue gracefully.
+                let render =
+                    panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                        resvg::render(tree, transform, &mut img.as_mut());
+                    }));
+
+                if let Err(error) = render {
+                    log::warn!(
+                        "SVG rendering for {handle:?} panicked: {error:?}"
+                    );
+                }
 
                 let mut rgba = img.take();
 
@@ -167,14 +180,15 @@ impl Cache {
                     });
                 }
 
-                let allocation =
-                    atlas.upload(device, encoder, width, height, &rgba)?;
+                let allocation = atlas
+                    .upload(device, encoder, belt, width, height, &rgba)?;
 
                 log::debug!("allocating {id} {width}x{height}");
 
                 let _ = self.svg_hits.insert(id);
                 let _ = self.rasterized_hits.insert(key);
                 let _ = self.rasterized.insert(key, allocation);
+                self.should_trim = true;
 
                 self.rasterized.get(&key)
             }

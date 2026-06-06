@@ -1,7 +1,18 @@
-use palette::rgb::{Srgb, Srgba};
-
 /// A color in the `sRGB` color space.
+///
+/// # String Representation
+///
+/// A color can be represented in either of the following valid formats: `#rrggbb`, `#rrggbbaa`, `#rgb`, and `#rgba`.
+/// Where `rgba` represent hexadecimal digits. Both uppercase and lowercase letters are supported.
+///
+/// If `a` (transparency) is not specified, `1.0` (completely opaque) would be used by default.
+///
+/// If you have a static color string, using the [`color!`] macro should be preferred
+/// since it leverages hexadecimal literal notation and arithmetic directly.
+///
+/// [`color!`]: crate::color!
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Color {
     /// Red component, 0.0 - 1.0
     pub r: f32,
@@ -42,22 +53,18 @@ impl Color {
     ///
     /// In debug mode, it will panic if the values are not in the correct
     /// range: 0.0 - 1.0
-    pub fn new(r: f32, g: f32, b: f32, a: f32) -> Color {
+    const fn new(r: f32, g: f32, b: f32, a: f32) -> Color {
         debug_assert!(
-            (0.0..=1.0).contains(&r),
-            "Red component must be on [0, 1]"
+            r >= 0.0 && r <= 1.0,
+            "Red component must be in [0, 1] range."
         );
         debug_assert!(
-            (0.0..=1.0).contains(&g),
-            "Green component must be on [0, 1]"
+            g >= 0.0 && g <= 1.0,
+            "Green component must be in [0, 1] range."
         );
         debug_assert!(
-            (0.0..=1.0).contains(&b),
-            "Blue component must be on [0, 1]"
-        );
-        debug_assert!(
-            (0.0..=1.0).contains(&a),
-            "Alpha component must be on [0, 1]"
+            b >= 0.0 && b <= 1.0,
+            "Blue component must be in [0, 1] range."
         );
 
         Color { r, g, b, a }
@@ -70,22 +77,17 @@ impl Color {
 
     /// Creates a [`Color`] from its RGBA components.
     pub const fn from_rgba(r: f32, g: f32, b: f32, a: f32) -> Color {
-        Color { r, g, b, a }
+        Color::new(r, g, b, a)
     }
 
     /// Creates a [`Color`] from its RGB8 components.
-    pub fn from_rgb8(r: u8, g: u8, b: u8) -> Color {
+    pub const fn from_rgb8(r: u8, g: u8, b: u8) -> Color {
         Color::from_rgba8(r, g, b, 1.0)
     }
 
     /// Creates a [`Color`] from its RGB8 components and an alpha value.
-    pub fn from_rgba8(r: u8, g: u8, b: u8, a: f32) -> Color {
-        Color {
-            r: f32::from(r) / 255.0,
-            g: f32::from(g) / 255.0,
-            b: f32::from(b) / 255.0,
-            a,
-        }
+    pub const fn from_rgba8(r: u8, g: u8, b: u8, a: f32) -> Color {
+        Color::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a)
     }
 
     /// Creates a [`Color`] from its linear RGBA components.
@@ -100,59 +102,12 @@ impl Color {
             }
         }
 
-        Self {
-            r: gamma_component(r),
-            g: gamma_component(g),
-            b: gamma_component(b),
+        Self::new(
+            gamma_component(r),
+            gamma_component(g),
+            gamma_component(b),
             a,
-        }
-    }
-
-    /// Parses a [`Color`] from a hex string.
-    ///
-    /// Supported formats are `#rrggbb`, `#rrggbbaa`, `#rgb`, and `#rgba`.
-    /// The starting "#" is optional. Both uppercase and lowercase are supported.
-    ///
-    /// If you have a static color string, using the [`color!`] macro should be preferred
-    /// since it leverages hexadecimal literal notation and arithmetic directly.
-    ///
-    /// [`color!`]: crate::color!
-    pub fn parse(s: &str) -> Option<Color> {
-        let hex = s.strip_prefix('#').unwrap_or(s);
-
-        let parse_channel = |from: usize, to: usize| {
-            let num =
-                usize::from_str_radix(&hex[from..=to], 16).ok()? as f32 / 255.0;
-
-            // If we only got half a byte (one letter), expand it into a full byte (two letters)
-            Some(if from == to { num + num * 16.0 } else { num })
-        };
-
-        Some(match hex.len() {
-            3 => Color::from_rgb(
-                parse_channel(0, 0)?,
-                parse_channel(1, 1)?,
-                parse_channel(2, 2)?,
-            ),
-            4 => Color::from_rgba(
-                parse_channel(0, 0)?,
-                parse_channel(1, 1)?,
-                parse_channel(2, 2)?,
-                parse_channel(3, 3)?,
-            ),
-            6 => Color::from_rgb(
-                parse_channel(0, 1)?,
-                parse_channel(2, 3)?,
-                parse_channel(4, 5)?,
-            ),
-            8 => Color::from_rgba(
-                parse_channel(0, 1)?,
-                parse_channel(2, 3)?,
-                parse_channel(4, 5)?,
-                parse_channel(6, 7)?,
-            ),
-            _ => None?,
-        })
+        )
     }
 
     /// Converts the [`Color`] into its RGBA8 equivalent.
@@ -205,6 +160,29 @@ impl Color {
             ..self
         }
     }
+
+    /// Returns the relative luminance of the [`Color`].
+    /// <https://www.w3.org/TR/WCAG21/#dfn-relative-luminance>
+    pub fn relative_luminance(self) -> f32 {
+        let linear = self.into_linear();
+        0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+    }
+
+    /// Returns the [relative contrast ratio] of the [`Color`] against another one.
+    ///
+    /// [relative contrast ratio]: https://www.w3.org/TR/WCAG21/#dfn-contrast-ratio
+    pub fn relative_contrast(self, b: Color) -> f32 {
+        let lum_a = self.relative_luminance();
+        let lum_b = b.relative_luminance();
+
+        (lum_a.max(lum_b) + 0.05) / (lum_a.min(lum_b) + 0.05)
+    }
+
+    /// Returns true if the current [`Color`] is readable on top
+    /// of the given background [`Color`].
+    pub fn is_readable_on(self, background: Color) -> bool {
+        background.relative_contrast(self) >= 6.0
+    }
 }
 
 impl From<[f32; 3]> for Color {
@@ -216,6 +194,78 @@ impl From<[f32; 3]> for Color {
 impl From<[f32; 4]> for Color {
     fn from([r, g, b, a]: [f32; 4]) -> Self {
         Color::new(r, g, b, a)
+    }
+}
+
+/// An error which can be returned when parsing color from an RGB hexadecimal string.
+///
+/// See [`Color`] for specifications for the string.
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+    /// The string could not be parsed to valid integers.
+    #[error(transparent)]
+    ParseIntError(#[from] std::num::ParseIntError),
+    /// The string is of invalid length.
+    #[error(
+        "expected hex string of length 3, 4, 6 or 8 excluding optional prefix '#', found {0}"
+    )]
+    InvalidLength(usize),
+}
+
+impl std::str::FromStr for Color {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let hex = s.strip_prefix('#').unwrap_or(s);
+
+        let parse_channel =
+            |from: usize, to: usize| -> Result<f32, std::num::ParseIntError> {
+                let num =
+                    usize::from_str_radix(&hex[from..=to], 16)? as f32 / 255.0;
+
+                // If we only got half a byte (one letter), expand it into a full byte (two letters)
+                Ok(if from == to { num + num * 16.0 } else { num })
+            };
+
+        let val = match hex.len() {
+            3 => Color::from_rgb(
+                parse_channel(0, 0)?,
+                parse_channel(1, 1)?,
+                parse_channel(2, 2)?,
+            ),
+            4 => Color::from_rgba(
+                parse_channel(0, 0)?,
+                parse_channel(1, 1)?,
+                parse_channel(2, 2)?,
+                parse_channel(3, 3)?,
+            ),
+            6 => Color::from_rgb(
+                parse_channel(0, 1)?,
+                parse_channel(2, 3)?,
+                parse_channel(4, 5)?,
+            ),
+            8 => Color::from_rgba(
+                parse_channel(0, 1)?,
+                parse_channel(2, 3)?,
+                parse_channel(4, 5)?,
+                parse_channel(6, 7)?,
+            ),
+            _ => return Err(ParseError::InvalidLength(hex.len())),
+        };
+
+        Ok(val)
+    }
+}
+
+impl std::fmt::Display for Color {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let [r, g, b, a] = self.into_rgba8();
+
+        if self.a == 1.0 {
+            return write!(f, "#{r:02x}{g:02x}{b:02x}");
+        }
+
+        write!(f, "#{r:02x}{g:02x}{b:02x}{a:02x}")
     }
 }
 
@@ -234,36 +284,21 @@ impl From<[f32; 4]> for Color {
 #[macro_export]
 macro_rules! color {
     ($r:expr, $g:expr, $b:expr) => {
-        $crate::color!($r, $g, $b, 1.0)
+        $crate::Color::from_rgb8($r, $g, $b)
     };
-    ($r:expr, $g:expr, $b:expr, $a:expr) => {{
-        let r = $r as f32 / 255.0;
-        let g = $g as f32 / 255.0;
-        let b = $b as f32 / 255.0;
+    ($r:expr, $g:expr, $b:expr, $a:expr) => {{ $crate::Color::from_rgba8($r, $g, $b, $a) }};
+    ($hex:literal) => {{ $crate::color!($hex, 1.0) }};
+    ($hex:literal, $a:expr) => {{
+        let mut hex = $hex as u32;
 
-        #[allow(clippy::manual_range_contains)]
-        {
-            debug_assert!(
-                r >= 0.0 && r <= 1.0,
-                "R channel must be in [0, 255] range."
-            );
-            debug_assert!(
-                g >= 0.0 && g <= 1.0,
-                "G channel must be in [0, 255] range."
-            );
-            debug_assert!(
-                b >= 0.0 && b <= 1.0,
-                "B channel must be in [0, 255] range."
-            );
+        // Shorthand notation: 0x123
+        if stringify!($hex).len() == 5 {
+            let r = hex & 0xF00;
+            let g = hex & 0xF0;
+            let b = hex & 0xF;
+
+            hex = (r << 12) | (r << 8) | (g << 8) | (g << 4) | (b << 4) | b;
         }
-
-        $crate::Color { r, g, b, a: $a }
-    }};
-    ($hex:expr) => {{
-        $crate::color!($hex, 1.0)
-    }};
-    ($hex:expr, $a:expr) => {{
-        let hex = $hex as u32;
 
         debug_assert!(hex <= 0xffffff, "color! value must not exceed 0xffffff");
 
@@ -271,91 +306,38 @@ macro_rules! color {
         let g = (hex & 0xff00) >> 8;
         let b = (hex & 0xff);
 
-        $crate::color!(r, g, b, $a)
+        $crate::color!(r as u8, g as u8, b as u8, $a)
     }};
-}
-
-/// Converts from palette's `Rgba` type to a [`Color`].
-impl From<Srgba> for Color {
-    fn from(rgba: Srgba) -> Self {
-        Color::new(rgba.red, rgba.green, rgba.blue, rgba.alpha)
-    }
-}
-
-/// Converts from [`Color`] to palette's `Rgba` type.
-impl From<Color> for Srgba {
-    fn from(c: Color) -> Self {
-        Srgba::new(c.r, c.g, c.b, c.a)
-    }
-}
-
-/// Converts from palette's `Rgb` type to a [`Color`].
-impl From<Srgb> for Color {
-    fn from(rgb: Srgb) -> Self {
-        Color::new(rgb.red, rgb.green, rgb.blue, 1.0)
-    }
-}
-
-/// Converts from [`Color`] to palette's `Rgb` type.
-impl From<Color> for Srgb {
-    fn from(c: Color) -> Self {
-        Srgb::new(c.r, c.g, c.b)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use palette::blend::Blend;
-
-    #[test]
-    fn srgba_traits() {
-        let c = Color::from_rgb(0.5, 0.4, 0.3);
-        // Round-trip conversion to the palette::Srgba type
-        let s: Srgba = c.into();
-        let r: Color = s.into();
-        assert_eq!(c, r);
-    }
-
-    #[test]
-    fn color_manipulation() {
-        use approx::assert_relative_eq;
-
-        let c1 = Color::from_rgb(0.5, 0.4, 0.3);
-        let c2 = Color::from_rgb(0.2, 0.5, 0.3);
-
-        // Convert to linear color for manipulation
-        let l1 = Srgba::from(c1).into_linear();
-        let l2 = Srgba::from(c2).into_linear();
-
-        // Take the lighter of each of the sRGB components
-        let lighter = l1.lighten(l2);
-
-        // Convert back to our Color
-        let result: Color = Srgba::from_linear(lighter).into();
-
-        assert_relative_eq!(result.r, 0.5);
-        assert_relative_eq!(result.g, 0.5);
-        assert_relative_eq!(result.b, 0.3);
-        assert_relative_eq!(result.a, 1.0);
-    }
 
     #[test]
     fn parse() {
         let tests = [
-            ("#ff0000", [255, 0, 0, 255]),
-            ("00ff0080", [0, 255, 0, 128]),
-            ("#F80", [255, 136, 0, 255]),
-            ("#00f1", [0, 0, 255, 17]),
+            ("#ff0000", [255, 0, 0, 255], "#ff0000"),
+            ("00ff0080", [0, 255, 0, 128], "#00ff0080"),
+            ("#F80", [255, 136, 0, 255], "#ff8800"),
+            ("#00f1", [0, 0, 255, 17], "#0000ff11"),
+            ("#00ff", [0, 0, 255, 255], "#0000ff"),
         ];
 
-        for (arg, expected) in tests {
-            assert_eq!(
-                Color::parse(arg).expect("color must parse").into_rgba8(),
-                expected
-            );
+        for (arg, expected_rgba8, expected_str) in tests {
+            let color = arg.parse::<Color>().expect("color must parse");
+
+            assert_eq!(color.into_rgba8(), expected_rgba8);
+            assert_eq!(color.to_string(), expected_str);
         }
 
-        assert!(Color::parse("invalid").is_none());
+        assert!("invalid".parse::<Color>().is_err());
+    }
+
+    const SHORTHAND: Color = color!(0x123);
+
+    #[test]
+    fn shorthand_notation() {
+        assert_eq!(SHORTHAND, Color::from_rgb8(0x11, 0x22, 0x33));
     }
 }

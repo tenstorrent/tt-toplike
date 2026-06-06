@@ -2,7 +2,7 @@
 Font introspection, complex text shaping and glyph rendering.
 
 For a comprehensive list of features provided by this crate, please check out
-the [readme](https://github.com/dfrg/swash/blob/master/README.md) on GitHub.
+the [readme](https://github.com/dfrg/swash/blob/main/README.md) on GitHub.
 
 # Note
 
@@ -27,6 +27,9 @@ the respective modules.
 #![allow(clippy::needless_lifetimes)]
 #![allow(clippy::redundant_static_lifetimes)]
 #![allow(clippy::too_many_arguments)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(not(any(test, feature = "std")), no_std)]
+extern crate alloc;
 
 #[cfg(feature = "scale")]
 pub use zeno;

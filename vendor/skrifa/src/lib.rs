@@ -11,7 +11,7 @@
 //! See the [readme](https://github.com/googlefonts/fontations/blob/main/skrifa/README.md)
 //! for additional details.
 
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
@@ -29,6 +29,7 @@ extern crate alloc;
 pub extern crate read_fonts as raw;
 
 pub mod attribute;
+pub mod bitmap;
 pub mod charmap;
 pub mod color;
 pub mod font;
@@ -36,16 +37,16 @@ pub mod instance;
 pub mod metrics;
 pub mod outline;
 
-#[cfg(feature = "std")]
-pub mod patchmap;
-
 pub mod setting;
 pub mod string;
 
 mod collections;
+mod decycler;
+mod glyph_name;
 mod provider;
 mod variation;
 
+pub use glyph_name::{GlyphName, GlyphNameSource, GlyphNames};
 #[doc(inline)]
 pub use outline::{OutlineGlyph, OutlineGlyphCollection};
 pub use variation::{Axis, AxisCollection, NamedInstance, NamedInstanceCollection};

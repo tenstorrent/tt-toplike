@@ -11,12 +11,12 @@ pub use cosmic_text;
 
 use crate::core::alignment;
 use crate::core::font::{self, Font};
-use crate::core::text::{Shaping, Wrapping};
+use crate::core::text::{Alignment, Shaping, Wrapping};
 use crate::core::{Color, Pixels, Point, Rectangle, Size, Transformation};
 
-use once_cell::sync::OnceCell;
 use std::borrow::Cow;
-use std::sync::{Arc, RwLock, Weak};
+use std::collections::HashSet;
+use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 /// A text primitive.
 #[derive(Debug, Clone, PartialEq)]
@@ -54,9 +54,9 @@ pub enum Text {
         /// The font of the text.
         font: Font,
         /// The horizontal alignment of the text.
-        horizontal_alignment: alignment::Horizontal,
+        align_x: Alignment,
         /// The vertical alignment of the text.
-        vertical_alignment: alignment::Vertical,
+        align_y: alignment::Vertical,
         /// The shaping strategy of the text.
         shaping: Shaping,
         /// The clip bounds of the text.
@@ -73,89 +73,48 @@ pub enum Text {
 impl Text {
     /// Returns the visible bounds of the [`Text`].
     pub fn visible_bounds(&self) -> Option<Rectangle> {
-        let (bounds, horizontal_alignment, vertical_alignment) = match self {
+        match self {
             Text::Paragraph {
                 position,
                 paragraph,
                 clip_bounds,
                 transformation,
                 ..
-            } => (
-                Rectangle::new(*position, paragraph.min_bounds)
-                    .intersection(clip_bounds)
-                    .map(|bounds| bounds * *transformation),
-                Some(paragraph.horizontal_alignment),
-                Some(paragraph.vertical_alignment),
-            ),
+            } => Rectangle::new(*position, paragraph.min_bounds)
+                .intersection(clip_bounds)
+                .map(|bounds| bounds * *transformation),
             Text::Editor {
                 editor,
                 position,
                 clip_bounds,
                 transformation,
                 ..
-            } => (
-                Rectangle::new(*position, editor.bounds)
-                    .intersection(clip_bounds)
-                    .map(|bounds| bounds * *transformation),
-                None,
-                None,
-            ),
+            } => Rectangle::new(*position, editor.bounds)
+                .intersection(clip_bounds)
+                .map(|bounds| bounds * *transformation),
             Text::Cached {
                 bounds,
                 clip_bounds,
-                horizontal_alignment,
-                vertical_alignment,
                 ..
-            } => (
-                bounds.intersection(clip_bounds),
-                Some(*horizontal_alignment),
-                Some(*vertical_alignment),
-            ),
-            Text::Raw { raw, .. } => (Some(raw.clip_bounds), None, None),
-        };
-
-        let mut bounds = bounds?;
-
-        if let Some(alignment) = horizontal_alignment {
-            match alignment {
-                alignment::Horizontal::Left => {}
-                alignment::Horizontal::Center => {
-                    bounds.x -= bounds.width / 2.0;
-                }
-                alignment::Horizontal::Right => {
-                    bounds.x -= bounds.width;
-                }
-            }
+            } => bounds.intersection(clip_bounds),
+            Text::Raw { raw, .. } => Some(raw.clip_bounds),
         }
-
-        if let Some(alignment) = vertical_alignment {
-            match alignment {
-                alignment::Vertical::Top => {}
-                alignment::Vertical::Center => {
-                    bounds.y -= bounds.height / 2.0;
-                }
-                alignment::Vertical::Bottom => {
-                    bounds.y -= bounds.height;
-                }
-            }
-        }
-
-        Some(bounds)
     }
 }
 
 /// The regular variant of the [Fira Sans] font.
 ///
-/// It is loaded as part of the default fonts in Wasm builds.
+/// It is loaded as part of the default fonts when the `fira-sans`
+/// feature is enabled.
 ///
 /// [Fira Sans]: https://mozilla.github.io/Fira/
-#[cfg(all(target_arch = "wasm32", feature = "fira-sans"))]
-pub const FIRA_SANS_REGULAR: &'static [u8] =
+#[cfg(feature = "fira-sans")]
+pub const FIRA_SANS_REGULAR: &[u8] =
     include_bytes!("../fonts/FiraSans-Regular.ttf").as_slice();
 
 /// Returns the global [`FontSystem`].
 pub fn font_system() -> &'static RwLock<FontSystem> {
-    static FONT_SYSTEM: OnceCell<RwLock<FontSystem>> = OnceCell::new();
+    static FONT_SYSTEM: OnceLock<RwLock<FontSystem>> = OnceLock::new();
 
     FONT_SYSTEM.get_or_init(|| {
         RwLock::new(FontSystem {
@@ -163,20 +122,21 @@ pub fn font_system() -> &'static RwLock<FontSystem> {
                 cosmic_text::fontdb::Source::Binary(Arc::new(
                     include_bytes!("../fonts/Iced-Icons.ttf").as_slice(),
                 )),
-                #[cfg(all(target_arch = "wasm32", feature = "fira-sans"))]
+                #[cfg(feature = "fira-sans")]
                 cosmic_text::fontdb::Source::Binary(Arc::new(
                     include_bytes!("../fonts/FiraSans-Regular.ttf").as_slice(),
                 )),
             ]),
+            loaded_fonts: HashSet::new(),
             version: Version::default(),
         })
     })
 }
 
 /// A set of system fonts.
-#[allow(missing_debug_implementations)]
 pub struct FontSystem {
     raw: cosmic_text::FontSystem,
+    loaded_fonts: HashSet<usize>,
     version: Version,
 }
 
@@ -188,6 +148,14 @@ impl FontSystem {
 
     /// Loads a font from its bytes.
     pub fn load_font(&mut self, bytes: Cow<'static, [u8]>) {
+        if let Cow::Borrowed(bytes) = bytes {
+            let address = bytes.as_ptr() as usize;
+
+            if !self.loaded_fonts.insert(address) {
+                return;
+            }
+        }
+
         let _ = self.raw.db_mut().load_font_source(
             cosmic_text::fontdb::Source::Binary(Arc::new(bytes.into_owned())),
         );
@@ -207,7 +175,7 @@ impl FontSystem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Version(u32);
 
-/// A weak reference to a [`cosmic-text::Buffer`] that can be drawn.
+/// A weak reference to a [`cosmic_text::Buffer`] that can be drawn.
 #[derive(Debug, Clone)]
 pub struct Raw {
     /// A weak reference to a [`cosmic_text::Buffer`].
@@ -231,15 +199,60 @@ impl PartialEq for Raw {
 }
 
 /// Measures the dimensions of the given [`cosmic_text::Buffer`].
-pub fn measure(buffer: &cosmic_text::Buffer) -> Size {
-    let (width, height) =
-        buffer
-            .layout_runs()
-            .fold((0.0, 0.0), |(width, height), run| {
-                (run.line_w.max(width), height + run.line_height)
+pub fn measure(buffer: &cosmic_text::Buffer) -> (Size, bool) {
+    let (width, height, has_rtl) = buffer.layout_runs().fold(
+        (0.0, 0.0, false),
+        |(width, height, has_rtl), run| {
+            (
+                run.line_w.max(width),
+                height + run.line_height,
+                has_rtl || run.rtl,
+            )
+        },
+    );
+
+    (Size::new(width, height), has_rtl)
+}
+
+/// Aligns the given [`cosmic_text::Buffer`] with the given [`Alignment`]
+/// and returns its minimum [`Size`].
+pub fn align(
+    buffer: &mut cosmic_text::Buffer,
+    font_system: &mut cosmic_text::FontSystem,
+    alignment: Alignment,
+) -> Size {
+    let (min_bounds, has_rtl) = measure(buffer);
+    let mut needs_relayout = has_rtl;
+
+    if let Some(align) = to_align(alignment) {
+        let has_multiple_lines = buffer.lines.len() > 1
+            || buffer.lines.first().is_some_and(|line| {
+                line.layout_opt().is_some_and(|layout| layout.len() > 1)
             });
 
-    Size::new(width, height)
+        if has_multiple_lines {
+            for line in &mut buffer.lines {
+                let _ = line.set_align(Some(align));
+            }
+
+            needs_relayout = true;
+        } else if let Some(line) = buffer.lines.first_mut() {
+            needs_relayout = line.set_align(None);
+        }
+    }
+
+    // TODO: Avoid relayout with some changes to `cosmic-text` (?)
+    if needs_relayout {
+        log::trace!("Relayouting paragraph...");
+
+        buffer.set_size(
+            font_system,
+            Some(min_bounds.width),
+            Some(min_bounds.height),
+        );
+    }
+
+    min_bounds
 }
 
 /// Returns the attributes of the given [`Font`].
@@ -298,9 +311,26 @@ fn to_style(style: font::Style) -> cosmic_text::Style {
     }
 }
 
+fn to_align(alignment: Alignment) -> Option<cosmic_text::Align> {
+    match alignment {
+        Alignment::Default => None,
+        Alignment::Left => Some(cosmic_text::Align::Left),
+        Alignment::Center => Some(cosmic_text::Align::Center),
+        Alignment::Right => Some(cosmic_text::Align::Right),
+        Alignment::Justified => Some(cosmic_text::Align::Justified),
+    }
+}
+
 /// Converts some [`Shaping`] strategy to a [`cosmic_text::Shaping`] strategy.
-pub fn to_shaping(shaping: Shaping) -> cosmic_text::Shaping {
+pub fn to_shaping(shaping: Shaping, text: &str) -> cosmic_text::Shaping {
     match shaping {
+        Shaping::Auto => {
+            if text.is_ascii() {
+                cosmic_text::Shaping::Basic
+            } else {
+                cosmic_text::Shaping::Advanced
+            }
+        }
         Shaping::Basic => cosmic_text::Shaping::Basic,
         Shaping::Advanced => cosmic_text::Shaping::Advanced,
     }
@@ -321,4 +351,10 @@ pub fn to_color(color: Color) -> cosmic_text::Color {
     let [r, g, b, a] = color.into_rgba8();
 
     cosmic_text::Color::rgba(r, g, b, a)
+}
+
+/// A text renderer coupled to `iced_graphics`.
+pub trait Renderer {
+    /// Draws the given [`Raw`] text.
+    fn fill_raw(&mut self, raw: Raw);
 }

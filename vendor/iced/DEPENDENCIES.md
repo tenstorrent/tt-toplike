@@ -11,25 +11,80 @@ get them, if your system isn't here, add it!
 You can add this `shell.nix` to your project and use it by running `nix-shell`:
 
 ```nix
-{ pkgs ? import <nixpkgs> {} }:
+{ pkgs ? import <nixpkgs> { } }:
 
-pkgs.mkShell rec {
-  buildInputs = with pkgs; [
-    expat
-    fontconfig
-    freetype
-    freetype.dev
-    libGL
-    pkg-config
-    xorg.libX11
-    xorg.libXcursor
-    xorg.libXi
-    xorg.libXrandr
-    wayland
+let
+  dlopenLibraries = with pkgs; [
     libxkbcommon
+
+    # GPU backend
+    vulkan-loader
+    # libGL
+
+    # Window system
+    wayland
+    # xorg.libX11
+    # xorg.libXcursor
+    # xorg.libXi
+  ];
+in pkgs.mkShell {
+  nativeBuildInputs = with pkgs; [
+    cargo
+    rustc
   ];
 
-  LD_LIBRARY_PATH =
-    builtins.foldl' (a: b: "${a}:${b}/lib") "${pkgs.vulkan-loader}/lib" buildInputs;
+  # additional libraries that your project
+  # links to at build time, e.g. OpenSSL
+  buildInputs = [];
+
+  env.RUSTFLAGS = "-C link-arg=-Wl,-rpath,${pkgs.lib.makeLibraryPath dlopenLibraries}";
+}
+```
+
+Alternatively, you can use this `flake.nix` to create a dev shell, activated by `nix develop`:
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    systems.url = "github:nix-systems/default";
+  };
+
+  outputs = { nixpkgs, systems, ... }:
+    let
+      eachSystem = nixpkgs.lib.genAttrs (import systems);
+      pkgsFor = nixpkgs.legacyPackages;
+    in {
+      devShells = eachSystem (system:
+        let
+          pkgs = pkgsFor.${system};
+          dlopenLibraries = with pkgs; [
+            libxkbcommon
+
+            # GPU backend
+            vulkan-loader
+            # libGL
+
+            # Window system
+            wayland
+            # xorg.libX11
+            # xorg.libXcursor
+            # xorg.libXi
+          ];
+        in {
+          default = pkgs.mkShell {
+            nativeBuildInputs = with pkgs; [
+              cargo
+              rustc
+            ];
+
+            # additional libraries that your project
+            # links to at build time, e.g. OpenSSL
+            buildInputs = [];
+
+            env.RUSTFLAGS = "-C link-arg=-Wl,-rpath,${nixpkgs.lib.makeLibraryPath dlopenLibraries}";
+          };
+        });
+    };
 }
 ```

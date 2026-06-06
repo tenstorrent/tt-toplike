@@ -1,11 +1,6 @@
 [package]
 name = "block2"
-# Remember to update html_root_url in lib.rs
-version = "0.5.1"
-authors = ["Steven Sheldon", "Mads Marquart <mads@marquart.dk>"]
-edition = "2021"
-rust-version = "1.60"
-
+version = "0.6.2" # Remember to update html_root_url in lib.rs
 description = "Apple's C language extension of blocks"
 keywords = ["objective-c", "macos", "ios", "blocks"]
 categories = [
@@ -14,20 +9,23 @@ categories = [
     "os::macos-apis",
     "external-ffi-bindings",
 ]
-readme = "README.md"
-repository = "https://github.com/madsmtm/objc2"
-documentation = "https://docs.rs/block2/"
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+# https://github.com/madsmtm/objc2/issues/23
+# All future contributions are licensed under "Zlib OR Apache-2.0 OR MIT".
 license = "MIT"
+
+[lints]
+workspace = true
 
 [features]
 default = ["std"]
 
 # Currently not possible to turn off, put here for forwards compatibility.
-std = ["alloc", "objc2/std"]
-alloc = ["objc2/alloc"]
-
-# Deprecated; this is the default on Apple platforms, and not applicable on other platforms.
-apple = []
+std = ["alloc"]
+alloc = []
 
 # Link to libBlocksRuntime from compiler-rt.
 compiler-rt = ["objc2/unstable-compiler-rt"] # TODO: fix this
@@ -48,25 +46,34 @@ unstable-objfw = []
 # Expose private ffi functions and statics.
 unstable-private = []
 
+# Uses the nightly derive_coerce_pointee feature to make conversions more ergonomic.
+unstable-coerce-pointee = []
+
 [dependencies]
-objc2 = { path = "../objc2", version = "0.5.2", default-features = false }
+objc2 = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+objc2-foundation = { path = "../../framework-crates/objc2-foundation", default-features = false, features = [
+    "std",
+    "NSError",
+] }
 
 [package.metadata.docs.rs]
 default-target = "aarch64-apple-darwin"
+rustc-args = ["--cfg", "docsrs"] # Fix cross-crate link to objc2::topics
 features = ["unstable-private"]
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
     "aarch64-apple-ios",
-    "x86_64-apple-ios",
     "aarch64-apple-tvos",
     "aarch64-apple-watchos",
     "aarch64-apple-ios-macabi",
+    "aarch64-apple-visionos",
     "x86_64-unknown-linux-gnu",
     "i686-unknown-linux-gnu",
 ]
 
 [package.metadata.release]
 shared-version = false
-tag-prefix = "block"
-enable-features = []
+tag-prefix = "block2"

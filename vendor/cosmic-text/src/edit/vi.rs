@@ -1,7 +1,7 @@
 use alloc::{collections::BTreeMap, string::String};
+#[cfg(feature = "swash")]
 use core::cmp;
 use modit::{Event, Key, Parser, TextObject, WordIter};
-use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     Action, AttrsList, BorrowedWithFontSystem, BufferRef, Change, Color, Cursor, Edit, FontSystem,
@@ -9,6 +9,8 @@ use crate::{
 };
 
 pub use modit::{ViMode, ViParser};
+#[cfg(feature = "swash")]
+use unicode_segmentation::UnicodeSegmentation;
 
 fn undo_2_action<'buffer, E: Edit<'buffer>>(
     editor: &mut E,
@@ -209,6 +211,9 @@ impl<'syntax_system, 'buffer> ViEditor<'syntax_system, 'buffer> {
     }
 
     /// Load text from a file, and also set syntax to the best option
+    ///
+    /// ## Errors
+    /// Returns an `io::Error` if reading the file fails
     #[cfg(feature = "std")]
     pub fn load_text<P: AsRef<std::path::Path>>(
         &mut self,
@@ -517,7 +522,7 @@ impl<'syntax_system, 'buffer> ViEditor<'syntax_system, 'buffer> {
     }
 }
 
-impl<'syntax_system, 'buffer> Edit<'buffer> for ViEditor<'syntax_system, 'buffer> {
+impl<'buffer> Edit<'buffer> for ViEditor<'_, 'buffer> {
     fn buffer_ref(&self) -> &BufferRef<'buffer> {
         self.editor.buffer_ref()
     }
@@ -596,7 +601,7 @@ impl<'syntax_system, 'buffer> Edit<'buffer> for ViEditor<'syntax_system, 'buffer
     }
 
     fn action(&mut self, font_system: &mut FontSystem, action: Action) {
-        log::debug!("Action {:?}", action);
+        log::debug!("Action {action:?}");
 
         let editor = &mut self.editor;
 
@@ -633,7 +638,7 @@ impl<'syntax_system, 'buffer> Edit<'buffer> for ViEditor<'syntax_system, 'buffer
             Action::Unindent => Key::Backtab,
             Action::Motion(Motion::Up) => Key::Up,
             _ => {
-                log::debug!("Pass through action {:?}", action);
+                log::debug!("Pass through action {action:?}");
                 editor.action(font_system, action);
                 // Always finish change when passing through (TODO: group changes)
                 finish_change(
@@ -646,13 +651,10 @@ impl<'syntax_system, 'buffer> Edit<'buffer> for ViEditor<'syntax_system, 'buffer
             }
         };
 
-        let has_selection = match editor.selection() {
-            Selection::None => false,
-            _ => true,
-        };
+        let has_selection = !matches!(editor.selection(), Selection::None);
 
         self.parser.parse(key, has_selection, |event| {
-            log::debug!("  Event {:?}", event);
+            log::debug!("  Event {event:?}");
             let action = match event {
                 Event::AutoIndent => {
                     log::info!("TODO: AutoIndent");
@@ -778,17 +780,14 @@ impl<'syntax_system, 'buffer> Edit<'buffer> for ViEditor<'syntax_system, 'buffer
                         TextObject::DoubleQuotes => select_in(editor, '"', '"', include),
                         TextObject::Parentheses => select_in(editor, '(', ')', include),
                         TextObject::Search { forwards } => {
-                            match &self.search_opt {
-                                Some((value, _)) => {
-                                    if search(editor, value, forwards) {
-                                        let mut cursor = editor.cursor();
-                                        editor.set_selection(Selection::Normal(cursor));
-                                        //TODO: traverse lines if necessary
-                                        cursor.index += value.len();
-                                        editor.set_cursor(cursor);
-                                    }
+                            if let Some((value, _)) = &self.search_opt {
+                                if search(editor, value, forwards) {
+                                    let mut cursor = editor.cursor();
+                                    editor.set_selection(Selection::Normal(cursor));
+                                    //TODO: traverse lines if necessary
+                                    cursor.index += value.len();
+                                    editor.set_cursor(cursor);
                                 }
-                                None => {}
                             }
                         }
                         TextObject::SingleQuotes => select_in(editor, '\'', '\'', include),
@@ -816,7 +815,7 @@ impl<'syntax_system, 'buffer> Edit<'buffer> for ViEditor<'syntax_system, 'buffer
                             editor.set_cursor(cursor);
                         }
                         _ => {
-                            log::info!("TODO: {:?}", text_object);
+                            log::info!("TODO: {text_object:?}");
                         }
                     }
                     return;
@@ -880,15 +879,11 @@ impl<'syntax_system, 'buffer> Edit<'buffer> for ViEditor<'syntax_system, 'buffer
                             editor.with_buffer(|buffer| {
                                 let text = buffer.lines[cursor.line].text();
                                 if cursor.index < text.len() {
-                                    match text[cursor.index..]
+                                    if let Some((i, _)) = text[cursor.index..]
                                         .char_indices()
-                                        .filter(|&(i, c)| i > 0 && c == find_c)
-                                        .next()
+                                        .find(|&(i, c)| i > 0 && c == find_c)
                                     {
-                                        Some((i, _)) => {
-                                            cursor.index += i;
-                                        }
-                                        None => {}
+                                        cursor.index += i;
                                     }
                                 }
                             });
@@ -986,15 +981,11 @@ impl<'syntax_system, 'buffer> Edit<'buffer> for ViEditor<'syntax_system, 'buffer
                             editor.with_buffer(|buffer| {
                                 let text = buffer.lines[cursor.line].text();
                                 if cursor.index > 0 {
-                                    match text[..cursor.index]
+                                    if let Some((i, _)) = text[..cursor.index]
                                         .char_indices()
-                                        .filter(|&(_, c)| c == find_c)
-                                        .last()
+                                        .rfind(|&(_, c)| c == find_c)
                                     {
-                                        Some((i, _)) => {
-                                            cursor.index = i;
-                                        }
-                                        None => {}
+                                        cursor.index = i;
                                     }
                                 }
                             });
@@ -1006,7 +997,7 @@ impl<'syntax_system, 'buffer> Edit<'buffer> for ViEditor<'syntax_system, 'buffer
                             editor.with_buffer(|buffer| {
                                 let text = buffer.lines[cursor.line].text();
                                 if cursor.index > 0 {
-                                    match text[..cursor.index]
+                                    if let Some(i) = text[..cursor.index]
                                         .char_indices()
                                         .filter_map(|(i, c)| {
                                             if c == find_c {
@@ -1017,12 +1008,9 @@ impl<'syntax_system, 'buffer> Edit<'buffer> for ViEditor<'syntax_system, 'buffer
                                             }
                                             None
                                         })
-                                        .last()
+                                        .next_back()
                                     {
-                                        Some(i) => {
-                                            cursor.index = i;
-                                        }
-                                        None => {}
+                                        cursor.index = i;
                                     }
                                 }
                             });
@@ -1132,16 +1120,12 @@ impl<'syntax_system, 'buffer> Edit<'buffer> for ViEditor<'syntax_system, 'buffer
                             //TODO: is this efficient?
                             let action_opt = editor.with_buffer(|buffer| {
                                 let mut layout_runs = buffer.layout_runs();
-                                if let Some(first) = layout_runs.next() {
-                                    if let Some(last) = layout_runs.last() {
-                                        Some(Action::Motion(Motion::GotoLine(
-                                            (last.line_i + first.line_i) / 2,
-                                        )))
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
+
+                                match (layout_runs.next(), layout_runs.last()) {
+                                    (Some(first), Some(last)) => Some(Action::Motion(
+                                        Motion::GotoLine((last.line_i + first.line_i) / 2),
+                                    )),
+                                    _ => None,
                                 }
                             });
                             match action_opt {
@@ -1167,10 +1151,11 @@ impl<'syntax_system, 'buffer> Edit<'buffer> for ViEditor<'syntax_system, 'buffer
     }
 }
 
-impl<'font_system, 'syntax_system, 'buffer>
-    BorrowedWithFontSystem<'font_system, ViEditor<'syntax_system, 'buffer>>
-{
+impl BorrowedWithFontSystem<'_, ViEditor<'_, '_>> {
     /// Load text from a file, and also set syntax to the best option
+    ///
+    /// ## Errors
+    /// Returns an `io::Error` if reading the file fails
     #[cfg(feature = "std")]
     pub fn load_text<P: AsRef<std::path::Path>>(
         &mut self,

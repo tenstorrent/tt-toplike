@@ -17,18 +17,18 @@
 //! }
 //! ```
 use crate::core::border::{self, Border};
-use crate::core::event::{self, Event};
 use crate::core::layout;
 use crate::core::mouse;
 use crate::core::overlay;
 use crate::core::renderer;
 use crate::core::theme::palette;
 use crate::core::touch;
-use crate::core::widget::tree::{self, Tree};
 use crate::core::widget::Operation;
+use crate::core::widget::tree::{self, Tree};
+use crate::core::window;
 use crate::core::{
-    Background, Clipboard, Color, Element, Layout, Length, Padding, Rectangle,
-    Shadow, Shell, Size, Theme, Vector, Widget,
+    Background, Clipboard, Color, Element, Event, Layout, Length, Padding,
+    Rectangle, Shadow, Shell, Size, Theme, Vector, Widget,
 };
 
 /// A generic widget that produces a message when pressed.
@@ -68,7 +68,6 @@ use crate::core::{
 ///     button("I am disabled!").into()
 /// }
 /// ```
-#[allow(missing_debug_implementations)]
 pub struct Button<'a, Message, Theme = crate::Theme, Renderer = crate::Renderer>
 where
     Renderer: crate::core::Renderer,
@@ -81,6 +80,7 @@ where
     padding: Padding,
     clip: bool,
     class: Theme::Class<'a>,
+    status: Option<Status>,
 }
 
 enum OnPress<'a, Message> {
@@ -88,7 +88,7 @@ enum OnPress<'a, Message> {
     Closure(Box<dyn Fn() -> Message + 'a>),
 }
 
-impl<'a, Message: Clone> OnPress<'a, Message> {
+impl<Message: Clone> OnPress<'_, Message> {
     fn get(&self) -> Message {
         match self {
             OnPress::Direct(message) => message.clone(),
@@ -117,6 +117,7 @@ where
             padding: DEFAULT_PADDING,
             clip: false,
             class: Theme::default(),
+            status: None,
         }
     }
 
@@ -233,7 +234,7 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         tree: &mut Tree,
         renderer: &Renderer,
         limits: &layout::Limits,
@@ -244,7 +245,7 @@ where
             self.height,
             self.padding,
             |limits| {
-                self.content.as_widget().layout(
+                self.content.as_widget_mut().layout(
                     &mut tree.children[0],
                     renderer,
                     limits,
@@ -254,14 +255,15 @@ where
     }
 
     fn operate(
-        &self,
+        &mut self,
         tree: &mut Tree,
         layout: Layout<'_>,
         renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
-        operation.container(None, layout.bounds(), &mut |operation| {
-            self.content.as_widget().operate(
+        operation.container(None, layout.bounds());
+        operation.traverse(&mut |operation| {
+            self.content.as_widget_mut().operate(
                 &mut tree.children[0],
                 layout.children().next().unwrap(),
                 renderer,
@@ -270,28 +272,30 @@ where
         });
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
-    ) -> event::Status {
-        if let event::Status::Captured = self.content.as_widget_mut().on_event(
+    ) {
+        self.content.as_widget_mut().update(
             &mut tree.children[0],
-            event.clone(),
+            event,
             layout.children().next().unwrap(),
             cursor,
             renderer,
             clipboard,
             shell,
             viewport,
-        ) {
-            return event::Status::Captured;
+        );
+
+        if shell.is_event_captured() {
+            return;
         }
 
         match event {
@@ -305,14 +309,13 @@ where
 
                         state.is_pressed = true;
 
-                        return event::Status::Captured;
+                        shell.capture_event();
                     }
                 }
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
             | Event::Touch(touch::Event::FingerLifted { .. }) => {
-                if let Some(on_press) = self.on_press.as_ref().map(OnPress::get)
-                {
+                if let Some(on_press) = &self.on_press {
                     let state = tree.state.downcast_mut::<State>();
 
                     if state.is_pressed {
@@ -321,10 +324,10 @@ where
                         let bounds = layout.bounds();
 
                         if cursor.is_over(bounds) {
-                            shell.publish(on_press);
+                            shell.publish(on_press.get());
                         }
 
-                        return event::Status::Captured;
+                        shell.capture_event();
                     }
                 }
             }
@@ -336,7 +339,25 @@ where
             _ => {}
         }
 
-        event::Status::Ignored
+        let current_status = if self.on_press.is_none() {
+            Status::Disabled
+        } else if cursor.is_over(layout.bounds()) {
+            let state = tree.state.downcast_ref::<State>();
+
+            if state.is_pressed {
+                Status::Pressed
+            } else {
+                Status::Hovered
+            }
+        } else {
+            Status::Active
+        };
+
+        if let Event::Window(window::Event::RedrawRequested(_now)) = event {
+            self.status = Some(current_status);
+        } else if self.status.is_some_and(|status| status != current_status) {
+            shell.request_redraw();
+        }
     }
 
     fn draw(
@@ -351,23 +372,8 @@ where
     ) {
         let bounds = layout.bounds();
         let content_layout = layout.children().next().unwrap();
-        let is_mouse_over = cursor.is_over(bounds);
-
-        let status = if self.on_press.is_none() {
-            Status::Disabled
-        } else if is_mouse_over {
-            let state = tree.state.downcast_ref::<State>();
-
-            if state.is_pressed {
-                Status::Pressed
-            } else {
-                Status::Hovered
-            }
-        } else {
-            Status::Active
-        };
-
-        let style = theme.style(&self.class, status);
+        let style =
+            theme.style(&self.class, self.status.unwrap_or(Status::Disabled));
 
         if style.background.is_some()
             || style.border.width > 0.0
@@ -378,6 +384,7 @@ where
                     bounds,
                     border: style.border,
                     shadow: style.shadow,
+                    snap: style.snap,
                 },
                 style
                     .background
@@ -424,14 +431,16 @@ where
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'_>,
+        layout: Layout<'b>,
         renderer: &Renderer,
+        viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
         self.content.as_widget_mut().overlay(
             &mut tree.children[0],
             layout.children().next().unwrap(),
             renderer,
+            viewport,
             translation,
         )
     }
@@ -450,7 +459,7 @@ where
 }
 
 /// The default [`Padding`] of a [`Button`].
-pub(crate) const DEFAULT_PADDING: Padding = Padding {
+pub const DEFAULT_PADDING: Padding = Padding {
     top: 5.0,
     bottom: 5.0,
     right: 10.0,
@@ -471,16 +480,21 @@ pub enum Status {
 }
 
 /// The style of a button.
+///
+/// If not specified with [`Button::style`]
+/// the theme will provide the style.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Style {
     /// The [`Background`] of the button.
     pub background: Option<Background>,
     /// The text [`Color`] of the button.
     pub text_color: Color,
-    /// The [`Border`] of the buton.
+    /// The [`Border`] of the button.
     pub border: Border,
-    /// The [`Shadow`] of the butoon.
+    /// The [`Shadow`] of the button.
     pub shadow: Shadow,
+    /// Whether the button should be snapped to the pixel grid.
+    pub snap: bool,
 }
 
 impl Style {
@@ -500,11 +514,60 @@ impl Default for Style {
             text_color: Color::BLACK,
             border: Border::default(),
             shadow: Shadow::default(),
+            snap: cfg!(feature = "crisp"),
         }
     }
 }
 
 /// The theme catalog of a [`Button`].
+///
+/// All themes that can be used with [`Button`]
+/// must implement this trait.
+///
+/// # Example
+/// ```no_run
+/// # use iced_widget::core::{Color, Background};
+/// # use iced_widget::button::{Catalog, Status, Style};
+/// # struct MyTheme;
+/// #[derive(Debug, Default)]
+/// pub enum ButtonClass {
+///     #[default]
+///     Primary,
+///     Secondary,
+///     Danger
+/// }
+///
+/// impl Catalog for MyTheme {
+///     type Class<'a> = ButtonClass;
+///     
+///     fn default<'a>() -> Self::Class<'a> {
+///         ButtonClass::default()
+///     }
+///     
+///
+///     fn style(&self, class: &Self::Class<'_>, status: Status) -> Style {
+///         let mut style = Style::default();
+///
+///         match class {
+///             ButtonClass::Primary => {
+///                 style.background = Some(Background::Color(Color::from_rgb(0.529, 0.808, 0.921)));
+///             },
+///             ButtonClass::Secondary => {
+///                 style.background = Some(Background::Color(Color::WHITE));
+///             },
+///             ButtonClass::Danger => {
+///                 style.background = Some(Background::Color(Color::from_rgb(0.941, 0.502, 0.502)));
+///             },
+///         }
+///
+///         style
+///     }
+/// }
+/// ```
+///
+/// Although, in order to use [`Button::style`]
+/// with `MyTheme`, [`Catalog::Class`] must implement
+/// `From<StyleFn<'_, MyTheme>>`.
 pub trait Catalog {
     /// The item class of the [`Catalog`].
     type Class<'a>;
@@ -534,12 +597,12 @@ impl Catalog for Theme {
 /// A primary button; denoting a main action.
 pub fn primary(theme: &Theme, status: Status) -> Style {
     let palette = theme.extended_palette();
-    let base = styled(palette.primary.strong);
+    let base = styled(palette.primary.base);
 
     match status {
         Status::Active | Status::Pressed => base,
         Status::Hovered => Style {
-            background: Some(Background::Color(palette.primary.base.color)),
+            background: Some(Background::Color(palette.primary.strong.color)),
             ..base
         },
         Status::Disabled => disabled(base),
@@ -576,6 +639,21 @@ pub fn success(theme: &Theme, status: Status) -> Style {
     }
 }
 
+/// A warning button; denoting a risky action.
+pub fn warning(theme: &Theme, status: Status) -> Style {
+    let palette = theme.extended_palette();
+    let base = styled(palette.warning.base);
+
+    match status {
+        Status::Active | Status::Pressed => base,
+        Status::Hovered => Style {
+            background: Some(Background::Color(palette.warning.strong.color)),
+            ..base
+        },
+        Status::Disabled => disabled(base),
+    }
+}
+
 /// A danger button; denoting a destructive action.
 pub fn danger(theme: &Theme, status: Status) -> Style {
     let palette = theme.extended_palette();
@@ -604,6 +682,50 @@ pub fn text(theme: &Theme, status: Status) -> Style {
         Status::Active | Status::Pressed => base,
         Status::Hovered => Style {
             text_color: palette.background.base.text.scale_alpha(0.8),
+            ..base
+        },
+        Status::Disabled => disabled(base),
+    }
+}
+
+/// A button using background shades.
+pub fn background(theme: &Theme, status: Status) -> Style {
+    let palette = theme.extended_palette();
+    let base = styled(palette.background.base);
+
+    match status {
+        Status::Active => base,
+        Status::Pressed => Style {
+            background: Some(Background::Color(
+                palette.background.strong.color,
+            )),
+            ..base
+        },
+        Status::Hovered => Style {
+            background: Some(Background::Color(palette.background.weak.color)),
+            ..base
+        },
+        Status::Disabled => disabled(base),
+    }
+}
+
+/// A subtle button using weak background shades.
+pub fn subtle(theme: &Theme, status: Status) -> Style {
+    let palette = theme.extended_palette();
+    let base = styled(palette.background.weakest);
+
+    match status {
+        Status::Active => base,
+        Status::Pressed => Style {
+            background: Some(Background::Color(
+                palette.background.strong.color,
+            )),
+            ..base
+        },
+        Status::Hovered => Style {
+            background: Some(Background::Color(
+                palette.background.weaker.color,
+            )),
             ..base
         },
         Status::Disabled => disabled(base),

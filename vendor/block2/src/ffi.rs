@@ -1,9 +1,9 @@
 //! # Raw bindings to `Block.h`
 
 use core::cell::UnsafeCell;
+use core::ffi::c_int;
 use core::ffi::c_void;
 use core::marker::{PhantomData, PhantomPinned};
-use std::os::raw::c_int;
 
 /// Type for block class ISAs.
 ///
@@ -27,13 +27,12 @@ pub struct Class {
     /// Mark as `!Send + !Sync + !Unpin` and as mutable behind shared
     /// references (`!Freeze`).
     ///
-    /// Same as `objc_sys::OpaqueData`.
+    /// Same as `objc2::ffi::OpaqueData`.
     _opaque: UnsafeCell<PhantomData<(*const UnsafeCell<()>, PhantomPinned)>>,
 }
 
-// TODO: Use `extern "C-unwind"` when in MSRV (because the runtime functions
-// may call external routines).
-extern "C" {
+// Use `extern "C-unwind"`, runtime functions may call external routines.
+extern "C-unwind" {
     /// Class ISA used for global blocks.
     pub static _NSConcreteGlobalBlock: Class;
 
@@ -81,11 +80,11 @@ extern "C" {
 pub mod private {
     use super::*;
     #[cfg(any(doc, target_vendor = "apple", feature = "gnustep-1-7"))]
-    use std::os::raw::c_char;
+    use core::ffi::c_char;
     #[cfg(any(doc, target_vendor = "apple", feature = "compiler-rt"))]
-    use std::os::raw::c_ulong;
+    use core::ffi::c_ulong;
 
-    extern "C" {
+    extern "C-unwind" {
         pub static _NSConcreteMallocBlock: Class;
         #[cfg(any(doc, target_vendor = "apple", feature = "compiler-rt"))]
         pub static _NSConcreteAutoBlock: Class;
@@ -145,7 +144,6 @@ pub mod private {
 mod tests {
     use super::*;
     use core::ptr;
-    use std::println;
 
     #[test]
     fn smoke() {
@@ -154,18 +152,24 @@ mod tests {
     }
 
     #[test]
+    #[allow(unused_unsafe)]
+    #[cfg(feature = "std")]
     fn test_linkable() {
+        use std::println;
         println!("{:?}", unsafe { ptr::addr_of!(_NSConcreteGlobalBlock) });
         println!("{:?}", unsafe { ptr::addr_of!(_NSConcreteStackBlock) });
         println!("{:?}", unsafe {
             ptr::addr_of!(private::_NSConcreteMallocBlock)
         });
-        println!("{:p}", _Block_copy as unsafe extern "C" fn(_) -> _);
+        println!("{:p}", _Block_copy as unsafe extern "C-unwind" fn(_) -> _);
         println!(
             "{:p}",
-            _Block_object_assign as unsafe extern "C" fn(_, _, _)
+            _Block_object_assign as unsafe extern "C-unwind" fn(_, _, _)
         );
-        println!("{:p}", _Block_object_dispose as unsafe extern "C" fn(_, _));
-        println!("{:p}", _Block_release as unsafe extern "C" fn(_));
+        println!(
+            "{:p}",
+            _Block_object_dispose as unsafe extern "C-unwind" fn(_, _)
+        );
+        println!("{:p}", _Block_release as unsafe extern "C-unwind" fn(_));
     }
 }

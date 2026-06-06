@@ -1,15 +1,17 @@
+use alloc::vec::Vec;
 use skrifa::{
     instance::{NormalizedCoord, Size},
     outline::{
         HintingInstance, HintingMode, LcdLayout, OutlineGlyphCollection, OutlineGlyphFormat,
     },
 };
+
 /// We keep this small to enable a simple LRU cache with a linear
 /// search. Regenerating hinting data is low to medium cost so it's fine
 /// to redo it occasionally.
 const MAX_CACHED_HINT_INSTANCES: usize = 8;
 
-pub struct HintingKey<'a> {
+pub(crate) struct HintingKey<'a> {
     pub id: [u64; 2],
     pub outlines: &'a OutlineGlyphCollection<'a>,
     pub size: Size,

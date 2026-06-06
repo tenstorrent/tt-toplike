@@ -1,8 +1,8 @@
 //! Listen to runtime events.
+use crate::MaybeSend;
 use crate::core::event::{self, Event};
 use crate::core::window;
 use crate::subscription::{self, Subscription};
-use crate::MaybeSend;
 
 /// Returns a [`Subscription`] to all the ignored runtime events.
 ///
@@ -36,7 +36,8 @@ where
         subscription::Event::Interaction {
             event: Event::Window(window::Event::RedrawRequested(_)),
             ..
-        } => None,
+        }
+        | subscription::Event::SystemThemeChanged(_) => None,
         subscription::Event::Interaction {
             window,
             event,
@@ -65,5 +66,6 @@ where
             event,
             status,
         } => f(event, status, window),
+        subscription::Event::SystemThemeChanged(_) => None,
     })
 }

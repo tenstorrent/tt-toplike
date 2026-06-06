@@ -3,6 +3,9 @@ pub mod palette;
 
 pub use palette::Palette;
 
+use crate::Color;
+
+use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
 
@@ -85,14 +88,17 @@ impl Theme {
     ];
 
     /// Creates a new custom [`Theme`] from the given [`Palette`].
-    pub fn custom(name: String, palette: Palette) -> Self {
+    pub fn custom(
+        name: impl Into<Cow<'static, str>>,
+        palette: Palette,
+    ) -> Self {
         Self::custom_with_fn(name, palette, palette::Extended::generate)
     }
 
     /// Creates a new custom [`Theme`] from the given [`Palette`], with
     /// a custom generator of a [`palette::Extended`].
     pub fn custom_with_fn(
-        name: String,
+        name: impl Into<Cow<'static, str>>,
         palette: Palette,
         generate: impl FnOnce(Palette) -> palette::Extended,
     ) -> Self {
@@ -160,62 +166,16 @@ impl Theme {
     }
 }
 
-impl Default for Theme {
-    fn default() -> Self {
-        #[cfg(feature = "auto-detect-theme")]
-        {
-            use once_cell::sync::Lazy;
-
-            static DEFAULT: Lazy<Theme> =
-                Lazy::new(|| match dark_light::detect() {
-                    dark_light::Mode::Dark => Theme::Dark,
-                    dark_light::Mode::Light | dark_light::Mode::Default => {
-                        Theme::Light
-                    }
-                });
-
-            DEFAULT.clone()
-        }
-
-        #[cfg(not(feature = "auto-detect-theme"))]
-        Theme::Light
-    }
-}
-
 impl fmt::Display for Theme {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Light => write!(f, "Light"),
-            Self::Dark => write!(f, "Dark"),
-            Self::Dracula => write!(f, "Dracula"),
-            Self::Nord => write!(f, "Nord"),
-            Self::SolarizedLight => write!(f, "Solarized Light"),
-            Self::SolarizedDark => write!(f, "Solarized Dark"),
-            Self::GruvboxLight => write!(f, "Gruvbox Light"),
-            Self::GruvboxDark => write!(f, "Gruvbox Dark"),
-            Self::CatppuccinLatte => write!(f, "Catppuccin Latte"),
-            Self::CatppuccinFrappe => write!(f, "Catppuccin Frappé"),
-            Self::CatppuccinMacchiato => write!(f, "Catppuccin Macchiato"),
-            Self::CatppuccinMocha => write!(f, "Catppuccin Mocha"),
-            Self::TokyoNight => write!(f, "Tokyo Night"),
-            Self::TokyoNightStorm => write!(f, "Tokyo Night Storm"),
-            Self::TokyoNightLight => write!(f, "Tokyo Night Light"),
-            Self::KanagawaWave => write!(f, "Kanagawa Wave"),
-            Self::KanagawaDragon => write!(f, "Kanagawa Dragon"),
-            Self::KanagawaLotus => write!(f, "Kanagawa Lotus"),
-            Self::Moonfly => write!(f, "Moonfly"),
-            Self::Nightfly => write!(f, "Nightfly"),
-            Self::Oxocarbon => write!(f, "Oxocarbon"),
-            Self::Ferra => write!(f, "Ferra"),
-            Self::Custom(custom) => custom.fmt(f),
-        }
+        f.write_str(self.name())
     }
 }
 
 /// A [`Theme`] with a customized [`Palette`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Custom {
-    name: String,
+    name: Cow<'static, str>,
     palette: Palette,
     extended: palette::Extended,
 }
@@ -229,12 +189,12 @@ impl Custom {
     /// Creates a [`Custom`] theme from the given [`Palette`] with
     /// a custom generator of a [`palette::Extended`].
     pub fn with_fn(
-        name: String,
+        name: impl Into<Cow<'static, str>>,
         palette: Palette,
         generate: impl FnOnce(Palette) -> palette::Extended,
     ) -> Self {
         Self {
-            name,
+            name: name.into(),
             palette,
             extended: generate(palette),
         }
@@ -244,5 +204,133 @@ impl Custom {
 impl fmt::Display for Custom {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.name)
+    }
+}
+
+/// A theme mode, denoting the tone or brightness of a theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// No specific tone.
+    #[default]
+    None,
+    /// A mode referring to themes with light tones.
+    Light,
+    /// A mode referring to themes with dark tones.
+    Dark,
+}
+
+/// The base style of a theme.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Style {
+    /// The background [`Color`] of the application.
+    pub background_color: Color,
+
+    /// The default text [`Color`] of the application.
+    pub text_color: Color,
+}
+
+/// The default blank style of a theme.
+pub trait Base {
+    /// Returns the default theme for the preferred [`Mode`].
+    fn default(preference: Mode) -> Self;
+
+    /// Returns the [`Mode`] of the theme.
+    fn mode(&self) -> Mode;
+
+    /// Returns the default base [`Style`] of the theme.
+    fn base(&self) -> Style;
+
+    /// Returns the color [`Palette`] of the theme.
+    ///
+    /// This [`Palette`] may be used by the runtime for
+    /// debugging purposes; like displaying performance
+    /// metrics or devtools.
+    fn palette(&self) -> Option<Palette>;
+
+    /// Returns the unique name of the theme.
+    ///
+    /// This name may be used to efficiently detect theme
+    /// changes in some widgets.
+    fn name(&self) -> &str;
+}
+
+impl Base for Theme {
+    fn default(preference: Mode) -> Self {
+        use std::env;
+        use std::sync::OnceLock;
+
+        static SYSTEM: OnceLock<Option<Theme>> = OnceLock::new();
+
+        let system = SYSTEM.get_or_init(|| {
+            let name = env::var("ICED_THEME").ok()?;
+
+            Theme::ALL
+                .iter()
+                .find(|theme| theme.to_string() == name)
+                .cloned()
+        });
+
+        if let Some(system) = system {
+            return system.clone();
+        }
+
+        match preference {
+            Mode::None | Mode::Light => Self::Light,
+            Mode::Dark => Self::Dark,
+        }
+    }
+
+    fn mode(&self) -> Mode {
+        if self.extended_palette().is_dark {
+            Mode::Dark
+        } else {
+            Mode::Light
+        }
+    }
+
+    fn base(&self) -> Style {
+        default(self)
+    }
+
+    fn palette(&self) -> Option<Palette> {
+        Some(self.palette())
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+            Self::Dracula => "Dracula",
+            Self::Nord => "Nord",
+            Self::SolarizedLight => "Solarized Light",
+            Self::SolarizedDark => "Solarized Dark",
+            Self::GruvboxLight => "Gruvbox Light",
+            Self::GruvboxDark => "Gruvbox Dark",
+            Self::CatppuccinLatte => "Catppuccin Latte",
+            Self::CatppuccinFrappe => "Catppuccin Frappé",
+            Self::CatppuccinMacchiato => "Catppuccin Macchiato",
+            Self::CatppuccinMocha => "Catppuccin Mocha",
+            Self::TokyoNight => "Tokyo Night",
+            Self::TokyoNightStorm => "Tokyo Night Storm",
+            Self::TokyoNightLight => "Tokyo Night Light",
+            Self::KanagawaWave => "Kanagawa Wave",
+            Self::KanagawaDragon => "Kanagawa Dragon",
+            Self::KanagawaLotus => "Kanagawa Lotus",
+            Self::Moonfly => "Moonfly",
+            Self::Nightfly => "Nightfly",
+            Self::Oxocarbon => "Oxocarbon",
+            Self::Ferra => "Ferra",
+            Self::Custom(custom) => &custom.name,
+        }
+    }
+}
+
+/// The default [`Style`] of a built-in [`Theme`].
+pub fn default(theme: &Theme) -> Style {
+    let palette = theme.extended_palette();
+
+    Style {
+        background_color: palette.background.base.color,
+        text_color: palette.background.base.text,
     }
 }

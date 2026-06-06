@@ -3,32 +3,44 @@
 
 [package]
 name = "objc2-core-data"
-version = "0.2.2" # Remember to update html_root_url in lib.rs
+version.workspace = true
 description = "Bindings to the CoreData framework"
-edition = "2021"
-rust-version = "1.60"
+edition.workspace = true
+rust-version.workspace = true
 keywords = ["cocoa", "apple", "framework", "macos", "ios"]
-categories = [
-    "api-bindings",
-    "development-tools::ffi",
-    "external-ffi-bindings",
-    "os::macos-apis",
-]
-repository = "https://github.com/madsmtm/objc2"
-license = "MIT"
+categories.workspace = true
+repository.workspace = true
+license.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
-bitflags = { version = "2.5.0", default-features = false, optional = true }
-block2 = { path = "../../crates/block2", version = "0.5.1", default-features = false, optional = true }
-objc2 = { path = "../../crates/objc2", version = "0.5.2", default-features = false }
-objc2-foundation = { path = "../objc2-foundation", version = "0.2.2", default-features = false }
+bitflags = { workspace = true, optional = true, features = ["std"] }
+block2 = { workspace = true, optional = true, features = ["alloc"] }
+objc2 = { workspace = true, features = ["std"] }
+objc2-cloud-kit = { workspace = true, optional = true, features = [
+    "CKContainer",
+    "CKDatabase",
+    "CKRecord",
+    "CKRecordID",
+    "CKRecordZoneID",
+    "CKShare",
+    "CKShareMetadata",
+    "CKShareParticipant",
+    "CKUserIdentityLookupInfo",
+] }
+objc2-foundation = { workspace = true, features = ["alloc"] }
+
+[target.'cfg(not(any(target_os = "tvos", target_os = "watchos")))'.dependencies]
+objc2-core-spotlight = { workspace = true, optional = true, features = [
+    "CSSearchableIndex",
+    "CSSearchableItemAttributeSet",
+] }
 
 [package.metadata.docs.rs]
 default-target = "aarch64-apple-darwin"
-features = ["all"]
+rustc-args = ["--cfg", "docsrs"] # Fix cross-crate link to objc2::topics
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
@@ -36,23 +48,105 @@ targets = [
     "aarch64-apple-tvos",
     "aarch64-apple-watchos",
     "aarch64-apple-ios-macabi",
+    "aarch64-apple-visionos",
 ]
+features = ["objc2-core-spotlight"]
 
 [features]
-default = ["std"]
-
-# Currently not possible to turn off, put here for forwards compatibility.
-std = ["alloc", "bitflags?/std", "block2?/std", "objc2/std", "objc2-foundation/std"]
-alloc = ["block2?/alloc", "objc2/alloc", "objc2-foundation/alloc"]
-apple = []
+default = [
+    "std",
+    "CloudKit",
+    "CoreDataDefines",
+    "CoreDataErrors",
+    "NSAtomicStore",
+    "NSAtomicStoreCacheNode",
+    "NSAttributeDescription",
+    "NSBatchDeleteRequest",
+    "NSBatchInsertRequest",
+    "NSBatchUpdateRequest",
+    "NSCompositeAttributeDescription",
+    "NSCoreDataCoreSpotlightDelegate",
+    "NSCustomMigrationStage",
+    "NSDerivedAttributeDescription",
+    "NSEntityDescription",
+    "NSEntityMapping",
+    "NSEntityMigrationPolicy",
+    "NSExpressionDescription",
+    "NSFetchIndexDescription",
+    "NSFetchIndexElementDescription",
+    "NSFetchRequest",
+    "NSFetchRequestExpression",
+    "NSFetchedPropertyDescription",
+    "NSFetchedResultsController",
+    "NSIncrementalStore",
+    "NSIncrementalStoreNode",
+    "NSLightweightMigrationStage",
+    "NSManagedObject",
+    "NSManagedObjectContext",
+    "NSManagedObjectID",
+    "NSManagedObjectModel",
+    "NSManagedObjectModelReference",
+    "NSMappingModel",
+    "NSMergePolicy",
+    "NSMigrationManager",
+    "NSMigrationStage",
+    "NSPersistentCloudKitContainer",
+    "NSPersistentCloudKitContainerEvent",
+    "NSPersistentCloudKitContainerEventRequest",
+    "NSPersistentCloudKitContainerOptions",
+    "NSPersistentContainer",
+    "NSPersistentHistoryChange",
+    "NSPersistentHistoryChangeRequest",
+    "NSPersistentHistoryToken",
+    "NSPersistentHistoryTransaction",
+    "NSPersistentStore",
+    "NSPersistentStoreCoordinator",
+    "NSPersistentStoreDescription",
+    "NSPersistentStoreRequest",
+    "NSPersistentStoreResult",
+    "NSPropertyDescription",
+    "NSPropertyMapping",
+    "NSQueryGenerationToken",
+    "NSRelationshipDescription",
+    "NSSaveChangesRequest",
+    "NSStagedMigrationManager",
+    "bitflags",
+    "block2",
+    "objc2-cloud-kit",
+]
+std = ["alloc"]
+alloc = []
 gnustep-1-7 = []
 gnustep-1-8 = []
 gnustep-1-9 = []
 gnustep-2-0 = []
 gnustep-2-1 = []
-bitflags = ["dep:bitflags", "objc2-foundation/bitflags"]
-block2 = ["dep:block2", "objc2-foundation/block2"]
+NSFetchedResultsController = [
+    "objc2-foundation/NSArray",
+    "objc2-foundation/NSError",
+    "objc2-foundation/NSIndexPath",
+    "objc2-foundation/NSOrderedCollectionDifference",
+    "objc2-foundation/NSString",
+    "NSFetchRequest",
+]
+NSPersistentStoreResult = [
+    "objc2-foundation/NSArray",
+    "objc2-foundation/NSError",
+    "objc2-foundation/NSProgress",
+    "NSFetchRequest",
+]
+bitflags = ["dep:bitflags"]
+block2 = ["dep:block2"]
+objc2-cloud-kit = ["dep:objc2-cloud-kit"]
+objc2-core-spotlight = ["dep:objc2-core-spotlight"]
+unstable-darwin-objc = []
 
+CloudKit = [
+    "objc2-foundation/NSArray",
+    "objc2-foundation/NSDictionary",
+    "objc2-foundation/NSError",
+    "objc2-foundation/NSSet",
+]
 CoreDataDefines = []
 CoreDataErrors = ["objc2-foundation/NSString"]
 NSAtomicStore = [
@@ -92,6 +186,7 @@ NSCompositeAttributeDescription = [
     "objc2-foundation/NSObject",
 ]
 NSCoreDataCoreSpotlightDelegate = [
+    "objc2-foundation/NSArray",
     "objc2-foundation/NSError",
     "objc2-foundation/NSNotification",
     "objc2-foundation/NSString",
@@ -152,13 +247,6 @@ NSFetchRequestExpression = [
     "objc2-foundation/NSObject",
 ]
 NSFetchedPropertyDescription = ["objc2-foundation/NSObject"]
-NSFetchedResultsController = [
-    "objc2-foundation/NSArray",
-    "objc2-foundation/NSError",
-    "objc2-foundation/NSIndexPath",
-    "objc2-foundation/NSOrderedCollectionDifference",
-    "objc2-foundation/NSString",
-]
 NSIncrementalStore = [
     "objc2-foundation/NSArray",
     "objc2-foundation/NSDictionary",
@@ -241,6 +329,8 @@ NSMigrationManager = [
 NSMigrationStage = ["objc2-foundation/NSString"]
 NSPersistentCloudKitContainer = [
     "bitflags",
+    "objc2-foundation/NSArray",
+    "objc2-foundation/NSDictionary",
     "objc2-foundation/NSError",
     "objc2-foundation/NSString",
 ]
@@ -306,11 +396,6 @@ NSPersistentStoreRequest = [
     "objc2-foundation/NSArray",
     "objc2-foundation/NSObject",
 ]
-NSPersistentStoreResult = [
-    "objc2-foundation/NSArray",
-    "objc2-foundation/NSError",
-    "objc2-foundation/NSProgress",
-]
 NSPropertyDescription = [
     "objc2-foundation/NSArray",
     "objc2-foundation/NSData",
@@ -334,61 +419,3 @@ NSSaveChangesRequest = [
     "objc2-foundation/NSSet",
 ]
 NSStagedMigrationManager = ["objc2-foundation/NSArray"]
-all = [
-    "CoreDataDefines",
-    "CoreDataErrors",
-    "NSAtomicStore",
-    "NSAtomicStoreCacheNode",
-    "NSAttributeDescription",
-    "NSBatchDeleteRequest",
-    "NSBatchInsertRequest",
-    "NSBatchUpdateRequest",
-    "NSCompositeAttributeDescription",
-    "NSCoreDataCoreSpotlightDelegate",
-    "NSCustomMigrationStage",
-    "NSDerivedAttributeDescription",
-    "NSEntityDescription",
-    "NSEntityMapping",
-    "NSEntityMigrationPolicy",
-    "NSExpressionDescription",
-    "NSFetchIndexDescription",
-    "NSFetchIndexElementDescription",
-    "NSFetchRequest",
-    "NSFetchRequestExpression",
-    "NSFetchedPropertyDescription",
-    "NSFetchedResultsController",
-    "NSIncrementalStore",
-    "NSIncrementalStoreNode",
-    "NSLightweightMigrationStage",
-    "NSManagedObject",
-    "NSManagedObjectContext",
-    "NSManagedObjectID",
-    "NSManagedObjectModel",
-    "NSManagedObjectModelReference",
-    "NSMappingModel",
-    "NSMergePolicy",
-    "NSMigrationManager",
-    "NSMigrationStage",
-    "NSPersistentCloudKitContainer",
-    "NSPersistentCloudKitContainerEvent",
-    "NSPersistentCloudKitContainerEventRequest",
-    "NSPersistentCloudKitContainerOptions",
-    "NSPersistentContainer",
-    "NSPersistentHistoryChange",
-    "NSPersistentHistoryChangeRequest",
-    "NSPersistentHistoryToken",
-    "NSPersistentHistoryTransaction",
-    "NSPersistentStore",
-    "NSPersistentStoreCoordinator",
-    "NSPersistentStoreDescription",
-    "NSPersistentStoreRequest",
-    "NSPersistentStoreResult",
-    "NSPropertyDescription",
-    "NSPropertyMapping",
-    "NSQueryGenerationToken",
-    "NSRelationshipDescription",
-    "NSSaveChangesRequest",
-    "NSStagedMigrationManager",
-    "bitflags",
-    "block2",
-]

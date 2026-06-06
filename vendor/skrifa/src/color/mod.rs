@@ -42,7 +42,11 @@ mod traversal;
 #[cfg(test)]
 mod traversal_tests;
 
-use raw::tables::colr;
+use raw::{
+    tables::{colr, cpal},
+    types::BigEndian,
+    FontRef,
+};
 #[cfg(test)]
 use serde::{Deserialize, Serialize};
 
@@ -53,13 +57,19 @@ use read_fonts::{
     ReadError, TableProvider,
 };
 
+#[doc(inline)]
+pub use cpal::ColorRecord as Color;
+
 use std::{fmt::Debug, ops::Range};
 
-use traversal::{get_clipbox_font_units, traverse_v0_range, traverse_with_callbacks, VisitedSet};
+use traversal::{
+    get_clipbox_font_units, traverse_v0_range, traverse_with_callbacks, PaintDecycler,
+};
 
 pub use transform::Transform;
 
 use crate::prelude::{LocationRef, Size};
+use crate::string::StringId;
 
 use self::instance::{resolve_paint, PaintId};
 
@@ -100,7 +110,7 @@ impl From<ReadError> for PaintError {
 ///
 /// All gradient callbacks of [`ColorPainter`] normalize color stops to be in the range of 0
 /// to 1.
-#[derive(Clone, PartialEq, Debug, Default)]
+#[derive(Copy, Clone, PartialEq, Debug, Default)]
 #[cfg_attr(test, derive(Serialize, Deserialize))]
 // This repr(C) is required so that C-side FFI's
 // are able to cast the ColorStop slice to a C-side array pointer.
@@ -121,7 +131,7 @@ pub struct ColorStop {
 // re-applying the deltas at least once, after which we would pass the scaled
 // stops to client side and have the client sort the collected items once
 // again. If we do want to pre-ort them, and still use use an
-// `Iterator<Item=ColorStop>`` instead as the `color_stops` field, then we would
+// `Iterator<Item=ColorStop>` instead as the `color_stops` field, then we would
 // need a Fontations-side allocations to sort, and an extra allocation on the
 // client side to `.collect()` from the provided iterator before passing it to
 // drawing API.
@@ -129,8 +139,8 @@ pub struct ColorStop {
 /// A fill type of a COLRv1 glyph (solid fill or various gradient types).
 ///
 /// The client receives the information about the fill type in the
-/// [`fill``](ColorPainter::fill) callback of the [`ColorPainter`] trait.
-#[derive(Debug, PartialEq)]
+/// [`fill`](ColorPainter::fill) callback of the [`ColorPainter`] trait.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Brush<'a> {
     /// A solid fill with the color specified by `palette_index`. The respective
     /// color from the CPAL table then needs to be multiplied with `alpha`.
@@ -261,7 +271,22 @@ pub trait ColorPainter {
     /// Open a new layer, and merge the layer down using `composite_mode` when
     /// [`pop_layer`](ColorPainter::pop_layer) is called, signalling that this layer is done drawing.
     fn push_layer(&mut self, composite_mode: CompositeMode);
-    fn pop_layer(&mut self);
+
+    /// Merge the pushed layer down using `composite_mode` passed to the matching
+    /// [`push_layer`](ColorPainter::push_layer).
+    fn pop_layer(&mut self) {}
+
+    /// Alternative version of [`push_layer`](ColorPainter::push_layer) where the
+    /// `composite_mode` is also passed to the method. This is useful for
+    /// graphics libraries that need the compositing mode at layer pop time
+    /// and do not want to manually track the mode.
+    ///
+    /// Only one of [`pop_layer`](ColorPainter::pop_layer) or this method
+    /// need to be implemented. By default, this simply calls
+    /// [`pop_layer`](ColorPainter::pop_layer).
+    fn pop_layer_with_mode(&mut self, _composite_mode: CompositeMode) {
+        self.pop_layer();
+    }
 }
 
 /// Distinguishes available color glyph formats.
@@ -294,27 +319,34 @@ impl<'a> ColorGlyph<'a> {
         }
     }
 
-    /// Returns the bounding box. For COLRv1 glyphs, this is clipbox of the
-    /// specified COLRv1 glyph, or `None` if there is
-    /// none for the particular glyph.  The `size` argument can optionally be used
-    /// to scale the bounding box to a particular font size. `location` allows
-    /// specifycing a variation instance.
+    /// Returns the bounding box.
+    ///
+    /// For COLRv1 glyphs, this is the clip box of the specified COLRv1 glyph,
+    /// or `None` if clip boxes are not present or if there is none for the
+    /// particular glyph.
+    ///
+    /// Always returns `None` for COLRv0 glyphs because precomputed clip boxes
+    /// are never available.
+    ///
+    /// The `size` argument can optionally be used to scale the bounding box
+    /// to a particular font size and `location` allows specifying a variation
+    /// instance.
     pub fn bounding_box(
         &self,
         location: impl Into<LocationRef<'a>>,
         size: Size,
     ) -> Option<BoundingBox<f32>> {
-        let instance = instance::ColrInstance::new(self.colr.clone(), location.into().coords());
-
         match &self.root_paint_ref {
             ColorGlyphRoot::V1Paint(_paint, _paint_id, glyph_id, upem) => {
+                let instance =
+                    instance::ColrInstance::new(self.colr.clone(), location.into().coords());
                 let resolved_bounding_box = get_clipbox_font_units(&instance, *glyph_id);
                 resolved_bounding_box.map(|bounding_box| {
                     let scale_factor = size.linear_scale((*upem).clone().unwrap_or(0));
                     bounding_box.scale(scale_factor)
                 })
             }
-            _ => todo!(),
+            _ => None,
         }
     }
 
@@ -340,7 +372,9 @@ impl<'a> ColorGlyph<'a> {
         location: impl Into<LocationRef<'a>>,
         painter: &mut impl ColorPainter,
     ) -> Result<(), PaintError> {
-        let instance = instance::ColrInstance::new(self.colr.clone(), location.into().coords());
+        let instance =
+            instance::ColrInstance::new(self.colr.clone(), location.into().effective_coords());
+        let mut resolved_stops = traversal::ColorStopVec::default();
         match &self.root_paint_ref {
             ColorGlyphRoot::V1Paint(paint, paint_id, glyph_id, _) => {
                 let clipbox = get_clipbox_font_units(&instance, *glyph_id);
@@ -349,13 +383,14 @@ impl<'a> ColorGlyph<'a> {
                     painter.push_clip_box(rect);
                 }
 
-                let mut visited_set = VisitedSet::default();
-                visited_set.insert(*paint_id);
+                let mut decycler = PaintDecycler::default();
+                let mut cycle_guard = decycler.enter(*paint_id)?;
                 traverse_with_callbacks(
                     &resolve_paint(&instance, paint)?,
                     &instance,
                     painter,
-                    &mut visited_set,
+                    &mut cycle_guard,
+                    &mut resolved_stops,
                     0,
                 )?;
 
@@ -381,7 +416,7 @@ pub struct ColorGlyphCollection<'a> {
 
 impl<'a> ColorGlyphCollection<'a> {
     /// Creates a new collection of paintable color glyphs for the given font.
-    pub fn new(font: &impl TableProvider<'a>) -> Self {
+    pub fn new(font: &FontRef<'a>) -> Self {
         let colr = font.colr().ok();
         let upem = font.head().map(|h| h.units_per_em());
 
@@ -422,14 +457,116 @@ impl<'a> ColorGlyphCollection<'a> {
     }
 }
 
+/// A single color palette.
+pub struct ColorPalette<'a> {
+    cpal: cpal::Cpal<'a>,
+    /// Preparsed subarray of color records for just this palette.
+    sub_array: &'a [Color],
+    /// This palette's index in the CPAL table.
+    index: u16,
+}
+
+impl ColorPalette<'_> {
+    /// Returns the colors contained within this palette.
+    pub fn colors(&self) -> &[Color] {
+        self.sub_array
+    }
+
+    /// Returns this palette's type flags (currently, whether this palette is appropriate for use on
+    /// a light and/or dark background). This may not always be present.
+    pub fn palette_type(&self) -> Option<cpal::PaletteType> {
+        self.cpal
+            .palette_types_array()?
+            .ok()?
+            .get(usize::from(self.index))
+            .map(|p| p.get())
+    }
+
+    /// Returns this palette's label/name, if present.
+    pub fn label(&self) -> Option<StringId> {
+        self.cpal
+            .palette_labels_array()?
+            .ok()?
+            .get(usize::from(self.index))
+            .and_then(|p| {
+                let name_id = p.get();
+                Some(name_id).filter(|name_id| name_id.to_u16() != 0xFFFF)
+            })
+    }
+
+    /// Returns this palette's index in the CPAL table.
+    pub fn index(&self) -> u16 {
+        self.index
+    }
+}
+
+/// Collection of color palettes for color glyphs.
+pub struct ColorPalettes<'a> {
+    cpal: Option<cpal::Cpal<'a>>,
+}
+
+impl<'a> ColorPalettes<'a> {
+    /// Creates a new collection of color palettes for the given font.
+    pub fn new(font: &FontRef<'a>) -> Self {
+        Self {
+            cpal: font.cpal().ok(),
+        }
+    }
+
+    /// Returns the total number of palettes in this collection (0 if this collection's font has no
+    /// CPAL table).
+    pub fn len(&self) -> u16 {
+        self.cpal.as_ref().map_or(0, |cpal| cpal.num_palettes())
+    }
+
+    /// Returns true if the collection is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns the color palette at the given index. The palette at index 0 is the default palette.
+    pub fn get(&self, index: u16) -> Option<ColorPalette<'_>> {
+        let cpal = self.cpal.clone()?;
+
+        let start_index: &BigEndian<u16> = cpal.color_record_indices().get(usize::from(index))?;
+        let start_index = usize::from(start_index.get());
+        let num_palette_entries = usize::from(cpal.num_palette_entries());
+
+        // Get the slice of the color records array containing just the chosen palette's colors.
+        let color_records_array = cpal.color_records_array()?.ok()?;
+        let sub_array = color_records_array.get(start_index..start_index + num_palette_entries)?;
+
+        Some(ColorPalette {
+            cpal,
+            sub_array,
+            index,
+        })
+    }
+
+    /// Returns the label/name for a given color, if present (labels are per-color, but shared
+    /// across all palettes).
+    pub fn color_label(&self, color_index: u16) -> Option<StringId> {
+        let name_id = self
+            .cpal
+            .as_ref()?
+            .palette_entry_labels_array()?
+            .ok()?
+            .get(usize::from(color_index))?
+            .get();
+        Some(name_id).filter(|name_id| name_id.to_u16() != 0xFFFF)
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
     use crate::{
-        color::traversal_tests::test_glyph_defs::PAINTCOLRGLYPH_CYCLE, prelude::LocationRef,
+        color::traversal_tests::test_glyph_defs::PAINTCOLRGLYPH_CYCLE,
+        prelude::{LocationRef, Size},
         MetadataProvider,
     };
 
+    use raw::tables::cpal;
     use read_fonts::{types::BoundingBox, FontRef};
 
     use super::{Brush, ColorPainter, CompositeMode, GlyphId, Transform};
@@ -509,5 +646,77 @@ mod tests {
             .unwrap()
             .paint(LocationRef::default(), &mut color_painter);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn colrv0_no_bbox_test() {
+        let colr_font = font_test_data::COLRV0V1;
+        let font = FontRef::new(colr_font).unwrap();
+        let colrv0_glyph_id = GlyphId::new(168);
+        let colrv0_glyph = font
+            .color_glyphs()
+            .get_with_format(colrv0_glyph_id, super::ColorGlyphFormat::ColrV0)
+            .unwrap();
+        assert!(colrv0_glyph
+            .bounding_box(LocationRef::default(), Size::unscaled())
+            .is_none());
+    }
+
+    #[test]
+    fn cpal_test() {
+        use crate::color::Color;
+        let cpal_font = font_test_data::COLRV0V1;
+        let font = FontRef::new(cpal_font).unwrap();
+        let palettes = font.color_palettes();
+        assert_eq!(palettes.len(), 3);
+
+        let first_palette = palettes.get(0).unwrap();
+        assert_eq!(first_palette.colors().len(), 14);
+        assert_eq!(
+            first_palette.colors().first(),
+            Some(&Color {
+                blue: 0,
+                green: 0,
+                red: 255,
+                alpha: 255
+            })
+        );
+        assert_eq!(first_palette.colors().get(14), None);
+        assert_eq!(
+            first_palette.palette_type(),
+            Some(cpal::PaletteType::empty())
+        );
+
+        let second_palette = palettes.get(1).unwrap();
+        assert_eq!(
+            second_palette.colors().first(),
+            Some(&Color {
+                blue: 74,
+                green: 41,
+                red: 42,
+                alpha: 255
+            })
+        );
+        assert_eq!(
+            second_palette.palette_type(),
+            Some(cpal::PaletteType::USABLE_WITH_DARK_BACKGROUND)
+        );
+
+        let third_palette = palettes.get(2).unwrap();
+        assert_eq!(
+            third_palette.colors().first(),
+            Some(&Color {
+                blue: 24,
+                green: 113,
+                red: 252,
+                alpha: 255
+            })
+        );
+        assert_eq!(
+            third_palette.palette_type(),
+            Some(cpal::PaletteType::USABLE_WITH_LIGHT_BACKGROUND)
+        );
+
+        assert!(palettes.get(3).is_none());
     }
 }

@@ -22,16 +22,11 @@ thread-pool = ["futures/thread-pool"]
 
 [dependencies]
 iced_core.workspace = true
-
 futures.workspace = true
 log.workspace = true
 rustc-hash.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-async-std.workspace = true
-async-std.optional = true
-async-std.features = ["unstable"]
-
 smol.workspace = true
 smol.optional = true
 
@@ -41,4 +36,4 @@ tokio.features = ["rt", "rt-multi-thread", "time"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures.workspace = true
-wasm-timer.workspace = true
+wasmtimer.workspace = true

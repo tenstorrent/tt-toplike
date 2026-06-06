@@ -5,7 +5,7 @@
 //! # mod iced { pub mod widget { pub use iced_widget::*; } }
 //! # pub type State = ();
 //! # pub type Element<'a, Message> = iced_widget::core::Element<'a, Message, iced_widget::Theme, iced_widget::Renderer>;
-//! use iced::widget::{column, scrollable, vertical_space};
+//! use iced::widget::{column, scrollable, space};
 //!
 //! enum Message {
 //!     // ...
@@ -14,19 +14,20 @@
 //! fn view(state: &State) -> Element<'_, Message> {
 //!     scrollable(column![
 //!         "Scroll me!",
-//!         vertical_space().height(3000),
+//!         space().height(3000),
 //!         "You did it!",
 //!     ]).into()
 //! }
 //! ```
 use crate::container;
+use crate::core::alignment;
 use crate::core::border::{self, Border};
-use crate::core::event::{self, Event};
 use crate::core::keyboard;
 use crate::core::layout;
 use crate::core::mouse;
 use crate::core::overlay;
 use crate::core::renderer;
+use crate::core::text;
 use crate::core::time::{Duration, Instant};
 use crate::core::touch;
 use crate::core::widget;
@@ -34,11 +35,10 @@ use crate::core::widget::operation::{self, Operation};
 use crate::core::widget::tree::{self, Tree};
 use crate::core::window;
 use crate::core::{
-    self, Background, Clipboard, Color, Element, Layout, Length, Padding,
-    Pixels, Point, Rectangle, Shell, Size, Theme, Vector, Widget,
+    self, Background, Clipboard, Color, Element, Event, InputMethod, Layout,
+    Length, Padding, Pixels, Point, Rectangle, Shadow, Shell, Size, Theme,
+    Vector, Widget,
 };
-use crate::runtime::task::{self, Task};
-use crate::runtime::Action;
 
 pub use operation::scrollable::{AbsoluteOffset, RelativeOffset};
 
@@ -50,7 +50,7 @@ pub use operation::scrollable::{AbsoluteOffset, RelativeOffset};
 /// # mod iced { pub mod widget { pub use iced_widget::*; } }
 /// # pub type State = ();
 /// # pub type Element<'a, Message> = iced_widget::core::Element<'a, Message, iced_widget::Theme, iced_widget::Renderer>;
-/// use iced::widget::{column, scrollable, vertical_space};
+/// use iced::widget::{column, scrollable, space};
 ///
 /// enum Message {
 ///     // ...
@@ -59,12 +59,11 @@ pub use operation::scrollable::{AbsoluteOffset, RelativeOffset};
 /// fn view(state: &State) -> Element<'_, Message> {
 ///     scrollable(column![
 ///         "Scroll me!",
-///         vertical_space().height(3000),
+///         space().height(3000),
 ///         "You did it!",
 ///     ]).into()
 /// }
 /// ```
-#[allow(missing_debug_implementations)]
 pub struct Scrollable<
     'a,
     Message,
@@ -72,21 +71,23 @@ pub struct Scrollable<
     Renderer = crate::Renderer,
 > where
     Theme: Catalog,
-    Renderer: core::Renderer,
+    Renderer: text::Renderer,
 {
-    id: Option<Id>,
+    id: Option<widget::Id>,
     width: Length,
     height: Length,
     direction: Direction,
+    auto_scroll: bool,
     content: Element<'a, Message, Theme, Renderer>,
     on_scroll: Option<Box<dyn Fn(Viewport) -> Message + 'a>>,
     class: Theme::Class<'a>,
+    last_status: Option<Status>,
 }
 
 impl<'a, Message, Theme, Renderer> Scrollable<'a, Message, Theme, Renderer>
 where
     Theme: Catalog,
-    Renderer: core::Renderer,
+    Renderer: text::Renderer,
 {
     /// Creates a new vertical [`Scrollable`].
     pub fn new(
@@ -95,7 +96,7 @@ where
         Self::with_direction(content, Direction::default())
     }
 
-    /// Creates a new vertical [`Scrollable`].
+    /// Creates a new [`Scrollable`] with the given [`Direction`].
     pub fn with_direction(
         content: impl Into<Element<'a, Message, Theme, Renderer>>,
         direction: impl Into<Direction>,
@@ -105,25 +106,17 @@ where
             width: Length::Shrink,
             height: Length::Shrink,
             direction: direction.into(),
+            auto_scroll: false,
             content: content.into(),
             on_scroll: None,
             class: Theme::default(),
+            last_status: None,
         }
-        .validate()
+        .enclose()
     }
 
-    fn validate(mut self) -> Self {
+    fn enclose(mut self) -> Self {
         let size_hint = self.content.as_widget().size_hint();
-
-        debug_assert!(
-            self.direction.vertical().is_none() || !size_hint.height.is_fill(),
-            "scrollable content must not fill its vertical scrolling axis"
-        );
-
-        debug_assert!(
-            self.direction.horizontal().is_none() || !size_hint.width.is_fill(),
-            "scrollable content must not fill its horizontal scrolling axis"
-        );
 
         if self.direction.horizontal().is_none() {
             self.width = self.width.enclose(size_hint.width);
@@ -136,15 +129,20 @@ where
         self
     }
 
-    /// Creates a new [`Scrollable`] with the given [`Direction`].
-    pub fn direction(mut self, direction: impl Into<Direction>) -> Self {
-        self.direction = direction.into();
-        self.validate()
+    /// Makes the [`Scrollable`] scroll horizontally, with default [`Scrollbar`] settings.
+    pub fn horizontal(self) -> Self {
+        self.direction(Direction::Horizontal(Scrollbar::default()))
     }
 
-    /// Sets the [`Id`] of the [`Scrollable`].
-    pub fn id(mut self, id: Id) -> Self {
-        self.id = Some(id);
+    /// Sets the [`Direction`] of the [`Scrollable`].
+    pub fn direction(mut self, direction: impl Into<Direction>) -> Self {
+        self.direction = direction.into();
+        self.enclose()
+    }
+
+    /// Sets the [`widget::Id`] of the [`Scrollable`].
+    pub fn id(mut self, id: impl Into<widget::Id>) -> Self {
+        self.id = Some(id.into());
         self
     }
 
@@ -228,6 +226,15 @@ where
             Direction::Both { .. } => {}
         }
 
+        self
+    }
+
+    /// Sets whether the user should be allowed to auto-scroll the [`Scrollable`]
+    /// with the middle mouse button.
+    ///
+    /// By default, it is disabled.
+    pub fn auto_scroll(mut self, auto_scroll: bool) -> Self {
+        self.auto_scroll = auto_scroll;
         self
     }
 
@@ -338,6 +345,12 @@ impl Scrollbar {
         Self::default()
     }
 
+    /// Create a [`Scrollbar`] with zero width to allow a [`Scrollable`] to scroll without a visible
+    /// scroller.
+    pub fn hidden() -> Self {
+        Self::default().width(0).scroller_width(0)
+    }
+
     /// Sets the scrollbar width of the [`Scrollbar`] .
     pub fn width(mut self, width: impl Into<Pixels>) -> Self {
         self.width = width.into().0.max(0.0);
@@ -384,11 +397,11 @@ pub enum Anchor {
     End,
 }
 
-impl<'a, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for Scrollable<'a, Message, Theme, Renderer>
+impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for Scrollable<'_, Message, Theme, Renderer>
 where
     Theme: Catalog,
-    Renderer: core::Renderer,
+    Renderer: text::Renderer,
 {
     fn tag(&self) -> tree::Tag {
         tree::Tag::of::<State>()
@@ -414,64 +427,117 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         tree: &mut Tree,
         renderer: &Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        let (right_padding, bottom_padding) = match self.direction {
+        let mut layout = |right_padding, bottom_padding| {
+            layout::padded(
+                limits,
+                self.width,
+                self.height,
+                Padding {
+                    right: right_padding,
+                    bottom: bottom_padding,
+                    ..Padding::ZERO
+                },
+                |limits| {
+                    let is_horizontal = self.direction.horizontal().is_some();
+                    let is_vertical = self.direction.vertical().is_some();
+
+                    let child_limits = layout::Limits::with_compression(
+                        limits.min(),
+                        Size::new(
+                            if is_horizontal {
+                                f32::INFINITY
+                            } else {
+                                limits.max().width
+                            },
+                            if is_vertical {
+                                f32::INFINITY
+                            } else {
+                                limits.max().height
+                            },
+                        ),
+                        Size::new(is_horizontal, is_vertical),
+                    );
+
+                    self.content.as_widget_mut().layout(
+                        &mut tree.children[0],
+                        renderer,
+                        &child_limits,
+                    )
+                },
+            )
+        };
+
+        match self.direction {
             Direction::Vertical(Scrollbar {
                 width,
                 margin,
                 spacing: Some(spacing),
                 ..
-            }) => (width + margin * 2.0 + spacing, 0.0),
-            Direction::Horizontal(Scrollbar {
+            })
+            | Direction::Horizontal(Scrollbar {
                 width,
                 margin,
                 spacing: Some(spacing),
                 ..
-            }) => (0.0, width + margin * 2.0 + spacing),
-            _ => (0.0, 0.0),
-        };
+            }) => {
+                let is_vertical =
+                    matches!(self.direction, Direction::Vertical(_));
 
-        layout::padded(
-            limits,
-            self.width,
-            self.height,
-            Padding {
-                right: right_padding,
-                bottom: bottom_padding,
-                ..Padding::ZERO
-            },
-            |limits| {
-                let child_limits = layout::Limits::new(
-                    Size::new(limits.min().width, limits.min().height),
-                    Size::new(
-                        if self.direction.horizontal().is_some() {
-                            f32::INFINITY
-                        } else {
-                            limits.max().width
-                        },
-                        if self.direction.vertical().is_some() {
-                            f32::MAX
-                        } else {
-                            limits.max().height
-                        },
-                    ),
+                let padding = width + margin * 2.0 + spacing;
+                let state = tree.state.downcast_mut::<State>();
+
+                let status_quo = layout(
+                    if is_vertical && state.is_scrollbar_visible {
+                        padding
+                    } else {
+                        0.0
+                    },
+                    if !is_vertical && state.is_scrollbar_visible {
+                        padding
+                    } else {
+                        0.0
+                    },
                 );
 
-                self.content.as_widget().layout(
-                    &mut tree.children[0],
-                    renderer,
-                    &child_limits,
-                )
-            },
-        )
+                let is_scrollbar_visible = if is_vertical {
+                    status_quo.children()[0].size().height
+                        > status_quo.size().height
+                } else {
+                    status_quo.children()[0].size().width
+                        > status_quo.size().width
+                };
+
+                if state.is_scrollbar_visible == is_scrollbar_visible {
+                    status_quo
+                } else {
+                    log::trace!("Scrollbar status quo has changed");
+                    state.is_scrollbar_visible = is_scrollbar_visible;
+
+                    layout(
+                        if is_vertical && state.is_scrollbar_visible {
+                            padding
+                        } else {
+                            0.0
+                        },
+                        if !is_vertical && state.is_scrollbar_visible {
+                            padding
+                        } else {
+                            0.0
+                        },
+                    )
+                }
+            }
+            _ => layout(0.0, 0.0),
+        }
     }
 
     fn operate(
-        &self,
+        &mut self,
         tree: &mut Tree,
         layout: Layout<'_>,
         renderer: &Renderer,
@@ -486,38 +552,37 @@ where
             state.translation(self.direction, bounds, content_bounds);
 
         operation.scrollable(
-            state,
-            self.id.as_ref().map(|id| &id.0),
+            self.id.as_ref(),
             bounds,
             content_bounds,
             translation,
+            state,
         );
 
-        operation.container(
-            self.id.as_ref().map(|id| &id.0),
-            bounds,
-            &mut |operation| {
-                self.content.as_widget().operate(
-                    &mut tree.children[0],
-                    layout.children().next().unwrap(),
-                    renderer,
-                    operation,
-                );
-            },
-        );
+        operation.traverse(&mut |operation| {
+            self.content.as_widget_mut().operate(
+                &mut tree.children[0],
+                layout.children().next().unwrap(),
+                renderer,
+                operation,
+            );
+        });
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         _viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
+        const AUTOSCROLL_DEADZONE: f32 = 20.0;
+        const AUTOSCROLL_SMOOTHNESS: f32 = 1.5;
+
         let state = tree.state.downcast_mut::<State>();
         let bounds = layout.bounds();
         let cursor_over_scrollable = cursor.position_over(bounds);
@@ -530,6 +595,8 @@ where
 
         let (mouse_over_y_scrollbar, mouse_over_x_scrollbar) =
             scrollbars.is_mouse_over(cursor);
+
+        let last_offsets = (state.offset_x, state.offset_y);
 
         if let Some(last_scrolled) = state.last_scrolled {
             let clear_transaction = match event {
@@ -549,292 +616,333 @@ where
             }
         }
 
-        if let Some(scroller_grabbed_at) = state.y_scroller_grabbed_at {
-            match event {
-                Event::Mouse(mouse::Event::CursorMoved { .. })
-                | Event::Touch(touch::Event::FingerMoved { .. }) => {
-                    if let Some(scrollbar) = scrollbars.y {
-                        let Some(cursor_position) = cursor.position() else {
-                            return event::Status::Ignored;
-                        };
+        let mut update = || {
+            if let Some(scroller_grabbed_at) = state.y_scroller_grabbed_at() {
+                match event {
+                    Event::Mouse(mouse::Event::CursorMoved { .. })
+                    | Event::Touch(touch::Event::FingerMoved { .. }) => {
+                        if let Some(scrollbar) = scrollbars.y {
+                            let Some(cursor_position) =
+                                cursor.land().position()
+                            else {
+                                return;
+                            };
 
-                        state.scroll_y_to(
-                            scrollbar.scroll_percentage_y(
-                                scroller_grabbed_at,
-                                cursor_position,
-                            ),
-                            bounds,
-                            content_bounds,
-                        );
-
-                        let _ = notify_scroll(
-                            state,
-                            &self.on_scroll,
-                            bounds,
-                            content_bounds,
-                            shell,
-                        );
-
-                        return event::Status::Captured;
-                    }
-                }
-                _ => {}
-            }
-        } else if mouse_over_y_scrollbar {
-            match event {
-                Event::Mouse(mouse::Event::ButtonPressed(
-                    mouse::Button::Left,
-                ))
-                | Event::Touch(touch::Event::FingerPressed { .. }) => {
-                    let Some(cursor_position) = cursor.position() else {
-                        return event::Status::Ignored;
-                    };
-
-                    if let (Some(scroller_grabbed_at), Some(scrollbar)) = (
-                        scrollbars.grab_y_scroller(cursor_position),
-                        scrollbars.y,
-                    ) {
-                        state.scroll_y_to(
-                            scrollbar.scroll_percentage_y(
-                                scroller_grabbed_at,
-                                cursor_position,
-                            ),
-                            bounds,
-                            content_bounds,
-                        );
-
-                        state.y_scroller_grabbed_at = Some(scroller_grabbed_at);
-
-                        let _ = notify_scroll(
-                            state,
-                            &self.on_scroll,
-                            bounds,
-                            content_bounds,
-                            shell,
-                        );
-                    }
-
-                    return event::Status::Captured;
-                }
-                _ => {}
-            }
-        }
-
-        if let Some(scroller_grabbed_at) = state.x_scroller_grabbed_at {
-            match event {
-                Event::Mouse(mouse::Event::CursorMoved { .. })
-                | Event::Touch(touch::Event::FingerMoved { .. }) => {
-                    let Some(cursor_position) = cursor.position() else {
-                        return event::Status::Ignored;
-                    };
-
-                    if let Some(scrollbar) = scrollbars.x {
-                        state.scroll_x_to(
-                            scrollbar.scroll_percentage_x(
-                                scroller_grabbed_at,
-                                cursor_position,
-                            ),
-                            bounds,
-                            content_bounds,
-                        );
-
-                        let _ = notify_scroll(
-                            state,
-                            &self.on_scroll,
-                            bounds,
-                            content_bounds,
-                            shell,
-                        );
-                    }
-
-                    return event::Status::Captured;
-                }
-                _ => {}
-            }
-        } else if mouse_over_x_scrollbar {
-            match event {
-                Event::Mouse(mouse::Event::ButtonPressed(
-                    mouse::Button::Left,
-                ))
-                | Event::Touch(touch::Event::FingerPressed { .. }) => {
-                    let Some(cursor_position) = cursor.position() else {
-                        return event::Status::Ignored;
-                    };
-
-                    if let (Some(scroller_grabbed_at), Some(scrollbar)) = (
-                        scrollbars.grab_x_scroller(cursor_position),
-                        scrollbars.x,
-                    ) {
-                        state.scroll_x_to(
-                            scrollbar.scroll_percentage_x(
-                                scroller_grabbed_at,
-                                cursor_position,
-                            ),
-                            bounds,
-                            content_bounds,
-                        );
-
-                        state.x_scroller_grabbed_at = Some(scroller_grabbed_at);
-
-                        let _ = notify_scroll(
-                            state,
-                            &self.on_scroll,
-                            bounds,
-                            content_bounds,
-                            shell,
-                        );
-
-                        return event::Status::Captured;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let content_status = if state.last_scrolled.is_some()
-            && matches!(event, Event::Mouse(mouse::Event::WheelScrolled { .. }))
-        {
-            event::Status::Ignored
-        } else {
-            let cursor = match cursor_over_scrollable {
-                Some(cursor_position)
-                    if !(mouse_over_x_scrollbar || mouse_over_y_scrollbar) =>
-                {
-                    mouse::Cursor::Available(
-                        cursor_position
-                            + state.translation(
-                                self.direction,
+                            state.scroll_y_to(
+                                scrollbar.scroll_percentage_y(
+                                    scroller_grabbed_at,
+                                    cursor_position,
+                                ),
                                 bounds,
                                 content_bounds,
-                            ),
-                    )
+                            );
+
+                            let _ = notify_scroll(
+                                state,
+                                &self.on_scroll,
+                                bounds,
+                                content_bounds,
+                                shell,
+                            );
+
+                            shell.capture_event();
+                        }
+                    }
+                    _ => {}
                 }
-                _ => mouse::Cursor::Unavailable,
+            } else if mouse_over_y_scrollbar {
+                match event {
+                    Event::Mouse(mouse::Event::ButtonPressed(
+                        mouse::Button::Left,
+                    ))
+                    | Event::Touch(touch::Event::FingerPressed { .. }) => {
+                        let Some(cursor_position) = cursor.position() else {
+                            return;
+                        };
+
+                        if let (Some(scroller_grabbed_at), Some(scrollbar)) = (
+                            scrollbars.grab_y_scroller(cursor_position),
+                            scrollbars.y,
+                        ) {
+                            state.scroll_y_to(
+                                scrollbar.scroll_percentage_y(
+                                    scroller_grabbed_at,
+                                    cursor_position,
+                                ),
+                                bounds,
+                                content_bounds,
+                            );
+
+                            state.interaction = Interaction::YScrollerGrabbed(
+                                scroller_grabbed_at,
+                            );
+
+                            let _ = notify_scroll(
+                                state,
+                                &self.on_scroll,
+                                bounds,
+                                content_bounds,
+                                shell,
+                            );
+                        }
+
+                        shell.capture_event();
+                    }
+                    _ => {}
+                }
+            }
+
+            if let Some(scroller_grabbed_at) = state.x_scroller_grabbed_at() {
+                match event {
+                    Event::Mouse(mouse::Event::CursorMoved { .. })
+                    | Event::Touch(touch::Event::FingerMoved { .. }) => {
+                        let Some(cursor_position) = cursor.land().position()
+                        else {
+                            return;
+                        };
+
+                        if let Some(scrollbar) = scrollbars.x {
+                            state.scroll_x_to(
+                                scrollbar.scroll_percentage_x(
+                                    scroller_grabbed_at,
+                                    cursor_position,
+                                ),
+                                bounds,
+                                content_bounds,
+                            );
+
+                            let _ = notify_scroll(
+                                state,
+                                &self.on_scroll,
+                                bounds,
+                                content_bounds,
+                                shell,
+                            );
+                        }
+
+                        shell.capture_event();
+                    }
+                    _ => {}
+                }
+            } else if mouse_over_x_scrollbar {
+                match event {
+                    Event::Mouse(mouse::Event::ButtonPressed(
+                        mouse::Button::Left,
+                    ))
+                    | Event::Touch(touch::Event::FingerPressed { .. }) => {
+                        let Some(cursor_position) = cursor.position() else {
+                            return;
+                        };
+
+                        if let (Some(scroller_grabbed_at), Some(scrollbar)) = (
+                            scrollbars.grab_x_scroller(cursor_position),
+                            scrollbars.x,
+                        ) {
+                            state.scroll_x_to(
+                                scrollbar.scroll_percentage_x(
+                                    scroller_grabbed_at,
+                                    cursor_position,
+                                ),
+                                bounds,
+                                content_bounds,
+                            );
+
+                            state.interaction = Interaction::XScrollerGrabbed(
+                                scroller_grabbed_at,
+                            );
+
+                            let _ = notify_scroll(
+                                state,
+                                &self.on_scroll,
+                                bounds,
+                                content_bounds,
+                                shell,
+                            );
+
+                            shell.capture_event();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if matches!(state.interaction, Interaction::AutoScrolling { .. })
+                && matches!(
+                    event,
+                    Event::Mouse(
+                        mouse::Event::ButtonPressed(_)
+                            | mouse::Event::WheelScrolled { .. }
+                    ) | Event::Touch(_)
+                        | Event::Keyboard(_)
+                )
+            {
+                state.interaction = Interaction::None;
+                shell.capture_event();
+                shell.invalidate_layout();
+                shell.request_redraw();
+                return;
+            }
+
+            if state.last_scrolled.is_none()
+                || !matches!(
+                    event,
+                    Event::Mouse(mouse::Event::WheelScrolled { .. })
+                )
+            {
+                let translation =
+                    state.translation(self.direction, bounds, content_bounds);
+
+                let cursor = match cursor_over_scrollable {
+                    Some(cursor_position)
+                        if !(mouse_over_x_scrollbar
+                            || mouse_over_y_scrollbar) =>
+                    {
+                        mouse::Cursor::Available(cursor_position + translation)
+                    }
+                    _ => cursor.levitate() + translation,
+                };
+
+                let had_input_method = shell.input_method().is_enabled();
+
+                self.content.as_widget_mut().update(
+                    &mut tree.children[0],
+                    event,
+                    content,
+                    cursor,
+                    renderer,
+                    clipboard,
+                    shell,
+                    &Rectangle {
+                        y: bounds.y + translation.y,
+                        x: bounds.x + translation.x,
+                        ..bounds
+                    },
+                );
+
+                if !had_input_method
+                    && let InputMethod::Enabled { cursor, .. } =
+                        shell.input_method_mut()
+                {
+                    *cursor = *cursor - translation;
+                }
             };
 
-            let translation =
-                state.translation(self.direction, bounds, content_bounds);
+            if matches!(
+                event,
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+                    | Event::Touch(
+                        touch::Event::FingerLifted { .. }
+                            | touch::Event::FingerLost { .. }
+                    )
+            ) {
+                state.interaction = Interaction::None;
+                return;
+            }
 
-            self.content.as_widget_mut().on_event(
-                &mut tree.children[0],
-                event.clone(),
-                content,
-                cursor,
-                renderer,
-                clipboard,
-                shell,
-                &Rectangle {
-                    y: bounds.y + translation.y,
-                    x: bounds.x + translation.x,
-                    ..bounds
-                },
-            )
-        };
+            if shell.is_event_captured() {
+                return;
+            }
 
-        if matches!(
-            event,
-            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
-                | Event::Touch(
-                    touch::Event::FingerLifted { .. }
-                        | touch::Event::FingerLost { .. }
-                )
-        ) {
-            state.scroll_area_touched_at = None;
-            state.x_scroller_grabbed_at = None;
-            state.y_scroller_grabbed_at = None;
+            match event {
+                Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                    if cursor_over_scrollable.is_none() {
+                        return;
+                    }
 
-            return content_status;
-        }
+                    let delta = match *delta {
+                        mouse::ScrollDelta::Lines { x, y } => {
+                            let is_shift_pressed =
+                                state.keyboard_modifiers.shift();
 
-        if let event::Status::Captured = content_status {
-            return event::Status::Captured;
-        }
-
-        if let Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) =
-            event
-        {
-            state.keyboard_modifiers = modifiers;
-
-            return event::Status::Ignored;
-        }
-
-        match event {
-            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
-                if cursor_over_scrollable.is_none() {
-                    return event::Status::Ignored;
-                }
-
-                let delta = match delta {
-                    mouse::ScrollDelta::Lines { x, y } => {
-                        let is_shift_pressed = state.keyboard_modifiers.shift();
-
-                        // macOS automatically inverts the axes when Shift is pressed
-                        let (x, y) =
-                            if cfg!(target_os = "macos") && is_shift_pressed {
+                            // macOS automatically inverts the axes when Shift is pressed
+                            let (x, y) = if cfg!(target_os = "macos")
+                                && is_shift_pressed
+                            {
                                 (y, x)
                             } else {
                                 (x, y)
                             };
 
-                        let is_vertical = match self.direction {
-                            Direction::Vertical(_) => true,
-                            Direction::Horizontal(_) => false,
-                            Direction::Both { .. } => !is_shift_pressed,
-                        };
+                            let movement = if !is_shift_pressed {
+                                Vector::new(x, y)
+                            } else {
+                                Vector::new(y, x)
+                            };
 
-                        let movement = if is_vertical {
-                            Vector::new(x, y)
-                        } else {
-                            Vector::new(y, x)
-                        };
+                            // TODO: Configurable speed/friction (?)
+                            -movement * 60.0
+                        }
+                        mouse::ScrollDelta::Pixels { x, y } => {
+                            -Vector::new(x, y)
+                        }
+                    };
 
-                        // TODO: Configurable speed/friction (?)
-                        -movement * 60.0
+                    state.scroll(
+                        self.direction.align(delta),
+                        bounds,
+                        content_bounds,
+                    );
+
+                    let has_scrolled = notify_scroll(
+                        state,
+                        &self.on_scroll,
+                        bounds,
+                        content_bounds,
+                        shell,
+                    );
+
+                    let in_transaction = state.last_scrolled.is_some();
+
+                    if has_scrolled || in_transaction {
+                        shell.capture_event();
                     }
-                    mouse::ScrollDelta::Pixels { x, y } => -Vector::new(x, y),
-                };
-
-                state.scroll(
-                    self.direction.align(delta),
-                    bounds,
-                    content_bounds,
-                );
-
-                let has_scrolled = notify_scroll(
-                    state,
-                    &self.on_scroll,
-                    bounds,
-                    content_bounds,
-                    shell,
-                );
-
-                let in_transaction = state.last_scrolled.is_some();
-
-                if has_scrolled || in_transaction {
-                    event::Status::Captured
-                } else {
-                    event::Status::Ignored
                 }
-            }
-            Event::Touch(event)
-                if state.scroll_area_touched_at.is_some()
-                    || !mouse_over_y_scrollbar && !mouse_over_x_scrollbar =>
-            {
-                match event {
-                    touch::Event::FingerPressed { .. } => {
-                        let Some(cursor_position) = cursor.position() else {
-                            return event::Status::Ignored;
-                        };
+                Event::Mouse(mouse::Event::ButtonPressed(
+                    mouse::Button::Middle,
+                )) if self.auto_scroll
+                    && matches!(state.interaction, Interaction::None) =>
+                {
+                    let Some(origin) = cursor_over_scrollable else {
+                        return;
+                    };
 
-                        state.scroll_area_touched_at = Some(cursor_position);
-                    }
-                    touch::Event::FingerMoved { .. } => {
-                        if let Some(scroll_box_touched_at) =
-                            state.scroll_area_touched_at
-                        {
+                    state.interaction = Interaction::AutoScrolling {
+                        origin,
+                        current: origin,
+                        last_frame: None,
+                    };
+
+                    shell.capture_event();
+                    shell.invalidate_layout();
+                    shell.request_redraw();
+                }
+                Event::Touch(event)
+                    if matches!(
+                        state.interaction,
+                        Interaction::TouchScrolling(_)
+                    ) || (!mouse_over_y_scrollbar
+                        && !mouse_over_x_scrollbar) =>
+                {
+                    match event {
+                        touch::Event::FingerPressed { .. } => {
+                            let Some(position) = cursor_over_scrollable else {
+                                return;
+                            };
+
+                            state.interaction =
+                                Interaction::TouchScrolling(position);
+                        }
+                        touch::Event::FingerMoved { .. } => {
+                            let Interaction::TouchScrolling(
+                                scroll_box_touched_at,
+                            ) = state.interaction
+                            else {
+                                return;
+                            };
+
                             let Some(cursor_position) = cursor.position()
                             else {
-                                return event::Status::Ignored;
+                                return;
                             };
 
                             let delta = Vector::new(
@@ -848,8 +956,8 @@ where
                                 content_bounds,
                             );
 
-                            state.scroll_area_touched_at =
-                                Some(cursor_position);
+                            state.interaction =
+                                Interaction::TouchScrolling(cursor_position);
 
                             // TODO: bubble up touch movements if not consumed.
                             let _ = notify_scroll(
@@ -860,24 +968,168 @@ where
                                 shell,
                             );
                         }
+                        _ => {}
                     }
-                    _ => {}
+
+                    shell.capture_event();
                 }
+                Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                    if let Interaction::AutoScrolling {
+                        origin,
+                        last_frame,
+                        ..
+                    } = state.interaction
+                    {
+                        let delta = *position - origin;
 
-                event::Status::Captured
-            }
-            Event::Window(window::Event::RedrawRequested(_)) => {
-                let _ = notify_viewport(
-                    state,
-                    &self.on_scroll,
-                    bounds,
-                    content_bounds,
-                    shell,
-                );
+                        state.interaction = Interaction::AutoScrolling {
+                            origin,
+                            current: *position,
+                            last_frame,
+                        };
 
-                event::Status::Ignored
+                        if (delta.x.abs() >= AUTOSCROLL_DEADZONE
+                            || delta.y.abs() >= AUTOSCROLL_DEADZONE)
+                            && last_frame.is_none()
+                        {
+                            shell.request_redraw();
+                        }
+                    }
+                }
+                Event::Keyboard(keyboard::Event::ModifiersChanged(
+                    modifiers,
+                )) => {
+                    state.keyboard_modifiers = *modifiers;
+                }
+                Event::Window(window::Event::RedrawRequested(now)) => {
+                    if let Interaction::AutoScrolling {
+                        origin,
+                        current,
+                        last_frame,
+                    } = state.interaction
+                    {
+                        if last_frame == Some(*now) {
+                            shell.request_redraw();
+                            return;
+                        }
+
+                        state.interaction = Interaction::AutoScrolling {
+                            origin,
+                            current,
+                            last_frame: None,
+                        };
+
+                        let mut delta = current - origin;
+
+                        if delta.x.abs() < AUTOSCROLL_DEADZONE {
+                            delta.x = 0.0;
+                        }
+
+                        if delta.y.abs() < AUTOSCROLL_DEADZONE {
+                            delta.y = 0.0;
+                        }
+
+                        if delta.x != 0.0 || delta.y != 0.0 {
+                            let time_delta =
+                                if let Some(last_frame) = last_frame {
+                                    *now - last_frame
+                                } else {
+                                    Duration::ZERO
+                                };
+
+                            let scroll_factor = time_delta.as_secs_f32();
+
+                            state.scroll(
+                                self.direction.align(Vector::new(
+                                    delta.x.signum()
+                                        * delta
+                                            .x
+                                            .abs()
+                                            .powf(AUTOSCROLL_SMOOTHNESS)
+                                        * scroll_factor,
+                                    delta.y.signum()
+                                        * delta
+                                            .y
+                                            .abs()
+                                            .powf(AUTOSCROLL_SMOOTHNESS)
+                                        * scroll_factor,
+                                )),
+                                bounds,
+                                content_bounds,
+                            );
+
+                            let has_scrolled = notify_scroll(
+                                state,
+                                &self.on_scroll,
+                                bounds,
+                                content_bounds,
+                                shell,
+                            );
+
+                            if has_scrolled || time_delta.is_zero() {
+                                state.interaction =
+                                    Interaction::AutoScrolling {
+                                        origin,
+                                        current,
+                                        last_frame: Some(*now),
+                                    };
+
+                                shell.request_redraw();
+                            }
+
+                            return;
+                        }
+                    }
+
+                    let _ = notify_viewport(
+                        state,
+                        &self.on_scroll,
+                        bounds,
+                        content_bounds,
+                        shell,
+                    );
+                }
+                _ => {}
             }
-            _ => event::Status::Ignored,
+        };
+
+        update();
+
+        let status = if state.scrollers_grabbed() {
+            Status::Dragged {
+                is_horizontal_scrollbar_dragged: state
+                    .x_scroller_grabbed_at()
+                    .is_some(),
+                is_vertical_scrollbar_dragged: state
+                    .y_scroller_grabbed_at()
+                    .is_some(),
+                is_horizontal_scrollbar_disabled: scrollbars.is_x_disabled(),
+                is_vertical_scrollbar_disabled: scrollbars.is_y_disabled(),
+            }
+        } else if cursor_over_scrollable.is_some() {
+            Status::Hovered {
+                is_horizontal_scrollbar_hovered: mouse_over_x_scrollbar,
+                is_vertical_scrollbar_hovered: mouse_over_y_scrollbar,
+                is_horizontal_scrollbar_disabled: scrollbars.is_x_disabled(),
+                is_vertical_scrollbar_disabled: scrollbars.is_y_disabled(),
+            }
+        } else {
+            Status::Active {
+                is_horizontal_scrollbar_disabled: scrollbars.is_x_disabled(),
+                is_vertical_scrollbar_disabled: scrollbars.is_y_disabled(),
+            }
+        };
+
+        if let Event::Window(window::Event::RedrawRequested(_now)) = event {
+            self.last_status = Some(status);
+        }
+
+        if last_offsets != (state.offset_x, state.offset_y)
+            || self
+                .last_status
+                .is_some_and(|last_status| last_status != status)
+        {
+            shell.request_redraw();
         }
     }
 
@@ -920,27 +1172,13 @@ where
             _ => mouse::Cursor::Unavailable,
         };
 
-        let status = if state.y_scroller_grabbed_at.is_some()
-            || state.x_scroller_grabbed_at.is_some()
-        {
-            Status::Dragged {
-                is_horizontal_scrollbar_dragged: state
-                    .x_scroller_grabbed_at
-                    .is_some(),
-                is_vertical_scrollbar_dragged: state
-                    .y_scroller_grabbed_at
-                    .is_some(),
-            }
-        } else if cursor_over_scrollable.is_some() {
-            Status::Hovered {
-                is_horizontal_scrollbar_hovered: mouse_over_x_scrollbar,
-                is_vertical_scrollbar_hovered: mouse_over_y_scrollbar,
-            }
-        } else {
-            Status::Active
-        };
-
-        let style = theme.style(&self.class, status);
+        let style = theme.style(
+            &self.class,
+            self.last_status.unwrap_or(Status::Active {
+                is_horizontal_scrollbar_disabled: false,
+                is_vertical_scrollbar_disabled: false,
+            }),
+        );
 
         container::draw_background(renderer, &style.container, layout.bounds());
 
@@ -958,9 +1196,9 @@ where
                             content_layout,
                             cursor,
                             &Rectangle {
-                                y: bounds.y + translation.y,
-                                x: bounds.x + translation.x,
-                                ..bounds
+                                y: visible_bounds.y + translation.y,
+                                x: visible_bounds.x + translation.x,
+                                ..visible_bounds
                             },
                         );
                     },
@@ -989,23 +1227,23 @@ where
                         );
                     }
 
-                    if let Some(scroller) = scrollbar.scroller {
-                        if scroller.bounds.width > 0.0
-                            && scroller.bounds.height > 0.0
-                            && (style.scroller.color != Color::TRANSPARENT
-                                || (style.scroller.border.color
-                                    != Color::TRANSPARENT
-                                    && style.scroller.border.width > 0.0))
-                        {
-                            renderer.fill_quad(
-                                renderer::Quad {
-                                    bounds: scroller.bounds,
-                                    border: style.scroller.border,
-                                    ..renderer::Quad::default()
-                                },
-                                style.scroller.color,
-                            );
-                        }
+                    if let Some(scroller) = scrollbar.scroller
+                        && scroller.bounds.width > 0.0
+                        && scroller.bounds.height > 0.0
+                        && (style.scroller.background
+                            != Background::Color(Color::TRANSPARENT)
+                            || (style.scroller.border.color
+                                != Color::TRANSPARENT
+                                && style.scroller.border.width > 0.0))
+                    {
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: scroller.bounds,
+                                border: style.scroller.border,
+                                ..renderer::Quad::default()
+                            },
+                            style.scroller.background,
+                        );
                     }
                 };
 
@@ -1062,9 +1300,9 @@ where
                 content_layout,
                 cursor,
                 &Rectangle {
-                    x: bounds.x + translation.x,
-                    y: bounds.y + translation.y,
-                    ..bounds
+                    x: visible_bounds.x + translation.x,
+                    y: visible_bounds.y + translation.y,
+                    ..visible_bounds
                 },
             );
         }
@@ -1091,60 +1329,226 @@ where
         let (mouse_over_y_scrollbar, mouse_over_x_scrollbar) =
             scrollbars.is_mouse_over(cursor);
 
-        if (mouse_over_x_scrollbar || mouse_over_y_scrollbar)
-            || state.scrollers_grabbed()
-        {
-            mouse::Interaction::None
-        } else {
-            let translation =
-                state.translation(self.direction, bounds, content_bounds);
-
-            let cursor = match cursor_over_scrollable {
-                Some(cursor_position)
-                    if !(mouse_over_x_scrollbar || mouse_over_y_scrollbar) =>
-                {
-                    mouse::Cursor::Available(cursor_position + translation)
-                }
-                _ => mouse::Cursor::Unavailable,
-            };
-
-            self.content.as_widget().mouse_interaction(
-                &tree.children[0],
-                content_layout,
-                cursor,
-                &Rectangle {
-                    y: bounds.y + translation.y,
-                    x: bounds.x + translation.x,
-                    ..bounds
-                },
-                renderer,
-            )
+        if state.scrollers_grabbed() {
+            return mouse::Interaction::None;
         }
+
+        let translation =
+            state.translation(self.direction, bounds, content_bounds);
+
+        let cursor = match cursor_over_scrollable {
+            Some(cursor_position)
+                if !(mouse_over_x_scrollbar || mouse_over_y_scrollbar) =>
+            {
+                mouse::Cursor::Available(cursor_position + translation)
+            }
+            _ => cursor.levitate() + translation,
+        };
+
+        self.content.as_widget().mouse_interaction(
+            &tree.children[0],
+            content_layout,
+            cursor,
+            &Rectangle {
+                y: bounds.y + translation.y,
+                x: bounds.x + translation.x,
+                ..bounds
+            },
+            renderer,
+        )
     }
 
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'_>,
+        layout: Layout<'b>,
         renderer: &Renderer,
+        viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        let state = tree.state.downcast_ref::<State>();
         let bounds = layout.bounds();
         let content_layout = layout.children().next().unwrap();
         let content_bounds = content_layout.bounds();
+        let visible_bounds = bounds.intersection(viewport).unwrap_or(*viewport);
+        let offset = state.translation(self.direction, bounds, content_bounds);
 
-        let offset = tree.state.downcast_ref::<State>().translation(
-            self.direction,
-            bounds,
-            content_bounds,
-        );
-
-        self.content.as_widget_mut().overlay(
+        let overlay = self.content.as_widget_mut().overlay(
             &mut tree.children[0],
             layout.children().next().unwrap(),
             renderer,
+            &visible_bounds,
             translation - offset,
-        )
+        );
+
+        let icon = if let Interaction::AutoScrolling { origin, .. } =
+            state.interaction
+        {
+            let scrollbars =
+                Scrollbars::new(state, self.direction, bounds, content_bounds);
+
+            Some(overlay::Element::new(Box::new(AutoScrollIcon {
+                origin,
+                vertical: scrollbars.y.is_some(),
+                horizontal: scrollbars.x.is_some(),
+                class: &self.class,
+            })))
+        } else {
+            None
+        };
+
+        match (overlay, icon) {
+            (None, None) => None,
+            (None, Some(icon)) => Some(icon),
+            (Some(overlay), None) => Some(overlay),
+            (Some(overlay), Some(icon)) => Some(overlay::Element::new(
+                Box::new(overlay::Group::with_children(vec![overlay, icon])),
+            )),
+        }
+    }
+}
+
+struct AutoScrollIcon<'a, Class> {
+    origin: Point,
+    vertical: bool,
+    horizontal: bool,
+    class: &'a Class,
+}
+
+impl<Class> AutoScrollIcon<'_, Class> {
+    const SIZE: f32 = 40.0;
+    const DOT: f32 = Self::SIZE / 10.0;
+    const PADDING: f32 = Self::SIZE / 10.0;
+}
+
+impl<Message, Theme, Renderer> core::Overlay<Message, Theme, Renderer>
+    for AutoScrollIcon<'_, Theme::Class<'_>>
+where
+    Renderer: text::Renderer,
+    Theme: Catalog,
+{
+    fn layout(&mut self, _renderer: &Renderer, _bounds: Size) -> layout::Node {
+        layout::Node::new(Size::new(Self::SIZE, Self::SIZE))
+            .move_to(self.origin - Vector::new(Self::SIZE, Self::SIZE) / 2.0)
+    }
+
+    fn draw(
+        &self,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        _style: &renderer::Style,
+        layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+    ) {
+        let bounds = layout.bounds();
+        let style = theme
+            .style(
+                self.class,
+                Status::Active {
+                    is_horizontal_scrollbar_disabled: false,
+                    is_vertical_scrollbar_disabled: false,
+                },
+            )
+            .auto_scroll;
+
+        renderer.with_layer(Rectangle::INFINITE, |renderer| {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds,
+                    border: style.border,
+                    shadow: style.shadow,
+                    snap: false,
+                },
+                style.background,
+            );
+
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle::new(
+                        bounds.center()
+                            - Vector::new(Self::DOT, Self::DOT) / 2.0,
+                        Size::new(Self::DOT, Self::DOT),
+                    ),
+                    border: border::rounded(bounds.width),
+                    snap: false,
+                    ..renderer::Quad::default()
+                },
+                style.icon,
+            );
+
+            let arrow = core::Text {
+                content: String::new(),
+                bounds: bounds.size(),
+                size: Pixels::from(12),
+                line_height: text::LineHeight::Relative(1.0),
+                font: Renderer::ICON_FONT,
+                align_x: text::Alignment::Center,
+                align_y: alignment::Vertical::Center,
+                shaping: text::Shaping::Basic,
+                wrapping: text::Wrapping::None,
+            };
+
+            if self.vertical {
+                renderer.fill_text(
+                    core::Text {
+                        content: Renderer::SCROLL_UP_ICON.to_string(),
+                        align_y: alignment::Vertical::Top,
+                        ..arrow
+                    },
+                    Point::new(bounds.center_x(), bounds.y + Self::PADDING),
+                    style.icon,
+                    bounds,
+                );
+
+                renderer.fill_text(
+                    core::Text {
+                        content: Renderer::SCROLL_DOWN_ICON.to_string(),
+                        align_y: alignment::Vertical::Bottom,
+                        ..arrow
+                    },
+                    Point::new(
+                        bounds.center_x(),
+                        bounds.y + bounds.height - Self::PADDING - 0.5,
+                    ),
+                    style.icon,
+                    bounds,
+                );
+            }
+
+            if self.horizontal {
+                renderer.fill_text(
+                    core::Text {
+                        content: Renderer::SCROLL_LEFT_ICON.to_string(),
+                        align_x: text::Alignment::Left,
+                        ..arrow
+                    },
+                    Point::new(
+                        bounds.x + Self::PADDING + 1.0,
+                        bounds.center_y() + 1.0,
+                    ),
+                    style.icon,
+                    bounds,
+                );
+
+                renderer.fill_text(
+                    core::Text {
+                        content: Renderer::SCROLL_RIGHT_ICON.to_string(),
+                        align_x: text::Alignment::Right,
+                        ..arrow
+                    },
+                    Point::new(
+                        bounds.x + bounds.width - Self::PADDING - 1.0,
+                        bounds.center_y() + 1.0,
+                    ),
+                    style.icon,
+                    bounds,
+                );
+            }
+        });
+    }
+
+    fn index(&self) -> f32 {
+        f32::MAX
     }
 }
 
@@ -1154,59 +1558,13 @@ impl<'a, Message, Theme, Renderer>
 where
     Message: 'a,
     Theme: 'a + Catalog,
-    Renderer: 'a + core::Renderer,
+    Renderer: 'a + text::Renderer,
 {
     fn from(
         text_input: Scrollable<'a, Message, Theme, Renderer>,
     ) -> Element<'a, Message, Theme, Renderer> {
         Element::new(text_input)
     }
-}
-
-/// The identifier of a [`Scrollable`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Id(widget::Id);
-
-impl Id {
-    /// Creates a custom [`Id`].
-    pub fn new(id: impl Into<std::borrow::Cow<'static, str>>) -> Self {
-        Self(widget::Id::new(id))
-    }
-
-    /// Creates a unique [`Id`].
-    ///
-    /// This function produces a different [`Id`] every time it is called.
-    pub fn unique() -> Self {
-        Self(widget::Id::unique())
-    }
-}
-
-impl From<Id> for widget::Id {
-    fn from(id: Id) -> Self {
-        id.0
-    }
-}
-
-/// Produces a [`Task`] that snaps the [`Scrollable`] with the given [`Id`]
-/// to the provided [`RelativeOffset`].
-pub fn snap_to<T>(id: Id, offset: RelativeOffset) -> Task<T> {
-    task::effect(Action::widget(operation::scrollable::snap_to(id.0, offset)))
-}
-
-/// Produces a [`Task`] that scrolls the [`Scrollable`] with the given [`Id`]
-/// to the provided [`AbsoluteOffset`].
-pub fn scroll_to<T>(id: Id, offset: AbsoluteOffset) -> Task<T> {
-    task::effect(Action::widget(operation::scrollable::scroll_to(
-        id.0, offset,
-    )))
-}
-
-/// Produces a [`Task`] that scrolls the [`Scrollable`] with the given [`Id`]
-/// by the provided [`AbsoluteOffset`].
-pub fn scroll_by<T>(id: Id, offset: AbsoluteOffset) -> Task<T> {
-    task::effect(Action::widget(operation::scrollable::scroll_by(
-        id.0, offset,
-    )))
 }
 
 fn notify_scroll<Message>(
@@ -1279,37 +1637,48 @@ fn notify_viewport<Message>(
 
 #[derive(Debug, Clone, Copy)]
 struct State {
-    scroll_area_touched_at: Option<Point>,
     offset_y: Offset,
-    y_scroller_grabbed_at: Option<f32>,
     offset_x: Offset,
-    x_scroller_grabbed_at: Option<f32>,
+    interaction: Interaction,
     keyboard_modifiers: keyboard::Modifiers,
     last_notified: Option<Viewport>,
     last_scrolled: Option<Instant>,
+    is_scrollbar_visible: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Interaction {
+    None,
+    YScrollerGrabbed(f32),
+    XScrollerGrabbed(f32),
+    TouchScrolling(Point),
+    AutoScrolling {
+        origin: Point,
+        current: Point,
+        last_frame: Option<Instant>,
+    },
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
-            scroll_area_touched_at: None,
             offset_y: Offset::Absolute(0.0),
-            y_scroller_grabbed_at: None,
             offset_x: Offset::Absolute(0.0),
-            x_scroller_grabbed_at: None,
+            interaction: Interaction::None,
             keyboard_modifiers: keyboard::Modifiers::default(),
             last_notified: None,
             last_scrolled: None,
+            is_scrollbar_visible: true,
         }
     }
 }
 
 impl operation::Scrollable for State {
-    fn snap_to(&mut self, offset: RelativeOffset) {
+    fn snap_to(&mut self, offset: RelativeOffset<Option<f32>>) {
         State::snap_to(self, offset);
     }
 
-    fn scroll_to(&mut self, offset: AbsoluteOffset) {
+    fn scroll_to(&mut self, offset: AbsoluteOffset<Option<f32>>) {
         State::scroll_to(self, offset);
     }
 
@@ -1323,7 +1692,7 @@ impl operation::Scrollable for State {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Offset {
     Absolute(f32),
     Relative(f32),
@@ -1414,14 +1783,11 @@ impl Viewport {
 }
 
 impl State {
-    /// Creates a new [`State`] with the scrollbar(s) at the beginning.
-    pub fn new() -> Self {
+    fn new() -> Self {
         State::default()
     }
 
-    /// Apply a scrolling offset to the current [`State`], given the bounds of
-    /// the [`Scrollable`] and its contents.
-    pub fn scroll(
+    fn scroll(
         &mut self,
         delta: Vector<f32>,
         bounds: Rectangle,
@@ -1444,11 +1810,7 @@ impl State {
         }
     }
 
-    /// Scrolls the [`Scrollable`] to a relative amount along the y axis.
-    ///
-    /// `0` represents scrollbar at the beginning, while `1` represents scrollbar at
-    /// the end.
-    pub fn scroll_y_to(
+    fn scroll_y_to(
         &mut self,
         percentage: f32,
         bounds: Rectangle,
@@ -1458,11 +1820,7 @@ impl State {
         self.unsnap(bounds, content_bounds);
     }
 
-    /// Scrolls the [`Scrollable`] to a relative amount along the x axis.
-    ///
-    /// `0` represents scrollbar at the beginning, while `1` represents scrollbar at
-    /// the end.
-    pub fn scroll_x_to(
+    fn scroll_x_to(
         &mut self,
         percentage: f32,
         bounds: Rectangle,
@@ -1472,20 +1830,28 @@ impl State {
         self.unsnap(bounds, content_bounds);
     }
 
-    /// Snaps the scroll position to a [`RelativeOffset`].
-    pub fn snap_to(&mut self, offset: RelativeOffset) {
-        self.offset_x = Offset::Relative(offset.x.clamp(0.0, 1.0));
-        self.offset_y = Offset::Relative(offset.y.clamp(0.0, 1.0));
+    fn snap_to(&mut self, offset: RelativeOffset<Option<f32>>) {
+        if let Some(x) = offset.x {
+            self.offset_x = Offset::Relative(x.clamp(0.0, 1.0));
+        }
+
+        if let Some(y) = offset.y {
+            self.offset_y = Offset::Relative(y.clamp(0.0, 1.0));
+        }
     }
 
-    /// Scroll to the provided [`AbsoluteOffset`].
-    pub fn scroll_to(&mut self, offset: AbsoluteOffset) {
-        self.offset_x = Offset::Absolute(offset.x.max(0.0));
-        self.offset_y = Offset::Absolute(offset.y.max(0.0));
+    fn scroll_to(&mut self, offset: AbsoluteOffset<Option<f32>>) {
+        if let Some(x) = offset.x {
+            self.offset_x = Offset::Absolute(x.max(0.0));
+        }
+
+        if let Some(y) = offset.y {
+            self.offset_y = Offset::Absolute(y.max(0.0));
+        }
     }
 
     /// Scroll by the provided [`AbsoluteOffset`].
-    pub fn scroll_by(
+    fn scroll_by(
         &mut self,
         offset: AbsoluteOffset,
         bounds: Rectangle,
@@ -1496,7 +1862,7 @@ impl State {
 
     /// Unsnaps the current scroll position, if snapped, given the bounds of the
     /// [`Scrollable`] and its contents.
-    pub fn unsnap(&mut self, bounds: Rectangle, content_bounds: Rectangle) {
+    fn unsnap(&mut self, bounds: Rectangle, content_bounds: Rectangle) {
         self.offset_x = Offset::Absolute(
             self.offset_x.absolute(bounds.width, content_bounds.width),
         );
@@ -1515,30 +1881,51 @@ impl State {
     ) -> Vector {
         Vector::new(
             if let Some(horizontal) = direction.horizontal() {
-                self.offset_x.translation(
-                    bounds.width,
-                    content_bounds.width,
-                    horizontal.alignment,
-                )
+                self.offset_x
+                    .translation(
+                        bounds.width,
+                        content_bounds.width,
+                        horizontal.alignment,
+                    )
+                    .round()
             } else {
                 0.0
             },
             if let Some(vertical) = direction.vertical() {
-                self.offset_y.translation(
-                    bounds.height,
-                    content_bounds.height,
-                    vertical.alignment,
-                )
+                self.offset_y
+                    .translation(
+                        bounds.height,
+                        content_bounds.height,
+                        vertical.alignment,
+                    )
+                    .round()
             } else {
                 0.0
             },
         )
     }
 
-    /// Returns whether any scroller is currently grabbed or not.
-    pub fn scrollers_grabbed(&self) -> bool {
-        self.x_scroller_grabbed_at.is_some()
-            || self.y_scroller_grabbed_at.is_some()
+    fn scrollers_grabbed(&self) -> bool {
+        matches!(
+            self.interaction,
+            Interaction::YScrollerGrabbed(_) | Interaction::XScrollerGrabbed(_),
+        )
+    }
+
+    pub fn y_scroller_grabbed_at(&self) -> Option<f32> {
+        let Interaction::YScrollerGrabbed(at) = self.interaction else {
+            return None;
+        };
+
+        Some(at)
+    }
+
+    pub fn x_scroller_grabbed_at(&self) -> Option<f32> {
+        let Interaction::XScrollerGrabbed(at) = self.interaction else {
+            return None;
+        };
+
+        Some(at)
     }
 }
 
@@ -1559,13 +1946,13 @@ impl Scrollbars {
     ) -> Self {
         let translation = state.translation(direction, bounds, content_bounds);
 
-        let show_scrollbar_x = direction.horizontal().filter(|scrollbar| {
-            scrollbar.spacing.is_some() || content_bounds.width > bounds.width
-        });
+        let show_scrollbar_x = direction
+            .horizontal()
+            .filter(|_scrollbar| content_bounds.width > bounds.width);
 
-        let show_scrollbar_y = direction.vertical().filter(|scrollbar| {
-            scrollbar.spacing.is_some() || content_bounds.height > bounds.height
-        });
+        let show_scrollbar_y = direction
+            .vertical()
+            .filter(|_scrollbar| content_bounds.height > bounds.height);
 
         let y_scrollbar = if let Some(vertical) = show_scrollbar_y {
             let Scrollbar {
@@ -1632,6 +2019,7 @@ impl Scrollbars {
                 bounds: scrollbar_bounds,
                 scroller,
                 alignment: vertical.alignment,
+                disabled: content_bounds.height <= bounds.height,
             })
         } else {
             None
@@ -1701,6 +2089,7 @@ impl Scrollbars {
                 bounds: scrollbar_bounds,
                 scroller,
                 alignment: horizontal.alignment,
+                disabled: content_bounds.width <= bounds.width,
             })
         } else {
             None
@@ -1727,6 +2116,14 @@ impl Scrollbars {
         } else {
             (false, false)
         }
+    }
+
+    fn is_y_disabled(&self) -> bool {
+        self.y.map(|y| y.disabled).unwrap_or(false)
+    }
+
+    fn is_x_disabled(&self) -> bool {
+        self.x.map(|x| x.disabled).unwrap_or(false)
     }
 
     fn grab_y_scroller(&self, cursor_position: Point) -> Option<f32> {
@@ -1775,6 +2172,7 @@ pub(super) mod internals {
         pub bounds: Rectangle,
         pub scroller: Option<Scroller>,
         pub alignment: Anchor,
+        pub disabled: bool,
     }
 
     impl Scrollbar {
@@ -1838,13 +2236,22 @@ pub(super) mod internals {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     /// The [`Scrollable`] can be interacted with.
-    Active,
+    Active {
+        /// Whether or not the horizontal scrollbar is disabled meaning the content isn't overflowing.
+        is_horizontal_scrollbar_disabled: bool,
+        /// Whether or not the vertical scrollbar is disabled meaning the content isn't overflowing.
+        is_vertical_scrollbar_disabled: bool,
+    },
     /// The [`Scrollable`] is being hovered.
     Hovered {
         /// Indicates if the horizontal scrollbar is being hovered.
         is_horizontal_scrollbar_hovered: bool,
         /// Indicates if the vertical scrollbar is being hovered.
         is_vertical_scrollbar_hovered: bool,
+        /// Whether or not the horizontal scrollbar is disabled meaning the content isn't overflowing.
+        is_horizontal_scrollbar_disabled: bool,
+        /// Whether or not the vertical scrollbar is disabled meaning the content isn't overflowing.
+        is_vertical_scrollbar_disabled: bool,
     },
     /// The [`Scrollable`] is being dragged.
     Dragged {
@@ -1852,11 +2259,15 @@ pub enum Status {
         is_horizontal_scrollbar_dragged: bool,
         /// Indicates if the vertical scrollbar is being dragged.
         is_vertical_scrollbar_dragged: bool,
+        /// Whether or not the horizontal scrollbar is disabled meaning the content isn't overflowing.
+        is_horizontal_scrollbar_disabled: bool,
+        /// Whether or not the vertical scrollbar is disabled meaning the content isn't overflowing.
+        is_vertical_scrollbar_disabled: bool,
     },
 }
 
 /// The appearance of a scrollable.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Style {
     /// The [`container::Style`] of a scrollable.
     pub container: container::Style,
@@ -1866,10 +2277,12 @@ pub struct Style {
     pub horizontal_rail: Rail,
     /// The [`Background`] of the gap between a horizontal and vertical scrollbar.
     pub gap: Option<Background>,
+    /// The appearance of the [`AutoScroll`] overlay.
+    pub auto_scroll: AutoScroll,
 }
 
 /// The appearance of the scrollbar of a scrollable.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rail {
     /// The [`Background`] of a scrollbar.
     pub background: Option<Background>,
@@ -1880,12 +2293,25 @@ pub struct Rail {
 }
 
 /// The appearance of the scroller of a scrollable.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Scroller {
-    /// The [`Color`] of the scroller.
-    pub color: Color,
+    /// The [`Background`] of the scroller.
+    pub background: Background,
     /// The [`Border`] of the scroller.
     pub border: Border,
+}
+
+/// The appearance of the autoscroll overlay of a scrollable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AutoScroll {
+    /// The [`Background`] of the [`AutoScroll`] overlay.
+    pub background: Background,
+    /// The [`Border`] of the [`AutoScroll`] overlay.
+    pub border: Border,
+    /// Thje [`Shadow`] of the [`AutoScroll`] overlay.
+    pub shadow: Shadow,
+    /// The [`Color`] for the arrow icons of the [`AutoScroll`] overlay.
+    pub icon: Color,
 }
 
 /// The theme catalog of a [`Scrollable`].
@@ -1923,25 +2349,40 @@ pub fn default(theme: &Theme, status: Status) -> Style {
         background: Some(palette.background.weak.color.into()),
         border: border::rounded(2),
         scroller: Scroller {
-            color: palette.background.strong.color,
+            background: palette.background.strongest.color.into(),
             border: border::rounded(2),
         },
     };
 
+    let auto_scroll = AutoScroll {
+        background: palette.background.base.color.scale_alpha(0.9).into(),
+        border: border::rounded(u32::MAX)
+            .width(1)
+            .color(palette.background.base.text.scale_alpha(0.8)),
+        shadow: Shadow {
+            color: Color::BLACK.scale_alpha(0.7),
+            offset: Vector::ZERO,
+            blur_radius: 2.0,
+        },
+        icon: palette.background.base.text.scale_alpha(0.8),
+    };
+
     match status {
-        Status::Active => Style {
+        Status::Active { .. } => Style {
             container: container::Style::default(),
             vertical_rail: scrollbar,
             horizontal_rail: scrollbar,
             gap: None,
+            auto_scroll,
         },
         Status::Hovered {
             is_horizontal_scrollbar_hovered,
             is_vertical_scrollbar_hovered,
+            ..
         } => {
             let hovered_scrollbar = Rail {
                 scroller: Scroller {
-                    color: palette.primary.strong.color,
+                    background: palette.primary.strong.color.into(),
                     ..scrollbar.scroller
                 },
                 ..scrollbar
@@ -1960,15 +2401,17 @@ pub fn default(theme: &Theme, status: Status) -> Style {
                     scrollbar
                 },
                 gap: None,
+                auto_scroll,
             }
         }
         Status::Dragged {
             is_horizontal_scrollbar_dragged,
             is_vertical_scrollbar_dragged,
+            ..
         } => {
             let dragged_scrollbar = Rail {
                 scroller: Scroller {
-                    color: palette.primary.base.color,
+                    background: palette.primary.base.color.into(),
                     ..scrollbar.scroller
                 },
                 ..scrollbar
@@ -1987,6 +2430,7 @@ pub fn default(theme: &Theme, status: Status) -> Style {
                     scrollbar
                 },
                 gap: None,
+                auto_scroll,
             }
         }
     }

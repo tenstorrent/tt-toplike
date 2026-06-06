@@ -232,11 +232,14 @@ use skrifa::{
 
 use super::internal;
 use super::{cache::FontCache, setting::Setting, FontRef, GlyphId, NormalizedCoord};
+use alloc::vec::Vec;
 use core::borrow::Borrow;
+#[cfg(all(feature = "libm", feature = "render"))]
+use core_maths::CoreFloat;
 use proxy::*;
+use zeno::Placement;
 #[cfg(feature = "render")]
-use zeno::{Format, Mask, Origin, Scratch, Style, Transform, Vector};
-use zeno::{Placement, Point};
+use zeno::{Format, Mask, Origin, Point, Scratch, Style, Transform, Vector};
 
 pub(crate) use bitmap::decode_png;
 
@@ -323,7 +326,17 @@ impl ScaleContext {
     /// Creates a new builder for constructing a scaler with this context
     /// and the specified font.
     pub fn builder<'a>(&'a mut self, font: impl Into<FontRef<'a>>) -> ScalerBuilder<'a> {
-        ScalerBuilder::new(self, font)
+        ScalerBuilder::new(self, font, None)
+    }
+
+    /// Creates a new builder for constructing a scaler with this context,
+    /// specified font and a custom unique identifier.
+    pub fn builder_with_id<'a>(
+        &'a mut self,
+        font: impl Into<FontRef<'a>>,
+        id: [u64; 2],
+    ) -> ScalerBuilder<'a> {
+        ScalerBuilder::new(self, font, Some(id))
     }
 }
 
@@ -347,9 +360,13 @@ pub struct ScalerBuilder<'a> {
 }
 
 impl<'a> ScalerBuilder<'a> {
-    fn new(context: &'a mut ScaleContext, font: impl Into<FontRef<'a>>) -> Self {
+    fn new(
+        context: &'a mut ScaleContext,
+        font: impl Into<FontRef<'a>>,
+        id: Option<[u64; 2]>,
+    ) -> Self {
         let font = font.into();
-        let (id, proxy) = context.fonts.get(&font, None, ScalerProxy::from_font);
+        let (id, proxy) = context.fonts.get(&font, id, ScalerProxy::from_font);
         let skrifa_font = if font.offset == 0 {
             skrifa::FontRef::new(font.data).ok()
         } else {
@@ -541,7 +558,7 @@ impl<'a> Scaler<'a> {
         color_index: Option<u16>,
         outline: Option<&mut Outline>,
     ) -> bool {
-        let outline = match outline {
+        let mut outline = match outline {
             Some(x) => x,
             _ => &mut self.state.outline,
         };
@@ -558,7 +575,10 @@ impl<'a> Scaler<'a> {
                         )
                             .into()
                     };
-                if glyph.draw(settings, outline).is_ok() {
+                if glyph
+                    .draw(settings, &mut OutlineWriter(&mut outline))
+                    .is_ok()
+                {
                     outline.maybe_close();
                     outline.finish();
                     return true;
@@ -779,7 +799,7 @@ impl<'a> Render<'a> {
     }
 
     /// Specifies the target format for rasterizing an outline. Default is
-    /// [`Format::Alpha`](zeno::Format::Alpha).
+    /// [`Format::Alpha`].
     pub fn format(&mut self, format: Format) -> &mut Self {
         self.format = format;
         self
@@ -845,6 +865,7 @@ impl<'a> Render<'a> {
                             .format(self.format)
                             .origin(Origin::BottomLeft)
                             .style(self.style)
+                            .offset(self.offset)
                             .render_offset(self.offset)
                             .inspect(|fmt, w, h| {
                                 image.data.resize(fmt.buffer_size(w, h), 0);
@@ -910,6 +931,7 @@ impl<'a> Render<'a> {
                             let placement = Mask::with_scratch(layer.path(), rcx)
                                 .origin(Origin::BottomLeft)
                                 .style(self.style)
+                                .offset(self.offset)
                                 .render_offset(self.offset)
                                 .inspect(|fmt, w, h| {
                                     scratch.resize(fmt.buffer_size(w, h), 0);

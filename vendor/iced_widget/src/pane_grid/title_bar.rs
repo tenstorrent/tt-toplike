@@ -1,20 +1,18 @@
 use crate::container;
-use crate::core::event::{self, Event};
 use crate::core::layout;
 use crate::core::mouse;
 use crate::core::overlay;
 use crate::core::renderer;
 use crate::core::widget::{self, Tree};
 use crate::core::{
-    self, Clipboard, Element, Layout, Padding, Point, Rectangle, Shell, Size,
-    Vector,
+    self, Clipboard, Element, Event, Layout, Padding, Point, Rectangle, Shell,
+    Size, Vector,
 };
 use crate::pane_grid::controls::Controls;
 
 /// The title bar of a [`Pane`].
 ///
 /// [`Pane`]: super::Pane
-#[allow(missing_debug_implementations)]
 pub struct TitleBar<
     'a,
     Message,
@@ -99,7 +97,7 @@ where
     }
 }
 
-impl<'a, Message, Theme, Renderer> TitleBar<'a, Message, Theme, Renderer>
+impl<Message, Theme, Renderer> TitleBar<'_, Message, Theme, Renderer>
 where
     Theme: container::Catalog,
     Renderer: core::Renderer,
@@ -175,38 +173,28 @@ where
         let title_layout = children.next().unwrap();
         let mut show_title = true;
 
-        if let Some(controls) = &self.controls {
-            if show_controls || self.always_show_controls {
-                let controls_layout = children.next().unwrap();
-                if title_layout.bounds().width + controls_layout.bounds().width
-                    > padded.bounds().width
-                {
-                    if let Some(compact) = controls.compact.as_ref() {
-                        let compact_layout = children.next().unwrap();
+        if let Some(controls) = &self.controls
+            && (show_controls || self.always_show_controls)
+        {
+            let controls_layout = children.next().unwrap();
+            if title_layout.bounds().width + controls_layout.bounds().width
+                > padded.bounds().width
+            {
+                if let Some(compact) = controls.compact.as_ref() {
+                    let compact_layout = children.next().unwrap();
 
-                        compact.as_widget().draw(
-                            &tree.children[2],
-                            renderer,
-                            theme,
-                            &inherited_style,
-                            compact_layout,
-                            cursor,
-                            viewport,
-                        );
-                    } else {
-                        show_title = false;
-
-                        controls.full.as_widget().draw(
-                            &tree.children[1],
-                            renderer,
-                            theme,
-                            &inherited_style,
-                            controls_layout,
-                            cursor,
-                            viewport,
-                        );
-                    }
+                    compact.as_widget().draw(
+                        &tree.children[2],
+                        renderer,
+                        theme,
+                        &inherited_style,
+                        compact_layout,
+                        cursor,
+                        viewport,
+                    );
                 } else {
+                    show_title = false;
+
                     controls.full.as_widget().draw(
                         &tree.children[1],
                         renderer,
@@ -217,6 +205,16 @@ where
                         viewport,
                     );
                 }
+            } else {
+                controls.full.as_widget().draw(
+                    &tree.children[1],
+                    renderer,
+                    theme,
+                    &inherited_style,
+                    controls_layout,
+                    cursor,
+                    viewport,
+                );
             }
         }
 
@@ -275,7 +273,7 @@ where
     }
 
     pub(crate) fn layout(
-        &self,
+        &mut self,
         tree: &mut Tree,
         renderer: &Renderer,
         limits: &layout::Limits,
@@ -283,7 +281,7 @@ where
         let limits = limits.shrink(self.padding);
         let max_size = limits.max();
 
-        let title_layout = self.content.as_widget().layout(
+        let title_layout = self.content.as_widget_mut().layout(
             &mut tree.children[0],
             renderer,
             &layout::Limits::new(Size::ZERO, max_size),
@@ -291,8 +289,8 @@ where
 
         let title_size = title_layout.size();
 
-        let node = if let Some(controls) = &self.controls {
-            let controls_layout = controls.full.as_widget().layout(
+        let node = if let Some(controls) = &mut self.controls {
+            let controls_layout = controls.full.as_widget_mut().layout(
                 &mut tree.children[1],
                 renderer,
                 &layout::Limits::new(Size::ZERO, max_size),
@@ -301,8 +299,8 @@ where
             if title_layout.bounds().width + controls_layout.bounds().width
                 > max_size.width
             {
-                if let Some(compact) = controls.compact.as_ref() {
-                    let compact_layout = compact.as_widget().layout(
+                if let Some(compact) = controls.compact.as_mut() {
+                    let compact_layout = compact.as_widget_mut().layout(
                         &mut tree.children[2],
                         renderer,
                         &layout::Limits::new(Size::ZERO, max_size),
@@ -370,7 +368,7 @@ where
     }
 
     pub(crate) fn operate(
-        &self,
+        &mut self,
         tree: &mut Tree,
         layout: Layout<'_>,
         renderer: &Renderer,
@@ -383,16 +381,16 @@ where
         let title_layout = children.next().unwrap();
         let mut show_title = true;
 
-        if let Some(controls) = &self.controls {
+        if let Some(controls) = &mut self.controls {
             let controls_layout = children.next().unwrap();
 
             if title_layout.bounds().width + controls_layout.bounds().width
                 > padded.bounds().width
             {
-                if let Some(compact) = controls.compact.as_ref() {
+                if let Some(compact) = controls.compact.as_mut() {
                     let compact_layout = children.next().unwrap();
 
-                    compact.as_widget().operate(
+                    compact.as_widget_mut().operate(
                         &mut tree.children[2],
                         compact_layout,
                         renderer,
@@ -401,7 +399,7 @@ where
                 } else {
                     show_title = false;
 
-                    controls.full.as_widget().operate(
+                    controls.full.as_widget_mut().operate(
                         &mut tree.children[1],
                         controls_layout,
                         renderer,
@@ -409,7 +407,7 @@ where
                     );
                 }
             } else {
-                controls.full.as_widget().operate(
+                controls.full.as_widget_mut().operate(
                     &mut tree.children[1],
                     controls_layout,
                     renderer,
@@ -419,7 +417,7 @@ where
         };
 
         if show_title {
-            self.content.as_widget().operate(
+            self.content.as_widget_mut().operate(
                 &mut tree.children[0],
                 title_layout,
                 renderer,
@@ -428,17 +426,17 @@ where
         }
     }
 
-    pub(crate) fn on_event(
+    pub(crate) fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
         let mut children = layout.children();
         let padded = children.next().unwrap();
 
@@ -446,56 +444,55 @@ where
         let title_layout = children.next().unwrap();
         let mut show_title = true;
 
-        let control_status = if let Some(controls) = &mut self.controls {
+        if let Some(controls) = &mut self.controls {
             let controls_layout = children.next().unwrap();
+
             if title_layout.bounds().width + controls_layout.bounds().width
                 > padded.bounds().width
             {
                 if let Some(compact) = controls.compact.as_mut() {
                     let compact_layout = children.next().unwrap();
 
-                    compact.as_widget_mut().on_event(
+                    compact.as_widget_mut().update(
                         &mut tree.children[2],
-                        event.clone(),
+                        event,
                         compact_layout,
                         cursor,
                         renderer,
                         clipboard,
                         shell,
                         viewport,
-                    )
+                    );
                 } else {
                     show_title = false;
 
-                    controls.full.as_widget_mut().on_event(
+                    controls.full.as_widget_mut().update(
                         &mut tree.children[1],
-                        event.clone(),
+                        event,
                         controls_layout,
                         cursor,
                         renderer,
                         clipboard,
                         shell,
                         viewport,
-                    )
+                    );
                 }
             } else {
-                controls.full.as_widget_mut().on_event(
+                controls.full.as_widget_mut().update(
                     &mut tree.children[1],
-                    event.clone(),
+                    event,
                     controls_layout,
                     cursor,
                     renderer,
                     clipboard,
                     shell,
                     viewport,
-                )
+                );
             }
-        } else {
-            event::Status::Ignored
-        };
+        }
 
-        let title_status = if show_title {
-            self.content.as_widget_mut().on_event(
+        if show_title {
+            self.content.as_widget_mut().update(
                 &mut tree.children[0],
                 event,
                 title_layout,
@@ -504,12 +501,8 @@ where
                 clipboard,
                 shell,
                 viewport,
-            )
-        } else {
-            event::Status::Ignored
-        };
-
-        control_status.merge(title_status)
+            );
+        }
     }
 
     pub(crate) fn mouse_interaction(
@@ -574,8 +567,9 @@ where
     pub(crate) fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'_>,
+        layout: Layout<'b>,
         renderer: &Renderer,
+        viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
         let mut children = layout.children();
@@ -594,7 +588,7 @@ where
 
         content
             .as_widget_mut()
-            .overlay(title_state, title_layout, renderer, translation)
+            .overlay(title_state, title_layout, renderer, viewport, translation)
             .or_else(move || {
                 controls.as_mut().and_then(|controls| {
                     let controls_layout = children.next()?;
@@ -611,6 +605,7 @@ where
                                 compact_state,
                                 compact_layout,
                                 renderer,
+                                viewport,
                                 translation,
                             )
                         } else {
@@ -618,6 +613,7 @@ where
                                 controls_state,
                                 controls_layout,
                                 renderer,
+                                viewport,
                                 translation,
                             )
                         }
@@ -626,6 +622,7 @@ where
                             controls_state,
                             controls_layout,
                             renderer,
+                            viewport,
                             translation,
                         )
                     }

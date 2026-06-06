@@ -1,7 +1,7 @@
 //! Operate on widgets that can be focused.
-use crate::widget::operation::{self, Operation, Outcome};
-use crate::widget::Id;
 use crate::Rectangle;
+use crate::widget::Id;
+use crate::widget::operation::{self, Operation, Outcome};
 
 /// The internal state of a widget that can be focused.
 pub trait Focusable {
@@ -32,7 +32,12 @@ pub fn focus<T>(target: Id) -> impl Operation<T> {
     }
 
     impl<T> Operation<T> for Focus {
-        fn focusable(&mut self, state: &mut dyn Focusable, id: Option<&Id>) {
+        fn focusable(
+            &mut self,
+            id: Option<&Id>,
+            _bounds: Rectangle,
+            state: &mut dyn Focusable,
+        ) {
             match id {
                 Some(id) if id == &self.target => {
                     state.focus();
@@ -43,17 +48,34 @@ pub fn focus<T>(target: Id) -> impl Operation<T> {
             }
         }
 
-        fn container(
-            &mut self,
-            _id: Option<&Id>,
-            _bounds: Rectangle,
-            operate_on_children: &mut dyn FnMut(&mut dyn Operation<T>),
-        ) {
-            operate_on_children(self);
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<T>)) {
+            operate(self);
         }
     }
 
     Focus { target }
+}
+
+/// Produces an [`Operation`] that unfocuses the focused widget.
+pub fn unfocus<T>() -> impl Operation<T> {
+    struct Unfocus;
+
+    impl<T> Operation<T> for Unfocus {
+        fn focusable(
+            &mut self,
+            _id: Option<&Id>,
+            _bounds: Rectangle,
+            state: &mut dyn Focusable,
+        ) {
+            state.unfocus();
+        }
+
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<T>)) {
+            operate(self);
+        }
+    }
+
+    Unfocus
 }
 
 /// Produces an [`Operation`] that generates a [`Count`] and chains it with the
@@ -64,7 +86,12 @@ pub fn count() -> impl Operation<Count> {
     }
 
     impl Operation<Count> for CountFocusable {
-        fn focusable(&mut self, state: &mut dyn Focusable, _id: Option<&Id>) {
+        fn focusable(
+            &mut self,
+            _id: Option<&Id>,
+            _bounds: Rectangle,
+            state: &mut dyn Focusable,
+        ) {
             if state.is_focused() {
                 self.count.focused = Some(self.count.total);
             }
@@ -72,13 +99,11 @@ pub fn count() -> impl Operation<Count> {
             self.count.total += 1;
         }
 
-        fn container(
+        fn traverse(
             &mut self,
-            _id: Option<&Id>,
-            _bounds: Rectangle,
-            operate_on_children: &mut dyn FnMut(&mut dyn Operation<Count>),
+            operate: &mut dyn FnMut(&mut dyn Operation<Count>),
         ) {
-            operate_on_children(self);
+            operate(self);
         }
 
         fn finish(&self) -> Outcome<Count> {
@@ -104,7 +129,12 @@ where
     }
 
     impl<T> Operation<T> for FocusPrevious {
-        fn focusable(&mut self, state: &mut dyn Focusable, _id: Option<&Id>) {
+        fn focusable(
+            &mut self,
+            _id: Option<&Id>,
+            _bounds: Rectangle,
+            state: &mut dyn Focusable,
+        ) {
             if self.count.total == 0 {
                 return;
             }
@@ -121,13 +151,8 @@ where
             self.current += 1;
         }
 
-        fn container(
-            &mut self,
-            _id: Option<&Id>,
-            _bounds: Rectangle,
-            operate_on_children: &mut dyn FnMut(&mut dyn Operation<T>),
-        ) {
-            operate_on_children(self);
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<T>)) {
+            operate(self);
         }
     }
 
@@ -147,7 +172,12 @@ where
     }
 
     impl<T> Operation<T> for FocusNext {
-        fn focusable(&mut self, state: &mut dyn Focusable, _id: Option<&Id>) {
+        fn focusable(
+            &mut self,
+            _id: Option<&Id>,
+            _bounds: Rectangle,
+            state: &mut dyn Focusable,
+        ) {
             match self.count.focused {
                 None if self.current == 0 => state.focus(),
                 Some(focused) if focused == self.current => state.unfocus(),
@@ -158,13 +188,8 @@ where
             self.current += 1;
         }
 
-        fn container(
-            &mut self,
-            _id: Option<&Id>,
-            _bounds: Rectangle,
-            operate_on_children: &mut dyn FnMut(&mut dyn Operation<T>),
-        ) {
-            operate_on_children(self);
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<T>)) {
+            operate(self);
         }
     }
 
@@ -179,19 +204,22 @@ pub fn find_focused() -> impl Operation<Id> {
     }
 
     impl Operation<Id> for FindFocused {
-        fn focusable(&mut self, state: &mut dyn Focusable, id: Option<&Id>) {
+        fn focusable(
+            &mut self,
+            id: Option<&Id>,
+            _bounds: Rectangle,
+            state: &mut dyn Focusable,
+        ) {
             if state.is_focused() && id.is_some() {
                 self.focused = id.cloned();
             }
         }
 
-        fn container(
+        fn traverse(
             &mut self,
-            _id: Option<&Id>,
-            _bounds: Rectangle,
-            operate_on_children: &mut dyn FnMut(&mut dyn Operation<Id>),
+            operate: &mut dyn FnMut(&mut dyn Operation<Id>),
         ) {
-            operate_on_children(self);
+            operate(self);
         }
 
         fn finish(&self) -> Outcome<Id> {
@@ -204,4 +232,47 @@ pub fn find_focused() -> impl Operation<Id> {
     }
 
     FindFocused { focused: None }
+}
+
+/// Produces an [`Operation`] that searches for the focusable widget
+/// and stores whether it is focused or not. This ignores widgets that
+/// do not have an ID.
+pub fn is_focused(target: Id) -> impl Operation<bool> {
+    struct IsFocused {
+        target: Id,
+        is_focused: Option<bool>,
+    }
+
+    impl Operation<bool> for IsFocused {
+        fn focusable(
+            &mut self,
+            id: Option<&Id>,
+            _bounds: Rectangle,
+            state: &mut dyn Focusable,
+        ) {
+            if id.is_some_and(|id| *id == self.target) {
+                self.is_focused = Some(state.is_focused());
+            }
+        }
+
+        fn traverse(
+            &mut self,
+            operate: &mut dyn FnMut(&mut dyn Operation<bool>),
+        ) {
+            if self.is_focused.is_some() {
+                return;
+            }
+
+            operate(self);
+        }
+
+        fn finish(&self) -> Outcome<bool> {
+            self.is_focused.map_or(Outcome::None, Outcome::Some)
+        }
+    }
+
+    IsFocused {
+        target,
+        is_focused: None,
+    }
 }

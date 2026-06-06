@@ -1,23 +1,22 @@
 //! Build and show dropdown menus.
 use crate::core::alignment;
 use crate::core::border::{self, Border};
-use crate::core::event::{self, Event};
 use crate::core::layout::{self, Layout};
 use crate::core::mouse;
 use crate::core::overlay;
 use crate::core::renderer;
 use crate::core::text::{self, Text};
 use crate::core::touch;
-use crate::core::widget::Tree;
+use crate::core::widget::tree::{self, Tree};
+use crate::core::window;
 use crate::core::{
-    Background, Clipboard, Color, Length, Padding, Pixels, Point, Rectangle,
-    Size, Theme, Vector,
+    Background, Clipboard, Color, Event, Length, Padding, Pixels, Point,
+    Rectangle, Shadow, Size, Theme, Vector,
 };
 use crate::core::{Element, Shell, Widget};
 use crate::scrollable::{self, Scrollable};
 
 /// A list of selectable options.
-#[allow(missing_debug_implementations)]
 pub struct Menu<
     'a,
     'b,
@@ -73,7 +72,7 @@ where
             padding: Padding::ZERO,
             text_size: None,
             text_line_height: text::LineHeight::default(),
-            text_shaping: text::Shaping::Basic,
+            text_shaping: text::Shaping::default(),
             font: None,
             class,
         }
@@ -127,12 +126,16 @@ where
     pub fn overlay(
         self,
         position: Point,
+        viewport: Rectangle,
         target_height: f32,
+        menu_height: Length,
     ) -> overlay::Element<'a, Message, Theme, Renderer> {
         overlay::Element::new(Box::new(Overlay::new(
             position,
+            viewport,
             self,
             target_height,
+            menu_height,
         )))
     }
 }
@@ -161,10 +164,11 @@ impl Default for State {
 struct Overlay<'a, 'b, Message, Theme, Renderer>
 where
     Theme: Catalog,
-    Renderer: crate::core::Renderer,
+    Renderer: text::Renderer,
 {
     position: Point,
-    state: &'a mut Tree,
+    viewport: Rectangle,
+    tree: &'a mut Tree,
     list: Scrollable<'a, Message, Theme, Renderer>,
     width: f32,
     target_height: f32,
@@ -180,8 +184,10 @@ where
 {
     pub fn new<T>(
         position: Point,
+        viewport: Rectangle,
         menu: Menu<'a, 'b, T, Message, Theme, Renderer>,
         target_height: f32,
+        menu_height: Length,
     ) -> Self
     where
         T: Clone + ToString,
@@ -212,13 +218,15 @@ where
             text_shaping,
             padding,
             class,
-        });
+        })
+        .height(menu_height);
 
         state.tree.diff(&list as &dyn Widget<_, _, _>);
 
         Self {
             position,
-            state: &mut state.tree,
+            viewport,
+            tree: &mut state.tree,
             list,
             width,
             target_height,
@@ -227,9 +235,8 @@ where
     }
 }
 
-impl<'a, 'b, Message, Theme, Renderer>
-    crate::core::Overlay<Message, Theme, Renderer>
-    for Overlay<'a, 'b, Message, Theme, Renderer>
+impl<Message, Theme, Renderer> crate::core::Overlay<Message, Theme, Renderer>
+    for Overlay<'_, '_, Message, Theme, Renderer>
 where
     Theme: Catalog,
     Renderer: text::Renderer,
@@ -252,7 +259,7 @@ where
         )
         .width(self.width);
 
-        let node = self.list.layout(self.state, renderer, &limits);
+        let node = self.list.layout(self.tree, renderer, &limits);
         let size = node.size();
 
         node.move_to(if space_below > space_above {
@@ -262,32 +269,36 @@ where
         })
     }
 
-    fn on_event(
+    fn update(
         &mut self,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
-    ) -> event::Status {
+    ) {
         let bounds = layout.bounds();
 
-        self.list.on_event(
-            self.state, event, layout, cursor, renderer, clipboard, shell,
+        self.list.update(
+            self.tree, event, layout, cursor, renderer, clipboard, shell,
             &bounds,
-        )
+        );
     }
 
     fn mouse_interaction(
         &self,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
-        viewport: &Rectangle,
         renderer: &Renderer,
     ) -> mouse::Interaction {
-        self.list
-            .mouse_interaction(self.state, layout, cursor, viewport, renderer)
+        self.list.mouse_interaction(
+            self.tree,
+            layout,
+            cursor,
+            &self.viewport,
+            renderer,
+        )
     }
 
     fn draw(
@@ -306,13 +317,14 @@ where
             renderer::Quad {
                 bounds,
                 border: style.border,
+                shadow: style.shadow,
                 ..renderer::Quad::default()
             },
             style.background,
         );
 
         self.list.draw(
-            self.state, renderer, theme, defaults, layout, cursor, &bounds,
+            self.tree, renderer, theme, defaults, layout, cursor, &bounds,
         );
     }
 }
@@ -334,13 +346,25 @@ where
     class: &'a <Theme as Catalog>::Class<'b>,
 }
 
-impl<'a, 'b, T, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for List<'a, 'b, T, Message, Theme, Renderer>
+struct ListState {
+    is_hovered: Option<bool>,
+}
+
+impl<T, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for List<'_, '_, T, Message, Theme, Renderer>
 where
     T: Clone + ToString,
     Theme: Catalog,
     Renderer: text::Renderer,
 {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<Option<bool>>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(ListState { is_hovered: None })
+    }
+
     fn size(&self) -> Size<Length> {
         Size {
             width: Length::Fill,
@@ -349,7 +373,7 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         _tree: &mut Tree,
         renderer: &Renderer,
         limits: &layout::Limits,
@@ -364,7 +388,7 @@ where
         let size = {
             let intrinsic = Size::new(
                 0.0,
-                (f32::from(text_line_height) + self.padding.vertical())
+                (f32::from(text_line_height) + self.padding.y())
                     * self.options.len() as f32,
             );
 
@@ -374,26 +398,25 @@ where
         layout::Node::new(size)
     }
 
-    fn on_event(
+    fn update(
         &mut self,
-        _state: &mut Tree,
-        event: Event,
+        tree: &mut Tree,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &Renderer,
         _clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         _viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                if cursor.is_over(layout.bounds()) {
-                    if let Some(index) = *self.hovered_option {
-                        if let Some(option) = self.options.get(index) {
-                            shell.publish((self.on_selected)(option.clone()));
-                            return event::Status::Captured;
-                        }
-                    }
+                if cursor.is_over(layout.bounds())
+                    && let Some(index) = *self.hovered_option
+                    && let Some(option) = self.options.get(index)
+                {
+                    shell.publish((self.on_selected)(option.clone()));
+                    shell.capture_event();
                 }
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
@@ -406,20 +429,21 @@ where
 
                     let option_height =
                         f32::from(self.text_line_height.to_absolute(text_size))
-                            + self.padding.vertical();
+                            + self.padding.y();
 
                     let new_hovered_option =
                         (cursor_position.y / option_height) as usize;
 
-                    if let Some(on_option_hovered) = self.on_option_hovered {
-                        if *self.hovered_option != Some(new_hovered_option) {
-                            if let Some(option) =
-                                self.options.get(new_hovered_option)
-                            {
-                                shell
-                                    .publish(on_option_hovered(option.clone()));
-                            }
+                    if *self.hovered_option != Some(new_hovered_option)
+                        && let Some(option) =
+                            self.options.get(new_hovered_option)
+                    {
+                        if let Some(on_option_hovered) = self.on_option_hovered
+                        {
+                            shell.publish(on_option_hovered(option.clone()));
                         }
+
+                        shell.request_redraw();
                     }
 
                     *self.hovered_option = Some(new_hovered_option);
@@ -435,28 +459,36 @@ where
 
                     let option_height =
                         f32::from(self.text_line_height.to_absolute(text_size))
-                            + self.padding.vertical();
+                            + self.padding.y();
 
                     *self.hovered_option =
                         Some((cursor_position.y / option_height) as usize);
 
-                    if let Some(index) = *self.hovered_option {
-                        if let Some(option) = self.options.get(index) {
-                            shell.publish((self.on_selected)(option.clone()));
-                            return event::Status::Captured;
-                        }
+                    if let Some(index) = *self.hovered_option
+                        && let Some(option) = self.options.get(index)
+                    {
+                        shell.publish((self.on_selected)(option.clone()));
+                        shell.capture_event();
                     }
                 }
             }
             _ => {}
         }
 
-        event::Status::Ignored
+        let state = tree.state.downcast_mut::<ListState>();
+
+        if let Event::Window(window::Event::RedrawRequested(_now)) = event {
+            state.is_hovered = Some(cursor.is_over(layout.bounds()));
+        } else if state.is_hovered.is_some_and(|is_hovered| {
+            is_hovered != cursor.is_over(layout.bounds())
+        }) {
+            shell.request_redraw();
+        }
     }
 
     fn mouse_interaction(
         &self,
-        _state: &Tree,
+        _tree: &Tree,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         _viewport: &Rectangle,
@@ -473,7 +505,7 @@ where
 
     fn draw(
         &self,
-        _state: &Tree,
+        _tree: &Tree,
         renderer: &mut Renderer,
         theme: &Theme,
         _style: &renderer::Style,
@@ -488,7 +520,7 @@ where
             self.text_size.unwrap_or_else(|| renderer.default_size());
         let option_height =
             f32::from(self.text_line_height.to_absolute(text_size))
-                + self.padding.vertical();
+                + self.padding.y();
 
         let offset = viewport.y - bounds.y;
         let start = (offset / option_height) as usize;
@@ -529,8 +561,8 @@ where
                     size: text_size,
                     line_height: self.text_line_height,
                     font: self.font.unwrap_or_else(|| renderer.default_font()),
-                    horizontal_alignment: alignment::Horizontal::Left,
-                    vertical_alignment: alignment::Vertical::Center,
+                    align_x: text::Alignment::Default,
+                    align_y: alignment::Vertical::Center,
                     shaping: self.text_shaping,
                     wrapping: text::Wrapping::default(),
                 },
@@ -562,7 +594,7 @@ where
 }
 
 /// The appearance of a [`Menu`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Style {
     /// The [`Background`] of the menu.
     pub background: Background,
@@ -574,6 +606,8 @@ pub struct Style {
     pub selected_text_color: Color,
     /// The background [`Color`] of a selected option in the menu.
     pub selected_background: Background,
+    /// The [`Shadow`] of the menu.
+    pub shadow: Shadow,
 }
 
 /// The theme catalog of a [`Menu`].
@@ -622,5 +656,6 @@ pub fn default(theme: &Theme) -> Style {
         text_color: palette.background.weak.text,
         selected_text_color: palette.primary.strong.text,
         selected_background: palette.primary.strong.color.into(),
+        shadow: Shadow::default(),
     }
 }

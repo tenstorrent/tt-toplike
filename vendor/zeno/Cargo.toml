@@ -10,10 +10,16 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2018"
+edition = "2021"
 name = "zeno"
-version = "0.2.3"
+version = "0.3.3"
 authors = ["Chad Brokaw <cbrokaw@gmail.com>"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "High performance, low level 2D path rasterization."
 homepage = "https://github.com/dfrg/zeno"
 readme = "README.md"
@@ -23,11 +29,37 @@ keywords = [
     "svg",
 ]
 categories = ["graphics"]
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0 OR MIT"
 repository = "https://github.com/dfrg/zeno"
 
-[dependencies]
-
 [features]
-default = ["eval"]
+default = [
+    "eval",
+    "std",
+]
 eval = []
+libm = ["dep:libm"]
+std = []
+
+[lib]
+name = "zeno"
+path = "src/lib.rs"
+
+[[bench]]
+name = "render"
+path = "benches/render.rs"
+harness = false
+
+[dependencies.libm]
+version = "0.2.7"
+optional = true
+default-features = false
+
+[dev-dependencies.criterion]
+version = "0.5.1"
+features = ["cargo_bench_support"]
+default-features = false
+
+[dev-dependencies.fastrand]
+version = "2.0.1"
+default-features = false

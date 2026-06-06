@@ -1,4 +1,4 @@
-use crate::geometry::path::{arc, Arc, Path};
+use crate::geometry::path::{Arc, Path, arc};
 
 use crate::core::border;
 use crate::core::{Point, Radians, Size};
@@ -10,7 +10,6 @@ use lyon_path::math;
 /// A [`Path`] builder.
 ///
 /// Once a [`Path`] is built, it can no longer be mutated.
-#[allow(missing_debug_implementations)]
 pub struct Builder {
     raw: builder::WithSvg<lyon_path::path::BuilderImpl>,
 }
@@ -116,7 +115,8 @@ impl Builder {
 
         let _ = self.raw.move_to(arc.sample(0.0));
 
-        arc.for_each_quadratic_bezier(&mut |curve| {
+        arc.cast::<f64>().for_each_quadratic_bezier(&mut |curve| {
+            let curve = curve.cast::<f32>();
             let _ = self.raw.quadratic_bezier_to(curve.ctrl, curve.to);
         });
     }
@@ -171,8 +171,12 @@ impl Builder {
         radius: border::Radius,
     ) {
         let min_size = (size.height / 2.0).min(size.width / 2.0);
-        let [top_left_corner, top_right_corner, bottom_right_corner, bottom_left_corner] =
-            radius.into();
+        let [
+            top_left_corner,
+            top_right_corner,
+            bottom_right_corner,
+            bottom_left_corner,
+        ] = radius.into();
 
         self.move_to(Point::new(
             top_left.x + min_size.min(top_left_corner),

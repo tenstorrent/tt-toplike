@@ -10,10 +10,16 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2018"
+edition = "2021"
 name = "yazi"
-version = "0.1.6"
+version = "0.2.1"
 authors = ["Chad Brokaw <cbrokaw@gmail.com>"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "DEFLATE/zlib compression and decompression."
 homepage = "https://github.com/dfrg/yazi"
 readme = "README.md"
@@ -24,7 +30,16 @@ keywords = [
     "decompression",
 ]
 categories = ["compression"]
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0 OR MIT"
 repository = "https://github.com/dfrg/yazi"
 
-[dependencies]
+[lib]
+name = "yazi"
+path = "src/lib.rs"
+
+[features]
+default = ["std"]
+std = []
+
+[target.'cfg(target_family = "wasm")'.dev-dependencies.wasm-bindgen-test]
+version = "0.3.37"

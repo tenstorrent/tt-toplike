@@ -27,7 +27,7 @@ pub struct SvgCommands<'a> {
     arc: Arc,
 }
 
-impl<'a> Iterator for SvgCommands<'a> {
+impl Iterator for SvgCommands<'_> {
     type Item = Command;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -611,6 +611,7 @@ impl<'a> SvgCommands<'a> {
         }
     }
 
+    #[allow(clippy::match_like_matches_macro)]
     fn skip_whitespace(&mut self) {
         while self.accept_by(|b| match b {
             0x9 | 0x20 | 0xA | 0xC | 0xD => true,

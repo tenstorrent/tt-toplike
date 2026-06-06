@@ -1,15 +1,14 @@
 //! Draw meshes of triangles.
 mod msaa;
 
-use crate::core::{Rectangle, Size, Transformation};
-use crate::graphics::mesh::{self, Mesh};
-use crate::graphics::Antialiasing;
 use crate::Buffer;
+use crate::core::{Point, Rectangle, Size, Transformation, Vector};
+use crate::graphics::Antialiasing;
+use crate::graphics::mesh::{self, Mesh};
 
 use rustc_hash::FxHashMap;
 use std::collections::hash_map;
-use std::rc::{self, Rc};
-use std::sync::atomic::{self, AtomicU64};
+use std::sync::Weak;
 
 const INITIAL_INDEX_COUNT: usize = 1_000;
 const INITIAL_VERTEX_COUNT: usize = 1_000;
@@ -24,39 +23,8 @@ pub enum Item {
     },
     Cached {
         transformation: Transformation,
-        cache: Cache,
+        cache: mesh::Cache,
     },
-}
-
-#[derive(Debug, Clone)]
-pub struct Cache {
-    id: Id,
-    batch: Rc<[Mesh]>,
-    version: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Id(u64);
-
-impl Cache {
-    pub fn new(meshes: Vec<Mesh>) -> Option<Self> {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-
-        if meshes.is_empty() {
-            return None;
-        }
-
-        Some(Self {
-            id: Id(NEXT_ID.fetch_add(1, atomic::Ordering::Relaxed)),
-            batch: Rc::from(meshes),
-            version: 0,
-        })
-    }
-
-    pub fn update(&mut self, meshes: Vec<Mesh>) {
-        self.batch = Rc::from(meshes);
-        self.version += 1;
-    }
 }
 
 #[derive(Debug)]
@@ -64,12 +32,12 @@ struct Upload {
     layer: Layer,
     transformation: Transformation,
     version: usize,
-    batch: rc::Weak<[Mesh]>,
+    batch: Weak<[Mesh]>,
 }
 
 #[derive(Debug, Default)]
 pub struct Storage {
-    uploads: FxHashMap<Id, Upload>,
+    uploads: FxHashMap<mesh::Id, Upload>,
 }
 
 impl Storage {
@@ -77,12 +45,12 @@ impl Storage {
         Self::default()
     }
 
-    fn get(&self, cache: &Cache) -> Option<&Upload> {
-        if cache.batch.is_empty() {
+    fn get(&self, cache: &mesh::Cache) -> Option<&Upload> {
+        if cache.is_empty() {
             return None;
         }
 
-        self.uploads.get(&cache.id)
+        self.uploads.get(&cache.id())
     }
 
     fn prepare(
@@ -92,15 +60,15 @@ impl Storage {
         belt: &mut wgpu::util::StagingBelt,
         solid: &solid::Pipeline,
         gradient: &gradient::Pipeline,
-        cache: &Cache,
+        cache: &mesh::Cache,
         new_transformation: Transformation,
     ) {
-        match self.uploads.entry(cache.id) {
+        match self.uploads.entry(cache.id()) {
             hash_map::Entry::Occupied(entry) => {
                 let upload = entry.into_mut();
 
-                if !cache.batch.is_empty()
-                    && (upload.version != cache.version
+                if !cache.is_empty()
+                    && (upload.version != cache.version()
                         || upload.transformation != new_transformation)
                 {
                     upload.layer.prepare(
@@ -109,12 +77,12 @@ impl Storage {
                         belt,
                         solid,
                         gradient,
-                        &cache.batch,
+                        cache.batch(),
                         new_transformation,
                     );
 
-                    upload.batch = Rc::downgrade(&cache.batch);
-                    upload.version = cache.version;
+                    upload.batch = cache.downgrade();
+                    upload.version = cache.version();
                     upload.transformation = new_transformation;
                 }
             }
@@ -127,7 +95,7 @@ impl Storage {
                     belt,
                     solid,
                     gradient,
-                    &cache.batch,
+                    cache.batch(),
                     new_transformation,
                 );
 
@@ -135,12 +103,12 @@ impl Storage {
                     layer,
                     transformation: new_transformation,
                     version: 0,
-                    batch: Rc::downgrade(&cache.batch),
+                    batch: cache.downgrade(),
                 });
 
                 log::debug!(
-                    "New mesh upload: {} (total: {})",
-                    cache.id.0,
+                    "New mesh upload: {:?} (total: {})",
+                    cache.id(),
                     self.uploads.len()
                 );
             }
@@ -153,42 +121,47 @@ impl Storage {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Pipeline {
-    blit: Option<msaa::Blit>,
+    msaa: Option<msaa::Pipeline>,
     solid: solid::Pipeline,
     gradient: gradient::Pipeline,
-    layers: Vec<Layer>,
-    prepare_layer: usize,
 }
 
-impl Pipeline {
-    pub fn new(
-        device: &wgpu::Device,
-        format: wgpu::TextureFormat,
-        antialiasing: Option<Antialiasing>,
-    ) -> Pipeline {
-        Pipeline {
-            blit: antialiasing.map(|a| msaa::Blit::new(device, format, a)),
-            solid: solid::Pipeline::new(device, format, antialiasing),
-            gradient: gradient::Pipeline::new(device, format, antialiasing),
+pub struct State {
+    msaa: Option<msaa::State>,
+    layers: Vec<Layer>,
+    prepare_layer: usize,
+    storage: Storage,
+}
+
+impl State {
+    pub fn new(device: &wgpu::Device, pipeline: &Pipeline) -> Self {
+        Self {
+            msaa: pipeline
+                .msaa
+                .as_ref()
+                .map(|pipeline| msaa::State::new(device, pipeline)),
             layers: Vec::new(),
             prepare_layer: 0,
+            storage: Storage::new(),
         }
     }
 
     pub fn prepare(
         &mut self,
+        pipeline: &Pipeline,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
         belt: &mut wgpu::util::StagingBelt,
-        storage: &mut Storage,
+        encoder: &mut wgpu::CommandEncoder,
         items: &[Item],
         scale: Transformation,
         target_size: Size<u32>,
     ) {
-        let projection = if let Some(blit) = &mut self.blit {
-            blit.prepare(device, encoder, belt, target_size) * scale
+        let projection = if let Some((state, pipeline)) =
+            self.msaa.as_mut().zip(pipeline.msaa.as_ref())
+        {
+            state.prepare(device, encoder, belt, pipeline, target_size) * scale
         } else {
             Transformation::orthographic(target_size.width, target_size.height)
                 * scale
@@ -203,8 +176,8 @@ impl Pipeline {
                     if self.layers.len() <= self.prepare_layer {
                         self.layers.push(Layer::new(
                             device,
-                            &self.solid,
-                            &self.gradient,
+                            &pipeline.solid,
+                            &pipeline.gradient,
                         ));
                     }
 
@@ -213,8 +186,8 @@ impl Pipeline {
                         device,
                         encoder,
                         belt,
-                        &self.solid,
-                        &self.gradient,
+                        &pipeline.solid,
+                        &pipeline.gradient,
                         meshes,
                         projection * *transformation,
                     );
@@ -225,12 +198,12 @@ impl Pipeline {
                     transformation,
                     cache,
                 } => {
-                    storage.prepare(
+                    self.storage.prepare(
                         device,
                         encoder,
                         belt,
-                        &self.solid,
-                        &self.gradient,
+                        &pipeline.solid,
+                        &pipeline.gradient,
                         cache,
                         projection * *transformation,
                     );
@@ -241,9 +214,9 @@ impl Pipeline {
 
     pub fn render(
         &mut self,
+        pipeline: &Pipeline,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
-        storage: &Storage,
         start: usize,
         batch: &Batch,
         bounds: Rectangle,
@@ -269,11 +242,11 @@ impl Pipeline {
                 transformation,
                 cache,
             } => {
-                let upload = storage.get(cache)?;
+                let upload = self.storage.get(cache)?;
 
                 Some((
                     &upload.layer,
-                    &cache.batch,
+                    cache.batch(),
                     screen_transformation * *transformation,
                 ))
             }
@@ -282,9 +255,9 @@ impl Pipeline {
         render(
             encoder,
             target,
-            self.blit.as_mut(),
-            &self.solid,
-            &self.gradient,
+            self.msaa.as_ref().zip(pipeline.msaa.as_ref()),
+            &pipeline.solid,
+            &pipeline.gradient,
             bounds,
             items,
         );
@@ -292,48 +265,56 @@ impl Pipeline {
         layer_count
     }
 
-    pub fn end_frame(&mut self) {
+    pub fn trim(&mut self) {
+        self.storage.trim();
+
         self.prepare_layer = 0;
+    }
+}
+
+impl Pipeline {
+    pub fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        antialiasing: Option<Antialiasing>,
+    ) -> Pipeline {
+        Pipeline {
+            msaa: antialiasing.map(|a| msaa::Pipeline::new(device, format, a)),
+            solid: solid::Pipeline::new(device, format, antialiasing),
+            gradient: gradient::Pipeline::new(device, format, antialiasing),
+        }
     }
 }
 
 fn render<'a>(
     encoder: &mut wgpu::CommandEncoder,
     target: &wgpu::TextureView,
-    mut blit: Option<&mut msaa::Blit>,
+    mut msaa: Option<(&msaa::State, &msaa::Pipeline)>,
     solid: &solid::Pipeline,
     gradient: &gradient::Pipeline,
     bounds: Rectangle,
     group: impl Iterator<Item = (&'a Layer, &'a [Mesh], Transformation)>,
 ) {
     {
-        let (attachment, resolve_target, load) = if let Some(blit) = &mut blit {
-            let (attachment, resolve_target) = blit.targets();
-
-            (
-                attachment,
-                Some(resolve_target),
-                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-            )
+        let mut render_pass = if let Some((_state, pipeline)) = &mut msaa {
+            pipeline.render_pass(encoder)
         } else {
-            (target, None, wgpu::LoadOp::Load)
-        };
-
-        let mut render_pass =
             encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("iced_wgpu.triangle.render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: attachment,
-                    resolve_target,
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
                     ops: wgpu::Operations {
-                        load,
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
-            });
+            })
+        };
 
         for (layer, meshes, transformation) in group {
             layer.render(
@@ -347,15 +328,14 @@ fn render<'a>(
         }
     }
 
-    if let Some(blit) = blit {
-        blit.draw(encoder, target);
+    if let Some((state, pipeline)) = msaa {
+        state.render(pipeline, encoder, target);
     }
 }
 
 #[derive(Debug)]
 pub struct Layer {
     index_buffer: Buffer<u32>,
-    index_strides: Vec<u32>,
     solid: solid::Layer,
     gradient: gradient::Layer,
 }
@@ -373,7 +353,6 @@ impl Layer {
                 INITIAL_INDEX_COUNT,
                 wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             ),
-            index_strides: Vec::new(),
             solid: solid::Layer::new(device, &solid.constants_layout),
             gradient: gradient::Layer::new(device, &gradient.constants_layout),
         }
@@ -419,13 +398,6 @@ impl Layer {
             );
         }
 
-        self.index_strides.clear();
-        self.index_buffer.clear();
-        self.solid.vertices.clear();
-        self.solid.uniforms.clear();
-        self.gradient.vertices.clear();
-        self.gradient.uniforms.clear();
-
         let mut solid_vertex_offset = 0;
         let mut solid_uniform_offset = 0;
         let mut gradient_vertex_offset = 0;
@@ -433,10 +405,25 @@ impl Layer {
         let mut index_offset = 0;
 
         for mesh in meshes {
-            let indices = mesh.indices();
+            let clip_bounds = mesh.clip_bounds() * transformation;
+            let snap_distance = clip_bounds
+                .snap()
+                .map(|snapped_bounds| {
+                    Point::new(snapped_bounds.x as f32, snapped_bounds.y as f32)
+                        - clip_bounds.position()
+                })
+                .unwrap_or(Vector::ZERO);
 
-            let uniforms =
-                Uniforms::new(transformation * mesh.transformation());
+            let uniforms = Uniforms::new(
+                transformation
+                    * mesh.transformation()
+                    * Transformation::translate(
+                        snap_distance.x,
+                        snap_distance.y,
+                    ),
+            );
+
+            let indices = mesh.indices();
 
             index_offset += self.index_buffer.write(
                 device,
@@ -445,8 +432,6 @@ impl Layer {
                 index_offset,
                 indices,
             );
-
-            self.index_strides.push(indices.len() as u32);
 
             match mesh {
                 Mesh::Solid { buffers, .. } => {
@@ -498,18 +483,23 @@ impl Layer {
     ) {
         let mut num_solids = 0;
         let mut num_gradients = 0;
+        let mut solid_offset = 0;
+        let mut gradient_offset = 0;
+        let mut index_offset = 0;
         let mut last_is_solid = None;
 
-        for (index, mesh) in meshes.iter().enumerate() {
+        for mesh in meshes {
             let Some(clip_bounds) = bounds
                 .intersection(&(mesh.clip_bounds() * transformation))
                 .and_then(Rectangle::snap)
             else {
                 match mesh {
-                    Mesh::Solid { .. } => {
+                    Mesh::Solid { buffers, .. } => {
+                        solid_offset += buffers.vertices.len();
                         num_solids += 1;
                     }
-                    Mesh::Gradient { .. } => {
+                    Mesh::Gradient { buffers, .. } => {
+                        gradient_offset += buffers.vertices.len();
                         num_gradients += 1;
                     }
                 }
@@ -524,7 +514,7 @@ impl Layer {
             );
 
             match mesh {
-                Mesh::Solid { .. } => {
+                Mesh::Solid { buffers, .. } => {
                     if !last_is_solid.unwrap_or(false) {
                         render_pass.set_pipeline(&solid.pipeline);
 
@@ -540,12 +530,16 @@ impl Layer {
 
                     render_pass.set_vertex_buffer(
                         0,
-                        self.solid.vertices.slice_from_index(num_solids),
+                        self.solid.vertices.range(
+                            solid_offset,
+                            solid_offset + buffers.vertices.len(),
+                        ),
                     );
 
                     num_solids += 1;
+                    solid_offset += buffers.vertices.len();
                 }
-                Mesh::Gradient { .. } => {
+                Mesh::Gradient { buffers, .. } => {
                     if last_is_solid.unwrap_or(true) {
                         render_pass.set_pipeline(&gradient.pipeline);
 
@@ -561,19 +555,26 @@ impl Layer {
 
                     render_pass.set_vertex_buffer(
                         0,
-                        self.gradient.vertices.slice_from_index(num_gradients),
+                        self.gradient.vertices.range(
+                            gradient_offset,
+                            gradient_offset + buffers.vertices.len(),
+                        ),
                     );
 
                     num_gradients += 1;
+                    gradient_offset += buffers.vertices.len();
                 }
             };
 
             render_pass.set_index_buffer(
-                self.index_buffer.slice_from_index(index),
+                self.index_buffer
+                    .range(index_offset, index_offset + mesh.indices().len()),
                 wgpu::IndexFormat::Uint32,
             );
 
-            render_pass.draw_indexed(0..self.index_strides[index], 0, 0..1);
+            render_pass.draw_indexed(0..mesh.indices().len() as u32, 0, 0..1);
+
+            index_offset += mesh.indices().len();
         }
     }
 }
@@ -583,7 +584,7 @@ fn fragment_target(
 ) -> wgpu::ColorTargetState {
     wgpu::ColorTargetState {
         format: texture_format,
-        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
         write_mask: wgpu::ColorWrites::ALL,
     }
 }
@@ -644,12 +645,12 @@ impl Uniforms {
 }
 
 mod solid {
-    use crate::graphics::mesh;
-    use crate::graphics::Antialiasing;
-    use crate::triangle;
     use crate::Buffer;
+    use crate::graphics::Antialiasing;
+    use crate::graphics::mesh;
+    use crate::triangle;
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct Pipeline {
         pub pipeline: wgpu::RenderPipeline,
         pub constants_layout: wgpu::BindGroupLayout,
@@ -742,6 +743,8 @@ mod solid {
                             include_str!("shader/triangle.wgsl"),
                             "\n",
                             include_str!("shader/triangle/solid.wgsl"),
+                            "\n",
+                            include_str!("shader/color.wgsl"),
                         )),
                     ),
                 });
@@ -753,7 +756,7 @@ mod solid {
                         layout: Some(&layout),
                         vertex: wgpu::VertexState {
                             module: &shader,
-                            entry_point: "solid_vs_main",
+                            entry_point: Some("solid_vs_main"),
                             buffers: &[wgpu::VertexBufferLayout {
                                 array_stride: std::mem::size_of::<
                                     mesh::SolidVertex2D,
@@ -768,16 +771,21 @@ mod solid {
                                     1 => Float32x4,
                                 ),
                             }],
+                            compilation_options:
+                                wgpu::PipelineCompilationOptions::default(),
                         },
                         fragment: Some(wgpu::FragmentState {
                             module: &shader,
-                            entry_point: "solid_fs_main",
+                            entry_point: Some("solid_fs_main"),
                             targets: &[Some(triangle::fragment_target(format))],
+                            compilation_options:
+                                wgpu::PipelineCompilationOptions::default(),
                         }),
                         primitive: triangle::primitive_state(),
                         depth_stencil: None,
                         multisample: triangle::multisample_state(antialiasing),
                         multiview: None,
+                        cache: None,
                     },
                 );
 
@@ -790,13 +798,12 @@ mod solid {
 }
 
 mod gradient {
-    use crate::graphics::color;
-    use crate::graphics::mesh;
-    use crate::graphics::Antialiasing;
-    use crate::triangle;
     use crate::Buffer;
+    use crate::graphics::Antialiasing;
+    use crate::graphics::mesh;
+    use crate::triangle;
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct Pipeline {
         pub pipeline: wgpu::RenderPipeline,
         pub constants_layout: wgpu::BindGroupLayout,
@@ -887,31 +894,15 @@ mod gradient {
                 device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("iced_wgpu.triangle.gradient.shader"),
                     source: wgpu::ShaderSource::Wgsl(
-                        std::borrow::Cow::Borrowed(
-                            if color::GAMMA_CORRECTION {
-                                concat!(
-                                    include_str!("shader/triangle.wgsl"),
-                                    "\n",
-                                    include_str!(
-                                        "shader/triangle/gradient.wgsl"
-                                    ),
-                                    "\n",
-                                    include_str!("shader/color/oklab.wgsl")
-                                )
-                            } else {
-                                concat!(
-                                    include_str!("shader/triangle.wgsl"),
-                                    "\n",
-                                    include_str!(
-                                        "shader/triangle/gradient.wgsl"
-                                    ),
-                                    "\n",
-                                    include_str!(
-                                        "shader/color/linear_rgb.wgsl"
-                                    )
-                                )
-                            },
-                        ),
+                        std::borrow::Cow::Borrowed(concat!(
+                            include_str!("shader/triangle.wgsl"),
+                            "\n",
+                            include_str!("shader/triangle/gradient.wgsl"),
+                            "\n",
+                            include_str!("shader/color.wgsl"),
+                            "\n",
+                            include_str!("shader/color/linear_rgb.wgsl")
+                        )),
                     ),
                 });
 
@@ -921,7 +912,7 @@ mod gradient {
                     layout: Some(&layout),
                     vertex: wgpu::VertexState {
                         module: &shader,
-                        entry_point: "gradient_vs_main",
+                        entry_point: Some("gradient_vs_main"),
                         buffers: &[wgpu::VertexBufferLayout {
                             array_stride: std::mem::size_of::<
                                 mesh::GradientVertex2D,
@@ -945,16 +936,21 @@ mod gradient {
                                 6 => Float32x4
                             ),
                         }],
+                        compilation_options:
+                            wgpu::PipelineCompilationOptions::default(),
                     },
                     fragment: Some(wgpu::FragmentState {
                         module: &shader,
-                        entry_point: "gradient_fs_main",
+                        entry_point: Some("gradient_fs_main"),
                         targets: &[Some(triangle::fragment_target(format))],
+                        compilation_options:
+                            wgpu::PipelineCompilationOptions::default(),
                     }),
                     primitive: triangle::primitive_state(),
                     depth_stencil: None,
                     multisample: triangle::multisample_state(antialiasing),
                     multiview: None,
+                    cache: None,
                 },
             );
 

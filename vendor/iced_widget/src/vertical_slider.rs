@@ -31,11 +31,10 @@
 use std::ops::RangeInclusive;
 
 pub use crate::slider::{
-    default, Catalog, Handle, HandleShape, Status, Style, StyleFn,
+    Catalog, Handle, HandleShape, Status, Style, StyleFn, default,
 };
 
 use crate::core::border::Border;
-use crate::core::event::{self, Event};
 use crate::core::keyboard;
 use crate::core::keyboard::key::{self, Key};
 use crate::core::layout::{self, Layout};
@@ -43,9 +42,10 @@ use crate::core::mouse;
 use crate::core::renderer;
 use crate::core::touch;
 use crate::core::widget::tree::{self, Tree};
+use crate::core::window;
 use crate::core::{
-    self, Clipboard, Element, Length, Pixels, Point, Rectangle, Shell, Size,
-    Widget,
+    self, Clipboard, Element, Event, Length, Pixels, Point, Rectangle, Shell,
+    Size, Widget,
 };
 
 /// An vertical bar and a handle that selects a single value from a range of
@@ -84,7 +84,6 @@ use crate::core::{
 ///     }
 /// }
 /// ```
-#[allow(missing_debug_implementations)]
 pub struct VerticalSlider<'a, T, Message, Theme = crate::Theme>
 where
     Theme: Catalog,
@@ -99,6 +98,7 @@ where
     width: f32,
     height: Length,
     class: Theme::Class<'a>,
+    status: Option<Status>,
 }
 
 impl<'a, T, Message, Theme> VerticalSlider<'a, T, Message, Theme>
@@ -145,6 +145,7 @@ where
             width: Self::DEFAULT_WIDTH,
             height: Length::Fill,
             class: Theme::default(),
+            status: None,
         }
     }
 
@@ -212,8 +213,8 @@ where
     }
 }
 
-impl<'a, T, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for VerticalSlider<'a, T, Message, Theme>
+impl<T, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for VerticalSlider<'_, T, Message, Theme>
 where
     T: Copy + Into<f64> + num_traits::FromPrimitive,
     Message: Clone,
@@ -236,7 +237,7 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         _tree: &mut Tree,
         _renderer: &Renderer,
         limits: &layout::Limits,
@@ -244,17 +245,17 @@ where
         layout::atomic(limits, self.width, self.height)
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         _renderer: &Renderer,
         _clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         _viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
         let state = tree.state.downcast_mut::<State>();
         let is_dragging = state.is_dragging;
         let current_value = self.value;
@@ -262,7 +263,7 @@ where
         let locate = |cursor_position: Point| -> Option<T> {
             let bounds = layout.bounds();
 
-            let new_value = if cursor_position.y >= bounds.y + bounds.height {
+            if cursor_position.y >= bounds.y + bounds.height {
                 Some(*self.range.start())
             } else if cursor_position.y <= bounds.y {
                 Some(*self.range.end())
@@ -285,9 +286,7 @@ where
                 let value = steps * step + start;
 
                 T::from_f64(value.min(end))
-            };
-
-            new_value
+            }
         };
 
         let increment = |value: T| -> Option<T> {
@@ -350,7 +349,7 @@ where
                         state.is_dragging = true;
                     }
 
-                    return event::Status::Captured;
+                    shell.capture_event();
                 }
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
@@ -361,23 +360,22 @@ where
                         shell.publish(on_release);
                     }
                     state.is_dragging = false;
-
-                    return event::Status::Captured;
                 }
             }
             Event::Mouse(mouse::Event::CursorMoved { .. })
             | Event::Touch(touch::Event::FingerMoved { .. }) => {
                 if is_dragging {
-                    let _ = cursor.position().and_then(locate).map(change);
+                    let _ =
+                        cursor.land().position().and_then(locate).map(change);
 
-                    return event::Status::Captured;
+                    shell.capture_event();
                 }
             }
             Event::Mouse(mouse::Event::WheelScrolled { delta })
                 if state.keyboard_modifiers.control() =>
             {
                 if cursor.is_over(layout.bounds()) {
-                    let delta = match delta {
+                    let delta = match *delta {
                         mouse::ScrollDelta::Lines { x: _, y } => y,
                         mouse::ScrollDelta::Pixels { x: _, y } => y,
                     };
@@ -388,7 +386,7 @@ where
                         let _ = increment(current_value).map(change);
                     }
 
-                    return event::Status::Captured;
+                    shell.capture_event();
                 }
             }
             Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) => {
@@ -396,49 +394,51 @@ where
                     match key {
                         Key::Named(key::Named::ArrowUp) => {
                             let _ = increment(current_value).map(change);
+                            shell.capture_event();
                         }
                         Key::Named(key::Named::ArrowDown) => {
                             let _ = decrement(current_value).map(change);
+                            shell.capture_event();
                         }
                         _ => (),
                     }
-
-                    return event::Status::Captured;
                 }
             }
             Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
-                state.keyboard_modifiers = modifiers;
+                state.keyboard_modifiers = *modifiers;
             }
             _ => {}
         }
 
-        event::Status::Ignored
+        let current_status = if state.is_dragging {
+            Status::Dragged
+        } else if cursor.is_over(layout.bounds()) {
+            Status::Hovered
+        } else {
+            Status::Active
+        };
+
+        if let Event::Window(window::Event::RedrawRequested(_now)) = event {
+            self.status = Some(current_status);
+        } else if self.status.is_some_and(|status| status != current_status) {
+            shell.request_redraw();
+        }
     }
 
     fn draw(
         &self,
-        tree: &Tree,
+        _tree: &Tree,
         renderer: &mut Renderer,
         theme: &Theme,
         _style: &renderer::Style,
         layout: Layout<'_>,
-        cursor: mouse::Cursor,
+        _cursor: mouse::Cursor,
         _viewport: &Rectangle,
     ) {
-        let state = tree.state.downcast_ref::<State>();
         let bounds = layout.bounds();
-        let is_mouse_over = cursor.is_over(bounds);
 
-        let style = theme.style(
-            &self.class,
-            if state.is_dragging {
-                Status::Dragged
-            } else if is_mouse_over {
-                Status::Hovered
-            } else {
-                Status::Active
-            },
-        );
+        let style =
+            theme.style(&self.class, self.status.unwrap_or(Status::Active));
 
         let (handle_width, handle_height, handle_border_radius) =
             match style.handle.shape {
@@ -523,13 +523,21 @@ where
         _renderer: &Renderer,
     ) -> mouse::Interaction {
         let state = tree.state.downcast_ref::<State>();
-        let bounds = layout.bounds();
-        let is_mouse_over = cursor.is_over(bounds);
 
         if state.is_dragging {
-            mouse::Interaction::Grabbing
-        } else if is_mouse_over {
-            mouse::Interaction::Grab
+            // FIXME: Fall back to `Pointer` on Windows
+            // See https://github.com/rust-windowing/winit/issues/1043
+            if cfg!(target_os = "windows") {
+                mouse::Interaction::Pointer
+            } else {
+                mouse::Interaction::Grabbing
+            }
+        } else if cursor.is_over(layout.bounds()) {
+            if cfg!(target_os = "windows") {
+                mouse::Interaction::Pointer
+            } else {
+                mouse::Interaction::Grab
+            }
         } else {
             mouse::Interaction::default()
         }

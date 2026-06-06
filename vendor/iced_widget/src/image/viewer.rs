@@ -1,17 +1,16 @@
 //! Zoom and pan on an image.
-use crate::core::event::{self, Event};
+use crate::core::border;
 use crate::core::image::{self, FilterMethod};
 use crate::core::layout;
 use crate::core::mouse;
 use crate::core::renderer;
 use crate::core::widget::tree::{self, Tree};
 use crate::core::{
-    Clipboard, ContentFit, Element, Image, Layout, Length, Pixels, Point,
-    Radians, Rectangle, Shell, Size, Vector, Widget,
+    Clipboard, ContentFit, Element, Event, Image, Layout, Length, Pixels,
+    Point, Radians, Rectangle, Shell, Size, Vector, Widget,
 };
 
 /// A frame that displays an image with the ability to zoom in/out and pan.
-#[allow(missing_debug_implementations)]
 pub struct Viewer<Handle> {
     padding: f32,
     width: Length,
@@ -118,13 +117,15 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         _tree: &mut Tree,
         renderer: &Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
         // The raw w/h of the underlying image
-        let image_size = renderer.measure_image(&self.handle);
+        let image_size =
+            renderer.measure_image(&self.handle).unwrap_or_default();
+
         let image_size =
             Size::new(image_size.width as f32, image_size.height as f32);
 
@@ -149,26 +150,26 @@ where
         layout::Node::new(final_size)
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &Renderer,
         _clipboard: &mut dyn Clipboard,
-        _shell: &mut Shell<'_, Message>,
+        shell: &mut Shell<'_, Message>,
         _viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
         let bounds = layout.bounds();
 
         match event {
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 let Some(cursor_position) = cursor.position_over(bounds) else {
-                    return event::Status::Ignored;
+                    return;
                 };
 
-                match delta {
+                match *delta {
                     mouse::ScrollDelta::Lines { y, .. }
                     | mouse::ScrollDelta::Pixels { y, .. } => {
                         let state = tree.state.downcast_mut::<State>();
@@ -216,11 +217,12 @@ where
                     }
                 }
 
-                event::Status::Captured
+                shell.request_redraw();
+                shell.capture_event();
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let Some(cursor_position) = cursor.position_over(bounds) else {
-                    return event::Status::Ignored;
+                    return;
                 };
 
                 let state = tree.state.downcast_mut::<State>();
@@ -228,18 +230,12 @@ where
                 state.cursor_grabbed_at = Some(cursor_position);
                 state.starting_offset = state.current_offset;
 
-                event::Status::Captured
+                shell.capture_event();
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 let state = tree.state.downcast_mut::<State>();
 
-                if state.cursor_grabbed_at.is_some() {
-                    state.cursor_grabbed_at = None;
-
-                    event::Status::Captured
-                } else {
-                    event::Status::Ignored
-                }
+                state.cursor_grabbed_at = None;
             }
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
                 let state = tree.state.downcast_mut::<State>();
@@ -261,7 +257,7 @@ where
                         .max(0.0)
                         .round();
 
-                    let delta = position - origin;
+                    let delta = *position - origin;
 
                     let x = if bounds.width < scaled_size.width {
                         (state.starting_offset.x - delta.x)
@@ -278,13 +274,11 @@ where
                     };
 
                     state.current_offset = Vector::new(x, y);
-
-                    event::Status::Captured
-                } else {
-                    event::Status::Ignored
+                    shell.request_redraw();
+                    shell.capture_event();
                 }
             }
-            _ => event::Status::Ignored,
+            _ => {}
         }
     }
 
@@ -317,7 +311,7 @@ where
         _style: &renderer::Style,
         layout: Layout<'_>,
         _cursor: mouse::Cursor,
-        _viewport: &Rectangle,
+        viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_ref::<State>();
         let bounds = layout.bounds();
@@ -351,12 +345,14 @@ where
                 renderer.draw_image(
                     Image {
                         handle: self.handle.clone(),
+                        border_radius: border::Radius::default(),
                         filter_method: self.filter_method,
                         rotation: Radians(0.0),
                         opacity: 1.0,
                         snap: true,
                     },
                     drawing_bounds,
+                    *viewport - translation,
                 );
             });
         };
@@ -437,7 +433,9 @@ pub fn scaled_image_size<Renderer>(
 where
     Renderer: image::Renderer,
 {
-    let Size { width, height } = renderer.measure_image(handle);
+    let Size { width, height } =
+        renderer.measure_image(handle).unwrap_or_default();
+
     let image_size = Size::new(width as f32, height as f32);
 
     let adjusted_fit = content_fit.fit(image_size, bounds);

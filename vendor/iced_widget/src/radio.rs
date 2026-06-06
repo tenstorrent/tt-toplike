@@ -58,7 +58,6 @@
 //! ```
 use crate::core::alignment;
 use crate::core::border::{self, Border};
-use crate::core::event::{self, Event};
 use crate::core::layout;
 use crate::core::mouse;
 use crate::core::renderer;
@@ -66,9 +65,10 @@ use crate::core::text;
 use crate::core::touch;
 use crate::core::widget;
 use crate::core::widget::tree::{self, Tree};
+use crate::core::window;
 use crate::core::{
-    Background, Clipboard, Color, Element, Layout, Length, Pixels, Rectangle,
-    Shell, Size, Theme, Widget,
+    Background, Clipboard, Color, Element, Event, Layout, Length, Pixels,
+    Rectangle, Shell, Size, Theme, Widget,
 };
 
 /// A circular button representing a choice.
@@ -129,7 +129,6 @@ use crate::core::{
 ///     column![a, b, c, all].into()
 /// }
 /// ```
-#[allow(missing_debug_implementations)]
 pub struct Radio<'a, Message, Theme = crate::Theme, Renderer = crate::Renderer>
 where
     Theme: Catalog,
@@ -147,6 +146,7 @@ where
     text_wrapping: text::Wrapping,
     font: Option<Renderer::Font>,
     class: Theme::Class<'a>,
+    last_status: Option<Status>,
 }
 
 impl<'a, Message, Theme, Renderer> Radio<'a, Message, Theme, Renderer>
@@ -192,6 +192,7 @@ where
             text_wrapping: text::Wrapping::default(),
             font: None,
             class: Theme::default(),
+            last_status: None,
         }
     }
 
@@ -265,8 +266,8 @@ where
     }
 }
 
-impl<'a, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for Radio<'a, Message, Theme, Renderer>
+impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for Radio<'_, Message, Theme, Renderer>
 where
     Message: Clone,
     Theme: Catalog,
@@ -288,7 +289,7 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         tree: &mut Tree,
         renderer: &Renderer,
         limits: &layout::Limits,
@@ -306,50 +307,69 @@ where
                     state,
                     renderer,
                     limits,
-                    self.width,
-                    Length::Shrink,
                     &self.label,
-                    self.text_line_height,
-                    self.text_size,
-                    self.font,
-                    alignment::Horizontal::Left,
-                    alignment::Vertical::Top,
-                    self.text_shaping,
-                    self.text_wrapping,
+                    widget::text::Format {
+                        width: self.width,
+                        height: Length::Shrink,
+                        line_height: self.text_line_height,
+                        size: self.text_size,
+                        font: self.font,
+                        align_x: text::Alignment::Default,
+                        align_y: alignment::Vertical::Top,
+                        shaping: self.text_shaping,
+                        wrapping: self.text_wrapping,
+                    },
                 )
             },
         )
     }
 
-    fn on_event(
+    fn update(
         &mut self,
-        _state: &mut Tree,
-        event: Event,
+        _tree: &mut Tree,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         _renderer: &Renderer,
         _clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         _viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
             | Event::Touch(touch::Event::FingerPressed { .. }) => {
                 if cursor.is_over(layout.bounds()) {
                     shell.publish(self.on_click.clone());
-
-                    return event::Status::Captured;
+                    shell.capture_event();
                 }
             }
             _ => {}
         }
 
-        event::Status::Ignored
+        let current_status = {
+            let is_mouse_over = cursor.is_over(layout.bounds());
+            let is_selected = self.is_selected;
+
+            if is_mouse_over {
+                Status::Hovered { is_selected }
+            } else {
+                Status::Active { is_selected }
+            }
+        };
+
+        if let Event::Window(window::Event::RedrawRequested(_now)) = event {
+            self.last_status = Some(current_status);
+        } else if self
+            .last_status
+            .is_some_and(|last_status| last_status != current_status)
+        {
+            shell.request_redraw();
+        }
     }
 
     fn mouse_interaction(
         &self,
-        _state: &Tree,
+        _tree: &Tree,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         _viewport: &Rectangle,
@@ -369,21 +389,17 @@ where
         theme: &Theme,
         defaults: &renderer::Style,
         layout: Layout<'_>,
-        cursor: mouse::Cursor,
+        _cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        let is_mouse_over = cursor.is_over(layout.bounds());
-        let is_selected = self.is_selected;
-
         let mut children = layout.children();
 
-        let status = if is_mouse_over {
-            Status::Hovered { is_selected }
-        } else {
-            Status::Active { is_selected }
-        };
-
-        let style = theme.style(&self.class, status);
+        let style = theme.style(
+            &self.class,
+            self.last_status.unwrap_or(Status::Active {
+                is_selected: self.is_selected,
+            }),
+        );
 
         {
             let layout = children.next().unwrap();
@@ -430,8 +446,8 @@ where
             crate::text::draw(
                 renderer,
                 defaults,
-                label_layout,
-                state.0.raw(),
+                label_layout.bounds(),
+                state.raw(),
                 crate::text::Style {
                     color: style.text_color,
                 },
@@ -471,7 +487,7 @@ pub enum Status {
 }
 
 /// The appearance of a radio button.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Style {
     /// The [`Background`] of the radio button.
     pub background: Background,

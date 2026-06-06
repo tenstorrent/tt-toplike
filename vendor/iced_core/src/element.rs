@@ -1,4 +1,3 @@
-use crate::event::{self, Event};
 use crate::layout;
 use crate::mouse;
 use crate::overlay;
@@ -6,8 +5,8 @@ use crate::renderer;
 use crate::widget;
 use crate::widget::tree::{self, Tree};
 use crate::{
-    Border, Clipboard, Color, Layout, Length, Rectangle, Shell, Size, Vector,
-    Widget,
+    Border, Clipboard, Color, Event, Layout, Length, Rectangle, Shell, Size,
+    Vector, Widget,
 };
 
 use std::borrow::Borrow;
@@ -21,7 +20,6 @@ use std::borrow::Borrow;
 /// to turn it into an [`Element`].
 ///
 /// [built-in widget]: crate::widget
-#[allow(missing_debug_implementations)]
 pub struct Element<'a, Message, Theme, Renderer> {
     widget: Box<dyn Widget<Message, Theme, Renderer> + 'a>,
 }
@@ -94,6 +92,7 @@ impl<'a, Message, Theme, Renderer> Element<'a, Message, Theme, Renderer> {
     ///
     /// ```no_run
     /// # mod iced {
+    /// #     pub use iced_core::Function;
     /// #     pub type Element<'a, Message> = iced_core::Element<'a, Message, iced_core::Theme, ()>;
     /// #
     /// #     pub mod widget {
@@ -120,7 +119,7 @@ impl<'a, Message, Theme, Renderer> Element<'a, Message, Theme, Renderer> {
     /// use counter::Counter;
     ///
     /// use iced::widget::row;
-    /// use iced::Element;
+    /// use iced::{Element, Function};
     ///
     /// struct ManyCounters {
     ///     counters: Vec<Counter>,
@@ -143,7 +142,7 @@ impl<'a, Message, Theme, Renderer> Element<'a, Message, Theme, Renderer> {
     ///                     // Here we turn our `Element<counter::Message>` into
     ///                     // an `Element<Message>` by combining the `index` and the
     ///                     // message of the `element`.
-    ///                     counter.map(move |message| Message::Counter(index, message))
+    ///                     counter.map(Message::Counter.with(index))
     ///                 }),
     ///         )
     ///         .into()
@@ -291,7 +290,7 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         tree: &mut Tree,
         renderer: &Renderer,
         limits: &layout::Limits,
@@ -300,7 +299,7 @@ where
     }
 
     fn operate(
-        &self,
+        &mut self,
         tree: &mut Tree,
         layout: Layout<'_>,
         renderer: &Renderer,
@@ -309,21 +308,21 @@ where
         self.widget.operate(tree, layout, renderer, operation);
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, B>,
         viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
         let mut local_messages = Vec::new();
         let mut local_shell = Shell::new(&mut local_messages);
 
-        let status = self.widget.on_event(
+        self.widget.update(
             tree,
             event,
             layout,
@@ -335,8 +334,6 @@ where
         );
 
         shell.merge(local_shell, &self.mapper);
-
-        status
     }
 
     fn draw(
@@ -368,14 +365,15 @@ where
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'_>,
+        layout: Layout<'b>,
         renderer: &Renderer,
+        viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, B, Theme, Renderer>> {
         let mapper = &self.mapper;
 
         self.widget
-            .overlay(tree, layout, renderer, translation)
+            .overlay(tree, layout, renderer, viewport, translation)
             .map(move |overlay| overlay.map(mapper))
     }
 }
@@ -397,8 +395,8 @@ where
     }
 }
 
-impl<'a, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for Explain<'a, Message, Theme, Renderer>
+impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for Explain<'_, Message, Theme, Renderer>
 where
     Renderer: crate::Renderer,
 {
@@ -427,7 +425,7 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         tree: &mut Tree,
         renderer: &Renderer,
         limits: &layout::Limits,
@@ -436,36 +434,36 @@ where
     }
 
     fn operate(
-        &self,
-        state: &mut Tree,
+        &mut self,
+        tree: &mut Tree,
         layout: Layout<'_>,
         renderer: &Renderer,
         operation: &mut dyn widget::Operation,
     ) {
         self.element
             .widget
-            .operate(state, layout, renderer, operation);
+            .operate(tree, layout, renderer, operation);
     }
 
-    fn on_event(
+    fn update(
         &mut self,
-        state: &mut Tree,
-        event: Event,
+        tree: &mut Tree,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
-    ) -> event::Status {
-        self.element.widget.on_event(
-            state, event, layout, cursor, renderer, clipboard, shell, viewport,
-        )
+    ) {
+        self.element.widget.update(
+            tree, event, layout, cursor, renderer, clipboard, shell, viewport,
+        );
     }
 
     fn draw(
         &self,
-        state: &Tree,
+        tree: &Tree,
         renderer: &mut Renderer,
         theme: &Theme,
         style: &renderer::Style,
@@ -498,14 +496,16 @@ where
 
         self.element
             .widget
-            .draw(state, renderer, theme, style, layout, cursor, viewport);
+            .draw(tree, renderer, theme, style, layout, cursor, viewport);
 
-        explain_layout(renderer, self.color, layout);
+        renderer.with_layer(Rectangle::INFINITE, |renderer| {
+            explain_layout(renderer, self.color, layout);
+        });
     }
 
     fn mouse_interaction(
         &self,
-        state: &Tree,
+        tree: &Tree,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         viewport: &Rectangle,
@@ -513,18 +513,69 @@ where
     ) -> mouse::Interaction {
         self.element
             .widget
-            .mouse_interaction(state, layout, cursor, viewport, renderer)
+            .mouse_interaction(tree, layout, cursor, viewport, renderer)
     }
 
     fn overlay<'b>(
         &'b mut self,
-        state: &'b mut Tree,
-        layout: Layout<'_>,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
         renderer: &Renderer,
+        viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
-        self.element
-            .widget
-            .overlay(state, layout, renderer, translation)
+        self.element.widget.overlay(
+            tree,
+            layout,
+            renderer,
+            viewport,
+            translation,
+        )
+    }
+}
+
+impl<'a, T, Message, Theme, Renderer> From<Option<T>>
+    for Element<'a, Message, Theme, Renderer>
+where
+    T: Into<Self>,
+    Renderer: crate::Renderer,
+{
+    fn from(element: Option<T>) -> Self {
+        struct Void;
+
+        impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer> for Void
+        where
+            Renderer: crate::Renderer,
+        {
+            fn size(&self) -> Size<Length> {
+                Size {
+                    width: Length::Fixed(0.0),
+                    height: Length::Fixed(0.0),
+                }
+            }
+
+            fn layout(
+                &mut self,
+                _tree: &mut Tree,
+                _renderer: &Renderer,
+                _limits: &layout::Limits,
+            ) -> layout::Node {
+                layout::Node::new(Size::ZERO)
+            }
+
+            fn draw(
+                &self,
+                _tree: &Tree,
+                _renderer: &mut Renderer,
+                _theme: &Theme,
+                _style: &renderer::Style,
+                _layout: Layout<'_>,
+                _cursor: mouse::Cursor,
+                _viewport: &Rectangle,
+            ) {
+            }
+        }
+
+        element.map(T::into).unwrap_or_else(|| Element::new(Void))
     }
 }

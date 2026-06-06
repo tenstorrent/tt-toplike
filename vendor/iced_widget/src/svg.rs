@@ -20,9 +20,10 @@ use crate::core::mouse;
 use crate::core::renderer;
 use crate::core::svg;
 use crate::core::widget::Tree;
+use crate::core::window;
 use crate::core::{
-    Color, ContentFit, Element, Layout, Length, Point, Rectangle, Rotation,
-    Size, Theme, Vector, Widget,
+    Clipboard, Color, ContentFit, Element, Event, Layout, Length, Point,
+    Rectangle, Rotation, Shell, Size, Theme, Vector, Widget,
 };
 
 use std::path::PathBuf;
@@ -51,7 +52,6 @@ pub use crate::core::svg::Handle;
 ///     svg("tiger.svg").into()
 /// }
 /// ```
-#[allow(missing_debug_implementations)]
 pub struct Svg<'a, Theme = crate::Theme>
 where
     Theme: Catalog,
@@ -63,6 +63,7 @@ where
     class: Theme::Class<'a>,
     rotation: Rotation,
     opacity: f32,
+    status: Option<Status>,
 }
 
 impl<'a, Theme> Svg<'a, Theme>
@@ -79,6 +80,7 @@ where
             class: Theme::default(),
             rotation: Rotation::default(),
             opacity: 1.0,
+            status: None,
         }
     }
 
@@ -148,8 +150,8 @@ where
     }
 }
 
-impl<'a, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for Svg<'a, Theme>
+impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for Svg<'_, Theme>
 where
     Renderer: svg::Renderer,
     Theme: Catalog,
@@ -162,7 +164,7 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         _tree: &mut Tree,
         renderer: &Renderer,
         limits: &layout::Limits,
@@ -195,6 +197,30 @@ where
         layout::Node::new(final_size)
     }
 
+    fn update(
+        &mut self,
+        _state: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        _renderer: &Renderer,
+        _clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        _viewport: &Rectangle,
+    ) {
+        let current_status = if cursor.is_over(layout.bounds()) {
+            Status::Hovered
+        } else {
+            Status::Idle
+        };
+
+        if let Event::Window(window::Event::RedrawRequested(_now)) = event {
+            self.status = Some(current_status);
+        } else if self.status.is_some_and(|status| status != current_status) {
+            shell.request_redraw();
+        }
+    }
+
     fn draw(
         &self,
         _state: &Tree,
@@ -202,7 +228,7 @@ where
         theme: &Theme,
         _style: &renderer::Style,
         layout: Layout<'_>,
-        cursor: mouse::Cursor,
+        _cursor: mouse::Cursor,
         _viewport: &Rectangle,
     ) {
         let Size { width, height } = renderer.measure_svg(&self.handle);
@@ -231,35 +257,19 @@ where
 
         let drawing_bounds = Rectangle::new(position, final_size);
 
-        let is_mouse_over = cursor.is_over(bounds);
+        let style =
+            theme.style(&self.class, self.status.unwrap_or(Status::Idle));
 
-        let status = if is_mouse_over {
-            Status::Hovered
-        } else {
-            Status::Idle
-        };
-
-        let style = theme.style(&self.class, status);
-
-        let render = |renderer: &mut Renderer| {
-            renderer.draw_svg(
-                svg::Svg {
-                    handle: self.handle.clone(),
-                    color: style.color,
-                    rotation: self.rotation.radians(),
-                    opacity: self.opacity,
-                },
-                drawing_bounds,
-            );
-        };
-
-        if adjusted_fit.width > bounds.width
-            || adjusted_fit.height > bounds.height
-        {
-            renderer.with_layer(bounds, render);
-        } else {
-            render(renderer);
-        }
+        renderer.draw_svg(
+            svg::Svg {
+                handle: self.handle.clone(),
+                color: style.color,
+                rotation: self.rotation.radians(),
+                opacity: self.opacity,
+            },
+            drawing_bounds,
+            bounds,
+        );
     }
 }
 
@@ -323,7 +333,7 @@ impl Catalog for Theme {
 /// This is just a boxed closure: `Fn(&Theme, Status) -> Style`.
 pub type StyleFn<'a, Theme> = Box<dyn Fn(&Theme, Status) -> Style + 'a>;
 
-impl<'a, Theme> From<Style> for StyleFn<'a, Theme> {
+impl<Theme> From<Style> for StyleFn<'_, Theme> {
     fn from(style: Style) -> Self {
         Box::new(move |_theme, _status| style)
     }

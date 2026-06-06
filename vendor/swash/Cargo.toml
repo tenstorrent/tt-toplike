@@ -12,9 +12,10 @@
 [package]
 edition = "2021"
 name = "swash"
-version = "0.1.19"
+version = "0.2.7"
 authors = ["Chad Brokaw <cbrokaw@gmail.com>"]
 build = false
+autolib = false
 autobins = false
 autoexamples = false
 autotests = false
@@ -35,26 +36,21 @@ categories = [
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/dfrg/swash"
 
-[lib]
-name = "swash"
-path = "src/lib.rs"
-
-[dependencies.skrifa]
-version = "0.22.3"
-
-[dependencies.yazi]
-version = "0.1.6"
-optional = true
-
-[dependencies.zeno]
-version = "0.2.2"
-optional = true
-default-features = false
+[package.metadata.docs.rs]
+all-features = true
+default-target = "x86_64-unknown-linux-gnu"
+targets = []
 
 [features]
 default = [
+    "std",
     "scale",
     "render",
+]
+libm = [
+    "dep:core_maths",
+    "skrifa/libm",
+    "zeno?/libm",
 ]
 render = [
     "scale",
@@ -64,6 +60,33 @@ scale = [
     "dep:yazi",
     "dep:zeno",
 ]
+std = [
+    "skrifa/std",
+    "zeno?/std",
+    "yazi?/std",
+]
+
+[lib]
+name = "swash"
+path = "src/lib.rs"
+
+[dependencies.core_maths]
+version = "0.1.1"
+optional = true
+
+[dependencies.skrifa]
+version = ">= 0.31.1, <= 0.40"
+default-features = false
+
+[dependencies.yazi]
+version = "0.2.1"
+optional = true
+default-features = false
+
+[dependencies.zeno]
+version = "0.3.3"
+optional = true
+default-features = false
 
 [lints.clippy]
 doc_markdown = "warn"

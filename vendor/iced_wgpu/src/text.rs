@@ -1,22 +1,22 @@
 use crate::core::alignment;
+use crate::core::text::Alignment;
 use crate::core::{Rectangle, Size, Transformation};
 use crate::graphics::cache;
 use crate::graphics::color;
 use crate::graphics::text::cache::{self as text_cache, Cache as BufferCache};
-use crate::graphics::text::{font_system, to_color, Editor, Paragraph};
+use crate::graphics::text::{Editor, Paragraph, font_system, to_color};
 
 use rustc_hash::FxHashMap;
 use std::collections::hash_map;
-use std::rc::{self, Rc};
 use std::sync::atomic::{self, AtomicU64};
-use std::sync::Arc;
+use std::sync::{self, Arc, RwLock};
 
 pub use crate::graphics::Text;
 
-const COLOR_MODE: glyphon::ColorMode = if color::GAMMA_CORRECTION {
-    glyphon::ColorMode::Accurate
+const COLOR_MODE: cryoglyph::ColorMode = if color::GAMMA_CORRECTION {
+    cryoglyph::ColorMode::Accurate
 } else {
-    glyphon::ColorMode::Web
+    cryoglyph::ColorMode::Web
 };
 
 pub type Batch = Vec<Item>;
@@ -37,7 +37,7 @@ pub enum Item {
 pub struct Cache {
     id: Id,
     group: cache::Group,
-    text: Rc<[Text]>,
+    text: Arc<[Text]>,
     version: usize,
 }
 
@@ -55,7 +55,7 @@ impl Cache {
         Some(Self {
             id: Id(NEXT_ID.fetch_add(1, atomic::Ordering::Relaxed)),
             group,
-            text: Rc::from(text),
+            text: Arc::from(text),
             version: 0,
         })
     }
@@ -65,19 +65,19 @@ impl Cache {
             return;
         }
 
-        self.text = Rc::from(text);
+        self.text = Arc::from(text);
         self.version += 1;
     }
 }
 
 struct Upload {
-    renderer: glyphon::TextRenderer,
+    renderer: cryoglyph::TextRenderer,
     buffer_cache: BufferCache,
     transformation: Transformation,
     version: usize,
     group_version: usize,
-    text: rc::Weak<[Text]>,
-    _atlas: rc::Weak<()>,
+    text: sync::Weak<[Text]>,
+    _atlas: sync::Weak<()>,
 }
 
 #[derive(Default)]
@@ -87,18 +87,14 @@ pub struct Storage {
 }
 
 struct Group {
-    atlas: glyphon::TextAtlas,
+    atlas: cryoglyph::TextAtlas,
     version: usize,
     should_trim: bool,
-    handle: Rc<()>, // Keeps track of active uploads
+    handle: Arc<()>, // Keeps track of active uploads
 }
 
 impl Storage {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn get(&self, cache: &Cache) -> Option<(&glyphon::TextAtlas, &Upload)> {
+    fn get(&self, cache: &Cache) -> Option<(&cryoglyph::TextAtlas, &Upload)> {
         if cache.text.is_empty() {
             return None;
         }
@@ -113,10 +109,10 @@ impl Storage {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        viewport: &glyphon::Viewport,
+        viewport: &cryoglyph::Viewport,
         encoder: &mut wgpu::CommandEncoder,
         format: wgpu::TextureFormat,
-        state: &glyphon::Cache,
+        state: &cryoglyph::Cache,
         cache: &Cache,
         new_transformation: Transformation,
         bounds: Rectangle,
@@ -131,12 +127,12 @@ impl Storage {
             );
 
             Group {
-                atlas: glyphon::TextAtlas::with_color_mode(
+                atlas: cryoglyph::TextAtlas::with_color_mode(
                     device, queue, state, format, COLOR_MODE,
                 ),
                 version: 0,
                 should_trim: false,
-                handle: Rc::new(()),
+                handle: Arc::new(()),
             }
         });
 
@@ -167,7 +163,7 @@ impl Storage {
                     group.should_trim =
                         group.should_trim || upload.version != cache.version;
 
-                    upload.text = Rc::downgrade(&cache.text);
+                    upload.text = Arc::downgrade(&cache.text);
                     upload.version = cache.version;
                     upload.group_version = group.version;
                     upload.transformation = new_transformation;
@@ -176,7 +172,7 @@ impl Storage {
                 }
             }
             hash_map::Entry::Vacant(entry) => {
-                let mut renderer = glyphon::TextRenderer::new(
+                let mut renderer = cryoglyph::TextRenderer::new(
                     &mut group.atlas,
                     device,
                     wgpu::MultisampleState::default(),
@@ -206,8 +202,8 @@ impl Storage {
                     transformation: new_transformation,
                     version: 0,
                     group_version: group.version,
-                    text: Rc::downgrade(&cache.text),
-                    _atlas: Rc::downgrade(&group.handle),
+                    text: Arc::downgrade(&cache.text),
+                    _atlas: Arc::downgrade(&group.handle),
                 });
 
                 group.should_trim = cache.group.is_singleton();
@@ -226,7 +222,7 @@ impl Storage {
             .retain(|_id, upload| upload.text.strong_count() > 0);
 
         self.groups.retain(|id, group| {
-            let active_uploads = Rc::weak_count(&group.handle);
+            let active_uploads = Arc::weak_count(&group.handle);
 
             if active_uploads == 0 {
                 log::debug!("Dropping text atlas: {id:?}");
@@ -258,13 +254,13 @@ impl Storage {
     }
 }
 
-pub struct Viewport(glyphon::Viewport);
+pub struct Viewport(cryoglyph::Viewport);
 
 impl Viewport {
     pub fn update(&mut self, queue: &wgpu::Queue, resolution: Size<u32>) {
         self.0.update(
             queue,
-            glyphon::Resolution {
+            cryoglyph::Resolution {
                 width: resolution.width,
                 height: resolution.height,
             },
@@ -272,14 +268,11 @@ impl Viewport {
     }
 }
 
-#[allow(missing_debug_implementations)]
+#[derive(Clone)]
 pub struct Pipeline {
-    state: glyphon::Cache,
     format: wgpu::TextureFormat,
-    atlas: glyphon::TextAtlas,
-    renderers: Vec<glyphon::TextRenderer>,
-    prepare_layer: usize,
-    cache: BufferCache,
+    cache: cryoglyph::Cache,
+    atlas: Arc<RwLock<cryoglyph::TextAtlas>>,
 }
 
 impl Pipeline {
@@ -288,32 +281,53 @@ impl Pipeline {
         queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
     ) -> Self {
-        let state = glyphon::Cache::new(device);
-        let atlas = glyphon::TextAtlas::with_color_mode(
-            device, queue, &state, format, COLOR_MODE,
+        let cache = cryoglyph::Cache::new(device);
+        let atlas = cryoglyph::TextAtlas::with_color_mode(
+            device, queue, &cache, format, COLOR_MODE,
         );
 
         Pipeline {
-            state,
             format,
-            renderers: Vec::new(),
-            atlas,
-            prepare_layer: 0,
-            cache: BufferCache::new(),
+            cache,
+            atlas: Arc::new(RwLock::new(atlas)),
         }
+    }
+
+    pub fn create_viewport(&self, device: &wgpu::Device) -> Viewport {
+        Viewport(cryoglyph::Viewport::new(device, &self.cache))
+    }
+
+    pub fn trim(&self) {
+        self.atlas.write().expect("Write text atlas").trim();
+    }
+}
+
+#[derive(Default)]
+pub struct State {
+    renderers: Vec<cryoglyph::TextRenderer>,
+    prepare_layer: usize,
+    cache: BufferCache,
+    storage: Storage,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn prepare(
         &mut self,
+        pipeline: &Pipeline,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         viewport: &Viewport,
         encoder: &mut wgpu::CommandEncoder,
-        storage: &mut Storage,
         batch: &Batch,
         layer_bounds: Rectangle,
         layer_transformation: Transformation,
     ) {
+        let mut atlas = pipeline.atlas.write().expect("Write to text atlas");
+
         for item in batch {
             match item {
                 Item::Group {
@@ -321,8 +335,8 @@ impl Pipeline {
                     text,
                 } => {
                     if self.renderers.len() <= self.prepare_layer {
-                        self.renderers.push(glyphon::TextRenderer::new(
-                            &mut self.atlas,
+                        self.renderers.push(cryoglyph::TextRenderer::new(
+                            &mut atlas,
                             device,
                             wgpu::MultisampleState::default(),
                             None,
@@ -336,7 +350,7 @@ impl Pipeline {
                         &viewport.0,
                         encoder,
                         renderer,
-                        &mut self.atlas,
+                        &mut atlas,
                         &mut self.cache,
                         text,
                         layer_bounds * layer_transformation,
@@ -347,7 +361,7 @@ impl Pipeline {
                         Ok(()) => {
                             self.prepare_layer += 1;
                         }
-                        Err(glyphon::PrepareError::AtlasFull) => {
+                        Err(cryoglyph::PrepareError::AtlasFull) => {
                             // If the atlas cannot grow, then all bets are off.
                             // Instead of panicking, we will just pray that the result
                             // will be somewhat readable...
@@ -358,13 +372,13 @@ impl Pipeline {
                     transformation,
                     cache,
                 } => {
-                    storage.prepare(
+                    self.storage.prepare(
                         device,
                         queue,
                         &viewport.0,
                         encoder,
-                        self.format,
-                        &self.state,
+                        pipeline.format,
+                        &pipeline.cache,
                         cache,
                         layer_transformation * *transformation,
                         layer_bounds * layer_transformation,
@@ -376,13 +390,14 @@ impl Pipeline {
 
     pub fn render<'a>(
         &'a self,
+        pipeline: &'a Pipeline,
         viewport: &'a Viewport,
-        storage: &'a Storage,
         start: usize,
         batch: &'a Batch,
         bounds: Rectangle<u32>,
         render_pass: &mut wgpu::RenderPass<'a>,
     ) -> usize {
+        let atlas = pipeline.atlas.read().expect("Read text atlas");
         let mut layer_count = 0;
 
         render_pass.set_scissor_rect(
@@ -398,13 +413,13 @@ impl Pipeline {
                     let renderer = &self.renderers[start + layer_count];
 
                     renderer
-                        .render(&self.atlas, &viewport.0, render_pass)
+                        .render(&atlas, &viewport.0, render_pass)
                         .expect("Render text");
 
                     layer_count += 1;
                 }
                 Item::Cached { cache, .. } => {
-                    if let Some((atlas, upload)) = storage.get(cache) {
+                    if let Some((atlas, upload)) = self.storage.get(cache) {
                         upload
                             .renderer
                             .render(atlas, &viewport.0, render_pass)
@@ -417,13 +432,9 @@ impl Pipeline {
         layer_count
     }
 
-    pub fn create_viewport(&self, device: &wgpu::Device) -> Viewport {
-        Viewport(glyphon::Viewport::new(device, &self.state))
-    }
-
-    pub fn end_frame(&mut self) {
-        self.atlas.trim();
+    pub fn trim(&mut self) {
         self.cache.trim();
+        self.storage.trim();
 
         self.prepare_layer = 0;
     }
@@ -432,15 +443,15 @@ impl Pipeline {
 fn prepare(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    viewport: &glyphon::Viewport,
+    viewport: &cryoglyph::Viewport,
     encoder: &mut wgpu::CommandEncoder,
-    renderer: &mut glyphon::TextRenderer,
-    atlas: &mut glyphon::TextAtlas,
+    renderer: &mut cryoglyph::TextRenderer,
+    atlas: &mut cryoglyph::TextAtlas,
     buffer_cache: &mut BufferCache,
     sections: &[Text],
     layer_bounds: Rectangle,
     layer_transformation: Transformation,
-) -> Result<(), glyphon::PrepareError> {
+) -> Result<(), cryoglyph::PrepareError> {
     let mut font_system = font_system().write().expect("Write font system");
     let font_system = font_system.raw();
 
@@ -448,7 +459,7 @@ fn prepare(
         Paragraph(Paragraph),
         Editor(Editor),
         Cache(text_cache::KeyHash),
-        Raw(Arc<glyphon::Buffer>),
+        Raw(Arc<cryoglyph::Buffer>),
     }
 
     let allocations: Vec<_> = sections
@@ -467,6 +478,7 @@ fn prepare(
                 line_height,
                 font,
                 shaping,
+                align_x,
                 ..
             } => {
                 let (key, _) = buffer_cache.allocate(
@@ -476,6 +488,7 @@ fn prepare(
                         size: f32::from(*size),
                         line_height: f32::from(*line_height),
                         font: *font,
+                        align_x: *align_x,
                         bounds: Size {
                             width: bounds.width,
                             height: bounds.height,
@@ -492,144 +505,130 @@ fn prepare(
 
     let text_areas = sections.iter().zip(allocations.iter()).filter_map(
         |(section, allocation)| {
-            let (
-                buffer,
-                bounds,
-                horizontal_alignment,
-                vertical_alignment,
-                color,
-                clip_bounds,
-                transformation,
-            ) = match section {
-                Text::Paragraph {
-                    position,
-                    color,
-                    clip_bounds,
-                    transformation,
-                    ..
-                } => {
-                    use crate::core::text::Paragraph as _;
+            let (buffer, position, color, clip_bounds, transformation) =
+                match section {
+                    Text::Paragraph {
+                        position,
+                        color,
+                        clip_bounds,
+                        transformation,
+                        ..
+                    } => {
+                        let Some(Allocation::Paragraph(paragraph)) = allocation
+                        else {
+                            return None;
+                        };
 
-                    let Some(Allocation::Paragraph(paragraph)) = allocation
-                    else {
-                        return None;
-                    };
+                        (
+                            paragraph.buffer(),
+                            *position,
+                            *color,
+                            *clip_bounds,
+                            *transformation,
+                        )
+                    }
+                    Text::Editor {
+                        position,
+                        color,
+                        clip_bounds,
+                        transformation,
+                        ..
+                    } => {
+                        let Some(Allocation::Editor(editor)) = allocation
+                        else {
+                            return None;
+                        };
 
-                    (
-                        paragraph.buffer(),
-                        Rectangle::new(*position, paragraph.min_bounds()),
-                        paragraph.horizontal_alignment(),
-                        paragraph.vertical_alignment(),
-                        *color,
-                        *clip_bounds,
-                        *transformation,
-                    )
-                }
-                Text::Editor {
-                    position,
-                    color,
-                    clip_bounds,
-                    transformation,
-                    ..
-                } => {
-                    use crate::core::text::Editor as _;
+                        (
+                            editor.buffer(),
+                            *position,
+                            *color,
+                            *clip_bounds,
+                            *transformation,
+                        )
+                    }
+                    Text::Cached {
+                        bounds,
+                        align_x,
+                        align_y,
+                        color,
+                        clip_bounds,
+                        ..
+                    } => {
+                        let Some(Allocation::Cache(key)) = allocation else {
+                            return None;
+                        };
 
-                    let Some(Allocation::Editor(editor)) = allocation else {
-                        return None;
-                    };
+                        let entry =
+                            buffer_cache.get(key).expect("Get cached buffer");
 
-                    (
-                        editor.buffer(),
-                        Rectangle::new(*position, editor.bounds()),
-                        alignment::Horizontal::Left,
-                        alignment::Vertical::Top,
-                        *color,
-                        *clip_bounds,
-                        *transformation,
-                    )
-                }
-                Text::Cached {
-                    bounds,
-                    horizontal_alignment,
-                    vertical_alignment,
-                    color,
-                    clip_bounds,
-                    ..
-                } => {
-                    let Some(Allocation::Cache(key)) = allocation else {
-                        return None;
-                    };
+                        let mut position = bounds.position();
 
-                    let entry =
-                        buffer_cache.get(key).expect("Get cached buffer");
+                        position.x = match align_x {
+                            Alignment::Default
+                            | Alignment::Left
+                            | Alignment::Justified => position.x,
+                            Alignment::Center => {
+                                position.x - entry.min_bounds.width / 2.0
+                            }
+                            Alignment::Right => {
+                                position.x - entry.min_bounds.width
+                            }
+                        };
 
-                    (
-                        &entry.buffer,
-                        Rectangle::new(bounds.position(), entry.min_bounds),
-                        *horizontal_alignment,
-                        *vertical_alignment,
-                        *color,
-                        *clip_bounds,
-                        Transformation::IDENTITY,
-                    )
-                }
-                Text::Raw {
-                    raw,
-                    transformation,
-                } => {
-                    let Some(Allocation::Raw(buffer)) = allocation else {
-                        return None;
-                    };
+                        position.y = match align_y {
+                            alignment::Vertical::Top => position.y,
+                            alignment::Vertical::Center => {
+                                position.y - entry.min_bounds.height / 2.0
+                            }
+                            alignment::Vertical::Bottom => {
+                                position.y - entry.min_bounds.height
+                            }
+                        };
 
-                    let (width, height) = buffer.size();
+                        (
+                            &entry.buffer,
+                            position,
+                            *color,
+                            *clip_bounds,
+                            Transformation::IDENTITY,
+                        )
+                    }
+                    Text::Raw {
+                        raw,
+                        transformation,
+                    } => {
+                        let Some(Allocation::Raw(buffer)) = allocation else {
+                            return None;
+                        };
 
-                    (
-                        buffer.as_ref(),
-                        Rectangle::new(
+                        (
+                            buffer.as_ref(),
                             raw.position,
-                            Size::new(
-                                width.unwrap_or(layer_bounds.width),
-                                height.unwrap_or(layer_bounds.height),
-                            ),
-                        ),
-                        alignment::Horizontal::Left,
-                        alignment::Vertical::Top,
-                        raw.color,
-                        raw.clip_bounds,
-                        *transformation,
-                    )
-                }
-            };
+                            raw.color,
+                            raw.clip_bounds,
+                            *transformation,
+                        )
+                    }
+                };
 
-            let bounds = bounds * transformation * layer_transformation;
-
-            let left = match horizontal_alignment {
-                alignment::Horizontal::Left => bounds.x,
-                alignment::Horizontal::Center => bounds.x - bounds.width / 2.0,
-                alignment::Horizontal::Right => bounds.x - bounds.width,
-            };
-
-            let top = match vertical_alignment {
-                alignment::Vertical::Top => bounds.y,
-                alignment::Vertical::Center => bounds.y - bounds.height / 2.0,
-                alignment::Vertical::Bottom => bounds.y - bounds.height,
-            };
+            let position = position * transformation * layer_transformation;
 
             let clip_bounds = layer_bounds.intersection(
                 &(clip_bounds * transformation * layer_transformation),
             )?;
 
-            Some(glyphon::TextArea {
+            Some(cryoglyph::TextArea {
                 buffer,
-                left,
-                top,
+                left: position.x,
+                top: position.y,
                 scale: transformation.scale_factor()
                     * layer_transformation.scale_factor(),
-                bounds: glyphon::TextBounds {
-                    left: clip_bounds.x as i32,
-                    top: clip_bounds.y as i32,
-                    right: (clip_bounds.x + clip_bounds.width) as i32,
-                    bottom: (clip_bounds.y + clip_bounds.height) as i32,
+                bounds: cryoglyph::TextBounds {
+                    left: clip_bounds.x.round() as i32,
+                    top: clip_bounds.y.round() as i32,
+                    right: (clip_bounds.x + clip_bounds.width).round() as i32,
+                    bottom: (clip_bounds.y + clip_bounds.height).round() as i32,
                 },
                 default_color: to_color(color),
             })
@@ -644,6 +643,6 @@ fn prepare(
         atlas,
         viewport,
         text_areas,
-        &mut glyphon::SwashCache::new(),
+        &mut cryoglyph::SwashCache::new(),
     )
 }

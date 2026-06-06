@@ -1,6 +1,6 @@
+use core::ffi::CStr;
 use core::fmt::{Debug, DebugStruct, Error, Formatter};
 use core::ptr;
-use std::ffi::CStr;
 
 use crate::abi::{BlockDescriptorPtr, BlockFlags, BlockHeader};
 use crate::ffi;
@@ -9,6 +9,7 @@ use crate::ffi;
 struct Isa(*const ffi::Class);
 
 impl Isa {
+    #[allow(unused_unsafe)]
     fn is_global(self) -> bool {
         ptr::eq(
             unsafe { ptr::addr_of!(ffi::_NSConcreteGlobalBlock) },
@@ -16,6 +17,7 @@ impl Isa {
         )
     }
 
+    #[allow(unused_unsafe)]
     fn is_stack(self) -> bool {
         ptr::eq(unsafe { ptr::addr_of!(ffi::_NSConcreteStackBlock) }, self.0)
     }
@@ -41,8 +43,8 @@ pub(crate) fn debug_block_header(header: &BlockHeader, f: &mut DebugStruct<'_, '
     f.field(
         "descriptor",
         &BlockDescriptorHelper {
-            has_copy_dispose: header.flags.0 & BlockFlags::BLOCK_HAS_COPY_DISPOSE.0 != 0,
-            has_signature: header.flags.0 & BlockFlags::BLOCK_HAS_SIGNATURE.0 != 0,
+            has_copy_dispose: header.flags.has(BlockFlags::BLOCK_HAS_COPY_DISPOSE),
+            has_signature: header.flags.has(BlockFlags::BLOCK_HAS_SIGNATURE),
             descriptor: header.descriptor,
         },
     );
@@ -115,6 +117,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(unused_unsafe)]
     fn test_isa() {
         let isa = Isa(unsafe { ptr::addr_of!(ffi::_NSConcreteGlobalBlock) });
         assert!(isa.is_global());

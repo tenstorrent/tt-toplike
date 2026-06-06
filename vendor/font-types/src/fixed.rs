@@ -27,6 +27,9 @@ macro_rules! fixed_impl {
             /// Representation of 1.0.
             pub const ONE: Self = Self(1 << $fract_bits);
 
+            /// Representation of -1.0.
+            pub const NEG_ONE: Self = Self((!0 << $fract_bits) as $ty);
+
             const INT_MASK: $ty = !0 << $fract_bits;
             const ROUND: $ty = 1 << ($fract_bits - 1);
             const FRACT_BITS: usize = $fract_bits;
@@ -78,6 +81,12 @@ macro_rules! fixed_impl {
             #[inline(always)]
             pub const fn saturating_add(self, other: Self) -> Self {
                 Self(self.0.saturating_add(other.0))
+            }
+
+            /// Checked addition.
+            #[inline(always)]
+            pub fn checked_add(self, other: Self) -> Option<Self> {
+                self.0.checked_add(other.0).map(|inner| Self(inner))
             }
 
             /// Wrapping substitution.
@@ -162,7 +171,7 @@ macro_rules! fixed_mul_div {
                     0x7FFFFFFF
                 };
                 Self(if sign < 0 {
-                    -(result as i32)
+                    (result as i32).wrapping_neg()
                 } else {
                     result as i32
                 })
@@ -187,25 +196,20 @@ macro_rules! fixed_mul_div {
 
         impl Div for $ty {
             type Output = Self;
-            #[inline(always)]
-            fn div(self, other: Self) -> Self::Output {
-                let mut sign = 1;
-                let mut a = self.0;
-                let mut b = other.0;
-                if a < 0 {
-                    a = -a;
-                    sign = -1;
-                }
-                if b < 0 {
-                    b = -b;
-                    sign = -sign;
-                }
-                let q = if b == 0 {
-                    0x7FFFFFFF
+            fn div(self, other: Self) -> Self {
+                let sign = (self.0 < 0) ^ (other.0 < 0);
+                let au = self.0.unsigned_abs() as u64;
+                let bu = other.0.unsigned_abs() as u64;
+                let q = if bu == 0 {
+                    0x7FFFFFFF_u32
                 } else {
-                    ((((a as u64) << 16) + ((b as u64) >> 1)) / (b as u64)) as u32
+                    (((au << 16) + (bu >> 1)) / bu) as u32
                 };
-                Self(if sign < 0 { -(q as i32) } else { q as i32 })
+                Self(if sign {
+                    (q as i32).wrapping_neg()
+                } else {
+                    q as i32
+                })
             }
         }
 
@@ -478,5 +482,36 @@ mod tests {
             Fixed::from_f64(0.5) / Fixed::from_f64(2.0),
             Fixed::from_f64(0.25)
         );
+    }
+
+    // OSS Fuzz caught panic with overflow in fixed point division.
+    // See <https://oss-fuzz.com/testcase-detail/5666843647082496> and
+    // <https://issues.oss-fuzz.com/issues/443104630>
+    #[test]
+    fn fixed_div_neg_overflow() {
+        let a = Fixed::from_f64(-92.5);
+        let b = Fixed::from_f64(0.0028228759765625);
+        // Just don't panic with overflow
+        let _ = a / b;
+    }
+
+    #[test]
+    fn fixed_mul_div_neg_overflow() {
+        let a = Fixed::from_f64(-92.5);
+        let b = Fixed::from_f64(0.0028228759765625);
+        // Just don't panic with overflow
+        let _ = a.mul_div(Fixed::ONE, b);
+    }
+
+    #[test]
+    fn fixed_div_min_value() {
+        // i32::MIN.abs() overflows i32, unsigned_abs() handles this correctly
+        let min = Fixed(i32::MIN);
+        let one = Fixed::ONE;
+        // Just don't panic with overflow
+        let _ = min / one;
+        // Dividing by -1 is also an edge case
+        let neg_one = Fixed(-Fixed::ONE.0);
+        let _ = min / neg_one;
     }
 }

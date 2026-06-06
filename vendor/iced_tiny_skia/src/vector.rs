@@ -8,6 +8,7 @@ use tiny_skia::Transform;
 use std::cell::RefCell;
 use std::collections::hash_map;
 use std::fs;
+use std::panic;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -42,17 +43,20 @@ impl Pipeline {
         if let Some(image) = self.cache.borrow_mut().draw(
             handle,
             color,
-            Size::new(bounds.width as u32, bounds.height as u32),
+            Size::new(
+                (bounds.width * transform.sx) as u32,
+                (bounds.height * transform.sy) as u32,
+            ),
         ) {
             pixels.draw_pixmap(
-                bounds.x as i32,
-                bounds.y as i32,
+                (bounds.x * transform.sx) as i32,
+                (bounds.y * transform.sy) as i32,
                 image,
                 &tiny_skia::PixmapPaint {
                     opacity,
                     ..tiny_skia::PixmapPaint::default()
                 },
-                transform,
+                Transform::default(),
                 clip_mask,
             );
         }
@@ -168,7 +172,15 @@ impl Cache {
                 tiny_skia::Transform::default()
             };
 
-            resvg::render(tree, transform, &mut image.as_mut());
+            // SVG rendering can panic on malformed or complex vectors.
+            // We catch panics to prevent crashes and continue gracefully.
+            let render = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                resvg::render(tree, transform, &mut image.as_mut());
+            }));
+
+            if let Err(error) = render {
+                log::warn!("SVG rendering for {handle:?} panicked: {error:?}");
+            }
 
             if let Some([r, g, b, _]) = key.color {
                 // Apply color filter
