@@ -1144,7 +1144,7 @@ tt-toplike-rs/
 ├── Cargo.toml           # Dependencies and project config
 ├── Cargo.lock           # Locked dependency versions
 ├── README.md            # User-facing documentation
-├── CLAUDE.md            # This file - development log
+├── AGENTS.md            # This file - development log
 ├── src/
 │   ├── main.rs          # Entry point
 │   ├── error.rs         # Error types
@@ -1286,7 +1286,7 @@ DateTime serialization requires enabling the `serde` feature in Cargo.toml. The 
 When using `#[error(...)]` on an enum variant with `#[from]`, thiserror automatically implements `From<T>` for that error type. Don't manually implement it.
 
 ### 4. **Comprehensive Comments Pay Off**
-Every 2-3 lines of explanation make the code immediately understandable to future developers (and to Claude when implementing later phases).
+Every 2-3 lines of explanation make the code immediately understandable to future developers (and to Agent when implementing later phases).
 
 ## Code Quality
 
@@ -1308,7 +1308,7 @@ Every 2-3 lines of explanation make the code immediately understandable to futur
 
 ### Inspiration
 - Python tt-top: `/home/ttuser/tt-top/`
-- Plan document: `~/.claude/plans/resilient-singing-globe.md`
+- Plan document: `~/.agent/plans/resilient-singing-globe.md`
 
 ### Rust Libraries
 - [Ratatui](https://github.com/ratatui/ratatui)
@@ -3762,7 +3762,7 @@ The Arcade mode achieves the rare combination of **aesthetic delight** and **inf
 ### Documentation
 
 - **Implementation Guide**: `ARCADE_MODE.md` - Complete technical documentation
-- **Project Log**: `CLAUDE.md` (this file) - Development history
+- **Project Log**: `AGENTS.md` (this file) - Development history
 
 ---
 
