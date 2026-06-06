@@ -1,7 +1,7 @@
 # tt-toplike Quick Start
 
-**Version**: 0.5.0
-**Last Updated**: April 29, 2026
+**Version**: 0.6.2
+**Last Updated**: June 6, 2026
 
 ---
 
@@ -130,7 +130,7 @@ For best results, ensure your terminal emulator supports 24-bit color.
 
 ### Board labels look wrong
 If you have independent PCIe cards (p150a, n150) and see "Board 0 → [Dev0, Dev1]"
-groupings, make sure you're running v0.5.0 or later. The fix auto-detects
+groupings, make sure you're running v0.6.0 or later. The fix auto-detects
 `chips_per_board` from the hardware's `board_type` field.
 
 ---

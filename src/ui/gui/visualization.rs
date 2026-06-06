@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! GPU-accelerated visualizations for the GUI
 //!
 //! This module provides Canvas-based hardware-responsive visualizations
 //! similar to the TUI starfield and TRON Grid modes.
 
 use iced::{
-    mouse, Element,
+    mouse,
     widget::canvas::{self, Cache, Canvas, Frame, Geometry, Path, Stroke, Text},
-    Color, Point, Rectangle, Size, Theme,
+    Color, Element, Point, Rectangle, Size, Theme,
 };
 
 use crate::models::{Architecture, Device};
@@ -107,7 +106,7 @@ impl StarfieldVisualization {
             let temp_hue_shift = colors::temp_to_hue(temp);
 
             // Update each star
-            for (i, star) in self.stars.iter_mut().enumerate() {
+            for (_i, star) in self.stars.iter_mut().enumerate() {
                 // Twinkle animation
                 star.phase += 0.05 + current / 100.0;
                 let twinkle = (star.phase.sin() * 0.5 + 0.5) * 0.3;
@@ -173,7 +172,10 @@ impl canvas::Program<(), Theme> for StarfieldVisualization {
 
             // Draw device info text
             let title_text = Text {
-                content: format!("{} - {:?}", self.device.board_type, self.device.architecture),
+                content: format!(
+                    "{} - {:?}",
+                    self.device.board_type, self.device.architecture
+                ),
                 position: Point::new(10.0, 10.0),
                 color: Color::from_rgb(0.7, 0.7, 0.9),
                 size: 16.0.into(),
@@ -345,11 +347,11 @@ impl canvas::Program<(), Theme> for DashboardVisualization {
             let height = bounds.height;
 
             // Calculate layout sections using percentage-based heights for better scaling
-            let header_height = height * 0.10;      // 10% for header
-            let ddr_section_height = height * 0.25;  // 25% for DDR channels
+            let header_height = height * 0.10; // 10% for header
+            let ddr_section_height = height * 0.25; // 25% for DDR channels
             let memory_section_height = height * 0.35; // 35% for memory hierarchy
             let metrics_section_height = height * 0.25; // 25% for metrics
-            // 5% left for spacing
+                                                        // 5% left for spacing
 
             let ddr_y = header_height;
             let memory_y = ddr_y + ddr_section_height;
@@ -387,7 +389,10 @@ impl DashboardVisualization {
 
         // Device name
         let title = Text {
-            content: format!("⚡ {} - {:?}", self.device.board_type, self.device.architecture),
+            content: format!(
+                "⚡ {} - {:?}",
+                self.device.board_type, self.device.architecture
+            ),
             position: Point::new(20.0, 15.0),
             color: Color::from_rgb(0.7, 0.85, 1.0),
             size: 24.0.into(),
@@ -405,8 +410,13 @@ impl DashboardVisualization {
         };
 
         let details = Text {
-            content: format!("{}×{} Tensix Grid │ {} DDR Channels │ {} Cores",
-                cols, rows, ddr_channels, rows * cols),
+            content: format!(
+                "{}×{} Tensix Grid │ {} DDR Channels │ {} Cores",
+                cols,
+                rows,
+                ddr_channels,
+                rows * cols
+            ),
             position: Point::new(20.0, 42.0),
             color: Color::from_rgb(0.5, 0.7, 0.9),
             size: 14.0.into(),
@@ -416,7 +426,13 @@ impl DashboardVisualization {
     }
 
     /// Draw DDR channels with training status and utilization
-    fn draw_ddr_channels(&self, frame: &mut Frame, width: f32, y_offset: f32, section_height: f32) {
+    fn draw_ddr_channels(
+        &self,
+        frame: &mut Frame,
+        width: f32,
+        y_offset: f32,
+        _section_height: f32,
+    ) {
         // Section title
         let title = Text {
             content: "═══ DDR MEMORY CHANNELS ═══".to_string(),
@@ -522,7 +538,13 @@ impl DashboardVisualization {
     }
 
     /// Draw memory hierarchy visualization (L1/L2/DDR)
-    fn draw_memory_hierarchy(&self, frame: &mut Frame, width: f32, y_offset: f32, section_height: f32) {
+    fn draw_memory_hierarchy(
+        &self,
+        frame: &mut Frame,
+        width: f32,
+        y_offset: f32,
+        _section_height: f32,
+    ) {
         // Section title
         let title = Text {
             content: "═══ MEMORY HIERARCHY ═══".to_string(),
@@ -635,14 +657,18 @@ impl DashboardVisualization {
         let border_path = Path::rectangle(position, Size::new(width, height));
         frame.stroke(
             &border_path,
-            Stroke::default()
-                .with_width(2.0)
-                .with_color(color),
+            Stroke::default().with_width(2.0).with_color(color),
         );
     }
 
     /// Draw real-time metrics with gauges
-    fn draw_metrics_gauges(&self, frame: &mut Frame, width: f32, y_offset: f32, _available_height: f32) {
+    fn draw_metrics_gauges(
+        &self,
+        frame: &mut Frame,
+        width: f32,
+        y_offset: f32,
+        _available_height: f32,
+    ) {
         // Section title
         let title = Text {
             content: "═══ REAL-TIME METRICS ═══".to_string(),
@@ -776,15 +802,10 @@ impl DashboardVisualization {
         let color2 = hsv_to_rgb((hue + 180.0) % 360.0, 0.6, 0.8);
 
         // Top edge
-        let top_path = Path::line(
-            Point::new(0.0, 0.0),
-            Point::new(bounds.width, 0.0),
-        );
+        let top_path = Path::line(Point::new(0.0, 0.0), Point::new(bounds.width, 0.0));
         frame.stroke(
             &top_path,
-            Stroke::default()
-                .with_width(3.0)
-                .with_color(color1),
+            Stroke::default().with_width(3.0).with_color(color1),
         );
 
         // Bottom edge
@@ -794,9 +815,7 @@ impl DashboardVisualization {
         );
         frame.stroke(
             &bottom_path,
-            Stroke::default()
-                .with_width(3.0)
-                .with_color(color2),
+            Stroke::default().with_width(3.0).with_color(color2),
         );
     }
 }
