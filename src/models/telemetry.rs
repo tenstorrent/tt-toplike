@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Telemetry data structures
 //!
 //! Contains structures for representing hardware telemetry data from
 //! Tenstorrent devices. These models are designed to deserialize from
 //! tt-smi JSON output and to be populated from luwen API calls.
 
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// Main telemetry data for a device
 ///
@@ -292,12 +291,14 @@ pub struct GddrTempPair(pub [f32; 4]);
 /// Returns None if the string is empty, `"N/A"`, or not a valid hex value.
 pub fn unpack_gddr_temps(s: &str) -> Option<GddrTempPair> {
     let s = s.trim();
-    if s.is_empty() || s == "N/A" { return None; }
+    if s.is_empty() || s == "N/A" {
+        return None;
+    }
     let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
     let v = u32::from_str_radix(hex, 16).ok()?;
     Some(GddrTempPair([
-        ((v >> 0)  & 0xFF) as f32,
-        ((v >> 8)  & 0xFF) as f32,
+        ((v >> 0) & 0xFF) as f32,
+        ((v >> 8) & 0xFF) as f32,
         ((v >> 16) & 0xFF) as f32,
         ((v >> 24) & 0xFF) as f32,
     ]))
@@ -312,7 +313,9 @@ pub const BH_TENSIX_COL_COUNT: usize = 14;
 /// Always returns false for col >= BH_TENSIX_COL_COUNT (Blackhole-specific field;
 /// Wormhole uses a different topology mechanism handled in chip_portrait.rs).
 pub fn tensix_col_harvested(enabled_tensix_col: u32, col: usize) -> bool {
-    if col >= BH_TENSIX_COL_COUNT { return false; }
+    if col >= BH_TENSIX_COL_COUNT {
+        return false;
+    }
     (enabled_tensix_col >> col) & 1 == 0
 }
 
@@ -320,18 +323,18 @@ pub fn tensix_col_harvested(enabled_tensix_col: u32, col: usize) -> bool {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FirmwaresInfo {
     pub fw_bundle_version: Option<String>,
-    pub eth_fw:            Option<String>,
-    pub cm_fw:             Option<String>,
-    pub gddr_fw:           Option<String>,
+    pub eth_fw: Option<String>,
+    pub cm_fw: Option<String>,
+    pub gddr_fw: Option<String>,
 }
 
 /// Per-device thermal/power limits (from tt-smi 5.2.0 `limits` block).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeviceLimits {
-    pub tdp_limit:  Option<f32>,
-    pub tdc_limit:  Option<f32>,
-    pub asic_fmax:  Option<u32>,
-    pub thm_limit:  Option<f32>,
+    pub tdp_limit: Option<f32>,
+    pub tdc_limit: Option<f32>,
+    pub asic_fmax: Option<u32>,
+    pub thm_limit: Option<f32>,
 }
 
 /// Parse a string as u32, accepting both "0x1A2B" hex and plain decimal.
@@ -407,15 +410,15 @@ impl SmbusTelemetry {
             aux_status: None,
             eth_debug_status0: None,
             eth_debug_status1: None,
-            gddr_temps:        [None; 4],
-            max_gddr_temp:     None,
-            gddr_corr_errs:    [None; 4],
-            gddr_uncorr_errs:  None,
-            harvesting_state:  None,
-            eth_live_status:   None,
-            enabled_eth:       None,
-            enabled_gddr:      None,
-            enabled_l2cpu:     None,
+            gddr_temps: [None; 4],
+            max_gddr_temp: None,
+            gddr_corr_errs: [None; 4],
+            gddr_uncorr_errs: None,
+            harvesting_state: None,
+            eth_live_status: None,
+            enabled_eth: None,
+            enabled_gddr: None,
+            enabled_l2cpu: None,
             enabled_tensix_col: None,
         }
     }
@@ -468,7 +471,11 @@ impl SmbusTelemetry {
         } else {
             s.parse().ok()?
         };
-        if v > 0.0 { Some(v) } else { None }
+        if v > 0.0 {
+            Some(v)
+        } else {
+            None
+        }
     }
 
     /// Firmware-reported measured current in Amperes from the SMBUS TDC register.
@@ -482,7 +489,11 @@ impl SmbusTelemetry {
         } else {
             s.parse().ok()?
         };
-        if v > 0.0 { Some(v) } else { None }
+        if v > 0.0 {
+            Some(v)
+        } else {
+            None
+        }
     }
 
     /// Get ARC0 health as integer (heartbeat counter).
@@ -500,12 +511,18 @@ impl SmbusTelemetry {
     /// Prefer this over the raw `max_gddr_temp` field when that field is `None`
     /// (older tt-smi versions don't expose MAX_GDDR_TEMP directly).
     pub fn max_gddr_temp_computed(&self) -> Option<f32> {
-        let max = self.gddr_temps.iter()
+        let max = self
+            .gddr_temps
+            .iter()
             .filter_map(|pair| pair.as_ref())
             .flat_map(|pair| pair.0.iter().copied())
-            .filter(|&t| t > 0.0)  // 0.0 = unpopulated slot; hardware never reports 0°C for live GDDR
+            .filter(|&t| t > 0.0) // 0.0 = unpopulated slot; hardware never reports 0°C for live GDDR
             .fold(f32::NEG_INFINITY, f32::max);
-        if max == f32::NEG_INFINITY { None } else { Some(max) }
+        if max == f32::NEG_INFINITY {
+            None
+        } else {
+            Some(max)
+        }
     }
 }
 
@@ -550,8 +567,8 @@ mod tests {
     fn test_smbus_telemetry() {
         let mut smbus = SmbusTelemetry::new();
         // Real tt-smi values: DDR_SPEED is hex, arc0_health (TIMER_HEARTBEAT) is hex
-        smbus.ddr_speed   = Some("0x3e80".to_string()); // 0x3e80 = 16000 MT/s
-        smbus.ddr_status  = Some("0x55555555".to_string());
+        smbus.ddr_speed = Some("0x3e80".to_string()); // 0x3e80 = 16000 MT/s
+        smbus.ddr_status = Some("0x55555555".to_string());
         smbus.arc0_health = Some("0x10e7a".to_string()); // non-zero → healthy
 
         assert_eq!(smbus.ddr_speed_mts(), Some(16000));
@@ -568,14 +585,22 @@ mod tests {
         // "0x55555555" → 8 channels, all trained.
         smbus.ddr_status = Some("0x55555555".to_string());
         for ch in 0..8 {
-            assert!(smbus.is_ddr_channel_trained(ch), "ch {} should be trained", ch);
+            assert!(
+                smbus.is_ddr_channel_trained(ch),
+                "ch {} should be trained",
+                ch
+            );
         }
 
         // Channel 0 nibble = 0x0 (untrained), rest 0x5 (trained) → 0x55555550
         smbus.ddr_status = Some("0x55555550".to_string());
         assert!(!smbus.is_ddr_channel_trained(0), "ch 0 should be untrained");
         for ch in 1..8 {
-            assert!(smbus.is_ddr_channel_trained(ch), "ch {} should be trained", ch);
+            assert!(
+                smbus.is_ddr_channel_trained(ch),
+                "ch {} should be trained",
+                ch
+            );
         }
 
         // Legacy decimal string with nibble value 2 still counts as trained.
@@ -610,8 +635,11 @@ mod tests {
     fn test_harvesting_col_all_active() {
         // 0x3FFF = all 14 bits set → no harvesting
         for col in 0..14_usize {
-            assert!(!tensix_col_harvested(0x3FFF, col),
-                "col {} should be active", col);
+            assert!(
+                !tensix_col_harvested(0x3FFF, col),
+                "col {} should be active",
+                col
+            );
         }
     }
 

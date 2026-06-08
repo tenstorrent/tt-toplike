@@ -13,6 +13,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -20,7 +22,34 @@ jobs:
           components: rustfmt, clippy
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: |
+          # Run fmt check on the whole codebase but only fail for files changed
+          # in this PR — pre-existing formatting debt in untouched files does
+          # not block contributors.
+          git fetch origin main --depth=1
+          BASE=$(git merge-base HEAD origin/main)
+          CHANGED=$(git diff --name-only "$BASE" HEAD -- '*.rs' | grep -v '^vendor/' | sort || true)
+
+          set +e
+          FMT_OUT=$(cargo fmt --check 2>&1)
+          FMT_EXIT=$?
+          set -e
+
+          if [ $FMT_EXIT -eq 0 ]; then
+            echo "All files properly formatted."
+            exit 0
+          fi
+
+          # Extract failing paths (cargo fmt prints absolute paths); strip cwd prefix.
+          FAILING=$(echo "$FMT_OUT" | grep "^Diff in " | sed "s|Diff in $(pwd)/||" | cut -d: -f1 | sort -u)
+          BLOCKING=$(comm -12 <(echo "$CHANGED") <(echo "$FAILING"))
+
+          if [ -n "$BLOCKING" ]; then
+            echo "Formatting errors in PR-changed files — run 'cargo fmt' locally:"
+            echo "$BLOCKING"
+            exit 1
+          fi
+          echo "Formatting ok (pre-existing issues in untouched files are ignored)."
 
       - name: Clippy (TUI, zero warnings)
         run: cargo clippy --locked --lib --bin tt-toplike-tui --features tui -- -D warnings

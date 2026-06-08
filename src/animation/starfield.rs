@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Hardware-responsive starfield visualization
 //!
 //! This module implements the core visualization where Tensix cores become stars,
@@ -14,10 +13,10 @@
 //! - Twinkle rate = Current draw
 //! - No fake animations - everything driven by real hardware state
 
+use crate::animation::topology::{sync_score, BoardTopology};
+use crate::animation::AdaptiveBaseline;
 use crate::backend::TelemetryBackend;
 use crate::models::Device;
-use crate::animation::AdaptiveBaseline;
-use crate::animation::topology::{BoardTopology, sync_score};
 use crate::ui::colors;
 use ratatui::style::Color;
 use std::collections::HashMap;
@@ -137,10 +136,10 @@ impl MemoryPlanet {
     /// Get color for this memory level
     pub fn get_color(&self) -> Color {
         match self.level {
-            0 => colors::rgb(100, 180, 255),   // L1 - blue (was colors::INFO)
-            1 => colors::rgb(255, 180, 100),   // L2 - orange (was colors::WARNING)
-            2 => colors::rgb(255, 100, 100),   // DDR - red (was colors::ERROR)
-            _ => colors::rgb(160, 160, 160),   // Fallback grey
+            0 => colors::rgb(100, 180, 255), // L1 - blue (was colors::INFO)
+            1 => colors::rgb(255, 180, 100), // L2 - orange (was colors::WARNING)
+            2 => colors::rgb(255, 100, 100), // DDR - red (was colors::ERROR)
+            _ => colors::rgb(160, 160, 160), // Fallback grey
         }
     }
 }
@@ -178,7 +177,11 @@ impl DataStream {
     /// `─` for intra-board links (always visible, even when idle).
     /// `═` for inter-board links (heavier, only shown when active).
     pub fn get_char(&self) -> char {
-        if self.intra_board { '─' } else { '═' }
+        if self.intra_board {
+            '─'
+        } else {
+            '═'
+        }
     }
 }
 
@@ -342,8 +345,10 @@ impl HardwareStarfield {
                         // Core position influences depth (edge cores = background, center = foreground)
                         let dist_from_center_x = (col as f32 - grid_cols as f32 / 2.0).abs();
                         let dist_from_center_y = (row as f32 - grid_rows as f32 / 2.0).abs();
-                        let depth = 1.0 - ((dist_from_center_x + dist_from_center_y) /
-                                         (grid_cols as f32 + grid_rows as f32)) * 0.6;
+                        let depth = 1.0
+                            - ((dist_from_center_x + dist_from_center_y)
+                                / (grid_cols as f32 + grid_rows as f32))
+                                * 0.6;
 
                         self.stars.push(Star {
                             x,
@@ -371,7 +376,11 @@ impl HardwareStarfield {
                 let px = device_center_x as f32 + angle.cos() * radius;
                 let py = device_center_y as f32 + angle.sin() * radius;
 
-                if px >= 0.0 && (px as usize) < self.width && py >= 0.0 && (py as usize) < self.height {
+                if px >= 0.0
+                    && (px as usize) < self.width
+                    && py >= 0.0
+                    && (py as usize) < self.height
+                {
                     self.planets.push(MemoryPlanet {
                         x: px as usize,
                         y: py as usize,
@@ -394,7 +403,11 @@ impl HardwareStarfield {
                 let px = device_center_x as f32 + angle.cos() * radius;
                 let py = device_center_y as f32 + angle.sin() * radius;
 
-                if px >= 0.0 && (px as usize) < self.width && py >= 0.0 && (py as usize) < self.height {
+                if px >= 0.0
+                    && (px as usize) < self.width
+                    && py >= 0.0
+                    && (py as usize) < self.height
+                {
                     self.planets.push(MemoryPlanet {
                         x: px as usize,
                         y: py as usize,
@@ -417,7 +430,11 @@ impl HardwareStarfield {
                 let px = device_center_x as f32 + angle.cos() * radius;
                 let py = device_center_y as f32 + angle.sin() * radius;
 
-                if px >= 0.0 && (px as usize) < self.width && py >= 0.0 && (py as usize) < self.height {
+                if px >= 0.0
+                    && (px as usize) < self.width
+                    && py >= 0.0
+                    && (py as usize) < self.height
+                {
                     self.planets.push(MemoryPlanet {
                         x: px as usize,
                         y: py as usize,
@@ -443,7 +460,9 @@ impl HardwareStarfield {
                     let to_x = (to_idx * device_spacing) + (device_spacing / 2);
 
                     // Determine topology relationship for this stream pair.
-                    let intra = self.board_topology.as_ref()
+                    let intra = self
+                        .board_topology
+                        .as_ref()
                         .map(|t| t.same_board(from_idx, to_idx))
                         .unwrap_or(false);
 
@@ -487,11 +506,15 @@ impl HardwareStarfield {
                 let temp = telem.temp_c();
                 let aiclk = telem.aiclk_mhz() as f32;
 
-                self.baseline.update(device.index, power, current, temp, aiclk);
+                self.baseline
+                    .update(device.index, power, current, temp, aiclk);
 
                 // Cache baseline-relative power change for stream sync_score.
-                let activity = self.baseline.power_change(device.index, power)
-                    .max(0.0).min(1.0);
+                let activity = self
+                    .baseline
+                    .power_change(device.index, power)
+                    .max(0.0)
+                    .min(1.0);
                 self.device_activity.insert(device.index, activity);
 
                 // Cache raw temp/power for fleet heat-map rendering.
@@ -542,9 +565,9 @@ impl HardwareStarfield {
                 // Color: full 360° rainbow cycling driven by temp + time + core position.
                 // Each core starts at a different phase so the grid shows a colour wave.
                 use crate::animation::{hsv_to_rgb, temp_to_hue};
-                let hue = (temp_to_hue(temp)
-                    + self.frame as f32 * 2.0
-                    + star.core_idx as f32 * 2.7) % 360.0;
+                let hue =
+                    (temp_to_hue(temp) + self.frame as f32 * 2.0 + star.core_idx as f32 * 2.7)
+                        % 360.0;
                 star.color = hsv_to_rgb(hue, 1.0, 1.0);
             }
         }
@@ -580,8 +603,12 @@ impl HardwareStarfield {
                 // per-channel offset spreads the colours so they aren't all in sync.
                 use crate::animation::hsv_to_rgb as _hsv;
                 let planet_hue = match planet.level {
-                    0 => (240.0 + self.frame as f32 * 1.5 + planet.channel_idx as f32 * 90.0) % 360.0,
-                    1 => (120.0 + self.frame as f32 * 1.0 + planet.channel_idx as f32 * 45.0) % 360.0,
+                    0 => {
+                        (240.0 + self.frame as f32 * 1.5 + planet.channel_idx as f32 * 90.0) % 360.0
+                    }
+                    1 => {
+                        (120.0 + self.frame as f32 * 1.0 + planet.channel_idx as f32 * 45.0) % 360.0
+                    }
                     _ => (self.frame as f32 * 2.5 + planet.channel_idx as f32 * 30.0) % 360.0,
                 };
                 let planet_value = 0.6 + planet.activity * 0.4;
@@ -590,9 +617,9 @@ impl HardwareStarfield {
                 // Orbital motion - planets orbit around device center
                 // Different levels orbit at different speeds
                 let orbit_speed = match planet.level {
-                    0 => 0.05,  // L1 fastest (inner ring)
-                    1 => 0.03,  // L2 medium
-                    2 => 0.02,  // DDR slowest (outer ring)
+                    0 => 0.05, // L1 fastest (inner ring)
+                    1 => 0.03, // L2 medium
+                    2 => 0.02, // DDR slowest (outer ring)
                     _ => 0.0,
                 };
 
@@ -607,7 +634,11 @@ impl HardwareStarfield {
                 let px = device_center_x as f32 + planet.angle.cos() * planet.radius;
                 let py = device_center_y as f32 + planet.angle.sin() * planet.radius;
 
-                if px >= 0.0 && (px as usize) < self.width && py >= 0.0 && (py as usize) < self.height {
+                if px >= 0.0
+                    && (px as usize) < self.width
+                    && py >= 0.0
+                    && (py as usize) < self.height
+                {
                     planet.x = px as usize;
                     planet.y = py as usize;
                 }
@@ -622,7 +653,10 @@ impl HardwareStarfield {
         // equally loaded — solving the "equal-load streams go dark" problem
         // that the old abs(power_diff)/50 formula had.
         for stream in &mut self.streams {
-            let act_a = *self.device_activity.get(&stream.from_device).unwrap_or(&0.0);
+            let act_a = *self
+                .device_activity
+                .get(&stream.from_device)
+                .unwrap_or(&0.0);
             let act_b = *self.device_activity.get(&stream.to_device).unwrap_or(&0.0);
 
             stream.intensity = sync_score(act_a, act_b, stream.intra_board);
@@ -649,10 +683,10 @@ impl HardwareStarfield {
     /// so the field fills the width.  Remaining rows are filled with faint
     /// background stars for depth.
     fn render_fleet_heatmap(&self) -> Vec<ratatui::text::Line<'static>> {
-        use ratatui::text::{Line, Span};
-        use ratatui::style::{Modifier, Style};
-        use crate::animation::hsv_to_rgb;
         use crate::animation::common::temp_to_hue;
+        use crate::animation::hsv_to_rgb;
+        use ratatui::style::{Modifier, Style};
+        use ratatui::text::{Line, Span};
 
         // Star characters in ascending brightness order.
         const STAR_CHARS: [char; 5] = ['·', '∘', '○', '◉', '●'];
@@ -671,7 +705,10 @@ impl HardwareStarfield {
         for row in 0..self.height {
             // ── Header row (one row above chip grid) ───────────────────────
             if row == top_pad && top_pad > 0 {
-                let label = format!(" ✦ Galaxy Fleet — {} chips · ·=cool ●=active ● =hot ", self.device_count);
+                let label = format!(
+                    " ✦ Galaxy Fleet — {} chips · ·=cool ●=active ● =hot ",
+                    self.device_count
+                );
                 lines.push(Line::from(vec![Span::styled(
                     label,
                     Style::default()
@@ -690,7 +727,8 @@ impl HardwareStarfield {
                 for col in 0..self.width {
                     // Hash position + frame for a slowly drifting starfield.
                     let seed = ((col * 7 + row * 13 + self.frame as usize * 3)
-                        .wrapping_mul(2654435761)) & 0xFFFF;
+                        .wrapping_mul(2654435761))
+                        & 0xFFFF;
                     let ch = if seed < 80 { '·' } else { ' ' };
                     text.push(ch);
                 }
@@ -709,7 +747,8 @@ impl HardwareStarfield {
                 if dev_idx >= self.device_count {
                     // Pad remainder with faint background stars.
                     let seed = ((col * 11 + row * 17 + self.frame as usize)
-                        .wrapping_mul(2654435761)) & 0xFFFF;
+                        .wrapping_mul(2654435761))
+                        & 0xFFFF;
                     let ch = if seed < 100 { '·' } else { ' ' };
                     spans.push(Span::styled(
                         format!("{} ", ch),
@@ -718,9 +757,9 @@ impl HardwareStarfield {
                     continue;
                 }
 
-                let temp  = *self.device_temps.get(&dev_idx).unwrap_or(&45.0);
+                let temp = *self.device_temps.get(&dev_idx).unwrap_or(&45.0);
                 let power = *self.device_powers.get(&dev_idx).unwrap_or(&0.0);
-                let act   = *self.device_activity.get(&dev_idx).unwrap_or(&0.0);
+                let act = *self.device_activity.get(&dev_idx).unwrap_or(&0.0);
 
                 // Twinkle: use frame + device_idx to give each star a different phase.
                 let phase = (self.frame as f32 * 0.15 + dev_idx as f32 * 0.7).sin();
@@ -737,7 +776,11 @@ impl HardwareStarfield {
                 let val = 0.5 + (power / 150.0_f32).min(0.5);
                 let color = hsv_to_rgb(hue, sat.min(1.0), val.min(1.0));
 
-                let modifier = if act > 0.7 { Modifier::BOLD } else { Modifier::empty() };
+                let modifier = if act > 0.7 {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                };
                 spans.push(Span::styled(
                     format!("{} ", star_ch),
                     Style::default().fg(color).add_modifier(modifier),
@@ -750,8 +793,8 @@ impl HardwareStarfield {
     }
 
     pub fn render(&self) -> Vec<ratatui::text::Line<'static>> {
-        use ratatui::text::{Line, Span};
         use ratatui::style::Style;
+        use ratatui::text::{Line, Span};
 
         // Galaxy fleet mode: 32+ devices switch to a macro galaxy heat-map view.
         if self.device_count >= 32 {
@@ -759,7 +802,8 @@ impl HardwareStarfield {
         }
 
         // Create blank canvas with explicit black background
-        let mut canvas: Vec<Vec<(char, Color)>> = vec![vec![(' ', colors::rgb(0, 0, 0)); self.width]; self.height];
+        let mut canvas: Vec<Vec<(char, Color)>> =
+            vec![vec![(' ', colors::rgb(0, 0, 0)); self.width]; self.height];
 
         // Render stars
         for star in &self.stars {
@@ -790,7 +834,8 @@ impl HardwareStarfield {
                 use crate::animation::hsv_to_rgb;
                 let stream_hue = if stream.intra_board {
                     // Use the board hue for intra-board links.
-                    self.board_topology.as_ref()
+                    self.board_topology
+                        .as_ref()
                         .map(|t| t.board_hue(stream.from_device))
                         .unwrap_or(200.0)
                 } else {
@@ -818,7 +863,7 @@ impl HardwareStarfield {
                         // Only set foreground color - let widget background show through
                         spans.push(Span::styled(
                             current_text.clone(),
-                            Style::default().fg(current_color)
+                            Style::default().fg(current_color),
                         ));
                         current_text.clear();
                     }
@@ -832,7 +877,7 @@ impl HardwareStarfield {
                 // Only set foreground color - let widget background show through
                 spans.push(Span::styled(
                     current_text,
-                    Style::default().fg(current_color)
+                    Style::default().fg(current_color),
                 ));
             }
 
@@ -857,9 +902,7 @@ impl HardwareStarfield {
                 Color::Rgb(r, g, b) => {
                     IcedColor::from_rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
                 }
-                Color::Indexed(_) => {
-                    IcedColor::from_rgb(0.8, 0.8, 0.8)
-                }
+                Color::Indexed(_) => IcedColor::from_rgb(0.8, 0.8, 0.8),
                 Color::Reset => IcedColor::from_rgb(0.8, 0.8, 0.8),
                 _ => IcedColor::from_rgb(0.8, 0.8, 0.8),
             }
@@ -869,7 +912,8 @@ impl HardwareStarfield {
         grid.clear();
 
         // Create internal canvas (same as render())
-        let mut canvas: Vec<Vec<(char, Color)>> = vec![vec![(' ', colors::TEXT_SECONDARY); self.width]; self.height];
+        let mut canvas: Vec<Vec<(char, Color)>> =
+            vec![vec![(' ', colors::TEXT_SECONDARY); self.width]; self.height];
 
         // Render stars
         for star in &self.stars {
@@ -894,7 +938,8 @@ impl HardwareStarfield {
             if show && stream.x < self.width && stream.y < self.height {
                 use crate::animation::hsv_to_rgb;
                 let stream_hue = if stream.intra_board {
-                    self.board_topology.as_ref()
+                    self.board_topology
+                        .as_ref()
                         .map(|t| t.board_hue(stream.from_device))
                         .unwrap_or(200.0)
                 } else {
@@ -1011,12 +1056,26 @@ mod tests {
 
     #[test]
     fn test_data_stream_chars() {
-        let intra = DataStream { x: 0, y: 0, from_device: 0, to_device: 1,
-            intensity: 0.5, offset: 0.0, intra_board: true };
+        let intra = DataStream {
+            x: 0,
+            y: 0,
+            from_device: 0,
+            to_device: 1,
+            intensity: 0.5,
+            offset: 0.0,
+            intra_board: true,
+        };
         assert_eq!(intra.get_char(), '─');
 
-        let inter = DataStream { x: 0, y: 0, from_device: 0, to_device: 2,
-            intensity: 0.5, offset: 0.0, intra_board: false };
+        let inter = DataStream {
+            x: 0,
+            y: 0,
+            from_device: 0,
+            to_device: 2,
+            intensity: 0.5,
+            offset: 0.0,
+            intra_board: false,
+        };
         assert_eq!(inter.get_char(), '═');
     }
 }
