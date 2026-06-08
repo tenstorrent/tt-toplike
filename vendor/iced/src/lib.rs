@@ -29,17 +29,17 @@
 //! # The Pocket Guide
 //! Start by calling [`run`]:
 //!
-//! ```rust,no_run
+//! ```no_run,standalone_crate
 //! pub fn main() -> iced::Result {
-//!     iced::run("A cool counter", update, view)
+//!     iced::run(update, view)
 //! }
 //! # fn update(state: &mut (), message: ()) {}
-//! # fn view(state: &()) -> iced::Element<()> { iced::widget::text("").into() }
+//! # fn view(state: &()) -> iced::Element<'_, ()> { iced::widget::text("").into() }
 //! ```
 //!
 //! Define an `update` function to __change__ your state:
 //!
-//! ```rust
+//! ```standalone_crate
 //! fn update(counter: &mut u64, message: Message) {
 //!     match message {
 //!         Message::Increment => *counter += 1,
@@ -51,11 +51,11 @@
 //!
 //! Define a `view` function to __display__ your state:
 //!
-//! ```rust
+//! ```standalone_crate
 //! use iced::widget::{button, text};
 //! use iced::Element;
 //!
-//! fn view(counter: &u64) -> Element<Message> {
+//! fn view(counter: &u64) -> Element<'_, Message> {
 //!     button(text(counter)).on_press(Message::Increment).into()
 //! }
 //! # #[derive(Clone)]
@@ -64,7 +64,7 @@
 //!
 //! And create a `Message` enum to __connect__ `view` and `update` together:
 //!
-//! ```rust
+//! ```standalone_crate
 //! #[derive(Debug, Clone)]
 //! enum Message {
 //!     Increment,
@@ -74,7 +74,7 @@
 //! ## Custom State
 //! You can define your own struct for your state:
 //!
-//! ```rust
+//! ```standalone_crate
 //! #[derive(Default)]
 //! struct Counter {
 //!     value: u64,
@@ -83,7 +83,7 @@
 //!
 //! But you have to change `update` and `view` accordingly:
 //!
-//! ```rust
+//! ```standalone_crate
 //! # struct Counter { value: u64 }
 //! # #[derive(Clone)]
 //! # enum Message { Increment }
@@ -95,7 +95,7 @@
 //!     }
 //! }
 //!
-//! fn view(counter: &Counter) -> Element<Message> {
+//! fn view(counter: &Counter) -> Element<'_, Message> {
 //!     button(text(counter.value)).on_press(Message::Increment).into()
 //! }
 //! ```
@@ -108,14 +108,14 @@
 //!
 //! Widgets are configured using the builder pattern:
 //!
-//! ```rust
+//! ```standalone_crate
 //! # struct Counter { value: u64 }
 //! # #[derive(Clone)]
 //! # enum Message { Increment }
 //! use iced::widget::{button, column, text};
 //! use iced::Element;
 //!
-//! fn view(counter: &Counter) -> Element<Message> {
+//! fn view(counter: &Counter) -> Element<'_, Message> {
 //!     column![
 //!         text(counter.value).size(20),
 //!         button("Increment").on_press(Message::Increment),
@@ -138,13 +138,13 @@
 //! Building your layout will often consist in using a combination of
 //! [rows], [columns], and [containers]:
 //!
-//! ```rust
+//! ```standalone_crate
 //! # struct State;
 //! # enum Message {}
 //! use iced::widget::{column, container, row};
 //! use iced::{Fill, Element};
 //!
-//! fn view(state: &State) -> Element<Message> {
+//! fn view(state: &State) -> Element<'_, Message> {
 //!     container(
 //!         column![
 //!             "Top",
@@ -181,13 +181,13 @@
 //!
 //! A fixed numeric [`Length`] in [`Pixels`] can also be used:
 //!
-//! ```rust
+//! ```standalone_crate
 //! # struct State;
 //! # enum Message {}
 //! use iced::widget::container;
 //! use iced::Element;
 //!
-//! fn view(state: &State) -> Element<Message> {
+//! fn view(state: &State) -> Element<'_, Message> {
 //!     container("I am 300px tall!").height(300).into()
 //! }
 //! ```
@@ -197,22 +197,26 @@
 //! function and leveraging the [`Application`] builder, instead of directly
 //! calling [`run`]:
 //!
-//! ```rust,no_run
-//! # #[derive(Default)]
+//! ```no_run,standalone_crate
 //! # struct State;
 //! use iced::Theme;
 //!
 //! pub fn main() -> iced::Result {
-//!     iced::application("A cool application", update, view)
+//!     iced::application(new, update, view)
 //!         .theme(theme)
 //!         .run()
+//! }
+//!
+//! fn new() -> State {
+//!     // ...
+//!     # State
 //! }
 //!
 //! fn theme(state: &State) -> Theme {
 //!     Theme::TokyoNight
 //! }
 //! # fn update(state: &mut State, message: ()) {}
-//! # fn view(state: &State) -> iced::Element<()> { iced::widget::text("").into() }
+//! # fn view(state: &State) -> iced::Element<'_, ()> { iced::widget::text("").into() }
 //! ```
 //!
 //! The `theme` function takes the current state of the application, allowing the
@@ -227,13 +231,13 @@
 //!
 //! The appearance of a widget can be changed by calling its `style` method:
 //!
-//! ```rust
+//! ```standalone_crate
 //! # struct State;
 //! # enum Message {}
 //! use iced::widget::container;
 //! use iced::Element;
 //!
-//! fn view(state: &State) -> Element<Message> {
+//! fn view(state: &State) -> Element<'_, Message> {
 //!     container("I am a rounded box!").style(container::rounded_box).into()
 //! }
 //! ```
@@ -241,14 +245,14 @@
 //! The `style` method of a widget takes a closure that, given the current active
 //! [`Theme`], returns the widget style:
 //!
-//! ```rust
+//! ```standalone_crate
 //! # struct State;
 //! # #[derive(Clone)]
 //! # enum Message {}
 //! use iced::widget::button;
 //! use iced::{Element, Theme};
 //!
-//! fn view(state: &State) -> Element<Message> {
+//! fn view(state: &State) -> Element<'_, Message> {
 //!     button("I am a styled button!").style(|theme: &Theme, status| {
 //!         let palette = theme.extended_palette();
 //!
@@ -286,7 +290,7 @@
 //! A [`Task`] can be leveraged to perform asynchronous work, like running a
 //! future or a stream:
 //!
-//! ```rust
+//! ```standalone_crate
 //! # #[derive(Clone)]
 //! # struct Weather;
 //! use iced::Task;
@@ -322,8 +326,8 @@
 //!
 //! Tasks can also be used to interact with the iced runtime. Some modules
 //! expose functions that create tasks for different purposes—like [changing
-//! window settings](window#functions), [focusing a widget](widget::focus_next), or
-//! [querying its visible bounds](widget::container::visible_bounds).
+//! window settings](window#functions), [focusing a widget](widget::operation::focus_next), or
+//! [querying its visible bounds](widget::selector::find).
 //!
 //! Like futures and streams, tasks expose [a monadic interface](Task::then)—but they can also be
 //! [mapped](Task::map), [chained](Task::chain), [batched](Task::batch), [canceled](Task::abortable),
@@ -334,19 +338,18 @@
 //!
 //! You will need to define a `subscription` function and use the [`Application`] builder:
 //!
-//! ```rust,no_run
-//! # #[derive(Default)]
+//! ```no_run,standalone_crate
 //! # struct State;
 //! use iced::window;
 //! use iced::{Size, Subscription};
 //!
-//! #[derive(Debug)]
+//! #[derive(Debug, Clone)]
 //! enum Message {
 //!     WindowResized(Size),
 //! }
 //!
 //! pub fn main() -> iced::Result {
-//!     iced::application("A cool application", update, view)
+//!     iced::application(new, update, view)
 //!         .subscription(subscription)
 //!         .run()
 //! }
@@ -354,8 +357,9 @@
 //! fn subscription(state: &State) -> Subscription<Message> {
 //!     window::resize_events().map(|(_id, size)| Message::WindowResized(size))
 //! }
+//! # fn new() -> State { State }
 //! # fn update(state: &mut State, message: Message) {}
-//! # fn view(state: &State) -> iced::Element<Message> { iced::widget::text("").into() }
+//! # fn view(state: &State) -> iced::Element<'_, Message> { iced::widget::text("").into() }
 //! ```
 //!
 //! A [`Subscription`] is [a _declarative_ builder of streams](Subscription#the-lifetime-of-a-subscription)
@@ -364,10 +368,10 @@
 //! visible widgets of your user interface, at every moment.
 //!
 //! As with tasks, some modules expose convenient functions that build a [`Subscription`] for you—like
-//! [`time::every`] which can be used to listen to time, or [`keyboard::on_key_press`] which will notify you
-//! of any key presses. But you can also create your own with [`Subscription::run`] and [`run_with_id`].
+//! [`time::every`] which can be used to listen to time, or [`keyboard::listen`] which will notify you
+//! of any keyboard events. But you can also create your own with [`Subscription::run`] and [`run_with`].
 //!
-//! [`run_with_id`]: Subscription::run_with_id
+//! [`run_with`]: Subscription::run_with
 //!
 //! ## Scaling Applications
 //! The `update`, `view`, and `Message` triplet composes very nicely.
@@ -375,7 +379,7 @@
 //! A common pattern is to leverage this composability to split an
 //! application into different screens:
 //!
-//! ```rust
+//! ```standalone_crate
 //! # mod contacts {
 //! #     use iced::{Element, Task};
 //! #     pub struct Contacts;
@@ -383,7 +387,7 @@
 //! #         pub fn update(&mut self, message: Message) -> Action { unimplemented!() }
 //! #         pub fn view(&self) -> Element<Message> { unimplemented!() }
 //! #     }
-//! #     #[derive(Debug)]
+//! #     #[derive(Debug, Clone)]
 //! #     pub enum Message {}
 //! #     pub enum Action { None, Run(Task<Message>), Chat(()) }
 //! # }
@@ -395,7 +399,7 @@
 //! #         pub fn update(&mut self, message: Message) -> Task<Message> { unimplemented!() }
 //! #         pub fn view(&self) -> Element<Message> { unimplemented!() }
 //! #     }
-//! #     #[derive(Debug)]
+//! #     #[derive(Debug, Clone)]
 //! #     pub enum Message {}
 //! # }
 //! use contacts::Contacts;
@@ -448,7 +452,7 @@
 //!     }
 //! }
 //!
-//! fn view(state: &State) -> Element<Message> {
+//! fn view(state: &State) -> Element<'_, Message> {
 //!     match &state.screen {
 //!         Screen::Contacts(contacts) => contacts.view().map(Message::Contacts),
 //!         Screen::Conversation(conversation) => conversation.view().map(Message::Conversation),
@@ -469,26 +473,51 @@
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/iced-rs/iced/bdf0430880f5c29443f5f0a0ae4895866dfef4c6/docs/logo.svg"
 )]
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 use iced_widget::graphics;
 use iced_widget::renderer;
 use iced_winit as shell;
 use iced_winit::core;
+use iced_winit::program;
 use iced_winit::runtime;
 
 pub use iced_futures::futures;
 pub use iced_futures::stream;
 
+#[cfg(not(any(
+    target_arch = "wasm32",
+    feature = "thread-pool",
+    feature = "tokio",
+    feature = "smol"
+)))]
+compile_error!(
+    "No futures executor has been enabled! You must enable an \
+    executor feature.\n\
+    Available options: thread-pool, tokio, or smol."
+);
+
+#[cfg(all(
+    target_family = "unix",
+    not(target_os = "macos"),
+    not(feature = "wayland"),
+    not(feature = "x11"),
+))]
+compile_error!(
+    "No Unix display server backend has been enabled. You must enable a \
+    display server feature.\n\
+    Available options: x11, wayland."
+);
+
 #[cfg(feature = "highlighter")]
 pub use iced_highlighter as highlighter;
 
+#[cfg(feature = "wgpu")]
+pub use iced_renderer::wgpu::wgpu;
+
 mod error;
-mod program;
 
 pub mod application;
 pub mod daemon;
-pub mod settings;
 pub mod time;
 pub mod window;
 
@@ -496,27 +525,39 @@ pub mod window;
 pub mod advanced;
 
 pub use crate::core::alignment;
+pub use crate::core::animation;
 pub use crate::core::border;
 pub use crate::core::color;
 pub use crate::core::gradient;
 pub use crate::core::padding;
 pub use crate::core::theme;
 pub use crate::core::{
-    Alignment, Background, Border, Color, ContentFit, Degrees, Gradient,
-    Length, Padding, Pixels, Point, Radians, Rectangle, Rotation, Shadow, Size,
-    Theme, Transformation, Vector,
+    Alignment, Animation, Background, Border, Color, ContentFit, Degrees,
+    Function, Gradient, Length, Never, Padding, Pixels, Point, Radians,
+    Rectangle, Rotation, Settings, Shadow, Size, Theme, Transformation, Vector,
+    never,
 };
+pub use crate::program::Preset;
+pub use crate::program::message;
 pub use crate::runtime::exit;
 pub use iced_futures::Subscription;
 
-pub use alignment::Horizontal::{Left, Right};
-pub use alignment::Vertical::{Bottom, Top};
 pub use Alignment::Center;
 pub use Length::{Fill, FillPortion, Shrink};
+pub use alignment::Horizontal::{Left, Right};
+pub use alignment::Vertical::{Bottom, Top};
+
+pub mod debug {
+    //! Debug your applications.
+    pub use iced_debug::{Span, time, time_with};
+}
 
 pub mod task {
     //! Create runtime tasks.
     pub use crate::runtime::task::{Handle, Task};
+
+    #[cfg(feature = "sipper")]
+    pub use crate::runtime::task::{Never, Sipper, Straw, sipper, stream};
 }
 
 pub mod clipboard {
@@ -529,18 +570,7 @@ pub mod clipboard {
 pub mod executor {
     //! Choose your preferred executor to power your application.
     pub use iced_futures::Executor;
-
-    /// A default cross-platform executor.
-    ///
-    /// - On native platforms, it will use:
-    ///   - `iced_futures::backend::native::tokio` when the `tokio` feature is enabled.
-    ///   - `iced_futures::backend::native::async-std` when the `async-std` feature is
-    ///     enabled.
-    ///   - `iced_futures::backend::native::smol` when the `smol` feature is enabled.
-    ///   - `iced_futures::backend::native::thread_pool` otherwise.
-    ///
-    /// - On Wasm, it will use `iced_futures::backend::wasm::wasm_bindgen`.
-    pub type Default = iced_futures::backend::default::Executor;
+    pub use iced_futures::backend::default::Executor as Default;
 }
 
 pub mod font {
@@ -559,7 +589,7 @@ pub mod keyboard {
     //! Listen and react to keyboard events.
     pub use crate::core::keyboard::key;
     pub use crate::core::keyboard::{Event, Key, Location, Modifiers};
-    pub use iced_futures::keyboard::{on_key_press, on_key_release};
+    pub use iced_futures::keyboard::listen;
 }
 
 pub mod mouse {
@@ -569,11 +599,12 @@ pub mod mouse {
     };
 }
 
-#[cfg(feature = "system")]
 pub mod system {
     //! Retrieve system information.
-    pub use crate::runtime::system::Information;
-    pub use crate::shell::system::*;
+    pub use crate::runtime::system::{theme, theme_changes};
+
+    #[cfg(feature = "sysinfo")]
+    pub use crate::runtime::system::{Information, information};
 }
 
 pub mod overlay {
@@ -602,15 +633,20 @@ pub mod touch {
 #[allow(hidden_glob_reexports)]
 pub mod widget {
     //! Use the built-in widgets or create your own.
+    pub use iced_runtime::widget::*;
     pub use iced_widget::*;
+
+    #[cfg(feature = "image")]
+    pub mod image {
+        //! Images display raster graphics in different formats (PNG, JPG, etc.).
+        pub use iced_runtime::image::{Allocation, Error, allocate};
+        pub use iced_widget::image::*;
+    }
 
     // We hide the re-exported modules by `iced_widget`
     mod core {}
     mod graphics {}
-    mod native {}
     mod renderer {}
-    mod style {}
-    mod runtime {}
 }
 
 pub use application::Application;
@@ -619,9 +655,10 @@ pub use error::Error;
 pub use event::Event;
 pub use executor::Executor;
 pub use font::Font;
+pub use program::Program;
 pub use renderer::Renderer;
-pub use settings::Settings;
 pub use task::Task;
+pub use window::Window;
 
 #[doc(inline)]
 pub use application::application;
@@ -641,17 +678,17 @@ pub type Element<
 /// The result of running an iced program.
 pub type Result = std::result::Result<(), Error>;
 
-/// Runs a basic iced application with default [`Settings`] given its title,
-/// update, and view logic.
+/// Runs a basic iced application with default [`Settings`] given its update
+/// and view logic.
 ///
 /// This is equivalent to chaining [`application()`] with [`Application::run`].
 ///
 /// # Example
-/// ```no_run
+/// ```no_run,standalone_crate
 /// use iced::widget::{button, column, text, Column};
 ///
 /// pub fn main() -> iced::Result {
-///     iced::run("A counter", update, view)
+///     iced::run(update, view)
 /// }
 ///
 /// #[derive(Debug, Clone)]
@@ -673,16 +710,15 @@ pub type Result = std::result::Result<(), Error>;
 /// }
 /// ```
 pub fn run<State, Message, Theme, Renderer>(
-    title: impl application::Title<State> + 'static,
-    update: impl application::Update<State, Message> + 'static,
-    view: impl for<'a> application::View<'a, State, Message, Theme, Renderer>
-        + 'static,
+    update: impl application::UpdateFn<State, Message> + 'static,
+    view: impl for<'a> application::ViewFn<'a, State, Message, Theme, Renderer>
+    + 'static,
 ) -> Result
 where
     State: Default + 'static,
-    Message: std::fmt::Debug + Send + 'static,
-    Theme: Default + program::DefaultStyle + 'static,
+    Message: Send + message::MaybeDebug + message::MaybeClone + 'static,
+    Theme: theme::Base + 'static,
     Renderer: program::Renderer + 'static,
 {
-    application(title, update, view).run()
+    application(State::default, update, view).run()
 }

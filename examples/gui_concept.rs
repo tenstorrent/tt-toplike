@@ -18,7 +18,7 @@ struct TTTopGUI {
 
 #[derive(Debug, Clone)]
 enum Message {
-    Tick,           // Periodic update
+    Tick, // Periodic update
     SelectDevice(usize),
     ToggleVisualization,
 }
@@ -71,16 +71,12 @@ impl Application for TTTopGUI {
         let telemetry = self.backend.telemetry(device.index);
 
         // Device selector tabs
-        let device_tabs = row(
-            self.devices
-                .iter()
-                .enumerate()
-                .map(|(i, d)| {
-                    button(text(format!("Device {}", i)))
-                        .on_press(Message::SelectDevice(i))
-                })
-                .collect::<Vec<_>>()
-        );
+        let device_tabs = row(self
+            .devices
+            .iter()
+            .enumerate()
+            .map(|(i, d)| button(text(format!("Device {}", i))).on_press(Message::SelectDevice(i)))
+            .collect::<Vec<_>>());
 
         // Telemetry display (styled like your TUI)
         let telemetry_view = if let Some(telem) = telemetry {
@@ -88,11 +84,13 @@ impl Application for TTTopGUI {
                 text(format!("Power: {:.1}W", telem.power.unwrap_or(0.0)))
                     .size(24)
                     .style(power_color(telem.power)),
-                text(format!("Temp: {:.1}°C", telem.asic_temperature.unwrap_or(0.0)))
-                    .size(24)
-                    .style(temp_color(telem.asic_temperature)),
-                text(format!("Current: {:.1}A", telem.current.unwrap_or(0.0)))
-                    .size(20),
+                text(format!(
+                    "Temp: {:.1}°C",
+                    telem.asic_temperature.unwrap_or(0.0)
+                ))
+                .size(24)
+                .style(temp_color(telem.asic_temperature)),
+                text(format!("Current: {:.1}A", telem.current.unwrap_or(0.0))).size(20),
                 // Psychedelic visualization canvas
                 canvas(StarfieldCanvas::new(telem, device))
                     .height(Length::Fill)
@@ -102,19 +100,12 @@ impl Application for TTTopGUI {
             column![text("No telemetry available")]
         };
 
-        container(
-            column![
-                device_tabs,
-                telemetry_view,
-            ]
-        )
-        .into()
+        container(column![device_tabs, telemetry_view,]).into()
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {
         // Periodic updates at your configured interval
-        iced::time::every(std::time::Duration::from_millis(100))
-            .map(|_| Message::Tick)
+        iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::Tick)
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::{Radians, Vector};
+use crate::{Length, Radians, Vector};
 
 /// An amount of space in 2 dimensions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -24,7 +24,7 @@ impl Size {
     pub const UNIT: Size = Size::new(1., 1.);
 
     /// A [`Size`] with infinite width and height.
-    pub const INFINITY: Size = Size::new(f32::INFINITY, f32::INFINITY);
+    pub const INFINITE: Size = Size::new(f32::INFINITY, f32::INFINITY);
 
     /// Returns the minimum of each component of this size and another.
     pub fn min(self, other: Self) -> Self {
@@ -52,7 +52,7 @@ impl Size {
         }
     }
 
-    /// Rotates the given [`Size`] and returns the minimum [`Size`]
+    /// Rotates this [`Size`] and returns the minimum [`Size`]
     /// containing it.
     pub fn rotate(self, rotation: Radians) -> Size {
         let radians = f32::from(rotation);
@@ -63,6 +63,24 @@ impl Size {
             height: (self.width * radians.sin()).abs()
                 + (self.height * radians.cos()).abs(),
         }
+    }
+
+    /// Applies an aspect ratio to this [`Size`] without
+    /// exceeding its bounds.
+    pub const fn ratio(self, aspect_ratio: f32) -> Size {
+        Size {
+            width: (self.height * aspect_ratio).min(self.width),
+            height: (self.width / aspect_ratio).min(self.height),
+        }
+    }
+}
+
+impl Size<Length> {
+    /// Returns true if either `width` or `height` are 0-sized.
+    #[inline]
+    pub fn is_void(&self) -> bool {
+        matches!(self.width, Length::Fixed(0.0))
+            || matches!(self.height, Length::Fixed(0.0))
     }
 }
 
@@ -75,6 +93,12 @@ impl<T> From<[T; 2]> for Size<T> {
 impl<T> From<(T, T)> for Size<T> {
     fn from((width, height): (T, T)) -> Self {
         Self { width, height }
+    }
+}
+
+impl From<(u32, u32)> for Size {
+    fn from((width, height): (u32, u32)) -> Self {
+        Size::new(width as f32, height as f32)
     }
 }
 
@@ -137,6 +161,20 @@ where
         Size {
             width: self.width * rhs,
             height: self.height * rhs,
+        }
+    }
+}
+
+impl<T> std::ops::Div<T> for Size<T>
+where
+    T: std::ops::Div<Output = T> + Copy,
+{
+    type Output = Size<T>;
+
+    fn div(self, rhs: T) -> Self::Output {
+        Size {
+            width: self.width / rhs,
+            height: self.height / rhs,
         }
     }
 }

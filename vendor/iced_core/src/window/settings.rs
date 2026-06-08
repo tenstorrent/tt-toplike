@@ -1,7 +1,7 @@
 //! Configure your windows.
 #[cfg(target_os = "windows")]
 #[path = "settings/windows.rs"]
-mod platform;
+pub mod platform;
 
 #[cfg(target_os = "macos")]
 #[path = "settings/macos.rs"]
@@ -24,15 +24,22 @@ mod platform;
 #[path = "settings/other.rs"]
 mod platform;
 
-use crate::window::{Icon, Level, Position};
 use crate::Size;
+use crate::window::{Icon, Level, Position};
 
 pub use platform::PlatformSpecific;
+
 /// The window settings of an application.
 #[derive(Debug, Clone)]
 pub struct Settings {
     /// The initial logical dimensions of the window.
     pub size: Size,
+
+    /// Whether the window should start maximized.
+    pub maximized: bool,
+
+    /// Whether the window should start fullscreen.
+    pub fullscreen: bool,
 
     /// The initial position of the window.
     pub position: Position,
@@ -49,11 +56,29 @@ pub struct Settings {
     /// Whether the window should be resizable or not.
     pub resizable: bool,
 
+    /// Whether the title bar has Close button or not
+    pub closeable: bool,
+
+    /// Whether the title bar has Minimize button or not
+    pub minimizable: bool,
+
     /// Whether the window should have a border, a title bar, etc. or not.
     pub decorations: bool,
 
     /// Whether the window should be transparent.
     pub transparent: bool,
+
+    /// Whether the window should have blurry background.
+    ///
+    /// Note that the blurry effect is applied to the transparent window. You need to enable
+    /// [`Settings::transparent`] and set a proper opacity value to the background color with
+    /// `Application::style`.
+    ///
+    /// This option is only supported on macOS and Linux. Please read the [winit document][winit]
+    /// for more details.
+    ///
+    /// [winit]: https://docs.rs/winit/0.30/winit/window/struct.Window.html#method.set_blur
+    pub blur: bool,
 
     /// The window [`Level`].
     pub level: Level,
@@ -79,13 +104,18 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             size: Size::new(1024.0, 768.0),
+            maximized: false,
+            fullscreen: false,
             position: Position::default(),
             min_size: None,
             max_size: None,
             visible: true,
             resizable: true,
+            minimizable: true,
+            closeable: true,
             decorations: true,
             transparent: false,
+            blur: false,
             level: Level::default(),
             icon: None,
             exit_on_close_request: true,

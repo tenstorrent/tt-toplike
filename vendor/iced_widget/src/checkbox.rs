@@ -16,7 +16,8 @@
 //! }
 //!
 //! fn view(state: &State) -> Element<'_, Message> {
-//!     checkbox("Toggle me!", state.is_checked)
+//!     checkbox(state.is_checked)
+//!         .label("Toggle me!")
 //!         .on_toggle(Message::CheckboxToggled)
 //!         .into()
 //! }
@@ -31,7 +32,6 @@
 //! ```
 //! ![Checkbox drawn by `iced_wgpu`](https://github.com/iced-rs/iced/blob/7760618fb112074bc40b148944521f312152012a/docs/images/checkbox.png?raw=true)
 use crate::core::alignment;
-use crate::core::event::{self, Event};
 use crate::core::layout;
 use crate::core::mouse;
 use crate::core::renderer;
@@ -40,9 +40,10 @@ use crate::core::theme::palette;
 use crate::core::touch;
 use crate::core::widget;
 use crate::core::widget::tree::{self, Tree};
+use crate::core::window;
 use crate::core::{
-    Background, Border, Clipboard, Color, Element, Layout, Length, Pixels,
-    Rectangle, Shell, Size, Theme, Widget,
+    Background, Border, Clipboard, Color, Element, Event, Layout, Length,
+    Pixels, Rectangle, Shell, Size, Theme, Widget,
 };
 
 /// A box that can be checked.
@@ -63,7 +64,8 @@ use crate::core::{
 /// }
 ///
 /// fn view(state: &State) -> Element<'_, Message> {
-///     checkbox("Toggle me!", state.is_checked)
+///     checkbox(state.is_checked)
+///         .label("Toggle me!")
 ///         .on_toggle(Message::CheckboxToggled)
 ///         .into()
 /// }
@@ -77,7 +79,6 @@ use crate::core::{
 /// }
 /// ```
 /// ![Checkbox drawn by `iced_wgpu`](https://github.com/iced-rs/iced/blob/7760618fb112074bc40b148944521f312152012a/docs/images/checkbox.png?raw=true)
-#[allow(missing_debug_implementations)]
 pub struct Checkbox<
     'a,
     Message,
@@ -89,7 +90,7 @@ pub struct Checkbox<
 {
     is_checked: bool,
     on_toggle: Option<Box<dyn Fn(bool) -> Message + 'a>>,
-    label: String,
+    label: Option<text::Fragment<'a>>,
     width: Length,
     size: f32,
     spacing: f32,
@@ -100,6 +101,7 @@ pub struct Checkbox<
     font: Option<Renderer::Font>,
     icon: Icon<Renderer::Font>,
     class: Theme::Class<'a>,
+    last_status: Option<Status>,
 }
 
 impl<'a, Message, Theme, Renderer> Checkbox<'a, Message, Theme, Renderer>
@@ -110,22 +112,18 @@ where
     /// The default size of a [`Checkbox`].
     const DEFAULT_SIZE: f32 = 16.0;
 
-    /// The default spacing of a [`Checkbox`].
-    const DEFAULT_SPACING: f32 = 8.0;
-
     /// Creates a new [`Checkbox`].
     ///
     /// It expects:
-    ///   * the label of the [`Checkbox`]
     ///   * a boolean describing whether the [`Checkbox`] is checked or not
-    pub fn new(label: impl Into<String>, is_checked: bool) -> Self {
+    pub fn new(is_checked: bool) -> Self {
         Checkbox {
             is_checked,
             on_toggle: None,
-            label: label.into(),
+            label: None,
             width: Length::Shrink,
             size: Self::DEFAULT_SIZE,
-            spacing: Self::DEFAULT_SPACING,
+            spacing: Self::DEFAULT_SIZE / 2.0,
             text_size: None,
             text_line_height: text::LineHeight::default(),
             text_shaping: text::Shaping::default(),
@@ -139,7 +137,14 @@ where
                 shaping: text::Shaping::Basic,
             },
             class: Theme::default(),
+            last_status: None,
         }
+    }
+
+    /// Sets the label of the [`Checkbox`].
+    pub fn label(mut self, label: impl text::IntoFragment<'a>) -> Self {
+        self.label = Some(label.into_fragment());
+        self
     }
 
     /// Sets the function that will be called when the [`Checkbox`] is toggled.
@@ -245,8 +250,8 @@ where
     }
 }
 
-impl<'a, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for Checkbox<'a, Message, Theme, Renderer>
+impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for Checkbox<'_, Message, Theme, Renderer>
 where
     Renderer: text::Renderer,
     Theme: Catalog,
@@ -267,66 +272,95 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         tree: &mut Tree,
         renderer: &Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
         layout::next_to_each_other(
             &limits.width(self.width),
-            self.spacing,
+            if self.label.is_some() {
+                self.spacing
+            } else {
+                0.0
+            },
             |_| layout::Node::new(Size::new(self.size, self.size)),
             |limits| {
-                let state = tree
+                if let Some(label) = self.label.as_deref() {
+                    let state = tree
                     .state
                     .downcast_mut::<widget::text::State<Renderer::Paragraph>>();
 
-                widget::text::layout(
-                    state,
-                    renderer,
-                    limits,
-                    self.width,
-                    Length::Shrink,
-                    &self.label,
-                    self.text_line_height,
-                    self.text_size,
-                    self.font,
-                    alignment::Horizontal::Left,
-                    alignment::Vertical::Top,
-                    self.text_shaping,
-                    self.text_wrapping,
-                )
+                    widget::text::layout(
+                        state,
+                        renderer,
+                        limits,
+                        label,
+                        widget::text::Format {
+                            width: self.width,
+                            height: Length::Shrink,
+                            line_height: self.text_line_height,
+                            size: self.text_size,
+                            font: self.font,
+                            align_x: text::Alignment::Default,
+                            align_y: alignment::Vertical::Top,
+                            shaping: self.text_shaping,
+                            wrapping: self.text_wrapping,
+                        },
+                    )
+                } else {
+                    layout::Node::new(Size::ZERO)
+                }
             },
         )
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         _tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         _renderer: &Renderer,
         _clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         _viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
             | Event::Touch(touch::Event::FingerPressed { .. }) => {
                 let mouse_over = cursor.is_over(layout.bounds());
 
-                if mouse_over {
-                    if let Some(on_toggle) = &self.on_toggle {
-                        shell.publish((on_toggle)(!self.is_checked));
-                        return event::Status::Captured;
-                    }
+                if mouse_over && let Some(on_toggle) = &self.on_toggle {
+                    shell.publish((on_toggle)(!self.is_checked));
+                    shell.capture_event();
                 }
             }
             _ => {}
         }
 
-        event::Status::Ignored
+        let current_status = {
+            let is_mouse_over = cursor.is_over(layout.bounds());
+            let is_disabled = self.on_toggle.is_none();
+            let is_checked = self.is_checked;
+
+            if is_disabled {
+                Status::Disabled { is_checked }
+            } else if is_mouse_over {
+                Status::Hovered { is_checked }
+            } else {
+                Status::Active { is_checked }
+            }
+        };
+
+        if let Event::Window(window::Event::RedrawRequested(_now)) = event {
+            self.last_status = Some(current_status);
+        } else if self
+            .last_status
+            .is_some_and(|status| status != current_status)
+        {
+            shell.request_redraw();
+        }
     }
 
     fn mouse_interaction(
@@ -351,24 +385,17 @@ where
         theme: &Theme,
         defaults: &renderer::Style,
         layout: Layout<'_>,
-        cursor: mouse::Cursor,
+        _cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        let is_mouse_over = cursor.is_over(layout.bounds());
-        let is_disabled = self.on_toggle.is_none();
-        let is_checked = self.is_checked;
-
         let mut children = layout.children();
 
-        let status = if is_disabled {
-            Status::Disabled { is_checked }
-        } else if is_mouse_over {
-            Status::Hovered { is_checked }
-        } else {
-            Status::Active { is_checked }
-        };
-
-        let style = theme.style(&self.class, status);
+        let style = theme.style(
+            &self.class,
+            self.last_status.unwrap_or(Status::Disabled {
+                is_checked: self.is_checked,
+            }),
+        );
 
         {
             let layout = children.next().unwrap();
@@ -400,8 +427,8 @@ where
                         size,
                         line_height: *line_height,
                         bounds: bounds.size(),
-                        horizontal_alignment: alignment::Horizontal::Center,
-                        vertical_alignment: alignment::Vertical::Center,
+                        align_x: text::Alignment::Center,
+                        align_y: alignment::Vertical::Center,
                         shaping: *shaping,
                         wrapping: text::Wrapping::default(),
                     },
@@ -412,6 +439,10 @@ where
             }
         }
 
+        if self.label.is_none() {
+            return;
+        }
+
         {
             let label_layout = children.next().unwrap();
             let state: &widget::text::State<Renderer::Paragraph> =
@@ -420,13 +451,25 @@ where
             crate::text::draw(
                 renderer,
                 defaults,
-                label_layout,
-                state.0.raw(),
+                label_layout.bounds(),
+                state.raw(),
                 crate::text::Style {
                     color: style.text_color,
                 },
                 viewport,
             );
+        }
+    }
+
+    fn operate(
+        &mut self,
+        _tree: &mut Tree,
+        layout: Layout<'_>,
+        _renderer: &Renderer,
+        operation: &mut dyn widget::Operation,
+    ) {
+        if let Some(label) = self.label.as_deref() {
+            operation.text(None, layout.bounds(), label);
         }
     }
 }
@@ -481,13 +524,13 @@ pub enum Status {
 }
 
 /// The style of a checkbox.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Style {
     /// The [`Background`] of the checkbox.
     pub background: Background,
     /// The icon [`Color`] of the checkbox.
     pub icon_color: Color,
-    /// The [`Border`] of hte checkbox.
+    /// The [`Border`] of the checkbox.
     pub border: Border,
     /// The text [`Color`] of the checkbox.
     pub text_color: Option<Color>,
@@ -528,20 +571,23 @@ pub fn primary(theme: &Theme, status: Status) -> Style {
 
     match status {
         Status::Active { is_checked } => styled(
-            palette.primary.strong.text,
+            palette.background.strong.color,
             palette.background.base,
-            palette.primary.strong,
-            is_checked,
-        ),
-        Status::Hovered { is_checked } => styled(
-            palette.primary.strong.text,
-            palette.background.weak,
+            palette.primary.base.text,
             palette.primary.base,
             is_checked,
         ),
-        Status::Disabled { is_checked } => styled(
-            palette.primary.strong.text,
+        Status::Hovered { is_checked } => styled(
+            palette.background.strong.color,
             palette.background.weak,
+            palette.primary.base.text,
+            palette.primary.strong,
+            is_checked,
+        ),
+        Status::Disabled { is_checked } => styled(
+            palette.background.weak.color,
+            palette.background.weaker,
+            palette.primary.base.text,
             palette.background.strong,
             is_checked,
         ),
@@ -554,20 +600,23 @@ pub fn secondary(theme: &Theme, status: Status) -> Style {
 
     match status {
         Status::Active { is_checked } => styled(
-            palette.background.base.text,
+            palette.background.strong.color,
             palette.background.base,
+            palette.background.base.text,
             palette.background.strong,
             is_checked,
         ),
         Status::Hovered { is_checked } => styled(
-            palette.background.base.text,
+            palette.background.strong.color,
             palette.background.weak,
+            palette.background.base.text,
             palette.background.strong,
             is_checked,
         ),
         Status::Disabled { is_checked } => styled(
-            palette.background.strong.color,
+            palette.background.weak.color,
             palette.background.weak,
+            palette.background.base.text,
             palette.background.weak,
             is_checked,
         ),
@@ -580,46 +629,52 @@ pub fn success(theme: &Theme, status: Status) -> Style {
 
     match status {
         Status::Active { is_checked } => styled(
-            palette.success.base.text,
+            palette.background.weak.color,
             palette.background.base,
+            palette.success.base.text,
             palette.success.base,
             is_checked,
         ),
         Status::Hovered { is_checked } => styled(
-            palette.success.base.text,
+            palette.background.strong.color,
             palette.background.weak,
-            palette.success.base,
+            palette.success.base.text,
+            palette.success.strong,
             is_checked,
         ),
         Status::Disabled { is_checked } => styled(
-            palette.success.base.text,
+            palette.background.weak.color,
             palette.background.weak,
+            palette.success.base.text,
             palette.success.weak,
             is_checked,
         ),
     }
 }
 
-/// A danger checkbox; denoting a negaive toggle.
+/// A danger checkbox; denoting a negative toggle.
 pub fn danger(theme: &Theme, status: Status) -> Style {
     let palette = theme.extended_palette();
 
     match status {
         Status::Active { is_checked } => styled(
-            palette.danger.base.text,
+            palette.background.strong.color,
             palette.background.base,
+            palette.danger.base.text,
             palette.danger.base,
             is_checked,
         ),
         Status::Hovered { is_checked } => styled(
-            palette.danger.base.text,
+            palette.background.strong.color,
             palette.background.weak,
-            palette.danger.base,
+            palette.danger.base.text,
+            palette.danger.strong,
             is_checked,
         ),
         Status::Disabled { is_checked } => styled(
-            palette.danger.base.text,
+            palette.background.weak.color,
             palette.background.weak,
+            palette.danger.base.text,
             palette.danger.weak,
             is_checked,
         ),
@@ -627,22 +682,25 @@ pub fn danger(theme: &Theme, status: Status) -> Style {
 }
 
 fn styled(
-    icon_color: Color,
+    border_color: Color,
     base: palette::Pair,
+    icon_color: Color,
     accent: palette::Pair,
     is_checked: bool,
 ) -> Style {
+    let (background, border) = if is_checked {
+        (accent, accent.color)
+    } else {
+        (base, border_color)
+    };
+
     Style {
-        background: Background::Color(if is_checked {
-            accent.color
-        } else {
-            base.color
-        }),
+        background: Background::Color(background.color),
         icon_color,
         border: Border {
             radius: 2.0.into(),
             width: 1.0,
-            color: accent.color,
+            color: border,
         },
         text_color: None,
     }

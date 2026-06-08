@@ -2,7 +2,7 @@
 //!
 //! [data types]: https://docs.microsoft.com/en-us/typography/opentype/spec/otff#data-types
 
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![warn(clippy::doc_markdown)]
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -21,6 +21,7 @@ mod fword;
 mod glyph_id;
 mod int24;
 mod longdatetime;
+mod matrix;
 mod name_id;
 mod offset;
 mod point;
@@ -38,6 +39,7 @@ pub use fword::{FWord, UfWord};
 pub use glyph_id::{GlyphId, GlyphId16, TryFromGlyphIdError};
 pub use int24::Int24;
 pub use longdatetime::LongDateTime;
+pub use matrix::{Matrix, MatrixElement};
 pub use name_id::NameId;
 pub use offset::{Nullable, Offset16, Offset24, Offset32};
 pub use point::Point;
@@ -54,4 +56,4 @@ pub const TT_SFNT_VERSION: u32 = 0x00010000;
 /// The SFNT version for legacy Apple fonts containing TrueType outlines.
 pub const TRUE_SFNT_VERSION: u32 = 0x74727565;
 /// The SFNT version for fonts containing CFF outlines.
-pub const CFF_SFTN_VERSION: u32 = 0x4F54544F;
+pub const CFF_SFNT_VERSION: u32 = 0x4F54544F;

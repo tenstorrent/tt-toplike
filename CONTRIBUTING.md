@@ -26,7 +26,7 @@ We welcome feature suggestions! Please open a [GitHub Issue](https://github.com/
 
 1. **Fork the repository** and create your branch from `main`
 2. **Make your changes** following the project's coding standards
-3. **Test your changes** - ensure `cargo test` passes and `cargo build --all-features` succeeds
+3. **Test your changes** - ensure `cargo test` passes and the build succeeds (see **Building** below)
 4. **Update documentation** if you're adding new features or changing behavior
 5. **Commit your changes** with clear, descriptive commit messages
 6. **Push to your fork** and submit a pull request to the `main` branch
@@ -48,15 +48,22 @@ We welcome feature suggestions! Please open a [GitHub Issue](https://github.com/
 ### Building
 
 ```bash
-# Build TUI only (safe defaults)
+# TUI (safe defaults — no Luwen, no GUI, runs without hardware)
 cargo build --release --bin tt-toplike-tui --features tui,json-backend,linux-procfs
 
-# Build with all features
-cargo build --release --all-features
+# GUI (requires a desktop environment with Vulkan/GL)
+cargo build --release --bin tt-toplike-gui --features gui
+
+# Luwen backend (direct PCI access — requires ttkmd kernel module loaded)
+# Only add this if you specifically need Luwen; it is NOT included by default
+cargo build --release --bin tt-toplike-tui --features tui,json-backend,linux-procfs,luwen-backend
 
 # Run tests
-cargo test
+cargo test --lib --features tui
 ```
+
+> **Note**: `--all-features` will not work because several features are mutually
+> exclusive or require hardware that is unavailable in a build environment.
 
 ### Code Style
 

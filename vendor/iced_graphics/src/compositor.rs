@@ -2,13 +2,12 @@
 //! surfaces.
 use crate::core::Color;
 use crate::futures::{MaybeSend, MaybeSync};
-use crate::{Error, Settings, Viewport};
+use crate::{Error, Settings, Shell, Viewport};
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use thiserror::Error;
 
 use std::borrow::Cow;
-use std::future::Future;
 
 /// A graphics compositor that can draw to windows.
 pub trait Compositor: Sized {
@@ -19,21 +18,25 @@ pub trait Compositor: Sized {
     type Surface;
 
     /// Creates a new [`Compositor`].
-    fn new<W: Window + Clone>(
+    fn new(
         settings: Settings,
-        compatible_window: W,
+        display: impl Display + Clone,
+        compatible_window: impl Window + Clone,
+        shell: Shell,
     ) -> impl Future<Output = Result<Self, Error>> {
-        Self::with_backend(settings, compatible_window, None)
+        Self::with_backend(settings, display, compatible_window, shell, None)
     }
 
     /// Creates a new [`Compositor`] with a backend preference.
     ///
     /// If the backend does not match the preference, it will return
     /// [`Error::GraphicsAdapterNotFound`].
-    fn with_backend<W: Window + Clone>(
-        _settings: Settings,
-        _compatible_window: W,
-        _backend: Option<&str>,
+    fn with_backend(
+        settings: Settings,
+        display: impl Display + Clone,
+        compatible_window: impl Window + Clone,
+        shell: Shell,
+        backend: Option<&str>,
     ) -> impl Future<Output = Result<Self, Error>>;
 
     /// Creates a [`Self::Renderer`] for the [`Compositor`].
@@ -60,7 +63,7 @@ pub trait Compositor: Sized {
     );
 
     /// Returns [`Information`] used by this [`Compositor`].
-    fn fetch_information(&self) -> Information;
+    fn information(&self) -> Information;
 
     /// Loads a font from its bytes.
     fn load_font(&mut self, font: Cow<'static, [u8]>) {
@@ -74,26 +77,24 @@ pub trait Compositor: Sized {
     ///
     /// [`Renderer`]: Self::Renderer
     /// [`Surface`]: Self::Surface
-    fn present<T: AsRef<str>>(
+    fn present(
         &mut self,
         renderer: &mut Self::Renderer,
         surface: &mut Self::Surface,
         viewport: &Viewport,
         background_color: Color,
-        overlay: &[T],
+        on_pre_present: impl FnOnce(),
     ) -> Result<(), SurfaceError>;
 
     /// Screenshots the current [`Renderer`] primitives to an offscreen texture, and returns the bytes of
     /// the texture ordered as `RGBA` in the `sRGB` color space.
     ///
     /// [`Renderer`]: Self::Renderer
-    fn screenshot<T: AsRef<str>>(
+    fn screenshot(
         &mut self,
         renderer: &mut Self::Renderer,
-        surface: &mut Self::Surface,
         viewport: &Viewport,
         background_color: Color,
-        overlay: &[T],
     ) -> Vec<u8>;
 }
 
@@ -111,6 +112,15 @@ impl<T> Window for T where
 {
 }
 
+/// An owned display handle that can be used in a [`Compositor`].
+///
+/// This is just a convenient super trait of the `raw-window-handle`
+/// trait.
+pub trait Display: HasDisplayHandle + MaybeSend + MaybeSync + 'static {}
+
+impl<T> Display for T where T: HasDisplayHandle + MaybeSend + MaybeSync + 'static
+{}
+
 /// Defines the default compositor of a renderer.
 pub trait Default {
     /// The compositor of the renderer.
@@ -121,9 +131,7 @@ pub trait Default {
 #[derive(Clone, PartialEq, Eq, Debug, Error)]
 pub enum SurfaceError {
     /// A timeout was encountered while trying to acquire the next frame.
-    #[error(
-        "A timeout was encountered while trying to acquire the next frame"
-    )]
+    #[error("A timeout was encountered while trying to acquire the next frame")]
     Timeout,
     /// The underlying surface has changed, and therefore the surface must be updated.
     #[error(
@@ -136,6 +144,9 @@ pub enum SurfaceError {
     /// There is no more memory left to allocate a new frame.
     #[error("There is no more memory left to allocate a new frame")]
     OutOfMemory,
+    /// Acquiring a texture failed with a generic error.
+    #[error("Acquiring a texture failed with a generic error")]
+    Other,
 }
 
 /// Contains information about the graphics (e.g. graphics adapter, graphics backend).
@@ -152,10 +163,12 @@ impl Compositor for () {
     type Renderer = ();
     type Surface = ();
 
-    async fn with_backend<W: Window + Clone>(
+    async fn with_backend(
         _settings: Settings,
-        _compatible_window: W,
-        _preffered_backend: Option<&str>,
+        _display: impl Display,
+        _compatible_window: impl Window + Clone,
+        _shell: Shell,
+        _preferred_backend: Option<&str>,
     ) -> Result<Self, Error> {
         Ok(())
     }
@@ -180,31 +193,29 @@ impl Compositor for () {
 
     fn load_font(&mut self, _font: Cow<'static, [u8]>) {}
 
-    fn fetch_information(&self) -> Information {
+    fn information(&self) -> Information {
         Information {
             adapter: String::from("Null Renderer"),
             backend: String::from("Null"),
         }
     }
 
-    fn present<T: AsRef<str>>(
+    fn present(
         &mut self,
         _renderer: &mut Self::Renderer,
         _surface: &mut Self::Surface,
         _viewport: &Viewport,
         _background_color: Color,
-        _overlay: &[T],
+        _on_pre_present: impl FnOnce(),
     ) -> Result<(), SurfaceError> {
         Ok(())
     }
 
-    fn screenshot<T: AsRef<str>>(
+    fn screenshot(
         &mut self,
         _renderer: &mut Self::Renderer,
-        _surface: &mut Self::Surface,
         _viewport: &Viewport,
         _background_color: Color,
-        _overlay: &[T],
     ) -> Vec<u8> {
         vec![]
     }

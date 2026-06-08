@@ -12,10 +12,17 @@
 #![allow(clippy::upper_case_acronyms)]
 #![allow(clippy::identity_op)]
 #![allow(clippy::missing_safety_doc)]
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(rustdoc::broken_intra_doc_links)]
+#![allow(rustdoc::bare_urls)]
+#![allow(rustdoc::invalid_html_tags)]
 
 #[link(name = "CoreData", kind = "framework")]
 extern "C" {}
 
+#[cfg(feature = "CloudKit")]
+#[path = "CloudKit.rs"]
+mod __CloudKit;
 #[cfg(feature = "CoreDataDefines")]
 #[path = "CoreDataDefines.rs"]
 mod __CoreDataDefines;
@@ -181,6 +188,84 @@ mod __NSStagedMigrationManager;
 
 #[cfg(feature = "CoreDataDefines")]
 pub use self::__CoreDataDefines::NSCoreDataVersionNumber;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_10;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_10_2;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_10_3;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_11;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_11_3;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_4;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_4_3;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_5;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_5_3;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_6;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_6_2;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_6_3;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_7;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_7_2;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_7_3;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_7_4;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_8;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_8_2;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_9;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_9_2;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber10_9_3;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber_iPhoneOS_3_0;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber_iPhoneOS_3_1;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber_iPhoneOS_3_2;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber_iPhoneOS_4_0;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber_iPhoneOS_4_1;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber_iPhoneOS_4_2;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber_iPhoneOS_4_3;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber_iPhoneOS_5_0;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber_iPhoneOS_5_1;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber_iPhoneOS_6_0;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber_iPhoneOS_6_1;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber_iPhoneOS_7_0;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber_iPhoneOS_7_1;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber_iPhoneOS_8_0;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber_iPhoneOS_8_3;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber_iPhoneOS_9_0;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber_iPhoneOS_9_2;
+#[cfg(feature = "CoreDataDefines")]
+pub use self::__CoreDataDefines::NSCoreDataVersionNumber_iPhoneOS_9_3;
 #[cfg(feature = "CoreDataErrors")]
 pub use self::__CoreDataErrors::NSAffectedObjectsErrorKey;
 #[cfg(feature = "CoreDataErrors")]
@@ -382,7 +467,7 @@ pub use self::__NSFetchRequestExpression::NSFetchRequestExpressionType;
 pub use self::__NSFetchedPropertyDescription::NSFetchedPropertyDescription;
 #[cfg(feature = "NSFetchedResultsController")]
 pub use self::__NSFetchedResultsController::NSFetchedResultsChangeType;
-#[cfg(feature = "NSFetchedResultsController")]
+#[cfg(all(feature = "NSFetchRequest", feature = "NSFetchedResultsController"))]
 pub use self::__NSFetchedResultsController::NSFetchedResultsController;
 #[cfg(feature = "NSFetchedResultsController")]
 pub use self::__NSFetchedResultsController::NSFetchedResultsControllerDelegate;
@@ -550,6 +635,8 @@ pub use self::__NSPersistentStoreCoordinator::NSPersistentStoreFileProtectionKey
 #[cfg(feature = "NSPersistentStoreCoordinator")]
 pub use self::__NSPersistentStoreCoordinator::NSPersistentStoreForceDestroyOption;
 #[cfg(feature = "NSPersistentStoreCoordinator")]
+pub use self::__NSPersistentStoreCoordinator::NSPersistentStoreModelVersionChecksumKey;
+#[cfg(feature = "NSPersistentStoreCoordinator")]
 pub use self::__NSPersistentStoreCoordinator::NSPersistentStoreOSCompatibility;
 #[cfg(feature = "NSPersistentStoreCoordinator")]
 pub use self::__NSPersistentStoreCoordinator::NSPersistentStoreRebuildFromUbiquitousContentOption;
@@ -615,7 +702,7 @@ pub use self::__NSPersistentStoreDescription::NSPersistentStoreDescription;
 pub use self::__NSPersistentStoreRequest::NSPersistentStoreRequest;
 #[cfg(feature = "NSPersistentStoreRequest")]
 pub use self::__NSPersistentStoreRequest::NSPersistentStoreRequestType;
-#[cfg(feature = "NSPersistentStoreResult")]
+#[cfg(all(feature = "NSFetchRequest", feature = "NSPersistentStoreResult"))]
 pub use self::__NSPersistentStoreResult::NSAsynchronousFetchResult;
 #[cfg(feature = "NSPersistentStoreResult")]
 pub use self::__NSPersistentStoreResult::NSBatchDeleteRequestResultType;

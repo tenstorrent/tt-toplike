@@ -1,0 +1,36 @@
+[package]
+name = "android-build"
+version = "0.1.4"
+authors = [
+    "Kevin Boos <kevinaboos@gmail.com>",
+    "Robius Project Maintainers",
+]
+description = """
+A build-time dependency to compile Java source files for Android as part of a Rust build.
+Use this from your `build.rs` Cargo build script.
+"""
+documentation = "https://docs.rs/android-build"
+edition = "2021"
+homepage = "https://robius.rs/"
+keywords = ["android", "java", "build", "build-rs", "robius"]
+categories = ["development-tools::build-utils"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/project-robius/android-build"
+
+
+[dependencies]
+
+## For finding the user's home directory on Windows.
+[target.'cfg(target_os = "windows")'.dependencies.windows-sys]
+version = "0.52"
+default-features = false
+features = [ "Win32_UI_Shell", "Win32_Foundation", "Win32_Globalization", "Win32_System_Com" ]
+
+
+[features]
+
+default = ["cargo"]
+
+## Enables communication with `cargo` via standard output for build scripts.
+cargo = []

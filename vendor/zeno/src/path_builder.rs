@@ -1,9 +1,14 @@
 //! Path builder.
 
+#![allow(clippy::excessive_precision)]
+
 use super::command::Command;
 use super::geometry::{Angle, BoundsBuilder, Point, Transform};
+#[allow(unused)]
+use super::F32Ext;
 
 use crate::lib::Vec;
+use core::f32;
 
 /// Describes the size of an arc.
 #[derive(Copy, Clone, PartialEq)]
@@ -210,12 +215,11 @@ impl PathBuilder for Vec<Command> {
                 | Command::CurveTo(_, _, p) => *p,
                 Command::Close => {
                     for cmd in self.iter().rev().skip(1) {
-                        match cmd {
-                            Command::MoveTo(p) => return *p,
-                            _ => {}
+                        if let Command::MoveTo(p) = cmd {
+                            return *p;
                         }
                     }
-                    return Point::ZERO;
+                    Point::ZERO
                 }
             },
         }
@@ -261,7 +265,7 @@ pub struct TransformSink<'a, S> {
     pub transform: Transform,
 }
 
-impl<'a, S: PathBuilder> PathBuilder for TransformSink<'a, S> {
+impl<S: PathBuilder> PathBuilder for TransformSink<'_, S> {
     fn current_point(&self) -> Point {
         self.sink.current_point()
     }
@@ -396,12 +400,7 @@ impl Arc {
         let (cx, cy, ang1, mut ang2) = {
             fn vec_angle(ux: f32, uy: f32, vx: f32, vy: f32) -> f32 {
                 let sign = if (ux * vy - uy * vx) < 0. { -1. } else { 1. };
-                let mut dot = ux * vx + uy * vy;
-                if dot > 1. {
-                    dot = 1.
-                } else if dot < -1. {
-                    dot = -1.
-                }
+                let dot = (ux * vx + uy * vy).clamp(-1., 1.);
                 sign * dot.acos()
             }
             let rxsq = rx * rx;
@@ -438,9 +437,9 @@ impl Arc {
         }
         let segments = ratio.ceil().max(1.);
         ang2 /= segments;
-        let a = if ang2 == 1.5707963267948966 {
+        let a = if ang2 == f32::consts::FRAC_PI_2 {
             0.551915024494
-        } else if ang2 == -1.5707963267948966 {
+        } else if ang2 == -f32::consts::FRAC_PI_2 {
             -0.551915024494
         } else {
             4. / 3. * (ang2 / 4.).tan()
@@ -493,6 +492,7 @@ impl Iterator for Arc {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn arc(
     sink: &mut impl PathBuilder,
     from: Point,
@@ -525,12 +525,7 @@ pub fn arc(
     let (cx, cy, mut ang1, mut ang2) = {
         fn vec_angle(ux: f32, uy: f32, vx: f32, vy: f32) -> f32 {
             let sign = if (ux * vy - uy * vx) < 0. { -1. } else { 1. };
-            let mut dot = ux * vx + uy * vy;
-            if dot > 1. {
-                dot = 1.
-            } else if dot < -1. {
-                dot = -1.
-            }
+            let dot = (ux * vx + uy * vy).clamp(-1., 1.);
             sign * dot.acos()
         }
         let rxsq = rx * rx;
@@ -567,9 +562,9 @@ pub fn arc(
     }
     let segments = ratio.ceil().max(1.);
     ang2 /= segments;
-    let a = if ang2 == 1.5707963267948966 {
+    let a = if ang2 == f32::consts::FRAC_PI_2 {
         0.551915024494
-    } else if ang2 == -1.5707963267948966 {
+    } else if ang2 == -f32::consts::FRAC_PI_2 {
         -0.551915024494
     } else {
         4. / 3. * (ang2 / 4.).tan()

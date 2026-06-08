@@ -2,9 +2,10 @@
 
 include!("../../generated/generated_variations.rs");
 
-use super::gvar::SharedTuples;
-
-use std::iter::Skip;
+use super::{
+    glyf::{PointCoord, PointFlags, PointMarker},
+    gvar::GlyphDelta,
+};
 
 pub const NO_VARIATION_INDEX: u32 = 0xFFFFFFFF;
 /// Outer and inner indices for reading from an [ItemVariationStore].
@@ -14,6 +15,13 @@ pub struct DeltaSetIndex {
     pub outer: u16,
     /// Inner delta set index.
     pub inner: u16,
+}
+
+impl DeltaSetIndex {
+    pub const NO_VARIATION_INDEX: Self = Self {
+        outer: (NO_VARIATION_INDEX >> 16) as u16,
+        inner: (NO_VARIATION_INDEX & 0xFFFF) as u16,
+    };
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -47,14 +55,13 @@ impl TupleIndex {
     /// Mask for the low 12 bits to give the shared tuple records index.
     pub const TUPLE_INDEX_MASK: u16 = 0x0FFF;
 
+    #[inline(always)]
     fn tuple_len(self, axis_count: u16, flag: usize) -> usize {
-        match flag {
-            0 => self.embedded_peak_tuple(),
-            1 => self.intermediate_region(),
-            _ => panic!("only 0 or 1 allowed here"),
+        if flag == 0 {
+            self.embedded_peak_tuple() as usize * axis_count as usize
+        } else {
+            self.intermediate_region() as usize * axis_count as usize
         }
-        .then_some(axis_count as usize)
-        .unwrap_or_default()
     }
 
     pub fn bits(self) -> u16 {
@@ -155,6 +162,7 @@ impl<'a> TupleVariationHeader<'a> {
     /// Peak tuple record for this tuple variation table — optional,
     /// determined by flags in the tupleIndex value.  Note that this
     /// must always be included in the 'cvar' table.
+    #[inline(always)]
     pub fn peak_tuple(&self) -> Option<Tuple<'a>> {
         self.tuple_index().embedded_peak_tuple().then(|| {
             let range = self.shape.peak_tuple_byte_range();
@@ -166,6 +174,7 @@ impl<'a> TupleVariationHeader<'a> {
 
     /// Intermediate start tuple record for this tuple variation table
     /// — optional, determined by flags in the tupleIndex value.
+    #[inline(always)]
     pub fn intermediate_start_tuple(&self) -> Option<Tuple<'a>> {
         self.tuple_index().intermediate_region().then(|| {
             let range = self.shape.intermediate_start_tuple_byte_range();
@@ -177,6 +186,7 @@ impl<'a> TupleVariationHeader<'a> {
 
     /// Intermediate end tuple record for this tuple variation table
     /// — optional, determined by flags in the tupleIndex value.
+    #[inline(always)]
     pub fn intermediate_end_tuple(&self) -> Option<Tuple<'a>> {
         self.tuple_index().intermediate_region().then(|| {
             let range = self.shape.intermediate_end_tuple_byte_range();
@@ -186,24 +196,45 @@ impl<'a> TupleVariationHeader<'a> {
         })
     }
 
+    /// Intermediate tuple records for this tuple variation table
+    /// — optional, determined by flags in the tupleIndex value.
+    #[inline(always)]
+    pub fn intermediate_tuples(&self) -> Option<(Tuple<'a>, Tuple<'a>)> {
+        self.tuple_index().intermediate_region().then(|| {
+            let start_range = self.shape.intermediate_start_tuple_byte_range();
+            let end_range = self.shape.intermediate_end_tuple_byte_range();
+            (
+                Tuple {
+                    values: self.data.read_array(start_range).unwrap(),
+                },
+                Tuple {
+                    values: self.data.read_array(end_range).unwrap(),
+                },
+            )
+        })
+    }
+
     /// Compute the actual length of this table in bytes
+    #[inline(always)]
     fn byte_len(&self, axis_count: u16) -> usize {
         const FIXED_LEN: usize = u16::RAW_BYTE_LEN + TupleIndex::RAW_BYTE_LEN;
         let tuple_byte_len = F2Dot14::RAW_BYTE_LEN * axis_count as usize;
         let index = self.tuple_index();
         FIXED_LEN
-            + index
-                .embedded_peak_tuple()
-                .then_some(tuple_byte_len)
-                .unwrap_or_default()
-            + index
-                .intermediate_region()
-                .then_some(tuple_byte_len * 2)
-                .unwrap_or_default()
+            + if index.embedded_peak_tuple() {
+                tuple_byte_len
+            } else {
+                Default::default()
+            }
+            + if index.intermediate_region() {
+                tuple_byte_len * 2
+            } else {
+                Default::default()
+            }
     }
 }
 
-impl<'a> Tuple<'a> {
+impl Tuple<'_> {
     pub fn len(&self) -> usize {
         self.values().len()
     }
@@ -212,6 +243,7 @@ impl<'a> Tuple<'a> {
         self.values.is_empty()
     }
 
+    #[inline(always)]
     pub fn get(&self, idx: usize) -> Option<F2Dot14> {
         self.values.get(idx).map(BigEndian::get)
     }
@@ -228,7 +260,7 @@ impl Default for Tuple<'_> {
 }
 
 /// [Packed "Point" Numbers](https://learn.microsoft.com/en-us/typography/opentype/spec/otvarcommonformats#packed-point-numbers)
-#[derive(Clone, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct PackedPointNumbers<'a> {
     data: FontData<'a>,
 }
@@ -270,6 +302,7 @@ impl<'a> PackedPointNumbers<'a> {
     }
 
     /// the number of bytes to encode the packed point numbers
+    #[inline(never)]
     fn total_len(&self) -> usize {
         let (n_points, mut n_bytes) = self.count_and_count_bytes();
         if n_points == 0 {
@@ -385,7 +418,7 @@ impl Iterator for PackedPointNumbersIter<'_> {
 }
 
 // completely unnecessary?
-impl<'a> ExactSizeIterator for PackedPointNumbersIter<'a> {}
+impl ExactSizeIterator for PackedPointNumbersIter<'_> {}
 
 /// [Packed Deltas](https://learn.microsoft.com/en-us/typography/opentype/spec/otvarcommonformats#packed-deltas)
 #[derive(Clone, Debug)]
@@ -403,7 +436,7 @@ impl<'a> PackedDeltas<'a> {
     /// NOTE: this is unbounded, and assumes all of data is deltas.
     #[doc(hidden)] // used by tests in write-fonts
     pub fn consume_all(data: FontData<'a>) -> Self {
-        let count = DeltaRunIter::new(data.cursor(), None).count();
+        let count = count_all_deltas(data);
         Self { data, count }
     }
 
@@ -413,6 +446,14 @@ impl<'a> PackedDeltas<'a> {
 
     pub fn iter(&self) -> DeltaRunIter<'a> {
         DeltaRunIter::new(self.data.cursor(), Some(self.count))
+    }
+
+    fn x_deltas(&self) -> DeltaRunIter<'a> {
+        DeltaRunIter::new(self.data.cursor(), Some(self.count / 2))
+    }
+
+    fn y_deltas(&self) -> DeltaRunIter<'a> {
+        DeltaRunIter::new(self.data.cursor(), Some(self.count)).skip_fast(self.count / 2)
     }
 }
 
@@ -425,12 +466,15 @@ const DELTAS_ARE_WORDS: u8 = 0x40;
 const DELTA_RUN_COUNT_MASK: u8 = 0x3F;
 
 /// The type of values for a given delta run (influences the number of bytes per delta)
+///
+/// The variants are intentionally set to the byte size of the type to allow usage
+/// as a multiplier when computing offsets.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DeltaRunType {
-    Zero,
-    I8,
-    I16,
-    I32,
+    Zero = 0,
+    I8 = 1,
+    I16 = 2,
+    I32 = 4,
 }
 
 impl DeltaRunType {
@@ -473,6 +517,41 @@ impl<'a> DeltaRunIter<'a> {
         while self.next().is_some() {}
         self.cursor
     }
+
+    /// Skips `n` deltas without reading the actual delta values.
+    fn skip_fast(mut self, n: usize) -> Self {
+        let mut wanted = n;
+        loop {
+            let remaining = self.remaining_in_run as usize;
+            if wanted > remaining {
+                // Haven't seen enough deltas yet; consume the remaining
+                // data bytes and move to the next run
+                self.cursor.advance_by(remaining * self.value_type as usize);
+                wanted -= remaining;
+                if self.read_next_control().is_none() {
+                    self.limit = Some(0);
+                    break;
+                }
+                continue;
+            }
+            let consumed = wanted.min(remaining);
+            self.remaining_in_run -= consumed as u8;
+            self.cursor.advance_by(consumed * self.value_type as usize);
+            if let Some(limit) = self.limit.as_mut() {
+                *limit = limit.saturating_sub(n);
+            }
+            break;
+        }
+        self
+    }
+
+    fn read_next_control(&mut self) -> Option<()> {
+        self.remaining_in_run = 0;
+        let control: u8 = self.cursor.read().ok()?;
+        self.value_type = DeltaRunType::new(control);
+        self.remaining_in_run = (control & DELTA_RUN_COUNT_MASK) + 1;
+        Some(())
+    }
 }
 
 impl Iterator for DeltaRunIter<'_> {
@@ -485,16 +564,9 @@ impl Iterator for DeltaRunIter<'_> {
             }
             self.limit = Some(limit - 1);
         }
-        // if no items remain in this run, start the next one.
-        // NOTE: we use `while` so we can sanely handle the case where some
-        // run in the middle of the data has an explicit zero length
-        //TODO: create a font with data of this shape and go crash some font parsers
-        while self.remaining_in_run == 0 {
-            let control: u8 = self.cursor.read().ok()?;
-            self.value_type = DeltaRunType::new(control);
-            self.remaining_in_run = (control & DELTA_RUN_COUNT_MASK) + 1;
+        if self.remaining_in_run == 0 {
+            self.read_next_control()?;
         }
-
         self.remaining_in_run -= 1;
         match self.value_type {
             DeltaRunType::Zero => Some(0),
@@ -503,6 +575,19 @@ impl Iterator for DeltaRunIter<'_> {
             DeltaRunType::I32 => self.cursor.read().ok(),
         }
     }
+}
+
+/// Counts the number of deltas available in the given data, avoiding
+/// excessive reads.
+fn count_all_deltas(data: FontData) -> usize {
+    let mut count = 0;
+    let mut offset = 0;
+    while let Ok(control) = data.read_at::<u8>(offset) {
+        let run_count = (control & DELTA_RUN_COUNT_MASK) as usize + 1;
+        count += run_count;
+        offset += run_count * DeltaRunType::new(control) as usize + 1;
+    }
+    count
 }
 
 /// A helper type for iterating over [`TupleVariationHeader`]s.
@@ -527,12 +612,14 @@ impl<'a> TupleVariationHeaderIter<'a> {
 impl<'a> Iterator for TupleVariationHeaderIter<'a> {
     type Item = Result<TupleVariationHeader<'a>, ReadError>;
 
+    #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
         if self.current == self.n_headers {
             return None;
         }
         self.current += 1;
         let next = TupleVariationHeader::read(self.data, self.axis_count);
+
         let next_len = next
             .as_ref()
             .map(|table| table.byte_len(self.axis_count))
@@ -545,7 +632,7 @@ impl<'a> Iterator for TupleVariationHeaderIter<'a> {
 #[derive(Clone)]
 pub struct TupleVariationData<'a, T> {
     pub(crate) axis_count: u16,
-    pub(crate) shared_tuples: Option<SharedTuples<'a>>,
+    pub(crate) shared_tuples: Option<ComputedArray<'a, Tuple<'a>>>,
     pub(crate) shared_point_numbers: Option<PackedPointNumbers<'a>>,
     pub(crate) tuple_count: TupleVariationCount,
     // the data for all the tuple variation headers
@@ -557,7 +644,7 @@ pub struct TupleVariationData<'a, T> {
 
 impl<'a, T> TupleVariationData<'a, T>
 where
-    T: TupleDelta + 'a,
+    T: TupleDelta,
 {
     pub fn tuples(&self) -> TupleVariationIter<'a, T> {
         TupleVariationIter {
@@ -580,10 +667,18 @@ where
         &self,
         coords: &'a [F2Dot14],
     ) -> impl Iterator<Item = (TupleVariation<'a, T>, Fixed)> + 'a {
-        self.tuples().filter_map(|tuple| {
-            let scaler = tuple.compute_scalar(coords)?;
-            Some((tuple, scaler))
-        })
+        ActiveTupleVariationIter {
+            coords,
+            parent: self.clone(),
+            header_iter: TupleVariationHeaderIter::new(
+                self.header_data,
+                self.tuple_count.count() as usize,
+                self.axis_count,
+            ),
+            serialized_data: self.serialized_data,
+            data_offset: 0,
+            _marker: std::marker::PhantomData,
+        }
     }
 
     pub(crate) fn tuple_count(&self) -> usize {
@@ -604,6 +699,7 @@ impl<'a, T> TupleVariationIter<'a, T>
 where
     T: TupleDelta,
 {
+    #[inline(always)]
     fn next_tuple(&mut self) -> Option<TupleVariation<'a, T>> {
         if self.parent.tuple_count() == self.current {
             return None;
@@ -615,17 +711,12 @@ where
         let data_len = header.variation_data_size() as usize;
         let var_data = self.serialized_data.take_up_to(data_len)?;
 
-        let (point_numbers, packed_deltas) = if header.tuple_index().private_point_numbers() {
-            PackedPointNumbers::split_off_front(var_data)
-        } else {
-            (self.parent.shared_point_numbers.clone()?, var_data)
-        };
         Some(TupleVariation {
             axis_count: self.parent.axis_count,
             header,
             shared_tuples: self.parent.shared_tuples.clone(),
-            packed_deltas: PackedDeltas::consume_all(packed_deltas),
-            point_numbers,
+            serialized_data: var_data,
+            shared_point_numbers: self.parent.shared_point_numbers.clone(),
             _marker: std::marker::PhantomData,
         })
     }
@@ -637,8 +728,57 @@ where
 {
     type Item = TupleVariation<'a, T>;
 
+    #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
         self.next_tuple()
+    }
+}
+
+/// An iterator over the active [`TupleVariation`]s for a specific glyph
+/// for a given set of coordinates.
+struct ActiveTupleVariationIter<'a, T> {
+    coords: &'a [F2Dot14],
+    parent: TupleVariationData<'a, T>,
+    header_iter: TupleVariationHeaderIter<'a>,
+    serialized_data: FontData<'a>,
+    data_offset: usize,
+    _marker: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<'a, T> Iterator for ActiveTupleVariationIter<'a, T>
+where
+    T: TupleDelta,
+{
+    type Item = (TupleVariation<'a, T>, Fixed);
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let header = self.header_iter.next()?.ok()?;
+            let data_len = header.variation_data_size() as usize;
+            let data_start = self.data_offset;
+            let data_end = data_start.checked_add(data_len)?;
+            self.data_offset = data_end;
+            if let Some(scalar) = compute_scalar(
+                &header,
+                self.parent.axis_count as usize,
+                &self.parent.shared_tuples,
+                self.coords,
+            ) {
+                let var_data = self.serialized_data.slice(data_start..data_end)?;
+                return Some((
+                    TupleVariation {
+                        axis_count: self.parent.axis_count,
+                        header,
+                        shared_tuples: self.parent.shared_tuples.clone(),
+                        serialized_data: var_data,
+                        shared_point_numbers: self.parent.shared_point_numbers.clone(),
+                        _marker: std::marker::PhantomData,
+                    },
+                    scalar,
+                ));
+            }
+        }
     }
 }
 
@@ -647,9 +787,9 @@ where
 pub struct TupleVariation<'a, T> {
     axis_count: u16,
     header: TupleVariationHeader<'a>,
-    shared_tuples: Option<SharedTuples<'a>>,
-    packed_deltas: PackedDeltas<'a>,
-    point_numbers: PackedPointNumbers<'a>,
+    shared_tuples: Option<ComputedArray<'a, Tuple<'a>>>,
+    serialized_data: FontData<'a>,
+    shared_point_numbers: Option<PackedPointNumbers<'a>>,
     _marker: std::marker::PhantomData<fn() -> T>,
 }
 
@@ -659,11 +799,22 @@ where
 {
     /// Returns true if this tuple provides deltas for all points in a glyph.
     pub fn has_deltas_for_all_points(&self) -> bool {
-        self.point_numbers.count() == 0
+        if self.header.tuple_index().private_point_numbers() {
+            PackedPointNumbers {
+                data: self.serialized_data,
+            }
+            .count()
+                == 0
+        } else if let Some(shared) = &self.shared_point_numbers {
+            shared.count() == 0
+        } else {
+            false
+        }
     }
 
-    pub fn point_numbers(&'a self) -> PackedPointNumbersIter<'a> {
-        self.point_numbers.iter()
+    pub fn point_numbers(&self) -> PackedPointNumbersIter<'a> {
+        let (point_numbers, _) = self.point_numbers_and_packed_deltas();
+        point_numbers.iter()
     }
 
     /// Returns the 'peak' tuple for this variation
@@ -671,7 +822,7 @@ where
         self.header
             .tuple_index()
             .tuple_records_index()
-            .and_then(|idx| self.shared_tuples.as_ref()?.tuples().get(idx as usize).ok())
+            .and_then(|idx| self.shared_tuples.as_ref()?.get(idx as usize).ok())
             .or_else(|| self.header.peak_tuple())
             .unwrap_or_default()
     }
@@ -694,46 +845,12 @@ where
     /// Returns `None` if this tuple is not applicable at the provided
     /// coordinates (e.g. if the resulting scalar is zero).
     pub fn compute_scalar(&self, coords: &[F2Dot14]) -> Option<Fixed> {
-        const ZERO: Fixed = Fixed::ZERO;
-        let mut scalar = Fixed::ONE;
-        let peak = self.peak();
-        let inter_start = self.header.intermediate_start_tuple();
-        let inter_end = self.header.intermediate_end_tuple();
-        if peak.len() != self.axis_count as usize {
-            return None;
-        }
-
-        for i in 0..self.axis_count {
-            let i = i as usize;
-            let coord = coords.get(i).copied().unwrap_or_default().to_fixed();
-            let peak = peak.get(i).unwrap_or_default().to_fixed();
-            if peak == ZERO || peak == coord {
-                continue;
-            }
-
-            if coord == ZERO {
-                return None;
-            }
-
-            if let (Some(inter_start), Some(inter_end)) = (&inter_start, &inter_end) {
-                let start = inter_start.get(i).unwrap_or_default().to_fixed();
-                let end = inter_end.get(i).unwrap_or_default().to_fixed();
-                if coord <= start || coord >= end {
-                    return None;
-                }
-                if coord < peak {
-                    scalar = scalar.mul_div(coord - start, peak - start);
-                } else {
-                    scalar = scalar.mul_div(end - coord, end - peak);
-                }
-            } else {
-                if coord < peak.min(ZERO) || coord > peak.max(ZERO) {
-                    return None;
-                }
-                scalar = scalar.mul_div(coord, peak);
-            }
-        }
-        Some(scalar)
+        compute_scalar(
+            &self.header,
+            self.axis_count as usize,
+            &self.shared_tuples,
+            coords,
+        )
     }
 
     /// Compute the floating point scalar for this tuple at the given location
@@ -793,9 +910,295 @@ where
     ///
     /// This does not account for scaling. Returns only explicitly encoded
     /// deltas, e.g. an omission by IUP will not be present.
-    pub fn deltas(&'a self) -> TupleDeltaIter<'a, T> {
-        TupleDeltaIter::new(&self.point_numbers, &self.packed_deltas)
+    pub fn deltas(&self) -> TupleDeltaIter<'a, T> {
+        let (point_numbers, packed_deltas) = self.point_numbers_and_packed_deltas();
+        let count = point_numbers.count() as usize;
+        let packed_deltas = if count == 0 {
+            PackedDeltas::consume_all(packed_deltas)
+        } else {
+            PackedDeltas::new(packed_deltas, if T::is_point() { count * 2 } else { count })
+        };
+        TupleDeltaIter::new(&point_numbers, packed_deltas)
     }
+
+    fn point_numbers_and_packed_deltas(&self) -> (PackedPointNumbers<'a>, FontData<'a>) {
+        if self.header.tuple_index().private_point_numbers() {
+            PackedPointNumbers::split_off_front(self.serialized_data)
+        } else {
+            (
+                self.shared_point_numbers.clone().unwrap_or_default(),
+                self.serialized_data,
+            )
+        }
+    }
+}
+
+impl TupleVariation<'_, GlyphDelta> {
+    /// Reads the set of deltas from this tuple variation.
+    ///
+    /// This is significantly faster than using the [`Self::deltas`]
+    /// method but requires preallocated memory to store deltas and
+    /// flags.
+    ///
+    /// This method should only be used when the tuple variation is dense,
+    /// that is, [`Self::has_deltas_for_all_points`] returns true.
+    ///
+    /// The size of `deltas` must be the same as the target value set to
+    /// which the variation is applied. For simple outlines, this is
+    /// `num_points + 4` and for composites it is `num_components + 4`
+    /// (where the `+ 4` is to accommodate phantom points).
+    ///
+    /// The `deltas` slice will not be zeroed before accumulation and each
+    /// delta will be multiplied by the given `scalar`.
+    pub fn accumulate_dense_deltas<D: PointCoord>(
+        &self,
+        deltas: &mut [Point<D>],
+        scalar: Fixed,
+    ) -> Result<(), ReadError> {
+        let (_, packed_deltas) = self.point_numbers_and_packed_deltas();
+        let mut cursor = packed_deltas.cursor();
+        if scalar == Fixed::ONE {
+            // scalar of 1.0 is common so avoid the costly conversions and
+            // multiplications per coord
+            read_dense_deltas(&mut cursor, deltas, |delta, new_delta| {
+                delta.x += D::from_i32(new_delta);
+            })?;
+            read_dense_deltas(&mut cursor, deltas, |delta, new_delta| {
+                delta.y += D::from_i32(new_delta);
+            })?;
+        } else {
+            read_dense_deltas(&mut cursor, deltas, |delta, new_delta| {
+                delta.x += D::from_fixed(Fixed::from_i32(new_delta) * scalar);
+            })?;
+            read_dense_deltas(&mut cursor, deltas, |delta, new_delta| {
+                delta.y += D::from_fixed(Fixed::from_i32(new_delta) * scalar);
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Reads the set of deltas from this tuple variation.
+    ///
+    /// This is significantly faster than using the [`Self::deltas`]
+    /// method but requires preallocated memory to store deltas and
+    /// flags.
+    ///
+    /// This method should only be used when the tuple variation is sparse,
+    /// that is, [`Self::has_deltas_for_all_points`] returns false.
+    ///
+    /// The size of `deltas` must be the same as the target value set to
+    /// which the variation is applied. For simple outlines, this is
+    /// `num_points + 4` and for composites it is `num_components + 4`
+    /// (where the `+ 4` is to accommodate phantom points).
+    ///
+    /// The `deltas` and `flags` slices must be the same size. Modifications
+    /// to `deltas` will be sparse and for each entry that is modified, the
+    /// [PointMarker::HAS_DELTA] marker will be set for the corresponding
+    /// entry in the `flags` slice.
+    ///
+    /// The `deltas` slice will not be zeroed before accumulation and each
+    /// delta will be multiplied by the given `scalar`.
+    pub fn accumulate_sparse_deltas<D: PointCoord>(
+        &self,
+        deltas: &mut [Point<D>],
+        flags: &mut [PointFlags],
+        scalar: Fixed,
+    ) -> Result<(), ReadError> {
+        let (point_numbers, packed_deltas) = self.point_numbers_and_packed_deltas();
+        let mut cursor = packed_deltas.cursor();
+        let count = point_numbers.count() as usize;
+        if scalar == Fixed::ONE {
+            // scalar of 1.0 is common so avoid the costly conversions and
+            // multiplications per coord
+            read_sparse_deltas(&mut cursor, &point_numbers, count, |ix, new_delta| {
+                if let Some((delta, flag)) = deltas.get_mut(ix).zip(flags.get_mut(ix)) {
+                    delta.x += D::from_i32(new_delta);
+                    flag.set_marker(PointMarker::HAS_DELTA);
+                }
+            })?;
+            read_sparse_deltas(&mut cursor, &point_numbers, count, |ix, new_delta| {
+                if let Some(delta) = deltas.get_mut(ix) {
+                    delta.y += D::from_i32(new_delta);
+                }
+            })?;
+        } else {
+            read_sparse_deltas(&mut cursor, &point_numbers, count, |ix, new_delta| {
+                if let Some((delta, flag)) = deltas.get_mut(ix).zip(flags.get_mut(ix)) {
+                    delta.x += D::from_fixed(Fixed::from_i32(new_delta) * scalar);
+                    flag.set_marker(PointMarker::HAS_DELTA);
+                }
+            })?;
+            read_sparse_deltas(&mut cursor, &point_numbers, count, |ix, new_delta| {
+                if let Some(delta) = deltas.get_mut(ix) {
+                    delta.y += D::from_fixed(Fixed::from_i32(new_delta) * scalar);
+                }
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// This is basically a manually applied loop unswitching optimization
+/// for reading deltas. It reads each typed run into a slice for processing
+/// instead of handling each delta individually with all the necessary
+/// branching that implies.
+fn read_dense_deltas<T>(
+    cursor: &mut Cursor,
+    deltas: &mut [T],
+    mut f: impl FnMut(&mut T, i32),
+) -> Result<(), ReadError> {
+    let count = deltas.len();
+    let mut cur = 0;
+    while cur < count {
+        let control: u8 = cursor.read()?;
+        let value_type = DeltaRunType::new(control);
+        let run_count = ((control & DELTA_RUN_COUNT_MASK) + 1) as usize;
+        let dest = deltas
+            .get_mut(cur..cur + run_count)
+            .ok_or(ReadError::OutOfBounds)?;
+        match value_type {
+            DeltaRunType::Zero => {}
+            DeltaRunType::I8 => {
+                let packed_deltas = cursor.read_array::<i8>(run_count)?;
+                for (delta, new_delta) in dest.iter_mut().zip(packed_deltas) {
+                    f(delta, *new_delta as i32);
+                }
+            }
+            DeltaRunType::I16 => {
+                let packed_deltas = cursor.read_array::<BigEndian<i16>>(run_count)?;
+                for (delta, new_delta) in dest.iter_mut().zip(packed_deltas) {
+                    f(delta, new_delta.get() as i32);
+                }
+            }
+            DeltaRunType::I32 => {
+                let packed_deltas = cursor.read_array::<BigEndian<i32>>(run_count)?;
+                for (delta, new_delta) in dest.iter_mut().zip(packed_deltas) {
+                    f(delta, new_delta.get());
+                }
+            }
+        }
+        cur += run_count;
+    }
+    Ok(())
+}
+
+/// See [read_dense_deltas] docs.
+fn read_sparse_deltas(
+    cursor: &mut Cursor,
+    point_numbers: &PackedPointNumbers,
+    count: usize,
+    mut f: impl FnMut(usize, i32),
+) -> Result<(), ReadError> {
+    let mut cur = 0;
+    let mut points_iter = point_numbers.iter().map(|ix| ix as usize);
+    while cur < count {
+        let control: u8 = cursor.read()?;
+        let value_type = DeltaRunType::new(control);
+        let run_count = ((control & DELTA_RUN_COUNT_MASK) + 1) as usize;
+        match value_type {
+            DeltaRunType::Zero => {
+                for _ in 0..run_count {
+                    let point_ix = points_iter.next().ok_or(ReadError::OutOfBounds)?;
+                    f(point_ix, 0);
+                }
+            }
+            DeltaRunType::I8 => {
+                let packed_deltas = cursor.read_array::<i8>(run_count)?;
+                for (new_delta, point_ix) in packed_deltas.iter().zip(points_iter.by_ref()) {
+                    f(point_ix, *new_delta as i32);
+                }
+            }
+            DeltaRunType::I16 => {
+                let packed_deltas = cursor.read_array::<BigEndian<i16>>(run_count)?;
+                for (new_delta, point_ix) in packed_deltas.iter().zip(points_iter.by_ref()) {
+                    f(point_ix, new_delta.get() as i32);
+                }
+            }
+            DeltaRunType::I32 => {
+                let packed_deltas = cursor.read_array::<BigEndian<i32>>(run_count)?;
+                for (new_delta, point_ix) in packed_deltas.iter().zip(points_iter.by_ref()) {
+                    f(point_ix, new_delta.get());
+                }
+            }
+        }
+        cur += run_count;
+    }
+    Ok(())
+}
+
+/// Compute the fixed point scalar for this tuple at the given location in
+/// variation space.
+///
+/// The `coords` slice must be of lesser or equal length to the number of
+/// axes. If it is less, missing (trailing) axes will be assumed to have
+/// zero values.
+///
+/// Returns `None` if this tuple is not applicable at the provided
+/// coordinates (e.g. if the resulting scalar is zero).
+#[inline(always)]
+fn compute_scalar<'a>(
+    header: &TupleVariationHeader,
+    axis_count: usize,
+    shared_tuples: &Option<ComputedArray<'a, Tuple<'a>>>,
+    coords: &[F2Dot14],
+) -> Option<Fixed> {
+    let mut scalar = Fixed::ONE;
+    let tuple_idx = header.tuple_index();
+    let peak = if let Some(shared_index) = tuple_idx.tuple_records_index() {
+        shared_tuples.as_ref()?.get(shared_index as usize).ok()?
+    } else {
+        header.peak_tuple()?
+    };
+    if peak.len() != axis_count {
+        return None;
+    }
+    let intermediate = header.intermediate_tuples();
+    for (i, peak) in peak
+        .values
+        .iter()
+        .enumerate()
+        .filter(|(_, peak)| peak.get() != F2Dot14::ZERO)
+    {
+        let coord = coords.get(i).copied().unwrap_or_default();
+        if coord == F2Dot14::ZERO {
+            return None;
+        }
+        let peak = peak.get();
+        if peak == coord {
+            continue;
+        }
+        if let Some((inter_start, inter_end)) = &intermediate {
+            let start = inter_start.get(i).unwrap_or_default();
+            let end = inter_end.get(i).unwrap_or_default();
+            if coord <= start || coord >= end {
+                return None;
+            }
+            let coord = coord.to_fixed();
+            let peak = peak.to_fixed();
+            if coord < peak {
+                let start = start.to_fixed();
+                scalar = scalar.mul_div(coord - start, peak - start);
+            } else {
+                let end = end.to_fixed();
+                scalar = scalar.mul_div(end - coord, end - peak);
+            }
+        } else {
+            if coord < peak.min(F2Dot14::ZERO) || coord > peak.max(F2Dot14::ZERO) {
+                return None;
+            }
+            let coord = coord.to_fixed();
+            let peak = peak.to_fixed();
+            scalar = scalar.mul_div(coord, peak);
+        }
+    }
+    (scalar != Fixed::ZERO).then_some(scalar)
+}
+
+#[derive(Clone, Debug)]
+enum TupleDeltaValues<'a> {
+    // Point deltas have separate runs for x and y coordinates.
+    Points(DeltaRunIter<'a>, DeltaRunIter<'a>),
+    Scalars(DeltaRunIter<'a>),
 }
 
 /// An iterator over the deltas for a glyph.
@@ -805,8 +1208,7 @@ pub struct TupleDeltaIter<'a, T> {
     // if None all points get deltas, if Some specifies subset of points that do
     points: Option<PackedPointNumbersIter<'a>>,
     next_point: usize,
-    x_iter: DeltaRunIter<'a>,
-    y_iter: Option<Skip<DeltaRunIter<'a>>>,
+    values: TupleDeltaValues<'a>,
     _marker: std::marker::PhantomData<fn() -> T>,
 }
 
@@ -814,24 +1216,26 @@ impl<'a, T> TupleDeltaIter<'a, T>
 where
     T: TupleDelta,
 {
-    fn new(points: &'a PackedPointNumbers, deltas: &'a PackedDeltas) -> TupleDeltaIter<'a, T> {
+    fn new(points: &PackedPointNumbers<'a>, deltas: PackedDeltas<'a>) -> TupleDeltaIter<'a, T> {
         let mut points = points.iter();
         let next_point = points.next();
-        let num_encoded_points = deltas.count() / 2; // x and y encoded independently
-        let y_iter = T::is_point().then(|| deltas.iter().skip(num_encoded_points));
+        let values = if T::is_point() {
+            TupleDeltaValues::Points(deltas.x_deltas(), deltas.y_deltas())
+        } else {
+            TupleDeltaValues::Scalars(deltas.iter())
+        };
         TupleDeltaIter {
             cur: 0,
             points: next_point.map(|_| points),
             next_point: next_point.unwrap_or_default() as usize,
-            x_iter: deltas.iter(),
-            y_iter,
+            values,
             _marker: std::marker::PhantomData,
         }
     }
 }
 
 /// Trait for deltas that are computed in a tuple variation store.
-pub trait TupleDelta: Sized + Copy {
+pub trait TupleDelta: Sized + Copy + 'static {
     /// Returns true if the delta is a point and requires reading two values
     /// from the packed delta stream.
     fn is_point() -> bool;
@@ -841,7 +1245,7 @@ pub trait TupleDelta: Sized + Copy {
     fn new(position: u16, x: i32, y: i32) -> Self;
 }
 
-impl<'a, T> Iterator for TupleDeltaIter<'a, T>
+impl<T> Iterator for TupleDeltaIter<'_, T>
 where
     T: TupleDelta,
 {
@@ -860,11 +1264,9 @@ where
                 self.cur
             };
             if position == self.cur {
-                let dx = self.x_iter.next()?;
-                let dy = if let Some(y_iter) = self.y_iter.as_mut() {
-                    y_iter.next()?
-                } else {
-                    0
+                let (dx, dy) = match &mut self.values {
+                    TupleDeltaValues::Points(x, y) => (x.next()?, y.next()?),
+                    TupleDeltaValues::Scalars(scalars) => (scalars.next()?, 0),
                 };
                 break (position, dx, dy);
             }
@@ -890,7 +1292,7 @@ impl EntryFormat {
     }
 }
 
-impl<'a> DeltaSetIndexMap<'a> {
+impl DeltaSetIndexMap<'_> {
     /// Returns the delta set index for the specified value.
     pub fn get(&self, index: u32) -> Result<DeltaSetIndex, ReadError> {
         let (entry_format, map_count, data) = match self {
@@ -924,7 +1326,7 @@ impl<'a> DeltaSetIndexMap<'a> {
     }
 }
 
-impl<'a> ItemVariationStore<'a> {
+impl ItemVariationStore<'_> {
     /// Computes the delta value for the specified index and set of normalized
     /// variation coordinates.
     pub fn compute_delta(
@@ -932,6 +1334,9 @@ impl<'a> ItemVariationStore<'a> {
         index: DeltaSetIndex,
         coords: &[F2Dot14],
     ) -> Result<i32, ReadError> {
+        if coords.is_empty() || index == DeltaSetIndex::NO_VARIATION_INDEX {
+            return Ok(0);
+        }
         let data = match self.item_variation_data().get(index.outer as usize) {
             Some(data) => data?,
             None => return Ok(0),
@@ -962,6 +1367,9 @@ impl<'a> ItemVariationStore<'a> {
         index: DeltaSetIndex,
         coords: &[F2Dot14],
     ) -> Result<FloatItemDelta, ReadError> {
+        if coords.is_empty() {
+            return Ok(FloatItemDelta::ZERO);
+        }
         let data = match self.item_variation_data().get(index.outer as usize) {
             Some(data) => data?,
             None => return Ok(FloatItemDelta::ZERO),
@@ -1032,14 +1440,15 @@ impl<'a> VariationRegion<'a> {
     pub fn compute_scalar(&self, coords: &[F2Dot14]) -> Fixed {
         const ZERO: Fixed = Fixed::ZERO;
         let mut scalar = Fixed::ONE;
-        for (i, axis_coords) in self.region_axes().iter().enumerate() {
-            let coord = coords.get(i).map(|coord| coord.to_fixed()).unwrap_or(ZERO);
+        for (i, peak, axis_coords) in self.active_region_axes() {
+            let peak = peak.to_fixed();
             let start = axis_coords.start_coord.get().to_fixed();
             let end = axis_coords.end_coord.get().to_fixed();
-            let peak = axis_coords.peak_coord.get().to_fixed();
-            if start > peak || peak > end || peak == ZERO || start < ZERO && end > ZERO {
+            if start > peak || peak > end || start < ZERO && end > ZERO {
                 continue;
-            } else if coord < start || coord > end {
+            }
+            let coord = coords.get(i).map(|coord| coord.to_fixed()).unwrap_or(ZERO);
+            if coord < start || coord > end {
                 return ZERO;
             } else if coord == peak {
                 continue;
@@ -1056,14 +1465,15 @@ impl<'a> VariationRegion<'a> {
     /// specified normalized variation coordinates.
     pub fn compute_scalar_f32(&self, coords: &[F2Dot14]) -> f32 {
         let mut scalar = 1.0;
-        for (i, axis_coords) in self.region_axes().iter().enumerate() {
-            let coord = coords.get(i).map(|coord| coord.to_f32()).unwrap_or(0.0);
+        for (i, peak, axis_coords) in self.active_region_axes() {
+            let peak = peak.to_f32();
             let start = axis_coords.start_coord.get().to_f32();
             let end = axis_coords.end_coord.get().to_f32();
-            let peak = axis_coords.peak_coord.get().to_f32();
-            if start > peak || peak > end || peak == 0.0 || start < 0.0 && end > 0.0 {
+            if start > peak || peak > end || start < 0.0 && end > 0.0 {
                 continue;
-            } else if coord < start || coord > end {
+            }
+            let coord = coords.get(i).map(|coord| coord.to_f32()).unwrap_or(0.0);
+            if coord < start || coord > end {
                 return 0.0;
             } else if coord == peak {
                 continue;
@@ -1074,6 +1484,22 @@ impl<'a> VariationRegion<'a> {
             }
         }
         scalar
+    }
+
+    fn active_region_axes(
+        &self,
+    ) -> impl Iterator<Item = (usize, F2Dot14, &'a RegionAxisCoordinates)> {
+        self.region_axes()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, axis_coords)| {
+                let peak = axis_coords.peak_coord();
+                if peak != F2Dot14::ZERO {
+                    Some((i, peak, axis_coords))
+                } else {
+                    None
+                }
+            })
     }
 }
 
@@ -1100,8 +1526,14 @@ impl<'a> ItemVariationData<'a> {
         }
     }
 
+    pub fn get_delta_row_len(&self) -> usize {
+        let word_delta_count = self.word_delta_count();
+        let region_count = self.region_index_count();
+        Self::delta_row_len(word_delta_count, region_count)
+    }
+
     /// the length of one delta set
-    fn delta_row_len(word_delta_count: u16, region_index_count: u16) -> usize {
+    pub fn delta_row_len(word_delta_count: u16, region_index_count: u16) -> usize {
         let region_count = region_index_count as usize;
         let long_words = word_delta_count & 0x8000 != 0;
         let (word_size, small_size) = if long_words { (4, 2) } else { (2, 1) };
@@ -1111,7 +1543,11 @@ impl<'a> ItemVariationData<'a> {
     }
 
     // called from generated code: compute the length in bytes of the delta_sets data
-    fn delta_sets_len(item_count: u16, word_delta_count: u16, region_index_count: u16) -> usize {
+    pub fn delta_sets_len(
+        item_count: u16,
+        word_delta_count: u16,
+        region_index_count: u16,
+    ) -> usize {
         let bytes_per_row = Self::delta_row_len(word_delta_count, region_index_count);
         bytes_per_row * item_count as usize
     }
@@ -1126,7 +1562,7 @@ struct ItemDeltas<'a> {
     pos: u16,
 }
 
-impl<'a> Iterator for ItemDeltas<'a> {
+impl Iterator for ItemDeltas<'_> {
     type Item = i32;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1150,6 +1586,9 @@ pub(crate) fn advance_delta(
     glyph_id: GlyphId,
     coords: &[F2Dot14],
 ) -> Result<Fixed, ReadError> {
+    if coords.is_empty() {
+        return Ok(Fixed::ZERO);
+    }
     let gid = glyph_id.to_u32();
     let ix = match dsim {
         Some(Ok(dsim)) => dsim.get(gid)?,
@@ -1167,6 +1606,9 @@ pub(crate) fn item_delta(
     glyph_id: GlyphId,
     coords: &[F2Dot14],
 ) -> Result<Fixed, ReadError> {
+    if coords.is_empty() {
+        return Ok(Fixed::ZERO);
+    }
     let gid = glyph_id.to_u32();
     let ix = match dsim {
         Some(Ok(dsim)) => dsim.get(gid)?,
@@ -1177,8 +1619,10 @@ pub(crate) fn item_delta(
 
 #[cfg(test)]
 mod tests {
+    use font_test_data::bebuffer::BeBuffer;
+
     use super::*;
-    use crate::{test_helpers::BeBuffer, FontRef, TableProvider};
+    use crate::{FontRef, TableProvider};
 
     #[test]
     fn ivs_regions() {
@@ -1325,7 +1769,38 @@ mod tests {
         static ALL_POINTS: FontData = FontData::new(&[0]);
         let (all_points, _) = PackedPointNumbers::split_off_front(ALL_POINTS);
         // in which case the iterator just keeps incrementing until u16::MAX
-        assert_eq!(all_points.iter().count(), u16::MAX as _);
+        assert_eq!(all_points.iter().count(), u16::MAX as usize);
+    }
+
+    /// Test that we split properly when the coordinate boundary doesn't align
+    /// with a packed run boundary
+    #[test]
+    fn packed_delta_run_crosses_coord_boundary() {
+        // 8 deltas with values 0..=7 with a run broken after the first 6; the
+        // coordinate boundary occurs after the first 4
+        static INPUT: FontData = FontData::new(&[
+            // first run: 6 deltas as bytes
+            5,
+            0,
+            1,
+            2,
+            3,
+            // coordinate boundary is here
+            4,
+            5,
+            // second run: 2 deltas as words
+            1 | DELTAS_ARE_WORDS,
+            0,
+            6,
+            0,
+            7,
+        ]);
+        let deltas = PackedDeltas::consume_all(INPUT);
+        assert_eq!(deltas.count, 8);
+        let x_deltas = deltas.x_deltas().collect::<Vec<_>>();
+        let y_deltas = deltas.y_deltas().collect::<Vec<_>>();
+        assert_eq!(x_deltas, [0, 1, 2, 3]);
+        assert_eq!(y_deltas, [4, 5, 6, 7]);
     }
 
     /// We don't have a reference for our float delta computation, so this is
@@ -1384,7 +1859,7 @@ mod tests {
             .extend([0u16, 1, 2, 3, 4]) // region_indices
             .extend([1u8; 128]); // this is much more data than we need!
 
-        let ivs = ItemVariationData::read(data.font_data()).unwrap();
+        let ivs = ItemVariationData::read(data.data().into()).unwrap();
         let row_len = (3 * u16::RAW_BYTE_LEN) + (2 * u8::RAW_BYTE_LEN); // 3 word deltas, 2 byte deltas
         let expected_len = 2 * row_len;
         assert_eq!(ivs.delta_sets().len(), expected_len);
@@ -1399,7 +1874,7 @@ mod tests {
             .extend([0u16, 1, 2]) // region_indices
             .extend([1u8; 128]); // this is much more data than we need!
 
-        let ivs = ItemVariationData::read(data.font_data()).unwrap();
+        let ivs = ItemVariationData::read(data.data().into()).unwrap();
         let row_len = (2 * u32::RAW_BYTE_LEN) + (2 * u16::RAW_BYTE_LEN); // 1 word (4-byte) delta, 2 short (2-byte)
         let expected_len = 2 * row_len;
         assert_eq!(ivs.delta_sets().len(), expected_len);
@@ -1414,5 +1889,72 @@ mod tests {
         let iter = PackedPointNumbersIter::new(0xFFFF, FontData::new(&buf).cursor());
         // Don't panic!
         let _ = iter.count();
+    }
+
+    // Dense accumulator should match iterator
+    #[test]
+    fn accumulate_dense() {
+        let font = FontRef::new(font_test_data::VAZIRMATN_VAR).unwrap();
+        let gvar = font.gvar().unwrap();
+        let gvar_data = gvar.glyph_variation_data(GlyphId::new(1)).unwrap().unwrap();
+        let mut count = 0;
+        for tuple in gvar_data.tuples() {
+            if !tuple.has_deltas_for_all_points() {
+                continue;
+            }
+            let iter_deltas = tuple
+                .deltas()
+                .map(|delta| (delta.x_delta, delta.y_delta))
+                .collect::<Vec<_>>();
+            let mut delta_buf = vec![Point::broadcast(Fixed::ZERO); iter_deltas.len()];
+            tuple
+                .accumulate_dense_deltas(&mut delta_buf, Fixed::ONE)
+                .unwrap();
+            let accum_deltas = delta_buf
+                .iter()
+                .map(|delta| (delta.x.to_i32(), delta.y.to_i32()))
+                .collect::<Vec<_>>();
+            assert_eq!(iter_deltas, accum_deltas);
+            count += iter_deltas.len();
+        }
+        assert!(count != 0);
+    }
+
+    // Sparse accumulator should match iterator
+    #[test]
+    fn accumulate_sparse() {
+        let font = FontRef::new(font_test_data::VAZIRMATN_VAR).unwrap();
+        let gvar = font.gvar().unwrap();
+        let gvar_data = gvar.glyph_variation_data(GlyphId::new(2)).unwrap().unwrap();
+        let mut count = 0;
+        for tuple in gvar_data.tuples() {
+            if tuple.has_deltas_for_all_points() {
+                continue;
+            }
+            let iter_deltas = tuple.deltas().collect::<Vec<_>>();
+            let max_modified_point = iter_deltas
+                .iter()
+                .max_by_key(|delta| delta.position)
+                .unwrap()
+                .position as usize;
+            let mut delta_buf = vec![Point::broadcast(Fixed::ZERO); max_modified_point + 1];
+            let mut flags = vec![PointFlags::default(); delta_buf.len()];
+            tuple
+                .accumulate_sparse_deltas(&mut delta_buf, &mut flags, Fixed::ONE)
+                .unwrap();
+            let mut accum_deltas = vec![];
+            for (i, (delta, flag)) in delta_buf.iter().zip(flags).enumerate() {
+                if flag.has_marker(PointMarker::HAS_DELTA) {
+                    accum_deltas.push(GlyphDelta::new(
+                        i as u16,
+                        delta.x.to_i32(),
+                        delta.y.to_i32(),
+                    ));
+                }
+            }
+            assert_eq!(iter_deltas, accum_deltas);
+            count += iter_deltas.len();
+        }
+        assert!(count != 0);
     }
 }

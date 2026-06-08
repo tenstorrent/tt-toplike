@@ -1,31 +1,27 @@
 //! A custom shader widget for wgpu applications.
-mod event;
 mod program;
 
-pub use event::Event;
 pub use program::Program;
 
-use crate::core;
+use crate::core::event;
 use crate::core::layout::{self, Layout};
 use crate::core::mouse;
 use crate::core::renderer;
 use crate::core::widget::tree::{self, Tree};
 use crate::core::widget::{self, Widget};
-use crate::core::window;
-use crate::core::{Clipboard, Element, Length, Rectangle, Shell, Size};
+use crate::core::{Clipboard, Element, Event, Length, Rectangle, Shell, Size};
 use crate::renderer::wgpu::primitive;
 
 use std::marker::PhantomData;
 
+pub use crate::Action;
 pub use crate::graphics::Viewport;
-pub use crate::renderer::wgpu::wgpu;
-pub use primitive::{Primitive, Storage};
+pub use primitive::{Pipeline, Primitive, Storage};
 
 /// A widget which can render custom shaders with Iced's `wgpu` backend.
 ///
 /// Must be initialized with a [`Program`], which describes the internal widget state & how
 /// its [`Program::Primitive`]s are drawn.
-#[allow(missing_debug_implementations)]
 pub struct Shader<Message, P: Program<Message>> {
     width: Length,
     height: Length,
@@ -80,7 +76,7 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         _tree: &mut Tree,
         _renderer: &Renderer,
         limits: &layout::Limits,
@@ -88,50 +84,35 @@ where
         layout::atomic(limits, self.width, self.height)
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: crate::core::Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         _renderer: &Renderer,
         _clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         _viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
         let bounds = layout.bounds();
 
-        let custom_shader_event = match event {
-            core::Event::Mouse(mouse_event) => Some(Event::Mouse(mouse_event)),
-            core::Event::Keyboard(keyboard_event) => {
-                Some(Event::Keyboard(keyboard_event))
-            }
-            core::Event::Touch(touch_event) => Some(Event::Touch(touch_event)),
-            core::Event::Window(window::Event::RedrawRequested(instant)) => {
-                Some(Event::RedrawRequested(instant))
-            }
-            core::Event::Window(_) => None,
-        };
+        let state = tree.state.downcast_mut::<P::State>();
 
-        if let Some(custom_shader_event) = custom_shader_event {
-            let state = tree.state.downcast_mut::<P::State>();
+        if let Some(action) = self.program.update(state, event, bounds, cursor)
+        {
+            let (message, redraw_request, event_status) = action.into_inner();
 
-            let (event_status, message) = self.program.update(
-                state,
-                custom_shader_event,
-                bounds,
-                cursor,
-                shell,
-            );
+            shell.request_redraw_at(redraw_request);
 
             if let Some(message) = message {
                 shell.publish(message);
             }
 
-            return event_status;
+            if event_status == event::Status::Captured {
+                shell.capture_event();
+            }
         }
-
-        event::Status::Ignored
     }
 
     fn mouse_interaction(
@@ -192,12 +173,11 @@ where
     fn update(
         &self,
         state: &mut Self::State,
-        event: Event,
+        event: &Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
-        shell: &mut Shell<'_, Message>,
-    ) -> (event::Status, Option<Message>) {
-        T::update(self, state, event, bounds, cursor, shell)
+    ) -> Option<Action<Message>> {
+        T::update(self, state, event, bounds, cursor)
     }
 
     fn draw(

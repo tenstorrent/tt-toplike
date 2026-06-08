@@ -11,10 +11,11 @@
 
 [package]
 edition = "2021"
-rust-version = "1.60"
+rust-version = "1.71"
 name = "objc2-core-data"
-version = "0.2.2"
+version = "0.3.2"
 build = false
+autolib = false
 autobins = false
 autoexamples = false
 autotests = false
@@ -34,12 +35,15 @@ categories = [
     "external-ffi-bindings",
     "os::macos-apis",
 ]
-license = "MIT"
+license = "Zlib OR Apache-2.0 OR MIT"
 repository = "https://github.com/madsmtm/objc2"
 
 [package.metadata.docs.rs]
 default-target = "aarch64-apple-darwin"
-features = ["all"]
+rustc-args = [
+    "--cfg",
+    "docsrs",
+]
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
@@ -47,31 +51,17 @@ targets = [
     "aarch64-apple-tvos",
     "aarch64-apple-watchos",
     "aarch64-apple-ios-macabi",
+    "aarch64-apple-visionos",
 ]
-
-[lib]
-name = "objc2_core_data"
-path = "src/lib.rs"
-
-[dependencies.bitflags]
-version = "2.5.0"
-optional = true
-default-features = false
-
-[dependencies.block2]
-version = "0.5.1"
-optional = true
-default-features = false
-
-[dependencies.objc2]
-version = "0.5.2"
-default-features = false
-
-[dependencies.objc2-foundation]
-version = "0.2.2"
-default-features = false
+features = ["objc2-core-spotlight"]
 
 [features]
+CloudKit = [
+    "objc2-foundation/NSArray",
+    "objc2-foundation/NSDictionary",
+    "objc2-foundation/NSError",
+    "objc2-foundation/NSSet",
+]
 CoreDataDefines = []
 CoreDataErrors = ["objc2-foundation/NSString"]
 NSAtomicStore = [
@@ -111,6 +101,7 @@ NSCompositeAttributeDescription = [
     "objc2-foundation/NSObject",
 ]
 NSCoreDataCoreSpotlightDelegate = [
+    "objc2-foundation/NSArray",
     "objc2-foundation/NSError",
     "objc2-foundation/NSNotification",
     "objc2-foundation/NSString",
@@ -177,6 +168,7 @@ NSFetchedResultsController = [
     "objc2-foundation/NSIndexPath",
     "objc2-foundation/NSOrderedCollectionDifference",
     "objc2-foundation/NSString",
+    "NSFetchRequest",
 ]
 NSIncrementalStore = [
     "objc2-foundation/NSArray",
@@ -260,6 +252,8 @@ NSMigrationManager = [
 NSMigrationStage = ["objc2-foundation/NSString"]
 NSPersistentCloudKitContainer = [
     "bitflags",
+    "objc2-foundation/NSArray",
+    "objc2-foundation/NSDictionary",
     "objc2-foundation/NSError",
     "objc2-foundation/NSString",
 ]
@@ -329,6 +323,7 @@ NSPersistentStoreResult = [
     "objc2-foundation/NSArray",
     "objc2-foundation/NSError",
     "objc2-foundation/NSProgress",
+    "NSFetchRequest",
 ]
 NSPropertyDescription = [
     "objc2-foundation/NSArray",
@@ -353,7 +348,12 @@ NSSaveChangesRequest = [
     "objc2-foundation/NSSet",
 ]
 NSStagedMigrationManager = ["objc2-foundation/NSArray"]
-all = [
+alloc = []
+bitflags = ["dep:bitflags"]
+block2 = ["dep:block2"]
+default = [
+    "std",
+    "CloudKit",
     "CoreDataDefines",
     "CoreDataErrors",
     "NSAtomicStore",
@@ -410,43 +410,84 @@ all = [
     "NSStagedMigrationManager",
     "bitflags",
     "block2",
+    "objc2-cloud-kit",
 ]
-alloc = [
-    "block2?/alloc",
-    "objc2/alloc",
-    "objc2-foundation/alloc",
-]
-apple = []
-bitflags = [
-    "dep:bitflags",
-    "objc2-foundation/bitflags",
-]
-block2 = [
-    "dep:block2",
-    "objc2-foundation/block2",
-]
-default = ["std"]
 gnustep-1-7 = []
 gnustep-1-8 = []
 gnustep-1-9 = []
 gnustep-2-0 = []
 gnustep-2-1 = []
-std = [
-    "alloc",
-    "bitflags?/std",
-    "block2?/std",
-    "objc2/std",
-    "objc2-foundation/std",
+objc2-cloud-kit = ["dep:objc2-cloud-kit"]
+objc2-core-spotlight = ["dep:objc2-core-spotlight"]
+std = ["alloc"]
+unstable-darwin-objc = []
+
+[lib]
+name = "objc2_core_data"
+path = "src/lib.rs"
+
+[[test]]
+name = "generics"
+path = "tests/generics.rs"
+
+[dependencies.bitflags]
+version = "2.5.0"
+features = ["std"]
+optional = true
+default-features = false
+
+[dependencies.block2]
+version = ">=0.6.1, <0.8.0"
+features = ["alloc"]
+optional = true
+default-features = false
+
+[dependencies.objc2]
+version = ">=0.6.2, <0.8.0"
+features = ["std"]
+default-features = false
+
+[dependencies.objc2-cloud-kit]
+version = "0.3.2"
+features = [
+    "CKContainer",
+    "CKDatabase",
+    "CKRecord",
+    "CKRecordID",
+    "CKRecordZoneID",
+    "CKShare",
+    "CKShareMetadata",
+    "CKShareParticipant",
+    "CKUserIdentityLookupInfo",
 ]
+optional = true
+default-features = false
+
+[dependencies.objc2-foundation]
+version = "0.3.2"
+features = ["alloc"]
+default-features = false
+
+[target.'cfg(not(any(target_os = "tvos", target_os = "watchos")))'.dependencies.objc2-core-spotlight]
+version = "0.3.2"
+features = [
+    "CSSearchableIndex",
+    "CSSearchableItemAttributeSet",
+]
+optional = true
+default-features = false
 
 [lints.clippy]
-cargo = "warn"
 ptr_as_ptr = "warn"
+redundant_feature_names = "allow"
+
+[lints.clippy.cargo]
+level = "warn"
+priority = -1
 
 [lints.rust]
 elided_lifetimes_in_paths = "warn"
 missing_copy_implementations = "warn"
-missing_debug_implementations = "warn"
 non_ascii_idents = "deny"
 unreachable_pub = "warn"
 unsafe_op_in_unsafe_fn = "deny"

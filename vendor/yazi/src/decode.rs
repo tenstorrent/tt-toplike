@@ -1,6 +1,16 @@
 //! RFC 1590 decompression implementation.
 
+#![allow(
+    clippy::needless_range_loop,
+    clippy::new_without_default,
+    clippy::too_many_arguments
+)]
+
 use super::{Error, Format};
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
+#[cfg(feature = "std")]
 use std::io::{self, Write};
 
 /// Stateful context for decompression.
@@ -27,6 +37,7 @@ impl Decoder {
     }
 
     /// Creates a decoder stream that will write into the specified writer.
+    #[cfg(feature = "std")]
     pub fn stream<'a, W: Write>(
         &'a mut self,
         writer: &'a mut W,
@@ -87,7 +98,7 @@ pub struct DecoderStream<'a, S: Sink> {
     finished: bool,
 }
 
-impl<'a, S: Sink> DecoderStream<'a, S> {
+impl<S: Sink> DecoderStream<'_, S> {
     /// Writes the specified buffer to the stream, producing decompressed data
     /// in the output.
     pub fn write(&mut self, buf: &[u8]) -> Result<(), Error> {
@@ -116,7 +127,7 @@ impl<'a, S: Sink> DecoderStream<'a, S> {
     }
 }
 
-impl<'a, S: Sink> Drop for DecoderStream<'a, S> {
+impl<S: Sink> Drop for DecoderStream<'_, S> {
     fn drop(&mut self) {
         if !self.finished {
             let _ = self.ctx.inflate(&[], &mut self.sink, true);
@@ -125,7 +136,8 @@ impl<'a, S: Sink> Drop for DecoderStream<'a, S> {
     }
 }
 
-impl<'a, S: Sink> Write for DecoderStream<'a, S> {
+#[cfg(feature = "std")]
+impl<S: Sink> Write for DecoderStream<'_, S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self.ctx.inflate(buf, &mut self.sink, false) {
             Ok(_) => Ok(buf.len()),
@@ -152,8 +164,7 @@ impl<'a, S: Sink> Write for DecoderStream<'a, S> {
 pub fn decompress(buf: &[u8], format: Format) -> Result<(Vec<u8>, Option<u32>), Error> {
     let mut decoder = Decoder::new();
     decoder.set_format(format);
-    let mut vec = Vec::new();
-    vec.reserve(buf.len() * 2);
+    let mut vec = Vec::with_capacity(buf.len() * 2);
     let mut stream = decoder.stream_into_vec(&mut vec);
     stream.write(buf)?;
     let (_, checksum) = stream.finish()?;
@@ -330,7 +341,7 @@ fn inflate<S: Sink>(
                         let mut parts = [0u32; 4];
                         for part in &mut parts {
                             if bits.bits_in >= 8 {
-                                *part = bits.pop(8) as u32;
+                                *part = bits.pop(8);
                             } else {
                                 *part = *source
                                     .buffer
@@ -341,8 +352,8 @@ fn inflate<S: Sink>(
                                 source.avail -= 1;
                             }
                         }
-                        let length = parts[0] | parts[1] << 8;
-                        let inv_length = parts[2] | parts[3] << 8;
+                        let length = parts[0] | (parts[1] << 8);
+                        let inv_length = parts[2] | (parts[3] << 8);
                         if length != (!inv_length & 0xFFFF) {
                             return Err(Error::InvalidBitstream);
                         }
@@ -708,7 +719,7 @@ fn build_tree(
     for sym in 0..lengths.len() {
         let len = lengths[sym];
         let idx = &mut offsets[len as usize];
-        sorted_entries[(*idx)] = entries[sym];
+        sorted_entries[*idx] = entries[sym];
         *idx += 1;
     }
     let sorted_entries = &mut sorted_entries[offsets[0]..];
@@ -829,7 +840,7 @@ fn read_zlib_checksum(source: &mut Source, bits: &mut Bits) -> Result<u32, Error
     for part in &mut parts {
         *part = bits.try_pop_source(source, 8)?;
     }
-    Ok(parts[0] << 24 | parts[1] << 16 | parts[2] << 8 | parts[3])
+    Ok((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3])
 }
 
 struct Trees {
@@ -942,7 +953,7 @@ impl Bits {
         let len = bytes.len();
         let mut i = 0;
         while (i + 4) <= len {
-            use std::convert::TryInto;
+            use core::convert::TryInto;
             let v = u32::from_le_bytes((&bytes[i..i + 4]).try_into().unwrap()) as u64;
             self.bit_buffer |= v << self.bits_in;
             self.bits_in += 32;
@@ -1045,13 +1056,13 @@ impl<'a> VecSink<'a> {
     }
 }
 
-impl<'a> Drop for VecSink<'a> {
+impl Drop for VecSink<'_> {
     fn drop(&mut self) {
         self.buffer.truncate(self.pos);
     }
 }
 
-impl<'a> Sink for VecSink<'a> {
+impl Sink for VecSink<'_> {
     fn written(&self) -> u64 {
         (self.pos - self.start_pos) as u64
     }
@@ -1089,7 +1100,7 @@ struct BufSink<'a> {
     pos: usize,
 }
 
-impl<'a> Sink for BufSink<'a> {
+impl Sink for BufSink<'_> {
     fn written(&self) -> u64 {
         self.pos as u64
     }
@@ -1131,12 +1142,14 @@ impl<'a> Sink for BufSink<'a> {
     }
 }
 
+#[cfg(feature = "std")]
 struct WriterSink<W> {
     writer: W,
     ring: RingBuffer,
     written: u64,
 }
 
+#[cfg(feature = "std")]
 impl<W: Write> Sink for WriterSink<W> {
     fn written(&self) -> u64 {
         self.written
@@ -1176,11 +1189,13 @@ impl<W: Write> Sink for WriterSink<W> {
     }
 }
 
+#[cfg(feature = "std")]
 struct RingBuffer {
     buffer: [u8; RING_BUFFER_SIZE],
     len: usize,
 }
 
+#[cfg(feature = "std")]
 impl RingBuffer {
     #[inline(always)]
     fn new() -> Self {
@@ -1240,6 +1255,7 @@ impl DistanceTree {
     }
 }
 
+#[cfg(feature = "std")]
 const RING_BUFFER_SIZE: usize = 32768;
 const LITERAL_LENGTH_TREE_SIZE: usize = 1334;
 const DISTANCE_TREE_SIZE: usize = 402;

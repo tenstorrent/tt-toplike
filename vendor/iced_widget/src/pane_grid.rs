@@ -52,7 +52,7 @@
 //! The [`pane_grid` example] showcases how to use a [`PaneGrid`] with resizing,
 //! drag and drop, and hotkey support.
 //!
-//! [`pane_grid` example]: https://github.com/iced-rs/iced/tree/0.13/examples/pane_grid
+//! [`pane_grid` example]: https://github.com/iced-rs/iced/tree/0.14/examples/pane_grid
 mod axis;
 mod configuration;
 mod content;
@@ -79,7 +79,6 @@ pub use state::State;
 pub use title_bar::TitleBar;
 
 use crate::container;
-use crate::core::event::{self, Event};
 use crate::core::layout;
 use crate::core::mouse;
 use crate::core::overlay::{self, Group};
@@ -87,8 +86,9 @@ use crate::core::renderer;
 use crate::core::touch;
 use crate::core::widget;
 use crate::core::widget::tree::{self, Tree};
+use crate::core::window;
 use crate::core::{
-    self, Background, Border, Clipboard, Color, Element, Layout, Length,
+    self, Background, Border, Clipboard, Color, Element, Event, Layout, Length,
     Pixels, Point, Rectangle, Shell, Size, Theme, Vector, Widget,
 };
 
@@ -147,7 +147,6 @@ const THICKNESS_RATIO: f32 = 25.0;
 ///     .into()
 /// }
 /// ```
-#[allow(missing_debug_implementations)]
 pub struct PaneGrid<
     'a,
     Message,
@@ -157,14 +156,18 @@ pub struct PaneGrid<
     Theme: Catalog,
     Renderer: core::Renderer,
 {
-    contents: Contents<'a, Content<'a, Message, Theme, Renderer>>,
+    internal: &'a state::Internal,
+    panes: Vec<Pane>,
+    contents: Vec<Content<'a, Message, Theme, Renderer>>,
     width: Length,
     height: Length,
     spacing: f32,
+    min_size: f32,
     on_click: Option<Box<dyn Fn(Pane) -> Message + 'a>>,
     on_drag: Option<Box<dyn Fn(DragEvent) -> Message + 'a>>,
     on_resize: Option<(f32, Box<dyn Fn(ResizeEvent) -> Message + 'a>)>,
     class: <Theme as Catalog>::Class<'a>,
+    last_mouse_interaction: Option<mouse::Interaction>,
 }
 
 impl<'a, Message, Theme, Renderer> PaneGrid<'a, Message, Theme, Renderer>
@@ -180,37 +183,29 @@ where
         state: &'a State<T>,
         view: impl Fn(Pane, &'a T, bool) -> Content<'a, Message, Theme, Renderer>,
     ) -> Self {
-        let contents = if let Some((pane, pane_state)) =
-            state.maximized.and_then(|pane| {
-                state.panes.get(&pane).map(|pane_state| (pane, pane_state))
-            }) {
-            Contents::Maximized(
-                pane,
-                view(pane, pane_state, true),
-                Node::Pane(pane),
-            )
-        } else {
-            Contents::All(
-                state
-                    .panes
-                    .iter()
-                    .map(|(pane, pane_state)| {
-                        (*pane, view(*pane, pane_state, false))
-                    })
-                    .collect(),
-                &state.internal,
-            )
-        };
+        let panes = state.panes.keys().copied().collect();
+        let contents = state
+            .panes
+            .iter()
+            .map(|(pane, pane_state)| match state.maximized() {
+                Some(p) if *pane == p => view(*pane, pane_state, true),
+                _ => view(*pane, pane_state, false),
+            })
+            .collect();
 
         Self {
+            internal: &state.internal,
+            panes,
             contents,
             width: Length::Fill,
             height: Length::Fill,
             spacing: 0.0,
+            min_size: 50.0,
             on_click: None,
             on_drag: None,
             on_resize: None,
             class: <Theme as Catalog>::default(),
+            last_mouse_interaction: None,
         }
     }
 
@@ -232,6 +227,12 @@ where
         self
     }
 
+    /// Sets the minimum size of a [`Pane`] in the [`PaneGrid`] on both axes.
+    pub fn min_size(mut self, min_size: impl Into<Pixels>) -> Self {
+        self.min_size = min_size.into().0;
+        self
+    }
+
     /// Sets the message that will be produced when a [`Pane`] of the
     /// [`PaneGrid`] is clicked.
     pub fn on_click<F>(mut self, f: F) -> Self
@@ -248,7 +249,9 @@ where
     where
         F: 'a + Fn(DragEvent) -> Message,
     {
-        self.on_drag = Some(Box::new(f));
+        if self.internal.maximized().is_none() {
+            self.on_drag = Some(Box::new(f));
+        }
         self
     }
 
@@ -265,7 +268,9 @@ where
     where
         F: 'a + Fn(ResizeEvent) -> Message,
     {
-        self.on_resize = Some((leeway.into().0, Box::new(f)));
+        if self.internal.maximized().is_none() {
+            self.on_resize = Some((leeway.into().0, Box::new(f)));
+        }
         self
     }
 
@@ -291,46 +296,117 @@ where
     }
 
     fn drag_enabled(&self) -> bool {
-        (!self.contents.is_maximized())
-            .then(|| self.on_drag.is_some())
-            .unwrap_or_default()
+        if self.internal.maximized().is_none() {
+            self.on_drag.is_some()
+        } else {
+            Default::default()
+        }
+    }
+
+    fn grid_interaction(
+        &self,
+        action: &state::Action,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+    ) -> Option<mouse::Interaction> {
+        if action.picked_pane().is_some() {
+            return Some(mouse::Interaction::Grabbing);
+        }
+
+        let resize_leeway = self.on_resize.as_ref().map(|(leeway, _)| *leeway);
+        let node = self.internal.layout();
+
+        let resize_axis =
+            action.picked_split().map(|(_, axis)| axis).or_else(|| {
+                resize_leeway.and_then(|leeway| {
+                    let cursor_position = cursor.position()?;
+                    let bounds = layout.bounds();
+
+                    let splits = node.split_regions(
+                        self.spacing,
+                        self.min_size,
+                        bounds.size(),
+                    );
+
+                    let relative_cursor = Point::new(
+                        cursor_position.x - bounds.x,
+                        cursor_position.y - bounds.y,
+                    );
+
+                    hovered_split(
+                        splits.iter(),
+                        self.spacing + leeway,
+                        relative_cursor,
+                    )
+                    .map(|(_, axis, _)| axis)
+                })
+            });
+
+        if let Some(resize_axis) = resize_axis {
+            return Some(match resize_axis {
+                Axis::Horizontal => mouse::Interaction::ResizingVertically,
+                Axis::Vertical => mouse::Interaction::ResizingHorizontally,
+            });
+        }
+
+        None
     }
 }
 
-impl<'a, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for PaneGrid<'a, Message, Theme, Renderer>
+#[derive(Default)]
+struct Memory {
+    action: state::Action,
+    order: Vec<Pane>,
+}
+
+impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for PaneGrid<'_, Message, Theme, Renderer>
 where
     Theme: Catalog,
     Renderer: core::Renderer,
 {
     fn tag(&self) -> tree::Tag {
-        tree::Tag::of::<state::Action>()
+        tree::Tag::of::<Memory>()
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(state::Action::Idle)
+        tree::State::new(Memory::default())
     }
 
     fn children(&self) -> Vec<Tree> {
-        self.contents
-            .iter()
-            .map(|(_, content)| content.state())
-            .collect()
+        self.contents.iter().map(Content::state).collect()
     }
 
     fn diff(&self, tree: &mut Tree) {
-        match &self.contents {
-            Contents::All(contents, _) => tree.diff_children_custom(
-                contents,
-                |state, (_, content)| content.diff(state),
-                |(_, content)| content.state(),
-            ),
-            Contents::Maximized(_, content, _) => tree.diff_children_custom(
-                &[content],
-                |state, content| content.diff(state),
-                |content| content.state(),
-            ),
-        }
+        let Memory { order, .. } = tree.state.downcast_ref();
+
+        // `Pane` always increments and is iterated by Ord so new
+        // states are always added at the end. We can simply remove
+        // states which no longer exist and `diff_children` will
+        // diff the remaining values in the correct order and
+        // add new states at the end
+
+        let mut i = 0;
+        let mut j = 0;
+        tree.children.retain(|_| {
+            let retain = self.panes.get(i) == order.get(j);
+
+            if retain {
+                i += 1;
+            }
+            j += 1;
+
+            retain
+        });
+
+        tree.diff_children_custom(
+            &self.contents,
+            |state, content| content.diff(state),
+            Content::state,
+        );
+
+        let Memory { order, .. } = tree.state.downcast_mut();
+        order.clone_from(&self.panes);
     }
 
     fn size(&self) -> Size<Length> {
@@ -341,21 +417,33 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         tree: &mut Tree,
         renderer: &Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        let size = limits.resolve(self.width, self.height, Size::ZERO);
-        let node = self.contents.layout();
-        let regions = node.pane_regions(self.spacing, size);
+        let bounds = limits.resolve(self.width, self.height, Size::ZERO);
+        let regions = self.internal.layout().pane_regions(
+            self.spacing,
+            self.min_size,
+            bounds,
+        );
 
         let children = self
-            .contents
-            .iter()
+            .panes
+            .iter_mut()
+            .zip(&mut self.contents)
             .zip(tree.children.iter_mut())
             .filter_map(|((pane, content), tree)| {
-                let region = regions.get(&pane)?;
+                if self
+                    .internal
+                    .maximized()
+                    .is_some_and(|maximized| maximized != *pane)
+                {
+                    return Some(layout::Node::new(Size::ZERO));
+                }
+
+                let region = regions.get(pane)?;
                 let size = Size::new(region.width, region.height);
 
                 let node = content.layout(
@@ -368,42 +456,47 @@ where
             })
             .collect();
 
-        layout::Node::with_children(size, children)
+        layout::Node::with_children(bounds, children)
     }
 
     fn operate(
-        &self,
+        &mut self,
         tree: &mut Tree,
         layout: Layout<'_>,
         renderer: &Renderer,
         operation: &mut dyn widget::Operation,
     ) {
-        operation.container(None, layout.bounds(), &mut |operation| {
-            self.contents
-                .iter()
+        operation.container(None, layout.bounds());
+        operation.traverse(&mut |operation| {
+            self.panes
+                .iter_mut()
+                .zip(&mut self.contents)
                 .zip(&mut tree.children)
                 .zip(layout.children())
-                .for_each(|(((_pane, content), state), layout)| {
+                .filter(|(((pane, _), _), _)| {
+                    self.internal
+                        .maximized()
+                        .is_none_or(|maximized| **pane == maximized)
+                })
+                .for_each(|(((_, content), state), layout)| {
                     content.operate(state, layout, renderer, operation);
                 });
         });
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
-    ) -> event::Status {
-        let mut event_status = event::Status::Ignored;
-
-        let action = tree.state.downcast_mut::<state::Action>();
-        let node = self.contents.layout();
+    ) {
+        let Memory { action, .. } = tree.state.downcast_mut();
+        let node = self.internal.layout();
 
         let on_drag = if self.drag_enabled() {
             &self.on_drag
@@ -411,13 +504,36 @@ where
             &None
         };
 
+        let picked_pane = action.picked_pane().map(|(pane, _)| pane);
+
+        for (((pane, content), tree), layout) in self
+            .panes
+            .iter()
+            .copied()
+            .zip(&mut self.contents)
+            .zip(&mut tree.children)
+            .zip(layout.children())
+            .filter(|(((pane, _), _), _)| {
+                self.internal
+                    .maximized()
+                    .is_none_or(|maximized| *pane == maximized)
+            })
+        {
+            let is_picked = picked_pane == Some(pane);
+
+            content.update(
+                tree, event, layout, cursor, renderer, clipboard, shell,
+                viewport, is_picked,
+            );
+        }
+
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
             | Event::Touch(touch::Event::FingerPressed { .. }) => {
                 let bounds = layout.bounds();
 
                 if let Some(cursor_position) = cursor.position_over(bounds) {
-                    event_status = event::Status::Captured;
+                    shell.capture_event();
 
                     match &self.on_resize {
                         Some((leeway, _)) => {
@@ -428,7 +544,8 @@ where
 
                             let splits = node.split_regions(
                                 self.spacing,
-                                Size::new(bounds.width, bounds.height),
+                                self.min_size,
+                                bounds.size(),
                             );
 
                             let clicked_split = hovered_split(
@@ -448,7 +565,10 @@ where
                                     layout,
                                     cursor_position,
                                     shell,
-                                    self.contents.iter(),
+                                    self.panes
+                                        .iter()
+                                        .copied()
+                                        .zip(&self.contents),
                                     &self.on_click,
                                     on_drag,
                                 );
@@ -460,7 +580,7 @@ where
                                 layout,
                                 cursor_position,
                                 shell,
-                                self.contents.iter(),
+                                self.panes.iter().copied().zip(&self.contents),
                                 &self.on_click,
                                 on_drag,
                             );
@@ -471,55 +591,48 @@ where
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
             | Event::Touch(touch::Event::FingerLifted { .. })
             | Event::Touch(touch::Event::FingerLost { .. }) => {
-                if let Some((pane, origin)) = action.picked_pane() {
-                    if let Some(on_drag) = on_drag {
-                        if let Some(cursor_position) = cursor.position() {
-                            if cursor_position.distance(origin)
-                                > DRAG_DEADBAND_DISTANCE
-                            {
-                                let event = if let Some(edge) =
-                                    in_edge(layout, cursor_position)
+                if let Some((pane, origin)) = action.picked_pane()
+                    && let Some(on_drag) = on_drag
+                    && let Some(cursor_position) = cursor.position()
+                {
+                    if cursor_position.distance(origin) > DRAG_DEADBAND_DISTANCE
+                    {
+                        let event = if let Some(edge) =
+                            in_edge(layout, cursor_position)
+                        {
+                            DragEvent::Dropped {
+                                pane,
+                                target: Target::Edge(edge),
+                            }
+                        } else {
+                            let dropped_region = self
+                                .panes
+                                .iter()
+                                .copied()
+                                .zip(&self.contents)
+                                .zip(layout.children())
+                                .find_map(|(target, layout)| {
+                                    layout_region(layout, cursor_position)
+                                        .map(|region| (target, region))
+                                });
+
+                            match dropped_region {
+                                Some(((target, _), region))
+                                    if pane != target =>
                                 {
                                     DragEvent::Dropped {
                                         pane,
-                                        target: Target::Edge(edge),
+                                        target: Target::Pane(target, region),
                                     }
-                                } else {
-                                    let dropped_region = self
-                                        .contents
-                                        .iter()
-                                        .zip(layout.children())
-                                        .find_map(|(target, layout)| {
-                                            layout_region(
-                                                layout,
-                                                cursor_position,
-                                            )
-                                            .map(|region| (target, region))
-                                        });
-
-                                    match dropped_region {
-                                        Some(((target, _), region))
-                                            if pane != target =>
-                                        {
-                                            DragEvent::Dropped {
-                                                pane,
-                                                target: Target::Pane(
-                                                    target, region,
-                                                ),
-                                            }
-                                        }
-                                        _ => DragEvent::Canceled { pane },
-                                    }
-                                };
-
-                                shell.publish(on_drag(event));
+                                }
+                                _ => DragEvent::Canceled { pane },
                             }
-                        }
-                    }
+                        };
 
-                    event_status = event::Status::Captured;
-                } else if action.picked_split().is_some() {
-                    event_status = event::Status::Captured;
+                        shell.publish(on_drag(event));
+                    } else {
+                        shell.publish(on_drag(DragEvent::Canceled { pane }));
+                    }
                 }
 
                 *action = state::Action::Idle;
@@ -532,66 +645,77 @@ where
 
                         let splits = node.split_regions(
                             self.spacing,
-                            Size::new(bounds.width, bounds.height),
+                            self.min_size,
+                            bounds.size(),
                         );
 
-                        if let Some((axis, rectangle, _)) = splits.get(&split) {
-                            if let Some(cursor_position) = cursor.position() {
-                                let ratio = match axis {
-                                    Axis::Horizontal => {
-                                        let position = cursor_position.y
-                                            - bounds.y
-                                            - rectangle.y;
+                        if let Some((axis, rectangle, _)) = splits.get(&split)
+                            && let Some(cursor_position) = cursor.position()
+                        {
+                            let ratio = match axis {
+                                Axis::Horizontal => {
+                                    let position = cursor_position.y
+                                        - bounds.y
+                                        - rectangle.y;
 
-                                        (position / rectangle.height)
-                                            .clamp(0.1, 0.9)
-                                    }
-                                    Axis::Vertical => {
-                                        let position = cursor_position.x
-                                            - bounds.x
-                                            - rectangle.x;
+                                    (position / rectangle.height)
+                                        .clamp(0.0, 1.0)
+                                }
+                                Axis::Vertical => {
+                                    let position = cursor_position.x
+                                        - bounds.x
+                                        - rectangle.x;
 
-                                        (position / rectangle.width)
-                                            .clamp(0.1, 0.9)
-                                    }
-                                };
+                                    (position / rectangle.width).clamp(0.0, 1.0)
+                                }
+                            };
 
-                                shell.publish(on_resize(ResizeEvent {
-                                    split,
-                                    ratio,
-                                }));
+                            shell.publish(on_resize(ResizeEvent {
+                                split,
+                                ratio,
+                            }));
 
-                                event_status = event::Status::Captured;
-                            }
+                            shell.capture_event();
                         }
+                    } else if action.picked_pane().is_some() {
+                        shell.request_redraw();
                     }
                 }
             }
             _ => {}
         }
 
-        let picked_pane = action.picked_pane().map(|(pane, _)| pane);
+        if shell.redraw_request() != window::RedrawRequest::NextFrame {
+            let interaction = self
+                .grid_interaction(action, layout, cursor)
+                .or_else(|| {
+                    self.panes
+                        .iter()
+                        .zip(&self.contents)
+                        .zip(layout.children())
+                        .filter(|((pane, _content), _layout)| {
+                            self.internal
+                                .maximized()
+                                .is_none_or(|maximized| **pane == maximized)
+                        })
+                        .find_map(|((_pane, content), layout)| {
+                            content.grid_interaction(
+                                layout,
+                                cursor,
+                                on_drag.is_some(),
+                            )
+                        })
+                })
+                .unwrap_or(mouse::Interaction::None);
 
-        self.contents
-            .iter_mut()
-            .zip(&mut tree.children)
-            .zip(layout.children())
-            .map(|(((pane, content), tree), layout)| {
-                let is_picked = picked_pane == Some(pane);
-
-                content.on_event(
-                    tree,
-                    event.clone(),
-                    layout,
-                    cursor,
-                    renderer,
-                    clipboard,
-                    shell,
-                    viewport,
-                    is_picked,
-                )
-            })
-            .fold(event_status, event::Status::merge)
+            if let Event::Window(window::Event::RedrawRequested(_now)) = event {
+                self.last_mouse_interaction = Some(interaction);
+            } else if self.last_mouse_interaction.is_some_and(
+                |last_mouse_interaction| last_mouse_interaction != interaction,
+            ) {
+                shell.request_redraw();
+            }
+        }
     }
 
     fn mouse_interaction(
@@ -602,50 +726,26 @@ where
         viewport: &Rectangle,
         renderer: &Renderer,
     ) -> mouse::Interaction {
-        let action = tree.state.downcast_ref::<state::Action>();
+        let Memory { action, .. } = tree.state.downcast_ref();
 
-        if action.picked_pane().is_some() {
-            return mouse::Interaction::Grabbing;
+        if let Some(grid_interaction) =
+            self.grid_interaction(action, layout, cursor)
+        {
+            return grid_interaction;
         }
 
-        let resize_leeway = self.on_resize.as_ref().map(|(leeway, _)| *leeway);
-        let node = self.contents.layout();
-
-        let resize_axis =
-            action.picked_split().map(|(_, axis)| axis).or_else(|| {
-                resize_leeway.and_then(|leeway| {
-                    let cursor_position = cursor.position()?;
-                    let bounds = layout.bounds();
-
-                    let splits =
-                        node.split_regions(self.spacing, bounds.size());
-
-                    let relative_cursor = Point::new(
-                        cursor_position.x - bounds.x,
-                        cursor_position.y - bounds.y,
-                    );
-
-                    hovered_split(
-                        splits.iter(),
-                        self.spacing + leeway,
-                        relative_cursor,
-                    )
-                    .map(|(_, axis, _)| axis)
-                })
-            });
-
-        if let Some(resize_axis) = resize_axis {
-            return match resize_axis {
-                Axis::Horizontal => mouse::Interaction::ResizingVertically,
-                Axis::Vertical => mouse::Interaction::ResizingHorizontally,
-            };
-        }
-
-        self.contents
+        self.panes
             .iter()
+            .copied()
+            .zip(&self.contents)
             .zip(&tree.children)
             .zip(layout.children())
-            .map(|(((_pane, content), tree), layout)| {
+            .filter(|(((pane, _), _), _)| {
+                self.internal
+                    .maximized()
+                    .is_none_or(|maximized| *pane == maximized)
+            })
+            .map(|(((_, content), tree), layout)| {
                 content.mouse_interaction(
                     tree,
                     layout,
@@ -669,15 +769,9 @@ where
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        let action = tree.state.downcast_ref::<state::Action>();
-        let node = self.contents.layout();
+        let Memory { action, .. } = tree.state.downcast_ref();
+        let node = self.internal.layout();
         let resize_leeway = self.on_resize.as_ref().map(|(leeway, _)| *leeway);
-
-        let contents = self
-            .contents
-            .iter()
-            .zip(&tree.children)
-            .map(|((pane, content), tree)| (pane, (content, tree)));
 
         let picked_pane = action.picked_pane().filter(|(_, origin)| {
             cursor
@@ -692,7 +786,11 @@ where
             .and_then(|(split, axis)| {
                 let bounds = layout.bounds();
 
-                let splits = node.split_regions(self.spacing, bounds.size());
+                let splits = node.split_regions(
+                    self.spacing,
+                    self.min_size,
+                    bounds.size(),
+                );
 
                 let (_axis, region, ratio) = splits.get(&split)?;
 
@@ -711,8 +809,11 @@ where
                         cursor_position.y - bounds.y,
                     );
 
-                    let splits =
-                        node.split_regions(self.spacing, bounds.size());
+                    let splits = node.split_regions(
+                        self.spacing,
+                        self.min_size,
+                        bounds.size(),
+                    );
 
                     let (_split, axis, region) = hovered_split(
                         splits.iter(),
@@ -747,8 +848,18 @@ where
 
         let style = Catalog::style(theme, &self.class);
 
-        for ((id, (content, tree)), pane_layout) in
-            contents.zip(layout.children())
+        for (((id, content), tree), pane_layout) in self
+            .panes
+            .iter()
+            .copied()
+            .zip(&self.contents)
+            .zip(&tree.children)
+            .zip(layout.children())
+            .filter(|(((pane, _), _), _)| {
+                self.internal
+                    .maximized()
+                    .is_none_or(|maximized| maximized == *pane)
+            })
         {
             match picked_pane {
                 Some((dragging, origin)) if id == dragging => {
@@ -766,24 +877,23 @@ where
                         viewport,
                     );
 
-                    if picked_pane.is_some() && pane_in_edge.is_none() {
-                        if let Some(region) =
+                    if picked_pane.is_some()
+                        && pane_in_edge.is_none()
+                        && let Some(region) =
                             cursor.position().and_then(|cursor_position| {
                                 layout_region(pane_layout, cursor_position)
                             })
-                        {
-                            let bounds =
-                                layout_region_bounds(pane_layout, region);
+                    {
+                        let bounds = layout_region_bounds(pane_layout, region);
 
-                            renderer.fill_quad(
-                                renderer::Quad {
-                                    bounds,
-                                    border: style.hovered_region.border,
-                                    ..renderer::Quad::default()
-                                },
-                                style.hovered_region.background,
-                            );
-                        }
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds,
+                                border: style.hovered_region.border,
+                                ..renderer::Quad::default()
+                            },
+                            style.hovered_region.background,
+                        );
                     }
                 }
                 _ => {
@@ -814,81 +924,90 @@ where
         }
 
         // Render picked pane last
-        if let Some(((content, tree), origin, layout)) = render_picked_pane {
-            if let Some(cursor_position) = cursor.position() {
-                let bounds = layout.bounds();
+        if let Some(((content, tree), origin, layout)) = render_picked_pane
+            && let Some(cursor_position) = cursor.position()
+        {
+            let bounds = layout.bounds();
 
-                let translation =
-                    cursor_position - Point::new(origin.x, origin.y);
+            let translation = cursor_position - Point::new(origin.x, origin.y);
 
-                renderer.with_translation(translation, |renderer| {
-                    renderer.with_layer(bounds, |renderer| {
-                        content.draw(
-                            tree,
-                            renderer,
-                            theme,
-                            defaults,
-                            layout,
-                            pane_cursor,
-                            viewport,
-                        );
-                    });
+            renderer.with_translation(translation, |renderer| {
+                renderer.with_layer(bounds, |renderer| {
+                    content.draw(
+                        tree,
+                        renderer,
+                        theme,
+                        defaults,
+                        layout,
+                        pane_cursor,
+                        viewport,
+                    );
                 });
-            }
+            });
         }
 
-        if picked_pane.is_none() {
-            if let Some((axis, split_region, is_picked)) = picked_split {
-                let highlight = if is_picked {
-                    style.picked_split
-                } else {
-                    style.hovered_split
-                };
+        if picked_pane.is_none()
+            && let Some((axis, split_region, is_picked)) = picked_split
+        {
+            let highlight = if is_picked {
+                style.picked_split
+            } else {
+                style.hovered_split
+            };
 
-                renderer.fill_quad(
-                    renderer::Quad {
-                        bounds: match axis {
-                            Axis::Horizontal => Rectangle {
-                                x: split_region.x,
-                                y: (split_region.y
-                                    + (split_region.height - highlight.width)
-                                        / 2.0)
-                                    .round(),
-                                width: split_region.width,
-                                height: highlight.width,
-                            },
-                            Axis::Vertical => Rectangle {
-                                x: (split_region.x
-                                    + (split_region.width - highlight.width)
-                                        / 2.0)
-                                    .round(),
-                                y: split_region.y,
-                                width: highlight.width,
-                                height: split_region.height,
-                            },
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: match axis {
+                        Axis::Horizontal => Rectangle {
+                            x: split_region.x,
+                            y: (split_region.y
+                                + (split_region.height - highlight.width)
+                                    / 2.0)
+                                .round(),
+                            width: split_region.width,
+                            height: highlight.width,
                         },
-                        ..renderer::Quad::default()
+                        Axis::Vertical => Rectangle {
+                            x: (split_region.x
+                                + (split_region.width - highlight.width) / 2.0)
+                                .round(),
+                            y: split_region.y,
+                            width: highlight.width,
+                            height: split_region.height,
+                        },
                     },
-                    highlight.color,
-                );
-            }
+                    ..renderer::Quad::default()
+                },
+                highlight.color,
+            );
         }
     }
 
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'_>,
+        layout: Layout<'b>,
         renderer: &Renderer,
+        viewport: &Rectangle,
         translation: Vector,
-    ) -> Option<overlay::Element<'_, Message, Theme, Renderer>> {
+    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
         let children = self
-            .contents
-            .iter_mut()
+            .panes
+            .iter()
+            .copied()
+            .zip(&mut self.contents)
             .zip(&mut tree.children)
             .zip(layout.children())
-            .filter_map(|(((_, content), state), layout)| {
-                content.overlay(state, layout, renderer, translation)
+            .filter_map(|(((pane, content), state), layout)| {
+                if self
+                    .internal
+                    .maximized()
+                    .is_some_and(|maximized| maximized != pane)
+                {
+                    return None;
+                }
+
+                content.overlay(state, layout, renderer, viewport, translation)
             })
             .collect::<Vec<_>>();
 
@@ -952,15 +1071,15 @@ fn click_pane<'a, Message, T>(
             shell.publish(on_click(pane));
         }
 
-        if let Some(on_drag) = &on_drag {
-            if content.can_be_dragged_at(layout, cursor_position) {
-                *action = state::Action::Dragging {
-                    pane,
-                    origin: cursor_position,
-                };
+        if let Some(on_drag) = &on_drag
+            && content.can_be_dragged_at(layout, cursor_position)
+        {
+            *action = state::Action::Dragging {
+                pane,
+                origin: cursor_position,
+            };
 
-                shell.publish(on_drag(DragEvent::Picked { pane }));
-            }
+            shell.publish(on_drag(DragEvent::Picked { pane }));
         }
     }
 }
@@ -1134,52 +1253,6 @@ fn hovered_split<'a>(
             None
         }
     })
-}
-
-/// The visible contents of the [`PaneGrid`]
-#[derive(Debug)]
-pub enum Contents<'a, T> {
-    /// All panes are visible
-    All(Vec<(Pane, T)>, &'a state::Internal),
-    /// A maximized pane is visible
-    Maximized(Pane, T, Node),
-}
-
-impl<'a, T> Contents<'a, T> {
-    /// Returns the layout [`Node`] of the [`Contents`]
-    pub fn layout(&self) -> &Node {
-        match self {
-            Contents::All(_, state) => state.layout(),
-            Contents::Maximized(_, _, layout) => layout,
-        }
-    }
-
-    /// Returns an iterator over the values of the [`Contents`]
-    pub fn iter(&self) -> Box<dyn Iterator<Item = (Pane, &T)> + '_> {
-        match self {
-            Contents::All(contents, _) => Box::new(
-                contents.iter().map(|(pane, content)| (*pane, content)),
-            ),
-            Contents::Maximized(pane, content, _) => {
-                Box::new(std::iter::once((*pane, content)))
-            }
-        }
-    }
-
-    fn iter_mut(&mut self) -> Box<dyn Iterator<Item = (Pane, &mut T)> + '_> {
-        match self {
-            Contents::All(contents, _) => Box::new(
-                contents.iter_mut().map(|(pane, content)| (*pane, content)),
-            ),
-            Contents::Maximized(pane, content, _) => {
-                Box::new(std::iter::once((*pane, content)))
-            }
-        }
-    }
-
-    fn is_maximized(&self) -> bool {
-        matches!(self, Self::Maximized(..))
-    }
 }
 
 /// The appearance of a [`PaneGrid`].

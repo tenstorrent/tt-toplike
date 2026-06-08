@@ -16,41 +16,55 @@ pub struct CpalMarker {
 }
 
 impl CpalMarker {
-    fn version_byte_range(&self) -> Range<usize> {
+    pub fn version_byte_range(&self) -> Range<usize> {
         let start = 0;
         start..start + u16::RAW_BYTE_LEN
     }
-    fn num_palette_entries_byte_range(&self) -> Range<usize> {
+
+    pub fn num_palette_entries_byte_range(&self) -> Range<usize> {
         let start = self.version_byte_range().end;
         start..start + u16::RAW_BYTE_LEN
     }
-    fn num_palettes_byte_range(&self) -> Range<usize> {
+
+    pub fn num_palettes_byte_range(&self) -> Range<usize> {
         let start = self.num_palette_entries_byte_range().end;
         start..start + u16::RAW_BYTE_LEN
     }
-    fn num_color_records_byte_range(&self) -> Range<usize> {
+
+    pub fn num_color_records_byte_range(&self) -> Range<usize> {
         let start = self.num_palettes_byte_range().end;
         start..start + u16::RAW_BYTE_LEN
     }
-    fn color_records_array_offset_byte_range(&self) -> Range<usize> {
+
+    pub fn color_records_array_offset_byte_range(&self) -> Range<usize> {
         let start = self.num_color_records_byte_range().end;
         start..start + Offset32::RAW_BYTE_LEN
     }
-    fn color_record_indices_byte_range(&self) -> Range<usize> {
+
+    pub fn color_record_indices_byte_range(&self) -> Range<usize> {
         let start = self.color_records_array_offset_byte_range().end;
         start..start + self.color_record_indices_byte_len
     }
-    fn palette_types_array_offset_byte_range(&self) -> Option<Range<usize>> {
+
+    pub fn palette_types_array_offset_byte_range(&self) -> Option<Range<usize>> {
         let start = self.palette_types_array_offset_byte_start?;
         Some(start..start + Offset32::RAW_BYTE_LEN)
     }
-    fn palette_labels_array_offset_byte_range(&self) -> Option<Range<usize>> {
+
+    pub fn palette_labels_array_offset_byte_range(&self) -> Option<Range<usize>> {
         let start = self.palette_labels_array_offset_byte_start?;
         Some(start..start + Offset32::RAW_BYTE_LEN)
     }
-    fn palette_entry_labels_array_offset_byte_range(&self) -> Option<Range<usize>> {
+
+    pub fn palette_entry_labels_array_offset_byte_range(&self) -> Option<Range<usize>> {
         let start = self.palette_entry_labels_array_offset_byte_start?;
         Some(start..start + Offset32::RAW_BYTE_LEN)
+    }
+}
+
+impl MinByteRange for CpalMarker {
+    fn min_byte_range(&self) -> Range<usize> {
+        0..self.color_record_indices_byte_range().end
     }
 }
 
@@ -104,6 +118,7 @@ impl<'a> FontRead<'a> for Cpal<'a> {
 /// [CPAL (Color Palette Table)](https://learn.microsoft.com/en-us/typography/opentype/spec/cpal#palette-table-header) table
 pub type Cpal<'a> = TableRef<'a, CpalMarker>;
 
+#[allow(clippy::needless_lifetimes)]
 impl<'a> Cpal<'a> {
     /// Table version number (=0).
     pub fn version(&self) -> u16 {
@@ -182,7 +197,7 @@ impl<'a> Cpal<'a> {
     }
 
     /// Attempt to resolve [`palette_labels_array_offset`][Self::palette_labels_array_offset].
-    pub fn palette_labels_array(&self) -> Option<Result<&'a [BigEndian<u16>], ReadError>> {
+    pub fn palette_labels_array(&self) -> Option<Result<&'a [BigEndian<NameId>], ReadError>> {
         let data = self.data;
         let args = self.num_palettes();
         self.palette_labels_array_offset()
@@ -267,6 +282,7 @@ impl<'a> SomeTable<'a> for Cpal<'a> {
 }
 
 #[cfg(feature = "experimental_traverse")]
+#[allow(clippy::needless_lifetimes)]
 impl<'a> std::fmt::Debug for Cpal<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         (self as &dyn SomeTable<'a>).fmt(f)
@@ -588,6 +604,8 @@ impl<'a> From<PaletteType> for FieldType<'a> {
 }
 
 /// [CPAL (Color Record)](https://learn.microsoft.com/en-us/typography/opentype/spec/cpal#palette-entries-and-color-records) record
+///
+/// Contains a color in non-premultiplied BGRA form, in the sRGB color space.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Copy, bytemuck :: AnyBitPattern)]
 #[repr(C)]
 #[repr(packed)]
@@ -596,7 +614,7 @@ pub struct ColorRecord {
     pub blue: u8,
     /// Green value (B1).
     pub green: u8,
-    ///     Red value (B2).
+    /// Red value (B2).
     pub red: u8,
     /// Alpha value (B3).
     pub alpha: u8,
@@ -613,7 +631,7 @@ impl ColorRecord {
         self.green
     }
 
-    ///     Red value (B2).
+    /// Red value (B2).
     pub fn red(&self) -> u8 {
         self.red
     }

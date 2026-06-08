@@ -24,6 +24,8 @@ bitflags! {
         const LOGO = 0b100 << 9;
         // const LLOGO = 0b010 << 9;
         // const RLOGO = 0b001 << 9;
+        /// No modifiers
+        const NONE = 0;
     }
 }
 
@@ -33,7 +35,7 @@ impl Modifiers {
     /// This is normally the main modifier to be used for hotkeys.
     ///
     /// On macOS, this is equivalent to `Self::LOGO`.
-    /// Ohterwise, this is equivalent to `Self::CTRL`.
+    /// Otherwise, this is equivalent to `Self::CTRL`.
     pub const COMMAND: Self = if cfg!(target_os = "macos") {
         Self::LOGO
     } else {

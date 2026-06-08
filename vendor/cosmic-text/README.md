@@ -8,7 +8,7 @@
 Pure Rust multi-line text handling.
 
 COSMIC Text provides advanced text shaping, layout, and rendering wrapped up
-into a simple abstraction. Shaping is provided by rustybuzz, and supports a
+into a simple abstraction. Shaping is provided by HarfRust, and supports a
 wide variety of advanced shaping operations. Rendering is provided by swash,
 which supports ligatures and color emoji. Layout is implemented custom, in safe
 Rust, and supports bidirectional text. Font fallback is also a custom
@@ -27,6 +27,8 @@ Hindi translation of Universal Declaration of Human Rights
 Simplified Chinese translation of Universal Declaration of Human Rights
 [![Simplified Chinses screenshot](screenshots/chinese-simplified.png)](screenshots/chinese-simplified.png)
 
+[View Universal Declaration of Human Rights on OHCHR](https://www.ohchr.org/en/universal-declaration-of-human-rights)
+
 ## Roadmap
 
 The following features must be supported before this is "ready":
@@ -37,7 +39,7 @@ The following features must be supported before this is "ready":
 - [x] Text styles (bold, italic, etc.)
   - [x] Per-buffer
   - [x] Per-span
-- [x] Font shaping (using rustybuzz)
+- [x] Font shaping (using HarfRust)
   - [x] Cache results
   - [x] RTL
   - [x] Bidirectional rendering

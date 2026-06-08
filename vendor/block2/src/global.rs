@@ -1,10 +1,10 @@
+use core::ffi::c_ulong;
 use core::fmt;
 use core::marker::PhantomData;
 use core::mem;
 use core::mem::MaybeUninit;
 use core::ops::Deref;
 use core::ptr::{self, NonNull};
-use std::os::raw::c_ulong;
 
 use crate::abi::{BlockDescriptor, BlockDescriptorPtr, BlockFlags, BlockHeader};
 use crate::debug::debug_block_header;
@@ -18,11 +18,15 @@ const GLOBAL_DESCRIPTOR: BlockDescriptor = BlockDescriptor {
 
 /// A global Objective-C block that does not capture an environment.
 ///
+/// This can be used as an optimization of [`RcBlock`] if your closure doesn't
+/// capture any variables.
+///
 /// This is a smart pointer that [`Deref`]s to [`Block`].
 ///
 /// It can created and stored in static memory using the [`global_block!`]
 /// macro.
 ///
+/// [`RcBlock`]: crate::RcBlock
 /// [`global_block!`]: crate::global_block
 #[repr(C)]
 pub struct GlobalBlock<F: ?Sized> {
@@ -44,10 +48,10 @@ unsafe impl<F: ?Sized + BlockFn> Send for GlobalBlock<F> {}
 // triggers an error.
 impl<F: ?Sized> GlobalBlock<F> {
     // TODO: Use new ABI with BLOCK_HAS_SIGNATURE
-    const FLAGS: BlockFlags =
-        BlockFlags(BlockFlags::BLOCK_IS_GLOBAL.0 | BlockFlags::BLOCK_USE_STRET.0);
+    const FLAGS: BlockFlags = BlockFlags::BLOCK_IS_GLOBAL.union(BlockFlags::BLOCK_USE_STRET);
 
     #[doc(hidden)]
+    #[allow(clippy::declare_interior_mutable_const)]
     pub const __DEFAULT_HEADER: BlockHeader = BlockHeader {
         // Populated in `global_block!`
         isa: ptr::null_mut(),
@@ -130,7 +134,7 @@ impl<F: ?Sized> fmt::Debug for GlobalBlock<F> {
 ///
 /// The following does not compile because [`Box`] is not [`EncodeReturn`]:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// use block2::global_block;
 /// global_block! {
 ///     pub static BLOCK = |b: Box<i32>| {};
@@ -163,7 +167,7 @@ impl<F: ?Sized> fmt::Debug for GlobalBlock<F> {
 /// }
 /// ```
 ///
-/// [`Box`]: std::boxed::Box
+/// [`Box`]: alloc::boxed::Box
 #[macro_export]
 macro_rules! global_block {
     // `||` is parsed as one token
@@ -186,14 +190,17 @@ macro_rules! global_block {
             let mut header = $crate::GlobalBlock::<dyn Fn($($t),*) $(-> $r)? + 'static>::__DEFAULT_HEADER;
             header.isa = ::core::ptr::addr_of!($crate::ffi::_NSConcreteGlobalBlock);
             header.invoke = ::core::option::Option::Some({
-                unsafe extern "C" fn inner(_: *mut $crate::GlobalBlock<dyn Fn($($t),*) $(-> $r)? + 'static>, $($a: $t),*) $(-> $r)? {
+                unsafe extern "C-unwind" fn inner(
+                    _: *mut $crate::GlobalBlock<dyn Fn($($t),*) $(-> $r)? + 'static>,
+                    $($a: $t),*
+                ) $(-> $r)? {
                     $body
                 }
 
                 // TODO: SAFETY
                 ::core::mem::transmute::<
-                    unsafe extern "C" fn(*mut $crate::GlobalBlock<dyn Fn($($t),*) $(-> $r)? + 'static>, $($a: $t),*) $(-> $r)?,
-                    unsafe extern "C" fn(),
+                    unsafe extern "C-unwind" fn(*mut $crate::GlobalBlock<dyn Fn($($t),*) $(-> $r)? + 'static>, $($a: $t),*) $(-> $r)?,
+                    unsafe extern "C-unwind" fn(),
                 >(inner)
             });
             $crate::GlobalBlock::from_header(header)
@@ -269,11 +276,12 @@ mod tests {
     fn test_debug() {
         let invoke = NOOP_BLOCK.header.invoke.unwrap();
         let size = mem::size_of::<BlockHeader>();
+        let maybeuninit = <MaybeUninit<i32>>::uninit();
         let expected = format!(
             "GlobalBlock {{
     isa: _NSConcreteGlobalBlock,
     flags: {DEBUG_BLOCKFLAGS},
-    reserved: core::mem::maybe_uninit::MaybeUninit<i32>,
+    reserved: {maybeuninit:?},
     invoke: Some(
         {invoke:#?},
     ),

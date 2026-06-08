@@ -1,6 +1,6 @@
+use crate::Buffer;
 use crate::graphics::color;
 use crate::quad::{self, Quad};
-use crate::Buffer;
 
 use bytemuck::{Pod, Zeroable};
 use std::ops::Range;
@@ -51,7 +51,7 @@ impl Layer {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Pipeline {
     pipeline: wgpu::RenderPipeline,
 }
@@ -74,6 +74,8 @@ impl Pipeline {
                 label: Some("iced_wgpu.quad.solid.shader"),
                 source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
                     concat!(
+                        include_str!("../shader/color.wgsl"),
+                        "\n",
                         include_str!("../shader/quad.wgsl"),
                         "\n",
                         include_str!("../shader/vertex.wgsl"),
@@ -89,7 +91,7 @@ impl Pipeline {
                 layout: Some(&layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
-                    entry_point: "solid_vs_main",
+                    entry_point: Some("solid_vs_main"),
                     buffers: &[wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<Solid>() as u64,
                         step_mode: wgpu::VertexStepMode::Instance,
@@ -112,13 +114,19 @@ impl Pipeline {
                             7 => Float32x2,
                             // Shadow blur radius
                             8 => Float32,
+                            // Snap
+                            9 => Uint32,
                         ),
                     }],
+                    compilation_options:
+                        wgpu::PipelineCompilationOptions::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: "solid_fs_main",
+                    entry_point: Some("solid_fs_main"),
                     targets: &quad::color_target_state(format),
+                    compilation_options:
+                        wgpu::PipelineCompilationOptions::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
@@ -132,6 +140,7 @@ impl Pipeline {
                     alpha_to_coverage_enabled: false,
                 },
                 multiview: None,
+                cache: None,
             });
 
         Self { pipeline }

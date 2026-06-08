@@ -1,3 +1,13 @@
+tt-toplike (0.6.2) noble; urgency=medium
+
+  * Fix power reporting: HybridBackend now overlays SMBUS TDP/TDC onto sysfs
+    telemetry so displayed wattage covers all power domains (Tensix + GDDR),
+    matching tt-smi output. Previously the hwmon driver's vcore-only reading
+    was used, which could be ~50% lower than firmware-reported total board power
+    on newer firmware versions (e.g. 19.10.0).
+
+ -- Tenstorrent <software@tenstorrent.com>  Thu, 05 Jun 2026 17:00:00 +0000
+
 tt-toplike (0.6.1) noble; urgency=medium
 
   * Fix static-width number formatting: all telemetry values in arcade, TUI

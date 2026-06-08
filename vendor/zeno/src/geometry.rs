@@ -1,5 +1,8 @@
 //! Geometric primitives.
 
+#[allow(unused)]
+use crate::F32Ext;
+
 use core::borrow::Borrow;
 use core::ops::{Add, Div, Mul, Sub};
 
@@ -478,8 +481,8 @@ impl Placement {
         let mut bounds = *bounds;
         bounds.min = (bounds.min + offset).floor();
         bounds.max = (bounds.max + offset).ceil();
-        let offset = Vector::new(-bounds.min.x + 1., -bounds.min.y);
-        let width = bounds.width() as u32 + 2;
+        let offset = Vector::new(-bounds.min.x, -bounds.min.y);
+        let width = bounds.width() as u32;
         let height = bounds.height() as u32;
         let left = -offset.x as i32;
         let top = if origin == Origin::BottomLeft {
@@ -549,6 +552,7 @@ impl Bounds {
 
 pub(super) struct BoundsBuilder {
     pub count: usize,
+    #[allow(dead_code)]
     pub start: Point,
     pub current: Point,
     pub min: Point,

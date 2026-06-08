@@ -2,7 +2,7 @@
 # debian/rules — debhelper build rules for tt-toplike
 #
 # This is a Rust project. The build step compiles two release binaries:
-#   - tt-toplike-tui  (installed as /usr/bin/tt-toplike)
+#   - tt-toplike-tui  (installed as /usr/bin/tt-toplike + symlink /usr/bin/tt-toplike-tui)
 #   - tt-toplike-app  (installed as /usr/bin/tt-toplike-app)
 #
 # OFFLINE BUILD: crates are vendored under vendor/ and .cargo/config.toml
@@ -61,9 +61,12 @@ override_dh_auto_install:
 	install -d debian/tt-toplike/usr/bin
 	install -d debian/tt-toplike/usr/share/doc/tt-toplike
 
-	# Binary renamed: tt-toplike-tui → tt-toplike (shorter, friendlier)
+	# Primary name: tt-toplike (short, user-facing)
 	install -m 755 debian/target/release/tt-toplike-tui \
 	    debian/tt-toplike/usr/bin/tt-toplike
+	# Compat symlink: tt-toplike-app spawns "tt-toplike-tui" by name;
+	# without this it falls back to PATH and may find a stale old install.
+	ln -s tt-toplike debian/tt-toplike/usr/bin/tt-toplike-tui
 
 	install -m 644 README.md QUICK_START.md \
 	    debian/tt-toplike/usr/share/doc/tt-toplike/

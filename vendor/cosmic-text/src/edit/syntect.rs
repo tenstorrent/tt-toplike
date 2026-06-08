@@ -88,7 +88,7 @@ impl<'syntax_system, 'buffer> SyntaxEditor<'syntax_system, 'buffer> {
                                 foreground.a,
                             ));
                         }
-                        line.set_attrs_list(AttrsList::new(attrs));
+                        line.set_attrs_list(AttrsList::new(&attrs));
                     }
                 });
             }
@@ -123,26 +123,32 @@ impl<'syntax_system, 'buffer> SyntaxEditor<'syntax_system, 'buffer> {
             ));
         }
 
-        let text = fs::read_to_string(path)?;
+        // Clear buffer first (allows sane handling of non-existant files)
         self.editor.with_buffer_mut(|buffer| {
-            buffer.set_text(font_system, &text, attrs, Shaping::Advanced)
+            buffer.set_text(font_system, "", &attrs, Shaping::Advanced, None);
         });
 
-        //TODO: re-use text
+        // Update syntax based on file name
         self.syntax = match self.syntax_system.syntax_set.find_syntax_for_file(path) {
             Ok(Some(some)) => some,
             Ok(None) => {
-                log::warn!("no syntax found for {:?}", path);
+                log::warn!("no syntax found for {path:?}");
                 self.syntax_system.syntax_set.find_syntax_plain_text()
             }
             Err(err) => {
-                log::warn!("failed to determine syntax for {:?}: {:?}", path, err);
+                log::warn!("failed to determine syntax for {path:?}: {err:?}");
                 self.syntax_system.syntax_set.find_syntax_plain_text()
             }
         };
 
         // Clear syntax cache
         self.syntax_cache.clear();
+
+        // Set text
+        let text = fs::read_to_string(path)?;
+        self.editor.with_buffer_mut(|buffer| {
+            buffer.set_text(font_system, &text, &attrs, Shaping::Advanced, None);
+        });
 
         Ok(())
     }
@@ -156,7 +162,7 @@ impl<'syntax_system, 'buffer> SyntaxEditor<'syntax_system, 'buffer> {
         {
             Some(some) => some,
             None => {
-                log::warn!("no syntax found for {}", extension);
+                log::warn!("no syntax found for {extension:?}");
                 self.syntax_system.syntax_set.find_syntax_plain_text()
             }
         };
@@ -235,7 +241,7 @@ impl<'syntax_system, 'buffer> SyntaxEditor<'syntax_system, 'buffer> {
     }
 }
 
-impl<'syntax_system, 'buffer> Edit<'buffer> for SyntaxEditor<'syntax_system, 'buffer> {
+impl<'buffer> Edit<'buffer> for SyntaxEditor<'_, 'buffer> {
     fn buffer_ref(&self) -> &BufferRef<'buffer> {
         self.editor.buffer_ref()
     }
@@ -332,9 +338,11 @@ impl<'syntax_system, 'buffer> Edit<'buffer> for SyntaxEditor<'syntax_system, 'bu
                 );
 
                 let attrs = line.attrs_list().defaults();
-                let mut attrs_list = AttrsList::new(attrs);
+                let mut attrs_list = AttrsList::new(&attrs);
+                let original_attrs = attrs.clone(); // Store a clone for comparison
                 for (style, _, range) in ranges {
                     let span_attrs = attrs
+                        .clone() // Clone attrs for modification
                         .color(Color::rgba(
                             style.foreground.r,
                             style.foreground.g,
@@ -352,8 +360,8 @@ impl<'syntax_system, 'buffer> Edit<'buffer> for SyntaxEditor<'syntax_system, 'bu
                         } else {
                             Weight::NORMAL
                         }); //TODO: underline
-                    if span_attrs != attrs {
-                        attrs_list.add_span(range, span_attrs);
+                    if span_attrs != original_attrs {
+                        attrs_list.add_span(range, &span_attrs);
                     }
                 }
 
@@ -440,9 +448,7 @@ impl<'syntax_system, 'buffer> Edit<'buffer> for SyntaxEditor<'syntax_system, 'bu
     }
 }
 
-impl<'font_system, 'syntax_system, 'buffer>
-    BorrowedWithFontSystem<'font_system, SyntaxEditor<'syntax_system, 'buffer>>
-{
+impl BorrowedWithFontSystem<'_, SyntaxEditor<'_, '_>> {
     /// Load text from a file, and also set syntax to the best option
     ///
     /// ## Errors

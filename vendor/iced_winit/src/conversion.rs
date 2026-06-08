@@ -1,9 +1,11 @@
 //! Convert [`winit`] types into [`iced_runtime`] types, and viceversa.
 //!
 //! [`winit`]: https://github.com/rust-windowing/winit
-//! [`iced_runtime`]: https://github.com/iced-rs/iced/tree/0.13/runtime
+//! [`iced_runtime`]: https://github.com/iced-rs/iced/tree/0.14/runtime
+use crate::core::input_method;
 use crate::core::keyboard;
 use crate::core::mouse;
+use crate::core::theme;
 use crate::core::touch;
 use crate::core::window;
 use crate::core::{Event, Point, Size};
@@ -12,26 +14,43 @@ use crate::core::{Event, Point, Size};
 pub fn window_attributes(
     settings: window::Settings,
     title: &str,
+    scale_factor: f32,
     primary_monitor: Option<winit::monitor::MonitorHandle>,
     _id: Option<String>,
 ) -> winit::window::WindowAttributes {
     let mut attributes = winit::window::WindowAttributes::default();
 
+    let mut buttons = winit::window::WindowButtons::empty();
+
+    if settings.resizable {
+        buttons |= winit::window::WindowButtons::MAXIMIZE;
+    }
+
+    if settings.closeable {
+        buttons |= winit::window::WindowButtons::CLOSE;
+    }
+
+    if settings.minimizable {
+        buttons |= winit::window::WindowButtons::MINIMIZE;
+    }
+
     attributes = attributes
         .with_title(title)
         .with_inner_size(winit::dpi::LogicalSize {
-            width: settings.size.width,
-            height: settings.size.height,
+            width: settings.size.width * scale_factor,
+            height: settings.size.height * scale_factor,
         })
+        .with_maximized(settings.maximized)
+        .with_fullscreen(
+            settings
+                .fullscreen
+                .then_some(winit::window::Fullscreen::Borderless(None)),
+        )
         .with_resizable(settings.resizable)
-        .with_enabled_buttons(if settings.resizable {
-            winit::window::WindowButtons::all()
-        } else {
-            winit::window::WindowButtons::CLOSE
-                | winit::window::WindowButtons::MINIMIZE
-        })
+        .with_enabled_buttons(buttons)
         .with_decorations(settings.decorations)
         .with_transparent(settings.transparent)
+        .with_blur(settings.blur)
         .with_window_icon(settings.icon.and_then(icon))
         .with_window_level(window_level(settings.level))
         .with_visible(settings.visible);
@@ -72,7 +91,10 @@ pub fn window_attributes(
 
     #[cfg(target_os = "windows")]
     {
-        use winit::platform::windows::WindowAttributesExtWindows;
+        use window::settings::platform;
+        use winit::platform::windows::{
+            CornerPreference, WindowAttributesExtWindows,
+        };
 
         attributes = attributes
             .with_drag_and_drop(settings.platform_specific.drag_and_drop);
@@ -82,6 +104,21 @@ pub fn window_attributes(
 
         attributes = attributes.with_undecorated_shadow(
             settings.platform_specific.undecorated_shadow,
+        );
+
+        attributes = attributes.with_corner_preference(
+            match settings.platform_specific.corner_preference {
+                platform::CornerPreference::Default => {
+                    CornerPreference::Default
+                }
+                platform::CornerPreference::DoNotRound => {
+                    CornerPreference::DoNotRound
+                }
+                platform::CornerPreference::Round => CornerPreference::Round,
+                platform::CornerPreference::RoundSmall => {
+                    CornerPreference::RoundSmall
+                }
+            },
         );
     }
 
@@ -131,14 +168,15 @@ pub fn window_attributes(
 /// Converts a winit window event into an iced event.
 pub fn window_event(
     event: winit::event::WindowEvent,
-    scale_factor: f64,
+    scale_factor: f32,
     modifiers: winit::keyboard::ModifiersState,
 ) -> Option<Event> {
+    use winit::event::Ime;
     use winit::event::WindowEvent;
 
     match event {
         WindowEvent::Resized(new_size) => {
-            let logical_size = new_size.to_logical(scale_factor);
+            let logical_size = new_size.to_logical(f64::from(scale_factor));
 
             Some(Event::Window(window::Event::Resized(Size {
                 width: logical_size.width,
@@ -149,7 +187,7 @@ pub fn window_event(
             Some(Event::Window(window::Event::CloseRequested))
         }
         WindowEvent::CursorMoved { position, .. } => {
-            let position = position.to_logical::<f64>(scale_factor);
+            let position = position.to_logical::<f64>(f64::from(scale_factor));
 
             Some(Event::Mouse(mouse::Event::CursorMoved {
                 position: Point::new(position.x as f32, position.y as f32),
@@ -191,6 +229,8 @@ pub fn window_event(
                 }))
             }
         },
+        // Ignore keyboard presses/releases during window focus/unfocus
+        WindowEvent::KeyboardInput { is_synthetic, .. } if is_synthetic => None,
         WindowEvent::KeyboardInput { event, .. } => Some(Event::Keyboard({
             let key = {
                 #[cfg(not(target_arch = "wasm32"))]
@@ -227,6 +267,7 @@ pub fn window_event(
                 location,
                 logical_key,
                 physical_key,
+                repeat,
                 ..
             } = event;
 
@@ -257,11 +298,14 @@ pub fn window_event(
                         modifiers,
                         location,
                         text,
+                        repeat,
                     }
                 }
                 winit::event::ElementState::Released => {
                     keyboard::Event::KeyReleased {
                         key,
+                        modified_key,
+                        physical_key,
                         modifiers,
                         location,
                     }
@@ -273,6 +317,15 @@ pub fn window_event(
                 self::modifiers(new_modifiers.state()),
             )))
         }
+        WindowEvent::Ime(event) => Some(Event::InputMethod(match event {
+            Ime::Enabled => input_method::Event::Opened,
+            Ime::Preedit(content, size) => input_method::Event::Preedit(
+                content,
+                size.map(|(start, end)| start..end),
+            ),
+            Ime::Commit(content) => input_method::Event::Commit(content),
+            Ime::Disabled => input_method::Event::Closed,
+        })),
         WindowEvent::Focused(focused) => Some(Event::Window(if focused {
             window::Event::Focused
         } else {
@@ -292,15 +345,18 @@ pub fn window_event(
         }
         WindowEvent::Moved(position) => {
             let winit::dpi::LogicalPosition { x, y } =
-                position.to_logical(scale_factor);
+                position.to_logical(f64::from(scale_factor));
 
             Some(Event::Window(window::Event::Moved(Point::new(x, y))))
+        }
+        WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+            Some(Event::Window(window::Event::Rescaled(scale_factor as f32)))
         }
         _ => None,
     }
 }
 
-/// Converts a [`window::Level`] to a [`winit`] window level.
+/// Converts a [`window::Level`] into a [`winit`] window level.
 ///
 /// [`winit`]: https://github.com/rust-windowing/winit
 pub fn window_level(level: window::Level) -> winit::window::WindowLevel {
@@ -313,7 +369,7 @@ pub fn window_level(level: window::Level) -> winit::window::WindowLevel {
     }
 }
 
-/// Converts a [`window::Position`] to a [`winit`] logical position for a given monitor.
+/// Converts a [`window::Position`] into a [`winit`] logical position for a given monitor.
 ///
 /// [`winit`]: https://github.com/rust-windowing/winit
 pub fn position(
@@ -385,7 +441,7 @@ pub fn position(
     }
 }
 
-/// Converts a [`window::Mode`] to a [`winit`] fullscreen mode.
+/// Converts a [`window::Mode`] into a [`winit`] fullscreen mode.
 ///
 /// [`winit`]: https://github.com/rust-windowing/winit
 pub fn fullscreen(
@@ -400,7 +456,7 @@ pub fn fullscreen(
     }
 }
 
-/// Converts a [`window::Mode`] to a visibility flag.
+/// Converts a [`window::Mode`] into a visibility flag.
 pub fn visible(mode: window::Mode) -> bool {
     match mode {
         window::Mode::Windowed | window::Mode::Fullscreen => true,
@@ -408,7 +464,7 @@ pub fn visible(mode: window::Mode) -> bool {
     }
 }
 
-/// Converts a [`winit`] fullscreen mode to a [`window::Mode`].
+/// Converts a [`winit`] fullscreen mode into a [`window::Mode`].
 ///
 /// [`winit`]: https://github.com/rust-windowing/winit
 pub fn mode(mode: Option<winit::window::Fullscreen>) -> window::Mode {
@@ -418,24 +474,57 @@ pub fn mode(mode: Option<winit::window::Fullscreen>) -> window::Mode {
     }
 }
 
-/// Converts a [`mouse::Interaction`] to a [`winit`] cursor icon.
+/// Converts a [`winit`] window theme into a [`theme::Mode`].
+///
+/// [`winit`]: https://github.com/rust-windowing/winit
+pub fn theme_mode(theme: winit::window::Theme) -> theme::Mode {
+    match theme {
+        winit::window::Theme::Light => theme::Mode::Light,
+        winit::window::Theme::Dark => theme::Mode::Dark,
+    }
+}
+
+/// Converts a [`theme::Mode`] into a window theme.
+///
+/// [`winit`]: https://github.com/rust-windowing/winit
+pub fn window_theme(mode: theme::Mode) -> Option<winit::window::Theme> {
+    match mode {
+        theme::Mode::None => None,
+        theme::Mode::Light => Some(winit::window::Theme::Light),
+        theme::Mode::Dark => Some(winit::window::Theme::Dark),
+    }
+}
+
+/// Converts a [`mouse::Interaction`] into a [`winit`] cursor icon.
 ///
 /// [`winit`]: https://github.com/rust-windowing/winit
 pub fn mouse_interaction(
     interaction: mouse::Interaction,
-) -> winit::window::CursorIcon {
+) -> Option<winit::window::CursorIcon> {
     use mouse::Interaction;
 
-    match interaction {
+    let icon = match interaction {
+        Interaction::Hidden => {
+            return None;
+        }
         Interaction::None | Interaction::Idle => {
             winit::window::CursorIcon::Default
         }
+        Interaction::ContextMenu => winit::window::CursorIcon::ContextMenu,
+        Interaction::Help => winit::window::CursorIcon::Help,
         Interaction::Pointer => winit::window::CursorIcon::Pointer,
-        Interaction::Working => winit::window::CursorIcon::Progress,
-        Interaction::Grab => winit::window::CursorIcon::Grab,
-        Interaction::Grabbing => winit::window::CursorIcon::Grabbing,
+        Interaction::Progress => winit::window::CursorIcon::Progress,
+        Interaction::Wait => winit::window::CursorIcon::Wait,
+        Interaction::Cell => winit::window::CursorIcon::Cell,
         Interaction::Crosshair => winit::window::CursorIcon::Crosshair,
         Interaction::Text => winit::window::CursorIcon::Text,
+        Interaction::Alias => winit::window::CursorIcon::Alias,
+        Interaction::Copy => winit::window::CursorIcon::Copy,
+        Interaction::Move => winit::window::CursorIcon::Move,
+        Interaction::NoDrop => winit::window::CursorIcon::NoDrop,
+        Interaction::NotAllowed => winit::window::CursorIcon::NotAllowed,
+        Interaction::Grab => winit::window::CursorIcon::Grab,
+        Interaction::Grabbing => winit::window::CursorIcon::Grabbing,
         Interaction::ResizingHorizontally => {
             winit::window::CursorIcon::EwResize
         }
@@ -446,14 +535,14 @@ pub fn mouse_interaction(
         Interaction::ResizingDiagonallyDown => {
             winit::window::CursorIcon::NwseResize
         }
-        Interaction::NotAllowed => winit::window::CursorIcon::NotAllowed,
+        Interaction::ResizingColumn => winit::window::CursorIcon::ColResize,
+        Interaction::ResizingRow => winit::window::CursorIcon::RowResize,
+        Interaction::AllScroll => winit::window::CursorIcon::AllScroll,
         Interaction::ZoomIn => winit::window::CursorIcon::ZoomIn,
         Interaction::ZoomOut => winit::window::CursorIcon::ZoomOut,
-        Interaction::Cell => winit::window::CursorIcon::Cell,
-        Interaction::Move => winit::window::CursorIcon::Move,
-        Interaction::Copy => winit::window::CursorIcon::Copy,
-        Interaction::Help => winit::window::CursorIcon::Help,
-    }
+    };
+
+    Some(icon)
 }
 
 /// Converts a `MouseButton` from [`winit`] to an [`iced`] mouse button.
@@ -489,12 +578,12 @@ pub fn modifiers(
     result
 }
 
-/// Converts a physical cursor position to a logical `Point`.
+/// Converts a physical cursor position into a logical `Point`.
 pub fn cursor_position(
     position: winit::dpi::PhysicalPosition<f64>,
-    scale_factor: f64,
+    scale_factor: f32,
 ) -> Point {
-    let logical_position = position.to_logical(scale_factor);
+    let logical_position = position.to_logical(f64::from(scale_factor));
 
     Point::new(logical_position.x, logical_position.y)
 }
@@ -505,11 +594,12 @@ pub fn cursor_position(
 /// [`iced`]: https://github.com/iced-rs/iced/tree/0.12
 pub fn touch_event(
     touch: winit::event::Touch,
-    scale_factor: f64,
+    scale_factor: f32,
 ) -> touch::Event {
     let id = touch::Finger(touch.id);
     let position = {
-        let location = touch.location.to_logical::<f64>(scale_factor);
+        let location =
+            touch.location.to_logical::<f64>(f64::from(scale_factor));
 
         Point::new(location.x as f32, location.y as f32)
     };
@@ -1110,7 +1200,7 @@ pub fn native_key_code(
     }
 }
 
-/// Converts some [`UserAttention`] into it's `winit` counterpart.
+/// Converts some [`UserAttention`] into its `winit` counterpart.
 ///
 /// [`UserAttention`]: window::UserAttention
 pub fn user_attention(
@@ -1126,13 +1216,48 @@ pub fn user_attention(
     }
 }
 
-/// Converts some [`window::Icon`] into it's `winit` counterpart.
+/// Converts some [`window::Direction`] into a [`winit::window::ResizeDirection`].
+pub fn resize_direction(
+    resize_direction: window::Direction,
+) -> winit::window::ResizeDirection {
+    match resize_direction {
+        window::Direction::North => winit::window::ResizeDirection::North,
+        window::Direction::South => winit::window::ResizeDirection::South,
+        window::Direction::East => winit::window::ResizeDirection::East,
+        window::Direction::West => winit::window::ResizeDirection::West,
+        window::Direction::NorthEast => {
+            winit::window::ResizeDirection::NorthEast
+        }
+        window::Direction::NorthWest => {
+            winit::window::ResizeDirection::NorthWest
+        }
+        window::Direction::SouthEast => {
+            winit::window::ResizeDirection::SouthEast
+        }
+        window::Direction::SouthWest => {
+            winit::window::ResizeDirection::SouthWest
+        }
+    }
+}
+
+/// Converts some [`window::Icon`] into its `winit` counterpart.
 ///
 /// Returns `None` if there is an error during the conversion.
 pub fn icon(icon: window::Icon) -> Option<winit::window::Icon> {
     let (pixels, size) = icon.into_raw();
 
     winit::window::Icon::from_rgba(pixels, size.width, size.height).ok()
+}
+
+/// Converts some [`input_method::Purpose`] into its `winit` counterpart.
+pub fn ime_purpose(
+    purpose: input_method::Purpose,
+) -> winit::window::ImePurpose {
+    match purpose {
+        input_method::Purpose::Normal => winit::window::ImePurpose::Normal,
+        input_method::Purpose::Secure => winit::window::ImePurpose::Password,
+        input_method::Purpose::Terminal => winit::window::ImePurpose::Terminal,
+    }
 }
 
 // See: https://en.wikipedia.org/wiki/Private_Use_Areas

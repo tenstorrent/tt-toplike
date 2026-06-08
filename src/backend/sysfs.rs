@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Sysfs sensor backend for reading hardware telemetry via Linux hwmon
 //!
 //! This backend provides a non-invasive fallback by reading sensor data directly
@@ -34,9 +33,9 @@ use std::process::Command;
 #[derive(Default)]
 struct SensorPaths {
     temperature: Option<PathBuf>, // tempN_input (millicelsius)
-    voltage:     Option<PathBuf>, // inN_input   (millivolts)
-    power:       Option<PathBuf>, // powerN_input (microwatts)
-    current:     Option<PathBuf>, // currN_input  (milliamperes)
+    voltage: Option<PathBuf>,     // inN_input   (millivolts)
+    power: Option<PathBuf>,       // powerN_input (microwatts)
+    current: Option<PathBuf>,     // currN_input  (milliamperes)
 }
 
 /// Sysfs sensor backend implementation
@@ -98,8 +97,9 @@ impl SysfsBackend {
             ));
         }
 
-        let entries = fs::read_dir(hwmon_base)
-            .map_err(|e| BackendError::Initialization(format!("Failed to read hwmon dir: {}", e)))?;
+        let entries = fs::read_dir(hwmon_base).map_err(|e| {
+            BackendError::Initialization(format!("Failed to read hwmon dir: {}", e))
+        })?;
 
         let mut device_idx = 0;
         for entry in entries.flatten() {
@@ -118,7 +118,11 @@ impl SysfsBackend {
                     || name.contains("wormhole")
                     || name.contains("blackhole")
                 {
-                    log::info!("SysfsBackend: Found Tenstorrent device: {} at {:?}", name, path);
+                    log::info!(
+                        "SysfsBackend: Found Tenstorrent device: {} at {:?}",
+                        name,
+                        path
+                    );
 
                     // Try to determine architecture from name
                     let architecture = if name.contains("grayskull") {
@@ -132,7 +136,8 @@ impl SysfsBackend {
                     };
 
                     // Try to extract PCI address from device path
-                    let bus_id = self.extract_pci_address(&path)
+                    let bus_id = self
+                        .extract_pci_address(&path)
                         .unwrap_or_else(|| format!("hwmon{}", device_idx));
 
                     let device = Device {
@@ -182,7 +187,8 @@ impl SysfsBackend {
             _ => return, // tt-smi not found or --version failed
         };
         let ver_str = String::from_utf8_lossy(&ver_out.stdout);
-        let major: u32 = ver_str.trim()
+        let major: u32 = ver_str
+            .trim()
             .split('.')
             .next()
             .and_then(|s| s.parse().ok())
@@ -197,11 +203,18 @@ impl SysfsBackend {
         }
 
         #[derive(serde::Deserialize)]
-        struct BoardInfo { bus_id: Option<String>, board_type: Option<String> }
+        struct BoardInfo {
+            bus_id: Option<String>,
+            board_type: Option<String>,
+        }
         #[derive(serde::Deserialize)]
-        struct RawDev { board_info: Option<BoardInfo> }
+        struct RawDev {
+            board_info: Option<BoardInfo>,
+        }
         #[derive(serde::Deserialize)]
-        struct Snapshot { device_info: Option<Vec<RawDev>> }
+        struct Snapshot {
+            device_info: Option<Vec<RawDev>>,
+        }
 
         let output = Command::new("tt-smi").arg("-s").output();
         let output = match output {
@@ -233,7 +246,9 @@ impl SysfsBackend {
                 }
             }
         }
-        if sku_by_bus.is_empty() { return; }
+        if sku_by_bus.is_empty() {
+            return;
+        }
 
         for device in &mut self.devices {
             let bus_norm = device.bus_id.trim().to_lowercase();
@@ -273,21 +288,29 @@ impl SysfsBackend {
         for i in 1..=8 {
             if paths.temperature.is_none() {
                 let p = hwmon_path.join(format!("temp{}_input", i));
-                if p.exists() { paths.temperature = Some(p); }
+                if p.exists() {
+                    paths.temperature = Some(p);
+                }
             }
             if paths.power.is_none() {
                 let p = hwmon_path.join(format!("power{}_input", i));
-                if p.exists() { paths.power = Some(p); }
+                if p.exists() {
+                    paths.power = Some(p);
+                }
             }
             if paths.current.is_none() {
                 let p = hwmon_path.join(format!("curr{}_input", i));
-                if p.exists() { paths.current = Some(p); }
+                if p.exists() {
+                    paths.current = Some(p);
+                }
             }
         }
         for i in 0..=8 {
             if paths.voltage.is_none() {
                 let p = hwmon_path.join(format!("in{}_input", i));
-                if p.exists() { paths.voltage = Some(p); }
+                if p.exists() {
+                    paths.voltage = Some(p);
+                }
             }
         }
 
@@ -296,30 +319,33 @@ impl SysfsBackend {
 
     /// Read a millicelsius sysfs file and convert to Celsius.
     fn read_temperature_path(path: &Path) -> Option<f32> {
-        fs::read_to_string(path).ok().and_then(|s| {
-            s.trim().parse::<i32>().ok().map(|mc| mc as f32 / 1000.0)
-        })
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok().map(|mc| mc as f32 / 1000.0))
     }
 
     /// Read a millivolt sysfs file and convert to Volts.
     fn read_voltage_path(path: &Path) -> Option<f32> {
-        fs::read_to_string(path).ok().and_then(|s| {
-            s.trim().parse::<i32>().ok().map(|mv| mv as f32 / 1000.0)
-        })
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok().map(|mv| mv as f32 / 1000.0))
     }
 
     /// Read a microwatt sysfs file and convert to Watts.
     fn read_power_path(path: &Path) -> Option<f32> {
         fs::read_to_string(path).ok().and_then(|s| {
-            s.trim().parse::<i64>().ok().map(|uw| uw as f32 / 1_000_000.0)
+            s.trim()
+                .parse::<i64>()
+                .ok()
+                .map(|uw| uw as f32 / 1_000_000.0)
         })
     }
 
     /// Read a milliampere sysfs file and convert to Amperes.
     fn read_current_path(path: &Path) -> Option<f32> {
-        fs::read_to_string(path).ok().and_then(|s| {
-            s.trim().parse::<i32>().ok().map(|ma| ma as f32 / 1000.0)
-        })
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok().map(|ma| ma as f32 / 1000.0))
     }
 }
 
@@ -334,6 +360,18 @@ impl SysfsBackend {
     /// sysfs devices with firmware/limits data obtained from the JSON snapshot.
     pub(crate) fn devices_mut(&mut self) -> &mut [Device] {
         &mut self.devices
+    }
+
+    /// Mutable access to a cached telemetry entry — used by HybridBackend to
+    /// overlay firmware-reported TDP/TDC values on top of the hwmon reading.
+    pub(crate) fn telemetry_cache_mut(&mut self, device_idx: usize) -> Option<&mut Telemetry> {
+        self.telemetry_cache.get_mut(&device_idx)
+    }
+
+    /// Insert a telemetry entry directly into the cache — test helper only.
+    #[cfg(test)]
+    pub(crate) fn insert_telemetry_for_test(&mut self, device_idx: usize, telem: Telemetry) {
+        self.telemetry_cache.insert(device_idx, telem);
     }
 }
 
@@ -358,14 +396,13 @@ impl TelemetryBackend for SysfsBackend {
                 None => continue,
             };
 
-            let temperature = paths.temperature.as_deref()
+            let temperature = paths
+                .temperature
+                .as_deref()
                 .and_then(Self::read_temperature_path);
-            let voltage = paths.voltage.as_deref()
-                .and_then(Self::read_voltage_path);
-            let power = paths.power.as_deref()
-                .and_then(Self::read_power_path);
-            let current = paths.current.as_deref()
-                .and_then(Self::read_current_path);
+            let voltage = paths.voltage.as_deref().and_then(Self::read_voltage_path);
+            let power = paths.power.as_deref().and_then(Self::read_power_path);
+            let current = paths.current.as_deref().and_then(Self::read_current_path);
 
             // If power and voltage available but not current, calculate it.
             let calculated_current = match (power, current, voltage) {

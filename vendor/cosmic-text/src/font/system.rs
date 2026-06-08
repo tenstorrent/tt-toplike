@@ -1,13 +1,19 @@
-use crate::{Attrs, Font, FontMatchAttrs, HashMap, ShapePlanCache};
+use crate::{Attrs, Font, FontMatchAttrs, HashMap, ShapeBuffer};
+use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 use core::ops::{Deref, DerefMut};
+use fontdb::Query;
+use skrifa::raw::{ReadError, TableProvider as _};
 
-// re-export fontdb and rustybuzz
+// re-export fontdb and harfrust
 pub use fontdb;
-pub use rustybuzz;
+pub use harfrust;
+
+use super::fallback::{Fallback, Fallbacks, MonospaceFallbackInfo, PlatformFallback};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FontMatchKey {
@@ -84,7 +90,7 @@ pub struct FontSystem {
     db: fontdb::Database,
 
     /// Cache for loaded fonts from the database.
-    font_cache: HashMap<fontdb::ID, Option<Arc<Font>>>,
+    font_cache: HashMap<(fontdb::ID, fontdb::Weight), Option<Arc<Font>>>,
 
     /// Sorted unique ID's of all Monospace fonts in DB
     monospace_font_ids: Vec<fontdb::ID>,
@@ -100,12 +106,21 @@ pub struct FontSystem {
     /// Cache for font matches.
     font_matches_cache: HashMap<FontMatchAttrs, Arc<Vec<FontMatchKey>>>,
 
-    /// Cache for rustybuzz shape plans.
-    shape_plan_cache: ShapePlanCache,
+    /// Scratch buffer for shaping and laying out.
+    pub(crate) shape_buffer: ShapeBuffer,
+
+    /// Buffer for use in `FontFallbackIter`.
+    pub(crate) monospace_fallbacks_buffer: BTreeSet<MonospaceFallbackInfo>,
 
     /// Cache for shaped runs
     #[cfg(feature = "shape-run-cache")]
     pub shape_run_cache: crate::ShapeRunCache,
+
+    /// List of fallbacks
+    pub(crate) dyn_fallback: Box<dyn Fallback>,
+
+    /// List of fallbacks
+    pub(crate) fallbacks: Fallbacks,
 }
 
 impl fmt::Debug for FontSystem {
@@ -113,7 +128,7 @@ impl fmt::Debug for FontSystem {
         f.debug_struct("FontSystem")
             .field("locale", &self.locale)
             .field("db", &self.db)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -133,22 +148,26 @@ impl FontSystem {
     /// Create a new [`FontSystem`] with a pre-specified set of fonts.
     pub fn new_with_fonts(fonts: impl IntoIterator<Item = fontdb::Source>) -> Self {
         let locale = Self::get_locale();
-        log::debug!("Locale: {}", locale);
+        log::debug!("Locale: {locale}");
 
         let mut db = fontdb::Database::new();
 
-        //TODO: configurable default fonts
-        db.set_monospace_family("Fira Mono");
-        db.set_sans_serif_family("Fira Sans");
-        db.set_serif_family("DejaVu Serif");
-
         Self::load_fonts(&mut db, fonts.into_iter());
 
-        Self::new_with_locale_and_db(locale, db)
+        //TODO: configurable default fonts
+        db.set_monospace_family("Noto Sans Mono");
+        db.set_sans_serif_family("Open Sans");
+        db.set_serif_family("DejaVu Serif");
+
+        Self::new_with_locale_and_db_and_fallback(locale, db, PlatformFallback)
     }
 
-    /// Create a new [`FontSystem`] with a pre-specified locale and font database.
-    pub fn new_with_locale_and_db(locale: String, db: fontdb::Database) -> Self {
+    /// Create a new [`FontSystem`] with a pre-specified locale, font database and font fallback list.
+    pub fn new_with_locale_and_db_and_fallback(
+        locale: String,
+        db: fontdb::Database,
+        impl_fallback: impl Fallback + 'static,
+    ) -> Self {
         let mut monospace_font_ids = db
             .faces()
             .filter(|face_info| {
@@ -158,32 +177,57 @@ impl FontSystem {
             .collect::<Vec<_>>();
         monospace_font_ids.sort();
 
-        let cloned_monospace_font_ids = monospace_font_ids.clone();
+        let mut per_script_monospace_font_ids: HashMap<[u8; 4], BTreeSet<fontdb::ID>> =
+            HashMap::default();
 
-        let mut ret = Self {
+        if cfg!(feature = "monospace_fallback") {
+            for &id in &monospace_font_ids {
+                db.with_face_data(id, |font_data, face_index| {
+                    let face = skrifa::FontRef::from_index(font_data, face_index)?;
+                    for script in face
+                        .gpos()?
+                        .script_list()?
+                        .script_records()
+                        .iter()
+                        .chain(face.gsub()?.script_list()?.script_records().iter())
+                    {
+                        per_script_monospace_font_ids
+                            .entry(script.script_tag().into_bytes())
+                            .or_default()
+                            .insert(id);
+                    }
+                    Ok::<_, ReadError>(())
+                });
+            }
+        }
+
+        let per_script_monospace_font_ids = per_script_monospace_font_ids
+            .into_iter()
+            .map(|(k, v)| (k, Vec::from_iter(v)))
+            .collect();
+
+        let fallbacks = Fallbacks::new(&impl_fallback, &[], &locale);
+
+        Self {
             locale,
             db,
             monospace_font_ids,
-            per_script_monospace_font_ids: Default::default(),
-            font_cache: Default::default(),
-            font_matches_cache: Default::default(),
-            font_codepoint_support_info_cache: Default::default(),
-            shape_plan_cache: ShapePlanCache::default(),
+            per_script_monospace_font_ids,
+            font_cache: HashMap::default(),
+            font_matches_cache: HashMap::default(),
+            font_codepoint_support_info_cache: HashMap::default(),
+            monospace_fallbacks_buffer: BTreeSet::default(),
             #[cfg(feature = "shape-run-cache")]
             shape_run_cache: crate::ShapeRunCache::default(),
-        };
-        ret.cache_fonts(cloned_monospace_font_ids.clone());
-        cloned_monospace_font_ids.into_iter().for_each(|id| {
-            if let Some(font) = ret.get_font(id) {
-                font.scripts().iter().copied().for_each(|script| {
-                    ret.per_script_monospace_font_ids
-                        .entry(script)
-                        .or_default()
-                        .push(font.id);
-                });
-            }
-        });
-        ret
+            shape_buffer: ShapeBuffer::default(),
+            dyn_fallback: Box::new(impl_fallback),
+            fallbacks,
+        }
+    }
+
+    /// Create a new [`FontSystem`] with a pre-specified locale and font database.
+    pub fn new_with_locale_and_db(locale: String, db: fontdb::Database) -> Self {
+        Self::new_with_locale_and_db_and_fallback(locale, db, PlatformFallback)
     }
 
     /// Get the locale.
@@ -192,13 +236,8 @@ impl FontSystem {
     }
 
     /// Get the database.
-    pub fn db(&self) -> &fontdb::Database {
+    pub const fn db(&self) -> &fontdb::Database {
         &self.db
-    }
-
-    /// Get the shape plan cache.
-    pub(crate) fn shape_plan_cache(&mut self) -> &mut ShapePlanCache {
-        &mut self.shape_plan_cache
     }
 
     /// Get a mutable reference to the database.
@@ -212,68 +251,23 @@ impl FontSystem {
         (self.locale, self.db)
     }
 
-    /// Concurrently cache fonts by id list
-    pub fn cache_fonts(&mut self, mut ids: Vec<fontdb::ID>) {
-        #[cfg(feature = "std")]
-        use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-        #[cfg(feature = "std")]
-        {
-            ids = ids
-                .into_iter()
-                .filter(|id| {
-                    let contains = self.font_cache.contains_key(id);
-                    if !contains {
-                        unsafe {
-                            self.db.make_shared_face_data(*id);
-                        }
-                    }
-                    !contains
-                })
-                .collect::<_>();
-        }
-
-        #[cfg(feature = "std")]
-        let fonts = ids.par_iter();
-        #[cfg(not(feature = "std"))]
-        let fonts = ids.iter();
-
-        fonts
-            .map(|id| match Font::new(&self.db, *id) {
-                Some(font) => Some(Arc::new(font)),
-                None => {
-                    log::warn!(
-                        "failed to load font '{}'",
-                        self.db.face(*id)?.post_script_name
-                    );
-                    None
-                }
-            })
-            .collect::<Vec<Option<Arc<Font>>>>()
-            .into_iter()
-            .flatten()
-            .for_each(|font| {
-                self.font_cache.insert(font.id, Some(font));
-            });
-    }
-
-    /// Get a font by its ID.
-    pub fn get_font(&mut self, id: fontdb::ID) -> Option<Arc<Font>> {
+    /// Get a font by its ID and weight.
+    pub fn get_font(&mut self, id: fontdb::ID, weight: fontdb::Weight) -> Option<Arc<Font>> {
         self.font_cache
-            .entry(id)
+            .entry((id, weight))
             .or_insert_with(|| {
                 #[cfg(feature = "std")]
                 unsafe {
                     self.db.make_shared_face_data(id);
                 }
-                match Font::new(&self.db, id) {
-                    Some(font) => Some(Arc::new(font)),
-                    None => {
-                        log::warn!(
-                            "failed to load font '{}'",
-                            self.db.face(id)?.post_script_name
-                        );
-                        None
-                    }
+                if let Some(font) = Font::new(&self.db, id, weight) {
+                    Some(Arc::new(font))
+                } else {
+                    log::warn!(
+                        "failed to load font '{}'",
+                        self.db.face(id)?.post_script_name
+                    );
+                    None
                 }
             })
             .clone()
@@ -300,9 +294,10 @@ impl FontSystem {
     pub fn get_font_supported_codepoints_in_word(
         &mut self,
         id: fontdb::ID,
+        weight: fontdb::Weight,
         word: &str,
     ) -> Option<usize> {
-        self.get_font(id).map(|font| {
+        self.get_font(id, weight).map(|font| {
             let code_points = font.unicode_codepoints();
             let cache = self
                 .font_codepoint_support_info_cache
@@ -314,7 +309,7 @@ impl FontSystem {
         })
     }
 
-    pub fn get_font_matches(&mut self, attrs: Attrs<'_>) -> Arc<Vec<FontMatchKey>> {
+    pub fn get_font_matches(&mut self, attrs: &Attrs<'_>) -> Arc<Vec<FontMatchKey>> {
         // Clear the cache first if it reached the size limit
         if self.font_matches_cache.len() >= Self::FONT_MATCHES_CACHE_SIZE_LIMIT {
             log::trace!("clear font mache cache");
@@ -342,10 +337,41 @@ impl FontSystem {
                 // Sort so we get the keys with weight_offset=0 first
                 font_match_keys.sort();
 
+                // db.query is better than above, but returns just one font
+                let query = Query {
+                    families: &[attrs.family],
+                    weight: attrs.weight,
+                    stretch: attrs.stretch,
+                    style: attrs.style,
+                };
+
+                if let Some(id) = self.db.query(&query) {
+                    if let Some(i) = font_match_keys
+                        .iter()
+                        .enumerate()
+                        .find(|(_i, key)| key.id == id)
+                        .map(|(i, _)| i)
+                    {
+                        // if exists move to front
+                        let match_key = font_match_keys.remove(i);
+                        font_match_keys.insert(0, match_key);
+                    } else if let Some(face) = self.db.face(id) {
+                        // else insert in front
+                        let match_key = FontMatchKey {
+                            font_weight_diff: attrs.weight.0.abs_diff(face.weight.0),
+                            font_weight: face.weight.0,
+                            id,
+                        };
+                        font_match_keys.insert(0, match_key);
+                    } else {
+                        log::error!("Could not get face from db, that should've been there.");
+                    }
+                }
+
                 #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
                 {
                     let elapsed = now.elapsed();
-                    log::debug!("font matches for {:?} in {:?}", attrs, elapsed);
+                    log::debug!("font matches for {attrs:?} in {elapsed:?}");
                 }
 
                 Arc::new(font_match_keys)
@@ -400,7 +426,7 @@ pub struct BorrowedWithFontSystem<'a, T> {
     pub(crate) font_system: &'a mut FontSystem,
 }
 
-impl<'a, T> Deref for BorrowedWithFontSystem<'a, T> {
+impl<T> Deref for BorrowedWithFontSystem<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -408,7 +434,7 @@ impl<'a, T> Deref for BorrowedWithFontSystem<'a, T> {
     }
 }
 
-impl<'a, T> DerefMut for BorrowedWithFontSystem<'a, T> {
+impl<T> DerefMut for BorrowedWithFontSystem<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.inner
     }

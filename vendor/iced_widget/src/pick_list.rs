@@ -61,7 +61,6 @@
 //! }
 //! ```
 use crate::core::alignment;
-use crate::core::event::{self, Event};
 use crate::core::keyboard;
 use crate::core::layout;
 use crate::core::mouse;
@@ -71,9 +70,10 @@ use crate::core::text::paragraph;
 use crate::core::text::{self, Text};
 use crate::core::touch;
 use crate::core::widget::tree::{self, Tree};
+use crate::core::window;
 use crate::core::{
-    Background, Border, Clipboard, Color, Element, Layout, Length, Padding,
-    Pixels, Point, Rectangle, Shell, Size, Theme, Vector, Widget,
+    Background, Border, Clipboard, Color, Element, Event, Layout, Length,
+    Padding, Pixels, Point, Rectangle, Shell, Size, Theme, Vector, Widget,
 };
 use crate::overlay::menu::{self, Menu};
 
@@ -142,7 +142,6 @@ use std::f32;
 ///     }
 /// }
 /// ```
-#[allow(missing_debug_implementations)]
 pub struct PickList<
     'a,
     T,
@@ -173,6 +172,8 @@ pub struct PickList<
     handle: Handle<Renderer::Font>,
     class: <Theme as Catalog>::Class<'a>,
     menu_class: <Theme as menu::Catalog>::Class<'a>,
+    last_status: Option<Status>,
+    menu_height: Length,
 }
 
 impl<'a, T, L, V, Message, Theme, Renderer>
@@ -208,6 +209,8 @@ where
             handle: Handle::default(),
             class: <Theme as Catalog>::default(),
             menu_class: <Theme as Catalog>::default_menu(),
+            last_status: None,
+            menu_height: Length::Shrink,
         }
     }
 
@@ -220,6 +223,12 @@ where
     /// Sets the width of the [`PickList`].
     pub fn width(mut self, width: impl Into<Length>) -> Self {
         self.width = width.into();
+        self
+    }
+
+    /// Sets the height of the [`Menu`].
+    pub fn menu_height(mut self, menu_height: impl Into<Length>) -> Self {
+        self.menu_height = menu_height.into();
         self
     }
 
@@ -346,7 +355,7 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         tree: &mut Tree,
         renderer: &Renderer,
         limits: &layout::Limits,
@@ -369,8 +378,8 @@ where
             size: text_size,
             line_height: self.text_line_height,
             font,
-            horizontal_alignment: alignment::Horizontal::Left,
-            vertical_alignment: alignment::Vertical::Center,
+            align_x: text::Alignment::Default,
+            align_y: alignment::Vertical::Center,
             shaping: self.text_shaping,
             wrapping: text::Wrapping::default(),
         };
@@ -379,14 +388,14 @@ where
         {
             let label = option.to_string();
 
-            paragraph.update(Text {
+            let _ = paragraph.update(Text {
                 content: &label,
                 ..option_text
             });
         }
 
         if let Some(placeholder) = &self.placeholder {
-            state.placeholder.update(Text {
+            let _ = state.placeholder.update(Text {
                 content: placeholder,
                 ..option_text
             });
@@ -425,23 +434,22 @@ where
         layout::Node::new(size)
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         _renderer: &Renderer,
         _clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         _viewport: &Rectangle,
-    ) -> event::Status {
+    ) {
+        let state = tree.state.downcast_mut::<State<Renderer::Paragraph>>();
+
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
             | Event::Touch(touch::Event::FingerPressed { .. }) => {
-                let state =
-                    tree.state.downcast_mut::<State<Renderer::Paragraph>>();
-
                 if state.is_open {
                     // Event wasn't processed by overlay, so cursor was clicked either outside its
                     // bounds or on the drop-down, either way we close the overlay.
@@ -451,7 +459,7 @@ where
                         shell.publish(on_close.clone());
                     }
 
-                    event::Status::Captured
+                    shell.capture_event();
                 } else if cursor.is_over(layout.bounds()) {
                     let selected = self.selected.as_ref().map(Borrow::borrow);
 
@@ -466,17 +474,12 @@ where
                         shell.publish(on_open.clone());
                     }
 
-                    event::Status::Captured
-                } else {
-                    event::Status::Ignored
+                    shell.capture_event();
                 }
             }
             Event::Mouse(mouse::Event::WheelScrolled {
                 delta: mouse::ScrollDelta::Lines { y, .. },
             }) => {
-                let state =
-                    tree.state.downcast_mut::<State<Renderer::Paragraph>>();
-
                 if state.keyboard_modifiers.command()
                     && cursor.is_over(layout.bounds())
                     && !state.is_open
@@ -493,13 +496,13 @@ where
                     let options = self.options.borrow();
                     let selected = self.selected.as_ref().map(Borrow::borrow);
 
-                    let next_option = if y < 0.0 {
+                    let next_option = if *y < 0.0 {
                         if let Some(selected) = selected {
                             find_next(selected, options.iter())
                         } else {
                             options.first()
                         }
-                    } else if y > 0.0 {
+                    } else if *y > 0.0 {
                         if let Some(selected) = selected {
                             find_next(selected, options.iter().rev())
                         } else {
@@ -513,20 +516,34 @@ where
                         shell.publish((self.on_select)(next_option.clone()));
                     }
 
-                    event::Status::Captured
-                } else {
-                    event::Status::Ignored
+                    shell.capture_event();
                 }
             }
             Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
-                let state =
-                    tree.state.downcast_mut::<State<Renderer::Paragraph>>();
-
-                state.keyboard_modifiers = modifiers;
-
-                event::Status::Ignored
+                state.keyboard_modifiers = *modifiers;
             }
-            _ => event::Status::Ignored,
+            _ => {}
+        };
+
+        let status = {
+            let is_hovered = cursor.is_over(layout.bounds());
+
+            if state.is_open {
+                Status::Opened { is_hovered }
+            } else if is_hovered {
+                Status::Hovered
+            } else {
+                Status::Active
+            }
+        };
+
+        if let Event::Window(window::Event::RedrawRequested(_now)) = event {
+            self.last_status = Some(status);
+        } else if self
+            .last_status
+            .is_some_and(|last_status| last_status != status)
+        {
+            shell.request_redraw();
         }
     }
 
@@ -555,7 +572,7 @@ where
         theme: &Theme,
         _style: &renderer::Style,
         layout: Layout<'_>,
-        cursor: mouse::Cursor,
+        _cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
         let font = self.font.unwrap_or_else(|| renderer.default_font());
@@ -563,18 +580,12 @@ where
         let state = tree.state.downcast_ref::<State<Renderer::Paragraph>>();
 
         let bounds = layout.bounds();
-        let is_mouse_over = cursor.is_over(bounds);
-        let is_selected = selected.is_some();
 
-        let status = if state.is_open {
-            Status::Opened
-        } else if is_mouse_over {
-            Status::Hovered
-        } else {
-            Status::Active
-        };
-
-        let style = Catalog::style(theme, &self.class, status);
+        let style = Catalog::style(
+            theme,
+            &self.class,
+            self.last_status.unwrap_or(Status::Active),
+        );
 
         renderer.fill_quad(
             renderer::Quad {
@@ -635,8 +646,8 @@ where
                         bounds.width,
                         f32::from(line_height.to_absolute(size)),
                     ),
-                    horizontal_alignment: alignment::Horizontal::Right,
-                    vertical_alignment: alignment::Vertical::Center,
+                    align_x: text::Alignment::Right,
+                    align_y: alignment::Vertical::Center,
                     shaping,
                     wrapping: text::Wrapping::default(),
                 },
@@ -662,16 +673,16 @@ where
                     line_height: self.text_line_height,
                     font,
                     bounds: Size::new(
-                        bounds.width - self.padding.horizontal(),
+                        bounds.width - self.padding.x(),
                         f32::from(self.text_line_height.to_absolute(text_size)),
                     ),
-                    horizontal_alignment: alignment::Horizontal::Left,
-                    vertical_alignment: alignment::Vertical::Center,
+                    align_x: text::Alignment::Default,
+                    align_y: alignment::Vertical::Center,
                     shaping: self.text_shaping,
                     wrapping: text::Wrapping::default(),
                 },
                 Point::new(bounds.x + self.padding.left, bounds.center_y()),
-                if is_selected {
+                if selected.is_some() {
                     style.text_color
                 } else {
                     style.placeholder_color
@@ -686,6 +697,7 @@ where
         tree: &'b mut Tree,
         layout: Layout<'_>,
         renderer: &Renderer,
+        viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
         let state = tree.state.downcast_mut::<State<Renderer::Paragraph>>();
@@ -717,7 +729,12 @@ where
                 menu = menu.text_size(text_size);
             }
 
-            Some(menu.overlay(layout.position() + translation, bounds.height))
+            Some(menu.overlay(
+                layout.position() + translation,
+                *viewport,
+                bounds.height,
+                self.menu_height,
+            ))
         } else {
             None
         }
@@ -824,11 +841,14 @@ pub enum Status {
     /// The [`PickList`] is being hovered.
     Hovered,
     /// The [`PickList`] is open.
-    Opened,
+    Opened {
+        /// Whether the [`PickList`] is hovered, while open.
+        is_hovered: bool,
+    },
 }
 
 /// The appearance of a pick list.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Style {
     /// The text [`Color`] of the pick list.
     pub text_color: Color,
@@ -887,7 +907,7 @@ pub fn default(theme: &Theme, status: Status) -> Style {
     let active = Style {
         text_color: palette.background.weak.text,
         background: palette.background.weak.color.into(),
-        placeholder_color: palette.background.strong.color,
+        placeholder_color: palette.secondary.base.color,
         handle_color: palette.background.weak.text,
         border: Border {
             radius: 2.0.into(),
@@ -898,7 +918,7 @@ pub fn default(theme: &Theme, status: Status) -> Style {
 
     match status {
         Status::Active => active,
-        Status::Hovered | Status::Opened => Style {
+        Status::Hovered | Status::Opened { .. } => Style {
             border: Border {
                 color: palette.primary.strong.color,
                 ..active.border

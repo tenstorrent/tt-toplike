@@ -16,13 +16,24 @@ impl Renderer for () {
 
     fn end_transformation(&mut self) {}
 
-    fn clear(&mut self) {}
+    fn reset(&mut self, _new_bounds: Rectangle) {}
 
     fn fill_quad(
         &mut self,
         _quad: renderer::Quad,
         _background: impl Into<Background>,
     ) {
+    }
+
+    fn allocate_image(
+        &mut self,
+        handle: &image::Handle,
+        callback: impl FnOnce(Result<image::Allocation, image::Error>)
+        + Send
+        + 'static,
+    ) {
+        #[allow(unsafe_code)]
+        callback(Ok(unsafe { image::allocate(handle, Size::new(100, 100)) }));
     }
 }
 
@@ -34,6 +45,11 @@ impl text::Renderer for () {
     const ICON_FONT: Font = Font::DEFAULT;
     const CHECKMARK_ICON: char = '0';
     const ARROW_DOWN_ICON: char = '0';
+    const SCROLL_UP_ICON: char = '0';
+    const SCROLL_DOWN_ICON: char = '0';
+    const SCROLL_LEFT_ICON: char = '0';
+    const SCROLL_RIGHT_ICON: char = '0';
+    const ICED_LOGO: char = '0';
 
     fn default_font(&self) -> Self::Font {
         Font::default()
@@ -87,16 +103,40 @@ impl text::Paragraph for () {
         text::Difference::None
     }
 
-    fn horizontal_alignment(&self) -> alignment::Horizontal {
-        alignment::Horizontal::Left
+    fn size(&self) -> Pixels {
+        Pixels(16.0)
     }
 
-    fn vertical_alignment(&self) -> alignment::Vertical {
+    fn font(&self) -> Font {
+        Font::DEFAULT
+    }
+
+    fn line_height(&self) -> text::LineHeight {
+        text::LineHeight::default()
+    }
+
+    fn align_x(&self) -> text::Alignment {
+        text::Alignment::Default
+    }
+
+    fn align_y(&self) -> alignment::Vertical {
         alignment::Vertical::Top
+    }
+
+    fn wrapping(&self) -> text::Wrapping {
+        text::Wrapping::default()
+    }
+
+    fn shaping(&self) -> text::Shaping {
+        text::Shaping::default()
     }
 
     fn grapheme_position(&self, _line: usize, _index: usize) -> Option<Point> {
         None
+    }
+
+    fn bounds(&self) -> Size {
+        Size::ZERO
     }
 
     fn min_bounds(&self) -> Size {
@@ -126,18 +166,21 @@ impl text::Editor for () {
     }
 
     fn cursor(&self) -> text::editor::Cursor {
-        text::editor::Cursor::Caret(Point::ORIGIN)
+        text::editor::Cursor {
+            position: text::editor::Position { line: 0, column: 0 },
+            selection: None,
+        }
     }
 
-    fn cursor_position(&self) -> (usize, usize) {
-        (0, 0)
+    fn selection(&self) -> text::editor::Selection {
+        text::editor::Selection::Caret(Point::ORIGIN)
     }
 
-    fn selection(&self) -> Option<String> {
+    fn copy(&self) -> Option<String> {
         None
     }
 
-    fn line(&self, _index: usize) -> Option<&str> {
+    fn line(&self, _index: usize) -> Option<text::editor::Line<'_>> {
         None
     }
 
@@ -146,6 +189,8 @@ impl text::Editor for () {
     }
 
     fn perform(&mut self, _action: text::editor::Action) {}
+
+    fn move_to(&mut self, _cursor: text::editor::Cursor) {}
 
     fn bounds(&self) -> Size {
         Size::ZERO
@@ -180,11 +225,25 @@ impl text::Editor for () {
 impl image::Renderer for () {
     type Handle = image::Handle;
 
-    fn measure_image(&self, _handle: &Self::Handle) -> Size<u32> {
-        Size::default()
+    fn load_image(
+        &self,
+        handle: &Self::Handle,
+    ) -> Result<image::Allocation, image::Error> {
+        #[allow(unsafe_code)]
+        Ok(unsafe { image::allocate(handle, Size::new(100, 100)) })
     }
 
-    fn draw_image(&mut self, _image: Image, _bounds: Rectangle) {}
+    fn measure_image(&self, _handle: &Self::Handle) -> Option<Size<u32>> {
+        Some(Size::new(100, 100))
+    }
+
+    fn draw_image(
+        &mut self,
+        _image: Image,
+        _bounds: Rectangle,
+        _clip_bounds: Rectangle,
+    ) {
+    }
 }
 
 impl svg::Renderer for () {
@@ -192,5 +251,37 @@ impl svg::Renderer for () {
         Size::default()
     }
 
-    fn draw_svg(&mut self, _svg: svg::Svg, _bounds: Rectangle) {}
+    fn draw_svg(
+        &mut self,
+        _svg: svg::Svg,
+        _bounds: Rectangle,
+        _clip_bounds: Rectangle,
+    ) {
+    }
+}
+
+impl renderer::Headless for () {
+    async fn new(
+        _default_font: Font,
+        _default_text_size: Pixels,
+        _backend: Option<&str>,
+    ) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        Some(())
+    }
+
+    fn name(&self) -> String {
+        "null renderer".to_owned()
+    }
+
+    fn screenshot(
+        &mut self,
+        _size: Size<u32>,
+        _scale_factor: f32,
+        _background_color: Color,
+    ) -> Vec<u8> {
+        Vec::new()
+    }
 }

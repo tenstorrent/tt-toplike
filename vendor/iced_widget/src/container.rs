@@ -21,20 +21,19 @@
 //! ```
 use crate::core::alignment::{self, Alignment};
 use crate::core::border::{self, Border};
-use crate::core::event::{self, Event};
 use crate::core::gradient::{self, Gradient};
 use crate::core::layout;
 use crate::core::mouse;
 use crate::core::overlay;
 use crate::core::renderer;
+use crate::core::theme;
 use crate::core::widget::tree::{self, Tree};
 use crate::core::widget::{self, Operation};
 use crate::core::{
-    self, color, Background, Clipboard, Color, Element, Layout, Length,
-    Padding, Pixels, Point, Rectangle, Shadow, Shell, Size, Theme, Vector,
-    Widget,
+    self, Background, Clipboard, Color, Element, Event, Layout, Length,
+    Padding, Pixels, Rectangle, Shadow, Shell, Size, Theme, Vector, Widget,
+    color,
 };
-use crate::runtime::task::{self, Task};
 
 /// A widget that aligns its contents inside of its boundaries.
 ///
@@ -57,7 +56,6 @@ use crate::runtime::task::{self, Task};
 ///         .into()
 /// }
 /// ```
-#[allow(missing_debug_implementations)]
 pub struct Container<
     'a,
     Message,
@@ -67,7 +65,7 @@ pub struct Container<
     Theme: Catalog,
     Renderer: core::Renderer,
 {
-    id: Option<Id>,
+    id: Option<widget::Id>,
     padding: Padding,
     width: Length,
     height: Length,
@@ -107,9 +105,9 @@ where
         }
     }
 
-    /// Sets the [`Id`] of the [`Container`].
-    pub fn id(mut self, id: Id) -> Self {
-        self.id = Some(id);
+    /// Sets the [`widget::Id`] of the [`Container`].
+    pub fn id(mut self, id: impl Into<widget::Id>) -> Self {
+        self.id = Some(id.into());
         self
     }
 
@@ -153,8 +151,8 @@ where
         self.height(height).align_y(alignment::Vertical::Center)
     }
 
-    /// Centers the contents in both the horizontal and vertical axes of the
-    /// [`Container`].
+    /// Sets the width and height of the [`Container`] and centers its contents in
+    /// both the horizontal and vertical axes.
     ///
     /// This is equivalent to chaining [`center_x`] and [`center_y`].
     ///
@@ -166,22 +164,22 @@ where
         self.center_x(length).center_y(length)
     }
 
-    /// Aligns the contents of the [`Container`] to the left.
+    /// Sets the width of the [`Container`] and aligns its contents to the left.
     pub fn align_left(self, width: impl Into<Length>) -> Self {
         self.width(width).align_x(alignment::Horizontal::Left)
     }
 
-    /// Aligns the contents of the [`Container`] to the right.
+    /// Sets the width of the [`Container`] and aligns its contents to the right.
     pub fn align_right(self, width: impl Into<Length>) -> Self {
         self.width(width).align_x(alignment::Horizontal::Right)
     }
 
-    /// Aligns the contents of the [`Container`] to the top.
+    /// Sets the height of the [`Container`] and aligns its contents to the top.
     pub fn align_top(self, height: impl Into<Length>) -> Self {
         self.height(height).align_y(alignment::Vertical::Top)
     }
 
-    /// Aligns the contents of the [`Container`] to the bottom.
+    /// Sets the height of the [`Container`] and aligns its contents to the bottom.
     pub fn align_bottom(self, height: impl Into<Length>) -> Self {
         self.height(height).align_y(alignment::Vertical::Bottom)
     }
@@ -229,8 +227,8 @@ where
     }
 }
 
-impl<'a, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for Container<'a, Message, Theme, Renderer>
+impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for Container<'_, Message, Theme, Renderer>
 where
     Theme: Catalog,
     Renderer: core::Renderer,
@@ -259,7 +257,7 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         tree: &mut Tree,
         renderer: &Renderer,
         limits: &layout::Limits,
@@ -273,43 +271,42 @@ where
             self.padding,
             self.horizontal_alignment,
             self.vertical_alignment,
-            |limits| self.content.as_widget().layout(tree, renderer, limits),
+            |limits| {
+                self.content.as_widget_mut().layout(tree, renderer, limits)
+            },
         )
     }
 
     fn operate(
-        &self,
+        &mut self,
         tree: &mut Tree,
         layout: Layout<'_>,
         renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
-        operation.container(
-            self.id.as_ref().map(|id| &id.0),
-            layout.bounds(),
-            &mut |operation| {
-                self.content.as_widget().operate(
-                    tree,
-                    layout.children().next().unwrap(),
-                    renderer,
-                    operation,
-                );
-            },
-        );
+        operation.container(self.id.as_ref(), layout.bounds());
+        operation.traverse(&mut |operation| {
+            self.content.as_widget_mut().operate(
+                tree,
+                layout.children().next().unwrap(),
+                renderer,
+                operation,
+            );
+        });
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
-    ) -> event::Status {
-        self.content.as_widget_mut().on_event(
+    ) {
+        self.content.as_widget_mut().update(
             tree,
             event,
             layout.children().next().unwrap(),
@@ -318,7 +315,7 @@ where
             clipboard,
             shell,
             viewport,
-        )
+        );
     }
 
     fn mouse_interaction(
@@ -377,14 +374,16 @@ where
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'_>,
+        layout: Layout<'b>,
         renderer: &Renderer,
+        viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
         self.content.as_widget_mut().overlay(
             tree,
             layout.children().next().unwrap(),
             renderer,
+            viewport,
             translation,
         )
     }
@@ -398,9 +397,9 @@ where
     Renderer: core::Renderer + 'a,
 {
     fn from(
-        column: Container<'a, Message, Theme, Renderer>,
+        container: Container<'a, Message, Theme, Renderer>,
     ) -> Element<'a, Message, Theme, Renderer> {
-        Element::new(column)
+        Element::new(container)
     }
 }
 
@@ -449,6 +448,7 @@ pub fn draw_background<Renderer>(
                 bounds,
                 border: style.border,
                 shadow: style.shadow,
+                snap: style.snap,
             },
             style
                 .background
@@ -457,122 +457,8 @@ pub fn draw_background<Renderer>(
     }
 }
 
-/// The identifier of a [`Container`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Id(widget::Id);
-
-impl Id {
-    /// Creates a custom [`Id`].
-    pub fn new(id: impl Into<std::borrow::Cow<'static, str>>) -> Self {
-        Self(widget::Id::new(id))
-    }
-
-    /// Creates a unique [`Id`].
-    ///
-    /// This function produces a different [`Id`] every time it is called.
-    pub fn unique() -> Self {
-        Self(widget::Id::unique())
-    }
-}
-
-impl From<Id> for widget::Id {
-    fn from(id: Id) -> Self {
-        id.0
-    }
-}
-
-/// Produces a [`Task`] that queries the visible screen bounds of the
-/// [`Container`] with the given [`Id`].
-pub fn visible_bounds(id: Id) -> Task<Option<Rectangle>> {
-    struct VisibleBounds {
-        target: widget::Id,
-        depth: usize,
-        scrollables: Vec<(Vector, Rectangle, usize)>,
-        bounds: Option<Rectangle>,
-    }
-
-    impl Operation<Option<Rectangle>> for VisibleBounds {
-        fn scrollable(
-            &mut self,
-            _state: &mut dyn widget::operation::Scrollable,
-            _id: Option<&widget::Id>,
-            bounds: Rectangle,
-            _content_bounds: Rectangle,
-            translation: Vector,
-        ) {
-            match self.scrollables.last() {
-                Some((last_translation, last_viewport, _depth)) => {
-                    let viewport = last_viewport
-                        .intersection(&(bounds - *last_translation))
-                        .unwrap_or(Rectangle::new(Point::ORIGIN, Size::ZERO));
-
-                    self.scrollables.push((
-                        translation + *last_translation,
-                        viewport,
-                        self.depth,
-                    ));
-                }
-                None => {
-                    self.scrollables.push((translation, bounds, self.depth));
-                }
-            }
-        }
-
-        fn container(
-            &mut self,
-            id: Option<&widget::Id>,
-            bounds: Rectangle,
-            operate_on_children: &mut dyn FnMut(
-                &mut dyn Operation<Option<Rectangle>>,
-            ),
-        ) {
-            if self.bounds.is_some() {
-                return;
-            }
-
-            if id == Some(&self.target) {
-                match self.scrollables.last() {
-                    Some((translation, viewport, _)) => {
-                        self.bounds =
-                            viewport.intersection(&(bounds - *translation));
-                    }
-                    None => {
-                        self.bounds = Some(bounds);
-                    }
-                }
-
-                return;
-            }
-
-            self.depth += 1;
-
-            operate_on_children(self);
-
-            self.depth -= 1;
-
-            match self.scrollables.last() {
-                Some((_, _, depth)) if self.depth == *depth => {
-                    let _ = self.scrollables.pop();
-                }
-                _ => {}
-            }
-        }
-
-        fn finish(&self) -> widget::operation::Outcome<Option<Rectangle>> {
-            widget::operation::Outcome::Some(self.bounds)
-        }
-    }
-
-    task::widget(VisibleBounds {
-        target: id.into(),
-        depth: 0,
-        scrollables: Vec::new(),
-        bounds: None,
-    })
-}
-
 /// The appearance of a container.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Style {
     /// The text [`Color`] of the container.
     pub text_color: Option<Color>,
@@ -582,6 +468,20 @@ pub struct Style {
     pub border: Border,
     /// The [`Shadow`] of the container.
     pub shadow: Shadow,
+    /// Whether the container should be snapped to the pixel grid.
+    pub snap: bool,
+}
+
+impl Default for Style {
+    fn default() -> Self {
+        Self {
+            text_color: None,
+            background: None,
+            border: Border::default(),
+            shadow: Shadow::default(),
+            snap: cfg!(feature = "crisp"),
+        }
+    }
 }
 
 impl Style {
@@ -651,7 +551,7 @@ pub trait Catalog {
 /// A styling function for a [`Container`].
 pub type StyleFn<'a, Theme> = Box<dyn Fn(&Theme) -> Style + 'a>;
 
-impl<'a, Theme> From<Style> for StyleFn<'a, Theme> {
+impl<Theme> From<Style> for StyleFn<'_, Theme> {
     fn from(style: Style) -> Self {
         Box::new(move |_theme| style)
     }
@@ -685,6 +585,7 @@ pub fn rounded_box(theme: &Theme) -> Style {
 
     Style {
         background: Some(palette.background.weak.color.into()),
+        text_color: Some(palette.background.weak.text),
         border: border::rounded(2),
         ..Style::default()
     }
@@ -695,11 +596,12 @@ pub fn bordered_box(theme: &Theme) -> Style {
     let palette = theme.extended_palette();
 
     Style {
-        background: Some(palette.background.weak.color.into()),
+        background: Some(palette.background.weakest.color.into()),
+        text_color: Some(palette.background.weakest.text),
         border: Border {
             width: 1.0,
-            radius: 0.0.into(),
-            color: palette.background.strong.color,
+            radius: 5.0.into(),
+            color: palette.background.weak.color,
         },
         ..Style::default()
     }
@@ -707,9 +609,51 @@ pub fn bordered_box(theme: &Theme) -> Style {
 
 /// A [`Container`] with a dark background and white text.
 pub fn dark(_theme: &Theme) -> Style {
+    style(theme::palette::Pair {
+        color: color!(0x111111),
+        text: Color::WHITE,
+    })
+}
+
+/// A [`Container`] with a primary background color.
+pub fn primary(theme: &Theme) -> Style {
+    let palette = theme.extended_palette();
+
+    style(palette.primary.base)
+}
+
+/// A [`Container`] with a secondary background color.
+pub fn secondary(theme: &Theme) -> Style {
+    let palette = theme.extended_palette();
+
+    style(palette.secondary.base)
+}
+
+/// A [`Container`] with a success background color.
+pub fn success(theme: &Theme) -> Style {
+    let palette = theme.extended_palette();
+
+    style(palette.success.base)
+}
+
+/// A [`Container`] with a warning background color.
+pub fn warning(theme: &Theme) -> Style {
+    let palette = theme.extended_palette();
+
+    style(palette.warning.base)
+}
+
+/// A [`Container`] with a danger background color.
+pub fn danger(theme: &Theme) -> Style {
+    let palette = theme.extended_palette();
+
+    style(palette.danger.base)
+}
+
+fn style(pair: theme::palette::Pair) -> Style {
     Style {
-        background: Some(color!(0x111111).into()),
-        text_color: Some(Color::WHITE),
+        background: Some(pair.color.into()),
+        text_color: Some(pair.text),
         border: border::rounded(2),
         ..Style::default()
     }

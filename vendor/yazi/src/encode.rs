@@ -1,10 +1,14 @@
 //! RFC 1590 compression implementation.
 
+#![allow(clippy::needless_range_loop, clippy::new_without_default)]
+
 use super::{Adler32, Error, Format};
-use std::{
-    convert::TryInto,
-    io::{self, Write},
-};
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use core::convert::TryInto;
+
+#[cfg(feature = "std")]
+use std::io::{self, Write};
 
 /// The level of compression-- a compromise between speed and size.
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -58,8 +62,10 @@ pub struct Encoder(DeflateContext);
 impl Encoder {
     /// Creates a new deflate encoder. Note that creating an encoder with this
     /// method allocates a large (200-300k) chunk of data on the stack and is
-    /// likely to cause an overflow if not carefully managed. See the boxed()
+    /// likely to cause an overflow if not carefully managed. See the [`boxed()`]
     /// constructor for a safer method that allocates on the heap.
+    ///
+    /// [`boxed()`]: Self::boxed
     pub fn new() -> Self {
         let flags = make_flags(
             false,
@@ -142,6 +148,7 @@ impl Encoder {
     }
 
     /// Creates an encoder stream that will write into the specified writer.
+    #[cfg(feature = "std")]
     pub fn stream<'a, W: Write>(
         &'a mut self,
         writer: &'a mut W,
@@ -195,7 +202,7 @@ pub struct EncoderStream<'a, S: Sink> {
     finished: bool,
 }
 
-impl<'a, S: Sink> EncoderStream<'a, S> {
+impl<S: Sink> EncoderStream<'_, S> {
     /// Writes the specified buffer to the stream, producing compressed data
     /// in the output.
     pub fn write(&mut self, buf: &[u8]) -> Result<(), Error> {
@@ -225,7 +232,7 @@ impl<'a, S: Sink> EncoderStream<'a, S> {
     }
 }
 
-impl<'a, S: Sink> Drop for EncoderStream<'a, S> {
+impl<S: Sink> Drop for EncoderStream<'_, S> {
     fn drop(&mut self) {
         if !self.finished {
             self.finished = true;
@@ -235,7 +242,8 @@ impl<'a, S: Sink> Drop for EncoderStream<'a, S> {
     }
 }
 
-impl<'a, S: Sink> Write for EncoderStream<'a, S> {
+#[cfg(feature = "std")]
+impl<S: Sink> Write for EncoderStream<'_, S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self.ctx.deflate(buf, &mut self.sink, false) {
             Ok(_) => Ok(buf.len()),
@@ -321,8 +329,8 @@ impl DeflateContext {
                 let dict = &mut self.dict;
                 let mut dst_pos = (lookahead_pos + lookahead_size) & DICT_MASK;
                 let mut ins_pos = lookahead_pos + lookahead_size - 2;
-                let mut hash = (u32::from(dict.dict[(ins_pos & DICT_MASK)]) << HASH_SHIFT)
-                    ^ u32::from(dict.dict[((ins_pos + 1) & DICT_MASK)]);
+                let mut hash = (u32::from(dict.dict[ins_pos & DICT_MASK]) << HASH_SHIFT)
+                    ^ u32::from(dict.dict[(ins_pos + 1) & DICT_MASK]);
                 lookahead_size += num_bytes_to_process;
                 for &c in &data[src_pos..src_pos + num_bytes_to_process] {
                     dict.dict[dst_pos] = c;
@@ -468,7 +476,7 @@ impl DeflateContext {
             && (self.dict.lookahead_pos - self.dict.code_buffer_offset) <= self.dict.len;
         self.cb.init_flag();
         if self.flags & WRITE_ZLIB_HEADER != 0 && self.block_index == 0 {
-            let header = make_zlib_header(self.flags as u32);
+            let header = make_zlib_header(self.flags);
             sink.put_bits(header[0].into(), 8)?;
             sink.put_bits(header[1].into(), 8)?;
         }
@@ -575,8 +583,7 @@ impl DeflateContext {
             }
             num_dist_codes -= 1;
         }
-        code_sizes_to_pack[0..num_lit_codes]
-            .copy_from_slice(&self.lt.code_sizes[0..num_lit_codes]);
+        code_sizes_to_pack[0..num_lit_codes].copy_from_slice(&self.lt.code_sizes[0..num_lit_codes]);
         code_sizes_to_pack[num_lit_codes..num_lit_codes + num_dist_codes]
             .copy_from_slice(&self.dt.code_sizes[0..num_dist_codes]);
         let total_code_sizes_to_pack = num_lit_codes + num_dist_codes;
@@ -907,7 +914,7 @@ mod huffman {
         for freq in syms0.iter() {
             let key = freq.key as usize;
             hist[0][key & 0xFF] += 1;
-            hist[1][((key >> 8) & 0xFF)] += 1;
+            hist[1][(key >> 8) & 0xFF] += 1;
         }
         let mut passes = 2;
         if syms0.len() == hist[1][0] as usize {
@@ -927,7 +934,7 @@ mod huffman {
                 new_syms[offsets[j] as usize] = *sym;
                 offsets[j] += 1;
             }
-            std::mem::swap(&mut cur_syms, &mut new_syms);
+            core::mem::swap(&mut cur_syms, &mut new_syms);
         }
         cur_syms
     }
@@ -976,7 +983,7 @@ mod huffman {
                 root -= 1;
             }
             while avail > used {
-                a[next as usize].key = depth as u16;
+                a[next as usize].key = depth;
                 next -= 1;
                 avail -= 1;
             }
@@ -1114,7 +1121,7 @@ impl CodeBuffer {
                     bits.flush(sink)?;
                 }
                 let match_len = self.buffer[i] as usize;
-                let match_dist = self.buffer[i + 1] as usize | (self.buffer[i + 2] as usize) << 8;
+                let match_dist = self.buffer[i + 1] as usize | ((self.buffer[i + 2] as usize) << 8);
                 i += 3;
                 let i0 = LEN_SYM[match_len & 0xFF] as usize;
                 bits.put(lt.codes[i0] as u32, lt.code_sizes[i0] as u32);
@@ -1342,7 +1349,7 @@ impl<'a> BufSink<'a> {
     }
 }
 
-impl<'a> Sink for BufSink<'a> {
+impl Sink for BufSink<'_> {
     #[inline(always)]
     fn put_bits(&mut self, bits: u32, len: u32) -> Result<(), Error> {
         self.bit_buffer |= bits << self.bits_in;
@@ -1423,7 +1430,7 @@ impl<'a> VecSink<'a> {
     }
 }
 
-impl<'a> Sink for VecSink<'a> {
+impl Sink for VecSink<'_> {
     #[inline(always)]
     fn put_bits(&mut self, bits: u32, len: u32) -> Result<(), Error> {
         self.bit_buffer |= bits << self.bits_in;
@@ -1475,6 +1482,7 @@ impl<'a> Sink for VecSink<'a> {
     }
 }
 
+#[cfg(feature = "std")]
 struct WriterSink<W> {
     writer: W,
     buffer: [u8; OUT_BUFFER_SIZE],
@@ -1484,6 +1492,7 @@ struct WriterSink<W> {
     written: u64,
 }
 
+#[cfg(feature = "std")]
 impl<W> WriterSink<W> {
     fn new(writer: W) -> Self {
         Self {
@@ -1497,6 +1506,7 @@ impl<W> WriterSink<W> {
     }
 }
 
+#[cfg(feature = "std")]
 impl<W: Write> Sink for WriterSink<W> {
     #[inline(always)]
     fn put_bits(&mut self, bits: u32, len: u32) -> Result<(), Error> {
@@ -1521,7 +1531,7 @@ impl<W: Write> Sink for WriterSink<W> {
         if self.pos + len > self.buffer.len() {
             return Err(Error::Overflow);
         }
-        (&mut self.buffer[self.pos..self.pos + len]).copy_from_slice(buf);
+        self.buffer[self.pos..self.pos + len].copy_from_slice(buf);
         self.pos += len;
         Ok(())
     }
@@ -1621,6 +1631,7 @@ const CODE_BUFFER_SIZE: usize = 64 * 1024;
 const HASH_BITS: usize = 15;
 const HASH_SHIFT: usize = (HASH_BITS + 2) / 3;
 const HASH_SIZE: usize = 1 << HASH_BITS;
+#[cfg(feature = "std")]
 const OUT_BUFFER_SIZE: usize = (CODE_BUFFER_SIZE * 13) / 10;
 const MIN_MATCH_LEN: usize = 3;
 const MAX_MATCH_LEN: usize = 258;

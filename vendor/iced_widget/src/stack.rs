@@ -1,28 +1,32 @@
 //! Display content on top of other content.
-use crate::core::event::{self, Event};
 use crate::core::layout;
 use crate::core::mouse;
 use crate::core::overlay;
 use crate::core::renderer;
 use crate::core::widget::{Operation, Tree};
 use crate::core::{
-    Clipboard, Element, Layout, Length, Rectangle, Shell, Size, Vector, Widget,
+    Clipboard, Element, Event, Layout, Length, Rectangle, Shell, Size, Vector,
+    Widget,
 };
 
 /// A container that displays children on top of each other.
 ///
 /// The first [`Element`] dictates the intrinsic [`Size`] of a [`Stack`] and
 /// will be displayed as the base layer. Every consecutive [`Element`] will be
-/// renderer on top; on its own layer.
+/// rendered on top; on its own layer.
+///
+/// You can use [`push_under`](Self::push_under) to push an [`Element`] under
+/// the current [`Stack`] without affecting its intrinsic [`Size`].
 ///
 /// Keep in mind that too much layering will normally produce bad UX as well as
 /// introduce certain rendering overhead. Use this widget sparingly!
-#[allow(missing_debug_implementations)]
 pub struct Stack<'a, Message, Theme = crate::Theme, Renderer = crate::Renderer>
 {
     width: Length,
     height: Length,
     children: Vec<Element<'a, Message, Theme, Renderer>>,
+    clip: bool,
+    base_layer: usize,
 }
 
 impl<'a, Message, Theme, Renderer> Stack<'a, Message, Theme, Renderer>
@@ -62,6 +66,8 @@ where
             width: Length::Shrink,
             height: Length::Shrink,
             children,
+            clip: false,
+            base_layer: 0,
         }
     }
 
@@ -77,34 +83,34 @@ where
         self
     }
 
-    /// Adds an element to the [`Stack`].
+    /// Adds an element on top of the [`Stack`].
     pub fn push(
         mut self,
         child: impl Into<Element<'a, Message, Theme, Renderer>>,
     ) -> Self {
         let child = child.into();
+        let child_size = child.as_widget().size_hint();
 
-        if self.children.is_empty() {
-            let child_size = child.as_widget().size_hint();
+        if !child_size.is_void() {
+            if self.children.is_empty() {
+                self.width = self.width.enclose(child_size.width);
+                self.height = self.height.enclose(child_size.height);
+            }
 
-            self.width = self.width.enclose(child_size.width);
-            self.height = self.height.enclose(child_size.height);
+            self.children.push(child);
         }
 
-        self.children.push(child);
         self
     }
 
-    /// Adds an element to the [`Stack`], if `Some`.
-    pub fn push_maybe(
-        self,
-        child: Option<impl Into<Element<'a, Message, Theme, Renderer>>>,
+    /// Adds an element under the [`Stack`].
+    pub fn push_under(
+        mut self,
+        child: impl Into<Element<'a, Message, Theme, Renderer>>,
     ) -> Self {
-        if let Some(child) = child {
-            self.push(child)
-        } else {
-            self
-        }
+        self.children.insert(0, child.into());
+        self.base_layer += 1;
+        self
     }
 
     /// Extends the [`Stack`] with the given children.
@@ -114,9 +120,19 @@ where
     ) -> Self {
         children.into_iter().fold(self, Self::push)
     }
+
+    /// Sets whether the [`Stack`] should clip overflowing content.
+    ///
+    /// It has a slight performance overhead during presentation.
+    ///
+    /// By default, it is set to `false`.
+    pub fn clip(mut self, clip: bool) -> Self {
+        self.clip = clip;
+        self
+    }
 }
 
-impl<'a, Message, Renderer> Default for Stack<'a, Message, Renderer>
+impl<Message, Renderer> Default for Stack<'_, Message, Renderer>
 where
     Renderer: crate::core::Renderer,
 {
@@ -146,14 +162,14 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         tree: &mut Tree,
         renderer: &Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
         let limits = limits.width(self.width).height(self.height);
 
-        if self.children.is_empty() {
+        if self.children.len() <= self.base_layer {
             return layout::Node::new(limits.resolve(
                 self.width,
                 self.height,
@@ -161,8 +177,8 @@ where
             ));
         }
 
-        let base = self.children[0].as_widget().layout(
-            &mut tree.children[0],
+        let base = self.children[self.base_layer].as_widget_mut().layout(
+            &mut tree.children[self.base_layer],
             renderer,
             &limits,
         );
@@ -170,13 +186,20 @@ where
         let size = limits.resolve(self.width, self.height, base.size());
         let limits = layout::Limits::new(Size::ZERO, size);
 
-        let nodes = std::iter::once(base)
-            .chain(self.children[1..].iter().zip(&mut tree.children[1..]).map(
-                |(layer, tree)| {
-                    let node =
-                        layer.as_widget().layout(tree, renderer, &limits);
+        let (under, above) = self.children.split_at_mut(self.base_layer);
+        let (tree_under, tree_above) =
+            tree.children.split_at_mut(self.base_layer);
 
-                    node
+        let nodes = under
+            .iter_mut()
+            .zip(tree_under)
+            .map(|(layer, tree)| {
+                layer.as_widget_mut().layout(tree, renderer, &limits)
+            })
+            .chain(std::iter::once(base))
+            .chain(above[1..].iter_mut().zip(&mut tree_above[1..]).map(
+                |(layer, tree)| {
+                    layer.as_widget_mut().layout(tree, renderer, &limits)
                 },
             ))
             .collect();
@@ -185,71 +208,71 @@ where
     }
 
     fn operate(
-        &self,
+        &mut self,
         tree: &mut Tree,
         layout: Layout<'_>,
         renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
-        operation.container(None, layout.bounds(), &mut |operation| {
+        operation.container(None, layout.bounds());
+        operation.traverse(&mut |operation| {
             self.children
-                .iter()
+                .iter_mut()
                 .zip(&mut tree.children)
                 .zip(layout.children())
                 .for_each(|((child, state), layout)| {
                     child
-                        .as_widget()
+                        .as_widget_mut()
                         .operate(state, layout, renderer, operation);
                 });
         });
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         mut cursor: mouse::Cursor,
         renderer: &Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
-    ) -> event::Status {
-        let is_over_scroll =
-            matches!(event, Event::Mouse(mouse::Event::WheelScrolled { .. }))
-                && cursor.is_over(layout.bounds());
+    ) {
+        if self.children.is_empty() {
+            return;
+        }
 
-        self.children
+        let is_over = cursor.is_over(layout.bounds());
+        let end = self.children.len() - 1;
+
+        for (i, ((child, tree), layout)) in self
+            .children
             .iter_mut()
             .rev()
             .zip(tree.children.iter_mut().rev())
             .zip(layout.children().rev())
-            .map(|((child, state), layout)| {
-                let status = child.as_widget_mut().on_event(
-                    state,
-                    event.clone(),
-                    layout,
-                    cursor,
-                    renderer,
-                    clipboard,
-                    shell,
-                    viewport,
+            .enumerate()
+        {
+            child.as_widget_mut().update(
+                tree, event, layout, cursor, renderer, clipboard, shell,
+                viewport,
+            );
+
+            if shell.is_event_captured() {
+                return;
+            }
+
+            if i < end && is_over && !cursor.is_levitating() {
+                let interaction = child.as_widget().mouse_interaction(
+                    tree, layout, cursor, viewport, renderer,
                 );
 
-                if is_over_scroll && cursor != mouse::Cursor::Unavailable {
-                    let interaction = child.as_widget().mouse_interaction(
-                        state, layout, cursor, viewport, renderer,
-                    );
-
-                    if interaction != mouse::Interaction::None {
-                        cursor = mouse::Cursor::Unavailable;
-                    }
+                if interaction != mouse::Interaction::None {
+                    cursor = cursor.levitate();
                 }
-
-                status
-            })
-            .find(|&status| status == event::Status::Captured)
-            .unwrap_or(event::Status::Ignored)
+            }
+        }
     }
 
     fn mouse_interaction(
@@ -265,10 +288,10 @@ where
             .rev()
             .zip(tree.children.iter().rev())
             .zip(layout.children().rev())
-            .map(|((child, state), layout)| {
-                child.as_widget().mouse_interaction(
-                    state, layout, cursor, viewport, renderer,
-                )
+            .map(|((child, tree), layout)| {
+                child
+                    .as_widget()
+                    .mouse_interaction(tree, layout, cursor, viewport, renderer)
             })
             .find(|&interaction| interaction != mouse::Interaction::None)
             .unwrap_or_default()
@@ -285,15 +308,21 @@ where
         viewport: &Rectangle,
     ) {
         if let Some(clipped_viewport) = layout.bounds().intersection(viewport) {
-            let layers_below = if cursor.is_over(layout.bounds()) {
+            let viewport = if self.clip {
+                &clipped_viewport
+            } else {
+                viewport
+            };
+
+            let layers_under = if cursor.is_over(layout.bounds()) {
                 self.children
                     .iter()
                     .rev()
                     .zip(tree.children.iter().rev())
                     .zip(layout.children().rev())
-                    .position(|((layer, state), layout)| {
+                    .position(|((layer, tree), layout)| {
                         let interaction = layer.as_widget().mouse_interaction(
-                            state, layout, cursor, viewport, renderer,
+                            tree, layout, cursor, viewport, renderer,
                         );
 
                         interaction != mouse::Interaction::None
@@ -316,40 +345,30 @@ where
             let mut draw_layer =
                 |i,
                  layer: &Element<'a, Message, Theme, Renderer>,
-                 state,
+                 tree,
                  layout,
                  cursor| {
                     if i > 0 {
-                        renderer.with_layer(clipped_viewport, |renderer| {
+                        renderer.with_layer(*viewport, |renderer| {
                             layer.as_widget().draw(
-                                state,
-                                renderer,
-                                theme,
-                                style,
-                                layout,
-                                cursor,
-                                &clipped_viewport,
+                                tree, renderer, theme, style, layout, cursor,
+                                viewport,
                             );
                         });
                     } else {
                         layer.as_widget().draw(
-                            state,
-                            renderer,
-                            theme,
-                            style,
-                            layout,
-                            cursor,
-                            &clipped_viewport,
+                            tree, renderer, theme, style, layout, cursor,
+                            viewport,
                         );
                     }
                 };
 
-            for (i, ((layer, state), layout)) in layers.take(layers_below) {
-                draw_layer(i, layer, state, layout, mouse::Cursor::Unavailable);
+            for (i, ((layer, tree), layout)) in layers.take(layers_under) {
+                draw_layer(i, layer, tree, layout, mouse::Cursor::Unavailable);
             }
 
-            for (i, ((layer, state), layout)) in layers {
-                draw_layer(i, layer, state, layout, cursor);
+            for (i, ((layer, tree), layout)) in layers {
+                draw_layer(i, layer, tree, layout, cursor);
             }
         }
     }
@@ -357,8 +376,9 @@ where
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'_>,
+        layout: Layout<'b>,
         renderer: &Renderer,
+        viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
         overlay::from_children(
@@ -366,6 +386,7 @@ where
             tree,
             layout,
             renderer,
+            viewport,
             translation,
         )
     }

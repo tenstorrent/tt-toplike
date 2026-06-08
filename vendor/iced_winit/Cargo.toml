@@ -10,11 +10,12 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2021"
+edition = "2024"
 name = "iced_winit"
-version = "0.13.0"
+version = "0.14.0"
 authors = ["Héctor Ramón Jiménez <hector@hecrj.dev>"]
 build = false
+autolib = false
 autobins = false
 autoexamples = false
 autotests = false
@@ -33,18 +34,39 @@ categories = ["gui"]
 license = "MIT"
 repository = "https://github.com/iced-rs/iced"
 
+[features]
+debug = ["iced_debug/enable"]
+default = [
+    "x11",
+    "wayland",
+]
+linux-theme-detection = [
+    "dep:mundy",
+    "mundy/async-io",
+    "mundy/color-scheme",
+]
+sysinfo = ["dep:sysinfo"]
+unconditional-rendering = []
+wayland = [
+    "winit/wayland",
+    "winit/wayland-dlopen",
+    "winit/wayland-csd-adwaita",
+    "window_clipboard/wayland",
+]
+x11 = [
+    "winit/x11",
+    "window_clipboard/x11",
+]
+
 [lib]
 name = "iced_winit"
 path = "src/lib.rs"
 
-[dependencies.iced_futures]
-version = "0.13.0"
+[dependencies.iced_debug]
+version = "0.14.0"
 
-[dependencies.iced_graphics]
-version = "0.13.0"
-
-[dependencies.iced_runtime]
-version = "0.13.0"
+[dependencies.iced_program]
+version = "0.14.0"
 
 [dependencies.log]
 version = "0.4"
@@ -53,36 +75,23 @@ version = "0.4"
 version = "2.0"
 
 [dependencies.sysinfo]
-version = "0.30"
+version = "0.33"
 optional = true
 
 [dependencies.thiserror]
-version = "1.0"
+version = "2"
 
 [dependencies.tracing]
 version = "0.1"
 
 [dependencies.window_clipboard]
-version = "0.4.1"
+version = "0.5"
+default-features = false
 
 [dependencies.winit]
 version = "0.30"
-
-[features]
-debug = ["iced_runtime/debug"]
-default = [
-    "x11",
-    "wayland",
-    "wayland-dlopen",
-    "wayland-csd-adwaita",
-]
-multi-window = ["iced_runtime/multi-window"]
-program = []
-system = ["sysinfo"]
-wayland = ["winit/wayland"]
-wayland-csd-adwaita = ["winit/wayland-csd-adwaita"]
-wayland-dlopen = ["winit/wayland-dlopen"]
-x11 = ["winit/x11"]
+features = ["rwh_06"]
+default-features = false
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.wasm-bindgen-futures]
 version = "0.4"
@@ -95,18 +104,23 @@ features = [
     "HtmlCanvasElement",
 ]
 
-[target.'cfg(target_os = "windows")'.dependencies.winapi]
-version = "0.3"
+[target.'cfg(target_os = "linux")'.dependencies.mundy]
+version = "0.2"
+optional = true
+default-features = false
 
 [lints.clippy]
 default_trait_access = "deny"
 filter_map_next = "deny"
 from_over_into = "deny"
+large-enum-variant = "allow"
 manual_let_else = "deny"
+map-entry = "allow"
 match-wildcard-for-single-variants = "deny"
 needless_borrow = "deny"
 new_without_default = "deny"
 redundant-closure-for-method-calls = "deny"
+result_large_err = "allow"
 semicolon_if_nothing_returned = "deny"
 trivially-copy-pass-by-ref = "deny"
 type-complexity = "allow"
@@ -114,13 +128,12 @@ unused_async = "deny"
 useless_conversion = "deny"
 
 [lints.rust]
-missing_debug_implementations = "deny"
 missing_docs = "deny"
 unsafe_code = "deny"
 unused_results = "deny"
 
 [lints.rust.rust_2018_idioms]
-level = "forbid"
+level = "deny"
 priority = -1
 
 [lints.rustdoc]

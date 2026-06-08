@@ -1,5 +1,8 @@
 //! Tooltips display a hint of information over some element when hovered.
 //!
+//! By default, the tooltip is displayed immediately, however, this can be adjusted
+//! with [`Tooltip::delay`].
+//!
 //! # Example
 //! ```no_run
 //! # mod iced { pub mod widget { pub use iced_widget::*; } }
@@ -22,16 +25,17 @@
 //! }
 //! ```
 use crate::container;
-use crate::core::event::{self, Event};
 use crate::core::layout::{self, Layout};
 use crate::core::mouse;
 use crate::core::overlay;
 use crate::core::renderer;
 use crate::core::text;
+use crate::core::time::{Duration, Instant};
 use crate::core::widget::{self, Widget};
+use crate::core::window;
 use crate::core::{
-    Clipboard, Element, Length, Padding, Pixels, Point, Rectangle, Shell, Size,
-    Vector,
+    Clipboard, Element, Event, Length, Padding, Pixels, Point, Rectangle,
+    Shell, Size, Vector,
 };
 
 /// An element to display a widget over another.
@@ -57,7 +61,6 @@ use crate::core::{
 ///     ).into()
 /// }
 /// ```
-#[allow(missing_debug_implementations)]
 pub struct Tooltip<
     'a,
     Message,
@@ -73,6 +76,7 @@ pub struct Tooltip<
     gap: f32,
     padding: f32,
     snap_within_viewport: bool,
+    delay: Duration,
     class: Theme::Class<'a>,
 }
 
@@ -99,6 +103,7 @@ where
             gap: 0.0,
             padding: Self::DEFAULT_PADDING,
             snap_within_viewport: true,
+            delay: Duration::ZERO,
             class: Theme::default(),
         }
     }
@@ -112,6 +117,14 @@ where
     /// Sets the padding of the [`Tooltip`].
     pub fn padding(mut self, padding: impl Into<Pixels>) -> Self {
         self.padding = padding.into().0;
+        self
+    }
+
+    /// Sets the delay before the [`Tooltip`] is shown.
+    ///
+    /// Set to [`Duration::ZERO`] to be shown immediately.
+    pub fn delay(mut self, delay: Duration) -> Self {
+        self.delay = delay;
         self
     }
 
@@ -143,8 +156,8 @@ where
     }
 }
 
-impl<'a, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for Tooltip<'a, Message, Theme, Renderer>
+impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for Tooltip<'_, Message, Theme, Renderer>
 where
     Theme: container::Catalog,
     Renderer: text::Renderer,
@@ -180,43 +193,84 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         tree: &mut widget::Tree,
         renderer: &Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        self.content
-            .as_widget()
-            .layout(&mut tree.children[0], renderer, limits)
+        self.content.as_widget_mut().layout(
+            &mut tree.children[0],
+            renderer,
+            limits,
+        )
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut widget::Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
-    ) -> event::Status {
-        let state = tree.state.downcast_mut::<State>();
+    ) {
+        if let Event::Mouse(_)
+        | Event::Window(window::Event::RedrawRequested(_)) = event
+        {
+            let state = tree.state.downcast_mut::<State>();
+            let now = Instant::now();
+            let cursor_position = cursor.position_over(layout.bounds());
 
-        let was_idle = *state == State::Idle;
+            match (*state, cursor_position) {
+                (State::Idle, Some(cursor_position)) => {
+                    if self.delay == Duration::ZERO {
+                        *state = State::Open { cursor_position };
+                        shell.invalidate_layout();
+                    } else {
+                        *state = State::Hovered { at: now };
+                    }
 
-        *state = cursor
-            .position_over(layout.bounds())
-            .map(|cursor_position| State::Hovered { cursor_position })
-            .unwrap_or_default();
+                    shell.request_redraw_at(now + self.delay);
+                }
+                (State::Hovered { .. }, None) => {
+                    *state = State::Idle;
+                }
+                (State::Hovered { at, .. }, _) if at.elapsed() < self.delay => {
+                    shell.request_redraw_at(now + self.delay - at.elapsed());
+                }
+                (State::Hovered { .. }, Some(cursor_position)) => {
+                    *state = State::Open { cursor_position };
+                    shell.invalidate_layout();
+                }
+                (
+                    State::Open {
+                        cursor_position: last_position,
+                    },
+                    Some(cursor_position),
+                ) if self.position == Position::FollowCursor
+                    && last_position != cursor_position =>
+                {
+                    *state = State::Open { cursor_position };
+                    shell.request_redraw();
+                }
+                (State::Open { .. }, None) => {
+                    *state = State::Idle;
+                    shell.invalidate_layout();
 
-        let is_idle = *state == State::Idle;
-
-        if was_idle != is_idle {
-            shell.invalidate_layout();
+                    if !matches!(
+                        event,
+                        Event::Window(window::Event::RedrawRequested(_)),
+                    ) {
+                        shell.request_redraw();
+                    }
+                }
+                (State::Open { .. }, Some(_)) | (State::Idle, None) => (),
+            }
         }
 
-        self.content.as_widget_mut().on_event(
+        self.content.as_widget_mut().update(
             &mut tree.children[0],
             event,
             layout,
@@ -225,7 +279,7 @@ where
             clipboard,
             shell,
             viewport,
-        )
+        );
     }
 
     fn mouse_interaction(
@@ -269,8 +323,9 @@ where
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut widget::Tree,
-        layout: Layout<'_>,
+        layout: Layout<'b>,
         renderer: &Renderer,
+        viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
         let state = tree.state.downcast_ref::<State>();
@@ -281,14 +336,15 @@ where
             children.next().unwrap(),
             layout,
             renderer,
+            viewport,
             translation,
         );
 
-        let tooltip = if let State::Hovered { cursor_position } = *state {
+        let tooltip = if let State::Open { cursor_position } = *state {
             Some(overlay::Element::new(Box::new(Overlay {
                 position: layout.position() + translation,
-                tooltip: &self.tooltip,
-                state: children.next().unwrap(),
+                tooltip: &mut self.tooltip,
+                tree: children.next().unwrap(),
                 cursor_position,
                 content_bounds: layout.bounds(),
                 snap_within_viewport: self.snap_within_viewport,
@@ -311,6 +367,24 @@ where
         } else {
             None
         }
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut widget::Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn widget::Operation,
+    ) {
+        operation.container(None, layout.bounds());
+        operation.traverse(&mut |operation| {
+            self.content.as_widget_mut().operate(
+                &mut tree.children[0],
+                layout,
+                renderer,
+                operation,
+            );
+        });
     }
 }
 
@@ -349,6 +423,9 @@ enum State {
     #[default]
     Idle,
     Hovered {
+        at: Instant,
+    },
+    Open {
         cursor_position: Point,
     },
 }
@@ -359,8 +436,8 @@ where
     Renderer: text::Renderer,
 {
     position: Point,
-    tooltip: &'b Element<'a, Message, Theme, Renderer>,
-    state: &'b mut widget::Tree,
+    tooltip: &'b mut Element<'a, Message, Theme, Renderer>,
+    tree: &'b mut widget::Tree,
     cursor_position: Point,
     content_bounds: Rectangle,
     snap_within_viewport: bool,
@@ -370,9 +447,8 @@ where
     class: &'b Theme::Class<'a>,
 }
 
-impl<'a, 'b, Message, Theme, Renderer>
-    overlay::Overlay<Message, Theme, Renderer>
-    for Overlay<'a, 'b, Message, Theme, Renderer>
+impl<Message, Theme, Renderer> overlay::Overlay<Message, Theme, Renderer>
+    for Overlay<'_, '_, Message, Theme, Renderer>
 where
     Theme: container::Catalog,
     Renderer: text::Renderer,
@@ -380,14 +456,16 @@ where
     fn layout(&mut self, renderer: &Renderer, bounds: Size) -> layout::Node {
         let viewport = Rectangle::with_size(bounds);
 
-        let tooltip_layout = self.tooltip.as_widget().layout(
-            self.state,
+        let tooltip_layout = self.tooltip.as_widget_mut().layout(
+            self.tree,
             renderer,
             &layout::Limits::new(
                 Size::ZERO,
-                self.snap_within_viewport
-                    .then(|| viewport.size())
-                    .unwrap_or(Size::INFINITY),
+                if self.snap_within_viewport {
+                    viewport.size()
+                } else {
+                    Size::INFINITE
+                },
             )
             .shrink(Padding::new(self.padding)),
         );
@@ -469,8 +547,10 @@ where
 
         layout::Node::with_children(
             tooltip_bounds.size(),
-            vec![tooltip_layout
-                .translate(Vector::new(self.padding, self.padding))],
+            vec![
+                tooltip_layout
+                    .translate(Vector::new(self.padding, self.padding)),
+            ],
         )
         .translate(Vector::new(tooltip_bounds.x, tooltip_bounds.y))
     }
@@ -492,22 +572,13 @@ where
         };
 
         self.tooltip.as_widget().draw(
-            self.state,
+            self.tree,
             renderer,
             theme,
             &defaults,
             layout.children().next().unwrap(),
             cursor_position,
-            &Rectangle::with_size(Size::INFINITY),
+            &Rectangle::with_size(Size::INFINITE),
         );
-    }
-
-    fn is_over(
-        &self,
-        _layout: Layout<'_>,
-        _renderer: &Renderer,
-        _cursor_position: Point,
-    ) -> bool {
-        false
     }
 }
