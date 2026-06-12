@@ -159,9 +159,11 @@ fn run_app(
         AnimConfig::from_profile(cli.profile).merge(load_config_overrides())
     };
 
-    // UI refresh rate: 60 FPS for smooth animations and responsive input
-    // This is independent of backend update rate
-    let ui_poll_rate = Duration::from_millis(16); // ~60 FPS
+    // UI refresh rates — chosen per display mode at the poll site below.
+    // Animation modes (Starfield/Castle/Flow/Arcade) need 60 FPS for smooth motion.
+    // Data modes (Insights/Grid) only need ~4 FPS; 60 FPS there wastes ~3 CPU cores.
+    let ui_poll_rate_anim = Duration::from_millis(16); // ~60 FPS
+    let ui_poll_rate_data = Duration::from_millis(250); // ~4 FPS
 
     // Process monitoring (Linux-only, update every 2 seconds)
     #[cfg(feature = "linux-procfs")]
@@ -418,10 +420,14 @@ fn run_app(
             })
             .map_err(|e| TTTopError::Terminal(e.to_string()))?;
 
-        // Handle input with fixed UI poll rate (60 FPS)
-        // This provides smooth animations and responsive keyboard input
-        // regardless of backend update interval
-        if event::poll(ui_poll_rate).map_err(|e| TTTopError::Terminal(e.to_string()))? {
+        // Poll at animation rate for visual modes, data rate for table/grid modes.
+        // Insights and Grid are static tables — 4 FPS is indistinguishable from 60 FPS
+        // to humans but saves ~3 CPU cores, important during long-running workloads.
+        let poll_rate = match display_mode {
+            DisplayMode::Insights | DisplayMode::Grid => ui_poll_rate_data,
+            _ => ui_poll_rate_anim,
+        };
+        if event::poll(poll_rate).map_err(|e| TTTopError::Terminal(e.to_string()))? {
             match event::read().map_err(|e| TTTopError::Terminal(e.to_string()))? {
                 Event::Resize(_, _) => {
                     // Drop all size-dependent visualizations so they reinitialize
