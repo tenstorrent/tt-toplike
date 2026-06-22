@@ -182,7 +182,8 @@ pub fn next_backend(current: BackendType) -> BackendType {
 /// Try to create the next available backend, skipping unavailable ones
 ///
 /// This function cycles through backends until it finds one that initializes successfully.
-/// It tries up to 4 times (one full cycle) before giving up.
+/// Linux cycle has 6 steps (Hybrid→Sysfs→Json→Luwen→Mock→Host); non-Linux has fewer.
+/// We try up to 7 times to cover a full Linux cycle plus one retry margin.
 pub fn switch_to_next_backend(
     current: BackendType,
     config: BackendConfig,
@@ -191,7 +192,7 @@ pub fn switch_to_next_backend(
     let mut attempts = 0;
     let mut next = next_backend(current);
 
-    while attempts < 4 {
+    while attempts < 7 {
         log::info!("Attempting to switch to {:?} backend", next);
 
         match create_backend(next, config.clone(), cli) {

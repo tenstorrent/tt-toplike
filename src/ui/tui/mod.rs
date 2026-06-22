@@ -556,7 +556,13 @@ fn run_app(
                                     anim_cfg.sensitivity,
                                     &mut overlay,
                                 );
-                                cmd_message = Some((msg, is_err));
+                                // Empty message (e.g. /help opens overlay) → don't
+                                // leave a blank command bar stuck on screen.
+                                cmd_message = if msg.is_empty() {
+                                    None
+                                } else {
+                                    Some((msg, is_err))
+                                };
                                 cmd_mode = false;
                                 cmd_buf.clear();
                             }
@@ -569,24 +575,30 @@ fn run_app(
                             _ => {}
                         }
                     } else {
+                        // Any keypress dismisses an open overlay, except the three
+                        // toggle hotkeys which flip it (handled explicitly below).
+                        // We reset here so every arm below starts from a clean slate;
+                        // the toggle arms then set it back to the desired panel.
+                        let prior_overlay = overlay.take();
+
                         match key.code {
                             // ── Overlay toggle hotkeys (l / ? / !) ─────────────────
                             KeyCode::Char('l') => {
-                                overlay = if overlay == Some(OverlayPanel::Legend) {
+                                overlay = if prior_overlay == Some(OverlayPanel::Legend) {
                                     None
                                 } else {
                                     Some(OverlayPanel::Legend)
                                 };
                             }
                             KeyCode::Char('?') => {
-                                overlay = if overlay == Some(OverlayPanel::Help) {
+                                overlay = if prior_overlay == Some(OverlayPanel::Help) {
                                     None
                                 } else {
                                     Some(OverlayPanel::Help)
                                 };
                             }
                             KeyCode::Char('!') => {
-                                overlay = if overlay == Some(OverlayPanel::Explain) {
+                                overlay = if prior_overlay == Some(OverlayPanel::Explain) {
                                     None
                                 } else {
                                     Some(OverlayPanel::Explain)
@@ -597,15 +609,16 @@ fn run_app(
                                 cmd_mode = true;
                                 cmd_buf.clear();
                                 cmd_message = None;
-                                overlay = None; // dismiss overlay when entering command mode
+                                // overlay already cleared above
                             }
                             KeyCode::Char('q') => {
                                 return Ok(());
                             }
                             KeyCode::Esc => {
-                                // Dismiss overlay, command message, zoom, kill confirm (in that order).
-                                if overlay.is_some() {
-                                    overlay = None;
+                                // Dismiss command message, zoom, kill confirm (in that order).
+                                // Overlays are already dismissed by the take() above.
+                                if prior_overlay.is_some() {
+                                    // Was showing overlay — already cleared, nothing else to do.
                                 } else if cmd_message.is_some() {
                                     cmd_message = None;
                                 } else if fleet_zoom_start.is_some() {
@@ -835,8 +848,7 @@ fn run_app(
                                 kill_confirm = None;
                             }
                             _ => {
-                                // Any unrecognized key dismisses the overlay (auto-hide).
-                                overlay = None;
+                                // Overlay already dismissed by take() before this match.
                             }
                         } // end inner key match
                     } // end else (not cmd_mode)
@@ -2169,14 +2181,14 @@ fn execute_command(
     match verb.as_str() {
         "fps" => match arg.parse::<u64>() {
             Ok(n) if (1..=120).contains(&n) => {
-                *anim_poll = Duration::from_millis(1000 / n);
+                *anim_poll = Duration::from_secs_f64(1.0 / n as f64);
                 (format!("animation fps set to {}", n), false)
             }
             _ => ("fps: expected 1–120".to_string(), true),
         },
         "datafps" => match arg.parse::<u64>() {
             Ok(n) if (1..=30).contains(&n) => {
-                *data_poll = Duration::from_millis(1000 / n);
+                *data_poll = Duration::from_secs_f64(1.0 / n as f64);
                 (format!("data fps set to {}", n), false)
             }
             _ => ("datafps: expected 1–30".to_string(), true),

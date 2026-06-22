@@ -216,7 +216,7 @@ tt-toplike --devices 0,2
 
 ### Backend System (Safe by Default)
 
-Auto-detect order: **Sysfs → JSON → Mock** (Luwen excluded from auto-detect).
+Auto-detect order: **Hybrid (sysfs + background JSON) → JSON → Mock** on Linux; **JSON → Mock** elsewhere. Luwen excluded from auto-detect.
 
 | Backend | Method | Safe on active HW? | Permissions |
 |---------|--------|--------------------|-------------|
