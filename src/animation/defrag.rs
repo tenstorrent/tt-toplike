@@ -315,8 +315,15 @@ impl DefragVis {
                 if all_empty { Phase::Dma } else { Phase::Deconstructing }
             } else if !ds.channels.iter().any(|c| c.enabled && c.trained) {
                 Phase::Init
-            } else if ds.phase == Phase::Running && power <= POWER_IDLE_W {
-                // Power dropped — model unloaded → EVICT.
+            } else if ds.phase == Phase::Running && {
+                // EVICT: power returned to near the idle baseline captured at DMA-start.
+                // Fixed 8 W floor is too low — Tenstorrent chips idle at 15–30 W.
+                // Threshold = idle_power + 20% headroom, clamped to at least POWER_IDLE_W
+                // so fresh-boot devices (idle_power ≈ 0) still evict when truly idle.
+                let evict_threshold = (ds.idle_power * 1.20).max(POWER_IDLE_W);
+                ds.power_ema <= evict_threshold
+            } {
+                // Power dropped back to idle — model unloaded → EVICT.
                 Phase::Deconstructing
             } else if (aiclk >= 200 || all_full) && power > POWER_IDLE_W {
                 Phase::Running
