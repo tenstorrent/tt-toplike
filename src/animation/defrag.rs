@@ -1236,7 +1236,6 @@ impl DefragVis {
             Span::styled("empty", Style::default().fg(colors::rgb(80, 90, 100))),
         ])
     }
-
 }
 
 #[cfg(test)]

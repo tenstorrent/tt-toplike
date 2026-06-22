@@ -1314,13 +1314,22 @@ fn render_global_statusbar(f: &mut Frame, backend: &dyn TelemetryBackend, mode: 
     // Insights-specific nav appended when in that mode.
     if matches!(mode, DisplayMode::Insights) {
         left.push(pipe());
-        left.push(Span::styled("↑↓", Style::default().fg(colors::rgb(220, 220, 220))));
+        left.push(Span::styled(
+            "↑↓",
+            Style::default().fg(colors::rgb(220, 220, 220)),
+        ));
         left.push(lbl(" nav"));
         left.push(pipe());
-        left.push(Span::styled("K", Style::default().fg(colors::rgb(255, 100, 100))));
+        left.push(Span::styled(
+            "K",
+            Style::default().fg(colors::rgb(255, 100, 100)),
+        ));
         left.push(lbl(" destroy"));
         left.push(pipe());
-        left.push(Span::styled("k", Style::default().fg(colors::rgb(220, 180, 80))));
+        left.push(Span::styled(
+            "k",
+            Style::default().fg(colors::rgb(220, 180, 80)),
+        ));
         left.push(lbl(" silence"));
     }
 
@@ -1330,7 +1339,7 @@ fn render_global_statusbar(f: &mut Frame, backend: &dyn TelemetryBackend, mode: 
 
     // Build chip telemetry: (label, temp, mhz, watts)
     struct ChipTelem {
-        label: String,     // "BH0", "WH1", …
+        label: String, // "BH0", "WH1", …
         temp: f32,
         mhz: u32,
         watts: f32,
@@ -1382,9 +1391,7 @@ fn render_global_statusbar(f: &mut Frame, backend: &dyn TelemetryBackend, mode: 
             };
             right.push(Span::styled(
                 c.label.clone(),
-                Style::default()
-                    .fg(key_fg)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(key_fg).add_modifier(Modifier::BOLD),
             ));
             right.push(Span::raw("  "));
             right.push(Span::styled(
@@ -1438,10 +1445,7 @@ fn render_global_statusbar(f: &mut Frame, backend: &dyn TelemetryBackend, mode: 
 
     left.extend(right);
 
-    f.render_widget(
-        Block::default().style(Style::default().bg(bg)),
-        bar_area,
-    );
+    f.render_widget(Block::default().style(Style::default().bg(bg)), bar_area);
     f.render_widget(
         Paragraph::new(Line::from(left)).style(Style::default().bg(bg)),
         bar_area,
@@ -2191,9 +2195,7 @@ fn execute_command(
     let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
 
     match verb.as_str() {
-        "quit" | "q" | "exit" => {
-            ("".to_string(), false, true)
-        }
+        "quit" | "q" | "exit" => ("".to_string(), false, true),
         "fps" => match arg.parse::<u64>() {
             Ok(n) if (1..=120).contains(&n) => {
                 *anim_poll = Duration::from_secs_f64(1.0 / n as f64);
