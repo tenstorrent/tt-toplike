@@ -42,7 +42,7 @@
 //!    power drives brightness.  No new blocks being written.
 //! 4. **IDLE** — power low: blocks slowly drain back to empty.
 
-use crate::animation::{hsv_to_rgb, temp_to_hue};
+use crate::animation::{hsv_to_rgb, lerp, temp_to_hue};
 use crate::backend::TelemetryBackend;
 use crate::models::telemetry::parse_hex_or_dec;
 use crate::ui::colors;
@@ -814,28 +814,57 @@ impl DefragVis {
             } else {
                 match phase {
                     Phase::Running => {
-                        let dist_to_scan = (col as i64 - scan_pos as i64).unsigned_abs() as u64;
-                        if dist_to_scan == 0 {
-                            // Cursor head: mid-brightness ▒ — marks position without glowing
-                            let c = hsv_to_rgb(base_hue, 0.90, 0.65);
-                            ('▒', Style::default().fg(c))
-                        } else if dist_to_scan == 1 {
-                            // Shoulder: slightly darker
-                            let c = hsv_to_rgb(base_hue, 0.85, 0.45);
-                            ('░', Style::default().fg(c))
-                        } else {
-                            // Body: block character encodes activity level.
-                            // mvddq lifts the char tier, not the brightness value.
+                        // Three-layer hue blend: channel base + per-channel temp bias + global mood.
+                        let ch_temp_bias = ((ch_temp - 25.0) / 60.0).clamp(0.0, 1.0) * 40.0;
+                        let global_mood_shift = ds.map(|s| s.thermal_mood).unwrap_or(0.0) * 25.0;
+                        let cell_hue = (base_hue + ch_temp_bias + global_mood_shift) % 360.0;
+
+                        let inference_energy = ds.map(|s| s.inference_energy).unwrap_or(0.0);
+                        let thermal_mood = ds.map(|s| s.thermal_mood).unwrap_or(0.0);
+
+                        // Check if this cell is inside an active scatter burst for this channel.
+                        let burst_hit = ds.and_then(|s| {
+                            s.scatter_bursts.iter()
+                                .filter(|b| b.channel == ch_idx)
+                                .find(|b| b.cells.contains(&col))
+                                .map(|b| (b.ttl, b.intensity))
+                        });
+
+                        if let Some((ttl, intensity)) = burst_hit {
+                            // Burst override: warmer flash in channel's own color family, linear decay.
+                            let t = (18u8.saturating_sub(ttl)) as f32 / 18.0;
+                            let burst_hue = (base_hue + 20.0) % 360.0;
+                            let burst_v = 0.75 + intensity * 0.15;
                             let t1 = self.frame % wave1_period;
                             let w1 = (t1 as f32 / wave1_period as f32 * std::f32::consts::TAU).sin();
-                            let base_v = seg_brightness(col);
-                            let mem_lift = mvddq_norm * 0.12;
-                            let v = (base_v + 0.05 * w1 + mem_lift).clamp(0.18, 0.70);
-                            let s = seg_saturation(col);
-                            let c = hsv_to_rgb(base_hue, s, v);
-                            // Block char tier driven by combined brightness — darker = ░, brighter = █
-                            let glyph = if v > 0.55 { '▓' } else if v > 0.38 { '▒' } else { '░' };
+                            let ambient_v = (seg_brightness(col) + inference_energy * 0.22 + 0.05 * w1)
+                                .clamp(0.18, 0.82);
+                            let v = lerp(burst_v, ambient_v, t);
+                            let s = lerp(1.0_f32, seg_saturation(col) + thermal_mood * 0.15, t).clamp(0.0, 1.0);
+                            let c = hsv_to_rgb(burst_hue, s, v);
+                            let glyph = if v > 0.60 { '▓' } else { '▒' };
                             (glyph, Style::default().fg(c))
+                        } else {
+                            let dist_to_scan = (col as i64 - scan_pos as i64).unsigned_abs() as u64;
+                            if dist_to_scan == 0 {
+                                let c = hsv_to_rgb(cell_hue, 0.90, 0.65);
+                                ('▒', Style::default().fg(c))
+                            } else if dist_to_scan == 1 {
+                                let c = hsv_to_rgb(cell_hue, 0.85, 0.45);
+                                ('░', Style::default().fg(c))
+                            } else {
+                                let t1 = self.frame % wave1_period;
+                                let w1 = (t1 as f32 / wave1_period as f32 * std::f32::consts::TAU).sin();
+                                let base_v = seg_brightness(col);
+                                let mem_lift = mvddq_norm * 0.12;
+                                // inference_energy lifts brightness; thermal_mood lifts saturation.
+                                let v = (base_v + inference_energy * 0.22 + 0.05 * w1 + mem_lift)
+                                    .clamp(0.18, 0.82);
+                                let s = (seg_saturation(col) + thermal_mood * 0.15).clamp(0.0, 1.0);
+                                let c = hsv_to_rgb(cell_hue, s, v);
+                                let glyph = if v > 0.55 { '▓' } else if v > 0.38 { '▒' } else { '░' };
+                                (glyph, Style::default().fg(c))
+                            }
                         }
                     }
                     Phase::Deconstructing => {
@@ -1153,5 +1182,33 @@ mod tests {
         // Should NOT spawn
         let should_spawn = ds.power_ema > ds.power_ema_slow * 1.08 && ds.burst_cooldown == 0;
         assert!(!should_spawn);
+    }
+
+    #[test]
+    fn hue_blend_stays_within_bounds() {
+        // base ch0 = 100°, max ch_temp_bias = +40°, max global_mood = +25° → max 165°
+        let base_channel_hue = 100.0_f32;
+        for temp in [25.0_f32, 55.0, 85.0] {
+            for mood in [0.0_f32, 0.5, 1.0] {
+                let ch_temp_bias = ((temp - 25.0) / 60.0).clamp(0.0, 1.0) * 40.0;
+                let global_mood_shift = mood * 25.0;
+                let cell_hue = base_channel_hue + ch_temp_bias + global_mood_shift;
+                assert!(cell_hue >= 100.0, "hue={cell_hue} went below base");
+                assert!(cell_hue <= 165.0, "hue={cell_hue} exceeded max");
+            }
+        }
+    }
+
+    #[test]
+    fn burst_lerp_gives_ambient_at_ttl_zero() {
+        // When ttl reaches 0 the retain() removes it, but just before removal (ttl=1),
+        // t = (18 - 1) / 18.0 ≈ 0.944 — nearly fully ambient.
+        let ttl = 1u8;
+        let t = (18 - ttl) as f32 / 18.0;
+        let burst_v = 0.88_f32;
+        let ambient_v = 0.40_f32;
+        let blended = lerp(burst_v, ambient_v, t);
+        assert!(blended < burst_v, "should be closer to ambient");
+        assert!((blended - ambient_v).abs() < 0.08, "blended={blended} should be near ambient");
     }
 }
