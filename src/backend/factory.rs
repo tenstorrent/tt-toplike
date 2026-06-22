@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Backend Factory - Dynamic backend creation and switching
 //!
 //! This module provides functionality to create and switch between different
 //! telemetry backends at runtime, enabling live backend comparison.
 
+use crate::backend::host::HostBackend;
+use crate::backend::json::JSONBackend;
+use crate::backend::mock::MockBackend;
 use crate::backend::{BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
 use crate::error::{BackendError, BackendResult};
-use crate::backend::mock::MockBackend;
-use crate::backend::json::JSONBackend;
-use crate::backend::host::HostBackend;
 
 #[cfg(target_os = "linux")]
 use crate::backend::sysfs::SysfsBackend;
@@ -106,7 +105,10 @@ pub fn create_backend(
 /// Order: Hybrid (sysfs + background JSON) → JSON (tt-smi) → Mock
 /// Use --backend luwen explicitly if you need direct hardware access.
 /// Use --backend sysfs if you want sysfs-only without any JSON background thread.
-fn create_auto_backend(config: BackendConfig, cli: &Cli) -> BackendResult<Box<dyn TelemetryBackend>> {
+fn create_auto_backend(
+    config: BackendConfig,
+    cli: &Cli,
+) -> BackendResult<Box<dyn TelemetryBackend>> {
     log::info!("Auto-detecting backend (safe mode - skipping Luwen)...");
 
     // Try Hybrid backend first on Linux (sysfs + optional background JSON enrichment).

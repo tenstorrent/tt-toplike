@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! egui-based Dashboard Entry Point
 //!
 //! Lightweight real-time monitoring dashboard using egui.
@@ -28,7 +27,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_interval(cli.interval)
         .with_max_errors(cli.max_errors);
 
-    let config = if cli.verbose { config.verbose() } else { config };
+    let config = if cli.verbose {
+        config.verbose()
+    } else {
+        config
+    };
 
     // Create backend
     let backend_type = cli.effective_backend();

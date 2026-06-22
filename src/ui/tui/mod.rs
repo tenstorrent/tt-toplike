@@ -12,7 +12,9 @@
 
 pub mod chip_portrait;
 
-use crate::animation::{ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis};
+use crate::animation::{
+    ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis,
+};
 use crate::backend::{factory, BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
 use crate::error::TTTopError;
@@ -146,8 +148,12 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
 
     // Restore terminal
     disable_raw_mode().map_err(|e| TTTopError::Terminal(e.to_string()))?;
-    execute!(terminal.backend_mut(), DisableFocusChange, LeaveAlternateScreen)
-        .map_err(|e| TTTopError::Terminal(e.to_string()))?;
+    execute!(
+        terminal.backend_mut(),
+        DisableFocusChange,
+        LeaveAlternateScreen
+    )
+    .map_err(|e| TTTopError::Terminal(e.to_string()))?;
     terminal
         .show_cursor()
         .map_err(|e| TTTopError::Terminal(e.to_string()))?;
@@ -304,8 +310,11 @@ fn run_app(
             last_data_render.elapsed() >= render_interval
         };
         if should_tick {
-            if is_anim_mode { last_anim_render = Instant::now(); }
-            else { last_data_render = Instant::now(); }
+            if is_anim_mode {
+                last_anim_render = Instant::now();
+            } else {
+                last_data_render = Instant::now();
+            }
         }
 
         // Initialize or update visualizations (only on tick to match target FPS)
@@ -314,96 +323,95 @@ fn run_app(
             .map_err(|e| TTTopError::Terminal(e.to_string()))?;
 
         if should_tick {
-        match display_mode {
-            DisplayMode::Starfield => {
-                if starfield.is_none() {
-                    let content_h = (size.height as usize).saturating_sub(8);
-                    let content_w = (size.width as usize).saturating_sub(2);
-                    let mut sf = HardwareStarfield::new(content_w, content_h);
-                    sf.initialize_from_devices(backend.devices());
-                    sf.set_sensitivity(anim_cfg.sensitivity);
-                    starfield = Some(sf);
-                }
-                if let Some(ref mut sf) = starfield {
-                    sf.update_from_telemetry(backend);
-                }
-            }
-            DisplayMode::MemoryCastle => {
-                if memory_castle.is_none() {
-                    // Create new MemoryCastle with density scaled by animation profile
-                    let glyph_count = ((30.0 * anim_cfg.max_particles_scale) as usize).max(5);
-                    let mut mc = MemoryCastle::new_with_density(
-                        size.width as usize,
-                        size.height as usize,
-                        anim_cfg.castle_max_particles(),
-                        glyph_count,
-                    );
-                    mc.set_sensitivity(anim_cfg.sensitivity);
-                    memory_castle = Some(mc);
-                }
-                if let Some(ref mut tg) = memory_castle {
-                    tg.update(backend);
-                }
-            }
-            DisplayMode::MemoryFlow => {
-                if memory_flow.is_none() {
-                    // Create new MemoryFlow visualization with density scaled by animation profile
-                    let mut mf = MemoryFlowVis::new_with_density(
-                        size.width as usize,
-                        size.height as usize,
-                        anim_cfg.flow_max_particles(),
-                    );
-                    mf.set_sensitivity(anim_cfg.sensitivity);
-                    memory_flow = Some(mf);
-                }
-                if let Some(ref mut mf) = memory_flow {
-                    mf.update(backend);
-                }
-            }
-            DisplayMode::Arcade => {
-                // Re-create if size changed — arcade pre-allocates at construction size.
-                if let Some(ref arc) = arcade {
-                    if arc.width() != size.width as usize || arc.height() != size.height as usize {
-                        arcade = None;
+            match display_mode {
+                DisplayMode::Starfield => {
+                    if starfield.is_none() {
+                        let content_h = (size.height as usize).saturating_sub(8);
+                        let content_w = (size.width as usize).saturating_sub(2);
+                        let mut sf = HardwareStarfield::new(content_w, content_h);
+                        sf.initialize_from_devices(backend.devices());
+                        sf.set_sensitivity(anim_cfg.sensitivity);
+                        starfield = Some(sf);
+                    }
+                    if let Some(ref mut sf) = starfield {
+                        sf.update_from_telemetry(backend);
                     }
                 }
-                if arcade.is_none() {
-                    // Create new Arcade visualization
-                    let mut arc =
-                        ArcadeVisualization::new(size.width as usize, size.height as usize);
-                    arc.initialize_from_devices(backend.devices());
-                    // Forward sensitivity so --profile paranoid (or any non-default profile)
-                    // takes effect inside Arcade just like it does in the standalone modes.
-                    arc.set_sensitivity(anim_cfg.sensitivity);
-                    // Build board topology from SMBUS board_id data so the
-                    // header diagram, stream characters, and castle separators
-                    // are all topology-aware from the first frame.
-                    arc.initialize_topology(backend);
-                    arcade = Some(arc);
+                DisplayMode::MemoryCastle => {
+                    if memory_castle.is_none() {
+                        // Create new MemoryCastle with density scaled by animation profile
+                        let glyph_count = ((30.0 * anim_cfg.max_particles_scale) as usize).max(5);
+                        let mut mc = MemoryCastle::new_with_density(
+                            size.width as usize,
+                            size.height as usize,
+                            anim_cfg.castle_max_particles(),
+                            glyph_count,
+                        );
+                        mc.set_sensitivity(anim_cfg.sensitivity);
+                        memory_castle = Some(mc);
+                    }
+                    if let Some(ref mut tg) = memory_castle {
+                        tg.update(backend);
+                    }
                 }
-                if let Some(ref mut arc) = arcade {
-                    arc.update(backend);
+                DisplayMode::MemoryFlow => {
+                    if memory_flow.is_none() {
+                        // Create new MemoryFlow visualization with density scaled by animation profile
+                        let mut mf = MemoryFlowVis::new_with_density(
+                            size.width as usize,
+                            size.height as usize,
+                            anim_cfg.flow_max_particles(),
+                        );
+                        mf.set_sensitivity(anim_cfg.sensitivity);
+                        memory_flow = Some(mf);
+                    }
+                    if let Some(ref mut mf) = memory_flow {
+                        mf.update(backend);
+                    }
+                }
+                DisplayMode::Arcade => {
+                    // Re-create if size changed — arcade pre-allocates at construction size.
+                    if let Some(ref arc) = arcade {
+                        if arc.width() != size.width as usize
+                            || arc.height() != size.height as usize
+                        {
+                            arcade = None;
+                        }
+                    }
+                    if arcade.is_none() {
+                        // Create new Arcade visualization
+                        let mut arc =
+                            ArcadeVisualization::new(size.width as usize, size.height as usize);
+                        arc.initialize_from_devices(backend.devices());
+                        // Forward sensitivity so --profile paranoid (or any non-default profile)
+                        // takes effect inside Arcade just like it does in the standalone modes.
+                        arc.set_sensitivity(anim_cfg.sensitivity);
+                        // Build board topology from SMBUS board_id data so the
+                        // header diagram, stream characters, and castle separators
+                        // are all topology-aware from the first frame.
+                        arc.initialize_topology(backend);
+                        arcade = Some(arc);
+                    }
+                    if let Some(ref mut arc) = arcade {
+                        arc.update(backend);
+                    }
+                }
+                DisplayMode::Insights => {
+                    // Ingestion now happens in the backend update block (runs at ~10 Hz,
+                    // not 60 FPS), so nothing to do here.
+                }
+                DisplayMode::Grid => {
+                    // Grid mode doesn't need special init
+                }
+                DisplayMode::Defrag => {
+                    if defrag.is_none() {
+                        defrag = Some(DefragVis::new(size.width as usize, size.height as usize));
+                    }
+                    if let Some(ref mut dv) = defrag {
+                        dv.update(backend);
+                    }
                 }
             }
-            DisplayMode::Insights => {
-                // Ingestion now happens in the backend update block (runs at ~10 Hz,
-                // not 60 FPS), so nothing to do here.
-            }
-            DisplayMode::Grid => {
-                // Grid mode doesn't need special init
-            }
-            DisplayMode::Defrag => {
-                if defrag.is_none() {
-                    defrag = Some(DefragVis::new(
-                        size.width as usize,
-                        size.height as usize,
-                    ));
-                }
-                if let Some(ref mut dv) = defrag {
-                    dv.update(backend);
-                }
-            }
-        }
         } // end if should_tick
 
         // Clear terminal when switching modes to remove artifacts
@@ -531,267 +539,307 @@ fn run_app(
                     terminal.clear().ok();
                 }
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                // ── Command mode intercepts all keystrokes ─────────────────
-                if cmd_mode {
-                    match key.code {
-                        KeyCode::Esc => {
-                            cmd_mode = false;
-                            cmd_buf.clear();
-                            cmd_message = None;
+                    // ── Command mode intercepts all keystrokes ─────────────────
+                    if cmd_mode {
+                        match key.code {
+                            KeyCode::Esc => {
+                                cmd_mode = false;
+                                cmd_buf.clear();
+                                cmd_message = None;
+                            }
+                            KeyCode::Enter => {
+                                let (msg, is_err) = execute_command(
+                                    &cmd_buf,
+                                    &mut display_mode,
+                                    &mut ui_poll_rate_anim,
+                                    &mut ui_poll_rate_data,
+                                    anim_cfg.sensitivity,
+                                    &mut overlay,
+                                );
+                                cmd_message = Some((msg, is_err));
+                                cmd_mode = false;
+                                cmd_buf.clear();
+                            }
+                            KeyCode::Backspace => {
+                                cmd_buf.pop();
+                            }
+                            KeyCode::Char(c) => {
+                                cmd_buf.push(c);
+                            }
+                            _ => {}
                         }
-                        KeyCode::Enter => {
-                            let (msg, is_err) = execute_command(
-                                &cmd_buf,
-                                &mut display_mode,
-                                &mut ui_poll_rate_anim,
-                                &mut ui_poll_rate_data,
-                                anim_cfg.sensitivity,
-                                &mut overlay,
-                            );
-                            cmd_message = Some((msg, is_err));
-                            cmd_mode = false;
-                            cmd_buf.clear();
-                        }
-                        KeyCode::Backspace => { cmd_buf.pop(); }
-                        KeyCode::Char(c) => { cmd_buf.push(c); }
-                        _ => {}
-                    }
-                } else { match key.code {
-                    // ── Overlay toggle hotkeys (l / ? / !) ─────────────────
-                    KeyCode::Char('l') => {
-                        overlay = if overlay == Some(OverlayPanel::Legend) { None } else { Some(OverlayPanel::Legend) };
-                    }
-                    KeyCode::Char('?') => {
-                        overlay = if overlay == Some(OverlayPanel::Help) { None } else { Some(OverlayPanel::Help) };
-                    }
-                    KeyCode::Char('!') => {
-                        overlay = if overlay == Some(OverlayPanel::Explain) { None } else { Some(OverlayPanel::Explain) };
-                    }
-                    KeyCode::Char('/') => {
-                        // Open command bar — clears any previous result message
-                        cmd_mode = true;
-                        cmd_buf.clear();
-                        cmd_message = None;
-                        overlay = None; // dismiss overlay when entering command mode
-                    }
-                    KeyCode::Char('q') => {
-                        return Ok(());
-                    }
-                    KeyCode::Esc => {
-                        // Dismiss overlay, command message, zoom, kill confirm (in that order).
-                        if overlay.is_some() {
-                            overlay = None;
-                        } else if cmd_message.is_some() {
-                            cmd_message = None;
-                        } else
-                        if fleet_zoom_start.is_some() {
-                            // Zoom out from portrait drill-down back to galaxy overview.
-                            fleet_zoom_start = None;
-                        } else {
-                            #[cfg(feature = "linux-procfs")]
-                            if kill_confirm.is_some() {
-                                kill_confirm = None;
-                            } else {
+                    } else {
+                        match key.code {
+                            // ── Overlay toggle hotkeys (l / ? / !) ─────────────────
+                            KeyCode::Char('l') => {
+                                overlay = if overlay == Some(OverlayPanel::Legend) {
+                                    None
+                                } else {
+                                    Some(OverlayPanel::Legend)
+                                };
+                            }
+                            KeyCode::Char('?') => {
+                                overlay = if overlay == Some(OverlayPanel::Help) {
+                                    None
+                                } else {
+                                    Some(OverlayPanel::Help)
+                                };
+                            }
+                            KeyCode::Char('!') => {
+                                overlay = if overlay == Some(OverlayPanel::Explain) {
+                                    None
+                                } else {
+                                    Some(OverlayPanel::Explain)
+                                };
+                            }
+                            KeyCode::Char('/') => {
+                                // Open command bar — clears any previous result message
+                                cmd_mode = true;
+                                cmd_buf.clear();
+                                cmd_message = None;
+                                overlay = None; // dismiss overlay when entering command mode
+                            }
+                            KeyCode::Char('q') => {
                                 return Ok(());
                             }
-                            #[cfg(not(feature = "linux-procfs"))]
-                            return Ok(());
-                        }
-                    }
-                    KeyCode::Char('r') => {
-                        // Force refresh
-                        if let Err(e) = backend.update() {
-                            log::warn!("Update failed: {}", e);
-                        }
-                    }
-                    KeyCode::Char('v') => {
-                        // Cycle through visualization modes.
-                        // Grid mode is intentionally excluded — the Insights screen
-                        // already is the chip-portrait grid.
-                        display_mode = match display_mode {
-                            DisplayMode::Insights | DisplayMode::Grid => DisplayMode::MemoryFlow,
-                            DisplayMode::MemoryFlow => DisplayMode::Starfield,
-                            DisplayMode::Starfield => {
-                                memory_castle = None;
-                                DisplayMode::MemoryCastle
+                            KeyCode::Esc => {
+                                // Dismiss overlay, command message, zoom, kill confirm (in that order).
+                                if overlay.is_some() {
+                                    overlay = None;
+                                } else if cmd_message.is_some() {
+                                    cmd_message = None;
+                                } else if fleet_zoom_start.is_some() {
+                                    // Zoom out from portrait drill-down back to galaxy overview.
+                                    fleet_zoom_start = None;
+                                } else {
+                                    #[cfg(feature = "linux-procfs")]
+                                    if kill_confirm.is_some() {
+                                        kill_confirm = None;
+                                    } else {
+                                        return Ok(());
+                                    }
+                                    #[cfg(not(feature = "linux-procfs"))]
+                                    return Ok(());
+                                }
                             }
-                            DisplayMode::MemoryCastle => {
-                                arcade = None;
-                                DisplayMode::Arcade
+                            KeyCode::Char('r') => {
+                                // Force refresh
+                                if let Err(e) = backend.update() {
+                                    log::warn!("Update failed: {}", e);
+                                }
                             }
-                            DisplayMode::Arcade => DisplayMode::Defrag,
-                            DisplayMode::Defrag => DisplayMode::Insights,
-                        };
-                        log::info!("Switched to {:?} mode", display_mode);
-                    }
-                    KeyCode::Char('d') | KeyCode::Char('D') => {
-                        // Jump directly to Defrag mode
-                        defrag = None; // reinit at new frame
-                        display_mode = DisplayMode::Defrag;
-                        log::info!("Switched directly to Defrag mode");
-                    }
-                    KeyCode::Char('g') => {
-                        display_mode = DisplayMode::Grid;
-                        log::info!("Switched to Grid mode");
-                    }
-                    KeyCode::Char('a') | KeyCode::Char('A') => {
-                        // Jump directly to Arcade mode
-                        arcade = None; // Reset arcade to reinitialize
-                        display_mode = DisplayMode::Arcade;
-                        log::info!("Switched directly to Arcade mode");
-                    }
-                    KeyCode::Char('b') => {
-                        // Switch to next backend
-                        log::info!("Attempting to switch from {:?} backend", backend_type);
+                            KeyCode::Char('v') => {
+                                // Cycle through visualization modes.
+                                // Grid mode is intentionally excluded — the Insights screen
+                                // already is the chip-portrait grid.
+                                display_mode = match display_mode {
+                                    DisplayMode::Insights | DisplayMode::Grid => {
+                                        DisplayMode::MemoryFlow
+                                    }
+                                    DisplayMode::MemoryFlow => DisplayMode::Starfield,
+                                    DisplayMode::Starfield => {
+                                        memory_castle = None;
+                                        DisplayMode::MemoryCastle
+                                    }
+                                    DisplayMode::MemoryCastle => {
+                                        arcade = None;
+                                        DisplayMode::Arcade
+                                    }
+                                    DisplayMode::Arcade => DisplayMode::Defrag,
+                                    DisplayMode::Defrag => DisplayMode::Insights,
+                                };
+                                log::info!("Switched to {:?} mode", display_mode);
+                            }
+                            KeyCode::Char('d') | KeyCode::Char('D') => {
+                                // Jump directly to Defrag mode
+                                defrag = None; // reinit at new frame
+                                display_mode = DisplayMode::Defrag;
+                                log::info!("Switched directly to Defrag mode");
+                            }
+                            KeyCode::Char('g') => {
+                                display_mode = DisplayMode::Grid;
+                                log::info!("Switched to Grid mode");
+                            }
+                            KeyCode::Char('a') | KeyCode::Char('A') => {
+                                // Jump directly to Arcade mode
+                                arcade = None; // Reset arcade to reinitialize
+                                display_mode = DisplayMode::Arcade;
+                                log::info!("Switched directly to Arcade mode");
+                            }
+                            KeyCode::Char('b') => {
+                                // Switch to next backend
+                                log::info!("Attempting to switch from {:?} backend", backend_type);
 
-                        match factory::switch_to_next_backend(backend_type, config.clone(), cli) {
-                            Ok((new_backend, new_type)) => {
-                                *backend = new_backend;
-                                backend_type = new_type;
-                                log::info!("Successfully switched to {:?} backend", backend_type);
+                                match factory::switch_to_next_backend(
+                                    backend_type,
+                                    config.clone(),
+                                    cli,
+                                ) {
+                                    Ok((new_backend, new_type)) => {
+                                        *backend = new_backend;
+                                        backend_type = new_type;
+                                        log::info!(
+                                            "Successfully switched to {:?} backend",
+                                            backend_type
+                                        );
 
-                                // Reinitialize visualizations with new backend
-                                if let DisplayMode::Starfield = display_mode {
-                                    starfield = None;
-                                }
-                                if let DisplayMode::MemoryCastle = display_mode {
-                                    memory_castle = None;
-                                }
-                                if let DisplayMode::MemoryFlow = display_mode {
-                                    memory_flow = None;
-                                }
-                                if let DisplayMode::Arcade = display_mode {
-                                    arcade = None;
-                                }
-                                if let DisplayMode::Defrag = display_mode {
-                                    defrag = None;
+                                        // Reinitialize visualizations with new backend
+                                        if let DisplayMode::Starfield = display_mode {
+                                            starfield = None;
+                                        }
+                                        if let DisplayMode::MemoryCastle = display_mode {
+                                            memory_castle = None;
+                                        }
+                                        if let DisplayMode::MemoryFlow = display_mode {
+                                            memory_flow = None;
+                                        }
+                                        if let DisplayMode::Arcade = display_mode {
+                                            arcade = None;
+                                        }
+                                        if let DisplayMode::Defrag = display_mode {
+                                            defrag = None;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        log::error!("Failed to switch backend: {}", e);
+                                    }
                                 }
                             }
-                            Err(e) => {
-                                log::error!("Failed to switch backend: {}", e);
+                            // Insights-mode navigation, fleet drill-down, and kill
+                            KeyCode::Up if display_mode == DisplayMode::Insights => {
+                                let n = backend.devices().len();
+                                if n >= FLEET_DEVICE_THRESHOLD && fleet_zoom_start.is_none() {
+                                    // Move cursor up one row in the galaxy overview.
+                                    let cells_per_row = (size.width / FLEET_CELL_W).max(1) as usize;
+                                    fleet_cursor = fleet_cursor.saturating_sub(cells_per_row);
+                                } else {
+                                    // Normal process-list navigation.
+                                    #[cfg(feature = "linux-procfs")]
+                                    if kill_confirm.is_none() {
+                                        process_cursor = process_cursor.saturating_sub(1);
+                                    }
+                                }
                             }
-                        }
-                    }
-                    // Insights-mode navigation, fleet drill-down, and kill
-                    KeyCode::Up if display_mode == DisplayMode::Insights => {
-                        let n = backend.devices().len();
-                        if n >= FLEET_DEVICE_THRESHOLD && fleet_zoom_start.is_none() {
-                            // Move cursor up one row in the galaxy overview.
-                            let cells_per_row = (size.width / FLEET_CELL_W).max(1) as usize;
-                            fleet_cursor = fleet_cursor.saturating_sub(cells_per_row);
-                        } else {
-                            // Normal process-list navigation.
+                            KeyCode::Down if display_mode == DisplayMode::Insights => {
+                                let n = backend.devices().len();
+                                if n >= FLEET_DEVICE_THRESHOLD && fleet_zoom_start.is_none() {
+                                    let cells_per_row = (size.width / FLEET_CELL_W).max(1) as usize;
+                                    fleet_cursor =
+                                        (fleet_cursor + cells_per_row).min(n.saturating_sub(1));
+                                } else {
+                                    #[cfg(feature = "linux-procfs")]
+                                    if kill_confirm.is_none() {
+                                        let max = flat_process_list(&process_monitor)
+                                            .len()
+                                            .saturating_sub(1);
+                                        process_cursor = (process_cursor + 1).min(max);
+                                    }
+                                }
+                            }
+                            KeyCode::Left if display_mode == DisplayMode::Insights => {
+                                let n = backend.devices().len();
+                                if n >= FLEET_DEVICE_THRESHOLD {
+                                    if let Some(start) = fleet_zoom_start {
+                                        // Page back in zoomed portrait view.
+                                        fleet_zoom_start =
+                                            Some(start.saturating_sub(FLEET_PAGE_SIZE));
+                                        fleet_cursor = fleet_zoom_start.unwrap();
+                                    } else {
+                                        // Move cursor left one cell.
+                                        fleet_cursor = fleet_cursor.saturating_sub(1);
+                                    }
+                                }
+                            }
+                            KeyCode::Right if display_mode == DisplayMode::Insights => {
+                                let n = backend.devices().len();
+                                if n >= FLEET_DEVICE_THRESHOLD {
+                                    if let Some(start) = fleet_zoom_start {
+                                        // Page forward in zoomed portrait view.
+                                        let new =
+                                            (start + FLEET_PAGE_SIZE).min(n.saturating_sub(1));
+                                        fleet_zoom_start = Some(new);
+                                        fleet_cursor = new;
+                                    } else {
+                                        fleet_cursor = (fleet_cursor + 1).min(n.saturating_sub(1));
+                                    }
+                                }
+                            }
+                            KeyCode::Enter if display_mode == DisplayMode::Insights => {
+                                let n = backend.devices().len();
+                                if n >= FLEET_DEVICE_THRESHOLD && fleet_zoom_start.is_none() {
+                                    // Zoom into portrait view for the page containing cursor.
+                                    let page_start =
+                                        (fleet_cursor / FLEET_PAGE_SIZE) * FLEET_PAGE_SIZE;
+                                    fleet_zoom_start = Some(page_start);
+                                } else {
+                                    // Kill-dialog confirmation.
+                                    #[cfg(feature = "linux-procfs")]
+                                    if let Some(ref kc) = kill_confirm {
+                                        let _ = crate::workload::process_monitor::kill_pid(
+                                            kc.pid,
+                                            libc::SIGTERM,
+                                        );
+                                        kill_confirm = None;
+                                    }
+                                }
+                            }
                             #[cfg(feature = "linux-procfs")]
-                            if kill_confirm.is_none() {
-                                process_cursor = process_cursor.saturating_sub(1);
+                            KeyCode::Char('k') if display_mode == DisplayMode::Insights => {
+                                if kill_confirm.is_none() {
+                                    if let Some(proc) =
+                                        flat_process_list(&process_monitor).get(process_cursor)
+                                    {
+                                        kill_confirm = Some(KillConfirmState {
+                                            pid: proc.pid,
+                                            name: proc.name.clone(),
+                                            device_idx: proc
+                                                .device_indices
+                                                .first()
+                                                .copied()
+                                                .unwrap_or(0),
+                                        });
+                                    }
+                                }
                             }
-                        }
-                    }
-                    KeyCode::Down if display_mode == DisplayMode::Insights => {
-                        let n = backend.devices().len();
-                        if n >= FLEET_DEVICE_THRESHOLD && fleet_zoom_start.is_none() {
-                            let cells_per_row = (size.width / FLEET_CELL_W).max(1) as usize;
-                            fleet_cursor = (fleet_cursor + cells_per_row).min(n.saturating_sub(1));
-                        } else {
                             #[cfg(feature = "linux-procfs")]
-                            if kill_confirm.is_none() {
-                                let max =
-                                    flat_process_list(&process_monitor).len().saturating_sub(1);
-                                process_cursor = (process_cursor + 1).min(max);
+                            KeyCode::Char('K') if display_mode == DisplayMode::Insights => {
+                                if let Some(ref kc) = kill_confirm {
+                                    // Inside dialog: SIGKILL and close
+                                    let _ = crate::workload::process_monitor::kill_pid(
+                                        kc.pid,
+                                        libc::SIGKILL,
+                                    );
+                                    kill_confirm = None;
+                                } else if let Some(proc) =
+                                    flat_process_list(&process_monitor).get(process_cursor)
+                                {
+                                    // Outside dialog: SIGKILL immediately
+                                    let _ = crate::workload::process_monitor::kill_pid(
+                                        proc.pid,
+                                        libc::SIGKILL,
+                                    );
+                                }
                             }
-                        }
-                    }
-                    KeyCode::Left if display_mode == DisplayMode::Insights => {
-                        let n = backend.devices().len();
-                        if n >= FLEET_DEVICE_THRESHOLD {
-                            if let Some(start) = fleet_zoom_start {
-                                // Page back in zoomed portrait view.
-                                fleet_zoom_start = Some(start.saturating_sub(FLEET_PAGE_SIZE));
-                                fleet_cursor = fleet_zoom_start.unwrap();
-                            } else {
-                                // Move cursor left one cell.
-                                fleet_cursor = fleet_cursor.saturating_sub(1);
-                            }
-                        }
-                    }
-                    KeyCode::Right if display_mode == DisplayMode::Insights => {
-                        let n = backend.devices().len();
-                        if n >= FLEET_DEVICE_THRESHOLD {
-                            if let Some(start) = fleet_zoom_start {
-                                // Page forward in zoomed portrait view.
-                                let new = (start + FLEET_PAGE_SIZE).min(n.saturating_sub(1));
-                                fleet_zoom_start = Some(new);
-                                fleet_cursor = new;
-                            } else {
-                                fleet_cursor = (fleet_cursor + 1).min(n.saturating_sub(1));
-                            }
-                        }
-                    }
-                    KeyCode::Enter if display_mode == DisplayMode::Insights => {
-                        let n = backend.devices().len();
-                        if n >= FLEET_DEVICE_THRESHOLD && fleet_zoom_start.is_none() {
-                            // Zoom into portrait view for the page containing cursor.
-                            let page_start = (fleet_cursor / FLEET_PAGE_SIZE) * FLEET_PAGE_SIZE;
-                            fleet_zoom_start = Some(page_start);
-                        } else {
-                            // Kill-dialog confirmation.
                             #[cfg(feature = "linux-procfs")]
-                            if let Some(ref kc) = kill_confirm {
-                                let _ = crate::workload::process_monitor::kill_pid(
-                                    kc.pid,
-                                    libc::SIGTERM,
-                                );
+                            KeyCode::Char('y') if display_mode == DisplayMode::Insights => {
+                                if let Some(ref kc) = kill_confirm {
+                                    let _ = crate::workload::process_monitor::kill_pid(
+                                        kc.pid,
+                                        libc::SIGTERM,
+                                    );
+                                    kill_confirm = None;
+                                }
+                            }
+                            #[cfg(feature = "linux-procfs")]
+                            KeyCode::Char('n') if display_mode == DisplayMode::Insights => {
                                 kill_confirm = None;
                             }
-                        }
-                    }
-                    #[cfg(feature = "linux-procfs")]
-                    KeyCode::Char('k') if display_mode == DisplayMode::Insights => {
-                        if kill_confirm.is_none() {
-                            if let Some(proc) =
-                                flat_process_list(&process_monitor).get(process_cursor)
-                            {
-                                kill_confirm = Some(KillConfirmState {
-                                    pid: proc.pid,
-                                    name: proc.name.clone(),
-                                    device_idx: proc.device_indices.first().copied().unwrap_or(0),
-                                });
+                            _ => {
+                                // Any unrecognized key dismisses the overlay (auto-hide).
+                                overlay = None;
                             }
-                        }
-                    }
-                    #[cfg(feature = "linux-procfs")]
-                    KeyCode::Char('K') if display_mode == DisplayMode::Insights => {
-                        if let Some(ref kc) = kill_confirm {
-                            // Inside dialog: SIGKILL and close
-                            let _ =
-                                crate::workload::process_monitor::kill_pid(kc.pid, libc::SIGKILL);
-                            kill_confirm = None;
-                        } else if let Some(proc) =
-                            flat_process_list(&process_monitor).get(process_cursor)
-                        {
-                            // Outside dialog: SIGKILL immediately
-                            let _ =
-                                crate::workload::process_monitor::kill_pid(proc.pid, libc::SIGKILL);
-                        }
-                    }
-                    #[cfg(feature = "linux-procfs")]
-                    KeyCode::Char('y') if display_mode == DisplayMode::Insights => {
-                        if let Some(ref kc) = kill_confirm {
-                            let _ =
-                                crate::workload::process_monitor::kill_pid(kc.pid, libc::SIGTERM);
-                            kill_confirm = None;
-                        }
-                    }
-                    #[cfg(feature = "linux-procfs")]
-                    KeyCode::Char('n') if display_mode == DisplayMode::Insights => {
-                        kill_confirm = None;
-                    }
-                    _ => {
-                        // Any unrecognized key dismisses the overlay (auto-hide).
-                        overlay = None;
-                    }
-                } // end inner key match
-                } // end else (not cmd_mode)
+                        } // end inner key match
+                    } // end else (not cmd_mode)
                 } // end Event::Key
                 _ => {}
             } // end match event::read()
@@ -996,19 +1044,48 @@ fn render_visualization_header(
 /// Render visualization mode footer with legend
 fn render_visualization_footer(f: &mut Frame, area: Rect) {
     let footer_text = vec![Line::from(vec![
-        Span::styled("stars=cores ", Style::default().fg(colors::rgb(100, 200, 255))),
+        Span::styled(
+            "stars=cores ",
+            Style::default().fg(colors::rgb(100, 200, 255)),
+        ),
         Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled("○ planets=mem ", Style::default().fg(colors::rgb(255, 200, 100))),
+        Span::styled(
+            "○ planets=mem ",
+            Style::default().fg(colors::rgb(255, 200, 100)),
+        ),
         Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled("color=temp ", Style::default().fg(colors::rgb(255, 100, 100))),
+        Span::styled(
+            "color=temp ",
+            Style::default().fg(colors::rgb(255, 100, 100)),
+        ),
         Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled(" v ", Style::default().fg(colors::rgb(80, 220, 200)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled(
+            " v ",
+            Style::default()
+                .fg(colors::rgb(80, 220, 200))
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        ),
         Span::styled("cycle  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(" l ", Style::default().fg(colors::rgb(80, 220, 200)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled(
+            " l ",
+            Style::default()
+                .fg(colors::rgb(80, 220, 200))
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        ),
         Span::styled("legend  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(" ? ", Style::default().fg(colors::rgb(220, 180, 80)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled(
+            " ? ",
+            Style::default()
+                .fg(colors::rgb(220, 180, 80))
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        ),
         Span::styled("help  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(" ! ", Style::default().fg(colors::rgb(180, 140, 255)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled(
+            " ! ",
+            Style::default()
+                .fg(colors::rgb(180, 140, 255))
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        ),
         Span::styled("explain", Style::default().fg(colors::rgb(160, 160, 160))),
     ])];
 
@@ -1175,13 +1252,31 @@ fn render_memory_castle_footer(f: &mut Frame, area: Rect) {
         Span::styled("◇hit ", Style::default().fg(colors::rgb(100, 255, 180))),
         Span::styled("•miss ", Style::default().fg(colors::rgb(255, 100, 150))),
         Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled("DDR→L2→L1→Tensix ", Style::default().fg(colors::rgb(255, 200, 100))),
+        Span::styled(
+            "DDR→L2→L1→Tensix ",
+            Style::default().fg(colors::rgb(255, 200, 100)),
+        ),
         Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled(" v ", Style::default().fg(colors::rgb(80, 220, 200)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled(
+            " v ",
+            Style::default()
+                .fg(colors::rgb(80, 220, 200))
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        ),
         Span::styled("cycle  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(" l ", Style::default().fg(colors::rgb(80, 220, 200)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled(
+            " l ",
+            Style::default()
+                .fg(colors::rgb(80, 220, 200))
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        ),
         Span::styled("legend  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(" ? ", Style::default().fg(colors::rgb(220, 180, 80)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled(
+            " ? ",
+            Style::default()
+                .fg(colors::rgb(220, 180, 80))
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        ),
         Span::styled("help", Style::default().fg(colors::rgb(160, 160, 160))),
     ])];
 
@@ -1253,15 +1348,36 @@ fn render_memory_flow_header(f: &mut Frame, area: Rect, backend: &dyn TelemetryB
 /// Render Memory Flow mode footer with controls
 fn render_memory_flow_footer(f: &mut Frame, area: Rect) {
     let footer_text = vec![Line::from(vec![
-        Span::styled("→ reads  ← writes ", Style::default().fg(colors::rgb(180, 255, 180))),
+        Span::styled(
+            "→ reads  ← writes ",
+            Style::default().fg(colors::rgb(180, 255, 180)),
+        ),
         Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled("speed=NoC  density=memW ", Style::default().fg(colors::rgb(255, 200, 100))),
+        Span::styled(
+            "speed=NoC  density=memW ",
+            Style::default().fg(colors::rgb(255, 200, 100)),
+        ),
         Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled(" v ", Style::default().fg(colors::rgb(80, 220, 200)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled(
+            " v ",
+            Style::default()
+                .fg(colors::rgb(80, 220, 200))
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        ),
         Span::styled("cycle  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(" l ", Style::default().fg(colors::rgb(80, 220, 200)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled(
+            " l ",
+            Style::default()
+                .fg(colors::rgb(80, 220, 200))
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        ),
         Span::styled("legend  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(" ? ", Style::default().fg(colors::rgb(220, 180, 80)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled(
+            " ? ",
+            Style::default()
+                .fg(colors::rgb(220, 180, 80))
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        ),
         Span::styled("help", Style::default().fg(colors::rgb(160, 160, 160))),
     ])];
 
@@ -1291,8 +1407,7 @@ fn render_memory_flow_footer(f: &mut Frame, area: Rect) {
 /// from observable signals: power ramp, aiclk transition, and GDDR temperature delta.
 fn ui_defrag(f: &mut Frame, dv: &DefragVis, backend: &dyn TelemetryBackend) {
     let lines = dv.render(backend);
-    let widget = Paragraph::new(lines)
-        .style(Style::default().bg(colors::rgb(0, 0, 0)));
+    let widget = Paragraph::new(lines).style(Style::default().bg(colors::rgb(0, 0, 0)));
     f.render_widget(widget, f.area());
 }
 
@@ -1306,12 +1421,9 @@ fn ui_defrag(f: &mut Frame, dv: &DefragVis, backend: &dyn TelemetryBackend) {
 /// the inline separators from render_separator() provide visual structure.
 fn ui_arcade(f: &mut Frame, arcade: &ArcadeVisualization, backend: &dyn TelemetryBackend) {
     let lines = arcade.render(backend);
-    let widget = Paragraph::new(lines)
-        .style(Style::default().bg(colors::rgb(0, 0, 0)));
+    let widget = Paragraph::new(lines).style(Style::default().bg(colors::rgb(0, 0, 0)));
     f.render_widget(widget, f.area());
 }
-
-
 
 /// Render the command bar overlay at the bottom of the terminal.
 ///
@@ -1340,7 +1452,10 @@ fn render_command_bar(f: &mut Frame, cmd_buf: &str, msg: Option<(&str, bool)>) {
         };
         vec![
             Span::styled("  ", Style::default()),
-            Span::styled(text.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                text.to_string(),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
         ]
     } else {
         vec![
@@ -1366,8 +1481,7 @@ fn render_command_bar(f: &mut Frame, cmd_buf: &str, msg: Option<(&str, bool)>) {
         bar_area,
     );
     f.render_widget(
-        Paragraph::new(Line::from(spans))
-            .style(Style::default().bg(colors::rgb(15, 20, 30))),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(colors::rgb(15, 20, 30))),
         bar_area,
     );
 }
@@ -1391,7 +1505,12 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
     let x = area.width.saturating_sub(PANEL_W);
     let y = area.height.saturating_sub(panel_h + 1); // +1 keeps above command bar row
 
-    let panel_rect = Rect { x, y, width: PANEL_W, height: panel_h };
+    let panel_rect = Rect {
+        x,
+        y,
+        width: PANEL_W,
+        height: panel_h,
+    };
 
     // Clear background behind the panel.
     f.render_widget(
@@ -1401,16 +1520,21 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
 
     // Build full display: top border + content lines + bottom border.
     let (title, border_color) = match kind {
-        OverlayPanel::Legend  => ("LEGEND",  colors::rgb(79, 209, 197)),   // teal
-        OverlayPanel::Help    => ("HELP",    colors::rgb(220, 180, 80)),    // gold
-        OverlayPanel::Explain => ("EXPLAIN", colors::rgb(180, 140, 255)),   // lavender
+        OverlayPanel::Legend => ("LEGEND", colors::rgb(79, 209, 197)), // teal
+        OverlayPanel::Help => ("HELP", colors::rgb(220, 180, 80)),     // gold
+        OverlayPanel::Explain => ("EXPLAIN", colors::rgb(180, 140, 255)), // lavender
     };
     let inner_w = PANEL_W.saturating_sub(2) as usize; // ╔ takes 1 col, no right border
     let top_rule = "═".repeat(inner_w.saturating_sub(title.len() + 2));
     let mut display_lines: Vec<Line> = Vec::with_capacity(panel_h as usize);
 
     display_lines.push(Line::from(vec![
-        Span::styled(format!("╔═ {} ", title), Style::default().fg(border_color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("╔═ {} ", title),
+            Style::default()
+                .fg(border_color)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(top_rule, Style::default().fg(colors::rgb(40, 55, 70))),
     ]));
 
@@ -1420,13 +1544,13 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
     }
 
     let bottom_rule = "═".repeat(PANEL_W.saturating_sub(1) as usize);
-    display_lines.push(Line::from(
-        Span::styled(format!("╚{}", bottom_rule), Style::default().fg(colors::rgb(40, 55, 70)))
-    ));
+    display_lines.push(Line::from(Span::styled(
+        format!("╚{}", bottom_rule),
+        Style::default().fg(colors::rgb(40, 55, 70)),
+    )));
 
     f.render_widget(
-        Paragraph::new(display_lines)
-            .style(Style::default().bg(colors::rgb(8, 14, 22))),
+        Paragraph::new(display_lines).style(Style::default().bg(colors::rgb(8, 14, 22))),
         panel_rect,
     );
 }
@@ -1436,30 +1560,37 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
 /// Lines must fit within PANEL_W - 2 visible columns (no right border means content
 /// needs to respect the panel width itself).  Each line is prefixed with `║ ` (2 cols).
 fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
-    let bg   = colors::rgb(8, 14, 22);
-    let bar  = colors::rgb(40, 55, 70);
-    let dim  = colors::rgb(90, 100, 120);
-    let key  = colors::rgb(79, 209, 197);   // teal
-    let lbl  = colors::rgb(180, 190, 210);
+    let bg = colors::rgb(8, 14, 22);
+    let bar = colors::rgb(40, 55, 70);
+    let dim = colors::rgb(90, 100, 120);
+    let key = colors::rgb(79, 209, 197); // teal
+    let lbl = colors::rgb(180, 190, 210);
     let head = colors::rgb(220, 230, 250);
 
     // Helper: build a ║-prefixed content line.
     macro_rules! ln {
         ($spans:expr) => {{
-            let mut v: Vec<Span<'static>> = vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            let mut v: Vec<Span<'static>> =
+                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
             v.extend($spans);
             Line::from(v)
         }};
     }
     macro_rules! sep {
         ($label:expr) => {
-            ln!(vec![Span::styled($label, Style::default().fg(head).add_modifier(Modifier::BOLD))])
+            ln!(vec![Span::styled(
+                $label,
+                Style::default().fg(head).add_modifier(Modifier::BOLD)
+            )])
         };
     }
     macro_rules! row {
         ($k:expr, $v:expr, $kc:expr) => {
             ln!(vec![
-                Span::styled(format!("{:<12}", $k), Style::default().fg($kc).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{:<12}", $k),
+                    Style::default().fg($kc).add_modifier(Modifier::BOLD)
+                ),
                 Span::styled($v, Style::default().fg(dim)),
             ])
         };
@@ -1469,25 +1600,28 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
         OverlayPanel::Help => {
             vec![
                 sep!("Keys"),
-                row!(" v",           "cycle views",                  key),
-                row!(" l",           "toggle legend",                 key),
-                row!(" ?",           "this help panel",               key),
-                row!(" !",           "explain current mode",          key),
-                row!(" /",           "open command bar",              key),
-                row!(" q  Esc",      "quit",                          key),
-                row!(" r",           "force data refresh",            key),
-                row!(" a  A",        "jump to Arcade",                key),
-                row!(" d  D",        "jump to Defrag",                key),
-                row!(" g",           "jump to Grid",                  key),
-                row!(" b",           "cycle backend",                 key),
-                ln!(vec![Span::styled("──────────────────────────────────────", Style::default().fg(bar))]),
+                row!(" v", "cycle views", key),
+                row!(" l", "toggle legend", key),
+                row!(" ?", "this help panel", key),
+                row!(" !", "explain current mode", key),
+                row!(" /", "open command bar", key),
+                row!(" q  Esc", "quit", key),
+                row!(" r", "force data refresh", key),
+                row!(" a  A", "jump to Arcade", key),
+                row!(" d  D", "jump to Defrag", key),
+                row!(" g", "jump to Grid", key),
+                row!(" b", "cycle backend", key),
+                ln!(vec![Span::styled(
+                    "──────────────────────────────────────",
+                    Style::default().fg(bar)
+                )]),
                 sep!("Commands  (/ to open)"),
-                row!(" /mode <name>","insights grid castle flow…",    lbl),
-                row!(" /fps <n>",    "animation FPS  1–120",          lbl),
-                row!(" /datafps <n>","data refresh FPS  1–30",        lbl),
-                row!(" /legend",     "toggle legend panel",           lbl),
-                row!(" /explain",    "toggle explain panel",          lbl),
-                row!(" /help",       "toggle this panel",             lbl),
+                row!(" /mode <name>", "insights grid castle flow…", lbl),
+                row!(" /fps <n>", "animation FPS  1–120", lbl),
+                row!(" /datafps <n>", "data refresh FPS  1–30", lbl),
+                row!(" /legend", "toggle legend panel", lbl),
+                row!(" /explain", "toggle explain panel", lbl),
+                row!(" /help", "toggle this panel", lbl),
             ]
         }
 
@@ -1503,32 +1637,54 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     let mut v = Vec::new();
                     v.push(sep!("✧ Starfield"));
                     v.extend(starfield_legend_lines(bar, bg, dim, key));
-                    v.push(ln!(vec![Span::styled("──────────────────────────────────────", Style::default().fg(bar))]));
+                    v.push(ln!(vec![Span::styled(
+                        "──────────────────────────────────────",
+                        Style::default().fg(bar)
+                    )]));
                     v.push(sep!("🏰 Memory Castle"));
                     v.extend(castle_legend_lines(bar, bg, dim));
-                    v.push(ln!(vec![Span::styled("──────────────────────────────────────", Style::default().fg(bar))]));
+                    v.push(ln!(vec![Span::styled(
+                        "──────────────────────────────────────",
+                        Style::default().fg(bar)
+                    )]));
                     v.push(sep!("▓ Defrag"));
                     v.extend(defrag_legend_lines(bar, bg, dim, key));
-                    v.push(ln!(vec![Span::styled("──────────────────────────────────────", Style::default().fg(bar))]));
+                    v.push(ln!(vec![Span::styled(
+                        "──────────────────────────────────────",
+                        Style::default().fg(bar)
+                    )]));
                     v.push(sep!("🌊 Memory Flow"));
                     v.extend(flow_legend_lines(bar, bg, dim));
-                    v.push(ln!(vec![Span::styled("──────────────────────────────────────", Style::default().fg(bar))]));
+                    v.push(ln!(vec![Span::styled(
+                        "──────────────────────────────────────",
+                        Style::default().fg(bar)
+                    )]));
                     v.push(sep!("@ Hero"));
                     v.extend(hero_legend_lines(bar, bg, dim));
                     v
                 }
                 _ => {
                     vec![
-                        ln!(vec![Span::styled("no legend for this view", Style::default().fg(dim))]),
-                        ln!(vec![Span::styled("try v to switch to a viz mode", Style::default().fg(dim))]),
+                        ln!(vec![Span::styled(
+                            "no legend for this view",
+                            Style::default().fg(dim)
+                        )]),
+                        ln!(vec![Span::styled(
+                            "try v to switch to a viz mode",
+                            Style::default().fg(dim)
+                        )]),
                     ]
                 }
             }
         }
 
-        OverlayPanel::Explain => {
-            match mode {
-                DisplayMode::Starfield => explain_lines(bar, bg, dim, lbl, &[
+        OverlayPanel::Explain => match mode {
+            DisplayMode::Starfield => explain_lines(
+                bar,
+                bg,
+                dim,
+                lbl,
+                &[
                     "Hardware-Responsive Starfield",
                     "",
                     "Each star represents one Tensix compute",
@@ -1546,8 +1702,14 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "Round planets (○) represent DDR/L2/L1",
                     "memory hierarchy — orbit radius tracks",
                     "memory bandwidth utilization.",
-                ]),
-                DisplayMode::MemoryCastle => explain_lines(bar, bg, dim, lbl, &[
+                ],
+            ),
+            DisplayMode::MemoryCastle => explain_lines(
+                bar,
+                bg,
+                dim,
+                lbl,
+                &[
                     "Memory Castle",
                     "",
                     "An architectural view of the Tenstorrent",
@@ -1563,8 +1725,14 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "",
                     "Particle color encodes the memory tier.",
                     "Density reflects current bandwidth.",
-                ]),
-                DisplayMode::Defrag => explain_lines(bar, bg, dim, lbl, &[
+                ],
+            ),
+            DisplayMode::Defrag => explain_lines(
+                bar,
+                bg,
+                dim,
+                lbl,
+                &[
                     "Model-Loading Defrag Display",
                     "",
                     "Inspired by classic disk defragmenters.",
@@ -1581,8 +1749,14 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "Block character intensity (░▒▓█) encodes",
                     "relative activity within each cell.",
                     "Color encodes channel temperature.",
-                ]),
-                DisplayMode::MemoryFlow => explain_lines(bar, bg, dim, lbl, &[
+                ],
+            ),
+            DisplayMode::MemoryFlow => explain_lines(
+                bar,
+                bg,
+                dim,
+                lbl,
+                &[
                     "Memory Flow — NoC & DDR Activity",
                     "",
                     "Visualizes the Network-on-Chip (NoC) and",
@@ -1598,8 +1772,14 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "corresponding arc segment.",
                     "",
                     "Heat-map center encodes die temperature.",
-                ]),
-                DisplayMode::Arcade => explain_lines(bar, bg, dim, lbl, &[
+                ],
+            ),
+            DisplayMode::Arcade => explain_lines(
+                bar,
+                bg,
+                dim,
+                lbl,
+                &[
                     "Arcade Mode — Unified View",
                     "",
                     "Combines all four visualizations into a",
@@ -1619,8 +1799,14 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "Hero glyph encodes chip health state:",
                     "  @  healthy   !  throttled/faulted",
                     "  ?  ARC stall  %  undervolt",
-                ]),
-                DisplayMode::Insights => explain_lines(bar, bg, dim, lbl, &[
+                ],
+            ),
+            DisplayMode::Insights => explain_lines(
+                bar,
+                bg,
+                dim,
+                lbl,
+                &[
                     "Insights Screen",
                     "",
                     "Real-time chip portrait grid with live",
@@ -1637,8 +1823,14 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "k = SIGTERM,  K = SIGKILL.",
                     "At 32+ devices a compact fleet heatmap",
                     "is shown — Enter to zoom in.",
-                ]),
-                DisplayMode::Grid => explain_lines(bar, bg, dim, lbl, &[
+                ],
+            ),
+            DisplayMode::Grid => explain_lines(
+                bar,
+                bg,
+                dim,
+                lbl,
+                &[
                     "Grid Mode",
                     "",
                     "Full-screen grid of chip portraits for",
@@ -1648,103 +1840,281 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "encode Tensix core temperature and power.",
                     "",
                     "Press v to continue cycling modes.",
-                ]),
-            }
-        }
+                ],
+            ),
+        },
     }
 }
 
 // ── Per-view legend line builders ─────────────────────────────────────────────
 
-fn starfield_legend_lines(bar: ratatui::style::Color, bg: ratatui::style::Color, dim: ratatui::style::Color, key: ratatui::style::Color) -> Vec<Line<'static>> {
+fn starfield_legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+    key: ratatui::style::Color,
+) -> Vec<Line<'static>> {
     let _ = key;
     macro_rules! ln {
         ($spans:expr) => {{
-            let mut v: Vec<Span<'static>> = vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            let mut v: Vec<Span<'static>> =
+                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
             v.extend($spans);
             Line::from(v)
         }};
     }
     vec![
-        ln!(vec![Span::styled("·  ○  ●", Style::default().fg(colors::rgb(100, 180, 255))), Span::styled("  each = one Tensix core", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("brightness", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("  = power draw", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("cyan→red  ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("  = ASIC temperature", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("twinkle   ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("  = current draw", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("○ planet  ", Style::default().fg(colors::rgb(255, 200, 80))), Span::styled("  = DDR/L2/L1 memory", Style::default().fg(dim))]),
+        ln!(vec![
+            Span::styled("·  ○  ●", Style::default().fg(colors::rgb(100, 180, 255))),
+            Span::styled("  each = one Tensix core", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled(
+                "brightness",
+                Style::default().fg(colors::rgb(200, 230, 255))
+            ),
+            Span::styled("  = power draw", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled(
+                "cyan→red  ",
+                Style::default().fg(colors::rgb(200, 230, 255))
+            ),
+            Span::styled("  = ASIC temperature", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled(
+                "twinkle   ",
+                Style::default().fg(colors::rgb(200, 230, 255))
+            ),
+            Span::styled("  = current draw", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled("○ planet  ", Style::default().fg(colors::rgb(255, 200, 80))),
+            Span::styled("  = DDR/L2/L1 memory", Style::default().fg(dim))
+        ]),
     ]
 }
 
-fn castle_legend_lines(bar: ratatui::style::Color, bg: ratatui::style::Color, dim: ratatui::style::Color) -> Vec<Line<'static>> {
+fn castle_legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+) -> Vec<Line<'static>> {
     macro_rules! ln {
         ($spans:expr) => {{
-            let mut v: Vec<Span<'static>> = vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            let mut v: Vec<Span<'static>> =
+                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
             v.extend($spans);
             Line::from(v)
         }};
     }
     vec![
-        ln!(vec![Span::styled("◦", Style::default().fg(colors::rgb(100, 200, 255))), Span::styled(" = read access", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("·", Style::default().fg(colors::rgb(255, 180, 80))),  Span::styled(" = write access", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("◇", Style::default().fg(colors::rgb(100, 255, 180))), Span::styled(" = cache hit", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("•", Style::default().fg(colors::rgb(255, 100, 150))), Span::styled(" = cache miss", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("layers    ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= DDR→L2→L1→Tensix", Style::default().fg(dim))]),
+        ln!(vec![
+            Span::styled("◦", Style::default().fg(colors::rgb(100, 200, 255))),
+            Span::styled(" = read access", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled("·", Style::default().fg(colors::rgb(255, 180, 80))),
+            Span::styled(" = write access", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled("◇", Style::default().fg(colors::rgb(100, 255, 180))),
+            Span::styled(" = cache hit", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled("•", Style::default().fg(colors::rgb(255, 100, 150))),
+            Span::styled(" = cache miss", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled(
+                "layers    ",
+                Style::default().fg(colors::rgb(200, 230, 255))
+            ),
+            Span::styled("= DDR→L2→L1→Tensix", Style::default().fg(dim))
+        ]),
     ]
 }
 
-fn defrag_legend_lines(bar: ratatui::style::Color, bg: ratatui::style::Color, dim: ratatui::style::Color, _key: ratatui::style::Color) -> Vec<Line<'static>> {
+fn defrag_legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+    _key: ratatui::style::Color,
+) -> Vec<Line<'static>> {
     macro_rules! ln {
         ($spans:expr) => {{
-            let mut v: Vec<Span<'static>> = vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            let mut v: Vec<Span<'static>> =
+                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
             v.extend($spans);
             Line::from(v)
         }};
     }
     vec![
-        ln!(vec![Span::styled("each row  ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= one GDDR channel", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("░", Style::default().fg(colors::rgb(60, 80, 100))),  Span::styled(" empty / unloaded", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("▒", Style::default().fg(colors::rgb(80, 140, 200))), Span::styled(" loading / in-flight DMA", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("▓", Style::default().fg(colors::rgb(79, 209, 197))), Span::styled(" resident / running", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("█", Style::default().fg(colors::rgb(220, 240, 255))), Span::styled(" peak activity", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("EVICT     ", Style::default().fg(colors::rgb(255, 100, 80))), Span::styled("= model unload surge", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("color     ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= channel temperature", Style::default().fg(dim))]),
+        ln!(vec![
+            Span::styled(
+                "each row  ",
+                Style::default().fg(colors::rgb(200, 230, 255))
+            ),
+            Span::styled("= one GDDR channel", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled("░", Style::default().fg(colors::rgb(60, 80, 100))),
+            Span::styled(" empty / unloaded", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled("▒", Style::default().fg(colors::rgb(80, 140, 200))),
+            Span::styled(" loading / in-flight DMA", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled("▓", Style::default().fg(colors::rgb(79, 209, 197))),
+            Span::styled(" resident / running", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled("█", Style::default().fg(colors::rgb(220, 240, 255))),
+            Span::styled(" peak activity", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled("EVICT     ", Style::default().fg(colors::rgb(255, 100, 80))),
+            Span::styled("= model unload surge", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled(
+                "color     ",
+                Style::default().fg(colors::rgb(200, 230, 255))
+            ),
+            Span::styled("= channel temperature", Style::default().fg(dim))
+        ]),
     ]
 }
 
-fn flow_legend_lines(bar: ratatui::style::Color, bg: ratatui::style::Color, dim: ratatui::style::Color) -> Vec<Line<'static>> {
+fn flow_legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+) -> Vec<Line<'static>> {
     macro_rules! ln {
         ($spans:expr) => {{
-            let mut v: Vec<Span<'static>> = vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            let mut v: Vec<Span<'static>> =
+                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
             v.extend($spans);
             Line::from(v)
         }};
     }
     vec![
-        ln!(vec![Span::styled("→ particles ", Style::default().fg(colors::rgb(100, 220, 255))), Span::styled("= DDR reads", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("← particles ", Style::default().fg(colors::rgb(255, 160, 80))), Span::styled("= DDR writes", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("speed       ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= NoC clock / aiclk", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("density     ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= MVDDQ power (mem W)", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("perimeter   ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= GDDR channel ring", Style::default().fg(dim))]),
+        ln!(vec![
+            Span::styled(
+                "→ particles ",
+                Style::default().fg(colors::rgb(100, 220, 255))
+            ),
+            Span::styled("= DDR reads", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled(
+                "← particles ",
+                Style::default().fg(colors::rgb(255, 160, 80))
+            ),
+            Span::styled("= DDR writes", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled(
+                "speed       ",
+                Style::default().fg(colors::rgb(200, 230, 255))
+            ),
+            Span::styled("= NoC clock / aiclk", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled(
+                "density     ",
+                Style::default().fg(colors::rgb(200, 230, 255))
+            ),
+            Span::styled("= MVDDQ power (mem W)", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled(
+                "perimeter   ",
+                Style::default().fg(colors::rgb(200, 230, 255))
+            ),
+            Span::styled("= GDDR channel ring", Style::default().fg(dim))
+        ]),
     ]
 }
 
-fn hero_legend_lines(bar: ratatui::style::Color, bg: ratatui::style::Color, dim: ratatui::style::Color) -> Vec<Line<'static>> {
+fn hero_legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+) -> Vec<Line<'static>> {
     macro_rules! ln {
         ($spans:expr) => {{
-            let mut v: Vec<Span<'static>> = vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            let mut v: Vec<Span<'static>> =
+                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
             v.extend($spans);
             Line::from(v)
         }};
     }
     vec![
-        ln!(vec![Span::styled("x-axis   ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= current draw 0–100A", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("y-axis   ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= power (low→bot, hi→top)", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("color    ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= ASIC temperature", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("@", Style::default().fg(colors::rgb(79, 209, 197)).add_modifier(Modifier::BOLD)), Span::styled("  healthy", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("!", Style::default().fg(colors::rgb(255, 100, 80)).add_modifier(Modifier::BOLD)),  Span::styled("  throttled / faulted", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("?", Style::default().fg(colors::rgb(255, 220, 80)).add_modifier(Modifier::BOLD)), Span::styled("  ARC firmware stalled", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("%", Style::default().fg(colors::rgb(255, 180, 80)).add_modifier(Modifier::BOLD)), Span::styled("  undervolt (vcore<0.75V)", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("( )", Style::default().fg(colors::rgb(180, 140, 255)).add_modifier(Modifier::BOLD)), Span::styled(" harvested cores disabled", Style::default().fg(dim))]),
-        ln!(vec![Span::styled("trail    ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= GDDR temp / ETH links", Style::default().fg(dim))]),
+        ln!(vec![
+            Span::styled("x-axis   ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled("= current draw 0–100A", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled("y-axis   ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled("= power (low→bot, hi→top)", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled("color    ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled("= ASIC temperature", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled(
+                "@",
+                Style::default()
+                    .fg(colors::rgb(79, 209, 197))
+                    .add_modifier(Modifier::BOLD)
+            ),
+            Span::styled("  healthy", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled(
+                "!",
+                Style::default()
+                    .fg(colors::rgb(255, 100, 80))
+                    .add_modifier(Modifier::BOLD)
+            ),
+            Span::styled("  throttled / faulted", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled(
+                "?",
+                Style::default()
+                    .fg(colors::rgb(255, 220, 80))
+                    .add_modifier(Modifier::BOLD)
+            ),
+            Span::styled("  ARC firmware stalled", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled(
+                "%",
+                Style::default()
+                    .fg(colors::rgb(255, 180, 80))
+                    .add_modifier(Modifier::BOLD)
+            ),
+            Span::styled("  undervolt (vcore<0.75V)", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled(
+                "( )",
+                Style::default()
+                    .fg(colors::rgb(180, 140, 255))
+                    .add_modifier(Modifier::BOLD)
+            ),
+            Span::styled(" harvested cores disabled", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled("trail    ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled("= GDDR temp / ETH links", Style::default().fg(dim))
+        ]),
     ]
 }
 
@@ -1756,15 +2126,21 @@ fn explain_lines(
     lbl: ratatui::style::Color,
     text: &[&'static str],
 ) -> Vec<Line<'static>> {
-    text.iter().map(|s| {
-        let mut v: Vec<Span<'static>> = vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
-        if s.is_empty() {
-            // blank separator line
-        } else {
-            v.push(Span::styled(s.to_string(), Style::default().fg(if s.starts_with(' ') { dim } else { lbl })));
-        }
-        Line::from(v)
-    }).collect()
+    text.iter()
+        .map(|s| {
+            let mut v: Vec<Span<'static>> =
+                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            if s.is_empty() {
+                // blank separator line
+            } else {
+                v.push(Span::styled(
+                    s.to_string(),
+                    Style::default().fg(if s.starts_with(' ') { dim } else { lbl }),
+                ));
+            }
+            Line::from(v)
+        })
+        .collect()
 }
 
 /// Parse and execute a slash command.  Returns `(message, is_error)`.
@@ -1791,49 +2167,88 @@ fn execute_command(
     let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
 
     match verb.as_str() {
-        "fps" => {
-            match arg.parse::<u64>() {
-                Ok(n) if (1..=120).contains(&n) => {
-                    *anim_poll = Duration::from_millis(1000 / n);
-                    (format!("animation fps set to {}", n), false)
-                }
-                _ => ("fps: expected 1–120".to_string(), true),
+        "fps" => match arg.parse::<u64>() {
+            Ok(n) if (1..=120).contains(&n) => {
+                *anim_poll = Duration::from_millis(1000 / n);
+                (format!("animation fps set to {}", n), false)
             }
-        }
-        "datafps" => {
-            match arg.parse::<u64>() {
-                Ok(n) if (1..=30).contains(&n) => {
-                    *data_poll = Duration::from_millis(1000 / n);
-                    (format!("data fps set to {}", n), false)
-                }
-                _ => ("datafps: expected 1–30".to_string(), true),
+            _ => ("fps: expected 1–120".to_string(), true),
+        },
+        "datafps" => match arg.parse::<u64>() {
+            Ok(n) if (1..=30).contains(&n) => {
+                *data_poll = Duration::from_millis(1000 / n);
+                (format!("data fps set to {}", n), false)
             }
-        }
-        "mode" => {
-            match arg {
-                "insights" | "normal" => { *display_mode = DisplayMode::Insights; ("→ insights".to_string(), false) }
-                "grid"     => { *display_mode = DisplayMode::Grid;         ("→ grid".to_string(), false) }
-                "starfield"=> { *display_mode = DisplayMode::Starfield;    ("→ starfield".to_string(), false) }
-                "castle"   => { *display_mode = DisplayMode::MemoryCastle; ("→ castle".to_string(), false) }
-                "flow"     => { *display_mode = DisplayMode::MemoryFlow;   ("→ flow".to_string(), false) }
-                "arcade"   => { *display_mode = DisplayMode::Arcade;       ("→ arcade".to_string(), false) }
-                "defrag"   => { *display_mode = DisplayMode::Defrag;       ("→ defrag".to_string(), false) }
-                _ => ("mode: insights|grid|starfield|castle|flow|arcade|defrag".to_string(), true),
+            _ => ("datafps: expected 1–30".to_string(), true),
+        },
+        "mode" => match arg {
+            "insights" | "normal" => {
+                *display_mode = DisplayMode::Insights;
+                ("→ insights".to_string(), false)
             }
-        }
+            "grid" => {
+                *display_mode = DisplayMode::Grid;
+                ("→ grid".to_string(), false)
+            }
+            "starfield" => {
+                *display_mode = DisplayMode::Starfield;
+                ("→ starfield".to_string(), false)
+            }
+            "castle" => {
+                *display_mode = DisplayMode::MemoryCastle;
+                ("→ castle".to_string(), false)
+            }
+            "flow" => {
+                *display_mode = DisplayMode::MemoryFlow;
+                ("→ flow".to_string(), false)
+            }
+            "arcade" => {
+                *display_mode = DisplayMode::Arcade;
+                ("→ arcade".to_string(), false)
+            }
+            "defrag" => {
+                *display_mode = DisplayMode::Defrag;
+                ("→ defrag".to_string(), false)
+            }
+            _ => (
+                "mode: insights|grid|starfield|castle|flow|arcade|defrag".to_string(),
+                true,
+            ),
+        },
         "legend" | "l" => {
-            *overlay = if *overlay == Some(OverlayPanel::Legend) { None } else { Some(OverlayPanel::Legend) };
-            ("legend overlay toggled  (press l or /legend to hide)".to_string(), false)
+            *overlay = if *overlay == Some(OverlayPanel::Legend) {
+                None
+            } else {
+                Some(OverlayPanel::Legend)
+            };
+            (
+                "legend overlay toggled  (press l or /legend to hide)".to_string(),
+                false,
+            )
         }
         "explain" => {
-            *overlay = if *overlay == Some(OverlayPanel::Explain) { None } else { Some(OverlayPanel::Explain) };
-            ("explain overlay toggled  (press ! or /explain to hide)".to_string(), false)
+            *overlay = if *overlay == Some(OverlayPanel::Explain) {
+                None
+            } else {
+                Some(OverlayPanel::Explain)
+            };
+            (
+                "explain overlay toggled  (press ! or /explain to hide)".to_string(),
+                false,
+            )
         }
         "help" | "?" | "" => {
-            *overlay = if *overlay == Some(OverlayPanel::Help) { None } else { Some(OverlayPanel::Help) };
+            *overlay = if *overlay == Some(OverlayPanel::Help) {
+                None
+            } else {
+                Some(OverlayPanel::Help)
+            };
             ("".to_string(), false) // panel shows the full content
         }
-        _ => (format!("unknown command: {}  (try /help or press ?)", verb), true),
+        _ => (
+            format!("unknown command: {}  (try /help or press ?)", verb),
+            true,
+        ),
     }
 }
 

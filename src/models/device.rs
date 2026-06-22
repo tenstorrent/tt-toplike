@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Device information and architecture types
 //!
 //! Defines the Device struct and Architecture enum for representing
@@ -61,9 +60,9 @@ impl Architecture {
     /// Get Tensix core grid dimensions (rows, cols)
     pub fn tensix_grid(&self) -> (usize, usize) {
         match self {
-            Architecture::Grayskull => (10, 12),  // 120 cores
-            Architecture::Wormhole => (8, 10),    // 80 cores
-            Architecture::Blackhole => (14, 16),  // 224 cores
+            Architecture::Grayskull => (10, 12), // 120 cores
+            Architecture::Wormhole => (8, 10),   // 80 cores
+            Architecture::Blackhole => (14, 16), // 224 cores
             Architecture::Unknown => (0, 0),
         }
     }
@@ -183,13 +182,34 @@ mod tests {
 
     #[test]
     fn test_architecture_detection() {
-        assert_eq!(Architecture::from_board_type("e75"), Architecture::Grayskull);
-        assert_eq!(Architecture::from_board_type("e150"), Architecture::Grayskull);
-        assert_eq!(Architecture::from_board_type("n150"), Architecture::Wormhole);
-        assert_eq!(Architecture::from_board_type("n300"), Architecture::Wormhole);
-        assert_eq!(Architecture::from_board_type("p150"), Architecture::Blackhole);
-        assert_eq!(Architecture::from_board_type("p300"), Architecture::Blackhole);
-        assert_eq!(Architecture::from_board_type("unknown"), Architecture::Unknown);
+        assert_eq!(
+            Architecture::from_board_type("e75"),
+            Architecture::Grayskull
+        );
+        assert_eq!(
+            Architecture::from_board_type("e150"),
+            Architecture::Grayskull
+        );
+        assert_eq!(
+            Architecture::from_board_type("n150"),
+            Architecture::Wormhole
+        );
+        assert_eq!(
+            Architecture::from_board_type("n300"),
+            Architecture::Wormhole
+        );
+        assert_eq!(
+            Architecture::from_board_type("p150"),
+            Architecture::Blackhole
+        );
+        assert_eq!(
+            Architecture::from_board_type("p300"),
+            Architecture::Blackhole
+        );
+        assert_eq!(
+            Architecture::from_board_type("unknown"),
+            Architecture::Unknown
+        );
     }
 
     #[test]
@@ -221,7 +241,12 @@ mod tests {
 
     #[test]
     fn test_device_new_fields_default_none() {
-        let d = Device::new(0, "p150a".to_string(), "0000:01:00.0".to_string(), "(0,0)".to_string());
+        let d = Device::new(
+            0,
+            "p150a".to_string(),
+            "0000:01:00.0".to_string(),
+            "(0,0)".to_string(),
+        );
         assert!(d.firmwares.is_none());
         assert!(d.limits.is_none());
         assert!(d.pcie_speed.is_none());

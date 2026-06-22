@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! tt-toplike - Terminal User Interface
 //!
 //! This binary provides a beautiful terminal-based interface for monitoring
@@ -15,8 +14,8 @@
 //! - Dark-mode optimized color palette
 
 use tt_toplike::{
-    backend::{BackendConfig, TelemetryBackend, mock::MockBackend, json::JSONBackend},
-    cli::{Cli, BackendType},
+    backend::{json::JSONBackend, mock::MockBackend, BackendConfig, TelemetryBackend},
+    cli::{BackendType, Cli},
     init_logging,
 };
 
@@ -57,16 +56,20 @@ fn main() {
 
     match backend_type {
         BackendType::Mock => {
-            log::info!("Initializing MockBackend with {} devices", cli.effective_mock_devices());
+            log::info!(
+                "Initializing MockBackend with {} devices",
+                cli.effective_mock_devices()
+            );
             let mut backend = MockBackend::with_config(cli.effective_mock_devices(), config);
             run_with_backend(&mut backend, &cli);
         }
         BackendType::Json => {
-            log::info!("Initializing JSONBackend with tt-smi path: {:?}", cli.tt_smi_path);
-            let mut backend = JSONBackend::with_config(
-                cli.tt_smi_path.to_string_lossy().to_string(),
-                config,
+            log::info!(
+                "Initializing JSONBackend with tt-smi path: {:?}",
+                cli.tt_smi_path
             );
+            let mut backend =
+                JSONBackend::with_config(cli.tt_smi_path.to_string_lossy().to_string(), config);
             run_with_backend(&mut backend, &cli);
         }
         BackendType::Auto => {
@@ -79,7 +82,8 @@ fn main() {
             #[cfg(target_os = "linux")]
             {
                 println!("🔍 Trying Sysfs backend (hwmon sensors - safest, non-invasive)...");
-                let mut sysfs_backend = tt_toplike::backend::sysfs::SysfsBackend::with_config(config.clone());
+                let mut sysfs_backend =
+                    tt_toplike::backend::sysfs::SysfsBackend::with_config(config.clone());
 
                 match sysfs_backend.init() {
                     Ok(_) => {
@@ -115,7 +119,9 @@ fn main() {
 
             // Last resort: Mock backend (for testing without hardware)
             println!("⚠ No hardware backends available, using mock backend");
-            println!("💡 Tip: Use --backend luwen for direct hardware access (requires PCI permissions)");
+            println!(
+                "💡 Tip: Use --backend luwen for direct hardware access (requires PCI permissions)"
+            );
             let mut mock_backend = MockBackend::with_config(cli.effective_mock_devices(), config);
             run_with_backend(&mut mock_backend, &cli);
         }
@@ -212,7 +218,10 @@ fn print_telemetry<B: TelemetryBackend>(backend: &B) {
 
     for device in backend.devices() {
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("Device {}: {} ({:?})", device.index, device.board_type, device.architecture);
+        println!(
+            "Device {}: {} ({:?})",
+            device.index, device.board_type, device.architecture
+        );
         println!("Bus ID: {}", device.bus_id);
 
         if let Some(telem) = backend.telemetry(device.index) {
@@ -220,7 +229,10 @@ fn print_telemetry<B: TelemetryBackend>(backend: &B) {
             println!("  Voltage:     {:.3} V", telem.voltage.unwrap_or(0.0));
             println!("  Current:     {:.2} A", telem.current.unwrap_or(0.0));
             println!("  Power:       {:.2} W", telem.power.unwrap_or(0.0));
-            println!("  Temperature: {:.1} °C", telem.asic_temperature.unwrap_or(0.0));
+            println!(
+                "  Temperature: {:.1} °C",
+                telem.asic_temperature.unwrap_or(0.0)
+            );
             println!("  AICLK:       {} MHz", telem.aiclk.unwrap_or(0));
             println!("  Heartbeat:   {}", telem.heartbeat.unwrap_or(0));
         }

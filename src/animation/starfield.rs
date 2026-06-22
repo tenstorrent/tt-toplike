@@ -560,11 +560,13 @@ impl HardwareStarfield {
 
                 // Brightness from power (relative to baseline), modulated by throttle.
                 let power_change = self.baseline.power_change(star.device_idx, power);
-                let base_brightness = (0.3 + power_change.max(0.0).min(1.0) * 0.7) * throttle_factor;
+                let base_brightness =
+                    (0.3 + power_change.max(0.0).min(1.0) * 0.7) * throttle_factor;
 
                 // Multi-frequency twinkling — faster when throttled (nervous flicker).
                 let current_change = self.baseline.current_change(star.device_idx, current);
-                let twinkle_speed = 0.1 + current_change.max(0.0).min(1.0) * 0.3
+                let twinkle_speed = 0.1
+                    + current_change.max(0.0).min(1.0) * 0.3
                     + if throttler > 0 { 0.15 } else { 0.0 };
                 star.phase += twinkle_speed;
                 star.phase2 += twinkle_speed * 1.7;
@@ -581,21 +583,26 @@ impl HardwareStarfield {
                 }
                 if star.sparkle > 0.0 {
                     star.sparkle -= 0.05;
-                    if star.sparkle < 0.0 { star.sparkle = 0.0; }
+                    if star.sparkle < 0.0 {
+                        star.sparkle = 0.0;
+                    }
                 }
 
                 star.brightness = (base_brightness + twinkle).clamp(0.0, 1.0);
 
                 // Color: rainbow cycling with thermal headroom pulling toward red.
                 use crate::animation::{hsv_to_rgb, temp_to_hue};
-                let hue = ((temp_to_hue(temp) - hue_penalty)
-                    .max(0.0)
+                let hue = ((temp_to_hue(temp) - hue_penalty).max(0.0)
                     + self.frame as f32 * 2.0
                     + star.core_idx as f32 * 2.7)
                     % 360.0;
                 // Saturation drops slightly when throttling — gives a "washed out"
                 // desaturated look that reads as "something is wrong".
-                let sat = if throttler > 0 { 0.5 + headroom * 0.5 } else { 1.0 };
+                let sat = if throttler > 0 {
+                    0.5 + headroom * 0.5
+                } else {
+                    1.0
+                };
                 star.color = hsv_to_rgb(hue, sat, 1.0);
             }
         }

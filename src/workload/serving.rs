@@ -50,8 +50,8 @@ impl ServerFlavour {
         match self {
             Self::TtInference => "tt-inference-server",
             Self::PromptServer => "prompt_server",
-            Self::VllmTt      => "vllm-tt",
-            Self::Unknown     => "server",
+            Self::VllmTt => "vllm-tt",
+            Self::Unknown => "server",
         }
     }
 }
@@ -127,7 +127,7 @@ impl ServingMetrics {
 #[derive(Default)]
 pub struct InferenceServerProbe {
     /// Previous generation-token counter values for computing delta TPS.
-    prev_gen_tokens:    HashMap<i32, (f32, std::time::Instant)>,
+    prev_gen_tokens: HashMap<i32, (f32, std::time::Instant)>,
     /// Previous prompt-token counter values.
     prev_prompt_tokens: HashMap<i32, (f32, std::time::Instant)>,
 }
@@ -150,8 +150,10 @@ impl InferenceServerProbe {
         }
         // GC stale counter entries for PIDs that are no longer alive.
         let active_pids: std::collections::HashSet<i32> = out.keys().copied().collect();
-        self.prev_gen_tokens.retain(|pid, _| active_pids.contains(pid));
-        self.prev_prompt_tokens.retain(|pid, _| active_pids.contains(pid));
+        self.prev_gen_tokens
+            .retain(|pid, _| active_pids.contains(pid));
+        self.prev_prompt_tokens
+            .retain(|pid, _| active_pids.contains(pid));
         out
     }
 
@@ -179,13 +181,24 @@ impl InferenceServerProbe {
         m.mesh_device = read_proc_env(proc.pid, "MESH_DEVICE");
 
         // Model id from cmdline first, fallback to /v1/models.
-        m.model_id = extract_model_from_cmdline(&proc.cmdline)
-            .or_else(|| if port > 0 { fetch_model_from_api(port) } else { None });
+        m.model_id = extract_model_from_cmdline(&proc.cmdline).or_else(|| {
+            if port > 0 {
+                fetch_model_from_api(port)
+            } else {
+                None
+            }
+        });
 
         // Probe /health.
         if port > 0 {
             probe_health(port, &mut m);
-            probe_metrics(port, &mut m, &mut self.prev_gen_tokens, &mut self.prev_prompt_tokens, proc.pid);
+            probe_metrics(
+                port,
+                &mut m,
+                &mut self.prev_gen_tokens,
+                &mut self.prev_prompt_tokens,
+                proc.pid,
+            );
         }
 
         // Scan fd/ for log file.
@@ -279,7 +292,9 @@ fn read_proc_env(pid: i32, key: &str) -> Option<String> {
 fn pid_socket_inodes(pid: i32) -> std::collections::HashSet<u64> {
     let mut inodes = std::collections::HashSet::new();
     let fd_dir = format!("/proc/{}/fd", pid);
-    let Ok(dir) = std::fs::read_dir(&fd_dir) else { return inodes; };
+    let Ok(dir) = std::fs::read_dir(&fd_dir) else {
+        return inodes;
+    };
     for entry in dir.flatten() {
         if let Ok(target) = std::fs::read_link(entry.path()) {
             let s = target.to_string_lossy();
@@ -307,11 +322,19 @@ fn find_listen_port_from_proc(pid: i32) -> Option<u16> {
     for line in BufReader::new(f).lines().flatten().skip(1) {
         let cols: Vec<&str> = line.split_whitespace().collect();
         // /proc/net/tcp columns: sl local_addr rem_addr state … inode (col 9)
-        if cols.len() < 10 { continue; }
-        if cols[3] != "0A" { continue; } // 0A = LISTEN
-        // Verify inode belongs to this PID
-        let Ok(inode) = cols[9].parse::<u64>() else { continue };
-        if !owned.is_empty() && !owned.contains(&inode) { continue; }
+        if cols.len() < 10 {
+            continue;
+        }
+        if cols[3] != "0A" {
+            continue;
+        } // 0A = LISTEN
+          // Verify inode belongs to this PID
+        let Ok(inode) = cols[9].parse::<u64>() else {
+            continue;
+        };
+        if !owned.is_empty() && !owned.contains(&inode) {
+            continue;
+        }
         // Extract port from "AABBCCDD:PORT" (hex, little-endian address)
         let local = cols[1];
         if let Some(colon) = local.find(':') {
@@ -351,10 +374,7 @@ fn find_log_path(pid: i32) -> Option<PathBuf> {
 /// Uses raw TcpStream so we have no external dependencies and full timeout control.
 fn http_get(port: u16, path: &str) -> Option<String> {
     let addr = format!("127.0.0.1:{}", port);
-    let mut stream = TcpStream::connect_timeout(
-        &addr.parse().ok()?,
-        HTTP_TIMEOUT,
-    ).ok()?;
+    let mut stream = TcpStream::connect_timeout(&addr.parse().ok()?, HTTP_TIMEOUT).ok()?;
     stream.set_read_timeout(Some(HTTP_TIMEOUT)).ok()?;
     stream.set_write_timeout(Some(HTTP_TIMEOUT)).ok()?;
 
@@ -374,12 +394,16 @@ fn http_get(port: u16, path: &str) -> Option<String> {
     for line in (&mut reader).lines().flatten() {
         let line = line.trim_end_matches('\r').to_owned();
         if in_headers {
-            if line.is_empty() { in_headers = false; }
+            if line.is_empty() {
+                in_headers = false;
+            }
             continue;
         }
         body.push_str(&line);
         body.push('\n');
-        if body.len() > 64 * 1024 { break; } // guard against huge /metrics responses
+        if body.len() > 64 * 1024 {
+            break;
+        } // guard against huge /metrics responses
     }
     Some(body)
 }
@@ -395,7 +419,9 @@ fn probe_health(port: u16, m: &mut ServingMetrics) {
                 let rest = &body[start + 9..];
                 if let Some(end) = rest.find('"') {
                     let s = &rest[..end];
-                    if !s.is_empty() { m.model_id = Some(s.to_string()); }
+                    if !s.is_empty() {
+                        m.model_id = Some(s.to_string());
+                    }
                 }
             }
         }
@@ -422,7 +448,7 @@ fn fetch_model_from_api(port: u16) -> Option<String> {
 fn probe_metrics(
     port: u16,
     m: &mut ServingMetrics,
-    prev_gen:    &mut HashMap<i32, (f32, std::time::Instant)>,
+    prev_gen: &mut HashMap<i32, (f32, std::time::Instant)>,
     prev_prompt: &mut HashMap<i32, (f32, std::time::Instant)>,
     pid: i32,
 ) {
@@ -437,7 +463,9 @@ fn probe_metrics(
     let mut prompt_total: Option<f32> = None;
 
     for line in body.lines() {
-        if line.starts_with('#') { continue; }
+        if line.starts_with('#') {
+            continue;
+        }
         // Match known TT metric names.
         if let Some(val) = parse_metric_line(line, "tt_generation_tokens_total") {
             gen_total = Some(val);
@@ -453,11 +481,15 @@ fn probe_metrics(
             m.kv_cache_utilization = Some(val);
         } else if let Some(val) = parse_metric_line(line, "tt_prefix_cache_hit_rate") {
             m.prefix_cache_hit_rate = Some(val);
-        } else if line.contains("tt_time_to_first_token_seconds") && line.contains("quantile=\"0.5\"") {
+        } else if line.contains("tt_time_to_first_token_seconds")
+            && line.contains("quantile=\"0.5\"")
+        {
             if let Some(val) = extract_histogram_quantile(line) {
                 m.ttft_p50 = Some(val);
             }
-        } else if line.contains("tt_time_to_first_token_seconds") && line.contains("quantile=\"0.99\"") {
+        } else if line.contains("tt_time_to_first_token_seconds")
+            && line.contains("quantile=\"0.99\"")
+        {
             if let Some(val) = extract_histogram_quantile(line) {
                 m.ttft_p99 = Some(val);
             }
@@ -495,7 +527,9 @@ fn parse_metric_line(line: &str, name: &str) -> Option<f32> {
     };
     // Metric name is the part before any `{`.
     let metric_name = metric_part.split('{').next()?;
-    if metric_name != name { return None; }
+    if metric_name != name {
+        return None;
+    }
     val_part.parse::<f32>().ok()
 }
 
@@ -541,7 +575,10 @@ mod tests {
             Some(3.0)
         );
         assert_eq!(
-            parse_metric_line("tt_generation_tokens_total{model=\"foo\"} 12345.0", "tt_generation_tokens_total"),
+            parse_metric_line(
+                "tt_generation_tokens_total{model=\"foo\"} 12345.0",
+                "tt_generation_tokens_total"
+            ),
             Some(12345.0)
         );
         assert!(parse_metric_line("other_metric 1.0", "tt_num_requests_in_flight").is_none());

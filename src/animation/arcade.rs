@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Arcade Mode - Unified Psychedelic Visualization
 //!
 //! Combines all three visualizations (Starfield, Memory Castle, Memory Flow) into a single
@@ -20,8 +19,8 @@
 //! - BOLD white character for maximum visibility
 
 use crate::animation::{
-    AdaptiveBaseline, HardwareStarfield, MemoryCastle, MemoryFlowVis, BoardTopology,
-    DefragVis, hsv_to_rgb, temp_to_hue, lerp,
+    hsv_to_rgb, lerp, temp_to_hue, AdaptiveBaseline, BoardTopology, DefragVis, HardwareStarfield,
+    MemoryCastle, MemoryFlowVis,
 };
 use crate::backend::TelemetryBackend;
 use crate::ui::colors;
@@ -64,11 +63,11 @@ pub struct ArcadeVisualization {
     /// Trail length in frames, driven by live ETH link count.
     hero_trail_length: usize,
     // Telemetry-driven expression flags (updated in update(), consumed in overlay_hero())
-    hero_throttled: bool,   // throttler register non-zero
-    hero_faulted: bool,     // faults register non-zero
-    hero_arc_stalled: bool, // heartbeat == 0
-    hero_undervolt: bool,   // vcore < 0.75 V
-    hero_harvested: bool,   // harvesting_state > 0 (some cores disabled)
+    hero_throttled: bool,        // throttler register non-zero
+    hero_faulted: bool,          // faults register non-zero
+    hero_arc_stalled: bool,      // heartbeat == 0
+    hero_undervolt: bool,        // vcore < 0.75 V
+    hero_harvested: bool,        // harvesting_state > 0 (some cores disabled)
     hero_gddr_temp: Option<f32>, // max GDDR temp — drives trail color separately from ASIC
 
     // Animation state
@@ -163,8 +162,12 @@ impl ArcadeVisualization {
     /// (e.g. `--profile paranoid`).  Without this call, `ArcadeVisualization` would
     /// silently stay at sensitivity=1.0 while the individual standalone modes
     /// (Starfield, MemoryCastle, MemoryFlow) correctly use the configured value.
-    pub fn width(&self) -> usize { self.width }
-    pub fn height(&self) -> usize { self.height }
+    pub fn width(&self) -> usize {
+        self.width
+    }
+    pub fn height(&self) -> usize {
+        self.height
+    }
 
     pub fn set_sensitivity(&mut self, s: f32) {
         self.starfield.set_sensitivity(s);
@@ -184,9 +187,14 @@ impl ArcadeVisualization {
     /// column separators are all topology-aware in the same frame.
     pub fn initialize_topology(&mut self, backend: &dyn TelemetryBackend) {
         use crate::animation::topology::BoardTopology;
-        let board_ids: Vec<Option<String>> = backend.devices().iter()
-            .map(|d| backend.smbus_telemetry(d.index)
-                .and_then(|s| s.board_id.clone()))
+        let board_ids: Vec<Option<String>> = backend
+            .devices()
+            .iter()
+            .map(|d| {
+                backend
+                    .smbus_telemetry(d.index)
+                    .and_then(|s| s.board_id.clone())
+            })
             .collect();
         let topo = BoardTopology::from_devices_with_ids(backend.devices(), &board_ids);
 
@@ -234,8 +242,8 @@ impl ArcadeVisualization {
 
             for (c_idx, &chip_idx) in board.chips.iter().enumerate() {
                 let device = devices.get(chip_idx);
-                let telem  = backend.telemetry(chip_idx);
-                let temp   = telem.map(|t| t.temp_c()).unwrap_or(25.0);
+                let telem = backend.telemetry(chip_idx);
+                let temp = telem.map(|t| t.temp_c()).unwrap_or(25.0);
 
                 let arch_label = device.map(|d| d.architecture.abbrev()).unwrap_or("?");
                 let chip_color = hsv_to_rgb(temp_to_hue(temp), 0.85, 0.9);
@@ -247,7 +255,9 @@ impl ArcadeVisualization {
                 if c_idx + 1 < board.chips.len() {
                     spans.push(Span::styled(
                         " ←→ ",
-                        Style::default().fg(board_color).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(board_color)
+                            .add_modifier(Modifier::BOLD),
                     ));
                 }
             }
@@ -258,7 +268,9 @@ impl ArcadeVisualization {
                 if has_multi {
                     spans.push(Span::styled(
                         "  ═══  ",
-                        Style::default().fg(colors::rgb(200, 160, 60)).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(colors::rgb(200, 160, 60))
+                            .add_modifier(Modifier::BOLD),
                     ));
                 } else {
                     spans.push(Span::raw("  "));
@@ -273,16 +285,29 @@ impl ArcadeVisualization {
     ///
     /// Each chip is represented by a single character (power level) coloured
     /// by temperature.  Fits any chip count in a single terminal line.
-    fn topology_minibar_line(&self, backend: &dyn TelemetryBackend, topo: &crate::animation::topology::BoardTopology) -> Line<'static> {
+    fn topology_minibar_line(
+        &self,
+        backend: &dyn TelemetryBackend,
+        topo: &crate::animation::topology::BoardTopology,
+    ) -> Line<'static> {
         use crate::animation::common::temp_to_hue;
 
         let devices = backend.devices();
         let n = devices.len();
 
         // Architecture summary for the label.
-        let bh = devices.iter().filter(|d| matches!(d.architecture, crate::models::Architecture::Blackhole)).count();
-        let wh = devices.iter().filter(|d| matches!(d.architecture, crate::models::Architecture::Wormhole)).count();
-        let gs = devices.iter().filter(|d| matches!(d.architecture, crate::models::Architecture::Grayskull)).count();
+        let bh = devices
+            .iter()
+            .filter(|d| matches!(d.architecture, crate::models::Architecture::Blackhole))
+            .count();
+        let wh = devices
+            .iter()
+            .filter(|d| matches!(d.architecture, crate::models::Architecture::Wormhole))
+            .count();
+        let gs = devices
+            .iter()
+            .filter(|d| matches!(d.architecture, crate::models::Architecture::Grayskull))
+            .count();
         let arch_str = match (bh, wh, gs) {
             (b, 0, 0) => format!("{}× BH", b),
             (0, w, 0) => format!("{}× WH", w),
@@ -294,7 +319,9 @@ impl ArcadeVisualization {
             Span::raw("  "),
             Span::styled(
                 format!("{}  [", arch_str),
-                Style::default().fg(colors::rgb(180, 180, 200)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(colors::rgb(180, 180, 200))
+                    .add_modifier(Modifier::BOLD),
             ),
         ];
 
@@ -305,14 +332,22 @@ impl ArcadeVisualization {
 
         for chip_idx in 0..bar_n {
             let device = &devices[chip_idx];
-            let telem  = backend.telemetry(device.index);
-            let power  = telem.map(|t| t.power_w()).unwrap_or(0.0);
-            let temp   = telem.map(|t| t.temp_c()).unwrap_or(25.0);
+            let telem = backend.telemetry(device.index);
+            let power = telem.map(|t| t.power_w()).unwrap_or(0.0);
+            let temp = telem.map(|t| t.temp_c()).unwrap_or(25.0);
 
             let act = (power / 80.0).clamp(0.0, 1.0);
-            let ch  = if act > 0.75 { '█' } else if act > 0.50 { '▓' } else if act > 0.25 { '▒' } else { '░' };
+            let ch = if act > 0.75 {
+                '█'
+            } else if act > 0.50 {
+                '▓'
+            } else if act > 0.25 {
+                '▒'
+            } else {
+                '░'
+            };
 
-            let hue   = temp_to_hue(temp);
+            let hue = temp_to_hue(temp);
             let color = hsv_to_rgb(hue, 0.85, 0.85 + act * 0.15);
             spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
 
@@ -322,12 +357,20 @@ impl ArcadeVisualization {
             if topo.has_multi_chip_boards() && chip_idx + 1 < bar_n {
                 let next_device = &devices[chip_idx + 1];
                 if !topo.same_board(device.index, next_device.index) {
-                    spans.push(Span::styled("|", Style::default().fg(colors::rgb(100, 90, 60))));
+                    spans.push(Span::styled(
+                        "|",
+                        Style::default().fg(colors::rgb(100, 90, 60)),
+                    ));
                 }
             }
         }
 
-        spans.push(Span::styled("]", Style::default().fg(colors::rgb(180, 180, 200)).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            "]",
+            Style::default()
+                .fg(colors::rgb(180, 180, 200))
+                .add_modifier(Modifier::BOLD),
+        ));
 
         if n > MAX_BAR_CHIPS {
             spans.push(Span::styled(
@@ -493,7 +536,10 @@ impl ArcadeVisualization {
         }
 
         // Castle + Defrag side-by-side separator
-        lines.push(self.render_separator("🏰 MEMORY CASTLE  │  ▓ DEFRAG", self.castle_end - self.castle_start));
+        lines.push(self.render_separator(
+            "🏰 MEMORY CASTLE  │  ▓ DEFRAG",
+            self.castle_end - self.castle_start,
+        ));
 
         // Render castle and defrag columns, zip them side by side.
         // Each produces `castle_height` lines; pad shorter side with blanks.
@@ -502,12 +548,19 @@ impl ArcadeVisualization {
         let split_rows = self.castle_end - self.castle_start;
         let div = Span::styled("│", Style::default().fg(colors::rgb(50, 70, 90)));
         for row in 0..split_rows {
-            let left = castle_lines.get(row).cloned().unwrap_or_else(|| Line::from(""));
-            let right = defrag_lines.get(row).cloned().unwrap_or_else(|| Line::from(""));
+            let left = castle_lines
+                .get(row)
+                .cloned()
+                .unwrap_or_else(|| Line::from(""));
+            let right = defrag_lines
+                .get(row)
+                .cloned()
+                .unwrap_or_else(|| Line::from(""));
             // Clamp both columns to their budgets, then pad left to exact width.
-            let left_spans  = clamp_spans_to_width(left.spans,  self.castle_col_w);
+            let left_spans = clamp_spans_to_width(left.spans, self.castle_col_w);
             let right_spans = clamp_spans_to_width(right.spans, self.defrag_col_w);
-            let left_w: usize = left_spans.iter()
+            let left_w: usize = left_spans
+                .iter()
                 .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
                 .sum();
             let pad = self.castle_col_w.saturating_sub(left_w);
@@ -542,19 +595,34 @@ impl ArcadeVisualization {
         let label = format!("  🎮 ARCADE MODE ");
         // "🎮" is 2 display cols wide; UnicodeWidthStr measures correctly.
         let label_w = UnicodeWidthStr::width(label.as_str());
-        let device_text = format!(" {} Device{} ", device_count, if device_count == 1 { "" } else { "s" });
+        let device_text = format!(
+            " {} Device{} ",
+            device_count,
+            if device_count == 1 { "" } else { "s" }
+        );
         let device_w = label_w + 1 + device_text.len() + 1; // +1 for each │
         let hint = " Press 'v' to cycle modes ";
         let has_hint = self.width > device_w + hint.len();
 
         let mut spans = vec![
-            Span::styled(label, Style::default().fg(colors::rgb(220, 240, 255)).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(colors::rgb(220, 240, 255))
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("│", Style::default().fg(colors::rgb(150, 120, 180))),
             Span::styled(device_text, Style::default().fg(colors::rgb(80, 220, 200))),
         ];
         if has_hint {
-            spans.push(Span::styled("│", Style::default().fg(colors::rgb(150, 120, 180))));
-            spans.push(Span::styled(hint, Style::default().fg(colors::rgb(160, 160, 160))));
+            spans.push(Span::styled(
+                "│",
+                Style::default().fg(colors::rgb(150, 120, 180)),
+            ));
+            spans.push(Span::styled(
+                hint,
+                Style::default().fg(colors::rgb(160, 160, 160)),
+            ));
         }
         Line::from(spans)
     }
@@ -596,14 +664,17 @@ impl ArcadeVisualization {
     /// One-line legend covering all three arcade panels + hero + global keys.
     /// Matches the style of the shared `render_command_bar` overlay on other views.
     fn render_footer(&self, backend: &dyn TelemetryBackend) -> Line<'static> {
-        let temp = backend.devices().first()
+        let temp = backend
+            .devices()
+            .first()
             .and_then(|d| backend.telemetry(d.index))
-            .map(|t| t.temp_c()).unwrap_or(25.0);
+            .map(|t| t.temp_c())
+            .unwrap_or(25.0);
         let hero_color = hsv_to_rgb(temp_to_hue(temp), 1.0, 0.95);
-        let dim   = colors::rgb(90, 90, 110);
+        let dim = colors::rgb(90, 90, 110);
         let label = colors::rgb(150, 150, 170);
-        let key   = colors::rgb(80, 220, 200);
-        let sep   = colors::rgb(50, 60, 80);
+        let key = colors::rgb(80, 220, 200);
+        let sep = colors::rgb(50, 60, 80);
 
         Line::from(vec![
             // Starfield legend
@@ -625,17 +696,40 @@ impl ArcadeVisualization {
             Span::styled("blocks=GDDR  ", Style::default().fg(dim)),
             Span::styled("│ ", Style::default().fg(sep)),
             // Hero legend
-            Span::styled("@ ", Style::default().fg(hero_color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "@ ",
+                Style::default().fg(hero_color).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("x=current y=power color=temp  ", Style::default().fg(dim)),
             Span::styled("│ ", Style::default().fg(sep)),
             // Nav keys — consistent with other views
-            Span::styled(" v ", Style::default().fg(key).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Span::styled(
+                " v ",
+                Style::default()
+                    .fg(key)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ),
             Span::styled("cycle  ", Style::default().fg(label)),
-            Span::styled(" l ", Style::default().fg(key).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Span::styled(
+                " l ",
+                Style::default()
+                    .fg(key)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ),
             Span::styled("legend  ", Style::default().fg(label)),
-            Span::styled(" ? ", Style::default().fg(colors::rgb(220, 180, 80)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Span::styled(
+                " ? ",
+                Style::default()
+                    .fg(colors::rgb(220, 180, 80))
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ),
             Span::styled("help  ", Style::default().fg(label)),
-            Span::styled(" / ", Style::default().fg(colors::rgb(220, 180, 80)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Span::styled(
+                " / ",
+                Style::default()
+                    .fg(colors::rgb(220, 180, 80))
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ),
             Span::styled("cmd", Style::default().fg(label)),
         ])
     }
@@ -650,7 +744,9 @@ impl ArcadeVisualization {
     /// disturbing the rest of the row's spans.  Works span-by-span so the
     /// surrounding colors (defrag blocks, castle particles, etc.) are untouched.
     fn splice_char(lines: &mut Vec<Line<'static>>, row: usize, col: usize, ch: char, style: Style) {
-        if row >= lines.len() { return; }
+        if row >= lines.len() {
+            return;
+        }
 
         let mut new_spans: Vec<Span<'static>> = Vec::new();
         let mut cursor = 0usize; // display column of the start of the current span
@@ -667,7 +763,7 @@ impl ArcadeVisualization {
             } else {
                 // Hero column falls inside this span.  Split around it.
                 let offset = col - cursor; // character offset into the span
-                // collect chars so we can index by display position safely
+                                           // collect chars so we can index by display position safely
                 let chars: Vec<char> = text.chars().collect();
                 // Compute char index at display offset (for non-ASCII, chars and
                 // display cols can differ, but all our content is ASCII-safe here).
@@ -730,9 +826,7 @@ impl ArcadeVisualization {
         let asic_hue = temp_to_hue(temp);
         // Trail uses GDDR temp color when available — shows memory heat separately
         // from ASIC heat.  They often diverge during model loading.
-        let trail_hue = self.hero_gddr_temp
-            .map(temp_to_hue)
-            .unwrap_or(asic_hue);
+        let trail_hue = self.hero_gddr_temp.map(temp_to_hue).unwrap_or(asic_hue);
 
         let max_age = self.hero_trail_length as f32;
 
@@ -745,10 +839,10 @@ impl ArcadeVisualization {
             let fade_exp = fade * fade; // exponential: rapid initial fade, lingering tail
 
             let trail_char = match pos.age {
-                0..=4  => '○',
-                5..=9  => '◦',
+                0..=4 => '○',
+                5..=9 => '◦',
                 10..=19 => '•',
-                _      => '·',
+                _ => '·',
             };
 
             let color = hsv_to_rgb(trail_hue, 0.7 * fade_exp, (0.55 * fade_exp).max(0.05));
@@ -761,16 +855,20 @@ impl ArcadeVisualization {
 
         // Character encodes the chip's primary condition (priority order).
         let hero_char = if self.hero_arc_stalled {
-            '?'                  // ARC firmware unresponsive — urgent
+            '?' // ARC firmware unresponsive — urgent
         } else if self.hero_faulted || self.hero_throttled {
-            '!'                  // thermal/power fault or active throttling
+            '!' // thermal/power fault or active throttling
         } else if self.hero_undervolt {
-            '%'                  // supply voltage too low
+            '%' // supply voltage too low
         } else if self.hero_harvested {
             // Alternating parens hint at "partial" chip (harvested cores disabled)
-            if self.frame % 40 < 20 { '(' } else { ')' }
+            if self.frame % 40 < 20 {
+                '('
+            } else {
+                ')'
+            }
         } else {
-            '@'                  // healthy
+            '@' // healthy
         };
 
         // Brightness pulses — faster and more pronounced when throttled/faulted
@@ -782,8 +880,9 @@ impl ArcadeVisualization {
         } else {
             (60u32, 0.15_f32) // gentle heartbeat
         };
-        let pulse = ((self.frame % pulse_period) as f32 / pulse_period as f32
-            * std::f32::consts::PI * 2.0).sin();
+        let pulse =
+            ((self.frame % pulse_period) as f32 / pulse_period as f32 * std::f32::consts::PI * 2.0)
+                .sin();
         let value = (0.85 + pulse * pulse_amp).clamp(0.0, 1.0);
 
         // Faulted/throttled hero is red regardless of temperature
@@ -796,9 +895,7 @@ impl ArcadeVisualization {
         };
 
         let hero_color = hsv_to_rgb(hero_hue, 1.0, value);
-        let hero_style = Style::default()
-            .fg(hero_color)
-            .add_modifier(Modifier::BOLD);
+        let hero_style = Style::default().fg(hero_color).add_modifier(Modifier::BOLD);
 
         Self::splice_char(&mut lines, row, col, hero_char, hero_style);
 
@@ -813,7 +910,9 @@ fn clamp_spans_to_width(spans: Vec<Span<'static>>, max_cols: usize) -> Vec<Span<
     let mut out = Vec::with_capacity(spans.len());
     let mut remaining = max_cols;
     for span in spans {
-        if remaining == 0 { break; }
+        if remaining == 0 {
+            break;
+        }
         let w = UnicodeWidthStr::width(span.content.as_ref());
         if w <= remaining {
             remaining -= w;
@@ -825,7 +924,9 @@ fn clamp_spans_to_width(spans: Vec<Span<'static>>, max_cols: usize) -> Vec<Span<
             let mut s = String::new();
             for ch in span.content.chars() {
                 let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
-                if col + cw > remaining { break; }
+                if col + cw > remaining {
+                    break;
+                }
                 col += cw;
                 s.push(ch);
             }
@@ -905,7 +1006,7 @@ mod tests {
     fn mid_sep_only_for_height_ge_2() {
         // starfield_height == 0: no mid separator → castle_start = starfield_end + 1
         let vis0 = ArcadeVisualization::new(80, 4); // content_height ≈ 0
-        // starfield_height == 1 (content_height ≈ 2): no mid separator
+                                                    // starfield_height == 1 (content_height ≈ 2): no mid separator
         let vis1 = ArcadeVisualization::new(80, 10);
         // Both must satisfy the no-overlap invariant
         assert!(vis0.starfield_end <= vis0.castle_start);

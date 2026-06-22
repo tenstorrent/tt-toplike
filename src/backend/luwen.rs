@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Luwen backend for direct hardware access
 //!
 //! This backend uses the official Tenstorrent luwen library to communicate
@@ -73,9 +72,9 @@ impl LuwenBackend {
 
         // Try with noc_safe first (safer for active hardware)
         let options = ChipDetectOptions {
-            local_only: true,       // Only detect locally attached devices
-            noc_safe: true,         // Use safer NoC access (won't interfere with workloads)
-            continue_on_failure: true,  // Try all devices even if some fail
+            local_only: true,          // Only detect locally attached devices
+            noc_safe: true,            // Use safer NoC access (won't interfere with workloads)
+            continue_on_failure: true, // Try all devices even if some fail
             ..Default::default()
         };
 
@@ -88,13 +87,19 @@ impl LuwenBackend {
             return Err(BackendError::Initialization("No devices found".to_string()));
         }
 
-        log::info!("LuwenBackend: Found {} uninitialized devices", uninit_chips.len());
+        log::info!(
+            "LuwenBackend: Found {} uninitialized devices",
+            uninit_chips.len()
+        );
 
         // Initialize each chip
         for (idx, uninit_chip) in uninit_chips.into_iter().enumerate() {
             // Initialize the chip with a dummy callback (all-smi pattern)
-            let chip = uninit_chip.init(&mut |_| Ok::<(), std::convert::Infallible>(()))
-                .map_err(|_| BackendError::Initialization("Chip initialization failed".to_string()))?;
+            let chip = uninit_chip
+                .init(&mut |_| Ok::<(), std::convert::Infallible>(()))
+                .map_err(|_| {
+                    BackendError::Initialization("Chip initialization failed".to_string())
+                })?;
 
             // Get architecture
             let arch = chip.get_arch();
@@ -108,7 +113,7 @@ impl LuwenBackend {
             // Get device info for better identification
             let device_info = chip.get_device_info().ok().flatten();
             let bus_id = if let Some(info) = &device_info {
-                format!("{:?}", info)  // Will include PCI address
+                format!("{:?}", info) // Will include PCI address
             } else {
                 format!("pci:{}", idx)
             };
@@ -125,7 +130,7 @@ impl LuwenBackend {
                 index: idx,
                 board_type,
                 bus_id,
-                coords: String::new(),  // Coordinates not provided by luwen-if
+                coords: String::new(), // Coordinates not provided by luwen-if
                 architecture,
                 firmwares: None,
                 limits: None,
@@ -139,14 +144,17 @@ impl LuwenBackend {
             self.chips.push(chip);
         }
 
-        log::info!("LuwenBackend: Successfully initialized {} devices", self.devices.len());
+        log::info!(
+            "LuwenBackend: Successfully initialized {} devices",
+            self.devices.len()
+        );
         Ok(())
     }
 
     #[cfg(not(feature = "luwen-backend"))]
     fn detect_devices(&mut self) -> BackendResult<()> {
         Err(BackendError::Initialization(
-            "Luwen backend not enabled. Rebuild with --features luwen-backend".to_string()
+            "Luwen backend not enabled. Rebuild with --features luwen-backend".to_string(),
         ))
     }
 }
@@ -230,7 +238,9 @@ impl TelemetryBackend for LuwenBackend {
                             tt_flash_version: Some(luwen_telem.tt_flash_version.to_string()),
                             enum_version: Some(luwen_telem.enum_version.to_string()),
                             device_id: Some(luwen_telem.device_id.to_string()),
-                            spibootrom_fw_version: Some(luwen_telem.spibootrom_fw_version.to_string()),
+                            spibootrom_fw_version: Some(
+                                luwen_telem.spibootrom_fw_version.to_string(),
+                            ),
                             wh_fw_date: Some(luwen_telem.wh_fw_date.to_string()),
                             aux_status: luwen_telem.aux_status.map(|v| v.to_string()),
                             // Fields not in all-smi Telemetry
@@ -244,7 +254,11 @@ impl TelemetryBackend for LuwenBackend {
                         self.smbus_cache.insert(idx, smbus);
                     }
                     Err(e) => {
-                        log::warn!("LuwenBackend: Failed to read telemetry for device {}: {:?}", idx, e);
+                        log::warn!(
+                            "LuwenBackend: Failed to read telemetry for device {}: {:?}",
+                            idx,
+                            e
+                        );
                         // Keep existing cached data on error (don't remove from cache)
                     }
                 }
@@ -255,7 +269,9 @@ impl TelemetryBackend for LuwenBackend {
 
         #[cfg(not(feature = "luwen-backend"))]
         {
-            Err(BackendError::Update("Luwen backend not enabled".to_string()))
+            Err(BackendError::Update(
+                "Luwen backend not enabled".to_string(),
+            ))
         }
     }
 

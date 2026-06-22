@@ -25,7 +25,9 @@ pub enum AnimationProfile {
 }
 
 impl Default for AnimationProfile {
-    fn default() -> Self { Self::Normal }
+    fn default() -> Self {
+        Self::Normal
+    }
 }
 
 /// Resolved animation configuration applied to all viz objects.
@@ -44,11 +46,26 @@ impl AnimConfig {
     /// Build a config from a named preset.
     pub fn from_profile(profile: AnimationProfile) -> Self {
         match profile {
-            AnimationProfile::AnomaliesOnly => Self { sensitivity: 0.2, max_particles_scale: 0.5 },
-            AnimationProfile::Relaxed       => Self { sensitivity: 0.5, max_particles_scale: 0.75 },
-            AnimationProfile::Normal        => Self { sensitivity: 1.0, max_particles_scale: 1.0 },
-            AnimationProfile::Hyper         => Self { sensitivity: 2.0, max_particles_scale: 2.0 },
-            AnimationProfile::Paranoid      => Self { sensitivity: 5.0, max_particles_scale: 3.0 },
+            AnimationProfile::AnomaliesOnly => Self {
+                sensitivity: 0.2,
+                max_particles_scale: 0.5,
+            },
+            AnimationProfile::Relaxed => Self {
+                sensitivity: 0.5,
+                max_particles_scale: 0.75,
+            },
+            AnimationProfile::Normal => Self {
+                sensitivity: 1.0,
+                max_particles_scale: 1.0,
+            },
+            AnimationProfile::Hyper => Self {
+                sensitivity: 2.0,
+                max_particles_scale: 2.0,
+            },
+            AnimationProfile::Paranoid => Self {
+                sensitivity: 5.0,
+                max_particles_scale: 3.0,
+            },
         }
     }
 
@@ -69,8 +86,12 @@ impl AnimConfig {
 
     /// Apply user-provided TOML overrides on top of profile defaults.
     pub fn merge(mut self, overrides: AnimConfigOverrides) -> Self {
-        if let Some(v) = overrides.sensitivity        { self.sensitivity = v; }
-        if let Some(v) = overrides.max_particles_scale { self.max_particles_scale = v; }
+        if let Some(v) = overrides.sensitivity {
+            self.sensitivity = v;
+        }
+        if let Some(v) = overrides.max_particles_scale {
+            self.max_particles_scale = v;
+        }
         self
     }
 }

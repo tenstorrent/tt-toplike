@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Command-line argument parsing
 //!
 //! This module handles all CLI argument parsing using clap.
@@ -279,8 +278,8 @@ impl Cli {
     /// `--mock` alone (or not specified) falls back to `--mock-devices` (default 3).
     pub fn effective_mock_devices(&self) -> usize {
         match self.mock {
-            Some(n) if n > 0 => n,   // --mock 32  → use the inline count
-            _ => self.mock_devices,  // --mock / --mock-devices / default
+            Some(n) if n > 0 => n,  // --mock 32  → use the inline count
+            _ => self.mock_devices, // --mock / --mock-devices / default
         }
     }
 
@@ -350,23 +349,25 @@ impl Cli {
         // Check if luwen backend is enabled (at compile time)
         #[cfg(not(feature = "luwen-backend"))]
         if self.effective_backend() == BackendType::Luwen {
-            return Err("Luwen backend not enabled. Rebuild with: cargo build --features luwen-backend".to_string());
+            return Err(
+                "Luwen backend not enabled. Rebuild with: cargo build --features luwen-backend"
+                    .to_string(),
+            );
         }
 
         // Warn if tt-smi-path specified with mock backend
         if self.effective_backend() == BackendType::Mock
             && self.tt_smi_path != PathBuf::from("tt-smi")
         {
-            eprintln!(
-                "Warning: --tt-smi-path ignored when using mock backend"
-            );
+            eprintln!("Warning: --tt-smi-path ignored when using mock backend");
         }
 
         // Warn if mock-devices specified with non-mock backend
-        if self.effective_backend() != BackendType::Mock && self.mock_devices != 3 && self.mock.is_none() {
-            eprintln!(
-                "Warning: --mock-devices ignored when not using mock backend"
-            );
+        if self.effective_backend() != BackendType::Mock
+            && self.mock_devices != 3
+            && self.mock.is_none()
+        {
+            eprintln!("Warning: --mock-devices ignored when not using mock backend");
         }
 
         Ok(())

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! egui-based K-RAD dashboard 🎸
 //!
 //! This module provides a PSYCHEDELIC real-time monitoring dashboard using egui.
@@ -347,7 +346,8 @@ impl eframe::App for DashboardApp {
         // Update particles
         let screen_rect = ctx.screen_rect();
         for particle in &mut self.particles {
-            particle.update(screen_rect.width(), screen_rect.height(), dt * 60.0); // 60 FPS reference
+            particle.update(screen_rect.width(), screen_rect.height(), dt * 60.0);
+            // 60 FPS reference
         }
 
         // Update telemetry
@@ -403,57 +403,59 @@ impl eframe::App for DashboardApp {
 
         // Top panel: Title and status with rainbow gradient
         egui::TopBottomPanel::top("top_panel")
-            .frame(egui::Frame::none()
-                .fill(self.theme.darker_bg)
-                .stroke(egui::Stroke::new(3.0, self.theme.neon_cyan))
-                .inner_margin(10.0))
+            .frame(
+                egui::Frame::none()
+                    .fill(self.theme.darker_bg)
+                    .stroke(egui::Stroke::new(3.0, self.theme.neon_cyan))
+                    .inner_margin(10.0),
+            )
             .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                // Psychedelic title with cycling colors
-                let title_hue = (self.frame as f32 * 2.0) % 360.0;
-                ui.label(
-                    egui::RichText::new("🦀 TT-TOPLIKE-RS 🎸")
-                        .size(24.0)
-                        .strong()
-                        .color(hsv_to_rgb(title_hue, 1.0, 1.0))
-                );
+                ui.horizontal(|ui| {
+                    // Psychedelic title with cycling colors
+                    let title_hue = (self.frame as f32 * 2.0) % 360.0;
+                    ui.label(
+                        egui::RichText::new("🦀 TT-TOPLIKE-RS 🎸")
+                            .size(24.0)
+                            .strong()
+                            .color(hsv_to_rgb(title_hue, 1.0, 1.0)),
+                    );
 
-                ui.add_space(20.0);
+                    ui.add_space(20.0);
 
-                // Neon separator
-                ui.label(
-                    egui::RichText::new("│")
-                        .size(20.0)
-                        .color(self.theme.neon_magenta)
-                );
+                    // Neon separator
+                    ui.label(
+                        egui::RichText::new("│")
+                            .size(20.0)
+                            .color(self.theme.neon_magenta),
+                    );
 
-                ui.add_space(10.0);
+                    ui.add_space(10.0);
 
-                // Backend info with glow
-                ui.label(
-                    egui::RichText::new(format!("Backend: {}", self.backend.backend_info()))
-                        .color(self.theme.neon_cyan)
-                        .strong()
-                );
+                    // Backend info with glow
+                    ui.label(
+                        egui::RichText::new(format!("Backend: {}", self.backend.backend_info()))
+                            .color(self.theme.neon_cyan)
+                            .strong(),
+                    );
 
-                ui.add_space(10.0);
+                    ui.add_space(10.0);
 
-                ui.label(
-                    egui::RichText::new("│")
-                        .size(20.0)
-                        .color(self.theme.neon_magenta)
-                );
+                    ui.label(
+                        egui::RichText::new("│")
+                            .size(20.0)
+                            .color(self.theme.neon_magenta),
+                    );
 
-                ui.add_space(10.0);
+                    ui.add_space(10.0);
 
-                // Device count
-                ui.label(
-                    egui::RichText::new(format!("⚡ {} devices", self.backend.devices().len()))
-                        .color(self.theme.neon_yellow)
-                        .strong()
-                );
+                    // Device count
+                    ui.label(
+                        egui::RichText::new(format!("⚡ {} devices", self.backend.devices().len()))
+                            .color(self.theme.neon_yellow)
+                            .strong(),
+                    );
+                });
             });
-        });
 
         // ═══════════════════════════════════════════════════════════════
         // 🔧 PROCESS MONITORING PANEL (K-RAD Edition) 🔧
@@ -464,17 +466,19 @@ impl eframe::App for DashboardApp {
         if self.process_monitor.has_any_processes() {
             egui::TopBottomPanel::bottom("process_panel")
                 .min_height(150.0)
-                .frame(egui::Frame::none()
-                    .fill(self.theme.darker_bg)
-                    .stroke(egui::Stroke::new(2.0, self.theme.neon_yellow))
-                    .inner_margin(10.0))
+                .frame(
+                    egui::Frame::none()
+                        .fill(self.theme.darker_bg)
+                        .stroke(egui::Stroke::new(2.0, self.theme.neon_yellow))
+                        .inner_margin(10.0),
+                )
                 .show(ctx, |ui| {
                     // Glowing title
                     ui.label(
                         egui::RichText::new("🔧 HARDWARE USAGE 🔧")
                             .size(18.0)
                             .strong()
-                            .color(self.theme.neon_yellow)
+                            .color(self.theme.neon_yellow),
                     );
                     ui.add_space(5.0);
 
@@ -577,160 +581,173 @@ impl eframe::App for DashboardApp {
 
         // Central panel: Graphs with rainbow styling
         egui::CentralPanel::default()
-            .frame(egui::Frame::none()
-                .fill(self.theme.dark_bg)
-                .inner_margin(10.0))
+            .frame(
+                egui::Frame::none()
+                    .fill(self.theme.dark_bg)
+                    .inner_margin(10.0),
+            )
             .show(ctx, |ui| {
-            // Animated title
-            let title_hue = ((self.frame as f32 * 1.5) + 120.0) % 360.0;
-            ui.label(
-                egui::RichText::new("📊 REAL-TIME TELEMETRY 📊")
-                    .size(20.0)
-                    .strong()
-                    .color(hsv_to_rgb(title_hue, 0.9, 1.0))
-            );
-            ui.add_space(10.0);
+                // Animated title
+                let title_hue = ((self.frame as f32 * 1.5) + 120.0) % 360.0;
+                ui.label(
+                    egui::RichText::new("📊 REAL-TIME TELEMETRY 📊")
+                        .size(20.0)
+                        .strong()
+                        .color(hsv_to_rgb(title_hue, 0.9, 1.0)),
+                );
+                ui.add_space(10.0);
 
-            // Create a 2×2 grid of plots
-            let available_height = ui.available_height();
-            let plot_height = (available_height - 40.0) / 2.0; // 2 rows
+                // Create a 2×2 grid of plots
+                let available_height = ui.available_height();
+                let plot_height = (available_height - 40.0) / 2.0; // 2 rows
 
-            // Row 1: Power and Temperature
-            ui.horizontal(|ui| {
-                let plot_width = (ui.available_width() - 10.0) / 2.0;
+                // Row 1: Power and Temperature
+                ui.horizontal(|ui| {
+                    let plot_width = (ui.available_width() - 10.0) / 2.0;
 
-                // Power plot with rainbow colors
-                ui.vertical(|ui| {
-                    ui.set_width(plot_width);
-                    ui.set_height(plot_height);
+                    // Power plot with rainbow colors
+                    ui.vertical(|ui| {
+                        ui.set_width(plot_width);
+                        ui.set_height(plot_height);
 
-                    // Frame for plot with neon border
-                    egui::Frame::none()
-                        .stroke(egui::Stroke::new(2.0, self.theme.neon_cyan))
-                        .inner_margin(5.0)
-                        .show(ui, |ui| {
-                            Plot::new("power_plot")
-                                .legend(egui_plot::Legend::default())
-                                .height(plot_height - 30.0)
-                                .show_axes([true, true])
-                                .y_axis_label("⚡ Power (W)")
-                                .x_axis_label("Time (s)")
-                                .show(ui, |plot_ui| {
-                                    for history in &self.device_history {
-                                        // Rainbow colors cycling per device
-                                        let hue = (history.device_idx as f32 * 90.0 + self.frame as f32 * 0.5) % 360.0;
-                                        let color = hsv_to_rgb(hue, 0.9, 1.0);
+                        // Frame for plot with neon border
+                        egui::Frame::none()
+                            .stroke(egui::Stroke::new(2.0, self.theme.neon_cyan))
+                            .inner_margin(5.0)
+                            .show(ui, |ui| {
+                                Plot::new("power_plot")
+                                    .legend(egui_plot::Legend::default())
+                                    .height(plot_height - 30.0)
+                                    .show_axes([true, true])
+                                    .y_axis_label("⚡ Power (W)")
+                                    .x_axis_label("Time (s)")
+                                    .show(ui, |plot_ui| {
+                                        for history in &self.device_history {
+                                            // Rainbow colors cycling per device
+                                            let hue = (history.device_idx as f32 * 90.0
+                                                + self.frame as f32 * 0.5)
+                                                % 360.0;
+                                            let color = hsv_to_rgb(hue, 0.9, 1.0);
 
-                                        plot_ui.line(
-                                            Line::new(&history.name, history.power_points())
-                                                .color(color)
-                                                .width(2.5),
-                                        );
-                                    }
-                                });
-                        });
+                                            plot_ui.line(
+                                                Line::new(&history.name, history.power_points())
+                                                    .color(color)
+                                                    .width(2.5),
+                                            );
+                                        }
+                                    });
+                            });
+                    });
+
+                    // Temperature plot with fire colors
+                    ui.vertical(|ui| {
+                        ui.set_width(plot_width);
+                        ui.set_height(plot_height);
+
+                        egui::Frame::none()
+                            .stroke(egui::Stroke::new(2.0, self.theme.neon_magenta))
+                            .inner_margin(5.0)
+                            .show(ui, |ui| {
+                                Plot::new("temp_plot")
+                                    .legend(egui_plot::Legend::default())
+                                    .height(plot_height - 30.0)
+                                    .show_axes([true, true])
+                                    .y_axis_label("🔥 Temperature (°C)")
+                                    .x_axis_label("Time (s)")
+                                    .show(ui, |plot_ui| {
+                                        for history in &self.device_history {
+                                            // Fire gradient (red-orange-yellow cycle)
+                                            let hue = (history.device_idx as f32 * 90.0
+                                                + self.frame as f32 * 0.5
+                                                + 180.0)
+                                                % 360.0;
+                                            let color = hsv_to_rgb(hue, 0.9, 1.0);
+
+                                            plot_ui.line(
+                                                Line::new(&history.name, history.temp_points())
+                                                    .color(color)
+                                                    .width(2.5),
+                                            );
+                                        }
+                                    });
+                            });
+                    });
                 });
 
-                // Temperature plot with fire colors
-                ui.vertical(|ui| {
-                    ui.set_width(plot_width);
-                    ui.set_height(plot_height);
+                ui.add_space(10.0);
 
-                    egui::Frame::none()
-                        .stroke(egui::Stroke::new(2.0, self.theme.neon_magenta))
-                        .inner_margin(5.0)
-                        .show(ui, |ui| {
-                            Plot::new("temp_plot")
-                                .legend(egui_plot::Legend::default())
-                                .height(plot_height - 30.0)
-                                .show_axes([true, true])
-                                .y_axis_label("🔥 Temperature (°C)")
-                                .x_axis_label("Time (s)")
-                                .show(ui, |plot_ui| {
-                                    for history in &self.device_history {
-                                        // Fire gradient (red-orange-yellow cycle)
-                                        let hue = (history.device_idx as f32 * 90.0 + self.frame as f32 * 0.5 + 180.0) % 360.0;
-                                        let color = hsv_to_rgb(hue, 0.9, 1.0);
+                // Row 2: Current and Voltage
+                ui.horizontal(|ui| {
+                    let plot_width = (ui.available_width() - 10.0) / 2.0;
 
-                                        plot_ui.line(
-                                            Line::new(&history.name, history.temp_points())
-                                                .color(color)
-                                                .width(2.5),
-                                        );
-                                    }
-                                });
-                        });
+                    // Current plot with electric colors
+                    ui.vertical(|ui| {
+                        ui.set_width(plot_width);
+                        ui.set_height(plot_height);
+
+                        egui::Frame::none()
+                            .stroke(egui::Stroke::new(2.0, self.theme.neon_yellow))
+                            .inner_margin(5.0)
+                            .show(ui, |ui| {
+                                Plot::new("current_plot")
+                                    .legend(egui_plot::Legend::default())
+                                    .height(plot_height - 30.0)
+                                    .show_axes([true, true])
+                                    .y_axis_label("⚡ Current (A)")
+                                    .x_axis_label("Time (s)")
+                                    .show(ui, |plot_ui| {
+                                        for history in &self.device_history {
+                                            // Electric blue-yellow gradient
+                                            let hue = (history.device_idx as f32 * 90.0
+                                                + self.frame as f32 * 0.5
+                                                + 240.0)
+                                                % 360.0;
+                                            let color = hsv_to_rgb(hue, 0.9, 1.0);
+
+                                            plot_ui.line(
+                                                Line::new(&history.name, history.current_points())
+                                                    .color(color)
+                                                    .width(2.5),
+                                            );
+                                        }
+                                    });
+                            });
+                    });
+
+                    // Voltage plot with plasma colors
+                    ui.vertical(|ui| {
+                        ui.set_width(plot_width);
+                        ui.set_height(plot_height);
+
+                        egui::Frame::none()
+                            .stroke(egui::Stroke::new(2.0, self.theme.neon_green))
+                            .inner_margin(5.0)
+                            .show(ui, |ui| {
+                                Plot::new("voltage_plot")
+                                    .legend(egui_plot::Legend::default())
+                                    .height(plot_height - 30.0)
+                                    .show_axes([true, true])
+                                    .y_axis_label("⚡ Voltage (V)")
+                                    .x_axis_label("Time (s)")
+                                    .show(ui, |plot_ui| {
+                                        for history in &self.device_history {
+                                            // Plasma magenta-green gradient
+                                            let hue = (history.device_idx as f32 * 90.0
+                                                + self.frame as f32 * 0.5
+                                                + 300.0)
+                                                % 360.0;
+                                            let color = hsv_to_rgb(hue, 0.9, 1.0);
+
+                                            plot_ui.line(
+                                                Line::new(&history.name, history.voltage_points())
+                                                    .color(color)
+                                                    .width(2.5),
+                                            );
+                                        }
+                                    });
+                            });
+                    });
                 });
             });
-
-            ui.add_space(10.0);
-
-            // Row 2: Current and Voltage
-            ui.horizontal(|ui| {
-                let plot_width = (ui.available_width() - 10.0) / 2.0;
-
-                // Current plot with electric colors
-                ui.vertical(|ui| {
-                    ui.set_width(plot_width);
-                    ui.set_height(plot_height);
-
-                    egui::Frame::none()
-                        .stroke(egui::Stroke::new(2.0, self.theme.neon_yellow))
-                        .inner_margin(5.0)
-                        .show(ui, |ui| {
-                            Plot::new("current_plot")
-                                .legend(egui_plot::Legend::default())
-                                .height(plot_height - 30.0)
-                                .show_axes([true, true])
-                                .y_axis_label("⚡ Current (A)")
-                                .x_axis_label("Time (s)")
-                                .show(ui, |plot_ui| {
-                                    for history in &self.device_history {
-                                        // Electric blue-yellow gradient
-                                        let hue = (history.device_idx as f32 * 90.0 + self.frame as f32 * 0.5 + 240.0) % 360.0;
-                                        let color = hsv_to_rgb(hue, 0.9, 1.0);
-
-                                        plot_ui.line(
-                                            Line::new(&history.name, history.current_points())
-                                                .color(color)
-                                                .width(2.5),
-                                        );
-                                    }
-                                });
-                        });
-                });
-
-                // Voltage plot with plasma colors
-                ui.vertical(|ui| {
-                    ui.set_width(plot_width);
-                    ui.set_height(plot_height);
-
-                    egui::Frame::none()
-                        .stroke(egui::Stroke::new(2.0, self.theme.neon_green))
-                        .inner_margin(5.0)
-                        .show(ui, |ui| {
-                            Plot::new("voltage_plot")
-                                .legend(egui_plot::Legend::default())
-                                .height(plot_height - 30.0)
-                                .show_axes([true, true])
-                                .y_axis_label("⚡ Voltage (V)")
-                                .x_axis_label("Time (s)")
-                                .show(ui, |plot_ui| {
-                                    for history in &self.device_history {
-                                        // Plasma magenta-green gradient
-                                        let hue = (history.device_idx as f32 * 90.0 + self.frame as f32 * 0.5 + 300.0) % 360.0;
-                                        let color = hsv_to_rgb(hue, 0.9, 1.0);
-
-                                        plot_ui.line(
-                                            Line::new(&history.name, history.voltage_points())
-                                                .color(color)
-                                                .width(2.5),
-                                        );
-                                    }
-                                });
-                        });
-                });
-            });
-        });
     }
 }

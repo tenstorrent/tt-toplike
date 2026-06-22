@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! EMA smoothing for numeric SMBUS telemetry fields.
 //!
 //! When a fresh SMBUS snapshot arrives (every ~1.5 s in streaming mode), numeric
@@ -58,26 +57,26 @@ type FieldEma = Option<f64>;
 /// Per-device EMA accumulators for each smoothable numeric field.
 #[derive(Default)]
 pub struct DeviceEmaState {
-    ddr_speed:         FieldEma,
-    arc0_health:       FieldEma,
-    arc1_health:       FieldEma,
-    arc2_health:       FieldEma,
-    arc3_health:       FieldEma,
-    aiclk:             FieldEma,
-    axiclk:            FieldEma,
-    arcclk:            FieldEma,
-    asic_temperature:  FieldEma,
-    vreg_temperature:  FieldEma,
+    ddr_speed: FieldEma,
+    arc0_health: FieldEma,
+    arc1_health: FieldEma,
+    arc2_health: FieldEma,
+    arc3_health: FieldEma,
+    aiclk: FieldEma,
+    axiclk: FieldEma,
+    arcclk: FieldEma,
+    asic_temperature: FieldEma,
+    vreg_temperature: FieldEma,
     board_temperature: FieldEma,
-    vcore:             FieldEma,
-    tdp:               FieldEma,
-    tdc:               FieldEma,
-    fan_speed:         FieldEma,
-    input_power:       FieldEma,
+    vcore: FieldEma,
+    tdp: FieldEma,
+    tdc: FieldEma,
+    fan_speed: FieldEma,
+    input_power: FieldEma,
     board_power_limit: FieldEma,
-    mvddq_power:       FieldEma,
-    therm_trip_count:  FieldEma,
-    rt_seconds:        FieldEma,
+    mvddq_power: FieldEma,
+    therm_trip_count: FieldEma,
+    rt_seconds: FieldEma,
 }
 
 /// Map from device index to that device's per-field EMA state.
@@ -91,65 +90,124 @@ pub type SmbusEmaState = HashMap<usize, DeviceEmaState>;
 /// `ema` accumulates the float state between calls; pass the same `SmbusEmaState`
 /// on every call to maintain continuity.
 pub fn apply_ema(
-    ema:        &mut SmbusEmaState,
+    ema: &mut SmbusEmaState,
     device_idx: usize,
-    incoming:   &SmbusTelemetry,
-    existing:   &mut SmbusTelemetry,
+    incoming: &SmbusTelemetry,
+    existing: &mut SmbusTelemetry,
 ) {
     let state = ema.entry(device_idx).or_default();
 
     // ── Discrete / identifier fields — copy verbatim ─────────────────────────
-    copy_field(&incoming.board_id,              &mut existing.board_id);
-    copy_field(&incoming.device_id,             &mut existing.device_id);
-    copy_field(&incoming.enum_version,          &mut existing.enum_version);
-    copy_field(&incoming.ddr_status,            &mut existing.ddr_status);
-    copy_field(&incoming.arc0_fw_version,       &mut existing.arc0_fw_version);
-    copy_field(&incoming.arc1_fw_version,       &mut existing.arc1_fw_version);
-    copy_field(&incoming.arc2_fw_version,       &mut existing.arc2_fw_version);
-    copy_field(&incoming.arc3_fw_version,       &mut existing.arc3_fw_version);
-    copy_field(&incoming.eth_fw_version,        &mut existing.eth_fw_version);
-    copy_field(&incoming.m3_bl_fw_version,      &mut existing.m3_bl_fw_version);
-    copy_field(&incoming.m3_app_fw_version,     &mut existing.m3_app_fw_version);
-    copy_field(&incoming.spibootrom_fw_version, &mut existing.spibootrom_fw_version);
-    copy_field(&incoming.tt_flash_version,      &mut existing.tt_flash_version);
-    copy_field(&incoming.pcie_status,           &mut existing.pcie_status);
-    copy_field(&incoming.eth_status0,           &mut existing.eth_status0);
-    copy_field(&incoming.eth_status1,           &mut existing.eth_status1);
-    copy_field(&incoming.eth_debug_status0,     &mut existing.eth_debug_status0);
-    copy_field(&incoming.eth_debug_status1,     &mut existing.eth_debug_status1);
-    copy_field(&incoming.aux_status,            &mut existing.aux_status);
-    copy_field(&incoming.faults,                &mut existing.faults);
-    copy_field(&incoming.throttler,             &mut existing.throttler);
-    copy_field(&incoming.vdd_limits,            &mut existing.vdd_limits);
-    copy_field(&incoming.thm_limits,            &mut existing.thm_limits);
-    copy_field(&incoming.boot_date,             &mut existing.boot_date);
-    copy_field(&incoming.wh_fw_date,            &mut existing.wh_fw_date);
-    copy_field(&incoming.gddr_train_temp0,      &mut existing.gddr_train_temp0);
-    copy_field(&incoming.gddr_train_temp1,      &mut existing.gddr_train_temp1);
-    copy_field(&incoming.asic_tmon0,            &mut existing.asic_tmon0);
-    copy_field(&incoming.asic_tmon1,            &mut existing.asic_tmon1);
+    copy_field(&incoming.board_id, &mut existing.board_id);
+    copy_field(&incoming.device_id, &mut existing.device_id);
+    copy_field(&incoming.enum_version, &mut existing.enum_version);
+    copy_field(&incoming.ddr_status, &mut existing.ddr_status);
+    copy_field(&incoming.arc0_fw_version, &mut existing.arc0_fw_version);
+    copy_field(&incoming.arc1_fw_version, &mut existing.arc1_fw_version);
+    copy_field(&incoming.arc2_fw_version, &mut existing.arc2_fw_version);
+    copy_field(&incoming.arc3_fw_version, &mut existing.arc3_fw_version);
+    copy_field(&incoming.eth_fw_version, &mut existing.eth_fw_version);
+    copy_field(&incoming.m3_bl_fw_version, &mut existing.m3_bl_fw_version);
+    copy_field(&incoming.m3_app_fw_version, &mut existing.m3_app_fw_version);
+    copy_field(
+        &incoming.spibootrom_fw_version,
+        &mut existing.spibootrom_fw_version,
+    );
+    copy_field(&incoming.tt_flash_version, &mut existing.tt_flash_version);
+    copy_field(&incoming.pcie_status, &mut existing.pcie_status);
+    copy_field(&incoming.eth_status0, &mut existing.eth_status0);
+    copy_field(&incoming.eth_status1, &mut existing.eth_status1);
+    copy_field(&incoming.eth_debug_status0, &mut existing.eth_debug_status0);
+    copy_field(&incoming.eth_debug_status1, &mut existing.eth_debug_status1);
+    copy_field(&incoming.aux_status, &mut existing.aux_status);
+    copy_field(&incoming.faults, &mut existing.faults);
+    copy_field(&incoming.throttler, &mut existing.throttler);
+    copy_field(&incoming.vdd_limits, &mut existing.vdd_limits);
+    copy_field(&incoming.thm_limits, &mut existing.thm_limits);
+    copy_field(&incoming.boot_date, &mut existing.boot_date);
+    copy_field(&incoming.wh_fw_date, &mut existing.wh_fw_date);
+    copy_field(&incoming.gddr_train_temp0, &mut existing.gddr_train_temp0);
+    copy_field(&incoming.gddr_train_temp1, &mut existing.gddr_train_temp1);
+    copy_field(&incoming.asic_tmon0, &mut existing.asic_tmon0);
+    copy_field(&incoming.asic_tmon1, &mut existing.asic_tmon1);
 
     // ── Numeric fields — EMA blend ────────────────────────────────────────────
-    blend(&mut state.ddr_speed,         &incoming.ddr_speed,         &mut existing.ddr_speed);
-    blend(&mut state.arc0_health,       &incoming.arc0_health,       &mut existing.arc0_health);
-    blend(&mut state.arc1_health,       &incoming.arc1_health,       &mut existing.arc1_health);
-    blend(&mut state.arc2_health,       &incoming.arc2_health,       &mut existing.arc2_health);
-    blend(&mut state.arc3_health,       &incoming.arc3_health,       &mut existing.arc3_health);
-    blend(&mut state.aiclk,             &incoming.aiclk,             &mut existing.aiclk);
-    blend(&mut state.axiclk,            &incoming.axiclk,            &mut existing.axiclk);
-    blend(&mut state.arcclk,            &incoming.arcclk,            &mut existing.arcclk);
-    blend(&mut state.asic_temperature,  &incoming.asic_temperature,  &mut existing.asic_temperature);
-    blend(&mut state.vreg_temperature,  &incoming.vreg_temperature,  &mut existing.vreg_temperature);
-    blend(&mut state.board_temperature, &incoming.board_temperature, &mut existing.board_temperature);
-    blend(&mut state.vcore,             &incoming.vcore,             &mut existing.vcore);
-    blend(&mut state.tdp,               &incoming.tdp,               &mut existing.tdp);
-    blend(&mut state.tdc,               &incoming.tdc,               &mut existing.tdc);
-    blend(&mut state.fan_speed,         &incoming.fan_speed,         &mut existing.fan_speed);
-    blend(&mut state.input_power,       &incoming.input_power,       &mut existing.input_power);
-    blend(&mut state.board_power_limit, &incoming.board_power_limit, &mut existing.board_power_limit);
-    blend(&mut state.mvddq_power,       &incoming.mvddq_power,       &mut existing.mvddq_power);
-    blend(&mut state.therm_trip_count,  &incoming.therm_trip_count,  &mut existing.therm_trip_count);
-    blend(&mut state.rt_seconds,        &incoming.rt_seconds,        &mut existing.rt_seconds);
+    blend(
+        &mut state.ddr_speed,
+        &incoming.ddr_speed,
+        &mut existing.ddr_speed,
+    );
+    blend(
+        &mut state.arc0_health,
+        &incoming.arc0_health,
+        &mut existing.arc0_health,
+    );
+    blend(
+        &mut state.arc1_health,
+        &incoming.arc1_health,
+        &mut existing.arc1_health,
+    );
+    blend(
+        &mut state.arc2_health,
+        &incoming.arc2_health,
+        &mut existing.arc2_health,
+    );
+    blend(
+        &mut state.arc3_health,
+        &incoming.arc3_health,
+        &mut existing.arc3_health,
+    );
+    blend(&mut state.aiclk, &incoming.aiclk, &mut existing.aiclk);
+    blend(&mut state.axiclk, &incoming.axiclk, &mut existing.axiclk);
+    blend(&mut state.arcclk, &incoming.arcclk, &mut existing.arcclk);
+    blend(
+        &mut state.asic_temperature,
+        &incoming.asic_temperature,
+        &mut existing.asic_temperature,
+    );
+    blend(
+        &mut state.vreg_temperature,
+        &incoming.vreg_temperature,
+        &mut existing.vreg_temperature,
+    );
+    blend(
+        &mut state.board_temperature,
+        &incoming.board_temperature,
+        &mut existing.board_temperature,
+    );
+    blend(&mut state.vcore, &incoming.vcore, &mut existing.vcore);
+    blend(&mut state.tdp, &incoming.tdp, &mut existing.tdp);
+    blend(&mut state.tdc, &incoming.tdc, &mut existing.tdc);
+    blend(
+        &mut state.fan_speed,
+        &incoming.fan_speed,
+        &mut existing.fan_speed,
+    );
+    blend(
+        &mut state.input_power,
+        &incoming.input_power,
+        &mut existing.input_power,
+    );
+    blend(
+        &mut state.board_power_limit,
+        &incoming.board_power_limit,
+        &mut existing.board_power_limit,
+    );
+    blend(
+        &mut state.mvddq_power,
+        &incoming.mvddq_power,
+        &mut existing.mvddq_power,
+    );
+    blend(
+        &mut state.therm_trip_count,
+        &incoming.therm_trip_count,
+        &mut existing.therm_trip_count,
+    );
+    blend(
+        &mut state.rt_seconds,
+        &incoming.rt_seconds,
+        &mut existing.rt_seconds,
+    );
 }
 
 /// Copy `src` into `dst` only when `src` is `Some` — a missing field in the
@@ -285,7 +343,11 @@ mod tests {
         }
 
         let v: i64 = existing.ddr_speed.as_deref().unwrap().parse().unwrap();
-        assert_eq!(v, 16000, "stable DDR speed should converge to 16000, got {}", v);
+        assert_eq!(
+            v, 16000,
+            "stable DDR speed should converge to 16000, got {}",
+            v
+        );
     }
 
     #[test]

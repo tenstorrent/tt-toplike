@@ -3,17 +3,17 @@
 
 //! Workload detection, process monitoring, and inference classification.
 
+pub mod inference;
 #[cfg(feature = "linux-procfs")]
 pub mod process_monitor;
-pub mod inference;
 #[cfg(feature = "linux-procfs")]
 pub mod serving;
 
-#[cfg(feature = "linux-procfs")]
-pub use process_monitor::{ProcessInfo, ProcessMonitor};
 pub use inference::{
-    Confidence, DeviceInferenceState, InferenceEngine, InferenceResult, PowerTrend,
-    TelemetrySample, state_label, state_color,
+    state_color, state_label, Confidence, DeviceInferenceState, InferenceEngine, InferenceResult,
+    PowerTrend, TelemetrySample,
 };
 #[cfg(feature = "linux-procfs")]
-pub use serving::{InferenceServerProbe, ServingMetrics, ServerFlavour};
+pub use process_monitor::{ProcessInfo, ProcessMonitor};
+#[cfg(feature = "linux-procfs")]
+pub use serving::{InferenceServerProbe, ServerFlavour, ServingMetrics};

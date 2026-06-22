@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Memory Flow Topology Visualization
 //!
 //! Full-screen visualization of memory hierarchy and data flow through the chip.
@@ -78,7 +77,13 @@ impl MemoryFlowParticle {
     /// `device_hue_base` is the 360°-divided hue band assigned to this device in the
     /// fleet (e.g. device 0 of 4 → 0°, device 1 → 90°, …).  Reads use that base;
     /// writes offset by +120° so read/write traffic are visually distinct per device.
-    pub fn new_read(channel: usize, current: f32, frame: u32, device_idx: usize, device_hue_base: f32) -> Self {
+    pub fn new_read(
+        channel: usize,
+        current: f32,
+        frame: u32,
+        device_idx: usize,
+        device_hue_base: f32,
+    ) -> Self {
         let channel_pos = (channel as f32 + 0.5) / 12.0;
         let pseudo_rand = ((channel * 73 + frame as usize * 37) % 100) as f32 / 100.0;
 
@@ -99,7 +104,13 @@ impl MemoryFlowParticle {
     }
 
     /// Create a new write particle (Core → DDR).
-    pub fn new_write(channel: usize, current: f32, frame: u32, device_idx: usize, device_hue_base: f32) -> Self {
+    pub fn new_write(
+        channel: usize,
+        current: f32,
+        frame: u32,
+        device_idx: usize,
+        device_hue_base: f32,
+    ) -> Self {
         let channel_pos = (channel as f32 + 0.5) / 12.0;
         let pseudo_rand = ((channel * 97 + frame as usize * 43) % 100) as f32 / 100.0;
 
@@ -155,7 +166,7 @@ impl MemoryFlowParticle {
     pub fn get_color(&self) -> Color {
         use crate::animation::hsv_to_rgb;
         let value = 0.6 + self.intensity * 0.4;
-        hsv_to_rgb(self.hue, 1.0, value)  // Full saturation for maximum vibrancy
+        hsv_to_rgb(self.hue, 1.0, value) // Full saturation for maximum vibrancy
     }
 }
 
@@ -246,13 +257,13 @@ impl MemoryFlowVis {
         for (fleet_pos, device) in devices.iter().enumerate() {
             let device_hue_base = fleet_pos as f32 * hue_step;
             let telem = backend.telemetry(device.index);
-            let smbus  = backend.smbus_telemetry(device.index);
+            let smbus = backend.smbus_telemetry(device.index);
 
             if let Some(t) = telem {
-                let power   = t.power_w();
+                let power = t.power_w();
                 let current = t.current_a();
-                let temp    = t.temp_c();
-                let aiclk   = t.aiclk_mhz() as f32;
+                let temp = t.temp_c();
+                let aiclk = t.aiclk_mhz() as f32;
 
                 let axiclk: f32 = smbus
                     .and_then(|s| s.axiclk.as_deref())
@@ -271,13 +282,16 @@ impl MemoryFlowVis {
                     .map(|v| v as f32)
                     .unwrap_or(0.0);
 
-                self.baseline.update(device.index, power, current, temp, aiclk);
+                self.baseline
+                    .update(device.index, power, current, temp, aiclk);
 
                 // Per-device particle budget: split max_particles across the fleet so
                 // total density stays constant regardless of how many chips are present.
                 let device_budget = self.max_particles / n_devices;
 
-                let device_particle_count = self.particles.iter()
+                let device_particle_count = self
+                    .particles
+                    .iter()
                     .filter(|p| p.device_idx == device.index)
                     .count();
 
@@ -287,7 +301,13 @@ impl MemoryFlowVis {
                 if pseudo_r < read_rate && device_particle_count < device_budget {
                     let num_ch = device.architecture.memory_channels();
                     let channel = (self.frame as usize + fleet_pos * 7) % num_ch;
-                    let mut p = MemoryFlowParticle::new_read(channel, current, self.frame, device.index, device_hue_base);
+                    let mut p = MemoryFlowParticle::new_read(
+                        channel,
+                        current,
+                        self.frame,
+                        device.index,
+                        device_hue_base,
+                    );
                     p.speed *= noc_factor;
                     self.particles.push(p);
                 }
@@ -299,7 +319,13 @@ impl MemoryFlowVis {
                 if pseudo_w < write_rate * 0.5 && device_particle_count < device_budget {
                     let num_ch = device.architecture.memory_channels();
                     let channel = (self.frame as usize + fleet_pos * 7 + num_ch / 2) % num_ch;
-                    let mut p = MemoryFlowParticle::new_write(channel, current, self.frame, device.index, device_hue_base);
+                    let mut p = MemoryFlowParticle::new_write(
+                        channel,
+                        current,
+                        self.frame,
+                        device.index,
+                        device_hue_base,
+                    );
                     p.speed *= noc_factor;
                     self.particles.push(p);
                 }
@@ -311,9 +337,14 @@ impl MemoryFlowVis {
                     for col in 0..self.grid_cols {
                         let idx = row * self.grid_cols + col;
                         if idx < self.core_heat.len() {
-                            let wave = (row as f32 * 0.5 + col as f32 * 0.5
-                                + self.frame as f32 * 0.1 + phase_offset).sin() * 0.15;
-                            let contrib = ((power_change + wave).max(0.0).min(1.0)) / n_devices as f32;
+                            let wave = (row as f32 * 0.5
+                                + col as f32 * 0.5
+                                + self.frame as f32 * 0.1
+                                + phase_offset)
+                                .sin()
+                                * 0.15;
+                            let contrib =
+                                ((power_change + wave).max(0.0).min(1.0)) / n_devices as f32;
                             // Accumulate rather than replace so all devices show simultaneously.
                             self.core_heat[idx] = (self.core_heat[idx] + contrib * 0.1).min(1.0);
                         }
@@ -352,19 +383,23 @@ impl MemoryFlowVis {
         }
 
         // Aggregate telemetry across all devices for the DDR bars and stats.
-        let mut total_power   = 0.0f32;
+        let mut total_power = 0.0f32;
         let mut total_current = 0.0f32;
-        let mut total_temp    = 0.0f32;
-        let mut active        = 0usize;
+        let mut total_temp = 0.0f32;
+        let mut active = 0usize;
         for device in devices {
             if let Some(t) = backend.telemetry(device.index) {
-                total_power   += t.power_w();
+                total_power += t.power_w();
                 total_current += t.current_a();
-                total_temp    += t.temp_c();
-                active        += 1;
+                total_temp += t.temp_c();
+                active += 1;
             }
         }
-        let avg_temp = if active > 0 { total_temp / active as f32 } else { 0.0 };
+        let avg_temp = if active > 0 {
+            total_temp / active as f32
+        } else {
+            0.0
+        };
 
         // Use the first device's architecture for channel count and smbus DDR status.
         let arch_device = &devices[0];
@@ -372,7 +407,7 @@ impl MemoryFlowVis {
         let smbus = backend.smbus_telemetry(arch_device.index);
 
         // Synthetic aggregate telemetry for the DDR bar helpers.
-        let agg_telem_power   = total_power;
+        let agg_telem_power = total_power;
         let agg_telem_current = total_current;
 
         let grid_height = self.height.saturating_sub(6);
@@ -400,7 +435,10 @@ impl MemoryFlowVis {
     ///   other → error / unknown
     ///
     /// Returns a Vec<u8> of length `num_channels`, one nibble per channel.
-    fn parse_ddr_status(smbus: Option<&crate::models::SmbusTelemetry>, num_channels: usize) -> Vec<u8> {
+    fn parse_ddr_status(
+        smbus: Option<&crate::models::SmbusTelemetry>,
+        num_channels: usize,
+    ) -> Vec<u8> {
         let raw = smbus
             .and_then(|s| s.ddr_status.as_ref())
             .and_then(|s| {
@@ -450,19 +488,39 @@ impl MemoryFlowVis {
                     } else {
                         colors::rgb(80, 150, 200)
                     };
-                    spans.push(Span::styled("═".repeat(filled), Style::default().bg(colors::rgb(0, 0, 0)).fg(color)));
-                    spans.push(Span::styled("·".repeat(empty), Style::default().fg(colors::rgb(40, 40, 60))));
+                    spans.push(Span::styled(
+                        "═".repeat(filled),
+                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                    ));
+                    spans.push(Span::styled(
+                        "·".repeat(empty),
+                        Style::default().fg(colors::rgb(40, 40, 60)),
+                    ));
                 }
                 1 => {
                     // Training — animate with alternating characters
-                    let anim = if (self.frame / 4) % 2 == 0 { '◐' } else { '◑' };
+                    let anim = if (self.frame / 4) % 2 == 0 {
+                        '◐'
+                    } else {
+                        '◑'
+                    };
                     let bar = anim.to_string().repeat(channel_width.max(1));
-                    spans.push(Span::styled(bar, Style::default().fg(colors::rgb(80, 220, 220))));
+                    spans.push(Span::styled(
+                        bar,
+                        Style::default().fg(colors::rgb(80, 220, 220)),
+                    ));
                 }
                 _ => {
                     // Untrained / error — dim outline
-                    let color = if status > 2 { colors::rgb(180, 60, 60) } else { colors::rgb(50, 50, 70) };
-                    spans.push(Span::styled("─".repeat(channel_width), Style::default().fg(color)));
+                    let color = if status > 2 {
+                        colors::rgb(180, 60, 60)
+                    } else {
+                        colors::rgb(50, 50, 70)
+                    };
+                    spans.push(Span::styled(
+                        "─".repeat(channel_width),
+                        Style::default().fg(color),
+                    ));
                 }
             }
         }
@@ -471,12 +529,7 @@ impl MemoryFlowVis {
     }
 
     /// Render core grid line with particles.  Takes `avg_temp` directly (pre-aggregated).
-    fn render_grid_line(
-        &self,
-        y: usize,
-        total_height: usize,
-        avg_temp: f32,
-    ) -> Line<'static> {
+    fn render_grid_line(&self, y: usize, total_height: usize, avg_temp: f32) -> Line<'static> {
         let mut spans = Vec::new();
         let temp = avg_temp;
 
@@ -595,18 +648,38 @@ impl MemoryFlowVis {
                     } else {
                         colors::rgb(150, 100, 60)
                     };
-                    spans.push(Span::styled("═".repeat(filled), Style::default().bg(colors::rgb(0, 0, 0)).fg(color)));
-                    spans.push(Span::styled("·".repeat(empty), Style::default().fg(colors::rgb(40, 30, 20))));
+                    spans.push(Span::styled(
+                        "═".repeat(filled),
+                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                    ));
+                    spans.push(Span::styled(
+                        "·".repeat(empty),
+                        Style::default().fg(colors::rgb(40, 30, 20)),
+                    ));
                 }
                 1 => {
                     // Training — animate with alternating characters
-                    let anim = if (self.frame / 4) % 2 == 0 { '◒' } else { '◓' };
+                    let anim = if (self.frame / 4) % 2 == 0 {
+                        '◒'
+                    } else {
+                        '◓'
+                    };
                     let bar = anim.to_string().repeat(channel_width.max(1));
-                    spans.push(Span::styled(bar, Style::default().fg(colors::rgb(220, 180, 80))));
+                    spans.push(Span::styled(
+                        bar,
+                        Style::default().fg(colors::rgb(220, 180, 80)),
+                    ));
                 }
                 _ => {
-                    let color = if status > 2 { colors::rgb(180, 60, 60) } else { colors::rgb(50, 40, 30) };
-                    spans.push(Span::styled("─".repeat(channel_width), Style::default().fg(color)));
+                    let color = if status > 2 {
+                        colors::rgb(180, 60, 60)
+                    } else {
+                        colors::rgb(50, 40, 30)
+                    };
+                    spans.push(Span::styled(
+                        "─".repeat(channel_width),
+                        Style::default().fg(color),
+                    ));
                 }
             }
         }
@@ -638,7 +711,9 @@ impl MemoryFlowVis {
         );
         Line::from(vec![Span::styled(
             stats,
-            Style::default().fg(colors::rgb(200, 200, 220)).add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(colors::rgb(200, 200, 220))
+                .add_modifier(Modifier::DIM),
         )])
     }
 

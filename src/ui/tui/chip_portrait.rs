@@ -7,8 +7,8 @@
 //! exactly one terminal column wide. The render function guarantees that no output
 //! line exceeds `portrait_cols(arch)` characters.
 
-use crate::models::{Architecture, Device, SmbusTelemetry, Telemetry};
 use crate::models::telemetry::tensix_col_harvested;
+use crate::models::{Architecture, Device, SmbusTelemetry, Telemetry};
 
 /// Full chip grid dimensions (cols × rows) for each architecture.
 /// These are the COMPLETE chip grids including ETH, DRAM, and PCIe cells.
@@ -16,9 +16,9 @@ use crate::models::telemetry::tensix_col_harvested;
 pub fn portrait_dims(arch: Architecture) -> (usize, usize) {
     match arch {
         Architecture::Blackhole => (17, 12),
-        Architecture::Wormhole  => (10, 12),
+        Architecture::Wormhole => (10, 12),
         Architecture::Grayskull => (10, 12), // rendered as all-Tensix
-        Architecture::Unknown   => (10, 12),
+        Architecture::Unknown => (10, 12),
     }
 }
 
@@ -46,17 +46,21 @@ pub enum ParticleKind {
 /// Map a particle's `progress` to a display character.
 /// Same lookup for both Read and Write — progress alone determines appearance.
 pub fn particle_char(progress: f32) -> char {
-    if      progress < 0.15 { '·' }
-    else if progress < 0.40 { '∘' }
-    else                     { '○' }
+    if progress < 0.15 {
+        '·'
+    } else if progress < 0.40 {
+        '∘'
+    } else {
+        '○'
+    }
 }
 
 /// Return the max aiclk (MHz) for the given architecture, used to normalise speed.
 fn max_aiclk(arch: Architecture) -> f32 {
     match arch {
         Architecture::Blackhole => 1000.0,
-        Architecture::Wormhole  => 800.0,
-        _                       => 700.0,
+        Architecture::Wormhole => 800.0,
+        _ => 700.0,
     }
 }
 
@@ -77,8 +81,8 @@ pub fn trained_random_col(
     let is_dram_col = |c: usize| -> bool {
         match arch {
             Architecture::Blackhole => c != 8 && core_type_bh(c, 0) == CoreType::Dram,
-            Architecture::Wormhole  => core_type_wh(c, 1) == CoreType::Dram,
-            _                       => false, // GS/Unknown: no DRAM cells in portrait
+            Architecture::Wormhole => core_type_wh(c, 1) == CoreType::Dram,
+            _ => false, // GS/Unknown: no DRAM cells in portrait
         }
     };
 
@@ -88,16 +92,20 @@ pub fn trained_random_col(
     // read nibbles 8-11 which are outside the defined DDR_STATUS bit range.
     let max_channels = match arch {
         Architecture::Blackhole => 8usize,
-        Architecture::Wormhole  => 8,
-        _                       => 8,
+        Architecture::Wormhole => 8,
+        _ => 8,
     };
     let dram_cols: Vec<usize> = (0..portrait_cols)
         .filter(|&c| {
-            if !is_dram_col(c) { return false; }
+            if !is_dram_col(c) {
+                return false;
+            }
             // Map chip column to a DRAM channel bit index (0-based among DRAM cols).
             // Cap at max_channels to avoid reading undefined nibbles beyond DDR_STATUS.
             let dram_idx = (0..c).filter(|&cc| is_dram_col(cc)).count();
-            if dram_idx >= max_channels { return false; }
+            if dram_idx >= max_channels {
+                return false;
+            }
             // DDR_STATUS nibble encoding: each 4-bit nibble = one channel.
             // 0x5 = trained (BH), 2 = trained (legacy WH/GS).
             let nibble = (ddr_status >> (dram_idx * 4)) & 0xF;
@@ -105,7 +113,9 @@ pub fn trained_random_col(
         })
         .collect();
 
-    if dram_cols.is_empty() { return None; }
+    if dram_cols.is_empty() {
+        return None;
+    }
 
     // Cheap hash of tick to pick a column
     let idx = ((tick.wrapping_mul(0x9e37_79b9_7f4a_7c15)) >> 32) as usize % dram_cols.len();
@@ -133,9 +143,9 @@ pub fn tick_particles(
     tick: u64,
     max_particles: usize,
 ) {
-    let power  = telemetry.power_w();
+    let power = telemetry.power_w();
     // aiclk_mhz() returns u32 — cast to f32 for normalisation
-    let aiclk  = telemetry.aiclk_mhz() as f32;
+    let aiclk = telemetry.aiclk_mhz() as f32;
     let aiclk_norm = (aiclk / max_aiclk(arch)).clamp(0.0, 1.0);
 
     // Update baseline with current reading (current and temp not available here; pass 0.0)
@@ -147,24 +157,40 @@ pub fn tick_particles(
     let speed = 1.0_f32 / 12.0 + (1.0 / 5.0 - 1.0 / 12.0) * aiclk_norm;
 
     let (portrait_cols, _portrait_rows) = portrait_dims(arch);
-    let ddr_status = smbus.and_then(|s| s.ddr_status_bitmask()).unwrap_or(u64::MAX);
+    let ddr_status = smbus
+        .and_then(|s| s.ddr_status_bitmask())
+        .unwrap_or(u64::MAX);
 
     // 1. Advance existing particles; drop expired ones.
     particles.retain_mut(|p| match p.kind {
-        ParticleKind::Read  => { p.progress += speed; p.progress < 1.0 }
-        ParticleKind::Write => { p.progress -= speed; p.progress > 0.0 }
+        ParticleKind::Read => {
+            p.progress += speed;
+            p.progress < 1.0
+        }
+        ParticleKind::Write => {
+            p.progress -= speed;
+            p.progress > 0.0
+        }
     });
 
-    if particles.len() >= max_particles { return; }
+    if particles.len() >= max_particles {
+        return;
+    }
 
     // 2. Heartbeat: one read particle every ~20 ticks regardless of power_change.
     // aiclk_norm scales the rate (faster clock → more frequent heartbeat) so the
     // chip feels alive even at idle baseline. This is the minimum animation floor.
     let heartbeat_interval = (20.0 / (0.5 + aiclk_norm * 0.5)).round() as u64;
     if tick % heartbeat_interval == 0 {
-        if let Some(col) = trained_random_col(ddr_status, portrait_cols, arch, tick.wrapping_mul(3)) {
+        if let Some(col) = trained_random_col(ddr_status, portrait_cols, arch, tick.wrapping_mul(3))
+        {
             let from_top = (tick / heartbeat_interval) % 2 == 0;
-            particles.push(Particle { col: col as u8, progress: 0.0, from_top, kind: ParticleKind::Read });
+            particles.push(Particle {
+                col: col as u8,
+                progress: 0.0,
+                from_top,
+                kind: ParticleKind::Read,
+            });
         }
     }
 
@@ -175,7 +201,12 @@ pub fn tick_particles(
         if tick % interval as u64 == 0 {
             if let Some(col) = trained_random_col(ddr_status, portrait_cols, arch, tick) {
                 let from_top = (tick % 2) == 0;
-                particles.push(Particle { col: col as u8, progress: 0.0, from_top, kind: ParticleKind::Read });
+                particles.push(Particle {
+                    col: col as u8,
+                    progress: 0.0,
+                    from_top,
+                    kind: ParticleKind::Read,
+                });
             }
         }
     }
@@ -192,7 +223,12 @@ pub fn tick_particles(
                     let from_top = (tick % 3) != 0;
                     // Write particles start in the interior and retreat outward
                     let progress = 0.2 + ((tick % 7) as f32) * 0.08;
-                    particles.push(Particle { col: col as u8, progress, from_top, kind: ParticleKind::Write });
+                    particles.push(Particle {
+                        col: col as u8,
+                        progress,
+                        from_top,
+                        kind: ParticleKind::Write,
+                    });
                 }
             }
         }
@@ -212,19 +248,28 @@ pub enum CoreType {
 /// BH: 17 cols × 12 rows. ETH at col 0 or 16. PCIe at col 8.
 /// DRAM at row 0 or 11. Tensix everywhere else.
 pub fn core_type_bh(col: usize, row: usize) -> CoreType {
-    if col == 0 || col == 16    { CoreType::Eth }
-    else if row == 0 || row == 11 { CoreType::Dram }
-    else if col == 8            { CoreType::Pcie }
-    else                        { CoreType::Tensix }
+    if col == 0 || col == 16 {
+        CoreType::Eth
+    } else if row == 0 || row == 11 {
+        CoreType::Dram
+    } else if col == 8 {
+        CoreType::Pcie
+    } else {
+        CoreType::Tensix
+    }
 }
 
 /// Return the CoreType for cell (col, row) on a Wormhole chip.
 /// WH: 10 cols × 12 rows. ETH at row 0 or 6. DRAM at col 0 or 5.
 /// Tensix everywhere else (no PCIe special cell).
 pub fn core_type_wh(col: usize, row: usize) -> CoreType {
-    if row == 0 || row == 6  { CoreType::Eth }
-    else if col == 0 || col == 5 { CoreType::Dram }
-    else                     { CoreType::Tensix }
+    if row == 0 || row == 6 {
+        CoreType::Eth
+    } else if col == 0 || col == 5 {
+        CoreType::Dram
+    } else {
+        CoreType::Tensix
+    }
 }
 
 #[cfg(feature = "tui")]
@@ -250,11 +295,14 @@ fn tensix_char(activity: f32, power_change: f32) -> char {
     // A chip at 15W / 300W TDP (5%) that is exactly at baseline scores 0.10
     // after blending; a chip with a 20% power_change above baseline scores 0.30.
     let combined = (activity + power_change * 0.5).min(1.0);
-    if      combined >= 0.60 { '▓' }
-    else if combined >= 0.25 { '▒' }
-    else                     { '░' }  // minimum floor — harvested cells use '·' directly
+    if combined >= 0.60 {
+        '▓'
+    } else if combined >= 0.25 {
+        '▒'
+    } else {
+        '░'
+    } // minimum floor — harvested cells use '·' directly
 }
-
 
 /// Linear interpolation between two RGB triples. `t` is clamped to [0, 1].
 pub(crate) fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
@@ -273,10 +321,10 @@ pub(crate) fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
 pub(crate) fn tensix_temp_rgb(temp_c: f32) -> [u8; 3] {
     // Teal → violet → pink → red. Gold/amber removed — typical operating temps
     // (40-65°C) now land in the violet range rather than brown/orange.
-    const TEAL:   [u8; 3] = [79, 209, 197];
+    const TEAL: [u8; 3] = [79, 209, 197];
     const VIOLET: [u8; 3] = [160, 120, 255];
-    const PINK:   [u8; 3] = [236, 150, 184];
-    const RED:    [u8; 3] = [255, 80,  80 ];
+    const PINK: [u8; 3] = [236, 150, 184];
+    const RED: [u8; 3] = [255, 80, 80];
     if temp_c <= 40.0 {
         TEAL
     } else if temp_c <= 65.0 {
@@ -292,9 +340,9 @@ pub(crate) fn tensix_temp_rgb(temp_c: f32) -> [u8; 3] {
 ///
 /// ≤40°C → cyan, 40–60°C → purple, >60°C → pink. Amber removed.
 pub(crate) fn dram_temp_rgb(temp_c: f32) -> [u8; 3] {
-    const CYAN:   [u8; 3] = [0,   210, 255];
+    const CYAN: [u8; 3] = [0, 210, 255];
     const PURPLE: [u8; 3] = [140, 100, 240];
-    const PINK:   [u8; 3] = [236, 150, 184];
+    const PINK: [u8; 3] = [236, 150, 184];
     if temp_c <= 40.0 {
         CYAN
     } else if temp_c <= 60.0 {
@@ -309,22 +357,30 @@ pub(crate) fn dram_temp_rgb(temp_c: f32) -> [u8; 3] {
 /// Returns None for ETH (col 0, 16) and PCIe (col 8) columns.
 fn bh_tensix_col_index(chip_col: usize) -> Option<usize> {
     match chip_col {
-        1..=7  => Some(chip_col - 1),   // tensix cols 0-6
-        9..=15 => Some(chip_col - 2),   // tensix cols 7-13
-        _      => None,
+        1..=7 => Some(chip_col - 1),  // tensix cols 0-6
+        9..=15 => Some(chip_col - 2), // tensix cols 7-13
+        _ => None,
     }
 }
 
 /// ETH port index for a BH cell (col 0 or 16, any row).
 /// Col 0 → ports 0-11 (row = port), col 16 → ports 12-23.
 fn bh_eth_port(col: usize, row: usize) -> usize {
-    if col == 0 { row } else { 12 + row }
+    if col == 0 {
+        row
+    } else {
+        12 + row
+    }
 }
 
 /// ETH port index for a WH cell (row 0 or 6, any col).
 /// Row 0 → ports 0-9 (col = port), row 6 → ports 10-19.
 fn wh_eth_port(col: usize, row: usize) -> usize {
-    if row == 0 { col } else { 10 + col }
+    if row == 0 {
+        col
+    } else {
+        10 + col
+    }
 }
 
 /// Build portrait rows as plain Strings (for testing and width validation).
@@ -353,8 +409,8 @@ pub fn build_portrait_rows(
         for col in 0..cols {
             let core_type = match device.architecture {
                 Architecture::Blackhole => core_type_bh(col, row),
-                Architecture::Wormhole  => core_type_wh(col, row),
-                _                       => CoreType::Tensix, // GS/Unknown: no ETH/DRAM/PCIe cells
+                Architecture::Wormhole => core_type_wh(col, row),
+                _ => CoreType::Tensix, // GS/Unknown: no ETH/DRAM/PCIe cells
             };
 
             let ch = match core_type {
@@ -363,13 +419,17 @@ pub fn build_portrait_rows(
                 CoreType::Eth => {
                     let port = match device.architecture {
                         Architecture::Blackhole => bh_eth_port(col, row),
-                        _                       => wh_eth_port(col, row),
+                        _ => wh_eth_port(col, row),
                     };
                     let live = smbus
                         .and_then(|s| s.eth_live_status)
                         .map(|mask| (mask >> port) & 1 == 1)
                         .unwrap_or(false);
-                    if live { '●' } else { '·' }
+                    if live {
+                        '●'
+                    } else {
+                        '·'
+                    }
                 }
 
                 CoreType::Dram => '▪',
@@ -379,14 +439,19 @@ pub fn build_portrait_rows(
                     let harvested = if device.architecture == Architecture::Blackhole {
                         bh_tensix_col_index(col)
                             .and_then(|tc| {
-                                smbus.and_then(|s| s.enabled_tensix_col)
+                                smbus
+                                    .and_then(|s| s.enabled_tensix_col)
                                     .map(|mask| tensix_col_harvested(mask, tc))
                             })
                             .unwrap_or(false)
                     } else {
                         false
                     };
-                    if harvested { '·' } else { tensix_char(activity, power_change) }
+                    if harvested {
+                        '·'
+                    } else {
+                        tensix_char(activity, power_change)
+                    }
                 }
             };
 
@@ -395,9 +460,12 @@ pub fn build_portrait_rows(
 
         // Width invariant: exactly `cols` terminal display columns pushed above.
         debug_assert_eq!(
-            unicode_width::UnicodeWidthStr::width(line.as_str()), cols,
-            "portrait row {} terminal width {} ≠ expected {}", row,
-            unicode_width::UnicodeWidthStr::width(line.as_str()), cols
+            unicode_width::UnicodeWidthStr::width(line.as_str()),
+            cols,
+            "portrait row {} terminal width {} ≠ expected {}",
+            row,
+            unicode_width::UnicodeWidthStr::width(line.as_str()),
+            cols
         );
 
         result.push(line);
@@ -448,41 +516,41 @@ pub fn build_portrait_lines<'a>(
     };
 
     // ── Pass 1: build base span grid (Vec<Vec<Span>>) ────────────────────────
-    let mut grid: Vec<Vec<Span<'a>>> = rows_strs.into_iter().enumerate().map(|(row, row_str)| {
-        let mut spans: Vec<Span<'a>> = Vec::with_capacity(cols);
+    let mut grid: Vec<Vec<Span<'a>>> = rows_strs
+        .into_iter()
+        .enumerate()
+        .map(|(row, row_str)| {
+            let mut spans: Vec<Span<'a>> = Vec::with_capacity(cols);
 
-        for (col, ch) in row_str.chars().enumerate() {
-            let core_type = match device.architecture {
-                Architecture::Blackhole => core_type_bh(col, row),
-                Architecture::Wormhole  => core_type_wh(col, row),
-                _                       => CoreType::Tensix,
-            };
+            for (col, ch) in row_str.chars().enumerate() {
+                let core_type = match device.architecture {
+                    Architecture::Blackhole => core_type_bh(col, row),
+                    Architecture::Wormhole => core_type_wh(col, row),
+                    _ => CoreType::Tensix,
+                };
 
-            let style = match (core_type, ch) {
-                // PCIe: indigo spine
-                (CoreType::Pcie, _) =>
-                    Style::default().fg(Color::Rgb(150, 120, 255)),
-                // ETH: cyan when live, dim gray when down
-                (CoreType::Eth, '●') =>
-                    Style::default().fg(Color::Rgb(79, 209, 197)),
-                (CoreType::Eth, _) =>
-                    Style::default().fg(Color::DarkGray),
-                // DRAM: blue→amber→red by per-column GDDR temperature
-                (CoreType::Dram, _) =>
-                    Style::default().fg(dram_color_for_col(col)),
-                // Tensix harvested ('·'): dim gray, no heatmap
-                (CoreType::Tensix, '·') =>
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
-                // Tensix non-harvested (░▒▓): ASIC temperature heatmap color
-                (CoreType::Tensix, _) =>
-                    Style::default().fg(tensix_color),
-            };
+                let style = match (core_type, ch) {
+                    // PCIe: indigo spine
+                    (CoreType::Pcie, _) => Style::default().fg(Color::Rgb(150, 120, 255)),
+                    // ETH: cyan when live, dim gray when down
+                    (CoreType::Eth, '●') => Style::default().fg(Color::Rgb(79, 209, 197)),
+                    (CoreType::Eth, _) => Style::default().fg(Color::DarkGray),
+                    // DRAM: blue→amber→red by per-column GDDR temperature
+                    (CoreType::Dram, _) => Style::default().fg(dram_color_for_col(col)),
+                    // Tensix harvested ('·'): dim gray, no heatmap
+                    (CoreType::Tensix, '·') => Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
+                    // Tensix non-harvested (░▒▓): ASIC temperature heatmap color
+                    (CoreType::Tensix, _) => Style::default().fg(tensix_color),
+                };
 
-            spans.push(Span::styled(ch.to_string(), style));
-        }
+                spans.push(Span::styled(ch.to_string(), style));
+            }
 
-        spans
-    }).collect();
+            spans
+        })
+        .collect();
 
     // ── Pass 2: particle overlay ─────────────────────────────────────────────
     // Only Tensix cells can be overwritten. Write particles win over Read.
@@ -490,7 +558,9 @@ pub fn build_portrait_lines<'a>(
 
     for p in particles {
         let col = p.col as usize;
-        if col >= portrait_cols { continue; }
+        if col >= portrait_cols {
+            continue;
+        }
 
         // Map progress [0, 1] to a row within the appropriate half of the portrait.
         // Particles that enter from the top travel downward into the interior rows;
@@ -500,22 +570,27 @@ pub fn build_portrait_lines<'a>(
         let portrait_row = if p.from_top {
             (p.progress * (portrait_rows as f32 / 2.0)) as usize
         } else {
-            portrait_rows.saturating_sub(1)
+            portrait_rows
+                .saturating_sub(1)
                 .saturating_sub((p.progress * (portrait_rows as f32 / 2.0)) as usize)
         };
-        if portrait_row >= portrait_rows { continue; }
+        if portrait_row >= portrait_rows {
+            continue;
+        }
 
         // Only overwrite Tensix cells — ETH, PCIe, and DRAM cells are never touched.
         let core_type = match device.architecture {
             Architecture::Blackhole => core_type_bh(col, portrait_row),
-            Architecture::Wormhole  => core_type_wh(col, portrait_row),
-            _                       => CoreType::Tensix,
+            Architecture::Wormhole => core_type_wh(col, portrait_row),
+            _ => CoreType::Tensix,
         };
-        if core_type != CoreType::Tensix { continue; }
+        if core_type != CoreType::Tensix {
+            continue;
+        }
 
         let ch = particle_char(p.progress);
         let color = match p.kind {
-            ParticleKind::Read  => Color::Rgb(79, 209, 197),  // teal
+            ParticleKind::Read => Color::Rgb(79, 209, 197), // teal
             ParticleKind::Write => Color::Rgb(236, 150, 184), // pink
         };
 
@@ -558,7 +633,7 @@ pub fn render_chip_portrait(
     let used = Rect {
         x: area.x,
         y: area.y,
-        width:  (cols as u16).min(area.width),
+        width: (cols as u16).min(area.width),
         height: (rows as u16).min(area.height),
     };
 
@@ -590,8 +665,13 @@ mod tests {
     #[test]
     fn test_bh_eth_cols() {
         for row in 0..12 {
-            assert_eq!(core_type_bh(0,  row), CoreType::Eth,  "BH col=0  row={}", row);
-            assert_eq!(core_type_bh(16, row), CoreType::Eth,  "BH col=16 row={}", row);
+            assert_eq!(core_type_bh(0, row), CoreType::Eth, "BH col=0  row={}", row);
+            assert_eq!(
+                core_type_bh(16, row),
+                CoreType::Eth,
+                "BH col=16 row={}",
+                row
+            );
         }
     }
 
@@ -599,9 +679,16 @@ mod tests {
     fn test_bh_dram_rows() {
         // DRAM rows only apply to non-ETH columns
         for col in 1..16_usize {
-            if col == 8 { continue; } // PCIe col
-            assert_eq!(core_type_bh(col, 0),  CoreType::Dram, "BH col={} row=0",  col);
-            assert_eq!(core_type_bh(col, 11), CoreType::Dram, "BH col={} row=11", col);
+            if col == 8 {
+                continue;
+            } // PCIe col
+            assert_eq!(core_type_bh(col, 0), CoreType::Dram, "BH col={} row=0", col);
+            assert_eq!(
+                core_type_bh(col, 11),
+                CoreType::Dram,
+                "BH col={} row=11",
+                col
+            );
         }
     }
 
@@ -615,9 +702,14 @@ mod tests {
     #[test]
     fn test_bh_tensix_interior() {
         // Sample interior cells that are definitely Tensix
-        for &(col, row) in &[(1,1), (4,5), (15,10), (7,6), (9,3)] {
-            assert_eq!(core_type_bh(col, row), CoreType::Tensix,
-                "expected Tensix at BH ({},{})", col, row);
+        for &(col, row) in &[(1, 1), (4, 5), (15, 10), (7, 6), (9, 3)] {
+            assert_eq!(
+                core_type_bh(col, row),
+                CoreType::Tensix,
+                "expected Tensix at BH ({},{})",
+                col,
+                row
+            );
         }
     }
 
@@ -625,10 +717,10 @@ mod tests {
     fn test_bh_dram_row_takes_precedence_over_pcie() {
         // col=8, row=0 → ETH col wins over DRAM, but col 8 is interior; row 0 should be DRAM
         // col=0 row=0 → ETH wins (ETH check first)
-        assert_eq!(core_type_bh(0, 0),   CoreType::Eth);  // ETH col
-        assert_eq!(core_type_bh(8, 0),   CoreType::Dram); // PCIe col but row 0 → DRAM
-        assert_eq!(core_type_bh(8, 11),  CoreType::Dram); // same
-        assert_eq!(core_type_bh(8, 1),   CoreType::Pcie); // PCIe non-DRAM row
+        assert_eq!(core_type_bh(0, 0), CoreType::Eth); // ETH col
+        assert_eq!(core_type_bh(8, 0), CoreType::Dram); // PCIe col but row 0 → DRAM
+        assert_eq!(core_type_bh(8, 11), CoreType::Dram); // same
+        assert_eq!(core_type_bh(8, 1), CoreType::Pcie); // PCIe non-DRAM row
     }
 
     // ── WH core type exhaustive ───────────────────────────────────────────────
@@ -644,17 +736,32 @@ mod tests {
     #[test]
     fn test_wh_dram_cols() {
         // DRAM only for non-ETH rows
-        for row in [1,2,3,4,5,7,8,9,10,11] {
-            assert_eq!(core_type_wh(0, row), CoreType::Dram, "WH DRAM col=0 row={}", row);
-            assert_eq!(core_type_wh(5, row), CoreType::Dram, "WH DRAM col=5 row={}", row);
+        for row in [1, 2, 3, 4, 5, 7, 8, 9, 10, 11] {
+            assert_eq!(
+                core_type_wh(0, row),
+                CoreType::Dram,
+                "WH DRAM col=0 row={}",
+                row
+            );
+            assert_eq!(
+                core_type_wh(5, row),
+                CoreType::Dram,
+                "WH DRAM col=5 row={}",
+                row
+            );
         }
     }
 
     #[test]
     fn test_wh_tensix_interior() {
-        for &(col, row) in &[(1,1), (3,5), (9,11), (6,8), (4,4)] {
-            assert_eq!(core_type_wh(col, row), CoreType::Tensix,
-                "expected Tensix at WH ({},{})", col, row);
+        for &(col, row) in &[(1, 1), (3, 5), (9, 11), (6, 8), (4, 4)] {
+            assert_eq!(
+                core_type_wh(col, row),
+                CoreType::Tensix,
+                "expected Tensix at WH ({},{})",
+                col,
+                row
+            );
         }
     }
 
@@ -665,8 +772,8 @@ mod tests {
         assert_eq!(core_type_wh(5, 6), CoreType::Eth);
     }
 
-    use crate::models::{Device, SmbusTelemetry, Telemetry};
     use crate::models::telemetry::GddrTempPair;
+    use crate::models::{Device, SmbusTelemetry, Telemetry};
 
     fn make_smbus(_arch: Architecture) -> SmbusTelemetry {
         let mut s = SmbusTelemetry::new();
@@ -684,14 +791,22 @@ mod tests {
     fn make_device(arch: Architecture) -> Device {
         let board = match arch {
             Architecture::Blackhole => "p150a",
-            Architecture::Wormhole  => "n150",
-            _                       => "e150",
+            Architecture::Wormhole => "n150",
+            _ => "e150",
         };
-        Device::new(0, board.to_string(), "0000:01:00.0".to_string(), "(0,0)".to_string())
+        Device::new(
+            0,
+            board.to_string(),
+            "0000:01:00.0".to_string(),
+            "(0,0)".to_string(),
+        )
     }
 
     fn make_telemetry() -> Telemetry {
-        Telemetry { power: Some(100.0), ..Telemetry::new() }
+        Telemetry {
+            power: Some(100.0),
+            ..Telemetry::new()
+        }
     }
 
     // ── Width contract ────────────────────────────────────────────────────────
@@ -699,9 +814,9 @@ mod tests {
     #[test]
     fn test_bh_portrait_row_width_exact() {
         use unicode_width::UnicodeWidthStr;
-        let device  = make_device(Architecture::Blackhole);
-        let smbus   = make_smbus(Architecture::Blackhole);
-        let telem   = make_telemetry();
+        let device = make_device(Architecture::Blackhole);
+        let smbus = make_smbus(Architecture::Blackhole);
+        let telem = make_telemetry();
         let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         assert_eq!(rows.len(), 12, "BH must have 12 rows");
         for (i, row) in rows.iter().enumerate() {
@@ -713,9 +828,9 @@ mod tests {
     #[test]
     fn test_wh_portrait_row_width_exact() {
         use unicode_width::UnicodeWidthStr;
-        let device  = make_device(Architecture::Wormhole);
-        let smbus   = make_smbus(Architecture::Wormhole);
-        let telem   = make_telemetry();
+        let device = make_device(Architecture::Wormhole);
+        let smbus = make_smbus(Architecture::Wormhole);
+        let telem = make_telemetry();
         let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         assert_eq!(rows.len(), 12, "WH must have 12 rows");
         for (i, row) in rows.iter().enumerate() {
@@ -728,11 +843,15 @@ mod tests {
     fn test_bh_portrait_no_overflow_no_smbus() {
         use unicode_width::UnicodeWidthStr;
         let device = make_device(Architecture::Blackhole);
-        let telem  = make_telemetry();
+        let telem = make_telemetry();
         let rows = build_portrait_rows(&device, &telem, None, 0, 0.0);
         for (i, row) in rows.iter().enumerate() {
-            assert_eq!(UnicodeWidthStr::width(row.as_str()), 17,
-                "BH row {} overflowed without smbus", i);
+            assert_eq!(
+                UnicodeWidthStr::width(row.as_str()),
+                17,
+                "BH row {} overflowed without smbus",
+                i
+            );
         }
     }
 
@@ -741,22 +860,25 @@ mod tests {
     #[test]
     fn test_bh_eth_cols_show_eth_char() {
         let device = make_device(Architecture::Blackhole);
-        let smbus  = make_smbus(Architecture::Blackhole);
-        let telem  = make_telemetry();
+        let smbus = make_smbus(Architecture::Blackhole);
+        let telem = make_telemetry();
         let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         // col 0 should be '●' (ETH live) in all rows
         for row in &rows {
             let chars: Vec<char> = row.chars().collect();
-            assert!(chars[0] == '●' || chars[0] == '·',
-                "BH col=0 should be ETH char, got '{}'", chars[0]);
+            assert!(
+                chars[0] == '●' || chars[0] == '·',
+                "BH col=0 should be ETH char, got '{}'",
+                chars[0]
+            );
         }
     }
 
     #[test]
     fn test_bh_dram_rows_show_block() {
         let device = make_device(Architecture::Blackhole);
-        let smbus  = make_smbus(Architecture::Blackhole);
-        let telem  = make_telemetry();
+        let smbus = make_smbus(Architecture::Blackhole);
+        let telem = make_telemetry();
         let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         // row 0 col 1 (non-ETH, non-PCIe) should be '▪'
         let row0_chars: Vec<char> = rows[0].chars().collect();
@@ -768,8 +890,8 @@ mod tests {
     #[test]
     fn test_bh_pcie_shows_cross() {
         let device = make_device(Architecture::Blackhole);
-        let smbus  = make_smbus(Architecture::Blackhole);
-        let telem  = make_telemetry();
+        let smbus = make_smbus(Architecture::Blackhole);
+        let telem = make_telemetry();
         let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         // col 8, non-DRAM rows (1-10) should be '╋'
         for row_idx in 1..11 {
@@ -783,12 +905,16 @@ mod tests {
         let device = make_device(Architecture::Blackhole);
         let mut smbus = make_smbus(Architecture::Blackhole);
         smbus.enabled_tensix_col = Some(0x3FFE); // bit 0 clear → Tensix col 0 harvested
-        // BH Tensix col 0 = chip col 1 (first non-ETH col)
+                                                 // BH Tensix col 0 = chip col 1 (first non-ETH col)
         let telem = make_telemetry();
         let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         // chip col 1, row 1 (Tensix area) should be '·' (harvested)
         let chars: Vec<char> = rows[1].chars().collect();
-        assert_eq!(chars[1], '·', "harvested col should show '·', got '{}'", chars[1]);
+        assert_eq!(
+            chars[1], '·',
+            "harvested col should show '·', got '{}'",
+            chars[1]
+        );
     }
 
     #[test]
@@ -938,9 +1064,13 @@ mod tests {
     #[test]
     fn test_build_portrait_lines_floor_char() {
         let device = make_device(Architecture::Blackhole);
-        let smbus  = make_smbus(Architecture::Blackhole);
-        let telem  = Telemetry { power: Some(1.0), asic_temperature: Some(20.0), ..Telemetry::new() };
-        let rows   = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
+        let smbus = make_smbus(Architecture::Blackhole);
+        let telem = Telemetry {
+            power: Some(1.0),
+            asic_temperature: Some(20.0),
+            ..Telemetry::new()
+        };
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
         let ch = rows[1].chars().nth(1).unwrap();
         assert_eq!(ch, '░', "idle non-harvested Tensix should show '░' floor");
     }
@@ -950,8 +1080,8 @@ mod tests {
     #[test]
     fn test_build_portrait_lines_particle_overlay() {
         let device = make_device(Architecture::Blackhole);
-        let smbus  = make_smbus(Architecture::Blackhole);
-        let telem  = make_telemetry();
+        let smbus = make_smbus(Architecture::Blackhole);
+        let telem = make_telemetry();
 
         // Spawn a Read particle at column 1 (BH DRAM col), from_top=true, progress=0.5
         // At progress=0.5 the particle is at portrait_row = (0.5 * 12/2) as usize = 3
@@ -969,14 +1099,18 @@ mod tests {
         // Collect chars from spans
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         let chars: Vec<char> = text.chars().collect();
-        assert_eq!(chars[1], '○', "particle at (col=1, row=3) should be '○', got '{}'", chars[1]);
+        assert_eq!(
+            chars[1], '○',
+            "particle at (col=1, row=3) should be '○', got '{}'",
+            chars[1]
+        );
     }
 
     #[test]
     fn test_build_portrait_lines_particle_no_overwrite_dram() {
         let device = make_device(Architecture::Blackhole);
-        let smbus  = make_smbus(Architecture::Blackhole);
-        let telem  = make_telemetry();
+        let smbus = make_smbus(Architecture::Blackhole);
+        let telem = make_telemetry();
 
         // Place a Read particle that would land on row 0 (DRAM row in BH, col 1)
         // BH row 0 col 1 is a DRAM cell — particle must NOT overwrite it
@@ -990,14 +1124,22 @@ mod tests {
         let lines = build_portrait_lines(&device, &telem, Some(&smbus), &particles, 0.0);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         let chars: Vec<char> = text.chars().collect();
-        assert_eq!(chars[1], '▪', "DRAM cell must not be overwritten by particle");
+        assert_eq!(
+            chars[1], '▪',
+            "DRAM cell must not be overwritten by particle"
+        );
     }
 
     // ── Particle system ───────────────────────────────────────────────────────
 
     #[test]
     fn test_particle_read_advances() {
-        let mut p = Particle { col: 3, progress: 0.0, from_top: true, kind: ParticleKind::Read };
+        let mut p = Particle {
+            col: 3,
+            progress: 0.0,
+            from_top: true,
+            kind: ParticleKind::Read,
+        };
         let speed = 0.1;
         p.progress += speed;
         assert!((p.progress - 0.1).abs() < f32::EPSILON);
@@ -1005,7 +1147,12 @@ mod tests {
 
     #[test]
     fn test_particle_write_retreats() {
-        let mut p = Particle { col: 3, progress: 0.5, from_top: true, kind: ParticleKind::Write };
+        let mut p = Particle {
+            col: 3,
+            progress: 0.5,
+            from_top: true,
+            kind: ParticleKind::Write,
+        };
         let speed = 0.1;
         p.progress -= speed;
         assert!((p.progress - 0.4).abs() < 0.001);
@@ -1043,6 +1190,9 @@ mod tests {
     fn test_trained_random_col_none_when_no_trained() {
         let (cols, _) = portrait_dims(Architecture::Blackhole);
         let result = trained_random_col(0u64, cols, Architecture::Blackhole, 42);
-        assert!(result.is_none(), "should return None when no trained columns");
+        assert!(
+            result.is_none(),
+            "should return None when no trained columns"
+        );
     }
 }

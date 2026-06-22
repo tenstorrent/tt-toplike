@@ -175,10 +175,16 @@ impl DeviceState {
     }
 
     fn mean_fill(&self) -> f32 {
-        let (sum, count) = self.channels.iter()
+        let (sum, count) = self
+            .channels
+            .iter()
             .filter(|c| c.enabled)
             .fold((0.0_f32, 0usize), |(s, n), c| (s + c.fill, n + 1));
-        if count == 0 { 0.0 } else { sum / count as f32 }
+        if count == 0 {
+            0.0
+        } else {
+            sum / count as f32
+        }
     }
 }
 
@@ -192,13 +198,20 @@ pub struct DefragVis {
 
 impl DefragVis {
     pub fn new(width: usize, height: usize) -> Self {
-        Self { width, height, frame: 0, devices: Default::default() }
+        Self {
+            width,
+            height,
+            frame: 0,
+            devices: Default::default(),
+        }
     }
 
     /// Returns false when all devices are in Init or Idle phase — no animation
     /// is needed, so callers can drop to a lower poll rate (e.g. 10 FPS vs 60 FPS).
     pub fn is_animated(&self) -> bool {
-        self.devices.values().any(|ds| !matches!(ds.phase, Phase::Idle | Phase::Init))
+        self.devices
+            .values()
+            .any(|ds| !matches!(ds.phase, Phase::Idle | Phase::Init))
     }
 
     pub fn update(&mut self, backend: &dyn TelemetryBackend) {
@@ -206,12 +219,15 @@ impl DefragVis {
 
         for device in backend.devices() {
             let idx = device.index;
-            let ds = self.devices.entry(idx).or_insert_with(|| DeviceState::new(idx));
+            let ds = self
+                .devices
+                .entry(idx)
+                .or_insert_with(|| DeviceState::new(idx));
 
             let telem = backend.telemetry(idx);
             let smbus = backend.smbus_telemetry(idx);
 
-            let power  = telem.map(|t| t.power_w()).unwrap_or(0.0);
+            let power = telem.map(|t| t.power_w()).unwrap_or(0.0);
             // Prefer sysfs aiclk; fall back to SMBUS AICLK register (hex string).
             // Sysfs reads 0 during GDDR DMA even when Tensix is running, so SMBUS
             // is the authoritative source.
@@ -221,7 +237,7 @@ impl DefragVis {
                 .unwrap_or(0);
             let sysfs_aiclk = telem.and_then(|t| t.aiclk).unwrap_or(0);
             let aiclk = smbus_aiclk.max(sysfs_aiclk);
-            let hb     = telem.and_then(|t| t.heartbeat).unwrap_or(0);
+            let hb = telem.and_then(|t| t.heartbeat).unwrap_or(0);
 
             // Fast EMA (noise filter for phase transitions).
             ds.power_ema = ds.power_ema * 0.92 + power * 0.08;
@@ -233,7 +249,9 @@ impl DefragVis {
                 ds.heartbeat_pulse = 8;
                 ds.last_heartbeat = hb;
             }
-            if ds.heartbeat_pulse > 0 { ds.heartbeat_pulse -= 1; }
+            if ds.heartbeat_pulse > 0 {
+                ds.heartbeat_pulse -= 1;
+            }
 
             // Per-channel temps from SMBUS
             let ch_temps: [f32; GDDR_CHANNELS] = if let Some(s) = smbus {
@@ -247,7 +265,9 @@ impl DefragVis {
                     s.gddr_temps[3].map(|p| p.0[0]).unwrap_or(25.0),
                     s.gddr_temps[3].map(|p| p.0[1]).unwrap_or(25.0),
                 ]
-            } else { [25.0; GDDR_CHANNELS] };
+            } else {
+                [25.0; GDDR_CHANNELS]
+            };
 
             // Per-channel DDR training status (nibble per channel-pair from DDR_STATUS)
             let ddr_mask: u64 = smbus
@@ -280,7 +300,9 @@ impl DefragVis {
                     s.gddr_corr_errs[2].unwrap_or(0) as u32,
                     s.gddr_corr_errs[3].unwrap_or(0) as u32,
                 ]
-            } else { [0; 4] };
+            } else {
+                [0; 4]
+            };
 
             // Update per-channel static properties
             for (ch_idx, ch) in ds.channels.iter_mut().enumerate() {
@@ -299,11 +321,15 @@ impl DefragVis {
                     ch.err_flash = 12; // flash for ~12 frames
                 }
                 ch.last_corr_errs = pair_errs;
-                if ch.err_flash > 0 { ch.err_flash -= 1; }
+                if ch.err_flash > 0 {
+                    ch.err_flash -= 1;
+                }
             }
 
             // All-channels-full → force Running even if aiclk still reads 0.
-            let all_full = ds.channels.iter()
+            let all_full = ds
+                .channels
+                .iter()
                 .filter(|c| c.enabled && c.trained)
                 .all(|c| c.fill >= 0.999);
 
@@ -318,10 +344,16 @@ impl DefragVis {
             let new_phase = if ds.phase == Phase::Deconstructing {
                 // Only check enabled channels — disabled channels sit at fill=0 permanently
                 // and would otherwise make this trivially true before enabled channels drain.
-                let all_empty = ds.channels.iter()
+                let all_empty = ds
+                    .channels
+                    .iter()
                     .filter(|c| c.enabled)
                     .all(|c| c.fill <= 0.0);
-                if all_empty { Phase::Dma } else { Phase::Deconstructing }
+                if all_empty {
+                    Phase::Dma
+                } else {
+                    Phase::Deconstructing
+                }
             } else if !ds.channels.iter().any(|c| c.enabled && c.trained) {
                 Phase::Init
             } else if ds.phase == Phase::Running && {
@@ -352,13 +384,18 @@ impl DefragVis {
                             ch.head_pos = 0.0;
                         }
                     } else {
-                        for ch in ds.channels.iter_mut() { ch.head_pos = ch.fill; }
+                        for ch in ds.channels.iter_mut() {
+                            ch.head_pos = ch.fill;
+                        }
                     }
                     ds.idle_power = ds.power_ema;
                 }
                 (p, Phase::Running) if p != Phase::Running => {
                     for ch in ds.channels.iter_mut() {
-                        if ch.enabled && ch.trained { ch.fill = 1.0; ch.head_pos = 1.0; }
+                        if ch.enabled && ch.trained {
+                            ch.fill = 1.0;
+                            ch.head_pos = 1.0;
+                        }
                     }
                 }
                 (_, Phase::Deconstructing) => {
@@ -389,16 +426,25 @@ impl DefragVis {
                     let start = ds.dma_start_frame.unwrap_or(self.frame);
                     // PCIe link width drives fill speed.  Without SMBUS (mock / sysfs),
                     // pcie_usage=0 → use mid speed so DMA is clearly visible.
-                    let pcie_speed = if ds.pcie_usage >= 16 { 1.0_f32 }
-                        else if ds.pcie_usage >= 8 { 0.65 }
-                        else if ds.pcie_usage >= 4 { 0.45 }
-                        else { 0.35 }; // slower mock default — DMA sweep is the show
+                    let pcie_speed = if ds.pcie_usage >= 16 {
+                        1.0_f32
+                    } else if ds.pcie_usage >= 8 {
+                        0.65
+                    } else if ds.pcie_usage >= 4 {
+                        0.45
+                    } else {
+                        0.35
+                    }; // slower mock default — DMA sweep is the show
                     for (ch_idx, ch) in ds.channels.iter_mut().enumerate() {
-                        if !ch.enabled || !ch.trained { continue; }
+                        if !ch.enabled || !ch.trained {
+                            continue;
+                        }
                         // Stagger channel starts so they don't all begin simultaneously.
                         // Channels stagger by 20 frames each (was 8) for clear cascade.
                         let stagger = ch_idx as u64 * 20;
-                        if self.frame < start + stagger { continue; }
+                        if self.frame < start + stagger {
+                            continue;
+                        }
                         let heat = ((ch.temp_ema - 25.0) / 20.0).clamp(0.0, 1.5);
                         // Base rate 0.0012 → ~14 s full fill at mock speed. Theatrical.
                         let rate = 0.0012 * pcie_speed * (1.0 + heat * 0.4);
@@ -411,17 +457,20 @@ impl DefragVis {
                     // Continuous organic signals — update every frame.
 
                     // thermal_mood: slow EMA of mean GDDR temp, normalized 25°C→0, 85°C→1.
-                    let (temp_sum, temp_count) = ds.channels.iter()
+                    let (temp_sum, temp_count) = ds
+                        .channels
+                        .iter()
                         .filter(|c| c.enabled)
                         .fold((0.0_f32, 0usize), |(s, n), c| (s + c.temp_ema, n + 1));
                     if temp_count > 0 {
-                        let mean_norm = ((temp_sum / temp_count as f32 - 25.0) / 60.0).clamp(0.0, 1.0);
+                        let mean_norm =
+                            ((temp_sum / temp_count as f32 - 25.0) / 60.0).clamp(0.0, 1.0);
                         ds.thermal_mood = ds.thermal_mood * 0.995 + mean_norm * 0.005;
                     }
 
                     // inference_energy: fast EMA of excess power above slow baseline.
-                    let energy_raw = (ds.power_ema - ds.power_ema_slow).max(0.0)
-                        / ds.power_ema_slow.max(1.0);
+                    let energy_raw =
+                        (ds.power_ema - ds.power_ema_slow).max(0.0) / ds.power_ema_slow.max(1.0);
                     ds.inference_energy = ds.inference_energy * 0.85 + energy_raw * 0.15;
                     ds.inference_energy *= 0.94; // additional decay so it falls after load drops
 
@@ -437,17 +486,22 @@ impl DefragVis {
                         let intensity = ((ds.power_ema / ds.power_ema_slow) - 1.0).clamp(0.0, 1.0);
                         for ch_idx in 0..GDDR_CHANNELS {
                             let ch = &ds.channels[ch_idx];
-                            if !ch.enabled || !ch.trained { continue; }
+                            if !ch.enabled || !ch.trained {
+                                continue;
+                            }
                             // Use 200 as upper bound — render will clamp against actual width.
                             // .max(1) prevents zero-modulo panic when fill rounds to 0.
                             let resident_cells = ((ch.fill * 200.0) as usize).max(1);
                             // n_cells: 5–12, varies by frame + channel to avoid sync flicker.
-                            let n_cells = 5 + (self.frame.wrapping_mul(7).wrapping_add(ch_idx as u64 * 13)) % 8;
+                            let n_cells = 5
+                                + (self.frame.wrapping_mul(7).wrapping_add(ch_idx as u64 * 13)) % 8;
                             // Pseudo-random cell indices — no rand crate needed.
                             // Seed mixes frame, channel, and cell index for independence.
                             let cells: Vec<usize> = (0..n_cells as usize)
                                 .map(|i| {
-                                    let seed = self.frame.wrapping_mul(31)
+                                    let seed = self
+                                        .frame
+                                        .wrapping_mul(31)
                                         .wrapping_add(ch_idx as u64 * 97)
                                         .wrapping_add(i as u64 * 61);
                                     (seed % resident_cells as u64) as usize
@@ -485,7 +539,9 @@ impl DefragVis {
                     // Channel 0 drains fastest (first in, first out), channel 7 slowest.
                     // Prime-modulated scatter makes each channel's edge feel alive.
                     for (ch_idx, ch) in ds.channels.iter_mut().enumerate() {
-                        if !ch.enabled { continue; }
+                        if !ch.enabled {
+                            continue;
+                        }
                         let primes = [7u64, 11, 13, 17, 19, 23, 29, 31];
                         let p = primes[ch_idx];
                         // Channel 0 drains ~2.5× faster than channel 7.
@@ -540,12 +596,12 @@ impl DefragVis {
             let mut spans: Vec<Span<'static>> = Vec::new();
             for (d_idx, device) in devices.iter().enumerate() {
                 let idx = device.index;
-                let telem  = backend.telemetry(idx);
-                let ds     = self.devices.get(&idx);
+                let telem = backend.telemetry(idx);
+                let ds = self.devices.get(&idx);
 
-                let power  = telem.map(|t| t.power_w()).unwrap_or(0.0);
-                let temp   = telem.map(|t| t.temp_c()).unwrap_or(25.0);
-                let smbus  = backend.smbus_telemetry(idx);
+                let power = telem.map(|t| t.power_w()).unwrap_or(0.0);
+                let temp = telem.map(|t| t.temp_c()).unwrap_or(25.0);
+                let smbus = backend.smbus_telemetry(idx);
                 let smbus_aiclk: u32 = smbus
                     .and_then(|s| s.aiclk.as_deref())
                     .and_then(|v| parse_hex_or_dec(v))
@@ -561,7 +617,9 @@ impl DefragVis {
                     .map(|v| (v as f32 / 20.0).clamp(0.0, 1.0))
                     .unwrap_or(0.0);
 
-                if d_idx > 0 { spans.push(Span::raw(" ".repeat(gutter))); }
+                if d_idx > 0 {
+                    spans.push(Span::raw(" ".repeat(gutter)));
+                }
 
                 if row == 0 {
                     self.render_device_label(&mut spans, device, ds, power, temp, aiclk, grid_w);
@@ -575,7 +633,17 @@ impl DefragVis {
                         spans.push(Span::raw(" ".repeat(grid_w)));
                         continue;
                     }
-                    self.render_channel_row(&mut spans, ds, idx, ch_idx, sub_row, rows_per_channel, grid_w, temp, mvddq_norm);
+                    self.render_channel_row(
+                        &mut spans,
+                        ds,
+                        idx,
+                        ch_idx,
+                        sub_row,
+                        rows_per_channel,
+                        grid_w,
+                        temp,
+                        mvddq_norm,
+                    );
                 }
             }
             lines.push(Line::from(spans));
@@ -604,36 +672,46 @@ impl DefragVis {
         // multibyte chars so byte length != display width.
         const PHASE_W: usize = 9; // 1 leading space + 8 label chars
         let phase_str = match phase {
-            Phase::Init           => " INIT    ",  // 9 display cols
-            Phase::Dma            => " DMA ←←  ",  // 9 display cols
-            Phase::Running        => " RUN ▶▶  ",  // 9 display cols
-            Phase::Idle           => " idle    ",  // 9 display cols
-            Phase::Deconstructing => " EVICT ░ ",  // 9 display cols
+            Phase::Init => " INIT    ",           // 9 display cols
+            Phase::Dma => " DMA ←←  ",            // 9 display cols
+            Phase::Running => " RUN ▶▶  ",        // 9 display cols
+            Phase::Idle => " idle    ",           // 9 display cols
+            Phase::Deconstructing => " EVICT ░ ", // 9 display cols
         };
         let phase_color = match phase {
-            Phase::Init           => colors::rgb(120, 120, 180),
-            Phase::Dma            => colors::rgb(255, 200, 60),
-            Phase::Running        => colors::rgb(80, 220, 140),
-            Phase::Idle           => colors::rgb(80, 80, 100),
+            Phase::Init => colors::rgb(120, 120, 180),
+            Phase::Dma => colors::rgb(255, 200, 60),
+            Phase::Running => colors::rgb(80, 220, 140),
+            Phase::Idle => colors::rgb(80, 80, 100),
             Phase::Deconstructing => colors::rgb(220, 80, 80),
         };
 
         // Heartbeat indicator: pulses on ARC tick
         let hb_char = if hb_pulse > 0 { "♥ " } else { "· " };
-        let hb_color = if hb_pulse > 0 { colors::rgb(220, 80, 100) } else { colors::rgb(50, 50, 60) };
+        let hb_color = if hb_pulse > 0 {
+            colors::rgb(220, 80, 100)
+        } else {
+            colors::rgb(50, 50, 60)
+        };
 
         // Fixed-width stats so the label never shifts.
         // hb(2) + label + phase(PHASE_W) must fit in grid_w.
         let label = format!(
             "{}{} {:>3}% {:>4}W {:>4}MHz e{}",
-            device.architecture.abbrev(), device.index,
-            (mean_fill * 100.0) as u32, power as u32, aiclk, eth,
+            device.architecture.abbrev(),
+            device.index,
+            (mean_fill * 100.0) as u32,
+            power as u32,
+            aiclk,
+            eth,
         );
         let label_budget = grid_w.saturating_sub(2 + PHASE_W);
         let truncated = if label.len() > label_budget {
             // Truncate on a char boundary
             let mut end = label_budget;
-            while end > 0 && !label.is_char_boundary(end) { end -= 1; }
+            while end > 0 && !label.is_char_boundary(end) {
+                end -= 1;
+            }
             label[..end].to_string()
         } else {
             label
@@ -642,11 +720,21 @@ impl DefragVis {
         let hue = temp_to_hue(temp);
         let label_color = hsv_to_rgb(hue, 0.5, 0.85);
 
-        spans.push(Span::styled(hb_char.to_string(), Style::default().fg(hb_color)));
-        spans.push(Span::styled(truncated, Style::default().fg(label_color).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            hb_char.to_string(),
+            Style::default().fg(hb_color),
+        ));
+        spans.push(Span::styled(
+            truncated,
+            Style::default()
+                .fg(label_color)
+                .add_modifier(Modifier::BOLD),
+        ));
         spans.push(Span::styled(
             phase_str.to_string(),
-            Style::default().fg(phase_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(phase_color)
+                .add_modifier(Modifier::BOLD),
         ));
     }
 
@@ -659,14 +747,22 @@ impl DefragVis {
         grid_w: usize,
     ) {
         let pcie = ds.map(|s| s.pcie_usage).unwrap_or(0);
-        let pcie_str = if pcie >= 16 { "x16" } else if pcie >= 8 { " x8" } else if pcie >= 4 { " x4" } else { "   " };
+        let pcie_str = if pcie >= 16 {
+            "x16"
+        } else if pcie >= 8 {
+            " x8"
+        } else if pcie >= 4 {
+            " x4"
+        } else {
+            "   "
+        };
         // Power bar: 0–200W range (TDP on BH can hit 160W+)
         let bar_w = grid_w.saturating_sub(11);
         let pct = (power / 200.0).clamp(0.0, 1.0);
         let filled = (pct * bar_w as f32) as usize;
         let hue = temp_to_hue(temp);
         let color = hsv_to_rgb(hue, 0.8, 0.8);
-        let dim   = hsv_to_rgb(hue, 0.4, 0.35);
+        let dim = hsv_to_rgb(hue, 0.4, 0.35);
 
         let prefix = format!("{:4.0}W {} ", power, pcie_str);
         spans.push(Span::raw(prefix));
@@ -699,14 +795,17 @@ impl DefragVis {
 
         let enabled = ch.map(|c| c.enabled).unwrap_or(true);
         let trained = ch.map(|c| c.trained).unwrap_or(false);
-        let fill    = ch.map(|c| c.fill).unwrap_or(0.0);
+        let fill = ch.map(|c| c.fill).unwrap_or(0.0);
         let ch_temp = ch.map(|c| c.temp_ema).unwrap_or(asic_temp);
         let err_flash = ch.map(|c| c.err_flash).unwrap_or(0);
 
         if !enabled {
             // Disabled channel: hatched
             let s: String = (0..grid_w).map(|_| '╌').collect();
-            spans.push(Span::styled(s, Style::default().fg(colors::rgb(30, 30, 40))));
+            spans.push(Span::styled(
+                s,
+                Style::default().fg(colors::rgb(30, 30, 40)),
+            ));
             return;
         }
 
@@ -737,7 +836,9 @@ impl DefragVis {
 
         // Per-channel cursor speed — prime multipliers make each channel move differently.
         let primes_spd: [u64; 8] = [2, 3, 5, 7, 11, 13, 17, 19];
-        let power_factor = ds.map(|s| (s.power_ema / 80.0).clamp(0.4, 2.5)).unwrap_or(1.0);
+        let power_factor = ds
+            .map(|s| (s.power_ema / 80.0).clamp(0.4, 2.5))
+            .unwrap_or(1.0);
         let base_fpc = (4.0 / power_factor).round().max(1.0) as u64;
         let cursor_frames_per_cell = (base_fpc * primes_spd[ch_idx] / primes_spd[0]).max(1);
         let scan_period = cells.max(1) as u64;
@@ -754,7 +855,10 @@ impl DefragVis {
         let seg_brightness = |col: usize| -> f32 {
             let seg_w = 6 + ((ch_idx * 3 + col / 6) % 4) * 2;
             let seg_idx = col / seg_w.max(1);
-            let h = (device_seed.wrapping_mul(7919) ^ ch_idx.wrapping_mul(1009) ^ seg_idx.wrapping_mul(6271)) % 16;
+            let h = (device_seed.wrapping_mul(7919)
+                ^ ch_idx.wrapping_mul(1009)
+                ^ seg_idx.wrapping_mul(6271))
+                % 16;
             match h % 4 {
                 0 => 0.28, // very dim — cold / unused segment
                 1 => 0.42, // dim
@@ -765,8 +869,15 @@ impl DefragVis {
         let seg_saturation = |col: usize| -> f32 {
             let seg_w = 6 + ((ch_idx * 3 + col / 6) % 4) * 2;
             let seg_idx = col / seg_w.max(1);
-            let h = (device_seed.wrapping_mul(3571) ^ ch_idx.wrapping_mul(2017) ^ seg_idx.wrapping_mul(4093)) % 8;
-            if h == 0 { 0.10 } else { 0.80 + (h % 3) as f32 * 0.05 }
+            let h = (device_seed.wrapping_mul(3571)
+                ^ ch_idx.wrapping_mul(2017)
+                ^ seg_idx.wrapping_mul(4093))
+                % 8;
+            if h == 0 {
+                0.10
+            } else {
+                0.80 + (h % 3) as f32 * 0.05
+            }
         };
 
         // "Build from darkness" factor: newly written cells start near-black and
@@ -774,7 +885,9 @@ impl DefragVis {
         // frontier are freshest (darkest); deep cells have had time to "settle".
         // In Running phase, all cells are fully settled → factor = 1.0.
         let age_factor = |col: usize| -> f32 {
-            if phase != Phase::Dma || resident_cells == 0 { return 1.0; }
+            if phase != Phase::Dma || resident_cells == 0 {
+                return 1.0;
+            }
             // Fraction of cells written so far
             let written_frac = fill;
             // This cell's position as fraction of total
@@ -797,22 +910,23 @@ impl DefragVis {
         let mut run_style: Option<Style> = None;
         let flush = |spans: &mut Vec<Span<'static>>, s: &mut String, st: &mut Option<Style>| {
             if !s.is_empty() {
-                spans.push(Span::styled(
-                    std::mem::take(s),
-                    st.unwrap_or_default(),
-                ));
+                spans.push(Span::styled(std::mem::take(s), st.unwrap_or_default()));
                 *st = None;
             }
         };
 
         // --- Error flash cell (if active) ---
-        let flash_col = if err_flash > 0 { Some(resident_cells.saturating_sub(1)) } else { None };
+        let flash_col = if err_flash > 0 {
+            Some(resident_cells.saturating_sub(1))
+        } else {
+            None
+        };
 
         // --- Hoist Running-phase per-row constants out of the cell loop ---
         // These are computed once per channel row, not once per cell.
         let ch_temp_bias = ((ch_temp - 25.0) / 60.0).clamp(0.0, 1.0) * 40.0;
         let inference_energy = ds.map(|s| s.inference_energy).unwrap_or(0.0);
-        let thermal_mood    = ds.map(|s| s.thermal_mood).unwrap_or(0.0);
+        let thermal_mood = ds.map(|s| s.thermal_mood).unwrap_or(0.0);
         let global_mood_shift = thermal_mood * 25.0;
         let max_shift = (359.0_f32 - base_hue).max(0.0);
         let cell_hue = base_hue + (ch_temp_bias + global_mood_shift).min(max_shift);
@@ -855,11 +969,14 @@ impl DefragVis {
                             let burst_hue = (base_hue + 20.0) % 360.0;
                             let burst_v = 0.75 + intensity * 0.15;
                             let t1 = self.frame % wave1_period;
-                            let w1 = (t1 as f32 / wave1_period as f32 * std::f32::consts::TAU).sin();
-                            let ambient_v = (seg_brightness(col) + inference_energy * 0.22 + 0.05 * w1)
-                                .clamp(0.18, 0.82);
+                            let w1 =
+                                (t1 as f32 / wave1_period as f32 * std::f32::consts::TAU).sin();
+                            let ambient_v =
+                                (seg_brightness(col) + inference_energy * 0.22 + 0.05 * w1)
+                                    .clamp(0.18, 0.82);
                             let v = lerp(burst_v, ambient_v, t);
-                            let s = lerp(1.0_f32, seg_saturation(col) + thermal_mood * 0.15, t).clamp(0.0, 1.0);
+                            let s = lerp(1.0_f32, seg_saturation(col) + thermal_mood * 0.15, t)
+                                .clamp(0.0, 1.0);
                             let c = hsv_to_rgb(burst_hue, s, v);
                             let glyph = if v > 0.60 { '▓' } else { '▒' };
                             (glyph, Style::default().fg(c))
@@ -873,7 +990,8 @@ impl DefragVis {
                                 ('░', Style::default().fg(c))
                             } else {
                                 let t1 = self.frame % wave1_period;
-                                let w1 = (t1 as f32 / wave1_period as f32 * std::f32::consts::TAU).sin();
+                                let w1 =
+                                    (t1 as f32 / wave1_period as f32 * std::f32::consts::TAU).sin();
                                 let base_v = seg_brightness(col);
                                 let mem_lift = mvddq_norm * 0.12;
                                 // inference_energy lifts brightness; thermal_mood lifts saturation.
@@ -881,7 +999,13 @@ impl DefragVis {
                                     .clamp(0.18, 0.82);
                                 let s = (seg_saturation(col) + thermal_mood * 0.15).clamp(0.0, 1.0);
                                 let c = hsv_to_rgb(cell_hue, s, v);
-                                let glyph = if v > 0.55 { '▓' } else if v > 0.38 { '▒' } else { '░' };
+                                let glyph = if v > 0.55 {
+                                    '▓'
+                                } else if v > 0.38 {
+                                    '▒'
+                                } else {
+                                    '░'
+                                };
                                 (glyph, Style::default().fg(c))
                             }
                         }
@@ -911,7 +1035,15 @@ impl DefragVis {
                         // Char tier encodes maturity of the written region.
                         let v = (seg_brightness(col) * age_factor(col)).clamp(0.05, 0.65);
                         let s = seg_saturation(col);
-                        let glyph = if v > 0.50 { '▓' } else if v > 0.30 { '▒' } else if v > 0.12 { '░' } else { ' ' };
+                        let glyph = if v > 0.50 {
+                            '▓'
+                        } else if v > 0.30 {
+                            '▒'
+                        } else if v > 0.12 {
+                            '░'
+                        } else {
+                            ' '
+                        };
                         (glyph, Style::default().fg(hsv_to_rgb(base_hue, s, v)))
                     }
                 }
@@ -936,7 +1068,11 @@ impl DefragVis {
                     .wrapping_add(ch_idx as u8 * 41);
                 // dist 0 = write head (darkest), dist 1 = just behind (slightly more settled)
                 let v = if dist == 0 {
-                    if phase_val % 4 < 2 { 0.28 } else { 0.22 }
+                    if phase_val % 4 < 2 {
+                        0.28
+                    } else {
+                        0.22
+                    }
                 } else {
                     0.35
                 };
@@ -953,7 +1089,7 @@ impl DefragVis {
 
             // --- DMA seek zone: dots then empty — emit as one or two spans ---
             let seek_start = (resident_cells + frontier_w).min(cells);
-            let dot_style  = Style::default().fg(colors::rgb(40, 55, 75));
+            let dot_style = Style::default().fg(colors::rgb(40, 55, 75));
             let dark_style = Style::default().fg(colors::rgb(25, 30, 40));
             for col in seek_start..seek_zone_end.min(cells) {
                 let noise = (col as u64 * 7 + ch_idx as u64 * 13 + self.frame / 3) % 11;
@@ -996,47 +1132,101 @@ impl DefragVis {
         // --- Empty tail: all remaining cells as a SINGLE span ---
         flush(spans, &mut run_str, &mut run_style);
         let empty_start = match phase {
-            Phase::Dma  => seek_zone_end.min(cells),
-            _           => resident_cells.min(cells),
+            Phase::Dma => seek_zone_end.min(cells),
+            _ => resident_cells.min(cells),
         };
         if empty_start < cells {
             let count = cells - empty_start;
             let s: String = std::iter::repeat('░').take(count).collect();
-            spans.push(Span::styled(s, Style::default().fg(colors::rgb(18, 24, 32))));
+            spans.push(Span::styled(
+                s,
+                Style::default().fg(colors::rgb(18, 24, 32)),
+            ));
         }
     }
 
     fn render_header(&self, backend: &dyn TelemetryBackend) -> Line<'static> {
         let n = backend.devices().len();
-        let (ndma, nrun, nidle) = backend.devices().iter().fold((0u32,0u32,0u32), |acc, dev| {
-            let ph = self.devices.get(&dev.index).map(|s| s.phase).unwrap_or(Phase::Idle);
-            match ph {
-                Phase::Dma     => (acc.0+1, acc.1, acc.2),
-                Phase::Running => (acc.0, acc.1+1, acc.2),
-                _              => (acc.0, acc.1, acc.2+1),
-            }
-        });
+        let (ndma, nrun, nidle) = backend
+            .devices()
+            .iter()
+            .fold((0u32, 0u32, 0u32), |acc, dev| {
+                let ph = self
+                    .devices
+                    .get(&dev.index)
+                    .map(|s| s.phase)
+                    .unwrap_or(Phase::Idle);
+                match ph {
+                    Phase::Dma => (acc.0 + 1, acc.1, acc.2),
+                    Phase::Running => (acc.0, acc.1 + 1, acc.2),
+                    _ => (acc.0, acc.1, acc.2 + 1),
+                }
+            });
 
         // Always render all three counters with fixed width so the header never shifts.
         // Format: "N×DMA " — N is always 1 digit (max 8 chips), label is fixed 3 chars.
-        let dma_color  = if ndma  > 0 { colors::rgb(255, 200, 60)  } else { colors::rgb(50, 55, 45)  };
-        let run_color  = if nrun  > 0 { colors::rgb(80, 220, 140)  } else { colors::rgb(40, 60, 50)  };
-        let idle_color = if nidle > 0 { colors::rgb(120, 120, 140) } else { colors::rgb(40, 40, 50)  };
-        let dma_mod  = if ndma  > 0 { Modifier::BOLD } else { Modifier::DIM };
-        let run_mod  = if nrun  > 0 { Modifier::BOLD } else { Modifier::DIM };
-        let idle_mod = if nidle > 0 { Modifier::empty() } else { Modifier::DIM };
+        let dma_color = if ndma > 0 {
+            colors::rgb(255, 200, 60)
+        } else {
+            colors::rgb(50, 55, 45)
+        };
+        let run_color = if nrun > 0 {
+            colors::rgb(80, 220, 140)
+        } else {
+            colors::rgb(40, 60, 50)
+        };
+        let idle_color = if nidle > 0 {
+            colors::rgb(120, 120, 140)
+        } else {
+            colors::rgb(40, 40, 50)
+        };
+        let dma_mod = if ndma > 0 {
+            Modifier::BOLD
+        } else {
+            Modifier::DIM
+        };
+        let run_mod = if nrun > 0 {
+            Modifier::BOLD
+        } else {
+            Modifier::DIM
+        };
+        let idle_mod = if nidle > 0 {
+            Modifier::empty()
+        } else {
+            Modifier::DIM
+        };
 
         Line::from(vec![
-            Span::styled("  DEFRAG ", Style::default().fg(colors::rgb(100, 220, 255)).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  DEFRAG ",
+                Style::default()
+                    .fg(colors::rgb(100, 220, 255))
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("│ ", Style::default().fg(colors::rgb(50, 70, 90))),
-            Span::styled(format!("{} device{}  ", n, if n == 1 { "" } else { "s" }), Style::default().fg(colors::rgb(150, 150, 170))),
+            Span::styled(
+                format!("{} device{}  ", n, if n == 1 { "" } else { "s" }),
+                Style::default().fg(colors::rgb(150, 150, 170)),
+            ),
             Span::styled("│ ", Style::default().fg(colors::rgb(50, 70, 90))),
-            Span::styled(format!("{}×DMA  ", ndma), Style::default().fg(dma_color).add_modifier(dma_mod)),
-            Span::styled(format!("{}×RUN  ", nrun), Style::default().fg(run_color).add_modifier(run_mod)),
-            Span::styled(format!("{}×idle  ", nidle), Style::default().fg(idle_color).add_modifier(idle_mod)),
+            Span::styled(
+                format!("{}×DMA  ", ndma),
+                Style::default().fg(dma_color).add_modifier(dma_mod),
+            ),
+            Span::styled(
+                format!("{}×RUN  ", nrun),
+                Style::default().fg(run_color).add_modifier(run_mod),
+            ),
+            Span::styled(
+                format!("{}×idle  ", nidle),
+                Style::default().fg(idle_color).add_modifier(idle_mod),
+            ),
             Span::styled("│  ", Style::default().fg(colors::rgb(50, 70, 90))),
             Span::styled("█ ", Style::default().fg(colors::rgb(80, 200, 130))),
-            Span::styled("resident  ", Style::default().fg(colors::rgb(100, 120, 100))),
+            Span::styled(
+                "resident  ",
+                Style::default().fg(colors::rgb(100, 120, 100)),
+            ),
             Span::styled("▓ ", Style::default().fg(colors::rgb(255, 200, 60))),
             Span::styled("writing  ", Style::default().fg(colors::rgb(120, 110, 80))),
             Span::styled("░ ", Style::default().fg(colors::rgb(35, 45, 55))),
@@ -1046,13 +1236,28 @@ impl DefragVis {
 
     fn render_footer(&self) -> Line<'static> {
         Line::from(vec![
-            Span::styled("  d ", Style::default().fg(colors::rgb(100, 220, 255)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Span::styled(
+                "  d ",
+                Style::default()
+                    .fg(colors::rgb(100, 220, 255))
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ),
             Span::styled("defrag  ", Style::default().fg(colors::rgb(120, 120, 140))),
             Span::styled("│ ", Style::default().fg(colors::rgb(50, 70, 90))),
-            Span::styled(" v ", Style::default().fg(colors::rgb(80, 220, 200)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Span::styled(
+                " v ",
+                Style::default()
+                    .fg(colors::rgb(80, 220, 200))
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ),
             Span::styled("cycle  ", Style::default().fg(colors::rgb(120, 120, 140))),
             Span::styled("│ ", Style::default().fg(colors::rgb(50, 70, 90))),
-            Span::styled(" / ", Style::default().fg(colors::rgb(220, 180, 80)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Span::styled(
+                " / ",
+                Style::default()
+                    .fg(colors::rgb(220, 180, 80))
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ),
             Span::styled("command", Style::default().fg(colors::rgb(120, 120, 140))),
         ])
     }
@@ -1107,15 +1312,19 @@ mod tests {
     fn inference_energy_rises_on_power_spike() {
         let mut ds = DeviceState::new(0);
         ds.power_ema_slow = 50.0; // baseline
-        // Spike power to 60W (20% above baseline)
+                                  // Spike power to 60W (20% above baseline)
         ds.power_ema = 60.0;
         for _ in 0..30 {
-            let energy_raw = (ds.power_ema - ds.power_ema_slow).max(0.0)
-                / ds.power_ema_slow.max(1.0);
+            let energy_raw =
+                (ds.power_ema - ds.power_ema_slow).max(0.0) / ds.power_ema_slow.max(1.0);
             ds.inference_energy = ds.inference_energy * 0.85 + energy_raw * 0.15;
             ds.inference_energy *= 0.94;
         }
-        assert!(ds.inference_energy > 0.05, "inference_energy={}", ds.inference_energy);
+        assert!(
+            ds.inference_energy > 0.05,
+            "inference_energy={}",
+            ds.inference_energy
+        );
     }
 
     #[test]
@@ -1125,12 +1334,16 @@ mod tests {
         ds.inference_energy = 0.8; // pre-loaded high
         ds.power_ema = 50.0; // no spike
         for _ in 0..60 {
-            let energy_raw = (ds.power_ema - ds.power_ema_slow).max(0.0)
-                / ds.power_ema_slow.max(1.0);
+            let energy_raw =
+                (ds.power_ema - ds.power_ema_slow).max(0.0) / ds.power_ema_slow.max(1.0);
             ds.inference_energy = ds.inference_energy * 0.85 + energy_raw * 0.15;
             ds.inference_energy *= 0.94;
         }
-        assert!(ds.inference_energy < 0.05, "inference_energy={}", ds.inference_energy);
+        assert!(
+            ds.inference_energy < 0.05,
+            "inference_energy={}",
+            ds.inference_energy
+        );
     }
 
     #[test]
@@ -1151,19 +1364,29 @@ mod tests {
             let intensity = ((ds.power_ema / ds.power_ema_slow) - 1.0).clamp(0.0, 1.0);
             for ch_idx in 0..GDDR_CHANNELS {
                 let ch = &ds.channels[ch_idx];
-                if !ch.enabled || !ch.trained { continue; }
+                if !ch.enabled || !ch.trained {
+                    continue;
+                }
                 let resident_cells = (ch.fill * 200.0) as usize;
-                if resident_cells == 0 { continue; }
+                if resident_cells == 0 {
+                    continue;
+                }
                 let n_cells = 5 + (frame.wrapping_mul(7).wrapping_add(ch_idx as u64 * 13)) % 8;
                 let cells: Vec<usize> = (0..n_cells)
                     .map(|i| {
-                        let seed = frame.wrapping_mul(31)
+                        let seed = frame
+                            .wrapping_mul(31)
                             .wrapping_add(ch_idx as u64 * 97)
                             .wrapping_add(i as u64 * 61);
                         (seed % resident_cells as u64) as usize
                     })
                     .collect();
-                ds.scatter_bursts.push(ScatterBurst { channel: ch_idx, cells, ttl: 18, intensity });
+                ds.scatter_bursts.push(ScatterBurst {
+                    channel: ch_idx,
+                    cells,
+                    ttl: 18,
+                    intensity,
+                });
             }
             ds.burst_cooldown = 30;
         }
@@ -1184,11 +1407,16 @@ mod tests {
 
         // Simulate two decay frames
         for _ in 0..2 {
-            for b in ds.scatter_bursts.iter_mut() { b.ttl = b.ttl.saturating_sub(1); }
+            for b in ds.scatter_bursts.iter_mut() {
+                b.ttl = b.ttl.saturating_sub(1);
+            }
             ds.scatter_bursts.retain(|b| b.ttl > 0);
         }
 
-        assert!(ds.scatter_bursts.is_empty(), "burst should be removed after ttl expires");
+        assert!(
+            ds.scatter_bursts.is_empty(),
+            "burst should be removed after ttl expires"
+        );
     }
 
     #[test]
@@ -1214,8 +1442,14 @@ mod tests {
                     let global_mood_shift = mood * 25.0;
                     let max_shift = (359.0_f32 - base_hue).max(0.0);
                     let cell_hue = base_hue + (ch_temp_bias + global_mood_shift).min(max_shift);
-                    assert!(cell_hue >= base_hue, "ch{ch_idx} hue={cell_hue} went below base {base_hue}");
-                    assert!(cell_hue < 360.0, "ch{ch_idx} hue={cell_hue} wrapped past 360");
+                    assert!(
+                        cell_hue >= base_hue,
+                        "ch{ch_idx} hue={cell_hue} went below base {base_hue}"
+                    );
+                    assert!(
+                        cell_hue < 360.0,
+                        "ch{ch_idx} hue={cell_hue} wrapped past 360"
+                    );
                 }
             }
         }
@@ -1231,7 +1465,10 @@ mod tests {
         let ambient_v = 0.40_f32;
         let blended = lerp(burst_v, ambient_v, t);
         assert!(blended < burst_v, "should be closer to ambient");
-        assert!((blended - ambient_v).abs() < 0.08, "blended={blended} should be near ambient");
+        assert!(
+            (blended - ambient_v).abs() < 0.08,
+            "blended={blended} should be near ambient"
+        );
     }
 
     #[test]
@@ -1240,7 +1477,10 @@ mod tests {
         // and zeroes inference_energy so stale state doesn't bleed across phases.
         let mut ds = DeviceState::new(0);
         ds.scatter_bursts.push(ScatterBurst {
-            channel: 0, cells: vec![1, 2], ttl: 10, intensity: 0.3,
+            channel: 0,
+            cells: vec![1, 2],
+            ttl: 10,
+            intensity: 0.3,
         });
         ds.inference_energy = 0.7;
 
@@ -1260,7 +1500,10 @@ mod tests {
         // so bursts from a Running phase don't render during Idle.
         let mut ds = DeviceState::new(0);
         ds.scatter_bursts.push(ScatterBurst {
-            channel: 1, cells: vec![3, 7, 11], ttl: 5, intensity: 0.5,
+            channel: 1,
+            cells: vec![3, 7, 11],
+            ttl: 5,
+            intensity: 0.5,
         });
         ds.burst_cooldown = 15;
 
