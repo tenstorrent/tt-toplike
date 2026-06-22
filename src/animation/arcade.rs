@@ -582,9 +582,6 @@ impl ArcadeVisualization {
             lines.push(line);
         }
 
-        // Footer: 1 row — legend + hero status.
-        lines.push(self.render_footer(backend));
-
         // Overlay hero character and trail on the composite canvas
         self.overlay_hero(lines, backend)
     }
@@ -658,79 +655,6 @@ impl ArcadeVisualization {
                     .fg(separator_color)
                     .add_modifier(Modifier::BOLD),
             ),
-        ])
-    }
-
-    /// One-line legend covering all three arcade panels + hero + global keys.
-    /// Matches the style of the shared `render_command_bar` overlay on other views.
-    fn render_footer(&self, backend: &dyn TelemetryBackend) -> Line<'static> {
-        let temp = backend
-            .devices()
-            .first()
-            .and_then(|d| backend.telemetry(d.index))
-            .map(|t| t.temp_c())
-            .unwrap_or(25.0);
-        let hero_color = hsv_to_rgb(temp_to_hue(temp), 1.0, 0.95);
-        let dim = colors::rgb(90, 90, 110);
-        let label = colors::rgb(150, 150, 170);
-        let key = colors::rgb(80, 220, 200);
-        let sep = colors::rgb(50, 60, 80);
-
-        Line::from(vec![
-            // Starfield legend
-            Span::styled("  ✧ ", Style::default().fg(colors::rgb(100, 180, 255))),
-            Span::styled("stars=cores ", Style::default().fg(dim)),
-            Span::styled("○ ", Style::default().fg(colors::rgb(255, 200, 100))),
-            Span::styled("planets=mem  ", Style::default().fg(dim)),
-            Span::styled("│ ", Style::default().fg(sep)),
-            // Castle legend
-            Span::styled("🏰 ", Style::default().fg(colors::rgb(180, 140, 255))),
-            Span::styled("particles: ", Style::default().fg(dim)),
-            Span::styled("◦read ", Style::default().fg(colors::rgb(100, 200, 255))),
-            Span::styled("·write ", Style::default().fg(colors::rgb(255, 180, 100))),
-            Span::styled("◇hit ", Style::default().fg(colors::rgb(100, 255, 180))),
-            Span::styled("•miss  ", Style::default().fg(colors::rgb(255, 100, 150))),
-            Span::styled("│ ", Style::default().fg(sep)),
-            // Defrag legend
-            Span::styled("▓ ", Style::default().fg(colors::rgb(100, 220, 255))),
-            Span::styled("blocks=GDDR  ", Style::default().fg(dim)),
-            Span::styled("│ ", Style::default().fg(sep)),
-            // Hero legend
-            Span::styled(
-                "@ ",
-                Style::default().fg(hero_color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("x=current y=power color=temp  ", Style::default().fg(dim)),
-            Span::styled("│ ", Style::default().fg(sep)),
-            // Nav keys — consistent with other views
-            Span::styled(
-                " v ",
-                Style::default()
-                    .fg(key)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ),
-            Span::styled("cycle  ", Style::default().fg(label)),
-            Span::styled(
-                " l ",
-                Style::default()
-                    .fg(key)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ),
-            Span::styled("legend  ", Style::default().fg(label)),
-            Span::styled(
-                " ? ",
-                Style::default()
-                    .fg(colors::rgb(220, 180, 80))
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ),
-            Span::styled("help  ", Style::default().fg(label)),
-            Span::styled(
-                " / ",
-                Style::default()
-                    .fg(colors::rgb(220, 180, 80))
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ),
-            Span::styled("cmd", Style::default().fg(label)),
         ])
     }
 

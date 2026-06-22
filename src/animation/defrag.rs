@@ -561,10 +561,7 @@ impl DefragVis {
     }
 
     pub fn render(&self, backend: &dyn TelemetryBackend) -> Vec<Line<'static>> {
-        let mut lines = self.render_inner(backend);
-        lines.push(Line::from(""));
-        lines.push(self.render_footer());
-        lines
+        self.render_inner(backend)
     }
 
     /// Render without header blank line, footer, or hotkey bar — for embedding
@@ -1234,33 +1231,6 @@ impl DefragVis {
         ])
     }
 
-    fn render_footer(&self) -> Line<'static> {
-        Line::from(vec![
-            Span::styled(
-                "  d ",
-                Style::default()
-                    .fg(colors::rgb(100, 220, 255))
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ),
-            Span::styled("defrag  ", Style::default().fg(colors::rgb(120, 120, 140))),
-            Span::styled("│ ", Style::default().fg(colors::rgb(50, 70, 90))),
-            Span::styled(
-                " v ",
-                Style::default()
-                    .fg(colors::rgb(80, 220, 200))
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ),
-            Span::styled("cycle  ", Style::default().fg(colors::rgb(120, 120, 140))),
-            Span::styled("│ ", Style::default().fg(colors::rgb(50, 70, 90))),
-            Span::styled(
-                " / ",
-                Style::default()
-                    .fg(colors::rgb(220, 180, 80))
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ),
-            Span::styled("command", Style::default().fg(colors::rgb(120, 120, 140))),
-        ])
-    }
 }
 
 #[cfg(test)]

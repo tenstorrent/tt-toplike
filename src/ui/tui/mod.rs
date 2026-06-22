@@ -510,6 +510,9 @@ fn run_app(
                     }
                 }
 
+                // ── Global status bar (all modes) ─────────────────────────
+                render_global_statusbar(f, backend, display_mode);
+
                 // ── Command bar overlay (all modes) ───────────────────────
                 if cmd_mode || cmd_message.is_some() {
                     let msg_ref = cmd_message.as_ref().map(|(s, e)| (s.as_str(), *e));
@@ -952,31 +955,27 @@ fn render_header(f: &mut Frame, area: Rect, backend: &dyn TelemetryBackend) {
 
 /// Render visualization mode (full-screen starfield)
 fn ui_visualization(f: &mut Frame, starfield: &HardwareStarfield, backend: &dyn TelemetryBackend) {
-    // Create layout with header and content
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header
             Constraint::Min(0),    // Starfield content
-            Constraint::Length(3), // Footer
         ])
         .split(f.area());
 
-    // Render visualization header
     render_visualization_header(f, chunks[0], starfield, backend);
 
-    // Render starfield content
     let starfield_lines = starfield.render();
 
     let starfield_widget = Paragraph::new(starfield_lines)
-        .style(Style::default().bg(colors::rgb(0, 0, 0))) // Transparent background for tmux
+        .style(Style::default().bg(colors::rgb(0, 0, 0)))
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(
                     Style::default()
-                        .fg(colors::rgb(100, 200, 255)) // Bright cyan
+                        .fg(colors::rgb(100, 200, 255))
                         .add_modifier(Modifier::BOLD),
                 )
                 .title(" ✧ Hardware-Responsive Starfield ")
@@ -986,13 +985,10 @@ fn ui_visualization(f: &mut Frame, starfield: &HardwareStarfield, backend: &dyn 
                         .fg(colors::rgb(150, 220, 255))
                         .add_modifier(Modifier::BOLD),
                 )
-                .style(Style::default().bg(colors::rgb(0, 0, 0))), // Transparent block background
+                .style(Style::default().bg(colors::rgb(0, 0, 0))),
         );
 
     f.render_widget(starfield_widget, chunks[1]);
-
-    // Render visualization footer
-    render_visualization_footer(f, chunks[2]);
 }
 
 /// Render visualization mode header with baseline status
@@ -1053,100 +1049,29 @@ fn render_visualization_header(
     f.render_widget(header, area);
 }
 
-/// Render visualization mode footer with legend
-fn render_visualization_footer(f: &mut Frame, area: Rect) {
-    let footer_text = vec![Line::from(vec![
-        Span::styled(
-            "stars=cores ",
-            Style::default().fg(colors::rgb(100, 200, 255)),
-        ),
-        Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled(
-            "○ planets=mem ",
-            Style::default().fg(colors::rgb(255, 200, 100)),
-        ),
-        Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled(
-            "color=temp ",
-            Style::default().fg(colors::rgb(255, 100, 100)),
-        ),
-        Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled(
-            " v ",
-            Style::default()
-                .fg(colors::rgb(80, 220, 200))
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ),
-        Span::styled("cycle  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(
-            " l ",
-            Style::default()
-                .fg(colors::rgb(80, 220, 200))
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ),
-        Span::styled("legend  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(
-            " ? ",
-            Style::default()
-                .fg(colors::rgb(220, 180, 80))
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ),
-        Span::styled("help  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(
-            " ! ",
-            Style::default()
-                .fg(colors::rgb(180, 140, 255))
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ),
-        Span::styled("explain", Style::default().fg(colors::rgb(160, 160, 160))),
-    ])];
-
-    let footer = Paragraph::new(footer_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(colors::rgb(100, 100, 120)))
-                .title(" ⌨  Controls ")
-                .title_alignment(Alignment::Left)
-                .title_style(
-                    Style::default()
-                        .fg(colors::rgb(150, 120, 180))
-                        .add_modifier(Modifier::BOLD),
-                ),
-        )
-        .alignment(Alignment::Center);
-
-    f.render_widget(footer, area);
-}
-
 /// Render Memory Castle mode (full-screen architectural memory hierarchy)
 fn ui_memory_castle(f: &mut Frame, memory_castle: &MemoryCastle, backend: &dyn TelemetryBackend) {
-    // Create layout with header and content
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header
             Constraint::Min(0),    // Memory Castle content
-            Constraint::Length(3), // Footer
         ])
         .split(f.area());
 
-    // Render Memory Castle header
     render_memory_castle_header(f, chunks[0], backend);
 
-    // Render Memory Castle content
     let castle_lines = memory_castle.render(backend);
 
     let castle_widget = Paragraph::new(castle_lines)
-        .style(Style::default().bg(colors::rgb(0, 0, 0))) // Transparent background for tmux
+        .style(Style::default().bg(colors::rgb(0, 0, 0)))
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(
                     Style::default()
-                        .fg(colors::rgb(255, 150, 200)) // Bright pink
+                        .fg(colors::rgb(255, 150, 200))
                         .add_modifier(Modifier::BOLD),
                 )
                 .title(" 🏰 Memory Castle - Hardware Memory Hierarchy ")
@@ -1156,42 +1081,35 @@ fn ui_memory_castle(f: &mut Frame, memory_castle: &MemoryCastle, backend: &dyn T
                         .fg(colors::rgb(255, 180, 220))
                         .add_modifier(Modifier::BOLD),
                 )
-                .style(Style::default().bg(colors::rgb(0, 0, 0))), // Transparent block background
+                .style(Style::default().bg(colors::rgb(0, 0, 0))),
         );
 
     f.render_widget(castle_widget, chunks[1]);
-
-    // Render Memory Castle footer
-    render_memory_castle_footer(f, chunks[2]);
 }
 
 /// Render Memory Flow visualization (full-screen DRAM motion)
 fn ui_memory_flow(f: &mut Frame, memory_flow: &MemoryFlowVis, backend: &dyn TelemetryBackend) {
-    // Create layout with header, content, and footer
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header
             Constraint::Min(0),    // Flow content
-            Constraint::Length(3), // Footer
         ])
         .split(f.area());
 
-    // Render Memory Flow header
     render_memory_flow_header(f, chunks[0], backend);
 
-    // Render Memory Flow content
     let flow_lines = memory_flow.render(backend);
 
     let flow_widget = Paragraph::new(flow_lines)
-        .style(Style::default().bg(colors::rgb(0, 0, 0))) // Transparent background for tmux
+        .style(Style::default().bg(colors::rgb(0, 0, 0)))
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(
                     Style::default()
-                        .fg(colors::rgb(150, 255, 150)) // Bright green
+                        .fg(colors::rgb(150, 255, 150))
                         .add_modifier(Modifier::BOLD),
                 )
                 .title(" 🌊 Memory Flow - NoC & DDR Activity ")
@@ -1201,13 +1119,10 @@ fn ui_memory_flow(f: &mut Frame, memory_flow: &MemoryFlowVis, backend: &dyn Tele
                         .fg(colors::rgb(180, 255, 180))
                         .add_modifier(Modifier::BOLD),
                 )
-                .style(Style::default().bg(colors::rgb(0, 0, 0))), // Transparent block background
+                .style(Style::default().bg(colors::rgb(0, 0, 0))),
         );
 
     f.render_widget(flow_widget, chunks[1]);
-
-    // Render Memory Flow footer
-    render_memory_flow_footer(f, chunks[2]);
 }
 
 /// Render Memory Castle mode header with device info
@@ -1256,61 +1171,6 @@ fn render_memory_castle_header(f: &mut Frame, area: Rect, backend: &dyn Telemetr
     f.render_widget(header, area);
 }
 
-/// Render Memory Castle mode footer with controls
-fn render_memory_castle_footer(f: &mut Frame, area: Rect) {
-    let footer_text = vec![Line::from(vec![
-        Span::styled("◦read ", Style::default().fg(colors::rgb(100, 200, 255))),
-        Span::styled("·write ", Style::default().fg(colors::rgb(255, 180, 80))),
-        Span::styled("◇hit ", Style::default().fg(colors::rgb(100, 255, 180))),
-        Span::styled("•miss ", Style::default().fg(colors::rgb(255, 100, 150))),
-        Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled(
-            "DDR→L2→L1→Tensix ",
-            Style::default().fg(colors::rgb(255, 200, 100)),
-        ),
-        Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled(
-            " v ",
-            Style::default()
-                .fg(colors::rgb(80, 220, 200))
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ),
-        Span::styled("cycle  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(
-            " l ",
-            Style::default()
-                .fg(colors::rgb(80, 220, 200))
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ),
-        Span::styled("legend  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(
-            " ? ",
-            Style::default()
-                .fg(colors::rgb(220, 180, 80))
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ),
-        Span::styled("help", Style::default().fg(colors::rgb(160, 160, 160))),
-    ])];
-
-    let footer = Paragraph::new(footer_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(colors::rgb(100, 100, 120)))
-                .title(" ⌨  Controls ")
-                .title_alignment(Alignment::Left)
-                .title_style(
-                    Style::default()
-                        .fg(colors::rgb(150, 120, 180))
-                        .add_modifier(Modifier::BOLD),
-                ),
-        )
-        .alignment(Alignment::Center);
-
-    f.render_widget(footer, area);
-}
-
 /// Render Memory Flow mode header with device info
 fn render_memory_flow_header(f: &mut Frame, area: Rect, backend: &dyn TelemetryBackend) {
     let header_text = vec![Line::from(vec![
@@ -1357,61 +1217,6 @@ fn render_memory_flow_header(f: &mut Frame, area: Rect, backend: &dyn TelemetryB
     f.render_widget(header, area);
 }
 
-/// Render Memory Flow mode footer with controls
-fn render_memory_flow_footer(f: &mut Frame, area: Rect) {
-    let footer_text = vec![Line::from(vec![
-        Span::styled(
-            "→ reads  ← writes ",
-            Style::default().fg(colors::rgb(180, 255, 180)),
-        ),
-        Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled(
-            "speed=NoC  density=memW ",
-            Style::default().fg(colors::rgb(255, 200, 100)),
-        ),
-        Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled(
-            " v ",
-            Style::default()
-                .fg(colors::rgb(80, 220, 200))
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ),
-        Span::styled("cycle  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(
-            " l ",
-            Style::default()
-                .fg(colors::rgb(80, 220, 200))
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ),
-        Span::styled("legend  ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(
-            " ? ",
-            Style::default()
-                .fg(colors::rgb(220, 180, 80))
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ),
-        Span::styled("help", Style::default().fg(colors::rgb(160, 160, 160))),
-    ])];
-
-    let footer = Paragraph::new(footer_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(colors::rgb(100, 100, 120)))
-                .title(" ⌨  Controls ")
-                .title_alignment(Alignment::Left)
-                .title_style(
-                    Style::default()
-                        .fg(colors::rgb(150, 120, 180))
-                        .add_modifier(Modifier::BOLD),
-                ),
-        )
-        .alignment(Alignment::Center);
-
-    f.render_widget(footer, area);
-}
-
 /// Render Defrag mode — model-loading visualization.
 ///
 /// Displays a grid of cells per device that fills from empty (░) → loading (▒▓)
@@ -1435,6 +1240,209 @@ fn ui_arcade(f: &mut Frame, arcade: &ArcadeVisualization, backend: &dyn Telemetr
     let lines = arcade.render(backend);
     let widget = Paragraph::new(lines).style(Style::default().bg(colors::rgb(0, 0, 0)));
     f.render_widget(widget, f.area());
+}
+
+/// Global status bar — 1 raw row at the absolute bottom of every view.
+///
+/// Left zone: uniform hotkey strip (all modes).  When in Insights, three
+/// Insights-specific keys are appended after the separator.
+/// Right zone: per-chip telemetry with fixed-width columns so that a value
+/// incrementing from 99 → 100 never shifts the next chip's label.
+///
+/// ≤4 chips: each shown individually as `BH0  43°  820M  78W`
+/// >4 chips: a single `avg  44°  822M  79W` column instead.
+///
+/// The command bar and overlay panels render on top of this row when active.
+fn render_global_statusbar(f: &mut Frame, backend: &dyn TelemetryBackend, mode: DisplayMode) {
+    use crate::models::telemetry::parse_hex_or_dec;
+
+    let area = f.area();
+    if area.height < 2 {
+        return;
+    }
+    let bar_area = Rect {
+        x: 0,
+        y: area.height.saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+
+    // ── Colour constants ──────────────────────────────────────────────────
+    let key_fg = colors::rgb(80, 220, 200);
+    let label_fg = colors::rgb(160, 160, 160);
+    let sep_fg = colors::rgb(80, 80, 100);
+    let bg = colors::rgb(10, 14, 22);
+
+    // ── Left zone: hotkey strip ───────────────────────────────────────────
+    let key_style = Style::default()
+        .fg(key_fg)
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    let lbl = |s: &'static str| Span::styled(s, Style::default().fg(label_fg));
+    let key = |s: &'static str| Span::styled(s, key_style);
+    let pipe = || Span::styled("  │  ", Style::default().fg(sep_fg));
+
+    let mut left: Vec<Span> = vec![
+        Span::raw(" "),
+        key(" v "),
+        lbl(" cycle"),
+        pipe(),
+        key(" a "),
+        lbl(" arcade"),
+        pipe(),
+        key(" d "),
+        lbl(" defrag"),
+        pipe(),
+        key(" l "),
+        lbl(" legend"),
+        pipe(),
+        key(" ? "),
+        lbl(" help"),
+        pipe(),
+        key(" ! "),
+        lbl(" explain"),
+        pipe(),
+        key(" / "),
+        lbl(" cmd"),
+        pipe(),
+        key(" q "),
+        lbl(" quit"),
+    ];
+
+    // Insights-specific nav appended when in that mode.
+    if matches!(mode, DisplayMode::Insights) {
+        left.push(pipe());
+        left.push(Span::styled("↑↓", Style::default().fg(colors::rgb(220, 220, 220))));
+        left.push(lbl(" nav"));
+        left.push(pipe());
+        left.push(Span::styled("K", Style::default().fg(colors::rgb(255, 100, 100))));
+        left.push(lbl(" destroy"));
+        left.push(pipe());
+        left.push(Span::styled("k", Style::default().fg(colors::rgb(220, 180, 80))));
+        left.push(lbl(" silence"));
+    }
+
+    // ── Right zone: per-chip telemetry ────────────────────────────────────
+    // Collect raw values first so we can decide individual vs average.
+    let devices = backend.devices();
+
+    // Build chip telemetry: (label, temp, mhz, watts)
+    struct ChipTelem {
+        label: String,     // "BH0", "WH1", …
+        temp: f32,
+        mhz: u32,
+        watts: f32,
+    }
+
+    let chips: Vec<ChipTelem> = devices
+        .iter()
+        .map(|d| {
+            let idx = d.index;
+            let telem = backend.telemetry(idx);
+            let smbus = backend.smbus_telemetry(idx);
+            let temp = telem.map(|t| t.temp_c()).unwrap_or(0.0);
+            // Prefer SMBUS aiclk (smoothed, decimal string); fall back to telemetry aiclk.
+            let mhz = smbus
+                .and_then(|s| s.aiclk.as_deref())
+                .and_then(|v| parse_hex_or_dec(v))
+                .or_else(|| telem.and_then(|t| t.aiclk))
+                .unwrap_or(0);
+            let watts = telem.map(|t| t.power_w()).unwrap_or(0.0);
+            ChipTelem {
+                label: format!("{}{}", d.architecture.abbrev(), idx),
+                temp,
+                mhz,
+                watts,
+            }
+        })
+        .collect();
+
+    let mut right: Vec<Span> = Vec::new();
+
+    if chips.is_empty() {
+        // nothing to show
+    } else if chips.len() <= 4 {
+        // Individual columns — fixed width per field so no shift on value change.
+        // Format: "BH0  43°  820M  78W" — each field right-aligned in fixed width.
+        // temp: {:>3.0}° (3 digits + °), mhz: {:>4}M, watts: {:>3.0}W
+        right.push(Span::styled("  │  ", Style::default().fg(sep_fg)));
+        for (i, c) in chips.iter().enumerate() {
+            if i > 0 {
+                right.push(Span::raw("  "));
+            }
+            // Temp hue: <60° cool blue, <80° warm yellow, ≥80° red.
+            let temp_color = if c.temp < 60.0_f32 {
+                colors::rgb(100, 180, 255)
+            } else if c.temp < 80.0_f32 {
+                colors::rgb(255, 200, 80)
+            } else {
+                colors::rgb(255, 100, 80)
+            };
+            right.push(Span::styled(
+                c.label.clone(),
+                Style::default()
+                    .fg(key_fg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            right.push(Span::raw("  "));
+            right.push(Span::styled(
+                format!("{:>3.0}°", c.temp),
+                Style::default().fg(temp_color),
+            ));
+            right.push(Span::raw("  "));
+            right.push(Span::styled(
+                format!("{:>4}M", c.mhz),
+                Style::default().fg(colors::rgb(140, 200, 255)),
+            ));
+            right.push(Span::raw("  "));
+            right.push(Span::styled(
+                format!("{:>3.0}W", c.watts),
+                Style::default().fg(colors::rgb(200, 160, 255)),
+            ));
+        }
+        right.push(Span::raw(" "));
+    } else {
+        // Average column for fleets >4 chips.
+        let n = chips.len() as f32;
+        let avg_temp = chips.iter().map(|c| c.temp).sum::<f32>() / n;
+        let avg_mhz = (chips.iter().map(|c| c.mhz as f32).sum::<f32>() / n).round() as u32;
+        let avg_watts = chips.iter().map(|c| c.watts).sum::<f32>() / n;
+        right.push(Span::styled("  │  ", Style::default().fg(sep_fg)));
+        right.push(Span::styled(
+            "avg",
+            Style::default().fg(key_fg).add_modifier(Modifier::BOLD),
+        ));
+        right.push(Span::raw("  "));
+        right.push(Span::styled(
+            format!("{:>3.0}°", avg_temp),
+            Style::default().fg(colors::rgb(180, 200, 220)),
+        ));
+        right.push(Span::raw("  "));
+        right.push(Span::styled(
+            format!("{:>4}M", avg_mhz),
+            Style::default().fg(colors::rgb(140, 200, 255)),
+        ));
+        right.push(Span::raw("  "));
+        right.push(Span::styled(
+            format!("{:>3.0}W", avg_watts),
+            Style::default().fg(colors::rgb(200, 160, 255)),
+        ));
+        right.push(Span::styled(
+            format!("  ×{}", chips.len()),
+            Style::default().fg(label_fg),
+        ));
+        right.push(Span::raw(" "));
+    }
+
+    left.extend(right);
+
+    f.render_widget(
+        Block::default().style(Style::default().bg(bg)),
+        bar_area,
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(left)).style(Style::default().bg(bg)),
+        bar_area,
+    );
 }
 
 /// Render the command bar overlay at the bottom of the terminal.
@@ -2414,7 +2422,7 @@ fn render_insights(
         devices
     };
 
-    // Layout: header(3) | cards(exact height) | process panel (remainder) | footer(1)
+    // Layout: header(3) | cards(exact height) | process panel (remainder)
     //
     // Cards use Constraint::Length so they always get the exact height needed to
     // show all chip panels (including a 2×2 grid when 4 chips don't fit in one row).
@@ -2427,7 +2435,6 @@ fn render_insights(
             Constraint::Length(3),
             Constraint::Length(cards_h),
             Constraint::Min(0),
-            Constraint::Length(1),
         ])
         .split(area);
 
@@ -2453,13 +2460,6 @@ fn render_insights(
         host_mem_used,
         host_mem_total,
         serving_metrics,
-    );
-    render_insights_footer(
-        f,
-        chunks[3],
-        kill_confirm,
-        devices.len() >= FLEET_DEVICE_THRESHOLD,
-        fleet_zoom_start.is_some(),
     );
     // Kill modal overlays the full screen when active
     if let Some(ref kc) = kill_confirm {
@@ -2714,83 +2714,6 @@ fn render_process_panel(
 
     let para = Paragraph::new(lines);
     f.render_widget(para, area);
-}
-
-/// One-line footer for Insights mode: always shows nav hints.
-/// The kill confirmation is now handled by the modal dialog (`render_kill_dialog`).
-#[cfg(feature = "linux-procfs")]
-fn render_insights_footer(
-    f: &mut Frame,
-    area: Rect,
-    _kill_confirm: Option<&KillConfirmState>,
-    in_fleet: bool,
-    in_zoom: bool,
-) {
-    use ratatui::style::{Color, Style};
-    use ratatui::text::{Line, Span};
-
-    let dot = Span::raw("  \u{00B7}  ");
-
-    let line = if in_zoom {
-        // Zoomed portrait view — show paging hints.
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("← →", Style::default().fg(Color::White)),
-            Span::raw("  page"),
-            dot.clone(),
-            Span::styled("Esc", Style::default().fg(Color::Cyan)),
-            Span::raw("  back to overview"),
-            dot.clone(),
-            Span::styled("v", Style::default().fg(Color::Cyan)),
-            Span::raw("  next view"),
-            dot.clone(),
-            Span::styled("q", Style::default().fg(Color::DarkGray)),
-            Span::raw("  leave"),
-        ])
-    } else if in_fleet {
-        // Galaxy overview — show navigation + drill-down hints.
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("←↑↓→", Style::default().fg(Color::White)),
-            Span::raw("  navigate"),
-            dot.clone(),
-            Span::styled("Enter", Style::default().fg(Color::Green)),
-            Span::raw("  zoom in"),
-            dot.clone(),
-            Span::styled("v", Style::default().fg(Color::Cyan)),
-            Span::raw("  next view"),
-            dot.clone(),
-            Span::styled("q", Style::default().fg(Color::DarkGray)),
-            Span::raw("  leave"),
-        ])
-    } else {
-        // Normal portrait grid.
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("\u{2191}\u{2193}", Style::default().fg(Color::White)),
-            Span::raw("  move"),
-            dot.clone(),
-            Span::styled("k", Style::default().fg(Color::Yellow)),
-            Span::raw("  silence"),
-            dot.clone(),
-            Span::styled("K", Style::default().fg(Color::Red)),
-            Span::raw("  destroy now"),
-            dot.clone(),
-            Span::styled("v", Style::default().fg(Color::Cyan)),
-            Span::raw("  next view"),
-            dot.clone(),
-            Span::styled("g", Style::default().fg(Color::Cyan)),
-            Span::raw("  grid"),
-            dot.clone(),
-            Span::styled("?", Style::default().fg(Color::Rgb(220, 180, 80))),
-            Span::raw("  help"),
-            dot.clone(),
-            Span::styled("q", Style::default().fg(Color::DarkGray)),
-            Span::raw("  leave"),
-        ])
-    };
-
-    f.render_widget(Paragraph::new(line), area);
 }
 
 /// Render a centered kill-confirmation modal dialog over the current frame.
