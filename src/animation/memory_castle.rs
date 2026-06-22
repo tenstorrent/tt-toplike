@@ -457,10 +457,11 @@ impl MemoryCastle {
     fn render_multi_device(&self, backend: &dyn TelemetryBackend) -> Vec<Line<'static>> {
         let devices = backend.devices();
 
-        // Each side-by-side column needs at least 20 chars to be readable.
-        // Beyond that threshold we switch to a compact fleet-grid view that
-        // scales to any number of chips without wrapping off-screen.
-        const MIN_CHIP_COL_WIDTH: usize = 20;
+        // Each side-by-side column needs at least this many chars to be readable.
+        // Set to 15 so arcade mode (castle gets ~55% of terminal width) can show
+        // 4 chips side-by-side at the same threshold the defrag panel uses.
+        // Fleet-grid only kicks in when columns would be truly unreadable.
+        const MIN_CHIP_COL_WIDTH: usize = 15;
         let max_side_by_side = ((self.width.saturating_sub(2)) / MIN_CHIP_COL_WIDTH).max(1);
         if devices.len() > max_side_by_side {
             return self.render_fleet_grid(backend);

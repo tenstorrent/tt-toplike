@@ -162,6 +162,11 @@ fn main() {
             eprintln!("Error: Hybrid backend only available on Linux");
             std::process::exit(1);
         }
+        BackendType::Host => {
+            log::info!("Initializing HostBackend (CPU/RAM via sysinfo — no TT hardware required)");
+            let mut backend = tt_toplike::backend::host::HostBackend::with_config(config);
+            run_with_backend(&mut backend, &cli);
+        }
     }
 }
 

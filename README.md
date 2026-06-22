@@ -54,7 +54,7 @@ Temperature lags power by several seconds (thermal mass of the package), so the 
 
 Video diffusion is a different animal. Each denoising step is a full forward pass of a large model — not a quick autoregressive decode but a sustained, high-memory-bandwidth computation that runs for hundreds of milliseconds. Steps happen sequentially through the diffusion schedule.
 
-The result is **sustained high power with structured plateaus**: you'll see the visualization stay dense and bright for the full duration of a step, then briefly relax between steps as the scheduler loads the next noise level. The Memory Castle particles stop thinning out between bursts — the dungeon stays full. In Arcade mode, the `@` hero sits high and right (high power, high current) and barely moves, which is its own kind of signal.
+The result is **sustained high power with structured plateaus**: you'll see the visualization stay dense and bright for the full duration of a step, then briefly relax between steps as the scheduler loads the next noise level. The Memory Castle particles stop thinning out between bursts — the dungeon stays full. In Arcade mode, the `@` hero sits high and right (high power, high current) and barely moves, which is its own kind of signal. In the defrag panel to the right of the Memory Castle, the block fill stays dense and near-full for the whole diffusion step, then briefly fades between steps.
 
 Temperature climbs higher and holds there. The color of everything — stars, particles, backgrounds — shifts warmer because `temp_to_hue()` biases toward red as the die heats up.
 
@@ -67,18 +67,33 @@ A "quiet" Blackhole is never actually quiet. Several things generate continuous 
 - **SRAM retention** — L1 and L2 SRAM need continuous power to hold state. The tensix grid never fully powers down.
 - **PLL lock** — the clock network (AICLK, AXICLK, ARCCLK) runs continuously.
 
-The adaptive baseline captures all of this and treats it as zero-point. What you see in the visualization at idle is the true floor: particles spawning slowly and evenly, stars dim but present, the hero character drifting in the lower-left of the Arcade canvas. That floor has meaning — it's the hardware telling you it's alive and maintained.
+The adaptive baseline captures all of this and treats it as zero-point. What you see in the visualization at idle is the true floor: particles spawning slowly and evenly, stars dim but present, the `@` hero drifting in the lower-left of the Arcade canvas, and the Defrag block map sitting full but dim (weights are resident, chip is not computing). That floor has meaning — it's the hardware telling you it's alive and maintained.
 
 ### Running `tt-smi -r` while watching
 
 `tt-smi -r` triggers a hard reset of the TT device: PCIe link goes down, the ARC firmware restarts from scratch, and all DDR channels retrain from zero. If you have tt-toplike running and do this in another terminal, you get a genuine light show backed by real hardware events:
 
 1. **Power drop** — as the chip resets, power briefly collapses toward zero. Particles stop spawning. The starfield dims out. The dungeon goes quiet.
-2. **DDR retraining** — the SMBUS DDR status bitmask flips channel-by-channel from *trained* → *idle* → *training* → *trained* as each channel comes back online. In Memory Flow's channel bars, you watch the channels relight one at a time. This takes a few seconds and the order is deterministic per chip.
-3. **ARC restart** — the heartbeat goes dark and comes back. ARC health indicators flicker red then green as the firmware finishes booting.
-4. **Power renormalization** — once the chip is back, the adaptive baseline has to re-learn idle state over the next 20 samples. During this window the visualization is slightly over-reactive — everything looks more active than it is while the baseline recalibrates. This produces the most visually intense few seconds of the whole sequence.
+2. **Defrag EVICT** — if you were in Defrag or Arcade mode with a model loaded, the power drop triggers the `EVICT` animation: each GDDR channel's blocks dissolve right-to-left (red→orange fade) at staggered speeds, with each chip's channels evicting at different rates via prime-number drain multipliers. Once all blocks drain to zero, the DMA rebuild animation starts automatically from scratch — blocks fill left-to-right again as the DDR channels retrain.
+3. **DDR retraining** — the SMBUS DDR status bitmask flips channel-by-channel from *trained* → *idle* → *training* → *trained* as each channel comes back online. In Memory Flow's channel bars, you watch the channels relight one at a time. This takes a few seconds and the order is deterministic per chip.
+4. **ARC restart** — the heartbeat goes dark and comes back. ARC health indicators flicker red then green as the firmware finishes booting.
+5. **Power renormalization** — once the chip is back, the adaptive baseline has to re-learn idle state over the next 20 samples. During this window the visualization is slightly over-reactive — everything looks more active than it is while the baseline recalibrates. This produces the most visually intense few seconds of the whole sequence.
 
 The full reset-to-stable cycle typically takes 10–15 seconds. tt-toplike's safe backends (sysfs, JSON) survive the reset without crashing because they're just reading kernel files — they just see a brief gap in data.
+
+---
+
+## Try it on any machine — no TT hardware required
+
+```bash
+tt-toplike --host          # or: tt-toplike --backend host
+tt-toplike --host --mode arcade
+tt-toplike --host --mode flow
+```
+
+`--host` reads your CPU frequency, temperature (via Linux hwmon/RAPL), and RAM usage and maps them into the same telemetry fields as a TT accelerator. Every visualization works: Starfield, Memory Castle, Memory Flow, Arcade. Your CPU cores glow as stars. RAM fill drives the DDR-channel bars. Package temperature shifts the color palette.
+
+It is not the same experience as real TT hardware — a discrete AI accelerator has DDR bandwidth, Tensix grid geometry, and ARC firmware that a CPU can't replicate. But it gives you the full visual engine to explore. Once you have TT hardware, remove `--host` and everything you learned transfers directly.
 
 ---
 
@@ -148,7 +163,11 @@ cargo build --release --all-features
 # Auto-detect backend (safe: Sysfs → JSON → Mock; never tries Luwen)
 tt-toplike
 
-# Explicit backends
+# Host backend — any machine, no TT hardware required
+tt-toplike --host             # reads CPU/RAM from sysinfo + Linux hwmon
+tt-toplike --host --mode arcade
+
+# Explicit TT backends
 tt-toplike --backend sysfs    # hwmon sensors — zero interference with running workloads
 tt-toplike --backend json     # tt-smi subprocess
 tt-toplike --mock --mock-devices 4
@@ -184,7 +203,8 @@ tt-toplike --devices 0,2
 - **Starfield** — stars = Tensix cores; brightness = power, color = temperature, twinkle = current
 - **Memory Castle** — roguelike dungeon with 600 particles representing DDR→L2→L1→Tensix memory hierarchy; 4 particle types (Read/Write/CacheHit/Miss) with trails
 - **Memory Flow** — NoC particles flowing across DDR channels
-- **Arcade** — all three visualizations simultaneously, with a `@` hero character driven by real telemetry (X = current, Y = power, color = temperature)
+- **Defrag** — Norton SpeedDisk-style block map: one row per GDDR channel, blocks fill left→right as weights DMA in, colored segments glow during inference, `EVICT` animation plays when a model unloads (power drops), then DMA rebuild restarts from scratch
+- **Arcade** — unified split-screen combining Starfield (top 40%), Memory Castle + Defrag block map side-by-side (middle 30%), and Memory Flow (bottom 30%); a `@` hero character roams the canvas driven by real telemetry: X = current draw, Y = power consumption, color = ASIC temperature; hero speed and trail length reflect aiclk and live ETH link count
 - **tt-toplike-app** — native desktop window hosting the full TUI in a PTY (GPU-accelerated via eframe; Wayland/X11)
 
 ### Backend System (Safe by Default)
@@ -195,6 +215,7 @@ Auto-detect order: **Sysfs → JSON → Mock** (Luwen excluded from auto-detect)
 |---------|--------|--------------------|-------------|
 | Sysfs   | Linux hwmon (`/sys/class/hwmon/`) | ✅ Yes | None |
 | JSON    | `tt-smi -s` subprocess | ✅ Yes | None |
+| Host    | CPU/RAM via sysinfo + hwmon | ✅ N/A | None |
 | Mock    | Simulated telemetry | ✅ N/A | None |
 | Luwen   | Direct PCI BAR0 access | ⚠️ May disrupt | root / ttkmd |
 

@@ -12,6 +12,7 @@ use crate::cli::{BackendType, Cli};
 use crate::error::{BackendError, BackendResult};
 use crate::backend::mock::MockBackend;
 use crate::backend::json::JSONBackend;
+use crate::backend::host::HostBackend;
 
 #[cfg(target_os = "linux")]
 use crate::backend::sysfs::SysfsBackend;
@@ -91,6 +92,11 @@ pub fn create_backend(
         BackendType::Hybrid => Err(BackendError::Initialization(
             "Hybrid backend only available on Linux".to_string(),
         )),
+        BackendType::Host => {
+            let mut backend = HostBackend::with_config(config);
+            backend.init()?;
+            Ok(Box::new(backend))
+        }
     }
 }
 
@@ -153,7 +159,9 @@ pub fn next_backend(current: BackendType) -> BackendType {
         #[cfg(not(feature = "luwen-backend"))]
         BackendType::Luwen => BackendType::Mock,
 
-        BackendType::Mock => {
+        BackendType::Mock => BackendType::Host,
+
+        BackendType::Host => {
             #[cfg(target_os = "linux")]
             return BackendType::Hybrid;
             #[cfg(not(target_os = "linux"))]
@@ -208,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_next_backend_cycle() {
-        // Full Linux cycle: Hybrid → Sysfs → Json → Luwen → Mock → Hybrid
+        // Full Linux cycle: Hybrid → Sysfs → Json → Luwen → Mock → Host → Hybrid
         #[cfg(target_os = "linux")]
         {
             let b1 = next_backend(BackendType::Hybrid);
@@ -224,7 +232,10 @@ mod tests {
             assert!(matches!(b4, BackendType::Mock));
 
             let b5 = next_backend(b4);
-            assert!(matches!(b5, BackendType::Hybrid));
+            assert!(matches!(b5, BackendType::Host));
+
+            let b6 = next_backend(b5);
+            assert!(matches!(b6, BackendType::Hybrid));
         }
     }
 
@@ -237,6 +248,7 @@ mod tests {
             backend: BackendType::Mock,
             mock: Some(0),
             json: false,
+            host: false,
             tt_smi_path: std::path::PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,

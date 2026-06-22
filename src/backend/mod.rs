@@ -44,6 +44,7 @@ pub mod luwen;  // Luwen backend for direct hardware access
 pub mod sysfs;  // Sysfs backend for Linux hwmon sensors (non-invasive)
 #[cfg(target_os = "linux")]
 pub mod hybrid;  // Hybrid backend: sysfs real-time + streaming JSON enrichment
+pub mod host;    // Host backend: any machine via sysinfo (no TT hardware required)
 pub mod factory;  // Backend factory for dynamic creation and switching
 
 use crate::error::BackendResult;

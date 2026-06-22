@@ -12,7 +12,7 @@
 
 pub mod chip_portrait;
 
-use crate::animation::{ArcadeVisualization, HardwareStarfield, MemoryCastle, MemoryFlowVis};
+use crate::animation::{ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis};
 use crate::backend::{factory, BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
 use crate::error::TTTopError;
@@ -20,7 +20,7 @@ use crate::ui::colors;
 #[cfg(feature = "linux-procfs")]
 use crate::workload::{InferenceEngine, InferenceServerProbe, ProcessMonitor, ServingMetrics};
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -61,6 +61,19 @@ enum DisplayMode {
     MemoryFlow,
     /// Arcade mode (unified visualization with all three modes + hero character)
     Arcade,
+    /// Defrag view — model-loading visualization (inspired by disk defragmenters)
+    Defrag,
+}
+
+/// Floating overlay panel type — toggled by hotkeys, auto-dismissed on any other keypress.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OverlayPanel {
+    /// Symbol/color legend for the current visualization.
+    Legend,
+    /// Quick reference card: all keys and commands.
+    Help,
+    /// Prose description of what the current mode is showing and why.
+    Explain,
 }
 
 /// Run the TUI application
@@ -110,7 +123,8 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     let mut stdout = io::stdout();
     // Note: Mouse capture disabled - we don't use mouse events and they were causing
     // performance issues (faster animation when mousing over the terminal)
-    execute!(stdout, EnterAlternateScreen).map_err(|e| TTTopError::Terminal(e.to_string()))?;
+    execute!(stdout, EnterAlternateScreen, EnableFocusChange)
+        .map_err(|e| TTTopError::Terminal(e.to_string()))?;
 
     // Disable stderr output to prevent log corruption in TUI
     crate::logging::disable_stderr();
@@ -132,7 +146,7 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
 
     // Restore terminal
     disable_raw_mode().map_err(|e| TTTopError::Terminal(e.to_string()))?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)
+    execute!(terminal.backend_mut(), DisableFocusChange, LeaveAlternateScreen)
         .map_err(|e| TTTopError::Terminal(e.to_string()))?;
     terminal
         .show_cursor()
@@ -159,11 +173,13 @@ fn run_app(
         AnimConfig::from_profile(cli.profile).merge(load_config_overrides())
     };
 
-    // UI refresh rates — chosen per display mode at the poll site below.
-    // Animation modes (Starfield/Castle/Flow/Arcade) need 60 FPS for smooth motion.
-    // Data modes (Insights/Grid) only need ~4 FPS; 60 FPS there wastes ~3 CPU cores.
-    let ui_poll_rate_anim = Duration::from_millis(16); // ~60 FPS
-    let ui_poll_rate_data = Duration::from_millis(250); // ~4 FPS
+    // UI refresh rates — animation modes target 60 FPS, data modes ~10 FPS.
+    // Input polling is always 16 ms so keystrokes are never delayed.
+    // No focus throttle — tt-toplike is designed to run alongside other work.
+    let mut ui_poll_rate_anim = Duration::from_millis(16); // ~60 FPS for animated modes
+    let mut ui_poll_rate_data = Duration::from_millis(100); // ~10 FPS for data modes
+    let mut last_anim_render = Instant::now();
+    let mut last_data_render = Instant::now();
 
     // Process monitoring (Linux-only, update every 2 seconds)
     #[cfg(feature = "linux-procfs")]
@@ -213,7 +229,22 @@ fn run_app(
     let mut memory_castle: Option<MemoryCastle> = None;
     let mut memory_flow: Option<MemoryFlowVis> = None;
     let mut arcade: Option<ArcadeVisualization> = None;
+    let mut defrag: Option<DefragVis> = None;
     let mut prev_display_mode = display_mode;
+
+    // ── Slash command state ────────────────────────────────────────────────
+    // Press '/' from any mode to open the command bar at the bottom of the
+    // screen.  Type a command, press Enter to execute, Esc to cancel.
+    // The command bar is rendered as an overlay on top of the current view
+    // so it works from every mode without mode-specific plumbing.
+    let mut cmd_mode = false;
+    let mut cmd_buf = String::new();
+    let mut cmd_message: Option<(String, bool)> = None; // (text, is_error)
+
+    // ── Floating overlay panel state ──────────────────────────────────────
+    // Toggled by l (legend), ? (help), ! (explain).
+    // Auto-dismissed on any other keypress — stays until explicit re-toggle.
+    let mut overlay: Option<OverlayPanel> = None;
 
     // Portrait particle state — per-device particle list keyed by device index,
     // a shared AdaptiveBaseline (one entry per device), and a monotonic tick counter.
@@ -248,11 +279,41 @@ fn run_app(
     let mut fleet_zoom_start: Option<usize> = None;
 
     loop {
-        // Initialize or update visualizations
+        // Decide whether to advance animations this iteration.
+        // nvtop-style trick: input always polls at INPUT_POLL_MS (16 ms) so
+        // keystrokes are never delayed.  Viz updates are gated separately so
+        // animation modes tick at their target FPS while data modes tick slower.
+        // Defrag is animation-tier: the fill sweep and frontier shimmer need
+        // 60fps ticks to look smooth during model loading.
+        let is_anim_mode = matches!(
+            display_mode,
+            DisplayMode::Starfield
+                | DisplayMode::MemoryCastle
+                | DisplayMode::MemoryFlow
+                | DisplayMode::Arcade
+                | DisplayMode::Defrag
+        );
+        let render_interval = if is_anim_mode {
+            ui_poll_rate_anim
+        } else {
+            ui_poll_rate_data
+        };
+        let should_tick = if is_anim_mode {
+            last_anim_render.elapsed() >= render_interval
+        } else {
+            last_data_render.elapsed() >= render_interval
+        };
+        if should_tick {
+            if is_anim_mode { last_anim_render = Instant::now(); }
+            else { last_data_render = Instant::now(); }
+        }
+
+        // Initialize or update visualizations (only on tick to match target FPS)
         let size = terminal
             .size()
             .map_err(|e| TTTopError::Terminal(e.to_string()))?;
 
+        if should_tick {
         match display_mode {
             DisplayMode::Starfield => {
                 if starfield.is_none() {
@@ -300,6 +361,12 @@ fn run_app(
                 }
             }
             DisplayMode::Arcade => {
+                // Re-create if size changed — arcade pre-allocates at construction size.
+                if let Some(ref arc) = arcade {
+                    if arc.width() != size.width as usize || arc.height() != size.height as usize {
+                        arcade = None;
+                    }
+                }
                 if arcade.is_none() {
                     // Create new Arcade visualization
                     let mut arc =
@@ -325,7 +392,19 @@ fn run_app(
             DisplayMode::Grid => {
                 // Grid mode doesn't need special init
             }
+            DisplayMode::Defrag => {
+                if defrag.is_none() {
+                    defrag = Some(DefragVis::new(
+                        size.width as usize,
+                        size.height as usize,
+                    ));
+                }
+                if let Some(ref mut dv) = defrag {
+                    dv.update(backend);
+                }
+            }
         }
+        } // end if should_tick
 
         // Clear terminal when switching modes to remove artifacts
         if display_mode != prev_display_mode {
@@ -416,19 +495,31 @@ fn run_app(
                             ui_arcade(f, arc, backend);
                         }
                     }
+                    DisplayMode::Defrag => {
+                        if let Some(ref dv) = defrag {
+                            ui_defrag(f, dv, backend);
+                        }
+                    }
+                }
+
+                // ── Command bar overlay (all modes) ───────────────────────
+                if cmd_mode || cmd_message.is_some() {
+                    let msg_ref = cmd_message.as_ref().map(|(s, e)| (s.as_str(), *e));
+                    render_command_bar(f, &cmd_buf, msg_ref);
+                }
+
+                // ── Floating overlay panel (legend / help / explain) ───────
+                if let Some(kind) = overlay {
+                    render_overlay_panel(f, kind, display_mode);
                 }
             })
             .map_err(|e| TTTopError::Terminal(e.to_string()))?;
 
-        // Poll at animation rate for visual modes, data rate for table/grid modes.
-        // Insights and Grid are static tables — 4 FPS is indistinguishable from 60 FPS
-        // to humans but saves ~3 CPU cores, important during long-running workloads.
-        let poll_rate = match display_mode {
-            DisplayMode::Insights | DisplayMode::Grid => ui_poll_rate_data,
-            _ => ui_poll_rate_anim,
-        };
-        if event::poll(poll_rate).map_err(|e| TTTopError::Terminal(e.to_string()))? {
+        // Input always polls at 16 ms so keystrokes respond immediately.
+        let input_poll = Duration::from_millis(16);
+        if event::poll(input_poll).map_err(|e| TTTopError::Terminal(e.to_string()))? {
             match event::read().map_err(|e| TTTopError::Terminal(e.to_string()))? {
+                Event::FocusGained | Event::FocusLost => {}
                 Event::Resize(_, _) => {
                     // Drop all size-dependent visualizations so they reinitialize
                     // at the new dimensions on the next loop iteration.
@@ -436,13 +527,63 @@ fn run_app(
                     memory_castle = None;
                     memory_flow = None;
                     arcade = None;
+                    defrag = None;
                     terminal.clear().ok();
                 }
-                Event::Key(key) => match key.code {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                // ── Command mode intercepts all keystrokes ─────────────────
+                if cmd_mode {
+                    match key.code {
+                        KeyCode::Esc => {
+                            cmd_mode = false;
+                            cmd_buf.clear();
+                            cmd_message = None;
+                        }
+                        KeyCode::Enter => {
+                            let (msg, is_err) = execute_command(
+                                &cmd_buf,
+                                &mut display_mode,
+                                &mut ui_poll_rate_anim,
+                                &mut ui_poll_rate_data,
+                                anim_cfg.sensitivity,
+                                &mut overlay,
+                            );
+                            cmd_message = Some((msg, is_err));
+                            cmd_mode = false;
+                            cmd_buf.clear();
+                        }
+                        KeyCode::Backspace => { cmd_buf.pop(); }
+                        KeyCode::Char(c) => { cmd_buf.push(c); }
+                        _ => {}
+                    }
+                } else { match key.code {
+                    // ── Overlay toggle hotkeys (l / ? / !) ─────────────────
+                    KeyCode::Char('l') => {
+                        overlay = if overlay == Some(OverlayPanel::Legend) { None } else { Some(OverlayPanel::Legend) };
+                    }
+                    KeyCode::Char('?') => {
+                        overlay = if overlay == Some(OverlayPanel::Help) { None } else { Some(OverlayPanel::Help) };
+                    }
+                    KeyCode::Char('!') => {
+                        overlay = if overlay == Some(OverlayPanel::Explain) { None } else { Some(OverlayPanel::Explain) };
+                    }
+                    KeyCode::Char('/') => {
+                        // Open command bar — clears any previous result message
+                        cmd_mode = true;
+                        cmd_buf.clear();
+                        cmd_message = None;
+                        overlay = None; // dismiss overlay when entering command mode
+                    }
                     KeyCode::Char('q') => {
                         return Ok(());
                     }
                     KeyCode::Esc => {
+                        // Dismiss overlay, command message, zoom, kill confirm (in that order).
+                        if overlay.is_some() {
+                            overlay = None;
+                        } else if cmd_message.is_some() {
+                            cmd_message = None;
+                        } else
                         if fleet_zoom_start.is_some() {
                             // Zoom out from portrait drill-down back to galaxy overview.
                             fleet_zoom_start = None;
@@ -471,18 +612,23 @@ fn run_app(
                             DisplayMode::Insights | DisplayMode::Grid => DisplayMode::MemoryFlow,
                             DisplayMode::MemoryFlow => DisplayMode::Starfield,
                             DisplayMode::Starfield => {
-                                // Randomize Memory Castle on each activation
                                 memory_castle = None;
                                 DisplayMode::MemoryCastle
                             }
                             DisplayMode::MemoryCastle => {
-                                // Reset Arcade on each activation
                                 arcade = None;
                                 DisplayMode::Arcade
                             }
-                            DisplayMode::Arcade => DisplayMode::Insights,
+                            DisplayMode::Arcade => DisplayMode::Defrag,
+                            DisplayMode::Defrag => DisplayMode::Insights,
                         };
                         log::info!("Switched to {:?} mode", display_mode);
+                    }
+                    KeyCode::Char('d') | KeyCode::Char('D') => {
+                        // Jump directly to Defrag mode
+                        defrag = None; // reinit at new frame
+                        display_mode = DisplayMode::Defrag;
+                        log::info!("Switched directly to Defrag mode");
                     }
                     KeyCode::Char('g') => {
                         display_mode = DisplayMode::Grid;
@@ -516,6 +662,9 @@ fn run_app(
                                 }
                                 if let DisplayMode::Arcade = display_mode {
                                     arcade = None;
+                                }
+                                if let DisplayMode::Defrag = display_mode {
+                                    defrag = None;
                                 }
                             }
                             Err(e) => {
@@ -637,8 +786,13 @@ fn run_app(
                     KeyCode::Char('n') if display_mode == DisplayMode::Insights => {
                         kill_confirm = None;
                     }
-                    _ => {}
-                },
+                    _ => {
+                        // Any unrecognized key dismisses the overlay (auto-hide).
+                        overlay = None;
+                    }
+                } // end inner key match
+                } // end else (not cmd_mode)
+                } // end Event::Key
                 _ => {}
             } // end match event::read()
         }
@@ -842,31 +996,20 @@ fn render_visualization_header(
 /// Render visualization mode footer with legend
 fn render_visualization_footer(f: &mut Frame, area: Rect) {
     let footer_text = vec![Line::from(vec![
-        Span::styled("Stars: ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(
-            "Tensix Cores ",
-            Style::default().fg(colors::rgb(100, 200, 255)),
-        ),
+        Span::styled("stars=cores ", Style::default().fg(colors::rgb(100, 200, 255))),
         Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled("Planets: ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(
-            "Memory (L1/L2/DDR) ",
-            Style::default().fg(colors::rgb(255, 200, 100)),
-        ),
+        Span::styled("○ planets=mem ", Style::default().fg(colors::rgb(255, 200, 100))),
         Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled("Color: ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(
-            "Temperature ",
-            Style::default().fg(colors::rgb(255, 100, 100)),
-        ),
+        Span::styled("color=temp ", Style::default().fg(colors::rgb(255, 100, 100))),
         Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled(
-            " v ",
-            Style::default()
-                .fg(colors::rgb(80, 220, 200))
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ),
-        Span::styled("cycle", Style::default().fg(colors::rgb(160, 160, 160))),
+        Span::styled(" v ", Style::default().fg(colors::rgb(80, 220, 200)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled("cycle  ", Style::default().fg(colors::rgb(160, 160, 160))),
+        Span::styled(" l ", Style::default().fg(colors::rgb(80, 220, 200)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled("legend  ", Style::default().fg(colors::rgb(160, 160, 160))),
+        Span::styled(" ? ", Style::default().fg(colors::rgb(220, 180, 80)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled("help  ", Style::default().fg(colors::rgb(160, 160, 160))),
+        Span::styled(" ! ", Style::default().fg(colors::rgb(180, 140, 255)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled("explain", Style::default().fg(colors::rgb(160, 160, 160))),
     ])];
 
     let footer = Paragraph::new(footer_text)
@@ -1027,28 +1170,19 @@ fn render_memory_castle_header(f: &mut Frame, area: Rect, backend: &dyn Telemetr
 /// Render Memory Castle mode footer with controls
 fn render_memory_castle_footer(f: &mut Frame, area: Rect) {
     let footer_text = vec![Line::from(vec![
-        Span::styled(
-            "Particles: ",
-            Style::default().fg(colors::rgb(160, 160, 160)),
-        ),
-        Span::styled(
-            "○◉ Read □■ Write ◇◆ Hit ●⬤ Miss ",
-            Style::default().fg(colors::rgb(255, 180, 220)),
-        ),
+        Span::styled("◦read ", Style::default().fg(colors::rgb(100, 200, 255))),
+        Span::styled("·write ", Style::default().fg(colors::rgb(255, 180, 80))),
+        Span::styled("◇hit ", Style::default().fg(colors::rgb(100, 255, 180))),
+        Span::styled("•miss ", Style::default().fg(colors::rgb(255, 100, 150))),
         Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled("Layers: ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(
-            "DDR→L2→L1→Tensix ",
-            Style::default().fg(colors::rgb(255, 200, 100)),
-        ),
+        Span::styled("DDR→L2→L1→Tensix ", Style::default().fg(colors::rgb(255, 200, 100))),
         Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled(
-            " v ",
-            Style::default()
-                .fg(colors::rgb(80, 220, 200))
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ),
-        Span::styled("cycle", Style::default().fg(colors::rgb(160, 160, 160))),
+        Span::styled(" v ", Style::default().fg(colors::rgb(80, 220, 200)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled("cycle  ", Style::default().fg(colors::rgb(160, 160, 160))),
+        Span::styled(" l ", Style::default().fg(colors::rgb(80, 220, 200)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled("legend  ", Style::default().fg(colors::rgb(160, 160, 160))),
+        Span::styled(" ? ", Style::default().fg(colors::rgb(220, 180, 80)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled("help", Style::default().fg(colors::rgb(160, 160, 160))),
     ])];
 
     let footer = Paragraph::new(footer_text)
@@ -1119,31 +1253,16 @@ fn render_memory_flow_header(f: &mut Frame, area: Rect, backend: &dyn TelemetryB
 /// Render Memory Flow mode footer with controls
 fn render_memory_flow_footer(f: &mut Frame, area: Rect) {
     let footer_text = vec![Line::from(vec![
-        Span::styled("Flow: ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(
-            "NoC Particles ",
-            Style::default().fg(colors::rgb(180, 255, 180)),
-        ),
+        Span::styled("→ reads  ← writes ", Style::default().fg(colors::rgb(180, 255, 180))),
         Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled("DDR: ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(
-            "Channel Activity ",
-            Style::default().fg(colors::rgb(255, 200, 100)),
-        ),
+        Span::styled("speed=NoC  density=memW ", Style::default().fg(colors::rgb(255, 200, 100))),
         Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled("Color: ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(
-            "Temperature + Traffic ",
-            Style::default().fg(colors::rgb(255, 100, 100)),
-        ),
-        Span::styled("│ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled(
-            " v ",
-            Style::default()
-                .fg(colors::rgb(80, 220, 200))
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ),
-        Span::styled("cycle", Style::default().fg(colors::rgb(160, 160, 160))),
+        Span::styled(" v ", Style::default().fg(colors::rgb(80, 220, 200)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled("cycle  ", Style::default().fg(colors::rgb(160, 160, 160))),
+        Span::styled(" l ", Style::default().fg(colors::rgb(80, 220, 200)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled("legend  ", Style::default().fg(colors::rgb(160, 160, 160))),
+        Span::styled(" ? ", Style::default().fg(colors::rgb(220, 180, 80)).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled("help", Style::default().fg(colors::rgb(160, 160, 160))),
     ])];
 
     let footer = Paragraph::new(footer_text)
@@ -1165,273 +1284,557 @@ fn render_memory_flow_footer(f: &mut Frame, area: Rect) {
     f.render_widget(footer, area);
 }
 
-/// Render Arcade mode with btop++-inspired layout
-fn ui_arcade(f: &mut Frame, arcade: &ArcadeVisualization, backend: &dyn TelemetryBackend) {
-    // Create main layout: Header (4 lines incl. topology diagram) | Content | Footer.
-    // Guard: keep header at 3 when device_count < 2 (no topology row needed).
-    let header_height = if backend.devices().len() >= 2 { 4 } else { 3 };
-    let main_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(header_height), // Header
-            Constraint::Min(10),               // Content
-            Constraint::Length(3),             // Footer
-        ])
-        .split(f.area());
-
-    // Render header (passes arcade for topology diagram)
-    render_arcade_header(f, main_chunks[0], arcade, backend);
-
-    // Split content: Top (Starfield) | Bottom (Castle+Flow + Table)
-    let content_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(40), // Starfield (top 40%)
-            Constraint::Percentage(60), // Bottom area
-        ])
-        .split(main_chunks[1]);
-
-    // Render starfield (full width)
-    render_arcade_starfield(f, content_chunks[0], arcade, backend);
-
-    // Split bottom: Castle (top) | Flow (bottom) - both full width
-    let viz_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(50), // Memory Castle
-            Constraint::Percentage(50), // Memory Flow
-        ])
-        .split(content_chunks[1]);
-
-    // Render visualizations (full width now!)
-    render_arcade_castle(f, viz_chunks[0], arcade, backend);
-    render_arcade_flow(f, viz_chunks[1], arcade, backend);
-
-    // Render footer
-    render_arcade_footer(f, main_chunks[2], backend);
-}
-
-/// Render Arcade mode header
+/// Render Defrag mode — model-loading visualization.
 ///
-/// When `arcade` has topology set (device_count ≥ 2), the header block gets an
-/// extra line with the topology diagram: `[BH0 ██░ 16W 43°C] ←→ [BH1 …] ═══ [BH2 …]`
-fn render_arcade_header(
-    f: &mut Frame,
-    area: Rect,
-    arcade: &ArcadeVisualization,
-    backend: &dyn TelemetryBackend,
-) {
-    let device_count = backend.devices().len();
+/// Displays a grid of cells per device that fills from empty (░) → loading (▒▓)
+/// → resident (█) as a model is transferred into DRAM.  Fill progress is inferred
+/// from observable signals: power ramp, aiclk transition, and GDDR temperature delta.
+fn ui_defrag(f: &mut Frame, dv: &DefragVis, backend: &dyn TelemetryBackend) {
+    let lines = dv.render(backend);
+    let widget = Paragraph::new(lines)
+        .style(Style::default().bg(colors::rgb(0, 0, 0)));
+    f.render_widget(widget, f.area());
+}
 
-    let mut header_text = vec![Line::from(vec![
-        Span::styled(
-            " 🎮 ARCADE MODE ",
-            Style::default()
-                .fg(colors::rgb(255, 100, 255)) // Bright magenta (btop++ style)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" │ ", Style::default().fg(colors::rgb(80, 80, 100))),
-        Span::styled(
-            format!(
-                " {} Device{} ",
-                device_count,
-                if device_count == 1 { "" } else { "s" }
-            ),
-            Style::default().fg(colors::rgb(100, 220, 255)), // Bright cyan
-        ),
-        Span::styled(" │ ", Style::default().fg(colors::rgb(80, 80, 100))),
-        Span::styled(
-            format!(" {} ", backend.backend_info()),
-            Style::default().fg(colors::rgb(150, 220, 100)), // Bright green
-        ),
-    ])];
+/// Render Arcade mode — uses the composite canvas so the hero `@` and trail
+/// actually appear.  The previous ratatui-Layout approach called sub-viz methods
+/// directly into separate Rects, bypassing ArcadeVisualization::render() and
+/// overlay_hero() entirely — the hero was computed but never drawn.
+///
+/// The composite path: arcade.render(backend) → Vec<Line> → single Paragraph
+/// over the full terminal area.  No border boxes around each sub-panel, but
+/// the inline separators from render_separator() provide visual structure.
+fn ui_arcade(f: &mut Frame, arcade: &ArcadeVisualization, backend: &dyn TelemetryBackend) {
+    let lines = arcade.render(backend);
+    let widget = Paragraph::new(lines)
+        .style(Style::default().bg(colors::rgb(0, 0, 0)));
+    f.render_widget(widget, f.area());
+}
 
-    // Topology diagram — only when ≥ 2 devices.
-    if device_count >= 2 {
-        if let Some(diagram) = arcade.topology_diagram_line(backend) {
-            header_text.push(diagram);
-        }
+
+
+/// Render the command bar overlay at the bottom of the terminal.
+///
+/// When `cmd_buf` is non-empty or command mode is active, shows:
+///   `:  <cmd_buf>_`
+/// When a result message is present (after Enter), shows the message for one
+/// render cycle until dismissed with Esc or the next `/` press.
+fn render_command_bar(f: &mut Frame, cmd_buf: &str, msg: Option<(&str, bool)>) {
+    let area = f.area();
+    if area.height < 2 {
+        return;
     }
-
-    let header = Paragraph::new(header_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(
-                    Style::default()
-                        .fg(colors::rgb(100, 150, 255)) // Bright blue border
-                        .add_modifier(Modifier::BOLD),
-                )
-                .title(" ⚡ Enhanced Layout ")
-                .title_alignment(Alignment::Left)
-                .title_style(
-                    Style::default()
-                        .fg(colors::rgb(255, 200, 100)) // Orange title
-                        .add_modifier(Modifier::BOLD),
-                ),
-        )
-        .alignment(Alignment::Left);
-
-    f.render_widget(header, area);
-}
-
-/// Render starfield section
-fn render_arcade_starfield(
-    f: &mut Frame,
-    area: Rect,
-    arcade: &ArcadeVisualization,
-    _backend: &dyn TelemetryBackend,
-) {
-    let starfield_lines = arcade.starfield.render();
-
-    let starfield_widget = Paragraph::new(starfield_lines)
-        .style(Style::default().bg(colors::rgb(0, 0, 0))) // Transparent background for tmux
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(colors::rgb(100, 200, 255))) // Cyan
-                .title(" ✧ STARFIELD ")
-                .title_alignment(Alignment::Center)
-                .title_style(
-                    Style::default()
-                        .fg(colors::rgb(150, 220, 255))
-                        .add_modifier(Modifier::BOLD),
-                )
-                .style(Style::default().bg(colors::rgb(0, 0, 0))), // Transparent block background
-        );
-
-    f.render_widget(starfield_widget, area);
-}
-
-/// Render memory castle section
-fn render_arcade_castle(
-    f: &mut Frame,
-    area: Rect,
-    arcade: &ArcadeVisualization,
-    backend: &dyn TelemetryBackend,
-) {
-    let castle_lines = arcade.memory_castle.render(backend);
-
-    let castle_widget = Paragraph::new(castle_lines)
-        .style(Style::default().bg(colors::rgb(0, 0, 0))) // Transparent background for tmux
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(colors::rgb(255, 150, 200))) // Pink
-                .title(" 🏰 MEMORY CASTLE ")
-                .title_alignment(Alignment::Center)
-                .title_style(
-                    Style::default()
-                        .fg(colors::rgb(255, 180, 220))
-                        .add_modifier(Modifier::BOLD),
-                )
-                .style(Style::default().bg(colors::rgb(0, 0, 0))), // Transparent block background
-        );
-
-    f.render_widget(castle_widget, area);
-}
-
-/// Render memory flow section
-fn render_arcade_flow(
-    f: &mut Frame,
-    area: Rect,
-    arcade: &ArcadeVisualization,
-    backend: &dyn TelemetryBackend,
-) {
-    let flow_lines = arcade.memory_flow.render(backend);
-
-    let flow_widget = Paragraph::new(flow_lines)
-        .style(Style::default().bg(colors::rgb(0, 0, 0))) // Transparent background for tmux
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(colors::rgb(150, 255, 150))) // Green
-                .title(" 🌊 MEMORY FLOW ")
-                .title_alignment(Alignment::Center)
-                .title_style(
-                    Style::default()
-                        .fg(colors::rgb(180, 255, 180))
-                        .add_modifier(Modifier::BOLD),
-                )
-                .style(Style::default().bg(colors::rgb(0, 0, 0))), // Transparent block background
-        );
-
-    f.render_widget(flow_widget, area);
-}
-
-/// Render device table (standard toplike display)
-/// Currently unused - kept for potential future use
-#[allow(dead_code)]
-
-/// Render arcade footer
-fn render_arcade_footer(f: &mut Frame, area: Rect, backend: &dyn TelemetryBackend) {
-    // Get hero stats from first device
-    let (power, temp, current) = if let Some(device) = backend.devices().first() {
-        if let Some(telem) = backend.telemetry(device.index) {
-            (
-                telem.power.unwrap_or(0.0),
-                telem.asic_temperature.unwrap_or(25.0),
-                telem.current.unwrap_or(0.0),
-            )
-        } else {
-            (0.0, 25.0, 0.0)
-        }
-    } else {
-        (0.0, 25.0, 0.0)
+    // Place the bar at the very bottom row.
+    let bar_area = Rect {
+        x: 0,
+        y: area.height.saturating_sub(1),
+        width: area.width,
+        height: 1,
     };
 
-    let temp_hue = crate::animation::temp_to_hue(temp);
-    let hero_color = crate::animation::hsv_to_rgb(temp_hue, 1.0, 1.0);
+    let spans = if let Some((text, is_error)) = msg {
+        let color = if is_error {
+            colors::rgb(255, 100, 100)
+        } else {
+            colors::rgb(80, 220, 140)
+        };
+        vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(text.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        ]
+    } else {
+        vec![
+            Span::styled(
+                "  / ",
+                Style::default()
+                    .fg(colors::rgb(220, 180, 80))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                cmd_buf.to_string(),
+                Style::default()
+                    .fg(colors::rgb(220, 220, 220))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("_", Style::default().fg(colors::rgb(200, 200, 80))),
+        ]
+    };
 
-    let footer_text = vec![Line::from(vec![
-        Span::styled(
-            " A ",
-            Style::default()
-                .fg(colors::rgb(255, 100, 255))
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ),
-        Span::styled(" arcade ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(" │ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled(
-            " v ",
-            Style::default()
-                .fg(colors::rgb(100, 220, 255))
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        ),
-        Span::styled(" cycle ", Style::default().fg(colors::rgb(160, 160, 160))),
-        Span::styled(" │ ", Style::default().fg(colors::rgb(100, 100, 120))),
-        Span::styled(" Hero: ", Style::default().fg(colors::rgb(180, 180, 180))),
-        Span::styled(
-            "@",
-            Style::default().fg(hero_color).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!(" │ P:{:5.1}W T:{:3.0}°C I:{:5.1}A ", power, temp, current),
-            Style::default().fg(colors::rgb(150, 220, 200)),
-        ),
-    ])];
+    // Clear the bar row with a dark background, then render text.
+    f.render_widget(
+        Block::default().style(Style::default().bg(colors::rgb(15, 20, 30))),
+        bar_area,
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(spans))
+            .style(Style::default().bg(colors::rgb(15, 20, 30))),
+        bar_area,
+    );
+}
 
-    let footer = Paragraph::new(footer_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(colors::rgb(100, 150, 255)))
-                .title(" ⌨  Controls ")
-                .title_alignment(Alignment::Left)
-                .title_style(
-                    Style::default()
-                        .fg(colors::rgb(150, 200, 255))
-                        .add_modifier(Modifier::BOLD),
-                ),
-        )
-        .alignment(Alignment::Center);
+/// Render the floating overlay panel (legend / help / explain) anchored to the
+/// bottom-right corner.  No right-side border characters per project convention.
+///
+/// The panel composites over whatever view is underneath — it does not consume
+/// any layout rows.  Width is fixed at 40 columns; height grows with content.
+fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
+    let area = f.area();
+    const PANEL_W: u16 = 42;
+    // Enforce minimum terminal size — skip if it would leave no room.
+    if area.width < PANEL_W + 4 || area.height < 6 {
+        return;
+    }
 
-    f.render_widget(footer, area);
+    let lines = overlay_panel_lines(kind, mode);
+    let panel_h = (lines.len() as u16 + 2).min(area.height.saturating_sub(2)); // +2 for top/bottom border
+
+    let x = area.width.saturating_sub(PANEL_W);
+    let y = area.height.saturating_sub(panel_h + 1); // +1 keeps above command bar row
+
+    let panel_rect = Rect { x, y, width: PANEL_W, height: panel_h };
+
+    // Clear background behind the panel.
+    f.render_widget(
+        Block::default().style(Style::default().bg(colors::rgb(8, 14, 22))),
+        panel_rect,
+    );
+
+    // Build full display: top border + content lines + bottom border.
+    let (title, border_color) = match kind {
+        OverlayPanel::Legend  => ("LEGEND",  colors::rgb(79, 209, 197)),   // teal
+        OverlayPanel::Help    => ("HELP",    colors::rgb(220, 180, 80)),    // gold
+        OverlayPanel::Explain => ("EXPLAIN", colors::rgb(180, 140, 255)),   // lavender
+    };
+    let inner_w = PANEL_W.saturating_sub(2) as usize; // ╔ takes 1 col, no right border
+    let top_rule = "═".repeat(inner_w.saturating_sub(title.len() + 2));
+    let mut display_lines: Vec<Line> = Vec::with_capacity(panel_h as usize);
+
+    display_lines.push(Line::from(vec![
+        Span::styled(format!("╔═ {} ", title), Style::default().fg(border_color).add_modifier(Modifier::BOLD)),
+        Span::styled(top_rule, Style::default().fg(colors::rgb(40, 55, 70))),
+    ]));
+
+    let content_rows = (panel_h as usize).saturating_sub(2);
+    for line in lines.iter().take(content_rows) {
+        display_lines.push(line.clone());
+    }
+
+    let bottom_rule = "═".repeat(PANEL_W.saturating_sub(1) as usize);
+    display_lines.push(Line::from(
+        Span::styled(format!("╚{}", bottom_rule), Style::default().fg(colors::rgb(40, 55, 70)))
+    ));
+
+    f.render_widget(
+        Paragraph::new(display_lines)
+            .style(Style::default().bg(colors::rgb(8, 14, 22))),
+        panel_rect,
+    );
+}
+
+/// Build the content lines for the overlay panel.
+///
+/// Lines must fit within PANEL_W - 2 visible columns (no right border means content
+/// needs to respect the panel width itself).  Each line is prefixed with `║ ` (2 cols).
+fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
+    let bg   = colors::rgb(8, 14, 22);
+    let bar  = colors::rgb(40, 55, 70);
+    let dim  = colors::rgb(90, 100, 120);
+    let key  = colors::rgb(79, 209, 197);   // teal
+    let lbl  = colors::rgb(180, 190, 210);
+    let head = colors::rgb(220, 230, 250);
+
+    // Helper: build a ║-prefixed content line.
+    macro_rules! ln {
+        ($spans:expr) => {{
+            let mut v: Vec<Span<'static>> = vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            v.extend($spans);
+            Line::from(v)
+        }};
+    }
+    macro_rules! sep {
+        ($label:expr) => {
+            ln!(vec![Span::styled($label, Style::default().fg(head).add_modifier(Modifier::BOLD))])
+        };
+    }
+    macro_rules! row {
+        ($k:expr, $v:expr, $kc:expr) => {
+            ln!(vec![
+                Span::styled(format!("{:<12}", $k), Style::default().fg($kc).add_modifier(Modifier::BOLD)),
+                Span::styled($v, Style::default().fg(dim)),
+            ])
+        };
+    }
+
+    match kind {
+        OverlayPanel::Help => {
+            vec![
+                sep!("Keys"),
+                row!(" v",           "cycle views",                  key),
+                row!(" l",           "toggle legend",                 key),
+                row!(" ?",           "this help panel",               key),
+                row!(" !",           "explain current mode",          key),
+                row!(" /",           "open command bar",              key),
+                row!(" q  Esc",      "quit",                          key),
+                row!(" r",           "force data refresh",            key),
+                row!(" a  A",        "jump to Arcade",                key),
+                row!(" d  D",        "jump to Defrag",                key),
+                row!(" g",           "jump to Grid",                  key),
+                row!(" b",           "cycle backend",                 key),
+                ln!(vec![Span::styled("──────────────────────────────────────", Style::default().fg(bar))]),
+                sep!("Commands  (/ to open)"),
+                row!(" /mode <name>","insights grid castle flow…",    lbl),
+                row!(" /fps <n>",    "animation FPS  1–120",          lbl),
+                row!(" /datafps <n>","data refresh FPS  1–30",        lbl),
+                row!(" /legend",     "toggle legend panel",           lbl),
+                row!(" /explain",    "toggle explain panel",          lbl),
+                row!(" /help",       "toggle this panel",             lbl),
+            ]
+        }
+
+        OverlayPanel::Legend => {
+            // Per-view symbol legend — Arcade shows all four combined.
+            match mode {
+                DisplayMode::Starfield => starfield_legend_lines(bar, bg, dim, key),
+                DisplayMode::MemoryCastle => castle_legend_lines(bar, bg, dim),
+                DisplayMode::Defrag => defrag_legend_lines(bar, bg, dim, key),
+                DisplayMode::MemoryFlow => flow_legend_lines(bar, bg, dim),
+                DisplayMode::Arcade => {
+                    // All four combined.
+                    let mut v = Vec::new();
+                    v.push(sep!("✧ Starfield"));
+                    v.extend(starfield_legend_lines(bar, bg, dim, key));
+                    v.push(ln!(vec![Span::styled("──────────────────────────────────────", Style::default().fg(bar))]));
+                    v.push(sep!("🏰 Memory Castle"));
+                    v.extend(castle_legend_lines(bar, bg, dim));
+                    v.push(ln!(vec![Span::styled("──────────────────────────────────────", Style::default().fg(bar))]));
+                    v.push(sep!("▓ Defrag"));
+                    v.extend(defrag_legend_lines(bar, bg, dim, key));
+                    v.push(ln!(vec![Span::styled("──────────────────────────────────────", Style::default().fg(bar))]));
+                    v.push(sep!("🌊 Memory Flow"));
+                    v.extend(flow_legend_lines(bar, bg, dim));
+                    v.push(ln!(vec![Span::styled("──────────────────────────────────────", Style::default().fg(bar))]));
+                    v.push(sep!("@ Hero"));
+                    v.extend(hero_legend_lines(bar, bg, dim));
+                    v
+                }
+                _ => {
+                    vec![
+                        ln!(vec![Span::styled("no legend for this view", Style::default().fg(dim))]),
+                        ln!(vec![Span::styled("try v to switch to a viz mode", Style::default().fg(dim))]),
+                    ]
+                }
+            }
+        }
+
+        OverlayPanel::Explain => {
+            match mode {
+                DisplayMode::Starfield => explain_lines(bar, bg, dim, lbl, &[
+                    "Hardware-Responsive Starfield",
+                    "",
+                    "Each star represents one Tensix compute",
+                    "core inside a Blackhole or Wormhole ASIC.",
+                    "",
+                    "Star brightness encodes instantaneous",
+                    "power draw. Hue cycles from cyan (cool)",
+                    "through yellow to red (hot) tracking the",
+                    "ASIC die temperature in real time.",
+                    "",
+                    "Twinkle speed accelerates when current",
+                    "draw is high. Brief sparkle flashes mark",
+                    "power spikes above the learned baseline.",
+                    "",
+                    "Round planets (○) represent DDR/L2/L1",
+                    "memory hierarchy — orbit radius tracks",
+                    "memory bandwidth utilization.",
+                ]),
+                DisplayMode::MemoryCastle => explain_lines(bar, bg, dim, lbl, &[
+                    "Memory Castle",
+                    "",
+                    "An architectural view of the Tenstorrent",
+                    "memory hierarchy rendered as a layered",
+                    "tower. Particles flow upward from DRAM",
+                    "at the base through L2 cache, L1 SRAM,",
+                    "and into the Tensix compute cores at top.",
+                    "",
+                    "◦ open circle  — read access",
+                    "· dot          — write access",
+                    "◇ diamond      — cache hit",
+                    "• filled dot   — cache miss",
+                    "",
+                    "Particle color encodes the memory tier.",
+                    "Density reflects current bandwidth.",
+                ]),
+                DisplayMode::Defrag => explain_lines(bar, bg, dim, lbl, &[
+                    "Model-Loading Defrag Display",
+                    "",
+                    "Inspired by classic disk defragmenters.",
+                    "Each row represents one GDDR channel.",
+                    "Cells fill left-to-right as model weights",
+                    "are transferred into device memory.",
+                    "",
+                    "░ empty     ▒ loading    ▓█ resident",
+                    "",
+                    "EVICT flashes when the runtime unloads",
+                    "a model — triggered when inference power",
+                    "surges above the rolling baseline.",
+                    "",
+                    "Block character intensity (░▒▓█) encodes",
+                    "relative activity within each cell.",
+                    "Color encodes channel temperature.",
+                ]),
+                DisplayMode::MemoryFlow => explain_lines(bar, bg, dim, lbl, &[
+                    "Memory Flow — NoC & DDR Activity",
+                    "",
+                    "Visualizes the Network-on-Chip (NoC) and",
+                    "DDR memory traffic in real time.",
+                    "",
+                    "Particles flowing → are read requests;",
+                    "particles flowing ← are write requests.",
+                    "Speed scales with NoC clock (axiclk/aiclk",
+                    "ratio) and MVDDQ memory subsystem power.",
+                    "",
+                    "DDR channels are shown as a perimeter",
+                    "ring. Channel activity brightens the",
+                    "corresponding arc segment.",
+                    "",
+                    "Heat-map center encodes die temperature.",
+                ]),
+                DisplayMode::Arcade => explain_lines(bar, bg, dim, lbl, &[
+                    "Arcade Mode — Unified View",
+                    "",
+                    "Combines all four visualizations into a",
+                    "single full-screen display.",
+                    "",
+                    "Top band: Starfield — Tensix cores",
+                    "Middle-left: Memory Castle — hierarchy",
+                    "Middle-right: Defrag — GDDR loading",
+                    "Bottom band: Memory Flow — NoC traffic",
+                    "",
+                    "The @ hero character moves across the",
+                    "full canvas driven by live telemetry:",
+                    "  x-axis = current draw (0–100A)",
+                    "  y-axis = power (low → bottom, high top)",
+                    "  color  = ASIC die temperature",
+                    "",
+                    "Hero glyph encodes chip health state:",
+                    "  @  healthy   !  throttled/faulted",
+                    "  ?  ARC stall  %  undervolt",
+                ]),
+                DisplayMode::Insights => explain_lines(bar, bg, dim, lbl, &[
+                    "Insights Screen",
+                    "",
+                    "Real-time chip portrait grid with live",
+                    "telemetry and process management.",
+                    "",
+                    "Each panel shows a Tensix core portrait",
+                    "with power, temperature, clock, and DDR",
+                    "status alongside a live process table.",
+                    "",
+                    "Animated particles in each portrait",
+                    "reflect the current compute activity.",
+                    "",
+                    "Use ↑↓ to navigate the process list.",
+                    "k = SIGTERM,  K = SIGKILL.",
+                    "At 32+ devices a compact fleet heatmap",
+                    "is shown — Enter to zoom in.",
+                ]),
+                DisplayMode::Grid => explain_lines(bar, bg, dim, lbl, &[
+                    "Grid Mode",
+                    "",
+                    "Full-screen grid of chip portraits for",
+                    "all connected devices. No process panel.",
+                    "",
+                    "Color and density in each portrait cell",
+                    "encode Tensix core temperature and power.",
+                    "",
+                    "Press v to continue cycling modes.",
+                ]),
+            }
+        }
+    }
+}
+
+// ── Per-view legend line builders ─────────────────────────────────────────────
+
+fn starfield_legend_lines(bar: ratatui::style::Color, bg: ratatui::style::Color, dim: ratatui::style::Color, key: ratatui::style::Color) -> Vec<Line<'static>> {
+    let _ = key;
+    macro_rules! ln {
+        ($spans:expr) => {{
+            let mut v: Vec<Span<'static>> = vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            v.extend($spans);
+            Line::from(v)
+        }};
+    }
+    vec![
+        ln!(vec![Span::styled("·  ○  ●", Style::default().fg(colors::rgb(100, 180, 255))), Span::styled("  each = one Tensix core", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("brightness", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("  = power draw", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("cyan→red  ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("  = ASIC temperature", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("twinkle   ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("  = current draw", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("○ planet  ", Style::default().fg(colors::rgb(255, 200, 80))), Span::styled("  = DDR/L2/L1 memory", Style::default().fg(dim))]),
+    ]
+}
+
+fn castle_legend_lines(bar: ratatui::style::Color, bg: ratatui::style::Color, dim: ratatui::style::Color) -> Vec<Line<'static>> {
+    macro_rules! ln {
+        ($spans:expr) => {{
+            let mut v: Vec<Span<'static>> = vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            v.extend($spans);
+            Line::from(v)
+        }};
+    }
+    vec![
+        ln!(vec![Span::styled("◦", Style::default().fg(colors::rgb(100, 200, 255))), Span::styled(" = read access", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("·", Style::default().fg(colors::rgb(255, 180, 80))),  Span::styled(" = write access", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("◇", Style::default().fg(colors::rgb(100, 255, 180))), Span::styled(" = cache hit", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("•", Style::default().fg(colors::rgb(255, 100, 150))), Span::styled(" = cache miss", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("layers    ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= DDR→L2→L1→Tensix", Style::default().fg(dim))]),
+    ]
+}
+
+fn defrag_legend_lines(bar: ratatui::style::Color, bg: ratatui::style::Color, dim: ratatui::style::Color, _key: ratatui::style::Color) -> Vec<Line<'static>> {
+    macro_rules! ln {
+        ($spans:expr) => {{
+            let mut v: Vec<Span<'static>> = vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            v.extend($spans);
+            Line::from(v)
+        }};
+    }
+    vec![
+        ln!(vec![Span::styled("each row  ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= one GDDR channel", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("░", Style::default().fg(colors::rgb(60, 80, 100))),  Span::styled(" empty / unloaded", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("▒", Style::default().fg(colors::rgb(80, 140, 200))), Span::styled(" loading / in-flight DMA", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("▓", Style::default().fg(colors::rgb(79, 209, 197))), Span::styled(" resident / running", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("█", Style::default().fg(colors::rgb(220, 240, 255))), Span::styled(" peak activity", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("EVICT     ", Style::default().fg(colors::rgb(255, 100, 80))), Span::styled("= model unload surge", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("color     ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= channel temperature", Style::default().fg(dim))]),
+    ]
+}
+
+fn flow_legend_lines(bar: ratatui::style::Color, bg: ratatui::style::Color, dim: ratatui::style::Color) -> Vec<Line<'static>> {
+    macro_rules! ln {
+        ($spans:expr) => {{
+            let mut v: Vec<Span<'static>> = vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            v.extend($spans);
+            Line::from(v)
+        }};
+    }
+    vec![
+        ln!(vec![Span::styled("→ particles ", Style::default().fg(colors::rgb(100, 220, 255))), Span::styled("= DDR reads", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("← particles ", Style::default().fg(colors::rgb(255, 160, 80))), Span::styled("= DDR writes", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("speed       ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= NoC clock / aiclk", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("density     ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= MVDDQ power (mem W)", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("perimeter   ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= GDDR channel ring", Style::default().fg(dim))]),
+    ]
+}
+
+fn hero_legend_lines(bar: ratatui::style::Color, bg: ratatui::style::Color, dim: ratatui::style::Color) -> Vec<Line<'static>> {
+    macro_rules! ln {
+        ($spans:expr) => {{
+            let mut v: Vec<Span<'static>> = vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            v.extend($spans);
+            Line::from(v)
+        }};
+    }
+    vec![
+        ln!(vec![Span::styled("x-axis   ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= current draw 0–100A", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("y-axis   ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= power (low→bot, hi→top)", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("color    ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= ASIC temperature", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("@", Style::default().fg(colors::rgb(79, 209, 197)).add_modifier(Modifier::BOLD)), Span::styled("  healthy", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("!", Style::default().fg(colors::rgb(255, 100, 80)).add_modifier(Modifier::BOLD)),  Span::styled("  throttled / faulted", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("?", Style::default().fg(colors::rgb(255, 220, 80)).add_modifier(Modifier::BOLD)), Span::styled("  ARC firmware stalled", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("%", Style::default().fg(colors::rgb(255, 180, 80)).add_modifier(Modifier::BOLD)), Span::styled("  undervolt (vcore<0.75V)", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("( )", Style::default().fg(colors::rgb(180, 140, 255)).add_modifier(Modifier::BOLD)), Span::styled(" harvested cores disabled", Style::default().fg(dim))]),
+        ln!(vec![Span::styled("trail    ", Style::default().fg(colors::rgb(200, 230, 255))), Span::styled("= GDDR temp / ETH links", Style::default().fg(dim))]),
+    ]
+}
+
+/// Build explain lines from a static slice of text strings.
+fn explain_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+    lbl: ratatui::style::Color,
+    text: &[&'static str],
+) -> Vec<Line<'static>> {
+    text.iter().map(|s| {
+        let mut v: Vec<Span<'static>> = vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+        if s.is_empty() {
+            // blank separator line
+        } else {
+            v.push(Span::styled(s.to_string(), Style::default().fg(if s.starts_with(' ') { dim } else { lbl })));
+        }
+        Line::from(v)
+    }).collect()
+}
+
+/// Parse and execute a slash command.  Returns `(message, is_error)`.
+///
+/// Available commands:
+/// ```
+/// /fps <n>          set animation FPS (1–120)
+/// /datafps <n>      set data-mode FPS (1–30)
+/// /mode <name>      switch display mode (insights|grid|starfield|castle|flow|arcade|defrag)
+/// /legend           toggle legend overlay      (hotkey: l)
+/// /explain          toggle explain overlay     (hotkey: !)
+/// /help             list commands              (hotkey: ?)
+/// ```
+fn execute_command(
+    cmd: &str,
+    display_mode: &mut DisplayMode,
+    anim_poll: &mut Duration,
+    data_poll: &mut Duration,
+    _sensitivity: f32,
+    overlay: &mut Option<OverlayPanel>,
+) -> (String, bool) {
+    let parts: Vec<&str> = cmd.trim().splitn(2, ' ').collect();
+    let verb = parts[0].trim_start_matches('/').to_lowercase();
+    let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+
+    match verb.as_str() {
+        "fps" => {
+            match arg.parse::<u64>() {
+                Ok(n) if (1..=120).contains(&n) => {
+                    *anim_poll = Duration::from_millis(1000 / n);
+                    (format!("animation fps set to {}", n), false)
+                }
+                _ => ("fps: expected 1–120".to_string(), true),
+            }
+        }
+        "datafps" => {
+            match arg.parse::<u64>() {
+                Ok(n) if (1..=30).contains(&n) => {
+                    *data_poll = Duration::from_millis(1000 / n);
+                    (format!("data fps set to {}", n), false)
+                }
+                _ => ("datafps: expected 1–30".to_string(), true),
+            }
+        }
+        "mode" => {
+            match arg {
+                "insights" | "normal" => { *display_mode = DisplayMode::Insights; ("→ insights".to_string(), false) }
+                "grid"     => { *display_mode = DisplayMode::Grid;         ("→ grid".to_string(), false) }
+                "starfield"=> { *display_mode = DisplayMode::Starfield;    ("→ starfield".to_string(), false) }
+                "castle"   => { *display_mode = DisplayMode::MemoryCastle; ("→ castle".to_string(), false) }
+                "flow"     => { *display_mode = DisplayMode::MemoryFlow;   ("→ flow".to_string(), false) }
+                "arcade"   => { *display_mode = DisplayMode::Arcade;       ("→ arcade".to_string(), false) }
+                "defrag"   => { *display_mode = DisplayMode::Defrag;       ("→ defrag".to_string(), false) }
+                _ => ("mode: insights|grid|starfield|castle|flow|arcade|defrag".to_string(), true),
+            }
+        }
+        "legend" | "l" => {
+            *overlay = if *overlay == Some(OverlayPanel::Legend) { None } else { Some(OverlayPanel::Legend) };
+            ("legend overlay toggled  (press l or /legend to hide)".to_string(), false)
+        }
+        "explain" => {
+            *overlay = if *overlay == Some(OverlayPanel::Explain) { None } else { Some(OverlayPanel::Explain) };
+            ("explain overlay toggled  (press ! or /explain to hide)".to_string(), false)
+        }
+        "help" | "?" | "" => {
+            *overlay = if *overlay == Some(OverlayPanel::Help) { None } else { Some(OverlayPanel::Help) };
+            ("".to_string(), false) // panel shows the full content
+        }
+        _ => (format!("unknown command: {}  (try /help or press ?)", verb), true),
+    }
 }
 
 /// Truncate a string to at most `max` characters (by char count, not bytes).
@@ -1951,6 +2354,9 @@ fn render_insights_footer(
             dot.clone(),
             Span::styled("g", Style::default().fg(Color::Cyan)),
             Span::raw("  grid"),
+            dot.clone(),
+            Span::styled("?", Style::default().fg(Color::Rgb(220, 180, 80))),
+            Span::raw("  help"),
             dot.clone(),
             Span::styled("q", Style::default().fg(Color::DarkGray)),
             Span::raw("  leave"),

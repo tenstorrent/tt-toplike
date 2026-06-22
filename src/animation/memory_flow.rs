@@ -56,6 +56,8 @@ pub struct MemoryFlowParticle {
     pub target_x: f32,
     /// Target Y position
     pub target_y: f32,
+    /// Source device index — pins this particle's color to a fleet hue band.
+    pub device_idx: usize,
     /// Flow direction
     pub direction: FlowDirection,
     /// DDR channel source/destination (0-11 for Blackhole)
@@ -71,48 +73,48 @@ pub struct MemoryFlowParticle {
 }
 
 impl MemoryFlowParticle {
-    /// Create a new read particle (DDR → Core)
-    pub fn new_read(channel: usize, current: f32, frame: u32) -> Self {
-        // Start at DDR channel position (top edge)
-        let channel_pos = (channel as f32 + 0.5) / 12.0; // Normalize 0-1
-
-        // Deterministic "randomness" based on channel and frame
+    /// Create a new read particle (DDR → Core).
+    ///
+    /// `device_hue_base` is the 360°-divided hue band assigned to this device in the
+    /// fleet (e.g. device 0 of 4 → 0°, device 1 → 90°, …).  Reads use that base;
+    /// writes offset by +120° so read/write traffic are visually distinct per device.
+    pub fn new_read(channel: usize, current: f32, frame: u32, device_idx: usize, device_hue_base: f32) -> Self {
+        let channel_pos = (channel as f32 + 0.5) / 12.0;
         let pseudo_rand = ((channel * 73 + frame as usize * 37) % 100) as f32 / 100.0;
 
         Self {
             x: channel_pos,
-            y: 0.0, // Top edge (DDR)
-            target_x: 0.3 + (pseudo_rand * 0.4), // Pseudo-random core
-            target_y: 0.5, // Center (core grid)
+            y: 0.0,
+            target_x: 0.3 + (pseudo_rand * 0.4),
+            target_y: 0.5,
+            device_idx,
             direction: FlowDirection::Read,
             channel,
             speed: 0.01 + (current / 100.0) * 0.03,
             intensity: 0.7 + pseudo_rand * 0.3,
-            // Full 360° hue cycling: frame-driven + per-channel spread.
-            // Reads get the "forward" arc; writes get the opposite arc (+180°).
-            hue: (frame as f32 * 3.0 + channel as f32 * 30.0) % 360.0,
+            // Base hue anchors to the device's band; slow time-drift keeps it alive.
+            hue: (device_hue_base + frame as f32 * 0.8 + channel as f32 * 8.0) % 360.0,
             ttl: 120,
         }
     }
 
-    /// Create a new write particle (Core → DDR)
-    pub fn new_write(channel: usize, current: f32, frame: u32) -> Self {
+    /// Create a new write particle (Core → DDR).
+    pub fn new_write(channel: usize, current: f32, frame: u32, device_idx: usize, device_hue_base: f32) -> Self {
         let channel_pos = (channel as f32 + 0.5) / 12.0;
-
-        // Deterministic "randomness" based on channel and frame
         let pseudo_rand = ((channel * 97 + frame as usize * 43) % 100) as f32 / 100.0;
 
         Self {
-            x: 0.3 + (pseudo_rand * 0.4), // Pseudo-random core
-            y: 0.5, // Center (core grid)
+            x: 0.3 + (pseudo_rand * 0.4),
+            y: 0.5,
             target_x: channel_pos,
-            target_y: 1.0, // Bottom edge (DDR)
+            target_y: 1.0,
+            device_idx,
             direction: FlowDirection::Write,
             channel,
             speed: 0.01 + (current / 100.0) * 0.03,
             intensity: 0.7 + pseudo_rand * 0.3,
-            // Writes offset 180° from reads so they visually counter-rotate.
-            hue: (180.0 + frame as f32 * 3.0 + channel as f32 * 30.0) % 360.0,
+            // Writes offset +120° within the device band — visually distinct from reads.
+            hue: (device_hue_base + 120.0 + frame as f32 * 0.8 + channel as f32 * 8.0) % 360.0,
             ttl: 120,
         }
     }
@@ -215,7 +217,11 @@ impl MemoryFlowVis {
         self.baseline.sensitivity = sensitivity;
     }
 
-    /// Update from telemetry
+    /// Update from telemetry — tracks all devices.
+    ///
+    /// Each device gets a hue band in the 360° wheel (device 0 → 0°, device 1 → 360/n°, …).
+    /// Particles carry `device_idx` so reads/writes from different chips appear in distinct
+    /// colors simultaneously.  The shared heat map and DDR bars accumulate across the fleet.
     pub fn update(&mut self, backend: &dyn TelemetryBackend) {
         self.frame += 1;
 
@@ -224,87 +230,118 @@ impl MemoryFlowVis {
             return;
         }
 
-        // Use first device for now (multi-device support later)
-        let device = &devices[0];
-        let telem = backend.telemetry(device.index);
-
-        // Update grid dimensions based on architecture
-        (self.grid_cols, self.grid_rows) = match device.architecture {
+        // Set grid dimensions from first device's architecture (they're all the same arch
+        // in practice; the heat map just uses the largest case so indices are always valid).
+        (self.grid_cols, self.grid_rows) = match devices[0].architecture {
             Architecture::Grayskull => (10, 12),
             Architecture::Wormhole => (8, 10),
             Architecture::Blackhole => (14, 16),
             Architecture::Unknown => (8, 8),
         };
 
-        if let Some(t) = telem {
-            let power = t.power_w();
-            let current = t.current_a();
-            let temp = t.temp_c();
-            let aiclk = t.aiclk_mhz() as f32;
+        let n_devices = devices.len().max(1);
+        let hue_step = 360.0 / n_devices as f32;
 
-            // Update baseline
-            self.baseline.update(device.index, power, current, temp, aiclk);
+        // Per-device pass: spawn particles and accumulate heat.
+        for (fleet_pos, device) in devices.iter().enumerate() {
+            let device_hue_base = fleet_pos as f32 * hue_step;
+            let telem = backend.telemetry(device.index);
+            let smbus  = backend.smbus_telemetry(device.index);
 
-            // Spawn read particles (DDR → Core)
-            let read_rate = (power / 150.0).min(1.0);
-            let pseudo_spawn = ((self.frame * 73) % 100) as f32 / 100.0;
-            if pseudo_spawn < read_rate && self.particles.len() < self.max_particles {
-                let num_channels = device.architecture.memory_channels();
-                let channel = (self.frame as usize) % num_channels;
-                self.particles
-                    .push(MemoryFlowParticle::new_read(
-                        channel,
-                        current,
-                        self.frame,
-                    ));
-            }
+            if let Some(t) = telem {
+                let power   = t.power_w();
+                let current = t.current_a();
+                let temp    = t.temp_c();
+                let aiclk   = t.aiclk_mhz() as f32;
 
-            // Spawn write particles (Core → DDR)
-            let write_rate = (current / 100.0).min(1.0);
-            let pseudo_spawn_write = ((self.frame * 97) % 100) as f32 / 100.0;
-            if pseudo_spawn_write < write_rate * 0.5 && self.particles.len() < self.max_particles
-            {
-                let num_channels = device.architecture.memory_channels();
-                let channel = ((self.frame + num_channels as u32 / 2) as usize) % num_channels;
-                self.particles
-                    .push(MemoryFlowParticle::new_write(
-                        channel,
-                        current,
-                        self.frame,
-                    ));
-            }
+                let axiclk: f32 = smbus
+                    .and_then(|s| s.axiclk.as_deref())
+                    .and_then(|v| crate::models::telemetry::parse_hex_or_dec(v))
+                    .map(|v| v as f32)
+                    .unwrap_or(0.0);
+                let noc_factor = if aiclk > 50.0 && axiclk > 0.0 {
+                    ((axiclk / aiclk) / 0.5).clamp(0.3, 1.4)
+                } else {
+                    1.0
+                };
 
-            // Update core heat map
-            let power_change = self.baseline.power_change(device.index, power);
-            for row in 0..self.grid_rows {
-                for col in 0..self.grid_cols {
-                    let idx = row * self.grid_cols + col;
-                    if idx < self.core_heat.len() {
-                        // Add wave pattern
-                        let wave = (row as f32 * 0.5
-                            + col as f32 * 0.5
-                            + self.frame as f32 * 0.1)
-                            .sin()
-                            * 0.2;
-                        let target_heat = (power_change + wave).max(0.0).min(1.0);
+                let mvddq: f32 = smbus
+                    .and_then(|s| s.mvddq_power.as_deref())
+                    .and_then(|v| crate::models::telemetry::parse_hex_or_dec(v))
+                    .map(|v| v as f32)
+                    .unwrap_or(0.0);
 
-                        // Smooth interpolation (decay over time)
-                        self.core_heat[idx] = self.core_heat[idx] * 0.9 + target_heat * 0.1;
+                self.baseline.update(device.index, power, current, temp, aiclk);
+
+                // Per-device particle budget: split max_particles across the fleet so
+                // total density stays constant regardless of how many chips are present.
+                let device_budget = self.max_particles / n_devices;
+
+                let device_particle_count = self.particles.iter()
+                    .filter(|p| p.device_idx == device.index)
+                    .count();
+
+                // Read particles
+                let read_rate = (power / 150.0).min(1.0);
+                let pseudo_r = ((self.frame * 73 + fleet_pos as u32 * 31) % 100) as f32 / 100.0;
+                if pseudo_r < read_rate && device_particle_count < device_budget {
+                    let num_ch = device.architecture.memory_channels();
+                    let channel = (self.frame as usize + fleet_pos * 7) % num_ch;
+                    let mut p = MemoryFlowParticle::new_read(channel, current, self.frame, device.index, device_hue_base);
+                    p.speed *= noc_factor;
+                    self.particles.push(p);
+                }
+
+                // Write particles
+                let mvddq_rate = (mvddq / 20.0).min(1.0);
+                let write_rate = (current / 100.0).min(1.0).max(mvddq_rate * 0.6);
+                let pseudo_w = ((self.frame * 97 + fleet_pos as u32 * 43) % 100) as f32 / 100.0;
+                if pseudo_w < write_rate * 0.5 && device_particle_count < device_budget {
+                    let num_ch = device.architecture.memory_channels();
+                    let channel = (self.frame as usize + fleet_pos * 7 + num_ch / 2) % num_ch;
+                    let mut p = MemoryFlowParticle::new_write(channel, current, self.frame, device.index, device_hue_base);
+                    p.speed *= noc_factor;
+                    self.particles.push(p);
+                }
+
+                // Accumulate heat from all devices (superimpose activity waves).
+                let power_change = self.baseline.power_change(device.index, power);
+                let phase_offset = fleet_pos as f32 * 1.2; // stagger waves per device
+                for row in 0..self.grid_rows {
+                    for col in 0..self.grid_cols {
+                        let idx = row * self.grid_cols + col;
+                        if idx < self.core_heat.len() {
+                            let wave = (row as f32 * 0.5 + col as f32 * 0.5
+                                + self.frame as f32 * 0.1 + phase_offset).sin() * 0.15;
+                            let contrib = ((power_change + wave).max(0.0).min(1.0)) / n_devices as f32;
+                            // Accumulate rather than replace so all devices show simultaneously.
+                            self.core_heat[idx] = (self.core_heat[idx] + contrib * 0.1).min(1.0);
+                        }
                     }
                 }
+
+                // Also slowly decay per-frame so heat doesn't saturate.
+                let _ = temp; // used indirectly via baseline
             }
         }
 
-        // Update particles
+        // Global decay after all devices contribute.
+        for h in &mut self.core_heat {
+            *h *= 0.92;
+        }
+
+        // Update and cull particles
         for particle in &mut self.particles {
             particle.update();
         }
-
-        // Remove dead particles
         self.particles.retain(|p| p.is_active());
     }
 
-    /// Render full-screen visualization
+    /// Render full-screen visualization.
+    ///
+    /// DDR bars show the fleet aggregate (sum of current / sum of power across all devices).
+    /// The core heat map and particle field are already accumulated from all devices in update().
+    /// Stats line reports fleet totals.
     pub fn render(&self, backend: &dyn TelemetryBackend) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
 
@@ -314,31 +351,42 @@ impl MemoryFlowVis {
             return lines;
         }
 
-        let device = &devices[0];
-        let telem = backend.telemetry(device.index);
+        // Aggregate telemetry across all devices for the DDR bars and stats.
+        let mut total_power   = 0.0f32;
+        let mut total_current = 0.0f32;
+        let mut total_temp    = 0.0f32;
+        let mut active        = 0usize;
+        for device in devices {
+            if let Some(t) = backend.telemetry(device.index) {
+                total_power   += t.power_w();
+                total_current += t.current_a();
+                total_temp    += t.temp_c();
+                active        += 1;
+            }
+        }
+        let avg_temp = if active > 0 { total_temp / active as f32 } else { 0.0 };
 
-        // Calculate layout
-        let ddr_channels = device.architecture.memory_channels();
-        let grid_height = self.height.saturating_sub(6); // Leave room for DDR + stats
+        // Use the first device's architecture for channel count and smbus DDR status.
+        let arch_device = &devices[0];
+        let ddr_channels = arch_device.architecture.memory_channels();
+        let smbus = backend.smbus_telemetry(arch_device.index);
 
-        let smbus = backend.smbus_telemetry(device.index);
+        // Synthetic aggregate telemetry for the DDR bar helpers.
+        let agg_telem_power   = total_power;
+        let agg_telem_current = total_current;
 
-        // Top DDR channels (sources)
-        lines.push(self.render_ddr_channels_top(ddr_channels, telem, smbus));
-        lines.push(Line::from("")); // Spacing
+        let grid_height = self.height.saturating_sub(6);
 
-        // Core grid with particles
+        lines.push(self.render_ddr_channels_top_agg(ddr_channels, agg_telem_current, smbus));
+        lines.push(Line::from(""));
+
         for y in 0..grid_height {
-            lines.push(self.render_grid_line(y, grid_height, telem));
+            lines.push(self.render_grid_line(y, grid_height, avg_temp));
         }
 
-        lines.push(Line::from("")); // Spacing
-
-        // Bottom DDR channels (sinks)
-        lines.push(self.render_ddr_channels_bottom(ddr_channels, telem, smbus));
-
-        // Stats line
-        lines.push(self.render_stats(device, telem));
+        lines.push(Line::from(""));
+        lines.push(self.render_ddr_channels_bottom_agg(ddr_channels, agg_telem_power, smbus));
+        lines.push(self.render_stats_fleet(devices, total_power, total_current, avg_temp));
 
         lines
     }
@@ -366,21 +414,15 @@ impl MemoryFlowVis {
             .collect()
     }
 
-    /// Render top DDR channels (sources).
-    ///
-    /// Bar height is driven by total current draw (real signal).
-    /// Per-channel state comes from the SMBUS DDR training status bitmask —
-    /// trained channels show full utilization bars, training channels animate,
-    /// untrained channels show a dim outline only.  No synthetic scanning.
-    fn render_ddr_channels_top(
+    /// Render top DDR channels — fleet aggregate version.
+    fn render_ddr_channels_top_agg(
         &self,
         num_channels: usize,
-        telem: Option<&crate::models::Telemetry>,
+        total_current: f32,
         smbus: Option<&crate::models::SmbusTelemetry>,
     ) -> Line<'static> {
         let mut spans = Vec::new();
-
-        let current = telem.map(|t| t.current_a()).unwrap_or(0.0);
+        let current = total_current;
         let utilization = (current / 100.0).min(1.0);
 
         spans.push(Span::styled(
@@ -428,15 +470,15 @@ impl MemoryFlowVis {
         Line::from(spans)
     }
 
-    /// Render core grid line with particles
+    /// Render core grid line with particles.  Takes `avg_temp` directly (pre-aggregated).
     fn render_grid_line(
         &self,
         y: usize,
         total_height: usize,
-        telem: Option<&crate::models::Telemetry>,
+        avg_temp: f32,
     ) -> Line<'static> {
         let mut spans = Vec::new();
-        let temp = telem.map(|t| t.temp_c()).unwrap_or(0.0);
+        let temp = avg_temp;
 
         // Normalize y to 0.0-1.0
         let y_norm = y as f32 / total_height as f32;
@@ -516,20 +558,16 @@ impl MemoryFlowVis {
         Line::from(spans)
     }
 
-    /// Render bottom DDR channels (sinks).
-    ///
-    /// Bar height uses power draw (complementary to the top bar's current).
-    /// Training status from SMBUS controls which channels are active —
-    /// same logic as the top bar, warm colour palette to distinguish direction.
-    fn render_ddr_channels_bottom(
+    /// Render bottom DDR channels — fleet aggregate version.
+    fn render_ddr_channels_bottom_agg(
         &self,
         num_channels: usize,
-        telem: Option<&crate::models::Telemetry>,
+        total_power: f32,
         smbus: Option<&crate::models::SmbusTelemetry>,
     ) -> Line<'static> {
         let mut spans = Vec::new();
 
-        let power = telem.map(|t| t.power_w()).unwrap_or(0.0);
+        let power = total_power;
         let utilization = (power / 150.0).min(1.0);
 
         spans.push(Span::styled(
@@ -576,31 +614,31 @@ impl MemoryFlowVis {
         Line::from(spans)
     }
 
-    /// Render stats line
-    fn render_stats(
+    /// Fleet stats line — totals across all devices.
+    fn render_stats_fleet(
         &self,
-        device: &crate::models::Device,
-        telem: Option<&crate::models::Telemetry>,
+        devices: &[crate::models::Device],
+        total_power: f32,
+        total_current: f32,
+        avg_temp: f32,
     ) -> Line<'static> {
-        let power = telem.map(|t| t.power_w()).unwrap_or(0.0);
-        let temp = telem.map(|t| t.temp_c()).unwrap_or(0.0);
-        let current = telem.map(|t| t.current_a()).unwrap_or(0.0);
-
+        let n = devices.len();
+        let arch_label = if n == 1 {
+            devices[0].architecture.abbrev().to_string()
+        } else {
+            format!("{}×{}", n, devices[0].architecture.abbrev())
+        };
         let stats = format!(
-            " {} | Particles: {:3} | Power: {:5.1}W | Temp: {:3.0}°C | Current: {:5.1}A | Frame: {:6}",
-            device.architecture.abbrev(),
+            " {} | particles:{:3} | power:{:5.1}W | temp:{:3.0}°C | current:{:5.1}A",
+            arch_label,
             self.particles.len(),
-            power,
-            temp,
-            current,
-            self.frame
+            total_power,
+            avg_temp,
+            total_current,
         );
-
         Line::from(vec![Span::styled(
             stats,
-            Style::default()
-                .fg(colors::rgb(200, 200, 220))
-                .add_modifier(Modifier::DIM),
+            Style::default().fg(colors::rgb(200, 200, 220)).add_modifier(Modifier::DIM),
         )])
     }
 

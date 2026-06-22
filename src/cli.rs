@@ -80,6 +80,13 @@ pub struct Cli {
     #[arg(long, conflicts_with = "mock")]
     pub json: bool,
 
+    /// Use Host backend — any machine, no TT hardware required (shortcut for --backend host)
+    ///
+    /// Reads CPU, RAM, and temperature from the host OS.  All visualisations
+    /// work unchanged and describe your CPU instead of a TT accelerator.
+    #[arg(long, conflicts_with = "mock", conflicts_with = "json")]
+    pub host: bool,
+
     /// Path to tt-smi executable
     ///
     /// Only used with JSON backend. Defaults to "tt-smi" in PATH.
@@ -194,6 +201,13 @@ pub enum BackendType {
     /// Falls back to sysfs-only if tt-smi is unavailable.
     #[cfg(target_os = "linux")]
     Hybrid,
+
+    /// Use Host backend (any machine, no TT hardware required)
+    ///
+    /// Reads CPU, RAM, and temperature from the host OS via sysinfo + Linux sysfs.
+    /// All visualisations work — they describe your CPU instead of a TT accelerator.
+    /// Great for demos, screenshots, or exploring tt-toplike before you have hardware.
+    Host,
 }
 
 /// Visualization mode selection
@@ -237,6 +251,8 @@ impl Cli {
             cli.backend = BackendType::Mock;
         } else if cli.json {
             cli.backend = BackendType::Json;
+        } else if cli.host {
+            cli.backend = BackendType::Host;
         }
 
         cli
@@ -250,6 +266,8 @@ impl Cli {
             BackendType::Mock
         } else if self.json {
             BackendType::Json
+        } else if self.host {
+            BackendType::Host
         } else {
             self.backend
         }
@@ -316,6 +334,7 @@ impl Cli {
             BackendType::Sysfs => "Sysfs (hwmon sensors)",
             #[cfg(target_os = "linux")]
             BackendType::Hybrid => "Hybrid (sysfs + tt-smi cache)",
+            BackendType::Host => "Host (CPU/RAM via sysinfo)",
         }
     }
 
@@ -365,6 +384,7 @@ mod tests {
             backend: BackendType::Auto,
             mock: None,
             json: false,
+            host: false,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -393,6 +413,7 @@ mod tests {
             backend: BackendType::Auto,
             mock: Some(0),
             json: false,
+            host: false,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -417,6 +438,7 @@ mod tests {
             backend: BackendType::Auto,
             mock: None,
             json: true,
+            host: false,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -441,6 +463,7 @@ mod tests {
             backend: BackendType::Auto,
             mock: None,
             json: false,
+            host: false,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: Some(vec![0, 2, 4]),
@@ -469,6 +492,7 @@ mod tests {
             backend: BackendType::Auto,
             mock: None,
             json: false,
+            host: false,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -490,6 +514,7 @@ mod tests {
             backend: BackendType::Auto,
             mock: None,
             json: false,
+            host: false,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -514,6 +539,7 @@ mod tests {
             backend: BackendType::Luwen,
             mock: None,
             json: false,
+            host: false,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -538,6 +564,7 @@ mod tests {
             backend: BackendType::Auto,
             mock: None,
             json: false,
+            host: false,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -559,6 +586,7 @@ mod tests {
             backend: BackendType::Mock,
             mock: Some(0),
             json: false,
+            host: false,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -582,6 +610,7 @@ mod tests {
             backend: BackendType::Auto,
             mock,
             json: false,
+            host: false,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
