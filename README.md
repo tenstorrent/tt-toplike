@@ -54,7 +54,7 @@ Temperature lags power by several seconds (thermal mass of the package), so the 
 
 Video diffusion is a different animal. Each denoising step is a full forward pass of a large model — not a quick autoregressive decode but a sustained, high-memory-bandwidth computation that runs for hundreds of milliseconds. Steps happen sequentially through the diffusion schedule.
 
-The result is **sustained high power with structured plateaus**: you'll see the visualization stay dense and bright for the full duration of a step, then briefly relax between steps as the scheduler loads the next noise level. The Memory Castle particles stop thinning out between bursts — the dungeon stays full. In Arcade mode, the `@` hero sits high and right (high power, high current) and barely moves, which is its own kind of signal. In the defrag panel to the right of the Memory Castle, the block fill stays dense and near-full for the whole diffusion step, then briefly fades between steps.
+The result is **sustained high power with structured plateaus**: you'll see the visualization stay dense and bright for the full duration of a step, then briefly relax between steps as the scheduler loads the next noise level. The Memory Castle particles stop thinning out between bursts — the dungeon stays full. In Arcade mode, the `@` hero sits high and right (high power, high current) and barely moves, which is its own kind of signal. In the Defrag panel (standalone or embedded in Arcade), the block fill stays dense and near-full for the whole diffusion step — the palette shifts steadily warmer as GDDR temperature climbs over minutes of sustained compute, and scatter bursts fire on each step's power ramp-up, making the denoising schedule visible as a sequence of flashes.
 
 Temperature climbs higher and holds there. The color of everything — stars, particles, backgrounds — shifts warmer because `temp_to_hue()` biases toward red as the die heats up.
 
@@ -67,7 +67,7 @@ A "quiet" Blackhole is never actually quiet. Several things generate continuous 
 - **SRAM retention** — L1 and L2 SRAM need continuous power to hold state. The tensix grid never fully powers down.
 - **PLL lock** — the clock network (AICLK, AXICLK, ARCCLK) runs continuously.
 
-The adaptive baseline captures all of this and treats it as zero-point. What you see in the visualization at idle is the true floor: particles spawning slowly and evenly, stars dim but present, the `@` hero drifting in the lower-left of the Arcade canvas, and the Defrag block map sitting full but dim (weights are resident, chip is not computing). That floor has meaning — it's the hardware telling you it's alive and maintained.
+The adaptive baseline captures all of this and treats it as zero-point. What you see in the visualization at idle is the true floor: particles spawning slowly and evenly, stars dim but present, the `@` hero drifting in the lower-left of the Arcade canvas, and the Defrag block map sitting full but cool — no scatter bursts, palette at its coolest hue (no thermal shift), brightness at segment floor. That floor has meaning — it's the hardware telling you it's alive and maintained.
 
 ### Running `tt-smi -r` while watching
 
@@ -181,6 +181,7 @@ tt-toplike --mode arcade      # unified split-screen (default: normal table)
 tt-toplike --mode castle      # Memory Castle roguelike
 tt-toplike --mode starfield   # Tensix starfield
 tt-toplike --mode flow        # NoC memory flow
+tt-toplike --mode defrag      # GDDR channel block map (DOS Defrag-style)
 
 # Filter to specific devices
 tt-toplike --devices 0,2
@@ -192,8 +193,14 @@ tt-toplike --devices 0,2
 |-----|--------|
 | `q` / `ESC` | Quit |
 | `r` | Force refresh |
-| `v` | Cycle visualization mode |
+| `v` | Cycle mode: Flow → Starfield → Castle → Arcade → Defrag → Insights |
+| `d` | Jump directly to Defrag |
+| `a` | Jump directly to Arcade |
+| `g` | Jump directly to Grid |
 | `b` | Cycle backend (live switching) |
+| `/` | Command prompt (e.g. `/mode defrag`) |
+| `l` | Toggle legend overlay |
+| `?` | Toggle help overlay |
 
 ## Features
 
@@ -203,7 +210,7 @@ tt-toplike --devices 0,2
 - **Starfield** — stars = Tensix cores; brightness = power, color = temperature, twinkle = current
 - **Memory Castle** — roguelike dungeon with 600 particles representing DDR→L2→L1→Tensix memory hierarchy; 4 particle types (Read/Write/CacheHit/Miss) with trails
 - **Memory Flow** — NoC particles flowing across DDR channels
-- **Defrag** — Norton SpeedDisk-style block map: one row per GDDR channel, blocks fill left→right as weights DMA in, colored segments glow during inference, `EVICT` animation plays when a model unloads (power drops), then DMA rebuild restarts from scratch
+- **Defrag** — Norton SpeedDisk-style block map: one row per GDDR channel, blocks fill left→right as weights DMA in. During inference, blocks glow reactively — brightness rises with inference power, saturation increases with GDDR temperature, and the palette shifts warmer under sustained thermal load (per-channel hue drifts up to +40° with channel temp; global palette shifts up to +25° warmer as the chip heats). Scatter bursts flash 5–12 random cells per channel on power spikes, giving each inference token a visible beat. `EVICT` animation plays when power returns to idle baseline (model unloaded) — blocks dissolve right→left at prime-staggered rates per channel, then DMA rebuild restarts from scratch
 - **Arcade** — unified split-screen combining Starfield (top 40%), Memory Castle + Defrag block map side-by-side (middle 30%), and Memory Flow (bottom 30%); a `@` hero character roams the canvas driven by real telemetry: X = current draw, Y = power consumption, color = ASIC temperature; hero speed and trail length reflect aiclk and live ETH link count
 - **tt-toplike-app** — native desktop window hosting the full TUI in a PTY (GPU-accelerated via eframe; Wayland/X11)
 

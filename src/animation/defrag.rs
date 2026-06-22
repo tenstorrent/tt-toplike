@@ -38,9 +38,14 @@
 //!    channels train one by one (DDR_STATUS nibble goes 0→5).
 //! 2. **DMA** — aiclk=0, PCIe active: write head sweeps left→right per channel,
 //!    speed driven by PCIe usage.  Channels with higher GDDR temp fill faster.
-//! 3. **RUNNING** — aiclk high: blocks glow with heat shimmer, ETH links pulse,
-//!    power drives brightness.  No new blocks being written.
-//! 4. **IDLE** — power low: blocks slowly drain back to empty.
+//! 3. **RUNNING** — aiclk high: blocks glow with reactive hue/brightness driven
+//!    by GDDR temperature and inference power.  Scatter bursts flash on power
+//!    spikes.  No new blocks being written.
+//! 4. **IDLE** — power low but no model eviction signal: blocks slowly drain back
+//!    to empty over ~10 minutes.
+//! 5. **EVICT / DECONSTRUCTING** — power fell back to idle baseline after inference:
+//!    blocks dissolve right→left per channel at staggered prime-modulated rates,
+//!    then DMA rebuild restarts automatically.
 
 use crate::animation::{hsv_to_rgb, lerp, temp_to_hue};
 use crate::backend::TelemetryBackend;
@@ -311,7 +316,11 @@ impl DefragVis {
             // sustained load where the fast EMA structurally leads the slow baseline.
 
             let new_phase = if ds.phase == Phase::Deconstructing {
-                let all_empty = ds.channels.iter().all(|c| c.fill <= 0.0);
+                // Only check enabled channels — disabled channels sit at fill=0 permanently
+                // and would otherwise make this trivially true before enabled channels drain.
+                let all_empty = ds.channels.iter()
+                    .filter(|c| c.enabled)
+                    .all(|c| c.fill <= 0.0);
                 if all_empty { Phase::Dma } else { Phase::Deconstructing }
             } else if !ds.channels.iter().any(|c| c.enabled && c.trained) {
                 Phase::Init
@@ -691,7 +700,6 @@ impl DefragVis {
         let enabled = ch.map(|c| c.enabled).unwrap_or(true);
         let trained = ch.map(|c| c.trained).unwrap_or(false);
         let fill    = ch.map(|c| c.fill).unwrap_or(0.0);
-        let _head   = ch.map(|c| c.head_pos).unwrap_or(0.0);
         let ch_temp = ch.map(|c| c.temp_ema).unwrap_or(asic_temp);
         let err_flash = ch.map(|c| c.err_flash).unwrap_or(0);
 
