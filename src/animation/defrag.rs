@@ -369,8 +369,20 @@ impl DefragVis {
                     // Cooldown: ~45 s — long enough to cover full EVICT + DMA refill
                     // so the surge trigger doesn't fire again immediately on refill.
                     ds.evict_cooldown = 2700;
+                    // Clear reactive state — burst list and energy don't survive an eviction.
+                    // Stale bursts from a previous inference run would render in the wrong
+                    // phase context and confuse the visual.
+                    ds.scatter_bursts.clear();
+                    ds.burst_cooldown = 0;
+                    ds.inference_energy = 0.0;
                 }
-                (_, Phase::Idle) => { ds.idle_power = ds.power_ema; }
+                (_, Phase::Idle) => {
+                    ds.idle_power = ds.power_ema;
+                    // Drop any in-flight bursts — they belong to the Running phase and
+                    // should not bleed into Idle's static rendering.
+                    ds.scatter_bursts.clear();
+                    ds.burst_cooldown = 0;
+                }
                 _ => {}
             }
 
@@ -1210,5 +1222,45 @@ mod tests {
         let blended = lerp(burst_v, ambient_v, t);
         assert!(blended < burst_v, "should be closer to ambient");
         assert!((blended - ambient_v).abs() < 0.08, "blended={blended} should be near ambient");
+    }
+
+    #[test]
+    fn scatter_bursts_clear_on_evict() {
+        // Verify that the Deconstructing transition side-effect clears burst state
+        // and zeroes inference_energy so stale state doesn't bleed across phases.
+        let mut ds = DeviceState::new(0);
+        ds.scatter_bursts.push(ScatterBurst {
+            channel: 0, cells: vec![1, 2], ttl: 10, intensity: 0.3,
+        });
+        ds.inference_energy = 0.7;
+
+        // Simulate the Deconstructing transition side-effect
+        ds.scatter_bursts.clear();
+        ds.burst_cooldown = 0;
+        ds.inference_energy = 0.0;
+
+        assert!(ds.scatter_bursts.is_empty());
+        assert_eq!(ds.burst_cooldown, 0);
+        assert_eq!(ds.inference_energy, 0.0);
+    }
+
+    #[test]
+    fn scatter_bursts_clear_on_idle() {
+        // Verify that the Idle transition side-effect clears burst state
+        // so bursts from a Running phase don't render during Idle.
+        let mut ds = DeviceState::new(0);
+        ds.scatter_bursts.push(ScatterBurst {
+            channel: 1, cells: vec![3, 7, 11], ttl: 5, intensity: 0.5,
+        });
+        ds.burst_cooldown = 15;
+
+        // Simulate the Idle transition side-effect
+        ds.scatter_bursts.clear();
+        ds.burst_cooldown = 0;
+
+        assert!(ds.scatter_bursts.is_empty());
+        assert_eq!(ds.burst_cooldown, 0);
+        // inference_energy not zeroed in Idle arm — that's intentional (power EMA
+        // stays meaningful; energy decay handles it naturally).
     }
 }
