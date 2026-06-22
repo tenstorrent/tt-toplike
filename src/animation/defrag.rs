@@ -152,6 +152,10 @@ struct DeviceState {
     scatter_bursts: Vec<ScatterBurst>,
     /// Frames until next burst spawn is allowed (prevents strobing).
     burst_cooldown: u64,
+    /// Frame at which Running phase was entered (None if not yet entered).
+    /// EVICT only fires after a minimum dwell in Running so idle BH chips
+    /// (aiclk always ≥200, power never spikes) don't loop Idle→Running→EVICT.
+    running_since: Option<u64>,
 }
 
 impl DeviceState {
@@ -171,6 +175,7 @@ impl DeviceState {
             inference_energy: 0.0,
             scatter_bursts: Vec::new(),
             burst_cooldown: 0,
+            running_since: None,
         }
     }
 
@@ -363,11 +368,17 @@ impl DefragVis {
                 Phase::Init
             } else if ds.phase == Phase::Running && {
                 // EVICT: power returned to near the idle baseline captured at DMA-start.
-                // Fixed 8 W floor is too low — Tenstorrent chips idle at 15–30 W.
-                // Threshold = idle_power + 20% headroom, clamped to at least POWER_IDLE_W
-                // so fresh-boot devices (idle_power ≈ 0) still evict when truly idle.
+                // Threshold = idle_power + 20% headroom, clamped to at least POWER_IDLE_W.
+                //
+                // Guard: require ≥120 frames (~2 s at 60 fps) in Running before EVICT is
+                // eligible.  BH chips sit at aiclk ≥200 and idle power regardless of load,
+                // so without this guard they'd loop Idle → Running → EVICT on every frame.
                 let evict_threshold = (ds.idle_power * 1.20).max(POWER_IDLE_W);
-                ds.power_ema <= evict_threshold
+                let ran_long_enough = ds
+                    .running_since
+                    .map(|f| self.frame.saturating_sub(f) >= 120)
+                    .unwrap_or(false);
+                ran_long_enough && ds.power_ema <= evict_threshold
             } {
                 // Power dropped back to idle — model unloaded → EVICT.
                 Phase::Deconstructing
@@ -389,6 +400,7 @@ impl DefragVis {
                     ds.idle_power = ds.power_ema;
                 }
                 (p, Phase::Running) if p != Phase::Running => {
+                    ds.running_since = Some(self.frame);
                     for ch in ds.channels.iter_mut() {
                         if ch.enabled && ch.trained {
                             ch.fill = 1.0;
@@ -403,6 +415,7 @@ impl DefragVis {
                     ds.scatter_bursts.clear();
                     ds.burst_cooldown = 0;
                     ds.inference_energy = 0.0;
+                    ds.running_since = None;
                 }
                 (_, Phase::Idle) => {
                     ds.idle_power = ds.power_ema;
