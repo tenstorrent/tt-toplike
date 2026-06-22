@@ -295,10 +295,10 @@ impl DefragVis {
             // Per-channel correctable errors (one counter per pair)
             let corr: [u32; 4] = if let Some(s) = smbus {
                 [
-                    s.gddr_corr_errs[0].unwrap_or(0) as u32,
-                    s.gddr_corr_errs[1].unwrap_or(0) as u32,
-                    s.gddr_corr_errs[2].unwrap_or(0) as u32,
-                    s.gddr_corr_errs[3].unwrap_or(0) as u32,
+                    s.gddr_corr_errs[0].unwrap_or(0),
+                    s.gddr_corr_errs[1].unwrap_or(0),
+                    s.gddr_corr_errs[2].unwrap_or(0),
+                    s.gddr_corr_errs[3].unwrap_or(0),
                 ]
             } else {
                 [0; 4]
@@ -772,12 +772,13 @@ impl DefragVis {
         // Build filled and empty segments as separate strings — avoids byte-slicing
         // multibyte chars (█ and ░ are 3 bytes each).
         if filled > 0 {
-            let s: String = std::iter::repeat('█').take(filled).collect();
-            spans.push(Span::styled(s, Style::default().fg(color)));
+            spans.push(Span::styled("█".repeat(filled), Style::default().fg(color)));
         }
         if filled < bar_w {
-            let s: String = std::iter::repeat('░').take(bar_w - filled).collect();
-            spans.push(Span::styled(s, Style::default().fg(dim)));
+            spans.push(Span::styled(
+                "░".repeat(bar_w - filled),
+                Style::default().fg(dim),
+            ));
         }
     }
 
@@ -984,7 +985,7 @@ impl DefragVis {
                             let glyph = if v > 0.60 { '▓' } else { '▒' };
                             (glyph, Style::default().fg(c))
                         } else {
-                            let dist_to_scan = (col as i64 - scan_pos as i64).unsigned_abs() as u64;
+                            let dist_to_scan = (col as i64 - scan_pos as i64).unsigned_abs();
                             if dist_to_scan == 0 {
                                 let c = hsv_to_rgb(cell_hue, 0.90, 0.65);
                                 ('▒', Style::default().fg(c))
@@ -1140,9 +1141,8 @@ impl DefragVis {
         };
         if empty_start < cells {
             let count = cells - empty_start;
-            let s: String = std::iter::repeat('░').take(count).collect();
             spans.push(Span::styled(
-                s,
+                "░".repeat(count),
                 Style::default().fg(colors::rgb(18, 24, 32)),
             ));
         }

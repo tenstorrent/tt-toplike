@@ -576,10 +576,11 @@ impl HardwareStarfield {
                 let twinkle = twinkle1 + twinkle2;
 
                 // Sparkle effect — occasional bright flash on power spikes.
-                if power_change > 0.7 && (star.sparkle == 0.0 || star.sparkle > 0.95) {
-                    if (self.frame + star.core_idx as u32) % 50 == 0 {
-                        star.sparkle = 1.0;
-                    }
+                if power_change > 0.7
+                    && (star.sparkle == 0.0 || star.sparkle > 0.95)
+                    && (self.frame + star.core_idx as u32) % 50 == 0
+                {
+                    star.sparkle = 1.0;
                 }
                 if star.sparkle > 0.0 {
                     star.sparkle -= 0.05;

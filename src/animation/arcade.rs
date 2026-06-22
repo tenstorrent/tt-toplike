@@ -589,9 +589,9 @@ impl ArcadeVisualization {
     /// Render header for Arcade mode
     fn render_header(&self, backend: &dyn TelemetryBackend) -> Line<'static> {
         let device_count = backend.devices().len();
-        let label = format!("  🎮 ARCADE MODE ");
+        let label = "  🎮 ARCADE MODE ";
         // "🎮" is 2 display cols wide; UnicodeWidthStr measures correctly.
-        let label_w = UnicodeWidthStr::width(label.as_str());
+        let label_w = UnicodeWidthStr::width(label);
         let device_text = format!(
             " {} Device{} ",
             device_count,

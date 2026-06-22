@@ -240,10 +240,7 @@ impl HostBackend {
         let max_freq_mhz = cpus.iter().map(|c| c.frequency()).max().unwrap_or(0) as u32;
 
         // Temperature — try hwmon sysfs first, fall back to sysinfo component temp
-        let temp_c = cpu_package_temp_c(socket_idx).or_else(|| {
-            // sysinfo components API as fallback (less reliable)
-            None // sysinfo 0.38 component refresh not wired here; hwmon is enough
-        });
+        let temp_c = cpu_package_temp_c(socket_idx);
 
         // RAPL power
         let now = std::time::Instant::now();
