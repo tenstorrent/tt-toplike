@@ -672,6 +672,13 @@ fn smbus_from_json_fields(smbus_json: SmbusTelemetryJSON) -> SmbusTelemetry {
             .enabled_tensix_col
             .as_deref()
             .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
+        // THM_LIMIT_SHUTDOWN is the thermal shutdown trip point in °C (may be hex-encoded).
+        // Map it to thm_limits so starfield's thermal-headroom logic can use it.
+        thm_limits: smbus_json
+            .thm_limit_shutdown
+            .as_deref()
+            .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s))
+            .map(|v| v.to_string()),
         ..SmbusTelemetry::default()
     }
 }

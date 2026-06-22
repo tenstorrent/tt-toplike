@@ -685,22 +685,44 @@ impl ArcadeVisualization {
                 // Hero column is outside this span — keep as-is.
                 new_spans.push(span);
             } else {
-                // Hero column falls inside this span.  Split around it.
-                let offset = col - cursor; // character offset into the span
-                                           // collect chars so we can index by display position safely
-                let chars: Vec<char> = text.chars().collect();
-                // Compute char index at display offset (for non-ASCII, chars and
-                // display cols can differ, but all our content is ASCII-safe here).
-                let before: String = chars[..offset].iter().collect();
-                let after: String = chars[(offset + 1).min(chars.len())..].iter().collect();
-                if !before.is_empty() {
-                    new_spans.push(Span::styled(before, span.style));
+                // Hero column falls inside this span.  Walk chars by display width
+                // so wide glyphs (emoji, CJK) are accounted for correctly.
+                let target_col = col; // display column we want to replace
+                let mut char_col = cursor; // running display-column counter
+                let mut before = String::new();
+                let mut after_start = false;
+                let mut after = String::new();
+                let mut replaced = false;
+                for c in text.chars() {
+                    let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
+                    if after_start {
+                        after.push(c);
+                    } else if char_col == target_col {
+                        // Skip this char (and any extra cols it occupies) — hero replaces it.
+                        after_start = true;
+                        replaced = true;
+                    } else if char_col + cw > target_col {
+                        // Wide glyph straddles target col — treat as replaced.
+                        after_start = true;
+                        replaced = true;
+                    } else {
+                        before.push(c);
+                    }
+                    char_col += cw;
                 }
-                new_spans.push(Span::styled(ch.to_string(), style));
-                if !after.is_empty() {
-                    new_spans.push(Span::styled(after, span.style));
+                if !replaced {
+                    // col was in range but walk didn't land exactly — keep span.
+                    new_spans.push(span);
+                } else {
+                    if !before.is_empty() {
+                        new_spans.push(Span::styled(before, span.style));
+                    }
+                    new_spans.push(Span::styled(ch.to_string(), style));
+                    if !after.is_empty() {
+                        new_spans.push(Span::styled(after, span.style));
+                    }
+                    spliced = true;
                 }
-                spliced = true;
             }
             cursor = span_end;
         }

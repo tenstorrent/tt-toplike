@@ -287,7 +287,8 @@ impl MemoryFlowVis {
 
                 // Per-device particle budget: split max_particles across the fleet so
                 // total density stays constant regardless of how many chips are present.
-                let device_budget = self.max_particles / n_devices;
+                // Clamp to at least 1 so a large fleet never silently disables the viz.
+                let device_budget = (self.max_particles / n_devices).max(1);
 
                 let device_particle_count = self
                     .particles
@@ -312,7 +313,13 @@ impl MemoryFlowVis {
                     self.particles.push(p);
                 }
 
-                // Write particles
+                // Write particles — recount after the read spawn so the budget check
+                // reflects any particle just added.
+                let device_particle_count = self
+                    .particles
+                    .iter()
+                    .filter(|p| p.device_idx == device.index)
+                    .count();
                 let mvddq_rate = (mvddq / 20.0).min(1.0);
                 let write_rate = (current / 100.0).min(1.0).max(mvddq_rate * 0.6);
                 let pseudo_w = ((self.frame * 97 + fleet_pos as u32 * 43) % 100) as f32 / 100.0;

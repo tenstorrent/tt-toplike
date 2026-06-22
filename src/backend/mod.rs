@@ -44,7 +44,7 @@ pub mod luwen; // Luwen backend for direct hardware access
 pub mod mock;
 pub mod smbus_smooth; // EMA smoothing for numeric SMBUS fields
 #[cfg(target_os = "linux")]
-pub mod sysfs; // Sysfs backend for Linux hwmon sensors (non-invasive) // Backend factory for dynamic creation and switching
+pub mod sysfs; // Sysfs backend for Linux hwmon sensors (non-invasive)
 
 use crate::error::BackendResult;
 use crate::models::{Device, SmbusTelemetry, Telemetry};

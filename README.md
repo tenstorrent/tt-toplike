@@ -160,7 +160,7 @@ cargo build --release --all-features
 ## Usage
 
 ```bash
-# Auto-detect backend (safe: Sysfs → JSON → Mock; never tries Luwen)
+# Auto-detect backend (safe: Hybrid → JSON → Mock on Linux; never tries Luwen)
 tt-toplike
 
 # Host backend — any machine, no TT hardware required
