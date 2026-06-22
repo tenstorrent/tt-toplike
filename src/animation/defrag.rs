@@ -766,7 +766,7 @@ impl DefragVis {
             match h % 4 {
                 0 => 0.28, // very dim — cold / unused segment
                 1 => 0.42, // dim
-                2 => 0.62, // mid — "hot" segment ceiling (was 0.82)
+                2 => 0.62, // mid — segment floor max; runtime clamp raised to 0.82 in reactive formula
                 _ => 0.35, // default
             }
         };
@@ -827,9 +827,12 @@ impl DefragVis {
                 match phase {
                     Phase::Running => {
                         // Three-layer hue blend: channel base + per-channel temp bias + global mood.
+                        // The total additive shift is capped so no channel's hue wraps past 360°
+                        // (which would send ch7/hot-pink into the orange-red zone and break identity).
                         let ch_temp_bias = ((ch_temp - 25.0) / 60.0).clamp(0.0, 1.0) * 40.0;
                         let global_mood_shift = ds.map(|s| s.thermal_mood).unwrap_or(0.0) * 25.0;
-                        let cell_hue = (base_hue + ch_temp_bias + global_mood_shift) % 360.0;
+                        let max_shift = (359.0_f32 - base_hue).max(0.0);
+                        let cell_hue = base_hue + (ch_temp_bias + global_mood_shift).min(max_shift);
 
                         let inference_energy = ds.map(|s| s.inference_energy).unwrap_or(0.0);
                         let thermal_mood = ds.map(|s| s.thermal_mood).unwrap_or(0.0);
@@ -1198,15 +1201,18 @@ mod tests {
 
     #[test]
     fn hue_blend_stays_within_bounds() {
-        // base ch0 = 100°, max ch_temp_bias = +40°, max global_mood = +25° → max 165°
-        let base_channel_hue = 100.0_f32;
-        for temp in [25.0_f32, 55.0, 85.0] {
-            for mood in [0.0_f32, 0.5, 1.0] {
-                let ch_temp_bias = ((temp - 25.0) / 60.0).clamp(0.0, 1.0) * 40.0;
-                let global_mood_shift = mood * 25.0;
-                let cell_hue = base_channel_hue + ch_temp_bias + global_mood_shift;
-                assert!(cell_hue >= 100.0, "hue={cell_hue} went below base");
-                assert!(cell_hue <= 165.0, "hue={cell_hue} exceeded max");
+        // All 8 channel base hues: ch0=100°…ch7=310°. Max shift = +65°. Must not wrap past 360°.
+        for ch_idx in 0..GDDR_CHANNELS {
+            let base_hue = 100.0_f32 + ch_idx as f32 * (210.0 / (GDDR_CHANNELS - 1) as f32);
+            for temp in [25.0_f32, 55.0, 85.0] {
+                for mood in [0.0_f32, 0.5, 1.0] {
+                    let ch_temp_bias = ((temp - 25.0) / 60.0).clamp(0.0, 1.0) * 40.0;
+                    let global_mood_shift = mood * 25.0;
+                    let max_shift = (359.0_f32 - base_hue).max(0.0);
+                    let cell_hue = base_hue + (ch_temp_bias + global_mood_shift).min(max_shift);
+                    assert!(cell_hue >= base_hue, "ch{ch_idx} hue={cell_hue} went below base {base_hue}");
+                    assert!(cell_hue < 360.0, "ch{ch_idx} hue={cell_hue} wrapped past 360");
+                }
             }
         }
     }
