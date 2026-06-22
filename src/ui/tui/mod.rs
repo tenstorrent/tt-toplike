@@ -551,7 +551,7 @@ fn run_app(
                                 cmd_message = None;
                             }
                             KeyCode::Enter => {
-                                let (msg, is_err) = execute_command(
+                                let (msg, is_err, should_quit) = execute_command(
                                     &cmd_buf,
                                     &mut display_mode,
                                     &mut ui_poll_rate_anim,
@@ -559,6 +559,9 @@ fn run_app(
                                     anim_cfg.sensitivity,
                                     &mut overlay,
                                 );
+                                if should_quit {
+                                    return Ok(());
+                                }
                                 // Empty message (e.g. /help opens overlay) → don't
                                 // leave a blank command bar stuck on screen.
                                 cmd_message = if msg.is_empty() {
@@ -2174,6 +2177,7 @@ fn explain_lines(
 /// /explain          toggle explain overlay     (hotkey: !)
 /// /help             list commands              (hotkey: ?)
 /// ```
+/// Returns `(message, is_error, should_quit)`.
 fn execute_command(
     cmd: &str,
     display_mode: &mut DisplayMode,
@@ -2181,58 +2185,62 @@ fn execute_command(
     data_poll: &mut Duration,
     _sensitivity: f32,
     overlay: &mut Option<OverlayPanel>,
-) -> (String, bool) {
+) -> (String, bool, bool) {
     let parts: Vec<&str> = cmd.trim().splitn(2, ' ').collect();
     let verb = parts[0].trim_start_matches('/').to_lowercase();
     let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
 
     match verb.as_str() {
+        "quit" | "q" | "exit" => {
+            ("".to_string(), false, true)
+        }
         "fps" => match arg.parse::<u64>() {
             Ok(n) if (1..=120).contains(&n) => {
                 *anim_poll = Duration::from_secs_f64(1.0 / n as f64);
-                (format!("animation fps set to {}", n), false)
+                (format!("animation fps set to {}", n), false, false)
             }
-            _ => ("fps: expected 1–120".to_string(), true),
+            _ => ("fps: expected 1–120".to_string(), true, false),
         },
         "datafps" => match arg.parse::<u64>() {
             Ok(n) if (1..=30).contains(&n) => {
                 *data_poll = Duration::from_secs_f64(1.0 / n as f64);
-                (format!("data fps set to {}", n), false)
+                (format!("data fps set to {}", n), false, false)
             }
-            _ => ("datafps: expected 1–30".to_string(), true),
+            _ => ("datafps: expected 1–30".to_string(), true, false),
         },
         "mode" => match arg {
             "insights" | "normal" => {
                 *display_mode = DisplayMode::Insights;
-                ("→ insights".to_string(), false)
+                ("→ insights".to_string(), false, false)
             }
             "grid" => {
                 *display_mode = DisplayMode::Grid;
-                ("→ grid".to_string(), false)
+                ("→ grid".to_string(), false, false)
             }
             "starfield" => {
                 *display_mode = DisplayMode::Starfield;
-                ("→ starfield".to_string(), false)
+                ("→ starfield".to_string(), false, false)
             }
             "castle" => {
                 *display_mode = DisplayMode::MemoryCastle;
-                ("→ castle".to_string(), false)
+                ("→ castle".to_string(), false, false)
             }
             "flow" => {
                 *display_mode = DisplayMode::MemoryFlow;
-                ("→ flow".to_string(), false)
+                ("→ flow".to_string(), false, false)
             }
             "arcade" => {
                 *display_mode = DisplayMode::Arcade;
-                ("→ arcade".to_string(), false)
+                ("→ arcade".to_string(), false, false)
             }
             "defrag" => {
                 *display_mode = DisplayMode::Defrag;
-                ("→ defrag".to_string(), false)
+                ("→ defrag".to_string(), false, false)
             }
             _ => (
                 "mode: insights|grid|starfield|castle|flow|arcade|defrag".to_string(),
                 true,
+                false,
             ),
         },
         "legend" | "l" => {
@@ -2243,6 +2251,7 @@ fn execute_command(
             };
             (
                 "legend overlay toggled  (press l or /legend to hide)".to_string(),
+                false,
                 false,
             )
         }
@@ -2255,6 +2264,7 @@ fn execute_command(
             (
                 "explain overlay toggled  (press ! or /explain to hide)".to_string(),
                 false,
+                false,
             )
         }
         "help" | "?" | "" => {
@@ -2263,11 +2273,12 @@ fn execute_command(
             } else {
                 Some(OverlayPanel::Help)
             };
-            ("".to_string(), false) // panel shows the full content
+            ("".to_string(), false, false) // panel shows the full content
         }
         _ => (
             format!("unknown command: {}  (try /help or press ?)", verb),
             true,
+            false,
         ),
     }
 }

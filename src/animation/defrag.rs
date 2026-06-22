@@ -350,7 +350,12 @@ impl DefragVis {
                     .filter(|c| c.enabled)
                     .all(|c| c.fill <= 0.0);
                 if all_empty {
-                    Phase::Dma
+                    // Eviction complete — device is genuinely idle.  Return to Idle so the
+                    // next DMA cycle only starts when a new inference actually begins (power
+                    // rises).  Going back to Dma here triggers an instant Running transition
+                    // on hardware where aiclk is always ≥200, which resets idle_power to the
+                    // live power and causes an immediate re-eviction loop.
+                    Phase::Idle
                 } else {
                     Phase::Deconstructing
                 }
@@ -376,17 +381,10 @@ impl DefragVis {
 
             // Transition side-effects
             match (ds.phase, new_phase) {
-                (p, Phase::Dma) if p != Phase::Dma => {
+                (_, Phase::Dma) if ds.phase != Phase::Dma => {
                     ds.dma_start_frame = Some(self.frame);
-                    if p == Phase::Deconstructing {
-                        for ch in ds.channels.iter_mut() {
-                            ch.fill = 0.0;
-                            ch.head_pos = 0.0;
-                        }
-                    } else {
-                        for ch in ds.channels.iter_mut() {
-                            ch.head_pos = ch.fill;
-                        }
+                    for ch in ds.channels.iter_mut() {
+                        ch.head_pos = ch.fill;
                     }
                     ds.idle_power = ds.power_ema;
                 }
@@ -412,6 +410,14 @@ impl DefragVis {
                     // should not bleed into Idle's static rendering.
                     ds.scatter_bursts.clear();
                     ds.burst_cooldown = 0;
+                    // If arriving from Deconstructing, channels are already at fill=0;
+                    // reset head_pos too so the next DMA cycle starts clean.
+                    if ds.phase == Phase::Deconstructing {
+                        for ch in ds.channels.iter_mut() {
+                            ch.fill = 0.0;
+                            ch.head_pos = 0.0;
+                        }
+                    }
                 }
                 _ => {}
             }
