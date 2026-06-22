@@ -177,11 +177,12 @@ tt-toplike --mock --mock-devices 4
 tt-toplike --backend luwen
 
 # Visualization modes
-tt-toplike --mode arcade      # unified split-screen (default: normal table)
-tt-toplike --mode castle      # Memory Castle roguelike
-tt-toplike --mode starfield   # Tensix starfield
-tt-toplike --mode flow        # NoC memory flow
-tt-toplike --mode defrag      # GDDR channel block map (DOS Defrag-style)
+tt-toplike                    # Insights (default) — per-chip telemetry panels
+tt-toplike --mode arcade      # Arcade — split-screen with all visualizers
+tt-toplike --mode castle      # Memory Castle — roguelike dungeon particles
+tt-toplike --mode starfield   # Starfield — Tensix cores as stars
+tt-toplike --mode flow        # Memory Flow — NoC DDR channel streams
+tt-toplike --mode defrag      # Defrag — GDDR block map (DOS Defrag style)
 
 # Filter to specific devices
 tt-toplike --devices 0,2
@@ -193,26 +194,35 @@ tt-toplike --devices 0,2
 |-----|--------|
 | `q` / `ESC` | Quit |
 | `r` | Force refresh |
-| `v` | Cycle mode: Flow → Starfield → Castle → Arcade → Defrag → Insights |
-| `d` | Jump directly to Defrag |
+| `v` | Cycle visualization mode |
 | `a` | Jump directly to Arcade |
-| `g` | Jump directly to Grid |
+| `d` | Jump directly to Defrag |
+| `g` | Jump directly to Grid (Insights table) |
 | `b` | Cycle backend (live switching) |
-| `/` | Command prompt (e.g. `/mode defrag`) |
-| `l` | Toggle legend overlay |
-| `?` | Toggle help overlay |
+| `/` | Command bar — type `/mode defrag`, `/fps 30`, `/quit`, etc. |
+| `l` | Toggle legend overlay (what each signal means in the current mode) |
+| `?` | Toggle help overlay (full key reference) |
+| `!` | Toggle explain overlay (how visualizations map to hardware signals) |
+
+**Insights mode only:**
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Navigate process list |
+| `k` | Silence selected process alerts |
+| `K` | Destroy (kill) selected process |
 
 ## Features
 
 ### Multiple Visualization Modes
 
-- **Normal** — live telemetry table with color-coded power/temp
-- **Starfield** — stars = Tensix cores; brightness = power, color = temperature, twinkle = current
-- **Memory Castle** — roguelike dungeon with 600 particles representing DDR→L2→L1→Tensix memory hierarchy; 4 particle types (Read/Write/CacheHit/Miss) with trails
-- **Memory Flow** — NoC particles flowing across DDR channels
-- **Defrag** — Norton SpeedDisk-style block map: one row per GDDR channel, blocks fill left→right as weights DMA in. During inference, blocks glow reactively — brightness rises with inference power, saturation increases with GDDR temperature, and the palette shifts warmer under sustained thermal load (per-channel hue drifts up to +40° with channel temp; global palette shifts up to +25° warmer as the chip heats). Scatter bursts flash 5–12 random cells per channel on power spikes, giving each inference token a visible beat. `EVICT` animation plays when power returns to idle baseline (model unloaded) — blocks dissolve right→left at prime-staggered rates per channel, then DMA rebuild restarts from scratch
-- **Arcade** — unified split-screen combining Starfield (top 40%), Memory Castle + Defrag block map side-by-side (middle 30%), and Memory Flow (bottom 30%); a `@` hero character roams the canvas driven by real telemetry: X = current draw, Y = power consumption, color = ASIC temperature; hero speed and trail length reflect aiclk and live ETH link count
-- **tt-toplike-app** — native desktop window hosting the full TUI in a PTY (GPU-accelerated via eframe; Wayland/X11)
+- **Insights** (`g` / default) — live per-chip telemetry panels with color-coded power, temperature, DDR status, and process list. Press `↑↓` to navigate processes; `k` to silence, `K` to kill.
+- **Starfield** — each Tensix core rendered as a star. Brightness = power fraction above idle, color hue = die temperature (cyan → red), character weight (`·∘○◉●`) = activity level, twinkle phase = current draw. Stars pulse in sync with inference tokens.
+- **Memory Castle** — roguelike dungeon with 600 particles per chip representing the DDR→L2→L1→Tensix memory hierarchy. Four particle types (Read/Write/CacheHit/CacheMiss) with trails; density and speed driven by live power. Colors rotate through the spectrum each inference burst.
+- **Memory Flow** — NoC particle streams flowing left-to-right across GDDR channel bars. One row per DDR channel (up to 12 on Blackhole); bar fill = trained/active state; particle speed and density = bandwidth.
+- **Defrag** — Norton SpeedDisk-style block map: one row per GDDR channel, blocks fill left→right as weights DMA in. During inference, blocks glow reactively — brightness rises with inference power, saturation increases with GDDR temperature, and the palette shifts warmer under sustained thermal load (per-channel hue drifts up to +40° with channel temp; global palette shifts up to +25° warmer as the chip heats). Scatter bursts flash 5–12 random cells per channel on power spikes, giving each inference token a visible beat. `EVICT` animation plays when power returns to idle baseline (model unloaded) — blocks dissolve right→left at prime-staggered rates per channel, then DMA rebuild restarts from scratch.
+- **Arcade** — unified split-screen combining Starfield (top 40%), Memory Castle + Defrag block map side-by-side (middle 30%), and Memory Flow (bottom 30%); a `@` hero character roams the canvas driven by real telemetry: X = current draw, Y = power consumption, color = ASIC temperature; hero speed and trail length reflect aiclk and live ETH link count.
+- **tt-toplike-app** — native desktop window hosting the full TUI in a PTY (GPU-accelerated via eframe; Wayland/X11).
 
 ### Backend System (Safe by Default)
 

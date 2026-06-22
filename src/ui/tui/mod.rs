@@ -3626,6 +3626,127 @@ fn render_grid_mode(f: &mut Frame, backend: &dyn TelemetryBackend) {
     }
 }
 
+#[cfg(test)]
+mod cmd_tests {
+    use super::*;
+
+    fn fresh() -> (DisplayMode, Duration, Duration, Option<OverlayPanel>) {
+        (
+            DisplayMode::Insights,
+            Duration::from_millis(16),
+            Duration::from_millis(250),
+            None,
+        )
+    }
+
+    #[test]
+    fn quit_verbs_set_should_quit() {
+        for verb in &["quit", "q", "exit", "/quit", "/q", "/exit"] {
+            let (mut mode, mut ap, mut dp, mut ov) = fresh();
+            let (msg, is_err, should_quit) =
+                execute_command(verb, &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+            assert!(should_quit, "{verb} should set should_quit");
+            assert!(!is_err, "{verb} should not be an error");
+            assert!(msg.is_empty(), "{verb} message should be empty");
+        }
+    }
+
+    #[test]
+    fn mode_command_switches_display_mode() {
+        let cases = [
+            ("mode insights", DisplayMode::Insights),
+            ("mode grid", DisplayMode::Grid),
+            ("mode starfield", DisplayMode::Starfield),
+            ("mode castle", DisplayMode::MemoryCastle),
+            ("mode flow", DisplayMode::MemoryFlow),
+            ("mode arcade", DisplayMode::Arcade),
+            ("mode defrag", DisplayMode::Defrag),
+        ];
+        for (cmd, expected) in cases {
+            let (mut mode, mut ap, mut dp, mut ov) = fresh();
+            let (_, is_err, should_quit) =
+                execute_command(cmd, &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+            assert_eq!(mode, expected, "/{cmd}");
+            assert!(!is_err);
+            assert!(!should_quit);
+        }
+    }
+
+    #[test]
+    fn mode_command_unknown_arg_returns_error() {
+        let (mut mode, mut ap, mut dp, mut ov) = fresh();
+        let (_, is_err, should_quit) =
+            execute_command("mode bogus", &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+        assert!(is_err);
+        assert!(!should_quit);
+        assert_eq!(mode, DisplayMode::Insights, "mode unchanged on bad arg");
+    }
+
+    #[test]
+    fn legend_help_explain_toggle_overlays() {
+        for (cmd, expected_panel) in &[
+            ("legend", OverlayPanel::Legend),
+            ("l", OverlayPanel::Legend),
+            ("help", OverlayPanel::Help),
+            ("?", OverlayPanel::Help),
+            ("", OverlayPanel::Help),
+            ("explain", OverlayPanel::Explain),
+        ] {
+            let (mut mode, mut ap, mut dp, mut ov) = fresh();
+            // First call: panel should appear.
+            execute_command(cmd, &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+            assert_eq!(
+                ov,
+                Some(*expected_panel),
+                "/{cmd} should open {expected_panel:?}"
+            );
+            // Second call: panel should dismiss (toggle).
+            execute_command(cmd, &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+            assert_eq!(ov, None, "/{cmd} second call should close panel");
+        }
+    }
+
+    #[test]
+    fn fps_and_datafps_commands() {
+        let (mut mode, mut ap, mut dp, mut ov) = fresh();
+        let (msg, is_err, _) = execute_command("fps 30", &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+        assert!(!is_err, "fps 30 should succeed");
+        assert!(msg.contains("30"));
+        assert_eq!(ap, Duration::from_secs_f64(1.0 / 30.0));
+
+        let (_, is_err, _) = execute_command("fps 0", &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+        assert!(is_err, "fps 0 out of range");
+
+        let (msg, is_err, _) =
+            execute_command("datafps 10", &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+        assert!(!is_err);
+        assert!(msg.contains("10"));
+        assert_eq!(dp, Duration::from_secs_f64(1.0 / 10.0));
+    }
+
+    #[test]
+    fn unknown_command_returns_error() {
+        let (mut mode, mut ap, mut dp, mut ov) = fresh();
+        let (msg, is_err, should_quit) =
+            execute_command("boguscommand", &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+        assert!(is_err);
+        assert!(!should_quit);
+        assert!(
+            msg.contains("boguscommand"),
+            "error message should echo the verb"
+        );
+    }
+
+    #[test]
+    fn slash_prefix_is_stripped() {
+        // "/quit" should work identically to "quit" — the verb parser strips leading '/'.
+        let (mut mode, mut ap, mut dp, mut ov) = fresh();
+        let (_, _, should_quit) =
+            execute_command("/quit", &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+        assert!(should_quit);
+    }
+}
+
 #[cfg(feature = "linux-procfs")]
 #[cfg(test)]
 mod tests {
