@@ -283,16 +283,16 @@ fn run_app(
         // nvtop-style trick: input always polls at INPUT_POLL_MS (16 ms) so
         // keystrokes are never delayed.  Viz updates are gated separately so
         // animation modes tick at their target FPS while data modes tick slower.
-        // Defrag is animation-tier: the fill sweep and frontier shimmer need
-        // 60fps ticks to look smooth during model loading.
+        // Defrag uses 60 FPS only when devices are active (Running/DMA/Deconstructing);
+        // in Idle/Init it drops to the data rate to avoid wasting CPU.
+        let defrag_is_animated = defrag.as_ref().map(|d| d.is_animated()).unwrap_or(false);
         let is_anim_mode = matches!(
             display_mode,
             DisplayMode::Starfield
                 | DisplayMode::MemoryCastle
                 | DisplayMode::MemoryFlow
                 | DisplayMode::Arcade
-                | DisplayMode::Defrag
-        );
+        ) || (display_mode == DisplayMode::Defrag && defrag_is_animated);
         let render_interval = if is_anim_mode {
             ui_poll_rate_anim
         } else {

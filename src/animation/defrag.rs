@@ -170,9 +170,10 @@ impl DeviceState {
     }
 
     fn mean_fill(&self) -> f32 {
-        let enabled: Vec<_> = self.channels.iter().filter(|c| c.enabled).collect();
-        if enabled.is_empty() { return 0.0; }
-        enabled.iter().map(|c| c.fill).sum::<f32>() / enabled.len() as f32
+        let (sum, count) = self.channels.iter()
+            .filter(|c| c.enabled)
+            .fold((0.0_f32, 0usize), |(s, n), c| (s + c.fill, n + 1));
+        if count == 0 { 0.0 } else { sum / count as f32 }
     }
 }
 
@@ -187,6 +188,12 @@ pub struct DefragVis {
 impl DefragVis {
     pub fn new(width: usize, height: usize) -> Self {
         Self { width, height, frame: 0, devices: Default::default() }
+    }
+
+    /// Returns false when all devices are in Init or Idle phase — no animation
+    /// is needed, so callers can drop to a lower poll rate (e.g. 10 FPS vs 60 FPS).
+    pub fn is_animated(&self) -> bool {
+        self.devices.values().any(|ds| !matches!(ds.phase, Phase::Idle | Phase::Init))
     }
 
     pub fn update(&mut self, backend: &dyn TelemetryBackend) {
@@ -388,11 +395,11 @@ impl DefragVis {
                     // Continuous organic signals — update every frame.
 
                     // thermal_mood: slow EMA of mean GDDR temp, normalized 25°C→0, 85°C→1.
-                    let enabled_chs: Vec<_> = ds.channels.iter().filter(|c| c.enabled).collect();
-                    if !enabled_chs.is_empty() {
-                        let mean_temp = enabled_chs.iter().map(|c| c.temp_ema).sum::<f32>()
-                            / enabled_chs.len() as f32;
-                        let mean_norm = ((mean_temp - 25.0) / 60.0).clamp(0.0, 1.0);
+                    let (temp_sum, temp_count) = ds.channels.iter()
+                        .filter(|c| c.enabled)
+                        .fold((0.0_f32, 0usize), |(s, n), c| (s + c.temp_ema, n + 1));
+                    if temp_count > 0 {
+                        let mean_norm = ((temp_sum / temp_count as f32 - 25.0) / 60.0).clamp(0.0, 1.0);
                         ds.thermal_mood = ds.thermal_mood * 0.995 + mean_norm * 0.005;
                     }
 
@@ -677,7 +684,7 @@ impl DefragVis {
         let enabled = ch.map(|c| c.enabled).unwrap_or(true);
         let trained = ch.map(|c| c.trained).unwrap_or(false);
         let fill    = ch.map(|c| c.fill).unwrap_or(0.0);
-        let head    = ch.map(|c| c.head_pos).unwrap_or(0.0);
+        let _head   = ch.map(|c| c.head_pos).unwrap_or(0.0);
         let ch_temp = ch.map(|c| c.temp_ema).unwrap_or(asic_temp);
         let err_flash = ch.map(|c| c.err_flash).unwrap_or(0);
 
@@ -773,7 +780,7 @@ impl DefragVis {
         // Avoids O(cells) heap allocations — adjacent same-style cells share one String.
         let mut run_str = String::with_capacity(cells * 3); // 3 bytes per block char
         let mut run_style: Option<Style> = None;
-        let mut flush = |spans: &mut Vec<Span<'static>>, s: &mut String, st: &mut Option<Style>| {
+        let flush = |spans: &mut Vec<Span<'static>>, s: &mut String, st: &mut Option<Style>| {
             if !s.is_empty() {
                 spans.push(Span::styled(
                     std::mem::take(s),
@@ -786,6 +793,34 @@ impl DefragVis {
         // --- Error flash cell (if active) ---
         let flash_col = if err_flash > 0 { Some(resident_cells.saturating_sub(1)) } else { None };
 
+        // --- Hoist Running-phase per-row constants out of the cell loop ---
+        // These are computed once per channel row, not once per cell.
+        let ch_temp_bias = ((ch_temp - 25.0) / 60.0).clamp(0.0, 1.0) * 40.0;
+        let inference_energy = ds.map(|s| s.inference_energy).unwrap_or(0.0);
+        let thermal_mood    = ds.map(|s| s.thermal_mood).unwrap_or(0.0);
+        let global_mood_shift = thermal_mood * 25.0;
+        let max_shift = (359.0_f32 - base_hue).max(0.0);
+        let cell_hue = base_hue + (ch_temp_bias + global_mood_shift).min(max_shift);
+
+        // Burst hit-map: one pass over active bursts for this channel → O(1) per cell.
+        // Vec<Option<(ttl, intensity)>> indexed by column; None = not a burst cell.
+        // Only populated during Running phase; stays empty (zero alloc) otherwise.
+        let burst_hit_map: Vec<Option<(u8, f32)>> = if phase == Phase::Running {
+            let mut map = vec![None; cells];
+            if let Some(s) = ds {
+                for b in s.scatter_bursts.iter().filter(|b| b.channel == ch_idx) {
+                    for &c in &b.cells {
+                        if c < cells {
+                            map[c] = Some((b.ttl, b.intensity));
+                        }
+                    }
+                }
+            }
+            map
+        } else {
+            Vec::new()
+        };
+
         // --- Resident region (col 0..resident_cells) ---
         for col in 0..resident_cells.min(cells) {
             let (glyph, style) = if flash_col == Some(col) {
@@ -796,24 +831,8 @@ impl DefragVis {
             } else {
                 match phase {
                     Phase::Running => {
-                        // Three-layer hue blend: channel base + per-channel temp bias + global mood.
-                        // The total additive shift is capped so no channel's hue wraps past 360°
-                        // (which would send ch7/hot-pink into the orange-red zone and break identity).
-                        let ch_temp_bias = ((ch_temp - 25.0) / 60.0).clamp(0.0, 1.0) * 40.0;
-                        let global_mood_shift = ds.map(|s| s.thermal_mood).unwrap_or(0.0) * 25.0;
-                        let max_shift = (359.0_f32 - base_hue).max(0.0);
-                        let cell_hue = base_hue + (ch_temp_bias + global_mood_shift).min(max_shift);
-
-                        let inference_energy = ds.map(|s| s.inference_energy).unwrap_or(0.0);
-                        let thermal_mood = ds.map(|s| s.thermal_mood).unwrap_or(0.0);
-
-                        // Check if this cell is inside an active scatter burst for this channel.
-                        let burst_hit = ds.and_then(|s| {
-                            s.scatter_bursts.iter()
-                                .filter(|b| b.channel == ch_idx)
-                                .find(|b| b.cells.contains(&col))
-                                .map(|b| (b.ttl, b.intensity))
-                        });
+                        // burst_hit_map built above: O(1) lookup, no per-cell iteration.
+                        let burst_hit = burst_hit_map.get(col).copied().flatten();
 
                         if let Some((ttl, intensity)) = burst_hit {
                             // Burst override: warmer flash in channel's own color family, linear decay.
