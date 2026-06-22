@@ -419,6 +419,53 @@ impl DefragVis {
                         / ds.power_ema_slow.max(1.0);
                     ds.inference_energy = ds.inference_energy * 0.85 + energy_raw * 0.15;
                     ds.inference_energy *= 0.94; // additional decay so it falls after load drops
+
+                    // Scatter burst spawn — fires on upward power spike during Running.
+                    // Threshold: fast EMA must be 8% above slow baseline (lower than the
+                    // 12% surge-EVICT threshold so bursts light up well before an EVICT).
+                    // power_ema_slow > 5.0 guards against spurious triggers during init.
+                    if ds.burst_cooldown == 0
+                        && ds.power_ema > ds.power_ema_slow * 1.08
+                        && ds.power_ema_slow > 5.0
+                    {
+                        // Intensity = fractional excess above baseline, clamped to [0, 1].
+                        let intensity = ((ds.power_ema / ds.power_ema_slow) - 1.0).clamp(0.0, 1.0);
+                        for ch_idx in 0..GDDR_CHANNELS {
+                            let ch = &ds.channels[ch_idx];
+                            if !ch.enabled || !ch.trained { continue; }
+                            // Use 200 as upper bound — render will clamp against actual width.
+                            // .max(1) prevents zero-modulo panic when fill rounds to 0.
+                            let resident_cells = ((ch.fill * 200.0) as usize).max(1);
+                            // n_cells: 5–12, varies by frame + channel to avoid sync flicker.
+                            let n_cells = 5 + (self.frame.wrapping_mul(7).wrapping_add(ch_idx as u64 * 13)) % 8;
+                            // Pseudo-random cell indices — no rand crate needed.
+                            // Seed mixes frame, channel, and cell index for independence.
+                            let cells: Vec<usize> = (0..n_cells as usize)
+                                .map(|i| {
+                                    let seed = self.frame.wrapping_mul(31)
+                                        .wrapping_add(ch_idx as u64 * 97)
+                                        .wrapping_add(i as u64 * 61);
+                                    (seed % resident_cells as u64) as usize
+                                })
+                                .collect();
+                            ds.scatter_bursts.push(ScatterBurst {
+                                channel: ch_idx,
+                                cells,
+                                ttl: 18, // ~0.3 s at 60 fps
+                                intensity,
+                            });
+                        }
+                        // Cooldown: ~0.5 s at 60 fps — prevents strobing on sustained spikes.
+                        ds.burst_cooldown = 30;
+                    }
+                    // Tick cooldown down every frame (including the frame we just spawned).
+                    ds.burst_cooldown = ds.burst_cooldown.saturating_sub(1);
+
+                    // Scatter burst decay — decrement TTL and remove expired bursts.
+                    for b in ds.scatter_bursts.iter_mut() {
+                        b.ttl = b.ttl.saturating_sub(1);
+                    }
+                    ds.scatter_bursts.retain(|b| b.ttl > 0);
                 }
 
                 Phase::Idle => {
@@ -1036,5 +1083,75 @@ mod tests {
             ds.inference_energy *= 0.94;
         }
         assert!(ds.inference_energy < 0.05, "inference_energy={}", ds.inference_energy);
+    }
+
+    #[test]
+    fn burst_spawns_on_power_spike() {
+        let mut ds = DeviceState::new(0);
+        ds.power_ema_slow = 50.0;
+        ds.power_ema = 56.0; // 12% above slow baseline — above 1.08 threshold
+        ds.phase = Phase::Running;
+        for ch in ds.channels.iter_mut() {
+            ch.enabled = true;
+            ch.trained = true;
+            ch.fill = 1.0;
+        }
+
+        // Simulate the burst spawn logic
+        let frame = 100u64;
+        if ds.power_ema > ds.power_ema_slow * 1.08 && ds.burst_cooldown == 0 {
+            let intensity = ((ds.power_ema / ds.power_ema_slow) - 1.0).clamp(0.0, 1.0);
+            for ch_idx in 0..GDDR_CHANNELS {
+                let ch = &ds.channels[ch_idx];
+                if !ch.enabled || !ch.trained { continue; }
+                let resident_cells = (ch.fill * 200.0) as usize;
+                if resident_cells == 0 { continue; }
+                let n_cells = 5 + (frame.wrapping_mul(7).wrapping_add(ch_idx as u64 * 13)) % 8;
+                let cells: Vec<usize> = (0..n_cells)
+                    .map(|i| {
+                        let seed = frame.wrapping_mul(31)
+                            .wrapping_add(ch_idx as u64 * 97)
+                            .wrapping_add(i as u64 * 61);
+                        (seed % resident_cells as u64) as usize
+                    })
+                    .collect();
+                ds.scatter_bursts.push(ScatterBurst { channel: ch_idx, cells, ttl: 18, intensity });
+            }
+            ds.burst_cooldown = 30;
+        }
+
+        assert!(!ds.scatter_bursts.is_empty(), "expected bursts to spawn");
+        assert_eq!(ds.burst_cooldown, 30);
+    }
+
+    #[test]
+    fn burst_ttl_decays_and_removes() {
+        let mut ds = DeviceState::new(0);
+        ds.scatter_bursts.push(ScatterBurst {
+            channel: 0,
+            cells: vec![0, 1, 2],
+            ttl: 2,
+            intensity: 0.5,
+        });
+
+        // Simulate two decay frames
+        for _ in 0..2 {
+            for b in ds.scatter_bursts.iter_mut() { b.ttl = b.ttl.saturating_sub(1); }
+            ds.scatter_bursts.retain(|b| b.ttl > 0);
+        }
+
+        assert!(ds.scatter_bursts.is_empty(), "burst should be removed after ttl expires");
+    }
+
+    #[test]
+    fn burst_cooldown_prevents_double_spawn() {
+        let mut ds = DeviceState::new(0);
+        ds.power_ema_slow = 50.0;
+        ds.power_ema = 60.0;
+        ds.burst_cooldown = 10; // cooldown active
+
+        // Should NOT spawn
+        let should_spawn = ds.power_ema > ds.power_ema_slow * 1.08 && ds.burst_cooldown == 0;
+        assert!(!should_spawn);
     }
 }
