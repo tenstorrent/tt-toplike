@@ -403,7 +403,22 @@ impl DefragVis {
                 }
 
                 Phase::Running => {
-                    // No fill change — shimmer is purely in render().
+                    // Continuous organic signals — update every frame.
+
+                    // thermal_mood: slow EMA of mean GDDR temp, normalized 25°C→0, 85°C→1.
+                    let enabled_chs: Vec<_> = ds.channels.iter().filter(|c| c.enabled).collect();
+                    if !enabled_chs.is_empty() {
+                        let mean_temp = enabled_chs.iter().map(|c| c.temp_ema).sum::<f32>()
+                            / enabled_chs.len() as f32;
+                        let mean_norm = ((mean_temp - 25.0) / 60.0).clamp(0.0, 1.0);
+                        ds.thermal_mood = ds.thermal_mood * 0.995 + mean_norm * 0.005;
+                    }
+
+                    // inference_energy: fast EMA of excess power above slow baseline.
+                    let energy_raw = (ds.power_ema - ds.power_ema_slow).max(0.0)
+                        / ds.power_ema_slow.max(1.0);
+                    ds.inference_energy = ds.inference_energy * 0.85 + energy_raw * 0.15;
+                    ds.inference_energy *= 0.94; // additional decay so it falls after load drops
                 }
 
                 Phase::Idle => {
@@ -972,5 +987,54 @@ mod tests {
         assert_eq!(burst.channel, 2);
         assert_eq!(burst.cells.len(), 3);
         assert_eq!(burst.ttl, 18);
+    }
+
+    #[test]
+    fn thermal_mood_increases_toward_hot() {
+        let mut ds = DeviceState::new(0);
+        // Simulate all channels at 85°C (normalized = 1.0)
+        for ch in ds.channels.iter_mut() {
+            ch.enabled = true;
+            ch.temp_ema = 85.0;
+        }
+        // Run 1000 frames of the update logic
+        for _ in 0..1000 {
+            let enabled: Vec<_> = ds.channels.iter().filter(|c| c.enabled).collect();
+            let mean_temp = enabled.iter().map(|c| c.temp_ema).sum::<f32>() / enabled.len() as f32;
+            let mean_norm = ((mean_temp - 25.0) / 60.0).clamp(0.0, 1.0);
+            ds.thermal_mood = ds.thermal_mood * 0.995 + mean_norm * 0.005;
+        }
+        // After 1000 frames at max temp, thermal_mood should be meaningfully above 0
+        assert!(ds.thermal_mood > 0.02, "thermal_mood={}", ds.thermal_mood);
+    }
+
+    #[test]
+    fn inference_energy_rises_on_power_spike() {
+        let mut ds = DeviceState::new(0);
+        ds.power_ema_slow = 50.0; // baseline
+        // Spike power to 60W (20% above baseline)
+        ds.power_ema = 60.0;
+        for _ in 0..30 {
+            let energy_raw = (ds.power_ema - ds.power_ema_slow).max(0.0)
+                / ds.power_ema_slow.max(1.0);
+            ds.inference_energy = ds.inference_energy * 0.85 + energy_raw * 0.15;
+            ds.inference_energy *= 0.94;
+        }
+        assert!(ds.inference_energy > 0.05, "inference_energy={}", ds.inference_energy);
+    }
+
+    #[test]
+    fn inference_energy_decays_when_power_drops() {
+        let mut ds = DeviceState::new(0);
+        ds.power_ema_slow = 50.0;
+        ds.inference_energy = 0.8; // pre-loaded high
+        ds.power_ema = 50.0; // no spike
+        for _ in 0..60 {
+            let energy_raw = (ds.power_ema - ds.power_ema_slow).max(0.0)
+                / ds.power_ema_slow.max(1.0);
+            ds.inference_energy = ds.inference_energy * 0.85 + energy_raw * 0.15;
+            ds.inference_energy *= 0.94;
+        }
+        assert!(ds.inference_energy < 0.05, "inference_energy={}", ds.inference_energy);
     }
 }
