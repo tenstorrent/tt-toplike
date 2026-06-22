@@ -137,10 +137,6 @@ struct DeviceState {
     /// Whether ARC heartbeat has changed recently.
     heartbeat_pulse: u8,
     last_heartbeat: u32,
-    /// Frame at which we entered Running phase — used for surge-EVICT cooldown.
-    running_since: Option<u64>,
-    /// Cooldown counter after an EVICT — prevents immediate re-trigger on refill.
-    evict_cooldown: u64,
     /// Slow EMA of mean GDDR temp, normalized 25°C→0.0, 85°C→1.0.
     /// α=0.005 (~200-frame lag). Drives global palette warmth shift.
     thermal_mood: f32,
@@ -166,8 +162,6 @@ impl DeviceState {
             eth_links: 0,
             heartbeat_pulse: 0,
             last_heartbeat: 0,
-            running_since: None,
-            evict_cooldown: 0,
             thermal_mood: 0.0,
             inference_energy: 0.0,
             scatter_bursts: Vec::new(),
@@ -221,7 +215,6 @@ impl DefragVis {
             ds.power_ema = ds.power_ema * 0.92 + power * 0.08;
             // Slow EMA (long-term baseline; surge = fast >> slow).
             ds.power_ema_slow = ds.power_ema_slow * 0.992 + power * 0.008;
-            if ds.evict_cooldown > 0 { ds.evict_cooldown -= 1; }
 
             // Heartbeat pulse
             if hb != ds.last_heartbeat && hb != 0 {
@@ -304,36 +297,19 @@ impl DefragVis {
 
             // Phase detection.
             //
-            // EVICT fires on two conditions:
-            //   1. Real hardware: power drops below idle threshold (model unloaded).
-            //   2. Inference surge: fast EMA spikes well above slow baseline, matching
-            //      the signal that causes Memory Flow to flash color blocks.  This lets
-            //      the two visualizations react to the same inference event together.
-            //      A cooldown prevents re-triggering until DMA refill completes.
-            //
-            // SURGE_RATIO: fast EMA must be this much above slow EMA to count.
-            // 1.12 = 12% above baseline, tuned to match Memory Flow's power_change
-            // threshold without false-firing on gentle power ramps.
-            const SURGE_RATIO: f32 = 1.12;
-            // Minimum frames in Running before surge-EVICT is eligible (lets DMA
-            // refill complete and channels stabilize after the previous EVICT).
-            const SURGE_MIN_RUNNING_FRAMES: u64 = 600; // ~10 s
-            let running_frames = ds.running_since
-                .map(|s| self.frame.saturating_sub(s))
-                .unwrap_or(0);
-            let surge_evict = ds.phase == Phase::Running
-                && ds.evict_cooldown == 0
-                && running_frames >= SURGE_MIN_RUNNING_FRAMES
-                && ds.power_ema_slow > 5.0 // slow EMA must be initialized
-                && ds.power_ema >= ds.power_ema_slow * SURGE_RATIO;
+            // EVICT fires on one condition only: power drops below idle threshold
+            // (model unloaded / chip went idle). Inference surges are now expressed
+            // through scatter bursts, thermal_mood, and inference_energy — the
+            // surge-EVICT path was removed because it fired too frequently under
+            // sustained load where the fast EMA structurally leads the slow baseline.
 
             let new_phase = if ds.phase == Phase::Deconstructing {
                 let all_empty = ds.channels.iter().all(|c| c.fill <= 0.0);
                 if all_empty { Phase::Dma } else { Phase::Deconstructing }
             } else if !ds.channels.iter().any(|c| c.enabled && c.trained) {
                 Phase::Init
-            } else if ds.phase == Phase::Running && (power <= POWER_IDLE_W || surge_evict) {
-                // Power dropped (model unloaded) OR inference surge → EVICT.
+            } else if ds.phase == Phase::Running && power <= POWER_IDLE_W {
+                // Power dropped — model unloaded → EVICT.
                 Phase::Deconstructing
             } else if (aiclk >= 200 || all_full) && power > POWER_IDLE_W {
                 Phase::Running
@@ -347,7 +323,6 @@ impl DefragVis {
             match (ds.phase, new_phase) {
                 (p, Phase::Dma) if p != Phase::Dma => {
                     ds.dma_start_frame = Some(self.frame);
-                    ds.running_since = None;
                     if p == Phase::Deconstructing {
                         for ch in ds.channels.iter_mut() {
                             ch.fill = 0.0;
@@ -359,16 +334,11 @@ impl DefragVis {
                     ds.idle_power = ds.power_ema;
                 }
                 (p, Phase::Running) if p != Phase::Running => {
-                    ds.running_since = Some(self.frame);
                     for ch in ds.channels.iter_mut() {
                         if ch.enabled && ch.trained { ch.fill = 1.0; ch.head_pos = 1.0; }
                     }
                 }
                 (_, Phase::Deconstructing) => {
-                    ds.running_since = None;
-                    // Cooldown: ~45 s — long enough to cover full EVICT + DMA refill
-                    // so the surge trigger doesn't fire again immediately on refill.
-                    ds.evict_cooldown = 2700;
                     // Clear reactive state — burst list and energy don't survive an eviction.
                     // Stale bursts from a previous inference run would render in the wrong
                     // phase context and confuse the visual.
