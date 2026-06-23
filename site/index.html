@@ -8,6 +8,7 @@
   <meta property="og:title" content="tt-toplike — Tenstorrent Hardware Monitor">
   <meta property="og:description" content="Watch inference happen. DRAM motion, Tensix activity, and chip topology — live in your terminal.">
   <meta property="og:image" content="assets/tt-toplike-arcade-active.png">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/asciinema-player@3.8.0/dist/bundle/asciinema-player.min.css">
   <style>
     /* ── Reset & base ─────────────────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -511,20 +512,19 @@
     .cmd-copy:hover { background: rgba(79, 209, 197, 0.2); }
 
     /* ── Modes ────────────────────────────────────────────────────────────── */
-    .modes-grid {
+    /* kept for any legacy references */
+    .modes-grid { display: flex; flex-direction: column; gap: 4rem; }
+    .mode-card { display: none; } /* replaced by mode-row */
+
+    /* ── Mode rows: description left, player right ────────────────────────── */
+    .mode-row {
       display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 1.25rem;
+      grid-template-columns: 1fr 2fr;
+      gap: 3rem;
+      align-items: start;
     }
 
-    .mode-card {
-      background: var(--bg2);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 1.65rem 1.75rem;
-      transition: border-color 0.15s;
-    }
-    .mode-card:hover { border-color: var(--border-hi); }
+    .mode-meta { padding-top: 0.25rem; }
 
     .mode-key {
       display: inline-block;
@@ -535,20 +535,68 @@
       border: 1px solid var(--border-hi);
       border-radius: 4px;
       color: var(--teal);
-      margin-bottom: 0.6rem;
+      margin-bottom: 0.75rem;
     }
 
     .mode-title {
-      font-size: 1.1rem;
+      font-size: 1.25rem;
       font-weight: 600;
       color: var(--text);
-      margin-bottom: 0.5rem;
+      margin-bottom: 0.6rem;
+      line-height: 1.25;
     }
 
     .mode-desc {
-      font-size: 0.875rem;
+      font-size: 0.9rem;
       color: var(--muted);
-      line-height: 1.65;
+      line-height: 1.7;
+    }
+
+    .mode-hints {
+      margin-top: 1rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
+    .mode-hint {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      padding: 0.2em 0.55em;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--muted);
+    }
+    .mode-hint kbd {
+      color: var(--teal);
+      font-style: normal;
+      background: none;
+      border: none;
+      padding: 0;
+      font-size: inherit;
+      font-family: inherit;
+    }
+
+    .mode-player {
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      background: #0a0e14;
+    }
+    /* override asciinema-player defaults to match site palette */
+    .mode-player .ap-player {
+      --color-bg: #0a0e14;
+    }
+
+    /* divider between mode rows */
+    .mode-divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 0;
+    }
+
+    @media (max-width: 860px) {
+      .mode-row { grid-template-columns: 1fr; }
+      .mode-player { order: -1; }  /* player above description on mobile */
     }
 
     /* ── Dram manifesto block ─────────────────────────────────────────────── */
@@ -643,7 +691,6 @@
       .hero-screenshot { max-width: 820px; margin: 0 auto; }
       .features-grid { grid-template-columns: repeat(2, 1fr); }
       .inspiration-grid { grid-template-columns: 1fr; }
-      .modes-grid { grid-template-columns: 1fr; }
       .gallery-grid { grid-template-columns: 1fr; }
       .gallery-item.wide { grid-column: auto; }
     }
@@ -869,72 +916,175 @@
 <!-- ── Modes ──────────────────────────────────────────────────────────────── -->
 <section class="section edge" id="modes">
   <p class="section-label">Visualization modes</p>
-  <h2 class="section-heading">Press <code>v</code> to cycle</h2>
+  <h2 class="section-heading">Seven ways to watch your hardware think</h2>
   <p class="section-sub">
-    Each mode is a different lens on the same live hardware data.
-    All modes support multi-device layouts that scale with your terminal width and chip count.
+    Press <code>v</code> to cycle, or jump directly with <code>a</code> (Arcade),
+    <code>d</code> (Defrag), <code>g</code> (Insights). Every mode reads the same
+    live telemetry — power, temperature, aiclk, DDR state — and renders it differently.
+    Recordings below are from real 4× Blackhole hardware.
   </p>
 
   <div class="modes-grid">
-    <div class="mode-card">
-      <span class="mode-key">normal</span>
-      <p class="mode-title">Telemetry Table</p>
-      <p class="mode-desc">
-        Classical htop-style table: power, temperature, current, voltage, AICLK,
-        ARC firmware health per device. Color-coded with progressive gradients.
-        Backend switcher (<code>b</code>) cycles Sysfs → JSON → Luwen live.
-      </p>
+
+    <!-- Insights -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">g · default</span>
+        <p class="mode-title">Insights</p>
+        <p class="mode-desc">
+          Live per-chip telemetry panels. Power, temperature, DDR training status,
+          ARC firmware health, and an active process list — all in one view.
+          The adaptive baseline learns your chip's idle state so all activity
+          is shown relative to what's normal for <em>your</em> hardware.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>↑↓</kbd> navigate processes</span>
+          <span class="mode-hint"><kbd>k</kbd> silence alerts</span>
+          <span class="mode-hint"><kbd>K</kbd> kill process</span>
+          <span class="mode-hint"><kbd>l</kbd> legend</span>
+          <span class="mode-hint"><kbd>!</kbd> explain</span>
+        </div>
+      </div>
+      <div class="mode-player" id="player-insights"></div>
     </div>
-    <div class="mode-card">
-      <span class="mode-key">starfield</span>
-      <p class="mode-title">Tensix Starfield</p>
-      <p class="mode-desc">
-        The original visualization — Tensix cores as stars, memory hierarchy as
-        orbiting planets, data flow streams between devices. Learns each device's
-        idle baseline over the first 20 frames; all activity shown relative to that
-        learned state so any hardware looks alive, from 5W idle to 150W inference.
-      </p>
+
+    <hr class="mode-divider">
+
+    <!-- Starfield -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">v · starfield</span>
+        <p class="mode-title">Tensix Starfield</p>
+        <p class="mode-desc">
+          Every Tensix core is a star. Brightness encodes power fraction above idle;
+          color hue encodes die temperature (cyan at cool, red at hot); character
+          weight (<code>·∘○◉●</code>) encodes activity level; twinkle phase encodes
+          current draw. During LLM inference, stars pulse in sync with each token's
+          compute burst then settle back to idle shimmer.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>l</kbd> legend</span>
+          <span class="mode-hint"><kbd>!</kbd> explain signals</span>
+        </div>
+      </div>
+      <div class="mode-player" id="player-starfield"></div>
     </div>
-    <div class="mode-card">
-      <span class="mode-key">castle</span>
-      <p class="mode-title">Memory Castle</p>
-      <p class="mode-desc">
-        A roguelike dungeon of memory hierarchy. 600 particles fill the screen,
-        flowing from DDR at the bottom up through L2, L1, and into Tensix compute.
-        30 environmental glyphs (⚡ ※ ☼ ◊) populate the dungeon atmosphere.
-        Adaptive spawning surges with power activity.
-      </p>
+
+    <hr class="mode-divider">
+
+    <!-- Memory Castle -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">v · castle</span>
+        <p class="mode-title">Memory Castle</p>
+        <p class="mode-desc">
+          A roguelike dungeon representing the memory hierarchy: DDR at the bottom,
+          L2 cache in the corridors, L1 and Tensix at the top. 600 particles per chip
+          flow upward — Read, Write, CacheHit, and CacheMiss each rendered differently
+          with trails. Spawning density and speed track live power. During inference
+          the dungeon fills and seethes; at idle it breathes slowly.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>l</kbd> legend</span>
+          <span class="mode-hint"><kbd>!</kbd> explain signals</span>
+        </div>
+      </div>
+      <div class="mode-player" id="player-castle"></div>
     </div>
-    <div class="mode-card">
-      <span class="mode-key">flow</span>
-      <p class="mode-title">Memory Flow</p>
-      <p class="mode-desc">
-        The NoC as a particle system. DDR channels ring the perimeter;
-        the Tensix core grid fills the center. Particle density tracks traffic,
-        color tracks temperature, speed tracks current draw.
-        Most meditative mode — watch the inference rhythm emerge.
-      </p>
+
+    <hr class="mode-divider">
+
+    <!-- Memory Flow -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">v · flow</span>
+        <p class="mode-title">Memory Flow</p>
+        <p class="mode-desc">
+          GDDR channels as horizontal streams. One bar per DDR channel
+          (up to 12 on Blackhole); fill state shows trained/active status;
+          particles flow left-to-right with speed and density driven by
+          bandwidth. Hue rotates 30° per channel so all 12 fan across the
+          full color wheel. Most meditative mode — watch the inference
+          rhythm emerge as a wave.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>l</kbd> legend</span>
+          <span class="mode-hint"><kbd>!</kbd> explain signals</span>
+        </div>
+      </div>
+      <div class="mode-player" id="player-flow"></div>
     </div>
-    <div class="mode-card">
-      <span class="mode-key">arcade</span>
-      <p class="mode-title">Arcade Mode</p>
-      <p class="mode-desc">
-        All three visualizations stacked vertically with animated separator bands.
-        Starfield on top, Memory Castle in the middle, Memory Flow below.
-        A hero character (<code>@</code>) navigates the chip in real time.
-        Maximum information density — the full picture at once.
-      </p>
+
+    <hr class="mode-divider">
+
+    <!-- Defrag -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">d · defrag</span>
+        <p class="mode-title">Defrag</p>
+        <p class="mode-desc">
+          Norton SpeedDisk-style block map: one row per GDDR channel, blocks fill
+          left→right as model weights DMA in. During inference, blocks glow — brightness
+          from power, saturation from GDDR temperature, palette shifting warmer as
+          the chip heats. Scatter bursts flash on power spikes (each token's compute
+          burst visible as a flash). When a model unloads, the <code>EVICT</code>
+          animation dissolves blocks right→left at prime-staggered rates, then DMA
+          rebuild restarts from scratch.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>d</kbd> jump here directly</span>
+          <span class="mode-hint"><kbd>l</kbd> legend</span>
+          <span class="mode-hint"><kbd>!</kbd> explain signals</span>
+        </div>
+      </div>
+      <div class="mode-player" id="player-defrag"></div>
     </div>
-    <div class="mode-card">
-      <span class="mode-key">topology</span>
-      <p class="mode-title">Board Topology</p>
-      <p class="mode-desc">
-        On multi-chip boards, renders the physical chip layout with Ethernet
-        and PCIe connections. Link status, firmware health, and per-chip
-        temperature shown as a live graph. Immediately shows which chip
-        is hot, which link is down, or which die is carrying the load.
-      </p>
+
+    <hr class="mode-divider">
+
+    <!-- Arcade -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">a · arcade</span>
+        <p class="mode-title">Arcade</p>
+        <p class="mode-desc">
+          All visualizations at once: Starfield (top 40%), Memory Castle + Defrag
+          block map side-by-side (middle 30%), Memory Flow (bottom 30%).
+          A <code>@</code> hero character roams the canvas — X position = current draw,
+          Y position = power, color = temperature, speed and trail length = aiclk and
+          ETH link count. The fullest picture of what your hardware is doing.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>a</kbd> jump here directly</span>
+          <span class="mode-hint"><kbd>l</kbd> legend</span>
+          <span class="mode-hint"><kbd>!</kbd> explain signals</span>
+        </div>
+      </div>
+      <div class="mode-player" id="player-arcade"></div>
     </div>
+
+    <hr class="mode-divider">
+
+    <!-- Host / CPU mode -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">--host</span>
+        <p class="mode-title">Host CPU mode</p>
+        <p class="mode-desc">
+          No Tenstorrent hardware? Run <code>tt-toplike --host</code> on any Linux
+          machine. CPU frequency maps to aiclk, package temperature to die temp,
+          RAM usage to DDR fill. Every visualization works — your CPU cores glow
+          as stars, your RAM drives the DDR channel bars. A useful way to explore
+          all modes before TT hardware arrives.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>--host</kbd> flag</span>
+          <span class="mode-hint"><kbd>--host --mode arcade</kbd></span>
+        </div>
+      </div>
+      <div class="mode-player" id="player-host"></div>
+    </div>
+
   </div>
 </section>
 
@@ -1279,6 +1429,50 @@ cargo build --release --bin tt-toplike-tui --features tui
         setTimeout(function () { btn.textContent = orig; }, 2000);
       });
     });
+  });
+}());
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/asciinema-player@3.8.0/dist/bundle/asciinema-player.min.js"></script>
+<script>
+(function () {
+  var PLAYERS = [
+    { id: 'player-insights',  src: 'assets/casts/01-insights.cast'     },
+    { id: 'player-starfield', src: 'assets/casts/02-starfield.cast'     },
+    { id: 'player-castle',    src: 'assets/casts/03-memory-castle.cast' },
+    { id: 'player-flow',      src: 'assets/casts/04-memory-flow.cast'   },
+    { id: 'player-defrag',    src: 'assets/casts/05-defrag.cast'        },
+    { id: 'player-arcade',    src: 'assets/casts/06-arcade.cast'        },
+    { id: 'player-host',      src: 'assets/casts/07-host-cpu.cast'      },
+  ];
+
+  var OPTS = {
+    fit:        'width',   // scale to container width
+    autoPlay:   false,
+    loop:       true,
+    speed:      1,
+    theme:      'monokai',
+    terminalFontFamily: "'JetBrains Mono', 'Fira Mono', 'Cascadia Code', monospace",
+    terminalFontSize:   '11px',
+    rows:       22,        // crop height so cards don't get too tall
+  };
+
+  // Lazy-init: only create a player when its container scrolls into view.
+  // The casts are several MB each — no point loading them all up front.
+  var observers = [];
+  PLAYERS.forEach(function (p) {
+    var el = document.getElementById(p.id);
+    if (!el) return;
+    var obs = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (entry.isIntersecting) {
+          AsciinemaPlayer.create(p.src, el, OPTS);
+          obs.disconnect();
+        }
+      });
+    }, { rootMargin: '200px' });
+    obs.observe(el);
+    observers.push(obs);
   });
 }());
 </script>
