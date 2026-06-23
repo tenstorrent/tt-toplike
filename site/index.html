@@ -8,7 +8,6 @@
   <meta property="og:title" content="tt-toplike — Tenstorrent Hardware Monitor">
   <meta property="og:description" content="Watch inference happen. DRAM motion, Tensix activity, and chip topology — live in your terminal.">
   <meta property="og:image" content="assets/tt-toplike-arcade-active.png">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/asciinema-player@3.8.0/dist/bundle/asciinema-player.min.css">
   <style>
     /* ── Reset & base ─────────────────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -582,9 +581,11 @@
       border: 1px solid var(--border);
       background: #0a0e14;
     }
-    /* override asciinema-player defaults to match site palette */
-    .mode-player .ap-player {
-      --color-bg: #0a0e14;
+    .mode-gif {
+      width: 100%;
+      display: block;
+      border-radius: 8px;
+      border: 1px solid var(--border);
     }
 
     /* divider between mode rows */
@@ -596,7 +597,7 @@
 
     @media (max-width: 860px) {
       .mode-row { grid-template-columns: 1fr; }
-      .mode-player { order: -1; }  /* player above description on mobile */
+      .mode-gif { order: -1; }  /* gif above description on mobile */
     }
 
     /* ── Dram manifesto block ─────────────────────────────────────────────── */
@@ -945,7 +946,7 @@
           <span class="mode-hint"><kbd>!</kbd> explain</span>
         </div>
       </div>
-      <div class="mode-player" id="player-insights"></div>
+      <img src="assets/gifs/01-insights.gif" alt="Insights mode demo" class="mode-gif" loading="lazy">
     </div>
 
     <hr class="mode-divider">
@@ -967,7 +968,7 @@
           <span class="mode-hint"><kbd>!</kbd> explain signals</span>
         </div>
       </div>
-      <div class="mode-player" id="player-starfield"></div>
+      <img src="assets/gifs/02-starfield.gif" alt="Starfield mode demo" class="mode-gif" loading="lazy">
     </div>
 
     <hr class="mode-divider">
@@ -989,7 +990,7 @@
           <span class="mode-hint"><kbd>!</kbd> explain signals</span>
         </div>
       </div>
-      <div class="mode-player" id="player-castle"></div>
+      <img src="assets/gifs/03-memory-castle.gif" alt="Memory Castle mode demo" class="mode-gif" loading="lazy">
     </div>
 
     <hr class="mode-divider">
@@ -1012,7 +1013,7 @@
           <span class="mode-hint"><kbd>!</kbd> explain signals</span>
         </div>
       </div>
-      <div class="mode-player" id="player-flow"></div>
+      <img src="assets/gifs/04-memory-flow.gif" alt="Memory Flow mode demo" class="mode-gif" loading="lazy">
     </div>
 
     <hr class="mode-divider">
@@ -1037,7 +1038,7 @@
           <span class="mode-hint"><kbd>!</kbd> explain signals</span>
         </div>
       </div>
-      <div class="mode-player" id="player-defrag"></div>
+      <img src="assets/gifs/05-defrag.gif" alt="Defrag mode demo" class="mode-gif" loading="lazy">
     </div>
 
     <hr class="mode-divider">
@@ -1060,7 +1061,7 @@
           <span class="mode-hint"><kbd>!</kbd> explain signals</span>
         </div>
       </div>
-      <div class="mode-player" id="player-arcade"></div>
+      <img src="assets/gifs/06-arcade.gif" alt="Arcade mode demo" class="mode-gif" loading="lazy">
     </div>
 
     <hr class="mode-divider">
@@ -1082,7 +1083,7 @@
           <span class="mode-hint"><kbd>--host --mode arcade</kbd></span>
         </div>
       </div>
-      <div class="mode-player" id="player-host"></div>
+      <img src="assets/gifs/07-host-cpu.gif" alt="Host/CPU mode demo" class="mode-gif" loading="lazy">
     </div>
 
   </div>
@@ -1433,49 +1434,6 @@ cargo build --release --bin tt-toplike-tui --features tui
 }());
 </script>
 
-<script src="https://cdn.jsdelivr.net/npm/asciinema-player@3.8.0/dist/bundle/asciinema-player.min.js"></script>
-<script>
-(function () {
-  var PLAYERS = [
-    { id: 'player-insights',  src: 'assets/casts/01-insights.cast'     },
-    { id: 'player-starfield', src: 'assets/casts/02-starfield.cast'     },
-    { id: 'player-castle',    src: 'assets/casts/03-memory-castle.cast' },
-    { id: 'player-flow',      src: 'assets/casts/04-memory-flow.cast'   },
-    { id: 'player-defrag',    src: 'assets/casts/05-defrag.cast'        },
-    { id: 'player-arcade',    src: 'assets/casts/06-arcade.cast'        },
-    { id: 'player-host',      src: 'assets/casts/07-host-cpu.cast'      },
-  ];
-
-  var OPTS = {
-    fit:        'width',   // scale to container width
-    autoPlay:   false,
-    loop:       true,
-    speed:      1,
-    theme:      'monokai',
-    terminalFontFamily: "'JetBrains Mono', 'Fira Mono', 'Cascadia Code', monospace",
-    terminalFontSize:   '11px',
-    rows:       22,        // crop height so cards don't get too tall
-  };
-
-  // Lazy-init: only create a player when its container scrolls into view.
-  // The casts are several MB each — no point loading them all up front.
-  var observers = [];
-  PLAYERS.forEach(function (p) {
-    var el = document.getElementById(p.id);
-    if (!el) return;
-    var obs = new IntersectionObserver(function (entries) {
-      entries.forEach(function (entry) {
-        if (entry.isIntersecting) {
-          AsciinemaPlayer.create(p.src, el, OPTS);
-          obs.disconnect();
-        }
-      });
-    }, { rootMargin: '200px' });
-    obs.observe(el);
-    observers.push(obs);
-  });
-}());
-</script>
 
 </body>
 </html>
