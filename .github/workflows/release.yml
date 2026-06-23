@@ -96,48 +96,39 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
-  # ── Update gh-pages site (runs once after all suite builds succeed) ─────────
+  # ── Update site/ in main and let deploy-site.yml publish it ─────────────────
   update-site:
     name: Update project site
     runs-on: ubuntu-24.04
     needs: build-deb
     if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
-
-      # Check out gh-pages as a sibling directory so the main checkout
-      # (and its git remote) is untouched.
-      - name: Check out gh-pages branch
-        uses: actions/checkout@v4
         with:
-          ref: gh-pages
-          path: gh-pages
+          ref: main   # site/ lives on main; tag may point to a release branch
 
-      - name: Update project site with new version
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Update version in site/index.html
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           REPO="${GITHUB_REPOSITORY}"
 
-          # Update version badge in hero eyebrow line
           sed -i "s|Tenstorrent Hardware Monitor · v[0-9]*\.[0-9]*\.[0-9]* · Rust|Tenstorrent Hardware Monitor · v${VERSION} · Rust|g" \
-            gh-pages/index.html
+            site/index.html
 
-          # Update only the --repo argument of the gh release download command,
-          # regardless of how --pattern is quoted in the source file.
           sed -Ei "s|(gh release download )--repo [^ ]*|\1--repo ${REPO}|g" \
-            gh-pages/index.html
+            site/index.html
 
-          cd gh-pages
+      - name: Commit updated site
+        run: |
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name  "github-actions[bot]"
-
           if git diff --quiet; then
             echo "No site changes needed."
           else
-            git add index.html
+            git add site/index.html
             git commit -m "site: bump to ${GITHUB_REF_NAME}"
-            git push origin gh-pages
+            git push origin main
           fi
