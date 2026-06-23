@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # upload release assets and push gh-pages
+  contents: write   # upload release assets
 
 jobs:
   # ── Build .deb packages for each supported Ubuntu suite ────────────────────
@@ -96,39 +96,3 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
-  # ── Update site/ in main and let deploy-site.yml publish it ─────────────────
-  update-site:
-    name: Update project site
-    runs-on: ubuntu-24.04
-    needs: build-deb
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: write
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main   # site/ lives on main; tag may point to a release branch
-
-      - name: Update version in site/index.html
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          REPO="${GITHUB_REPOSITORY}"
-
-          sed -i "s|Tenstorrent Hardware Monitor · v[0-9]*\.[0-9]*\.[0-9]* · Rust|Tenstorrent Hardware Monitor · v${VERSION} · Rust|g" \
-            site/index.html
-
-          sed -Ei "s|(gh release download )--repo [^ ]*|\1--repo ${REPO}|g" \
-            site/index.html
-
-      - name: Commit updated site
-        run: |
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name  "github-actions[bot]"
-          if git diff --quiet; then
-            echo "No site changes needed."
-          else
-            git add site/index.html
-            git commit -m "site: bump to ${GITHUB_REF_NAME}"
-            git push origin main
-          fi
