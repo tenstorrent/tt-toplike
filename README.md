@@ -182,7 +182,7 @@ tt-toplike --mode arcade      # Arcade — split-screen with all visualizers
 tt-toplike --mode castle      # Memory Castle — roguelike dungeon particles
 tt-toplike --mode starfield   # Starfield — Tensix cores as stars
 tt-toplike --mode flow        # Memory Flow — NoC DDR channel streams
-tt-toplike --mode defrag      # Defrag — GDDR block map (DOS Defrag style)
+tt-toplike                    # then press d  — Defrag (no --mode flag; use keypress)
 
 # Filter to specific devices
 tt-toplike --devices 0,2
@@ -194,7 +194,7 @@ tt-toplike --devices 0,2
 |-----|--------|
 | `q` / `ESC` | Quit |
 | `r` | Force refresh |
-| `v` | Cycle visualization mode |
+| `v` | Cycle visualization mode: Insights → Flow → Starfield → Castle → Arcade → Defrag → Insights |
 | `a` | Jump directly to Arcade |
 | `d` | Jump directly to Defrag |
 | `g` | Jump directly to Grid (Insights table) |
@@ -257,21 +257,17 @@ Arcade mode topology header adapts similarly: detailed chip diagram for ≤ 8 ch
 
 Particle density reflects real power differentials (e.g. 12W vs 18W across 4 Blackhole chips).
 
-## Tenstorrent PPA Integration
+## Package Dependencies
 
-The `tt-toplike` package integrates with the Tenstorrent PPA ecosystem:
+`tt-toplike` is distributed as standalone `.deb` packages from [GitHub Releases](https://github.com/tenstorrent/tt-toplike/releases) — **not via `apt install`** or a PPA. Install the .deb directly (see Installation above), then install the tools it works with:
 
-```
-tt-toplike Recommends → tt-smi           (required for JSON backend)
-tt-toplike Recommends → tenstorrent-dkms (required for sysfs hwmon driver)
-tt-toplike Suggests   → tt-toplike-app   (optional native window, needs display)
-tt-toplike Suggests   → tenstorrent-tools
-```
+| Dependency | Purpose | How to get |
+|-----------|---------|-----------|
+| `tt-smi` | Required for JSON backend | Tenstorrent software stack |
+| `tenstorrent-dkms` | Required for sysfs hwmon driver | Tenstorrent software stack |
+| `tt-toplike-app` | Optional native window app | Same GitHub Releases page |
 
-Install the full stack:
-```bash
-sudo apt install tt-toplike tt-smi tenstorrent-dkms
-```
+The `.deb` package declares these as `Recommends`/`Suggests` so package managers surface them, but they are not pulled in automatically.
 
 ## Building .deb Packages
 
@@ -298,19 +294,19 @@ The `vendor/` directory (~80 MB) is committed to git for reproducible offline bu
                 │
         ┌───────┴───────┐
         │  Backend Trait │
-        └──┬──┬──┬──┬───┘
-           │  │  │  │
-       Sysfs JSON Mock Luwen
-      (hwmon)(tt-smi)   (PCI†)
+        └──┬──┬──┬──┬──┬─┘
+           │  │  │  │  │
+       Sysfs JSON Mock Host Luwen
+      (hwmon)(tt-smi) (CPU/RAM) (PCI†)
 
-† explicit --backend luwen only
+† explicit --backend luwen only; never auto-detected
 ```
 
 ## Testing
 
 ```bash
-cargo test
-cargo build --bin tt-toplike-tui --features tui    # zero warnings
+cargo test --lib --features tui             # 200+ unit tests
+cargo clippy --locked --lib --bin tt-toplike-tui --features tui -- -D warnings
 ```
 
 ## Contributing
