@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Logging infrastructure with message buffering
 //!
 //! This module provides a custom log implementation that captures log messages
@@ -9,7 +8,10 @@
 
 use log::{Level, LevelFilter, Metadata, Record};
 use std::collections::VecDeque;
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, Once};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, Once,
+};
 
 /// Maximum number of log messages to keep in the buffer
 const MAX_LOG_MESSAGES: usize = 100;
@@ -106,10 +108,7 @@ pub fn init_logging_with_buffer(level: LevelFilter) {
         }
 
         // Create and install the logger
-        let logger = BufferedLogger {
-            buffer,
-            level,
-        };
+        let logger = BufferedLogger { buffer, level };
 
         if let Err(e) = log::set_boxed_logger(Box::new(logger)) {
             eprintln!("Failed to set logger: {}", e);
@@ -251,8 +250,10 @@ mod tests {
         log::error!("{}-3", tag);
 
         let messages = get_log_messages();
-        assert!(messages.iter().filter(|m| m.message.contains(&tag)).count() >= 3,
-            "Expected all 3 tagged messages in the log buffer");
+        assert!(
+            messages.iter().filter(|m| m.message.contains(&tag)).count() >= 3,
+            "Expected all 3 tagged messages in the log buffer"
+        );
     }
 
     #[test]
@@ -280,13 +281,23 @@ mod tests {
 
         // Fetch a window large enough to include our messages.
         let recent = get_recent_log_messages(200);
-        let a_pos = recent.iter().rposition(|m| m.message.contains(&format!("{}-A", tag)));
-        let b_pos = recent.iter().rposition(|m| m.message.contains(&format!("{}-B", tag)));
-        let c_pos = recent.iter().rposition(|m| m.message.contains(&format!("{}-C", tag)));
+        let a_pos = recent
+            .iter()
+            .rposition(|m| m.message.contains(&format!("{}-A", tag)));
+        let b_pos = recent
+            .iter()
+            .rposition(|m| m.message.contains(&format!("{}-B", tag)));
+        let c_pos = recent
+            .iter()
+            .rposition(|m| m.message.contains(&format!("{}-C", tag)));
 
-        assert!(a_pos.is_some() && b_pos.is_some() && c_pos.is_some(),
-                "Expected all three tagged messages to appear in the log");
-        assert!(a_pos.unwrap() < b_pos.unwrap() && b_pos.unwrap() < c_pos.unwrap(),
-                "Expected messages in A < B < C order");
+        assert!(
+            a_pos.is_some() && b_pos.is_some() && c_pos.is_some(),
+            "Expected all three tagged messages to appear in the log"
+        );
+        assert!(
+            a_pos.unwrap() < b_pos.unwrap() && b_pos.unwrap() < c_pos.unwrap(),
+            "Expected messages in A < B < C order"
+        );
     }
 }

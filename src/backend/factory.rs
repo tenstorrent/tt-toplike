@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Backend Factory - Dynamic backend creation and switching
 //!
 //! This module provides functionality to create and switch between different
 //! telemetry backends at runtime, enabling live backend comparison.
 
+use crate::backend::host::HostBackend;
+use crate::backend::json::JSONBackend;
+use crate::backend::mock::MockBackend;
 use crate::backend::{BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
 use crate::error::{BackendError, BackendResult};
-use crate::backend::mock::MockBackend;
-use crate::backend::json::JSONBackend;
 
 #[cfg(target_os = "linux")]
 use crate::backend::sysfs::SysfsBackend;
@@ -91,6 +91,11 @@ pub fn create_backend(
         BackendType::Hybrid => Err(BackendError::Initialization(
             "Hybrid backend only available on Linux".to_string(),
         )),
+        BackendType::Host => {
+            let mut backend = HostBackend::with_config(config);
+            backend.init()?;
+            Ok(Box::new(backend))
+        }
     }
 }
 
@@ -100,7 +105,10 @@ pub fn create_backend(
 /// Order: Hybrid (sysfs + background JSON) → JSON (tt-smi) → Mock
 /// Use --backend luwen explicitly if you need direct hardware access.
 /// Use --backend sysfs if you want sysfs-only without any JSON background thread.
-fn create_auto_backend(config: BackendConfig, cli: &Cli) -> BackendResult<Box<dyn TelemetryBackend>> {
+fn create_auto_backend(
+    config: BackendConfig,
+    cli: &Cli,
+) -> BackendResult<Box<dyn TelemetryBackend>> {
     log::info!("Auto-detecting backend (safe mode - skipping Luwen)...");
 
     // Try Hybrid backend first on Linux (sysfs + optional background JSON enrichment).
@@ -153,7 +161,9 @@ pub fn next_backend(current: BackendType) -> BackendType {
         #[cfg(not(feature = "luwen-backend"))]
         BackendType::Luwen => BackendType::Mock,
 
-        BackendType::Mock => {
+        BackendType::Mock => BackendType::Host,
+
+        BackendType::Host => {
             #[cfg(target_os = "linux")]
             return BackendType::Hybrid;
             #[cfg(not(target_os = "linux"))]
@@ -172,7 +182,8 @@ pub fn next_backend(current: BackendType) -> BackendType {
 /// Try to create the next available backend, skipping unavailable ones
 ///
 /// This function cycles through backends until it finds one that initializes successfully.
-/// It tries up to 4 times (one full cycle) before giving up.
+/// Linux cycle has 6 steps (Hybrid→Sysfs→Json→Luwen→Mock→Host); non-Linux has fewer.
+/// We try up to 7 times to cover a full Linux cycle plus one retry margin.
 pub fn switch_to_next_backend(
     current: BackendType,
     config: BackendConfig,
@@ -181,7 +192,7 @@ pub fn switch_to_next_backend(
     let mut attempts = 0;
     let mut next = next_backend(current);
 
-    while attempts < 4 {
+    while attempts < 7 {
         log::info!("Attempting to switch to {:?} backend", next);
 
         match create_backend(next, config.clone(), cli) {
@@ -208,7 +219,7 @@ mod tests {
 
     #[test]
     fn test_next_backend_cycle() {
-        // Full Linux cycle: Hybrid → Sysfs → Json → Luwen → Mock → Hybrid
+        // Full Linux cycle: Hybrid → Sysfs → Json → Luwen → Mock → Host → Hybrid
         #[cfg(target_os = "linux")]
         {
             let b1 = next_backend(BackendType::Hybrid);
@@ -224,7 +235,10 @@ mod tests {
             assert!(matches!(b4, BackendType::Mock));
 
             let b5 = next_backend(b4);
-            assert!(matches!(b5, BackendType::Hybrid));
+            assert!(matches!(b5, BackendType::Host));
+
+            let b6 = next_backend(b5);
+            assert!(matches!(b6, BackendType::Hybrid));
         }
     }
 
@@ -237,6 +251,7 @@ mod tests {
             backend: BackendType::Mock,
             mock: Some(0),
             json: false,
+            host: false,
             tt_smi_path: std::path::PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,

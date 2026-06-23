@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Terminal Grid - Character-based display buffer
 //!
 //! This module provides a terminal emulator grid for rendering ASCII art
@@ -142,7 +141,11 @@ impl TerminalGrid {
         fg_color: Color,
         bg_color: Color,
     ) {
-        self.set(row, col, TerminalCell::with_bg(character, fg_color, bg_color));
+        self.set(
+            row,
+            col,
+            TerminalCell::with_bg(character, fg_color, bg_color),
+        );
     }
 
     /// Clear the entire grid to default cells (spaces)

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Common utilities for psychedelic visualizations
 //!
 //! Shared functions for:
@@ -10,8 +9,8 @@
 //! - Animation helpers (lerp, easing, phase wrapping)
 //! - ARC health rendering
 
-use ratatui::style::Color;
 use crate::ui::colors;
+use ratatui::style::Color;
 
 /// Convert HSV color space to RGB
 ///
@@ -208,22 +207,22 @@ pub fn wrap_phase(phase: f32) -> f32 {
 /// 16-color ANSI palette (BBS-era aesthetic)
 /// Note: Uses Color::Rgb directly since const arrays can't use runtime functions
 pub const ANSI_PALETTE: [Color; 16] = [
-    Color::Rgb(0, 0, 0),         // 0: Black
-    Color::Rgb(255, 100, 100),   // 1: Red
-    Color::Rgb(80, 220, 100),    // 2: Green
-    Color::Rgb(255, 220, 100),   // 3: Yellow
-    Color::Rgb(100, 150, 255),   // 4: Blue
-    Color::Rgb(255, 100, 255),   // 5: Magenta
-    Color::Rgb(100, 220, 220),   // 6: Cyan
-    Color::Rgb(220, 220, 220),   // 7: White
-    Color::Rgb(100, 100, 100),   // 8: Bright Black
-    Color::Rgb(255, 150, 150),   // 9: Bright Red
-    Color::Rgb(150, 255, 150),   // 10: Bright Green
-    Color::Rgb(255, 255, 150),   // 11: Bright Yellow
-    Color::Rgb(150, 200, 255),   // 12: Bright Blue
-    Color::Rgb(255, 150, 255),   // 13: Bright Magenta
-    Color::Rgb(150, 255, 255),   // 14: Bright Cyan
-    Color::Rgb(255, 255, 255),   // 15: Bright White
+    Color::Rgb(0, 0, 0),       // 0: Black
+    Color::Rgb(255, 100, 100), // 1: Red
+    Color::Rgb(80, 220, 100),  // 2: Green
+    Color::Rgb(255, 220, 100), // 3: Yellow
+    Color::Rgb(100, 150, 255), // 4: Blue
+    Color::Rgb(255, 100, 255), // 5: Magenta
+    Color::Rgb(100, 220, 220), // 6: Cyan
+    Color::Rgb(220, 220, 220), // 7: White
+    Color::Rgb(100, 100, 100), // 8: Bright Black
+    Color::Rgb(255, 150, 150), // 9: Bright Red
+    Color::Rgb(150, 255, 150), // 10: Bright Green
+    Color::Rgb(255, 255, 150), // 11: Bright Yellow
+    Color::Rgb(150, 200, 255), // 12: Bright Blue
+    Color::Rgb(255, 150, 255), // 13: Bright Magenta
+    Color::Rgb(150, 255, 255), // 14: Bright Cyan
+    Color::Rgb(255, 255, 255), // 15: Bright White
 ];
 
 /// Get ANSI palette color by index (wraps around if > 15)
@@ -274,9 +273,9 @@ pub fn arc_health_header(arc_health: &[(usize, bool)]) -> String {
 /// Solid colors for ARC health status
 pub fn arc_health_color(is_healthy: bool, _frame: u32) -> Color {
     if is_healthy {
-        colors::rgb(80, 220, 100)  // Bright green (healthy)
+        colors::rgb(80, 220, 100) // Bright green (healthy)
     } else {
-        colors::rgb(255, 100, 100)  // Solid bright red (no blinking)
+        colors::rgb(255, 100, 100) // Solid bright red (no blinking)
     }
 }
 
@@ -307,7 +306,7 @@ pub fn spirograph(t: f32, r1: f32, r2: f32, d: f32) -> (f32, f32) {
     let ratio = (r1 - r2) / r2;
     let x = (r1 - r2) * t.cos() + d * (ratio * t).cos();
     let y = (r1 - r2) * t.sin() - d * (ratio * t).sin();
-    (x / (r1 + r2), y / (r1 + r2))  // Normalize to -1.0..1.0
+    (x / (r1 + r2), y / (r1 + r2)) // Normalize to -1.0..1.0
 }
 
 #[cfg(test)]
@@ -335,9 +334,9 @@ mod tests {
 
     #[test]
     fn test_temp_to_hue() {
-        assert_eq!(temp_to_hue(0.0), 180.0);   // Cold = cyan
-        assert_eq!(temp_to_hue(50.0), 90.0);   // Medium = yellow-green
-        assert_eq!(temp_to_hue(100.0), 0.0);   // Hot = red
+        assert_eq!(temp_to_hue(0.0), 180.0); // Cold = cyan
+        assert_eq!(temp_to_hue(50.0), 90.0); // Medium = yellow-green
+        assert_eq!(temp_to_hue(100.0), 0.0); // Hot = red
     }
 
     #[test]
@@ -365,25 +364,25 @@ mod tests {
     #[test]
     fn test_lissajous() {
         let (x, y) = lissajous(0.0, 1.0, 1.0, 0.0);
-        assert!(x.abs() < 0.01);  // Should be near origin at t=0
+        assert!(x.abs() < 0.01); // Should be near origin at t=0
         assert!(y.abs() < 0.01);
     }
 
     #[test]
     fn test_castle_window_chars() {
-        assert_eq!(value_to_window_char(0.0), '□');  // Empty window
-        assert_eq!(value_to_window_char(1.0), '■');  // Solid window
+        assert_eq!(value_to_window_char(0.0), '□'); // Empty window
+        assert_eq!(value_to_window_char(1.0), '■'); // Solid window
     }
 
     #[test]
     fn test_singularity_chars() {
-        assert_eq!(value_to_singularity_char(0.0), '·');  // Far from singularity
-        assert_eq!(value_to_singularity_char(1.0), '◉');  // At event horizon
+        assert_eq!(value_to_singularity_char(0.0), '·'); // Far from singularity
+        assert_eq!(value_to_singularity_char(1.0), '◉'); // At event horizon
     }
 
     #[test]
     fn test_portal_chars() {
-        assert_eq!(value_to_portal_char(0.0), '◯');  // Closed portal
-        assert_eq!(value_to_portal_char(1.0), '◉');  // Open portal
+        assert_eq!(value_to_portal_char(0.0), '◯'); // Closed portal
+        assert_eq!(value_to_portal_char(1.0), '◉'); // Open portal
     }
 }

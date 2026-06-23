@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Adaptive baseline learning system
 //!
 //! This module implements the adaptive baseline that makes visualizations universally
@@ -207,16 +206,15 @@ impl AdaptiveBaseline {
     /// * `temp` - Temperature (celsius)
     /// * `aiclk` - AICLK frequency (MHz)
     pub fn update(&mut self, device_idx: usize, power: f32, current: f32, temp: f32, aiclk: f32) {
-        let baseline = self.device_baselines
+        let baseline = self
+            .device_baselines
             .entry(device_idx)
             .or_insert_with(DeviceBaseline::new);
 
         baseline.add_sample(power, current, temp, aiclk);
 
         // Check if all devices have established baselines
-        self.all_established = self.device_baselines
-            .values()
-            .all(|b| b.is_established());
+        self.all_established = self.device_baselines.values().all(|b| b.is_established());
     }
 
     /// Check if all device baselines are established
@@ -290,7 +288,12 @@ impl AdaptiveBaseline {
     ///
     /// The raw hardware threshold the user likely expects is therefore `0.20 / sensitivity`.
     /// For example, at sensitivity=5.0 a 4% hardware power increase will be detected.
-    pub fn workload_detected(&self, device_idx: usize, current_power: f32, current_current: f32) -> bool {
+    pub fn workload_detected(
+        &self,
+        device_idx: usize,
+        current_power: f32,
+        current_current: f32,
+    ) -> bool {
         if !self.is_established() {
             return false;
         }
@@ -370,7 +373,7 @@ mod tests {
 
         // Test workload detection
         assert!(!baseline.workload_detected(0, 55.0, 22.0)); // 10% increase - below threshold
-        assert!(baseline.workload_detected(0, 65.0, 26.0));  // 30% increase - above threshold
+        assert!(baseline.workload_detected(0, 65.0, 26.0)); // 30% increase - above threshold
     }
 
     #[test]
@@ -389,7 +392,10 @@ mod tests {
         }
         // At 2× sensitivity, a 10% power increase should appear as a 20% change
         let raw_change = b.power_change(0, 11.0); // 10% above baseline
-        assert!((raw_change - 0.2).abs() < 0.01,
-            "expected ~0.2 with sensitivity=2.0, got {}", raw_change);
+        assert!(
+            (raw_change - 0.2).abs() < 0.01,
+            "expected ~0.2 with sensitivity=2.0, got {}",
+            raw_change
+        );
     }
 }

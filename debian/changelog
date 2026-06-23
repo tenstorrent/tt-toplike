@@ -1,3 +1,20 @@
+tt-toplike (0.6.3) noble; urgency=medium
+
+  * Add HostBackend (--host / --backend host): run all visualisations on
+    any machine without Tenstorrent hardware. Reads CPU frequency, package
+    temperature (hwmon coretemp/k10temp), and RAM usage via sysinfo + Linux
+    sysfs RAPL. Maps to same Telemetry fields so Starfield, Memory Flow,
+    Memory Castle, and Arcade all work unchanged.
+  * Fix: default tt-toplike binary (from cargo install) now delegates to
+    tt-toplike-tui instead of printing a deprecation message. Users can
+    run `tt-toplike` directly after cargo install.
+  * Fix: /legend, /help, /explain overlays (and l/? hotkeys) in TUI
+  * Fix: Memory Flow now visualises all devices simultaneously (multi-device
+    hue-band assignment; per-device particle budget).
+  * docs: HOST_BACKEND.md; README "Try it on any machine" section.
+
+ -- Tenstorrent <software@tenstorrent.com>  Mon, 16 Jun 2026 18:00:00 +0000
+
 tt-toplike (0.6.2) noble; urgency=medium
 
   * Fix power reporting: HybridBackend now overlays SMBUS TDP/TDC onto sysfs

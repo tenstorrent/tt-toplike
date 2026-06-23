@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Color scheme definitions
 //!
 //! This module defines the color palette used throughout the TUI.
@@ -37,8 +36,8 @@ use ratatui::style::Color;
 pub fn supports_true_color() -> bool {
     // Disable RGB in tmux - use 256-color mode instead
     // This fixes rendering issues with Terminal.app on macOS via SSH
-    let in_tmux = std::env::var("TMUX").is_ok() ||
-                  std::env::var("TERM").unwrap_or_default().contains("screen");
+    let in_tmux = std::env::var("TMUX").is_ok()
+        || std::env::var("TERM").unwrap_or_default().contains("screen");
 
     if in_tmux {
         return false;
@@ -69,7 +68,7 @@ pub fn rgb(r: u8, g: u8, b: u8) -> Color {
         // Special case: Pure black should use terminal default (Color::Reset)
         // This prevents grey backgrounds in tmux
         if r == 0 && g == 0 && b == 0 {
-            return Color::Reset;  // Use terminal's default background
+            return Color::Reset; // Use terminal's default background
         }
 
         // Convert RGB to 256-color palette
@@ -94,7 +93,7 @@ pub fn primary() -> Color {
     if supports_true_color() {
         Color::Rgb(120, 150, 255)
     } else {
-        Color::Indexed(69)  // 256-color bright blue
+        Color::Indexed(69) // 256-color bright blue
     }
 }
 
@@ -156,23 +155,23 @@ pub const INFO: Color = Color::Rgb(100, 180, 255); // Bright blue
 pub fn temp_color(temp_c: f32) -> Color {
     if supports_true_color() {
         if temp_c < 45.0 {
-            Color::Rgb(79, 209, 197)   // Teal-cyan
+            Color::Rgb(79, 209, 197) // Teal-cyan
         } else if temp_c < 65.0 {
-            Color::Rgb(160, 120, 255)  // Violet
+            Color::Rgb(160, 120, 255) // Violet
         } else if temp_c < 80.0 {
-            Color::Rgb(236, 150, 184)  // Pink
+            Color::Rgb(236, 150, 184) // Pink
         } else {
-            Color::Rgb(255, 80, 80)    // Red
+            Color::Rgb(255, 80, 80) // Red
         }
     } else {
         if temp_c < 45.0 {
-            Color::Indexed(51)   // Cyan
+            Color::Indexed(51) // Cyan
         } else if temp_c < 65.0 {
-            Color::Indexed(135)  // Violet (256-color palette)
+            Color::Indexed(135) // Violet (256-color palette)
         } else if temp_c < 80.0 {
-            Color::Indexed(218)  // Pink (256-color palette)
+            Color::Indexed(218) // Pink (256-color palette)
         } else {
-            Color::Indexed(196)  // Red
+            Color::Indexed(196) // Red
         }
     }
 }
@@ -196,23 +195,23 @@ pub fn temp_color(temp_c: f32) -> Color {
 pub fn power_color(power_w: f32) -> Color {
     if supports_true_color() {
         if power_w < 50.0 {
-            Color::Rgb(79, 209, 197)   // Teal
+            Color::Rgb(79, 209, 197) // Teal
         } else if power_w < 100.0 {
-            Color::Rgb(160, 120, 255)  // Violet
+            Color::Rgb(160, 120, 255) // Violet
         } else if power_w < 150.0 {
-            Color::Rgb(236, 150, 184)  // Pink
+            Color::Rgb(236, 150, 184) // Pink
         } else {
-            Color::Rgb(255, 80, 80)    // Red
+            Color::Rgb(255, 80, 80) // Red
         }
     } else {
         if power_w < 50.0 {
-            Color::Indexed(51)   // Cyan
+            Color::Indexed(51) // Cyan
         } else if power_w < 100.0 {
-            Color::Indexed(135)  // Violet
+            Color::Indexed(135) // Violet
         } else if power_w < 150.0 {
-            Color::Indexed(218)  // Pink
+            Color::Indexed(218) // Pink
         } else {
-            Color::Indexed(196)  // Red
+            Color::Indexed(196) // Red
         }
     }
 }

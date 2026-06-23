@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Board topology detection and visualization helpers
 //!
 //! This module groups Tenstorrent chips into boards and provides helpers that
@@ -105,7 +104,7 @@ impl BoardTopology {
             // Only use ID grouping when there are ≥2 distinct board IDs.
             if id_to_chips.len() >= 2 {
                 let mut sorted_ids: Vec<String> = id_to_chips.keys().cloned().collect();
-                sorted_ids.sort();  // stable board ordering across calls
+                sorted_ids.sort(); // stable board ordering across calls
 
                 let boards: Vec<Board> = sorted_ids
                     .iter()
@@ -122,7 +121,10 @@ impl BoardTopology {
                     .collect();
 
                 let inter = inter_board_links(boards.len());
-                return Self { boards, inter_board_links: inter };
+                return Self {
+                    boards,
+                    inter_board_links: inter,
+                };
             }
         }
 
@@ -143,8 +145,8 @@ impl BoardTopology {
     /// entry so `has_multi_chip_boards()` returns `false` and visualizations
     /// can suppress board-level decorations.
     pub fn from_devices(devices: &[Device]) -> Self {
-        let all_single_chip = !devices.is_empty()
-            && devices.iter().all(|d| is_single_chip_card(&d.board_type));
+        let all_single_chip =
+            !devices.is_empty() && devices.iter().all(|d| is_single_chip_card(&d.board_type));
         let chips_per_board = if all_single_chip { 1 } else { 2 };
 
         let n = devices.len();
@@ -167,12 +169,19 @@ impl BoardTopology {
                 } else {
                     format!("board-{}", b)
                 };
-                Board { label, chips, hue: BASE_HUES[b % BASE_HUES.len()] }
+                Board {
+                    label,
+                    chips,
+                    hue: BASE_HUES[b % BASE_HUES.len()],
+                }
             })
             .collect();
 
         let inter = inter_board_links(boards.len());
-        Self { boards, inter_board_links: inter }
+        Self {
+            boards,
+            inter_board_links: inter,
+        }
     }
 
     /// Returns `true` when at least one board contains more than one chip.
@@ -186,9 +195,9 @@ impl BoardTopology {
 
     /// Returns `true` when devices `a` and `b` are on the same board.
     pub fn same_board(&self, a: usize, b: usize) -> bool {
-        self.boards.iter().any(|board| {
-            board.chips.contains(&a) && board.chips.contains(&b)
-        })
+        self.boards
+            .iter()
+            .any(|board| board.chips.contains(&a) && board.chips.contains(&b))
     }
 
     /// Base hue for the board that owns `device_idx`, or 0.0 if not found.
@@ -228,8 +237,10 @@ impl BoardTopology {
 /// Unknown strings return `false` (conservative: assume multi-chip).
 fn is_single_chip_card(board_type: &str) -> bool {
     let lower = board_type.to_lowercase();
-    lower.contains("p150") || lower.contains("n150")
-        || lower.contains("e75") || lower.contains("e150")
+    lower.contains("p150")
+        || lower.contains("n150")
+        || lower.contains("e75")
+        || lower.contains("e150")
 }
 
 /// Build a full mesh of inter-board links for `num_boards` boards.
@@ -267,7 +278,11 @@ pub fn sync_score(activity_a: f32, activity_b: f32, intra_board: bool) -> f32 {
     let a = activity_a.max(0.0).min(1.0);
     let b = activity_b.max(0.0).min(1.0);
     let raw = (a * b).sqrt();
-    if intra_board { raw.max(INTRA_BOARD_FLOOR) } else { raw }
+    if intra_board {
+        raw.max(INTRA_BOARD_FLOOR)
+    } else {
+        raw
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -278,17 +293,19 @@ mod tests {
     use crate::models::Architecture;
 
     fn make_devices_typed(n: usize, board_type: &str) -> Vec<Device> {
-        (0..n).map(|i| Device {
-            index: i,
-            board_type: board_type.to_string(),
-            bus_id: format!("0000:0{}:00.0", i),
-            coords: String::new(),
-            architecture: Architecture::Blackhole,
-            firmwares: None,
-            limits: None,
-            pcie_speed: None,
-            pcie_width: None,
-        }).collect()
+        (0..n)
+            .map(|i| Device {
+                index: i,
+                board_type: board_type.to_string(),
+                bus_id: format!("0000:0{}:00.0", i),
+                coords: String::new(),
+                architecture: Architecture::Blackhole,
+                firmwares: None,
+                limits: None,
+                pcie_speed: None,
+                pcie_width: None,
+            })
+            .collect()
     }
 
     fn make_devices(n: usize) -> Vec<Device> {
@@ -327,7 +344,13 @@ mod tests {
         // Each card gets its own board — no pairing.
         assert_eq!(topo.boards.len(), 4);
         for (b, board) in topo.boards.iter().enumerate() {
-            assert_eq!(board.chips, vec![b], "board {} should contain only chip {}", b, b);
+            assert_eq!(
+                board.chips,
+                vec![b],
+                "board {} should contain only chip {}",
+                b,
+                b
+            );
         }
         // No chip shares a board with another.
         assert!(!topo.same_board(0, 1));
@@ -341,8 +364,17 @@ mod tests {
         for bt in &["p150a", "p150c", "n150", "e75", "e150"] {
             let devices = make_devices_typed(2, bt);
             let topo = BoardTopology::from_devices(&devices);
-            assert_eq!(topo.boards.len(), 2, "board_type '{}' should give 1 chip/board", bt);
-            assert!(!topo.has_multi_chip_boards(), "board_type '{}' should not have multi-chip boards", bt);
+            assert_eq!(
+                topo.boards.len(),
+                2,
+                "board_type '{}' should give 1 chip/board",
+                bt
+            );
+            assert!(
+                !topo.has_multi_chip_boards(),
+                "board_type '{}' should not have multi-chip boards",
+                bt
+            );
         }
     }
 
@@ -405,7 +437,7 @@ mod tests {
         let devices = make_devices(4);
         let ids = vec![
             Some("p300c-abc".to_string()),
-            None,  // <-- missing
+            None, // <-- missing
             Some("p300c-def".to_string()),
             Some("p300c-def".to_string()),
         ];

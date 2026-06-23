@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Mock backend for testing and development
 //!
 //! Generates realistic fake telemetry data without requiring actual hardware.
@@ -20,8 +19,8 @@
 
 use crate::backend::{BackendConfig, TelemetryBackend};
 use crate::error::{BackendError, BackendResult};
+use crate::models::telemetry::{DeviceLimits, FirmwaresInfo, GddrTempPair};
 use crate::models::{Architecture, Device, SmbusTelemetry, Telemetry};
-use crate::models::telemetry::{FirmwaresInfo, DeviceLimits, GddrTempPair};
 use chrono::Utc;
 use std::collections::HashMap;
 
@@ -176,8 +175,12 @@ impl MockBackend {
                 },
             };
             let bus_id = format!("0000:{:02x}:00.0", (idx % 256) + 1);
-            let mut device = Device::new(idx, board_type, bus_id,
-                format!("({},{})", idx / 8, idx % 8));
+            let mut device = Device::new(
+                idx,
+                board_type,
+                bus_id,
+                format!("({},{})", idx / 8, idx % 8),
+            );
 
             // Populate firmwares and limits for all scenarios
             device.firmwares = Some(FirmwaresInfo {
@@ -199,7 +202,12 @@ impl MockBackend {
         if self.config.verbose {
             log::info!("MockBackend: Generated {} devices", self.devices.len());
             for device in &self.devices {
-                log::debug!("  - {}: {} ({})", device.index, device.name(), device.bus_id);
+                log::debug!(
+                    "  - {}: {} ({})",
+                    device.index,
+                    device.name(),
+                    device.bus_id
+                );
             }
         }
     }
@@ -209,9 +217,9 @@ impl MockBackend {
         for idx in 0..self.device_count {
             // Base power varies by architecture
             let base_power = match self.devices[idx].architecture {
-                Architecture::Grayskull => 40.0,  // Lower power
-                Architecture::Wormhole => 55.0,   // Medium power
-                Architecture::Blackhole => 70.0,  // Higher power
+                Architecture::Grayskull => 40.0, // Lower power
+                Architecture::Wormhole => 55.0,  // Medium power
+                Architecture::Blackhole => 70.0, // Higher power
                 Architecture::Unknown => 50.0,
             };
 
@@ -360,20 +368,40 @@ impl MockBackend {
             wh_fw_date: Some("2026-01-01".to_string()),
 
             // tt-smi 5.2.0 fields
-            gddr_temps:         [
-                Some(GddrTempPair([t_base + t_var, t_base + t_var + 2.0, t_base + t_var + 4.0, t_base + t_var + 6.0])),
-                Some(GddrTempPair([t_base + t_var, t_base + t_var + 2.0, t_base + t_var + 4.0, t_base + t_var + 6.0])),
-                Some(GddrTempPair([t_base + t_var, t_base + t_var + 2.0, t_base + t_var + 4.0, t_base + t_var + 6.0])),
-                Some(GddrTempPair([t_base + t_var, t_base + t_var + 2.0, t_base + t_var + 4.0, t_base + t_var + 6.0])),
+            gddr_temps: [
+                Some(GddrTempPair([
+                    t_base + t_var,
+                    t_base + t_var + 2.0,
+                    t_base + t_var + 4.0,
+                    t_base + t_var + 6.0,
+                ])),
+                Some(GddrTempPair([
+                    t_base + t_var,
+                    t_base + t_var + 2.0,
+                    t_base + t_var + 4.0,
+                    t_base + t_var + 6.0,
+                ])),
+                Some(GddrTempPair([
+                    t_base + t_var,
+                    t_base + t_var + 2.0,
+                    t_base + t_var + 4.0,
+                    t_base + t_var + 6.0,
+                ])),
+                Some(GddrTempPair([
+                    t_base + t_var,
+                    t_base + t_var + 2.0,
+                    t_base + t_var + 4.0,
+                    t_base + t_var + 6.0,
+                ])),
             ],
-            max_gddr_temp:      Some(t_base + t_var + 6.0),
-            gddr_corr_errs:     [None; 4],
-            gddr_uncorr_errs:   None,
+            max_gddr_temp: Some(t_base + t_var + 6.0),
+            gddr_corr_errs: [None; 4],
+            gddr_uncorr_errs: None,
             harvesting_state,
-            eth_live_status:    Some(eth_live),
-            enabled_eth:        None,
-            enabled_gddr:       None,
-            enabled_l2cpu:      None,
+            eth_live_status: Some(eth_live),
+            enabled_eth: None,
+            enabled_gddr: None,
+            enabled_l2cpu: None,
             enabled_tensix_col,
         }
     }
@@ -395,7 +423,10 @@ impl MockBackend {
 
 impl TelemetryBackend for MockBackend {
     fn init(&mut self) -> BackendResult<()> {
-        log::info!("MockBackend: Initializing with {} devices", self.device_count);
+        log::info!(
+            "MockBackend: Initializing with {} devices",
+            self.device_count
+        );
 
         if self.device_count == 0 {
             return Err(BackendError::DeviceNotFound(
@@ -548,7 +579,10 @@ mod tests {
         let mut b = MockBackend::with_scenario(MockScenario::Galaxy);
         b.init().unwrap();
         assert_eq!(b.devices().len(), 32);
-        assert!(b.devices().iter().all(|d| d.architecture == Architecture::Blackhole));
+        assert!(b
+            .devices()
+            .iter()
+            .all(|d| d.architecture == Architecture::Blackhole));
     }
 
     #[test]
@@ -556,7 +590,10 @@ mod tests {
         let mut b = MockBackend::with_scenario(MockScenario::QuadGalaxy);
         b.init().unwrap();
         assert_eq!(b.devices().len(), 128);
-        assert!(b.devices().iter().all(|d| d.architecture == Architecture::Blackhole));
+        assert!(b
+            .devices()
+            .iter()
+            .all(|d| d.architecture == Architecture::Blackhole));
     }
 
     #[test]
@@ -564,7 +601,10 @@ mod tests {
         let mut b = MockBackend::with_scenario(MockScenario::WormholeCluster);
         b.init().unwrap();
         assert_eq!(b.devices().len(), 32);
-        assert!(b.devices().iter().all(|d| d.architecture == Architecture::Wormhole));
+        assert!(b
+            .devices()
+            .iter()
+            .all(|d| d.architecture == Architecture::Wormhole));
     }
 
     #[test]
@@ -572,7 +612,11 @@ mod tests {
         let mut b = MockBackend::with_scenario(MockScenario::Galaxy);
         b.init().unwrap();
         for d in b.devices() {
-            assert!(d.firmwares.is_some(), "device {} missing firmwares", d.index);
+            assert!(
+                d.firmwares.is_some(),
+                "device {} missing firmwares",
+                d.index
+            );
             assert!(d.firmwares.as_ref().unwrap().fw_bundle_version.is_some());
         }
     }
@@ -595,8 +639,12 @@ mod tests {
             if let Some(smbus) = b.smbus_telemetry(idx) {
                 for pair in smbus.gddr_temps.iter().flatten() {
                     for &t in pair.0.iter() {
-                        assert!(t >= 0.0 && t <= 100.0,
-                            "GDDR temp {} out of range for dev {}", t, idx);
+                        assert!(
+                            t >= 0.0 && t <= 100.0,
+                            "GDDR temp {} out of range for dev {}",
+                            t,
+                            idx
+                        );
                     }
                 }
             }
@@ -614,6 +662,9 @@ mod tests {
                 .map(|v| v != 0x3FFF)
                 .unwrap_or(false)
         });
-        assert!(any_harvested, "QuadGalaxy mock should have some harvested columns");
+        assert!(
+            any_harvested,
+            "QuadGalaxy mock should have some harvested columns"
+        );
     }
 }

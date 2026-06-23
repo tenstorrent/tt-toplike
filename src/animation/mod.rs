@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Animation module for hardware-responsive visualizations
 //!
 //! This module provides the animation systems that make tt-toplike special:
@@ -21,6 +20,7 @@
 pub mod arcade;
 pub mod baseline;
 pub mod common;
+pub mod defrag;
 pub mod memory_castle;
 pub mod memory_flow;
 pub mod starfield;
@@ -29,7 +29,8 @@ pub mod topology;
 pub use arcade::ArcadeVisualization;
 pub use baseline::AdaptiveBaseline;
 pub use common::*;
+pub use defrag::DefragVis;
 pub use memory_castle::MemoryCastle;
 pub use memory_flow::MemoryFlowVis;
 pub use starfield::{DataStream, HardwareStarfield, MemoryPlanet, Star};
-pub use topology::{BoardTopology, sync_score};
+pub use topology::{sync_score, BoardTopology};

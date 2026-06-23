@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Native GUI module
 //!
 //! This module provides GUI-specific utilities and components.
 //! The main GUI application is in src/bin/gui.rs.
 
 pub mod history;
-pub mod visualization;
-pub mod terminal_grid;
 pub mod terminal_canvas;
+pub mod terminal_grid;
+pub mod visualization;
 
 pub use history::HistoryManager;
 pub use terminal_grid::TerminalGrid;

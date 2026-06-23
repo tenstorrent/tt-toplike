@@ -526,33 +526,62 @@ impl HardwareStarfield {
         // Update star properties based on telemetry
         for star in &mut self.stars {
             if let Some(telem) = backend.telemetry(star.device_idx) {
+                let smbus = backend.smbus_telemetry(star.device_idx);
                 let power = telem.power_w();
                 let current = telem.current_a();
                 let temp = telem.temp_c();
 
-                // Brightness from power (relative to baseline)
+                // Throttler: non-zero means the chip is actively being held back.
+                // Parse as bitmask — any set bit = some throttle condition active.
+                let throttler: u32 = smbus
+                    .and_then(|s| s.throttler.as_deref())
+                    .and_then(|v| crate::models::telemetry::parse_hex_or_dec(v))
+                    .unwrap_or(0);
+                // throttle_factor: 0.0 = fully throttled, 1.0 = free running.
+                // Each set throttle bit costs ~20% brightness — a heavy throttle
+                // visibly darkens the entire starfield.
+                let throttle_bits = throttler.count_ones();
+                let throttle_factor = (1.0 - throttle_bits as f32 * 0.20).max(0.1);
+
+                // Thermal headroom: thm_limits is the configured trip point in °C.
+                // headroom_factor shrinks toward 0 as temp approaches the limit,
+                // biasing hue toward red even before throttle fires.
+                let thm_limit: f32 = smbus
+                    .and_then(|s| s.thm_limits.as_deref())
+                    .and_then(|v| crate::models::telemetry::parse_hex_or_dec(v))
+                    .map(|v| v as f32)
+                    .unwrap_or(95.0);
+                // headroom 0..1: 1.0 = cool, 0.0 = at the limit
+                let headroom = ((thm_limit - temp) / thm_limit.max(1.0)).clamp(0.0, 1.0);
+                // Hue anchor shifts toward red (0°) as headroom shrinks.
+                // Normal: temp_to_hue gives 180°(cold)→0°(hot).
+                // Near-limit: pull an additional 40° toward red.
+                let hue_penalty = (1.0 - headroom) * 40.0;
+
+                // Brightness from power (relative to baseline), modulated by throttle.
                 let power_change = self.baseline.power_change(star.device_idx, power);
-                let base_brightness = 0.3 + power_change.max(0.0).min(1.0) * 0.7;
+                let base_brightness =
+                    (0.3 + power_change.max(0.0).min(1.0) * 0.7) * throttle_factor;
 
-                // Multi-frequency twinkling for more organic star behavior
+                // Multi-frequency twinkling — faster when throttled (nervous flicker).
                 let current_change = self.baseline.current_change(star.device_idx, current);
-                let twinkle_speed = 0.1 + current_change.max(0.0).min(1.0) * 0.3;
+                let twinkle_speed = 0.1
+                    + current_change.max(0.0).min(1.0) * 0.3
+                    + if throttler > 0 { 0.15 } else { 0.0 };
                 star.phase += twinkle_speed;
-                star.phase2 += twinkle_speed * 1.7; // Different frequency
+                star.phase2 += twinkle_speed * 1.7;
 
-                // Combine two sine waves for complex twinkling
                 let twinkle1 = (star.phase.sin() * 0.5 + 0.5) * 0.15;
                 let twinkle2 = (star.phase2.cos() * 0.5 + 0.5) * 0.10;
-                let twinkle = twinkle1 + twinkle2; // ±25% variation total
+                let twinkle = twinkle1 + twinkle2;
 
-                // Sparkle effect - occasional bright flash when power spikes
-                if power_change > 0.7 && (star.sparkle == 0.0 || star.sparkle > 0.95) {
-                    // Trigger sparkle with random chance
-                    if (self.frame + star.core_idx as u32) % 50 == 0 {
-                        star.sparkle = 1.0;
-                    }
+                // Sparkle effect — occasional bright flash on power spikes.
+                if power_change > 0.7
+                    && (star.sparkle == 0.0 || star.sparkle > 0.95)
+                    && (self.frame + star.core_idx as u32) % 50 == 0
+                {
+                    star.sparkle = 1.0;
                 }
-                // Decay sparkle
                 if star.sparkle > 0.0 {
                     star.sparkle -= 0.05;
                     if star.sparkle < 0.0 {
@@ -562,13 +591,20 @@ impl HardwareStarfield {
 
                 star.brightness = (base_brightness + twinkle).clamp(0.0, 1.0);
 
-                // Color: full 360° rainbow cycling driven by temp + time + core position.
-                // Each core starts at a different phase so the grid shows a colour wave.
+                // Color: rainbow cycling with thermal headroom pulling toward red.
                 use crate::animation::{hsv_to_rgb, temp_to_hue};
-                let hue =
-                    (temp_to_hue(temp) + self.frame as f32 * 2.0 + star.core_idx as f32 * 2.7)
-                        % 360.0;
-                star.color = hsv_to_rgb(hue, 1.0, 1.0);
+                let hue = ((temp_to_hue(temp) - hue_penalty).max(0.0)
+                    + self.frame as f32 * 2.0
+                    + star.core_idx as f32 * 2.7)
+                    % 360.0;
+                // Saturation drops slightly when throttling — gives a "washed out"
+                // desaturated look that reads as "something is wrong".
+                let sat = if throttler > 0 {
+                    0.5 + headroom * 0.5
+                } else {
+                    1.0
+                };
+                star.color = hsv_to_rgb(hue, sat, 1.0);
             }
         }
 

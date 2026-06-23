@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! JSON backend for tt-smi subprocess integration
 //!
 //! This backend runs tt-smi in snapshot mode and parses its JSON output.
@@ -47,10 +46,14 @@ use std::time::Instant;
 fn de_opt_f32_str<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f32>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
-    enum NumOrStr { Num(f32), Str(String), Null }
+    enum NumOrStr {
+        Num(f32),
+        Str(String),
+        Null,
+    }
     Ok(match Option::<NumOrStr>::deserialize(d)? {
-        Some(NumOrStr::Num(v))  => Some(v),
-        Some(NumOrStr::Str(s))  => s.trim().parse::<f32>().ok(),
+        Some(NumOrStr::Num(v)) => Some(v),
+        Some(NumOrStr::Str(s)) => s.trim().parse::<f32>().ok(),
         Some(NumOrStr::Null) | None => None,
     })
 }
@@ -58,10 +61,14 @@ fn de_opt_f32_str<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f32>, D::Err
 fn de_opt_u32_str<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
-    enum NumOrStr { Num(u32), Str(String), Null }
+    enum NumOrStr {
+        Num(u32),
+        Str(String),
+        Null,
+    }
     Ok(match Option::<NumOrStr>::deserialize(d)? {
-        Some(NumOrStr::Num(v))  => Some(v),
-        Some(NumOrStr::Str(s))  => s.trim().parse::<u32>().ok(),
+        Some(NumOrStr::Num(v)) => Some(v),
+        Some(NumOrStr::Str(s)) => s.trim().parse::<u32>().ok(),
         Some(NumOrStr::Null) | None => None,
     })
 }
@@ -291,7 +298,7 @@ impl JSONBackend {
     pub fn new(tt_smi_path: impl Into<String>) -> Self {
         Self {
             tt_smi_path: tt_smi_path.into(),
-            tt_smi_args: vec!["-s".to_string()],  // Use -s/--snapshot for JSON output
+            tt_smi_args: vec!["-s".to_string()], // Use -s/--snapshot for JSON output
             devices: Vec::new(),
             telemetry: HashMap::new(),
             smbus_telemetry: HashMap::new(),
@@ -305,7 +312,7 @@ impl JSONBackend {
     pub fn with_config(tt_smi_path: impl Into<String>, config: BackendConfig) -> Self {
         Self {
             tt_smi_path: tt_smi_path.into(),
-            tt_smi_args: vec!["-s".to_string()],  // Use -s/--snapshot for JSON output
+            tt_smi_args: vec!["-s".to_string()], // Use -s/--snapshot for JSON output
             devices: Vec::new(),
             telemetry: HashMap::new(),
             smbus_telemetry: HashMap::new(),
@@ -318,8 +325,11 @@ impl JSONBackend {
     /// Run tt-smi and capture its complete JSON output
     fn run_tt_smi(&self) -> BackendResult<String> {
         if self.config.verbose {
-            log::info!("JSONBackend: Running: {} {:?}",
-                self.tt_smi_path, self.tt_smi_args);
+            log::info!(
+                "JSONBackend: Running: {} {:?}",
+                self.tt_smi_path,
+                self.tt_smi_args
+            );
         }
 
         let output = Command::new(&self.tt_smi_path)
@@ -327,23 +337,23 @@ impl JSONBackend {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .map_err(|e| {
-                BackendError::SubprocessFailed(format!("Failed to run tt-smi: {}", e))
-            })?;
+            .map_err(|e| BackendError::SubprocessFailed(format!("Failed to run tt-smi: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(BackendError::SubprocessFailed(format!(
                 "tt-smi failed with status {}: {}",
-                output.status,
-                stderr
+                output.status, stderr
             )));
         }
 
         let json_output = String::from_utf8_lossy(&output.stdout).to_string();
 
         if self.config.verbose {
-            log::debug!("JSONBackend: Received {} bytes of JSON output", json_output.len());
+            log::debug!(
+                "JSONBackend: Received {} bytes of JSON output",
+                json_output.len()
+            );
         }
 
         Ok(json_output)
@@ -422,14 +432,24 @@ impl JSONBackend {
 
             // Create device if not exists
             if self.devices.is_empty() || !self.devices.iter().any(|d| d.index == idx) {
-                let board_type = json_dev.board_type.clone().unwrap_or_else(|| "unknown".to_string());
-                let bus_id = json_dev.bus_id.clone().unwrap_or_else(|| format!("0000:0{}:00.0", idx + 1));
-                let coords = json_dev.coords.clone().unwrap_or_else(|| format!("({},{})", idx / 4, idx % 4));
+                let board_type = json_dev
+                    .board_type
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                let bus_id = json_dev
+                    .bus_id
+                    .clone()
+                    .unwrap_or_else(|| format!("0000:0{}:00.0", idx + 1));
+                let coords = json_dev
+                    .coords
+                    .clone()
+                    .unwrap_or_else(|| format!("({},{})", idx / 4, idx % 4));
 
                 // Parse firmwares and limits blocks (tt-smi 5.2.0+), falling back to
                 // None for older snapshots that don't include these keys.
                 let firmwares = json_dev.firmwares.as_ref().and_then(|v| {
-                    serde_json::from_value::<crate::models::telemetry::FirmwaresInfo>(v.clone()).ok()
+                    serde_json::from_value::<crate::models::telemetry::FirmwaresInfo>(v.clone())
+                        .ok()
                 });
                 let limits = json_dev.limits.as_ref().and_then(|v| {
                     serde_json::from_value::<crate::models::telemetry::DeviceLimits>(v.clone()).ok()
@@ -456,18 +476,21 @@ impl JSONBackend {
 
             // Update SMBUS telemetry if present
             if let Some(smbus_json) = json_dev.smbus {
-                self.smbus_telemetry.insert(idx, smbus_from_json_fields(smbus_json));
+                self.smbus_telemetry
+                    .insert(idx, smbus_from_json_fields(smbus_json));
             }
         }
 
         Ok(())
     }
-
 }
 
 impl TelemetryBackend for JSONBackend {
     fn init(&mut self) -> BackendResult<()> {
-        log::info!("JSONBackend: Initializing with tt-smi path: {}", self.tt_smi_path);
+        log::info!(
+            "JSONBackend: Initializing with tt-smi path: {}",
+            self.tt_smi_path
+        );
 
         // Run tt-smi to get initial device list
         let json_output = self.run_tt_smi()?;
@@ -480,7 +503,10 @@ impl TelemetryBackend for JSONBackend {
             ));
         }
 
-        log::info!("JSONBackend: Initialization complete, found {} devices", self.devices.len());
+        log::info!(
+            "JSONBackend: Initialization complete, found {} devices",
+            self.devices.len()
+        );
         Ok(())
     }
 
@@ -508,7 +534,8 @@ impl TelemetryBackend for JSONBackend {
 
                 // Apply exponential backoff on repeated errors
                 if self.error_count > 1 {
-                    let backoff_ms = (100 * 2_u64.pow((self.error_count - 1).min(5) as u32)).min(5000);
+                    let backoff_ms =
+                        (100 * 2_u64.pow((self.error_count - 1).min(5) as u32)).min(5000);
                     std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
                 }
 
@@ -539,69 +566,119 @@ impl TelemetryBackend for JSONBackend {
 /// Build a `SmbusTelemetry` from the parsed JSON fields struct.
 fn smbus_from_json_fields(smbus_json: SmbusTelemetryJSON) -> SmbusTelemetry {
     // Combine the two 32-bit board-id halves into one string ("0xHHHH-0xLLLLLLLL").
-    let board_id = match (smbus_json.board_id_high.as_deref(), smbus_json.board_id_low.as_deref()) {
+    let board_id = match (
+        smbus_json.board_id_high.as_deref(),
+        smbus_json.board_id_low.as_deref(),
+    ) {
         (Some(hi), Some(lo)) => Some(format!("{}-{}", hi, lo)),
-        (Some(hi), None)     => Some(hi.to_string()),
-        (None,     Some(lo)) => Some(lo.to_string()),
-        (None,     None)     => None,
+        (Some(hi), None) => Some(hi.to_string()),
+        (None, Some(lo)) => Some(lo.to_string()),
+        (None, None) => None,
     };
 
     SmbusTelemetry {
         board_id,
-        ddr_status:       smbus_json.ddr_status,
-        ddr_speed:        smbus_json.ddr_speed,
+        ddr_status: smbus_json.ddr_status,
+        ddr_speed: smbus_json.ddr_speed,
         // TIMER_HEARTBEAT is the ARC0 health heartbeat counter.
-        arc0_health:      smbus_json.timer_heartbeat,
-        aiclk:            smbus_json.aiclk,
-        axiclk:           smbus_json.axiclk,
-        arcclk:           smbus_json.arcclk,
-        vcore:            smbus_json.vcore,
-        tdp:              smbus_json.tdp,
-        tdc:              smbus_json.tdc,
+        arc0_health: smbus_json.timer_heartbeat,
+        aiclk: smbus_json.aiclk,
+        axiclk: smbus_json.axiclk,
+        arcclk: smbus_json.arcclk,
+        vcore: smbus_json.vcore,
+        tdp: smbus_json.tdp,
+        tdc: smbus_json.tdc,
         asic_temperature: smbus_json.asic_temperature,
         vreg_temperature: smbus_json.vreg_temperature,
         board_temperature: smbus_json.board_temperature,
-        eth_fw_version:   smbus_json.eth_fw_version,
+        eth_fw_version: smbus_json.eth_fw_version,
         m3_app_fw_version: smbus_json.dm_app_fw_version,
-        m3_bl_fw_version:  smbus_json.dm_bl_fw_version,
-        tt_flash_version:  smbus_json.tt_flash_version,
-        fan_speed:        smbus_json.fan_speed,
-        pcie_status:      smbus_json.pcie_usage,
+        m3_bl_fw_version: smbus_json.dm_bl_fw_version,
+        tt_flash_version: smbus_json.tt_flash_version,
+        fan_speed: smbus_json.fan_speed,
+        pcie_status: smbus_json.pcie_usage,
         board_power_limit: smbus_json.board_power_limit,
         therm_trip_count: smbus_json.therm_trip_count,
-        vdd_limits:       smbus_json.vdd_limits,
+        vdd_limits: smbus_json.vdd_limits,
         // ── GDDR temperatures (tt-smi 5.2.0+) ──────────────────────────────────
         gddr_temps: [
-            smbus_json.gddr_0_1_temp.as_deref().and_then(crate::models::telemetry::unpack_gddr_temps),
-            smbus_json.gddr_2_3_temp.as_deref().and_then(crate::models::telemetry::unpack_gddr_temps),
-            smbus_json.gddr_4_5_temp.as_deref().and_then(crate::models::telemetry::unpack_gddr_temps),
-            smbus_json.gddr_6_7_temp.as_deref().and_then(crate::models::telemetry::unpack_gddr_temps),
+            smbus_json
+                .gddr_0_1_temp
+                .as_deref()
+                .and_then(crate::models::telemetry::unpack_gddr_temps),
+            smbus_json
+                .gddr_2_3_temp
+                .as_deref()
+                .and_then(crate::models::telemetry::unpack_gddr_temps),
+            smbus_json
+                .gddr_4_5_temp
+                .as_deref()
+                .and_then(crate::models::telemetry::unpack_gddr_temps),
+            smbus_json
+                .gddr_6_7_temp
+                .as_deref()
+                .and_then(crate::models::telemetry::unpack_gddr_temps),
         ],
-        max_gddr_temp: smbus_json.max_gddr_temp.as_deref()
+        max_gddr_temp: smbus_json
+            .max_gddr_temp
+            .as_deref()
             .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s))
             .map(|v| v as f32),
         // ── GDDR error counters (tt-smi 5.2.0+) ────────────────────────────────
         gddr_corr_errs: [
-            smbus_json.gddr_0_1_corr_errs.as_deref().and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
-            smbus_json.gddr_2_3_corr_errs.as_deref().and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
-            smbus_json.gddr_4_5_corr_errs.as_deref().and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
-            smbus_json.gddr_6_7_corr_errs.as_deref().and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
+            smbus_json
+                .gddr_0_1_corr_errs
+                .as_deref()
+                .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
+            smbus_json
+                .gddr_2_3_corr_errs
+                .as_deref()
+                .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
+            smbus_json
+                .gddr_4_5_corr_errs
+                .as_deref()
+                .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
+            smbus_json
+                .gddr_6_7_corr_errs
+                .as_deref()
+                .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
         ],
-        gddr_uncorr_errs: smbus_json.gddr_uncorr_errs.as_deref()
+        gddr_uncorr_errs: smbus_json
+            .gddr_uncorr_errs
+            .as_deref()
             .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
         // ── Harvesting / enabled bitmasks (tt-smi 5.2.0+) ──────────────────────
-        harvesting_state: smbus_json.harvesting_state.as_deref()
+        harvesting_state: smbus_json
+            .harvesting_state
+            .as_deref()
             .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
-        eth_live_status: smbus_json.eth_live_status.as_deref()
+        eth_live_status: smbus_json
+            .eth_live_status
+            .as_deref()
             .and_then(|s| crate::models::telemetry::parse_hex_or_dec_64(s)),
-        enabled_eth: smbus_json.enabled_eth.as_deref()
+        enabled_eth: smbus_json
+            .enabled_eth
+            .as_deref()
             .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
-        enabled_gddr: smbus_json.enabled_gddr.as_deref()
+        enabled_gddr: smbus_json
+            .enabled_gddr
+            .as_deref()
             .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
-        enabled_l2cpu: smbus_json.enabled_l2cpu.as_deref()
+        enabled_l2cpu: smbus_json
+            .enabled_l2cpu
+            .as_deref()
             .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
-        enabled_tensix_col: smbus_json.enabled_tensix_col.as_deref()
+        enabled_tensix_col: smbus_json
+            .enabled_tensix_col
+            .as_deref()
             .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s)),
+        // THM_LIMIT_SHUTDOWN is the thermal shutdown trip point in °C (may be hex-encoded).
+        // Map it to thm_limits so starfield's thermal-headroom logic can use it.
+        thm_limits: smbus_json
+            .thm_limit_shutdown
+            .as_deref()
+            .and_then(|s| crate::models::telemetry::parse_hex_or_dec(s))
+            .map(|v| v.to_string()),
         ..SmbusTelemetry::default()
     }
 }
@@ -610,7 +687,13 @@ fn smbus_from_json_fields(smbus_json: SmbusTelemetryJSON) -> SmbusTelemetry {
 /// telemetry and device metadata (firmwares, limits) in one pass.
 pub(crate) struct ParsedSnapshot {
     pub smbus: HashMap<usize, SmbusTelemetry>,
-    pub meta:  HashMap<usize, (Option<crate::models::telemetry::FirmwaresInfo>, Option<crate::models::telemetry::DeviceLimits>)>,
+    pub meta: HashMap<
+        usize,
+        (
+            Option<crate::models::telemetry::FirmwaresInfo>,
+            Option<crate::models::telemetry::DeviceLimits>,
+        ),
+    >,
 }
 
 /// Parse a tt-smi JSON snapshot once and extract both SMBUS telemetry and
@@ -622,11 +705,14 @@ pub(crate) fn parse_snapshot(json_str: &str) -> ParsedSnapshot {
         Ok(d) => d,
         Err(e) => {
             log::debug!("parse_snapshot: parse error: {}", e);
-            return ParsedSnapshot { smbus: HashMap::new(), meta: HashMap::new() };
+            return ParsedSnapshot {
+                smbus: HashMap::new(),
+                meta: HashMap::new(),
+            };
         }
     };
     let mut smbus_map = HashMap::new();
-    let mut meta_map  = HashMap::new();
+    let mut meta_map = HashMap::new();
     for dev in devices {
         let idx = dev.index.unwrap_or(0);
         if let Some(smbus_json) = dev.smbus {
@@ -642,7 +728,10 @@ pub(crate) fn parse_snapshot(json_str: &str) -> ParsedSnapshot {
             meta_map.insert(idx, (firmwares, limits));
         }
     }
-    ParsedSnapshot { smbus: smbus_map, meta: meta_map }
+    ParsedSnapshot {
+        smbus: smbus_map,
+        meta: meta_map,
+    }
 }
 
 #[cfg(test)]
@@ -719,12 +808,16 @@ mod tests {
         assert_eq!(devices.len(), 1);
 
         let telem = devices[0].telemetry.as_ref().expect("telemetry missing");
-        assert_eq!(telem.power,            Some(16.0),  "power string not parsed");
-        assert_eq!(telem.voltage,          Some(0.72),  "voltage string not parsed");
-        assert_eq!(telem.current,          Some(23.0),  "current string not parsed");
-        assert_eq!(telem.asic_temperature, Some(34.8),  "temperature string not parsed");
-        assert_eq!(telem.aiclk,            Some(800),   "aiclk string not parsed");
-        assert_eq!(telem.heartbeat,        Some(11540), "heartbeat string not parsed");
+        assert_eq!(telem.power, Some(16.0), "power string not parsed");
+        assert_eq!(telem.voltage, Some(0.72), "voltage string not parsed");
+        assert_eq!(telem.current, Some(23.0), "current string not parsed");
+        assert_eq!(
+            telem.asic_temperature,
+            Some(34.8),
+            "temperature string not parsed"
+        );
+        assert_eq!(telem.aiclk, Some(800), "aiclk string not parsed");
+        assert_eq!(telem.heartbeat, Some(11540), "heartbeat string not parsed");
     }
 
     /// Regression: smbus_telem uses SCREAMING_SNAKE_CASE keys — must map correctly.
@@ -735,13 +828,33 @@ mod tests {
 
         let smbus = devices[0].smbus.as_ref().expect("smbus_telem missing");
 
-        assert_eq!(smbus.ddr_status,   Some("0x55555555".to_string()), "DDR_STATUS not mapped");
-        assert_eq!(smbus.ddr_speed,    Some("0x3e80".to_string()),      "DDR_SPEED not mapped");
-        assert_eq!(smbus.timer_heartbeat, Some("0x10e7a".to_string()),  "TIMER_HEARTBEAT not mapped");
-        assert_eq!(smbus.aiclk,        Some("0x320".to_string()),       "AICLK not mapped");
-        assert_eq!(smbus.vcore,        Some("0x2cf".to_string()),       "VCORE not mapped");
-        assert_eq!(smbus.board_id_high, Some("0x461".to_string()),      "BOARD_ID_HIGH not mapped");
-        assert_eq!(smbus.board_id_low,  Some("0x31924062".to_string()), "BOARD_ID_LOW not mapped");
+        assert_eq!(
+            smbus.ddr_status,
+            Some("0x55555555".to_string()),
+            "DDR_STATUS not mapped"
+        );
+        assert_eq!(
+            smbus.ddr_speed,
+            Some("0x3e80".to_string()),
+            "DDR_SPEED not mapped"
+        );
+        assert_eq!(
+            smbus.timer_heartbeat,
+            Some("0x10e7a".to_string()),
+            "TIMER_HEARTBEAT not mapped"
+        );
+        assert_eq!(smbus.aiclk, Some("0x320".to_string()), "AICLK not mapped");
+        assert_eq!(smbus.vcore, Some("0x2cf".to_string()), "VCORE not mapped");
+        assert_eq!(
+            smbus.board_id_high,
+            Some("0x461".to_string()),
+            "BOARD_ID_HIGH not mapped"
+        );
+        assert_eq!(
+            smbus.board_id_low,
+            Some("0x31924062".to_string()),
+            "BOARD_ID_LOW not mapped"
+        );
     }
 
     /// parse_smbus_from_json must produce populated SmbusTelemetry from real format.
@@ -751,12 +864,18 @@ mod tests {
         assert!(!result.is_empty(), "no SMBUS data extracted");
 
         let smbus = result.get(&0).expect("device 0 missing");
-        assert!(smbus.ddr_status.is_some(),  "ddr_status empty after parse");
-        assert!(smbus.arc0_health.is_some(), "arc0_health (TIMER_HEARTBEAT) empty after parse");
-        assert!(smbus.aiclk.is_some(),       "aiclk empty after parse");
+        assert!(smbus.ddr_status.is_some(), "ddr_status empty after parse");
+        assert!(
+            smbus.arc0_health.is_some(),
+            "arc0_health (TIMER_HEARTBEAT) empty after parse"
+        );
+        assert!(smbus.aiclk.is_some(), "aiclk empty after parse");
         // board_id must combine HIGH and LOW
-        assert!(smbus.board_id.is_some(),    "board_id not combined");
-        assert!(smbus.board_id.as_deref().unwrap().contains('-'), "board_id missing separator");
+        assert!(smbus.board_id.is_some(), "board_id not combined");
+        assert!(
+            smbus.board_id.as_deref().unwrap().contains('-'),
+            "board_id missing separator"
+        );
     }
 
     /// ddr_status_bitmask must parse the hex string "0x55555555".
@@ -768,7 +887,11 @@ mod tests {
         // The model parses ddr_status as decimal; confirm the raw string is preserved for
         // tron_grid.rs which does its own hex parsing via u64::from_str_radix.
         let raw = smbus.ddr_status.as_deref().expect("ddr_status missing");
-        assert!(raw.starts_with("0x"), "ddr_status should be hex string: {}", raw);
+        assert!(
+            raw.starts_with("0x"),
+            "ddr_status should be hex string: {}",
+            raw
+        );
     }
 
     // Legacy format tests kept for coverage.
@@ -915,14 +1038,24 @@ mod tests {
         let snap = parse_snapshot(TTSMI_52_JSON);
         // SMBUS path unchanged
         let smbus = snap.smbus.get(&0).expect("SMBUS for device 0 missing");
-        assert!(smbus.eth_live_status.is_some(), "eth_live_status should be populated");
+        assert!(
+            smbus.eth_live_status.is_some(),
+            "eth_live_status should be populated"
+        );
         // Meta path (used by HybridBackend, not covered by other tests)
         let (fw, lim) = snap.meta.get(&0).expect("meta for device 0 missing");
         let fw = fw.as_ref().expect("firmwares should be Some");
-        assert_eq!(fw.fw_bundle_version.as_deref(), Some("fw_pack-19.9.0"),
-            "parse_snapshot fw_bundle_version mismatch");
+        assert_eq!(
+            fw.fw_bundle_version.as_deref(),
+            Some("fw_pack-19.9.0"),
+            "parse_snapshot fw_bundle_version mismatch"
+        );
         let lim = lim.as_ref().expect("limits should be Some");
-        assert_eq!(lim.tdp_limit, Some(300.0_f32), "parse_snapshot tdp_limit mismatch");
+        assert_eq!(
+            lim.tdp_limit,
+            Some(300.0_f32),
+            "parse_snapshot tdp_limit mismatch"
+        );
     }
 
     #[test]
@@ -930,7 +1063,9 @@ mod tests {
         // Existing pre-5.2 snapshot (no GDDR fields) must still parse without error.
         let result = parse_smbus_from_json(REAL_TTSMI_JSON);
         let smbus = result.get(&0).expect("device 0 missing");
-        assert!(smbus.gddr_temps.iter().all(|t| t.is_none()),
-            "old format should leave gddr_temps as None");
+        assert!(
+            smbus.gddr_temps.iter().all(|t| t.is_none()),
+            "old format should leave gddr_temps as None"
+        );
     }
 }

@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Historical telemetry tracking for GUI charts
 //!
 //! This module provides efficient circular buffers for tracking telemetry
 //! history, used for rendering line charts and responsive visualizations.
 
-use std::collections::VecDeque;
 use crate::models::Telemetry;
+use std::collections::VecDeque;
 
 /// Maximum number of historical samples to keep per device
 const MAX_HISTORY_SAMPLES: usize = 300; // 30 seconds at 100ms interval
@@ -56,7 +55,8 @@ impl TelemetryHistory {
     pub fn push(&mut self, telem: &Telemetry, timestamp: f64) {
         // Add new values
         self.power.push_back(telem.power.unwrap_or(0.0));
-        self.temperature.push_back(telem.asic_temperature.unwrap_or(0.0));
+        self.temperature
+            .push_back(telem.asic_temperature.unwrap_or(0.0));
         self.current.push_back(telem.current.unwrap_or(0.0));
         self.voltage.push_back(telem.voltage.unwrap_or(0.0));
         self.aiclk.push_back(telem.aiclk.unwrap_or(0));
@@ -91,8 +91,12 @@ impl TelemetryHistory {
         let mut min = f32::MAX;
         let mut max = f32::MIN;
         for &val in &self.power {
-            if val < min { min = val; }
-            if val > max { max = val; }
+            if val < min {
+                min = val;
+            }
+            if val > max {
+                max = val;
+            }
         }
         (min, max)
     }
@@ -101,8 +105,12 @@ impl TelemetryHistory {
         let mut min = f32::MAX;
         let mut max = f32::MIN;
         for &val in &self.temperature {
-            if val < min { min = val; }
-            if val > max { max = val; }
+            if val < min {
+                min = val;
+            }
+            if val > max {
+                max = val;
+            }
         }
         (min, max)
     }

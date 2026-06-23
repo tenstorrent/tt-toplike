@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Process monitoring for Tenstorrent device usage
 //!
 //! This module provides functionality to detect which processes are currently
@@ -100,7 +99,10 @@ impl ProcessMonitor {
             }
             Err(e) => {
                 // If /proc is completely inaccessible, log once but don't crash
-                log::warn!("Failed to scan processes: {}. Process monitoring disabled.", e);
+                log::warn!(
+                    "Failed to scan processes: {}. Process monitoring disabled.",
+                    e
+                );
             }
         }
     }
@@ -162,11 +164,7 @@ impl ProcessMonitor {
         }
 
         // If process uses tenstorrent devices OR has hugepages/TT mappings, record it
-        if !device_indices.is_empty()
-            || hugepages_1g > 0
-            || hugepages_2m > 0
-            || has_tt_mapping
-        {
+        if !device_indices.is_empty() || hugepages_1g > 0 || hugepages_2m > 0 || has_tt_mapping {
             let cmdline = process
                 .cmdline()
                 .ok()
@@ -271,7 +269,10 @@ mod tests {
             // As root, signal 0 to any existing PID succeeds.
             assert!(result.is_ok(), "kill_pid(1, 0) should succeed for root");
         } else {
-            assert!(result.is_err(), "kill_pid(1, 0) should fail for non-root (EPERM)");
+            assert!(
+                result.is_err(),
+                "kill_pid(1, 0) should fail for non-root (EPERM)"
+            );
             assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EPERM));
         }
     }

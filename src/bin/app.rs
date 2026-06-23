@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! tt-toplike-app — native terminal window that hosts tt-toplike-tui as a PTY child.
 //!
 //! Architecture:
@@ -333,8 +332,12 @@ impl Perform for Screen {
                 self.pending_wrap = false;
                 self.cursor_row = p1.saturating_sub(1).min(self.rows.saturating_sub(1));
                 self.cursor_col = p2.saturating_sub(1).min(self.cols.saturating_sub(1));
-                if p1 == 0 { self.cursor_row = 0; }
-                if p2 == 0 { self.cursor_col = 0; }
+                if p1 == 0 {
+                    self.cursor_row = 0;
+                }
+                if p2 == 0 {
+                    self.cursor_col = 0;
+                }
             }
             // Erase in display
             'J' => match p1 {
@@ -372,7 +375,8 @@ impl Perform for Screen {
                 let n = p1.max(1);
                 for _ in 0..n {
                     if self.cursor_row < self.rows {
-                        self.cells.insert(self.cursor_row, vec![Cell::default(); self.cols]);
+                        self.cells
+                            .insert(self.cursor_row, vec![Cell::default(); self.cols]);
                         if self.cells.len() > self.rows {
                             self.cells.pop();
                         }
@@ -493,7 +497,13 @@ fn encode_key(key: Key, modifiers: Modifiers) -> Option<Vec<u8>> {
         Key::Enter => b"\r".to_vec(),
         Key::Escape => b"\x1b".to_vec(),
         Key::Backspace => b"\x7f".to_vec(),
-        Key::Tab => if shift { b"\x1b[Z".to_vec() } else { b"\t".to_vec() },
+        Key::Tab => {
+            if shift {
+                b"\x1b[Z".to_vec()
+            } else {
+                b"\t".to_vec()
+            }
+        }
         Key::ArrowUp => b"\x1b[A".to_vec(),
         Key::ArrowDown => b"\x1b[B".to_vec(),
         Key::ArrowRight => b"\x1b[C".to_vec(),
@@ -534,9 +544,13 @@ impl TermApp {
 
         // Determine terminal size from available viewport.
         let vp = cc.egui_ctx.input(|i| {
-            i.viewport().inner_rect
+            i.viewport()
+                .inner_rect
                 .or(i.viewport().outer_rect)
-                .unwrap_or(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)))
+                .unwrap_or(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                ))
         });
         let cols = ((vp.width() / cell_w) as u16).max(80);
         let rows = ((vp.height() / cell_h) as u16).max(24);
@@ -694,7 +708,12 @@ impl eframe::App for TermApp {
                     egui::Event::Text(text) => {
                         bytes.extend_from_slice(text.as_bytes());
                     }
-                    egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } => {
                         if modifiers.ctrl {
                             // Ctrl+letter → single byte 0x01-0x1A
                             let name: &str = key.name();

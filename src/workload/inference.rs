@@ -14,10 +14,10 @@ use std::time::Instant;
 /// One sample in the rolling history kept per device.
 #[derive(Debug, Clone)]
 pub struct TelemetrySample {
-    pub power:     f32,
-    pub temp:      f32,
-    pub current:   f32,
-    pub aiclk:     Option<u32>,
+    pub power: f32,
+    pub temp: f32,
+    pub current: f32,
+    pub aiclk: Option<u32>,
     pub timestamp: Instant,
 }
 
@@ -25,33 +25,33 @@ pub struct TelemetrySample {
 #[derive(Debug, Clone, Default)]
 pub struct PowerTrend {
     /// W/s (positive = rising). Zero when fewer than 2 samples.
-    pub slope:       f32,
+    pub slope: f32,
     /// Standard deviation (not raw variance) of power in last 10 samples.
-    pub variance:    f32,
+    pub variance: f32,
     /// True when last 8 samples are monotonically rising.
-    pub is_rising:   bool,
+    pub is_rising: bool,
     /// True when last 8 samples are monotonically falling.
-    pub is_falling:  bool,
+    pub is_falling: bool,
     /// Max power in the window.
-    pub peak:        f32,
+    pub peak: f32,
 }
 
 /// Classified hardware activity state (13 states, priority-ordered).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceInferenceState {
-    Stalled,         // ARC counters frozen or heartbeat == 0
-    HardwareFault,   // faults register non-empty
-    ThermalStress,   // temp > 82°C
-    Throttling,      // throttler set, or AICLK dropped >20% while power medium-high
-    FabricDegraded,  // eth_status error and device_count > 1
-    MaxedOut,        // power > 85% TDP, or power_change > 1.5
-    WarmingUp,       // rising trend, was near baseline 20 samples ago
-    CoolingDown,     // falling from high peak
-    Thinking,        // active, high-variance (prefill / attention)
-    Generating,      // active, low-variance, high current:power (decode)
-    MovingData,      // current_change >> power_change
-    Idle,            // all within 15% of baseline
-    Unclear,         // active but no pattern
+    Stalled,        // ARC counters frozen or heartbeat == 0
+    HardwareFault,  // faults register non-empty
+    ThermalStress,  // temp > 82°C
+    Throttling,     // throttler set, or AICLK dropped >20% while power medium-high
+    FabricDegraded, // eth_status error and device_count > 1
+    MaxedOut,       // power > 85% TDP, or power_change > 1.5
+    WarmingUp,      // rising trend, was near baseline 20 samples ago
+    CoolingDown,    // falling from high peak
+    Thinking,       // active, high-variance (prefill / attention)
+    Generating,     // active, low-variance, high current:power (decode)
+    MovingData,     // current_change >> power_change
+    Idle,           // all within 15% of baseline
+    Unclear,        // active but no pattern
 }
 
 /// Confidence in the classified state.
@@ -65,20 +65,20 @@ pub enum Confidence {
 /// Classification result for one device, ready for rendering.
 #[derive(Debug, Clone)]
 pub struct InferenceResult {
-    pub state:              DeviceInferenceState,
-    pub confidence:         Confidence,
+    pub state: DeviceInferenceState,
+    pub confidence: Confidence,
     /// Bold ALL-CAPS label, max 16 chars.
-    pub label:              &'static str,
+    pub label: &'static str,
     /// RGB color for the label.  Convert to `ratatui::style::Color::Rgb(r, g, b)`
     /// in the TUI layer; kept as a plain tuple here to avoid an unconditional
     /// ratatui dependency in the workload crate.
-    pub label_color:        (u8, u8, u8),
+    pub label_color: (u8, u8, u8),
     /// Fixed-format metrics line: `"18.0W   62.1°C  1100MHz   +50%"`
-    pub headline:           String,
+    pub headline: String,
     /// Fixed-format interpretation line: `"humming   rivers of data   24% TDP"`
-    pub detail:             String,
+    pub detail: String,
     /// Fill fraction for power bar: `Some(0.24)` if TDP known.
-    pub power_pct_of_tdp:   Option<f32>,
+    pub power_pct_of_tdp: Option<f32>,
     /// Fill fraction fallback: power / (2 * baseline_power).
     pub power_pct_baseline: f32,
 }
@@ -86,24 +86,49 @@ pub struct InferenceResult {
 /// State and label table (matches spec § State display).
 /// Colors are stored as `(r, g, b)` tuples; convert to `Color::Rgb(r,g,b)` in the TUI layer.
 const STATE_META: &[(DeviceInferenceState, &str, (u8, u8, u8))] = &[
-    (DeviceInferenceState::Stalled,        "GONE SILENT",     (205,   0,   0)),
-    (DeviceInferenceState::HardwareFault,  "IN DISTRESS",     (205,   0,   0)),
-    (DeviceInferenceState::ThermalStress,  "SCORCHING",       (255,  80,   0)),
-    (DeviceInferenceState::Throttling,     "REINED IN",       (255, 140,   0)),
-    (DeviceInferenceState::FabricDegraded, "LOST THE THREAD", (255, 140,   0)),
-    (DeviceInferenceState::MaxedOut,       "BURNING BRIGHT",  (220,  60,   0)),
-    (DeviceInferenceState::WarmingUp,      "AWAKENING",       (205, 205,   0)),
-    (DeviceInferenceState::CoolingDown,    "EXHALING",        (  0, 205, 205)),
-    (DeviceInferenceState::Thinking,       "DREAMING DEEP",   (160,  80, 255)),
-    (DeviceInferenceState::Generating,     "CONJURING",       (  0, 205,   0)),
-    (DeviceInferenceState::MovingData,     "IN FULL FLOW",    (  0,   0, 205)),
-    (DeviceInferenceState::Idle,           "BREATHING",       ( 85,  85,  85)),
-    (DeviceInferenceState::Unclear,        "INSCRUTABLE",     (160, 160,  40)),
+    (DeviceInferenceState::Stalled, "GONE SILENT", (205, 0, 0)),
+    (
+        DeviceInferenceState::HardwareFault,
+        "IN DISTRESS",
+        (205, 0, 0),
+    ),
+    (
+        DeviceInferenceState::ThermalStress,
+        "SCORCHING",
+        (255, 80, 0),
+    ),
+    (DeviceInferenceState::Throttling, "REINED IN", (255, 140, 0)),
+    (
+        DeviceInferenceState::FabricDegraded,
+        "LOST THE THREAD",
+        (255, 140, 0),
+    ),
+    (
+        DeviceInferenceState::MaxedOut,
+        "BURNING BRIGHT",
+        (220, 60, 0),
+    ),
+    (DeviceInferenceState::WarmingUp, "AWAKENING", (205, 205, 0)),
+    (DeviceInferenceState::CoolingDown, "EXHALING", (0, 205, 205)),
+    (
+        DeviceInferenceState::Thinking,
+        "DREAMING DEEP",
+        (160, 80, 255),
+    ),
+    (DeviceInferenceState::Generating, "CONJURING", (0, 205, 0)),
+    (
+        DeviceInferenceState::MovingData,
+        "IN FULL FLOW",
+        (0, 0, 205),
+    ),
+    (DeviceInferenceState::Idle, "BREATHING", (85, 85, 85)),
+    (DeviceInferenceState::Unclear, "INSCRUTABLE", (160, 160, 40)),
 ];
 
 /// Return the ALL-CAPS label string for a given state.
 pub fn state_label(state: DeviceInferenceState) -> &'static str {
-    STATE_META.iter()
+    STATE_META
+        .iter()
         .find(|(s, _, _)| *s == state)
         .map(|(_, l, _)| *l)
         .unwrap_or("UNKNOWN")
@@ -113,7 +138,8 @@ pub fn state_label(state: DeviceInferenceState) -> &'static str {
 ///
 /// In the TUI layer, convert with `ratatui::style::Color::Rgb(r, g, b)`.
 pub fn state_color(state: DeviceInferenceState) -> (u8, u8, u8) {
-    STATE_META.iter()
+    STATE_META
+        .iter()
         .find(|(s, _, _)| *s == state)
         .map(|(_, _, c)| *c)
         .unwrap_or((205, 205, 205))
@@ -122,7 +148,7 @@ pub fn state_color(state: DeviceInferenceState) -> (u8, u8, u8) {
 /// Maintains rolling history and classifies hardware state per device.
 pub struct InferenceEngine {
     /// 30-sample rolling window per device index.
-    pub history:  HashMap<usize, VecDeque<TelemetrySample>>,
+    pub history: HashMap<usize, VecDeque<TelemetrySample>>,
     /// Shared adaptive baseline (learns idle power/current/temp).
     pub baseline: AdaptiveBaseline,
     /// Last observed ARC health counter values per device.
@@ -136,9 +162,9 @@ impl InferenceEngine {
     /// Create a new engine with empty history.
     pub fn new() -> Self {
         Self {
-            history:          HashMap::new(),
-            baseline:         AdaptiveBaseline::new(),
-            arc_snapshots:    HashMap::new(),
+            history: HashMap::new(),
+            baseline: AdaptiveBaseline::new(),
+            arc_snapshots: HashMap::new(),
             arc_stall_frames: HashMap::new(),
         }
     }
@@ -160,10 +186,14 @@ impl InferenceEngine {
         arc_health: Option<[Option<u32>; 4]>,
     ) {
         // Update baseline (learns idle state over first 20 samples)
-        self.baseline.update(device_idx, power, current, temp, aiclk.unwrap_or(0) as f32);
+        self.baseline
+            .update(device_idx, power, current, temp, aiclk.unwrap_or(0) as f32);
 
         let sample = TelemetrySample {
-            power, temp, current, aiclk,
+            power,
+            temp,
+            current,
+            aiclk,
             timestamp: Instant::now(),
         };
         let deque = self.history.entry(device_idx).or_insert_with(VecDeque::new);
@@ -185,13 +215,17 @@ impl InferenceEngine {
                     // populated by this backend) are treated as "not observed" and don't
                     // break the frozen condition, which lets stall detection work even
                     // when only TIMER_HEARTBEAT/arc0 is available.
-                    let has_observed = prev.iter().zip(current_counts.iter())
+                    let has_observed = prev
+                        .iter()
+                        .zip(current_counts.iter())
                         .any(|(p, c)| matches!((p, c), (Some(_), Some(_))));
-                    let all_observed_frozen = prev.iter().zip(current_counts.iter())
-                        .all(|(p, c)| match (p, c) {
-                            (Some(pv), Some(cv)) => pv == cv,
-                            _ => true, // absent — doesn't break the frozen claim
-                        });
+                    let all_observed_frozen =
+                        prev.iter()
+                            .zip(current_counts.iter())
+                            .all(|(p, c)| match (p, c) {
+                                (Some(pv), Some(cv)) => pv == cv,
+                                _ => true, // absent — doesn't break the frozen claim
+                            });
                     if has_observed && all_observed_frozen {
                         *stall_count = stall_count.saturating_add(1);
                     } else {
@@ -231,14 +265,16 @@ impl InferenceEngine {
         };
 
         let latest = history.back().unwrap();
-        let power   = latest.power;
-        let temp    = latest.temp;
+        let power = latest.power;
+        let temp = latest.temp;
         let current = latest.current;
-        let aiclk   = latest.aiclk;
+        let aiclk = latest.aiclk;
 
-        let power_change   = self.baseline.power_change(device_idx, power);
+        let power_change = self.baseline.power_change(device_idx, power);
         let current_change = self.baseline.current_change(device_idx, current);
-        let aiclk_change   = self.baseline.get_baseline(device_idx)
+        let aiclk_change = self
+            .baseline
+            .get_baseline(device_idx)
             .map(|b| b.aiclk_change(aiclk.unwrap_or(0) as f32))
             .unwrap_or(0.0);
 
@@ -246,15 +282,23 @@ impl InferenceEngine {
 
         // Parse SMBUS fields
         let tdp_w = smbus.and_then(|s| parse_tdp_watts(s.tdp.as_deref()));
-        let throttler_on = smbus.map(|s| is_throttler_active(s.throttler.as_deref())).unwrap_or(false);
-        let eth0_err = smbus.map(|s| is_eth_status_error(s.eth_status0.as_deref())).unwrap_or(false);
-        let eth1_err = smbus.map(|s| is_eth_status_error(s.eth_status1.as_deref())).unwrap_or(false);
+        let throttler_on = smbus
+            .map(|s| is_throttler_active(s.throttler.as_deref()))
+            .unwrap_or(false);
+        let eth0_err = smbus
+            .map(|s| is_eth_status_error(s.eth_status0.as_deref()))
+            .unwrap_or(false);
+        let eth1_err = smbus
+            .map(|s| is_eth_status_error(s.eth_status1.as_deref()))
+            .unwrap_or(false);
         let has_faults = smbus.map(|s| {
             matches!(s.faults.as_deref(), Some(f) if f != "0" && f != "0x0" && f != "0X0" && !f.is_empty())
         }).unwrap_or(false);
 
         // Baseline power (for bar fallback)
-        let baseline_power = self.baseline.get_baseline(device_idx)
+        let baseline_power = self
+            .baseline
+            .get_baseline(device_idx)
             .map(|b| b.power_baseline)
             .unwrap_or(1.0)
             .max(1.0);
@@ -272,27 +316,48 @@ impl InferenceEngine {
         let arc_stall_frames = self.arc_stall_frames.get(&device_idx).copied().unwrap_or(0);
         if arc_stall_frames >= 30 {
             return self.build_result(
-                DeviceInferenceState::Stalled, Confidence::High,
-                power, temp, aiclk, power_change,
-                trend, tdp_w, power_pct_of_tdp, power_pct_baseline,
+                DeviceInferenceState::Stalled,
+                Confidence::High,
+                power,
+                temp,
+                aiclk,
+                power_change,
+                trend,
+                tdp_w,
+                power_pct_of_tdp,
+                power_pct_baseline,
             );
         }
 
         // 2. HardwareFault
         if has_faults {
             return self.build_result(
-                DeviceInferenceState::HardwareFault, Confidence::High,
-                power, temp, aiclk, power_change,
-                trend, tdp_w, power_pct_of_tdp, power_pct_baseline,
+                DeviceInferenceState::HardwareFault,
+                Confidence::High,
+                power,
+                temp,
+                aiclk,
+                power_change,
+                trend,
+                tdp_w,
+                power_pct_of_tdp,
+                power_pct_baseline,
             );
         }
 
         // 3. ThermalStress
         if temp > 82.0 {
             return self.build_result(
-                DeviceInferenceState::ThermalStress, Confidence::High,
-                power, temp, aiclk, power_change,
-                trend, tdp_w, power_pct_of_tdp, power_pct_baseline,
+                DeviceInferenceState::ThermalStress,
+                Confidence::High,
+                power,
+                temp,
+                aiclk,
+                power_change,
+                trend,
+                tdp_w,
+                power_pct_of_tdp,
+                power_pct_baseline,
             );
         }
 
@@ -300,18 +365,32 @@ impl InferenceEngine {
         let aiclk_throttled = aiclk_change < -0.20 && power_change > 0.3;
         if throttler_on || aiclk_throttled {
             return self.build_result(
-                DeviceInferenceState::Throttling, Confidence::High,
-                power, temp, aiclk, power_change,
-                trend, tdp_w, power_pct_of_tdp, power_pct_baseline,
+                DeviceInferenceState::Throttling,
+                Confidence::High,
+                power,
+                temp,
+                aiclk,
+                power_change,
+                trend,
+                tdp_w,
+                power_pct_of_tdp,
+                power_pct_baseline,
             );
         }
 
         // 5. FabricDegraded — eth error AND multi-chip system
         if (eth0_err || eth1_err) && device_count > 1 {
             return self.build_result(
-                DeviceInferenceState::FabricDegraded, Confidence::Medium,
-                power, temp, aiclk, power_change,
-                trend, tdp_w, power_pct_of_tdp, power_pct_baseline,
+                DeviceInferenceState::FabricDegraded,
+                Confidence::Medium,
+                power,
+                temp,
+                aiclk,
+                power_change,
+                trend,
+                tdp_w,
+                power_pct_of_tdp,
+                power_pct_baseline,
             );
         }
 
@@ -319,49 +398,87 @@ impl InferenceEngine {
         let maxed_by_tdp = power_pct_of_tdp.map(|p| p > 0.85).unwrap_or(false);
         if maxed_by_tdp || power_change > 1.5 {
             return self.build_result(
-                DeviceInferenceState::MaxedOut, Confidence::High,
-                power, temp, aiclk, power_change,
-                trend, tdp_w, power_pct_of_tdp, power_pct_baseline,
+                DeviceInferenceState::MaxedOut,
+                Confidence::High,
+                power,
+                temp,
+                aiclk,
+                power_change,
+                trend,
+                tdp_w,
+                power_pct_of_tdp,
+                power_pct_baseline,
             );
         }
 
         // 7. WarmingUp — rising AND recently near baseline
         let recently_near_baseline = history.len() >= 20 && {
             let old_idx = history.len().saturating_sub(20);
-            let old_power = history.iter().nth(old_idx).map(|s| s.power).unwrap_or(power);
-            let baseline_power_val = self.baseline.get_baseline(device_idx)
-                .map(|b| b.power_baseline).unwrap_or(0.0);
+            let old_power = history
+                .iter()
+                .nth(old_idx)
+                .map(|s| s.power)
+                .unwrap_or(power);
+            let baseline_power_val = self
+                .baseline
+                .get_baseline(device_idx)
+                .map(|b| b.power_baseline)
+                .unwrap_or(0.0);
             baseline_power_val > 0.0 && (old_power / baseline_power_val - 1.0).abs() < 0.15
         };
         if trend.is_rising && power_change > 0.2 && recently_near_baseline {
             return self.build_result(
-                DeviceInferenceState::WarmingUp, Confidence::Medium,
-                power, temp, aiclk, power_change,
-                trend, tdp_w, power_pct_of_tdp, power_pct_baseline,
+                DeviceInferenceState::WarmingUp,
+                Confidence::Medium,
+                power,
+                temp,
+                aiclk,
+                power_change,
+                trend,
+                tdp_w,
+                power_pct_of_tdp,
+                power_pct_baseline,
             );
         }
 
         // 8. CoolingDown — falling AND peak was high
-        let baseline_power_val = self.baseline.get_baseline(device_idx)
-            .map(|b| b.power_baseline).unwrap_or(0.0);
-        let peak_was_high = baseline_power_val > 0.0
-            && trend.peak > baseline_power_val * 1.5;
+        let baseline_power_val = self
+            .baseline
+            .get_baseline(device_idx)
+            .map(|b| b.power_baseline)
+            .unwrap_or(0.0);
+        let peak_was_high = baseline_power_val > 0.0 && trend.peak > baseline_power_val * 1.5;
         if trend.is_falling && peak_was_high {
             return self.build_result(
-                DeviceInferenceState::CoolingDown, Confidence::Medium,
-                power, temp, aiclk, power_change,
-                trend, tdp_w, power_pct_of_tdp, power_pct_baseline,
+                DeviceInferenceState::CoolingDown,
+                Confidence::Medium,
+                power,
+                temp,
+                aiclk,
+                power_change,
+                trend,
+                tdp_w,
+                power_pct_of_tdp,
+                power_pct_baseline,
             );
         }
 
         // 9. Thinking — active, high variance (prefill / attention)
         // high_variance_threshold is W std dev (PowerTrend.variance stores std dev, not raw variance)
         let high_variance_threshold = 3.0; // W std dev
-        if power_change > 0.5 && trend.variance > high_variance_threshold { // W std dev
+        if power_change > 0.5 && trend.variance > high_variance_threshold {
+            // W std dev
             return self.build_result(
-                DeviceInferenceState::Thinking, Confidence::Medium,
-                power, temp, aiclk, power_change,
-                trend, tdp_w, power_pct_of_tdp, power_pct_baseline,
+                DeviceInferenceState::Thinking,
+                Confidence::Medium,
+                power,
+                temp,
+                aiclk,
+                power_change,
+                trend,
+                tdp_w,
+                power_pct_of_tdp,
+                power_pct_baseline,
             );
         }
 
@@ -371,7 +488,11 @@ impl InferenceEngine {
             let b = self.baseline.get_baseline(device_idx);
             let bp = b.map(|x| x.power_baseline).unwrap_or(1.0).max(1.0);
             let bc = b.map(|x| x.current_baseline).unwrap_or(0.0);
-            if bp > 0.0 { bc / bp } else { 0.0 }
+            if bp > 0.0 {
+                bc / bp
+            } else {
+                0.0
+            }
         };
         let ratio_elevated = current_power_ratio > baseline_cp_ratio * 1.2;
         if power_change > 0.2 && power_change < 0.8
@@ -379,35 +500,63 @@ impl InferenceEngine {
             && ratio_elevated
         {
             return self.build_result(
-                DeviceInferenceState::Generating, Confidence::Medium,
-                power, temp, aiclk, power_change,
-                trend, tdp_w, power_pct_of_tdp, power_pct_baseline,
+                DeviceInferenceState::Generating,
+                Confidence::Medium,
+                power,
+                temp,
+                aiclk,
+                power_change,
+                trend,
+                tdp_w,
+                power_pct_of_tdp,
+                power_pct_baseline,
             );
         }
 
         // 11. MovingData — current_change significantly exceeds power_change
         if current_change > power_change + 0.3 && power_change > 0.1 {
             return self.build_result(
-                DeviceInferenceState::MovingData, Confidence::Medium,
-                power, temp, aiclk, power_change,
-                trend, tdp_w, power_pct_of_tdp, power_pct_baseline,
+                DeviceInferenceState::MovingData,
+                Confidence::Medium,
+                power,
+                temp,
+                aiclk,
+                power_change,
+                trend,
+                tdp_w,
+                power_pct_of_tdp,
+                power_pct_baseline,
             );
         }
 
         // 12. Idle — within 15% of baseline
         if power_change.abs() < 0.15 && current_change.abs() < 0.15 {
             return self.build_result(
-                DeviceInferenceState::Idle, Confidence::High,
-                power, temp, aiclk, power_change,
-                trend, tdp_w, power_pct_of_tdp, power_pct_baseline,
+                DeviceInferenceState::Idle,
+                Confidence::High,
+                power,
+                temp,
+                aiclk,
+                power_change,
+                trend,
+                tdp_w,
+                power_pct_of_tdp,
+                power_pct_baseline,
             );
         }
 
         // 13. Unclear
         self.build_result(
-            DeviceInferenceState::Unclear, Confidence::Low,
-            power, temp, aiclk, power_change,
-            trend, tdp_w, power_pct_of_tdp, power_pct_baseline,
+            DeviceInferenceState::Unclear,
+            Confidence::Low,
+            power,
+            temp,
+            aiclk,
+            power_change,
+            trend,
+            tdp_w,
+            power_pct_of_tdp,
+            power_pct_baseline,
         )
     }
 
@@ -430,27 +579,33 @@ impl InferenceEngine {
 
         // Headline: "18.0W   62.1°C  1100MHz   +50%"
         let power_str = format!("{:5.1}W", power);
-        let temp_str  = format!("{:5.1}\u{00B0}C", temp);
-        let clk_str   = aiclk.map(|c| format!("{:4}MHz", c))
-                             .unwrap_or_else(|| "  ---  ".to_string());
+        let temp_str = format!("{:5.1}\u{00B0}C", temp);
+        let clk_str = aiclk
+            .map(|c| format!("{:4}MHz", c))
+            .unwrap_or_else(|| "  ---  ".to_string());
         let delta_str = format!("{:+4.0}%", power_change * 100.0);
-        let headline = format!("{}   {}  {}  {}",
-            power_str, temp_str, clk_str, delta_str);
+        let headline = format!("{}   {}  {}  {}", power_str, temp_str, clk_str, delta_str);
 
         // Detail: "humming   rivers of data   24% TDP"
-        let trend_word   = trend_vocabulary(&trend);
+        let trend_word = trend_vocabulary(&trend);
         let pattern_word = pattern_vocabulary(state);
-        let tdp_field = tdp_w.map(|tdp| {
-            let pct = ((power / tdp) * 100.0).round() as u32;
-            format!("{:3}% TDP", pct)
-        }).unwrap_or_else(|| " --- TDP".to_string());
-        let detail = format!("{:<8}  {:<14}  {}",
-            trend_word, pattern_word, tdp_field);
+        let tdp_field = tdp_w
+            .map(|tdp| {
+                let pct = ((power / tdp) * 100.0).round() as u32;
+                format!("{:3}% TDP", pct)
+            })
+            .unwrap_or_else(|| " --- TDP".to_string());
+        let detail = format!("{:<8}  {:<14}  {}", trend_word, pattern_word, tdp_field);
 
         InferenceResult {
-            state, confidence, label, label_color,
-            headline, detail,
-            power_pct_of_tdp, power_pct_baseline,
+            state,
+            confidence,
+            label,
+            label_color,
+            headline,
+            detail,
+            power_pct_of_tdp,
+            power_pct_baseline,
         }
     }
 
@@ -459,7 +614,11 @@ impl InferenceEngine {
         //   power_str(6) + "   "(3) + temp_str(7) + "  "(2) + clk_str(7) + "  "(2) + delta_str(5)
         //   "  ---W"      + "   "   + "  ---°C"   + "  "   + "  ---  "   + "  "   + "  ---"
         let headline = "  ---W     ---\u{00B0}C    ---      ---".to_string();
-        debug_assert_eq!(headline.chars().count(), 32, "unknown_result headline must be 32 chars");
+        debug_assert_eq!(
+            headline.chars().count(),
+            32,
+            "unknown_result headline must be 32 chars"
+        );
         InferenceResult {
             state: DeviceInferenceState::Unclear,
             confidence: Confidence::Low,
@@ -512,18 +671,28 @@ pub fn compute_power_trend(history: &VecDeque<TelemetrySample>) -> PowerTrend {
     // Monotone checks — iterate directly, no allocation.
     let check_n = n.min(8);
     let mut prev = f32::NAN;
-    let mut is_rising  = true;
+    let mut is_rising = true;
     let mut is_falling = true;
     for sample in history.iter().rev().take(check_n) {
         if !prev.is_nan() {
             // sample.power is older; prev is newer
-            if sample.power > prev { is_rising  = false; }
-            if sample.power < prev { is_falling = false; }
+            if sample.power > prev {
+                is_rising = false;
+            }
+            if sample.power < prev {
+                is_falling = false;
+            }
         }
         prev = sample.power;
     }
 
-    PowerTrend { slope, variance, is_rising, is_falling, peak }
+    PowerTrend {
+        slope,
+        variance,
+        is_rising,
+        is_falling,
+        peak,
+    }
 }
 
 /// Parse a TDP string (decimal watts or hex) into watts.
@@ -535,7 +704,11 @@ pub fn parse_tdp_watts(tdp: Option<&str>) -> Option<f32> {
     } else {
         s.parse::<f32>().ok()?
     };
-    if raw > 0.0 { Some(raw) } else { None }
+    if raw > 0.0 {
+        Some(raw)
+    } else {
+        None
+    }
 }
 
 /// Parse all four ARC health counter strings into `[Option<u32>; 4]`.
@@ -591,10 +764,18 @@ pub fn is_eth_status_error(eth_status: Option<&str>) -> bool {
 /// Used in the detail line of `InferenceResult`. Each string is exactly 8 chars
 /// (including any trailing space) so the detail line stays fixed-width.
 fn trend_vocabulary(trend: &PowerTrend) -> &'static str {
-    if trend.is_rising  { return "climbing"; }
-    if trend.is_falling { return "settling"; }
-    if trend.variance > 5.0 { return "sparking"; }
-    if trend.variance > 2.0 { return "churning"; }
+    if trend.is_rising {
+        return "climbing";
+    }
+    if trend.is_falling {
+        return "settling";
+    }
+    if trend.variance > 5.0 {
+        return "sparking";
+    }
+    if trend.variance > 2.0 {
+        return "churning";
+    }
     "humming "
 }
 
@@ -604,17 +785,16 @@ fn trend_vocabulary(trend: &PowerTrend) -> &'static str {
 /// (including any trailing spaces) so the detail line stays fixed-width.
 fn pattern_vocabulary(state: DeviceInferenceState) -> &'static str {
     match state {
-        DeviceInferenceState::Generating     => "rivers of data",
-        DeviceInferenceState::Thinking       => "tensix ablaze ",
-        DeviceInferenceState::Idle           => "quiet as ever ",
-        DeviceInferenceState::ThermalStress
-        | DeviceInferenceState::Throttling   => "fighting heat ",
-        DeviceInferenceState::MovingData     => "pipes are full",
+        DeviceInferenceState::Generating => "rivers of data",
+        DeviceInferenceState::Thinking => "tensix ablaze ",
+        DeviceInferenceState::Idle => "quiet as ever ",
+        DeviceInferenceState::ThermalStress | DeviceInferenceState::Throttling => "fighting heat ",
+        DeviceInferenceState::MovingData => "pipes are full",
         DeviceInferenceState::FabricDegraded => "losing thread ",
-        DeviceInferenceState::MaxedOut       => "burning full  ",
-        DeviceInferenceState::WarmingUp      => "coming to life",
-        DeviceInferenceState::CoolingDown    => "finding rest  ",
-        _                                    => "who can say   ",
+        DeviceInferenceState::MaxedOut => "burning full  ",
+        DeviceInferenceState::WarmingUp => "coming to life",
+        DeviceInferenceState::CoolingDown => "finding rest  ",
+        _ => "who can say   ",
     }
 }
 
@@ -623,7 +803,7 @@ fn pattern_vocabulary(state: DeviceInferenceState) -> &'static str {
 /// `fraction` — 0.0..=1.0 fill fraction (clamped).
 pub fn render_power_bar(fraction: f32, width: usize) -> String {
     let filled = (fraction.clamp(0.0, 1.0) * width as f32).round() as usize;
-    let empty  = width.saturating_sub(filled);
+    let empty = width.saturating_sub(filled);
     format!("{}{}", "█".repeat(filled), "░".repeat(empty))
 }
 
@@ -632,7 +812,13 @@ mod tests {
     use super::*;
 
     fn make_sample(power: f32) -> TelemetrySample {
-        TelemetrySample { power, temp: 50.0, current: 10.0, aiclk: Some(1000), timestamp: Instant::now() }
+        TelemetrySample {
+            power,
+            temp: 50.0,
+            current: 10.0,
+            aiclk: Some(1000),
+            timestamp: Instant::now(),
+        }
     }
 
     // Helper: build an engine with a full 30-sample history for device 0
@@ -645,10 +831,16 @@ mod tests {
         // Then add all samples to history
         for &p in powers {
             let sample = TelemetrySample {
-                power: p, temp, current, aiclk: Some(1000),
+                power: p,
+                temp,
+                current,
+                aiclk: Some(1000),
                 timestamp: Instant::now(),
             };
-            eng.history.entry(0).or_insert_with(VecDeque::new).push_back(sample);
+            eng.history
+                .entry(0)
+                .or_insert_with(VecDeque::new)
+                .push_back(sample);
         }
         eng
     }
@@ -688,9 +880,8 @@ mod tests {
 
     #[test]
     fn power_trend_rising() {
-        let samples: VecDeque<TelemetrySample> = (0..10)
-            .map(|i| make_sample(10.0 + i as f32))
-            .collect();
+        let samples: VecDeque<TelemetrySample> =
+            (0..10).map(|i| make_sample(10.0 + i as f32)).collect();
         let trend = compute_power_trend(&samples);
         assert!(trend.is_rising, "monotonically increasing should be rising");
         assert!(!trend.is_falling);
@@ -699,9 +890,8 @@ mod tests {
 
     #[test]
     fn power_trend_falling() {
-        let samples: VecDeque<TelemetrySample> = (0..10)
-            .map(|i| make_sample(20.0 - i as f32))
-            .collect();
+        let samples: VecDeque<TelemetrySample> =
+            (0..10).map(|i| make_sample(20.0 - i as f32)).collect();
         let trend = compute_power_trend(&samples);
         assert!(trend.is_falling);
         assert!(!trend.is_rising);
@@ -709,11 +899,12 @@ mod tests {
 
     #[test]
     fn power_trend_variance_stable() {
-        let samples: VecDeque<TelemetrySample> = (0..10)
-            .map(|_| make_sample(15.0))
-            .collect();
+        let samples: VecDeque<TelemetrySample> = (0..10).map(|_| make_sample(15.0)).collect();
         let trend = compute_power_trend(&samples);
-        assert!(trend.variance < 0.01, "constant power has near-zero variance");
+        assert!(
+            trend.variance < 0.01,
+            "constant power has near-zero variance"
+        );
     }
 
     #[test]
@@ -723,7 +914,10 @@ mod tests {
             .map(|(i, _)| make_sample(if i % 2 == 0 { 10.0 } else { 30.0 }))
             .collect();
         let trend = compute_power_trend(&samples);
-        assert!(trend.variance > 5.0, "alternating ±10W should have high variance");
+        assert!(
+            trend.variance > 5.0,
+            "alternating ±10W should have high variance"
+        );
     }
 
     #[test]
@@ -743,17 +937,13 @@ mod tests {
 
     #[test]
     fn parse_arc_health_zero_is_stalled() {
-        let counters = parse_arc_health_counters([
-            Some("0".to_string()), None, None, None
-        ]);
+        let counters = parse_arc_health_counters([Some("0".to_string()), None, None, None]);
         assert_eq!(counters[0], Some(0));
     }
 
     #[test]
     fn parse_arc_health_hex() {
-        let counters = parse_arc_health_counters([
-            Some("0x10e7a".to_string()), None, None, None
-        ]);
+        let counters = parse_arc_health_counters([Some("0x10e7a".to_string()), None, None, None]);
         assert_eq!(counters[0], Some(0x10e7a));
     }
 

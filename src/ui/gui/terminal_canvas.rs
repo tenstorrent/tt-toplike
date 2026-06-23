@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-
 //! Terminal Canvas - Renders a character grid with monospace font
 //!
 //! This widget renders a TerminalGrid using iced's canvas API,
 //! creating a faux-terminal display in the GUI.
 
+use super::terminal_grid::TerminalGrid;
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Text};
 use iced::{Color, Point, Rectangle, Size, Theme};
-use super::terminal_grid::TerminalGrid;
 
 /// Terminal canvas widget for rendering character grids
 pub struct TerminalCanvas {
@@ -91,10 +90,7 @@ impl canvas::Program<()> for TerminalCanvas {
 
             // Draw background color if specified
             if let Some(bg_color) = cell.bg_color {
-                let bg_rect = Path::rectangle(
-                    Point::new(x, y),
-                    Size::new(cell_size, cell_size),
-                );
+                let bg_rect = Path::rectangle(Point::new(x, y), Size::new(cell_size, cell_size));
                 frame.fill(&bg_rect, bg_color);
             }
 
@@ -135,7 +131,11 @@ impl canvas::Program<()> for TerminalCanvas {
 ///
 /// let canvas = terminal_canvas::view(grid, 10.0, 20.0);
 /// ```
-pub fn view(grid: TerminalGrid, cell_width: f32, cell_height: f32) -> Canvas<TerminalCanvas, (), Theme> {
+pub fn view(
+    grid: TerminalGrid,
+    cell_width: f32,
+    cell_height: f32,
+) -> Canvas<TerminalCanvas, (), Theme> {
     let program = TerminalCanvas::new(grid, cell_width, cell_height);
     Canvas::new(program)
 }
