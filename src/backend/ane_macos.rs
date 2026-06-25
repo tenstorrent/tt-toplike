@@ -198,6 +198,14 @@ impl AneSampler {
     }
 }
 
+// SAFETY: AneSampler owns its IOReport handles exclusively and is only ever
+// accessed from HostBackend's single-threaded update path (&mut self); the raw
+// pointers are never shared or used concurrently across threads. The
+// TelemetryBackend trait requires Send + Sync, so the host backend that owns
+// this sampler must be too.
+unsafe impl Send for AneSampler {}
+unsafe impl Sync for AneSampler {}
+
 impl Drop for AneSampler {
     fn drop(&mut self) {
         // SAFETY: each pointer was produced by an IOReport/CF create call and is

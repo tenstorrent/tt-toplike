@@ -157,6 +157,14 @@ pub struct HostBackend {
     #[cfg(target_os = "macos")]
     gpu_device_idx: Option<usize>,
 
+    /// IOReport-based ANE power sampler (macOS), if available.
+    #[cfg(target_os = "macos")]
+    ane_sampler: Option<crate::backend::ane_macos::AneSampler>,
+
+    /// Index of the synthetic ANE device, if added.
+    #[cfg(target_os = "macos")]
+    ane_device_idx: Option<usize>,
+
     /// Last time the accelerators (GPU/ANE) were sampled — throttles ioreg/IOReport.
     #[cfg(target_os = "macos")]
     last_accel_sample: std::time::Instant,
@@ -187,6 +195,10 @@ impl HostBackend {
             core_count: 0,
             #[cfg(target_os = "macos")]
             gpu_device_idx: None,
+            #[cfg(target_os = "macos")]
+            ane_sampler: None,
+            #[cfg(target_os = "macos")]
+            ane_device_idx: None,
             #[cfg(target_os = "macos")]
             last_accel_sample: std::time::Instant::now(),
             config,
@@ -292,6 +304,65 @@ impl HostBackend {
             idx,
             SmbusTelemetry {
                 ddr_status: Some(format!("{fill_pct}%")),
+                arc0_health: Some("1".to_string()),
+                ..SmbusTelemetry::default()
+            },
+        );
+    }
+
+    /// Append/refresh an ANE device from IOReport power (macOS). No-op if the
+    /// IOReport subscription wasn't available.
+    #[cfg(target_os = "macos")]
+    fn sample_ane(&mut self) {
+        let Some(sampler) = self.ane_sampler.as_mut() else {
+            return;
+        };
+        let Some(watts) = sampler.sample() else {
+            return;
+        };
+
+        let idx = match self.ane_device_idx {
+            Some(i) => i,
+            None => {
+                let i = self.devices.len();
+                self.devices.push(Device {
+                    index: i,
+                    board_type: "apple-ane".to_string(),
+                    bus_id: "ane:0".to_string(),
+                    architecture: Architecture::Unknown,
+                    coords: "(ane,0)".to_string(),
+                    firmwares: None,
+                    limits: None,
+                    pcie_speed: None,
+                    pcie_width: None,
+                    // Apple's stated 16-core ANE → 4×4 (nominal, not from an API).
+                    grid_override: Some((4, 4)),
+                    channels_override: Some(1),
+                });
+                self.ane_device_idx = Some(i);
+                i
+            }
+        };
+
+        // Synthetic utilization from power vs a nominal ANE ceiling (~8 W) so the
+        // viz animates; power carried through directly.
+        const NOMINAL_ANE_MAX_W: f64 = 8.0;
+        let util = ((watts / NOMINAL_ANE_MAX_W) * 100.0).clamp(0.0, 100.0) as f32;
+        self.telemetry.insert(
+            idx,
+            Telemetry {
+                voltage: None,
+                current: Some(util / 10.0),
+                power: Some(watts as f32),
+                asic_temperature: None,
+                aiclk: None,
+                heartbeat: Some(1),
+                timestamp: Utc::now(),
+            },
+        );
+        self.smbus.insert(
+            idx,
+            SmbusTelemetry {
                 arc0_health: Some("1".to_string()),
                 ..SmbusTelemetry::default()
             },
@@ -442,7 +513,15 @@ impl TelemetryBackend for HostBackend {
         }
 
         #[cfg(target_os = "macos")]
+        {
+            self.ane_sampler = crate::backend::ane_macos::AneSampler::new();
+        }
+
+        #[cfg(target_os = "macos")]
         self.sample_gpu();
+
+        #[cfg(target_os = "macos")]
+        self.sample_ane();
 
         Ok(())
     }
@@ -458,6 +537,7 @@ impl TelemetryBackend for HostBackend {
         #[cfg(target_os = "macos")]
         if self.last_accel_sample.elapsed() >= std::time::Duration::from_secs(1) {
             self.sample_gpu();
+            self.sample_ane();
             self.last_accel_sample = std::time::Instant::now();
         }
         Ok(())
@@ -542,6 +622,20 @@ mod tests {
             dev.memory_channels() >= 1,
             "host must report >=1 memory channel for the DDR visualizations"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_host_ane_device_is_well_formed_when_present() {
+        let mut backend = HostBackend::new();
+        backend.init().unwrap();
+        if let Some(ane) = backend.devices().iter().find(|d| d.board_type == "apple-ane") {
+            let (rows, cols) = ane.tensix_grid();
+            assert!(rows > 0 && cols > 0);
+            assert!(ane.memory_channels() >= 1);
+            // Power may be 0 W when idle but the telemetry entry must exist.
+            assert!(backend.telemetry(ane.index).is_some());
+        }
     }
 
     #[cfg(target_os = "macos")]
