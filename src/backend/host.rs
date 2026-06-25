@@ -321,6 +321,14 @@ impl TelemetryBackend for HostBackend {
             .map(|c| c.brand().to_string())
             .unwrap_or_else(|| "CPU".to_string());
 
+        // Map this socket's logical cores into a near-square star grid so the
+        // Starfield visualization has one "core" per CPU thread to render
+        // (Architecture::Unknown would otherwise yield a 0×0 grid → empty view).
+        let cores_per_socket = (self.core_count / self.socket_count.max(1)).max(1);
+        let grid_cols = (cores_per_socket as f64).sqrt().ceil() as usize;
+        let grid_cols = grid_cols.max(1);
+        let grid_rows = cores_per_socket.div_ceil(grid_cols).max(1);
+
         for sock in 0..self.socket_count {
             let device = Device {
                 index: sock,
@@ -334,6 +342,10 @@ impl TelemetryBackend for HostBackend {
                 limits: None,
                 pcie_speed: None,
                 pcie_width: None,
+                // CPU cores → star grid; 4 synthesised DDR channels (see
+                // make_smbus_from_ram) so Memory Castle/Flow render channels.
+                grid_override: Some((grid_rows, grid_cols)),
+                channels_override: Some(4),
             };
             self.devices.push(device);
             log::info!(
@@ -428,6 +440,26 @@ mod tests {
         );
 
         assert!(backend.update().is_ok());
+    }
+
+    #[test]
+    fn test_host_device_has_renderable_geometry() {
+        // The Host backend must give its CPU "device" a non-zero star grid and
+        // channel count (via the overrides) so Starfield/Memory Castle render
+        // something instead of an empty 0×0 Architecture::Unknown grid.
+        let mut backend = HostBackend::new();
+        backend.init().unwrap();
+        let dev = &backend.devices()[0];
+
+        let (rows, cols) = dev.tensix_grid();
+        assert!(
+            rows > 0 && cols > 0,
+            "host grid must be non-empty (was {rows}x{cols}) so Starfield renders"
+        );
+        assert!(
+            dev.memory_channels() >= 1,
+            "host must report >=1 memory channel for the DDR visualizations"
+        );
     }
 
     #[test]

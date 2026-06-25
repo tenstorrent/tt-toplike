@@ -300,7 +300,9 @@ impl MemoryFlowVis {
                 let read_rate = (power / 150.0).min(1.0);
                 let pseudo_r = ((self.frame * 73 + fleet_pos as u32 * 31) % 100) as f32 / 100.0;
                 if pseudo_r < read_rate && device_particle_count < device_budget {
-                    let num_ch = device.architecture.memory_channels();
+                    // `.max(1)` guards 0-channel devices (Host/CPU backend's
+                    // `Architecture::Unknown`) against a divide-by-zero panic.
+                    let num_ch = device.memory_channels().max(1);
                     let channel = (self.frame as usize + fleet_pos * 7) % num_ch;
                     let mut p = MemoryFlowParticle::new_read(
                         channel,
@@ -324,7 +326,9 @@ impl MemoryFlowVis {
                 let write_rate = (current / 100.0).min(1.0).max(mvddq_rate * 0.6);
                 let pseudo_w = ((self.frame * 97 + fleet_pos as u32 * 43) % 100) as f32 / 100.0;
                 if pseudo_w < write_rate * 0.5 && device_particle_count < device_budget {
-                    let num_ch = device.architecture.memory_channels();
+                    // `.max(1)` guards 0-channel devices (Host/CPU backend's
+                    // `Architecture::Unknown`) against a divide-by-zero panic.
+                    let num_ch = device.memory_channels().max(1);
                     let channel = (self.frame as usize + fleet_pos * 7 + num_ch / 2) % num_ch;
                     let mut p = MemoryFlowParticle::new_write(
                         channel,
@@ -410,7 +414,7 @@ impl MemoryFlowVis {
 
         // Use the first device's architecture for channel count and smbus DDR status.
         let arch_device = &devices[0];
-        let ddr_channels = arch_device.architecture.memory_channels();
+        let ddr_channels = arch_device.memory_channels();
         let smbus = backend.smbus_telemetry(arch_device.index);
 
         // Synthetic aggregate telemetry for the DDR bar helpers.
@@ -733,5 +737,28 @@ impl MemoryFlowVis {
     /// Get mode name
     pub fn mode_name(&self) -> &'static str {
         "Memory Flow"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::host::HostBackend;
+    use crate::backend::TelemetryBackend;
+
+    /// Regression: same zero-channel divide-by-zero as Memory Castle. The Host
+    /// backend's `Architecture::Unknown` device reports 0 memory channels, and
+    /// the read/write particle spawn paths did `frame % num_ch`. Arcade embeds
+    /// Memory Flow, so this panicked too. update() must tolerate 0 channels.
+    #[test]
+    fn update_survives_zero_channel_device() {
+        let mut backend = HostBackend::new();
+        backend.init().expect("host backend init");
+        backend.update().expect("host backend update");
+
+        let mut flow = MemoryFlowVis::new(80, 24);
+        for _ in 0..10 {
+            flow.update(&backend);
+        }
     }
 }

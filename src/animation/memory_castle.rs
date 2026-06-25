@@ -315,7 +315,11 @@ impl MemoryCastle {
 
                 for _ in 0..spawn_count {
                     if self.particles.len() < self.max_particles {
-                        let num_channels = device.architecture.memory_channels();
+                        // `.max(1)` guards against architectures that report 0
+                        // memory channels (e.g. the Host/CPU backend's
+                        // `Architecture::Unknown`), which would otherwise panic
+                        // with a divide-by-zero in the `%` below.
+                        let num_channels = device.memory_channels().max(1);
                         let channel =
                             (self.frame as usize * 7 + device.index * 3 + self.particles.len())
                                 % num_channels;
@@ -1205,5 +1209,30 @@ impl MemoryCastle {
             ),
             Span::raw("Glyphs"),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::host::HostBackend;
+    use crate::backend::TelemetryBackend;
+
+    /// Regression: the Host backend (`--host`) presents a CPU as an
+    /// `Architecture::Unknown` device, which reports 0 memory channels. The
+    /// particle-spawn path did `frame % num_channels`, panicking with
+    /// "remainder with a divisor of zero" the moment Memory Castle (and Arcade,
+    /// which embeds it) rendered. update() must tolerate a zero-channel device.
+    #[test]
+    fn update_survives_zero_channel_device() {
+        let mut backend = HostBackend::new();
+        backend.init().expect("host backend init");
+        backend.update().expect("host backend update");
+
+        let mut castle = MemoryCastle::new(80, 24);
+        // Multiple frames exercise the frame-counter-driven channel index.
+        for _ in 0..10 {
+            castle.update(&backend);
+        }
     }
 }

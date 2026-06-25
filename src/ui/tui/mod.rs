@@ -19,14 +19,14 @@ use crate::backend::{factory, BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
 use crate::error::TTTopError;
 use crate::ui::colors;
-#[cfg(feature = "linux-procfs")]
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 use crate::workload::{InferenceEngine, InferenceServerProbe, ProcessMonitor, ServingMetrics};
 use crossterm::{
     event::{self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-#[cfg(feature = "linux-procfs")]
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 use libc;
 use ratatui::{
     backend::CrosstermBackend,
@@ -40,7 +40,7 @@ use std::io::{self, IsTerminal};
 use std::time::{Duration, Instant};
 
 /// Pending kill confirmation state.
-#[cfg(feature = "linux-procfs")]
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 #[derive(Debug, Clone)]
 struct KillConfirmState {
     pid: i32,
@@ -188,18 +188,18 @@ fn run_app(
     let mut last_data_render = Instant::now();
 
     // Process monitoring (Linux-only, update every 2 seconds)
-    #[cfg(feature = "linux-procfs")]
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut process_monitor = crate::workload::ProcessMonitor::new();
-    #[cfg(feature = "linux-procfs")]
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut last_process_update = Instant::now();
-    #[cfg(feature = "linux-procfs")]
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let process_update_interval = Duration::from_secs(2);
 
     // Host CPU / RAM monitoring — sampled alongside the process monitor.
     // sysinfo needs two calls separated in time to compute meaningful CPU%;
     // we call it twice at init (with a tiny sleep) so the first frame shows
     // real data rather than zeros.
-    #[cfg(feature = "linux-procfs")]
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let (mut sys_monitor, mut host_cpu_pct, mut host_mem_used, mut host_mem_total) = {
         use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
         let mut s = System::new_with_specifics(
@@ -265,16 +265,16 @@ fn run_app(
     let mut portrait_tick: u64 = 0;
 
     // Insights mode state
-    #[cfg(feature = "linux-procfs")]
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut inference_engine = InferenceEngine::new();
-    #[cfg(feature = "linux-procfs")]
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut inference_probe = InferenceServerProbe::new();
-    #[cfg(feature = "linux-procfs")]
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut serving_metrics: std::collections::HashMap<i32, ServingMetrics> =
         std::collections::HashMap::new();
-    #[cfg(feature = "linux-procfs")]
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut process_cursor: usize = 0;
-    #[cfg(feature = "linux-procfs")]
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut kill_confirm: Option<KillConfirmState> = None;
 
     // Fleet navigation state (Insights with 32+ devices).
@@ -455,7 +455,7 @@ fn run_app(
 
                 match display_mode {
                     DisplayMode::Insights => {
-                        #[cfg(feature = "linux-procfs")]
+                        #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                         render_insights(
                             f,
                             backend,
@@ -473,7 +473,7 @@ fn run_app(
                             host_mem_total,
                             &serving_metrics,
                         );
-                        #[cfg(not(feature = "linux-procfs"))]
+                        #[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
                         render_insights_no_procfs(
                             f,
                             backend,
@@ -631,13 +631,13 @@ fn run_app(
                                     // Zoom out from portrait drill-down back to galaxy overview.
                                     fleet_zoom_start = None;
                                 } else {
-                                    #[cfg(feature = "linux-procfs")]
+                                    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_some() {
                                         kill_confirm = None;
                                     } else {
                                         return Ok(());
                                     }
-                                    #[cfg(not(feature = "linux-procfs"))]
+                                    #[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
                                     return Ok(());
                                 }
                             }
@@ -733,7 +733,7 @@ fn run_app(
                                     fleet_cursor = fleet_cursor.saturating_sub(cells_per_row);
                                 } else {
                                     // Normal process-list navigation.
-                                    #[cfg(feature = "linux-procfs")]
+                                    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_none() {
                                         process_cursor = process_cursor.saturating_sub(1);
                                     }
@@ -746,7 +746,7 @@ fn run_app(
                                     fleet_cursor =
                                         (fleet_cursor + cells_per_row).min(n.saturating_sub(1));
                                 } else {
-                                    #[cfg(feature = "linux-procfs")]
+                                    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_none() {
                                         let max = flat_process_list(&process_monitor)
                                             .len()
@@ -792,7 +792,7 @@ fn run_app(
                                     fleet_zoom_start = Some(page_start);
                                 } else {
                                     // Kill-dialog confirmation.
-                                    #[cfg(feature = "linux-procfs")]
+                                    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if let Some(ref kc) = kill_confirm {
                                         let _ = crate::workload::process_monitor::kill_pid(
                                             kc.pid,
@@ -802,7 +802,7 @@ fn run_app(
                                     }
                                 }
                             }
-                            #[cfg(feature = "linux-procfs")]
+                            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                             KeyCode::Char('k') if display_mode == DisplayMode::Insights => {
                                 if kill_confirm.is_none() {
                                     if let Some(proc) =
@@ -820,7 +820,7 @@ fn run_app(
                                     }
                                 }
                             }
-                            #[cfg(feature = "linux-procfs")]
+                            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                             KeyCode::Char('K') if display_mode == DisplayMode::Insights => {
                                 if let Some(ref kc) = kill_confirm {
                                     // Inside dialog: SIGKILL and close
@@ -839,7 +839,7 @@ fn run_app(
                                     );
                                 }
                             }
-                            #[cfg(feature = "linux-procfs")]
+                            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                             KeyCode::Char('y') if display_mode == DisplayMode::Insights => {
                                 if let Some(ref kc) = kill_confirm {
                                     let _ = crate::workload::process_monitor::kill_pid(
@@ -849,7 +849,7 @@ fn run_app(
                                     kill_confirm = None;
                                 }
                             }
-                            #[cfg(feature = "linux-procfs")]
+                            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                             KeyCode::Char('n') if display_mode == DisplayMode::Insights => {
                                 kill_confirm = None;
                             }
@@ -872,7 +872,7 @@ fn run_app(
 
             // Ingest fresh telemetry into InferenceEngine — runs at backend rate (~10 Hz),
             // not at the UI render rate (60 FPS), so ARC stall counters don't oversaturate.
-            #[cfg(feature = "linux-procfs")]
+            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
             for device in backend.devices() {
                 use crate::workload::inference::parse_arc_health_counters;
                 let idx = device.index;
@@ -893,7 +893,7 @@ fn run_app(
         }
 
         // Update process monitor + host stats (every 2 seconds to avoid overhead)
-        #[cfg(feature = "linux-procfs")]
+        #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
         if last_process_update.elapsed() >= process_update_interval {
             process_monitor.update();
             // Probe inference servers — runs at same 2s cadence to avoid hammering
@@ -2301,7 +2301,7 @@ fn truncate(s: &str, max: usize) -> &str {
 
 /// Flatten all processes into one stable-sorted Vec for cursor navigation.
 /// Uses a HashSet to dedup by PID in O(n) instead of O(n²) scan.
-#[cfg(feature = "linux-procfs")]
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 fn flat_process_list<'a>(pm: &'a ProcessMonitor) -> Vec<&'a crate::workload::ProcessInfo> {
     use std::collections::HashSet;
     let mut seen: HashSet<i32> = HashSet::new();
@@ -2352,7 +2352,7 @@ const FLEET_HEIGHT_THRESHOLD: u16 = 30; // lines; beyond this we switch to compa
 ///
 /// Single source of truth so the two callers can never diverge on gap or
 /// compact-mode threshold.
-#[cfg(feature = "linux-procfs")]
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 fn panel_layout(n: usize, portrait_w: u16, area_width: u16) -> (u16, u16, usize) {
     let balanced_cols = ((n as f64).sqrt().ceil() as usize).max(1);
     let full_panel_w = portrait_w + 1 + 31; // gap=1, stats_w=31
@@ -2374,7 +2374,7 @@ fn panel_layout(n: usize, portrait_w: u16, area_width: u16) -> (u16, u16, usize)
 ///
 /// When the device count is large enough that full portraits would overflow the screen
 /// we switch to a compact fleet heat-map (one coloured cell per device).
-#[cfg(feature = "linux-procfs")]
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 fn device_panels_height(devices: &[crate::models::Device], area_width: u16) -> u16 {
     use crate::ui::tui::chip_portrait::portrait_dims;
     let n = devices.len().max(1);
@@ -2403,7 +2403,7 @@ fn device_panels_height(devices: &[crate::models::Device], area_width: u16) -> u
 ///
 /// `portrait_particles` maps device index → live particle list, threaded through
 /// to `render_device_panels` → `render_chip_portrait` for the particle overlay.
-#[cfg(feature = "linux-procfs")]
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 fn render_insights(
     f: &mut Frame,
     backend: &dyn TelemetryBackend,
@@ -2481,7 +2481,7 @@ fn render_insights(
 }
 
 /// Stub Insights render for non-linux-procfs builds.
-#[cfg(not(feature = "linux-procfs"))]
+#[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
 fn render_insights_no_procfs(
     f: &mut Frame,
     backend: &dyn TelemetryBackend,
@@ -2494,7 +2494,7 @@ fn render_insights_no_procfs(
 ///
 /// `filled` is a fraction in [0, 1]; `bar_width` is the inner glyph count.
 /// Returns a `Vec<Span>` ready to append to a `Line`.
-#[cfg(feature = "linux-procfs")]
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 fn host_bar_spans(
     label: &str,
     filled: f32,
@@ -2523,7 +2523,7 @@ fn host_bar_spans(
 }
 
 /// Pick a color for a bar value in [0, 1]: teal → yellow → red.
-#[cfg(feature = "linux-procfs")]
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 fn bar_color(frac: f32) -> ratatui::style::Color {
     use ratatui::style::Color;
     if frac < 0.5 {
@@ -2536,7 +2536,7 @@ fn bar_color(frac: f32) -> ratatui::style::Color {
 }
 
 /// Render the process panel with cursor, device mapping, and kill confirmation.
-#[cfg(feature = "linux-procfs")]
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 fn render_process_panel(
     f: &mut Frame,
     area: Rect,
@@ -2732,7 +2732,7 @@ fn render_process_panel(
 /// Render a centered kill-confirmation modal dialog over the current frame.
 /// Uses `Clear` to erase the background, then draws a left-border-only dialog
 /// (no right-side border characters per AGENTS.md).
-#[cfg(feature = "linux-procfs")]
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 fn render_kill_dialog(f: &mut Frame, area: Rect, kc: &KillConfirmState) {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
@@ -2831,7 +2831,7 @@ fn render_kill_dialog(f: &mut Frame, area: Rect, kc: &KillConfirmState) {
 /// `cursor` is the currently highlighted device index — that cell is shown with
 /// a bright white `◉` instead of the normal block glyph so the user can see
 /// where Enter will zoom them in.  Press Enter to drill down to portrait view.
-#[cfg(feature = "linux-procfs")]
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 fn render_fleet_heatmap_panel(
     f: &mut Frame,
     area: Rect,
@@ -2981,7 +2981,7 @@ fn render_fleet_heatmap_panel(
 /// dispatches to `render_fleet_heatmap_panel` instead.
 /// `fleet_cursor` and `fleet_zoom_start` control galaxy-overview cursor highlighting
 /// and portrait drill-down zoom respectively.
-#[cfg(feature = "linux-procfs")]
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 fn render_device_panels(
     f: &mut Frame,
     area: Rect,
@@ -3747,7 +3747,7 @@ mod cmd_tests {
     }
 }
 
-#[cfg(feature = "linux-procfs")]
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 #[cfg(test)]
 mod tests {
     use super::panel_layout;

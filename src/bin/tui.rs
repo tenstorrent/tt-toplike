@@ -125,19 +125,13 @@ fn main() {
             let mut mock_backend = MockBackend::with_config(cli.effective_mock_devices(), config);
             run_with_backend(&mut mock_backend, &cli);
         }
+        // Sysfs is a Linux-only variant (see cli::BackendType); the arm only exists
+        // when compiling for Linux, so no non-Linux fallback arm is required.
+        #[cfg(target_os = "linux")]
         BackendType::Sysfs => {
-            #[cfg(target_os = "linux")]
-            {
-                log::info!("Initializing Sysfs backend");
-                let mut backend = tt_toplike::backend::sysfs::SysfsBackend::with_config(config);
-                run_with_backend(&mut backend, &cli);
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                eprintln!("Error: Sysfs backend only available on Linux");
-                eprintln!("Use --mock, --json, or --backend luwen instead");
-                std::process::exit(1);
-            }
+            log::info!("Initializing Sysfs backend");
+            let mut backend = tt_toplike::backend::sysfs::SysfsBackend::with_config(config);
+            run_with_backend(&mut backend, &cli);
         }
         BackendType::Luwen => {
             #[cfg(feature = "luwen-backend")]
@@ -162,11 +156,6 @@ fn main() {
                 config,
             );
             run_with_backend(&mut backend, &cli);
-        }
-        #[cfg(not(target_os = "linux"))]
-        BackendType::Hybrid => {
-            eprintln!("Error: Hybrid backend only available on Linux");
-            std::process::exit(1);
         }
         BackendType::Host => {
             log::info!("Initializing HostBackend (CPU/RAM via sysinfo — no TT hardware required)");

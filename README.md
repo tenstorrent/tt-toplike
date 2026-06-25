@@ -91,7 +91,19 @@ tt-toplike --host --mode arcade
 tt-toplike --host --mode flow
 ```
 
-`--host` reads your CPU frequency, temperature (via Linux hwmon/RAPL), and RAM usage and maps them into the same telemetry fields as a TT accelerator. Every visualization works: Starfield, Memory Castle, Memory Flow, Arcade. Your CPU cores glow as stars. RAM fill drives the DDR-channel bars. Package temperature shifts the color palette.
+`--host` reads your CPU frequency, temperature, and RAM usage and maps them into the same telemetry fields as a TT accelerator. Every visualization works: Starfield, Memory Castle, Memory Flow, Arcade. Your CPU cores glow as stars. RAM fill drives the DDR-channel bars. Package temperature shifts the color palette.
+
+**Runs on Linux, macOS, and Windows.** `--host` is the one non-mock backend that needs no Tenstorrent hardware and no Linux kernel interfaces, so it's the way to explore tt-toplike on a laptop. What's available depends on the OS:
+
+| Metric | Linux | macOS / Windows |
+|--------|-------|-----------------|
+| CPU frequency (→ AICLK) | ✅ | ✅ |
+| CPU utilization (→ current proxy) | ✅ | ✅ |
+| RAM usage (→ DDR channels) | ✅ | ✅ |
+| Package temperature | ✅ via hwmon | ⚠️ not exposed — reads 0 |
+| Package power | ✅ via RAPL (`/sys/class/powercap`) | ⚠️ not exposed — estimated/0 |
+
+CPU package temperature and RAPL power come from Linux-only sysfs paths; on macOS/Windows those fields are simply absent (the temperature-driven color palette stays at its baseline). Everything else is driven by the cross-platform `sysinfo` crate.
 
 It is not the same experience as real TT hardware — a discrete AI accelerator has DDR bandwidth, Tensix grid geometry, and ARC firmware that a CPU can't replicate. But it gives you the full visual engine to explore. Once you have TT hardware, remove `--host` and everything you learned transfers directly.
 
@@ -232,7 +244,7 @@ Auto-detect order: **Hybrid (sysfs + background JSON) → JSON → Mock** on Lin
 |---------|--------|--------------------|-------------|
 | Sysfs   | Linux hwmon (`/sys/class/hwmon/`) | ✅ Yes | None |
 | JSON    | `tt-smi -s` subprocess | ✅ Yes | None |
-| Host    | CPU/RAM via sysinfo + hwmon | ✅ N/A | None |
+| Host    | CPU/RAM via sysinfo (+ hwmon/RAPL on Linux) — Linux/macOS/Windows | ✅ N/A | None |
 | Mock    | Simulated telemetry | ✅ N/A | None |
 | Luwen   | Direct PCI BAR0 access | ⚠️ May disrupt | root / ttkmd |
 

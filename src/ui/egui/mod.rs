@@ -232,10 +232,10 @@ pub struct DashboardApp {
     /// Update interval
     update_interval: Duration,
     /// Process monitor (Linux only)
-    #[cfg(feature = "linux-procfs")]
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     process_monitor: crate::workload::ProcessMonitor,
     /// Last process scan time
-    #[cfg(feature = "linux-procfs")]
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     last_process_scan: Instant,
     /// Background particles for psychedelic effect
     particles: Vec<Particle>,
@@ -272,9 +272,9 @@ impl DashboardApp {
             start_time,
             last_update: start_time,
             update_interval,
-            #[cfg(feature = "linux-procfs")]
+            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
             process_monitor: crate::workload::ProcessMonitor::new(),
-            #[cfg(feature = "linux-procfs")]
+            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
             last_process_scan: start_time,
             particles,
             theme: CyberpunkTheme::new(),
@@ -312,7 +312,7 @@ impl DashboardApp {
         self.last_update = Instant::now();
 
         // Update process monitor (every 2 seconds)
-        #[cfg(feature = "linux-procfs")]
+        #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
         if self.last_process_scan.elapsed() >= Duration::from_secs(2) {
             self.process_monitor.update();
             self.last_process_scan = Instant::now();
@@ -462,7 +462,7 @@ impl eframe::App for DashboardApp {
         // ═══════════════════════════════════════════════════════════════
 
         // Bottom panel: Process monitoring (if available)
-        #[cfg(feature = "linux-procfs")]
+        #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
         if self.process_monitor.has_any_processes() {
             egui::TopBottomPanel::bottom("process_panel")
                 .min_height(150.0)

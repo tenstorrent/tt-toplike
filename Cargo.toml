@@ -71,7 +71,6 @@ clap = { version = "4.5", features = ["derive", "cargo"] }
 
 # System monitoring
 sysinfo = "0.38"
-procfs = { version = "0.17", optional = true }  # Linux-specific
 
 # Error handling
 thiserror = "1.0"
@@ -103,6 +102,14 @@ which = "7"
 [target.'cfg(unix)'.dependencies]
 # libc: used for kill(2) syscall in the Insights screen kill panel
 libc = "0.2"
+
+# Linux-only process monitoring via /proc. Scoped to the linux target so the
+# crate is never compiled on macOS/Windows (procfs refuses to build elsewhere).
+# The `linux-procfs` feature still references it (it's in `default`), but every
+# code path that uses it is additionally gated on `target_os = "linux"`, so
+# enabling the feature on a non-Linux host is a harmless no-op, not a build error.
+[target.'cfg(target_os = "linux")'.dependencies]
+procfs = { version = "0.17", optional = true }  # Linux-specific
 
 [dev-dependencies]
 # Testing

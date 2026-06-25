@@ -888,8 +888,26 @@ fn clamp_spans_to_width(spans: Vec<Span<'static>>, max_cols: usize) -> Vec<Span<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::host::HostBackend;
+    use crate::backend::TelemetryBackend;
     use ratatui::style::Style;
     use ratatui::text::Line;
+
+    /// Regression for the reported `--host` arcade crash: Arcade embeds Memory
+    /// Castle / Memory Flow, whose particle spawn used `frame % memory_channels`.
+    /// The Host backend's `Architecture::Unknown` device reports 0 channels, so
+    /// `ArcadeVisualization::update` panicked with a divide-by-zero. It must not.
+    #[test]
+    fn update_survives_zero_channel_host_device() {
+        let mut backend = HostBackend::new();
+        backend.init().expect("host backend init");
+        backend.update().expect("host backend update");
+
+        let mut arcade = ArcadeVisualization::new(120, 40);
+        for _ in 0..10 {
+            arcade.update(&backend);
+        }
+    }
 
     fn plain_line(s: &str) -> Line<'static> {
         Line::from(s.to_string())

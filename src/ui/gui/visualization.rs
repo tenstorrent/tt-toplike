@@ -65,7 +65,7 @@ impl StarfieldVisualization {
 
     /// Create stars based on device architecture's Tensix grid
     fn create_stars_for_device(device: &Device) -> Vec<Star> {
-        let (rows, cols) = device.architecture.tensix_grid();
+        let (rows, cols) = device.tensix_grid();
         let mut stars = Vec::with_capacity(rows * cols);
 
         for row in 0..rows {
@@ -184,7 +184,7 @@ impl canvas::Program<(), Theme> for StarfieldVisualization {
             frame.fill_text(title_text);
 
             // Draw architecture info
-            let (rows, cols) = self.device.architecture.tensix_grid();
+            let (rows, cols) = self.device.tensix_grid();
             let arch_text = Text {
                 content: format!("{}×{} Tensix Grid - {} Cores", cols, rows, rows * cols),
                 position: Point::new(10.0, 30.0),
@@ -401,7 +401,7 @@ impl DashboardVisualization {
         frame.fill_text(title);
 
         // Architecture details
-        let (rows, cols) = self.device.architecture.tensix_grid();
+        let (rows, cols) = self.device.tensix_grid();
         let ddr_channels = match self.device.architecture {
             Architecture::Grayskull => 4,
             Architecture::Wormhole => 8,

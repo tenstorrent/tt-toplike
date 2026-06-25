@@ -70,16 +70,14 @@ pub fn create_backend(
         BackendType::Luwen => Err(BackendError::Initialization(
             "Luwen backend not compiled (requires --features luwen-backend)".to_string(),
         )),
+        // Sysfs and Hybrid are Linux-only variants (see cli::BackendType); on other
+        // platforms these variants don't exist, so no match arm is needed for them.
         #[cfg(target_os = "linux")]
         BackendType::Sysfs => {
             let mut backend = SysfsBackend::with_config(config);
             backend.init()?;
             Ok(Box::new(backend))
         }
-        #[cfg(not(target_os = "linux"))]
-        BackendType::Sysfs => Err(BackendError::Initialization(
-            "Sysfs backend only available on Linux".to_string(),
-        )),
         #[cfg(target_os = "linux")]
         BackendType::Hybrid => {
             let tt_smi_path = cli.tt_smi_path.to_string_lossy().to_string();
@@ -87,10 +85,6 @@ pub fn create_backend(
             backend.init()?;
             Ok(Box::new(backend))
         }
-        #[cfg(not(target_os = "linux"))]
-        BackendType::Hybrid => Err(BackendError::Initialization(
-            "Hybrid backend only available on Linux".to_string(),
-        )),
         BackendType::Host => {
             let mut backend = HostBackend::with_config(config);
             backend.init()?;
@@ -150,8 +144,6 @@ pub fn next_backend(current: BackendType) -> BackendType {
         BackendType::Hybrid => BackendType::Sysfs,
 
         #[cfg(target_os = "linux")]
-        BackendType::Sysfs => BackendType::Json,
-        #[cfg(not(target_os = "linux"))]
         BackendType::Sysfs => BackendType::Json,
 
         BackendType::Json => BackendType::Luwen,
