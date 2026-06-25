@@ -234,6 +234,34 @@ mod tests {
         }
     }
 
+    /// Off-Linux the Sysfs/Hybrid variants don't exist, so the cycle must be a
+    /// well-formed loop over only the cross-platform backends. This guards that
+    /// removing the `not(target_os = "linux")` Sysfs/Hybrid arms didn't leave a
+    /// dangling or non-terminating cycle on macOS/Windows.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn test_next_backend_cycle_non_linux() {
+        // Json → Luwen → Mock → Host → Json
+        assert!(matches!(next_backend(BackendType::Json), BackendType::Luwen));
+        assert!(matches!(next_backend(BackendType::Luwen), BackendType::Mock));
+        assert!(matches!(next_backend(BackendType::Mock), BackendType::Host));
+        assert!(matches!(next_backend(BackendType::Host), BackendType::Json));
+        // Auto resolves into the cycle at JSON (no Hybrid off-Linux).
+        assert!(matches!(next_backend(BackendType::Auto), BackendType::Json));
+
+        // The cycle must return to its start within a bounded number of steps
+        // (i.e. it terminates / has no dead end).
+        let mut seen = std::collections::HashSet::new();
+        let mut cur = BackendType::Json;
+        for _ in 0..16 {
+            cur = next_backend(cur);
+            seen.insert(format!("{:?}", cur));
+        }
+        for expected in ["Json", "Luwen", "Mock", "Host"] {
+            assert!(seen.contains(expected), "cycle should visit {expected}");
+        }
+    }
+
     #[test]
     fn test_mock_backend_always_works() {
         let config = BackendConfig::default();
