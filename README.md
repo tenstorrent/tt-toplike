@@ -107,6 +107,13 @@ CPU package temperature and RAPL power come from Linux-only sysfs paths; on macO
 
 It is not the same experience as real TT hardware — a discrete AI accelerator has DDR bandwidth, Tensix grid geometry, and ARC firmware that a CPU can't replicate. But it gives you the full visual engine to explore. Once you have TT hardware, remove `--host` and everything you learned transfers directly.
 
+On Apple Silicon, `--host` also surfaces the **GPU** (utilization + memory, via
+`ioreg`) and the **Neural Engine** (power, via the private IOReport framework) as
+extra devices — both **without sudo**. Caveats: ANE shows power-derived activity,
+not a true utilization % (no API exposes one); its "16 cores" is Apple's stated
+figure used only for the star grid; GPU power/temperature/frequency aren't
+available without sudo; and GPU utilization is whole-device, not per-process.
+
 ---
 
 ## Installation

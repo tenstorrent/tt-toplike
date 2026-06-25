@@ -146,3 +146,18 @@ fn every_backend_device_reports_at_least_one_channel() {
         assert!(d.memory_channels() >= 1, "host dev {}", d.index);
     }
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_accelerator_devices_render_safely() {
+    let b = ready_host();
+
+    // Any GPU/ANE devices present must have renderable geometry…
+    for d in b.devices() {
+        let (rows, cols) = d.tensix_grid();
+        assert!(rows > 0 && cols > 0, "{} grid empty", d.board_type);
+        assert!(d.memory_channels() >= 1, "{} channels", d.board_type);
+    }
+    // …and the whole multi-device set survives every visualization.
+    drive_all_visualizations(&b);
+}
