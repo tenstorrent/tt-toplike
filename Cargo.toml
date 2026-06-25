@@ -111,6 +111,13 @@ libc = "0.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 procfs = { version = "0.17", optional = true }  # Linux-specific
 
+# Apple GPU/ANE telemetry (macOS only, no sudo). core-foundation provides the
+# CFDictionary/CFArray/CFString interop used to walk the private IOReport
+# framework's "Energy Model" channels for the ANE power sampler. No block2:
+# we iterate the IOReportChannels CFArray directly rather than via a callback.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+
 [dev-dependencies]
 # Testing
 mockall = "0.13"

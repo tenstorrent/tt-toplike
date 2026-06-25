@@ -5476,6 +5476,7 @@ dependencies = [
  "arc-swap",
  "chrono",
  "clap",
+ "core-foundation 0.10.1",
  "crossterm",
  "dirs",
  "eframe",
