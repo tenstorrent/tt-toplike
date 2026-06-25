@@ -149,6 +149,16 @@ impl AneSampler {
                 return None;
             }
 
+            // `IOReportCreateSubscription` writes a refined channel dict into
+            // `subbed` under the Create rule, so we own a reference to it. The
+            // subscription object retains its own reference, so we can release
+            // ours immediately now that the subscription was created
+            // successfully. (Released here, never in `Drop`, to avoid a
+            // double-free.)
+            if !subbed.is_null() {
+                CFRelease(subbed as CFTypeRef);
+            }
+
             let prev = IOReportCreateSamples(sub, chans, ptr::null());
             if prev.is_null() {
                 CFRelease(chans as CFTypeRef);
@@ -198,11 +208,14 @@ impl AneSampler {
     }
 }
 
-// SAFETY: AneSampler owns its IOReport handles exclusively and is only ever
-// accessed from HostBackend's single-threaded update path (&mut self); the raw
-// pointers are never shared or used concurrently across threads. The
-// TelemetryBackend trait requires Send + Sync, so the host backend that owns
-// this sampler must be too.
+// SAFETY (Send): AneSampler exclusively owns its IOReport handles and is only
+// ever touched via `&mut self` in HostBackend's single-threaded update path, so
+// moving it to another thread cannot create concurrent access to the raw
+// pointers.
+// SAFETY (Sync): a shared `&AneSampler` exposes no method that reads the raw
+// pointers (`sample` requires `&mut self`), so sharing `&` across threads can
+// never touch them. The `TelemetryBackend: Send + Sync` bound requires both
+// impls on the host backend that owns this sampler.
 unsafe impl Send for AneSampler {}
 unsafe impl Sync for AneSampler {}
 
