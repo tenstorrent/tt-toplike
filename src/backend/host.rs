@@ -153,6 +153,14 @@ pub struct HostBackend {
     /// Total logical CPU core count
     core_count: usize,
 
+    /// Index of the synthetic GPU device, if one was detected (macOS).
+    #[cfg(target_os = "macos")]
+    gpu_device_idx: Option<usize>,
+
+    /// Last time the accelerators (GPU/ANE) were sampled — throttles ioreg/IOReport.
+    #[cfg(target_os = "macos")]
+    last_accel_sample: std::time::Instant,
+
     #[allow(dead_code)]
     config: BackendConfig,
 }
@@ -177,6 +185,10 @@ impl HostBackend {
             prev_rapl_time: std::time::Instant::now(),
             socket_count: 1,
             core_count: 0,
+            #[cfg(target_os = "macos")]
+            gpu_device_idx: None,
+            #[cfg(target_os = "macos")]
+            last_accel_sample: std::time::Instant::now(),
             config,
         }
     }
@@ -223,6 +235,67 @@ impl HostBackend {
             // Leave everything else None — host doesn't have SMBUS
             ..SmbusTelemetry::default()
         }
+    }
+
+    /// Append a GPU device (macOS) if `ioreg` exposes an Apple GPU. Idempotent:
+    /// only adds the device once; later calls just refresh its telemetry.
+    #[cfg(target_os = "macos")]
+    fn sample_gpu(&mut self) {
+        let Some(s) = crate::backend::gpu_macos::sample() else {
+            return;
+        };
+
+        // Map GPU cores into a near-square grid (same approach as CPU cores).
+        let cores = s.core_count.max(1);
+        let cols = (cores as f64).sqrt().ceil() as usize;
+        let cols = cols.max(1);
+        let rows = cores.div_ceil(cols).max(1);
+
+        let idx = match self.gpu_device_idx {
+            Some(i) => i,
+            None => {
+                let i = self.devices.len();
+                self.devices.push(Device {
+                    index: i,
+                    board_type: "apple-gpu".to_string(),
+                    bus_id: "gpu:0".to_string(),
+                    architecture: Architecture::Unknown,
+                    coords: "(gpu,0)".to_string(),
+                    firmwares: None,
+                    limits: None,
+                    pcie_speed: None,
+                    pcie_width: None,
+                    grid_override: Some((rows, cols)),
+                    channels_override: Some(4),
+                });
+                self.gpu_device_idx = Some(i);
+                i
+            }
+        };
+
+        // Telemetry: utilization → "current" proxy; GPU memory drives DDR bars.
+        let mem_total = s.mem_alloc_bytes.max(1);
+        let fill_pct = ((s.mem_in_use_bytes as f64 / mem_total as f64) * 100.0).min(100.0) as u32;
+        self.telemetry.insert(
+            idx,
+            Telemetry {
+                voltage: None,
+                current: Some(s.util_pct / 10.0), // 0..10 A-ish proxy from 0..100%
+                power: None,                        // no-sudo ioreg can't read GPU power
+                asic_temperature: None,
+                aiclk: None,
+                heartbeat: Some(1),
+                timestamp: Utc::now(),
+            },
+        );
+        self.smbus.insert(
+            idx,
+            SmbusTelemetry {
+                ddr_status: Some(format!("{fill_pct}%")),
+                arc0_health: Some("1".to_string()),
+                ..SmbusTelemetry::default()
+            },
+        );
     }
 
     /// Sample telemetry for one socket and update internal maps.
@@ -368,6 +441,9 @@ impl TelemetryBackend for HostBackend {
             self.sample_socket(sock);
         }
 
+        #[cfg(target_os = "macos")]
+        self.sample_gpu();
+
         Ok(())
     }
 
@@ -377,6 +453,12 @@ impl TelemetryBackend for HostBackend {
 
         for sock in 0..self.socket_count {
             self.sample_socket(sock);
+        }
+
+        #[cfg(target_os = "macos")]
+        if self.last_accel_sample.elapsed() >= std::time::Duration::from_secs(1) {
+            self.sample_gpu();
+            self.last_accel_sample = std::time::Instant::now();
         }
         Ok(())
     }
@@ -460,6 +542,21 @@ mod tests {
             dev.memory_channels() >= 1,
             "host must report >=1 memory channel for the DDR visualizations"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_host_adds_gpu_device_when_available() {
+        let mut backend = HostBackend::new();
+        backend.init().unwrap();
+        // If this Mac exposes an Apple GPU (it does on Apple Silicon), there must
+        // be a device whose board_type is "apple-gpu" with renderable geometry.
+        if let Some(gpu) = backend.devices().iter().find(|d| d.board_type == "apple-gpu") {
+            let (rows, cols) = gpu.tensix_grid();
+            assert!(rows > 0 && cols > 0, "gpu grid must be non-empty");
+            assert!(gpu.memory_channels() >= 1);
+            assert!(backend.telemetry(gpu.index).is_some(), "gpu telemetry present");
+        }
     }
 
     #[test]
