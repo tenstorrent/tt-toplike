@@ -61,10 +61,10 @@ pub fn parse_ioreg(output: &str) -> Option<GpuSample> {
     })
 }
 
-/// Spawn `ioreg` and parse one GPU sample. `None` if `ioreg` is missing/errors.
+/// Spawn `ioreg -r -c IOAccelerator` and parse one GPU sample. `None` if `ioreg` is missing/errors.
 pub fn sample() -> Option<GpuSample> {
     let out = Command::new("ioreg")
-        .args(["-r", "-d", "1", "-c", "IOAccelerator"])
+        .args(["-r", "-c", "IOAccelerator"])
         .output()
         .ok()?;
     parse_ioreg(&String::from_utf8_lossy(&out.stdout))
