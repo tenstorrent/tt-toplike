@@ -35,6 +35,8 @@
 //! ```
 
 pub mod factory;
+#[cfg(target_os = "macos")]
+pub mod gpu_macos; // Apple GPU stats via ioreg (no sudo)
 pub mod host; // Host backend: any machine via sysinfo (no TT hardware required)
 #[cfg(target_os = "linux")]
 pub mod hybrid; // Hybrid backend: sysfs real-time + streaming JSON enrichment
