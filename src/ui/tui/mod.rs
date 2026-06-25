@@ -2481,13 +2481,22 @@ fn render_insights(
 }
 
 /// Stub Insights render for non-linux-procfs builds.
+/// Insights fallback for platforms without procfs (macOS/Windows, or
+/// `--no-default-features`).
+///
+/// The full Insights screen pairs per-chip telemetry with a `/proc`-based
+/// process panel, which doesn't exist off-Linux. Rather than render nothing
+/// (the old stub left the default screen blank — notably under `--host` on a
+/// Mac), fall back to the chip-portrait grid, which is fully cross-platform and
+/// shows each device's live telemetry (temperature, power, clock, utilization).
 #[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
 fn render_insights_no_procfs(
     f: &mut Frame,
     backend: &dyn TelemetryBackend,
     engine: &crate::workload::InferenceEngine,
 ) {
-    let _ = (f, backend, engine);
+    let _ = engine; // inference text panel is part of the Linux-only layout
+    render_grid_mode(f, backend);
 }
 
 /// Render a btop-style horizontal bar: `[████████░░░░░░░░]  42%`.
@@ -3798,5 +3807,48 @@ mod tests {
         let (stats_w, _, cols_per_row) = panel_layout(9, BH_PORTRAIT_W, 160);
         assert_eq!(stats_w, 31);
         assert_eq!(cols_per_row, 3, "9 chips → 3×3 grid");
+    }
+}
+
+/// Cross-platform tests for the default (Insights) screen fallback.
+///
+/// Unlike the Linux-gated `tests` module above, these run on every platform —
+/// they guard the behaviour that matters off-Linux (e.g. `--host` on macOS).
+#[cfg(test)]
+mod host_default_screen_tests {
+    use super::render_grid_mode;
+    use crate::backend::host::HostBackend;
+    use crate::backend::TelemetryBackend;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// Regression: the default Insights screen used to render nothing off-Linux
+    /// (the `render_insights_no_procfs` stub was a no-op), so `--host` on macOS
+    /// showed a blank screen. The fallback now paints the chip-portrait grid;
+    /// assert it produces a non-empty buffer with the host device's telemetry.
+    #[test]
+    fn default_screen_paints_host_device() {
+        let mut backend = HostBackend::new();
+        backend.init().expect("host init");
+        backend.update().expect("host update");
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+        terminal
+            .draw(|f| render_grid_mode(f, &backend))
+            .expect("draw");
+
+        let painted: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        let glyphs = painted.chars().filter(|c| !c.is_whitespace()).count();
+        assert!(
+            glyphs > 20,
+            "host default screen must not be blank (only {glyphs} non-space glyphs)"
+        );
     }
 }
