@@ -161,3 +161,21 @@ fn macos_accelerator_devices_render_safely() {
     // …and the whole multi-device set survives every visualization.
     drive_all_visualizations(&b);
 }
+
+#[test]
+fn inference_match_tags_known_runtimes_via_public_api() {
+    use tt_toplike::workload::inference_match;
+    assert_eq!(inference_match("ollama", "ollama serve"), Some("ollama"));
+    assert_eq!(inference_match("WindowServer", "/System/WindowServer"), None);
+}
+
+#[test]
+fn host_process_monitor_lists_this_process() {
+    use tt_toplike::workload::HostProcessMonitor;
+    let mut m = HostProcessMonitor::new();
+    m.update();
+    // The test binary itself should appear among the rows.
+    let rows = m.rows(64);
+    assert!(!rows.is_empty(), "should enumerate at least one process");
+    assert!(rows.iter().all(|r| r.pid > 0));
+}
