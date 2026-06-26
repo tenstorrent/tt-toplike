@@ -762,9 +762,9 @@ fn run_app(
                                 } else {
                                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_none() {
-                                        let max = flat_process_list(&process_monitor)
-                                            .len()
-                                            .saturating_sub(1);
+                                        // Clamp to proc_rows — the SAME list the panel renders,
+                                        // so the cursor always matches the highlighted row.
+                                        let max = proc_rows.len().saturating_sub(1);
                                         process_cursor = (process_cursor + 1).min(max);
                                     }
                                 }
@@ -819,16 +819,17 @@ fn run_app(
                             #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                             KeyCode::Char('k') if display_mode == DisplayMode::Insights => {
                                 if kill_confirm.is_none() {
-                                    if let Some(proc) =
-                                        flat_process_list(&process_monitor).get(process_cursor)
-                                    {
+                                    // Use proc_rows (the rendered list) so the kill target
+                                    // always matches the highlighted row — not flat_process_list
+                                    // (PID-ascending, uncapped) which diverges from the display.
+                                    if let Some(row) = proc_rows.get(process_cursor) {
                                         kill_confirm = Some(KillConfirmState {
-                                            pid: proc.pid,
-                                            name: proc.name.clone(),
-                                            device_idx: proc
-                                                .device_indices
-                                                .first()
-                                                .copied()
+                                            pid: row.pid,
+                                            name: row.name.clone(),
+                                            device_idx: row
+                                                .tt
+                                                .as_ref()
+                                                .and_then(|t| t.device_indices.first().copied())
                                                 .unwrap_or(0),
                                         });
                                     }
@@ -843,12 +844,11 @@ fn run_app(
                                         libc::SIGKILL,
                                     );
                                     kill_confirm = None;
-                                } else if let Some(proc) =
-                                    flat_process_list(&process_monitor).get(process_cursor)
-                                {
-                                    // Outside dialog: SIGKILL immediately
+                                } else if let Some(row) = proc_rows.get(process_cursor) {
+                                    // Outside dialog: SIGKILL immediately using proc_rows
+                                    // (the rendered list) so highlight == kill target.
                                     let _ = crate::workload::process_monitor::kill_pid(
-                                        proc.pid,
+                                        row.pid,
                                         libc::SIGKILL,
                                     );
                                 }
@@ -2441,7 +2441,7 @@ fn device_panels_height(devices: &[crate::models::Device], area_width: u16) -> u
     (row_count as u16) * 15 // panel_h(14) + inter-row gap(1)
 }
 
-/// Render Insights screen (full layout — implemented by Task 8/9 helpers below).
+/// Render Insights screen (full layout: chip portraits + process panel).
 ///
 /// `portrait_particles` maps device index → live particle list, threaded through
 /// to `render_device_panels` → `render_chip_portrait` for the particle overlay.
