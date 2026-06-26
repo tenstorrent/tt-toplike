@@ -148,6 +148,29 @@ any row has `tt = Some` (i.e. on TT hardware).
 - NVIDIA/AMD device discovery — a separate effort; this screen is simply ready
   to render them once they appear as `Device`s.
 
+## Future direction: inference-perf telemetry (Phase 2, separate spec)
+
+This screen detects *which* processes are doing inference. A natural follow-on
+is reporting *how well* they perform — **tokens/sec, time-to-first-token, tokens
+generated, model, context length** — so users can compare machine-to-machine
+(a Mac vs a TT box vs a GPU box). It generalizes the existing TT-only
+`workload::serving` (which already scrapes `/metrics` and tails logs) to a
+cross-engine, cross-platform perf layer, surfaced in a **details pane** for the
+selected inference process.
+
+Sources per engine (Phase 2 research):
+- **vLLM / tt-inference-server** — Prometheus `/metrics` (TTFT, time-per-output-token, throughput); already partly handled by `serving.rs`.
+- **llama.cpp `llama-server`** — `/metrics` when started with `--metrics`, else per-request timing in its log/stderr.
+- **Ollama** — per-request `eval_count`/`eval_duration` from its API, or its `server.log`; compute TPS/TTFT.
+- **MLX (`mlx_lm.server`) / LM Studio** — tokens/sec in their logs (log-tail parsing).
+
+Two harvest strategies, both read-only and bounded: **endpoint scrape** (precise,
+needs a metrics-friendly server) and **log tailing** (passive, universal-ish,
+matches engines without a metrics endpoint — the main path on macOS). The
+`ProcRow` record from this spec is the seam: Phase 2 adds an optional
+`perf: Option<InferencePerf>` field, populated per detected engine. Kept out of
+this spec to bound scope; this screen is the substrate Phase 2 builds on.
+
 ## Effort & risk
 ~3–5 days. Most of the work is the unification refactor of the gated Insights
 renderers and the enrich-by-PID merge layer; the `sysinfo` collector and the
