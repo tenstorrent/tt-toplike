@@ -130,6 +130,22 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     // message buffer (shown in the Insights panel); stderr is re-enabled on exit.
     crate::logging::disable_stderr();
 
+    // Install a panic hook that restores the terminal BEFORE the panic prints.
+    // Without this, a panic anywhere in the render/event loop unwinds straight
+    // past the normal cleanup below, leaving the terminal in raw mode + the
+    // alternate screen — which makes every subsequent shell command "staircase"
+    // until the user runs `reset`. Restoring here also lets the panic message
+    // print in cooked mode so the failure is actually visible.
+    {
+        let original_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableFocusChange);
+            crate::logging::enable_stderr();
+            original_hook(info);
+        }));
+    }
+
     // Setup terminal
     enable_raw_mode().map_err(|e| {
         TTTopError::Terminal(format!(
