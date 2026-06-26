@@ -2511,16 +2511,10 @@ fn render_insights(
         .split(area);
 
     render_header(f, chunks[0], backend);
-    // `render_device_panels` takes an `&InferenceEngine` it does not currently
-    // read (`_engine`). The ingested engine state in `run_app` is Linux-gated and
-    // never rendered, so we pass a fresh throwaway engine here to keep this path
-    // cross-platform without threading the gated state through.
-    let engine = InferenceEngine::new();
     render_device_panels(
         f,
         chunks[1],
         backend,
-        &engine,
         portrait_particles,
         &portrait_baseline,
         fleet_cursor,
@@ -3091,7 +3085,6 @@ fn render_device_panels(
     f: &mut Frame,
     area: Rect,
     backend: &dyn TelemetryBackend,
-    _engine: &crate::workload::InferenceEngine,
     portrait_particles: &std::collections::HashMap<
         usize,
         Vec<crate::ui::tui::chip_portrait::Particle>,

@@ -24,7 +24,7 @@ const RUNTIMES: &[(&str, &[&str])] = &[
     ("torch", &["torchrun", "torch.distributed", "pytorch", " torch"]),
     ("transformers", &["transformers", "huggingface", "accelerate launch"]),
     ("diffusers", &["diffusers"]),
-    ("jax", &["jax", "flax"]),
+    ("jax", &["jax.numpy", "import jax", " jax ", "/jax", "flax.linen"]),
     ("tensorflow", &["tensorflow", "tf.keras"]),
     ("triton", &["tritonserver", "triton_python"]),
 ];
