@@ -408,7 +408,8 @@ mod tests {
         assert_eq!(cli.interval, 100);
         assert!(cli.should_monitor_device(0));
         assert!(cli.should_monitor_device(999));
-        assert_eq!(cli.log_level(), log::LevelFilter::Info);
+        // Default is quiet: Warn (only surfaces problems; -v raises to Debug).
+        assert_eq!(cli.log_level(), log::LevelFilter::Warn);
     }
 
     #[test]
