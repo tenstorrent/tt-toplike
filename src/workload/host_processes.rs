@@ -56,7 +56,8 @@ impl HostProcessMonitor {
         );
     }
 
-    /// Build selected rows: union of top-`max` by CPU and all inference-matched.
+    /// Build selected rows: all inference-matched processes (never dropped),
+    /// plus the busiest non-matched processes filling the remaining slots up to `max` total.
     pub fn rows(&self, max: usize) -> Vec<ProcRow> {
         let all: Vec<ProcRow> = self
             .sys
@@ -71,7 +72,7 @@ impl HostProcessMonitor {
                     .collect::<Vec<_>>()
                     .join(" ");
                 ProcRow {
-                    pid: pid.as_u32() as i32,
+                    pid: i32::try_from(pid.as_u32()).unwrap_or(i32::MAX), // PIDs never exceed i32::MAX on supported OSes; clamp defensively.
                     inference: inference_match(&name, &cmdline),
                     name,
                     cpu_pct: p.cpu_usage(),
