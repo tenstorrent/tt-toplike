@@ -4058,6 +4058,9 @@ pub fn run_render_bench(
             Vec<crate::ui::tui::chip_portrait::Particle>,
         > = std::collections::HashMap::new();
         let baseline = crate::animation::baseline::AdaptiveBaseline::new();
+        // Built once outside the timed loop — render_insights ignores it (`_cli`),
+        // but constructing it per frame would add noise to the insights timing.
+        let bench_cli = crate::cli::Cli::bench_default();
         results.push(measure("insights", 10, frames, || {
             term.draw(|f| {
                 render_insights(
@@ -4066,7 +4069,7 @@ pub fn run_render_bench(
                     &rows,
                     0,
                     None,
-                    &crate::cli::Cli::bench_default(),
+                    &bench_cli,
                     &particles,
                     &baseline,
                     0,
