@@ -19,8 +19,9 @@ use crate::backend::{factory, BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
 use crate::error::TTTopError;
 use crate::ui::colors;
+use crate::workload::{HostProcessMonitor, InferenceEngine, ProcRow};
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-use crate::workload::{InferenceEngine, InferenceServerProbe, ProcessMonitor, ServingMetrics};
+use crate::workload::{InferenceServerProbe, ProcessMonitor, ServingMetrics};
 use crossterm::{
     event::{self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyEventKind},
     execute,
@@ -40,7 +41,11 @@ use std::io::{self, IsTerminal};
 use std::time::{Duration, Instant};
 
 /// Pending kill confirmation state.
-#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+///
+/// Cross-platform so the unified Insights render path can take a
+/// `Option<&KillConfirmState>` without a `cfg` gate. It is only ever populated
+/// by the Linux-gated kill key handlers; off-Linux it stays `None`, so the
+/// kill dialog never appears.
 #[derive(Debug, Clone)]
 struct KillConfirmState {
     pid: i32,
@@ -86,6 +91,10 @@ enum OverlayPanel {
 /// # Arguments
 ///
 /// * `cli` - CLI configuration
+/// Max rows shown in the Insights process panel (inference-matched rows are
+/// always kept; the rest are the busiest processes filling remaining slots).
+const PROC_PANEL_MAX_ROWS: usize = 12;
+
 pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     // Check if we have a TTY available
     if !std::io::stdout().is_terminal() {
@@ -191,19 +200,24 @@ fn run_app(
     let mut last_anim_render = Instant::now();
     let mut last_data_render = Instant::now();
 
-    // Process monitoring (Linux-only, update every 2 seconds)
+    // TT process attribution (Linux-only, update every 2 seconds). This reads
+    // /proc to map PIDs → device fds / hugepages and is merged into the
+    // cross-platform `proc_rows` by PID via `enrich_proc_rows_tt`.
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut process_monitor = crate::workload::ProcessMonitor::new();
-    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-    let mut last_process_update = Instant::now();
-    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-    let process_update_interval = Duration::from_secs(2);
 
-    // Host CPU / RAM monitoring — sampled alongside the process monitor.
-    // sysinfo needs two calls separated in time to compute meaningful CPU%;
-    // we call it twice at init (with a tiny sleep) so the first frame shows
-    // real data rather than zeros.
-    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+    // Cross-platform process listing for the Insights process panel. Enumerates
+    // host processes via sysinfo and tags inference runtimes; on Linux it is
+    // enriched by PID with TT device attribution (see the refresh tick).
+    let mut host_proc_monitor = HostProcessMonitor::new();
+    host_proc_monitor.update();
+    let mut proc_rows: Vec<ProcRow> = host_proc_monitor.rows(PROC_PANEL_MAX_ROWS);
+    let mut last_proc_rows_update = Instant::now();
+
+    // Host CPU / RAM monitoring — sampled on the same 2s cadence as processes.
+    // Cross-platform: the bars are useful on macOS too. sysinfo needs two calls
+    // separated in time to compute meaningful CPU%; we call it twice at init
+    // (with a tiny sleep) so the first frame shows real data rather than zeros.
     let (mut sys_monitor, mut host_cpu_pct, mut host_mem_used, mut host_mem_total) = {
         use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
         let mut s = System::new_with_specifics(
@@ -276,9 +290,12 @@ fn run_app(
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut serving_metrics: std::collections::HashMap<i32, ServingMetrics> =
         std::collections::HashMap::new();
-    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+    // Cross-platform: the unified render path reads these. They're only mutated
+    // by the Linux-gated process-navigation / kill key handlers; off-Linux they
+    // stay at their defaults (cursor 0, no kill dialog).
+    #[cfg_attr(not(all(target_os = "linux", feature = "linux-procfs")), allow(unused_mut))]
     let mut process_cursor: usize = 0;
-    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+    #[cfg_attr(not(all(target_os = "linux", feature = "linux-procfs")), allow(unused_mut))]
     let mut kill_confirm: Option<KillConfirmState> = None;
 
     // Fleet navigation state (Insights with 32+ devices).
@@ -459,12 +476,10 @@ fn run_app(
 
                 match display_mode {
                     DisplayMode::Insights => {
-                        #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                         render_insights(
                             f,
                             backend,
-                            &inference_engine,
-                            &process_monitor,
+                            &proc_rows,
                             process_cursor,
                             kill_confirm.as_ref(),
                             cli,
@@ -475,13 +490,8 @@ fn run_app(
                             host_cpu_pct,
                             host_mem_used,
                             host_mem_total,
+                            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                             &serving_metrics,
-                        );
-                        #[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
-                        render_insights_no_procfs(
-                            f,
-                            backend,
-                            &crate::workload::InferenceEngine::new(),
                         );
                     }
                     DisplayMode::Grid => {
@@ -896,20 +906,30 @@ fn run_app(
             }
         }
 
-        // Update process monitor + host stats (every 2 seconds to avoid overhead)
-        #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-        if last_process_update.elapsed() >= process_update_interval {
-            process_monitor.update();
-            // Probe inference servers — runs at same 2s cadence to avoid hammering
-            // HTTP endpoints on every backend tick.
-            let flat = flat_process_list(&process_monitor);
-            serving_metrics = inference_probe.update(&flat);
+        // Update process list + host stats (every 2 seconds to avoid overhead).
+        // Cross-platform: the host CPU/RAM bars and process panel work on macOS.
+        if last_proc_rows_update.elapsed() >= Duration::from_secs(2) {
+            host_proc_monitor.update();
+            proc_rows = host_proc_monitor.rows(PROC_PANEL_MAX_ROWS);
+
+            // Linux/TT: refresh /proc attribution + serving probes, then merge
+            // TT device info into proc_rows by PID.
+            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+            {
+                process_monitor.update();
+                // Probe inference servers at the same 2s cadence to avoid
+                // hammering HTTP endpoints on every backend tick.
+                let flat = flat_process_list(&process_monitor);
+                serving_metrics = inference_probe.update(&flat);
+                enrich_proc_rows_tt(&mut proc_rows, &process_monitor);
+            }
+
             sys_monitor.refresh_cpu_usage();
             sys_monitor.refresh_memory();
             host_cpu_pct = sys_monitor.global_cpu_usage();
             host_mem_used = sys_monitor.used_memory();
             host_mem_total = sys_monitor.total_memory();
-            last_process_update = Instant::now();
+            last_proc_rows_update = Instant::now();
         }
     }
 }
@@ -2332,6 +2352,26 @@ fn flat_process_list<'a>(pm: &'a ProcessMonitor) -> Vec<&'a crate::workload::Pro
     all
 }
 
+/// Merge TT device attribution into cross-platform `proc_rows` by PID.
+///
+/// For every process the Linux `/proc` monitor knows about, find the matching
+/// `ProcRow` (same PID) and attach its TT device indices + hugepage counts.
+/// A TT process that didn't rank into the top-N rows (and wasn't inference-
+/// name-matched) simply isn't shown — acceptable, as TT processes are typically
+/// high-CPU and rank in.
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+fn enrich_proc_rows_tt(rows: &mut [crate::workload::ProcRow], pm: &ProcessMonitor) {
+    for info in flat_process_list(pm) {
+        if let Some(r) = rows.iter_mut().find(|r| r.pid == info.pid) {
+            r.tt = Some(crate::workload::TtProcInfo {
+                device_indices: info.device_indices.clone(),
+                hugepages_1g: info.hugepages_1g,
+                hugepages_2m: info.hugepages_2m,
+            });
+        }
+    }
+}
+
 /// Cell width used in fleet compact mode (see `render_device_panels`).
 /// 3 chars: temperature block glyph (1) + space (1) + separator (1).
 const FLEET_CELL_W: u16 = 3;
@@ -2405,12 +2445,10 @@ fn device_panels_height(devices: &[crate::models::Device], area_width: u16) -> u
 ///
 /// `portrait_particles` maps device index → live particle list, threaded through
 /// to `render_device_panels` → `render_chip_portrait` for the particle overlay.
-#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 fn render_insights(
     f: &mut Frame,
     backend: &dyn TelemetryBackend,
-    engine: &InferenceEngine,
-    pm: &ProcessMonitor,
+    rows: &[crate::workload::ProcRow],
     cursor: usize,
     kill_confirm: Option<&KillConfirmState>,
     _cli: &Cli,
@@ -2424,7 +2462,10 @@ fn render_insights(
     host_cpu_pct: f32,
     host_mem_used: u64,
     host_mem_total: u64,
-    serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))] serving_metrics: &std::collections::HashMap<
+        i32,
+        ServingMetrics,
+    >,
 ) {
     let area = f.area();
     let devices = backend.devices();
@@ -2454,11 +2495,16 @@ fn render_insights(
         .split(area);
 
     render_header(f, chunks[0], backend);
+    // `render_device_panels` takes an `&InferenceEngine` it does not currently
+    // read (`_engine`). The ingested engine state in `run_app` is Linux-gated and
+    // never rendered, so we pass a fresh throwaway engine here to keep this path
+    // cross-platform without threading the gated state through.
+    let engine = InferenceEngine::new();
     render_device_panels(
         f,
         chunks[1],
         backend,
-        engine,
+        &engine,
         portrait_particles,
         &portrait_baseline,
         fleet_cursor,
@@ -2467,13 +2513,13 @@ fn render_insights(
     render_process_panel(
         f,
         chunks[2],
-        pm,
-        &flat_process_list(pm),
+        rows,
         cursor,
         kill_confirm,
         host_cpu_pct,
         host_mem_used,
         host_mem_total,
+        #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
         serving_metrics,
     );
     // Kill modal overlays the full screen when active
@@ -2482,30 +2528,10 @@ fn render_insights(
     }
 }
 
-/// Stub Insights render for non-linux-procfs builds.
-/// Insights fallback for platforms without procfs (macOS/Windows, or
-/// `--no-default-features`).
-///
-/// The full Insights screen pairs per-chip telemetry with a `/proc`-based
-/// process panel, which doesn't exist off-Linux. Rather than render nothing
-/// (the old stub left the default screen blank — notably under `--host` on a
-/// Mac), fall back to the chip-portrait grid, which is fully cross-platform and
-/// shows each device's live telemetry (temperature, power, clock, utilization).
-#[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
-fn render_insights_no_procfs(
-    f: &mut Frame,
-    backend: &dyn TelemetryBackend,
-    engine: &crate::workload::InferenceEngine,
-) {
-    let _ = engine; // inference text panel is part of the Linux-only layout
-    render_grid_mode(f, backend);
-}
-
 /// Render a btop-style horizontal bar: `[████████░░░░░░░░]  42%`.
 ///
 /// `filled` is a fraction in [0, 1]; `bar_width` is the inner glyph count.
 /// Returns a `Vec<Span>` ready to append to a `Line`.
-#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 fn host_bar_spans(
     label: &str,
     filled: f32,
@@ -2534,7 +2560,6 @@ fn host_bar_spans(
 }
 
 /// Pick a color for a bar value in [0, 1]: teal → yellow → red.
-#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 fn bar_color(frac: f32) -> ratatui::style::Color {
     use ratatui::style::Color;
     if frac < 0.5 {
@@ -2546,24 +2571,29 @@ fn bar_color(frac: f32) -> ratatui::style::Color {
     }
 }
 
-/// Render the process panel with cursor, device mapping, and kill confirmation.
-#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+/// Render the process panel over cross-platform `ProcRow`s.
+///
+/// Always shows PID / CPU% / MEM / NAME and an inference tag. When a row carries
+/// TT attribution (`row.tt`, Linux-only) it also shows the device-index column
+/// and a hugepage hint. On Linux, a matching `serving_metrics` entry adds a
+/// per-process serving summary row (port / health / model / tok-s).
 fn render_process_panel(
     f: &mut Frame,
     area: Rect,
-    pm: &ProcessMonitor,
-    procs: &[&crate::workload::ProcessInfo],
+    rows: &[crate::workload::ProcRow],
     cursor: usize,
     _kill_confirm: Option<&KillConfirmState>,
     host_cpu_pct: f32,
     host_mem_used: u64,
     host_mem_total: u64,
-    serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))] serving_metrics: &std::collections::HashMap<
+        i32,
+        ServingMetrics,
+    >,
 ) {
     use ratatui::style::{Color, Style};
     use ratatui::text::{Line, Span};
 
-    let _ = pm; // pm available for future expansion
     let mut lines: Vec<Line> = Vec::new();
 
     // Separator rule
@@ -2617,7 +2647,7 @@ fn render_process_panel(
         Span::styled("Processes", Style::default().fg(Color::Gray)),
     ]));
 
-    if procs.is_empty() {
+    if rows.is_empty() {
         lines.push(Line::from(vec![
             Span::raw("  "),
             Span::styled(
@@ -2626,36 +2656,44 @@ fn render_process_panel(
             ),
         ]));
     } else {
-        let clamped_cursor = cursor.min(procs.len().saturating_sub(1));
+        let clamped_cursor = cursor.min(rows.len().saturating_sub(1));
 
-        for (i, proc) in procs.iter().enumerate() {
+        // Human-readable memory: bytes → KMG with one decimal for ≥1 unit.
+        let human_bytes = |bytes: u64| -> String {
+            const KB: f64 = 1024.0;
+            const MB: f64 = KB * 1024.0;
+            const GB: f64 = MB * 1024.0;
+            let b = bytes as f64;
+            if b >= GB {
+                format!("{:.1}G", b / GB)
+            } else if b >= MB {
+                format!("{:.1}M", b / MB)
+            } else if b >= KB {
+                format!("{:.1}K", b / KB)
+            } else {
+                format!("{}B", bytes)
+            }
+        };
+
+        for (i, row) in rows.iter().enumerate() {
             let selected = i == clamped_cursor;
             // Use ">" (guaranteed 1-column width) rather than "▶" (ambiguous
             // Unicode width — some terminals render it as 2 columns, shifting
             // all subsequent spans on the selected row 1 char to the right).
             let cursor_char = if selected { ">" } else { " " };
 
-            let name = format!("{:<12}", truncate(&proc.name, 12));
-            let cmdline = format!("{:<32}", truncate(&proc.cmdline, 32));
-            let pid = format!("{:>7}", proc.pid);
+            let pid = format!("{:>7}", row.pid);
+            let cpu = format!("{:>5.1}%", row.cpu_pct);
+            let mem = format!("{:>7}", human_bytes(row.mem_bytes));
+            let name = format!("{:<16}", truncate(&row.name, 16));
 
-            // Device column: build raw string then *truncate* to column width.
-            // format!("{:<N}", s) pads but never truncates; without an explicit
-            // truncation step a process holding 4+ devices overflows the column
-            // and misaligns everything to the right.
-            const DEV_W: usize = 10;
-            let dev_raw = if proc.device_indices.is_empty() {
-                "shared".to_string()
-            } else {
-                let dev_str = proc
-                    .device_indices
-                    .iter()
-                    .map(|d| d.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                format!("D{}", dev_str)
+            // Inference tag: `~ label` when matched, else `-`.
+            let inf_raw = match row.inference {
+                Some(label) => format!("~ {}", label),
+                None => "-".to_string(),
             };
-            let devices = format!("{:<width$}", truncate(&dev_raw, DEV_W), width = DEV_W);
+            const INF_W: usize = 12;
+            let inference = format!("{:<width$}", truncate(&inf_raw, INF_W), width = INF_W);
 
             let row_color = if selected { Color::White } else { Color::Gray };
             let cursor_color = if selected {
@@ -2663,22 +2701,61 @@ fn render_process_panel(
             } else {
                 Color::DarkGray
             };
+            let inf_color = if row.inference.is_some() {
+                Color::Green
+            } else {
+                Color::DarkGray
+            };
 
-            lines.push(Line::from(vec![
+            let mut row_spans = vec![
                 Span::raw("  "),
                 Span::styled(cursor_char, Style::default().fg(cursor_color)),
                 Span::raw(" "),
-                Span::styled(name, Style::default().fg(row_color)),
-                Span::raw("  "),
-                Span::styled(cmdline, Style::default().fg(Color::DarkGray)),
-                Span::raw("  "),
                 Span::styled(pid, Style::default().fg(Color::Cyan)),
                 Span::raw("  "),
-                Span::styled(devices, Style::default().fg(Color::Blue)),
-            ]));
+                Span::styled(cpu, Style::default().fg(row_color)),
+                Span::raw("  "),
+                Span::styled(mem, Style::default().fg(row_color)),
+                Span::raw("  "),
+                Span::styled(name, Style::default().fg(row_color)),
+                Span::raw("  "),
+                Span::styled(inference, Style::default().fg(inf_color)),
+            ];
+
+            // TT attribution (Linux-only enrichment): device indices + hugepages.
+            if let Some(ref tt) = row.tt {
+                let dev_raw = if tt.device_indices.is_empty() {
+                    "shared".to_string()
+                } else {
+                    format!(
+                        "dev {}",
+                        tt.device_indices
+                            .iter()
+                            .map(|d| d.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                };
+                const DEV_W: usize = 12;
+                let dev = format!("{:<width$}", truncate(&dev_raw, DEV_W), width = DEV_W);
+                row_spans.push(Span::raw("  "));
+                row_spans.push(Span::styled(dev, Style::default().fg(Color::Blue)));
+
+                let hp = tt.hugepages_1g + tt.hugepages_2m;
+                if hp > 0 {
+                    row_spans.push(Span::raw("  "));
+                    row_spans.push(Span::styled(
+                        format!("{}hp", hp),
+                        Style::default().fg(Color::Magenta),
+                    ));
+                }
+            }
+
+            lines.push(Line::from(row_spans));
 
             // If this is a known TT inference server, append a metrics summary row.
-            if let Some(sm) = serving_metrics.get(&proc.pid) {
+            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+            if let Some(sm) = serving_metrics.get(&row.pid) {
                 let mut spans: Vec<Span> = vec![
                     Span::raw("       "),
                     Span::styled(
@@ -2743,7 +2820,10 @@ fn render_process_panel(
 /// Render a centered kill-confirmation modal dialog over the current frame.
 /// Uses `Clear` to erase the background, then draws a left-border-only dialog
 /// (no right-side border characters per AGENTS.md).
-#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+///
+/// Reachable from the cross-platform Insights path, but only ever invoked when
+/// `kill_confirm` is `Some`, which happens solely through the Linux-gated kill
+/// key handlers. Off-Linux it's compiled but never called.
 fn render_kill_dialog(f: &mut Frame, area: Rect, kc: &KillConfirmState) {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
