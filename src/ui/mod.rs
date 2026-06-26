@@ -29,6 +29,10 @@ pub mod egui;
 #[cfg(feature = "tui")]
 pub use tui::run_tui;
 
+// Re-export run_render_bench for convenience
+#[cfg(feature = "tui")]
+pub use tui::run_render_bench;
+
 // Re-export run_gui for convenience
 #[cfg(feature = "gui")]
 pub use gui::run_gui;

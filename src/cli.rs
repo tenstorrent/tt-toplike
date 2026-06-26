@@ -346,6 +346,34 @@ impl Cli {
         }
     }
 
+    /// Minimal defaults for headless rendering (bench / tests). Not for normal use.
+    ///
+    /// Constructs a `Cli` with safe quiet-mock defaults so callers like
+    /// `run_render_bench` can invoke render functions that need a `&Cli` reference
+    /// without having to parse actual command-line arguments.
+    pub fn bench_default() -> Self {
+        Cli {
+            backend: BackendType::Mock,
+            mock: Some(0),
+            json: false,
+            host: false,
+            tt_smi_path: std::path::PathBuf::from("tt-smi"),
+            interval: 100,
+            devices: None,
+            verbose: false,
+            quiet: true,
+            mock_devices: 3,
+            max_errors: 10,
+            timeout: 5000,
+            visualize: false,
+            workload: false,
+            print: false,
+            bench: true,
+            mode: None,
+            profile: crate::config::AnimationProfile::Normal,
+        }
+    }
+
     /// Validate CLI arguments
     ///
     /// Checks for invalid combinations and returns error messages if found.

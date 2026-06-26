@@ -51,6 +51,22 @@ fn main() {
         .with_interval(cli.interval)
         .with_max_errors(cli.max_errors);
 
+    // --bench: headless render benchmark — does NOT require a TTY. Dispatch here,
+    // before the backend selection / TUI path, so it works in CI and scripts.
+    if cli.bench {
+        let backend_type = cli.effective_backend();
+        match tt_toplike::backend::factory::create_backend(backend_type, config, &cli) {
+            Ok(mut backend) => {
+                let _ = backend.update();
+                let results =
+                    tt_toplike::ui::run_render_bench(backend.as_ref(), 120, 120, 40);
+                print!("{}", tt_toplike::ui::tui::bench::format_table(&results));
+            }
+            Err(e) => eprintln!("bench: backend init failed: {e}"),
+        }
+        return;
+    }
+
     // Select and initialize backend based on CLI arguments
     let backend_type = cli.effective_backend();
 

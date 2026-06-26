@@ -3960,3 +3960,150 @@ mod host_default_screen_tests {
         );
     }
 }
+
+/// Headless render benchmark: render each screen into a `TestBackend` for
+/// `frames` frames, timing the per-frame update+draw, and return per-mode cost.
+/// No raw mode, no TTY — safe to call from `--bench` or tests.
+pub fn run_render_bench(
+    backend: &dyn TelemetryBackend,
+    frames: usize,
+    width: u16,
+    height: u16,
+) -> Vec<bench::BenchResult> {
+    use crate::animation::{
+        ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis,
+    };
+    use ratatui::{backend::TestBackend, Terminal};
+    use std::time::Instant;
+
+    let mut results = Vec::new();
+
+    // Helper: run `frames` timed iterations of a per-frame closure, build a result.
+    fn measure<F: FnMut()>(
+        mode: &'static str,
+        target_fps: u32,
+        frames: usize,
+        mut frame: F,
+    ) -> bench::BenchResult {
+        let mut times = Vec::with_capacity(frames);
+        for _ in 0..frames {
+            let t = Instant::now();
+            frame();
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        let avg = if times.is_empty() {
+            0.0
+        } else {
+            times.iter().sum::<f64>() / times.len() as f64
+        };
+        let p95 = bench::percentile_ms(&mut times.clone(), 95.0);
+        bench::BenchResult {
+            mode,
+            frames,
+            avg_ms: avg,
+            p95_ms: p95,
+            target_fps,
+            est_cpu_pct: bench::est_cpu_pct(avg, target_fps),
+        }
+    }
+
+    let mk_term = || Terminal::new(TestBackend::new(width, height)).unwrap();
+
+    // Insights (data, 10 fps)
+    {
+        let mut term = mk_term();
+        let mut hpm = crate::workload::HostProcessMonitor::new();
+        let particles: std::collections::HashMap<
+            usize,
+            Vec<crate::ui::tui::chip_portrait::Particle>,
+        > = std::collections::HashMap::new();
+        let baseline = crate::animation::baseline::AdaptiveBaseline::new();
+        results.push(measure("insights", 10, frames, || {
+            hpm.update();
+            let rows = hpm.rows(12);
+            term.draw(|f| {
+                render_insights(
+                    f,
+                    backend,
+                    &rows,
+                    0,
+                    None,
+                    &crate::cli::Cli::bench_default(),
+                    &particles,
+                    &baseline,
+                    0,
+                    None,
+                    0.0,
+                    0,
+                    0,
+                    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+                    &std::collections::HashMap::new(),
+                );
+            })
+            .unwrap();
+        }));
+    }
+
+    // Grid (data, 10 fps)
+    {
+        let mut term = mk_term();
+        results.push(measure("grid", 10, frames, || {
+            term.draw(|f| render_grid_mode(f, backend)).unwrap();
+        }));
+    }
+
+    // Starfield (anim, 60 fps)
+    {
+        let mut term = mk_term();
+        let mut sf = HardwareStarfield::new(width as usize, height as usize);
+        sf.initialize_from_devices(backend.devices());
+        results.push(measure("starfield", 60, frames, || {
+            sf.update_from_telemetry(backend);
+            term.draw(|f| ui_visualization(f, &sf, backend)).unwrap();
+        }));
+    }
+
+    // Memory Castle (anim, 60 fps)
+    {
+        let mut term = mk_term();
+        let mut mc = MemoryCastle::new(width as usize, height as usize);
+        results.push(measure("memory-castle", 60, frames, || {
+            mc.update(backend);
+            term.draw(|f| ui_memory_castle(f, &mc, backend)).unwrap();
+        }));
+    }
+
+    // Memory Flow (anim, 60 fps)
+    {
+        let mut term = mk_term();
+        let mut mf = MemoryFlowVis::new(width as usize, height as usize);
+        results.push(measure("memory-flow", 60, frames, || {
+            mf.update(backend);
+            term.draw(|f| ui_memory_flow(f, &mf, backend)).unwrap();
+        }));
+    }
+
+    // Arcade (anim, 60 fps)
+    {
+        let mut term = mk_term();
+        let mut arc = ArcadeVisualization::new(width as usize, height as usize);
+        arc.initialize_from_devices(backend.devices());
+        arc.initialize_topology(backend);
+        results.push(measure("arcade", 60, frames, || {
+            arc.update(backend);
+            term.draw(|f| ui_arcade(f, &arc, backend)).unwrap();
+        }));
+    }
+
+    // Defrag (60 fps when active)
+    {
+        let mut term = mk_term();
+        let mut dv = DefragVis::new(width as usize, height as usize);
+        results.push(measure("defrag", 60, frames, || {
+            dv.update(backend);
+            term.draw(|f| ui_defrag(f, &dv, backend)).unwrap();
+        }));
+    }
+
+    results
+}

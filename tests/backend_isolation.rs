@@ -179,3 +179,25 @@ fn host_process_monitor_lists_this_process() {
     assert!(!rows.is_empty(), "should enumerate at least one process");
     assert!(rows.iter().all(|r| r.pid > 0));
 }
+
+#[test]
+fn render_bench_produces_a_row_per_mode() {
+    use tt_toplike::backend::mock::MockBackend;
+    use tt_toplike::backend::TelemetryBackend;
+    let mut b = MockBackend::new(3);
+    b.init().unwrap();
+    b.update().unwrap();
+
+    let results = tt_toplike::ui::run_render_bench(&b, 5, 120, 40);
+    // One row for each screen the run loop can show.
+    let modes: Vec<&str> = results.iter().map(|r| r.mode).collect();
+    for expected in ["insights", "grid", "starfield", "memory-castle", "memory-flow", "arcade", "defrag"] {
+        assert!(modes.contains(&expected), "missing bench row for {expected}: {modes:?}");
+    }
+    // Every row rendered the requested frame count and produced finite timings.
+    for r in &results {
+        assert_eq!(r.frames, 5);
+        assert!(r.avg_ms.is_finite() && r.avg_ms >= 0.0);
+        assert!(r.est_cpu_pct.is_finite() && r.est_cpu_pct >= 0.0);
+    }
+}
