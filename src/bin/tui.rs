@@ -35,16 +35,18 @@ fn main() {
     // Initialize logging with appropriate level
     init_logging(cli.log_level());
 
-    // Print startup banner
-    println!("🦀 tt-toplike v{}", env!("CARGO_PKG_VERSION"));
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("Backend: {}", cli.backend_name());
-    println!("Update Interval: {}ms", cli.interval);
-    if let Some(ref devices) = cli.devices {
-        println!("Device Filter: {:?}", devices);
+    // Print startup banner (suppressed under --bench to keep output machine-parseable)
+    if !cli.bench {
+        println!("🦀 tt-toplike v{}", env!("CARGO_PKG_VERSION"));
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!("Backend: {}", cli.backend_name());
+        println!("Update Interval: {}ms", cli.interval);
+        if let Some(ref devices) = cli.devices {
+            println!("Device Filter: {:?}", devices);
+        }
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!();
     }
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!();
 
     // Create backend configuration
     let config = BackendConfig::default()

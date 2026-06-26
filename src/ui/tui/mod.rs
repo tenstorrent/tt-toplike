@@ -3996,7 +3996,7 @@ pub fn run_render_bench(
         } else {
             times.iter().sum::<f64>() / times.len() as f64
         };
-        let p95 = bench::percentile_ms(&mut times.clone(), 95.0);
+        let p95 = bench::percentile_ms(&mut times, 95.0);
         bench::BenchResult {
             mode,
             frames,
@@ -4013,14 +4013,14 @@ pub fn run_render_bench(
     {
         let mut term = mk_term();
         let mut hpm = crate::workload::HostProcessMonitor::new();
+        hpm.update(); // one scan, not timed
+        let rows = hpm.rows(12); // snapshot, not timed
         let particles: std::collections::HashMap<
             usize,
             Vec<crate::ui::tui::chip_portrait::Particle>,
         > = std::collections::HashMap::new();
         let baseline = crate::animation::baseline::AdaptiveBaseline::new();
         results.push(measure("insights", 10, frames, || {
-            hpm.update();
-            let rows = hpm.rows(12);
             term.draw(|f| {
                 render_insights(
                     f,
