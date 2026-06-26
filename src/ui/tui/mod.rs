@@ -13,6 +13,8 @@
 pub mod bench;
 pub use bench::BenchResult;
 pub mod chip_portrait;
+pub mod perf;
+pub use perf::PerfMeter;
 
 use crate::animation::{
     ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis,
