@@ -35,7 +35,7 @@ impl PerfMeter {
             fps: 0.0,
             last_frame_ms: 0.0,
             cpu_pct: None,
-            last_cpu_sample: Instant::now(),
+            last_cpu_sample: Instant::now() - Duration::from_secs(1),
         }
     }
 

@@ -224,6 +224,10 @@ fn run_app(
     // data screens (where the draw is otherwise gated to the slow tick).
     let mut force_redraw = true;
 
+    // Live self-instrumentation — off by default, toggled with `P`.
+    let mut perf_meter = PerfMeter::new();
+    let mut show_perf = false;
+
     // TT process attribution (Linux-only, update every 2 seconds). This reads
     // /proc to map PIDs → device fds / hugepages and is merged into the
     // cross-platform `proc_rows` by PID via `enrich_proc_rows_tt`.
@@ -499,6 +503,19 @@ fn run_app(
         // On data screens this is ~10 FPS; without this gate the full screen was
         // redrawn on every 16 ms input-poll wakeup (~60 FPS), wasting CPU.
         if do_draw {
+            // Sample the perf meter (own CPU at most ~1/s) only when the readout
+            // is toggled on, so it costs nothing by default. `perf_status` must
+            // outlive the draw closure, so compute it here.
+            if show_perf {
+                perf_meter.maybe_sample_cpu();
+            }
+            let perf_status = if show_perf {
+                Some(perf_meter.status_string())
+            } else {
+                None
+            };
+            let perf_arg = perf_status.as_deref();
+            let draw_start = Instant::now();
         terminal
             .draw(|f| {
                 // Clear frame with explicit black background for tmux compatibility
@@ -558,7 +575,7 @@ fn run_app(
                 }
 
                 // ── Global status bar (all modes) ─────────────────────────
-                render_global_statusbar(f, backend, display_mode);
+                render_global_statusbar(f, backend, display_mode, perf_arg);
 
                 // ── Command bar overlay (all modes) ───────────────────────
                 if cmd_mode || cmd_message.is_some() {
@@ -572,6 +589,7 @@ fn run_app(
                 }
             })
             .map_err(|e| TTTopError::Terminal(e.to_string()))?;
+            perf_meter.record_frame(draw_start.elapsed());
         } // end if do_draw
 
         // Input always polls at 16 ms so keystrokes respond immediately.
@@ -660,6 +678,10 @@ fn run_app(
                                 } else {
                                     Some(OverlayPanel::Explain)
                                 };
+                            }
+                            KeyCode::Char('P') => {
+                                show_perf = !show_perf;
+                                force_redraw = true;
                             }
                             KeyCode::Char('/') => {
                                 // Open command bar — clears any previous result message
@@ -1317,7 +1339,12 @@ fn ui_arcade(f: &mut Frame, arcade: &ArcadeVisualization, backend: &dyn Telemetr
 /// >4 chips: a single `avg  44°  822M  79W` column instead.
 ///
 /// The command bar and overlay panels render on top of this row when active.
-fn render_global_statusbar(f: &mut Frame, backend: &dyn TelemetryBackend, mode: DisplayMode) {
+fn render_global_statusbar(
+    f: &mut Frame,
+    backend: &dyn TelemetryBackend,
+    mode: DisplayMode,
+    perf: Option<&str>,
+) {
     use crate::models::telemetry::parse_hex_or_dec;
 
     let area = f.area();
@@ -1502,6 +1529,15 @@ fn render_global_statusbar(f: &mut Frame, backend: &dyn TelemetryBackend, mode: 
             Style::default().fg(label_fg),
         ));
         right.push(Span::raw(" "));
+    }
+
+    // Optional perf readout (toggled by `P`), dim, between hotkeys and telemetry.
+    if let Some(p) = perf {
+        left.push(Span::styled("  │  ", Style::default().fg(sep_fg)));
+        left.push(Span::styled(
+            p.to_string(),
+            Style::default().fg(colors::rgb(120, 120, 140)),
+        ));
     }
 
     left.extend(right);
