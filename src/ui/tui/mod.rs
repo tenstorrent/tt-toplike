@@ -10,6 +10,8 @@
 //! - Normal mode: Traditional table view with real-time telemetry
 //! - Visualization mode: Hardware-responsive starfield animation
 
+pub mod bench;
+pub use bench::BenchResult;
 pub mod chip_portrait;
 
 use crate::animation::{

@@ -169,6 +169,12 @@ pub struct Cli {
     /// Useful for debugging or piping to other tools.
     #[arg(long)]
     pub print: bool,
+
+    /// Headless render benchmark: render each screen into an off-screen buffer
+    /// for a fixed number of frames and print per-screen timing + estimated CPU.
+    /// Does not enter the TUI. Respects --mock / --host for the backend.
+    #[arg(long)]
+    pub bench: bool,
 }
 
 /// Backend selection
@@ -402,6 +408,7 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Auto);
@@ -432,6 +439,7 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Mock);
@@ -457,6 +465,7 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Json);
@@ -482,6 +491,7 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
         };
 
         assert!(cli.should_monitor_device(0));
@@ -511,6 +521,7 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
         };
 
         assert_eq!(verbose_cli.log_level(), log::LevelFilter::Debug);
@@ -533,6 +544,7 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
         };
 
         assert_eq!(quiet_cli.log_level(), log::LevelFilter::Off);
@@ -558,6 +570,7 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
         };
 
         assert!(cli.validate().is_err());
@@ -583,6 +596,7 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
         };
 
         assert_eq!(auto_cli.backend_name(), "Auto-detect");
@@ -605,6 +619,7 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
         };
 
         assert_eq!(mock_cli.backend_name(), "Mock");
@@ -629,6 +644,7 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
         }
     }
 
