@@ -215,6 +215,10 @@ fn run_app(
     let mut ui_poll_rate_data = Duration::from_millis(100); // ~10 FPS for data modes
     let mut last_anim_render = Instant::now();
     let mut last_data_render = Instant::now();
+    // Force an immediate redraw outside the FPS cadence — set on the first frame
+    // and after any input event so keystrokes feel instant even on the 10 FPS
+    // data screens (where the draw is otherwise gated to the slow tick).
+    let mut force_redraw = true;
 
     // TT process attribution (Linux-only, update every 2 seconds). This reads
     // /proc to map PIDs → device fds / hugepages and is merged into the
@@ -354,6 +358,12 @@ fn run_app(
             }
         }
 
+        // Whether to redraw this iteration: on the mode's FPS tick, or once
+        // immediately after input. Gating the draw (and the portrait particle
+        // tick below) by this is what keeps the data screens at ~10 FPS instead
+        // of redrawing the full screen on every 16 ms input-poll wakeup.
+        let do_draw = should_tick || std::mem::take(&mut force_redraw);
+
         // Initialize or update visualizations (only on tick to match target FPS)
         let size = terminal
             .size()
@@ -459,7 +469,7 @@ fn run_app(
 
         // Tick portrait particles once per UI frame when on the Insights screen.
         // This must happen *before* the immutable borrow inside terminal.draw().
-        if display_mode == DisplayMode::Insights {
+        if do_draw && display_mode == DisplayMode::Insights {
             use crate::ui::tui::chip_portrait::tick_particles;
             portrait_tick = portrait_tick.wrapping_add(1);
             let devices_snapshot: Vec<_> = backend.devices().to_vec();
@@ -481,7 +491,10 @@ fn run_app(
             }
         }
 
-        // Draw UI based on mode
+        // Draw UI based on mode — only on a render tick (or just after input).
+        // On data screens this is ~10 FPS; without this gate the full screen was
+        // redrawn on every 16 ms input-poll wakeup (~60 FPS), wasting CPU.
+        if do_draw {
         terminal
             .draw(|f| {
                 // Clear frame with explicit black background for tmux compatibility
@@ -555,10 +568,14 @@ fn run_app(
                 }
             })
             .map_err(|e| TTTopError::Terminal(e.to_string()))?;
+        } // end if do_draw
 
         // Input always polls at 16 ms so keystrokes respond immediately.
         let input_poll = Duration::from_millis(16);
         if event::poll(input_poll).map_err(|e| TTTopError::Terminal(e.to_string()))? {
+            // Any input event redraws on the next iteration, regardless of the
+            // FPS cadence, so the screen reflects the keystroke immediately.
+            force_redraw = true;
             match event::read().map_err(|e| TTTopError::Terminal(e.to_string()))? {
                 Event::FocusGained | Event::FocusLost => {}
                 Event::Resize(_, _) => {
