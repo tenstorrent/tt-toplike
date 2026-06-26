@@ -3,6 +3,7 @@
 
 //! Workload detection, process monitoring, and inference classification.
 
+pub mod host_processes;
 pub mod inference;
 pub mod inference_match;
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
@@ -14,6 +15,7 @@ pub use inference::{
     state_color, state_label, Confidence, DeviceInferenceState, InferenceEngine, InferenceResult,
     PowerTrend, TelemetrySample,
 };
+pub use host_processes::{HostProcessMonitor, ProcRow, TtProcInfo};
 pub use inference_match::inference_match;
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 pub use process_monitor::{ProcessInfo, ProcessMonitor};
