@@ -292,7 +292,10 @@ impl Cli {
         } else if self.verbose {
             log::LevelFilter::Debug
         } else {
-            log::LevelFilter::Info
+            // Quiet by default: only surface problems (e.g. a requested backend's
+            // hardware/config being unavailable). Routine startup progress is
+            // Info/Debug and hidden unless `-v` is passed. `-q` silences entirely.
+            log::LevelFilter::Warn
         }
     }
 

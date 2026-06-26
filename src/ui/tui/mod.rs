@@ -114,6 +114,13 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
 
     log::info!("TUI started with {:?} backend", backend_type);
 
+    // Disable stderr log output BEFORE entering raw mode. Once the terminal is
+    // in raw mode, a stray `\n` from a log line doesn't return the cursor to
+    // column 0, so any log emitted between raw-mode-enable and this call would
+    // "staircase" diagonally across the screen. Logs still reach the in-app
+    // message buffer (shown in the Insights panel); stderr is re-enabled on exit.
+    crate::logging::disable_stderr();
+
     // Setup terminal
     enable_raw_mode().map_err(|e| {
         TTTopError::Terminal(format!(
@@ -127,9 +134,6 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     // performance issues (faster animation when mousing over the terminal)
     execute!(stdout, EnterAlternateScreen, EnableFocusChange)
         .map_err(|e| TTTopError::Terminal(e.to_string()))?;
-
-    // Disable stderr output to prevent log corruption in TUI
-    crate::logging::disable_stderr();
 
     let backend_term = CrosstermBackend::new(stdout);
     let mut terminal =

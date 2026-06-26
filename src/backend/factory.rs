@@ -126,8 +126,9 @@ fn create_auto_backend(
     }
     log::warn!("JSON backend failed, falling back to mock");
 
-    // Fallback to mock backend (always succeeds)
-    log::info!("No hardware backends available, using mock backend");
+    // Fallback to mock backend (always succeeds). This means auto-detect found
+    // no real hardware, which the user should see even at the default (Warn) level.
+    log::warn!("No hardware backends available, using mock backend");
     log::info!("Tip: Use --backend luwen for direct hardware access (requires PCI permissions)");
     let mut backend = MockBackend::with_config(cli.effective_mock_devices(), config);
     backend.init()?;
