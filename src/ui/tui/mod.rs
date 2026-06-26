@@ -2356,7 +2356,6 @@ const FLEET_HEIGHT_THRESHOLD: u16 = 30; // lines; beyond this we switch to compa
 ///
 /// Single source of truth so the two callers can never diverge on gap or
 /// compact-mode threshold.
-#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 fn panel_layout(n: usize, portrait_w: u16, area_width: u16) -> (u16, u16, usize) {
     let balanced_cols = ((n as f64).sqrt().ceil() as usize).max(1);
     let full_panel_w = portrait_w + 1 + 31; // gap=1, stats_w=31
@@ -2378,7 +2377,6 @@ fn panel_layout(n: usize, portrait_w: u16, area_width: u16) -> (u16, u16, usize)
 ///
 /// When the device count is large enough that full portraits would overflow the screen
 /// we switch to a compact fleet heat-map (one coloured cell per device).
-#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 fn device_panels_height(devices: &[crate::models::Device], area_width: u16) -> u16 {
     use crate::ui::tui::chip_portrait::portrait_dims;
     let n = devices.len().max(1);
@@ -2844,7 +2842,6 @@ fn render_kill_dialog(f: &mut Frame, area: Rect, kc: &KillConfirmState) {
 /// `cursor` is the currently highlighted device index — that cell is shown with
 /// a bright white `◉` instead of the normal block glyph so the user can see
 /// where Enter will zoom them in.  Press Enter to drill down to portrait view.
-#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 fn render_fleet_heatmap_panel(
     f: &mut Frame,
     area: Rect,
@@ -2994,7 +2991,6 @@ fn render_fleet_heatmap_panel(
 /// dispatches to `render_fleet_heatmap_panel` instead.
 /// `fleet_cursor` and `fleet_zoom_start` control galaxy-overview cursor highlighting
 /// and portrait drill-down zoom respectively.
-#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 fn render_device_panels(
     f: &mut Frame,
     area: Rect,
