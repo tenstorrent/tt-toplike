@@ -226,6 +226,10 @@ fn run_app(
     // data screens (where the draw is otherwise gated to the slow tick).
     let mut force_redraw = true;
 
+    // Adaptive frame-rate throttle — both flags default to false, so the
+    // default render cadence is unchanged (60 FPS anim, 10 FPS data).
+    let mut throttle_state = ThrottleState::new(cli.throttle, cli.idle_on_blur);
+
     // Live self-instrumentation — off by default, toggled with `P`.
     let mut perf_meter = PerfMeter::new();
     let mut show_perf = false;
@@ -351,7 +355,7 @@ fn run_app(
                 | DisplayMode::Arcade
         ) || (display_mode == DisplayMode::Defrag && defrag_is_animated);
         let render_interval = if is_anim_mode {
-            ui_poll_rate_anim
+            throttle_state.effective_anim_interval(ui_poll_rate_anim)
         } else {
             ui_poll_rate_data
         };
@@ -517,6 +521,10 @@ fn run_app(
                 None
             };
             let perf_arg = perf_status.as_deref();
+            // Compute throttle hint before the draw closure (borrow safety: status_hint()
+            // returns Option<&'static str> so no lifetime issue, but keep pattern consistent
+            // with perf_arg to avoid any future borrow conflicts inside the closure).
+            let throttle_hint = throttle_state.status_hint();
             let draw_start = Instant::now();
         terminal
             .draw(|f| {
@@ -577,7 +585,7 @@ fn run_app(
                 }
 
                 // ── Global status bar (all modes) ─────────────────────────
-                render_global_statusbar(f, backend, display_mode, perf_arg);
+                render_global_statusbar(f, backend, display_mode, perf_arg, throttle_hint);
 
                 // ── Command bar overlay (all modes) ───────────────────────
                 if cmd_mode || cmd_message.is_some() {
@@ -601,7 +609,14 @@ fn run_app(
             // FPS cadence, so the screen reflects the keystroke immediately.
             force_redraw = true;
             match event::read().map_err(|e| TTTopError::Terminal(e.to_string()))? {
-                Event::FocusGained | Event::FocusLost => {}
+                Event::FocusGained => {
+                    throttle_state.focused = true;
+                    force_redraw = true;
+                }
+                Event::FocusLost => {
+                    throttle_state.focused = false;
+                    force_redraw = true;
+                }
                 Event::Resize(_, _) => {
                     // Drop all size-dependent visualizations so they reinitialize
                     // at the new dimensions on the next loop iteration.
@@ -629,6 +644,7 @@ fn run_app(
                                     &mut ui_poll_rate_data,
                                     anim_cfg.sensitivity,
                                     &mut overlay,
+                                    &mut throttle_state,
                                 );
                                 if should_quit {
                                     return Ok(());
@@ -990,6 +1006,7 @@ fn run_app(
             host_cpu_pct = sys_monitor.global_cpu_usage();
             host_mem_used = sys_monitor.used_memory();
             host_mem_total = sys_monitor.total_memory();
+            throttle_state.update_load(host_cpu_pct);
             last_proc_rows_update = Instant::now();
         }
     }
@@ -1346,6 +1363,7 @@ fn render_global_statusbar(
     backend: &dyn TelemetryBackend,
     mode: DisplayMode,
     perf: Option<&str>,
+    throttle_hint: Option<&str>,
 ) {
     use crate::models::telemetry::parse_hex_or_dec;
 
@@ -1539,6 +1557,15 @@ fn render_global_statusbar(
         left.push(Span::styled(
             p.to_string(),
             Style::default().fg(colors::rgb(120, 120, 140)),
+        ));
+    }
+
+    // Throttle status hint (e.g. "⏷30" or "⏸2") shown dim when active.
+    if let Some(hint) = throttle_hint {
+        left.push(Span::styled("  ", Style::default().fg(sep_fg)));
+        left.push(Span::styled(
+            hint.to_string(),
+            Style::default().fg(colors::rgb(100, 100, 120)),
         ));
     }
 
@@ -2288,6 +2315,7 @@ fn execute_command(
     data_poll: &mut Duration,
     _sensitivity: f32,
     overlay: &mut Option<OverlayPanel>,
+    throttle_state: &mut ThrottleState,
 ) -> (String, bool, bool) {
     let parts: Vec<&str> = cmd.trim().splitn(2, ' ').collect();
     let verb = parts[0].trim_start_matches('/').to_lowercase();
@@ -2375,6 +2403,28 @@ fn execute_command(
                 Some(OverlayPanel::Help)
             };
             ("".to_string(), false, false) // panel shows the full content
+        }
+        "throttle" => {
+            throttle_state.throttle_on = !throttle_state.throttle_on;
+            (
+                format!(
+                    "load throttle: {}",
+                    if throttle_state.throttle_on { "on" } else { "off" }
+                ),
+                false,
+                false,
+            )
+        }
+        "idle-on-blur" | "idleonblur" => {
+            throttle_state.idle_on_blur = !throttle_state.idle_on_blur;
+            (
+                format!(
+                    "idle-on-blur: {}",
+                    if throttle_state.idle_on_blur { "on" } else { "off" }
+                ),
+                false,
+                false,
+            )
         }
         _ => (
             format!("unknown command: {}  (try /help or press ?)", verb),
@@ -3787,21 +3837,22 @@ fn render_grid_mode(f: &mut Frame, backend: &dyn TelemetryBackend) {
 mod cmd_tests {
     use super::*;
 
-    fn fresh() -> (DisplayMode, Duration, Duration, Option<OverlayPanel>) {
+    fn fresh() -> (DisplayMode, Duration, Duration, Option<OverlayPanel>, ThrottleState) {
         (
             DisplayMode::Insights,
             Duration::from_millis(16),
             Duration::from_millis(250),
             None,
+            ThrottleState::new(false, false),
         )
     }
 
     #[test]
     fn quit_verbs_set_should_quit() {
         for verb in &["quit", "q", "exit", "/quit", "/q", "/exit"] {
-            let (mut mode, mut ap, mut dp, mut ov) = fresh();
+            let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
             let (msg, is_err, should_quit) =
-                execute_command(verb, &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+                execute_command(verb, &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
             assert!(should_quit, "{verb} should set should_quit");
             assert!(!is_err, "{verb} should not be an error");
             assert!(msg.is_empty(), "{verb} message should be empty");
@@ -3820,9 +3871,9 @@ mod cmd_tests {
             ("mode defrag", DisplayMode::Defrag),
         ];
         for (cmd, expected) in cases {
-            let (mut mode, mut ap, mut dp, mut ov) = fresh();
+            let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
             let (_, is_err, should_quit) =
-                execute_command(cmd, &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+                execute_command(cmd, &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
             assert_eq!(mode, expected, "/{cmd}");
             assert!(!is_err);
             assert!(!should_quit);
@@ -3831,9 +3882,9 @@ mod cmd_tests {
 
     #[test]
     fn mode_command_unknown_arg_returns_error() {
-        let (mut mode, mut ap, mut dp, mut ov) = fresh();
+        let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
         let (_, is_err, should_quit) =
-            execute_command("mode bogus", &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+            execute_command("mode bogus", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
         assert!(is_err);
         assert!(!should_quit);
         assert_eq!(mode, DisplayMode::Insights, "mode unchanged on bad arg");
@@ -3849,33 +3900,35 @@ mod cmd_tests {
             ("", OverlayPanel::Help),
             ("explain", OverlayPanel::Explain),
         ] {
-            let (mut mode, mut ap, mut dp, mut ov) = fresh();
+            let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
             // First call: panel should appear.
-            execute_command(cmd, &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+            execute_command(cmd, &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
             assert_eq!(
                 ov,
                 Some(*expected_panel),
                 "/{cmd} should open {expected_panel:?}"
             );
             // Second call: panel should dismiss (toggle).
-            execute_command(cmd, &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+            execute_command(cmd, &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
             assert_eq!(ov, None, "/{cmd} second call should close panel");
         }
     }
 
     #[test]
     fn fps_and_datafps_commands() {
-        let (mut mode, mut ap, mut dp, mut ov) = fresh();
-        let (msg, is_err, _) = execute_command("fps 30", &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+        let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
+        let (msg, is_err, _) =
+            execute_command("fps 30", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
         assert!(!is_err, "fps 30 should succeed");
         assert!(msg.contains("30"));
         assert_eq!(ap, Duration::from_secs_f64(1.0 / 30.0));
 
-        let (_, is_err, _) = execute_command("fps 0", &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+        let (_, is_err, _) =
+            execute_command("fps 0", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
         assert!(is_err, "fps 0 out of range");
 
         let (msg, is_err, _) =
-            execute_command("datafps 10", &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+            execute_command("datafps 10", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
         assert!(!is_err);
         assert!(msg.contains("10"));
         assert_eq!(dp, Duration::from_secs_f64(1.0 / 10.0));
@@ -3883,9 +3936,9 @@ mod cmd_tests {
 
     #[test]
     fn unknown_command_returns_error() {
-        let (mut mode, mut ap, mut dp, mut ov) = fresh();
+        let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
         let (msg, is_err, should_quit) =
-            execute_command("boguscommand", &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+            execute_command("boguscommand", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
         assert!(is_err);
         assert!(!should_quit);
         assert!(
@@ -3897,10 +3950,38 @@ mod cmd_tests {
     #[test]
     fn slash_prefix_is_stripped() {
         // "/quit" should work identically to "quit" — the verb parser strips leading '/'.
-        let (mut mode, mut ap, mut dp, mut ov) = fresh();
+        let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
         let (_, _, should_quit) =
-            execute_command("/quit", &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+            execute_command("/quit", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
         assert!(should_quit);
+    }
+
+    #[test]
+    fn throttle_command_toggles() {
+        let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
+        assert!(!ts.throttle_on, "starts off");
+        let (msg, is_err, _) =
+            execute_command("throttle", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
+        assert!(!is_err);
+        assert!(ts.throttle_on, "toggled on");
+        assert!(msg.contains("on"));
+        // Toggle again
+        execute_command("throttle", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
+        assert!(!ts.throttle_on, "toggled off");
+    }
+
+    #[test]
+    fn idle_on_blur_command_toggles() {
+        let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
+        assert!(!ts.idle_on_blur, "starts off");
+        let (msg, is_err, _) =
+            execute_command("idle-on-blur", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
+        assert!(!is_err);
+        assert!(ts.idle_on_blur, "toggled on");
+        assert!(msg.contains("on"));
+        // Alias also works
+        execute_command("idleonblur", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
+        assert!(!ts.idle_on_blur, "toggled off via alias");
     }
 }
 
