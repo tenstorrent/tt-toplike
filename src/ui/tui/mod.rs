@@ -611,11 +611,9 @@ fn run_app(
             match event::read().map_err(|e| TTTopError::Terminal(e.to_string()))? {
                 Event::FocusGained => {
                     throttle_state.focused = true;
-                    force_redraw = true;
                 }
                 Event::FocusLost => {
                     throttle_state.focused = false;
-                    force_redraw = true;
                 }
                 Event::Resize(_, _) => {
                     // Drop all size-dependent visualizations so they reinitialize
@@ -1562,7 +1560,7 @@ fn render_global_statusbar(
 
     // Throttle status hint (e.g. "⏷30" or "⏸2") shown dim when active.
     if let Some(hint) = throttle_hint {
-        left.push(Span::styled("  ", Style::default().fg(sep_fg)));
+        left.push(Span::styled("  │  ", Style::default().fg(sep_fg)));
         left.push(Span::styled(
             hint.to_string(),
             Style::default().fg(colors::rgb(100, 100, 120)),
@@ -1775,6 +1773,8 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 row!(" /legend", "toggle legend panel", lbl),
                 row!(" /explain", "toggle explain panel", lbl),
                 row!(" /help", "toggle this panel", lbl),
+                row!(" /throttle", "throttle anim FPS under heavy load (60→30)", lbl),
+                row!(" /idle-on-blur", "drop to 2 FPS when terminal unfocused", lbl),
             ]
         }
 
@@ -2306,6 +2306,8 @@ fn explain_lines(
 /// /legend           toggle legend overlay      (hotkey: l)
 /// /explain          toggle explain overlay     (hotkey: !)
 /// /help             list commands              (hotkey: ?)
+/// /throttle         toggle anim FPS throttle under heavy CPU load (60→30)
+/// /idle-on-blur     toggle drop to 2 FPS when terminal loses focus
 /// ```
 /// Returns `(message, is_error, should_quit)`.
 fn execute_command(
