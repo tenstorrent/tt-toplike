@@ -175,6 +175,20 @@ pub struct Cli {
     /// Does not enter the TUI. Respects --mock / --host for the backend.
     #[arg(long)]
     pub bench: bool,
+
+    /// Throttle animation FPS when the host is under heavy load (opt-in).
+    ///
+    /// When set, animated modes drop from 60 to 30 FPS while system CPU is high
+    /// (≥85%, restored below 80%), yielding CPU to the monitored workload.
+    /// Toggle live with the `/throttle` command. Off by default.
+    #[arg(long)]
+    pub throttle: bool,
+
+    /// Drop animation to ~2 FPS while the terminal is unfocused (opt-in).
+    ///
+    /// Toggle live with the `/idle-on-blur` command. Off by default.
+    #[arg(long)]
+    pub idle_on_blur: bool,
 }
 
 /// Backend selection
@@ -371,6 +385,8 @@ impl Cli {
             bench: true,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            throttle: false,
+            idle_on_blur: false,
         }
     }
 
@@ -437,6 +453,8 @@ mod tests {
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Auto);
@@ -468,6 +486,8 @@ mod tests {
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Mock);
@@ -494,6 +514,8 @@ mod tests {
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Json);
@@ -520,6 +542,8 @@ mod tests {
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         assert!(cli.should_monitor_device(0));
@@ -550,6 +574,8 @@ mod tests {
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         assert_eq!(verbose_cli.log_level(), log::LevelFilter::Debug);
@@ -573,6 +599,8 @@ mod tests {
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         assert_eq!(quiet_cli.log_level(), log::LevelFilter::Off);
@@ -599,6 +627,8 @@ mod tests {
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         assert!(cli.validate().is_err());
@@ -625,6 +655,8 @@ mod tests {
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         assert_eq!(auto_cli.backend_name(), "Auto-detect");
@@ -648,6 +680,8 @@ mod tests {
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         assert_eq!(mock_cli.backend_name(), "Mock");
@@ -673,6 +707,8 @@ mod tests {
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            throttle: false,
+            idle_on_blur: false,
         }
     }
 

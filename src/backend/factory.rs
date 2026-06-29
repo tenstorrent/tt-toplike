@@ -287,6 +287,8 @@ mod tests {
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         let result = create_backend(BackendType::Mock, config, &cli);
