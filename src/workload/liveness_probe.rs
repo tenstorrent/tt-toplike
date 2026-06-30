@@ -66,15 +66,27 @@ fn probe_spec(label: &str) -> Option<ProbeSpec> {
             path: "/v1/models",
             judge: judge_data_nonempty, // {"object":"list","data":[...]}
         }),
+        // TT inference server is OpenAI-compatible; defaults to 8000 (often 800X).
+        // The actual port is discovered from the socket table at probe time, so
+        // the default here is only the last-resort fallback.
+        "tt-inference-server" => Some(ProbeSpec {
+            default_port: 8000,
+            path: "/v1/models",
+            judge: judge_data_nonempty,
+        }),
         _ => None,
     }
 }
 
-/// A resolved thing to probe: a detected runtime and the port to reach it on.
+/// A detected inference-server process worth probing. The render loop produces
+/// these cheaply (no socket I/O); the background thread resolves the actual port
+/// and probes. `pid` lets us discover the real listening port from the OS socket
+/// table, since the cmdline doesn't always carry `--port`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProbeTarget {
+pub struct DetectedRuntime {
     pub label: String,
-    pub port: u16,
+    pub pid: i32,
+    pub cmdline: String,
 }
 
 /// Cached outcome of one probe.
@@ -84,16 +96,20 @@ struct ProbeVerdict {
     observed_at: Instant,
 }
 
-/// Resolve the port for a detected runtime: prefer one parsed from its cmdline,
-/// else the runtime's conventional default. Returns `None` if the label has no
-/// probe spec (caller should skip it).
-pub fn resolve_target(label: &str, cmdline: &str) -> Option<ProbeTarget> {
+/// Resolve the port to probe a detected runtime on, most-trusted first:
+/// 1. the port the PID is *actually listening on* (from the OS socket table),
+/// 2. a `--port`/`host:port` parsed from its cmdline,
+/// 3. the runtime's conventional default.
+///
+/// `discovered` is the socket-table result (see [`listening_port_for_pid`]);
+/// pass `None` where socket inspection isn't available (e.g. non-Linux).
+fn resolve_port(label: &str, cmdline: &str, discovered: Option<u16>) -> Option<u16> {
     let spec = probe_spec(label)?;
-    let port = parse_port_from_cmdline(cmdline).unwrap_or(spec.default_port);
-    Some(ProbeTarget {
-        label: label.to_string(),
-        port,
-    })
+    Some(
+        discovered
+            .or_else(|| parse_port_from_cmdline(cmdline))
+            .unwrap_or(spec.default_port),
+    )
 }
 
 /// Pull a port out of a server cmdline: `--port 8000`, `--port=8000`, or a
@@ -123,6 +139,104 @@ pub fn parse_port_from_cmdline(cmdline: &str) -> Option<u16> {
         }
     }
     None
+}
+
+// ── Listening-port discovery (the "netstat" part) ───────────────────────────
+//
+// We map a PID to the TCP port it's actually listening on — the same join that
+// `netstat`/`ss -ltnp` perform — but by reading `/proc` directly (no subprocess):
+//   1. `/proc/net/tcp{,6}` gives LISTEN sockets as (socket inode → local port).
+//   2. `/proc/<pid>/fd/*` symlinks resolve to `socket:[inode]` for that PID.
+// Intersect the two and we have the PID's listening port(s). Linux-only; other
+// platforms return `None` and resolution falls back to cmdline/default.
+
+/// Parse `/proc/net/tcp` (or `tcp6`) contents into `socket inode → local port`,
+/// keeping only sockets in the LISTEN state (`st == 0A`). Pure, so it can be
+/// unit-tested against captured fixtures without touching `/proc`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_listen_table(contents: &str) -> HashMap<u64, u16> {
+    let mut map = HashMap::new();
+    // Skip the header line; each data line is whitespace-separated columns:
+    //   sl local_address rem_address st ... uid timeout inode ...
+    //   1  [1]           [2]         [3]            [9: inode]
+    for line in contents.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 10 || cols[3] != "0A" {
+            continue; // not enough fields, or not a LISTEN socket
+        }
+        // local_address is "HEXIP:HEXPORT"; we only need the port.
+        let Some((_, port_hex)) = cols[1].rsplit_once(':') else {
+            continue;
+        };
+        let (Ok(port), Ok(inode)) = (u16::from_str_radix(port_hex, 16), cols[9].parse::<u64>())
+        else {
+            continue;
+        };
+        map.insert(inode, port);
+    }
+    map
+}
+
+/// The TCP port `pid` is listening on, if any, using the prebuilt LISTEN
+/// inode→port table. Returns the lowest matching port for determinism when a
+/// process holds several listeners.
+#[cfg(target_os = "linux")]
+fn listening_port_for_pid(pid: i32, listen_table: &HashMap<u64, u16>) -> Option<u16> {
+    use std::fs;
+    let fd_dir = format!("/proc/{pid}/fd");
+    let mut best: Option<u16> = None;
+    // Permission denied (another user's process) just yields no port → fallback.
+    for entry in fs::read_dir(fd_dir).ok()?.flatten() {
+        let Ok(link) = fs::read_link(entry.path()) else {
+            continue;
+        };
+        // Symlink target looks like "socket:[12345]".
+        let s = link.to_string_lossy();
+        let Some(inode) = s
+            .strip_prefix("socket:[")
+            .and_then(|r| r.strip_suffix(']'))
+            .and_then(|n| n.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        if let Some(&port) = listen_table.get(&inode) {
+            best = Some(best.map_or(port, |b| b.min(port)));
+        }
+    }
+    best
+}
+
+/// Build the LISTEN inode→port table from the live socket tables. Linux reads
+/// `/proc/net/tcp` + `tcp6`; other platforms return an empty table (callers then
+/// fall back to cmdline/default ports).
+fn load_listen_table() -> HashMap<u64, u16> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut map = HashMap::new();
+        for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                map.extend(parse_listen_table(&contents));
+            }
+        }
+        map
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        HashMap::new()
+    }
+}
+
+/// Discover a PID's listening port. Linux uses the socket table; elsewhere there
+/// is no `/proc`, so we report nothing and let cmdline/default win.
+fn discover_port(_pid: i32, _listen_table: &HashMap<u64, u16>) -> Option<u16> {
+    #[cfg(target_os = "linux")]
+    {
+        listening_port_for_pid(_pid, _listen_table)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
 }
 
 // ── HTTP (minimal, blocking, localhost) ────────────────────────────────────
@@ -175,11 +289,11 @@ fn http_get_localhost(port: u16, path: &str, timeout: Duration) -> std::io::Resu
     Ok(buf)
 }
 
-/// Probe one target. `Some(active)` on a clean response, `None` on any error /
-/// unknown label so the caller falls back to the cheap tier.
-fn probe_once(target: &ProbeTarget) -> Option<bool> {
-    let spec = probe_spec(&target.label)?;
-    match http_get_localhost(target.port, spec.path, PROBE_TIMEOUT) {
+/// Probe one runtime on a resolved port. `Some(active)` on a clean response,
+/// `None` on any error / unknown label so the caller falls back to the cheap tier.
+fn probe_once(label: &str, port: u16) -> Option<bool> {
+    let spec = probe_spec(label)?;
+    match http_get_localhost(port, spec.path, PROBE_TIMEOUT) {
         Ok(resp) => Some((spec.judge)(
             http_status(&resp).unwrap_or(0),
             http_body(&resp),
@@ -202,46 +316,55 @@ fn verdict_is_fresh(age: Duration) -> bool {
 /// exits on its own.
 pub struct LivenessProber {
     cache: Arc<ArcSwap<HashMap<String, ProbeVerdict>>>,
-    tx: Sender<Vec<ProbeTarget>>,
+    tx: Sender<Vec<DetectedRuntime>>,
 }
 
 impl LivenessProber {
-    /// Spawn the background thread. The thread coalesces queued target updates to
-    /// the latest, probes at most once per `PROBE_INTERVAL`, and stores results.
+    /// Spawn the background thread. The thread coalesces queued detections to the
+    /// latest set, then at most once per `PROBE_INTERVAL` discovers each runtime's
+    /// listening port from the socket table and probes it. All socket reads and
+    /// network I/O happen here, never on the render path.
     pub fn spawn() -> Self {
         let cache = Arc::new(ArcSwap::from_pointee(HashMap::new()));
-        let (tx, rx) = mpsc::channel::<Vec<ProbeTarget>>();
+        let (tx, rx) = mpsc::channel::<Vec<DetectedRuntime>>();
         let cache_bg = Arc::clone(&cache);
 
         // Detached worker: exits when `tx` (and thus all senders) drops.
         let _ = std::thread::Builder::new()
             .name("tt-liveness-probe".into())
             .spawn(move || {
-                let mut targets: Vec<ProbeTarget> = Vec::new();
+                let mut detected: Vec<DetectedRuntime> = Vec::new();
                 let mut last_probe: Option<Instant> = None;
                 loop {
                     match rx.recv_timeout(PROBE_INTERVAL) {
-                        Ok(mut t) => {
+                        Ok(mut d) => {
                             // Drain any backlog; only the most recent set matters.
                             while let Ok(newer) = rx.try_recv() {
-                                t = newer;
+                                d = newer;
                             }
-                            targets = t;
+                            detected = d;
                         }
                         Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => break,
                     }
 
                     let due = last_probe.is_none_or(|l| l.elapsed() >= PROBE_INTERVAL);
-                    if targets.is_empty() || !due {
+                    if detected.is_empty() || !due {
                         continue;
                     }
 
+                    // Build the LISTEN socket table once per cycle (the "netstat"
+                    // join), then resolve + probe each detected runtime.
+                    let listen_table = load_listen_table();
                     let mut map = HashMap::new();
-                    for t in &targets {
-                        if let Some(active) = probe_once(t) {
+                    for d in &detected {
+                        let discovered = discover_port(d.pid, &listen_table);
+                        let Some(port) = resolve_port(&d.label, &d.cmdline, discovered) else {
+                            continue; // no probe spec for this label
+                        };
+                        if let Some(active) = probe_once(&d.label, port) {
                             map.insert(
-                                t.label.clone(),
+                                d.label.clone(),
                                 ProbeVerdict {
                                     active,
                                     observed_at: Instant::now(),
@@ -259,8 +382,8 @@ impl LivenessProber {
 
     /// Hand the worker the runtimes detected this cycle. Non-blocking; a dead
     /// worker just means the send is dropped.
-    pub fn submit(&self, targets: Vec<ProbeTarget>) {
-        let _ = self.tx.send(targets);
+    pub fn submit(&self, detected: Vec<DetectedRuntime>) {
+        let _ = self.tx.send(detected);
     }
 
     /// Snapshot of `label → active` for verdicts still within `MAX_AGE`. Stale or
@@ -298,23 +421,42 @@ mod tests {
     }
 
     #[test]
-    fn resolve_target_uses_cmdline_then_default() {
+    fn resolve_port_precedence_discovered_then_cmdline_then_default() {
+        // 1. A discovered (socket-table) port wins over everything.
         assert_eq!(
-            resolve_target("vllm", "vllm serve m --port 8123"),
-            Some(ProbeTarget {
-                label: "vllm".into(),
-                port: 8123
-            })
+            resolve_port("tt-inference-server", "server --port 8001", Some(8004)),
+            Some(8004)
+        );
+        // 2. No discovery ⇒ cmdline port.
+        assert_eq!(
+            resolve_port("vllm", "vllm serve m --port 8123", None),
+            Some(8123)
+        );
+        // 3. No discovery, no cmdline port ⇒ conventional default.
+        assert_eq!(
+            resolve_port("ollama", "/usr/local/bin/ollama serve", None),
+            Some(11434)
         );
         assert_eq!(
-            resolve_target("ollama", "/usr/local/bin/ollama serve"),
-            Some(ProbeTarget {
-                label: "ollama".into(),
-                port: 11434 // conventional default
-            })
+            resolve_port("tt-inference-server", "tt-inference-server", None),
+            Some(8000)
         );
-        // No probe spec ⇒ not a probe target.
-        assert_eq!(resolve_target("mlx", "mlx_lm.server"), None);
+        // No probe spec ⇒ nothing to resolve.
+        assert_eq!(resolve_port("mlx", "mlx_lm.server", None), None);
+    }
+
+    #[test]
+    fn parses_listen_table_from_proc_net_tcp() {
+        // Two real-shaped rows: a LISTEN on 0x1F90 (8080) inode 54321, and an
+        // ESTABLISHED row (st 01) that must be ignored.
+        let sample = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 54321 1 0000 100 0 0 10 0
+   1: 0100007F:8AE2 0100007F:1F90 01 00000000:00000000 00:00000000 00000000  1000        0 99999 1 0000 20 0 0 10 0";
+        let table = parse_listen_table(sample);
+        assert_eq!(table.get(&54321), Some(&8080));
+        assert_eq!(table.get(&99999), None, "non-LISTEN sockets are excluded");
+        assert_eq!(table.len(), 1);
     }
 
     #[test]
@@ -357,6 +499,7 @@ mod tests {
         assert!(probe_spec("triton").is_none());
         assert!(probe_spec("ollama").is_some());
         assert!(probe_spec("vllm").is_some());
+        assert!(probe_spec("tt-inference-server").is_some());
     }
 
     #[test]
@@ -371,10 +514,11 @@ mod tests {
         let p = LivenessProber::spawn();
         // No probes have run, so no verdicts yet — callers fall back to cheap tier.
         assert!(p.fresh_verdicts().is_empty());
-        // Submitting targets must not block or panic.
-        p.submit(vec![ProbeTarget {
+        // Submitting detections must not block or panic.
+        p.submit(vec![DetectedRuntime {
             label: "vllm".into(),
-            port: 65000, // nothing listening; probe will error → no verdict
+            pid: 1,
+            cmdline: "vllm serve m --port 65000".into(), // nothing listening → no verdict
         }]);
     }
 }

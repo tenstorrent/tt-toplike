@@ -111,15 +111,15 @@ impl HostProcessMonitor {
         );
     }
 
-    /// The inference *server* runtimes detected in the current snapshot, resolved
-    /// to `(label, port)` probe targets (deduped by label). Feed these to a
-    /// [`crate::workload::LivenessProber`] each refresh — confirm-only, so we only
-    /// ever probe a port belonging to a process we actually saw.
-    pub fn detected_runtime_targets(&self) -> Vec<crate::workload::ProbeTarget> {
-        use crate::workload::liveness_probe::resolve_target;
+    /// The inference runtimes detected in the current snapshot (deduped by label),
+    /// as cheap `(label, pid, cmdline)` records — no socket or network I/O here.
+    /// Feed these to a [`crate::workload::LivenessProber`] each refresh; the
+    /// prober's background thread resolves each one's real listening port and
+    /// probes it. Confirm-only: every record corresponds to a process we saw.
+    pub fn detected_runtimes(&self) -> Vec<crate::workload::DetectedRuntime> {
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
-        for p in self.sys.processes().values() {
+        for (pid, p) in self.sys.processes() {
             let name = p.name().to_string_lossy().to_string();
             let cmdline = p
                 .cmd()
@@ -129,9 +129,11 @@ impl HostProcessMonitor {
                 .join(" ");
             if let Some(label) = inference_match(&name, &cmdline) {
                 if seen.insert(label) {
-                    if let Some(target) = resolve_target(label, &cmdline) {
-                        out.push(target);
-                    }
+                    out.push(crate::workload::DetectedRuntime {
+                        label: label.to_string(),
+                        pid: i32::try_from(pid.as_u32()).unwrap_or(i32::MAX),
+                        cmdline,
+                    });
                 }
             }
         }

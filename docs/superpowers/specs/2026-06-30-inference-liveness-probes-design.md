@@ -46,9 +46,13 @@ vllm             127.0.0.1:8000        GET /v1/models        JSON .data[] non-em
 tt-inference-... 127.0.0.1:<port>      GET /health or /v1/models  200 OK / models present
 ```
 
-- Port discovery: prefer a port parsed from the detected process cmdline
-  (`--port N`); fall back to the runtime's conventional default. Confirm-only means
-  we only ever hit a port belonging to a process we already saw.
+- Port discovery (most-trusted first): the port the PID is **actually listening
+  on**, read from the OS socket table (`/proc/net/tcp{,6}` joined to
+  `/proc/<pid>/fd` socket inodes — the same join `netstat`/`ss -ltnp` do, but no
+  subprocess); then a `--port`/`host:port` from the cmdline; then the runtime's
+  conventional default. Socket discovery is Linux-only (other platforms fall back
+  to cmdline/default) and runs on the background thread, not the render path.
+  Confirm-only means we only ever hit a port belonging to a process we already saw.
 - Each probe is **pure where possible**: a free function `parse_<runtime>_active(&[u8]) -> bool`
   over the raw response body, unit-tested with captured fixtures. Only the socket
   read/write is impure.

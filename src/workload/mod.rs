@@ -18,7 +18,7 @@ pub use inference::{
     PowerTrend, TelemetrySample,
 };
 pub use inference_match::inference_match;
-pub use liveness_probe::{LivenessProber, ProbeTarget};
+pub use liveness_probe::{DetectedRuntime, LivenessProber};
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 pub use process_monitor::{ProcessInfo, ProcessMonitor};
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]

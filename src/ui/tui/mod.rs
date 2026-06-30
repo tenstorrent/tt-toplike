@@ -249,7 +249,7 @@ fn run_app(
     // their local API off the render path. First cycle has no verdicts yet, so
     // rows() relies on the cheap snapshot tier until the worker reports back.
     let liveness_prober = crate::workload::LivenessProber::spawn();
-    liveness_prober.submit(host_proc_monitor.detected_runtime_targets());
+    liveness_prober.submit(host_proc_monitor.detected_runtimes());
     let mut proc_rows: Vec<ProcRow> =
         host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts());
     let mut last_proc_rows_update = Instant::now();
@@ -1001,7 +1001,7 @@ fn run_app(
         if last_proc_rows_update.elapsed() >= Duration::from_secs(2) {
             host_proc_monitor.update();
             // Refresh the prober's target set; read back last cycle's verdicts.
-            liveness_prober.submit(host_proc_monitor.detected_runtime_targets());
+            liveness_prober.submit(host_proc_monitor.detected_runtimes());
             proc_rows =
                 host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts());
 

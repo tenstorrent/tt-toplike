@@ -12,6 +12,12 @@
 /// least-specific so the first hit wins.
 const RUNTIMES: &[(&str, &[&str])] = &[
     ("ollama", &["ollama"]),
+    // Listed before vllm: a TT inference server often runs vllm internally, but
+    // we want the more-specific tt label to win when its own name is present.
+    (
+        "tt-inference-server",
+        &["tt-inference-server", "tt_inference_server"],
+    ),
     ("vllm", &["vllm"]),
     (
         "llama.cpp",
