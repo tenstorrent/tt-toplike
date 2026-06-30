@@ -69,7 +69,6 @@
     clippy::unused_enumerate_index,
     clippy::unwrap_or_default
 )]
-
 // On non-Linux hosts (e.g. macOS for `--host`/`--mock` development) the procfs-,
 // hwmon-, and tt-smi-backed code paths are configured out. Several helpers that
 // are only reachable from those Linux paths (HybridBackend JSON parsing, the

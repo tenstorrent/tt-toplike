@@ -327,9 +327,15 @@ fn run_app(
     // Cross-platform: the unified render path reads these. They're only mutated
     // by the Linux-gated process-navigation / kill key handlers; off-Linux they
     // stay at their defaults (cursor 0, no kill dialog).
-    #[cfg_attr(not(all(target_os = "linux", feature = "linux-procfs")), allow(unused_mut))]
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "linux-procfs")),
+        allow(unused_mut)
+    )]
     let mut process_cursor: usize = 0;
-    #[cfg_attr(not(all(target_os = "linux", feature = "linux-procfs")), allow(unused_mut))]
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "linux-procfs")),
+        allow(unused_mut)
+    )]
     let mut kill_confirm: Option<KillConfirmState> = None;
 
     // Fleet navigation state (Insights with 32+ devices).
@@ -526,79 +532,79 @@ fn run_app(
             // with perf_arg to avoid any future borrow conflicts inside the closure).
             let throttle_hint = throttle_state.status_hint();
             let draw_start = Instant::now();
-        terminal
-            .draw(|f| {
-                // Clear frame with explicit black background for tmux compatibility
-                f.render_widget(
-                    Block::default().style(Style::default().bg(colors::rgb(0, 0, 0))),
-                    f.area(),
-                );
+            terminal
+                .draw(|f| {
+                    // Clear frame with explicit black background for tmux compatibility
+                    f.render_widget(
+                        Block::default().style(Style::default().bg(colors::rgb(0, 0, 0))),
+                        f.area(),
+                    );
 
-                match display_mode {
-                    DisplayMode::Insights => {
-                        render_insights(
-                            f,
-                            backend,
-                            &proc_rows,
-                            process_cursor,
-                            kill_confirm.as_ref(),
-                            cli,
-                            &portrait_particles,
-                            &portrait_baseline,
-                            fleet_cursor,
-                            fleet_zoom_start,
-                            host_cpu_pct,
-                            host_mem_used,
-                            host_mem_total,
-                            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-                            &serving_metrics,
-                        );
-                    }
-                    DisplayMode::Grid => {
-                        render_grid_mode(f, backend);
-                    }
-                    DisplayMode::Starfield => {
-                        if let Some(ref sf) = starfield {
-                            ui_visualization(f, sf, backend);
+                    match display_mode {
+                        DisplayMode::Insights => {
+                            render_insights(
+                                f,
+                                backend,
+                                &proc_rows,
+                                process_cursor,
+                                kill_confirm.as_ref(),
+                                cli,
+                                &portrait_particles,
+                                &portrait_baseline,
+                                fleet_cursor,
+                                fleet_zoom_start,
+                                host_cpu_pct,
+                                host_mem_used,
+                                host_mem_total,
+                                #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+                                &serving_metrics,
+                            );
+                        }
+                        DisplayMode::Grid => {
+                            render_grid_mode(f, backend);
+                        }
+                        DisplayMode::Starfield => {
+                            if let Some(ref sf) = starfield {
+                                ui_visualization(f, sf, backend);
+                            }
+                        }
+                        DisplayMode::MemoryCastle => {
+                            if let Some(ref tg) = memory_castle {
+                                ui_memory_castle(f, tg, backend);
+                            }
+                        }
+                        DisplayMode::MemoryFlow => {
+                            if let Some(ref mf) = memory_flow {
+                                ui_memory_flow(f, mf, backend);
+                            }
+                        }
+                        DisplayMode::Arcade => {
+                            if let Some(ref arc) = arcade {
+                                ui_arcade(f, arc, backend);
+                            }
+                        }
+                        DisplayMode::Defrag => {
+                            if let Some(ref dv) = defrag {
+                                ui_defrag(f, dv, backend);
+                            }
                         }
                     }
-                    DisplayMode::MemoryCastle => {
-                        if let Some(ref tg) = memory_castle {
-                            ui_memory_castle(f, tg, backend);
-                        }
-                    }
-                    DisplayMode::MemoryFlow => {
-                        if let Some(ref mf) = memory_flow {
-                            ui_memory_flow(f, mf, backend);
-                        }
-                    }
-                    DisplayMode::Arcade => {
-                        if let Some(ref arc) = arcade {
-                            ui_arcade(f, arc, backend);
-                        }
-                    }
-                    DisplayMode::Defrag => {
-                        if let Some(ref dv) = defrag {
-                            ui_defrag(f, dv, backend);
-                        }
-                    }
-                }
 
-                // ── Global status bar (all modes) ─────────────────────────
-                render_global_statusbar(f, backend, display_mode, perf_arg, throttle_hint);
+                    // ── Global status bar (all modes) ─────────────────────────
+                    render_global_statusbar(f, backend, display_mode, perf_arg, throttle_hint);
 
-                // ── Command bar overlay (all modes) ───────────────────────
-                if cmd_mode || cmd_message.is_some() {
-                    let msg_ref = cmd_message.as_ref().map(|(s, e)| (s.as_str(), *e));
-                    render_command_bar(f, &cmd_buf, msg_ref);
-                }
+                    // ── Command bar overlay (all modes) ───────────────────────
+                    if cmd_mode || cmd_message.is_some() {
+                        let msg_ref = cmd_message.as_ref().map(|(s, e)| (s.as_str(), *e));
+                        render_command_bar(f, &cmd_buf, msg_ref);
+                    }
 
-                // ── Floating overlay panel (legend / help / explain) ───────
-                if let Some(kind) = overlay {
-                    render_overlay_panel(f, kind, display_mode);
-                }
-            })
-            .map_err(|e| TTTopError::Terminal(e.to_string()))?;
+                    // ── Floating overlay panel (legend / help / explain) ───────
+                    if let Some(kind) = overlay {
+                        render_overlay_panel(f, kind, display_mode);
+                    }
+                })
+                .map_err(|e| TTTopError::Terminal(e.to_string()))?;
             perf_meter.record_frame(draw_start.elapsed());
         } // end if do_draw
 
@@ -726,7 +732,10 @@ fn run_app(
                                     } else {
                                         return Ok(());
                                     }
-                                    #[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
+                                    #[cfg(not(all(
+                                        target_os = "linux",
+                                        feature = "linux-procfs"
+                                    )))]
                                     return Ok(());
                                 }
                             }
@@ -1773,8 +1782,16 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 row!(" /legend", "toggle legend panel", lbl),
                 row!(" /explain", "toggle explain panel", lbl),
                 row!(" /help", "toggle this panel", lbl),
-                row!(" /throttle", "throttle anim FPS under heavy load (60→30)", lbl),
-                row!(" /idle-on-blur", "drop to 2 FPS when terminal unfocused", lbl),
+                row!(
+                    " /throttle",
+                    "throttle anim FPS under heavy load (60→30)",
+                    lbl
+                ),
+                row!(
+                    " /idle-on-blur",
+                    "drop to 2 FPS when terminal unfocused",
+                    lbl
+                ),
             ]
         }
 
@@ -2411,7 +2428,11 @@ fn execute_command(
             (
                 format!(
                     "load throttle: {}",
-                    if throttle_state.throttle_on { "on" } else { "off" }
+                    if throttle_state.throttle_on {
+                        "on"
+                    } else {
+                        "off"
+                    }
                 ),
                 false,
                 false,
@@ -2422,7 +2443,11 @@ fn execute_command(
             (
                 format!(
                     "idle-on-blur: {}",
-                    if throttle_state.idle_on_blur { "on" } else { "off" }
+                    if throttle_state.idle_on_blur {
+                        "on"
+                    } else {
+                        "off"
+                    }
                 ),
                 false,
                 false,
@@ -2589,10 +2614,8 @@ fn render_insights(
     host_cpu_pct: f32,
     host_mem_used: u64,
     host_mem_total: u64,
-    #[cfg(all(target_os = "linux", feature = "linux-procfs"))] serving_metrics: &std::collections::HashMap<
-        i32,
-        ServingMetrics,
-    >,
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+    serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
 ) {
     let area = f.area();
     let devices = backend.devices();
@@ -2707,10 +2730,8 @@ fn render_process_panel(
     host_cpu_pct: f32,
     host_mem_used: u64,
     host_mem_total: u64,
-    #[cfg(all(target_os = "linux", feature = "linux-procfs"))] serving_metrics: &std::collections::HashMap<
-        i32,
-        ServingMetrics,
-    >,
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+    serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
 ) {
     use ratatui::style::{Color, Style};
     use ratatui::text::{Line, Span};
@@ -3839,7 +3860,13 @@ fn render_grid_mode(f: &mut Frame, backend: &dyn TelemetryBackend) {
 mod cmd_tests {
     use super::*;
 
-    fn fresh() -> (DisplayMode, Duration, Duration, Option<OverlayPanel>, ThrottleState) {
+    fn fresh() -> (
+        DisplayMode,
+        Duration,
+        Duration,
+        Option<OverlayPanel>,
+        ThrottleState,
+    ) {
         (
             DisplayMode::Insights,
             Duration::from_millis(16),
@@ -3885,8 +3912,15 @@ mod cmd_tests {
     #[test]
     fn mode_command_unknown_arg_returns_error() {
         let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
-        let (_, is_err, should_quit) =
-            execute_command("mode bogus", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
+        let (_, is_err, should_quit) = execute_command(
+            "mode bogus",
+            &mut mode,
+            &mut ap,
+            &mut dp,
+            1.0,
+            &mut ov,
+            &mut ts,
+        );
         assert!(is_err);
         assert!(!should_quit);
         assert_eq!(mode, DisplayMode::Insights, "mode unchanged on bad arg");
@@ -3929,8 +3963,15 @@ mod cmd_tests {
             execute_command("fps 0", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
         assert!(is_err, "fps 0 out of range");
 
-        let (msg, is_err, _) =
-            execute_command("datafps 10", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
+        let (msg, is_err, _) = execute_command(
+            "datafps 10",
+            &mut mode,
+            &mut ap,
+            &mut dp,
+            1.0,
+            &mut ov,
+            &mut ts,
+        );
         assert!(!is_err);
         assert!(msg.contains("10"));
         assert_eq!(dp, Duration::from_secs_f64(1.0 / 10.0));
@@ -3939,8 +3980,15 @@ mod cmd_tests {
     #[test]
     fn unknown_command_returns_error() {
         let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
-        let (msg, is_err, should_quit) =
-            execute_command("boguscommand", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
+        let (msg, is_err, should_quit) = execute_command(
+            "boguscommand",
+            &mut mode,
+            &mut ap,
+            &mut dp,
+            1.0,
+            &mut ov,
+            &mut ts,
+        );
         assert!(is_err);
         assert!(!should_quit);
         assert!(
@@ -3962,13 +4010,16 @@ mod cmd_tests {
     fn throttle_command_toggles() {
         let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
         assert!(!ts.throttle_on, "starts off");
-        let (msg, is_err, _) =
-            execute_command("throttle", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
+        let (msg, is_err, _) = execute_command(
+            "throttle", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts,
+        );
         assert!(!is_err);
         assert!(ts.throttle_on, "toggled on");
         assert!(msg.contains("on"));
         // Toggle again
-        execute_command("throttle", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
+        execute_command(
+            "throttle", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts,
+        );
         assert!(!ts.throttle_on, "toggled off");
     }
 
@@ -3976,13 +4027,28 @@ mod cmd_tests {
     fn idle_on_blur_command_toggles() {
         let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
         assert!(!ts.idle_on_blur, "starts off");
-        let (msg, is_err, _) =
-            execute_command("idle-on-blur", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
+        let (msg, is_err, _) = execute_command(
+            "idle-on-blur",
+            &mut mode,
+            &mut ap,
+            &mut dp,
+            1.0,
+            &mut ov,
+            &mut ts,
+        );
         assert!(!is_err);
         assert!(ts.idle_on_blur, "toggled on");
         assert!(msg.contains("on"));
         // Alias also works
-        execute_command("idleonblur", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
+        execute_command(
+            "idleonblur",
+            &mut mode,
+            &mut ap,
+            &mut dp,
+            1.0,
+            &mut ov,
+            &mut ts,
+        );
         assert!(!ts.idle_on_blur, "toggled off via alias");
     }
 }

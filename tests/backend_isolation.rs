@@ -117,7 +117,10 @@ fn host_device_uses_overrides_to_become_renderable() {
     assert!(d.grid_override.is_some(), "host must set a grid override");
     assert_eq!(d.channels_override, Some(4));
     let (rows, cols) = d.tensix_grid();
-    assert!(rows > 0 && cols > 0, "host grid must be non-empty: {rows}x{cols}");
+    assert!(
+        rows > 0 && cols > 0,
+        "host grid must be non-empty: {rows}x{cols}"
+    );
     assert!(d.memory_channels() >= 1);
 }
 
@@ -166,7 +169,10 @@ fn macos_accelerator_devices_render_safely() {
 fn inference_match_tags_known_runtimes_via_public_api() {
     use tt_toplike::workload::inference_match;
     assert_eq!(inference_match("ollama", "ollama serve"), Some("ollama"));
-    assert_eq!(inference_match("WindowServer", "/System/WindowServer"), None);
+    assert_eq!(
+        inference_match("WindowServer", "/System/WindowServer"),
+        None
+    );
 }
 
 #[test]
@@ -191,8 +197,19 @@ fn render_bench_produces_a_row_per_mode() {
     let results = tt_toplike::ui::run_render_bench(&b, 5, 120, 40);
     // One row for each screen the run loop can show.
     let modes: Vec<&str> = results.iter().map(|r| r.mode).collect();
-    for expected in ["insights", "grid", "starfield", "memory-castle", "memory-flow", "arcade", "defrag"] {
-        assert!(modes.contains(&expected), "missing bench row for {expected}: {modes:?}");
+    for expected in [
+        "insights",
+        "grid",
+        "starfield",
+        "memory-castle",
+        "memory-flow",
+        "arcade",
+        "defrag",
+    ] {
+        assert!(
+            modes.contains(&expected),
+            "missing bench row for {expected}: {modes:?}"
+        );
     }
     // Every row rendered the requested frame count and produced finite timings.
     for r in &results {

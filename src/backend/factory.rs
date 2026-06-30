@@ -243,8 +243,14 @@ mod tests {
     #[test]
     fn test_next_backend_cycle_non_linux() {
         // Json → Luwen → Mock → Host → Json
-        assert!(matches!(next_backend(BackendType::Json), BackendType::Luwen));
-        assert!(matches!(next_backend(BackendType::Luwen), BackendType::Mock));
+        assert!(matches!(
+            next_backend(BackendType::Json),
+            BackendType::Luwen
+        ));
+        assert!(matches!(
+            next_backend(BackendType::Luwen),
+            BackendType::Mock
+        ));
         assert!(matches!(next_backend(BackendType::Mock), BackendType::Host));
         assert!(matches!(next_backend(BackendType::Host), BackendType::Json));
         // Auto resolves into the cycle at JSON (no Hybrid off-Linux).

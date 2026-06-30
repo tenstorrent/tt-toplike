@@ -114,7 +114,14 @@ mod tests {
     use super::*;
 
     fn row(pid: i32, cpu: f32, inf: Option<&'static str>) -> ProcRow {
-        ProcRow { pid, name: format!("p{pid}"), cpu_pct: cpu, mem_bytes: 0, inference: inf, tt: None }
+        ProcRow {
+            pid,
+            name: format!("p{pid}"),
+            cpu_pct: cpu,
+            mem_bytes: 0,
+            inference: inf,
+            tt: None,
+        }
     }
 
     #[test]
@@ -136,6 +143,9 @@ mod tests {
         let mut all: Vec<ProcRow> = (10..20).map(|p| row(p, 80.0, None)).collect();
         all.push(row(99, 0.1, Some("mlx")));
         let out = select_rows(all, 3);
-        assert!(out.iter().any(|r| r.pid == 99), "matched process must be kept");
+        assert!(
+            out.iter().any(|r| r.pid == 99),
+            "matched process must be kept"
+        );
     }
 }

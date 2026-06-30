@@ -11,11 +11,11 @@ pub mod process_monitor;
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 pub mod serving;
 
+pub use host_processes::{HostProcessMonitor, ProcRow, TtProcInfo};
 pub use inference::{
     state_color, state_label, Confidence, DeviceInferenceState, InferenceEngine, InferenceResult,
     PowerTrend, TelemetrySample,
 };
-pub use host_processes::{HostProcessMonitor, ProcRow, TtProcInfo};
 pub use inference_match::inference_match;
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 pub use process_monitor::{ProcessInfo, ProcessMonitor};

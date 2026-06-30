@@ -60,8 +60,7 @@ fn main() {
         match tt_toplike::backend::factory::create_backend(backend_type, config, &cli) {
             Ok(mut backend) => {
                 let _ = backend.update();
-                let results =
-                    tt_toplike::ui::run_render_bench(backend.as_ref(), 120, 120, 40);
+                let results = tt_toplike::ui::run_render_bench(backend.as_ref(), 120, 120, 40);
                 print!("{}", tt_toplike::ui::tui::bench::format_table(&results));
             }
             Err(e) => eprintln!("bench: backend init failed: {e}"),

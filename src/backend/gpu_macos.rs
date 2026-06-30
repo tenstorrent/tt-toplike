@@ -33,7 +33,9 @@ fn find_int_assign(output: &str, key: &str) -> Option<u64> {
     let needle = format!("\"{key}\" = ");
     let start = output.find(&needle)? + needle.len();
     let rest = &output[start..];
-    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
     rest[..end].parse().ok()
 }
 
@@ -42,7 +44,9 @@ fn find_dict_int(output: &str, key: &str) -> Option<u64> {
     let needle = format!("\"{key}\"=");
     let start = output.find(&needle)? + needle.len();
     let rest = &output[start..];
-    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
     rest[..end].parse().ok()
 }
 

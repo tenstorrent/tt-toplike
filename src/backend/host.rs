@@ -287,14 +287,15 @@ impl HostBackend {
 
         // Telemetry: utilization → "current" proxy; GPU memory drives DDR bars.
         let mem_total = s.mem_alloc_bytes.max(1);
-        let fill_pct =
-            ((s.mem_in_use_bytes as f64 / mem_total as f64) * 100.0).min(100.0).round() as u32;
+        let fill_pct = ((s.mem_in_use_bytes as f64 / mem_total as f64) * 100.0)
+            .min(100.0)
+            .round() as u32;
         self.telemetry.insert(
             idx,
             Telemetry {
                 voltage: None,
                 current: Some(s.util_pct / 10.0), // 0..10 A-ish proxy from 0..100%
-                power: None,                        // no-sudo ioreg can't read GPU power
+                power: None,                      // no-sudo ioreg can't read GPU power
                 asic_temperature: None,
                 aiclk: None,
                 heartbeat: Some(1),
@@ -630,7 +631,11 @@ mod tests {
     fn macos_host_ane_device_is_well_formed_when_present() {
         let mut backend = HostBackend::new();
         backend.init().unwrap();
-        if let Some(ane) = backend.devices().iter().find(|d| d.board_type == "apple-ane") {
+        if let Some(ane) = backend
+            .devices()
+            .iter()
+            .find(|d| d.board_type == "apple-ane")
+        {
             let (rows, cols) = ane.tensix_grid();
             assert!(rows > 0 && cols > 0);
             assert!(ane.memory_channels() >= 1);
@@ -646,11 +651,18 @@ mod tests {
         backend.init().unwrap();
         // If this Mac exposes an Apple GPU (it does on Apple Silicon), there must
         // be a device whose board_type is "apple-gpu" with renderable geometry.
-        if let Some(gpu) = backend.devices().iter().find(|d| d.board_type == "apple-gpu") {
+        if let Some(gpu) = backend
+            .devices()
+            .iter()
+            .find(|d| d.board_type == "apple-gpu")
+        {
             let (rows, cols) = gpu.tensix_grid();
             assert!(rows > 0 && cols > 0, "gpu grid must be non-empty");
             assert!(gpu.memory_channels() >= 1);
-            assert!(backend.telemetry(gpu.index).is_some(), "gpu telemetry present");
+            assert!(
+                backend.telemetry(gpu.index).is_some(),
+                "gpu telemetry present"
+            );
         }
     }
 

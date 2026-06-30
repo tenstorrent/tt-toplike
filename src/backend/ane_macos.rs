@@ -142,8 +142,7 @@ impl AneSampler {
             }
 
             let mut subbed: CFMutableDictionaryRef = ptr::null_mut();
-            let sub =
-                IOReportCreateSubscription(ptr::null(), chans, &mut subbed, 0, ptr::null());
+            let sub = IOReportCreateSubscription(ptr::null(), chans, &mut subbed, 0, ptr::null());
             if sub.is_null() {
                 CFRelease(chans as CFTypeRef);
                 return None;

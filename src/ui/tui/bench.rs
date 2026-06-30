@@ -72,8 +72,22 @@ mod tests {
     #[test]
     fn table_has_a_row_per_result() {
         let rows = vec![
-            BenchResult { mode: "insights", frames: 10, avg_ms: 0.4, p95_ms: 0.6, target_fps: 10, est_cpu_pct: 0.4 },
-            BenchResult { mode: "arcade", frames: 10, avg_ms: 3.6, p95_ms: 5.0, target_fps: 60, est_cpu_pct: 21.6 },
+            BenchResult {
+                mode: "insights",
+                frames: 10,
+                avg_ms: 0.4,
+                p95_ms: 0.6,
+                target_fps: 10,
+                est_cpu_pct: 0.4,
+            },
+            BenchResult {
+                mode: "arcade",
+                frames: 10,
+                avg_ms: 3.6,
+                p95_ms: 5.0,
+                target_fps: 60,
+                est_cpu_pct: 21.6,
+            },
         ];
         let t = format_table(&rows);
         assert!(t.contains("insights"));
