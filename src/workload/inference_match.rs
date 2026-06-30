@@ -41,7 +41,7 @@ const RUNTIMES: &[(&str, &[&str])] = &[
     ),
     (
         "torch",
-        &["torchrun", "torch.distributed", "pytorch", " torch"],
+        &["torchrun", "torch.distributed", "pytorch", " torch "],
     ),
     (
         "transformers",
@@ -62,7 +62,12 @@ pub fn inference_match(name: &str, cmdline: &str) -> Option<&'static str> {
     if name.is_empty() && cmdline.is_empty() {
         return None;
     }
-    let hay = format!("{} {}", name, cmdline).to_lowercase();
+    // Pad both ends with spaces so the space-bounded needles (" torch ", " jax ")
+    // also match a bare process name like `torch` or `jax` — without the padding
+    // the label wouldn't tag a process whose name is exactly that label. The
+    // bounded needles stay tight (e.g. " torch " won't match `torchlight`), which
+    // is why we pad rather than add bare substrings that would over-match.
+    let hay = format!(" {} {} ", name, cmdline).to_lowercase();
     for (label, needles) in RUNTIMES {
         for needle in *needles {
             if hay.contains(&needle.to_lowercase()) {

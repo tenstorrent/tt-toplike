@@ -173,6 +173,12 @@ fn inference_match_tags_known_runtimes_via_public_api() {
         inference_match("WindowServer", "/System/WindowServer"),
         None
     );
+    // A process whose name is exactly the label is tagged (haystack is padded so
+    // the tight word-boundary needles " torch" / " jax " match a bare name).
+    assert_eq!(inference_match("torch", ""), Some("torch"));
+    assert_eq!(inference_match("jax", ""), Some("jax"));
+    // ...but the tight needles still don't over-match unrelated names.
+    assert_eq!(inference_match("torchlight", ""), None);
 }
 
 #[test]

@@ -63,7 +63,12 @@ fn main() {
                 let results = tt_toplike::ui::run_render_bench(backend.as_ref(), 120, 120, 40);
                 print!("{}", tt_toplike::ui::tui::bench::format_table(&results));
             }
-            Err(e) => eprintln!("bench: backend init failed: {e}"),
+            Err(e) => {
+                // Exit non-zero so `--bench` is usable as a CI/scripting gate —
+                // a failed backend init should fail the job, not pass silently.
+                eprintln!("bench: backend init failed: {e}");
+                std::process::exit(1);
+            }
         }
         return;
     }
