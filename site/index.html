@@ -545,6 +545,22 @@
       line-height: 1.25;
     }
 
+    .mode-badge {
+      display: inline-block;
+      vertical-align: middle;
+      font-family: var(--mono);
+      font-size: 0.62rem;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 0.1em 0.5em;
+      margin-left: 0.5em;
+      background: rgba(244, 196, 113, 0.1);
+      border: 1px solid rgba(244, 196, 113, 0.4);
+      border-radius: 4px;
+      color: #F4C471;
+    }
+
     .mode-desc {
       font-size: 0.9rem;
       color: var(--muted);
@@ -751,7 +767,7 @@
 ·∘○◉         ●◉○∘·∘○◉●
 ◉●∘·  ·∘○◉●◉○∘·  ·∘○◉</div>
 
-      <p class="hero-eyebrow">Tenstorrent Hardware Monitor · v0.6.2 · Rust</p>
+      <p class="hero-eyebrow">Tenstorrent Hardware Monitor · v0.7.0 · Rust</p>
 
       <h1 class="hero-title">
         Watch<br>
@@ -1070,13 +1086,23 @@
     <div class="mode-row">
       <div class="mode-meta">
         <span class="mode-key">--host</span>
-        <p class="mode-title">Host CPU mode</p>
+        <p class="mode-title">Host CPU mode <span class="mode-badge">experimental</span></p>
         <p class="mode-desc">
-          No Tenstorrent hardware? Run <code>tt-toplike --host</code> on any Linux
-          machine. CPU frequency maps to aiclk, package temperature to die temp,
-          RAM usage to DDR fill. Every visualization works — your CPU cores glow
-          as stars, your RAM drives the DDR channel bars. A useful way to explore
-          all modes before TT hardware arrives.
+          No Tenstorrent hardware yet? Run <code>tt-toplike --host</code> on any
+          Linux, macOS, or Windows machine. CPU frequency maps to aiclk, package
+          temperature to die temp, RAM usage to DDR fill. Every visualization
+          works — your CPU cores glow as stars, your RAM drives the DDR channel
+          bars. Preview all the modes on the machine you already have, before your
+          Tenstorrent cloud instance, cards, or towers arrive.
+        </p>
+        <p class="mode-desc">
+          One quirk: in host mode the visualizer runs on the very CPU it's
+          watching, so rendering at high FPS heats and loads that CPU — and you
+          see it <em>in</em> the visualization. You're partly watching tt-toplike
+          watch itself. On a real TT card the tool watches a separate chip and
+          never steals compute from your workload. And each hardware type —
+          Grayskull, Wormhole, Blackhole, a multi-card tower — shows something
+          host mode can't: the point is to learn the visual language now.
         </p>
         <div class="mode-hints">
           <span class="mode-hint"><kbd>--host</kbd> flag</span>
