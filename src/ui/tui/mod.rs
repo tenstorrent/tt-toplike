@@ -2829,9 +2829,11 @@ fn render_process_panel(
             let mem = format!("{:>7}", human_bytes(row.mem_bytes));
             let name = format!("{:<16}", truncate(&row.name, 16));
 
-            // Inference tag: `~ label` when matched, else `-`.
+            // Inference tag: `~ label` when actively working, `~ label idle` when
+            // matched but parked (e.g. `ollama serve` with no model), else `-`.
             let inf_raw = match row.inference {
-                Some(label) => format!("~ {}", label),
+                Some(label) if row.active => format!("~ {}", label),
+                Some(label) => format!("~ {} idle", label),
                 None => "-".to_string(),
             };
             const INF_W: usize = 12;
@@ -2843,10 +2845,10 @@ fn render_process_panel(
             } else {
                 Color::DarkGray
             };
-            let inf_color = if row.inference.is_some() {
-                Color::Green
-            } else {
-                Color::DarkGray
+            let inf_color = match row.inference {
+                Some(_) if row.active => Color::Green, // actively serving
+                Some(_) => Color::Yellow,              // matched but idle/parked
+                None => Color::DarkGray,
             };
 
             let mut row_spans = vec![
