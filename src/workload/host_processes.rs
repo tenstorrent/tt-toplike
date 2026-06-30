@@ -8,6 +8,7 @@
 //! Linux/TT path may enrich by PID with device-fd attribution.
 
 use crate::workload::inference_match;
+use std::collections::HashMap;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
 /// TT-specific per-process info, merged in by PID on TT hardware. Primitives
@@ -57,13 +58,24 @@ fn is_ollama_runner(name: &str, cmdline: &str) -> bool {
 
 /// Decide whether a matched inference runtime is actively working.
 ///
-/// Cheap, pure, and snapshot-driven — no network calls on the hot path:
+/// Precedence: a fresh authoritative probe verdict wins; otherwise fall back to
+/// the cheap, pure, snapshot-driven signal (no network calls on the hot path):
 /// - Any matched process above `IDLE_CPU_PCT` is active (covers every runtime).
 /// - For runtimes whose idle/active shape we *know*, corroborate at ~0% CPU:
 ///   ollama's `serve` daemon idles permanently with no model loaded, so it's
 ///   only active when a model-runner worker is present in the same snapshot.
 /// - Runtimes with no known idle shape fall back to the CPU signal alone.
-fn runtime_active(label: &str, cpu_pct: f32, ollama_runner_present: bool) -> bool {
+fn runtime_active(
+    label: &str,
+    cpu_pct: f32,
+    ollama_runner_present: bool,
+    probe: Option<bool>,
+) -> bool {
+    // An authoritative probe (e.g. ollama /api/ps, vllm /v1/models) is the truth
+    // when available — it catches a server holding a model at ~0% CPU.
+    if let Some(ready) = probe {
+        return ready;
+    }
     if cpu_pct > IDLE_CPU_PCT {
         return true;
     }
@@ -99,11 +111,42 @@ impl HostProcessMonitor {
         );
     }
 
+    /// The inference *server* runtimes detected in the current snapshot, resolved
+    /// to `(label, port)` probe targets (deduped by label). Feed these to a
+    /// [`crate::workload::LivenessProber`] each refresh — confirm-only, so we only
+    /// ever probe a port belonging to a process we actually saw.
+    pub fn detected_runtime_targets(&self) -> Vec<crate::workload::ProbeTarget> {
+        use crate::workload::liveness_probe::resolve_target;
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for p in self.sys.processes().values() {
+            let name = p.name().to_string_lossy().to_string();
+            let cmdline = p
+                .cmd()
+                .iter()
+                .map(|s| s.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if let Some(label) = inference_match(&name, &cmdline) {
+                if seen.insert(label) {
+                    if let Some(target) = resolve_target(label, &cmdline) {
+                        out.push(target);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Build selected rows: all *actively-working* inference runtimes (force-kept),
     /// plus the busiest remaining processes filling the slots up to `max` total.
     /// Idle resident daemons (e.g. `ollama serve` with no model) are not
     /// force-kept — see `select_rows`.
-    pub fn rows(&self, max: usize) -> Vec<ProcRow> {
+    ///
+    /// `probe_verdicts` maps a runtime label to an authoritative `active` verdict
+    /// from a [`crate::workload::LivenessProber`]; pass an empty map to rely solely
+    /// on the cheap snapshot tier.
+    pub fn rows(&self, max: usize, probe_verdicts: &HashMap<String, bool>) -> Vec<ProcRow> {
         // First pass: pull the raw fields once (name + cmdline + cpu/mem). We
         // need the whole snapshot before we can judge liveness, because some
         // "busy" signals are cross-process (e.g. an ollama model-runner worker
@@ -139,8 +182,14 @@ impl HostProcessMonitor {
             .into_iter()
             .map(|(pid, name, cmdline, cpu_pct, mem_bytes)| {
                 let inference = inference_match(&name, &cmdline);
-                let active =
-                    inference.is_some_and(|l| runtime_active(l, cpu_pct, ollama_runner_present));
+                let active = inference.is_some_and(|l| {
+                    runtime_active(
+                        l,
+                        cpu_pct,
+                        ollama_runner_present,
+                        probe_verdicts.get(l).copied(),
+                    )
+                });
                 ProcRow {
                     pid,
                     inference,
@@ -239,9 +288,12 @@ mod tests {
 
     #[test]
     fn runtime_active_uses_cpu_threshold_for_any_runtime() {
-        assert!(runtime_active("vllm", 5.0, false), "busy runtime is active");
         assert!(
-            !runtime_active("vllm", 0.0, false),
+            runtime_active("vllm", 5.0, false, None),
+            "busy runtime is active"
+        );
+        assert!(
+            !runtime_active("vllm", 0.0, false, None),
             "idle unknown-shape runtime is inactive"
         );
     }
@@ -249,9 +301,18 @@ mod tests {
     #[test]
     fn ollama_idle_without_runner_is_inactive() {
         // The lone `ollama serve` daemon at 0% cpu, no model-runner present.
-        assert!(!runtime_active("ollama", 0.0, false));
+        assert!(!runtime_active("ollama", 0.0, false, None));
         // ...but a loaded model (runner present) makes it active even at 0% cpu.
-        assert!(runtime_active("ollama", 0.0, true));
+        assert!(runtime_active("ollama", 0.0, true, None));
+    }
+
+    #[test]
+    fn fresh_probe_verdict_overrides_cheap_signal() {
+        // A server holding a model at 0% cpu with no known subprocess shape would
+        // read idle on the cheap tier, but a probe says "ready" → active.
+        assert!(runtime_active("vllm", 0.0, false, Some(true)));
+        // And a probe can authoritatively say "idle" even if cpu briefly spiked.
+        assert!(!runtime_active("vllm", 50.0, false, Some(false)));
     }
 
     #[test]

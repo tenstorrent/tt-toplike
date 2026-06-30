@@ -6,6 +6,7 @@
 pub mod host_processes;
 pub mod inference;
 pub mod inference_match;
+pub mod liveness_probe;
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 pub mod process_monitor;
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
@@ -17,6 +18,7 @@ pub use inference::{
     PowerTrend, TelemetrySample,
 };
 pub use inference_match::inference_match;
+pub use liveness_probe::{LivenessProber, ProbeTarget};
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 pub use process_monitor::{ProcessInfo, ProcessMonitor};
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]

@@ -245,7 +245,13 @@ fn run_app(
     // enriched by PID with TT device attribution (see the refresh tick).
     let mut host_proc_monitor = HostProcessMonitor::new();
     host_proc_monitor.update();
-    let mut proc_rows: Vec<ProcRow> = host_proc_monitor.rows(PROC_PANEL_MAX_ROWS);
+    // Background liveness prober: confirms server runtimes (vllm, ollama) via
+    // their local API off the render path. First cycle has no verdicts yet, so
+    // rows() relies on the cheap snapshot tier until the worker reports back.
+    let liveness_prober = crate::workload::LivenessProber::spawn();
+    liveness_prober.submit(host_proc_monitor.detected_runtime_targets());
+    let mut proc_rows: Vec<ProcRow> =
+        host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts());
     let mut last_proc_rows_update = Instant::now();
 
     // Host CPU / RAM monitoring — sampled on the same 2s cadence as processes.
@@ -994,7 +1000,10 @@ fn run_app(
         // Cross-platform: the host CPU/RAM bars and process panel work on macOS.
         if last_proc_rows_update.elapsed() >= Duration::from_secs(2) {
             host_proc_monitor.update();
-            proc_rows = host_proc_monitor.rows(PROC_PANEL_MAX_ROWS);
+            // Refresh the prober's target set; read back last cycle's verdicts.
+            liveness_prober.submit(host_proc_monitor.detected_runtime_targets());
+            proc_rows =
+                host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts());
 
             // Linux/TT: refresh /proc attribution + serving probes, then merge
             // TT device info into proc_rows by PID.
@@ -4205,7 +4214,7 @@ pub fn run_render_bench(
         let mut term = mk_term();
         let mut hpm = crate::workload::HostProcessMonitor::new();
         hpm.update(); // one scan, not timed
-        let rows = hpm.rows(12); // snapshot, not timed
+        let rows = hpm.rows(12, &std::collections::HashMap::new()); // snapshot, not timed
         let particles: std::collections::HashMap<
             usize,
             Vec<crate::ui::tui::chip_portrait::Particle>,

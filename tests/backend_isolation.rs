@@ -187,7 +187,7 @@ fn host_process_monitor_lists_this_process() {
     let mut m = HostProcessMonitor::new();
     m.update();
     // The test binary itself should appear among the rows.
-    let rows = m.rows(64);
+    let rows = m.rows(64, &std::collections::HashMap::new());
     assert!(!rows.is_empty(), "should enumerate at least one process");
     assert!(rows.iter().all(|r| r.pid > 0));
 }
