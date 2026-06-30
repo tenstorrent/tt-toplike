@@ -39,12 +39,16 @@ about.
 A small registry mapping a detected runtime label → how to confirm it:
 
 ```text
-label            host:port (default)   endpoint              "active" when
----------------  --------------------  --------------------  -----------------------------
-ollama           127.0.0.1:11434       GET /api/ps           JSON .models[] non-empty
-vllm             127.0.0.1:8000        GET /v1/models        JSON .data[] non-empty (200)
-tt-inference-... 127.0.0.1:<port>      GET /health or /v1/models  200 OK / models present
+label            host:port (default)   endpoint        "active" when
+---------------  --------------------  --------------  -----------------------------
+ollama           127.0.0.1:11434       GET /api/ps     JSON .models[] non-empty (200)
+vllm             127.0.0.1:8000        GET /v1/models  JSON .data[] non-empty (200)
+tt-inference-... 127.0.0.1:<discovered> GET /health    200 (503 = "Model not ready")
 ```
+
+`tt-inference-server` exposes `/health` (200 when the model is ready, 503 otherwise,
+no auth) — confirmed in `tt-media-server/open_ai_api/tt_maintenance_api.py`. We use
+that rather than `/tt-liveness`, which reports "alive" even before a model loads.
 
 - Port discovery (most-trusted first): the port the PID is **actually listening
   on**, read from the OS socket table (`/proc/net/tcp{,6}` joined to
