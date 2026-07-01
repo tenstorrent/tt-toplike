@@ -59,7 +59,13 @@ fn main() {
         let backend_type = cli.effective_backend();
         match tt_toplike::backend::factory::create_backend(backend_type, config, &cli) {
             Ok(mut backend) => {
-                let _ = backend.update();
+                // A failed first sample means the bench renders against no data,
+                // which is a broken run — fail loudly so CI/scripts catch it
+                // rather than reporting a green benchmark over empty telemetry.
+                if let Err(e) = backend.update() {
+                    eprintln!("bench: backend update failed: {e}");
+                    std::process::exit(1);
+                }
                 let results = tt_toplike::ui::run_render_bench(backend.as_ref(), 120, 120, 40);
                 print!("{}", tt_toplike::ui::tui::bench::format_table(&results));
             }
