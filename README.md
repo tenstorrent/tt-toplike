@@ -99,7 +99,7 @@ tt-toplike --host --mode flow
 
 > **The observer effect is real here.** On a TT accelerator the visualizer runs on the host CPU and watches a *separate* chip, so it barely perturbs what it measures. In `--host` mode the visualizer and the thing it's visualizing are the same CPU — rendering Arcade at a high frame rate burns cycles that then show up *in the visualization itself* as higher utilization, frequency, and temperature. You're partly watching tt-toplike watch itself. That feedback loop is a quirk of host mode, not a bug; switch modes or lower the FPS (`/fps 10`) to damp it. It also makes a quiet point: nothing you do to a real TT card from the host steals compute from the workload the way it does here.
 
-**Runs on Linux and macOS; Windows should work but is untested** (it builds on the cross-platform `sysinfo` crate, but there's no Windows CI coverage yet — treat it as best-effort). `--host` is the one non-mock backend that needs no Tenstorrent hardware and no Linux kernel interfaces, so it's the way to explore tt-toplike on a laptop. What's available depends on the OS:
+**Runs on Linux and macOS; Windows cross-compiles cleanly and is built + tested in CI** (its runtime hasn't yet been validated on real Windows, so treat it as best-effort). Linux-only pieces — procfs, the `/proc` socket table, the `libc` kill panel — are `cfg`-gated out on Windows. `--host` is the one non-mock backend that needs no Tenstorrent hardware and no Linux kernel interfaces, so it's the way to explore tt-toplike on a laptop. What's available depends on the OS:
 
 | Metric | Linux | macOS / Windows |
 |--------|-------|-----------------|

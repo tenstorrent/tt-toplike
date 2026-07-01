@@ -66,3 +66,27 @@ jobs:
         run: cargo build --locked --bin tt-toplike-gui --features gui
         env:
           RUSTFLAGS: -D warnings
+
+  # ── Windows build + tests ──────────────────────────────────────────────────
+  # Gives real Windows coverage for the cross-platform `--host` path. Uses the
+  # native MSVC target on GitHub's windows-latest runner. Linux-only modules
+  # (procfs, the /proc socket table, the libc kill panel) are cfg-gated out, so
+  # we build the same safe feature set that cross-compiles cleanly:
+  # tui + json-backend, without linux-procfs.
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run library tests
+        run: cargo test --locked --lib --no-default-features --features tui,json-backend
+
+      - name: Build TUI binary (zero warnings)
+        run: cargo build --locked --bin tt-toplike-tui --no-default-features --features tui,json-backend
+        env:
+          RUSTFLAGS: -D warnings
