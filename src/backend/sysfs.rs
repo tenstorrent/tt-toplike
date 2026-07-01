@@ -150,6 +150,8 @@ impl SysfsBackend {
                         limits: None,
                         pcie_speed: None,
                         pcie_width: None,
+                        grid_override: None,
+                        channels_override: None,
                     };
 
                     self.devices.push(device);

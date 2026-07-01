@@ -10,6 +10,8 @@ Real-time hardware monitoring for Tenstorrent silicon (Grayskull, Wormhole, Blac
 
 *Insights screen — split-panel view of all 4 Blackhole chips captured during live inference. Each panel shows chip portrait, live power (58–77W), temperature, DDR training status, and accuracy trend.*
 
+The Insights screen works on any machine — it shows each processor (CPU/GPU/ANE/TT) as a device card and lists processes by resource use, tagging those that match known inference runtimes (ollama, vLLM, llama.cpp, MLX, ComfyUI, …); on TT hardware it additionally attributes device usage and serving metrics per process.
+
 ## How visualizations are grounded in hardware activity
 
 The visualizations aren't decorative. Every particle, star, color shift, and brightness change maps to a real signal coming off the hardware. Here's what you're actually looking at.
@@ -83,7 +85,7 @@ The full reset-to-stable cycle typically takes 10–15 seconds. tt-toplike's saf
 
 ---
 
-## Try it on any machine — no TT hardware required
+## Try it on any machine — no TT hardware required (experimental)
 
 ```bash
 tt-toplike --host          # or: tt-toplike --backend host
@@ -91,9 +93,34 @@ tt-toplike --host --mode arcade
 tt-toplike --host --mode flow
 ```
 
-`--host` reads your CPU frequency, temperature (via Linux hwmon/RAPL), and RAM usage and maps them into the same telemetry fields as a TT accelerator. Every visualization works: Starfield, Memory Castle, Memory Flow, Arcade. Your CPU cores glow as stars. RAM fill drives the DDR-channel bars. Package temperature shifts the color palette.
+> **Experimental.** `--host` and the macOS/Windows builds are a preview. Use them to get a feel for every visualization on the machine you already have — your laptop, workstation, or a CPU box — *before* you get your Tenstorrent cloud instance, cards, or towers. When the real silicon arrives, drop `--host` and everything you learned transfers directly.
+
+`--host` reads your CPU frequency, temperature, and RAM usage and maps them into the same telemetry fields as a TT accelerator. Every visualization works: Starfield, Memory Castle, Memory Flow, Arcade. Your CPU cores glow as stars. RAM fill drives the DDR-channel bars. Package temperature shifts the color palette.
+
+> **The observer effect is real here.** On a TT accelerator the visualizer runs on the host CPU and watches a *separate* chip, so it barely perturbs what it measures. In `--host` mode the visualizer and the thing it's visualizing are the same CPU — rendering Arcade at a high frame rate burns cycles that then show up *in the visualization itself* as higher utilization, frequency, and temperature. You're partly watching tt-toplike watch itself. That feedback loop is a quirk of host mode, not a bug; switch modes or lower the FPS (`/fps 10`) to damp it. It also makes a quiet point: nothing you do to a real TT card from the host steals compute from the workload the way it does here.
+
+**Runs on Linux, macOS, and Windows.** `--host` is the one non-mock backend that needs no Tenstorrent hardware and no Linux kernel interfaces, so it's the way to explore tt-toplike on a laptop. What's available depends on the OS:
+
+| Metric | Linux | macOS / Windows |
+|--------|-------|-----------------|
+| CPU frequency (→ AICLK) | ✅ | ✅ |
+| CPU utilization (→ current proxy) | ✅ | ✅ |
+| RAM usage (→ DDR channels) | ✅ | ✅ |
+| Package temperature | ✅ via hwmon | ⚠️ not exposed — reads 0 |
+| Package power | ✅ via RAPL (`/sys/class/powercap`) | ⚠️ not exposed — estimated/0 |
+
+CPU package temperature and RAPL power come from Linux-only sysfs paths; on macOS/Windows those fields are simply absent (the temperature-driven color palette stays at its baseline). Everything else is driven by the cross-platform `sysinfo` crate.
 
 It is not the same experience as real TT hardware — a discrete AI accelerator has DDR bandwidth, Tensix grid geometry, and ARC firmware that a CPU can't replicate. But it gives you the full visual engine to explore. Once you have TT hardware, remove `--host` and everything you learned transfers directly.
+
+**Every hardware type shows you something you can't see anywhere else.** A CPU under `--host` has its own rhythm; a Wormhole's 8 DDR channels train differently than a Blackhole's 12; Grayskull's grid geometry is its own shape entirely; and a multi-card tower or cloud fleet lights up the fleet-grid and topology views that a single chip never will. The point of host mode isn't to substitute for any of that — it's to learn the visual language now, so the uniqueness of each real device is legible the moment you plug it in.
+
+On Apple Silicon, `--host` also surfaces the **GPU** (utilization + memory, via
+`ioreg`) and the **Neural Engine** (power, via the private IOReport framework) as
+extra devices — both **without sudo**. Caveats: ANE shows power-derived activity,
+not a true utilization % (no API exposes one); its "16 cores" is Apple's stated
+figure used only for the star grid; GPU power/temperature/frequency aren't
+available without sudo; and GPU utilization is whole-device, not per-process.
 
 ---
 
@@ -123,6 +150,24 @@ sudo dpkg -i tt-toplike-app_*_amd64_${SUITE}.deb     # native window (optional, 
 tt-toplike --mock --mock-devices 4
 tt-toplike --mode arcade
 ```
+
+### macOS — download the universal binary (experimental)
+
+Each release ships a universal (`arm64` + `x86_64`) macOS build of the TUI. This is the `--host` preview path — no TT hardware, no `.deb`, no GUI app.
+
+```bash
+# Download + extract the universal tarball for this release
+gh release download --repo tenstorrent/tt-toplike --pattern "tt-toplike-tui-*-macos-universal.tar.gz"
+tar -xzf tt-toplike-tui-*-macos-universal.tar.gz
+
+# The binary is unsigned/unnotarized — clear the quarantine flag before first run
+xattr -dr com.apple.quarantine tt-toplike-tui
+
+# Run it (host mode is the only backend that works without TT hardware)
+./tt-toplike-tui --host --mode arcade
+```
+
+On Apple Silicon, `--host` also surfaces the GPU and Neural Engine as extra devices (no sudo). See [Try it on any machine](#try-it-on-any-machine--no-tt-hardware-required-experimental) for the field mapping and the host-mode observer-effect caveat.
 
 ### Debian / Ubuntu — build from the debian/ tree
 
@@ -232,7 +277,7 @@ Auto-detect order: **Hybrid (sysfs + background JSON) → JSON → Mock** on Lin
 |---------|--------|--------------------|-------------|
 | Sysfs   | Linux hwmon (`/sys/class/hwmon/`) | ✅ Yes | None |
 | JSON    | `tt-smi -s` subprocess | ✅ Yes | None |
-| Host    | CPU/RAM via sysinfo + hwmon | ✅ N/A | None |
+| Host    | CPU/RAM via sysinfo (+ hwmon/RAPL on Linux) — Linux/macOS/Windows | ✅ N/A | None |
 | Mock    | Simulated telemetry | ✅ N/A | None |
 | Luwen   | Direct PCI BAR0 access | ⚠️ May disrupt | root / ttkmd |
 

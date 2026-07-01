@@ -26,7 +26,7 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[cfg(feature = "linux-procfs")]
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 use crate::workload::ProcessInfo;
 
 /// How long we allow any single HTTP probe request to take.
@@ -140,7 +140,7 @@ impl InferenceServerProbe {
     /// Probe all TT inference server processes in `processes` and return their metrics.
     ///
     /// Processes that don't look like known server flavours are skipped.
-    #[cfg(feature = "linux-procfs")]
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     pub fn update(&mut self, processes: &[&ProcessInfo]) -> HashMap<i32, ServingMetrics> {
         let mut out = HashMap::new();
         for proc in processes {
@@ -157,7 +157,7 @@ impl InferenceServerProbe {
         out
     }
 
-    #[cfg(feature = "linux-procfs")]
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     fn probe_process(&mut self, proc: &ProcessInfo) -> Option<ServingMetrics> {
         let (flavour, port_hint) = classify_cmdline(&proc.cmdline)?;
 

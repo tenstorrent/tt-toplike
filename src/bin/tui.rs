@@ -35,21 +35,49 @@ fn main() {
     // Initialize logging with appropriate level
     init_logging(cli.log_level());
 
-    // Print startup banner
-    println!("🦀 tt-toplike v{}", env!("CARGO_PKG_VERSION"));
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("Backend: {}", cli.backend_name());
-    println!("Update Interval: {}ms", cli.interval);
-    if let Some(ref devices) = cli.devices {
-        println!("Device Filter: {:?}", devices);
+    // Print startup banner (suppressed under --bench to keep output machine-parseable)
+    if !cli.bench {
+        println!("🦀 tt-toplike v{}", env!("CARGO_PKG_VERSION"));
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!("Backend: {}", cli.backend_name());
+        println!("Update Interval: {}ms", cli.interval);
+        if let Some(ref devices) = cli.devices {
+            println!("Device Filter: {:?}", devices);
+        }
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!();
     }
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!();
 
     // Create backend configuration
     let config = BackendConfig::default()
         .with_interval(cli.interval)
         .with_max_errors(cli.max_errors);
+
+    // --bench: headless render benchmark — does NOT require a TTY. Dispatch here,
+    // before the backend selection / TUI path, so it works in CI and scripts.
+    if cli.bench {
+        let backend_type = cli.effective_backend();
+        match tt_toplike::backend::factory::create_backend(backend_type, config, &cli) {
+            Ok(mut backend) => {
+                // A failed first sample means the bench renders against no data,
+                // which is a broken run — fail loudly so CI/scripts catch it
+                // rather than reporting a green benchmark over empty telemetry.
+                if let Err(e) = backend.update() {
+                    eprintln!("bench: backend update failed: {e}");
+                    std::process::exit(1);
+                }
+                let results = tt_toplike::ui::run_render_bench(backend.as_ref(), 120, 120, 40);
+                print!("{}", tt_toplike::ui::tui::bench::format_table(&results));
+            }
+            Err(e) => {
+                // Exit non-zero so `--bench` is usable as a CI/scripting gate —
+                // a failed backend init should fail the job, not pass silently.
+                eprintln!("bench: backend init failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     // Select and initialize backend based on CLI arguments
     let backend_type = cli.effective_backend();
@@ -125,19 +153,13 @@ fn main() {
             let mut mock_backend = MockBackend::with_config(cli.effective_mock_devices(), config);
             run_with_backend(&mut mock_backend, &cli);
         }
+        // Sysfs is a Linux-only variant (see cli::BackendType); the arm only exists
+        // when compiling for Linux, so no non-Linux fallback arm is required.
+        #[cfg(target_os = "linux")]
         BackendType::Sysfs => {
-            #[cfg(target_os = "linux")]
-            {
-                log::info!("Initializing Sysfs backend");
-                let mut backend = tt_toplike::backend::sysfs::SysfsBackend::with_config(config);
-                run_with_backend(&mut backend, &cli);
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                eprintln!("Error: Sysfs backend only available on Linux");
-                eprintln!("Use --mock, --json, or --backend luwen instead");
-                std::process::exit(1);
-            }
+            log::info!("Initializing Sysfs backend");
+            let mut backend = tt_toplike::backend::sysfs::SysfsBackend::with_config(config);
+            run_with_backend(&mut backend, &cli);
         }
         BackendType::Luwen => {
             #[cfg(feature = "luwen-backend")]
@@ -162,11 +184,6 @@ fn main() {
                 config,
             );
             run_with_backend(&mut backend, &cli);
-        }
-        #[cfg(not(target_os = "linux"))]
-        BackendType::Hybrid => {
-            eprintln!("Error: Hybrid backend only available on Linux");
-            std::process::exit(1);
         }
         BackendType::Host => {
             log::info!("Initializing HostBackend (CPU/RAM via sysinfo — no TT hardware required)");

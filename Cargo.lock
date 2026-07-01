@@ -5467,7 +5467,7 @@ dependencies = [
 
 [[package]]
 name = "tt-toplike"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "all-smi-luwen-core",
  "all-smi-luwen-if",
@@ -5476,6 +5476,7 @@ dependencies = [
  "arc-swap",
  "chrono",
  "clap",
+ "core-foundation 0.10.1",
  "crossterm",
  "dirs",
  "eframe",

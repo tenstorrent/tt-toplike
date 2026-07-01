@@ -70,16 +70,14 @@ pub fn create_backend(
         BackendType::Luwen => Err(BackendError::Initialization(
             "Luwen backend not compiled (requires --features luwen-backend)".to_string(),
         )),
+        // Sysfs and Hybrid are Linux-only variants (see cli::BackendType); on other
+        // platforms these variants don't exist, so no match arm is needed for them.
         #[cfg(target_os = "linux")]
         BackendType::Sysfs => {
             let mut backend = SysfsBackend::with_config(config);
             backend.init()?;
             Ok(Box::new(backend))
         }
-        #[cfg(not(target_os = "linux"))]
-        BackendType::Sysfs => Err(BackendError::Initialization(
-            "Sysfs backend only available on Linux".to_string(),
-        )),
         #[cfg(target_os = "linux")]
         BackendType::Hybrid => {
             let tt_smi_path = cli.tt_smi_path.to_string_lossy().to_string();
@@ -87,10 +85,6 @@ pub fn create_backend(
             backend.init()?;
             Ok(Box::new(backend))
         }
-        #[cfg(not(target_os = "linux"))]
-        BackendType::Hybrid => Err(BackendError::Initialization(
-            "Hybrid backend only available on Linux".to_string(),
-        )),
         BackendType::Host => {
             let mut backend = HostBackend::with_config(config);
             backend.init()?;
@@ -132,8 +126,9 @@ fn create_auto_backend(
     }
     log::warn!("JSON backend failed, falling back to mock");
 
-    // Fallback to mock backend (always succeeds)
-    log::info!("No hardware backends available, using mock backend");
+    // Fallback to mock backend (always succeeds). This means auto-detect found
+    // no real hardware, which the user should see even at the default (Warn) level.
+    log::warn!("No hardware backends available, using mock backend");
     log::info!("Tip: Use --backend luwen for direct hardware access (requires PCI permissions)");
     let mut backend = MockBackend::with_config(cli.effective_mock_devices(), config);
     backend.init()?;
@@ -150,8 +145,6 @@ pub fn next_backend(current: BackendType) -> BackendType {
         BackendType::Hybrid => BackendType::Sysfs,
 
         #[cfg(target_os = "linux")]
-        BackendType::Sysfs => BackendType::Json,
-        #[cfg(not(target_os = "linux"))]
         BackendType::Sysfs => BackendType::Json,
 
         BackendType::Json => BackendType::Luwen,
@@ -242,6 +235,40 @@ mod tests {
         }
     }
 
+    /// Off-Linux the Sysfs/Hybrid variants don't exist, so the cycle must be a
+    /// well-formed loop over only the cross-platform backends. This guards that
+    /// removing the `not(target_os = "linux")` Sysfs/Hybrid arms didn't leave a
+    /// dangling or non-terminating cycle on macOS/Windows.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn test_next_backend_cycle_non_linux() {
+        // Json → Luwen → Mock → Host → Json
+        assert!(matches!(
+            next_backend(BackendType::Json),
+            BackendType::Luwen
+        ));
+        assert!(matches!(
+            next_backend(BackendType::Luwen),
+            BackendType::Mock
+        ));
+        assert!(matches!(next_backend(BackendType::Mock), BackendType::Host));
+        assert!(matches!(next_backend(BackendType::Host), BackendType::Json));
+        // Auto resolves into the cycle at JSON (no Hybrid off-Linux).
+        assert!(matches!(next_backend(BackendType::Auto), BackendType::Json));
+
+        // The cycle must return to its start within a bounded number of steps
+        // (i.e. it terminates / has no dead end).
+        let mut seen = std::collections::HashSet::new();
+        let mut cur = BackendType::Json;
+        for _ in 0..16 {
+            cur = next_backend(cur);
+            seen.insert(format!("{:?}", cur));
+        }
+        for expected in ["Json", "Luwen", "Mock", "Host"] {
+            assert!(seen.contains(expected), "cycle should visit {expected}");
+        }
+    }
+
     #[test]
     fn test_mock_backend_always_works() {
         let config = BackendConfig::default();
@@ -265,6 +292,9 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         let result = create_backend(BackendType::Mock, config, &cli);

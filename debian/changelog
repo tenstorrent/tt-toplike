@@ -1,3 +1,17 @@
+tt-toplike (0.7.0) noble; urgency=medium
+
+  * Animation FPS throttles: --throttle (load-based) and --idle-on-blur
+    (focus-based), with /throttle and /idle-on-blur command-bar toggles and a
+    status-bar hint. Both default off.
+  * Apple Silicon host mode: --host now surfaces the GPU (utilisation + memory
+    via ioreg) and Neural Engine (power via the private IOReport framework) as
+    extra devices, no sudo required.
+  * docs: mark --host and macOS/Windows builds as experimental; note the host
+    mode observer effect (the visualiser shares the CPU it measures) and the
+    per-hardware uniqueness of each device type, in README and project site.
+
+ -- Tenstorrent <software@tenstorrent.com>  Tue, 30 Jun 2026 12:00:00 +0000
+
 tt-toplike (0.6.3) noble; urgency=medium
 
   * Add HostBackend (--host / --backend host): run all visualisations on

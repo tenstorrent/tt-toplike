@@ -304,6 +304,8 @@ mod tests {
                 limits: None,
                 pcie_speed: None,
                 pcie_width: None,
+                grid_override: None,
+                channels_override: None,
             })
             .collect()
     }
@@ -392,6 +394,8 @@ mod tests {
             limits: None,
             pcie_speed: None,
             pcie_width: None,
+            grid_override: None,
+            channels_override: None,
         });
         let topo = BoardTopology::from_devices(&devices);
         // Not all single-chip → chips_per_board = 2

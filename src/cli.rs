@@ -169,6 +169,26 @@ pub struct Cli {
     /// Useful for debugging or piping to other tools.
     #[arg(long)]
     pub print: bool,
+
+    /// Headless render benchmark: render each screen into an off-screen buffer
+    /// for a fixed number of frames and print per-screen timing + estimated CPU.
+    /// Does not enter the TUI. Respects --mock / --host for the backend.
+    #[arg(long)]
+    pub bench: bool,
+
+    /// Throttle animation FPS when the host is under heavy load (opt-in).
+    ///
+    /// When set, animated modes drop from 60 to 30 FPS while system CPU is high
+    /// (≥85%, restored below 80%), yielding CPU to the monitored workload.
+    /// Toggle live with the `/throttle` command. Off by default.
+    #[arg(long)]
+    pub throttle: bool,
+
+    /// Drop animation to ~2 FPS while the terminal is unfocused (opt-in).
+    ///
+    /// Toggle live with the `/idle-on-blur` command. Off by default.
+    #[arg(long)]
+    pub idle_on_blur: bool,
 }
 
 /// Backend selection
@@ -292,7 +312,10 @@ impl Cli {
         } else if self.verbose {
             log::LevelFilter::Debug
         } else {
-            log::LevelFilter::Info
+            // Quiet by default: only surface problems (e.g. a requested backend's
+            // hardware/config being unavailable). Routine startup progress is
+            // Info/Debug and hidden unless `-v` is passed. `-q` silences entirely.
+            log::LevelFilter::Warn
         }
     }
 
@@ -334,6 +357,36 @@ impl Cli {
             #[cfg(target_os = "linux")]
             BackendType::Hybrid => "Hybrid (sysfs + tt-smi cache)",
             BackendType::Host => "Host (CPU/RAM via sysinfo)",
+        }
+    }
+
+    /// Minimal defaults for headless rendering (bench / tests). Not for normal use.
+    ///
+    /// Constructs a `Cli` with safe quiet-mock defaults so callers like
+    /// `run_render_bench` can invoke render functions that need a `&Cli` reference
+    /// without having to parse actual command-line arguments.
+    pub fn bench_default() -> Self {
+        Cli {
+            backend: BackendType::Mock,
+            mock: Some(0),
+            json: false,
+            host: false,
+            tt_smi_path: std::path::PathBuf::from("tt-smi"),
+            interval: 100,
+            devices: None,
+            verbose: false,
+            quiet: true,
+            mock_devices: 3,
+            max_errors: 10,
+            timeout: 5000,
+            visualize: false,
+            workload: false,
+            print: false,
+            bench: true,
+            mode: None,
+            profile: crate::config::AnimationProfile::Normal,
+            throttle: false,
+            idle_on_blur: false,
         }
     }
 
@@ -399,13 +452,17 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Auto);
         assert_eq!(cli.interval, 100);
         assert!(cli.should_monitor_device(0));
         assert!(cli.should_monitor_device(999));
-        assert_eq!(cli.log_level(), log::LevelFilter::Info);
+        // Default is quiet: Warn (only surfaces problems; -v raises to Debug).
+        assert_eq!(cli.log_level(), log::LevelFilter::Warn);
     }
 
     #[test]
@@ -428,6 +485,9 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Mock);
@@ -453,6 +513,9 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Json);
@@ -478,6 +541,9 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         assert!(cli.should_monitor_device(0));
@@ -507,6 +573,9 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         assert_eq!(verbose_cli.log_level(), log::LevelFilter::Debug);
@@ -529,6 +598,9 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         assert_eq!(quiet_cli.log_level(), log::LevelFilter::Off);
@@ -554,6 +626,9 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         assert!(cli.validate().is_err());
@@ -579,6 +654,9 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         assert_eq!(auto_cli.backend_name(), "Auto-detect");
@@ -601,6 +679,9 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
+            throttle: false,
+            idle_on_blur: false,
         };
 
         assert_eq!(mock_cli.backend_name(), "Mock");
@@ -625,6 +706,9 @@ mod tests {
             print: false,
             mode: None,
             profile: crate::config::AnimationProfile::Normal,
+            bench: false,
+            throttle: false,
+            idle_on_blur: false,
         }
     }
 

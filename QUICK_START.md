@@ -1,7 +1,7 @@
 # tt-toplike Quick Start
 
-**Version**: 0.6.2
-**Last Updated**: June 6, 2026
+**Version**: 0.7.0
+**Last Updated**: June 30, 2026
 
 ---
 
@@ -68,11 +68,21 @@ tt-toplike --backend json
 - Runs `tt-smi -s` as a subprocess
 - Requires `tt-smi` installed
 
+### Host (CPU/RAM — any machine, no TT hardware)
+```bash
+tt-toplike --host                 # or: tt-toplike --backend host
+tt-toplike --host --mode arcade
+```
+- **Runs on Linux, macOS, and Windows** — the way to try tt-toplike on a laptop with no Tenstorrent hardware
+- Maps your CPU (frequency → AICLK, utilization → current), RAM (→ DDR channels), and — on Linux — package temperature (hwmon) and power (RAPL) into the normal telemetry fields
+- On macOS/Windows, temperature and power aren't exposed by the OS, so those read as 0; everything else is live
+- Real data (unlike `--mock`), just describing your CPU instead of a TT accelerator
+
 ### Mock (Testing)
 ```bash
 tt-toplike --mock --mock-devices 4
 ```
-- No hardware required; simulated telemetry
+- No hardware required; fully simulated telemetry (use `--host` instead if you want your real CPU/RAM)
 
 ### Luwen (Direct PCI — explicit only)
 ```bash
@@ -92,6 +102,7 @@ tt-toplike --mode starfield -v              # starfield with verbose log
 tt-toplike --mode flow --devices 0,2       # flow, devices 0 and 2 only
 tt-toplike --mock --mock-devices 8          # 8-device mock (shows fleet grid)
 tt-toplike --mock --mock-devices 32         # 32-device mock (fleet grid + mini-bar)
+tt-toplike --host --mode arcade             # your real CPU/RAM in arcade mode (macOS/Linux/Windows)
 ```
 
 ---
@@ -120,8 +131,9 @@ tt-toplike-app --mock --mock-devices 4
 
 ### No hardware detected
 ```bash
-ls /sys/class/hwmon/       # check hwmon entries
-tt-toplike --mock --mock-devices 2   # verify binary works
+ls /sys/class/hwmon/       # check hwmon entries (Linux)
+tt-toplike --host          # real CPU/RAM telemetry, any OS — no TT hardware needed
+tt-toplike --mock --mock-devices 2   # or fully simulated, to verify the binary works
 ```
 
 ### tmux / SSH terminal colors

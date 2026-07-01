@@ -69,6 +69,13 @@
     clippy::unused_enumerate_index,
     clippy::unwrap_or_default
 )]
+// On non-Linux hosts (e.g. macOS for `--host`/`--mock` development) the procfs-,
+// hwmon-, and tt-smi-backed code paths are configured out. Several helpers that
+// are only reachable from those Linux paths (HybridBackend JSON parsing, the
+// Insights/fleet renderers) then look unused to the compiler. They are live on
+// Linux, so suppress the resulting dead-code/unused-import noise off-Linux only,
+// keeping full lint coverage on the primary (Linux) target.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
 // Public modules - these are the stable API
 pub mod animation;
@@ -77,8 +84,10 @@ pub mod error;
 pub mod logging;
 pub mod models;
 
-// Process monitoring (Linux-only)
-#[cfg(feature = "linux-procfs")]
+// Workload analysis. The module is always available because its `inference`
+// submodule (telemetry-based workload classification) is cross-platform and used
+// by every backend. Only the procfs-backed submodules (process_monitor, serving)
+// are gated to Linux + the `linux-procfs` feature, inside workload/mod.rs.
 pub mod workload;
 
 // CLI module - shared by both TUI and GUI

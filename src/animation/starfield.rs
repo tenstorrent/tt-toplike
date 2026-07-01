@@ -315,7 +315,7 @@ impl HardwareStarfield {
             let device_center_x = (device_idx * device_spacing) + (device_spacing / 2);
 
             // Get Tensix grid dimensions for this architecture
-            let (grid_rows, grid_cols) = device.architecture.tensix_grid();
+            let (grid_rows, grid_cols) = device.tensix_grid();
 
             // Cell spacing: at least 1 so no rows/cols collapse in small panels
             // (arcade starfield can be as few as 8 rows).
@@ -367,7 +367,7 @@ impl HardwareStarfield {
             }
 
             // Create memory planets around device perimeter
-            let num_channels = device.architecture.memory_channels();
+            let num_channels = device.memory_channels();
 
             // DDR planets (outer ring)
             for i in 0..num_channels {

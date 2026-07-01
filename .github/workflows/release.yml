@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # upload release assets and push gh-pages
+  contents: write   # upload release assets
 
 jobs:
   # ── Build .deb packages for each supported Ubuntu suite ────────────────────
@@ -96,39 +96,76 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
-  # ── Update site/ in main and let deploy-site.yml publish it ─────────────────
-  update-site:
-    name: Update project site
-    runs-on: ubuntu-24.04
-    needs: build-deb
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: write
+  # ── Build a universal macOS binary (experimental --host preview) ───────────
+  #
+  # macOS can't be cross-compiled from the Linux runners above: the host
+  # backend links the private IOReport framework (src/backend/ane_macos.rs) and
+  # CoreFoundation, and shells out to `ioreg`, so it needs the real macOS SDK
+  # and linker. We build natively on a macos-14 (Apple Silicon) runner instead.
+  #
+  # A single runner produces a UNIVERSAL binary: we build both arches (the SDK
+  # carries both framework slices, so cross-arch linking within macOS works)
+  # and fuse them with `lipo`. The result is the TUI binary only — no .deb, no
+  # GUI app, and it is UNSIGNED/UNNOTARIZED, so first launch hits a Gatekeeper
+  # prompt (right-click → Open, or `xattr -dr com.apple.quarantine <bin>`).
+  build-macos:
+    name: Build macOS (universal)
+    runs-on: macos-14
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: main   # site/ lives on main; tag may point to a release branch
 
-      - name: Update version in site/index.html
+      - name: Add Rust targets (arm64 + x86_64)
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      # --no-default-features drops linux-procfs (its procfs dep is Linux-only);
+      # tui + json-backend match the README build line. The host backend and
+      # Apple GPU/ANE devices are always compiled — no feature flag needed.
+      - name: Build TUI for both arches
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked --target "$target" \
+              --bin tt-toplike-tui \
+              --no-default-features --features tui,json-backend
+          done
+
+      - name: Fuse into a universal binary
+        run: |
+          mkdir -p dist
+          lipo -create -output dist/tt-toplike-tui \
+            target/aarch64-apple-darwin/release/tt-toplike-tui \
+            target/x86_64-apple-darwin/release/tt-toplike-tui
+          lipo -info dist/tt-toplike-tui
+
+      - name: Package tarball
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          REPO="${GITHUB_REPOSITORY}"
+          [ -n "$VERSION" ] || VERSION="dev"   # workflow_dispatch has no tag
+          cp LICENSE NOTICE README.md dist/
+          TARBALL="tt-toplike-tui-${VERSION}-macos-universal.tar.gz"
+          tar -C dist -czf "$TARBALL" .
+          echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+          shasum -a 256 "$TARBALL"
 
-          sed -i "s|Tenstorrent Hardware Monitor · v[0-9]*\.[0-9]*\.[0-9]* · Rust|Tenstorrent Hardware Monitor · v${VERSION} · Rust|g" \
-            site/index.html
-
-          sed -Ei "s|(gh release download )--repo [^ ]*|\1--repo ${REPO}|g" \
-            site/index.html
-
-      - name: Commit updated site
+      - name: Ensure release exists, then upload tarball
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name  "github-actions[bot]"
-          if git diff --quiet; then
-            echo "No site changes needed."
+          # Matrix .deb jobs may create the release first; create only if absent
+          # (same race-tolerant pattern as build-deb).
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists — skipping create."
           else
-            git add site/index.html
-            git commit -m "site: bump to ${GITHUB_REF_NAME}"
-            git push origin main
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes \
+              --verify-tag
           fi
+
+          gh release upload "$GITHUB_REF_NAME" \
+            "$TARBALL" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber

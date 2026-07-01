@@ -153,6 +153,22 @@ pub struct HostBackend {
     /// Total logical CPU core count
     core_count: usize,
 
+    /// Index of the synthetic GPU device, if one was detected (macOS).
+    #[cfg(target_os = "macos")]
+    gpu_device_idx: Option<usize>,
+
+    /// IOReport-based ANE power sampler (macOS), if available.
+    #[cfg(target_os = "macos")]
+    ane_sampler: Option<crate::backend::ane_macos::AneSampler>,
+
+    /// Index of the synthetic ANE device, if added.
+    #[cfg(target_os = "macos")]
+    ane_device_idx: Option<usize>,
+
+    /// Last time the accelerators (GPU/ANE) were sampled — throttles ioreg/IOReport.
+    #[cfg(target_os = "macos")]
+    last_accel_sample: std::time::Instant,
+
     #[allow(dead_code)]
     config: BackendConfig,
 }
@@ -177,6 +193,14 @@ impl HostBackend {
             prev_rapl_time: std::time::Instant::now(),
             socket_count: 1,
             core_count: 0,
+            #[cfg(target_os = "macos")]
+            gpu_device_idx: None,
+            #[cfg(target_os = "macos")]
+            ane_sampler: None,
+            #[cfg(target_os = "macos")]
+            ane_device_idx: None,
+            #[cfg(target_os = "macos")]
+            last_accel_sample: std::time::Instant::now(),
             config,
         }
     }
@@ -223,6 +247,128 @@ impl HostBackend {
             // Leave everything else None — host doesn't have SMBUS
             ..SmbusTelemetry::default()
         }
+    }
+
+    /// Append a GPU device (macOS) if `ioreg` exposes an Apple GPU. Idempotent:
+    /// only adds the device once; later calls just refresh its telemetry.
+    #[cfg(target_os = "macos")]
+    fn sample_gpu(&mut self) {
+        let Some(s) = crate::backend::gpu_macos::sample() else {
+            return;
+        };
+
+        // Map GPU cores into a near-square grid (same approach as CPU cores).
+        let cores = s.core_count.max(1);
+        let cols = (cores as f64).sqrt().ceil() as usize;
+        let cols = cols.max(1);
+        let rows = cores.div_ceil(cols).max(1);
+
+        let idx = match self.gpu_device_idx {
+            Some(i) => i,
+            None => {
+                let i = self.devices.len();
+                self.devices.push(Device {
+                    index: i,
+                    board_type: "apple-gpu".to_string(),
+                    bus_id: "gpu:0".to_string(),
+                    architecture: Architecture::Unknown,
+                    coords: "(gpu,0)".to_string(),
+                    firmwares: None,
+                    limits: None,
+                    pcie_speed: None,
+                    pcie_width: None,
+                    grid_override: Some((rows, cols)),
+                    channels_override: Some(4),
+                });
+                self.gpu_device_idx = Some(i);
+                i
+            }
+        };
+
+        // Telemetry: utilization → "current" proxy; GPU memory drives DDR bars.
+        let mem_total = s.mem_alloc_bytes.max(1);
+        let fill_pct = ((s.mem_in_use_bytes as f64 / mem_total as f64) * 100.0)
+            .min(100.0)
+            .round() as u32;
+        self.telemetry.insert(
+            idx,
+            Telemetry {
+                voltage: None,
+                current: Some(s.util_pct / 10.0), // 0..10 A-ish proxy from 0..100%
+                power: None,                      // no-sudo ioreg can't read GPU power
+                asic_temperature: None,
+                aiclk: None,
+                heartbeat: Some(1),
+                timestamp: Utc::now(),
+            },
+        );
+        self.smbus.insert(
+            idx,
+            SmbusTelemetry {
+                ddr_status: Some(format!("{fill_pct}%")),
+                arc0_health: Some("1".to_string()),
+                ..SmbusTelemetry::default()
+            },
+        );
+    }
+
+    /// Append/refresh an ANE device from IOReport power (macOS). No-op if the
+    /// IOReport subscription wasn't available.
+    #[cfg(target_os = "macos")]
+    fn sample_ane(&mut self) {
+        let Some(sampler) = self.ane_sampler.as_mut() else {
+            return;
+        };
+        let Some(watts) = sampler.sample() else {
+            return;
+        };
+
+        let idx = match self.ane_device_idx {
+            Some(i) => i,
+            None => {
+                let i = self.devices.len();
+                self.devices.push(Device {
+                    index: i,
+                    board_type: "apple-ane".to_string(),
+                    bus_id: "ane:0".to_string(),
+                    architecture: Architecture::Unknown,
+                    coords: "(ane,0)".to_string(),
+                    firmwares: None,
+                    limits: None,
+                    pcie_speed: None,
+                    pcie_width: None,
+                    // Apple's stated 16-core ANE → 4×4 (nominal, not from an API).
+                    grid_override: Some((4, 4)),
+                    channels_override: Some(1),
+                });
+                self.ane_device_idx = Some(i);
+                i
+            }
+        };
+
+        // Synthetic utilization from power vs a nominal ANE ceiling (~8 W) so the
+        // viz animates; power carried through directly.
+        const NOMINAL_ANE_MAX_W: f64 = 8.0;
+        let util = ((watts / NOMINAL_ANE_MAX_W) * 100.0).clamp(0.0, 100.0) as f32;
+        self.telemetry.insert(
+            idx,
+            Telemetry {
+                voltage: None,
+                current: Some(util / 10.0),
+                power: Some(watts as f32),
+                asic_temperature: None,
+                aiclk: None,
+                heartbeat: Some(1),
+                timestamp: Utc::now(),
+            },
+        );
+        self.smbus.insert(
+            idx,
+            SmbusTelemetry {
+                arc0_health: Some("1".to_string()),
+                ..SmbusTelemetry::default()
+            },
+        );
     }
 
     /// Sample telemetry for one socket and update internal maps.
@@ -321,6 +467,14 @@ impl TelemetryBackend for HostBackend {
             .map(|c| c.brand().to_string())
             .unwrap_or_else(|| "CPU".to_string());
 
+        // Map this socket's logical cores into a near-square star grid so the
+        // Starfield visualization has one "core" per CPU thread to render
+        // (Architecture::Unknown would otherwise yield a 0×0 grid → empty view).
+        let cores_per_socket = (self.core_count / self.socket_count.max(1)).max(1);
+        let grid_cols = (cores_per_socket as f64).sqrt().ceil() as usize;
+        let grid_cols = grid_cols.max(1);
+        let grid_rows = cores_per_socket.div_ceil(grid_cols).max(1);
+
         for sock in 0..self.socket_count {
             let device = Device {
                 index: sock,
@@ -334,6 +488,10 @@ impl TelemetryBackend for HostBackend {
                 limits: None,
                 pcie_speed: None,
                 pcie_width: None,
+                // CPU cores → star grid; 4 synthesised DDR channels (see
+                // make_smbus_from_ram) so Memory Castle/Flow render channels.
+                grid_override: Some((grid_rows, grid_cols)),
+                channels_override: Some(4),
             };
             self.devices.push(device);
             log::info!(
@@ -356,6 +514,17 @@ impl TelemetryBackend for HostBackend {
             self.sample_socket(sock);
         }
 
+        #[cfg(target_os = "macos")]
+        {
+            self.ane_sampler = crate::backend::ane_macos::AneSampler::new();
+        }
+
+        #[cfg(target_os = "macos")]
+        self.sample_gpu();
+
+        #[cfg(target_os = "macos")]
+        self.sample_ane();
+
         Ok(())
     }
 
@@ -365,6 +534,13 @@ impl TelemetryBackend for HostBackend {
 
         for sock in 0..self.socket_count {
             self.sample_socket(sock);
+        }
+
+        #[cfg(target_os = "macos")]
+        if self.last_accel_sample.elapsed() >= std::time::Duration::from_secs(1) {
+            self.sample_gpu();
+            self.sample_ane();
+            self.last_accel_sample = std::time::Instant::now();
         }
         Ok(())
     }
@@ -428,6 +604,66 @@ mod tests {
         );
 
         assert!(backend.update().is_ok());
+    }
+
+    #[test]
+    fn test_host_device_has_renderable_geometry() {
+        // The Host backend must give its CPU "device" a non-zero star grid and
+        // channel count (via the overrides) so Starfield/Memory Castle render
+        // something instead of an empty 0×0 Architecture::Unknown grid.
+        let mut backend = HostBackend::new();
+        backend.init().unwrap();
+        let dev = &backend.devices()[0];
+
+        let (rows, cols) = dev.tensix_grid();
+        assert!(
+            rows > 0 && cols > 0,
+            "host grid must be non-empty (was {rows}x{cols}) so Starfield renders"
+        );
+        assert!(
+            dev.memory_channels() >= 1,
+            "host must report >=1 memory channel for the DDR visualizations"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_host_ane_device_is_well_formed_when_present() {
+        let mut backend = HostBackend::new();
+        backend.init().unwrap();
+        if let Some(ane) = backend
+            .devices()
+            .iter()
+            .find(|d| d.board_type == "apple-ane")
+        {
+            let (rows, cols) = ane.tensix_grid();
+            assert!(rows > 0 && cols > 0);
+            assert!(ane.memory_channels() >= 1);
+            // Power may be 0 W when idle but the telemetry entry must exist.
+            assert!(backend.telemetry(ane.index).is_some());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_host_adds_gpu_device_when_available() {
+        let mut backend = HostBackend::new();
+        backend.init().unwrap();
+        // If this Mac exposes an Apple GPU (it does on Apple Silicon), there must
+        // be a device whose board_type is "apple-gpu" with renderable geometry.
+        if let Some(gpu) = backend
+            .devices()
+            .iter()
+            .find(|d| d.board_type == "apple-gpu")
+        {
+            let (rows, cols) = gpu.tensix_grid();
+            assert!(rows > 0 && cols > 0, "gpu grid must be non-empty");
+            assert!(gpu.memory_channels() >= 1);
+            assert!(
+                backend.telemetry(gpu.index).is_some(),
+                "gpu telemetry present"
+            );
+        }
     }
 
     #[test]

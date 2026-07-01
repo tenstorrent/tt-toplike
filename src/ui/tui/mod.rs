@@ -10,7 +10,13 @@
 //! - Normal mode: Traditional table view with real-time telemetry
 //! - Visualization mode: Hardware-responsive starfield animation
 
+pub mod bench;
+pub use bench::BenchResult;
 pub mod chip_portrait;
+pub mod perf;
+pub use perf::PerfMeter;
+pub mod throttle;
+pub use throttle::ThrottleState;
 
 use crate::animation::{
     ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis,
@@ -19,14 +25,15 @@ use crate::backend::{factory, BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
 use crate::error::TTTopError;
 use crate::ui::colors;
-#[cfg(feature = "linux-procfs")]
-use crate::workload::{InferenceEngine, InferenceServerProbe, ProcessMonitor, ServingMetrics};
+use crate::workload::{HostProcessMonitor, InferenceEngine, ProcRow};
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+use crate::workload::{InferenceServerProbe, ProcessMonitor, ServingMetrics};
 use crossterm::{
     event::{self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-#[cfg(feature = "linux-procfs")]
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 use libc;
 use ratatui::{
     backend::CrosstermBackend,
@@ -40,7 +47,11 @@ use std::io::{self, IsTerminal};
 use std::time::{Duration, Instant};
 
 /// Pending kill confirmation state.
-#[cfg(feature = "linux-procfs")]
+///
+/// Cross-platform so the unified Insights render path can take a
+/// `Option<&KillConfirmState>` without a `cfg` gate. It is only ever populated
+/// by the Linux-gated kill key handlers; off-Linux it stays `None`, so the
+/// kill dialog never appears.
 #[derive(Debug, Clone)]
 struct KillConfirmState {
     pid: i32,
@@ -86,6 +97,10 @@ enum OverlayPanel {
 /// # Arguments
 ///
 /// * `cli` - CLI configuration
+/// Max rows shown in the Insights process panel (inference-matched rows are
+/// always kept; the rest are the busiest processes filling remaining slots).
+const PROC_PANEL_MAX_ROWS: usize = 12;
+
 pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     // Check if we have a TTY available
     if !std::io::stdout().is_terminal() {
@@ -114,6 +129,29 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
 
     log::info!("TUI started with {:?} backend", backend_type);
 
+    // Disable stderr log output BEFORE entering raw mode. Once the terminal is
+    // in raw mode, a stray `\n` from a log line doesn't return the cursor to
+    // column 0, so any log emitted between raw-mode-enable and this call would
+    // "staircase" diagonally across the screen. Logs still reach the in-app
+    // message buffer (shown in the Insights panel); stderr is re-enabled on exit.
+    crate::logging::disable_stderr();
+
+    // Install a panic hook that restores the terminal BEFORE the panic prints.
+    // Without this, a panic anywhere in the render/event loop unwinds straight
+    // past the normal cleanup below, leaving the terminal in raw mode + the
+    // alternate screen — which makes every subsequent shell command "staircase"
+    // until the user runs `reset`. Restoring here also lets the panic message
+    // print in cooked mode so the failure is actually visible.
+    {
+        let original_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableFocusChange);
+            crate::logging::enable_stderr();
+            original_hook(info);
+        }));
+    }
+
     // Setup terminal
     enable_raw_mode().map_err(|e| {
         TTTopError::Terminal(format!(
@@ -127,9 +165,6 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     // performance issues (faster animation when mousing over the terminal)
     execute!(stdout, EnterAlternateScreen, EnableFocusChange)
         .map_err(|e| TTTopError::Terminal(e.to_string()))?;
-
-    // Disable stderr output to prevent log corruption in TUI
-    crate::logging::disable_stderr();
 
     let backend_term = CrosstermBackend::new(stdout);
     let mut terminal =
@@ -186,20 +221,37 @@ fn run_app(
     let mut ui_poll_rate_data = Duration::from_millis(100); // ~10 FPS for data modes
     let mut last_anim_render = Instant::now();
     let mut last_data_render = Instant::now();
+    // Force an immediate redraw outside the FPS cadence — set on the first frame
+    // and after any input event so keystrokes feel instant even on the 10 FPS
+    // data screens (where the draw is otherwise gated to the slow tick).
+    let mut force_redraw = true;
 
-    // Process monitoring (Linux-only, update every 2 seconds)
-    #[cfg(feature = "linux-procfs")]
+    // Adaptive frame-rate throttle — both flags default to false, so the
+    // default render cadence is unchanged (60 FPS anim, 10 FPS data).
+    let mut throttle_state = ThrottleState::new(cli.throttle, cli.idle_on_blur);
+
+    // Live self-instrumentation — off by default, toggled with `P`.
+    let mut perf_meter = PerfMeter::new();
+    let mut show_perf = false;
+
+    // TT process attribution (Linux-only, update every 2 seconds). This reads
+    // /proc to map PIDs → device fds / hugepages and is merged into the
+    // cross-platform `proc_rows` by PID via `enrich_proc_rows_tt`.
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut process_monitor = crate::workload::ProcessMonitor::new();
-    #[cfg(feature = "linux-procfs")]
-    let mut last_process_update = Instant::now();
-    #[cfg(feature = "linux-procfs")]
-    let process_update_interval = Duration::from_secs(2);
 
-    // Host CPU / RAM monitoring — sampled alongside the process monitor.
-    // sysinfo needs two calls separated in time to compute meaningful CPU%;
-    // we call it twice at init (with a tiny sleep) so the first frame shows
-    // real data rather than zeros.
-    #[cfg(feature = "linux-procfs")]
+    // Cross-platform process listing for the Insights process panel. Enumerates
+    // host processes via sysinfo and tags inference runtimes; on Linux it is
+    // enriched by PID with TT device attribution (see the refresh tick).
+    let mut host_proc_monitor = HostProcessMonitor::new();
+    host_proc_monitor.update();
+    let mut proc_rows: Vec<ProcRow> = host_proc_monitor.rows(PROC_PANEL_MAX_ROWS);
+    let mut last_proc_rows_update = Instant::now();
+
+    // Host CPU / RAM monitoring — sampled on the same 2s cadence as processes.
+    // Cross-platform: the bars are useful on macOS too. sysinfo needs two calls
+    // separated in time to compute meaningful CPU%; we call it twice at init
+    // (with a tiny sleep) so the first frame shows real data rather than zeros.
     let (mut sys_monitor, mut host_cpu_pct, mut host_mem_used, mut host_mem_total) = {
         use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
         let mut s = System::new_with_specifics(
@@ -265,16 +317,25 @@ fn run_app(
     let mut portrait_tick: u64 = 0;
 
     // Insights mode state
-    #[cfg(feature = "linux-procfs")]
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut inference_engine = InferenceEngine::new();
-    #[cfg(feature = "linux-procfs")]
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut inference_probe = InferenceServerProbe::new();
-    #[cfg(feature = "linux-procfs")]
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut serving_metrics: std::collections::HashMap<i32, ServingMetrics> =
         std::collections::HashMap::new();
-    #[cfg(feature = "linux-procfs")]
+    // Cross-platform: the unified render path reads these. They're only mutated
+    // by the Linux-gated process-navigation / kill key handlers; off-Linux they
+    // stay at their defaults (cursor 0, no kill dialog).
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "linux-procfs")),
+        allow(unused_mut)
+    )]
     let mut process_cursor: usize = 0;
-    #[cfg(feature = "linux-procfs")]
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "linux-procfs")),
+        allow(unused_mut)
+    )]
     let mut kill_confirm: Option<KillConfirmState> = None;
 
     // Fleet navigation state (Insights with 32+ devices).
@@ -300,7 +361,7 @@ fn run_app(
                 | DisplayMode::Arcade
         ) || (display_mode == DisplayMode::Defrag && defrag_is_animated);
         let render_interval = if is_anim_mode {
-            ui_poll_rate_anim
+            throttle_state.effective_anim_interval(ui_poll_rate_anim)
         } else {
             ui_poll_rate_data
         };
@@ -316,6 +377,12 @@ fn run_app(
                 last_data_render = Instant::now();
             }
         }
+
+        // Whether to redraw this iteration: on the mode's FPS tick, or once
+        // immediately after input. Gating the draw (and the portrait particle
+        // tick below) by this is what keeps the data screens at ~10 FPS instead
+        // of redrawing the full screen on every 16 ms input-poll wakeup.
+        let do_draw = should_tick || std::mem::take(&mut force_redraw);
 
         // Initialize or update visualizations (only on tick to match target FPS)
         let size = terminal
@@ -422,7 +489,7 @@ fn run_app(
 
         // Tick portrait particles once per UI frame when on the Insights screen.
         // This must happen *before* the immutable borrow inside terminal.draw().
-        if display_mode == DisplayMode::Insights {
+        if do_draw && display_mode == DisplayMode::Insights {
             use crate::ui::tui::chip_portrait::tick_particles;
             portrait_tick = portrait_tick.wrapping_add(1);
             let devices_snapshot: Vec<_> = backend.devices().to_vec();
@@ -444,93 +511,116 @@ fn run_app(
             }
         }
 
-        // Draw UI based on mode
-        terminal
-            .draw(|f| {
-                // Clear frame with explicit black background for tmux compatibility
-                f.render_widget(
-                    Block::default().style(Style::default().bg(colors::rgb(0, 0, 0))),
-                    f.area(),
-                );
+        // Draw UI based on mode — only on a render tick (or just after input).
+        // On data screens this is ~10 FPS; without this gate the full screen was
+        // redrawn on every 16 ms input-poll wakeup (~60 FPS), wasting CPU.
+        if do_draw {
+            // Sample the perf meter (own CPU at most ~1/s) only when the readout
+            // is toggled on, so it costs nothing by default. `perf_status` must
+            // outlive the draw closure, so compute it here.
+            if show_perf {
+                perf_meter.maybe_sample_cpu();
+            }
+            let perf_status = if show_perf {
+                Some(perf_meter.status_string())
+            } else {
+                None
+            };
+            let perf_arg = perf_status.as_deref();
+            // Compute throttle hint before the draw closure (borrow safety: status_hint()
+            // returns Option<&'static str> so no lifetime issue, but keep pattern consistent
+            // with perf_arg to avoid any future borrow conflicts inside the closure).
+            let throttle_hint = throttle_state.status_hint();
+            let draw_start = Instant::now();
+            terminal
+                .draw(|f| {
+                    // Clear frame with explicit black background for tmux compatibility
+                    f.render_widget(
+                        Block::default().style(Style::default().bg(colors::rgb(0, 0, 0))),
+                        f.area(),
+                    );
 
-                match display_mode {
-                    DisplayMode::Insights => {
-                        #[cfg(feature = "linux-procfs")]
-                        render_insights(
-                            f,
-                            backend,
-                            &inference_engine,
-                            &process_monitor,
-                            process_cursor,
-                            kill_confirm.as_ref(),
-                            cli,
-                            &portrait_particles,
-                            &portrait_baseline,
-                            fleet_cursor,
-                            fleet_zoom_start,
-                            host_cpu_pct,
-                            host_mem_used,
-                            host_mem_total,
-                            &serving_metrics,
-                        );
-                        #[cfg(not(feature = "linux-procfs"))]
-                        render_insights_no_procfs(
-                            f,
-                            backend,
-                            &crate::workload::InferenceEngine::new(),
-                        );
-                    }
-                    DisplayMode::Grid => {
-                        render_grid_mode(f, backend);
-                    }
-                    DisplayMode::Starfield => {
-                        if let Some(ref sf) = starfield {
-                            ui_visualization(f, sf, backend);
+                    match display_mode {
+                        DisplayMode::Insights => {
+                            render_insights(
+                                f,
+                                backend,
+                                &proc_rows,
+                                process_cursor,
+                                kill_confirm.as_ref(),
+                                cli,
+                                &portrait_particles,
+                                &portrait_baseline,
+                                fleet_cursor,
+                                fleet_zoom_start,
+                                host_cpu_pct,
+                                host_mem_used,
+                                host_mem_total,
+                                #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+                                &serving_metrics,
+                            );
+                        }
+                        DisplayMode::Grid => {
+                            render_grid_mode(f, backend);
+                        }
+                        DisplayMode::Starfield => {
+                            if let Some(ref sf) = starfield {
+                                ui_visualization(f, sf, backend);
+                            }
+                        }
+                        DisplayMode::MemoryCastle => {
+                            if let Some(ref tg) = memory_castle {
+                                ui_memory_castle(f, tg, backend);
+                            }
+                        }
+                        DisplayMode::MemoryFlow => {
+                            if let Some(ref mf) = memory_flow {
+                                ui_memory_flow(f, mf, backend);
+                            }
+                        }
+                        DisplayMode::Arcade => {
+                            if let Some(ref arc) = arcade {
+                                ui_arcade(f, arc, backend);
+                            }
+                        }
+                        DisplayMode::Defrag => {
+                            if let Some(ref dv) = defrag {
+                                ui_defrag(f, dv, backend);
+                            }
                         }
                     }
-                    DisplayMode::MemoryCastle => {
-                        if let Some(ref tg) = memory_castle {
-                            ui_memory_castle(f, tg, backend);
-                        }
-                    }
-                    DisplayMode::MemoryFlow => {
-                        if let Some(ref mf) = memory_flow {
-                            ui_memory_flow(f, mf, backend);
-                        }
-                    }
-                    DisplayMode::Arcade => {
-                        if let Some(ref arc) = arcade {
-                            ui_arcade(f, arc, backend);
-                        }
-                    }
-                    DisplayMode::Defrag => {
-                        if let Some(ref dv) = defrag {
-                            ui_defrag(f, dv, backend);
-                        }
-                    }
-                }
 
-                // ── Global status bar (all modes) ─────────────────────────
-                render_global_statusbar(f, backend, display_mode);
+                    // ── Global status bar (all modes) ─────────────────────────
+                    render_global_statusbar(f, backend, display_mode, perf_arg, throttle_hint);
 
-                // ── Command bar overlay (all modes) ───────────────────────
-                if cmd_mode || cmd_message.is_some() {
-                    let msg_ref = cmd_message.as_ref().map(|(s, e)| (s.as_str(), *e));
-                    render_command_bar(f, &cmd_buf, msg_ref);
-                }
+                    // ── Command bar overlay (all modes) ───────────────────────
+                    if cmd_mode || cmd_message.is_some() {
+                        let msg_ref = cmd_message.as_ref().map(|(s, e)| (s.as_str(), *e));
+                        render_command_bar(f, &cmd_buf, msg_ref);
+                    }
 
-                // ── Floating overlay panel (legend / help / explain) ───────
-                if let Some(kind) = overlay {
-                    render_overlay_panel(f, kind, display_mode);
-                }
-            })
-            .map_err(|e| TTTopError::Terminal(e.to_string()))?;
+                    // ── Floating overlay panel (legend / help / explain) ───────
+                    if let Some(kind) = overlay {
+                        render_overlay_panel(f, kind, display_mode);
+                    }
+                })
+                .map_err(|e| TTTopError::Terminal(e.to_string()))?;
+            perf_meter.record_frame(draw_start.elapsed());
+        } // end if do_draw
 
         // Input always polls at 16 ms so keystrokes respond immediately.
         let input_poll = Duration::from_millis(16);
         if event::poll(input_poll).map_err(|e| TTTopError::Terminal(e.to_string()))? {
+            // Any input event redraws on the next iteration, regardless of the
+            // FPS cadence, so the screen reflects the keystroke immediately.
+            force_redraw = true;
             match event::read().map_err(|e| TTTopError::Terminal(e.to_string()))? {
-                Event::FocusGained | Event::FocusLost => {}
+                Event::FocusGained => {
+                    throttle_state.focused = true;
+                }
+                Event::FocusLost => {
+                    throttle_state.focused = false;
+                }
                 Event::Resize(_, _) => {
                     // Drop all size-dependent visualizations so they reinitialize
                     // at the new dimensions on the next loop iteration.
@@ -558,6 +648,7 @@ fn run_app(
                                     &mut ui_poll_rate_data,
                                     anim_cfg.sensitivity,
                                     &mut overlay,
+                                    &mut throttle_state,
                                 );
                                 if should_quit {
                                     return Ok(());
@@ -610,6 +701,10 @@ fn run_app(
                                     Some(OverlayPanel::Explain)
                                 };
                             }
+                            KeyCode::Char('P') => {
+                                show_perf = !show_perf;
+                                force_redraw = true;
+                            }
                             KeyCode::Char('/') => {
                                 // Open command bar — clears any previous result message
                                 cmd_mode = true;
@@ -631,13 +726,16 @@ fn run_app(
                                     // Zoom out from portrait drill-down back to galaxy overview.
                                     fleet_zoom_start = None;
                                 } else {
-                                    #[cfg(feature = "linux-procfs")]
+                                    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_some() {
                                         kill_confirm = None;
                                     } else {
                                         return Ok(());
                                     }
-                                    #[cfg(not(feature = "linux-procfs"))]
+                                    #[cfg(not(all(
+                                        target_os = "linux",
+                                        feature = "linux-procfs"
+                                    )))]
                                     return Ok(());
                                 }
                             }
@@ -733,7 +831,7 @@ fn run_app(
                                     fleet_cursor = fleet_cursor.saturating_sub(cells_per_row);
                                 } else {
                                     // Normal process-list navigation.
-                                    #[cfg(feature = "linux-procfs")]
+                                    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_none() {
                                         process_cursor = process_cursor.saturating_sub(1);
                                     }
@@ -746,11 +844,11 @@ fn run_app(
                                     fleet_cursor =
                                         (fleet_cursor + cells_per_row).min(n.saturating_sub(1));
                                 } else {
-                                    #[cfg(feature = "linux-procfs")]
+                                    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_none() {
-                                        let max = flat_process_list(&process_monitor)
-                                            .len()
-                                            .saturating_sub(1);
+                                        // Clamp to proc_rows — the SAME list the panel renders,
+                                        // so the cursor always matches the highlighted row.
+                                        let max = proc_rows.len().saturating_sub(1);
                                         process_cursor = (process_cursor + 1).min(max);
                                     }
                                 }
@@ -792,7 +890,7 @@ fn run_app(
                                     fleet_zoom_start = Some(page_start);
                                 } else {
                                     // Kill-dialog confirmation.
-                                    #[cfg(feature = "linux-procfs")]
+                                    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if let Some(ref kc) = kill_confirm {
                                         let _ = crate::workload::process_monitor::kill_pid(
                                             kc.pid,
@@ -802,25 +900,26 @@ fn run_app(
                                     }
                                 }
                             }
-                            #[cfg(feature = "linux-procfs")]
+                            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                             KeyCode::Char('k') if display_mode == DisplayMode::Insights => {
                                 if kill_confirm.is_none() {
-                                    if let Some(proc) =
-                                        flat_process_list(&process_monitor).get(process_cursor)
-                                    {
+                                    // Use proc_rows (the rendered list) so the kill target
+                                    // always matches the highlighted row — not flat_process_list
+                                    // (PID-ascending, uncapped) which diverges from the display.
+                                    if let Some(row) = proc_rows.get(process_cursor) {
                                         kill_confirm = Some(KillConfirmState {
-                                            pid: proc.pid,
-                                            name: proc.name.clone(),
-                                            device_idx: proc
-                                                .device_indices
-                                                .first()
-                                                .copied()
+                                            pid: row.pid,
+                                            name: row.name.clone(),
+                                            device_idx: row
+                                                .tt
+                                                .as_ref()
+                                                .and_then(|t| t.device_indices.first().copied())
                                                 .unwrap_or(0),
                                         });
                                     }
                                 }
                             }
-                            #[cfg(feature = "linux-procfs")]
+                            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                             KeyCode::Char('K') if display_mode == DisplayMode::Insights => {
                                 if let Some(ref kc) = kill_confirm {
                                     // Inside dialog: SIGKILL and close
@@ -829,17 +928,16 @@ fn run_app(
                                         libc::SIGKILL,
                                     );
                                     kill_confirm = None;
-                                } else if let Some(proc) =
-                                    flat_process_list(&process_monitor).get(process_cursor)
-                                {
-                                    // Outside dialog: SIGKILL immediately
+                                } else if let Some(row) = proc_rows.get(process_cursor) {
+                                    // Outside dialog: SIGKILL immediately using proc_rows
+                                    // (the rendered list) so highlight == kill target.
                                     let _ = crate::workload::process_monitor::kill_pid(
-                                        proc.pid,
+                                        row.pid,
                                         libc::SIGKILL,
                                     );
                                 }
                             }
-                            #[cfg(feature = "linux-procfs")]
+                            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                             KeyCode::Char('y') if display_mode == DisplayMode::Insights => {
                                 if let Some(ref kc) = kill_confirm {
                                     let _ = crate::workload::process_monitor::kill_pid(
@@ -849,7 +947,7 @@ fn run_app(
                                     kill_confirm = None;
                                 }
                             }
-                            #[cfg(feature = "linux-procfs")]
+                            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                             KeyCode::Char('n') if display_mode == DisplayMode::Insights => {
                                 kill_confirm = None;
                             }
@@ -872,7 +970,7 @@ fn run_app(
 
             // Ingest fresh telemetry into InferenceEngine — runs at backend rate (~10 Hz),
             // not at the UI render rate (60 FPS), so ARC stall counters don't oversaturate.
-            #[cfg(feature = "linux-procfs")]
+            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
             for device in backend.devices() {
                 use crate::workload::inference::parse_arc_health_counters;
                 let idx = device.index;
@@ -892,20 +990,31 @@ fn run_app(
             }
         }
 
-        // Update process monitor + host stats (every 2 seconds to avoid overhead)
-        #[cfg(feature = "linux-procfs")]
-        if last_process_update.elapsed() >= process_update_interval {
-            process_monitor.update();
-            // Probe inference servers — runs at same 2s cadence to avoid hammering
-            // HTTP endpoints on every backend tick.
-            let flat = flat_process_list(&process_monitor);
-            serving_metrics = inference_probe.update(&flat);
+        // Update process list + host stats (every 2 seconds to avoid overhead).
+        // Cross-platform: the host CPU/RAM bars and process panel work on macOS.
+        if last_proc_rows_update.elapsed() >= Duration::from_secs(2) {
+            host_proc_monitor.update();
+            proc_rows = host_proc_monitor.rows(PROC_PANEL_MAX_ROWS);
+
+            // Linux/TT: refresh /proc attribution + serving probes, then merge
+            // TT device info into proc_rows by PID.
+            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+            {
+                process_monitor.update();
+                // Probe inference servers at the same 2s cadence to avoid
+                // hammering HTTP endpoints on every backend tick.
+                let flat = flat_process_list(&process_monitor);
+                serving_metrics = inference_probe.update(&flat);
+                enrich_proc_rows_tt(&mut proc_rows, &process_monitor);
+            }
+
             sys_monitor.refresh_cpu_usage();
             sys_monitor.refresh_memory();
             host_cpu_pct = sys_monitor.global_cpu_usage();
             host_mem_used = sys_monitor.used_memory();
             host_mem_total = sys_monitor.total_memory();
-            last_process_update = Instant::now();
+            throttle_state.update_load(host_cpu_pct);
+            last_proc_rows_update = Instant::now();
         }
     }
 }
@@ -1256,7 +1365,13 @@ fn ui_arcade(f: &mut Frame, arcade: &ArcadeVisualization, backend: &dyn Telemetr
 /// >4 chips: a single `avg  44°  822M  79W` column instead.
 ///
 /// The command bar and overlay panels render on top of this row when active.
-fn render_global_statusbar(f: &mut Frame, backend: &dyn TelemetryBackend, mode: DisplayMode) {
+fn render_global_statusbar(
+    f: &mut Frame,
+    backend: &dyn TelemetryBackend,
+    mode: DisplayMode,
+    perf: Option<&str>,
+    throttle_hint: Option<&str>,
+) {
     use crate::models::telemetry::parse_hex_or_dec;
 
     let area = f.area();
@@ -1441,6 +1556,24 @@ fn render_global_statusbar(f: &mut Frame, backend: &dyn TelemetryBackend, mode: 
             Style::default().fg(label_fg),
         ));
         right.push(Span::raw(" "));
+    }
+
+    // Optional perf readout (toggled by `P`), dim, between hotkeys and telemetry.
+    if let Some(p) = perf {
+        left.push(Span::styled("  │  ", Style::default().fg(sep_fg)));
+        left.push(Span::styled(
+            p.to_string(),
+            Style::default().fg(colors::rgb(120, 120, 140)),
+        ));
+    }
+
+    // Throttle status hint (e.g. "⏷30" or "⏸2") shown dim when active.
+    if let Some(hint) = throttle_hint {
+        left.push(Span::styled("  │  ", Style::default().fg(sep_fg)));
+        left.push(Span::styled(
+            hint.to_string(),
+            Style::default().fg(colors::rgb(100, 100, 120)),
+        ));
     }
 
     left.extend(right);
@@ -1649,6 +1782,16 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 row!(" /legend", "toggle legend panel", lbl),
                 row!(" /explain", "toggle explain panel", lbl),
                 row!(" /help", "toggle this panel", lbl),
+                row!(
+                    " /throttle",
+                    "throttle anim FPS under heavy load (60→30)",
+                    lbl
+                ),
+                row!(
+                    " /idle-on-blur",
+                    "drop to 2 FPS when terminal unfocused",
+                    lbl
+                ),
             ]
         }
 
@@ -2180,6 +2323,8 @@ fn explain_lines(
 /// /legend           toggle legend overlay      (hotkey: l)
 /// /explain          toggle explain overlay     (hotkey: !)
 /// /help             list commands              (hotkey: ?)
+/// /throttle         toggle anim FPS throttle under heavy CPU load (60→30)
+/// /idle-on-blur     toggle drop to 2 FPS when terminal loses focus
 /// ```
 /// Returns `(message, is_error, should_quit)`.
 fn execute_command(
@@ -2189,6 +2334,7 @@ fn execute_command(
     data_poll: &mut Duration,
     _sensitivity: f32,
     overlay: &mut Option<OverlayPanel>,
+    throttle_state: &mut ThrottleState,
 ) -> (String, bool, bool) {
     let parts: Vec<&str> = cmd.trim().splitn(2, ' ').collect();
     let verb = parts[0].trim_start_matches('/').to_lowercase();
@@ -2277,6 +2423,36 @@ fn execute_command(
             };
             ("".to_string(), false, false) // panel shows the full content
         }
+        "throttle" => {
+            throttle_state.throttle_on = !throttle_state.throttle_on;
+            (
+                format!(
+                    "load throttle: {}",
+                    if throttle_state.throttle_on {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                ),
+                false,
+                false,
+            )
+        }
+        "idle-on-blur" | "idleonblur" => {
+            throttle_state.idle_on_blur = !throttle_state.idle_on_blur;
+            (
+                format!(
+                    "idle-on-blur: {}",
+                    if throttle_state.idle_on_blur {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                ),
+                false,
+                false,
+            )
+        }
         _ => (
             format!("unknown command: {}  (try /help or press ?)", verb),
             true,
@@ -2301,7 +2477,7 @@ fn truncate(s: &str, max: usize) -> &str {
 
 /// Flatten all processes into one stable-sorted Vec for cursor navigation.
 /// Uses a HashSet to dedup by PID in O(n) instead of O(n²) scan.
-#[cfg(feature = "linux-procfs")]
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 fn flat_process_list<'a>(pm: &'a ProcessMonitor) -> Vec<&'a crate::workload::ProcessInfo> {
     use std::collections::HashSet;
     let mut seen: HashSet<i32> = HashSet::new();
@@ -2328,6 +2504,26 @@ fn flat_process_list<'a>(pm: &'a ProcessMonitor) -> Vec<&'a crate::workload::Pro
     all
 }
 
+/// Merge TT device attribution into cross-platform `proc_rows` by PID.
+///
+/// For every process the Linux `/proc` monitor knows about, find the matching
+/// `ProcRow` (same PID) and attach its TT device indices + hugepage counts.
+/// A TT process that didn't rank into the top-N rows (and wasn't inference-
+/// name-matched) simply isn't shown — acceptable, as TT processes are typically
+/// high-CPU and rank in.
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+fn enrich_proc_rows_tt(rows: &mut [crate::workload::ProcRow], pm: &ProcessMonitor) {
+    for info in flat_process_list(pm) {
+        if let Some(r) = rows.iter_mut().find(|r| r.pid == info.pid) {
+            r.tt = Some(crate::workload::TtProcInfo {
+                device_indices: info.device_indices.clone(),
+                hugepages_1g: info.hugepages_1g,
+                hugepages_2m: info.hugepages_2m,
+            });
+        }
+    }
+}
+
 /// Cell width used in fleet compact mode (see `render_device_panels`).
 /// 3 chars: temperature block glyph (1) + space (1) + separator (1).
 const FLEET_CELL_W: u16 = 3;
@@ -2352,7 +2548,6 @@ const FLEET_HEIGHT_THRESHOLD: u16 = 30; // lines; beyond this we switch to compa
 ///
 /// Single source of truth so the two callers can never diverge on gap or
 /// compact-mode threshold.
-#[cfg(feature = "linux-procfs")]
 fn panel_layout(n: usize, portrait_w: u16, area_width: u16) -> (u16, u16, usize) {
     let balanced_cols = ((n as f64).sqrt().ceil() as usize).max(1);
     let full_panel_w = portrait_w + 1 + 31; // gap=1, stats_w=31
@@ -2374,7 +2569,6 @@ fn panel_layout(n: usize, portrait_w: u16, area_width: u16) -> (u16, u16, usize)
 ///
 /// When the device count is large enough that full portraits would overflow the screen
 /// we switch to a compact fleet heat-map (one coloured cell per device).
-#[cfg(feature = "linux-procfs")]
 fn device_panels_height(devices: &[crate::models::Device], area_width: u16) -> u16 {
     use crate::ui::tui::chip_portrait::portrait_dims;
     let n = devices.len().max(1);
@@ -2399,16 +2593,14 @@ fn device_panels_height(devices: &[crate::models::Device], area_width: u16) -> u
     (row_count as u16) * 15 // panel_h(14) + inter-row gap(1)
 }
 
-/// Render Insights screen (full layout — implemented by Task 8/9 helpers below).
+/// Render Insights screen (full layout: chip portraits + process panel).
 ///
 /// `portrait_particles` maps device index → live particle list, threaded through
 /// to `render_device_panels` → `render_chip_portrait` for the particle overlay.
-#[cfg(feature = "linux-procfs")]
 fn render_insights(
     f: &mut Frame,
     backend: &dyn TelemetryBackend,
-    engine: &InferenceEngine,
-    pm: &ProcessMonitor,
+    rows: &[crate::workload::ProcRow],
     cursor: usize,
     kill_confirm: Option<&KillConfirmState>,
     _cli: &Cli,
@@ -2422,6 +2614,7 @@ fn render_insights(
     host_cpu_pct: f32,
     host_mem_used: u64,
     host_mem_total: u64,
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
 ) {
     let area = f.area();
@@ -2456,7 +2649,6 @@ fn render_insights(
         f,
         chunks[1],
         backend,
-        engine,
         portrait_particles,
         &portrait_baseline,
         fleet_cursor,
@@ -2465,13 +2657,13 @@ fn render_insights(
     render_process_panel(
         f,
         chunks[2],
-        pm,
-        &flat_process_list(pm),
+        rows,
         cursor,
         kill_confirm,
         host_cpu_pct,
         host_mem_used,
         host_mem_total,
+        #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
         serving_metrics,
     );
     // Kill modal overlays the full screen when active
@@ -2480,21 +2672,10 @@ fn render_insights(
     }
 }
 
-/// Stub Insights render for non-linux-procfs builds.
-#[cfg(not(feature = "linux-procfs"))]
-fn render_insights_no_procfs(
-    f: &mut Frame,
-    backend: &dyn TelemetryBackend,
-    engine: &crate::workload::InferenceEngine,
-) {
-    let _ = (f, backend, engine);
-}
-
 /// Render a btop-style horizontal bar: `[████████░░░░░░░░]  42%`.
 ///
 /// `filled` is a fraction in [0, 1]; `bar_width` is the inner glyph count.
 /// Returns a `Vec<Span>` ready to append to a `Line`.
-#[cfg(feature = "linux-procfs")]
 fn host_bar_spans(
     label: &str,
     filled: f32,
@@ -2523,7 +2704,6 @@ fn host_bar_spans(
 }
 
 /// Pick a color for a bar value in [0, 1]: teal → yellow → red.
-#[cfg(feature = "linux-procfs")]
 fn bar_color(frac: f32) -> ratatui::style::Color {
     use ratatui::style::Color;
     if frac < 0.5 {
@@ -2535,24 +2715,27 @@ fn bar_color(frac: f32) -> ratatui::style::Color {
     }
 }
 
-/// Render the process panel with cursor, device mapping, and kill confirmation.
-#[cfg(feature = "linux-procfs")]
+/// Render the process panel over cross-platform `ProcRow`s.
+///
+/// Always shows PID / CPU% / MEM / NAME and an inference tag. When a row carries
+/// TT attribution (`row.tt`, Linux-only) it also shows the device-index column
+/// and a hugepage hint. On Linux, a matching `serving_metrics` entry adds a
+/// per-process serving summary row (port / health / model / tok-s).
 fn render_process_panel(
     f: &mut Frame,
     area: Rect,
-    pm: &ProcessMonitor,
-    procs: &[&crate::workload::ProcessInfo],
+    rows: &[crate::workload::ProcRow],
     cursor: usize,
     _kill_confirm: Option<&KillConfirmState>,
     host_cpu_pct: f32,
     host_mem_used: u64,
     host_mem_total: u64,
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
 ) {
     use ratatui::style::{Color, Style};
     use ratatui::text::{Line, Span};
 
-    let _ = pm; // pm available for future expansion
     let mut lines: Vec<Line> = Vec::new();
 
     // Separator rule
@@ -2606,7 +2789,7 @@ fn render_process_panel(
         Span::styled("Processes", Style::default().fg(Color::Gray)),
     ]));
 
-    if procs.is_empty() {
+    if rows.is_empty() {
         lines.push(Line::from(vec![
             Span::raw("  "),
             Span::styled(
@@ -2615,36 +2798,46 @@ fn render_process_panel(
             ),
         ]));
     } else {
-        let clamped_cursor = cursor.min(procs.len().saturating_sub(1));
+        let clamped_cursor = cursor.min(rows.len().saturating_sub(1));
 
-        for (i, proc) in procs.iter().enumerate() {
+        // Human-readable memory: bytes → KMG with one decimal for ≥1 unit.
+        let human_bytes = |bytes: u64| -> String {
+            const KB: f64 = 1024.0;
+            const MB: f64 = KB * 1024.0;
+            const GB: f64 = MB * 1024.0;
+            let b = bytes as f64;
+            if b >= GB {
+                format!("{:.1}G", b / GB)
+            } else if b >= MB {
+                format!("{:.1}M", b / MB)
+            } else if b >= KB {
+                format!("{:.1}K", b / KB)
+            } else {
+                format!("{}B", bytes)
+            }
+        };
+
+        for (i, row) in rows.iter().enumerate() {
             let selected = i == clamped_cursor;
             // Use ">" (guaranteed 1-column width) rather than "▶" (ambiguous
             // Unicode width — some terminals render it as 2 columns, shifting
             // all subsequent spans on the selected row 1 char to the right).
             let cursor_char = if selected { ">" } else { " " };
 
-            let name = format!("{:<12}", truncate(&proc.name, 12));
-            let cmdline = format!("{:<32}", truncate(&proc.cmdline, 32));
-            let pid = format!("{:>7}", proc.pid);
+            let pid = format!("{:>7}", row.pid);
+            let cpu = format!("{:>5.1}%", row.cpu_pct);
+            let mem = format!("{:>7}", human_bytes(row.mem_bytes));
+            let name = format!("{:<16}", truncate(&row.name, 16));
 
-            // Device column: build raw string then *truncate* to column width.
-            // format!("{:<N}", s) pads but never truncates; without an explicit
-            // truncation step a process holding 4+ devices overflows the column
-            // and misaligns everything to the right.
-            const DEV_W: usize = 10;
-            let dev_raw = if proc.device_indices.is_empty() {
-                "shared".to_string()
-            } else {
-                let dev_str = proc
-                    .device_indices
-                    .iter()
-                    .map(|d| d.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                format!("D{}", dev_str)
+            // Inference tag: `~ label` when actively working, `~ label idle` when
+            // matched but parked (e.g. `ollama serve` with no model), else `-`.
+            let inf_raw = match row.inference {
+                Some(label) if row.active => format!("~ {}", label),
+                Some(label) => format!("~ {} idle", label),
+                None => "-".to_string(),
             };
-            let devices = format!("{:<width$}", truncate(&dev_raw, DEV_W), width = DEV_W);
+            const INF_W: usize = 12;
+            let inference = format!("{:<width$}", truncate(&inf_raw, INF_W), width = INF_W);
 
             let row_color = if selected { Color::White } else { Color::Gray };
             let cursor_color = if selected {
@@ -2652,22 +2845,61 @@ fn render_process_panel(
             } else {
                 Color::DarkGray
             };
+            let inf_color = match row.inference {
+                Some(_) if row.active => Color::Green, // actively serving
+                Some(_) => Color::Yellow,              // matched but idle/parked
+                None => Color::DarkGray,
+            };
 
-            lines.push(Line::from(vec![
+            let mut row_spans = vec![
                 Span::raw("  "),
                 Span::styled(cursor_char, Style::default().fg(cursor_color)),
                 Span::raw(" "),
-                Span::styled(name, Style::default().fg(row_color)),
-                Span::raw("  "),
-                Span::styled(cmdline, Style::default().fg(Color::DarkGray)),
-                Span::raw("  "),
                 Span::styled(pid, Style::default().fg(Color::Cyan)),
                 Span::raw("  "),
-                Span::styled(devices, Style::default().fg(Color::Blue)),
-            ]));
+                Span::styled(cpu, Style::default().fg(row_color)),
+                Span::raw("  "),
+                Span::styled(mem, Style::default().fg(row_color)),
+                Span::raw("  "),
+                Span::styled(name, Style::default().fg(row_color)),
+                Span::raw("  "),
+                Span::styled(inference, Style::default().fg(inf_color)),
+            ];
+
+            // TT attribution (Linux-only enrichment): device indices + hugepages.
+            if let Some(ref tt) = row.tt {
+                let dev_raw = if tt.device_indices.is_empty() {
+                    "shared".to_string()
+                } else {
+                    format!(
+                        "dev {}",
+                        tt.device_indices
+                            .iter()
+                            .map(|d| d.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                };
+                const DEV_W: usize = 12;
+                let dev = format!("{:<width$}", truncate(&dev_raw, DEV_W), width = DEV_W);
+                row_spans.push(Span::raw("  "));
+                row_spans.push(Span::styled(dev, Style::default().fg(Color::Blue)));
+
+                let hp = tt.hugepages_1g + tt.hugepages_2m;
+                if hp > 0 {
+                    row_spans.push(Span::raw("  "));
+                    row_spans.push(Span::styled(
+                        format!("{}hp", hp),
+                        Style::default().fg(Color::Magenta),
+                    ));
+                }
+            }
+
+            lines.push(Line::from(row_spans));
 
             // If this is a known TT inference server, append a metrics summary row.
-            if let Some(sm) = serving_metrics.get(&proc.pid) {
+            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+            if let Some(sm) = serving_metrics.get(&row.pid) {
                 let mut spans: Vec<Span> = vec![
                     Span::raw("       "),
                     Span::styled(
@@ -2732,7 +2964,10 @@ fn render_process_panel(
 /// Render a centered kill-confirmation modal dialog over the current frame.
 /// Uses `Clear` to erase the background, then draws a left-border-only dialog
 /// (no right-side border characters per AGENTS.md).
-#[cfg(feature = "linux-procfs")]
+///
+/// Reachable from the cross-platform Insights path, but only ever invoked when
+/// `kill_confirm` is `Some`, which happens solely through the Linux-gated kill
+/// key handlers. Off-Linux it's compiled but never called.
 fn render_kill_dialog(f: &mut Frame, area: Rect, kc: &KillConfirmState) {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
@@ -2831,7 +3066,6 @@ fn render_kill_dialog(f: &mut Frame, area: Rect, kc: &KillConfirmState) {
 /// `cursor` is the currently highlighted device index — that cell is shown with
 /// a bright white `◉` instead of the normal block glyph so the user can see
 /// where Enter will zoom them in.  Press Enter to drill down to portrait view.
-#[cfg(feature = "linux-procfs")]
 fn render_fleet_heatmap_panel(
     f: &mut Frame,
     area: Rect,
@@ -2981,12 +3215,10 @@ fn render_fleet_heatmap_panel(
 /// dispatches to `render_fleet_heatmap_panel` instead.
 /// `fleet_cursor` and `fleet_zoom_start` control galaxy-overview cursor highlighting
 /// and portrait drill-down zoom respectively.
-#[cfg(feature = "linux-procfs")]
 fn render_device_panels(
     f: &mut Frame,
     area: Rect,
     backend: &dyn TelemetryBackend,
-    _engine: &crate::workload::InferenceEngine,
     portrait_particles: &std::collections::HashMap<
         usize,
         Vec<crate::ui::tui::chip_portrait::Particle>,
@@ -3630,21 +3862,28 @@ fn render_grid_mode(f: &mut Frame, backend: &dyn TelemetryBackend) {
 mod cmd_tests {
     use super::*;
 
-    fn fresh() -> (DisplayMode, Duration, Duration, Option<OverlayPanel>) {
+    fn fresh() -> (
+        DisplayMode,
+        Duration,
+        Duration,
+        Option<OverlayPanel>,
+        ThrottleState,
+    ) {
         (
             DisplayMode::Insights,
             Duration::from_millis(16),
             Duration::from_millis(250),
             None,
+            ThrottleState::new(false, false),
         )
     }
 
     #[test]
     fn quit_verbs_set_should_quit() {
         for verb in &["quit", "q", "exit", "/quit", "/q", "/exit"] {
-            let (mut mode, mut ap, mut dp, mut ov) = fresh();
+            let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
             let (msg, is_err, should_quit) =
-                execute_command(verb, &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+                execute_command(verb, &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
             assert!(should_quit, "{verb} should set should_quit");
             assert!(!is_err, "{verb} should not be an error");
             assert!(msg.is_empty(), "{verb} message should be empty");
@@ -3663,9 +3902,9 @@ mod cmd_tests {
             ("mode defrag", DisplayMode::Defrag),
         ];
         for (cmd, expected) in cases {
-            let (mut mode, mut ap, mut dp, mut ov) = fresh();
+            let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
             let (_, is_err, should_quit) =
-                execute_command(cmd, &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+                execute_command(cmd, &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
             assert_eq!(mode, expected, "/{cmd}");
             assert!(!is_err);
             assert!(!should_quit);
@@ -3674,9 +3913,16 @@ mod cmd_tests {
 
     #[test]
     fn mode_command_unknown_arg_returns_error() {
-        let (mut mode, mut ap, mut dp, mut ov) = fresh();
-        let (_, is_err, should_quit) =
-            execute_command("mode bogus", &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+        let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
+        let (_, is_err, should_quit) = execute_command(
+            "mode bogus",
+            &mut mode,
+            &mut ap,
+            &mut dp,
+            1.0,
+            &mut ov,
+            &mut ts,
+        );
         assert!(is_err);
         assert!(!should_quit);
         assert_eq!(mode, DisplayMode::Insights, "mode unchanged on bad arg");
@@ -3692,33 +3938,42 @@ mod cmd_tests {
             ("", OverlayPanel::Help),
             ("explain", OverlayPanel::Explain),
         ] {
-            let (mut mode, mut ap, mut dp, mut ov) = fresh();
+            let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
             // First call: panel should appear.
-            execute_command(cmd, &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+            execute_command(cmd, &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
             assert_eq!(
                 ov,
                 Some(*expected_panel),
                 "/{cmd} should open {expected_panel:?}"
             );
             // Second call: panel should dismiss (toggle).
-            execute_command(cmd, &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+            execute_command(cmd, &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
             assert_eq!(ov, None, "/{cmd} second call should close panel");
         }
     }
 
     #[test]
     fn fps_and_datafps_commands() {
-        let (mut mode, mut ap, mut dp, mut ov) = fresh();
-        let (msg, is_err, _) = execute_command("fps 30", &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+        let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
+        let (msg, is_err, _) =
+            execute_command("fps 30", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
         assert!(!is_err, "fps 30 should succeed");
         assert!(msg.contains("30"));
         assert_eq!(ap, Duration::from_secs_f64(1.0 / 30.0));
 
-        let (_, is_err, _) = execute_command("fps 0", &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+        let (_, is_err, _) =
+            execute_command("fps 0", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
         assert!(is_err, "fps 0 out of range");
 
-        let (msg, is_err, _) =
-            execute_command("datafps 10", &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+        let (msg, is_err, _) = execute_command(
+            "datafps 10",
+            &mut mode,
+            &mut ap,
+            &mut dp,
+            1.0,
+            &mut ov,
+            &mut ts,
+        );
         assert!(!is_err);
         assert!(msg.contains("10"));
         assert_eq!(dp, Duration::from_secs_f64(1.0 / 10.0));
@@ -3726,9 +3981,16 @@ mod cmd_tests {
 
     #[test]
     fn unknown_command_returns_error() {
-        let (mut mode, mut ap, mut dp, mut ov) = fresh();
-        let (msg, is_err, should_quit) =
-            execute_command("boguscommand", &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+        let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
+        let (msg, is_err, should_quit) = execute_command(
+            "boguscommand",
+            &mut mode,
+            &mut ap,
+            &mut dp,
+            1.0,
+            &mut ov,
+            &mut ts,
+        );
         assert!(is_err);
         assert!(!should_quit);
         assert!(
@@ -3740,14 +4002,60 @@ mod cmd_tests {
     #[test]
     fn slash_prefix_is_stripped() {
         // "/quit" should work identically to "quit" — the verb parser strips leading '/'.
-        let (mut mode, mut ap, mut dp, mut ov) = fresh();
+        let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
         let (_, _, should_quit) =
-            execute_command("/quit", &mut mode, &mut ap, &mut dp, 1.0, &mut ov);
+            execute_command("/quit", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts);
         assert!(should_quit);
+    }
+
+    #[test]
+    fn throttle_command_toggles() {
+        let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
+        assert!(!ts.throttle_on, "starts off");
+        let (msg, is_err, _) = execute_command(
+            "throttle", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts,
+        );
+        assert!(!is_err);
+        assert!(ts.throttle_on, "toggled on");
+        assert!(msg.contains("on"));
+        // Toggle again
+        execute_command(
+            "throttle", &mut mode, &mut ap, &mut dp, 1.0, &mut ov, &mut ts,
+        );
+        assert!(!ts.throttle_on, "toggled off");
+    }
+
+    #[test]
+    fn idle_on_blur_command_toggles() {
+        let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
+        assert!(!ts.idle_on_blur, "starts off");
+        let (msg, is_err, _) = execute_command(
+            "idle-on-blur",
+            &mut mode,
+            &mut ap,
+            &mut dp,
+            1.0,
+            &mut ov,
+            &mut ts,
+        );
+        assert!(!is_err);
+        assert!(ts.idle_on_blur, "toggled on");
+        assert!(msg.contains("on"));
+        // Alias also works
+        execute_command(
+            "idleonblur",
+            &mut mode,
+            &mut ap,
+            &mut dp,
+            1.0,
+            &mut ov,
+            &mut ts,
+        );
+        assert!(!ts.idle_on_blur, "toggled off via alias");
     }
 }
 
-#[cfg(feature = "linux-procfs")]
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 #[cfg(test)]
 mod tests {
     use super::panel_layout;
@@ -3799,4 +4107,197 @@ mod tests {
         assert_eq!(stats_w, 31);
         assert_eq!(cols_per_row, 3, "9 chips → 3×3 grid");
     }
+}
+
+/// Cross-platform tests for the default (Insights) screen fallback.
+///
+/// Unlike the Linux-gated `tests` module above, these run on every platform —
+/// they guard the behaviour that matters off-Linux (e.g. `--host` on macOS).
+#[cfg(test)]
+mod host_default_screen_tests {
+    use super::render_grid_mode;
+    use crate::backend::host::HostBackend;
+    use crate::backend::TelemetryBackend;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// Regression: the default Insights screen used to render nothing off-Linux
+    /// (the `render_insights_no_procfs` stub was a no-op), so `--host` on macOS
+    /// showed a blank screen. The fallback now paints the chip-portrait grid;
+    /// assert it produces a non-empty buffer with the host device's telemetry.
+    #[test]
+    fn default_screen_paints_host_device() {
+        let mut backend = HostBackend::new();
+        backend.init().expect("host init");
+        backend.update().expect("host update");
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+        terminal
+            .draw(|f| render_grid_mode(f, &backend))
+            .expect("draw");
+
+        let painted: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        let glyphs = painted.chars().filter(|c| !c.is_whitespace()).count();
+        assert!(
+            glyphs > 20,
+            "host default screen must not be blank (only {glyphs} non-space glyphs)"
+        );
+    }
+}
+
+/// Headless render benchmark: render each screen into a `TestBackend` for
+/// `frames` frames, timing the per-frame update+draw, and return per-mode cost.
+/// No raw mode, no TTY — safe to call from `--bench` or tests.
+pub fn run_render_bench(
+    backend: &dyn TelemetryBackend,
+    frames: usize,
+    width: u16,
+    height: u16,
+) -> Vec<bench::BenchResult> {
+    use crate::animation::{
+        ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis,
+    };
+    use ratatui::{backend::TestBackend, Terminal};
+    use std::time::Instant;
+
+    let mut results = Vec::new();
+
+    // Helper: run `frames` timed iterations of a per-frame closure, build a result.
+    fn measure<F: FnMut()>(
+        mode: &'static str,
+        target_fps: u32,
+        frames: usize,
+        mut frame: F,
+    ) -> bench::BenchResult {
+        let mut times = Vec::with_capacity(frames);
+        for _ in 0..frames {
+            let t = Instant::now();
+            frame();
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        let avg = if times.is_empty() {
+            0.0
+        } else {
+            times.iter().sum::<f64>() / times.len() as f64
+        };
+        let p95 = bench::percentile_ms(&mut times, 95.0);
+        bench::BenchResult {
+            mode,
+            frames,
+            avg_ms: avg,
+            p95_ms: p95,
+            target_fps,
+            est_cpu_pct: bench::est_cpu_pct(avg, target_fps),
+        }
+    }
+
+    let mk_term = || Terminal::new(TestBackend::new(width, height)).unwrap();
+
+    // Insights (data, 10 fps)
+    {
+        let mut term = mk_term();
+        let mut hpm = crate::workload::HostProcessMonitor::new();
+        hpm.update(); // one scan, not timed
+        let rows = hpm.rows(12); // snapshot, not timed
+        let particles: std::collections::HashMap<
+            usize,
+            Vec<crate::ui::tui::chip_portrait::Particle>,
+        > = std::collections::HashMap::new();
+        let baseline = crate::animation::baseline::AdaptiveBaseline::new();
+        // Built once outside the timed loop — render_insights ignores it (`_cli`),
+        // but constructing it per frame would add noise to the insights timing.
+        let bench_cli = crate::cli::Cli::bench_default();
+        results.push(measure("insights", 10, frames, || {
+            term.draw(|f| {
+                render_insights(
+                    f,
+                    backend,
+                    &rows,
+                    0,
+                    None,
+                    &bench_cli,
+                    &particles,
+                    &baseline,
+                    0,
+                    None,
+                    0.0,
+                    0,
+                    0,
+                    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+                    &std::collections::HashMap::new(),
+                );
+            })
+            .unwrap();
+        }));
+    }
+
+    // Grid (data, 10 fps)
+    {
+        let mut term = mk_term();
+        results.push(measure("grid", 10, frames, || {
+            term.draw(|f| render_grid_mode(f, backend)).unwrap();
+        }));
+    }
+
+    // Starfield (anim, 60 fps)
+    {
+        let mut term = mk_term();
+        let mut sf = HardwareStarfield::new(width as usize, height as usize);
+        sf.initialize_from_devices(backend.devices());
+        results.push(measure("starfield", 60, frames, || {
+            sf.update_from_telemetry(backend);
+            term.draw(|f| ui_visualization(f, &sf, backend)).unwrap();
+        }));
+    }
+
+    // Memory Castle (anim, 60 fps)
+    {
+        let mut term = mk_term();
+        let mut mc = MemoryCastle::new(width as usize, height as usize);
+        results.push(measure("memory-castle", 60, frames, || {
+            mc.update(backend);
+            term.draw(|f| ui_memory_castle(f, &mc, backend)).unwrap();
+        }));
+    }
+
+    // Memory Flow (anim, 60 fps)
+    {
+        let mut term = mk_term();
+        let mut mf = MemoryFlowVis::new(width as usize, height as usize);
+        results.push(measure("memory-flow", 60, frames, || {
+            mf.update(backend);
+            term.draw(|f| ui_memory_flow(f, &mf, backend)).unwrap();
+        }));
+    }
+
+    // Arcade (anim, 60 fps)
+    {
+        let mut term = mk_term();
+        let mut arc = ArcadeVisualization::new(width as usize, height as usize);
+        arc.initialize_from_devices(backend.devices());
+        arc.initialize_topology(backend);
+        results.push(measure("arcade", 60, frames, || {
+            arc.update(backend);
+            term.draw(|f| ui_arcade(f, &arc, backend)).unwrap();
+        }));
+    }
+
+    // Defrag (60 fps when active)
+    {
+        let mut term = mk_term();
+        let mut dv = DefragVis::new(width as usize, height as usize);
+        results.push(measure("defrag", 60, frames, || {
+            dv.update(backend);
+            term.draw(|f| ui_defrag(f, &dv, backend)).unwrap();
+        }));
+    }
+
+    results
 }
