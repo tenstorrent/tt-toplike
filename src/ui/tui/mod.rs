@@ -25,9 +25,11 @@ use crate::backend::{factory, BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
 use crate::error::TTTopError;
 use crate::ui::colors;
-use crate::workload::{HostProcessMonitor, InferenceEngine, ProcRow};
+use crate::workload::{HostProcessMonitor, ProcRow};
+// InferenceEngine + the /proc-based probes are only used on the Linux/TT path,
+// so gate the import to match (keeps non-Linux builds warning-clean under -D warnings).
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-use crate::workload::{InferenceServerProbe, ProcessMonitor, ServingMetrics};
+use crate::workload::{InferenceEngine, InferenceServerProbe, ProcessMonitor, ServingMetrics};
 use crossterm::{
     event::{self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyEventKind},
     execute,

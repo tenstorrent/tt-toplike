@@ -99,7 +99,7 @@ tt-toplike --host --mode flow
 
 > **The observer effect is real here.** On a TT accelerator the visualizer runs on the host CPU and watches a *separate* chip, so it barely perturbs what it measures. In `--host` mode the visualizer and the thing it's visualizing are the same CPU — rendering Arcade at a high frame rate burns cycles that then show up *in the visualization itself* as higher utilization, frequency, and temperature. You're partly watching tt-toplike watch itself. That feedback loop is a quirk of host mode, not a bug; switch modes or lower the FPS (`/fps 10`) to damp it. It also makes a quiet point: nothing you do to a real TT card from the host steals compute from the workload the way it does here.
 
-**Runs on Linux and macOS; Windows cross-compiles cleanly and is built + tested in CI** (its runtime hasn't yet been validated on real Windows, so treat it as best-effort). Linux-only pieces — procfs, the `/proc` socket table, the `libc` kill panel — are `cfg`-gated out on Windows. `--host` is the one non-mock backend that needs no Tenstorrent hardware and no Linux kernel interfaces, so it's the way to explore tt-toplike on a laptop. What's available depends on the OS:
+**Runs on Linux and macOS; Windows is built in CI with a headless runtime smoke** (`--bench` on `windows-latest`), though the interactive TUI hasn't been hand-tested on Windows yet — treat it as best-effort. Linux-only pieces — procfs, the `/proc` socket table, the `libc` kill panel — are `cfg`-gated out on Windows. `--host` is the one non-mock backend that needs no Tenstorrent hardware and no Linux kernel interfaces, so it's the way to explore tt-toplike on a laptop. What's available depends on the OS:
 
 | Metric | Linux | macOS / Windows |
 |--------|-------|-----------------|
@@ -168,6 +168,21 @@ xattr -dr com.apple.quarantine tt-toplike-tui
 ```
 
 On Apple Silicon, `--host` also surfaces the GPU and Neural Engine as extra devices (no sudo). See [Try it on any machine](#try-it-on-any-machine--no-tt-hardware-required-experimental) for the field mapping and the host-mode observer-effect caveat.
+
+### Windows — download the x86_64 binary (experimental)
+
+Each release ships a Windows x86_64 build of the TUI (`--host` preview path). CI builds it on `windows-latest` and runs a headless `--bench` smoke to confirm it executes, but the interactive TUI hasn't been hand-tested on Windows yet — best-effort.
+
+```powershell
+# Download + unzip this release's Windows binary
+gh release download --repo tenstorrent/tt-toplike --pattern "tt-toplike-tui-*-windows-x86_64.zip"
+Expand-Archive tt-toplike-tui-*-windows-x86_64.zip -DestinationPath tt-toplike
+
+# Run in Windows Terminal (host mode — no TT hardware needed)
+./tt-toplike/tt-toplike-tui.exe --host --mode arcade
+```
+
+Best in [Windows Terminal](https://aka.ms/terminal) (truecolor + Unicode); the legacy `conhost` console renders the visualizations poorly.
 
 ### Debian / Ubuntu — build from the debian/ tree
 

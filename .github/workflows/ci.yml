@@ -90,3 +90,9 @@ jobs:
         run: cargo build --locked --bin tt-toplike-tui --no-default-features --features tui,json-backend
         env:
           RUSTFLAGS: -D warnings
+
+      # Runtime proof on real Windows: --bench is headless (needs no TTY) and
+      # exercises the actual Windows code paths — notably sysinfo's PDH calls,
+      # which Wine can't emulate. A non-zero exit here fails the job.
+      - name: Runtime smoke (headless --bench)
+        run: cargo run --locked --bin tt-toplike-tui --no-default-features --features tui,json-backend -- --bench --mock
