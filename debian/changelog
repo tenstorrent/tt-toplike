@@ -9,6 +9,9 @@ tt-toplike (0.7.0) noble; urgency=medium
   * docs: mark --host and macOS/Windows builds as experimental; note the host
     mode observer effect (the visualiser shares the CPU it measures) and the
     per-hardware uniqueness of each device type, in README and project site.
+  * Change: default log level is now Warn (was Info). This is global, not
+    macOS-specific, so quieter startup output on Linux too; pass -v/--verbose
+    for Debug-level logging, or -q/--quiet to silence entirely.
 
  -- Tenstorrent <software@tenstorrent.com>  Tue, 30 Jun 2026 12:00:00 +0000
 

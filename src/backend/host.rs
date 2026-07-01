@@ -286,7 +286,11 @@ impl HostBackend {
         };
 
         // Telemetry: utilization → "current" proxy; GPU memory drives DDR bars.
-        let mem_total = s.mem_alloc_bytes.max(1);
+        // Fill % is GPU-in-use against *total system (unified) memory* — the real
+        // capacity on Apple Silicon — rather than against the dynamically-growing
+        // "Alloc system memory", which made the bar read near-full regardless of
+        // actual pressure. Falls back to the allocation if total is unavailable.
+        let mem_total = self.sys.total_memory().max(s.mem_alloc_bytes).max(1);
         let fill_pct = ((s.mem_in_use_bytes as f64 / mem_total as f64) * 100.0)
             .min(100.0)
             .round() as u32;

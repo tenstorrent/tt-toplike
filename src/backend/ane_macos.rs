@@ -263,7 +263,11 @@ unsafe fn sum_ane_energy_uj(delta: CFDictionaryRef) -> u64 {
             continue;
         }
         let name = IOReportChannelGetChannelName(chan);
-        if name.is_null() || !cfstring_eq(name, "ANE") {
+        // Match the ANE energy channel case-insensitively. Verified as literally
+        // "ANE" on M4 Pro; the case-insensitive compare is a safe superset that
+        // tolerates casing differences on other chips without matching unrelated
+        // channels (still an exact-name compare, not a prefix/substring one).
+        if name.is_null() || !cfstring_to_string(name).eq_ignore_ascii_case("ANE") {
             continue;
         }
         let raw = IOReportSimpleGetIntegerValue(chan, 0);
@@ -290,18 +294,12 @@ unsafe fn energy_to_uj(raw: i64, unit: CFStringRef) -> i64 {
         cfstring_to_string(unit)
     };
     match label.trim() {
-        "nJ" => raw / 1_000,       // nanojoules → microjoules
-        "uJ" | "µJ" => raw,        // already microjoules
-        _ /* "mJ" or unknown */ => raw.saturating_mul(1_000), // millijoules → microjoules
+        "nJ" => raw / 1_000,                     // nanojoules → microjoules
+        "uJ" | "µJ" => raw,                       // already microjoules
+        "mJ" => raw.saturating_mul(1_000),        // millijoules → microjoules
+        "J" => raw.saturating_mul(1_000_000),     // joules → microjoules
+        _ /* unknown */ => raw.saturating_mul(1_000), // default to mJ (observed ANE unit)
     }
-}
-
-/// Compare a borrowed `CFStringRef` to a Rust `&str` without taking ownership.
-///
-/// # Safety
-/// `s` must be a valid `CFStringRef` (get-rule; we do not release it).
-unsafe fn cfstring_eq(s: CFStringRef, expected: &str) -> bool {
-    cfstring_to_string(s) == expected
 }
 
 /// Copy a borrowed `CFStringRef` into an owned Rust `String` (get-rule).
