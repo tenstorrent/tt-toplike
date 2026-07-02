@@ -80,13 +80,17 @@ impl LoadSnake {
     /// Advance the journey for the featured (Compiling/Loading) service.
     pub fn update(&mut self, featured: &ServiceState, cadence_secs: u32) {
         self.frame = self.frame.wrapping_add(1);
-        // New service → reset the journey.
+        // New service → reset the journey. Reset `phase` too: the `Alarm` arm
+        // deliberately preserves the working phase, so without this a switch to
+        // an already-stalled service would inherit the prior service's phase and
+        // redden the wrong box.
         if self.active_key.as_deref() != Some(featured.key.as_str()) {
             self.active_key = Some(featured.key.clone());
             self.compile_fill = 0.0;
             self.load_fill = 0.0;
             self.burst_left = 0;
             self.started = Some(Instant::now());
+            self.phase = Phase::Down;
         }
         self.cadence_secs = cadence_secs.max(1);
         self.label = featured.label.clone();
@@ -330,6 +334,26 @@ mod tests {
             "keeps last working phase so renderer knows the active box"
         );
         assert_eq!(s.load_fill(), load_before, "fills freeze during alarm");
+    }
+
+    #[test]
+    fn switching_to_an_already_alarmed_service_does_not_inherit_prior_phase() {
+        let mut s = LoadSnake::new(80, 20);
+        let mut a = svc(Phase::Loading);
+        a.key = "a".into();
+        s.update(&a, 2); // journey A ends at Loading
+        // featured_loading jumps to a different, already-stalled service B.
+        let mut b = svc(Phase::Alarm);
+        b.key = "b".into();
+        b.flat_ticks = 200;
+        s.update(&b, 2);
+        assert_eq!(
+            s.active_phase(),
+            Phase::Down,
+            "new journey resets phase; Alarm arm must not inherit A's Loading"
+        );
+        assert_eq!(s.compile_fill(), 0.0, "new journey reset the fills");
+        assert_eq!(s.load_fill(), 0.0);
     }
 
     #[test]
