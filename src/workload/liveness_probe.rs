@@ -66,15 +66,14 @@ fn probe_spec(label: &str) -> Option<ProbeSpec> {
             path: "/v1/models",
             judge: judge_data_nonempty, // {"object":"list","data":[...]}
         }),
-        // TT inference server exposes a dedicated readiness endpoint: GET /health
-        // returns 200 when the model is loaded and ready, 503 ("Model not ready")
-        // otherwise — no auth required (we deliberately avoid /tt-liveness, which
-        // reports "alive" even before a model is loaded). Defaults to 8000 (often
-        // 800X); the real port is discovered from the socket table at probe time.
+        // OpenAI-compatible across variants: /v1/models returns 200 when the API
+        // is up. (The media variant returns 405 on /health, so we don't use it.)
+        // Note: 200 here means "server reachable"; true model-ready comes from the
+        // log lifecycle (LifecycleState), not this probe.
         "tt-inference-server" => Some(ProbeSpec {
             default_port: 8000,
-            path: "/health",
-            judge: judge_http_ok, // 200 ⇒ model ready
+            path: "/v1/models",
+            judge: judge_data_nonempty,
         }),
         _ => None,
     }
@@ -277,6 +276,7 @@ fn judge_data_nonempty(status: u16, body: &[u8]) -> bool {
 
 /// A bare readiness endpoint (e.g. tt-inference-server `/health`): 200 ⇒ ready,
 /// anything else (notably 503 "Model not ready") ⇒ not ready. Body is ignored.
+#[allow(dead_code)]
 fn judge_http_ok(status: u16, _body: &[u8]) -> bool {
     status == 200
 }
@@ -516,6 +516,18 @@ mod tests {
         assert!(probe_spec("ollama").is_some());
         assert!(probe_spec("vllm").is_some());
         assert!(probe_spec("tt-inference-server").is_some());
+    }
+
+    #[test]
+    fn tt_inference_server_probes_v1_models_not_health() {
+        // The media variant returns 405 on /health but 200 on /v1/models, and the
+        // LLM variant is OpenAI-compatible (also serves /v1/models), so /v1/models
+        // is the common readiness endpoint.
+        let spec = probe_spec("tt-inference-server").expect("has a probe spec");
+        assert_eq!(spec.path, "/v1/models");
+        // 200 with a served model ⇒ up; empty/again ⇒ not.
+        assert!((spec.judge)(200, br#"{"object":"list","data":[{"id":"m"}]}"#));
+        assert!(!(spec.judge)(405, b""));
     }
 
     #[test]
