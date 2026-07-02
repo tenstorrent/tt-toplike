@@ -184,9 +184,44 @@ pub fn model_unloaded(prev: &[ServiceState], cur: &[ServiceState]) -> bool {
     })
 }
 
+/// Best-effort: map a selected process row to a known inference service key so the
+/// monitor can pre-focus it. ProcRow carries no cmdline/model, so we only match its
+/// inference label against a SERVERS key; anything else → None (monitor opens
+/// unfocused). Precise PID→container linking is out of scope (spec #1).
+pub fn service_for_selected_process(row: &crate::workload::ProcRow) -> Option<&'static str> {
+    let label = row.inference?;
+    SERVERS.iter().find(|d| d.key == label).map(|d| d.key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // NOTE: the brief for this task illustrated the resolver with `"vllm"` as
+    // an example "SERVERS key", but `SERVERS` (see `services.rs`) only holds
+    // TT container services (`wan2.2`, `mochi`, `flux`, `sdxl`,
+    // `z-image-turbo`, `motif`, `animate`, `skyreels`, `prompt-server`) —
+    // `vllm` is a host-runtime label from `inference_match`, never a
+    // container-service key. Swapped the example to `"flux"` (an actual
+    // `SERVERS` key) so the match-succeeds branch is real; `"ollama"` still
+    // stands in for a matched-but-not-a-container-service label.
+    #[test]
+    fn service_for_selected_process_matches_label_else_none() {
+        let mut r = crate::workload::ProcRow {
+            pid: 1,
+            name: "python3".into(),
+            cpu_pct: 1.0,
+            mem_bytes: 0,
+            inference: Some("flux"),
+            active: true,
+            tt: None,
+        };
+        assert_eq!(service_for_selected_process(&r), Some("flux")); // label is a SERVERS key
+        r.inference = Some("ollama"); // not a container service
+        assert_eq!(service_for_selected_process(&r), None);
+        r.inference = None;
+        assert_eq!(service_for_selected_process(&r), None);
+    }
 
     #[test]
     fn model_unloaded_detects_ready_to_gone_only() {

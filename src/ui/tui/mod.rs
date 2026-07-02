@@ -331,6 +331,11 @@ fn run_app(
     let mut arcade: Option<ArcadeVisualization> = None;
     let mut defrag: Option<DefragVis> = None;
     let mut prev_display_mode = display_mode;
+    // The mode to return to when `i`/`I`/`Esc` exits the dedicated
+    // `DisplayMode::InferenceMonitor` view — captured at entry so `i` (or
+    // `Esc`) always lands back wherever the user came from, not a hardcoded
+    // Insights. Only meaningful while `display_mode == InferenceMonitor`.
+    let mut prev_mode = DisplayMode::Insights;
 
     // ── Slash command state ────────────────────────────────────────────────
     // Press '/' from any mode to open the command bar at the bottom of the
@@ -386,6 +391,12 @@ fn run_app(
     //                   instead of the compact fleet map.
     let mut fleet_cursor: usize = 0;
     let mut fleet_zoom_start: Option<usize> = None;
+
+    // Service-list cursor for the dedicated `DisplayMode::InferenceMonitor`
+    // view. Set on entry (best-effort pre-focus off the selected process, via
+    // `service_for_selected_process`) and moved by Up/Down while that view is
+    // active; see the `i`/`I`/Up/Down handlers below.
+    let mut service_cursor: usize = 0;
 
     loop {
         // Decide whether to advance animations this iteration.
@@ -597,10 +608,6 @@ fn run_app(
             let inference_monitor_rows: Vec<
                 crate::workload::inference_server::ServiceState,
             > = Vec::new();
-            // Service-list cursor for the InferenceMonitor view. Navigation
-            // (Up/Down) and pre-focus-on-entry are wired up in a later task;
-            // for now the view always renders with the first row highlighted.
-            let service_cursor: usize = 0;
             // Whether `proc_rows` above was actually built via the TT-filtered
             // path this cycle — only possible on Linux/procfs builds (see the
             // proc_rows assignments). Drives the process panel's empty-state
@@ -794,14 +801,38 @@ fn run_app(
                             }
                             KeyCode::Char('i') | KeyCode::Char('I') => {
                                 // Enter/exit the dedicated full-screen Inference Server
-                                // Monitor view. Cursor navigation and pre-focus-on-entry
-                                // (e.g. landing on a service already in Alarm) are wired
-                                // up in a later task — this just flips the view for now.
-                                display_mode = if display_mode == DisplayMode::InferenceMonitor {
-                                    DisplayMode::Insights
+                                // Monitor view. On entry, remember the mode we came from
+                                // (so exit lands back there, not a hardcoded Insights) and
+                                // best-effort pre-focus the service tied to the currently
+                                // selected process — see `service_for_selected_process`
+                                // (spec #1: ProcRow carries no cmdline/model, so this is a
+                                // label match, not precise PID→container linking).
+                                if display_mode != DisplayMode::InferenceMonitor {
+                                    prev_mode = display_mode;
+                                    display_mode = DisplayMode::InferenceMonitor;
+
+                                    #[cfg(target_os = "linux")]
+                                    let snapshot: Vec<
+                                        crate::workload::inference_server::ServiceState,
+                                    > = inference_monitor.snapshot();
+                                    #[cfg(not(target_os = "linux"))]
+                                    let snapshot: Vec<
+                                        crate::workload::inference_server::ServiceState,
+                                    > = Vec::new();
+
+                                    let target_key = proc_rows
+                                        .get(process_cursor)
+                                        .and_then(inference_panel::service_for_selected_process);
+                                    service_cursor = target_key
+                                        .and_then(|key| {
+                                            inference_panel::service_rows(&snapshot)
+                                                .iter()
+                                                .position(|s| s.key == key)
+                                        })
+                                        .unwrap_or(0);
                                 } else {
-                                    DisplayMode::InferenceMonitor
-                                };
+                                    display_mode = prev_mode;
+                                }
                                 force_redraw = true;
                             }
                             KeyCode::Char('/') => {
@@ -824,6 +855,11 @@ fn run_app(
                                 } else if fleet_zoom_start.is_some() {
                                     // Zoom out from portrait drill-down back to galaxy overview.
                                     fleet_zoom_start = None;
+                                } else if display_mode == DisplayMode::InferenceMonitor {
+                                    // Back out of the dedicated Inference Server Monitor
+                                    // view to wherever the user came from (see the
+                                    // `i`/`I` handler above) rather than quitting.
+                                    display_mode = prev_mode;
                                 } else {
                                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_some() {
@@ -954,6 +990,20 @@ fn run_app(
                                         process_cursor = (process_cursor + 1).min(max);
                                     }
                                 }
+                            }
+                            KeyCode::Up if display_mode == DisplayMode::InferenceMonitor => {
+                                service_cursor = service_cursor.saturating_sub(1);
+                            }
+                            KeyCode::Down if display_mode == DisplayMode::InferenceMonitor => {
+                                // `service_rows` always renders one row per `SERVERS`
+                                // entry regardless of snapshot contents (absent services
+                                // synthesize as Down — see `inference_panel::service_rows`),
+                                // so the cursor's upper bound is the static table length,
+                                // no snapshot read needed here.
+                                let max = crate::workload::inference_server::SERVERS
+                                    .len()
+                                    .saturating_sub(1);
+                                service_cursor = (service_cursor + 1).min(max);
                             }
                             KeyCode::Left if display_mode == DisplayMode::Insights => {
                                 let n = backend.devices().len();
