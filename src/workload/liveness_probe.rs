@@ -297,6 +297,21 @@ fn http_get_localhost(port: u16, path: &str, timeout: Duration) -> std::io::Resu
     Ok(buf)
 }
 
+/// Blocking GET to `127.0.0.1:port/path`, returning (status, body-as-string).
+/// Status `0` on any connect/timeout/IO error, so callers can treat that as
+/// "down" without matching on a `Result`. Used by the inference-server
+/// monitor's `ContainerProbe::http` (see `inference_server::probe`), which
+/// wants an owned, infallible reading rather than `probe_once`'s judged bool.
+pub fn http_get_status_body(port: u16, path: &str) -> (u16, String) {
+    match http_get_localhost(port, path, PROBE_TIMEOUT) {
+        Ok(resp) => (
+            http_status(&resp).unwrap_or(0),
+            String::from_utf8_lossy(http_body(&resp)).into_owned(),
+        ),
+        Err(_) => (0, String::new()),
+    }
+}
+
 /// Probe one runtime on a resolved port. `Some(active)` on a clean response,
 /// `None` on any error / unknown label so the caller falls back to the cheap tier.
 fn probe_once(label: &str, port: u16) -> Option<bool> {

@@ -87,6 +87,75 @@ pub fn top_process(ps_output: &str) -> Option<(String, f32, u64)> {
     Some((comm, cpu, rss_kib.saturating_mul(1024)))
 }
 
+// ── Container access abstraction ────────────────────────────────────────────
+//
+// The monitor's tick loop needs raw text from a running container (env dump,
+// resource stats, an exec'd shell probe, an HTTP health check) — all of it
+// I/O, none of it pure. `ContainerProbe` isolates that I/O behind a trait so
+// `fold_tick` (the actual decision logic) can be unit-tested against a fake
+// without touching a real `docker` binary or socket.
+
+use std::process::Command;
+
+/// One tick's raw sample for a service, already parsed from probe output into
+/// the shapes `fold_tick` needs. Built by the monitor from `ContainerProbe`
+/// calls; consumed purely by `fold_tick`.
+pub struct TickSample {
+    pub cpu_pct: f32,
+    pub rss_bytes: u64,
+    pub kernel_count: usize,
+    pub safetensors_fds: usize,
+    pub readiness: Readiness,
+    pub top_proc: Option<String>,
+    pub python_alive: bool,
+    pub last_log: Option<String>,
+}
+
+/// Abstract container access so the monitor is testable with a fake. Trail: a
+/// host/systemd impl for non-Docker installs would implement this same trait.
+pub trait ContainerProbe: Send {
+    /// `printenv`-style dump of the container's environment.
+    fn env(&self, container: &str) -> String;
+    /// `"cpu%|memusage"` resource snapshot (see [`parse_docker_stats`]).
+    fn stats(&self, container: &str) -> String;
+    /// Run `sh -c sh` inside the container, returning stdout.
+    fn exec(&self, container: &str, sh: &str) -> String;
+    /// GET `path` on the container's published `port`. `(status, body)`;
+    /// status `0` means unreachable (down or timed out).
+    fn http(&self, port: u16, path: &str) -> (u16, String);
+}
+
+/// Real `docker`-CLI-backed [`ContainerProbe`]. All calls shell out; every
+/// method degrades to an empty string / status 0 on error rather than
+/// panicking, since a mid-tick docker hiccup shouldn't take down the monitor.
+pub struct DockerProbe;
+
+impl ContainerProbe for DockerProbe {
+    fn env(&self, c: &str) -> String {
+        docker(&["exec", c, "env"])
+    }
+    fn stats(&self, c: &str) -> String {
+        docker(&["stats", "--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}", c])
+    }
+    fn exec(&self, c: &str, sh: &str) -> String {
+        docker(&["exec", c, "sh", "-c", sh])
+    }
+    fn http(&self, port: u16, path: &str) -> (u16, String) {
+        // Reuse the crate's localhost HTTP helper (liveness_probe) for status+body.
+        crate::workload::liveness_probe::http_get_status_body(port, path)
+    }
+}
+
+/// Run `docker <args>`, returning stdout as a lossy UTF-8 string. Any spawn
+/// or exec failure (docker not installed, container gone) yields `""`.
+fn docker(args: &[&str]) -> String {
+    Command::new("docker")
+        .args(args)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
