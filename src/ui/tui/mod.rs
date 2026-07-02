@@ -265,6 +265,11 @@ fn run_app(
     let inference_monitor = crate::workload::InferenceServerMonitor::spawn();
     #[cfg(target_os = "linux")]
     inference_monitor.submit(host_proc_monitor.detected_inference_servers());
+    // Previous inference snapshot, for detecting the model-unload edge that
+    // triggers the Defrag EVICT animation.
+    #[cfg(target_os = "linux")]
+    let mut prev_inference_snapshot: Vec<crate::workload::inference_server::ServiceState> =
+        inference_monitor.snapshot();
     let mut proc_rows: Vec<ProcRow> =
         host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts());
     let mut last_proc_rows_update = Instant::now();
@@ -1044,6 +1049,19 @@ fn run_app(
             // Refresh the inference-server monitor's target set (containers only).
             #[cfg(target_os = "linux")]
             inference_monitor.submit(host_proc_monitor.detected_inference_servers());
+            // Model-unload edge → kick off the Defrag EVICT animation. The
+            // power-EMA heuristic can't detect unload on Blackhole (see
+            // DefragVis::trigger_evict), so we drive it from this discrete signal.
+            #[cfg(target_os = "linux")]
+            {
+                let cur_inf = inference_monitor.snapshot();
+                if inference_panel::model_unloaded(&prev_inference_snapshot, &cur_inf) {
+                    if let Some(dv) = defrag.as_mut() {
+                        dv.trigger_evict();
+                    }
+                }
+                prev_inference_snapshot = cur_inf;
+            }
             proc_rows =
                 host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts());
 

@@ -121,9 +121,57 @@ fn down_placeholder(key: &'static str, label: &'static str) -> ServiceState {
     }
 }
 
+/// Detect a model-unload edge between two consecutive inference-monitor
+/// snapshots: a service that was loaded (`Ready`) previously and is now `Down` or
+/// absent from the snapshot. Used to trigger the Defrag EVICT animation (the
+/// power-EMA heuristic can't reliably detect unload on Blackhole). Pure.
+///
+/// A `Loading`→gone transition is deliberately NOT an unload — the model never
+/// finished loading, so there's nothing to evict.
+pub fn model_unloaded(prev: &[ServiceState], cur: &[ServiceState]) -> bool {
+    prev.iter().any(|p| {
+        p.phase == Phase::Ready
+            && match cur.iter().find(|c| c.key == p.key) {
+                Some(c) => c.phase == Phase::Down,
+                None => true, // container disappeared entirely
+            }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_unloaded_detects_ready_to_gone_only() {
+        let mut ready = base();
+        ready.key = "flux".into();
+        ready.phase = Phase::Ready;
+        let mut down = base();
+        down.key = "flux".into();
+        down.phase = Phase::Down;
+
+        assert!(
+            model_unloaded(&[ready.clone()], &[down]),
+            "Ready → Down is an unload"
+        );
+        assert!(
+            model_unloaded(&[ready.clone()], &[]),
+            "Ready → absent is an unload"
+        );
+        assert!(
+            !model_unloaded(&[ready.clone()], &[ready.clone()]),
+            "still Ready → no unload"
+        );
+
+        let mut loading = base();
+        loading.key = "flux".into();
+        loading.phase = Phase::Loading;
+        assert!(
+            !model_unloaded(&[loading], &[]),
+            "Loading → gone is not an unload"
+        );
+    }
 
     /// Full-field `ServiceState` builder for tests — every field is explicit
     /// so each test only overrides what it cares about via `..base()`.

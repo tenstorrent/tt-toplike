@@ -579,6 +579,40 @@ impl DefragVis {
         }
     }
 
+    /// Force every loaded device into the EVICT (Deconstructing) animation.
+    ///
+    /// Driven by an explicit model-unload signal from the inference monitor — a
+    /// reliable discrete event. The power-EMA heuristic in `update()` can't be
+    /// relied on for this: on Blackhole `aiclk` is always ≥200, so the chip jumps
+    /// straight from the initial Idle to Running and never returns to Idle, leaving
+    /// `idle_power` at its 0.0 init value; that pins the evict threshold to
+    /// `POWER_IDLE_W` (8 W), which real BH idle power (>8 W) never falls to — so
+    /// EVICT is otherwise unreachable there.
+    ///
+    /// Fills each device's trained channels then hands them to `Deconstructing`, so
+    /// there's a full→empty drain to watch (mirrors the Running→Deconstructing
+    /// side-effects in `update()`). Devices with no trained channels are skipped.
+    /// `update()` respects the forced phase — it holds `Deconstructing` until the
+    /// channels drain, then returns to `Idle`.
+    pub fn trigger_evict(&mut self) {
+        for ds in self.devices.values_mut() {
+            if !ds.channels.iter().any(|c| c.enabled && c.trained) {
+                continue;
+            }
+            for ch in ds.channels.iter_mut() {
+                if ch.enabled && ch.trained {
+                    ch.fill = 1.0;
+                    ch.head_pos = 1.0;
+                }
+            }
+            ds.phase = Phase::Deconstructing;
+            ds.running_since = None;
+            ds.scatter_bursts.clear();
+            ds.burst_cooldown = 0;
+            ds.inference_energy = 0.0;
+        }
+    }
+
     pub fn render(&self, backend: &dyn TelemetryBackend) -> Vec<Line<'static>> {
         self.render_inner(backend)
     }
@@ -1503,5 +1537,45 @@ mod tests {
         assert_eq!(ds.burst_cooldown, 0);
         // inference_energy not zeroed in Idle arm — that's intentional (power EMA
         // stays meaningful; energy decay handles it naturally).
+    }
+
+    #[test]
+    fn trigger_evict_forces_deconstructing_on_trained_devices() {
+        let mut dv = DefragVis::new(120, 40);
+        let mut ds = DeviceState::new(0);
+        ds.phase = Phase::Running;
+        ds.running_since = Some(5);
+        ds.channels[0].enabled = true;
+        ds.channels[0].trained = true;
+        ds.channels[0].fill = 1.0;
+        dv.devices.insert(0, ds);
+
+        // A second device with no trained channels must be left alone.
+        let mut idle = DeviceState::new(1);
+        idle.phase = Phase::Idle;
+        dv.devices.insert(1, idle);
+
+        dv.trigger_evict();
+
+        let evicting = &dv.devices[&0];
+        assert_eq!(
+            evicting.phase,
+            Phase::Deconstructing,
+            "a loaded device must enter EVICT on the unload signal"
+        );
+        assert!(
+            evicting.channels[0].fill > 0.0,
+            "channel is full, about to drain"
+        );
+        assert_eq!(
+            evicting.running_since, None,
+            "running dwell reset for EVICT"
+        );
+
+        assert_eq!(
+            dv.devices[&1].phase,
+            Phase::Idle,
+            "a device with no trained channels is not evicted"
+        );
     }
 }
