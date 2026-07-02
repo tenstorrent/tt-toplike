@@ -39,7 +39,7 @@ use crate::workload::inference_server::state::{
 /// every message, exactly like `LivenessProber`'s `PROBE_INTERVAL` gate.)
 const TICK_INTERVAL: Duration = Duration::from_secs(5);
 /// `TICK_INTERVAL` in whole seconds, passed to `fold_tick`'s alarm timer.
-const CADENCE_SECS: u32 = TICK_INTERVAL.as_secs() as u32;
+pub const CADENCE_SECS: u32 = TICK_INTERVAL.as_secs() as u32;
 
 /// Sentinel absolute kernel count meaning "no prior tick observed yet". A
 /// service just discovered may already have `.dephash` artifacts on disk from

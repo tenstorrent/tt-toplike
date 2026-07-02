@@ -184,6 +184,22 @@ pub fn model_unloaded(prev: &[ServiceState], cur: &[ServiceState]) -> bool {
     })
 }
 
+/// The service to feature in the full-screen loading view: the first one that
+/// is Compiling or Loading, in snapshot order. `None` when nothing is loading
+/// (the view then falls to the starfield when cold, else the live list).
+///
+/// Not yet wired into `mod.rs`'s render path — that lands in a later task of
+/// the "loading boxed-snake" series, so this is only exercised by its unit
+/// test for now. `#[allow(dead_code)]` mirrors the pattern used elsewhere in
+/// the crate for functions reserved for near-term future use (e.g.
+/// `src/bin/app.rs`'s buffered-keyboard-input field).
+#[allow(dead_code)]
+pub fn featured_loading(snapshot: &[ServiceState]) -> Option<&ServiceState> {
+    snapshot
+        .iter()
+        .find(|s| matches!(s.phase, Phase::Compiling | Phase::Loading))
+}
+
 /// The inference "trail" is cold when no service is doing anything — used to
 /// swap the [i] view to the model-starfield screensaver. Compiling/Loading/Ready
 /// means a model is present, so the live list is shown instead.
@@ -230,6 +246,26 @@ mod tests {
         assert_eq!(service_for_selected_process(&r), None);
         r.inference = None;
         assert_eq!(service_for_selected_process(&r), None);
+    }
+
+    #[test]
+    fn featured_loading_picks_first_compiling_or_loading() {
+        let mut down = base();
+        down.phase = Phase::Down;
+        let mut ready = base();
+        ready.phase = Phase::Ready;
+        let mut loading = base();
+        loading.phase = Phase::Loading;
+        loading.key = "b".into();
+        let mut compiling = base();
+        compiling.phase = Phase::Compiling;
+        compiling.key = "a".into();
+        // Nothing loading → None.
+        assert!(featured_loading(&[down.clone(), ready.clone()]).is_none());
+        assert!(featured_loading(&[]).is_none());
+        // First Compiling/Loading in slice order wins; Down/Ready skipped.
+        let rows = vec![down, ready, compiling.clone(), loading];
+        assert_eq!(featured_loading(&rows).map(|s| s.key.as_str()), Some("a"));
     }
 
     #[test]
