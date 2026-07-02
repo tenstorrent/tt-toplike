@@ -1,1102 +1,571 @@
-# TT Inference-Server Monitoring Implementation Plan
+# TT Inference-Server Monitoring Implementation Plan (v2 — resource-probe model)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax.
 
-**Goal:** Reliably detect a TT inference server on the box and show its lifecycle (Starting → Loading → Ready → Serving → Error) in Insights, instead of unrelated processes.
+**Goal:** A toggle-able Insights `[i]` panel showing each inference service's phase (compiling / loading / ready / hung) with concrete progress evidence, so an operator can tell "working" from "stuck" during long first-run kernel compiles + weight loads.
 
-**Architecture:** Cmdline-first identity (parse the container's `docker run` args for model/mesh/arch/port/device), a Docker-log lifecycle engine (polled `docker logs --since`, version-tolerant line classifier, state reducer), and the existing liveness HTTP probe as readiness corroboration. A background thread folds logs+probe into a lock-free `arc-swap` cache read by the render path. Linux/TT-gated.
+**Architecture:** A Linux-gated background `InferenceServerMonitor` shells out to `docker stats`/`docker exec`/`docker inspect` and the per-service liveness HTTP endpoint on a ~5s cadence, folds the signals into per-service `ServiceState` (phase + progress deltas + hang timer) via pure functions, and publishes a snapshot via `arc-swap` that the render path reads lock-free.
 
-**Tech Stack:** Rust, `sysinfo` (process cmdlines), `arc-swap` (lock-free cache), `std::process::Command` (docker subprocess), `std::thread` + `std::sync::mpsc`. No new dependencies.
+**Tech Stack:** Rust; `std::process::Command` (docker), the existing `std::net` HTTP helper in `liveness_probe`, `arc-swap`, `std::thread`/`mpsc`. No new deps.
 
 ## Global Constraints
 
-- **Linux/TT only.** All new modules and their wiring are `#[cfg(target_os = "linux")]`-gated; the feature compiles to a no-op elsewhere (matches `process_monitor`/`serving`).
-- **No new dependencies.** Reuse `arc-swap`, `std::process::Command`, `std::thread`.
-- **Off the hot path.** Zero subprocess/network I/O in the render loop or in any `rows()`-style call; all docker/probe I/O runs on the background thread, results read via `arc-swap`.
-- **No panics.** Every failure path returns `None`/keeps last state; never unwrap external data.
-- **SPDX header** on every new file: `// SPDX-License-Identifier: Apache-2.0` / `// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.`
-- **Extension trails (build the seam even though v1 fills one impl):** `Source` enum (Docker now, Host later); `LogSource` trait (DockerLogSource now); variant `registry` (media/LLM now); `LifecycleEvent` enum + `LifecycleState.metrics: Option<ServingMetrics>` (always `None` in v1) for future serving telemetry.
-- **Verify each task** with: `cargo test --locked --lib --features tui <module>` and `cargo clippy --locked --lib --bin tt-toplike-tui --features tui -- -D warnings`.
+- **Linux/TT only** (`#[cfg(target_os = "linux")]`); no-op elsewhere.
+- **No new dependencies.**
+- **Off the hot path:** all `docker`/HTTP I/O on the background thread; render reads `arc-swap` only.
+- **No panics** on external output (docker/HTTP text): parse with `Option`/`Result`, never index/unwrap untrusted data.
+- **Discover, don't hardcode:** the kernel-cache dir is `$TT_METAL_HOME/built`, with `TT_METAL_HOME` read from the container env at runtime. Never hardcode a container path.
+- **SPDX header** on every new file (`Apache-2.0` / `2026 Tenstorrent USA, Inc.`).
+- **Verify each task:** `cargo test --locked --lib --features tui inference_server` and `cargo clippy --locked --lib --bin tt-toplike-tui --features tui -- -D warnings`.
+
+## Context: what already exists on the branch (v1, partially superseded)
+
+- `inference_server/detect.rs` — `parse_inference_server` (cmdline → `InferenceServer{source,image,model,mesh,arch,device,port,uses_tt_device}`). **KEEP + reuse.**
+- `inference_server/logs.rs` — `Phase`(Starting/Loading/Ready/Serving/Error), `LifecycleEvent`, `LifecycleState`, `classify_log_line`, `ServingMetrics`. **Task A retires the lifecycle bits** (v2's `Phase` is different and lives in `state.rs`); only a log breadcrumb survives.
+- `liveness_probe.rs` — `probe_spec("tt-inference-server")` now `/v1/models` (Task 2). Leave as-is; that module is the *generic runtime* liveness feature. v2's per-service probing is separate, in `probe.rs`.
+
+## File Structure (v2)
+
+- `inference_server/services.rs` (new) — `ServiceDef` + the `SERVERS` table (mirrors tt-local-generator) + `service_for(model, image) -> Option<&'static ServiceDef>`.
+- `inference_server/probe.rs` (new) — pure parsers (`parse_docker_stats`, `parse_liveness`, `parse_env_var`, `count_lines`, `top_process`) + thin docker/HTTP shells behind a `ContainerProbe` trait.
+- `inference_server/state.rs` (new) — `Phase`, `ModelProfile`, `ServiceState`, `Phase::derive`, alarm-timer reducer, `estimate_progress`.
+- `inference_server/monitor.rs` (new) — `InferenceServerMonitor` (bg thread + `arc-swap` snapshot).
+- `inference_server/logs.rs` (modify) — retire lifecycle; keep `last_non_health_line`.
+- `inference_server/mod.rs` (modify) — module decls + re-exports.
+- `src/ui/tui/mod.rs` (modify) — `i` toggle + panel render + `format_service_row` (pure).
 
 ---
 
-## File Structure
+### Task A: Retire the log-lifecycle bits; keep a breadcrumb
 
-- `src/workload/inference_server/mod.rs` — module root: re-exports + shared types (`Source`, `InferenceServer`, `Phase`, `LifecycleEvent`, `LifecycleState`, `ServingMetrics`).
-- `src/workload/inference_server/detect.rs` — `parse_inference_server` (cmdline → `InferenceServer`) + variant registry.
-- `src/workload/inference_server/logs.rs` — `LogSource` trait, `DockerLogSource`, `classify_log_line`, `LifecycleState::fold`.
-- `src/workload/inference_server/monitor.rs` — `InferenceServerMonitor` (background thread + `arc-swap` cache).
-- Modify `src/workload/mod.rs` — gate + declare the submodule, re-export public types.
-- Modify `src/workload/liveness_probe.rs` — probe fix: `tt-inference-server` readiness via `/v1/models`.
-- Modify `src/ui/tui/mod.rs` — build detected servers each refresh, feed the monitor, render the "Inference Servers" card.
+**Files:** Modify `src/workload/inference_server/logs.rs`, `src/workload/inference_server/mod.rs`.
 
-A submodule directory (not a flat file) because this feature has four distinct responsibilities; keeping each in a focused file matches the skill's file-boundary guidance while the existing flat `workload/*.rs` files stay untouched.
+**Interfaces:** Produces `last_non_health_line(lines: &[String]) -> Option<String>`. Removes `Phase`, `LifecycleEvent`, `LifecycleState` (none created yet beyond Task 3's `Phase`/`LifecycleEvent`/`ServingMetrics`), `classify_log_line`.
 
----
-
-### Task 1: Inference-server record + cmdline detection
-
-**Files:**
-- Create: `src/workload/inference_server/mod.rs`
-- Create: `src/workload/inference_server/detect.rs`
-- Modify: `src/workload/mod.rs`
-
-**Interfaces:**
-- Produces: `Source` (enum), `InferenceServer` (struct), `parse_inference_server(name: &str, cmdline: &str) -> Option<InferenceServer>`.
-
-- [ ] **Step 1: Declare the gated submodule in `src/workload/mod.rs`**
-
-Add near the other workload modules:
-
-```rust
-#[cfg(target_os = "linux")]
-pub mod inference_server;
-#[cfg(target_os = "linux")]
-pub use inference_server::{InferenceServer, InferenceServerMonitor, LifecycleState, Phase, Source};
-```
-
-(The `InferenceServerMonitor`/`LifecycleState`/`Phase` re-exports resolve in Task 4/6; declaring them now keeps one edit to `mod.rs`. If the crate is built between tasks, temporarily trim the `pub use` to only the types defined so far.)
-
-- [ ] **Step 2: Write `mod.rs` shared types**
-
-`src/workload/inference_server/mod.rs`:
-
-```rust
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
-
-//! Detect and monitor TT inference servers (Docker-first), reporting a lifecycle
-//! state to the Insights screen. See
-//! `docs/superpowers/specs/2026-07-02-tt-inference-server-monitoring-design.md`.
-
-mod detect;
-mod logs;
-mod monitor;
-
-pub use detect::{parse_inference_server, InferenceServer, Source};
-pub use logs::{classify_log_line, LifecycleEvent, LifecycleState, Phase, ServingMetrics};
-pub use monitor::InferenceServerMonitor;
-```
-
-- [ ] **Step 3: Write the failing detection test**
-
-`src/workload/inference_server/detect.rs` (test module first):
+- [ ] **Step 1: Write the failing test** in `logs.rs` (replace the old test module):
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Trimmed from a real `docker run` on the QuietBox (media inference server).
-    const DOCKER_RUN: &str = "docker run --rm --name tt-inference-server-5edd00ce \
-        --device /dev/tenstorrent:/dev/tenstorrent --publish 0.0.0.0:8000:8000 \
-        -e MODEL=FLUX.1-schnell -e MESH_DEVICE=P300x2 -e ARCH_NAME=blackhole \
-        -e DEVICE=p300x2 -e NO_AUTH=1 ghcr.io/tenstorrent/tt-media-inference-server:0.17.0-8c48a10";
-
     #[test]
-    fn parses_tt_inference_docker_run() {
-        let s = parse_inference_server("docker", DOCKER_RUN).expect("should detect");
-        assert!(matches!(s.source, Source::Docker { .. }));
-        assert_eq!(s.model.as_deref(), Some("FLUX.1-schnell"));
-        assert_eq!(s.mesh.as_deref(), Some("P300x2"));
-        assert_eq!(s.arch.as_deref(), Some("blackhole"));
-        assert_eq!(s.device.as_deref(), Some("p300x2"));
-        assert_eq!(s.port, Some(8000));
-        assert!(s.uses_tt_device);
-        assert!(s.image.contains("tt-media-inference-server"));
-    }
-
-    #[test]
-    fn ignores_unrelated_processes() {
-        assert!(parse_inference_server("uvicorn", "uvicorn --host 0.0.0.0 main:app").is_none());
-        assert!(parse_inference_server("bash", "docker ps").is_none());
-        assert!(parse_inference_server("node", "node server.js").is_none());
+    fn breadcrumb_skips_health_poll_spam() {
+        let lines = vec![
+            "INFO: compiling kernels for z-image".to_string(),
+            r#"172.17.0.1 - "GET /tt-liveness HTTP/1.1" 405 Method Not Allowed"#.to_string(),
+            r#"172.17.0.1 - "GET /health HTTP/1.0" 405"#.to_string(),
+        ];
+        assert_eq!(last_non_health_line(&lines).as_deref(), Some("INFO: compiling kernels for z-image"));
+        assert_eq!(last_non_health_line(&[]), None);
     }
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it fails**
+- [ ] **Step 2: Run it — fails** (`last_non_health_line` undefined, old items still present).
 
-Run: `cargo test --locked --lib --features tui inference_server::detect`
-Expected: FAIL — `parse_inference_server`/`Source`/`InferenceServer` not found.
+Run: `cargo test --locked --lib --features tui inference_server::logs`
 
-- [ ] **Step 5: Implement `detect.rs`**
-
-Prepend to `src/workload/inference_server/detect.rs` (above the test module):
+- [ ] **Step 3: Replace `logs.rs` body** (keep SPDX header) with just the breadcrumb:
 
 ```rust
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+//! Log breadcrumb for the inference-server panel. v2 derives lifecycle from
+//! resource/process probes (see state.rs), not log parsing — the server log is
+//! silent during the long load phase. The only log use is surfacing the last
+//! human-meaningful line, filtering out liveness/health-poll spam.
 
-//! Recognize a TT inference server from a process name + cmdline and extract a
-//! structured record. Pure and cross-platform-compilable; only invoked on Linux.
-
-/// Where the server runs. v1 handles Docker; the `Host` trail (non-container
-/// installs) slots in behind this enum without changing consumers.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Source {
-    Docker { container: String },
-    // Trail: Host { unit_or_pid: String },
-}
-
-/// Identity of a detected inference server, parsed from its launch cmdline.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InferenceServer {
-    pub source: Source,
-    pub image: String,
-    pub model: Option<String>,
-    pub mesh: Option<String>,
-    pub arch: Option<String>,
-    pub device: Option<String>,
-    pub port: Option<u16>,
-    pub uses_tt_device: bool,
-}
-
-/// True if `image_or_name` names a TT inference server. Central recognizer so
-/// new variants (vLLM-native, Triton, …) are a one-line addition here.
-fn is_tt_inference_image(token: &str) -> bool {
-    let t = token.to_lowercase();
-    t.contains("inference-server")
-        || t.contains("tt-media-inference")
-        || (t.contains("ghcr.io/tenstorrent/tt-") && t.contains("server"))
-}
-
-/// Value following a flag token, e.g. `--name X` → `X`. Returns the next token.
-fn value_after<'a>(toks: &[&'a str], i: usize) -> Option<&'a str> {
-    toks.get(i + 1).copied()
-}
-
-/// Parse `-e KEY=VAL` env pairs (KEY is the token after `-e`/`--env`).
-fn env_value(toks: &[&str], key: &str) -> Option<String> {
-    for (i, t) in toks.iter().enumerate() {
-        if (*t == "-e" || *t == "--env") {
-            if let Some(kv) = value_after(toks, i) {
-                if let Some((k, v)) = kv.split_once('=') {
-                    if k == key {
-                        return Some(v.to_string());
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Extract the container port from `--publish [host:]ctr[/proto]`, e.g.
-/// `--publish 0.0.0.0:8000:8000` → 8000 (last numeric segment before any `/`).
-fn published_port(toks: &[&str]) -> Option<u16> {
-    for (i, t) in toks.iter().enumerate() {
-        if *t == "--publish" || *t == "-p" {
-            if let Some(spec) = value_after(toks, i) {
-                let spec = spec.split('/').next().unwrap_or(spec);
-                if let Some(seg) = spec.rsplit(':').next() {
-                    if let Ok(p) = seg.parse::<u16>() {
-                        return Some(p);
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Recognize a TT inference server from `name` + full `cmdline`, or `None`.
-/// v1 only recognizes the `docker run` form.
-pub fn parse_inference_server(name: &str, cmdline: &str) -> Option<InferenceServer> {
-    let toks: Vec<&str> = cmdline.split_whitespace().collect();
-    // Must be a docker run invocation.
-    let is_docker_run = (name == "docker" || toks.first() == Some(&"docker"))
-        && toks.iter().any(|t| *t == "run");
-    if !is_docker_run {
-        return None;
-    }
-    // Find the image token (recognizer) and the --name.
-    let image = toks.iter().find(|t| is_tt_inference_image(t))?.to_string();
-    let container = toks
+/// Last log line that isn't a health/liveness poll, if any.
+pub fn last_non_health_line(lines: &[String]) -> Option<String> {
+    lines
         .iter()
-        .position(|t| *t == "--name")
-        .and_then(|i| value_after(&toks, i))
-        .unwrap_or("unknown")
-        .to_string();
-
-    Some(InferenceServer {
-        source: Source::Docker { container },
-        image,
-        model: env_value(&toks, "MODEL"),
-        mesh: env_value(&toks, "MESH_DEVICE"),
-        arch: env_value(&toks, "ARCH_NAME"),
-        device: env_value(&toks, "DEVICE"),
-        port: published_port(&toks),
-        uses_tt_device: cmdline.contains("/dev/tenstorrent"),
-    })
+        .rev()
+        .find(|l| {
+            let low = l.to_lowercase();
+            !(low.contains("/tt-liveness") || low.contains("/health") || low.contains("/v1/models"))
+        })
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
 }
 ```
 
-- [ ] **Step 6: Run the tests to verify they pass**
-
-Run: `cargo test --locked --lib --features tui inference_server::detect`
-Expected: PASS (2 tests). Then `cargo clippy --locked --lib --features tui -- -D warnings` clean.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add src/workload/mod.rs src/workload/inference_server/mod.rs src/workload/inference_server/detect.rs
-git commit -m "feat(workload): detect TT inference server from docker run cmdline"
-```
-
-Note: `mod.rs` references `logs`/`monitor` (Tasks 3–6). If building now, comment out the `mod logs;`/`mod monitor;` lines and their re-exports until those tasks land, or implement Tasks 1,3,4,6 before the first full build.
-
----
-
-### Task 2: Fix the liveness probe for the media variant
-
-**Files:**
-- Modify: `src/workload/liveness_probe.rs` (the `tt-inference-server` arm of `probe_spec`, and add a test)
-
-**Interfaces:**
-- Consumes: existing `probe_spec`, `judge_data_nonempty`, `judge_http_ok`.
-
-- [ ] **Step 1: Write the failing test**
-
-Add to `liveness_probe.rs` tests:
+- [ ] **Step 4: Update `inference_server/mod.rs`** — replace the `logs` re-export line:
 
 ```rust
-#[test]
-fn tt_inference_server_probes_v1_models_not_health() {
-    // The media variant returns 405 on /health but 200 on /v1/models, and the
-    // LLM variant is OpenAI-compatible (also serves /v1/models), so /v1/models
-    // is the common readiness endpoint.
-    let spec = probe_spec("tt-inference-server").expect("has a probe spec");
-    assert_eq!(spec.path, "/v1/models");
-    // 200 with a served model ⇒ up; empty/again ⇒ not.
-    assert!((spec.judge)(200, br#"{"object":"list","data":[{"id":"m"}]}"#));
-    assert!(!(spec.judge)(405, b""));
-}
+pub use logs::last_non_health_line;
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+Remove any `pub use logs::{classify_log_line, LifecycleEvent, Phase, ServingMetrics};`. (Later tasks add `services`, `probe`, `state`, `monitor` mod lines + re-exports.)
 
-Run: `cargo test --locked --lib --features tui liveness_probe::tests::tt_inference_server_probes_v1_models`
-Expected: FAIL — `spec.path` is currently `/health`.
-
-- [ ] **Step 3: Change the probe spec**
-
-In `probe_spec`, replace the `tt-inference-server` arm:
-
-```rust
-        // OpenAI-compatible across variants: /v1/models returns 200 when the API
-        // is up. (The media variant returns 405 on /health, so we don't use it.)
-        // Note: 200 here means "server reachable"; true model-ready comes from the
-        // log lifecycle (LifecycleState), not this probe.
-        "tt-inference-server" => Some(ProbeSpec {
-            default_port: 8000,
-            path: "/v1/models",
-            judge: judge_data_nonempty,
-        }),
-```
-
-- [ ] **Step 4: Run tests to verify pass**
-
-Run: `cargo test --locked --lib --features tui liveness_probe`
-Expected: PASS (existing probe tests + the new one).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/workload/liveness_probe.rs
-git commit -m "fix(workload): tt-inference-server readiness via /v1/models (media variant 405s on /health)"
-```
-
----
-
-### Task 3: Lifecycle types + log-line classifier
-
-**Files:**
-- Create: `src/workload/inference_server/logs.rs`
-
-**Interfaces:**
-- Produces: `Phase` (enum), `LifecycleEvent` (enum), `ServingMetrics` (struct), `classify_log_line(line: &str) -> Option<LifecycleEvent>`.
-
-- [ ] **Step 1: Write the failing classifier test**
-
-`src/workload/inference_server/logs.rs` (test module):
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn classifies_known_log_markers() {
-        assert!(matches!(
-            classify_log_line("Loading weights: 42%"),
-            Some(LifecycleEvent::Loading { progress: Some(p), .. }) if (p - 0.42).abs() < 1e-3
-        ));
-        assert!(matches!(
-            classify_log_line("INFO: Application startup complete."),
-            Some(LifecycleEvent::Ready)
-        ));
-        assert!(matches!(
-            classify_log_line("Traceback (most recent call last):"),
-            Some(LifecycleEvent::Error(_))
-        ));
-        assert!(matches!(
-            classify_log_line(r#"172.17.0.1 - "POST /v1/images/generations HTTP/1.1" 200"#),
-            Some(LifecycleEvent::Serving)
-        ));
-        // Health-check spam and unknown lines are ignored.
-        assert!(classify_log_line(r#""GET /health HTTP/1.0" 405 Method Not Allowed"#).is_none());
-        assert!(classify_log_line("some unrelated chatter").is_none());
-    }
-}
-```
-
-- [ ] **Step 2: Run it to verify it fails**
-
-Run: `cargo test --locked --lib --features tui inference_server::logs`
-Expected: FAIL — `classify_log_line`/`LifecycleEvent` not found.
-
-- [ ] **Step 3: Implement the types + classifier**
-
-Prepend to `logs.rs`:
-
-```rust
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
-
-//! Turn inference-server log lines into lifecycle events, and fold events (plus
-//! the readiness probe) into a `LifecycleState`. Pure classifier + reducer;
-//! the log *source* lives alongside as a trait (see `LogSource`).
-
-use std::time::{Duration, Instant};
-
-/// Coarse lifecycle phase surfaced on the Insights card.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Phase {
-    Starting,
-    Loading,
-    Ready,
-    Serving,
-    Error,
-}
-
-/// A single classified log observation. Trail: add variants (e.g.
-/// `Tokens { per_sec }`, `DiffusionStep { i, n }`) for richer telemetry later.
-#[derive(Debug, Clone, PartialEq)]
-pub enum LifecycleEvent {
-    Loading { progress: Option<f32>, detail: String },
-    Ready,
-    Serving,
-    Error(String),
-}
-
-/// Placeholder for future serving telemetry (tokens/sec, latency, …). Always
-/// `None` on `LifecycleState` in v1; the field + type reserve the card slot.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ServingMetrics {}
-
-/// Best-effort, version-tolerant. Returns `None` for lines we don't recognize
-/// (state then holds). Case-insensitive; ordered most- to least-specific.
-pub fn classify_log_line(line: &str) -> Option<LifecycleEvent> {
-    let l = line.to_lowercase();
-
-    // Errors first.
-    if l.contains("traceback (most recent call last)")
-        || l.contains("failed to load")
-        || l.contains("fatal")
-        || l.contains(" error:")
-    {
-        return Some(LifecycleEvent::Error(line.trim().to_string()));
-    }
-    // Readiness markers (uvicorn/vLLM/tt-metal).
-    if l.contains("application startup complete")
-        || l.contains("uvicorn running on")
-        || l.contains("model ready")
-        || l.contains("compilation complete")
-    {
-        return Some(LifecycleEvent::Ready);
-    }
-    // Serving: a successful inference request (not a health poll).
-    if (l.contains("/v1/") || l.contains("/generate"))
-        && !l.contains("/v1/models")
-        && (l.contains(" 200") || l.contains(" 201"))
-    {
-        return Some(LifecycleEvent::Serving);
-    }
-    // Loading, optionally with a percentage.
-    if l.contains("loading") || l.contains("downloading") || l.contains("compiling") {
-        let progress = parse_percent(&l);
-        return Some(LifecycleEvent::Loading {
-            progress,
-            detail: line.trim().to_string(),
-        });
-    }
-    None
-}
-
-/// Extract the first `NN%` as a 0..1 fraction, if present.
-fn parse_percent(l: &str) -> Option<f32> {
-    let idx = l.find('%')?;
-    let start = l[..idx].rfind(|c: char| !c.is_ascii_digit() && c != '.').map_or(0, |p| p + 1);
-    l[start..idx].parse::<f32>().ok().map(|p| (p / 100.0).clamp(0.0, 1.0))
-}
-```
-
-- [ ] **Step 4: Run tests to verify pass**
-
-Run: `cargo test --locked --lib --features tui inference_server::logs`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/workload/inference_server/logs.rs
-git commit -m "feat(workload): inference-server log-line classifier + lifecycle types"
-```
-
----
-
-### Task 4: LifecycleState + reducer (precedence + staleness)
-
-**Files:**
-- Modify: `src/workload/inference_server/logs.rs`
-
-**Interfaces:**
-- Consumes: `Phase`, `LifecycleEvent`, `ServingMetrics`.
-- Produces: `LifecycleState { phase, progress, detail, metrics, observed_at }`, `LifecycleState::starting()`, `LifecycleState::fold(&mut self, events: &[LifecycleEvent], probe_ok: bool, now: Instant)`, `LifecycleState::is_stale(now, max_age) -> bool`.
-
-- [ ] **Step 1: Write the failing reducer test**
-
-Add to `logs.rs` tests:
-
-```rust
-    #[test]
-    fn fold_precedence_and_staleness() {
-        let t0 = Instant::now();
-        let mut st = LifecycleState::starting(t0);
-        assert_eq!(st.phase, Phase::Starting);
-
-        // Probe up (reachable) with no log events ⇒ still not Ready (probe only
-        // proves "reachable"); phase advances to Loading at most.
-        st.fold(&[], true, t0);
-        assert_eq!(st.phase, Phase::Loading);
-
-        // A Ready log event wins over probe/loading.
-        st.fold(&[LifecycleEvent::Ready], true, t0);
-        assert_eq!(st.phase, Phase::Ready);
-
-        // An Error event beats everything in the same batch.
-        st.fold(&[LifecycleEvent::Ready, LifecycleEvent::Error("boom".into())], true, t0);
-        assert_eq!(st.phase, Phase::Error);
-
-        // Staleness: older than 2× the poll cadence.
-        assert!(!st.is_stale(t0, Duration::from_secs(12)));
-    }
-```
-
-- [ ] **Step 2: Run it to verify it fails**
-
-Run: `cargo test --locked --lib --features tui inference_server::logs::tests::fold_precedence`
-Expected: FAIL — `LifecycleState` not found.
-
-- [ ] **Step 3: Implement `LifecycleState`**
-
-Add to `logs.rs` (above the test module):
-
-```rust
-/// The reduced lifecycle state surfaced on the card. `metrics` is always `None`
-/// in v1 (reserved for the serving-telemetry trail).
-#[derive(Debug, Clone)]
-pub struct LifecycleState {
-    pub phase: Phase,
-    pub progress: Option<f32>,
-    pub detail: String,
-    pub metrics: Option<ServingMetrics>,
-    pub observed_at: Instant,
-}
-
-impl LifecycleState {
-    /// Initial state for a freshly-detected server (container present, nothing
-    /// observed yet).
-    pub fn starting(now: Instant) -> Self {
-        LifecycleState {
-            phase: Phase::Starting,
-            progress: None,
-            detail: String::new(),
-            metrics: None,
-            observed_at: now,
-        }
-    }
-
-    /// Fold a batch of log events plus the readiness-probe result into the state.
-    /// Precedence: log Error > log Ready/Serving > probe-reachable (⇒ Loading)
-    /// > current phase. `now` timestamps the observation.
-    pub fn fold(&mut self, events: &[LifecycleEvent], probe_ok: bool, now: Instant) {
-        self.observed_at = now;
-
-        // Highest-precedence event in the batch wins.
-        if let Some(err) = events.iter().find_map(|e| match e {
-            LifecycleEvent::Error(d) => Some(d.clone()),
-            _ => None,
-        }) {
-            self.phase = Phase::Error;
-            self.detail = err;
-            return;
-        }
-        if events.iter().any(|e| matches!(e, LifecycleEvent::Serving)) {
-            self.phase = Phase::Serving;
-            return;
-        }
-        if events.iter().any(|e| matches!(e, LifecycleEvent::Ready)) {
-            self.phase = Phase::Ready;
-            self.progress = None;
-            return;
-        }
-        if let Some((prog, detail)) = events.iter().rev().find_map(|e| match e {
-            LifecycleEvent::Loading { progress, detail } => Some((*progress, detail.clone())),
-            _ => None,
-        }) {
-            self.phase = Phase::Loading;
-            self.progress = prog;
-            self.detail = detail;
-            return;
-        }
-        // No log events this batch: the probe being reachable means at least
-        // "up/loading" — but never asserts Ready (that's a log-only signal).
-        if probe_ok && matches!(self.phase, Phase::Starting) {
-            self.phase = Phase::Loading;
-        }
-    }
-
-    /// True if this state hasn't been refreshed within `max_age` (so a dead
-    /// server doesn't read "Ready" forever).
-    pub fn is_stale(&self, now: Instant, max_age: Duration) -> bool {
-        now.duration_since(self.observed_at) > max_age
-    }
-}
-```
-
-- [ ] **Step 4: Run tests to verify pass**
-
-Run: `cargo test --locked --lib --features tui inference_server::logs`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/workload/inference_server/logs.rs
-git commit -m "feat(workload): lifecycle state reducer (log Error > Ready/Serving > probe > phase)"
-```
-
----
-
-### Task 5: LogSource trait + DockerLogSource
-
-**Files:**
-- Modify: `src/workload/inference_server/logs.rs`
-
-**Interfaces:**
-- Consumes: `Source`.
-- Produces: `trait LogSource { fn poll_lines(&mut self) -> Vec<String>; }`, `DockerLogSource::new(container: String) -> Self`, and a pure helper `docker_logs_args(container, since_secs) -> Vec<String>`.
-
-- [ ] **Step 1: Write the failing test for the pure arg builder**
-
-Add to `logs.rs` tests:
-
-```rust
-    #[test]
-    fn docker_logs_args_are_bounded_and_since_scoped() {
-        let args = docker_logs_args("tt-inference-server-5edd00ce", 6);
-        assert_eq!(args[0], "logs");
-        assert!(args.iter().any(|a| a == "--since"));
-        assert!(args.iter().any(|a| a == "6s"));
-        assert!(args.iter().any(|a| a == "tt-inference-server-5edd00ce"));
-    }
-```
-
-- [ ] **Step 2: Run it to verify it fails**
-
-Run: `cargo test --locked --lib --features tui inference_server::logs::tests::docker_logs_args`
-Expected: FAIL — `docker_logs_args` not found.
-
-- [ ] **Step 3: Implement the trait + Docker source**
-
-Add to `logs.rs`:
-
-```rust
-use std::process::Command;
-
-/// A source of recent log lines for one server. Trail: `FileLogSource` /
-/// `JournaldLogSource` implement this for non-Docker installs.
-pub trait LogSource: Send {
-    /// Return log lines produced since the previous call (best-effort; empty on
-    /// error). Must not block longer than a couple of seconds.
-    fn poll_lines(&mut self) -> Vec<String>;
-}
-
-/// Build `docker logs --since <N>s <container>` args. Pure, unit-tested.
-pub fn docker_logs_args(container: &str, since_secs: u64) -> Vec<String> {
-    vec![
-        "logs".to_string(),
-        "--since".to_string(),
-        format!("{since_secs}s"),
-        container.to_string(),
-    ]
-}
-
-/// Polls `docker logs --since` for one container. Each poll reads only lines
-/// since the previous poll's window (`since_secs`). Never panics; a missing
-/// docker / stopped container yields an empty batch.
-pub struct DockerLogSource {
-    container: String,
-    since_secs: u64,
-}
-
-impl DockerLogSource {
-    pub fn new(container: String, since_secs: u64) -> Self {
-        DockerLogSource { container, since_secs }
-    }
-}
-
-impl LogSource for DockerLogSource {
-    fn poll_lines(&mut self) -> Vec<String> {
-        let out = match Command::new("docker")
-            .args(docker_logs_args(&self.container, self.since_secs))
-            .output()
-        {
-            Ok(o) => o,
-            Err(_) => return Vec::new(),
-        };
-        // docker writes logs to both stdout and stderr; classify both.
-        let mut lines = Vec::new();
-        for stream in [&out.stdout, &out.stderr] {
-            for line in String::from_utf8_lossy(stream).lines() {
-                lines.push(line.to_string());
-            }
-        }
-        lines
-    }
-}
-```
-
-- [ ] **Step 4: Run tests to verify pass**
-
-Run: `cargo test --locked --lib --features tui inference_server::logs`
-Expected: PASS. Clippy clean.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/workload/inference_server/logs.rs
-git commit -m "feat(workload): LogSource trait + DockerLogSource (polled docker logs --since)"
-```
-
----
-
-### Task 6: InferenceServerMonitor (background thread + arc-swap)
-
-**Files:**
-- Create: `src/workload/inference_server/monitor.rs`
-
-**Interfaces:**
-- Consumes: `InferenceServer`, `Source`, `LifecycleState`, `LifecycleEvent`, `classify_log_line`, `DockerLogSource`, `LogSource`, and `crate::workload::liveness_probe` for the readiness probe.
-- Produces: `InferenceServerMonitor::spawn() -> Self`, `submit(&self, servers: Vec<InferenceServer>)`, `snapshot(&self) -> Vec<(InferenceServer, LifecycleState)>`.
-
-- [ ] **Step 1: Write the failing test for the pure fold-over-source path**
-
-`src/workload/inference_server/monitor.rs` (test module) — tests the reduction logic with a fake source, no real docker:
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::workload::inference_server::logs::{LifecycleEvent, LogSource, Phase};
-    use std::time::Instant;
-
-    struct FakeSource(Vec<String>);
-    impl LogSource for FakeSource {
-        fn poll_lines(&mut self) -> Vec<String> {
-            std::mem::take(&mut self.0)
-        }
-    }
-
-    #[test]
-    fn reduce_from_source_marks_ready_on_startup_complete() {
-        let mut src = FakeSource(vec![
-            "Loading weights: 10%".into(),
-            "INFO: Application startup complete.".into(),
-        ]);
-        let mut state = LifecycleState::starting(Instant::now());
-        reduce_from_source(&mut state, &mut src, true, Instant::now());
-        assert_eq!(state.phase, Phase::Ready);
-    }
-}
-```
-
-- [ ] **Step 2: Run it to verify it fails**
-
-Run: `cargo test --locked --lib --features tui inference_server::monitor`
-Expected: FAIL — module/`reduce_from_source` not found.
-
-- [ ] **Step 3: Implement `monitor.rs`**
-
-```rust
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
-
-//! Background monitor: given the inference servers detected each refresh, polls
-//! their logs + readiness probe on a slow cadence and publishes a lock-free
-//! snapshot of `(InferenceServer, LifecycleState)` for the render path.
-
-use super::detect::{InferenceServer, Source};
-use super::logs::{classify_log_line, DockerLogSource, LifecycleState, LogSource};
-use crate::workload::liveness_probe;
-use arc_swap::ArcSwap;
-use std::collections::HashMap;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-/// Poll cadence (matches LivenessProber::PROBE_INTERVAL).
-const POLL_INTERVAL: Duration = Duration::from_secs(5);
-/// A state not refreshed within this window is dropped from the snapshot.
-const MAX_AGE: Duration = Duration::from_secs(12);
-
-type Snapshot = Vec<(InferenceServer, LifecycleState)>;
-
-/// Pure step: pull a source's lines, classify them, fold into `state`. Extracted
-/// so the reduction is testable with a fake source (no docker).
-pub(crate) fn reduce_from_source(
-    state: &mut LifecycleState,
-    source: &mut dyn LogSource,
-    probe_ok: bool,
-    now: Instant,
-) {
-    let events: Vec<_> = source
-        .poll_lines()
-        .iter()
-        .filter_map(|l| classify_log_line(l))
-        .collect();
-    state.fold(&events, probe_ok, now);
-}
-
-pub struct InferenceServerMonitor {
-    cache: Arc<ArcSwap<Snapshot>>,
-    tx: Sender<Vec<InferenceServer>>,
-}
-
-impl InferenceServerMonitor {
-    pub fn spawn() -> Self {
-        let cache: Arc<ArcSwap<Snapshot>> = Arc::new(ArcSwap::from_pointee(Vec::new()));
-        let (tx, rx) = mpsc::channel::<Vec<InferenceServer>>();
-        let cache_bg = Arc::clone(&cache);
-
-        let _ = std::thread::Builder::new()
-            .name("tt-inference-monitor".into())
-            .spawn(move || {
-                let mut servers: Vec<InferenceServer> = Vec::new();
-                let mut states: HashMap<String, LifecycleState> = HashMap::new();
-                let mut sources: HashMap<String, DockerLogSource> = HashMap::new();
-                loop {
-                    match rx.recv_timeout(POLL_INTERVAL) {
-                        Ok(mut s) => {
-                            while let Ok(newer) = rx.try_recv() {
-                                s = newer;
-                            }
-                            servers = s;
-                        }
-                        Err(RecvTimeoutError::Timeout) => {}
-                        Err(RecvTimeoutError::Disconnected) => break,
-                    }
-
-                    let now = Instant::now();
-                    let mut snapshot: Snapshot = Vec::new();
-                    let mut seen = Vec::new();
-                    for srv in &servers {
-                        let Source::Docker { container } = &srv.source;
-                        let key = container.clone();
-                        seen.push(key.clone());
-                        let src = sources
-                            .entry(key.clone())
-                            .or_insert_with(|| DockerLogSource::new(container.clone(), 6));
-                        let state = states
-                            .entry(key.clone())
-                            .or_insert_with(|| LifecycleState::starting(now));
-                        let probe_ok = srv
-                            .port
-                            .map(|p| liveness_probe::probe_reachable("tt-inference-server", p))
-                            .unwrap_or(false);
-                        reduce_from_source(state, src, probe_ok, now);
-                        snapshot.push((srv.clone(), state.clone()));
-                    }
-                    // Drop states/sources for servers that disappeared.
-                    states.retain(|k, st| seen.contains(k) && !st.is_stale(now, MAX_AGE));
-                    sources.retain(|k, _| seen.contains(k));
-                    cache_bg.store(Arc::new(snapshot));
-                }
-            });
-
-        InferenceServerMonitor { cache, tx }
-    }
-
-    /// Hand the monitor the servers detected this refresh (non-blocking).
-    pub fn submit(&self, servers: Vec<InferenceServer>) {
-        let _ = self.tx.send(servers);
-    }
-
-    /// Lock-free read of the latest `(server, state)` snapshot.
-    pub fn snapshot(&self) -> Snapshot {
-        self.cache.load().as_ref().clone()
-    }
-}
-```
-
-- [ ] **Step 4: Add the probe helper to `liveness_probe.rs`**
-
-`InferenceServerMonitor` needs a one-shot readiness check. Expose a thin wrapper over the existing `probe_once` (Task 2's `/v1/models` spec):
-
-```rust
-/// One-shot readiness probe for `label` on `port` (localhost). `true` only on a
-/// clean positive; errors/timeouts ⇒ `false`. Used by InferenceServerMonitor.
-pub fn probe_reachable(label: &str, port: u16) -> bool {
-    probe_once(label, port).unwrap_or(false)
-}
-```
-
-(If `probe_once` is private, mark it `pub(crate)`; add `probe_reachable` next to it.)
-
-- [ ] **Step 5: Run tests to verify pass**
-
-Run: `cargo test --locked --lib --features tui inference_server`
-Expected: PASS (detect + logs + monitor). Clippy `-D warnings` clean. Confirm the `mod.rs` `pub use` now resolves all names.
+- [ ] **Step 5: Run tests + clippy + build** → green; `cargo build --locked --bin tt-toplike-tui --features tui` clean.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/workload/inference_server/monitor.rs src/workload/liveness_probe.rs
-git commit -m "feat(workload): InferenceServerMonitor — background log+probe fold, arc-swap snapshot"
+git add src/workload/inference_server/logs.rs src/workload/inference_server/mod.rs
+git commit -m "refactor(workload): retire log-lifecycle; keep last_non_health_line breadcrumb (v2 pivot)"
 ```
 
 ---
 
-### Task 7: Detect servers from the process snapshot + feed the monitor
+### Task B: Services registry
 
-**Files:**
-- Modify: `src/workload/host_processes.rs` (add `detected_inference_servers`)
-- Modify: `src/ui/tui/mod.rs` (spawn monitor, submit each refresh)
+**Files:** Create `src/workload/inference_server/services.rs`; modify `inference_server/mod.rs` (`mod services; pub use services::{ServiceDef, service_for, SERVERS};`).
 
-**Interfaces:**
-- Consumes: `parse_inference_server`, `InferenceServer`, `InferenceServerMonitor`.
-- Produces: `HostProcessMonitor::detected_inference_servers(&self) -> Vec<InferenceServer>`.
+**Interfaces:** Produces `ServiceDef { key, label, port, health_path, runner_key: Option<&'static str> }`, `SERVERS: &[ServiceDef]`, `service_for(model: Option<&str>, image: &str) -> Option<&'static ServiceDef>`.
 
-- [ ] **Step 1: Write the failing test**
-
-Add to `host_processes.rs` tests (it already has a tests module):
-
-```rust
-    #[test]
-    fn detected_inference_servers_is_gated_and_returns_vec() {
-        // Smoke: on a machine with no TT inference container this is empty, but
-        // the call must exist and not panic.
-        let mut m = HostProcessMonitor::new();
-        m.update();
-        #[cfg(target_os = "linux")]
-        {
-            let _servers = m.detected_inference_servers();
-        }
-    }
-```
-
-- [ ] **Step 2: Run it to verify it fails**
-
-Run: `cargo test --locked --lib --features tui host_processes::tests::detected_inference_servers`
-Expected: FAIL — method not found.
-
-- [ ] **Step 3: Implement `detected_inference_servers`**
-
-Add to `impl HostProcessMonitor` (Linux-gated):
-
-```rust
-    /// TT inference servers detected in the current snapshot (deduped by
-    /// container). Cheap: cmdline parse only, no I/O. Linux-only.
-    #[cfg(target_os = "linux")]
-    pub fn detected_inference_servers(&self) -> Vec<crate::workload::InferenceServer> {
-        use crate::workload::inference_server::parse_inference_server;
-        use crate::workload::inference_server::Source;
-        let mut seen = std::collections::HashSet::new();
-        let mut out = Vec::new();
-        for p in self.sys.processes().values() {
-            let name = p.name().to_string_lossy().to_string();
-            let cmdline = p
-                .cmd()
-                .iter()
-                .map(|s| s.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(" ");
-            if let Some(srv) = parse_inference_server(&name, &cmdline) {
-                let Source::Docker { container } = &srv.source;
-                if seen.insert(container.clone()) {
-                    out.push(srv);
-                }
-            }
-        }
-        out
-    }
-```
-
-- [ ] **Step 4: Run test to verify pass**
-
-Run: `cargo test --locked --lib --features tui host_processes`
-Expected: PASS.
-
-- [ ] **Step 5: Spawn + feed the monitor in the TUI loop**
-
-In `src/ui/tui/mod.rs`, next to the `LivenessProber` setup (init block ~line 249), Linux-gated:
-
-```rust
-    #[cfg(target_os = "linux")]
-    let inference_monitor = crate::workload::InferenceServerMonitor::spawn();
-    #[cfg(target_os = "linux")]
-    inference_monitor.submit(host_proc_monitor.detected_inference_servers());
-```
-
-In the 2s refresh block (next to the existing `liveness_prober.submit(...)`):
-
-```rust
-            #[cfg(target_os = "linux")]
-            inference_monitor.submit(host_proc_monitor.detected_inference_servers());
-```
-
-- [ ] **Step 6: Build + commit**
-
-Run: `cargo build --locked --bin tt-toplike-tui --features tui` then `RUSTFLAGS="-D warnings" cargo build --locked --bin tt-toplike-tui --features tui`
-Expected: clean.
-
-```bash
-git add src/workload/host_processes.rs src/ui/tui/mod.rs
-git commit -m "feat(workload): detect inference servers from snapshot; feed the monitor from the TUI loop"
-```
-
----
-
-### Task 8: Render the "Inference Servers" card in Insights
-
-**Files:**
-- Modify: `src/ui/tui/mod.rs` (read `inference_monitor.snapshot()`, render a card in the Insights layout)
-
-**Interfaces:**
-- Consumes: `InferenceServerMonitor::snapshot()`, `LifecycleState`, `Phase`.
-- Produces: a rendered card; a pure helper `format_inference_row(server, state) -> String` (unit-tested).
-
-- [ ] **Step 1: Write the failing formatter test**
-
-Add a small test module near the Insights render code (or in a new `src/ui/tui/inference_card.rs` with `mod inference_card;` in `mod.rs`):
+- [ ] **Step 1: Failing test**
 
 ```rust
 #[cfg(test)]
-mod inference_card_tests {
+mod tests {
     use super::*;
-    use crate::workload::{InferenceServer, LifecycleState, Phase, Source};
-    use std::time::Instant;
-
     #[test]
-    fn formats_loading_with_model_and_mesh() {
-        let srv = InferenceServer {
-            source: Source::Docker { container: "tt-inference-server-x".into() },
-            image: "…/tt-media-inference-server:0.17.0".into(),
-            model: Some("FLUX.1-schnell".into()),
-            mesh: Some("P300x2".into()),
-            arch: Some("blackhole".into()),
-            device: Some("p300x2".into()),
-            port: Some(8000),
-            uses_tt_device: true,
-        };
-        let mut st = LifecycleState::starting(Instant::now());
-        st.phase = Phase::Loading;
-        st.progress = Some(0.42);
-        let row = format_inference_row(&srv, &st);
-        assert!(row.contains("FLUX.1-schnell"));
-        assert!(row.contains("P300x2"));
-        assert!(row.contains("LOADING"));
-        assert!(row.contains("42%"));
+    fn maps_model_to_service_and_carries_endpoint() {
+        let s = service_for(Some("Z-Image-Turbo"), "ghcr.io/tenstorrent/tt-media-inference-server:x").expect("known");
+        assert_eq!(s.key, "z-image-turbo");
+        assert_eq!(s.port, 8000);
+        assert_eq!(s.health_path, "/tt-liveness");
+        assert_eq!(s.runner_key, Some("tt-z-image-turbo"));
+        // prompt-server uses a different port + path
+        let p = SERVERS.iter().find(|d| d.key == "prompt-server").unwrap();
+        assert_eq!((p.port, p.health_path), (8001, "/health"));
     }
 }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Run — fails.**
 
-Run: `cargo test --locked --lib --features tui inference_card`
-Expected: FAIL — `format_inference_row` not found.
-
-- [ ] **Step 3: Implement the formatter**
+- [ ] **Step 3: Implement `services.rs`** (SPDX header + table mirroring `tt-local-generator/app/server_manager.py`):
 
 ```rust
-/// One-line summary for the Inference Servers card. Pure + unit-tested.
-pub(crate) fn format_inference_row(
-    server: &crate::workload::InferenceServer,
-    state: &crate::workload::LifecycleState,
-) -> String {
-    use crate::workload::Phase;
-    let phase = match state.phase {
-        Phase::Starting => "STARTING",
-        Phase::Loading => "LOADING",
-        Phase::Ready => "READY",
-        Phase::Serving => "SERVING",
-        Phase::Error => "ERROR",
-    };
-    let model = server.model.as_deref().unwrap_or("?");
-    let mesh = server.mesh.as_deref().unwrap_or("?");
-    let pct = match state.progress {
-        Some(p) => format!(" {}%", (p * 100.0).round() as u32),
-        None => String::new(),
-    };
-    format!("{model}  [{mesh}]  {phase}{pct}")
+/// One managed inference service (mirrors tt-local-generator's SERVERS dict).
+#[derive(Debug, Clone, Copy)]
+pub struct ServiceDef {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub port: u16,
+    pub health_path: &'static str,
+    /// `runner_in_use` value reported by /tt-liveness when this model is loaded.
+    pub runner_key: Option<&'static str>,
+}
+
+/// Known services. Trail: later read from a shared config so the two tools can't drift.
+pub const SERVERS: &[ServiceDef] = &[
+    ServiceDef { key: "wan2.2", label: "Wan2.2-T2V-A14B (P300X2)", port: 8000, health_path: "/tt-liveness", runner_key: Some("tt-wan2.2") },
+    ServiceDef { key: "mochi", label: "Mochi-1", port: 8000, health_path: "/tt-liveness", runner_key: Some("tt-mochi-1") },
+    ServiceDef { key: "flux", label: "FLUX.1-schnell", port: 8000, health_path: "/tt-liveness", runner_key: Some("tt-flux.1-schnell") },
+    ServiceDef { key: "sdxl", label: "SDXL (cpp_server)", port: 8000, health_path: "/tt-liveness", runner_key: Some("tt-sdxl-generate") },
+    ServiceDef { key: "z-image-turbo", label: "Z-Image-Turbo (P150X4)", port: 8000, health_path: "/tt-liveness", runner_key: Some("tt-z-image-turbo") },
+    ServiceDef { key: "motif", label: "Motif-Image-6B-Preview (P300X2)", port: 8000, health_path: "/tt-liveness", runner_key: Some("tt-motif-image-6b-preview") },
+    ServiceDef { key: "animate", label: "Wan2.2-Animate-14B", port: 8000, health_path: "/tt-liveness", runner_key: Some("tt-wan2.2-animate") },
+    ServiceDef { key: "skyreels", label: "SkyReels-V2-I2V-14B-540P (Blackhole)", port: 8000, health_path: "/tt-liveness", runner_key: Some("tt-skyreels-v2-i2v") },
+    ServiceDef { key: "prompt-server", label: "Prompt Generator (Qwen3-0.6B)", port: 8001, health_path: "/health", runner_key: None },
+];
+
+/// Map a detected container's MODEL env (preferred) or image to a service.
+/// Case-insensitive contains match on the model against each key's tokens.
+pub fn service_for(model: Option<&str>, _image: &str) -> Option<&'static ServiceDef> {
+    let m = model?.to_lowercase();
+    SERVERS.iter().find(|d| {
+        // e.g. model "Z-Image-Turbo" → key "z-image-turbo"
+        m.replace(['.', '_'], "-").contains(d.key) || d.key.contains(&m.replace(['.', '_'], "-"))
+    })
 }
 ```
 
-- [ ] **Step 4: Render the card in the Insights layout**
-
-Where the Insights screen composes panels, add a block (Linux-gated) that reads the snapshot and renders one styled line per server (green=Ready/Serving, yellow=Loading/Starting, red=Error), using `format_inference_row`. Follow the existing panel-rendering style in the file (Paragraph/Line/Span with `colors`). Keep it above or beside the process list.
-
-```rust
-    #[cfg(target_os = "linux")]
-    let inference_rows: Vec<(crate::workload::InferenceServer, crate::workload::LifecycleState)> =
-        inference_monitor.snapshot();
-    // …in the Insights render fn, iterate inference_rows and push a titled block
-    // "Inference Servers" with one colored line per row via format_inference_row.
-```
-
-- [ ] **Step 5: Run tests + build**
-
-Run: `cargo test --locked --lib --features tui inference_card` (PASS), then `cargo test --locked --lib --features tui` (all pass), `RUSTFLAGS="-D warnings" cargo build --locked --bin tt-toplike-tui --features tui` (clean), `cargo clippy --locked --lib --bin tt-toplike-tui --features tui -- -D warnings` (clean).
-
-- [ ] **Step 6: Manual check on the live box**
-
-Run `tt-toplike` while the tt-inference-server container is up; confirm the "Inference Servers" card shows the model/mesh and a LOADING→READY transition.
-
-- [ ] **Step 7: Commit**
+- [ ] **Step 4: tests + clippy + build green. Commit**
 
 ```bash
-git add src/ui/tui/mod.rs
-git commit -m "feat(tui): Inference Servers card — model/mesh + lifecycle state in Insights"
+git add src/workload/inference_server/services.rs src/workload/inference_server/mod.rs
+git commit -m "feat(workload): inference-server services registry (mirrors tt-local-generator SERVERS)"
 ```
+
+---
+
+### Task C: Pure probe parsers
+
+**Files:** Create `src/workload/inference_server/probe.rs`; modify `mod.rs`.
+
+**Interfaces:** Produces `parse_docker_stats(&str) -> Option<(f32, u64)>` (cpu%, rss bytes), `Readiness` (`Down`/`NotReady`/`Ready{runner: Option<String>}`), `parse_liveness(status: u16, body: &str) -> Readiness`, `parse_env_var(env_output: &str, key: &str) -> Option<String>`, `count_lines(&str) -> usize`, `top_process(ps_output: &str) -> Option<(String, f32, u64)>`.
+
+- [ ] **Step 1: Failing tests** (fixtures captured live):
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parses_docker_stats_line() {
+        // `docker stats --no-stream --format '{{.CPUPerc}}|{{.MemUsage}}'`
+        let (cpu, rss) = parse_docker_stats("102.17%|39.96GiB / 249.3GiB").unwrap();
+        assert!((cpu - 102.17).abs() < 0.01);
+        assert_eq!(rss, (39.96 * 1024.0 * 1024.0 * 1024.0) as u64);
+    }
+    #[test]
+    fn liveness_ladder() {
+        assert!(matches!(parse_liveness(0, ""), Readiness::Down));
+        assert!(matches!(parse_liveness(405, r#"{"detail":"Model is not ready"}"#), Readiness::NotReady));
+        match parse_liveness(200, r#"{"runner_in_use":"tt-z-image-turbo"}"#) {
+            Readiness::Ready { runner } => assert_eq!(runner.as_deref(), Some("tt-z-image-turbo")),
+            _ => panic!("expected Ready"),
+        }
+    }
+    #[test]
+    fn parses_env_and_counts() {
+        assert_eq!(parse_env_var("HOME=/root\nTT_METAL_HOME=/x/tt-metal\n", "TT_METAL_HOME").as_deref(), Some("/x/tt-metal"));
+        assert_eq!(count_lines("a\nb\nc\n"), 3);
+        assert_eq!(count_lines(""), 0);
+    }
+    #[test]
+    fn top_process_from_ps() {
+        // `ps -eo pcpu,rss,comm --sort=-pcpu` (rss in KiB)
+        let out = "%CPU   RSS COMMAND\n33.7 9043136 python3\n 5.2 815612 python3\n";
+        let (name, cpu, rss) = top_process(out).unwrap();
+        assert_eq!(name, "python3");
+        assert!((cpu - 33.7).abs() < 0.01);
+        assert_eq!(rss, 9043136 * 1024);
+    }
+}
+```
+
+- [ ] **Step 2: Run — fails.**
+
+- [ ] **Step 3: Implement `probe.rs`** (SPDX header). Parsers first:
+
+```rust
+/// Readiness ladder from a liveness probe.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Readiness {
+    Down,                              // connection refused / no response
+    NotReady,                          // up but model not loaded (e.g. 405 "Model is not ready")
+    Ready { runner: Option<String> },  // 200; runner = runner_in_use if present
+}
+
+/// Parse `{{.CPUPerc}}|{{.MemUsage}}` → (cpu%, rss bytes). MemUsage is "USED / LIMIT".
+pub fn parse_docker_stats(line: &str) -> Option<(f32, u64)> {
+    let (cpu_s, mem_s) = line.split_once('|')?;
+    let cpu = cpu_s.trim().trim_end_matches('%').parse::<f32>().ok()?;
+    let used = mem_s.split('/').next()?.trim();
+    Some((cpu, parse_size_bytes(used)?))
+}
+
+/// "39.96GiB" / "812916KiB" / "700MiB" → bytes.
+fn parse_size_bytes(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let split = s.find(|c: char| c.is_alphabetic())?;
+    let (num, unit) = s.split_at(split);
+    let v = num.trim().parse::<f64>().ok()?;
+    let mult = match unit.trim().to_lowercase().as_str() {
+        "b" => 1.0,
+        "kib" | "kb" => 1024.0,
+        "mib" | "mb" => 1024.0 * 1024.0,
+        "gib" | "gb" => 1024.0 * 1024.0 * 1024.0,
+        "tib" | "tb" => 1024.0f64.powi(4),
+        _ => return None,
+    };
+    Some((v * mult) as u64)
+}
+
+pub fn parse_liveness(status: u16, body: &str) -> Readiness {
+    match status {
+        0 => Readiness::Down,
+        200 => {
+            // pull runner_in_use if present (tolerant substring parse, no serde dep needed)
+            let runner = body
+                .split_once("\"runner_in_use\"")
+                .and_then(|(_, rest)| rest.split_once(':'))
+                .and_then(|(_, rest)| rest.split('"').nth(1))
+                .map(|s| s.to_string());
+            Readiness::Ready { runner }
+        }
+        _ => Readiness::NotReady, // 405 "Model is not ready", 503, etc.
+    }
+}
+
+/// Extract `KEY=VALUE` from `env`/`printenv`-style output.
+pub fn parse_env_var(env_output: &str, key: &str) -> Option<String> {
+    env_output.lines().find_map(|l| {
+        let (k, v) = l.split_once('=')?;
+        (k == key).then(|| v.to_string())
+    })
+}
+
+/// Count non-empty lines (kernel-artifact count, FD count).
+pub fn count_lines(s: &str) -> usize {
+    s.lines().filter(|l| !l.trim().is_empty()).count()
+}
+
+/// First data row of `ps -eo pcpu,rss,comm --sort=-pcpu` → (comm, cpu%, rss bytes).
+/// rss is KiB in ps output. Skips the header line.
+pub fn top_process(ps_output: &str) -> Option<(String, f32, u64)> {
+    for line in ps_output.lines().skip(1) {
+        let mut it = line.split_whitespace();
+        let cpu = it.next()?.parse::<f32>().ok()?;
+        let rss_kib = it.next()?.parse::<u64>().ok()?;
+        let comm = it.next()?.to_string();
+        return Some((comm, cpu, rss_kib * 1024));
+    }
+    None
+}
+```
+
+- [ ] **Step 4: tests + clippy + build green. Commit**
+
+```bash
+git add src/workload/inference_server/probe.rs src/workload/inference_server/mod.rs
+git commit -m "feat(workload): pure probe parsers (docker stats, /tt-liveness, env, ps, counts)"
+```
+
+---
+
+### Task D: Phase, ServiceState, reducer + progress estimate
+
+**Files:** Create `src/workload/inference_server/state.rs`; modify `mod.rs`.
+
+**Interfaces:** Consumes `Readiness`. Produces `Phase` (Down/Compiling/Loading/Ready/Alarm), `ModelProfile { o_baseline: Option<usize>, footprint_bytes: Option<u64> }`, `ServiceState { key, label, phase, cpu_pct, rss_bytes, rss_delta, kernel_count, kernel_delta, safetensors_fds, readiness, top_proc, last_log, progress, flat_ticks }`, `Phase::derive(kernel_delta: i64, python_alive: bool, rss_delta: i64, readiness: &Readiness) -> Phase`, `estimate_progress(phase: Phase, kernel_count: usize, rss: u64, profile: &ModelProfile) -> Option<f32>`, and an `Alarm` rule: `flat_ticks * cadence >= 5min` when not Ready.
+
+- [ ] **Step 1: Failing tests**
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workload::inference_server::probe::Readiness;
+    #[test]
+    fn phase_derivation() {
+        assert_eq!(Phase::derive(0, false, 0, &Readiness::Down), Phase::Down);
+        assert_eq!(Phase::derive(12, true, 0, &Readiness::NotReady), Phase::Compiling); // kernels growing
+        assert_eq!(Phase::derive(0, true, 700_000_000, &Readiness::NotReady), Phase::Loading); // RSS growing
+        assert_eq!(Phase::derive(0, true, 0, &Readiness::Ready { runner: None }), Phase::Ready);
+    }
+    #[test]
+    fn all_flat_not_ready_is_alarm_after_5min() {
+        // 5s cadence → 60 flat ticks = 5 min.
+        assert!(is_alarm(60, 5, &Readiness::NotReady));
+        assert!(!is_alarm(59, 5, &Readiness::NotReady));
+        assert!(!is_alarm(120, 5, &Readiness::Ready { runner: None }));
+    }
+    #[test]
+    fn progress_uses_profile_when_present() {
+        let prof = ModelProfile { o_baseline: Some(1000), footprint_bytes: None };
+        assert_eq!(estimate_progress(Phase::Compiling, 500, 0, &prof), Some(0.5));
+        let none = ModelProfile { o_baseline: None, footprint_bytes: None };
+        assert_eq!(estimate_progress(Phase::Compiling, 500, 0, &none), None);
+    }
+}
+```
+
+- [ ] **Step 2: Run — fails.**
+
+- [ ] **Step 3: Implement `state.rs`** (SPDX header):
+
+```rust
+use crate::workload::inference_server::probe::Readiness;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase { Down, Compiling, Loading, Ready, Alarm }
+
+/// Per-model baselines for the optional % estimate. v1 hardcodes a few; unknown → all None.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModelProfile {
+    pub o_baseline: Option<usize>,
+    pub footprint_bytes: Option<u64>,
+}
+
+/// Derive phase from the tick's deltas + readiness. `Alarm` is layered on top by
+/// the reducer (needs the flat-tick history), so this returns the momentary phase.
+impl Phase {
+    pub fn derive(kernel_delta: i64, python_alive: bool, rss_delta: i64, readiness: &Readiness) -> Phase {
+        if let Readiness::Ready { .. } = readiness { return Phase::Ready; }
+        if let Readiness::Down = readiness {
+            if !python_alive { return Phase::Down; }
+        }
+        if kernel_delta > 0 { return Phase::Compiling; }
+        if rss_delta > 0 { return Phase::Loading; }
+        // not ready, nothing moving, but process alive → provisional Loading;
+        // the reducer escalates to Alarm after enough flat ticks.
+        if python_alive { Phase::Loading } else { Phase::Down }
+    }
+}
+
+/// True when nothing has progressed for >= 5 minutes and the service isn't Ready.
+pub fn is_alarm(flat_ticks: u32, cadence_secs: u32, readiness: &Readiness) -> bool {
+    !matches!(readiness, Readiness::Ready { .. }) && flat_ticks.saturating_mul(cadence_secs) >= 300
+}
+
+/// Best-effort % (compile: kernel_count/baseline; load: rss/footprint). None w/o profile.
+pub fn estimate_progress(phase: Phase, kernel_count: usize, rss: u64, profile: &ModelProfile) -> Option<f32> {
+    match phase {
+        Phase::Compiling => profile.o_baseline.filter(|b| *b > 0).map(|b| (kernel_count as f32 / b as f32).clamp(0.0, 1.0)),
+        Phase::Loading => profile.footprint_bytes.filter(|b| *b > 0).map(|b| (rss as f32 / b as f32).clamp(0.0, 1.0)),
+        _ => None,
+    }
+}
+
+/// Full per-service state published to the render path.
+#[derive(Debug, Clone)]
+pub struct ServiceState {
+    pub key: String,
+    pub label: String,
+    pub phase: Phase,
+    pub cpu_pct: f32,
+    pub rss_bytes: u64,
+    pub rss_delta: i64,
+    pub kernel_count: usize,
+    pub kernel_delta: i64,
+    pub safetensors_fds: usize,
+    pub readiness: Readiness,
+    pub top_proc: Option<String>,
+    pub last_log: Option<String>,
+    pub progress: Option<f32>,
+    pub flat_ticks: u32,
+}
+```
+
+- [ ] **Step 4: tests + clippy + build green. Commit**
+
+```bash
+git add src/workload/inference_server/state.rs src/workload/inference_server/mod.rs
+git commit -m "feat(workload): Phase derivation, ServiceState, alarm timer, progress estimate"
+```
+
+---
+
+### Task E: ContainerProbe trait + Docker impl + InferenceServerMonitor
+
+**Files:** add the `ContainerProbe` trait + `DockerProbe` to `probe.rs`; create `src/workload/inference_server/monitor.rs`; modify `mod.rs`.
+
+**Interfaces:** Consumes everything above. Produces `trait ContainerProbe` (env/stats/exec/http methods returning owned strings/ints, empty on error), `DockerProbe`, `InferenceServerMonitor::{spawn, submit(Vec<InferenceServer>), snapshot() -> Vec<ServiceState>}`, and a pure `fold_tick(prev: &ServiceState, sample: TickSample) -> ServiceState` that the fake-probe test drives.
+
+- [ ] **Step 1: Failing test** for the pure `fold_tick` with a synthetic sample (no docker):
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workload::inference_server::probe::Readiness;
+    #[test]
+    fn fold_tick_marks_loading_and_tracks_flat_ticks() {
+        let prev = ServiceState_zeroed("z-image-turbo", "Z-Image-Turbo");
+        let sample = TickSample {
+            cpu_pct: 33.0, rss_bytes: 9_000_000_000, kernel_count: 500,
+            safetensors_fds: 2, readiness: Readiness::NotReady,
+            top_proc: Some("python3".into()), python_alive: true, last_log: None,
+        };
+        let next = fold_tick(&prev, sample, &ModelProfile::default(), 5);
+        assert_eq!(next.phase, crate::workload::inference_server::state::Phase::Loading);
+        assert_eq!(next.rss_delta, 9_000_000_000);   // grew from 0
+        // second identical tick → nothing moved → flat_ticks increments
+        let sample2 = TickSample { rss_bytes: 9_000_000_000, kernel_count: 500, ..sample_like(&next) };
+        let next2 = fold_tick(&next, sample2, &ModelProfile::default(), 5);
+        assert_eq!(next2.flat_ticks, 1);
+    }
+}
+```
+
+(The implementer writes the small `ServiceState_zeroed`/`sample_like` test helpers.)
+
+- [ ] **Step 2: Run — fails.**
+
+- [ ] **Step 3: Implement `ContainerProbe` + `DockerProbe` in `probe.rs`:**
+
+```rust
+use std::process::Command;
+
+/// One tick's raw sample for a service (already parsed from probe output).
+pub struct TickSample {
+    pub cpu_pct: f32,
+    pub rss_bytes: u64,
+    pub kernel_count: usize,
+    pub safetensors_fds: usize,
+    pub readiness: Readiness,
+    pub top_proc: Option<String>,
+    pub python_alive: bool,
+    pub last_log: Option<String>,
+}
+
+/// Abstract container access so the monitor is testable with a fake. Trail: a
+/// host/systemd impl for non-Docker installs.
+pub trait ContainerProbe: Send {
+    fn env(&self, container: &str) -> String;                 // `printenv`-style dump
+    fn stats(&self, container: &str) -> String;               // "cpu%|memusage"
+    fn exec(&self, container: &str, sh: &str) -> String;      // `sh -c`, stdout
+    fn http(&self, port: u16, path: &str) -> (u16, String);   // (status, body); status 0 = down
+}
+
+pub struct DockerProbe;
+impl ContainerProbe for DockerProbe {
+    fn env(&self, c: &str) -> String { docker(&["exec", c, "env"]) }
+    fn stats(&self, c: &str) -> String {
+        docker(&["stats", "--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}", c])
+    }
+    fn exec(&self, c: &str, sh: &str) -> String { docker(&["exec", c, "sh", "-c", sh]) }
+    fn http(&self, port: u16, path: &str) -> (u16, String) {
+        // Reuse the crate's localhost HTTP helper (liveness_probe) for status+body.
+        crate::workload::liveness_probe::http_get_status_body(port, path)
+    }
+}
+
+fn docker(args: &[&str]) -> String {
+    Command::new("docker").args(args).output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+```
+
+(Add a small `pub fn http_get_status_body(port, path) -> (u16, String)` to `liveness_probe.rs` reusing its existing `http_get_localhost`; status 0 on connect error.)
+
+- [ ] **Step 4: Implement `fold_tick` + `InferenceServerMonitor` in `monitor.rs`:**
+
+`fold_tick(prev, sample, profile, cadence_secs)`:
+- `rss_delta = sample.rss_bytes as i64 - prev.rss_bytes as i64`
+- `kernel_delta = sample.kernel_count as i64 - prev.kernel_count as i64`
+- momentary `phase = Phase::derive(kernel_delta, sample.python_alive, rss_delta, &sample.readiness)`
+- moved this tick = `kernel_delta > 0 || rss_delta > 0`; `flat_ticks = if moved {0} else {prev.flat_ticks + 1}`
+- if `is_alarm(flat_ticks, cadence_secs, &sample.readiness)` → `phase = Phase::Alarm`
+- `progress = estimate_progress(phase, sample.kernel_count, sample.rss_bytes, profile)`
+- return the updated `ServiceState`.
+
+`InferenceServerMonitor::spawn()`: background thread (mirror `LivenessProber`): receives detected `Vec<InferenceServer>`, maps each to a `ServiceDef` via `service_for`; per cadence tick, for each service builds a `TickSample` from the `ContainerProbe` calls (discover `TT_METAL_HOME` via `parse_env_var(probe.env(c), "TT_METAL_HOME")`; kernel_count = `count_lines(probe.exec(c, "find \"$TT_METAL_HOME/built\" -name '*.dephash' 2>/dev/null"))`; stats via `parse_docker_stats(probe.stats(c))`; top proc via `top_process`; python_alive from top_proc/ps; readiness via `parse_liveness(probe.http(port, path))`; last_log via `last_non_health_line`), folds with `fold_tick`, stores `Vec<ServiceState>` in `arc-swap`. `snapshot()` clones the cache.
+
+Full code follows the `liveness_probe.rs` monitor pattern (channel + `recv_timeout(cadence)` + `ArcSwap`). The implementer mirrors that file.
+
+- [ ] **Step 5: tests + clippy + build green. Commit**
+
+```bash
+git add src/workload/inference_server/probe.rs src/workload/inference_server/monitor.rs src/workload/inference_server/mod.rs src/workload/liveness_probe.rs
+git commit -m "feat(workload): ContainerProbe/DockerProbe + InferenceServerMonitor (fold_tick + arc-swap)"
+```
+
+---
+
+### Task F: Detect + feed the monitor from the TUI loop
+
+**Files:** Modify `src/workload/host_processes.rs` (`detected_inference_servers` — reuse Task 1 `parse_inference_server`), `src/ui/tui/mod.rs` (spawn monitor + submit each refresh). Same shape as the existing `LivenessProber` wiring.
+
+- [ ] **Step 1:** Add `HostProcessMonitor::detected_inference_servers() -> Vec<InferenceServer>` (Linux-gated; dedupe by container) — as in the v1 plan Task 7. Test: exists, returns Vec, no panic.
+- [ ] **Step 2:** In the TUI init + 2s refresh blocks (next to `liveness_prober`), Linux-gated: `let inference_monitor = InferenceServerMonitor::spawn();` and `inference_monitor.submit(host_proc_monitor.detected_inference_servers());`.
+- [ ] **Step 3:** build (`-D warnings`) + tests green. **Commit.**
+
+---
+
+### Task G: `[i]` Inference Servers panel
+
+**Files:** Modify `src/ui/tui/mod.rs` — add an `i` key toggle for a new Insights sub-view; `format_service_row(&ServiceState) -> String` (pure, tested); render one colored row per `inference_monitor.snapshot()` entry (green Ready, yellow Compiling/Loading, red Alarm, gray Down), plus the progress evidence line (RSS, +rate, kernel count/delta, liveness code).
+
+- [ ] **Step 1: Failing test** for `format_service_row` (loading z-image, RSS shown, phase LOADING).
+- [ ] **Step 2: Run — fails.**
+- [ ] **Step 3: Implement `format_service_row`** (phase label, model, RSS in GiB, `+MB/tick` rate, liveness code; `✓ progressing` when a delta moved, `⚠ stalled` at Alarm).
+- [ ] **Step 4: Wire the `i` toggle + panel render** into the Insights layout (follow the existing key-handling + panel style in the file). Show all `SERVERS`, not just running ones (Down for absent).
+- [ ] **Step 5:** tests + clippy + `-D warnings` build green.
+- [ ] **Step 6: Manual check** on the live box: `tt-toplike`, press `i`; while Z-Image-Turbo loads, confirm phase + growing RSS/kernel evidence and the alarm path when idle.
+- [ ] **Step 7: Commit.**
 
 ---
 
 ## Self-Review
 
-**Spec coverage:**
-- Detection from cmdline (model/mesh/arch/port/device/tt-device) → Task 1. ✓
-- Probe fix (`/v1/models`) → Task 2. ✓
-- Log classifier + lifecycle types → Task 3. ✓
-- State reducer (precedence + staleness) → Task 4. ✓
-- LogSource trait + DockerLogSource (polled `--since`) → Task 5. ✓
-- Background monitor, off hot path, arc-swap → Task 6. ✓
-- Detect-from-snapshot + TUI feed → Task 7. ✓
-- Insights "Inference Servers" card → Task 8. ✓
-- Extension trails (Source enum, LogSource trait, variant recognizer, LifecycleEvent + metrics=None) → present in Tasks 1,3,4,5. ✓
-- Linux/TT gating + no new deps + off-hot-path + no panics → Global Constraints, enforced per task. ✓
+**Spec coverage:** phase model (Down/Compiling/Loading/Ready/Alarm) → Task D; three progress probes (kernel-artifact count via discovered `$TT_METAL_HOME/built`, RSS, `.safetensors` FDs) → Tasks C/E; per-service liveness endpoints + `runner_in_use` → Tasks B/C; docker stats/exec/inspect access → Task E; hang alarm (all-flat ≥5min) → Task D; services registry → Task B; `[i]` panel + services list → Task G; log breadcrumb → Task A; runtime cache discovery (no hardcode) → Task E; extension trails (ContainerProbe trait, ModelProfile, config-driven services, metrics) → Tasks B/D/E. ✓
 
-**Placeholder scan:** Task 8 Step 4 describes the card wiring at the render site rather than pasting the file's exact panel code (the Insights render fn is large and its exact insertion point depends on the current layout); the pure `format_inference_row` it depends on is fully specified and tested. All other steps contain complete code.
+**Placeholder scan:** Task E Step 4 (fold_tick + monitor) and Task F/G describe the monitor loop and panel wiring in prose rather than full code, because they mirror the existing `liveness_probe.rs` monitor and the Insights render code already in the tree; the pure pieces they depend on (`fold_tick` rule, `Phase::derive`, all parsers, `format_service_row`) are fully specified with code + tests. Acceptable per "follow existing patterns."
 
-**Type consistency:** `InferenceServer`, `Source::Docker { container }`, `LifecycleState { phase, progress, detail, metrics, observed_at }`, `Phase`, `LifecycleEvent`, `classify_log_line`, `LogSource::poll_lines`, `docker_logs_args`, `reduce_from_source`, `InferenceServerMonitor::{spawn,submit,snapshot}`, `liveness_probe::probe_reachable` — names/signatures consistent across Tasks 1–8.
+**Type consistency:** `Readiness`, `ServiceDef`/`service_for`/`SERVERS`, `Phase`/`ModelProfile`/`ServiceState`/`is_alarm`/`estimate_progress`/`Phase::derive`, `ContainerProbe`/`DockerProbe`/`TickSample`, `fold_tick`, `InferenceServerMonitor::{spawn,submit,snapshot}`, `last_non_health_line`, `parse_*`/`count_lines`/`top_process` — consistent across Tasks A–G.
