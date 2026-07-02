@@ -8,6 +8,7 @@ pub mod inference;
 pub mod inference_match;
 pub mod inference_server;
 pub mod liveness_probe;
+pub mod model_catalog;
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 pub mod process_monitor;
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
@@ -21,6 +22,7 @@ pub use inference::{
 pub use inference_match::inference_match;
 pub use inference_server::{InferenceServer, InferenceServerMonitor, Source};
 pub use liveness_probe::{DetectedRuntime, LivenessProber};
+pub use model_catalog::{bundled, model_support, parse_catalog, CatalogModel, Support};
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 pub use process_monitor::{ProcessInfo, ProcessMonitor};
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
