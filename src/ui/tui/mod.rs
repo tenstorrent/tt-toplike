@@ -270,6 +270,9 @@ fn run_app(
     #[cfg(target_os = "linux")]
     let mut prev_inference_snapshot: Vec<crate::workload::inference_server::ServiceState> =
         inference_monitor.snapshot();
+    // Background model-catalog refresher: curl-refreshes the compatibility
+    // catalog off the render path; feeds the cold-trail starfield screensaver.
+    let catalog_refresher = crate::workload::CatalogRefresher::spawn();
     let mut proc_rows: Vec<ProcRow> =
         host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts());
     // Linux/TT: seed /proc attribution immediately so a TT-attributed backend
@@ -398,6 +401,12 @@ fn run_app(
     // active; see the `i`/`I`/Up/Down handlers below.
     let mut service_cursor: usize = 0;
 
+    // Cold-trail screensaver for the `[i]` view: the model starfield fixes its
+    // dimensions at construction (no resize method), so we track the size it was
+    // built for and recreate it when the terminal is resized.
+    let mut model_starfield = crate::animation::ModelStarfield::new(0, 0);
+    let mut model_starfield_dims: (usize, usize) = (0, 0);
+
     loop {
         // Decide whether to advance animations this iteration.
         // nvtop-style trick: input always polls at INPUT_POLL_MS (16 ms) so
@@ -524,8 +533,19 @@ fn run_app(
                     // Grid mode doesn't need special init
                 }
                 DisplayMode::InferenceMonitor => {
-                    // No per-tick state to initialize — the view reads
-                    // `inference_monitor.snapshot()` fresh on each draw.
+                    // Cold-trail screensaver: (re)size the model starfield to the body
+                    // region (full width, height minus the 1-line title) and advance it.
+                    let dims = (size.width as usize, (size.height as usize).saturating_sub(1));
+                    if dims != model_starfield_dims {
+                        model_starfield = crate::animation::ModelStarfield::new(dims.0, dims.1);
+                        model_starfield_dims = dims;
+                    }
+                    let arch = backend
+                        .devices()
+                        .first()
+                        .map(|d| d.architecture.name())
+                        .unwrap_or("unknown");
+                    model_starfield.update(&catalog_refresher.snapshot(), arch);
                 }
                 DisplayMode::Defrag => {
                     if defrag.is_none() {
@@ -651,11 +671,18 @@ fn run_app(
                             render_grid_mode(f, backend);
                         }
                         DisplayMode::InferenceMonitor => {
-                            render_inference_monitor_view(
-                                f,
-                                &inference_monitor_rows,
-                                service_cursor,
-                            );
+                            // Cold trail (nothing Compiling/Loading/Ready — always
+                            // true off-Linux where the snapshot is empty) → show the
+                            // model-starfield screensaver instead of a wall of Down.
+                            if inference_panel::trail_is_cold(&inference_monitor_rows) {
+                                render_model_starfield_view(f, &model_starfield);
+                            } else {
+                                render_inference_monitor_view(
+                                    f,
+                                    &inference_monitor_rows,
+                                    service_cursor,
+                                );
+                            }
                         }
                         DisplayMode::Starfield => {
                             if let Some(ref sf) = starfield {
@@ -2940,6 +2967,46 @@ fn render_inference_monitor_view(
     };
     let lines = inference_panel::render_inference_monitor(snapshot, service_cursor);
     f.render_widget(Paragraph::new(lines), body_rect);
+}
+
+/// Render the cold-trail screensaver for the `[i]` view: the model starfield
+/// fills the body region while no inference server is Compiling/Loading/Ready.
+/// Mirrors `render_inference_monitor_view`'s layout — a 1-line title bar plus a
+/// body `Rect` — so the two views swap in place without shifting the chrome.
+fn render_model_starfield_view(f: &mut Frame, sf: &crate::animation::ModelStarfield) {
+    use ratatui::style::Color;
+
+    let area = f.area();
+
+    let title_rect = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1,
+    };
+    let title = "tt-toplike  [Inference Servers — cold trail]  i to return  │  q to quit";
+    // Truncate by `char`, not byte index: the title contains a multi-byte
+    // box-drawing glyph ('│'), so a byte-offset slice could land mid-character
+    // and panic on a narrow terminal.
+    let max_w = area.width as usize;
+    let truncated: String = title.chars().take(max_w).collect();
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("{truncated:<max_w$}"),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        title_rect,
+    );
+
+    let body_rect = Rect {
+        x: area.x,
+        y: area.y + 1,
+        width: area.width,
+        height: area.height.saturating_sub(1),
+    };
+    f.render_widget(Paragraph::new(sf.render()), body_rect);
 }
 
 /// Render a btop-style horizontal bar: `[████████░░░░░░░░]  42%`.

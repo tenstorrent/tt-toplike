@@ -10,7 +10,7 @@ Rules-Requires-Root: no
 Package: tt-toplike
 Architecture: amd64
 Depends: ${shlibs:Depends}, ${misc:Depends}
-Recommends: tt-smi, tenstorrent-dkms
+Recommends: tt-smi, tenstorrent-dkms, curl
 Suggests: tt-toplike-app, tenstorrent-tools
 Description: Real-time hardware monitoring TUI for Tenstorrent silicon
  tt-toplike is a terminal-based monitoring tool for Tenstorrent hardware

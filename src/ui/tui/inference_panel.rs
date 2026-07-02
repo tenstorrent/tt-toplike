@@ -184,6 +184,15 @@ pub fn model_unloaded(prev: &[ServiceState], cur: &[ServiceState]) -> bool {
     })
 }
 
+/// The inference "trail" is cold when no service is doing anything — used to
+/// swap the [i] view to the model-starfield screensaver. Compiling/Loading/Ready
+/// means a model is present, so the live list is shown instead.
+pub fn trail_is_cold(snapshot: &[ServiceState]) -> bool {
+    !snapshot
+        .iter()
+        .any(|s| matches!(s.phase, Phase::Compiling | Phase::Loading | Phase::Ready))
+}
+
 /// Best-effort: map a selected process row to a known inference service key so the
 /// monitor can pre-focus it. ProcRow carries no cmdline/model, so we only match its
 /// inference label against a SERVERS key; anything else → None (monitor opens
@@ -221,6 +230,20 @@ mod tests {
         assert_eq!(service_for_selected_process(&r), None);
         r.inference = None;
         assert_eq!(service_for_selected_process(&r), None);
+    }
+
+    #[test]
+    fn trail_is_cold_only_when_nothing_running() {
+        let mut down = base();
+        down.phase = Phase::Down;
+        assert!(trail_is_cold(&[down.clone()]));
+        assert!(trail_is_cold(&[]));
+        let mut loading = base();
+        loading.phase = Phase::Loading;
+        assert!(!trail_is_cold(&[down, loading]));
+        let mut ready = base();
+        ready.phase = Phase::Ready;
+        assert!(!trail_is_cold(&[ready]));
     }
 
     #[test]
