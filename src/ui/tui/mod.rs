@@ -79,6 +79,11 @@ enum DisplayMode {
     Arcade,
     /// Defrag view — model-loading visualization (inspired by disk defragmenters)
     Defrag,
+    /// Dedicated full-screen Inference Server Monitor — entered via `i`/`I`
+    /// only (deliberately excluded from the `v`-cycle rotation, see the `v`
+    /// key handler below). Supersedes the old `[i]` overlay strip that used
+    /// to live inside the Insights screen.
+    InferenceMonitor,
 }
 
 /// Floating overlay panel type — toggled by hotkeys, auto-dismissed on any other keypress.
@@ -236,11 +241,6 @@ fn run_app(
     // Live self-instrumentation — off by default, toggled with `P`.
     let mut perf_meter = PerfMeter::new();
     let mut show_perf = false;
-
-    // `[i]` Inference Servers panel — off by default, toggled with `i`/`I`.
-    // Shows `inference_monitor`'s snapshot (Linux-only; see below) merged
-    // with the static `SERVERS` table so every known service is listed.
-    let mut show_inference = false;
 
     // TT process attribution (Linux-only, update every 2 seconds). This reads
     // /proc to map PIDs → device fds / hugepages and is merged into the
@@ -512,6 +512,10 @@ fn run_app(
                 DisplayMode::Grid => {
                     // Grid mode doesn't need special init
                 }
+                DisplayMode::InferenceMonitor => {
+                    // No per-tick state to initialize — the view reads
+                    // `inference_monitor.snapshot()` fresh on each draw.
+                }
                 DisplayMode::Defrag => {
                     if defrag.is_none() {
                         defrag = Some(DefragVis::new(size.width as usize, size.height as usize));
@@ -573,22 +577,30 @@ fn run_app(
             // returns Option<&'static str> so no lifetime issue, but keep pattern consistent
             // with perf_arg to avoid any future borrow conflicts inside the closure).
             let throttle_hint = throttle_state.status_hint();
-            // Inference-server panel rows — computed here (not inside the draw
-            // closure) so `inference_monitor` stays a simple, single borrow.
-            // `inference_monitor` only exists on Linux (the design is
+            // Inference-server monitor snapshot for the dedicated full-screen
+            // `DisplayMode::InferenceMonitor` view — computed here (not inside
+            // the draw closure) so `inference_monitor` stays a simple, single
+            // borrow. `inference_monitor` only exists on Linux (the design is
             // Docker/TT-only), so the snapshot read is gated; off Linux (and
-            // whenever the panel is hidden) this is just an empty Vec, which
-            // `render_inference_panel` shows as "no inference servers
-            // detected" rather than faking every known service as Down.
+            // whenever a different mode is active) this is just an empty Vec,
+            // which `render_inference_monitor` shows as every known service
+            // sitting at Down rather than an empty screen.
             #[cfg(target_os = "linux")]
-            let inference_rows: Vec<crate::workload::inference_server::ServiceState> =
-                if show_inference {
-                    inference_panel::service_rows(&inference_monitor.snapshot())
-                } else {
-                    Vec::new()
-                };
+            let inference_monitor_rows: Vec<
+                crate::workload::inference_server::ServiceState,
+            > = if display_mode == DisplayMode::InferenceMonitor {
+                inference_monitor.snapshot()
+            } else {
+                Vec::new()
+            };
             #[cfg(not(target_os = "linux"))]
-            let inference_rows: Vec<crate::workload::inference_server::ServiceState> = Vec::new();
+            let inference_monitor_rows: Vec<
+                crate::workload::inference_server::ServiceState,
+            > = Vec::new();
+            // Service-list cursor for the InferenceMonitor view. Navigation
+            // (Up/Down) and pre-focus-on-entry are wired up in a later task;
+            // for now the view always renders with the first row highlighted.
+            let service_cursor: usize = 0;
             // Whether `proc_rows` above was actually built via the TT-filtered
             // path this cycle — only possible on Linux/procfs builds (see the
             // proc_rows assignments). Drives the process panel's empty-state
@@ -626,12 +638,17 @@ fn run_app(
                                 tt_filtered,
                                 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                 &serving_metrics,
-                                show_inference,
-                                &inference_rows,
                             );
                         }
                         DisplayMode::Grid => {
                             render_grid_mode(f, backend);
+                        }
+                        DisplayMode::InferenceMonitor => {
+                            render_inference_monitor_view(
+                                f,
+                                &inference_monitor_rows,
+                                service_cursor,
+                            );
                         }
                         DisplayMode::Starfield => {
                             if let Some(ref sf) = starfield {
@@ -776,9 +793,15 @@ fn run_app(
                                 force_redraw = true;
                             }
                             KeyCode::Char('i') | KeyCode::Char('I') => {
-                                // Toggle the Inference Servers panel (Insights screen only;
-                                // harmless no-op to flip the flag from other modes).
-                                show_inference = !show_inference;
+                                // Enter/exit the dedicated full-screen Inference Server
+                                // Monitor view. Cursor navigation and pre-focus-on-entry
+                                // (e.g. landing on a service already in Alarm) are wired
+                                // up in a later task — this just flips the view for now.
+                                display_mode = if display_mode == DisplayMode::InferenceMonitor {
+                                    DisplayMode::Insights
+                                } else {
+                                    DisplayMode::InferenceMonitor
+                                };
                                 force_redraw = true;
                             }
                             KeyCode::Char('/') => {
@@ -840,6 +863,9 @@ fn run_app(
                                     }
                                     DisplayMode::Arcade => DisplayMode::Defrag,
                                     DisplayMode::Defrag => DisplayMode::Insights,
+                                    // Deliberately not part of the rotation (entered only via
+                                    // `i`/`I`) — `v` from here just returns to Insights.
+                                    DisplayMode::InferenceMonitor => DisplayMode::Insights,
                                 };
                                 log::info!("Switched to {:?} mode", display_mode);
                             }
@@ -1879,7 +1905,7 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 row!(" a  A", "jump to Arcade", key),
                 row!(" d  D", "jump to Defrag", key),
                 row!(" g", "jump to Grid", key),
-                row!(" i  I", "toggle inference panel", key),
+                row!(" i  I", "Inference Servers monitor", key),
                 row!(" b", "cycle backend", key),
                 ln!(vec![Span::styled(
                     "──────────────────────────────────────",
@@ -2120,6 +2146,26 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "encode Tensix core temperature and power.",
                     "",
                     "Press v to continue cycling modes.",
+                ],
+            ),
+            DisplayMode::InferenceMonitor => explain_lines(
+                bar,
+                bg,
+                dim,
+                lbl,
+                &[
+                    "Inference Server Monitor",
+                    "",
+                    "Full-screen list of every known TT",
+                    "inference-server model (docker-detected),",
+                    "colored by lifecycle phase.",
+                    "",
+                    "DOWN  — no container running",
+                    "COMPILING/LOADING — kernels/weights",
+                    "READY — serving, live=200 on /tt-liveness",
+                    "ALARM — stalled 5+ min with no progress",
+                    "",
+                    "Press i to return to Insights.",
                 ],
             ),
         },
@@ -2730,14 +2776,6 @@ fn render_insights(
     tt_filtered: bool,
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
-    // `[i]` Inference Servers panel toggle + rows. `inference_rows` is
-    // already the final display list (SERVERS merged with the live
-    // snapshot, or empty when hidden / off-Linux) — see the call site in
-    // `run_app`, where the one `inference_monitor.snapshot()` read is
-    // Linux-gated. This function and `render_inference_panel` stay
-    // platform-agnostic.
-    show_inference: bool,
-    inference_rows: &[crate::workload::inference_server::ServiceState],
 ) {
     let area = f.area();
     let devices = backend.devices();
@@ -2750,27 +2788,23 @@ fn render_insights(
         devices
     };
 
-    // Layout: header(3) | cards(exact height) | inference panel (toggle) | process panel (remainder)
+    // Layout: header(3) | cards(exact height) | process panel (remainder)
     //
     // Cards use Constraint::Length so they always get the exact height needed to
     // show all chip panels (including a 2×2 grid when 4 chips don't fit in one row).
-    // The inference panel only claims space when toggled on (one line per known
-    // service, or one "not detected" line). The process panel takes whatever
-    // remains; it may be zero on very short terminals but the chip panels are
-    // never truncated.
+    // The process panel takes whatever remains; it may be zero on very short
+    // terminals but the chip panels are never truncated.
+    //
+    // The old toggle-able `[i]` Inference Servers strip that used to live here
+    // has been retired in favor of the dedicated full-screen
+    // `DisplayMode::InferenceMonitor` view (see `render_inference_monitor_view`
+    // and `inference_panel::render_inference_monitor`), entered via `i`/`I`.
     let cards_h = device_panels_height(panel_devices, area.width);
-    let inference_h: u16 = if show_inference {
-        // Section label + one line per row, or one line for the empty-state message.
-        1 + inference_rows.len().max(1) as u16
-    } else {
-        0
-    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Length(cards_h),
-            Constraint::Length(inference_h),
             Constraint::Min(0),
         ])
         .split(area);
@@ -2785,12 +2819,9 @@ fn render_insights(
         fleet_cursor,
         fleet_zoom_start,
     );
-    if show_inference {
-        render_inference_panel(f, chunks[2], inference_rows);
-    }
     render_process_panel(
         f,
-        chunks[3],
+        chunks[2],
         rows,
         cursor,
         kill_confirm,
@@ -2807,62 +2838,58 @@ fn render_insights(
     }
 }
 
-/// Render the `[i]` Inference Servers panel: one colored status line per
-/// known service (`SERVERS`, filled in with the live snapshot where
-/// available — see `inference_panel::service_rows`), or a graceful
-/// "not detected" line when `rows` is empty. `rows` is empty exactly when
-/// the panel is toggled on but there's no monitor to report from (currently:
-/// any non-Linux build, since `InferenceServerMonitor` is Linux/TT-only) —
-/// deliberately distinct from "every known service is Down", which would be
-/// misleading on a platform that never even looked.
+/// Render the dedicated, full-screen Inference Server Monitor view
+/// (`DisplayMode::InferenceMonitor`, entered via `i`/`I`). Supersedes the old
+/// `[i]` toggle strip that used to live inside the Insights screen: this view
+/// owns the whole terminal, so there's no height budget to fight over with
+/// the chip portraits or process panel.
 ///
-/// Styled like `render_process_panel` below it: a plain `Paragraph`, no
-/// border, so the two panels read as one continuous list.
-fn render_inference_panel(
+/// `snapshot` is the raw (possibly empty) live snapshot from
+/// `InferenceServerMonitor` — this function hands it to
+/// `inference_panel::render_inference_monitor`, which merges it with the
+/// static `SERVERS` table (via `service_rows`) so every known service is
+/// always listed, showing `Down` for anything not currently detected. Off
+/// Linux, `snapshot` is always empty, so the view renders every known
+/// service as `Down` rather than an empty screen.
+fn render_inference_monitor_view(
     f: &mut Frame,
-    area: Rect,
-    rows: &[crate::workload::inference_server::ServiceState],
+    snapshot: &[crate::workload::inference_server::ServiceState],
+    service_cursor: usize,
 ) {
-    use crate::workload::inference_server::Phase;
-    use ratatui::style::{Color, Style};
-    use ratatui::text::{Line, Span};
+    use ratatui::style::Color;
 
-    let mut lines: Vec<Line> = Vec::new();
+    let area = f.area();
 
-    lines.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled("Inference Servers", Style::default().fg(Color::Gray)),
-    ]));
+    let title_rect = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1,
+    };
+    let title = "tt-toplike  [Inference Servers]  i to return  │  q to quit";
+    // Truncate by `char`, not byte index: the title contains a multi-byte
+    // box-drawing glyph ('│'), so a byte-offset slice (`&title[..n]`) could
+    // land mid-character on a narrow terminal and panic.
+    let max_w = area.width as usize;
+    let truncated: String = title.chars().take(max_w).collect();
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("{truncated:<max_w$}"),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        title_rect,
+    );
 
-    if rows.is_empty() {
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                "no inference servers detected",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
-    } else {
-        for row in rows {
-            // green Ready, yellow Compiling/Loading, red Alarm, gray Down.
-            let color = match row.phase {
-                Phase::Ready => Color::Green,
-                Phase::Compiling | Phase::Loading => Color::Yellow,
-                Phase::Alarm => Color::Red,
-                Phase::Down => Color::DarkGray,
-            };
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(
-                    inference_panel::format_service_row(row),
-                    Style::default().fg(color),
-                ),
-            ]));
-        }
-    }
-
-    let para = Paragraph::new(lines);
-    f.render_widget(para, area);
+    let body_rect = Rect {
+        x: area.x,
+        y: area.y + 1,
+        width: area.width,
+        height: area.height.saturating_sub(1),
+    };
+    let lines = inference_panel::render_inference_monitor(snapshot, service_cursor);
+    f.render_widget(Paragraph::new(lines), body_rect);
 }
 
 /// Render a btop-style horizontal bar: `[████████░░░░░░░░]  42%`.
@@ -4429,8 +4456,6 @@ pub fn run_render_bench(
                     false,
                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                     &std::collections::HashMap::new(),
-                    false,
-                    &[],
                 );
             })
             .unwrap();
@@ -4442,6 +4467,16 @@ pub fn run_render_bench(
         let mut term = mk_term();
         results.push(measure("grid", 10, frames, || {
             term.draw(|f| render_grid_mode(f, backend)).unwrap();
+        }));
+    }
+
+    // Inference Monitor (data, 10 fps) — empty snapshot (as on non-Linux, or
+    // Linux with no detected containers) exercises the all-Down render path.
+    {
+        let mut term = mk_term();
+        results.push(measure("inference-monitor", 10, frames, || {
+            term.draw(|f| render_inference_monitor_view(f, &[], 0))
+                .unwrap();
         }));
     }
 

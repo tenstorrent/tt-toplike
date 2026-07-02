@@ -1,18 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! Pure helpers for the `[i]` Inference Servers panel.
+//! Pure helpers for the Inference Servers views: the dedicated full-screen
+//! `DisplayMode::InferenceMonitor` (entered via `i`/`I`; see
+//! `render_inference_monitor` below and its caller
+//! `render_inference_monitor_view` in `mod.rs`).
 //!
 //! Kept separate from `mod.rs`'s ratatui rendering so the text layout is
 //! unit-testable without a terminal: `format_service_row` turns one
-//! `ServiceState` into a single status line, and `service_rows` merges the
-//! live snapshot with the static `SERVERS` table so every known service is
-//! always shown (a service with no running container renders as `Down`
-//! rather than vanishing from the list — see the design doc's "services
-//! registry" section). Both are pure — no I/O, no ratatui types — so they're
-//! exercised directly in tests below.
+//! `ServiceState` into a single status line, `service_rows` merges the live
+//! snapshot with the static `SERVERS` table so every known service is always
+//! shown (a service with no running container renders as `Down` rather than
+//! vanishing from the list — see the design doc's "services registry"
+//! section), and `render_inference_monitor` turns those rows into styled,
+//! cursor-aware `Line`s. All pure — no I/O — so they're exercised directly in
+//! tests below.
 
 use crate::workload::inference_server::{Phase, Readiness, ServiceState, SERVERS};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 
 /// Map a `Phase` to the fixed-width word shown in the panel.
 fn phase_word(phase: Phase) -> &'static str {
@@ -119,6 +125,46 @@ fn down_placeholder(key: &'static str, label: &'static str) -> ServiceState {
         progress: None,
         flat_ticks: 0,
     }
+}
+
+/// Render the dedicated, full-screen "Inference Servers" monitor view: one
+/// line per `service_rows(snapshot)` entry (so every known `SERVERS` service
+/// always appears, even with an empty/off-Linux snapshot — see
+/// `service_rows`), colored by phase, with the `service_cursor`-th row
+/// marked for keyboard navigation (the cursor itself is wired up in a later
+/// task; this function just renders whatever index it's given, clamping
+/// nothing — an out-of-range cursor simply matches no row).
+///
+/// Pure — returns styled `Line`s rather than drawing directly, so the layout
+/// is unit-testable without a terminal. The caller (`mod.rs`) wraps the
+/// result in a `Paragraph`/`Block` and renders it to a full-screen `Rect`.
+pub fn render_inference_monitor(
+    snapshot: &[ServiceState],
+    service_cursor: usize,
+) -> Vec<Line<'static>> {
+    service_rows(snapshot)
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            // green Ready, yellow Compiling/Loading, red Alarm, gray Down.
+            let color = match row.phase {
+                Phase::Ready => Color::Green,
+                Phase::Compiling | Phase::Loading => Color::Yellow,
+                Phase::Alarm => Color::Red,
+                Phase::Down => Color::DarkGray,
+            };
+            let selected = i == service_cursor;
+            let marker = if selected { "> " } else { "  " };
+            let mut style = Style::default().fg(color);
+            if selected {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            Line::from(vec![
+                Span::raw(marker),
+                Span::styled(format_service_row(row), style),
+            ])
+        })
+        .collect()
 }
 
 /// Detect a model-unload edge between two consecutive inference-monitor
@@ -296,5 +342,56 @@ mod tests {
             .iter()
             .filter(|r| r.key != "z-image-turbo")
             .all(|r| r.phase == Phase::Down));
+    }
+
+    /// Flatten a rendered `Line`'s spans back into plain text for assertions
+    /// — mirrors the pattern used by other TUI render tests (e.g.
+    /// `animation::arcade`'s `line_text`).
+    fn line_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn render_inference_monitor_lists_all_servers_and_marks_cursor() {
+        // Empty snapshot (no live monitor / off-Linux) still renders one row
+        // per known service, all Down.
+        let lines = render_inference_monitor(&[], 1);
+        assert_eq!(lines.len(), SERVERS.len());
+
+        for def in SERVERS {
+            assert!(
+                lines.iter().any(|l| line_text(l).contains(def.label)),
+                "expected a row for {}",
+                def.label
+            );
+        }
+
+        // The cursor row (index 1) is marked with the "> " prefix; every
+        // other row keeps the unmarked "  " prefix.
+        for (i, line) in lines.iter().enumerate() {
+            let text = line_text(line);
+            if i == 1 {
+                assert!(text.starts_with("> "), "cursor row not marked: {text}");
+            } else {
+                assert!(
+                    !text.starts_with("> "),
+                    "non-cursor row {i} unexpectedly marked: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn render_inference_monitor_uses_live_state() {
+        let live = base(); // key "z-image-turbo", Loading, progress 68%
+        let lines = render_inference_monitor(std::slice::from_ref(&live), 0);
+        assert_eq!(lines.len(), SERVERS.len());
+        assert!(
+            lines.iter().any(|l| {
+                let t = line_text(l);
+                t.contains("Z-Image-Turbo") && t.contains("LOADING")
+            }),
+            "expected the live Loading row to appear"
+        );
     }
 }
