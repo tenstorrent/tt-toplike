@@ -47,16 +47,30 @@ discriminating requirement: distinguish "working" from "stuck" — CPU% cannot
 | Phase | Signal |
 |---|---|
 | `Down` | no container / connection refused on liveness port |
-| `Compiling` | `g++` process alive inside the container |
-| `Loading` | no `g++`, Python alive, **RSS growing** tick-over-tick |
+| `Compiling` | **kernel-artifact count under `built/` growing** tick-over-tick (`g++` alive = coarse corroborating hint) |
+| `Loading` | kernel count flat, Python alive, **RSS growing** tick-over-tick |
 | `Ready` | liveness endpoint returns 200 (media: `runner_in_use` matches `runner_key`) |
 | `Alarm` | not Ready and **all progress probes flat** for ≥ 5 min (hang/OOM) |
 
+**Cache-dir discovery (do NOT hardcode).** The runtime kernel cache is
+`$TT_METAL_HOME/built` — verified live: kernels JIT-compile into
+`$TT_METAL_HOME/built/<dev_ids>/tt-metal-cache<hash>/kernels/<name>/<hash>/{brisc,
+ncrisc,trisc…}` as `.elf`/`.o`/`.dephash`/`.build_state`. The monitor reads
+`TT_METAL_HOME` (and `CACHE_ROOT`) from the **container's environment** at runtime
+(`docker inspect -f '{{range .Config.Env}}…' <c>`, or `docker exec <c> printenv
+TT_METAL_HOME`). Never hardcode the path — it varies by image/user. (Do NOT count
+`.o` under `build_Release/`: that's tt-metal's static C++ build, a constant ~4233,
+not per-run progress.)
+
 **Three independent progress probes** (a hang is all three flat; the key insight):
-1. **`.o` file count** in the TTNN cache dir inside the container (compile progress) —
-   `docker exec <c> sh -c 'find <cache> -name "*.o" | wc -l'`.
+1. **Compiled-kernel artifact count** under `$TT_METAL_HOME/built` (compile progress)
+   — e.g. `docker exec <c> sh -c 'find "$TT_METAL_HOME/built" -name "*.dephash" |
+   wc -l'` (one per compiled kernel). Tracked as a **delta per tick** — a nonzero
+   delta means kernels are still compiling. (`g++` presence is only a coarse hint:
+   the compiler subprocesses are transient and often missed by a `ps` snapshot, as
+   observed live while kernels were actively building.)
 2. **RSS growing** (load progress) — from `docker stats` MemUsage delta per tick.
-3. **open `.safetensors` FDs** (load cross-check) —
+3. **open `.safetensors` / weight FDs** (load cross-check) —
    `docker exec <c> sh -c 'ls -l /proc/<pid>/fd 2>/dev/null | grep -c safetensors'`.
 
 **Progress % (best-effort, optional):** compile = `.o count / baseline` (baseline
@@ -93,11 +107,12 @@ A background `InferenceServerMonitor` (Linux-gated), same shape as `LivenessProb
 **Pure, unit-tested cores** (the docker calls are thin shells around these):
 - `parse_docker_stats(line) -> (cpu_pct, rss_bytes)`
 - `parse_liveness(status, body) -> Readiness` (Down/NotReady/Ready{runner})
-- `count_o_files(find_output) -> usize`, `count_safetensors_fds(ls_output) -> usize`
+- `parse_env_var(env_output, key) -> Option<String>` (discover `TT_METAL_HOME`)
+- `count_lines(find_output) -> usize` (kernel-artifact count; `.safetensors` FD count)
 - `top_process(ps_output) -> Option<(name, cpu, rss)>`
-- `Phase::derive(has_gpp, python_alive, rss_delta, readiness)` + the flat-line
+- `Phase::derive(kernel_delta, python_alive, rss_delta, readiness)` + the flat-line
   `Alarm` timer reducer
-- `estimate_progress(phase, o_count, rss, model_profile) -> Option<f32>`
+- `estimate_progress(phase, kernel_count, rss, model_profile) -> Option<f32>`
 
 ## What survives from v1 (already committed on the branch)
 
