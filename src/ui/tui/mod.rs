@@ -252,6 +252,13 @@ fn run_app(
     // rows() relies on the cheap snapshot tier until the worker reports back.
     let liveness_prober = crate::workload::LivenessProber::spawn();
     liveness_prober.submit(host_proc_monitor.detected_runtimes());
+    // Background inference-server monitor: probes detected TT inference-server
+    // containers (docker stats + /health) off the render path. Not yet read by
+    // any panel — used by the [i] panel in the next task.
+    #[cfg(target_os = "linux")]
+    let inference_monitor = crate::workload::InferenceServerMonitor::spawn();
+    #[cfg(target_os = "linux")]
+    inference_monitor.submit(host_proc_monitor.detected_inference_servers());
     let mut proc_rows: Vec<ProcRow> =
         host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts());
     let mut last_proc_rows_update = Instant::now();
@@ -1004,6 +1011,9 @@ fn run_app(
             host_proc_monitor.update();
             // Refresh the prober's target set; read back last cycle's verdicts.
             liveness_prober.submit(host_proc_monitor.detected_runtimes());
+            // Refresh the inference-server monitor's target set (containers only).
+            #[cfg(target_os = "linux")]
+            inference_monitor.submit(host_proc_monitor.detected_inference_servers());
             proc_rows =
                 host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts());
 

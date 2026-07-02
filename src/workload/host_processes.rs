@@ -140,6 +140,35 @@ impl HostProcessMonitor {
         out
     }
 
+    /// The TT inference-server containers detected in the current snapshot
+    /// (deduped by container name), as structured [`crate::workload::InferenceServer`]
+    /// records — no docker or network I/O here. Feed these to a
+    /// [`crate::workload::InferenceServerMonitor`] each refresh; the monitor's
+    /// background thread probes each container's readiness/health.
+    #[cfg(target_os = "linux")]
+    pub fn detected_inference_servers(&self) -> Vec<crate::workload::InferenceServer> {
+        use crate::workload::inference_server::{parse_inference_server, Source};
+
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for p in self.sys.processes().values() {
+            let name = p.name().to_string_lossy().to_string();
+            let cmdline = p
+                .cmd()
+                .iter()
+                .map(|s| s.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if let Some(server) = parse_inference_server(&name, &cmdline) {
+                let Source::Docker { container } = &server.source;
+                if seen.insert(container.clone()) {
+                    out.push(server);
+                }
+            }
+        }
+        out
+    }
+
     /// Build selected rows: all *actively-working* inference runtimes (force-kept),
     /// plus the busiest remaining processes filling the slots up to `max` total.
     /// Idle resident daemons (e.g. `ollama serve` with no model) are not
@@ -325,5 +354,19 @@ mod tests {
         ));
         assert!(is_ollama_runner("ollama_llama_server", ""));
         assert!(!is_ollama_runner("ollama", "/usr/local/bin/ollama serve"));
+    }
+
+    /// Smoke test: `detected_inference_servers` must not panic against a real
+    /// process snapshot on whatever box CI happens to run on, and — since it's
+    /// almost certainly not running a `docker run ... tt-inference-server ...`
+    /// process — should return an empty (or at least non-panicking) `Vec`.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn detected_inference_servers_smoke() {
+        let mut mon = HostProcessMonitor::new();
+        mon.update();
+        let servers = mon.detected_inference_servers();
+        // No assertion on contents — just confirm the call is safe and typed.
+        let _: Vec<crate::workload::InferenceServer> = servers;
     }
 }

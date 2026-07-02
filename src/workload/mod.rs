@@ -20,7 +20,7 @@ pub use inference::{
     PowerTrend, TelemetrySample,
 };
 #[cfg(target_os = "linux")]
-pub use inference_server::{InferenceServer, Source};
+pub use inference_server::{InferenceServer, InferenceServerMonitor, Source};
 pub use inference_match::inference_match;
 pub use liveness_probe::{DetectedRuntime, LivenessProber};
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
