@@ -6,5 +6,7 @@
 //! `docs/superpowers/specs/2026-07-02-tt-inference-server-monitoring-design.md`.
 
 mod detect;
+mod logs;
 
 pub use detect::{parse_inference_server, InferenceServer, Source};
+pub use logs::{classify_log_line, LifecycleEvent, Phase, ServingMetrics};
