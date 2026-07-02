@@ -155,7 +155,7 @@ impl ModelStarfield {
             for star in &self.stars {
                 // Twinkle: brightness pulses with frame + per-star phase.
                 let twinkle = (self.frame as f32 * 0.12 + star.phase).sin();
-                let (color, bold) = star_style(star.support, twinkle);
+                let (color, peak) = star_style(star.support, twinkle);
 
                 // Round the float drift position to a cell and clamp to grid.
                 let sx = (star.x as usize).min(self.width - 1);
@@ -169,9 +169,11 @@ impl ModelStarfield {
                     }
                     canvas[sy][col] = (ch, color);
                 }
-                // A bare star always leaves a visible mark, even for empty labels.
+                // A bare star always leaves a visible mark, even for empty labels
+                // (a downloaded model with no display_name). Brighter glyph at a
+                // twinkle peak.
                 if star.label.is_empty() {
-                    let mark = if bold { '*' } else { '·' };
+                    let mark = if peak { '*' } else { '·' };
                     canvas[sy][sx] = (mark, color);
                 }
             }
@@ -218,11 +220,13 @@ impl ModelStarfield {
     }
 }
 
-/// Pick a star's foreground color + bold flag from its support level and a
-/// twinkle factor in `[-1.0, 1.0]`.
+/// Pick a star's foreground color and a "twinkle peak" flag from its support
+/// level and a twinkle factor in `[-1.0, 1.0]`.
 ///
-/// Compatible stars pulse in brightness (scaled base color, bold on peaks);
-/// incompatible stars stay a steady dim gray so they read as background.
+/// Compatible stars pulse in brightness (scaled base color); the peak flag is
+/// true near the top of the pulse and only selects the brighter mark glyph for
+/// bare (empty-label) stars. Incompatible stars stay a steady dim gray so they
+/// read as background.
 fn star_style(support: Support, twinkle: f32) -> (Color, bool) {
     match support {
         Support::Supported => (scale(colors::SUCCESS, 0.7 + 0.3 * twinkle), twinkle > 0.4),

@@ -544,7 +544,9 @@ fn run_app(
                         .devices()
                         .first()
                         .map(|d| d.architecture.name())
-                        .unwrap_or("unknown");
+                        // Matches Architecture::name()'s "Unknown" for a
+                        // detected-but-unknown device (consistent footer casing).
+                        .unwrap_or("Unknown");
                     model_starfield.update(&catalog_refresher.snapshot(), arch);
                 }
                 DisplayMode::Defrag => {
