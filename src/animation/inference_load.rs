@@ -6,8 +6,12 @@
 //! that fill as a model comes up — a true % when the monitor has a baseline,
 //! else live momentum from the per-tick deltas; red when stalled (Alarm).
 
-use crate::workload::inference_server::{is_alarm, Phase, ServiceState};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use std::time::Instant;
+
+use crate::ui::colors;
+use crate::workload::inference_server::{is_alarm, Phase, ServiceState};
 
 /// Momentum "briskness" references: a per-tick delta at/above this reads as a
 /// strong surge. Compile counts `.o` kernels; load counts RSS bytes.
@@ -29,11 +33,56 @@ pub fn momentum_step(delta: i64, reference: i64) -> f32 {
     BASE_STEP * (1.0 + ratio) // BASE_STEP .. 3*BASE_STEP
 }
 
+/// Compact byte size: `0B`, `700M`, `6.2G`. Binary units (KiB base) but a short
+/// single-letter suffix to keep the footer narrow.
+pub fn fmt_bytes(bytes: u64) -> String {
+    const K: f64 = 1024.0;
+    let b = bytes as f64;
+    if bytes == 0 {
+        "0B".into()
+    } else if b < K * K {
+        format!("{:.0}K", b / K)
+    } else if b < K * K * K {
+        format!("{:.0}M", b / (K * K))
+    } else {
+        format!("{:.1}G", b / (K * K * K))
+    }
+}
+
+/// Per-second rate from a per-tick delta and the tick cadence. Negative → 0.
+pub fn fmt_rate_per_sec(delta: i64, cadence_secs: u32) -> String {
+    let cadence = cadence_secs.max(1) as i64;
+    let per_sec = (delta / cadence).max(0);
+    if per_sec >= 1024 * 1024 {
+        format!("{}/s", fmt_bytes(per_sec as u64))
+    } else {
+        format!("{per_sec}/s")
+    }
+}
+
+/// `M:SS` elapsed, minutes uncapped (`2:14`, `61:01`).
+pub fn fmt_elapsed(secs: u64) -> String {
+    format!("{}:{:02}", secs / 60, secs % 60)
+}
+
+/// Group an integer's digits into comma-separated thousands: `1842 -> "1,842"`.
+/// Pure and ASCII-only (digits + commas), so it never byte-slices multibyte text.
+fn group_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let len = digits.len();
+    let mut out = String::with_capacity(len + len / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 pub struct LoadSnake {
-    // Layout for the boxed-snake render; consumed by Task 3's `render`, unread until then.
-    #[allow(dead_code)]
+    // Layout for the boxed-snake render (read by `render`).
     width: usize,
-    #[allow(dead_code)]
     height: usize,
     frame: u64,
     /// The service whose journey we're rendering; `None` until first update.
@@ -199,6 +248,237 @@ impl LoadSnake {
     }
     pub fn is_finishing(&self) -> bool {
         self.burst_left > 0
+    }
+
+    /// Render the boxed-snake loading visualization to owned Ratatui lines:
+    /// a title line, three labeled chambers (compile → load → ready) that fill
+    /// serpentine as the model comes up, and a footer of live stats. Red when
+    /// stalled (Alarm). Returns `vec![]` on a zero-sized view.
+    pub fn render(&self) -> Vec<Line<'static>> {
+        if self.width == 0 || self.height == 0 {
+            return vec![];
+        }
+
+        let bg = colors::rgb(0, 0, 0);
+        let gold = Color::Rgb(246, 188, 66);
+        let dim = colors::rgb(90, 90, 90);
+        let alarm = self.is_alarm();
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        // --- Title: "{label}  {phase_word}  {elapsed}" ---
+        // Down/Alarm fall back to the working sense ("compiling"): Task 2 keeps
+        // the working phase through an Alarm, so `self.phase` still names the box.
+        let phase_word = match self.phase {
+            Phase::Loading => "loading",
+            Phase::Ready => "ready",
+            _ => "compiling",
+        };
+        let elapsed = self.started.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let title_full = format!("{}  {}  {}", self.label, phase_word, fmt_elapsed(elapsed));
+        // Char-safe truncation — labels may be multibyte, never byte-slice.
+        let title: String = title_full.chars().take(self.width).collect();
+        let title_color = if alarm {
+            colors::ERROR
+        } else {
+            colors::TEXT_PRIMARY
+        };
+        lines.push(Line::from(Span::styled(
+            title,
+            Style::default().fg(title_color).add_modifier(Modifier::BOLD),
+        )));
+
+        // --- Chambers canvas (title + footer reserve one row each) ---
+        let box_h = self.height.saturating_sub(2);
+        if box_h > 0 {
+            let mut canvas: Vec<Vec<(char, Color)>> = vec![vec![(' ', bg); self.width]; box_h];
+
+            // Which chamber is active (gets the head + alarm-red tint).
+            let active = match self.phase {
+                Phase::Loading => 1usize,
+                Phase::Ready => 2usize,
+                _ => 0usize, // Compiling / Down
+            };
+
+            let ready_fill = if self.is_finishing() { 1.0 } else { 0.0 };
+            // (label, phase color, fill fraction, is_open)
+            let chambers: [(&str, Color, f32, bool); 3] = [
+                (
+                    "compile",
+                    colors::SUCCESS,
+                    self.compile_fill,
+                    self.compile_fill > 0.0
+                        || matches!(self.phase, Phase::Compiling | Phase::Loading | Phase::Ready),
+                ),
+                (
+                    "load",
+                    colors::WARNING,
+                    self.load_fill,
+                    self.load_fill > 0.0 || matches!(self.phase, Phase::Loading | Phase::Ready),
+                ),
+                ("ready", gold, ready_fill, self.is_finishing()),
+            ];
+
+            let seg_w = self.width / 3;
+            for (i, (label, color, fill, open)) in chambers.iter().enumerate() {
+                let x0 = i * seg_w;
+                let x1 = if i == 2 { self.width } else { (i + 1) * seg_w };
+                let is_active = i == active;
+                // Active box reddens on alarm; closed boxes read dim gray.
+                let box_color = if is_active && alarm {
+                    colors::ERROR
+                } else if *open {
+                    *color
+                } else {
+                    dim
+                };
+                draw_chamber(
+                    &mut canvas, x0, x1, box_h, label, box_color, *fill, *open, is_active,
+                );
+            }
+
+            for row in canvas {
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                let mut current_text = String::new();
+                let mut current_color = bg;
+                for (ch, color) in row {
+                    if color != current_color {
+                        if !current_text.is_empty() {
+                            spans.push(Span::styled(
+                                std::mem::take(&mut current_text),
+                                Style::default().fg(current_color),
+                            ));
+                        }
+                        current_color = color;
+                    }
+                    current_text.push(ch);
+                }
+                if !current_text.is_empty() {
+                    spans.push(Span::styled(
+                        current_text,
+                        Style::default().fg(current_color),
+                    ));
+                }
+                lines.push(Line::from(spans));
+            }
+        }
+
+        // --- Footer: determinate shows %, momentum shows signal rates instead ---
+        let mut footer = if let Some(p) = self.progress {
+            format!(
+                "kernels {}  rss {} {}  {:.0}%",
+                group_thousands(self.kernel_count),
+                fmt_bytes(self.rss_bytes),
+                fmt_rate_per_sec(self.rss_delta, self.cadence_secs),
+                p * 100.0,
+            )
+        } else {
+            format!(
+                "kernels {} ↑{}  rss {} ↑{}",
+                group_thousands(self.kernel_count),
+                fmt_rate_per_sec(self.kernel_delta, self.cadence_secs),
+                fmt_bytes(self.rss_bytes),
+                fmt_rate_per_sec(self.rss_delta, self.cadence_secs),
+            )
+        };
+        if alarm {
+            footer.push_str("  stalled");
+        }
+        let footer: String = footer.chars().take(self.width).collect();
+        let footer_color = if alarm {
+            colors::ERROR
+        } else {
+            colors::TEXT_SECONDARY
+        };
+        lines.push(Line::from(Span::styled(
+            footer,
+            Style::default().fg(footer_color),
+        )));
+
+        lines
+    }
+}
+
+/// Draw one chamber (border + serpentine fill + head) into the canvas region
+/// spanning columns `[x0, x1)` and all `box_h` rows. Closed chambers get a
+/// dashed border and no fill. All indices are clamped by the caller-supplied
+/// bounds so this never panics on a narrow/short view.
+#[allow(clippy::too_many_arguments)]
+fn draw_chamber(
+    canvas: &mut [Vec<(char, Color)>],
+    x0: usize,
+    x1: usize,
+    box_h: usize,
+    label: &str,
+    color: Color,
+    fill: f32,
+    open: bool,
+    is_active: bool,
+) {
+    if x1 <= x0 || box_h == 0 {
+        return;
+    }
+    let w = x1 - x0;
+    let last_row = box_h - 1;
+    let last_col = x1 - 1;
+    // Solid border when the chamber has opened; dashed while it's still closed.
+    let (hz, vt) = if open { ('─', '│') } else { ('┄', '┆') };
+
+    // Top and bottom borders (corners are always solid so the box reads).
+    let corner = |x: usize, l: char, r: char| {
+        if x == x0 {
+            l
+        } else if x == last_col {
+            r
+        } else {
+            hz
+        }
+    };
+    for (x, cell) in canvas[0].iter_mut().enumerate().take(x1).skip(x0) {
+        *cell = (corner(x, '┌', '┐'), color);
+    }
+    for (x, cell) in canvas[last_row].iter_mut().enumerate().take(x1).skip(x0) {
+        *cell = (corner(x, '└', '┘'), color);
+    }
+    // Left/right sides.
+    for row in canvas.iter_mut().take(last_row).skip(1) {
+        row[x0] = (vt, color);
+        row[last_col] = (vt, color);
+    }
+
+    // Label along the top border, inside the corners.
+    if w > 2 {
+        let inner_w = w - 2;
+        for (i, ch) in label.chars().take(inner_w).enumerate() {
+            canvas[0][x0 + 1 + i] = (ch, color);
+        }
+    }
+
+    // Interior serpentine fill (only meaningful once the chamber is open and it
+    // has an inside). Even rows run left→right, odd rows right→left.
+    if open && box_h > 2 && w > 2 {
+        let inner_w = w - 2;
+        let inner_h = box_h - 2;
+        let total = inner_w * inner_h;
+        let filled = ((fill.clamp(0.0, 1.0) * total as f32).round() as usize).min(total);
+        for idx in 0..filled {
+            let r = idx / inner_w;
+            let col_in_row = idx % inner_w;
+            let cx = if r % 2 == 0 {
+                col_in_row
+            } else {
+                inner_w - 1 - col_in_row
+            };
+            let y = 1 + r;
+            let x = x0 + 1 + cx;
+            // Head glyph rides the frontier of the active chamber; body elsewhere.
+            let glyph = if is_active && idx + 1 == filled {
+                '▶'
+            } else {
+                '●'
+            };
+            canvas[y][x] = (glyph, color);
+        }
     }
 }
 
@@ -394,5 +674,60 @@ mod tests {
             !s.finish_if_ready(&[]),
             "vanished service → no burst, journey cleared"
         );
+    }
+
+    #[test]
+    fn formatters_are_human_readable() {
+        assert_eq!(fmt_bytes(0), "0B");
+        assert_eq!(fmt_bytes(6_657_000_000), "6.2G");
+        assert_eq!(fmt_bytes(700 * 1024 * 1024), "700M");
+        // rate = delta / cadence, per second.
+        assert_eq!(fmt_rate_per_sec(0, 2), "0/s");
+        assert_eq!(fmt_rate_per_sec(84, 2), "42/s");
+        assert_eq!(fmt_elapsed(0), "0:00");
+        assert_eq!(fmt_elapsed(134), "2:14");
+        assert_eq!(fmt_elapsed(3_661), "61:01");
+    }
+
+    #[test]
+    fn render_determinate_shows_percent_and_label() {
+        let mut s = LoadSnake::new(60, 16);
+        let mut l = svc(Phase::Loading);
+        l.label = "FLUX".into();
+        l.progress = Some(0.47);
+        s.update(&l, 2);
+        let text: String = s
+            .render()
+            .iter()
+            .flat_map(|ln| ln.spans.iter().map(|sp| sp.content.to_string()))
+            .collect();
+        assert!(text.contains("FLUX"));
+        assert!(text.contains("47%"), "determinate → shows percent");
+        assert!(text.contains("load"));
+    }
+
+    #[test]
+    fn render_momentum_shows_no_percent() {
+        let mut s = LoadSnake::new(60, 16);
+        let mut c = svc(Phase::Compiling);
+        c.kernel_count = 1842;
+        c.kernel_delta = 84; // progress None
+        s.update(&c, 2);
+        let text: String = s
+            .render()
+            .iter()
+            .flat_map(|ln| ln.spans.iter().map(|sp| sp.content.to_string()))
+            .collect();
+        assert!(!text.contains('%'), "momentum → never shows a percent");
+        assert!(
+            text.contains("1,842") || text.contains("1842"),
+            "shows raw kernel count"
+        );
+    }
+
+    #[test]
+    fn render_zero_dims_does_not_panic() {
+        let s = LoadSnake::new(0, 0);
+        let _ = s.render(); // must not panic
     }
 }
