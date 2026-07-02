@@ -272,6 +272,22 @@ fn run_app(
         inference_monitor.snapshot();
     let mut proc_rows: Vec<ProcRow> =
         host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts());
+    // Linux/TT: seed /proc attribution immediately so a TT-attributed backend
+    // (Sysfs/Hybrid/Json/Luwen — anything but --host/--mock, per
+    // `backend_shows_only_tt`) shows the TT-filtered process list from the
+    // very first frame, not just after the first 2s refresh tick below.
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+    {
+        process_monitor.update();
+        if crate::cli::backend_shows_only_tt(backend_type) {
+            let tt_pids: std::collections::HashSet<i32> = flat_process_list(&process_monitor)
+                .iter()
+                .map(|p| p.pid)
+                .collect();
+            proc_rows = host_proc_monitor.tt_rows(PROC_PANEL_MAX_ROWS, &tt_pids);
+        }
+        enrich_proc_rows_tt(&mut proc_rows, &process_monitor);
+    }
     let mut last_proc_rows_update = Instant::now();
 
     // Host CPU / RAM monitoring — sampled on the same 2s cadence as processes.
@@ -573,6 +589,15 @@ fn run_app(
                 };
             #[cfg(not(target_os = "linux"))]
             let inference_rows: Vec<crate::workload::inference_server::ServiceState> = Vec::new();
+            // Whether `proc_rows` above was actually built via the TT-filtered
+            // path this cycle — only possible on Linux/procfs builds (see the
+            // proc_rows assignments). Drives the process panel's empty-state
+            // message so "no TT processes" reads differently from "no host
+            // processes at all".
+            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+            let tt_filtered = crate::cli::backend_shows_only_tt(backend_type);
+            #[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
+            let tt_filtered = false;
             let draw_start = Instant::now();
             terminal
                 .draw(|f| {
@@ -598,6 +623,7 @@ fn run_app(
                                 host_cpu_pct,
                                 host_mem_used,
                                 host_mem_total,
+                                tt_filtered,
                                 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                 &serving_metrics,
                                 show_inference,
@@ -1062,11 +1088,18 @@ fn run_app(
                 }
                 prev_inference_snapshot = cur_inf;
             }
-            proc_rows =
-                host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts());
+            // Non-Linux / no-procfs: always the cross-platform host snapshot —
+            // TT filtering needs the /proc device-fd attribution below, which
+            // doesn't exist on these builds.
+            #[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
+            {
+                proc_rows =
+                    host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts());
+            }
 
-            // Linux/TT: refresh /proc attribution + serving probes, then merge
-            // TT device info into proc_rows by PID.
+            // Linux/TT: refresh /proc attribution + serving probes, choose the
+            // TT-filtered or full host row set by backend, then merge TT device
+            // info into proc_rows by PID.
             #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
             {
                 process_monitor.update();
@@ -1074,6 +1107,13 @@ fn run_app(
                 // hammering HTTP endpoints on every backend tick.
                 let flat = flat_process_list(&process_monitor);
                 serving_metrics = inference_probe.update(&flat);
+                proc_rows = if crate::cli::backend_shows_only_tt(backend_type) {
+                    let tt_pids: std::collections::HashSet<i32> =
+                        flat.iter().map(|p| p.pid).collect();
+                    host_proc_monitor.tt_rows(PROC_PANEL_MAX_ROWS, &tt_pids)
+                } else {
+                    host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts())
+                };
                 enrich_proc_rows_tt(&mut proc_rows, &process_monitor);
             }
 
@@ -2684,6 +2724,10 @@ fn render_insights(
     host_cpu_pct: f32,
     host_mem_used: u64,
     host_mem_total: u64,
+    // True when `rows` was built by the TT-filtered path (Linux/procfs +
+    // `backend_shows_only_tt`) — picks the process panel's empty-state
+    // message. Always `false` off that path (nothing was filtered out).
+    tt_filtered: bool,
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
     // `[i]` Inference Servers panel toggle + rows. `inference_rows` is
@@ -2753,6 +2797,7 @@ fn render_insights(
         host_cpu_pct,
         host_mem_used,
         host_mem_total,
+        tt_filtered,
         #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
         serving_metrics,
     );
@@ -2878,6 +2923,7 @@ fn render_process_panel(
     host_cpu_pct: f32,
     host_mem_used: u64,
     host_mem_total: u64,
+    tt_filtered: bool,
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
 ) {
@@ -2938,12 +2984,14 @@ fn render_process_panel(
     ]));
 
     if rows.is_empty() {
+        let empty_msg = if tt_filtered {
+            "No processes are currently using TT devices"
+        } else {
+            "nothing is feeding the chips right now"
+        };
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(
-                "nothing is feeding the chips right now",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(empty_msg, Style::default().fg(Color::DarkGray)),
         ]));
     } else {
         let clamped_cursor = cursor.min(rows.len().saturating_sub(1));
@@ -4378,6 +4426,7 @@ pub fn run_render_bench(
                     0.0,
                     0,
                     0,
+                    false,
                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                     &std::collections::HashMap::new(),
                     false,
