@@ -56,9 +56,38 @@ use ratatui::text::{Line, Span};
 
 const GDDR_CHANNELS: usize = 8;
 const POWER_IDLE_W: f32 = 8.0;
+/// Power must rise to this multiple of the captured idle baseline for a device to
+/// count as "saw a load" — the gate that arms power-based EVICT. Large margin:
+/// Blackhole idles at ~12–18 W and runs inference at ~60–77 W (≳4×), so this
+/// clears easily under load and never trips on a merely-idle chip (which on BH
+/// still sits in the Running phase because aiclk is always ≥200).
+const LOAD_SURGE_FACTOR: f32 = 1.5;
 
 // EVICT is triggered by real hardware events, not a frame timer.
 // See Phase transition logic in update().
+
+/// Power-based EVICT eligibility (pure, unit-tested).
+///
+/// Fires only when a device has (a) been Running long enough to dodge the
+/// idle-BH Idle→Running→EVICT loop, (b) actually seen a load surge this run
+/// (`saw_load` — armed when power exceeded `idle_power × LOAD_SURGE_FACTOR`), and
+/// (c) fallen back to near its captured idle baseline. Without the `saw_load`
+/// gate a BH chip that merely sits idle (power_ema ≈ idle_power) would satisfy the
+/// threshold every frame and evict in a loop — which is why naively initializing
+/// `idle_power` is not enough on its own.
+fn evict_eligible(
+    frame: u64,
+    running_since: Option<u64>,
+    power_ema: f32,
+    idle_power: f32,
+    saw_load: bool,
+) -> bool {
+    let evict_threshold = (idle_power * 1.20).max(POWER_IDLE_W);
+    let ran_long_enough = running_since
+        .map(|f| frame.saturating_sub(f) >= 120)
+        .unwrap_or(false);
+    ran_long_enough && saw_load && power_ema <= evict_threshold
+}
 
 /// Which phase this device is in.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -156,6 +185,10 @@ struct DeviceState {
     /// EVICT only fires after a minimum dwell in Running so idle BH chips
     /// (aiclk always ≥200, power never spikes) don't loop Idle→Running→EVICT.
     running_since: Option<u64>,
+    /// Whether power has surged above `idle_power × LOAD_SURGE_FACTOR` during the
+    /// current Running spell. Arms power-based EVICT: without it, an idle BH chip
+    /// (which sits in Running because aiclk ≥200) would evict every frame.
+    saw_load: bool,
 }
 
 impl DeviceState {
@@ -176,6 +209,7 @@ impl DeviceState {
             scatter_bursts: Vec::new(),
             burst_cooldown: 0,
             running_since: None,
+            saw_load: false,
         }
     }
 
@@ -366,20 +400,15 @@ impl DefragVis {
                 }
             } else if !ds.channels.iter().any(|c| c.enabled && c.trained) {
                 Phase::Init
-            } else if ds.phase == Phase::Running && {
-                // EVICT: power returned to near the idle baseline captured at DMA-start.
-                // Threshold = idle_power + 20% headroom, clamped to at least POWER_IDLE_W.
-                //
-                // Guard: require ≥120 frames (~2 s at 60 fps) in Running before EVICT is
-                // eligible.  BH chips sit at aiclk ≥200 and idle power regardless of load,
-                // so without this guard they'd loop Idle → Running → EVICT on every frame.
-                let evict_threshold = (ds.idle_power * 1.20).max(POWER_IDLE_W);
-                let ran_long_enough = ds
-                    .running_since
-                    .map(|f| self.frame.saturating_sub(f) >= 120)
-                    .unwrap_or(false);
-                ran_long_enough && ds.power_ema <= evict_threshold
-            } {
+            } else if ds.phase == Phase::Running
+                && evict_eligible(
+                    self.frame,
+                    ds.running_since,
+                    ds.power_ema,
+                    ds.idle_power,
+                    ds.saw_load,
+                )
+            {
                 // Power dropped back to idle — model unloaded → EVICT.
                 Phase::Deconstructing
             } else if (aiclk >= 200 || all_full) && power > POWER_IDLE_W {
@@ -401,6 +430,14 @@ impl DefragVis {
                 }
                 (p, Phase::Running) if p != Phase::Running => {
                     ds.running_since = Some(self.frame);
+                    ds.saw_load = false;
+                    // Capture the pre-load idle baseline when a chip goes straight
+                    // Idle/Init → Running (Blackhole: aiclk is always ≥200, so it
+                    // never dwells in Idle). Arriving via Dma instead, idle_power
+                    // was already captured at Dma-start, so leave it.
+                    if matches!(p, Phase::Idle | Phase::Init) {
+                        ds.idle_power = power;
+                    }
                     for ch in ds.channels.iter_mut() {
                         if ch.enabled && ch.trained {
                             ch.fill = 1.0;
@@ -416,6 +453,8 @@ impl DefragVis {
                     ds.burst_cooldown = 0;
                     ds.inference_energy = 0.0;
                     ds.running_since = None;
+                    // Disarm the load gate — the next Running spell must see its own surge.
+                    ds.saw_load = false;
                 }
                 (_, Phase::Idle) => {
                     ds.idle_power = ds.power_ema;
@@ -473,6 +512,13 @@ impl DefragVis {
                 }
 
                 Phase::Running => {
+                    // Arm the power-based EVICT gate: once power rises well above the
+                    // captured idle baseline, this run has genuinely loaded something,
+                    // so a later drop back to idle is a real unload (not idle jitter).
+                    if ds.idle_power > 0.0 && ds.power_ema > ds.idle_power * LOAD_SURGE_FACTOR {
+                        ds.saw_load = true;
+                    }
+
                     // Continuous organic signals — update every frame.
 
                     // thermal_mood: slow EMA of mean GDDR temp, normalized 25°C→0, 85°C→1.
@@ -1577,5 +1623,20 @@ mod tests {
             Phase::Idle,
             "a device with no trained channels is not evicted"
         );
+    }
+
+    #[test]
+    fn evict_eligible_gates_on_saw_load_to_prevent_idle_loop() {
+        // Idle Blackhole: power_ema ≈ idle_power, been "Running" a long time, but
+        // never saw a load surge → must NOT be eligible (this is the loop guard).
+        assert!(!evict_eligible(200, Some(0), 15.0, 15.0, false));
+        // Loaded then dropped back to idle, with a surge seen → eligible (EVICT).
+        assert!(evict_eligible(200, Some(0), 15.0, 15.0, true));
+        // Still loaded (power high) → not eligible.
+        assert!(!evict_eligible(200, Some(0), 60.0, 15.0, true));
+        // Hasn't been Running long enough → not eligible.
+        assert!(!evict_eligible(50, Some(0), 15.0, 15.0, true));
+        // Never entered Running → not eligible.
+        assert!(!evict_eligible(200, None, 15.0, 15.0, true));
     }
 }
