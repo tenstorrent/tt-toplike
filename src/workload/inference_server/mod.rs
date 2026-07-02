@@ -9,4 +9,4 @@ mod detect;
 mod logs;
 
 pub use detect::{parse_inference_server, InferenceServer, Source};
-pub use logs::{classify_log_line, LifecycleEvent, Phase, ServingMetrics};
+pub use logs::last_non_health_line;
