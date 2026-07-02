@@ -7,6 +7,8 @@
 
 mod detect;
 mod logs;
+mod services;
 
 pub use detect::{parse_inference_server, InferenceServer, Source};
 pub use logs::last_non_health_line;
+pub use services::{service_for, ServiceDef, SERVERS};
