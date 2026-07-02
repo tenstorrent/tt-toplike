@@ -36,10 +36,13 @@ pub fn classify_log_line(line: &str) -> Option<LifecycleEvent> {
     let l = line.to_lowercase();
 
     // Errors first.
+    let trimmed = l.trim_start();
     if l.contains("traceback (most recent call last)")
         || l.contains("failed to load")
-        || l.contains("fatal")
+        || trimmed.starts_with("error")
+        || trimmed.starts_with("fatal")
         || l.contains(" error:")
+        || l.contains(" fatal")
     {
         return Some(LifecycleEvent::Error(line.trim().to_string()));
     }
@@ -69,11 +72,21 @@ pub fn classify_log_line(line: &str) -> Option<LifecycleEvent> {
     None
 }
 
-/// Extract the first `NN%` as a 0..1 fraction, if present.
+/// Extract the first `NN%` as a 0..1 fraction, if present. Char-boundary-safe
+/// (digits/'.' are ASCII, so the computed start is always a valid boundary).
 fn parse_percent(l: &str) -> Option<f32> {
     let idx = l.find('%')?;
-    let start = l[..idx].rfind(|c: char| !c.is_ascii_digit() && c != '.').map_or(0, |p| p + 1);
-    l[start..idx].parse::<f32>().ok().map(|p| (p / 100.0).clamp(0.0, 1.0))
+    let prefix = &l[..idx];
+    let trailing: usize = prefix
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .map(|c| c.len_utf8())
+        .sum();
+    prefix[prefix.len() - trailing..]
+        .parse::<f32>()
+        .ok()
+        .map(|p| (p / 100.0).clamp(0.0, 1.0))
 }
 
 #[cfg(test)]
@@ -101,5 +114,21 @@ mod tests {
         // Health-check spam and unknown lines are ignored.
         assert!(classify_log_line(r#""GET /health HTTP/1.0" 405 Method Not Allowed"#).is_none());
         assert!(classify_log_line("some unrelated chatter").is_none());
+
+        // Non-ASCII abutting a percentage must NOT panic. (Deviates from the
+        // literal task example "下载 weights 42%", which never reaches
+        // parse_percent because it lacks a loading/downloading/compiling
+        // keyword; this string keeps the "loading" keyword while still
+        // having non-ASCII text directly abutting the digits, reproducing
+        // Finding 1's byte-slicing panic through classify_log_line.)
+        assert!(matches!(
+            classify_log_line("loading 下载42%"),
+            Some(LifecycleEvent::Loading { progress: Some(_), .. })
+        ));
+        // Line-initial error marker is classified.
+        assert!(matches!(classify_log_line("Error: connection refused"), Some(LifecycleEvent::Error(_))));
+        // "non-fatal" must NOT be classified as Error.
+        assert!(classify_log_line("this is a non-fatal warning").is_none() ||
+            !matches!(classify_log_line("this is a non-fatal warning"), Some(LifecycleEvent::Error(_))));
     }
 }
