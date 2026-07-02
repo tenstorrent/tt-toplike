@@ -407,6 +407,16 @@ fn run_app(
     let mut model_starfield = crate::animation::ModelStarfield::new(0, 0);
     let mut model_starfield_dims: (usize, usize) = (0, 0);
 
+    // Loading takeover for the `[i]` view: the boxed-snake visualization also
+    // fixes its dimensions at construction (no resize method, like the
+    // starfield), so we track its size and recreate on a terminal resize.
+    let mut load_snake = crate::animation::LoadSnake::new(0, 0);
+    // Tracks the size `load_snake` was built for so we recreate on resize; only
+    // read from the Linux-gated tick block below (the snapshot that feeds the
+    // snake is Docker/TT-only), so it's Linux-only to stay warning-clean off it.
+    #[cfg(target_os = "linux")]
+    let mut load_snake_dims: (usize, usize) = (0, 0);
+
     loop {
         // Decide whether to advance animations this iteration.
         // nvtop-style trick: input always polls at INPUT_POLL_MS (16 ms) so
@@ -535,7 +545,10 @@ fn run_app(
                 DisplayMode::InferenceMonitor => {
                     // Cold-trail screensaver: (re)size the model starfield to the body
                     // region (full width, height minus the 1-line title) and advance it.
-                    let dims = (size.width as usize, (size.height as usize).saturating_sub(1));
+                    let dims = (
+                        size.width as usize,
+                        (size.height as usize).saturating_sub(1),
+                    );
                     if dims != model_starfield_dims {
                         model_starfield = crate::animation::ModelStarfield::new(dims.0, dims.1);
                         model_starfield_dims = dims;
@@ -548,6 +561,22 @@ fn run_app(
                         // detected-but-unknown device (consistent footer casing).
                         .unwrap_or("Unknown");
                     model_starfield.update(&catalog_refresher.snapshot(), arch);
+
+                    // Loading takes over: feed the boxed-snake when a service is
+                    // Compiling/Loading/Alarm. Snapshot read is Linux-only.
+                    #[cfg(target_os = "linux")]
+                    {
+                        let snap = inference_monitor.snapshot();
+                        if let Some(svc) = inference_panel::featured_loading(&snap) {
+                            let sdims =
+                                (size.width as usize, (size.height as usize).saturating_sub(1));
+                            if sdims != load_snake_dims {
+                                load_snake = crate::animation::LoadSnake::new(sdims.0, sdims.1);
+                                load_snake_dims = sdims;
+                            }
+                            load_snake.update(svc, crate::workload::inference_server::CADENCE_SECS);
+                        }
+                    }
                 }
                 DisplayMode::Defrag => {
                     if defrag.is_none() {
@@ -630,6 +659,9 @@ fn run_app(
             let inference_monitor_rows: Vec<
                 crate::workload::inference_server::ServiceState,
             > = Vec::new();
+            // Precomputed so the draw closure (which borrows `load_snake`
+            // immutably) doesn't also need `&mut` for `finish_if_ready`.
+            let snake_finishing = load_snake.finish_if_ready(&inference_monitor_rows);
             // Whether `proc_rows` above was actually built via the TT-filtered
             // path this cycle — only possible on Linux/procfs builds (see the
             // proc_rows assignments). Drives the process panel's empty-state
@@ -673,10 +705,16 @@ fn run_app(
                             render_grid_mode(f, backend);
                         }
                         DisplayMode::InferenceMonitor => {
-                            // Cold trail (nothing Compiling/Loading/Ready — always
-                            // true off-Linux where the snapshot is empty) → show the
-                            // model-starfield screensaver instead of a wall of Down.
-                            if inference_panel::trail_is_cold(&inference_monitor_rows) {
+                            // Tri-state: a Compiling/Loading/Alarm service takes over
+                            // with the boxed-snake (checked FIRST so a loading/Alarm
+                            // service wins over a cold trail), plus a brief gold burst
+                            // after it goes Ready; else a cold trail shows the
+                            // model-starfield screensaver; else the live list.
+                            if inference_panel::featured_loading(&inference_monitor_rows).is_some()
+                                || snake_finishing
+                            {
+                                render_load_snake_view(f, &load_snake);
+                            } else if inference_panel::trail_is_cold(&inference_monitor_rows) {
                                 render_model_starfield_view(f, &model_starfield);
                             } else {
                                 render_inference_monitor_view(
@@ -3009,6 +3047,18 @@ fn render_model_starfield_view(f: &mut Frame, sf: &crate::animation::ModelStarfi
         height: area.height.saturating_sub(1),
     };
     f.render_widget(Paragraph::new(sf.render()), body_rect);
+}
+
+/// Full-screen render of the boxed-snake loading view (see
+/// `crate::animation::LoadSnake`), shown in `DisplayMode::InferenceMonitor`
+/// while a service is Compiling/Loading/Alarm (and briefly after it goes Ready).
+fn render_load_snake_view(f: &mut Frame, snake: &crate::animation::LoadSnake) {
+    let area = f.area();
+    f.render_widget(
+        Block::default().style(Style::default().bg(colors::rgb(0, 0, 0))),
+        area,
+    );
+    f.render_widget(Paragraph::new(snake.render()), area);
 }
 
 /// Render a btop-style horizontal bar: `[████████░░░░░░░░]  42%`.

@@ -190,12 +190,8 @@ pub fn model_unloaded(prev: &[ServiceState], cur: &[ServiceState]) -> bool {
 /// nothing is loading (the view then falls to the starfield when cold, else
 /// the live list).
 ///
-/// Not yet wired into `mod.rs`'s render path — that lands in a later task of
-/// the "loading boxed-snake" series, so this is only exercised by its unit
-/// test for now. `#[allow(dead_code)]` mirrors the pattern used elsewhere in
-/// the crate for functions reserved for near-term future use (e.g.
-/// `src/bin/app.rs`'s buffered-keyboard-input field).
-#[allow(dead_code)]
+/// Wired into `mod.rs`'s `DisplayMode::InferenceMonitor` render path: when this
+/// returns `Some`, the boxed-snake loading view takes over the `[i]` screen.
 pub fn featured_loading(snapshot: &[ServiceState]) -> Option<&ServiceState> {
     snapshot
         .iter()
