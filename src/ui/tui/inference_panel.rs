@@ -185,8 +185,10 @@ pub fn model_unloaded(prev: &[ServiceState], cur: &[ServiceState]) -> bool {
 }
 
 /// The service to feature in the full-screen loading view: the first one that
-/// is Compiling or Loading, in snapshot order. `None` when nothing is loading
-/// (the view then falls to the starfield when cold, else the live list).
+/// is Compiling, Loading, or Alarm (a stalled load stays featured so the
+/// snake can show the red alarm state), in snapshot order. `None` when
+/// nothing is loading (the view then falls to the starfield when cold, else
+/// the live list).
 ///
 /// Not yet wired into `mod.rs`'s render path — that lands in a later task of
 /// the "loading boxed-snake" series, so this is only exercised by its unit
@@ -197,7 +199,7 @@ pub fn model_unloaded(prev: &[ServiceState], cur: &[ServiceState]) -> bool {
 pub fn featured_loading(snapshot: &[ServiceState]) -> Option<&ServiceState> {
     snapshot
         .iter()
-        .find(|s| matches!(s.phase, Phase::Compiling | Phase::Loading))
+        .find(|s| matches!(s.phase, Phase::Compiling | Phase::Loading | Phase::Alarm))
 }
 
 /// The inference "trail" is cold when no service is doing anything — used to
@@ -266,6 +268,14 @@ mod tests {
         // First Compiling/Loading in slice order wins; Down/Ready skipped.
         let rows = vec![down, ready, compiling.clone(), loading];
         assert_eq!(featured_loading(&rows).map(|s| s.key.as_str()), Some("a"));
+    }
+
+    #[test]
+    fn featured_loading_includes_alarm() {
+        let mut alarm = base();
+        alarm.phase = Phase::Alarm;
+        alarm.key = "z".into();
+        assert_eq!(featured_loading(&[alarm]).map(|s| s.key.as_str()), Some("z"));
     }
 
     #[test]

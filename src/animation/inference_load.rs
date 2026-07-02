@@ -88,7 +88,6 @@ impl LoadSnake {
             self.burst_left = 0;
             self.started = Some(Instant::now());
         }
-        self.phase = featured.phase;
         self.cadence_secs = cadence_secs.max(1);
         self.label = featured.label.clone();
         self.kernel_count = featured.kernel_count;
@@ -96,29 +95,45 @@ impl LoadSnake {
         self.rss_bytes = featured.rss_bytes;
         self.rss_delta = featured.rss_delta;
         self.progress = featured.progress;
-        self.alarm = is_alarm(featured.flat_ticks, self.cadence_secs, &featured.readiness);
+        self.alarm = featured.phase == Phase::Alarm
+            || is_alarm(featured.flat_ticks, self.cadence_secs, &featured.readiness);
 
         match featured.phase {
             Phase::Compiling => {
-                self.compile_fill = self.advance(
-                    self.compile_fill,
-                    featured.progress,
-                    featured.kernel_delta,
-                    COMPILE_REF,
-                );
+                self.phase = Phase::Compiling;
+                self.compile_fill = self
+                    .advance(
+                        self.compile_fill,
+                        featured.progress,
+                        featured.kernel_delta,
+                        COMPILE_REF,
+                    )
+                    .max(self.compile_fill);
             }
             Phase::Loading => {
+                self.phase = Phase::Loading;
                 // Entering load locks the compile box full.
                 self.compile_fill = 1.0;
-                self.load_fill = self.advance(
-                    self.load_fill,
-                    featured.progress,
-                    featured.rss_delta,
-                    LOAD_REF,
-                );
+                self.load_fill = self
+                    .advance(
+                        self.load_fill,
+                        featured.progress,
+                        featured.rss_delta,
+                        LOAD_REF,
+                    )
+                    .max(self.load_fill);
             }
-            // Ready/Down/Alarm aren't featured by `featured_loading`, but be safe.
-            _ => {}
+            Phase::Ready => {
+                self.phase = Phase::Ready;
+            }
+            Phase::Down => {
+                self.phase = Phase::Down;
+            }
+            Phase::Alarm => {
+                // Keep the last working phase (Compiling/Loading) and freeze
+                // both fills — the frozen snake + `self.alarm`'s red tint is
+                // the stall indicator, not further fill movement.
+            }
         }
     }
 
@@ -277,6 +292,44 @@ mod tests {
         s.update(&b, 2);
         assert_eq!(s.load_fill(), 0.0, "switching service resets fills");
         assert_eq!(s.active_phase(), Phase::Compiling);
+    }
+
+    #[test]
+    fn loading_then_compiling_bounce_does_not_deflate_compile_box() {
+        let mut s = LoadSnake::new(80, 20);
+        let mut l = svc(Phase::Loading);
+        l.progress = Some(0.2);
+        s.update(&l, 2);
+        assert_eq!(s.compile_fill(), 1.0);
+        // JIT recompile mid-load bounces phase back to Compiling.
+        let mut c = svc(Phase::Compiling);
+        c.progress = Some(0.4);
+        s.update(&c, 2);
+        assert_eq!(
+            s.compile_fill(),
+            1.0,
+            "compile box must not deflate once locked"
+        );
+    }
+
+    #[test]
+    fn alarm_keeps_working_phase_and_freezes_fills() {
+        let mut s = LoadSnake::new(80, 20);
+        let mut l = svc(Phase::Loading);
+        l.progress = Some(0.3);
+        s.update(&l, 2);
+        let load_before = s.load_fill();
+        let mut a = svc(Phase::Alarm);
+        a.flat_ticks = 200;
+        a.progress = Some(0.9);
+        s.update(&a, 2);
+        assert!(s.is_alarm(), "alarm phase sets the alarm flag");
+        assert_eq!(
+            s.active_phase(),
+            Phase::Loading,
+            "keeps last working phase so renderer knows the active box"
+        );
+        assert_eq!(s.load_fill(), load_before, "fills freeze during alarm");
     }
 
     #[test]
