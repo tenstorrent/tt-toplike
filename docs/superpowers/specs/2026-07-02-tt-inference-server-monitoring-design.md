@@ -139,9 +139,32 @@ device association (via `--device`) lets the card sit next to the chip it runs o
   (`/v1/models` for the media variant).
 - Background thread kept a thin shell; logic lives in the pure functions.
 
-## Out of scope (v1)
+## Out of scope for v1 — and the trail to each
 
-- Non-Docker/host-native inference installs (log source is Docker-first; the
-  `LogSource` trait leaves room for a file/journald impl later).
-- Deep serving metrics (tokens/sec, latency histograms) — future enrichment.
-- Non-Linux platforms.
+v1 ships the Docker path, state-first. Each deferred piece has a designed-in seam
+so it's an additive change, not a rewrite. The plan must build these seams even
+though v1 leaves one implementation behind each.
+
+- **Host-native / non-Docker installs** → the `LogSource` **trait** is the seam.
+  v1 ships `DockerLogSource`; a later `FileLogSource` / `JournaldLogSource` slots
+  in behind the same trait, and detection grows a non-container branch that emits
+  the same `InferenceServer` record (leave the record's source field an enum:
+  `Source::Docker { container } | Source::Host { … }`).
+- **More runtime variants** → detection recognizes servers through a small
+  **registry** (image/name patterns → variant), parallel to `liveness_probe`'s
+  `probe_spec`. Adding vLLM-native, Triton, etc. is a registry entry + optional
+  parser markers, no structural change.
+- **Deep serving telemetry** (tokens/sec, latency, per-step diffusion progress)
+  → the **`LifecycleEvent` enum + state reducer** are the seam. v1 defines
+  `Loading/Ready/Serving/Error`; richer signals are new `LifecycleEvent` variants
+  and fields on `LifecycleState`, consumed by the same card. Wire a
+  `metrics: Option<ServingMetrics>` field now (always `None` in v1) so the type
+  and card slot already exist.
+- **Feeding telemetry into the visualizations** (e.g. Defrag inference energy from
+  real per-step progress) → downstream consumers read `LifecycleState`/`metrics`;
+  no producer change needed later.
+- **Non-Linux platforms** → stays `cfg`-gated; the trait/registry seams are
+  platform-neutral, so a future non-Docker source could even be cross-platform.
+
+Each trail is called out again as an explicit "extension point" note in the
+implementation plan so the v1 code leaves the door open by construction.
