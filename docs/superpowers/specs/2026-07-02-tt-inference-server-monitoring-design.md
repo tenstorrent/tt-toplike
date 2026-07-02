@@ -1,170 +1,164 @@
-# TT inference-server monitoring (design)
+# TT inference-server monitoring (design, v2 — resource-probe model)
 
-**Status:** approved design, pending spec review. Follow-on to the liveness-probe
-work (see `2026-06-30-inference-liveness-probes-design.md`).
+**Status:** revised after real-world ops input (AGENTS.md Phase 22); pending re-approval.
 **Date:** 2026-07-02
+**Supersedes:** the v1 log-lifecycle approach below the line. Follow-on to the
+liveness-probe work (`2026-06-30-inference-liveness-probes-design.md`).
 
-## Problem
+## Problem (revised)
 
-While a `tt-inference-server` is loading a model on the box, the Insights panel
-lists unrelated top-CPU apps and never surfaces the server. Root causes observed
-live (QuietBox, 2026-07-02):
+An operator waiting for a model to come up (e.g. Z-Image-Turbo first-run TTNN
+kernel compilation + weight load on P150X4) gets **no signal for 90+ minutes**:
+the server log goes silent during weight loading, and the only heartbeat is
+`405 Method Not Allowed` liveness polls. There's no way to tell "progressing" from
+"hung/OOM." tt-toplike should fill that gap with a live inference-server panel.
 
-- The server runs as a **Docker container** (`ghcr.io/tenstorrent/tt-media-inference-server`);
-  the real workers are `uvicorn … main:app` **inside** the container, which match
-  none of `inference_match`'s needles.
-- The only matching host process is the **idle `docker run` client** (0% CPU),
-  which the liveness gate demotes.
-- The HTTP probe is wrong for this variant: `GET /health` → **405**, while
-  `GET /v1/models` → **200**.
-
-Process-name and single-endpoint HTTP heuristics are too fragile across variants
-(LLM vs media, container vs host, differing endpoints, loading vs ready). We need
-a signal that is (a) reliable for identity and (b) able to report lifecycle.
+**This invalidates the v1 assumption that logs carry lifecycle.** Verified live on
+the QuietBox (2026-07-02): the log is silent during load; the real progress signals
+are resource/process-based.
 
 ## Goal
 
-Both, **state-first**: reliably detect a TT inference server and show its
-lifecycle — `Starting → Loading(+progress) → Ready → Serving → Error` — so it is
-surfaced correctly instead of unrelated processes. Richer serving telemetry
-(tokens/sec, per-step diffusion progress) is layered on opportunistically as logs
-expose it, not required for v1.
+A toggle-able **`[i]` Inference Server panel** showing, per service: **phase**
+(compiling kernels / loading weights / ready / failed-or-hung), **concrete progress
+evidence** (not just elapsed time), a **hang/OOM alarm**, and a services list. The
+discriminating requirement: distinguish "working" from "stuck" — CPU% cannot
+(a tight loop and g++ look identical).
 
-## Key insight
+## Grounded facts (verified live, 2026-07-02)
 
-The most reliable signal is the **`docker run` cmdline we already read** from the
-process table. It carries full identity with zero parsing fragility:
+- **Readiness is per-service** (from `tt-local-generator/app/server_manager.py`'s
+  `SERVERS` dict): media services on **:8000 → `GET /tt-liveness`**; prompt-server on
+  **:8001 → `/health`**; artgen LLMs on **:8002 → `/v1/models`**. Each media service
+  has a `runner_key` (e.g. `tt-flux.1-schnell`).
+- **`/tt-liveness` while loading → HTTP 405, body `{"detail":"Model is not ready"}`**;
+  when ready → 200 with a `runner_in_use` field matching `runner_key`. So the
+  readiness ladder is: connection-refused (down) → 405 "Model is not ready"
+  (up, not ready) → 200 + runner_in_use (ready).
+- **`docker stats --no-stream`** gives container CPU% and MEM (RSS). **`docker exec`**
+  works (`ps`, `find`, `ls /proc/<pid>/fd`). No daemon socket needed.
+- Phase signals observed: during load, top process is `python3` at ~100% CPU with
+  RSS climbing and **no `g++`**; during compile, `g++` is alive.
 
-```
---name tt-inference-server-5edd00ce
-ghcr.io/tenstorrent/tt-media-inference-server:0.17.0-8c48a10
--e MODEL=FLUX.1-schnell  -e MESH_DEVICE=P300x2  -e DEVICE=p300x2
--e ARCH_NAME=blackhole   --publish 0.0.0.0:8000:8000
---device /dev/tenstorrent
-```
+## Signal model (the redesign)
 
-→ identity, model, mesh, arch, port, and TT-device association. **Logs** add the
-*lifecycle* (load progress / ready / errors) the cmdline can't; an **HTTP probe**
-corroborates readiness. Each layer degrades independently (approach #1, chosen
-over log-only and probe-first).
+**Phase** is derived from process + resource + liveness signals, not logs:
 
-## Scope
+| Phase | Signal |
+|---|---|
+| `Down` | no container / connection refused on liveness port |
+| `Compiling` | `g++` process alive inside the container |
+| `Loading` | no `g++`, Python alive, **RSS growing** tick-over-tick |
+| `Ready` | liveness endpoint returns 200 (media: `runner_in_use` matches `runner_key`) |
+| `Alarm` | not Ready and **all progress probes flat** for ≥ 5 min (hang/OOM) |
 
-**Linux/TT only.** Docker and `/dev/tenstorrent` are Linux concepts; the whole
-feature is `cfg(target_os = "linux")`-gated and compiles to a no-op elsewhere,
-matching how `process_monitor`/`serving` are already gated.
+**Three independent progress probes** (a hang is all three flat; the key insight):
+1. **`.o` file count** in the TTNN cache dir inside the container (compile progress) —
+   `docker exec <c> sh -c 'find <cache> -name "*.o" | wc -l'`.
+2. **RSS growing** (load progress) — from `docker stats` MemUsage delta per tick.
+3. **open `.safetensors` FDs** (load cross-check) —
+   `docker exec <c> sh -c 'ls -l /proc/<pid>/fd 2>/dev/null | grep -c safetensors'`.
 
-## Design — two tracks
+**Progress % (best-effort, optional):** compile = `.o count / baseline` (baseline
+profiled once per model, hardcoded); load = `RSS / model_disk_footprint` (footprint
+known per model). Absent a baseline, show the raw evidence (counts/rate) without a %.
 
-### Track A — detection from the container cmdline (foundation)
+**Metrics surfaced per service:** phase, CPU% + RSS (docker stats), RSS delta/tick
+(GB/min), `.o` count + delta, `.safetensors` FD count, liveness status (000/405/200),
+top process name, and the **last non-health-check log line** (`docker logs --tail`,
+filtering out the `/tt-liveness … 405` spam) as a human breadcrumb.
 
-A pure parser over a process's name + cmdline that recognizes a TT inference
-container and extracts a structured record:
+## Services registry
 
-```
-InferenceServer {
-    container_name: String,       // tt-inference-server-5edd00ce
-    image: String,                // …/tt-media-inference-server:0.17.0-…
-    model: Option<String>,        // FLUX.1-schnell   (-e MODEL=)
-    mesh: Option<String>,         // P300x2           (-e MESH_DEVICE=)
-    arch: Option<String>,         // blackhole        (-e ARCH_NAME=)
-    device: Option<String>,       // p300x2           (-e DEVICE=)
-    port: Option<u16>,            // 8000             (--publish host:ctr)
-    uses_tt_device: bool,         // --device /dev/tenstorrent present
-}
-```
+Mirror the `SERVERS` dict: `key`, `label`, `health_url` (→ port + path), optional
+`runner_key`. v1 hardcodes the current set (wan2.2, mochi, flux, sdxl,
+z-image-turbo, motif, animate, skyreels @ :8000/`/tt-liveness`; prompt-server
+@ :8001/`/health`; artgen-* @ :8002/`/v1/models`) in one Rust table, with a note that
+it could later be read from a shared config file. The panel shows every known
+service with its state; a service with no running container shows `Down` gracefully.
 
-Recognition: image contains `inference-server` or matches `ghcr.io/tenstorrent/tt-*`,
-**or** `--name` contains `tt-inference-server`. Pure and unit-tested against the
-captured cmdline fixture. This alone fixes today's "junk in the panel" problem —
-we can label and surface the server without any logs.
+## Architecture
 
-**Probe fix (relates to the liveness-probe module):** for `tt-inference-server`,
-readiness = a **200 from `/v1/models`** (media variant) **or `/health`** (LLM
-variant, which returns 200/503). The probe tries `/v1/models` first, then
-`/health`; ready if either returns 200. Uses Track A's discovered/known port.
+A background `InferenceServerMonitor` (Linux-gated), same shape as `LivenessProber`:
+- **Detect** the running container(s) from the process snapshot (Task 1's cmdline
+  parse — reused) and/or `docker ps`, mapping to a service `key`.
+- On a slow cadence (~5s), for each known service: read `docker stats --no-stream`,
+  run the `docker exec` probes (`.o` count, top process, `.safetensors` FDs), and
+  probe the per-service `health_url`. Fold into a `ServiceState` (phase + metrics +
+  RSS/`.o` history for delta and the flat-line alarm timer).
+- Publish `Vec<ServiceState>` via `arc-swap`; the render path reads it lock-free.
+- **All docker/HTTP I/O is on the background thread**; nothing on the render path.
+- New Insights sub-view toggled with **`i`**, rendered from the snapshot.
 
-### Track B — log lifecycle engine
+**Pure, unit-tested cores** (the docker calls are thin shells around these):
+- `parse_docker_stats(line) -> (cpu_pct, rss_bytes)`
+- `parse_liveness(status, body) -> Readiness` (Down/NotReady/Ready{runner})
+- `count_o_files(find_output) -> usize`, `count_safetensors_fds(ls_output) -> usize`
+- `top_process(ps_output) -> Option<(name, cpu, rss)>`
+- `Phase::derive(has_gpp, python_alive, rss_delta, readiness)` + the flat-line
+  `Alarm` timer reducer
+- `estimate_progress(phase, o_count, rss, model_profile) -> Option<f32>`
 
-- **Log source abstraction** (`trait LogSource`): first impl shells out to
-  `docker logs --since <last_poll> <name>` **by polling** on the background
-  cadence (not a long-lived `-f` follow — polling is bounded, needs no child-
-  process lifecycle management, and matches how we already spawn `tt-smi`). Each
-  poll reads only lines since the previous poll. Unavailable/errored source →
-  `None` (degrade to "present/up").
-- **Version-tolerant parser** (`fn classify_log_line(&str) -> Option<LifecycleEvent>`):
-  a small, centralized set of markers → `Loading{progress}`, `Ready`, `Serving`,
-  `Error`. Unknown lines are ignored (state holds). Pure, fixture-tested.
-- **State reducer**: folds events into
-  `LifecycleState { phase, progress: Option<f32>, detail: String, observed_at }`.
-  Precedence when combining signals: **log Error > log Ready/Serving > probe 200
-  (Ready) > container present (Starting/Loading)**. A stale log state (older than
-  ~2× cadence) is not trusted as authoritative.
+## What survives from v1 (already committed on the branch)
 
-### Execution
+- **Task 1 — cmdline → container/model/mesh/port identity:** reused for container
+  detection and service mapping. ✅
+- **Monitor pattern** (background thread + `arc-swap` snapshot), `Source` enum: reused.
+- **Task 2 — `/v1/models` probe:** superseded. Readiness is per-service; media uses
+  `/tt-liveness`. Rework into `parse_liveness` + the per-service `health_url` table.
+  (`/v1/models` remains correct for the artgen :8002 services.)
+- **Task 3 — log-line classifier:** demoted. The lifecycle is resource-driven; the
+  only log use now is "last non-health-check line" as a breadcrumb. `classify_log_line`
+  and the log-marker set are dropped from the critical path (kept only if trivially
+  useful for the breadcrumb filter).
 
-A `InferenceServerMonitor` owns a background thread and a lock-free cache
-(`arc-swap`), mirroring `LivenessProber`:
+## Extension trails
 
-1. Each ~2s process refresh, the TUI hands it the detected `InferenceServer`
-   records (cheap; from Track A over the snapshot).
-2. The background thread, on a slow cadence (~5s, matching `LivenessProber`'s
-   `PROBE_INTERVAL`), pulls recent `docker logs` per detected server and folds
-   them into `LifecycleState`; on the same tick it triggers the HTTP probe.
-3. The render path reads the cached `Vec<(InferenceServer, LifecycleState)>`
-   lock-free. **No subprocess or network I/O on the render path.**
-
-### Surfacing
-
-A dedicated Insights **"Inference Servers"** card, one row per detected server:
-`model · arch/mesh · phase (+progress bar while Loading) · port/health`. The
-existing process list stays but is no longer the primary inference signal. TT
-device association (via `--device`) lets the card sit next to the chip it runs on.
+- **Config-driven services:** the registry is one table now; later read the shared
+  `SERVERS` config so the two tools can't drift.
+- **Per-model profiles:** `estimate_progress` takes a `ModelProfile { o_baseline,
+  disk_footprint }`; v1 hardcodes the few known models, more added as data-only rows.
+- **Richer telemetry:** `ServiceState.metrics` stays a growing struct (tokens/sec etc.).
+- **Non-Docker/host installs:** container access is behind a small `ContainerProbe`
+  trait; a host/systemd impl slots in later.
 
 ## Error handling / degradation
 
-- No docker / `docker logs` fails → keep Track A identity, phase = best-effort
-  from probe/container presence; never panic, never block the UI.
-- Log format drift → unknown lines ignored; card still shows identity + probe
-  readiness.
-- Multiple servers → one record/card each (dedup by container name).
-- Everything off the hot path; failures yield `None` and fall back a layer.
+- No docker / `docker exec` denied / container gone → that service shows `Down` or
+  the last-known phase with a stale marker; never panic, never block the UI.
+- Missing `.o`/FD data → that probe reports `None`; phase falls back to the signals
+  that are available (RSS + liveness).
+- Everything off the render path; failures degrade a service to a lesser signal.
+
+## Scope
+
+Linux/TT only (`cfg(target_os = "linux")`); no-op elsewhere. No new dependencies
+(shell out to `docker` + the existing `std::net` HTTP helper). Off the hot path.
+No panics on external output.
 
 ## Testing
 
-- **Pure, host-runnable** (Linux): cmdline parser over the captured `docker run`
-  fixture (asserts model/mesh/arch/port/device); `classify_log_line` over captured
-  log fixtures (loading/ready/error/unknown); state reducer precedence
-  (log Error beats probe Ready; stale state ignored); probe endpoint choice
-  (`/v1/models` for the media variant).
-- Background thread kept a thin shell; logic lives in the pure functions.
+Host-runnable pure functions over captured fixtures: `docker stats` line,
+`/tt-liveness` 405/200 bodies, `find … *.o` output, `ls /proc/<pid>/fd` output,
+`ps` output, `Phase::derive` truth table (incl. the all-flat → Alarm case with a
+timer), and `estimate_progress`. The docker/HTTP shells stay thin and are exercised
+via injected fakes (no real docker in unit tests), mirroring the LogSource fake used
+before.
 
-## Out of scope for v1 — and the trail to each
+## Out of scope (v1)
 
-v1 ships the Docker path, state-first. Each deferred piece has a designed-in seam
-so it's an additive change, not a rewrite. The plan must build these seams even
-though v1 leaves one implementation behind each.
+- Non-Docker/host-native installs (behind the `ContainerProbe` trait seam).
+- Deep serving metrics (tokens/sec, latency) — `metrics` struct reserved.
+- Profiling the `.o`/footprint baselines automatically (v1 hardcodes known models;
+  unknown models show raw evidence, no %).
 
-- **Host-native / non-Docker installs** → the `LogSource` **trait** is the seam.
-  v1 ships `DockerLogSource`; a later `FileLogSource` / `JournaldLogSource` slots
-  in behind the same trait, and detection grows a non-container branch that emits
-  the same `InferenceServer` record (leave the record's source field an enum:
-  `Source::Docker { container } | Source::Host { … }`).
-- **More runtime variants** → detection recognizes servers through a small
-  **registry** (image/name patterns → variant), parallel to `liveness_probe`'s
-  `probe_spec`. Adding vLLM-native, Triton, etc. is a registry entry + optional
-  parser markers, no structural change.
-- **Deep serving telemetry** (tokens/sec, latency, per-step diffusion progress)
-  → the **`LifecycleEvent` enum + state reducer** are the seam. v1 defines
-  `Loading/Ready/Serving/Error`; richer signals are new `LifecycleEvent` variants
-  and fields on `LifecycleState`, consumed by the same card. Wire a
-  `metrics: Option<ServingMetrics>` field now (always `None` in v1) so the type
-  and card slot already exist.
-- **Feeding telemetry into the visualizations** (e.g. Defrag inference energy from
-  real per-step progress) → downstream consumers read `LifecycleState`/`metrics`;
-  no producer change needed later.
-- **Non-Linux platforms** → stays `cfg`-gated; the trait/registry seams are
-  platform-neutral, so a future non-Docker source could even be cross-platform.
+---
 
-Each trail is called out again as an explicit "extension point" note in the
-implementation plan so the v1 code leaves the door open by construction.
+# v1 (superseded) — log-lifecycle approach
+
+The original design assumed the server log carried lifecycle (parse "Loading
+model", progress %) with a Docker `LogSource`, a `classify_log_line` classifier, and
+a `/v1/models` readiness probe. Real-world ops (Phase 22) showed the log is silent
+during the painful load phase, so the signal model moved to resource/process probes
+above. Retained here for provenance; the `LogSource` trait, `LifecycleEvent`
+classifier, and `LifecycleState` reducer from Tasks 3–4 are not the v2 critical path.
