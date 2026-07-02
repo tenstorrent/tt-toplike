@@ -7,8 +7,10 @@
 
 mod detect;
 mod logs;
+mod probe;
 mod services;
 
 pub use detect::{parse_inference_server, InferenceServer, Source};
 pub use logs::last_non_health_line;
+pub use probe::{count_lines, parse_docker_stats, parse_env_var, parse_liveness, top_process, Readiness};
 pub use services::{service_for, ServiceDef, SERVERS};
