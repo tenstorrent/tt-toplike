@@ -229,6 +229,13 @@ pub enum BackendType {
     Host,
 }
 
+/// True when the active backend represents real TT hardware, so the process
+/// panel should list only TT-attributed processes. Host shows host CPU procs;
+/// Mock is exempt (no real /dev/tenstorrent fds — keep --mock demos non-blank).
+pub fn backend_shows_only_tt(bt: BackendType) -> bool {
+    !matches!(bt, BackendType::Host | BackendType::Mock)
+}
+
 /// Visualization mode selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum VisualizationMode {
@@ -710,6 +717,16 @@ mod tests {
             throttle: false,
             idle_on_blur: false,
         }
+    }
+
+    #[test]
+    fn tt_filter_applies_to_real_tt_backends_only() {
+        use super::*;
+        assert!(!backend_shows_only_tt(BackendType::Host));
+        assert!(!backend_shows_only_tt(BackendType::Mock));
+        assert!(backend_shows_only_tt(BackendType::Sysfs));
+        assert!(backend_shows_only_tt(BackendType::Json));
+        assert!(backend_shows_only_tt(BackendType::Luwen));
     }
 
     #[test]

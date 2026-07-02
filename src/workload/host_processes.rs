@@ -178,6 +178,23 @@ impl HostProcessMonitor {
     /// from a [`crate::workload::LivenessProber`]; pass an empty map to rely solely
     /// on the cheap snapshot tier.
     pub fn rows(&self, max: usize, probe_verdicts: &HashMap<String, bool>) -> Vec<ProcRow> {
+        select_rows(self.build_all_rows(probe_verdicts), max)
+    }
+
+    /// Rows for TT-attributed processes only (real-TT backends). `tt_pids` is the
+    /// set of PIDs holding a /dev/tenstorrent fd (from `flat_process_list`). Rows are
+    /// not TT-enriched here — the caller runs `enrich_proc_rows_tt` afterward as usual.
+    pub fn tt_rows(&self, max: usize, tt_pids: &std::collections::HashSet<i32>) -> Vec<ProcRow> {
+        let all = self.build_all_rows(&HashMap::new());
+        select_tt_rows(all, tt_pids, max)
+    }
+
+    /// Build the full, untrimmed set of `ProcRow`s for the current snapshot,
+    /// tagging each with its matched inference runtime (if any) and whether
+    /// that runtime looks actively busy right now. Shared by `rows()` (host
+    /// path, uses `probe_verdicts`) and `tt_rows()` (TT path, no probe
+    /// verdicts — the panel is filtered by device-fd attribution instead).
+    fn build_all_rows(&self, probe_verdicts: &HashMap<String, bool>) -> Vec<ProcRow> {
         // First pass: pull the raw fields once (name + cmdline + cpu/mem). We
         // need the whole snapshot before we can judge liveness, because some
         // "busy" signals are cross-process (e.g. an ollama model-runner worker
@@ -209,8 +226,7 @@ impl HostProcessMonitor {
             .iter()
             .any(|(_, name, cmdline, _, _)| is_ollama_runner(name, cmdline));
 
-        let all: Vec<ProcRow> = raw
-            .into_iter()
+        raw.into_iter()
             .map(|(pid, name, cmdline, cpu_pct, mem_bytes)| {
                 let inference = inference_match(&name, &cmdline);
                 let active = inference.is_some_and(|l| {
@@ -231,8 +247,7 @@ impl HostProcessMonitor {
                     tt: None,
                 }
             })
-            .collect();
-        select_rows(all, max)
+            .collect()
     }
 }
 
@@ -261,6 +276,24 @@ pub(crate) fn select_rows(mut all: Vec<ProcRow>, max: usize) -> Vec<ProcRow> {
     let remaining = max.saturating_sub(kept.len());
     kept.extend(rest.into_iter().take(remaining));
     kept
+}
+
+/// Pure: keep only rows whose PID is in `tt_pids` (attributed to a TT device),
+/// sorted by CPU desc, capped at `max`. Used on real-TT backends so the panel
+/// shows only processes contributing to TT load.
+pub(crate) fn select_tt_rows(
+    mut all: Vec<ProcRow>,
+    tt_pids: &std::collections::HashSet<i32>,
+    max: usize,
+) -> Vec<ProcRow> {
+    all.retain(|r| tt_pids.contains(&r.pid));
+    all.sort_by(|a, b| {
+        b.cpu_pct
+            .partial_cmp(&a.cpu_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    all.truncate(max);
+    all
 }
 
 #[cfg(test)]
@@ -354,6 +387,23 @@ mod tests {
         ));
         assert!(is_ollama_runner("ollama_llama_server", ""));
         assert!(!is_ollama_runner("ollama", "/usr/local/bin/ollama serve"));
+    }
+
+    #[test]
+    fn select_tt_rows_keeps_only_attributed_pids_sorted_by_cpu() {
+        use std::collections::HashSet;
+        let all = vec![
+            row(1, 10.0, None, false),
+            row(2, 90.0, None, false), // high cpu but NOT a TT pid
+            row(3, 50.0, Some("vllm"), true),
+            row(4, 20.0, None, false),
+        ];
+        let tt: HashSet<i32> = [1, 3, 4].into_iter().collect();
+        let out = select_tt_rows(all, &tt, 10);
+        // only TT pids, sorted by cpu desc: 3 (50), 4 (20), 1 (10)
+        assert_eq!(out.iter().map(|r| r.pid).collect::<Vec<_>>(), vec![3, 4, 1]);
+        // empty pid set → empty
+        assert!(select_tt_rows(vec![row(1, 5.0, None, false)], &HashSet::new(), 10).is_empty());
     }
 
     /// Smoke test: `detected_inference_servers` must not panic against a real
