@@ -84,7 +84,7 @@ pub fn top_process(ps_output: &str) -> Option<(String, f32, u64)> {
     let cpu = it.next()?.parse::<f32>().ok()?;
     let rss_kib = it.next()?.parse::<u64>().ok()?;
     let comm = it.next()?.to_string();
-    Some((comm, cpu, rss_kib * 1024))
+    Some((comm, cpu, rss_kib.saturating_mul(1024)))
 }
 
 #[cfg(test)]
@@ -120,5 +120,12 @@ mod tests {
         assert_eq!(name, "python3");
         assert!((cpu - 33.7).abs() < 0.01);
         assert_eq!(rss, 9043136 * 1024);
+    }
+    #[test]
+    fn top_process_rss_saturates_and_does_not_panic() {
+        let out = "%CPU   RSS COMMAND\n1.0 18446744073709551615 python3\n";
+        let (name, _cpu, rss) = top_process(out).unwrap();
+        assert_eq!(name, "python3");
+        assert_eq!(rss, u64::MAX); // saturated, no overflow panic
     }
 }
