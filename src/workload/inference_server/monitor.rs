@@ -99,7 +99,12 @@ pub(crate) fn fold_tick(
 ) -> ServiceState {
     let rss_delta = sample.rss_bytes as i64 - prev.rss_bytes as i64;
     let kernel_delta = sample.kernel_count as i64 - prev.kernel_count as i64;
-    let mut phase = Phase::derive(kernel_delta, sample.python_alive, rss_delta, &sample.readiness);
+    let mut phase = Phase::derive(
+        kernel_delta,
+        sample.python_alive,
+        rss_delta,
+        &sample.readiness,
+    );
 
     let moved = kernel_delta > 0 || rss_delta > 0;
     let flat_ticks = if moved { 0 } else { prev.flat_ticks + 1 };
@@ -197,7 +202,12 @@ pub(crate) fn rebuild_snapshot(
             .find(|s| s.key == def.key)
             .cloned()
             .unwrap_or_else(|| fresh_state(def.key, def.label));
-        next_states.push(fold_tick(&prev_state, sample, &ModelProfile::default(), cadence_secs));
+        next_states.push(fold_tick(
+            &prev_state,
+            sample,
+            &ModelProfile::default(),
+            cadence_secs,
+        ));
     }
     next_states
 }
@@ -258,7 +268,8 @@ impl InferenceServerMonitor {
                     // Rebuild unconditionally (even when `detected` is empty) so a
                     // fully-stopped fleet clears the snapshot instead of leaving
                     // the last-known states cached forever.
-                    let snapshot = rebuild_snapshot(&detected, &prev_snapshot, probe.as_ref(), CADENCE_SECS);
+                    let snapshot =
+                        rebuild_snapshot(&detected, &prev_snapshot, probe.as_ref(), CADENCE_SECS);
                     cache_bg.store(Arc::new(snapshot.clone()));
                     prev_snapshot = snapshot;
                     last_tick = Some(Instant::now());
@@ -323,10 +334,17 @@ mod tests {
             last_log: None,
         };
         let next = fold_tick(&prev, sample, &ModelProfile::default(), 5);
-        assert_eq!(next.phase, crate::workload::inference_server::state::Phase::Loading);
+        assert_eq!(
+            next.phase,
+            crate::workload::inference_server::state::Phase::Loading
+        );
         assert_eq!(next.rss_delta, 9_000_000_000); // grew from 0
-        // second identical tick → nothing moved → flat_ticks increments
-        let sample2 = TickSample { rss_bytes: 9_000_000_000, kernel_count: 500, ..sample_like(&next) };
+                                                   // second identical tick → nothing moved → flat_ticks increments
+        let sample2 = TickSample {
+            rss_bytes: 9_000_000_000,
+            kernel_count: 500,
+            ..sample_like(&next)
+        };
         let next2 = fold_tick(&next, sample2, &ModelProfile::default(), 5);
         assert_eq!(next2.flat_ticks, 1);
     }
@@ -368,7 +386,9 @@ mod tests {
     #[test]
     fn empty_detected_clears_the_snapshot() {
         let srv = InferenceServer {
-            source: Source::Docker { container: "c".into() },
+            source: Source::Docker {
+                container: "c".into(),
+            },
             image: "ghcr.io/tenstorrent/tt-media-inference-server:0.17.0".into(),
             model: Some("Z-Image-Turbo".into()),
             mesh: None,
@@ -389,10 +409,16 @@ mod tests {
         // NotReady and nothing moving for 60 ticks @ 5s cadence = 5 minutes.
         let mut state = ServiceState_zeroed("flux", "FLUX.1-schnell");
         for _ in 0..60 {
-            let sample = TickSample { readiness: Readiness::NotReady, ..sample_like(&state) };
+            let sample = TickSample {
+                readiness: Readiness::NotReady,
+                ..sample_like(&state)
+            };
             state = fold_tick(&state, sample, &ModelProfile::default(), 5);
         }
-        assert_eq!(state.phase, crate::workload::inference_server::state::Phase::Alarm);
+        assert_eq!(
+            state.phase,
+            crate::workload::inference_server::state::Phase::Alarm
+        );
         assert_eq!(state.flat_ticks, 60);
     }
 }

@@ -541,7 +541,10 @@ mod tests {
         let spec = probe_spec("tt-inference-server").expect("has a probe spec");
         assert_eq!(spec.path, "/v1/models");
         // 200 with a served model ⇒ up; empty/again ⇒ not.
-        assert!((spec.judge)(200, br#"{"object":"list","data":[{"id":"m"}]}"#));
+        assert!((spec.judge)(
+            200,
+            br#"{"object":"list","data":[{"id":"m"}]}"#
+        ));
         assert!(!(spec.judge)(405, b""));
     }
 

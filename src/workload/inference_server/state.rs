@@ -4,7 +4,13 @@
 use crate::workload::inference_server::probe::Readiness;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Phase { Down, Compiling, Loading, Ready, Alarm }
+pub enum Phase {
+    Down,
+    Compiling,
+    Loading,
+    Ready,
+    Alarm,
+}
 
 /// Per-model baselines for the optional % estimate. v1 hardcodes a few; unknown → all None.
 #[derive(Debug, Clone, Copy, Default)]
@@ -16,16 +22,33 @@ pub struct ModelProfile {
 /// Derive phase from the tick's deltas + readiness. `Alarm` is layered on top by
 /// the reducer (needs the flat-tick history), so this returns the momentary phase.
 impl Phase {
-    pub fn derive(kernel_delta: i64, python_alive: bool, rss_delta: i64, readiness: &Readiness) -> Phase {
-        if let Readiness::Ready { .. } = readiness { return Phase::Ready; }
-        if let Readiness::Down = readiness {
-            if !python_alive { return Phase::Down; }
+    pub fn derive(
+        kernel_delta: i64,
+        python_alive: bool,
+        rss_delta: i64,
+        readiness: &Readiness,
+    ) -> Phase {
+        if let Readiness::Ready { .. } = readiness {
+            return Phase::Ready;
         }
-        if kernel_delta > 0 { return Phase::Compiling; }
-        if rss_delta > 0 { return Phase::Loading; }
+        if let Readiness::Down = readiness {
+            if !python_alive {
+                return Phase::Down;
+            }
+        }
+        if kernel_delta > 0 {
+            return Phase::Compiling;
+        }
+        if rss_delta > 0 {
+            return Phase::Loading;
+        }
         // not ready, nothing moving, but process alive → provisional Loading;
         // the reducer escalates to Alarm after enough flat ticks.
-        if python_alive { Phase::Loading } else { Phase::Down }
+        if python_alive {
+            Phase::Loading
+        } else {
+            Phase::Down
+        }
     }
 }
 
@@ -35,10 +58,21 @@ pub fn is_alarm(flat_ticks: u32, cadence_secs: u32, readiness: &Readiness) -> bo
 }
 
 /// Best-effort % (compile: kernel_count/baseline; load: rss/footprint). None w/o profile.
-pub fn estimate_progress(phase: Phase, kernel_count: usize, rss: u64, profile: &ModelProfile) -> Option<f32> {
+pub fn estimate_progress(
+    phase: Phase,
+    kernel_count: usize,
+    rss: u64,
+    profile: &ModelProfile,
+) -> Option<f32> {
     match phase {
-        Phase::Compiling => profile.o_baseline.filter(|b| *b > 0).map(|b| (kernel_count as f32 / b as f32).clamp(0.0, 1.0)),
-        Phase::Loading => profile.footprint_bytes.filter(|b| *b > 0).map(|b| (rss as f32 / b as f32).clamp(0.0, 1.0)),
+        Phase::Compiling => profile
+            .o_baseline
+            .filter(|b| *b > 0)
+            .map(|b| (kernel_count as f32 / b as f32).clamp(0.0, 1.0)),
+        Phase::Loading => profile
+            .footprint_bytes
+            .filter(|b| *b > 0)
+            .map(|b| (rss as f32 / b as f32).clamp(0.0, 1.0)),
         _ => None,
     }
 }
@@ -69,9 +103,18 @@ mod tests {
     #[test]
     fn phase_derivation() {
         assert_eq!(Phase::derive(0, false, 0, &Readiness::Down), Phase::Down);
-        assert_eq!(Phase::derive(12, true, 0, &Readiness::NotReady), Phase::Compiling); // kernels growing
-        assert_eq!(Phase::derive(0, true, 700_000_000, &Readiness::NotReady), Phase::Loading); // RSS growing
-        assert_eq!(Phase::derive(0, true, 0, &Readiness::Ready { runner: None }), Phase::Ready);
+        assert_eq!(
+            Phase::derive(12, true, 0, &Readiness::NotReady),
+            Phase::Compiling
+        ); // kernels growing
+        assert_eq!(
+            Phase::derive(0, true, 700_000_000, &Readiness::NotReady),
+            Phase::Loading
+        ); // RSS growing
+        assert_eq!(
+            Phase::derive(0, true, 0, &Readiness::Ready { runner: None }),
+            Phase::Ready
+        );
     }
     #[test]
     fn all_flat_not_ready_is_alarm_after_5min() {
@@ -82,9 +125,18 @@ mod tests {
     }
     #[test]
     fn progress_uses_profile_when_present() {
-        let prof = ModelProfile { o_baseline: Some(1000), footprint_bytes: None };
-        assert_eq!(estimate_progress(Phase::Compiling, 500, 0, &prof), Some(0.5));
-        let none = ModelProfile { o_baseline: None, footprint_bytes: None };
+        let prof = ModelProfile {
+            o_baseline: Some(1000),
+            footprint_bytes: None,
+        };
+        assert_eq!(
+            estimate_progress(Phase::Compiling, 500, 0, &prof),
+            Some(0.5)
+        );
+        let none = ModelProfile {
+            o_baseline: None,
+            footprint_bytes: None,
+        };
         assert_eq!(estimate_progress(Phase::Compiling, 500, 0, &none), None);
     }
 }

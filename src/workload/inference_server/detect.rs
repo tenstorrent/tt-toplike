@@ -78,8 +78,8 @@ fn published_port(toks: &[&str]) -> Option<u16> {
 pub fn parse_inference_server(name: &str, cmdline: &str) -> Option<InferenceServer> {
     let toks: Vec<&str> = cmdline.split_whitespace().collect();
     // Must be a docker run invocation.
-    let is_docker_run = (name == "docker" || toks.first() == Some(&"docker"))
-        && toks.contains(&"run");
+    let is_docker_run =
+        (name == "docker" || toks.first() == Some(&"docker")) && toks.contains(&"run");
     if !is_docker_run {
         return None;
     }

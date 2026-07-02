@@ -5,8 +5,8 @@
 
 pub mod host_processes;
 pub mod inference;
-pub mod inference_server;
 pub mod inference_match;
+pub mod inference_server;
 pub mod liveness_probe;
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 pub mod process_monitor;
@@ -18,8 +18,8 @@ pub use inference::{
     state_color, state_label, Confidence, DeviceInferenceState, InferenceEngine, InferenceResult,
     PowerTrend, TelemetrySample,
 };
-pub use inference_server::{InferenceServer, InferenceServerMonitor, Source};
 pub use inference_match::inference_match;
+pub use inference_server::{InferenceServer, InferenceServerMonitor, Source};
 pub use liveness_probe::{DetectedRuntime, LivenessProber};
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 pub use process_monitor::{ProcessInfo, ProcessMonitor};

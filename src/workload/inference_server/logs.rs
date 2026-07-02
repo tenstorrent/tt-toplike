@@ -29,7 +29,10 @@ mod tests {
             r#"172.17.0.1 - "GET /tt-liveness HTTP/1.1" 405 Method Not Allowed"#.to_string(),
             r#"172.17.0.1 - "GET /health HTTP/1.0" 405"#.to_string(),
         ];
-        assert_eq!(last_non_health_line(&lines).as_deref(), Some("INFO: compiling kernels for z-image"));
+        assert_eq!(
+            last_non_health_line(&lines).as_deref(),
+            Some("INFO: compiling kernels for z-image")
+        );
         assert_eq!(last_non_health_line(&[]), None);
     }
 }

@@ -13,9 +13,9 @@
 /// Readiness ladder from a liveness probe.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Readiness {
-    Down,                              // connection refused / no response
-    NotReady,                          // up but model not loaded (e.g. 405 "Model is not ready")
-    Ready { runner: Option<String> },  // 200; runner = runner_in_use if present
+    Down,                             // connection refused / no response
+    NotReady,                         // up but model not loaded (e.g. 405 "Model is not ready")
+    Ready { runner: Option<String> }, // 200; runner = runner_in_use if present
 }
 
 /// Parse `{{.CPUPerc}}|{{.MemUsage}}` → (cpu%, rss bytes). MemUsage is "USED / LIMIT".
@@ -135,7 +135,13 @@ impl ContainerProbe for DockerProbe {
         docker(&["exec", c, "env"])
     }
     fn stats(&self, c: &str) -> String {
-        docker(&["stats", "--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}", c])
+        docker(&[
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{.CPUPerc}}|{{.MemUsage}}",
+            c,
+        ])
     }
     fn exec(&self, c: &str, sh: &str) -> String {
         docker(&["exec", c, "sh", "-c", sh])
@@ -169,7 +175,10 @@ mod tests {
     #[test]
     fn liveness_ladder() {
         assert!(matches!(parse_liveness(0, ""), Readiness::Down));
-        assert!(matches!(parse_liveness(405, r#"{"detail":"Model is not ready"}"#), Readiness::NotReady));
+        assert!(matches!(
+            parse_liveness(405, r#"{"detail":"Model is not ready"}"#),
+            Readiness::NotReady
+        ));
         match parse_liveness(200, r#"{"runner_in_use":"tt-z-image-turbo"}"#) {
             Readiness::Ready { runner } => assert_eq!(runner.as_deref(), Some("tt-z-image-turbo")),
             _ => panic!("expected Ready"),
@@ -177,7 +186,10 @@ mod tests {
     }
     #[test]
     fn parses_env_and_counts() {
-        assert_eq!(parse_env_var("HOME=/root\nTT_METAL_HOME=/x/tt-metal\n", "TT_METAL_HOME").as_deref(), Some("/x/tt-metal"));
+        assert_eq!(
+            parse_env_var("HOME=/root\nTT_METAL_HOME=/x/tt-metal\n", "TT_METAL_HOME").as_deref(),
+            Some("/x/tt-metal")
+        );
         assert_eq!(count_lines("a\nb\nc\n"), 3);
         assert_eq!(count_lines(""), 0);
     }
