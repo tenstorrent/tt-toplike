@@ -17,6 +17,7 @@ pub mod perf;
 pub use perf::PerfMeter;
 pub mod throttle;
 pub use throttle::ThrottleState;
+mod inference_panel;
 
 use crate::animation::{
     ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis,
@@ -235,6 +236,11 @@ fn run_app(
     // Live self-instrumentation — off by default, toggled with `P`.
     let mut perf_meter = PerfMeter::new();
     let mut show_perf = false;
+
+    // `[i]` Inference Servers panel — off by default, toggled with `i`/`I`.
+    // Shows `inference_monitor`'s snapshot (Linux-only; see below) merged
+    // with the static `SERVERS` table so every known service is listed.
+    let mut show_inference = false;
 
     // TT process attribution (Linux-only, update every 2 seconds). This reads
     // /proc to map PIDs → device fds / hugepages and is merged into the
@@ -546,6 +552,22 @@ fn run_app(
             // returns Option<&'static str> so no lifetime issue, but keep pattern consistent
             // with perf_arg to avoid any future borrow conflicts inside the closure).
             let throttle_hint = throttle_state.status_hint();
+            // Inference-server panel rows — computed here (not inside the draw
+            // closure) so `inference_monitor` stays a simple, single borrow.
+            // `inference_monitor` only exists on Linux (the design is
+            // Docker/TT-only), so the snapshot read is gated; off Linux (and
+            // whenever the panel is hidden) this is just an empty Vec, which
+            // `render_inference_panel` shows as "no inference servers
+            // detected" rather than faking every known service as Down.
+            #[cfg(target_os = "linux")]
+            let inference_rows: Vec<crate::workload::inference_server::ServiceState> =
+                if show_inference {
+                    inference_panel::service_rows(&inference_monitor.snapshot())
+                } else {
+                    Vec::new()
+                };
+            #[cfg(not(target_os = "linux"))]
+            let inference_rows: Vec<crate::workload::inference_server::ServiceState> = Vec::new();
             let draw_start = Instant::now();
             terminal
                 .draw(|f| {
@@ -573,6 +595,8 @@ fn run_app(
                                 host_mem_total,
                                 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                 &serving_metrics,
+                                show_inference,
+                                &inference_rows,
                             );
                         }
                         DisplayMode::Grid => {
@@ -718,6 +742,12 @@ fn run_app(
                             }
                             KeyCode::Char('P') => {
                                 show_perf = !show_perf;
+                                force_redraw = true;
+                            }
+                            KeyCode::Char('i') | KeyCode::Char('I') => {
+                                // Toggle the Inference Servers panel (Insights screen only;
+                                // harmless no-op to flip the flag from other modes).
+                                show_inference = !show_inference;
                                 force_redraw = true;
                             }
                             KeyCode::Char('/') => {
@@ -1791,6 +1821,7 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 row!(" a  A", "jump to Arcade", key),
                 row!(" d  D", "jump to Defrag", key),
                 row!(" g", "jump to Grid", key),
+                row!(" i  I", "toggle inference panel", key),
                 row!(" b", "cycle backend", key),
                 ln!(vec![Span::styled(
                     "──────────────────────────────────────",
@@ -2637,6 +2668,14 @@ fn render_insights(
     host_mem_total: u64,
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
+    // `[i]` Inference Servers panel toggle + rows. `inference_rows` is
+    // already the final display list (SERVERS merged with the live
+    // snapshot, or empty when hidden / off-Linux) — see the call site in
+    // `run_app`, where the one `inference_monitor.snapshot()` read is
+    // Linux-gated. This function and `render_inference_panel` stay
+    // platform-agnostic.
+    show_inference: bool,
+    inference_rows: &[crate::workload::inference_server::ServiceState],
 ) {
     let area = f.area();
     let devices = backend.devices();
@@ -2649,18 +2688,27 @@ fn render_insights(
         devices
     };
 
-    // Layout: header(3) | cards(exact height) | process panel (remainder)
+    // Layout: header(3) | cards(exact height) | inference panel (toggle) | process panel (remainder)
     //
     // Cards use Constraint::Length so they always get the exact height needed to
     // show all chip panels (including a 2×2 grid when 4 chips don't fit in one row).
-    // The process panel takes whatever remains; it may be zero on very short terminals
-    // but the chip panels are never truncated.
+    // The inference panel only claims space when toggled on (one line per known
+    // service, or one "not detected" line). The process panel takes whatever
+    // remains; it may be zero on very short terminals but the chip panels are
+    // never truncated.
     let cards_h = device_panels_height(panel_devices, area.width);
+    let inference_h: u16 = if show_inference {
+        // Section label + one line per row, or one line for the empty-state message.
+        1 + inference_rows.len().max(1) as u16
+    } else {
+        0
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Length(cards_h),
+            Constraint::Length(inference_h),
             Constraint::Min(0),
         ])
         .split(area);
@@ -2675,9 +2723,12 @@ fn render_insights(
         fleet_cursor,
         fleet_zoom_start,
     );
+    if show_inference {
+        render_inference_panel(f, chunks[2], inference_rows);
+    }
     render_process_panel(
         f,
-        chunks[2],
+        chunks[3],
         rows,
         cursor,
         kill_confirm,
@@ -2691,6 +2742,64 @@ fn render_insights(
     if let Some(ref kc) = kill_confirm {
         render_kill_dialog(f, area, kc);
     }
+}
+
+/// Render the `[i]` Inference Servers panel: one colored status line per
+/// known service (`SERVERS`, filled in with the live snapshot where
+/// available — see `inference_panel::service_rows`), or a graceful
+/// "not detected" line when `rows` is empty. `rows` is empty exactly when
+/// the panel is toggled on but there's no monitor to report from (currently:
+/// any non-Linux build, since `InferenceServerMonitor` is Linux/TT-only) —
+/// deliberately distinct from "every known service is Down", which would be
+/// misleading on a platform that never even looked.
+///
+/// Styled like `render_process_panel` below it: a plain `Paragraph`, no
+/// border, so the two panels read as one continuous list.
+fn render_inference_panel(
+    f: &mut Frame,
+    area: Rect,
+    rows: &[crate::workload::inference_server::ServiceState],
+) {
+    use crate::workload::inference_server::Phase;
+    use ratatui::style::{Color, Style};
+    use ratatui::text::{Line, Span};
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("Inference Servers", Style::default().fg(Color::Gray)),
+    ]));
+
+    if rows.is_empty() {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "no inference servers detected",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    } else {
+        for row in rows {
+            // green Ready, yellow Compiling/Loading, red Alarm, gray Down.
+            let color = match row.phase {
+                Phase::Ready => Color::Green,
+                Phase::Compiling | Phase::Loading => Color::Yellow,
+                Phase::Alarm => Color::Red,
+                Phase::Down => Color::DarkGray,
+            };
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    inference_panel::format_service_row(row),
+                    Style::default().fg(color),
+                ),
+            ]));
+        }
+    }
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, area);
 }
 
 /// Render a btop-style horizontal bar: `[████████░░░░░░░░]  42%`.
@@ -4253,6 +4362,8 @@ pub fn run_render_bench(
                     0,
                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                     &std::collections::HashMap::new(),
+                    false,
+                    &[],
                 );
             })
             .unwrap();
