@@ -18,7 +18,6 @@
 //! simplest correct shape.
 
 use arc_swap::ArcSwap;
-use std::collections::HashMap;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -168,6 +167,41 @@ fn build_sample(probe: &dyn ContainerProbe, container: &str, def: &ServiceDef) -
     }
 }
 
+/// Build one tick's full snapshot: map each detected server to its
+/// [`TickSample`] (via `probe`), look up its prior [`ServiceState`] in `prev`
+/// by key (falling back to [`fresh_state`] for a newly-discovered service),
+/// and fold the two together with [`fold_tick`]. Pure aside from the `probe`
+/// calls, so it's the one piece of the tick loop worth unit-testing directly
+/// — including the edge case of `detected` going empty (all tracked
+/// containers stopped): the `for` loop below simply doesn't iterate, so the
+/// result is an empty `Vec` rather than a carryover of stale states. That
+/// matters because the panel falls back to rendering known services as Down
+/// from the SERVERS table when the snapshot is empty — so a stale non-empty
+/// snapshot (e.g. stuck at `Loading`) would otherwise linger forever after
+/// every tracked container stops.
+pub(crate) fn rebuild_snapshot(
+    detected: &[InferenceServer],
+    prev: &[ServiceState],
+    probe: &dyn ContainerProbe,
+    cadence_secs: u32,
+) -> Vec<ServiceState> {
+    let mut next_states = Vec::with_capacity(detected.len());
+    for server in detected {
+        let Source::Docker { container } = &server.source;
+        let Some(def) = service_for(server.model.as_deref()) else {
+            continue; // unrecognized model → not tracked
+        };
+        let sample = build_sample(probe, container, def);
+        let prev_state = prev
+            .iter()
+            .find(|s| s.key == def.key)
+            .cloned()
+            .unwrap_or_else(|| fresh_state(def.key, def.label));
+        next_states.push(fold_tick(&prev_state, sample, &ModelProfile::default(), cadence_secs));
+    }
+    next_states
+}
+
 /// Owns the background probe thread and a lock-free cache of per-service state.
 ///
 /// Submit the currently-detected servers each refresh; read a fresh snapshot
@@ -184,17 +218,24 @@ impl InferenceServerMonitor {
     /// recognized service's container and folds the result into its running
     /// state. All docker/HTTP I/O happens here, never on the render path.
     pub fn spawn() -> Self {
+        Self::spawn_with_probe(Box::new(DockerProbe))
+    }
+
+    /// Same as [`Self::spawn`], but with the [`ContainerProbe`] injected —
+    /// production always passes a real `DockerProbe`; tests can pass a fake
+    /// to drive the worker without a docker daemon. `pub(crate)` since only
+    /// `spawn()` and this module's tests need it.
+    pub(crate) fn spawn_with_probe(probe: Box<dyn ContainerProbe + Send>) -> Self {
         let cache = Arc::new(ArcSwap::from_pointee(Vec::new()));
         let (tx, rx) = mpsc::channel::<Vec<InferenceServer>>();
         let cache_bg = Arc::clone(&cache);
-        let probe: Box<dyn ContainerProbe> = Box::new(DockerProbe);
 
         // Detached worker: exits when `tx` (and thus all senders) drops.
         let _ = std::thread::Builder::new()
             .name("tt-inference-monitor".into())
             .spawn(move || {
                 let mut detected: Vec<InferenceServer> = Vec::new();
-                let mut history: HashMap<String, ServiceState> = HashMap::new();
+                let mut prev_snapshot: Vec<ServiceState> = Vec::new();
                 let mut last_tick: Option<Instant> = None;
                 loop {
                     match rx.recv_timeout(TICK_INTERVAL) {
@@ -210,25 +251,16 @@ impl InferenceServerMonitor {
                     }
 
                     let due = last_tick.is_none_or(|l| l.elapsed() >= TICK_INTERVAL);
-                    if detected.is_empty() || !due {
+                    if !due {
                         continue;
                     }
 
-                    let mut next_states = Vec::with_capacity(detected.len());
-                    for server in &detected {
-                        let Source::Docker { container } = &server.source;
-                        let Some(def) = service_for(server.model.as_deref()) else {
-                            continue; // unrecognized model → not tracked
-                        };
-                        let sample = build_sample(probe.as_ref(), container, def);
-                        let prev = history
-                            .remove(def.key)
-                            .unwrap_or_else(|| fresh_state(def.key, def.label));
-                        next_states.push(fold_tick(&prev, sample, &ModelProfile::default(), CADENCE_SECS));
-                    }
-                    // Rebuild history from this cycle's outputs for the next tick.
-                    history = next_states.iter().map(|s| (s.key.clone(), s.clone())).collect();
-                    cache_bg.store(Arc::new(next_states));
+                    // Rebuild unconditionally (even when `detected` is empty) so a
+                    // fully-stopped fleet clears the snapshot instead of leaving
+                    // the last-known states cached forever.
+                    let snapshot = rebuild_snapshot(&detected, &prev_snapshot, probe.as_ref(), CADENCE_SECS);
+                    cache_bg.store(Arc::new(snapshot.clone()));
+                    prev_snapshot = snapshot;
                     last_tick = Some(Instant::now());
                 }
             });
@@ -306,6 +338,50 @@ mod tests {
         let next = fold_tick(&prev, sample, &ModelProfile::default(), 5);
         assert_eq!(next.key, "flux");
         assert_eq!(next.label, "FLUX.1-schnell");
+    }
+
+    /// A fake `ContainerProbe` that returns steady, plausible readings for
+    /// every call, regardless of the container name — good enough to drive
+    /// `rebuild_snapshot` without a real docker daemon.
+    struct FakeProbe;
+    impl ContainerProbe for FakeProbe {
+        fn env(&self, _c: &str) -> String {
+            "TT_METAL_HOME=/x/tt-metal\n".into()
+        }
+        fn stats(&self, _c: &str) -> String {
+            "50.0%|9GiB / 249GiB".into()
+        }
+        fn exec(&self, _c: &str, _sh: &str) -> String {
+            "5\n".into() // kernel count
+        }
+        fn http(&self, _port: u16, _path: &str) -> (u16, String) {
+            (405, "{\"detail\":\"Model is not ready\"}".into())
+        }
+    }
+
+    /// Regression test for the bug where an empty `detected` set (all tracked
+    /// containers stopped) left the snapshot stuck at its last-known states
+    /// forever instead of clearing to empty — the panel is supposed to fall
+    /// back to rendering known services as Down from the SERVERS table once
+    /// nothing is detected, which only works if `snapshot()` actually goes
+    /// empty.
+    #[test]
+    fn empty_detected_clears_the_snapshot() {
+        let srv = InferenceServer {
+            source: Source::Docker { container: "c".into() },
+            image: "ghcr.io/tenstorrent/tt-media-inference-server:0.17.0".into(),
+            model: Some("Z-Image-Turbo".into()),
+            mesh: None,
+            arch: None,
+            device: None,
+            port: Some(8000),
+            uses_tt_device: true,
+        };
+        let one = rebuild_snapshot(std::slice::from_ref(&srv), &[], &FakeProbe, 5);
+        assert_eq!(one.len(), 1);
+        // when nothing is detected, the rebuild must return an empty snapshot (no stale carryover)
+        let cleared = rebuild_snapshot(&[], &one, &FakeProbe, 5);
+        assert!(cleared.is_empty());
     }
 
     #[test]
