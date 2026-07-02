@@ -724,9 +724,14 @@ mod tests {
         use super::*;
         assert!(!backend_shows_only_tt(BackendType::Host));
         assert!(!backend_shows_only_tt(BackendType::Mock));
-        assert!(backend_shows_only_tt(BackendType::Sysfs));
         assert!(backend_shows_only_tt(BackendType::Json));
         assert!(backend_shows_only_tt(BackendType::Luwen));
+
+        #[cfg(target_os = "linux")]
+        {
+            assert!(backend_shows_only_tt(BackendType::Sysfs));
+            assert!(backend_shows_only_tt(BackendType::Hybrid));
+        }
     }
 
     #[test]
