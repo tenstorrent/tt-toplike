@@ -344,6 +344,12 @@ mod tests {
             requests_waiting: 0,
             kv_cache_usage: 0.0,
             ttft_avg_s: 0.0,
+            queue_avg_s: 0.0,
+            prefill_avg_s: 0.0,
+            decode_avg_s: 0.0,
+            tpot_avg_s: 0.0,
+            prefix_hit_rate: 0.0,
+            preemptions_delta: 0,
             counters: VllmCounters::default(),
         }
     }
