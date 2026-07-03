@@ -210,53 +210,9 @@ pub fn featured_loading(snapshot: &[ServiceState]) -> Option<&ServiceState> {
         .find(|s| matches!(s.phase, Phase::Compiling | Phase::Loading | Phase::Alarm))
 }
 
-/// The inference "trail" is cold when no service is doing anything — used to
-/// swap the [i] view to the model-starfield screensaver. Compiling/Loading/Ready
-/// means a model is present, so the live list is shown instead.
-pub fn trail_is_cold(snapshot: &[ServiceState]) -> bool {
-    !snapshot
-        .iter()
-        .any(|s| matches!(s.phase, Phase::Compiling | Phase::Loading | Phase::Ready))
-}
-
-/// Best-effort: map a selected process row to a known inference service key so the
-/// monitor can pre-focus it. ProcRow carries no cmdline/model, so we only match its
-/// inference label against a SERVERS key; anything else → None (monitor opens
-/// unfocused). Precise PID→container linking is out of scope (spec #1).
-pub fn service_for_selected_process(row: &crate::workload::ProcRow) -> Option<&'static str> {
-    let label = row.inference?;
-    SERVERS.iter().find(|d| d.key == label).map(|d| d.key)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // NOTE: the brief for this task illustrated the resolver with `"vllm"` as
-    // an example "SERVERS key", but `SERVERS` (see `services.rs`) only holds
-    // TT container services (`wan2.2`, `mochi`, `flux`, `sdxl`,
-    // `z-image-turbo`, `motif`, `animate`, `skyreels`, `prompt-server`) —
-    // `vllm` is a host-runtime label from `inference_match`, never a
-    // container-service key. Swapped the example to `"flux"` (an actual
-    // `SERVERS` key) so the match-succeeds branch is real; `"ollama"` still
-    // stands in for a matched-but-not-a-container-service label.
-    #[test]
-    fn service_for_selected_process_matches_label_else_none() {
-        let mut r = crate::workload::ProcRow {
-            pid: 1,
-            name: "python3".into(),
-            cpu_pct: 1.0,
-            mem_bytes: 0,
-            inference: Some("flux"),
-            active: true,
-            tt: None,
-        };
-        assert_eq!(service_for_selected_process(&r), Some("flux")); // label is a SERVERS key
-        r.inference = Some("ollama"); // not a container service
-        assert_eq!(service_for_selected_process(&r), None);
-        r.inference = None;
-        assert_eq!(service_for_selected_process(&r), None);
-    }
 
     #[test]
     fn featured_loading_picks_first_compiling_or_loading() {
@@ -303,20 +259,6 @@ mod tests {
         );
         // curated SERVERS entries still present (as Down placeholders).
         assert!(rows.iter().any(|r| r.key == "flux"));
-    }
-
-    #[test]
-    fn trail_is_cold_only_when_nothing_running() {
-        let mut down = base();
-        down.phase = Phase::Down;
-        assert!(trail_is_cold(&[down.clone()]));
-        assert!(trail_is_cold(&[]));
-        let mut loading = base();
-        loading.phase = Phase::Loading;
-        assert!(!trail_is_cold(&[down, loading]));
-        let mut ready = base();
-        ready.phase = Phase::Ready;
-        assert!(!trail_is_cold(&[ready]));
     }
 
     #[test]

@@ -395,27 +395,13 @@ fn run_app(
     let mut fleet_cursor: usize = 0;
     let mut fleet_zoom_start: Option<usize> = None;
 
-    // Service-list cursor for the dedicated `DisplayMode::InferenceMonitor`
-    // view. Set on entry (best-effort pre-focus off the selected process, via
-    // `service_for_selected_process`) and moved by Up/Down while that view is
-    // active; see the `i`/`I`/Up/Down handlers below.
-    let mut service_cursor: usize = 0;
-
-    // Cold-trail screensaver for the `[i]` view: the model starfield fixes its
-    // dimensions at construction (no resize method), so we track the size it was
-    // built for and recreate it when the terminal is resized.
-    let mut model_starfield = crate::animation::ModelStarfield::new(0, 0);
-    let mut model_starfield_dims: (usize, usize) = (0, 0);
-
-    // Loading takeover for the `[i]` view: the boxed-snake visualization also
-    // fixes its dimensions at construction (no resize method, like the
-    // starfield), so we track its size and recreate on a terminal resize.
-    let mut load_snake = crate::animation::LoadSnake::new(0, 0);
-    // Tracks the size `load_snake` was built for so we recreate on resize; only
-    // read from the Linux-gated tick block below (the snapshot that feeds the
-    // snake is Docker/TT-only), so it's Linux-only to stay warning-clean off it.
-    #[cfg(target_os = "linux")]
-    let mut load_snake_dims: (usize, usize) = (0, 0);
+    // The `[i]` Inference Server Monitor view is one unified creature: it roams
+    // the model-catalog starfield when nothing serves, grows the boxed-snake
+    // while a model loads, and feeds on live serving telemetry once Ready. All
+    // behavior selection, resizing, and the loading→ready burst live inside
+    // `Snake` (see `crate::animation::snake`); the loop just feeds it a
+    // `SnakeWorld` each tick and hands it the terminal at render time.
+    let mut snake = crate::animation::Snake::new();
 
     loop {
         // Decide whether to advance animations this iteration.
@@ -543,16 +529,16 @@ fn run_app(
                     // Grid mode doesn't need special init
                 }
                 DisplayMode::InferenceMonitor => {
-                    // Cold-trail screensaver: (re)size the model starfield to the body
-                    // region (full width, height minus the 1-line title) and advance it.
-                    let dims = (
-                        size.width as usize,
-                        (size.height as usize).saturating_sub(1),
-                    );
-                    if dims != model_starfield_dims {
-                        model_starfield = crate::animation::ModelStarfield::new(dims.0, dims.1);
-                        model_starfield_dims = dims;
-                    }
+                    // Feed the unified snake a fresh view of the world; it owns
+                    // behavior selection (roaming/growing/feeding) and the
+                    // loading→ready burst internally. The live service rows only
+                    // exist on Linux (the design is Docker/TT-only); off Linux we
+                    // hand it an empty slice, so it simply roams the catalog.
+                    #[cfg(target_os = "linux")]
+                    let rows = inference_monitor.snapshot();
+                    #[cfg(not(target_os = "linux"))]
+                    let rows: Vec<crate::workload::inference_server::ServiceState> = Vec::new();
+                    let catalog = catalog_refresher.snapshot();
                     let arch = backend
                         .devices()
                         .first()
@@ -560,25 +546,14 @@ fn run_app(
                         // Matches Architecture::name()'s "Unknown" for a
                         // detected-but-unknown device (consistent footer casing).
                         .unwrap_or("Unknown");
-                    model_starfield.update(&catalog_refresher.snapshot(), arch);
-
-                    // Loading takes over: feed the boxed-snake when a service is
-                    // Compiling/Loading/Alarm. Snapshot read is Linux-only.
-                    #[cfg(target_os = "linux")]
-                    {
-                        let snap = inference_monitor.snapshot();
-                        if let Some(svc) = inference_panel::featured_loading(&snap) {
-                            let sdims = (
-                                size.width as usize,
-                                (size.height as usize).saturating_sub(1),
-                            );
-                            if sdims != load_snake_dims {
-                                load_snake = crate::animation::LoadSnake::new(sdims.0, sdims.1);
-                                load_snake_dims = sdims;
-                            }
-                            load_snake.update(svc, crate::workload::inference_server::CADENCE_SECS);
-                        }
-                    }
+                    snake.update(&crate::animation::SnakeWorld {
+                        rows: &rows,
+                        catalog: &catalog,
+                        arch,
+                        cadence_secs: crate::workload::inference_server::CADENCE_SECS,
+                        width: size.width as usize,
+                        height: size.height as usize,
+                    });
                 }
                 DisplayMode::Defrag => {
                     if defrag.is_none() {
@@ -641,35 +616,6 @@ fn run_app(
             // returns Option<&'static str> so no lifetime issue, but keep pattern consistent
             // with perf_arg to avoid any future borrow conflicts inside the closure).
             let throttle_hint = throttle_state.status_hint();
-            // Inference-server monitor snapshot for the dedicated full-screen
-            // `DisplayMode::InferenceMonitor` view — computed here (not inside
-            // the draw closure) so `inference_monitor` stays a simple, single
-            // borrow. `inference_monitor` only exists on Linux (the design is
-            // Docker/TT-only), so the snapshot read is gated; off Linux (and
-            // whenever a different mode is active) this is just an empty Vec,
-            // which `render_inference_monitor` shows as every known service
-            // sitting at Down rather than an empty screen.
-            #[cfg(target_os = "linux")]
-            let inference_monitor_rows: Vec<
-                crate::workload::inference_server::ServiceState,
-            > = if display_mode == DisplayMode::InferenceMonitor {
-                inference_monitor.snapshot()
-            } else {
-                Vec::new()
-            };
-            #[cfg(not(target_os = "linux"))]
-            let inference_monitor_rows: Vec<
-                crate::workload::inference_server::ServiceState,
-            > = Vec::new();
-            // Whether the loading snake takes over this frame. Precomputed
-            // (outside the draw closure, which borrows `load_snake` immutably)
-            // because `finish_if_ready` needs `&mut`. The `||` short-circuits:
-            // `finish_if_ready` runs ONLY when nothing is loading — critical,
-            // because its non-Ready arm clears the active journey as a side
-            // effect, so calling it every frame during a load would reset the
-            // snake (fills, elapsed) each tick and suppress the Ready burst.
-            let show_snake = inference_panel::featured_loading(&inference_monitor_rows).is_some()
-                || load_snake.finish_if_ready(&inference_monitor_rows);
             // Whether `proc_rows` above was actually built via the TT-filtered
             // path this cycle — only possible on Linux/procfs builds (see the
             // proc_rows assignments). Drives the process panel's empty-state
@@ -713,22 +659,7 @@ fn run_app(
                             render_grid_mode(f, backend);
                         }
                         DisplayMode::InferenceMonitor => {
-                            // Tri-state: a Compiling/Loading/Alarm service takes over
-                            // with the boxed-snake (checked FIRST so a loading/Alarm
-                            // service wins over a cold trail), plus a brief gold burst
-                            // after it goes Ready; else a cold trail shows the
-                            // model-starfield screensaver; else the live list.
-                            if show_snake {
-                                render_load_snake_view(f, &load_snake);
-                            } else if inference_panel::trail_is_cold(&inference_monitor_rows) {
-                                render_model_starfield_view(f, &model_starfield);
-                            } else {
-                                render_inference_monitor_view(
-                                    f,
-                                    &inference_monitor_rows,
-                                    service_cursor,
-                                );
-                            }
+                            render_snake_view(f, &snake);
                         }
                         DisplayMode::Starfield => {
                             if let Some(ref sf) = starfield {
@@ -874,35 +805,13 @@ fn run_app(
                             }
                             KeyCode::Char('i') | KeyCode::Char('I') => {
                                 // Enter/exit the dedicated full-screen Inference Server
-                                // Monitor view. On entry, remember the mode we came from
-                                // (so exit lands back there, not a hardcoded Insights) and
-                                // best-effort pre-focus the service tied to the currently
-                                // selected process — see `service_for_selected_process`
-                                // (spec #1: ProcRow carries no cmdline/model, so this is a
-                                // label match, not precise PID→container linking).
+                                // Monitor view (the unified serving snake). On entry,
+                                // remember the mode we came from so exit lands back there
+                                // rather than a hardcoded Insights. There's no roster list
+                                // or cursor anymore — the snake reflects the whole fleet.
                                 if display_mode != DisplayMode::InferenceMonitor {
                                     prev_mode = display_mode;
                                     display_mode = DisplayMode::InferenceMonitor;
-
-                                    #[cfg(target_os = "linux")]
-                                    let snapshot: Vec<
-                                        crate::workload::inference_server::ServiceState,
-                                    > = inference_monitor.snapshot();
-                                    #[cfg(not(target_os = "linux"))]
-                                    let snapshot: Vec<
-                                        crate::workload::inference_server::ServiceState,
-                                    > = Vec::new();
-
-                                    let target_key = proc_rows
-                                        .get(process_cursor)
-                                        .and_then(inference_panel::service_for_selected_process);
-                                    service_cursor = target_key
-                                        .and_then(|key| {
-                                            inference_panel::service_rows(&snapshot)
-                                                .iter()
-                                                .position(|s| s.key == key)
-                                        })
-                                        .unwrap_or(0);
                                 } else {
                                     display_mode = prev_mode;
                                 }
@@ -1063,20 +972,6 @@ fn run_app(
                                         process_cursor = (process_cursor + 1).min(max);
                                     }
                                 }
-                            }
-                            KeyCode::Up if display_mode == DisplayMode::InferenceMonitor => {
-                                service_cursor = service_cursor.saturating_sub(1);
-                            }
-                            KeyCode::Down if display_mode == DisplayMode::InferenceMonitor => {
-                                // `service_rows` always renders one row per `SERVERS`
-                                // entry regardless of snapshot contents (absent services
-                                // synthesize as Down — see `inference_panel::service_rows`),
-                                // so the cursor's upper bound is the static table length,
-                                // no snapshot read needed here.
-                                let max = crate::workload::inference_server::SERVERS
-                                    .len()
-                                    .saturating_sub(1);
-                                service_cursor = (service_cursor + 1).min(max);
                             }
                             KeyCode::Left if display_mode == DisplayMode::Insights => {
                                 let n = backend.devices().len();
@@ -3015,56 +2910,17 @@ fn render_inference_monitor_view(
     f.render_widget(Paragraph::new(lines), body_rect);
 }
 
-/// Render the cold-trail screensaver for the `[i]` view: the model starfield
-/// fills the body region while no inference server is Compiling/Loading/Ready.
-/// Mirrors `render_inference_monitor_view`'s layout — a 1-line title bar plus a
-/// body `Rect` — so the two views swap in place without shifting the chrome.
-fn render_model_starfield_view(f: &mut Frame, sf: &crate::animation::ModelStarfield) {
-    use ratatui::style::Color;
-
-    let area = f.area();
-
-    let title_rect = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: 1,
-    };
-    let title = "tt-toplike  [Inference Servers — cold trail]  i to return  │  q to quit";
-    // Truncate by `char`, not byte index: the title contains a multi-byte
-    // box-drawing glyph ('│'), so a byte-offset slice could land mid-character
-    // and panic on a narrow terminal.
-    let max_w = area.width as usize;
-    let truncated: String = title.chars().take(max_w).collect();
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!("{truncated:<max_w$}"),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ))),
-        title_rect,
-    );
-
-    let body_rect = Rect {
-        x: area.x,
-        y: area.y + 1,
-        width: area.width,
-        height: area.height.saturating_sub(1),
-    };
-    f.render_widget(Paragraph::new(sf.render()), body_rect);
-}
-
-/// Full-screen render of the boxed-snake loading view (see
-/// `crate::animation::LoadSnake`), shown in `DisplayMode::InferenceMonitor`
-/// while a service is Compiling/Loading/Alarm (and briefly after it goes Ready).
-fn render_load_snake_view(f: &mut Frame, snake: &crate::animation::LoadSnake) {
+/// Full-screen render of the unified serving snake (see `crate::animation::Snake`).
+fn render_snake_view(f: &mut Frame, snake: &crate::animation::Snake) {
     let area = f.area();
     f.render_widget(
         Block::default().style(Style::default().bg(colors::rgb(0, 0, 0))),
         area,
     );
-    f.render_widget(Paragraph::new(snake.render()), area);
+    f.render_widget(
+        Paragraph::new(snake.render(area.width as usize, area.height as usize)),
+        area,
+    );
 }
 
 /// Render a btop-style horizontal bar: `[████████░░░░░░░░]  42%`.
