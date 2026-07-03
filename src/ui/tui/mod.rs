@@ -568,8 +568,10 @@ fn run_app(
                     {
                         let snap = inference_monitor.snapshot();
                         if let Some(svc) = inference_panel::featured_loading(&snap) {
-                            let sdims =
-                                (size.width as usize, (size.height as usize).saturating_sub(1));
+                            let sdims = (
+                                size.width as usize,
+                                (size.height as usize).saturating_sub(1),
+                            );
                             if sdims != load_snake_dims {
                                 load_snake = crate::animation::LoadSnake::new(sdims.0, sdims.1);
                                 load_snake_dims = sdims;

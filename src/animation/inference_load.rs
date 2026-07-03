@@ -285,7 +285,9 @@ impl LoadSnake {
         };
         lines.push(Line::from(Span::styled(
             title,
-            Style::default().fg(title_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(title_color)
+                .add_modifier(Modifier::BOLD),
         )));
 
         // --- Chambers canvas (title + footer reserve one row each) ---
@@ -333,7 +335,15 @@ impl LoadSnake {
                     dim
                 };
                 draw_chamber(
-                    &mut canvas, x0, x1, box_h, label, box_color, *fill, *open, is_active,
+                    &mut canvas,
+                    x0,
+                    x1,
+                    box_h,
+                    label,
+                    box_color,
+                    *fill,
+                    *open,
+                    is_active,
                 );
             }
 
@@ -622,7 +632,7 @@ mod tests {
         let mut a = svc(Phase::Loading);
         a.key = "a".into();
         s.update(&a, 2); // journey A ends at Loading
-        // featured_loading jumps to a different, already-stalled service B.
+                         // featured_loading jumps to a different, already-stalled service B.
         let mut b = svc(Phase::Alarm);
         b.key = "b".into();
         b.flat_ticks = 200;

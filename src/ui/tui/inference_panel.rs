@@ -271,7 +271,10 @@ mod tests {
         let mut alarm = base();
         alarm.phase = Phase::Alarm;
         alarm.key = "z".into();
-        assert_eq!(featured_loading(&[alarm]).map(|s| s.key.as_str()), Some("z"));
+        assert_eq!(
+            featured_loading(&[alarm]).map(|s| s.key.as_str()),
+            Some("z")
+        );
     }
 
     #[test]
