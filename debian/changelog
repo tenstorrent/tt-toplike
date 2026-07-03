@@ -1,3 +1,10 @@
+tt-toplike (0.7.6) noble; urgency=medium
+
+  * Reword the process-panel empty state (TT-filtered) to "No processes
+    using TT devices detected".
+
+ -- Tenstorrent <software@tenstorrent.com>  Fri, 03 Jul 2026 13:00:00 +0000
+
 tt-toplike (0.7.5) noble; urgency=medium
 
   * Inference Server Monitor [i] view is now a tri-state surface:

@@ -3187,7 +3187,7 @@ fn render_process_panel(
 
     if rows.is_empty() {
         let empty_msg = if tt_filtered {
-            "No processes are currently using TT devices"
+            "No processes using TT devices detected"
         } else {
             "nothing is feeding the chips right now"
         };
