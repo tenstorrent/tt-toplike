@@ -521,7 +521,27 @@ fn run_app(
                         arc.initialize_topology(backend);
                         arcade = Some(arc);
                     }
+                    // Thread the first Ready inference service's serving stats
+                    // into the hero ⚔ snake duel. Zero new probing: this only
+                    // reads the monitor snapshot already maintained on Linux.
+                    // The design is Docker/TT-only, so off-Linux there is never
+                    // a serving model — hand the duel None.
+                    #[cfg(target_os = "linux")]
+                    let serving = {
+                        use crate::workload::inference_server::Phase;
+                        inference_monitor
+                            .snapshot()
+                            .iter()
+                            .find(|s| s.phase == Phase::Ready)
+                            .and_then(|s| s.serving)
+                    };
+                    #[cfg(not(target_os = "linux"))]
+                    let serving: Option<
+                        crate::workload::inference_server::ServingStats,
+                    > = None;
+
                     if let Some(ref mut arc) = arcade {
+                        arc.set_serving(serving);
                         arc.update(backend);
                     }
                 }
