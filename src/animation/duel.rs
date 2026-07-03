@@ -135,7 +135,10 @@ impl DuelState {
     /// The hero sits at column 2, lunging +2 toward center on a real spike. The
     /// snake is tail-anchored at the right edge with its head (`▶`) nearest the
     /// hero; the head advances left during its lunge. The `⚔` marker floats at
-    /// `center + balance_smooth * span/2`, clamped strictly between the two.
+    /// `center - balance_smooth * span/2` — tug-of-war semantics: the winning
+    /// side pulls the marker toward itself, so positive balance (hardware
+    /// dominating) drags it LEFT toward the hero. Clamped strictly between the
+    /// two actors.
     ///
     /// Idle (both signals ~0, no lunges) → the hero `@` bobs by frame parity,
     /// the snake coils to `◉~` at rest, and the marker rests dim at center.
@@ -181,7 +184,9 @@ impl DuelState {
         // then clamp strictly between the two actors so it never overlaps them.
         let center = w as f32 / 2.0;
         let span = (head_x - hx).max(0) as f32;
-        let raw = center + self.balance_smooth * (span / 2.0);
+        // Winner pulls the marker toward themselves: positive balance =
+        // hardware (hero, left side) dominating → negative offset.
+        let raw = center - self.balance_smooth * (span / 2.0);
         let mut mx = raw.round() as i32;
         let lo = (hx + 1).clamp(0, w - 1);
         let hi = (head_x - 1).clamp(0, w - 1);
@@ -261,5 +266,35 @@ mod tests {
         let mut idle = DuelState::new();
         idle.update(0.0, 0.0, false, false, 0.0);
         let _ = idle.render_strip(40); // no panic; visual rest is manual-checked
+    }
+
+    /// Tug-of-war direction (spec: "slides toward the hero when chip
+    /// power/util dominates"): the winner pulls the ⚔ marker toward itself.
+    /// Regression for the inverted-sign bug the initial implementation shipped.
+    #[test]
+    fn marker_pulls_toward_the_winning_side() {
+        let width = 80;
+        let center = width / 2;
+        let marker_at = |hw: f32, serve: f32| -> usize {
+            let mut d = DuelState::new();
+            // Run the EMA to convergence so balance_smooth ≈ duel_balance.
+            for _ in 0..200 {
+                d.update(hw, serve, false, false, 0.0);
+            }
+            d.render_strip(width)
+                .chars()
+                .position(|c| c == '⚔')
+                .expect("marker present")
+        };
+        // Hardware dominating → marker LEFT of center (toward the hero).
+        assert!(
+            marker_at(1.0, 0.0) < center,
+            "hw dominance must pull the marker toward the hero (left)"
+        );
+        // Serving demand dominating → marker RIGHT of center (toward the snake).
+        assert!(
+            marker_at(0.0, 1.0) > center,
+            "serving dominance must pull the marker toward the snake (right)"
+        );
     }
 }
