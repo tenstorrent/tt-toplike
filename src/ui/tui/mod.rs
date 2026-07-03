@@ -3835,7 +3835,7 @@ fn render_device_panels(
         let board_raw = device.board_type.to_lowercase();
         let arch_lower = device.architecture.name().to_lowercase();
         let label = if !board_raw.is_empty() && board_raw != arch_lower && board_raw != "unknown" {
-            let board_trim = &device.board_type[..device.board_type.len().min(7)];
+            let board_trim = truncate(&device.board_type, 7);
             format!(
                 "── {} · D{} · {} ·{:>3}°C ",
                 arch_name, idx, board_trim, temp_i
@@ -4220,7 +4220,9 @@ fn render_grid_mode(f: &mut Frame, backend: &dyn TelemetryBackend) {
         Paragraph::new(Line::from(Span::styled(
             format!(
                 "{:<w$}",
-                &title[..title.len().min(area.width as usize)],
+                // Char-safe: the title contains a multibyte `│`, so a byte
+                // slice could land mid-character and panic on a narrow grid.
+                truncate(&title, area.width as usize),
                 w = area.width as usize
             ),
             Style::default()
@@ -4289,7 +4291,7 @@ fn render_grid_mode(f: &mut Frame, backend: &dyn TelemetryBackend) {
         let label = format!(
             "{} {}",
             device.architecture.abbrev(),
-            &device.board_type[..device.board_type.len().min(6)]
+            truncate(&device.board_type, 6)
         );
         let label_rect = Rect {
             x: cell_x + 1,
@@ -4299,7 +4301,7 @@ fn render_grid_mode(f: &mut Frame, backend: &dyn TelemetryBackend) {
         };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                format!("{:<w$}", &label[..label.len().min(p_cols)], w = p_cols),
+                format!("{:<w$}", truncate(&label, p_cols), w = p_cols),
                 Style::default().fg(Color::Gray),
             ))),
             label_rect,
@@ -4624,6 +4626,23 @@ mod host_default_screen_tests {
             glyphs > 20,
             "host default screen must not be blank (only {glyphs} non-space glyphs)"
         );
+    }
+
+    /// Regression: the Grid title / device labels contain a multibyte `│`, so a
+    /// byte-offset truncation could land mid-character and panic on a narrow
+    /// terminal. Render across small widths (including ones that would slice
+    /// inside the `│`) and assert no panic.
+    #[test]
+    fn grid_mode_narrow_terminal_does_not_panic() {
+        let mut backend = HostBackend::new();
+        backend.init().expect("host init");
+        backend.update().expect("host update");
+        for (w, h) in [(1, 4), (5, 6), (12, 8), (40, 3), (80, 24)] {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
+            terminal
+                .draw(|f| render_grid_mode(f, &backend))
+                .expect("draw must not panic");
+        }
     }
 }
 
