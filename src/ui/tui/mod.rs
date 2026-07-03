@@ -659,9 +659,15 @@ fn run_app(
             let inference_monitor_rows: Vec<
                 crate::workload::inference_server::ServiceState,
             > = Vec::new();
-            // Precomputed so the draw closure (which borrows `load_snake`
-            // immutably) doesn't also need `&mut` for `finish_if_ready`.
-            let snake_finishing = load_snake.finish_if_ready(&inference_monitor_rows);
+            // Whether the loading snake takes over this frame. Precomputed
+            // (outside the draw closure, which borrows `load_snake` immutably)
+            // because `finish_if_ready` needs `&mut`. The `||` short-circuits:
+            // `finish_if_ready` runs ONLY when nothing is loading — critical,
+            // because its non-Ready arm clears the active journey as a side
+            // effect, so calling it every frame during a load would reset the
+            // snake (fills, elapsed) each tick and suppress the Ready burst.
+            let show_snake = inference_panel::featured_loading(&inference_monitor_rows).is_some()
+                || load_snake.finish_if_ready(&inference_monitor_rows);
             // Whether `proc_rows` above was actually built via the TT-filtered
             // path this cycle — only possible on Linux/procfs builds (see the
             // proc_rows assignments). Drives the process panel's empty-state
@@ -710,9 +716,7 @@ fn run_app(
                             // service wins over a cold trail), plus a brief gold burst
                             // after it goes Ready; else a cold trail shows the
                             // model-starfield screensaver; else the live list.
-                            if inference_panel::featured_loading(&inference_monitor_rows).is_some()
-                                || snake_finishing
-                            {
+                            if show_snake {
                                 render_load_snake_view(f, &load_snake);
                             } else if inference_panel::trail_is_cold(&inference_monitor_rows) {
                                 render_model_starfield_view(f, &model_starfield);
