@@ -28,6 +28,7 @@ use crate::animation::{
 };
 use crate::ui::colors;
 use crate::workload::inference_server::{ServiceState, ServingStats};
+use std::time::Instant;
 
 /// Frames a completion "pulse" glyph stays lit after `completed_delta > 0`.
 const PULSE_FRAMES: u32 = 6;
@@ -38,6 +39,11 @@ const GEN_TPS_REF: f32 = 200.0;
 /// Max samples kept in the bounded throughput-history ring (the timeline the
 /// compositor sparklines). Oldest samples are dropped once this is exceeded.
 const HISTORY_CAP: usize = 64;
+/// Minimum wall-clock spacing between throughput-history samples. Decoupled
+/// from the render FPS so the timeline spans a meaningful window (~64 × this)
+/// regardless of how fast the view redraws — the monitor only refreshes data
+/// every few seconds anyway, so sampling faster would just flatten the line.
+const HISTORY_SAMPLE_MS: u128 = 1000;
 
 /// Body length (cells) for `running` in-flight requests, clamped to `max`.
 /// A small base so the creature is always visible; grows with concurrency.
@@ -73,6 +79,9 @@ pub struct ServingCreature {
     chips: Vec<ChipReading>,
     /// Bounded ring of past `generation_tps` samples for the compositor timeline.
     tps_history: Vec<f32>,
+    /// When the last history sample was taken, to pace sampling by wall-clock
+    /// (`HISTORY_SAMPLE_MS`) independently of the render FPS.
+    last_history_push: Option<Instant>,
 }
 
 impl Default for ServingCreature {
@@ -95,6 +104,17 @@ impl ServingCreature {
             fray_left: 0,
             chips: Vec::new(),
             tps_history: Vec::new(),
+            last_history_push: None,
+        }
+    }
+
+    /// Push one throughput sample onto the bounded history ring, dropping the
+    /// oldest when it overflows. Split out from the wall-clock throttle in
+    /// [`update`](Self::update) so the ring's bound is unit-testable directly.
+    fn push_history(&mut self, tps: f32) {
+        self.tps_history.push(tps);
+        if self.tps_history.len() > HISTORY_CAP {
+            self.tps_history.remove(0);
         }
     }
 
@@ -119,13 +139,19 @@ impl ServingCreature {
         self.rss_bytes = svc.rss_bytes;
         self.serving = svc.serving;
 
-        // Refresh the silicon strip and push this tick's throughput onto the
-        // bounded history ring (0.0 when there are no serving metrics yet).
+        // Refresh the silicon strip every tick; sample the throughput history
+        // on a wall-clock cadence (not every frame) so the timeline spans a
+        // useful window at 60 FPS instead of collapsing to a flat ~1s of the
+        // same value.
         self.chips = chips.to_vec();
-        self.tps_history
-            .push(self.serving.map(|s| s.generation_tps).unwrap_or(0.0));
-        if self.tps_history.len() > HISTORY_CAP {
-            self.tps_history.remove(0);
+        let now = Instant::now();
+        let due = self
+            .last_history_push
+            .map(|t| now.duration_since(t).as_millis() >= HISTORY_SAMPLE_MS)
+            .unwrap_or(true);
+        if due {
+            self.push_history(self.serving.map(|s| s.generation_tps).unwrap_or(0.0));
+            self.last_history_push = Some(now);
         }
 
         // Decay any live effect, then re-arm it if this tick earned it.
@@ -355,9 +381,15 @@ impl ServingCreature {
         let len = body_len(running, max_len);
         let amp_norm = (gen_tps / GEN_TPS_REF).clamp(0.0, 1.0);
         let max_amp = (snake_rows.saturating_sub(1)) as f32 / 2.0;
-        let amp = amp_norm * max_amp;
+        // A small always-on idle amplitude so the creature gently breathes even
+        // at rest (never fully frozen), rising with throughput. The y-write is
+        // clamped to the snake rows, so the +idle can't overflow the region.
+        let amp = 0.45 + amp_norm * max_amp;
         let center = snake_top as f32 + (snake_rows as f32 - 1.0) / 2.0;
-        let speed = 0.12 + 0.18 * amp_norm;
+        // Per-frame phase step, tuned for the 60 FPS anim cadence (≈2–5 rad/s):
+        // gentle undulation at rest, livelier under load. Not the old 10 FPS
+        // value (which would whip around 6× too fast at 60 FPS).
+        let speed = 0.03 + 0.05 * amp_norm;
         let heat = hsv_to_rgb(240.0 * (1.0 - kv.clamp(0.0, 1.0)), 0.85, 0.95);
         let (mut head_x, mut head_y) = (0usize, snake_top);
         for i in 0..len {
@@ -389,7 +421,9 @@ impl ServingCreature {
         // head, frame-indexed so they animate; none at 0 tps. Bounds-clamped.
         if head_x > 0 {
             let n = exhaust_count(gen_tps);
-            let drift = self.frame as usize % 3;
+            // Slow the drift cycle for the 60 FPS cadence so particles stream
+            // rather than strobe.
+            let drift = (self.frame as usize / 4) % 3;
             for k in 0..n {
                 let ex = head_x + 1 + k + drift;
                 if ex >= snake_right {
@@ -684,14 +718,25 @@ mod tests {
         }];
         let svc = ready_svc("M", 2.0, 1024, Some(stats(1, 842.0, 0, 0)));
         c.update(&svc, 10, &chips);
-        c.update(&svc, 11, &chips);
-        assert_eq!(c.chips().len(), 1);
-        assert!(c.tps_history().len() >= 2, "history grows each update");
-        // Ring is bounded.
+        assert_eq!(c.chips().len(), 1, "chips stored");
+        assert!(
+            c.tps_history().len() >= 1,
+            "first update seeds a history sample"
+        );
+        // History sampling is wall-clock throttled (HISTORY_SAMPLE_MS), so rapid
+        // updates don't spam the ring — it stays tiny under a burst of updates.
         for _ in 0..500 {
             c.update(&svc, 12, &chips);
         }
-        assert!(c.tps_history().len() <= HISTORY_CAP);
+        assert!(
+            c.tps_history().len() <= 3,
+            "wall-clock throttle keeps rapid updates from flooding history"
+        );
+        // The ring's bound itself: pushing past the cap drops the oldest.
+        for i in 0..(HISTORY_CAP + 50) {
+            c.push_history(i as f32);
+        }
+        assert_eq!(c.tps_history().len(), HISTORY_CAP, "ring bounded to cap");
     }
 
     #[test]

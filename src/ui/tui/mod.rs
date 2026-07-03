@@ -417,6 +417,10 @@ fn run_app(
                 | DisplayMode::MemoryCastle
                 | DisplayMode::MemoryFlow
                 | DisplayMode::Arcade
+                // The [i] view is a live animated dashboard (snake wave, token
+                // exhaust, timeline, coiling loader) — it must redraw at anim
+                // cadence, not the 10 FPS data rate, or it reads as frozen.
+                | DisplayMode::InferenceMonitor
         ) || (display_mode == DisplayMode::Defrag && defrag_is_animated);
         let render_interval = if is_anim_mode {
             throttle_state.effective_anim_interval(ui_poll_rate_anim)
@@ -1976,6 +1980,7 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 DisplayMode::MemoryCastle => castle_legend_lines(bar, bg, dim),
                 DisplayMode::Defrag => defrag_legend_lines(bar, bg, dim, key),
                 DisplayMode::MemoryFlow => flow_legend_lines(bar, bg, dim),
+                DisplayMode::InferenceMonitor => inference_legend_lines(bar, bg, dim),
                 DisplayMode::Arcade => {
                     // All four combined.
                     let mut v = Vec::new();
@@ -2194,16 +2199,23 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 &[
                     "Inference Server Monitor",
                     "",
-                    "Full-screen list of every known TT",
-                    "inference-server model (docker-detected),",
-                    "colored by lifecycle phase.",
+                    "One creature across the whole lifecycle of",
+                    "a TT inference-server (docker-detected):",
                     "",
-                    "DOWN  — no container running",
-                    "COMPILING/LOADING — kernels/weights",
-                    "READY — serving, live=200 on /tt-liveness",
-                    "ALARM — stalled 5+ min with no progress",
+                    "COLD  — no model up: a hungry snake roams",
+                    "  the model-catalog starfield (what could",
+                    "  run on your hardware).",
+                    "LOADING — compiling kernels / streaming",
+                    "  weights: the snake grows + coils through",
+                    "  compile→load, then uncoils at ready.",
+                    "SERVING — live dashboard from vLLM /metrics:",
+                    "  throughput timeline, the token-exhaust",
+                    "  snake, request swimlanes (queue→prefill→",
+                    "  decode), and a TT silicon strip tying",
+                    "  tokens/s to real chip power/temp/clock.",
+                    "ALARM — stalled 5+ min: the snake reddens.",
                     "",
-                    "Press i to return to Insights.",
+                    "Press l for the symbol legend · i to return.",
                 ],
             ),
         },
@@ -2211,6 +2223,69 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
 }
 
 // ── Per-view legend line builders ─────────────────────────────────────────────
+
+/// Legend for the `[i]` Inference Server Monitor (the unified snake dashboard).
+fn inference_legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    macro_rules! ln {
+        ($spans:expr) => {{
+            let mut v: Vec<Span<'static>> =
+                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            v.extend($spans);
+            Line::from(v)
+        }};
+    }
+    vec![
+        ln!(vec![
+            Span::styled("◉ ", Style::default().fg(colors::rgb(246, 188, 66))),
+            Span::styled(
+                "= snake head (coils, then uncoils)",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("█▓▒░ ", Style::default().fg(colors::SUCCESS)),
+            Span::styled(
+                "= body/fill (teal→amber→gold journey)",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("» · ", Style::default().fg(colors::TEXT_SECONDARY)),
+            Span::styled(
+                "= token exhaust (rate = tokens/s)",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("✦ ", Style::default().fg(colors::TEXT_PRIMARY)),
+            Span::styled("= a request completed  ", Style::default().fg(dim)),
+            Span::styled("✗ ", Style::default().fg(colors::ERROR)),
+            Span::styled("= error/stall", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("swimlanes ", Style::default().fg(colors::WARNING)),
+            Span::styled(
+                "= queue→prefill→decode (avg times)",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("timeline ", Style::default().fg(colors::SUCCESS)),
+            Span::styled("= tok/s over time (▁▂▃▄▅▆▇█)", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("silicon ", Style::default().fg(colors::rgb(120, 180, 200))),
+            Span::styled(
+                "= per-chip power/temp/AICLK (live)",
+                Style::default().fg(dim)
+            ),
+        ]),
+    ]
+}
 
 fn starfield_legend_lines(
     bar: ratatui::style::Color,
