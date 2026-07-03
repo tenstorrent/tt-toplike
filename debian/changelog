@@ -1,3 +1,16 @@
+tt-toplike (0.7.12) noble; urgency=medium
+
+  * Fix: the [i] Inference Server Monitor no longer appears frozen — it now
+    redraws at animation cadence (60 FPS) instead of the 10 FPS data rate. The
+    serving snake gently breathes at rest and the throughput timeline samples
+    on a wall-clock cadence so it spans a useful window.
+  * The loading snake now coils and chases its tail while compiling/loading,
+    then uncoils and straightens into the ready box as the load resolves.
+  * The [i] view has a proper explain overlay (rewritten for the unified
+    snake) and a symbol legend (press l).
+
+ -- Tenstorrent <software@tenstorrent.com>  Sat, 04 Jul 2026 01:00:00 +0000
+
 tt-toplike (0.7.11) noble; urgency=medium
 
   * Serving view is now a full adaptive dashboard: a throughput timeline
