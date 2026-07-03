@@ -23,6 +23,7 @@ use ratatui::text::{Line, Span};
 
 use crate::animation::hsv_to_rgb;
 use crate::animation::inference_load::{fmt_bytes, fmt_elapsed, group_thousands};
+use crate::animation::ChipReading;
 use crate::ui::colors;
 use crate::workload::inference_server::{ServiceState, ServingStats};
 
@@ -32,6 +33,9 @@ const PULSE_FRAMES: u32 = 6;
 const FRAY_FRAMES: u32 = 8;
 /// `generation_tps` at/above which the wave reaches full amplitude/speed.
 const GEN_TPS_REF: f32 = 200.0;
+/// Max samples kept in the bounded throughput-history ring (the timeline the
+/// compositor sparklines). Oldest samples are dropped once this is exceeded.
+const HISTORY_CAP: usize = 64;
 
 /// Body length (cells) for `running` in-flight requests, clamped to `max`.
 /// A small base so the creature is always visible; grows with concurrency.
@@ -63,6 +67,10 @@ pub struct ServingCreature {
     pulse_left: u32,
     /// Frames left on the frayed error tail.
     fray_left: u32,
+    /// Latest per-chip telemetry readings, refreshed each `update` (silicon strip).
+    chips: Vec<ChipReading>,
+    /// Bounded ring of past `generation_tps` samples for the compositor timeline.
+    tps_history: Vec<f32>,
 }
 
 impl Default for ServingCreature {
@@ -83,19 +91,40 @@ impl ServingCreature {
             serving: None,
             pulse_left: 0,
             fray_left: 0,
+            chips: Vec::new(),
+            tps_history: Vec::new(),
         }
+    }
+
+    /// The latest per-chip telemetry readings folded in by [`update`](Self::update).
+    pub fn chips(&self) -> &[ChipReading] {
+        &self.chips
+    }
+
+    /// The bounded throughput-history ring (oldest→newest `generation_tps`).
+    pub fn tps_history(&self) -> &[f32] {
+        &self.tps_history
     }
 
     /// Fold this tick's Ready `ServiceState` (+ its `serving` stats) into the
     /// creature. Pulse/fray are set as short frame-countdowns so a single
     /// completion/error tick leaves a brief visible mark that decays on its own.
-    pub fn update(&mut self, svc: &ServiceState, uptime_secs: u64) {
+    pub fn update(&mut self, svc: &ServiceState, uptime_secs: u64, chips: &[ChipReading]) {
         self.frame = self.frame.wrapping_add(1);
         self.label = svc.label.clone();
         self.uptime_secs = uptime_secs;
         self.cpu_pct = svc.cpu_pct;
         self.rss_bytes = svc.rss_bytes;
         self.serving = svc.serving;
+
+        // Refresh the silicon strip and push this tick's throughput onto the
+        // bounded history ring (0.0 when there are no serving metrics yet).
+        self.chips = chips.to_vec();
+        self.tps_history
+            .push(self.serving.map(|s| s.generation_tps).unwrap_or(0.0));
+        if self.tps_history.len() > HISTORY_CAP {
+            self.tps_history.remove(0);
+        }
 
         // Decay any live effect, then re-arm it if this tick earned it.
         self.pulse_left = self.pulse_left.saturating_sub(1);
@@ -330,6 +359,7 @@ fn row_to_line(row: Vec<(char, Color)>, bg: Color) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::animation::ChipReading;
     use crate::workload::inference_server::{
         Phase, Readiness, ServiceState, ServingStats, VllmCounters,
     };
@@ -403,7 +433,7 @@ mod tests {
             70 * 1024 * 1024 * 1024,
             Some(stats(1, 842.0, 0, 0)),
         );
-        c.update(&svc, 1454);
+        c.update(&svc, 1454, &[]);
         // Tall + wide so the whole panel fits beside the snake.
         let text: String = c
             .render(80, 24)
@@ -435,10 +465,32 @@ mod tests {
     }
 
     #[test]
+    fn update_records_chips_and_throughput_history() {
+        let mut c = ServingCreature::new();
+        let chips = [ChipReading {
+            index: 0,
+            arch: "Blackhole",
+            power_w: Some(90.0),
+            temp_c: Some(70.0),
+            aiclk_mhz: Some(1350),
+        }];
+        let svc = ready_svc("M", 2.0, 1024, Some(stats(1, 842.0, 0, 0)));
+        c.update(&svc, 10, &chips);
+        c.update(&svc, 11, &chips);
+        assert_eq!(c.chips().len(), 1);
+        assert!(c.tps_history().len() >= 2, "history grows each update");
+        // Ring is bounded.
+        for _ in 0..500 {
+            c.update(&svc, 12, &chips);
+        }
+        assert!(c.tps_history().len() <= HISTORY_CAP);
+    }
+
+    #[test]
     fn no_metrics_shows_dashes_not_rates() {
         let mut c = ServingCreature::new();
         let svc = ready_svc("Qwen3-32B", 0.0, 0, None); // serving=None
-        c.update(&svc, 60);
+        c.update(&svc, 60, &[]);
         let text: String = c
             .render(80, 24)
             .iter()

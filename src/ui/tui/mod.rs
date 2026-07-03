@@ -548,10 +548,28 @@ fn run_app(
                         // Matches Architecture::name()'s "Unknown" for a
                         // detected-but-unknown device (consistent footer casing).
                         .unwrap_or("Unknown");
+                    // Per-chip telemetry snapshot for the Feeding silicon strip:
+                    // one reading per detected device, with power/temp/clock when
+                    // the backend exposes them (all `None` otherwise).
+                    let chips: Vec<crate::animation::ChipReading> = backend
+                        .devices()
+                        .iter()
+                        .map(|d| {
+                            let t = backend.telemetry(d.index);
+                            crate::animation::ChipReading {
+                                index: d.index,
+                                arch: d.architecture.name(),
+                                power_w: t.and_then(|t| t.power),
+                                temp_c: t.and_then(|t| t.asic_temperature),
+                                aiclk_mhz: t.and_then(|t| t.aiclk),
+                            }
+                        })
+                        .collect();
                     snake.update(&crate::animation::SnakeWorld {
                         rows: &rows,
                         catalog: &catalog,
                         arch,
+                        chips: &chips,
                         cadence_secs: crate::workload::inference_server::CADENCE_SECS,
                         width: size.width as usize,
                         height: size.height as usize,

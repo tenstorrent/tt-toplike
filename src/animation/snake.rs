@@ -28,7 +28,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use std::time::Instant;
 
-use crate::animation::{LoadSnake, ModelStarfield, ServingCreature};
+use crate::animation::{ChipReading, LoadSnake, ModelStarfield, ServingCreature};
 use crate::ui::tui::inference_panel::featured_loading;
 use crate::workload::inference_server::{Phase, ServiceState};
 use crate::workload::model_catalog::CatalogModel;
@@ -56,6 +56,9 @@ pub struct SnakeWorld<'a> {
     pub catalog: &'a [CatalogModel],
     /// The detected chip set / architecture name (classifies catalog support).
     pub arch: &'a str,
+    /// Live per-chip telemetry readings (power/temp/clock), one per device.
+    /// Threaded into the Feeding creature for the silicon strip; empty off-TT.
+    pub chips: &'a [ChipReading],
     /// Monitor tick cadence in seconds (drives per-second rate readouts).
     pub cadence_secs: u32,
     /// Render width in cells (fixed-dim renderers are built to this).
@@ -157,7 +160,7 @@ impl Snake {
         } else if let Some(svc) = world.rows.iter().find(|s| s.phase == Phase::Ready) {
             self.behavior = Behavior::Feeding;
             let uptime = self.uptime_for(&svc.key);
-            self.serving_creature.update(svc, uptime);
+            self.serving_creature.update(svc, uptime, world.chips);
         } else {
             self.behavior = Behavior::Roaming;
             self.served_since = None;
@@ -262,6 +265,7 @@ mod tests {
             rows,
             catalog: &[],
             arch: "Blackhole",
+            chips: &[],
             cadence_secs: 2,
             width: 60,
             height: 16,
@@ -342,6 +346,7 @@ mod tests {
             rows: &[],
             catalog: &[],
             arch: "Unknown",
+            chips: &[],
             cadence_secs: 2,
             width: 0,
             height: 0,
