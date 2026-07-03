@@ -26,6 +26,7 @@ pub mod memory_castle;
 pub mod memory_flow;
 pub mod model_starfield;
 pub mod serving_creature;
+pub mod snake;
 pub mod starfield;
 pub mod topology;
 
@@ -38,5 +39,6 @@ pub use memory_castle::MemoryCastle;
 pub use memory_flow::MemoryFlowVis;
 pub use model_starfield::ModelStarfield;
 pub use serving_creature::ServingCreature;
+pub use snake::{Behavior, Snake, SnakeWorld};
 pub use starfield::{DataStream, HardwareStarfield, MemoryPlanet, Star};
 pub use topology::{sync_score, BoardTopology};

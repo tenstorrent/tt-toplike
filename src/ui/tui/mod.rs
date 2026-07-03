@@ -17,7 +17,7 @@ pub mod perf;
 pub use perf::PerfMeter;
 pub mod throttle;
 pub use throttle::ThrottleState;
-mod inference_panel;
+pub mod inference_panel;
 
 use crate::animation::{
     ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis,
