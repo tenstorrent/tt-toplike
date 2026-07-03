@@ -322,21 +322,29 @@ vllm:num_preemptions_total{m=\"M\"} 3.0
     #[test]
     fn fold_derives_stage_averages_and_rates() {
         let cur = VllmCounters {
-            queue_time_sum: 2.0, queue_time_count: 4,
-            prefill_time_sum: 4.0, prefill_time_count: 4,
-            decode_time_sum: 12.0, decode_time_count: 4,
-            tpot_sum: 0.8, tpot_count: 40,
-            prefix_queries_total: 200, prefix_hits_total: 150,
+            queue_time_sum: 2.0,
+            queue_time_count: 4,
+            prefill_time_sum: 4.0,
+            prefill_time_count: 4,
+            decode_time_sum: 12.0,
+            decode_time_count: 4,
+            tpot_sum: 0.8,
+            tpot_count: 40,
+            prefix_queries_total: 200,
+            prefix_hits_total: 150,
             preemptions_total: 5,
             ..Default::default()
         };
-        let prev = VllmCounters { preemptions_total: 3, ..Default::default() };
+        let prev = VllmCounters {
+            preemptions_total: 3,
+            ..Default::default()
+        };
         let s = ServingStats::fold(Some(&prev), &cur, 5);
-        assert!((s.queue_avg_s - 0.5).abs() < 1e-4);   // 2/4
+        assert!((s.queue_avg_s - 0.5).abs() < 1e-4); // 2/4
         assert!((s.prefill_avg_s - 1.0).abs() < 1e-4); // 4/4
-        assert!((s.decode_avg_s - 3.0).abs() < 1e-4);  // 12/4
-        assert!((s.tpot_avg_s - 0.02).abs() < 1e-4);   // 0.8/40
+        assert!((s.decode_avg_s - 3.0).abs() < 1e-4); // 12/4
+        assert!((s.tpot_avg_s - 0.02).abs() < 1e-4); // 0.8/40
         assert!((s.prefix_hit_rate - 0.75).abs() < 1e-4); // 150/200
-        assert_eq!(s.preemptions_delta, 2);            // 5-3
+        assert_eq!(s.preemptions_delta, 2); // 5-3
     }
 }
