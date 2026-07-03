@@ -1,3 +1,22 @@
+tt-toplike (0.7.5) noble; urgency=medium
+
+  * Inference Server Monitor [i] view is now a tri-state surface:
+    - cold trail (nothing running) shows a model-catalog starfield
+      screensaver: the Tenstorrent compatibility catalog as drifting stars,
+      with models that run on the detected hardware lit up ("N of M models
+      run on your <arch>"). Bundled snapshot + background curl refresh.
+    - a compiling/loading service takes over full-screen with a boxed-snake
+      progress visualization (compile -> load -> ready), filling by true %
+      when a baseline exists else by live kernel/RSS momentum, and turning
+      red when a load stalls (Alarm).
+    - otherwise the live service list, as before.
+  * Process list: outside --host mode, only processes contributing to TT
+    hardware load are shown; `i` opens the Inference Server Monitor.
+  * Defrag EVICT now fires on model unload / after a load surge.
+  * New dependency (Recommends): curl, for the catalog refresh (HTTPS).
+
+ -- Tenstorrent <software@tenstorrent.com>  Fri, 03 Jul 2026 12:00:00 +0000
+
 tt-toplike (0.7.0) noble; urgency=medium
 
   * Animation FPS throttles: --throttle (load-based) and --idle-on-blur
