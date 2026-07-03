@@ -1289,9 +1289,9 @@ fn render_visualization_header(
 ) {
     let status = starfield.baseline_status();
     let status_color = if starfield.is_baseline_established() {
-        colors::SUCCESS
+        colors::success()
     } else {
-        colors::WARNING
+        colors::warning()
     };
 
     let header_text = vec![Line::from(vec![
@@ -2251,7 +2251,7 @@ fn grid_legend_lines(
             ),
         ]),
         ln!(vec![
-            Span::styled("v ", Style::default().fg(colors::WARNING)),
+            Span::styled("v ", Style::default().fg(colors::warning())),
             Span::styled(
                 "= cycle to the next visualization",
                 Style::default().fg(dim)
@@ -2304,14 +2304,14 @@ fn insights_legend_lines(
             ),
         ]),
         ln!(vec![
-            Span::styled("k / K ", Style::default().fg(colors::ERROR)),
+            Span::styled("k / K ", Style::default().fg(colors::error())),
             Span::styled(
                 "= SIGTERM / SIGKILL the selected process",
                 Style::default().fg(dim),
             ),
         ]),
         ln!(vec![
-            Span::styled("fleet grid ", Style::default().fg(colors::WARNING)),
+            Span::styled("fleet grid ", Style::default().fg(colors::warning())),
             Span::styled(
                 "= per-chip heatmap at 32+ devices (Enter=zoom)",
                 Style::default().fg(dim),
@@ -2357,41 +2357,41 @@ fn inference_legend_lines(
             ),
         ]),
         ln!(vec![
-            Span::styled("▶ ", Style::default().fg(colors::WARNING)),
+            Span::styled("▶ ", Style::default().fg(colors::warning())),
             Span::styled(
                 "serving — head of the live feeding snake",
                 Style::default().fg(dim)
             ),
         ]),
         ln!(vec![
-            Span::styled("█▓▒░ ", Style::default().fg(colors::SUCCESS)),
+            Span::styled("█▓▒░ ", Style::default().fg(colors::success())),
             Span::styled(
                 "= body/fill (teal→amber→gold journey)",
                 Style::default().fg(dim)
             ),
         ]),
         ln!(vec![
-            Span::styled("» · ", Style::default().fg(colors::TEXT_SECONDARY)),
+            Span::styled("» · ", Style::default().fg(colors::text_secondary())),
             Span::styled(
                 "= token exhaust (rate = tokens/s)",
                 Style::default().fg(dim)
             ),
         ]),
         ln!(vec![
-            Span::styled("✦ ", Style::default().fg(colors::TEXT_PRIMARY)),
+            Span::styled("✦ ", Style::default().fg(colors::text_primary())),
             Span::styled("= a request completed  ", Style::default().fg(dim)),
-            Span::styled("✗ ", Style::default().fg(colors::ERROR)),
+            Span::styled("✗ ", Style::default().fg(colors::error())),
             Span::styled("= error/stall", Style::default().fg(dim)),
         ]),
         ln!(vec![
-            Span::styled("swimlanes ", Style::default().fg(colors::WARNING)),
+            Span::styled("swimlanes ", Style::default().fg(colors::warning())),
             Span::styled(
                 "= queue→prefill→decode (avg times)",
                 Style::default().fg(dim)
             ),
         ]),
         ln!(vec![
-            Span::styled("timeline ", Style::default().fg(colors::SUCCESS)),
+            Span::styled("timeline ", Style::default().fg(colors::success())),
             Span::styled("= tok/s over time (▁▂▃▄▅▆▇█)", Style::default().fg(dim)),
         ]),
         ln!(vec![
@@ -2773,6 +2773,38 @@ fn execute_command(
             }
             _ => (
                 "mode: insights|grid|starfield|castle|flow|arcade|defrag".to_string(),
+                true,
+                false,
+            ),
+        },
+        // App-wide color theme. `grayskull` collapses the rainbow to a thousand
+        // shades of grey (+ cyan/purple accents), with hot pink the only hot
+        // color; `default` restores full color; bare `/theme` toggles.
+        "theme" => match arg {
+            "grayskull" | "greyskull" | "grey" | "gray" | "grayscale" | "greyscale" => {
+                colors::set_theme(colors::Theme::Grayskull);
+                (
+                    "theme: grayskull 🩶 — a thousand shades of grey (pink runs hot)".to_string(),
+                    false,
+                    false,
+                )
+            }
+            "default" | "rainbow" | "color" | "colour" | "off" => {
+                colors::set_theme(colors::Theme::Default);
+                ("theme: default (full color)".to_string(), false, false)
+            }
+            "" => match colors::current_theme() {
+                colors::Theme::Default => {
+                    colors::set_theme(colors::Theme::Grayskull);
+                    ("theme: grayskull 🩶".to_string(), false, false)
+                }
+                colors::Theme::Grayskull => {
+                    colors::set_theme(colors::Theme::Default);
+                    ("theme: default (full color)".to_string(), false, false)
+                }
+            },
+            _ => (
+                "theme: grayskull | default  (or /theme to toggle)".to_string(),
                 true,
                 false,
             ),

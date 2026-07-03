@@ -1,3 +1,13 @@
+tt-toplike (0.7.16) noble; urgency=medium
+
+  * New app-wide `/theme grayskull` (a.k.a. greyskull): collapses the whole
+    palette to a thousand shades of grey — greys everywhere, a cyan tint for
+    cool hues, a faint purple for violets, and HOT PINK as the only saturated
+    "hot" color. `/theme default` restores full color; bare `/theme` toggles.
+    Applies across every view via a single color transform in the palette.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sat, 04 Jul 2026 05:00:00 +0000
+
 tt-toplike (0.7.15) noble; urgency=medium
 
   * Serving swimlanes: when a model is idle (no in-flight requests) but has

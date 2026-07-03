@@ -177,7 +177,7 @@ impl ServingCreature {
     /// state, so the caller passes `false` to avoid repeating it in the panel.
     fn panel_rows(&self, include_requests: bool) -> Vec<(String, Color)> {
         let header = colors::rgb(120, 180, 200); // muted teal group headers
-        let val = colors::TEXT_PRIMARY;
+        let val = colors::text_primary();
         let mut rows: Vec<(String, Color)> = Vec::new();
         let hdr = |rows: &mut Vec<(String, Color)>, t: &str| {
             rows.push((t.to_string(), header));
@@ -282,7 +282,7 @@ impl ServingCreature {
         lines.push(Line::from(Span::styled(
             title,
             Style::default()
-                .fg(colors::TEXT_PRIMARY)
+                .fg(colors::text_primary())
                 .add_modifier(Modifier::BOLD),
         )));
 
@@ -342,12 +342,12 @@ impl ServingCreature {
         // the band spans the FULL width rather than clipping to `snake_right`.
         if has_timeline {
             let label = format!("tok/s {:.0} ", gen_tps);
-            put_str(&mut canvas, 0, 0, &label, colors::INFO, width);
+            put_str(&mut canvas, 0, 0, &label, colors::info(), width);
             let spark_x = label.chars().count().min(width);
             let spark_w = width.saturating_sub(spark_x);
             if spark_w > 0 {
                 let spark = sparkline(self.tps_history(), spark_w);
-                put_str(&mut canvas, 0, spark_x, &spark, colors::SUCCESS, width);
+                put_str(&mut canvas, 0, spark_x, &spark, colors::success(), width);
                 // Second row: a dimmer full-width continuation of the same trace.
                 let wide = sparkline(self.tps_history(), width);
                 put_str(&mut canvas, 1, 0, &wide, dim, width);
@@ -413,9 +413,9 @@ impl ServingCreature {
             let is_head = i + 1 == len;
             let is_tail = i == 0;
             let (glyph, color) = if is_tail && self.fray_left > 0 {
-                ('✗', colors::ERROR)
+                ('✗', colors::error())
             } else if is_head && self.pulse_left > 0 {
-                ('✦', colors::TEXT_PRIMARY)
+                ('✦', colors::text_primary())
             } else if is_head {
                 ('▶', heat)
             } else {
@@ -464,18 +464,25 @@ impl ServingCreature {
             } else {
                 "requests".to_string()
             };
-            put_str(&mut canvas, swim_top, 1, &header, colors::INFO, snake_right);
+            put_str(
+                &mut canvas,
+                swim_top,
+                1,
+                &header,
+                colors::info(),
+                snake_right,
+            );
             // Completion marker: a bright pulse glyph beside the header,
             // lit while a completion is fresh (this tick, or during its pulse).
             if completed > 0 || self.pulse_left > 0 {
                 let mx = 1 + header.chars().count() + 1;
                 if mx < snake_right {
-                    canvas[swim_top][mx] = ('✦', colors::SUCCESS);
+                    canvas[swim_top][mx] = ('✦', colors::success());
                 }
             }
             let q_col = colors::rgb(90, 110, 130); // queue: dim blue-grey
             let p_col = colors::rgb(120, 170, 200); // prefill: mid teal
-            let d_col = colors::SUCCESS; // decode: bright teal
+            let d_col = colors::success(); // decode: bright teal
             for (li, seg) in lanes.iter().enumerate() {
                 let row = swim_top + 1 + li;
                 if row > snake_last + swim_h || row >= mid_bot {
