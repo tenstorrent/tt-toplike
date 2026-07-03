@@ -22,14 +22,60 @@ pub fn journey_hue(t: f32) -> f32 {
     crate::animation::lerp(170.0, 45.0, t)
 }
 
+/// Segments in the coiling loading snake (head + trailing body).
+const COIL_BODY: usize = 10;
+/// `t`-spacing between body segments along the coil path.
+const COIL_STEP: f32 = 0.35;
+
+/// A point on the coiling path inside a `w`×`h` chamber at parameter `t`. A
+/// precessing, radius-pulsing ellipse so the head loops and chases its own tail
+/// rather than tracing a static circle. Always inside `[0,w)`×`[0,h)`.
+pub fn coil_point(t: f32, w: f32, h: f32) -> (f32, f32) {
+    let cx = w / 2.0;
+    let cy = h / 2.0;
+    // Radii pulse and the x-angle precesses → a coiling, self-approaching path.
+    let rx = (w * 0.30) * (0.7 + 0.3 * (t * 0.5).sin());
+    let ry = (h * 0.32) * (0.7 + 0.3 * (t * 0.3).cos());
+    let x = cx + rx * (t * 1.15).cos();
+    let y = cy + ry * (t * 1.3).sin();
+    (
+        x.clamp(0.0, (w - 1.0).max(0.0)),
+        y.clamp(0.0, (h - 1.0).max(0.0)),
+    )
+}
+
+/// The coiling snake's body points (index 0 = head), trailing back along the
+/// coil path. When `resolve_t` > 0 the body uncoils toward a straight
+/// horizontal line (head at the right edge), fully straight at `resolve_t` = 1
+/// — the "resolution" as the load completes. Pure; always in-bounds.
+pub fn coil_body(head_t: f32, w: f32, h: f32, resolve_t: f32) -> Vec<(f32, f32)> {
+    let rt = resolve_t.clamp(0.0, 1.0);
+    (0..COIL_BODY)
+        .map(|j| {
+            let (cx, cy) = coil_point(head_t - j as f32 * COIL_STEP, w, h);
+            if rt <= 0.0 {
+                (cx, cy)
+            } else {
+                let sx = (w - 1.0 - j as f32).max(0.0);
+                let sy = h / 2.0;
+                (
+                    crate::animation::lerp(cx, sx, rt),
+                    crate::animation::lerp(cy, sy, rt),
+                )
+            }
+        })
+        .collect()
+}
+
 /// Momentum "briskness" references: a per-tick delta at/above this reads as a
 /// strong surge. Compile counts `.o` kernels; load counts RSS bytes.
 const COMPILE_REF: i64 = 50; // kernels/tick
 const LOAD_REF: i64 = 200 * 1024 * 1024; // 200 MiB/tick
 const BASE_STEP: f32 = 0.02; // momentum head advance per active tick (before scaling)
 const FILL_CAP: f32 = 0.95; // momentum never claims a full box
-/// Ready-burst duration in update frames (cosmetic gold celebration).
-const BURST_FRAMES: u32 = 24;
+/// Ready-burst duration in update frames (cosmetic gold celebration). Tuned for
+/// the 60 FPS anim cadence the `[i]` view now runs at (~1.5s of gold).
+const BURST_FRAMES: u32 = 96;
 
 /// Momentum increment for the active box given this tick's `delta` and the
 /// phase's briskness `reference`. Zero for a non-positive delta; monotonically
@@ -357,6 +403,55 @@ impl LoadSnake {
                     i,
                     is_active && alarm,
                 );
+            }
+
+            // --- Coiling snake overlay: a head + trailing body coils within the
+            // active chamber (chasing its tail while the model works), then
+            // uncoils and straightens into the ready box as the load resolves.
+            // Frozen on alarm (the stall reading). Bounds-safe: every cell is
+            // clamped into the chamber region.
+            if !alarm {
+                let ax0 = active * seg_w;
+                let ax1 = if active == 2 {
+                    self.width
+                } else {
+                    (active + 1) * seg_w
+                };
+                let rw = ax1.saturating_sub(ax0);
+                if rw > 3 && box_h > 2 {
+                    // Brisker coil when the load is actively moving. Per-frame
+                    // step tuned for the 60 FPS anim cadence the [i] view runs.
+                    let moving = self.kernel_delta > 0 || self.rss_delta > 0;
+                    let coil_speed = if moving { 0.08 } else { 0.04 };
+                    let head_t = self.frame as f32 * coil_speed;
+                    // 0 while coiling; ramps 0→1 across the ready burst = uncoil.
+                    let resolve_t = if self.is_finishing() {
+                        1.0 - (self.burst_left as f32 / BURST_FRAMES as f32)
+                    } else {
+                        0.0
+                    };
+                    let hue = journey_hue(match active {
+                        0 => 0.1,
+                        1 => 0.6,
+                        _ => 1.0,
+                    });
+                    let body = coil_body(head_t, rw as f32, box_h as f32, resolve_t);
+                    let n = body.len().max(1) as f32;
+                    for (j, (px, py)) in body.iter().enumerate() {
+                        let gx = ax0 + (*px as usize).min(rw - 1);
+                        let gy = (*py as usize).min(box_h - 1);
+                        let seg = 1.0 - (j as f32 / n); // head brightest
+                        let (glyph, color) = if j == 0 {
+                            ('◉', gold)
+                        } else {
+                            (
+                                value_to_block_char(seg),
+                                hsv_to_rgb(hue, 0.8, 0.4 + 0.5 * seg),
+                            )
+                        };
+                        canvas[gy][gx] = (glyph, color);
+                    }
+                }
             }
 
             for row in canvas {
@@ -785,6 +880,53 @@ mod tests {
     fn render_zero_dims_does_not_panic() {
         let s = LoadSnake::new(0, 0);
         let _ = s.render(); // must not panic
+    }
+
+    #[test]
+    fn coil_point_stays_in_bounds_and_animates() {
+        for i in 0..80 {
+            let (x, y) = coil_point(i as f32 * 0.3, 24.0, 10.0);
+            assert!((0.0..24.0).contains(&x), "x in bounds: {x}");
+            assert!((0.0..10.0).contains(&y), "y in bounds: {y}");
+        }
+        assert_ne!(
+            coil_point(0.0, 24.0, 10.0),
+            coil_point(1.0, 24.0, 10.0),
+            "coil animates with t"
+        );
+    }
+
+    #[test]
+    fn coil_body_uncoils_to_a_straight_line() {
+        let coiled = coil_body(3.0, 24.0, 10.0, 0.0);
+        assert_eq!(coiled.len(), COIL_BODY, "head + trailing body");
+        // Fully resolved: all segments on the mid row, head (index 0) at the
+        // right, tail to its left — the "resolution" straight line.
+        let straight = coil_body(3.0, 24.0, 10.0, 1.0);
+        for (_, y) in &straight {
+            assert!((y - 5.0).abs() < 0.6, "resolved y near mid (h/2): {y}");
+        }
+        assert!(
+            straight[0].0 > straight[COIL_BODY - 1].0,
+            "head right of tail when straightened"
+        );
+    }
+
+    #[test]
+    fn loading_render_has_coiling_head() {
+        let mut s = LoadSnake::new(60, 12);
+        let mut l = svc(Phase::Loading);
+        l.progress = Some(0.4);
+        s.update(&l, 2);
+        let text: String = s
+            .render()
+            .iter()
+            .flat_map(|ln| ln.spans.iter().map(|sp| sp.content.to_string()))
+            .collect();
+        assert!(
+            text.contains('◉'),
+            "coiling snake head present while loading"
+        );
     }
 
     #[test]
