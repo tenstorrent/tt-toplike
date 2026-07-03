@@ -1,3 +1,18 @@
+tt-toplike (0.7.11) noble; urgency=medium
+
+  * Serving view is now a full adaptive dashboard: a throughput timeline
+    (scrolling tok/s + request sparklines), the token-exhaust snake, request
+    swimlanes (queue→prefill→decode, from average per-stage vLLM latencies),
+    a live stats panel (throughput/cache/latency/container), and a TT silicon
+    strip correlating serving activity with real per-chip power/temp/AICLK.
+    Regions collapse gracefully on smaller terminals.
+  * vLLM /metrics parsing extended: per-stage latency, inter-token time,
+    prefix-cache hit rate, preemptions.
+  * Loading sequence reskinned with ANSI-art shading: block-ramp gradients and
+    a compile→load→ready teal→gold hue sweep with a bright leading edge.
+
+ -- Tenstorrent <software@tenstorrent.com>  Fri, 03 Jul 2026 23:00:00 +0000
+
 tt-toplike (0.7.10) noble; urgency=medium
 
   * Serving view: the snake now sits beside a verbose, grouped info panel
