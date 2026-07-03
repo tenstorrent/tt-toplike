@@ -124,6 +124,32 @@ available without sudo; and GPU utilization is whole-device, not per-process.
 
 ---
 
+## Watch a box remotely over the LAN (`--remote`, experimental)
+
+If a Tenstorrent box on your network runs the **tt-station** agent, you can watch
+it from another machine — your Mac, a laptop — with no local TT hardware:
+
+```
+tt-toplike --remote qb2-lab.local:8765      # or any HOST:PORT (bare host → :8000)
+tt-toplike --remote 192.168.1.42:8765 --mode starfield
+```
+
+The box's `tt-station-agentd` publishes a WebSocket at `ws://<host>:<port>/telemetry`
+that streams the verbatim `tt-smi -s` snapshot on an interval; tt-toplike's
+`--remote` backend consumes those frames **exactly like local telemetry** — same
+`Telemetry`/`SmbusTelemetry` structs, same render path, every visualization
+unchanged. It's the "QuietBox on your desk, on your Mac's screen" view.
+
+This is **strictly additive**: `--remote` is a new backend alongside the local
+ones, opt-in only (never entered by auto-detect or Tab-cycling); everything else
+is untouched. What you get remotely is the chip-level telemetry `tt-smi -s`
+exposes (temps, power, clocks, DDR/GDDR/ARC status, serving state) — which is
+what every visualization already derives from. Discovery of boxes by name
+(`_tenstorrent._tcp`) and live serving-swimlane detail are the next steps; see
+`docs/REMOTE_QUIETBOX_DESIGN.md`. Telemetry is unauthed today — trusted-LAN only.
+
+---
+
 ## Installation
 
 ### Debian / Ubuntu — download pre-built packages (easiest)
