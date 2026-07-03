@@ -537,7 +537,9 @@ fn run_app(
                     #[cfg(target_os = "linux")]
                     let rows = inference_monitor.snapshot();
                     #[cfg(not(target_os = "linux"))]
-                    let rows: Vec<crate::workload::inference_server::ServiceState> = Vec::new();
+                    let rows: Vec<
+                        crate::workload::inference_server::ServiceState,
+                    > = Vec::new();
                     let catalog = catalog_refresher.snapshot();
                     let arch = backend
                         .devices()

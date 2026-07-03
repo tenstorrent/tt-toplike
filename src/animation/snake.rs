@@ -275,7 +275,10 @@ mod tests {
         let ready = svc(Phase::Ready);
         let down = svc(Phase::Down);
         assert_eq!(choose_behavior(&[]), Behavior::Roaming);
-        assert_eq!(choose_behavior(std::slice::from_ref(&down)), Behavior::Roaming);
+        assert_eq!(
+            choose_behavior(std::slice::from_ref(&down)),
+            Behavior::Roaming
+        );
         assert_eq!(
             choose_behavior(std::slice::from_ref(&loading)),
             Behavior::Growing

@@ -60,7 +60,9 @@ pub fn parse_vllm_metrics(text: &str) -> Option<VllmCounters> {
         } else if is_metric(line, "vllm:request_success_total") {
             // Sum the labelled variants by finished_reason.
             let n = v.max(0.0) as u64;
-            if line.contains("finished_reason=\"error\"") || line.contains("finished_reason=\"abort\"") {
+            if line.contains("finished_reason=\"error\"")
+                || line.contains("finished_reason=\"abort\"")
+            {
                 c.requests_errored_total += n;
             } else if line.contains("finished_reason=") {
                 c.requests_succeeded_total += n; // stop, length, others
@@ -89,7 +91,11 @@ impl ServingStats {
     /// Fold `cur` against the previous tick's counters over `cadence_secs`.
     /// A counter reset (cur < prev, e.g. server restart) clamps that
     /// rate/delta to 0. Without `prev`, rates/deltas are 0 but gauges hold.
-    pub fn fold(prev: Option<&VllmCounters>, cur: &VllmCounters, cadence_secs: u32) -> ServingStats {
+    pub fn fold(
+        prev: Option<&VllmCounters>,
+        cur: &VllmCounters,
+        cadence_secs: u32,
+    ) -> ServingStats {
         let secs = cadence_secs.max(1) as f32;
         let rate = |c: u64, p: u64| -> f32 { c.saturating_sub(p) as f32 / secs };
         let delta = |c: u64, p: u64| -> u32 { c.saturating_sub(p) as u32 };
@@ -162,10 +168,29 @@ vllm:time_to_first_token_seconds_sum{engine=\"0\",model_name=\"M\"} 0.88
 
     #[test]
     fn fold_computes_rates_from_deltas() {
-        let prev = VllmCounters { generation_tokens_total: 826, prompt_tokens_total: 343, requests_succeeded_total: 4, requests_errored_total: 2, ..Default::default() };
-        let cur = VllmCounters { generation_tokens_total: 826 + 4210, prompt_tokens_total: 343 + 100, requests_succeeded_total: 6, requests_errored_total: 2, requests_running: 1, requests_waiting: 2, kv_cache_usage: 0.04, ttft_sum: 1.10, ttft_count: 6 };
+        let prev = VllmCounters {
+            generation_tokens_total: 826,
+            prompt_tokens_total: 343,
+            requests_succeeded_total: 4,
+            requests_errored_total: 2,
+            ..Default::default()
+        };
+        let cur = VllmCounters {
+            generation_tokens_total: 826 + 4210,
+            prompt_tokens_total: 343 + 100,
+            requests_succeeded_total: 6,
+            requests_errored_total: 2,
+            requests_running: 1,
+            requests_waiting: 2,
+            kv_cache_usage: 0.04,
+            ttft_sum: 1.10,
+            ttft_count: 6,
+        };
         let s = ServingStats::fold(Some(&prev), &cur, 5);
-        assert!((s.generation_tps - 842.0).abs() < 0.5, "4210 gen tokens / 5s ≈ 842");
+        assert!(
+            (s.generation_tps - 842.0).abs() < 0.5,
+            "4210 gen tokens / 5s ≈ 842"
+        );
         assert_eq!(s.completed_delta, 2); // 6-4
         assert_eq!(s.errored_delta, 0);
         assert_eq!(s.requests_running, 1);
@@ -176,8 +201,16 @@ vllm:time_to_first_token_seconds_sum{engine=\"0\",model_name=\"M\"} 0.88
     #[test]
     fn fold_clamps_counter_reset_to_zero() {
         // Server restarted: cur < prev → no negative rates/deltas.
-        let prev = VllmCounters { generation_tokens_total: 9000, requests_succeeded_total: 50, ..Default::default() };
-        let cur = VllmCounters { generation_tokens_total: 10, requests_succeeded_total: 1, ..Default::default() };
+        let prev = VllmCounters {
+            generation_tokens_total: 9000,
+            requests_succeeded_total: 50,
+            ..Default::default()
+        };
+        let cur = VllmCounters {
+            generation_tokens_total: 10,
+            requests_succeeded_total: 1,
+            ..Default::default()
+        };
         let s = ServingStats::fold(Some(&prev), &cur, 5);
         assert_eq!(s.generation_tps, 0.0);
         assert_eq!(s.completed_delta, 0);
@@ -185,7 +218,13 @@ vllm:time_to_first_token_seconds_sum{engine=\"0\",model_name=\"M\"} 0.88
 
     #[test]
     fn fold_without_prev_is_zero_rates_but_keeps_gauges() {
-        let cur = VllmCounters { requests_running: 3, kv_cache_usage: 0.5, ttft_sum: 2.0, ttft_count: 4, ..Default::default() };
+        let cur = VllmCounters {
+            requests_running: 3,
+            kv_cache_usage: 0.5,
+            ttft_sum: 2.0,
+            ttft_count: 4,
+            ..Default::default()
+        };
         let s = ServingStats::fold(None, &cur, 5);
         assert_eq!(s.generation_tps, 0.0);
         assert_eq!(s.requests_running, 3);

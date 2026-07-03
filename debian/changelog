@@ -1,3 +1,20 @@
+tt-toplike (0.7.8) noble; urgency=medium
+
+  * The [i] Inference Server Monitor is now one unified "snake" across all
+    three states, replacing the Down-roster list:
+    - cold  → a hungry snake roams the model-catalog starfield;
+    - loading → the snake grows through the compile→load journey (gold burst
+      at ready);
+    - serving → a calm living creature whose form encodes live vLLM signals
+      directly (body length = in-flight requests, wave = tokens/s, colour =
+      KV-cache load, a pulse per completed request, a fray on errors), with a
+      stats line: tok/s · running · queued · KV% · TTFT · served. Near-still
+      when idle.
+  * New: scrape the vLLM Prometheus /metrics endpoint per tick and fold live
+    ServingStats (rates from counter deltas) onto each inference service.
+
+ -- Tenstorrent <software@tenstorrent.com>  Fri, 03 Jul 2026 18:00:00 +0000
+
 tt-toplike (0.7.7) noble; urgency=medium
 
   * Fix: the [i] Inference Server Monitor no longer sits on the cold-trail

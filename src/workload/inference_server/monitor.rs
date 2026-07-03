@@ -119,15 +119,14 @@ pub(crate) fn fold_tick(
     // a vLLM server, or the service is down); prior counters (if any) seed
     // the rate computation so the very first tick with metrics reports 0
     // rates rather than a spurious spike from "0 -> current".
-    let serving = crate::workload::inference_server::parse_vllm_metrics(&sample.metrics_text).map(
-        |cur| {
+    let serving =
+        crate::workload::inference_server::parse_vllm_metrics(&sample.metrics_text).map(|cur| {
             crate::workload::inference_server::ServingStats::fold(
                 prev.serving.as_ref().map(|s| &s.counters),
                 &cur,
                 cadence_secs,
             )
-        },
-    );
+        });
 
     ServiceState {
         key: prev.key.clone(),
@@ -443,7 +442,10 @@ mod tests {
             &ModelProfile::default(),
             5,
         );
-        assert!(s1.serving.is_some(), "serving populated when metrics present");
+        assert!(
+            s1.serving.is_some(),
+            "serving populated when metrics present"
+        );
         assert_eq!(s1.serving.unwrap().requests_running, 2);
         // Next tick: +4210 gen tokens over 5s ≈ 842 tok/s (rate needs prev counters).
         let s2 = fold_tick(

@@ -203,12 +203,13 @@ impl ServingCreature {
         // --- Footer: live stats when serving, else the calm ready state ---
         let footer_full = match &self.serving {
             Some(s) => format!(
-                "{:.0} tok/s · {} running · {} queued · KV {:.0}% · TTFT {:.2}s",
+                "{:.0} tok/s · {} running · {} queued · KV {:.0}% · TTFT {:.2}s · {} served",
                 s.generation_tps,
                 s.requests_running,
                 s.requests_waiting,
                 s.kv_cache_usage * 100.0,
                 s.ttft_avg_s,
+                s.counters.requests_succeeded_total,
             ),
             None => "serving · ready".to_string(),
         };
@@ -241,7 +242,10 @@ fn row_to_line(row: Vec<(char, Color)>, bg: Color) -> Line<'static> {
         current_text.push(ch);
     }
     if !current_text.is_empty() {
-        spans.push(Span::styled(current_text, Style::default().fg(current_color)));
+        spans.push(Span::styled(
+            current_text,
+            Style::default().fg(current_color),
+        ));
     }
     Line::from(spans)
 }
@@ -267,7 +271,10 @@ mod tests {
 
     #[test]
     fn body_length_tracks_in_flight_requests() {
-        assert!(body_len(0, 40) < body_len(3, 40), "more in-flight → longer body");
+        assert!(
+            body_len(0, 40) < body_len(3, 40),
+            "more in-flight → longer body"
+        );
         assert!(body_len(1000, 40) <= 40, "clamped to arena width");
     }
 
@@ -275,7 +282,10 @@ mod tests {
     fn idle_is_active_false_active_true() {
         assert!(!is_active(&stats(0, 0.0, 0, 0)), "0 tps + 0 running = idle");
         assert!(is_active(&stats(0, 120.0, 0, 0)), "tokens flowing = active");
-        assert!(is_active(&stats(2, 0.0, 0, 0)), "requests in flight = active");
+        assert!(
+            is_active(&stats(2, 0.0, 0, 0)),
+            "requests in flight = active"
+        );
     }
 
     #[test]
