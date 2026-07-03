@@ -24,13 +24,17 @@
 //! [`Snake::render`] therefore match what [`Snake::update`] built the fixed-dim
 //! renderers against, and everything lines up.
 
-use ratatui::text::Line;
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
 use std::time::Instant;
 
 use crate::animation::{LoadSnake, ModelStarfield, ServingCreature};
 use crate::ui::tui::inference_panel::featured_loading;
 use crate::workload::inference_server::{Phase, ServiceState};
 use crate::workload::model_catalog::CatalogModel;
+
+/// Length (cells) of the hungry roaming snake drawn over the cold starfield.
+const ROAM_LEN: usize = 6;
 
 /// The behavior the coordinator resolved for the current frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +95,9 @@ pub struct Snake {
     /// The currently-fed Ready service key and when it first went Ready, so the
     /// Feeding uptime is real (reset when the fed service changes).
     served_since: Option<(String, Instant)>,
+    /// Frame counter advanced only while Roaming, driving the hungry snake's
+    /// horizontal drift across the cold starfield.
+    roam_frame: u64,
 }
 
 impl Default for Snake {
@@ -109,6 +116,7 @@ impl Snake {
             serving_creature: ServingCreature::new(),
             behavior: Behavior::Roaming,
             served_since: None,
+            roam_frame: 0,
         }
     }
 
@@ -154,6 +162,7 @@ impl Snake {
         } else {
             self.behavior = Behavior::Roaming;
             self.served_since = None;
+            self.roam_frame = self.roam_frame.wrapping_add(1);
             self.starfield.update(world.catalog, world.arch);
         }
     }
@@ -179,8 +188,45 @@ impl Snake {
         match self.behavior {
             Behavior::Feeding => self.serving_creature.render(width, height),
             Behavior::Growing => self.load_snake.render(),
-            Behavior::Roaming => self.starfield.render(),
+            Behavior::Roaming => {
+                // The same creature is present in the cold state: a small hungry
+                // snake drifts across the starfield of model "food" it can't yet
+                // reach. Overlay it on a ground row so the field + footer show.
+                let mut lines = self.starfield.render();
+                self.overlay_roamer(&mut lines, width);
+                lines
+            }
         }
+    }
+
+    /// Draw the hungry roaming snake onto a "ground" row of the starfield output
+    /// (the row just above the footer), leaving the field and footer intact.
+    /// A short body trails the drifting head; dim teal so it reads as the same
+    /// creature, waiting. No-ops when there's no room. Never panics.
+    fn overlay_roamer(&self, lines: &mut Vec<Line<'static>>, width: usize) {
+        if width <= ROAM_LEN || lines.len() < 3 {
+            return;
+        }
+        // Head drifts right and wraps; body trails to its left.
+        let span = width - ROAM_LEN;
+        let head = ROAM_LEN - 1 + (self.roam_frame as usize / 2) % span.max(1);
+        let mut row: Vec<char> = vec![' '; width];
+        for i in 0..ROAM_LEN {
+            let x = head - i;
+            row[x] = if i == 0 {
+                '\u{25CF}' // ● head
+            } else if i == ROAM_LEN - 1 {
+                '~' // tail
+            } else {
+                '\u{2248}' // ≈ body ripple
+            };
+        }
+        let text: String = row.into_iter().collect();
+        let ground = lines.len() - 2; // just above the footer
+        lines[ground] = Line::from(Span::styled(
+            text,
+            Style::default().fg(Color::Rgb(80, 160, 150)), // dim hungry teal
+        ));
     }
 }
 
@@ -271,6 +317,19 @@ mod tests {
         let ready = svc(Phase::Ready);
         s.update(&world(std::slice::from_ref(&ready)));
         assert_eq!(s.behavior(), Behavior::Growing, "burst still playing");
+    }
+
+    #[test]
+    fn roaming_overlays_a_visible_snake_on_the_starfield() {
+        // Cold state must show the creature (a ● head), not just the bare field.
+        let mut s = Snake::new();
+        s.update(&world(&[]));
+        let text: String = s
+            .render(60, 16)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|sp| sp.content.to_string()))
+            .collect();
+        assert!(text.contains('\u{25CF}'), "roaming snake head ● is drawn");
     }
 
     #[test]
