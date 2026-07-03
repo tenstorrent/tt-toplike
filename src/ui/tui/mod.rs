@@ -1982,6 +1982,7 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 DisplayMode::MemoryFlow => flow_legend_lines(bar, bg, dim),
                 DisplayMode::InferenceMonitor => inference_legend_lines(bar, bg, dim),
                 DisplayMode::Insights => insights_legend_lines(bar, bg, dim),
+                DisplayMode::Grid => grid_legend_lines(bar, bg, dim),
                 DisplayMode::Arcade => {
                     // All four combined.
                     let mut v = Vec::new();
@@ -2012,18 +2013,6 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     v.push(sep!("@ Hero"));
                     v.extend(hero_legend_lines(bar, bg, dim));
                     v
-                }
-                _ => {
-                    vec![
-                        ln!(vec![Span::styled(
-                            "no legend for this view",
-                            Style::default().fg(dim)
-                        )]),
-                        ln!(vec![Span::styled(
-                            "try v to switch to a viz mode",
-                            Style::default().fg(dim)
-                        )]),
-                    ]
                 }
             }
         }
@@ -2225,6 +2214,52 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
 
 // ── Per-view legend line builders ─────────────────────────────────────────────
 
+/// Legend for Grid mode: a full-screen grid of chip portraits, no process panel.
+fn grid_legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    macro_rules! ln {
+        ($spans:expr) => {{
+            let mut v: Vec<Span<'static>> =
+                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            v.extend($spans);
+            Line::from(v)
+        }};
+    }
+    vec![
+        ln!(vec![
+            Span::styled("cell ", Style::default().fg(colors::rgb(120, 200, 255))),
+            Span::styled(
+                "= one chip portrait per device (all at once)",
+                Style::default().fg(dim),
+            ),
+        ]),
+        ln!(vec![
+            Span::styled(
+                "particles ",
+                Style::default().fg(colors::rgb(120, 200, 255)),
+            ),
+            Span::styled("= Tensix compute activity", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("cyan→red ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled(
+                "= cool→hot (core temperature / power)",
+                Style::default().fg(dim),
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("v ", Style::default().fg(colors::WARNING)),
+            Span::styled(
+                "= cycle to the next visualization",
+                Style::default().fg(dim)
+            ),
+        ]),
+    ]
+}
+
 /// Legend for the Insights (default) screen: chip portraits + process panel.
 fn insights_legend_lines(
     bar: ratatui::style::Color,
@@ -2308,9 +2343,23 @@ fn inference_legend_lines(
     }
     vec![
         ln!(vec![
+            Span::styled("● ", Style::default().fg(colors::rgb(80, 160, 150))),
+            Span::styled(
+                "cold — hungry snake roams the model-star field",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
             Span::styled("◉ ", Style::default().fg(colors::rgb(246, 188, 66))),
             Span::styled(
-                "= snake head (coils, then uncoils)",
+                "loading — coils compile→load, then uncoils",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("▶ ", Style::default().fg(colors::WARNING)),
+            Span::styled(
+                "serving — head of the live feeding snake",
                 Style::default().fg(dim)
             ),
         ]),

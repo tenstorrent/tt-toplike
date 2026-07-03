@@ -1,3 +1,12 @@
+tt-toplike (0.7.14) noble; urgency=medium
+
+  * Add a legend for Grid mode. Every view now has a symbol legend (press l);
+    the "no legend for this view" fallback is gone.
+  * Fix the [i] legend's snake-head entry: the head glyph is state-specific —
+    ● (cold, roaming), ◉ (loading, coiling), ▶ (serving) — not a single ◉.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sat, 04 Jul 2026 03:00:00 +0000
+
 tt-toplike (0.7.13) noble; urgency=medium
 
   * The Insights (default) screen now has a symbol legend (press l): chip
