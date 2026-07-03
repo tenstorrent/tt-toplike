@@ -334,9 +334,9 @@ impl LoadSnake {
         // Char-safe truncation — labels may be multibyte, never byte-slice.
         let title: String = title_full.chars().take(self.width).collect();
         let title_color = if alarm {
-            colors::ERROR
+            colors::error()
         } else {
-            colors::TEXT_PRIMARY
+            colors::text_primary()
         };
         lines.push(Line::from(Span::styled(
             title,
@@ -362,14 +362,14 @@ impl LoadSnake {
             let chambers: [(&str, Color, f32, bool); 3] = [
                 (
                     "compile",
-                    colors::SUCCESS,
+                    colors::success(),
                     self.compile_fill,
                     self.compile_fill > 0.0
                         || matches!(self.phase, Phase::Compiling | Phase::Loading | Phase::Ready),
                 ),
                 (
                     "load",
-                    colors::WARNING,
+                    colors::warning(),
                     self.load_fill,
                     self.load_fill > 0.0 || matches!(self.phase, Phase::Loading | Phase::Ready),
                 ),
@@ -383,7 +383,7 @@ impl LoadSnake {
                 let is_active = i == active;
                 // Active box reddens on alarm; closed boxes read dim gray.
                 let box_color = if is_active && alarm {
-                    colors::ERROR
+                    colors::error()
                 } else if *open {
                     *color
                 } else {
@@ -503,9 +503,9 @@ impl LoadSnake {
         }
         let footer: String = footer.chars().take(self.width).collect();
         let footer_color = if alarm {
-            colors::ERROR
+            colors::error()
         } else {
-            colors::TEXT_SECONDARY
+            colors::text_secondary()
         };
         lines.push(Line::from(Span::styled(
             footer,
@@ -615,7 +615,7 @@ fn draw_chamber(
             let global_t = (chamber_index as f32 + local_frac) / 3.0;
             let brightness = (1.0 - 0.35 * ramp).clamp(0.4, 1.0);
             let cell_color = if alarm_fill {
-                colors::ERROR // a stalled box stays red, sweep and all
+                colors::error() // a stalled box stays red, sweep and all
             } else {
                 hsv_to_rgb(journey_hue(global_t), 0.8, brightness)
             };

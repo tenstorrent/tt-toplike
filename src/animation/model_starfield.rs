@@ -212,7 +212,7 @@ impl ModelStarfield {
                 self.compatible, self.total, self.chip_set
             ),
             Style::default()
-                .fg(colors::TEXT_SECONDARY)
+                .fg(colors::text_secondary())
                 .add_modifier(Modifier::BOLD),
         )));
 
@@ -229,8 +229,8 @@ impl ModelStarfield {
 /// read as background.
 fn star_style(support: Support, twinkle: f32) -> (Color, bool) {
     match support {
-        Support::Supported => (scale(colors::SUCCESS, 0.7 + 0.3 * twinkle), twinkle > 0.4),
-        Support::Experimental => (scale(colors::WARNING, 0.7 + 0.3 * twinkle), twinkle > 0.4),
+        Support::Supported => (scale(colors::success(), 0.7 + 0.3 * twinkle), twinkle > 0.4),
+        Support::Experimental => (scale(colors::warning(), 0.7 + 0.3 * twinkle), twinkle > 0.4),
         Support::No => (colors::rgb(90, 90, 90), false),
     }
 }
