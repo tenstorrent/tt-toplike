@@ -21,9 +21,11 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::animation::hsv_to_rgb;
 use crate::animation::inference_load::{fmt_bytes, fmt_elapsed, group_thousands};
-use crate::animation::ChipReading;
+use crate::animation::{
+    exhaust_count, format_chip, hsv_to_rgb, lane_segments, sparkline, temp_to_hue,
+    value_to_char_intensity, ChipReading, BLOCK_CHARS,
+};
 use crate::ui::colors;
 use crate::workload::inference_server::{ServiceState, ServingStats};
 
@@ -151,33 +153,35 @@ impl ServingCreature {
             rows.push((t.to_string(), header));
         };
         // Metric getters degrade to "—" when there are no serving stats.
-        let (dec, pre, run, wait, served, errs, kv, ttft, gen_tot, prompt_tot) = match &self.serving
-        {
-            Some(s) => (
-                format!("{:.0} tok/s", s.generation_tps),
-                format!("{:.0} tok/s", s.prompt_tps),
-                s.requests_running.to_string(),
-                s.requests_waiting.to_string(),
-                group_thousands(s.counters.requests_succeeded_total as usize),
-                group_thousands(s.counters.requests_errored_total as usize),
-                format!("{:.0}%", s.kv_cache_usage * 100.0),
-                format!("{:.2}s", s.ttft_avg_s),
-                group_thousands(s.counters.generation_tokens_total as usize),
-                group_thousands(s.counters.prompt_tokens_total as usize),
-            ),
-            None => (
-                "—".into(),
-                "—".into(),
-                "—".into(),
-                "—".into(),
-                "—".into(),
-                "—".into(),
-                "—".into(),
-                "—".into(),
-                "—".into(),
-                "—".into(),
-            ),
-        };
+        let (dec, pre, run, wait, served, errs, kv, ttft, prefix, gen_tot, prompt_tot) =
+            match &self.serving {
+                Some(s) => (
+                    format!("{:.0} tok/s", s.generation_tps),
+                    format!("{:.0} tok/s", s.prompt_tps),
+                    s.requests_running.to_string(),
+                    s.requests_waiting.to_string(),
+                    group_thousands(s.counters.requests_succeeded_total as usize),
+                    group_thousands(s.counters.requests_errored_total as usize),
+                    format!("{:.0}%", s.kv_cache_usage * 100.0),
+                    format!("{:.2}s", s.ttft_avg_s),
+                    format!("{:.0}%", s.prefix_hit_rate * 100.0),
+                    group_thousands(s.counters.generation_tokens_total as usize),
+                    group_thousands(s.counters.prompt_tokens_total as usize),
+                ),
+                None => (
+                    "—".into(),
+                    "—".into(),
+                    "—".into(),
+                    "—".into(),
+                    "—".into(),
+                    "—".into(),
+                    "—".into(),
+                    "—".into(),
+                    "—".into(),
+                    "—".into(),
+                    "—".into(),
+                ),
+            };
 
         hdr(&mut rows, "throughput");
         rows.push((format!("  decode   {dec}"), val));
@@ -192,6 +196,7 @@ impl ServingCreature {
         hdr(&mut rows, "cache · latency");
         rows.push((format!("  KV cache {kv}"), val));
         rows.push((format!("  TTFT avg {ttft}"), val));
+        rows.push((format!("  prefix   {prefix}"), val));
         rows.push((String::new(), val));
         hdr(&mut rows, "container");
         rows.push((format!("  CPU      {:.1}%", self.cpu_pct), val));
@@ -200,10 +205,15 @@ impl ServingCreature {
         rows
     }
 
-    /// Render the creature to owned Ratatui lines: a title row, then a body that
-    /// splits into the animated snake (left) and a verbose info panel (right,
-    /// when the view is wide enough). Returns `vec![]` on a zero-sized view;
-    /// never panics on narrow/short grids (falls back to snake-only when narrow).
+    /// Render the creature as an adaptive full-screen dashboard composed onto a
+    /// single `(char, Color)` canvas: a title row, a throughput **timeline** band
+    /// at the top, the animated **snake + token-exhaust** (center-left), request
+    /// **swimlanes** + the verbose stats panel (center-right), and a **silicon
+    /// strip** across the bottom. Regions are gated on width/height and dropped
+    /// in the order timeline → swimlanes → chip strip → (snake + stats always
+    /// survive); below `width < 44` it collapses to the snake-only fallback.
+    /// Returns `vec![]` on a zero-sized view and never panics on narrow/short
+    /// grids — every region is gated on its min size and all indices are bounded.
     pub fn render(&self, width: usize, height: usize) -> Vec<Line<'static>> {
         if width == 0 || height == 0 {
             return vec![];
@@ -213,12 +223,27 @@ impl ServingCreature {
         let dim = colors::rgb(90, 90, 90);
         let mut lines: Vec<Line<'static>> = Vec::new();
 
-        // --- Title: "{label}  serving · READY · up {elapsed}" (char-safe) ---
-        let title_full = format!(
-            "{}  serving · READY · up {}",
-            self.label,
-            fmt_elapsed(self.uptime_secs)
-        );
+        // --- Title: "{label}  serving · READY · up {elapsed} · {arch}" ---
+        // The architecture suffix is appended only when a chip reports a known
+        // (non-empty) arch, so the title stays honest when telemetry is absent.
+        let arch = self
+            .chips
+            .iter()
+            .map(|c| c.arch)
+            .find(|a| !a.is_empty() && *a != "Unknown");
+        let title_full = match arch {
+            Some(a) => format!(
+                "{}  serving · READY · up {} · {}",
+                self.label,
+                fmt_elapsed(self.uptime_secs),
+                a
+            ),
+            None => format!(
+                "{}  serving · READY · up {}",
+                self.label,
+                fmt_elapsed(self.uptime_secs)
+            ),
+        };
         let title: String = title_full.chars().take(width).collect();
         lines.push(Line::from(Span::styled(
             title,
@@ -227,17 +252,31 @@ impl ServingCreature {
                 .add_modifier(Modifier::BOLD),
         )));
 
-        // --- Body canvas (only the title row is reserved; the panel lives in
-        // the body beside the snake, so there's no separate footer row) ---
+        // --- Body canvas (only the title row is reserved) ---
         let body_rows = height.saturating_sub(1);
         if body_rows == 0 {
             return lines;
         }
         let mut canvas: Vec<Vec<(char, Color)>> = vec![vec![(' ', bg); width]; body_rows];
 
+        // Live serving signals (all degrade to 0 when metrics are absent).
+        let (gen_tps, kv, running, waiting, q_avg, p_avg, d_avg, completed) = match &self.serving {
+            Some(s) => (
+                s.generation_tps,
+                s.kv_cache_usage,
+                s.requests_running,
+                s.requests_waiting,
+                s.queue_avg_s,
+                s.prefill_avg_s,
+                s.decode_avg_s,
+                s.completed_delta,
+            ),
+            None => (0.0, 0.0, 0, 0, 0.0, 0.0, 0.0, 0),
+        };
+
         // Column split: a fixed-ish info panel on the right when there's room,
-        // else snake-only. `panel_x` is the first panel column; the snake draws
-        // left of a one-column divider at `panel_x - 1`.
+        // else snake-only. `panel_x` is the first panel column; the left region
+        // ends one column before it (a divider at `panel_x - 1`).
         let panel_w = if width >= 44 {
             30usize.min(width / 2)
         } else {
@@ -250,26 +289,74 @@ impl ServingCreature {
             width
         };
 
-        // --- Snake (left region) ---
-        let (gen_tps, kv, running, waiting) = match &self.serving {
-            Some(s) => (
-                s.generation_tps,
-                s.kv_cache_usage,
-                s.requests_running,
-                s.requests_waiting,
-            ),
-            None => (0.0, 0.0, 0, 0),
+        // --- Region budget (collapse order: timeline → chip strip → middle) ---
+        // Full-width throughput timeline (2 rows) at the top, only with room and
+        // live metrics (so the "tok/s" label never appears in a calm no-metrics
+        // view). Full-width silicon strip (1 row) at the bottom.
+        let has_timeline = self.serving.is_some() && body_rows >= 10 && width >= 60;
+        let timeline_h = if has_timeline { 2 } else { 0 };
+        let has_strip = body_rows >= timeline_h + 5;
+        let strip_h = if has_strip { 1 } else { 0 };
+        let mid_top = timeline_h;
+        let mid_bot = body_rows - strip_h; // exclusive
+        let mid_rows = mid_bot - mid_top; // >= 1 (strip only claimed when room)
+
+        // --- Timeline band: sparkline of tps_history + numeric tok/s ---
+        if has_timeline {
+            let label = format!("tok/s {:.0} ", gen_tps);
+            put_str(&mut canvas, 0, 0, &label, colors::INFO, snake_right);
+            let spark_x = label.chars().count().min(snake_right);
+            let spark_w = snake_right.saturating_sub(spark_x);
+            if spark_w > 0 {
+                let spark = sparkline(self.tps_history(), spark_w);
+                put_str(
+                    &mut canvas,
+                    0,
+                    spark_x,
+                    &spark,
+                    colors::SUCCESS,
+                    snake_right,
+                );
+                // Second row: a dimmer full-width continuation of the same trace.
+                let wide = sparkline(self.tps_history(), snake_right);
+                put_str(&mut canvas, 1, 0, &wide, dim, snake_right);
+            }
+        }
+
+        // --- Swimlanes (center-right, when wide) claim the bottom of the middle
+        // left region; the snake gets the rows above them. ---
+        let want_swim = width >= 70 && mid_rows >= 6 && snake_right >= 8;
+        let max_lanes = if want_swim {
+            5usize.min(mid_rows.saturating_sub(2)).max(1)
+        } else {
+            0
         };
+        let lane_w = snake_right.saturating_sub(4);
+        let lanes = if want_swim {
+            lane_segments(running, q_avg, p_avg, d_avg, lane_w, max_lanes)
+        } else {
+            Vec::new()
+        };
+        // +1 header row ("requests"); clamp so the snake keeps at least one row.
+        let swim_h = if want_swim {
+            (lanes.len() + 1).min(mid_rows.saturating_sub(1))
+        } else {
+            0
+        };
+        let snake_rows = mid_rows - swim_h;
+
+        // --- Snake + token exhaust (center-left) ---
+        let snake_top = mid_top;
+        let snake_last = snake_top + snake_rows - 1; // snake_rows >= 1
         let max_len = snake_right.saturating_sub(1);
         let len = body_len(running, max_len);
-        // Wave amplitude/speed scale with throughput; 0 tps → flat + still.
         let amp_norm = (gen_tps / GEN_TPS_REF).clamp(0.0, 1.0);
-        let max_amp = (body_rows.saturating_sub(1)) as f32 / 2.0;
+        let max_amp = (snake_rows.saturating_sub(1)) as f32 / 2.0;
         let amp = amp_norm * max_amp;
-        let center = (body_rows as f32 - 1.0) / 2.0;
+        let center = snake_top as f32 + (snake_rows as f32 - 1.0) / 2.0;
         let speed = 0.12 + 0.18 * amp_norm;
         let heat = hsv_to_rgb(240.0 * (1.0 - kv.clamp(0.0, 1.0)), 0.85, 0.95);
-        let last_row = body_rows - 1;
+        let (mut head_x, mut head_y) = (0usize, snake_top);
         for i in 0..len {
             let x = 1 + i;
             if x >= snake_right {
@@ -277,7 +364,7 @@ impl ServingCreature {
             }
             let phase = self.frame as f32 * speed + i as f32 * 0.6;
             let y = (center + amp * phase.sin()).round();
-            let y = (y.max(0.0) as usize).min(last_row);
+            let y = ((y.max(0.0) as usize).max(snake_top)).min(snake_last);
             let is_head = i + 1 == len;
             let is_tail = i == 0;
             let (glyph, color) = if is_tail && self.fray_left > 0 {
@@ -290,9 +377,27 @@ impl ServingCreature {
                 ('●', heat)
             };
             canvas[y][x] = (glyph, color);
+            if is_head {
+                head_x = x;
+                head_y = y;
+            }
         }
-        // Dim queued pellets trail to the right of the snake, one per waiting req.
-        let pellet_row = (center.round().max(0.0) as usize).min(last_row);
+        // Token exhaust: `exhaust_count(gen_tps)` dim glyphs drifting right of the
+        // head, frame-indexed so they animate; none at 0 tps. Bounds-clamped.
+        if head_x > 0 {
+            let n = exhaust_count(gen_tps);
+            let drift = self.frame as usize % 3;
+            for k in 0..n {
+                let ex = head_x + 1 + k + drift;
+                if ex >= snake_right {
+                    break;
+                }
+                let ch = if k % 2 == 0 { '»' } else { '·' };
+                canvas[head_y][ex] = (ch, dim);
+            }
+        }
+        // Dim queued pellets trail one per waiting req, on the snake center row.
+        let pellet_row = (center.round().max(0.0) as usize).clamp(snake_top, snake_last);
         let mut px = 1 + len + 1;
         for _ in 0..waiting {
             if px >= snake_right {
@@ -302,22 +407,85 @@ impl ServingCreature {
             px += 1;
         }
 
-        // --- Info panel (right region) + divider ---
+        // --- Swimlanes: one shaded [queue|prefill|decode] bar per running req ---
+        if swim_h > 0 {
+            let swim_top = snake_top + snake_rows;
+            put_str(
+                &mut canvas,
+                swim_top,
+                1,
+                "requests",
+                colors::INFO,
+                snake_right,
+            );
+            // Completion marker: a bright pulse glyph beside the header,
+            // lit while a completion is fresh (this tick, or during its pulse).
+            if completed > 0 || self.pulse_left > 0 {
+                let mx = 1 + "requests".len() + 1;
+                if mx < snake_right {
+                    canvas[swim_top][mx] = ('✦', colors::SUCCESS);
+                }
+            }
+            let q_col = colors::rgb(90, 110, 130); // queue: dim blue-grey
+            let p_col = colors::rgb(120, 170, 200); // prefill: mid teal
+            let d_col = colors::SUCCESS; // decode: bright teal
+            for (li, seg) in lanes.iter().enumerate() {
+                let row = swim_top + 1 + li;
+                if row > snake_last + swim_h || row >= mid_bot {
+                    break;
+                }
+                let label = format!("#{} ", li + 1);
+                put_str(&mut canvas, row, 1, &label, dim, snake_right);
+                let mut x = 1 + label.chars().count();
+                let stages = [
+                    (seg[0], 0.3_f32, q_col),
+                    (seg[1], 0.6, p_col),
+                    (seg[2], 1.0, d_col),
+                ];
+                for (w, intensity, color) in stages {
+                    let ch = value_to_char_intensity(intensity, &BLOCK_CHARS);
+                    for _ in 0..w {
+                        if x >= snake_right {
+                            break;
+                        }
+                        canvas[row][x] = (ch, color);
+                        x += 1;
+                    }
+                }
+            }
+        }
+
+        // --- Info / stats panel (right region) + divider ---
         if panel_w > 0 {
             let div = panel_x - 1;
-            for row in canvas.iter_mut() {
+            for row in canvas.iter_mut().take(mid_bot).skip(mid_top) {
                 row[div] = ('│', dim);
             }
             for (r, (text, color)) in self.panel_rows().into_iter().enumerate() {
-                if r >= body_rows {
+                let row = mid_top + r;
+                if row >= mid_bot {
                     break;
                 }
-                for (c, ch) in text.chars().enumerate() {
-                    let x = panel_x + c;
+                put_str(&mut canvas, row, panel_x, &text, color, width);
+            }
+        }
+
+        // --- Silicon strip (bottom row): one shaded cell per chip ---
+        if strip_h > 0 {
+            let row = mid_bot; // strip occupies [mid_bot, body_rows)
+            if self.chips.is_empty() {
+                put_str(&mut canvas, row, 0, "no device telemetry", dim, width);
+            } else {
+                let mut x = 0usize;
+                for chip in &self.chips {
                     if x >= width {
                         break;
                     }
-                    canvas[r][x] = (ch, color);
+                    let cell = format_chip(chip);
+                    let hue = temp_to_hue(chip.temp_c.unwrap_or(0.0));
+                    let color = hsv_to_rgb(hue, 0.75, 0.95);
+                    put_str(&mut canvas, row, x, &cell, color, width);
+                    x += cell.chars().count() + 3; // gap between chip cells
                 }
             }
         }
@@ -326,6 +494,30 @@ impl ServingCreature {
             lines.push(row_to_line(row, bg));
         }
         lines
+    }
+}
+
+/// Write `s` onto canvas `row` starting at column `col`, one char per cell,
+/// clipped at `max_x` and at the row length. A no-op when `row` is off-canvas.
+/// Every index is bounds-checked so callers never panic on a tight grid.
+fn put_str(
+    canvas: &mut [Vec<(char, Color)>],
+    row: usize,
+    col: usize,
+    s: &str,
+    color: Color,
+    max_x: usize,
+) {
+    if row >= canvas.len() {
+        return;
+    }
+    let line = &mut canvas[row];
+    for (i, ch) in s.chars().enumerate() {
+        let x = col + i;
+        if x >= max_x || x >= line.len() {
+            break;
+        }
+        line[x] = (ch, color);
     }
 }
 
@@ -484,6 +676,44 @@ mod tests {
             c.update(&svc, 12, &chips);
         }
         assert!(c.tps_history().len() <= HISTORY_CAP);
+    }
+
+    #[test]
+    fn dashboard_composes_regions_at_large_size_and_degrades() {
+        let mut c = ServingCreature::new();
+        let chips = [ChipReading {
+            index: 0,
+            arch: "Blackhole",
+            power_w: Some(92.0),
+            temp_c: Some(78.0),
+            aiclk_mhz: Some(1350),
+        }];
+        let mut svc = ready_svc(
+            "Qwen3-32B",
+            2.8,
+            70 * 1024 * 1024 * 1024,
+            Some(stats(2, 842.0, 0, 0)),
+        );
+        // give swimlanes some stage times
+        if let Some(s) = svc.serving.as_mut() {
+            s.queue_avg_s = 0.5;
+            s.prefill_avg_s = 1.0;
+            s.decode_avg_s = 3.0;
+        }
+        c.update(&svc, 1454, &chips);
+        let big: String = c
+            .render(100, 30)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(big.contains("Qwen3-32B"), "title"); // title
+        assert!(big.contains("tok/s"), "timeline / stats"); // timeline / stats
+        assert!(big.contains("requests"), "swimlane header"); // swimlane header
+        assert!(big.contains("BH0"), "chip strip"); // chip strip
+                                                    // Degrade: tiny sizes must not panic and must still show the label.
+        for (w, h) in [(100, 6), (60, 10), (30, 8), (10, 4), (0, 0)] {
+            let _ = c.render(w, h);
+        }
     }
 
     #[test]
