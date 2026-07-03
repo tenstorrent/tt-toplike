@@ -190,6 +190,20 @@ fn main() {
             let mut backend = tt_toplike::backend::host::HostBackend::with_config(config);
             run_with_backend(&mut backend, &cli);
         }
+        // Remote QuietBox — opt-in only via --remote <HOST:PORT>. Consumes the
+        // box's streamed `tt-smi -s` frames over WebSocket exactly like local
+        // telemetry. Never entered by auto-detect or Tab-cycling.
+        BackendType::Remote => {
+            let spec = cli.remote.clone().unwrap_or_default();
+            log::info!("Initializing WsBackend (remote QuietBox @ {})", spec);
+            match tt_toplike::backend::ws::WsBackend::from_host_port(&spec, config) {
+                Ok(mut backend) => run_with_backend(&mut backend, &cli),
+                Err(e) => {
+                    eprintln!("Error: invalid --remote target '{}': {}", spec, e);
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 }
 

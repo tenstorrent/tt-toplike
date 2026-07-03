@@ -86,6 +86,24 @@ pub struct Cli {
     #[arg(long, conflicts_with = "mock", conflicts_with = "json")]
     pub host: bool,
 
+    /// Connect to a remote Tenstorrent box over WebSocket (remote QuietBox).
+    ///
+    /// Reads telemetry from `ws://<HOST:PORT>/telemetry`, where a
+    /// tt-station-agentd publisher pushes frames that are the verbatim stdout of
+    /// `tt-smi -s` — consumed exactly like local telemetry. Opt-in only: this
+    /// backend is never entered by auto-detect or Tab-cycling.
+    ///
+    /// Accepts `HOST:PORT` (e.g. `192.168.1.42:8765`) or a bare `HOST`
+    /// (defaults to port 8000, the agentd control port). IPv6: `[::1]:8765`.
+    #[arg(
+        long,
+        value_name = "HOST:PORT",
+        conflicts_with = "mock",
+        conflicts_with = "json",
+        conflicts_with = "host"
+    )]
+    pub remote: Option<String>,
+
     /// Path to tt-smi executable
     ///
     /// Only used with JSON backend. Defaults to "tt-smi" in PATH.
@@ -227,6 +245,13 @@ pub enum BackendType {
     /// All visualisations work — they describe your CPU instead of a TT accelerator.
     /// Great for demos, screenshots, or exploring tt-toplike before you have hardware.
     Host,
+
+    /// Use Remote WebSocket backend (remote QuietBox telemetry over the LAN)
+    ///
+    /// Connects to `ws://<host:port>/telemetry` and consumes the streamed
+    /// `tt-smi -s` frames as if they were local telemetry. Selected only via the
+    /// explicit `--remote <HOST:PORT>` flag; never auto-detected or Tab-cycled.
+    Remote,
 }
 
 /// True when the active backend represents real TT hardware, so the process
@@ -279,6 +304,8 @@ impl Cli {
             cli.backend = BackendType::Json;
         } else if cli.host {
             cli.backend = BackendType::Host;
+        } else if cli.remote.is_some() {
+            cli.backend = BackendType::Remote;
         }
 
         cli
@@ -294,6 +321,8 @@ impl Cli {
             BackendType::Json
         } else if self.host {
             BackendType::Host
+        } else if self.remote.is_some() {
+            BackendType::Remote
         } else {
             self.backend
         }
@@ -364,6 +393,7 @@ impl Cli {
             #[cfg(target_os = "linux")]
             BackendType::Hybrid => "Hybrid (sysfs + tt-smi cache)",
             BackendType::Host => "Host (CPU/RAM via sysinfo)",
+            BackendType::Remote => "Remote (WebSocket QuietBox)",
         }
     }
 
@@ -378,6 +408,7 @@ impl Cli {
             mock: Some(0),
             json: false,
             host: false,
+            remote: None,
             tt_smi_path: std::path::PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -446,6 +477,7 @@ mod tests {
             mock: None,
             json: false,
             host: false,
+            remote: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -479,6 +511,7 @@ mod tests {
             mock: Some(0),
             json: false,
             host: false,
+            remote: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -507,6 +540,7 @@ mod tests {
             mock: None,
             json: true,
             host: false,
+            remote: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -535,6 +569,7 @@ mod tests {
             mock: None,
             json: false,
             host: false,
+            remote: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: Some(vec![0, 2, 4]),
@@ -567,6 +602,7 @@ mod tests {
             mock: None,
             json: false,
             host: false,
+            remote: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -592,6 +628,7 @@ mod tests {
             mock: None,
             json: false,
             host: false,
+            remote: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -620,6 +657,7 @@ mod tests {
             mock: None,
             json: false,
             host: false,
+            remote: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -648,6 +686,7 @@ mod tests {
             mock: None,
             json: false,
             host: false,
+            remote: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -673,6 +712,7 @@ mod tests {
             mock: Some(0),
             json: false,
             host: false,
+            remote: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -700,6 +740,7 @@ mod tests {
             mock,
             json: false,
             host: false,
+            remote: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,

@@ -9,6 +9,7 @@
 use crate::backend::host::HostBackend;
 use crate::backend::json::JSONBackend;
 use crate::backend::mock::MockBackend;
+use crate::backend::ws::WsBackend;
 use crate::backend::{BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
 use crate::error::{BackendError, BackendResult};
@@ -90,6 +91,19 @@ pub fn create_backend(
             backend.init()?;
             Ok(Box::new(backend))
         }
+        // Remote QuietBox — opt-in only, entered exclusively via --remote <HOST:PORT>.
+        // Never reached from auto-detect or Tab-cycling (create_auto_backend and
+        // next_backend deliberately omit it), preserving the additive contract.
+        BackendType::Remote => {
+            let spec = cli.remote.as_deref().ok_or_else(|| {
+                BackendError::Initialization(
+                    "Remote backend requires --remote <HOST:PORT>".to_string(),
+                )
+            })?;
+            let mut backend = WsBackend::from_host_port(spec, config)?;
+            backend.init()?;
+            Ok(Box::new(backend))
+        }
     }
 }
 
@@ -164,6 +178,18 @@ pub fn next_backend(current: BackendType) -> BackendType {
         }
 
         BackendType::Auto => {
+            #[cfg(target_os = "linux")]
+            return BackendType::Hybrid;
+            #[cfg(not(target_os = "linux"))]
+            return BackendType::Json;
+        }
+
+        // Remote is a sticky, explicit mode: it is NEVER a target of the cycle
+        // (no other arm returns Remote), so Tab-cycling can never enter it. If a
+        // user who launched with --remote presses Tab, we drop them into the
+        // normal local cycle start and never return to Remote — preserving the
+        // additive rule that remote is opt-in only.
+        BackendType::Remote => {
             #[cfg(target_os = "linux")]
             return BackendType::Hybrid;
             #[cfg(not(target_os = "linux"))]
@@ -279,6 +305,7 @@ mod tests {
             mock: Some(0),
             json: false,
             host: false,
+            remote: None,
             tt_smi_path: std::path::PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,

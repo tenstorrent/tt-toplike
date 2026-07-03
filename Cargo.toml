@@ -62,6 +62,11 @@ vte = { version = "0.13", optional = true }             # ANSI/VT parser (alacri
 tokio = { version = "1.49", features = ["full"] }
 tokio-util = "0.7"
 
+# WebSocket client for the remote QuietBox (WsBackend) telemetry stream.
+# Additive: only the opt-in --remote path uses it; every other backend is unaffected.
+tokio-tungstenite = "0.24"
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+
 # JSON parsing (for JSON backend fallback)
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

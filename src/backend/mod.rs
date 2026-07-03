@@ -49,6 +49,7 @@ pub mod mock;
 pub mod smbus_smooth; // EMA smoothing for numeric SMBUS fields
 #[cfg(target_os = "linux")]
 pub mod sysfs; // Sysfs backend for Linux hwmon sensors (non-invasive)
+pub mod ws; // WebSocket backend: remote QuietBox telemetry over the LAN (opt-in --remote)
 
 use crate::error::BackendResult;
 use crate::models::{Device, SmbusTelemetry, Telemetry};
