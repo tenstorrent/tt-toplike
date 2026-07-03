@@ -67,7 +67,7 @@ pub fn fmt_elapsed(secs: u64) -> String {
 
 /// Group an integer's digits into comma-separated thousands: `1842 -> "1,842"`.
 /// Pure and ASCII-only (digits + commas), so it never byte-slices multibyte text.
-fn group_thousands(n: usize) -> String {
+pub fn group_thousands(n: usize) -> String {
     let digits = n.to_string();
     let len = digits.len();
     let mut out = String::with_capacity(len + len / 3);

@@ -157,8 +157,7 @@ impl Snake {
         } else if let Some(svc) = world.rows.iter().find(|s| s.phase == Phase::Ready) {
             self.behavior = Behavior::Feeding;
             let uptime = self.uptime_for(&svc.key);
-            self.serving_creature
-                .update(&svc.label, uptime, svc.serving.as_ref());
+            self.serving_creature.update(svc, uptime);
         } else {
             self.behavior = Behavior::Roaming;
             self.served_since = None;

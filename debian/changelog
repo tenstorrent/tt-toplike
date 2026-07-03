@@ -1,3 +1,13 @@
+tt-toplike (0.7.10) noble; urgency=medium
+
+  * Serving view: the snake now sits beside a verbose, grouped info panel
+    (throughput: decode/prefill tok/s · requests: running/queued/served/errors
+    · cache·latency: KV% / TTFT · container: CPU/RSS/token totals), replacing
+    the single-line footer. Falls back to snake-only on narrow terminals; shows
+    em-dash placeholders when a server exposes no vLLM metrics.
+
+ -- Tenstorrent <software@tenstorrent.com>  Fri, 03 Jul 2026 21:00:00 +0000
+
 tt-toplike (0.7.9) noble; urgency=medium
 
   * Fix: the serving-snake stats line (tok/s · running · queued · KV · TTFT ·
