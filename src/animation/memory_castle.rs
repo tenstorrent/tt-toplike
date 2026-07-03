@@ -259,7 +259,7 @@ pub(crate) fn castle_tier(width: usize, devices: usize) -> CastleTier {
     // boundary for Compact so there's a visible step down before towers
     // hit their true minimum. `>= MIN_COMPACT_COL_WIDTH` stays inclusive —
     // Compact's own floor is meant to include its exact threshold.
-    if per > MIN_CHIP_COL_WIDTH {
+    if per >= MIN_CHIP_COL_WIDTH {
         CastleTier::Full
     } else if per >= MIN_COMPACT_COL_WIDTH {
         CastleTier::Compact
@@ -1621,7 +1621,11 @@ mod tests {
     fn tier_dispatch_thresholds() {
         // 120 usable cols: 7 devices fit Full (>=15 each), 8..=14 Compact (>=8), 15+ FleetGrid.
         assert_eq!(castle_tier(122, 7), CastleTier::Full);
-        assert_eq!(castle_tier(122, 8), CastleTier::Compact);
+        // 8 devices @ 122 → per == 15 exactly → still Full (the original
+        // dispatch boundary is preserved byte-for-byte by `>=`).
+        assert_eq!(castle_tier(122, 8), CastleTier::Full);
+        // Compact begins when per drops below 15: 8 devices @ 114 → per 14.
+        assert_eq!(castle_tier(114, 8), CastleTier::Compact);
         assert_eq!(castle_tier(122, 14), CastleTier::Compact);
         assert_eq!(castle_tier(122, 16), CastleTier::FleetGrid);
         assert_eq!(castle_tier(0, 4), CastleTier::FleetGrid);
@@ -1641,6 +1645,28 @@ mod tests {
 
         let lines = castle.render(&backend);
         assert!(!lines.is_empty(), "compact render must produce output");
+    }
+
+    /// The compact tier's per-device particle budget (its newest logic) only
+    /// executes when particles exist — so populate them via update() ticks
+    /// before rendering. Guards the budget gate / counter / trail fallthrough
+    /// against silent regressions the empty-particle smoke can't catch.
+    #[test]
+    fn compact_tier_particle_budget_path_renders_without_panic() {
+        let mut backend = MockBackend::new(10);
+        backend.init().expect("mock backend init");
+        backend.update().expect("mock backend update");
+
+        let mut castle = MemoryCastle::new(122, 40);
+        for _ in 0..20 {
+            castle.update(&backend);
+        }
+        assert!(
+            !castle.particles.is_empty(),
+            "updates must spawn particles so the budget path actually runs"
+        );
+        let lines = castle.render(&backend);
+        assert!(!lines.is_empty(), "compact render with particles must work");
     }
 
     /// 4 devices at a narrow 30-col terminal (usable=28, per=7: below the
