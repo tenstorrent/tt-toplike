@@ -257,8 +257,15 @@ mod tests {
 
     fn model(name: &str, chip: &str, status: &str) -> CatalogModel {
         CatalogModel {
-            display_name: name.into(), family: String::new(), model_size: String::new(),
-            tasks: vec![], compatibility: vec![Compat { chip_set: chip.into(), hardware: String::new(), status: status.into() }],
+            display_name: name.into(),
+            family: String::new(),
+            model_size: String::new(),
+            tasks: vec![],
+            compatibility: vec![Compat {
+                chip_set: chip.into(),
+                hardware: String::new(),
+                status: status.into(),
+            }],
         }
     }
     #[test]
@@ -266,14 +273,17 @@ mod tests {
         let models = vec![
             model("A", "Blackhole", "Supported"),
             model("B", "Blackhole", "Experimental"),
-            model("C", "Wormhole", "Supported"),  // not Blackhole
+            model("C", "Wormhole", "Supported"), // not Blackhole
         ];
         assert_eq!(compatible_count(&models, "Blackhole"), 2);
         let mut sf = ModelStarfield::new(80, 24);
         sf.update(&models, "Blackhole");
         assert_eq!(sf.star_count(), 3, "one star per model");
-        let text: String = sf.render().iter()
-            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string())).collect();
+        let text: String = sf
+            .render()
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
         assert!(text.contains("2 of 3"), "footer shows compatible/total");
         assert!(text.contains("Blackhole"));
     }
