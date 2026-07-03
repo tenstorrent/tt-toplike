@@ -1,3 +1,13 @@
+tt-toplike (0.7.15) noble; urgency=medium
+
+  * Serving swimlanes: when a model is idle (no in-flight requests) but has
+    served some, the region now shows a representative dim "avg" lane built
+    from the average per-stage times, plus the cumulative served count in the
+    header — instead of going blank. Live lanes still appear per in-flight
+    request.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sat, 04 Jul 2026 04:00:00 +0000
+
 tt-toplike (0.7.14) noble; urgency=medium
 
   * Add a legend for Grid mode. Every view now has a symbol legend (press l);

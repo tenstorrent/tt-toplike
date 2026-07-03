@@ -294,19 +294,21 @@ impl ServingCreature {
         let mut canvas: Vec<Vec<(char, Color)>> = vec![vec![(' ', bg); width]; body_rows];
 
         // Live serving signals (all degrade to 0 when metrics are absent).
-        let (gen_tps, kv, running, waiting, q_avg, p_avg, d_avg, completed) = match &self.serving {
-            Some(s) => (
-                s.generation_tps,
-                s.kv_cache_usage,
-                s.requests_running,
-                s.requests_waiting,
-                s.queue_avg_s,
-                s.prefill_avg_s,
-                s.decode_avg_s,
-                s.completed_delta,
-            ),
-            None => (0.0, 0.0, 0, 0, 0.0, 0.0, 0.0, 0),
-        };
+        let (gen_tps, kv, running, waiting, q_avg, p_avg, d_avg, completed, served) =
+            match &self.serving {
+                Some(s) => (
+                    s.generation_tps,
+                    s.kv_cache_usage,
+                    s.requests_running,
+                    s.requests_waiting,
+                    s.queue_avg_s,
+                    s.prefill_avg_s,
+                    s.decode_avg_s,
+                    s.completed_delta,
+                    s.counters.requests_succeeded_total,
+                ),
+                None => (0.0, 0.0, 0, 0, 0.0, 0.0, 0.0, 0, 0),
+            };
 
         // Column split: a fixed-ish info panel on the right when there's room,
         // else snake-only. `panel_x` is the first panel column; the left region
@@ -361,8 +363,16 @@ impl ServingCreature {
             0
         };
         let lane_w = snake_right.saturating_sub(4);
-        let lanes = if want_swim {
+        // Idle-but-served: no requests in flight, but we've served some and have
+        // stage-time averages — show ONE dim "avg" lane (the typical request
+        // shape) so the region stays informative instead of going blank.
+        let idle_avg = want_swim && running == 0 && served > 0 && (q_avg + p_avg + d_avg) > 0.0;
+        let lanes = if !want_swim {
+            Vec::new()
+        } else if running > 0 {
             lane_segments(running, q_avg, p_avg, d_avg, lane_w, max_lanes)
+        } else if idle_avg {
+            lane_segments(1, q_avg, p_avg, d_avg, lane_w, 1)
         } else {
             Vec::new()
         };
@@ -447,18 +457,18 @@ impl ServingCreature {
         // --- Swimlanes: one shaded [queue|prefill|decode] bar per running req ---
         if swim_h > 0 {
             let swim_top = snake_top + snake_rows;
-            put_str(
-                &mut canvas,
-                swim_top,
-                1,
-                "requests",
-                colors::INFO,
-                snake_right,
-            );
+            // Header carries the cumulative served count so the region reads as
+            // informative even when idle (no live lanes).
+            let header = if served > 0 {
+                format!("requests · {} served", group_thousands(served as usize))
+            } else {
+                "requests".to_string()
+            };
+            put_str(&mut canvas, swim_top, 1, &header, colors::INFO, snake_right);
             // Completion marker: a bright pulse glyph beside the header,
             // lit while a completion is fresh (this tick, or during its pulse).
             if completed > 0 || self.pulse_left > 0 {
-                let mx = 1 + "requests".len() + 1;
+                let mx = 1 + header.chars().count() + 1;
                 if mx < snake_right {
                     canvas[swim_top][mx] = ('✦', colors::SUCCESS);
                 }
@@ -471,7 +481,12 @@ impl ServingCreature {
                 if row > snake_last + swim_h || row >= mid_bot {
                     break;
                 }
-                let label = format!("#{} ", li + 1);
+                // Live lanes are numbered; the idle representative lane is "avg".
+                let label = if idle_avg {
+                    "avg ".to_string()
+                } else {
+                    format!("#{} ", li + 1)
+                };
                 put_str(&mut canvas, row, 1, &label, dim, snake_right);
                 let mut x = 1 + label.chars().count();
                 let stages = [
@@ -737,6 +752,31 @@ mod tests {
             c.push_history(i as f32);
         }
         assert_eq!(c.tps_history().len(), HISTORY_CAP, "ring bounded to cap");
+    }
+
+    #[test]
+    fn idle_swimlanes_show_avg_lane_and_served_count() {
+        // Idle (0 in-flight) but has served history + stage averages: the
+        // swimlane region should show a representative "avg" lane and the
+        // cumulative served count, not go blank.
+        let mut c = ServingCreature::new();
+        let mut s = stats(0, 0.0, 0, 0); // 0 running, 0 tps → idle
+        s.queue_avg_s = 0.01;
+        s.prefill_avg_s = 20.0;
+        s.decode_avg_s = 0.4;
+        s.counters.requests_succeeded_total = 11;
+        let svc = ready_svc("Llama-3.3-70B", 3.0, 1024, Some(s));
+        c.update(&svc, 100, &[]);
+        let text: String = c
+            .render(100, 30)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|sp| sp.content.to_string()))
+            .collect();
+        assert!(
+            text.contains("11 served"),
+            "header shows served count when idle"
+        );
+        assert!(text.contains("avg"), "idle shows a representative avg lane");
     }
 
     #[test]
