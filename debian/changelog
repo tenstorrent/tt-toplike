@@ -1,3 +1,12 @@
+tt-toplike (0.7.9) noble; urgency=medium
+
+  * Fix: the serving-snake stats line (tok/s · running · queued · KV · TTFT ·
+    served) was rendered on the absolute bottom row and painted over by the
+    global status bar, so it never appeared. The snake view now reserves that
+    row for the status bar; its footer stats are visible just above it.
+
+ -- Tenstorrent <software@tenstorrent.com>  Fri, 03 Jul 2026 20:00:00 +0000
+
 tt-toplike (0.7.8) noble; urgency=medium
 
   * The [i] Inference Server Monitor is now one unified "snake" across all

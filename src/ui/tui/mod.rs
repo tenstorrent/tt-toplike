@@ -2919,9 +2919,18 @@ fn render_snake_view(f: &mut Frame, snake: &crate::animation::Snake) {
         Block::default().style(Style::default().bg(colors::rgb(0, 0, 0))),
         area,
     );
+    // Reserve the bottom row for the global status bar (drawn on top afterwards);
+    // otherwise the creature's own footer (the serving stats line) lands on the
+    // absolute bottom row and gets painted over by that bar.
+    let body = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: area.height.saturating_sub(1),
+    };
     f.render_widget(
-        Paragraph::new(snake.render(area.width as usize, area.height as usize)),
-        area,
+        Paragraph::new(snake.render(body.width as usize, body.height as usize)),
+        body,
     );
 }
 
