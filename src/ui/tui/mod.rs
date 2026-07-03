@@ -1981,6 +1981,7 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 DisplayMode::Defrag => defrag_legend_lines(bar, bg, dim, key),
                 DisplayMode::MemoryFlow => flow_legend_lines(bar, bg, dim),
                 DisplayMode::InferenceMonitor => inference_legend_lines(bar, bg, dim),
+                DisplayMode::Insights => insights_legend_lines(bar, bg, dim),
                 DisplayMode::Arcade => {
                     // All four combined.
                     let mut v = Vec::new();
@@ -2223,6 +2224,73 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
 }
 
 // ── Per-view legend line builders ─────────────────────────────────────────────
+
+/// Legend for the Insights (default) screen: chip portraits + process panel.
+fn insights_legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    macro_rules! ln {
+        ($spans:expr) => {{
+            let mut v: Vec<Span<'static>> =
+                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            v.extend($spans);
+            Line::from(v)
+        }};
+    }
+    vec![
+        ln!(vec![
+            Span::styled("portrait ", Style::default().fg(colors::rgb(120, 200, 255))),
+            Span::styled(
+                "= one panel per TT chip (power/temp/clock/DDR)",
+                Style::default().fg(dim),
+            ),
+        ]),
+        ln!(vec![
+            Span::styled(
+                "particles ",
+                Style::default().fg(colors::rgb(120, 200, 255)),
+            ),
+            Span::styled("= live compute activity", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("cyan→red ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled("= cool→hot (temperature / power)", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled(
+                "proc list ",
+                Style::default().fg(colors::rgb(180, 230, 180)),
+            ),
+            Span::styled(
+                "= processes using TT devices (↑↓ to select)",
+                Style::default().fg(dim),
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("k / K ", Style::default().fg(colors::ERROR)),
+            Span::styled(
+                "= SIGTERM / SIGKILL the selected process",
+                Style::default().fg(dim),
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("fleet grid ", Style::default().fg(colors::WARNING)),
+            Span::styled(
+                "= per-chip heatmap at 32+ devices (Enter=zoom)",
+                Style::default().fg(dim),
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("i ", Style::default().fg(colors::rgb(120, 200, 255))),
+            Span::styled(
+                "= open the Inference Server Monitor",
+                Style::default().fg(dim),
+            ),
+        ]),
+    ]
+}
 
 /// Legend for the `[i]` Inference Server Monitor (the unified snake dashboard).
 fn inference_legend_lines(
