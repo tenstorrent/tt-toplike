@@ -160,6 +160,48 @@ pub const ACCRETION_CHARS: [char; 4] = ['◐', '◑', '◒', '◓'];
 /// Used for Blackhole L1 SRAM cores near event horizon
 pub const SINGULARITY_CHARS: [char; 5] = ['·', '∘', '○', '●', '◉'];
 
+/// One 1990s-BBS-style horizontal rule: `╔══[ LABEL ]══════▓▒░` — double-line
+/// lead, boxed label, rule body, and a dither fade on the right (this project
+/// never draws right-side walls). Char-exact `width`; label truncated char-safe
+/// when it doesn't fit; empty at width 0.
+pub fn bbs_rule(label: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let fade = "▓▒░";
+    let lead = "╔══[ ";
+    let close = " ]";
+    let fixed = lead.chars().count() + close.chars().count() + fade.chars().count();
+    let label_room = width.saturating_sub(fixed);
+    let label_cut: String = label.chars().take(label_room).collect();
+    let mut s = String::new();
+    s.push_str(lead);
+    s.push_str(&label_cut);
+    s.push_str(close);
+    let used = s.chars().count() + fade.chars().count();
+    for _ in used..width {
+        s.push('═');
+    }
+    s.push_str(fade);
+    // Degenerate widths: hard-clamp to exactly `width` chars.
+    s.chars().take(width).collect()
+}
+
+/// BBS-style title bookends: `░▒▓ TEXT ▓▒░` centered-ish, padded/clamped to
+/// exactly `width` chars.
+pub fn bbs_title(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let core = format!("░▒▓ {text} ▓▒░");
+    let mut s: String = core.chars().take(width).collect();
+    let pad = width.saturating_sub(s.chars().count());
+    for _ in 0..pad {
+        s.push('▄');
+    }
+    s
+}
+
 /// Map value to standard block character
 pub fn value_to_block_char(value: f32) -> char {
     value_to_char_intensity(value, &BLOCK_CHARS)
@@ -384,5 +426,25 @@ mod tests {
     fn test_portal_chars() {
         assert_eq!(value_to_portal_char(0.0), '◯'); // Closed portal
         assert_eq!(value_to_portal_char(1.0), '◉'); // Open portal
+    }
+
+    #[test]
+    fn bbs_rule_boxes_label_and_fades_right() {
+        let r = bbs_rule("STARFIELD", 40);
+        assert_eq!(r.chars().count(), 40, "exact width");
+        assert!(r.starts_with("╔══[ "), "double-line lead-in + label box");
+        assert!(r.contains("STARFIELD ]"));
+        assert!(r.ends_with("▓▒░"), "dither fade, never a right wall");
+        // Degenerate widths: char-safe, exact width, no panic.
+        assert_eq!(bbs_rule("STARFIELD", 6).chars().count(), 6);
+        assert_eq!(bbs_rule("X", 0), "");
+    }
+
+    #[test]
+    fn bbs_title_bookends_and_clamps() {
+        let t = bbs_title("tt-toplike", 30);
+        assert_eq!(t.chars().count(), 30);
+        assert!(t.contains("▓ tt-toplike ▓") || t.contains("█ tt-toplike █"));
+        assert_eq!(bbs_title("tt-toplike", 4).chars().count(), 4);
     }
 }

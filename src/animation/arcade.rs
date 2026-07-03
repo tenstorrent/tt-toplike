@@ -19,8 +19,8 @@
 //! - BOLD white character for maximum visibility
 
 use crate::animation::{
-    hsv_to_rgb, lerp, temp_to_hue, AdaptiveBaseline, BoardTopology, DefragVis, HardwareStarfield,
-    MemoryCastle, MemoryFlowVis,
+    bbs_rule, hsv_to_rgb, lerp, temp_to_hue, AdaptiveBaseline, BoardTopology, DefragVis,
+    HardwareStarfield, MemoryCastle, MemoryFlowVis,
 };
 use crate::backend::TelemetryBackend;
 use crate::ui::colors;
@@ -625,37 +625,34 @@ impl ArcadeVisualization {
     }
 
     /// Render region separator
+    ///
+    /// BBS-chrome rule (`bbs_rule`): `╔══[ LABEL ]══════▓▒░` — the boxed
+    /// label keeps the bright "active section" color, the rule/box-drawing
+    /// portion keeps the animated hue-cycling color, matching the previous
+    /// dash-separator's palette split.
     fn render_separator(&self, label: &str, _region_height: usize) -> Line<'static> {
         // Animated color cycling for separator
         let hue = (self.frame as f32 * 2.0) % 360.0;
         let separator_color = hsv_to_rgb(hue, 0.6, 0.8);
+        let label_color = Style::default()
+            .fg(colors::rgb(220, 240, 255))
+            .add_modifier(Modifier::BOLD);
+        let rule_color = Style::default()
+            .fg(separator_color)
+            .add_modifier(Modifier::BOLD);
 
-        // Use display width (columns) not byte length — emoji like 🏰 are 2 columns wide.
-        let label_display_width = UnicodeWidthStr::width(label) + 2; // " label "
-        let remaining = self.width.saturating_sub(label_display_width);
-        let left_width = remaining / 2;
-        let right_width = remaining - left_width; // absorbs odd remainder so total == self.width
-
-        Line::from(vec![
-            Span::styled(
-                "─".repeat(left_width),
-                Style::default()
-                    .fg(separator_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" {} ", label),
-                Style::default()
-                    .fg(colors::rgb(220, 240, 255))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "─".repeat(right_width),
-                Style::default()
-                    .fg(separator_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])
+        let rule = bbs_rule(label, self.width);
+        // Split the boxed label back out so it can keep its distinct color;
+        // if the label got char-truncated (narrow width) it won't be found
+        // verbatim, so fall back to coloring the whole rule uniformly.
+        match rule.find(label) {
+            Some(idx) => Line::from(vec![
+                Span::styled(rule[..idx].to_string(), rule_color),
+                Span::styled(label.to_string(), label_color),
+                Span::styled(rule[idx + label.len()..].to_string(), rule_color),
+            ]),
+            None => Line::from(vec![Span::styled(rule, rule_color)]),
+        }
     }
 
     /// Splice a single styled character into an existing line at a given column.
