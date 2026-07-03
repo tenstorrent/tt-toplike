@@ -145,7 +145,11 @@ impl ServingCreature {
     /// snake. `(text, color)` per row; blank rows separate groups. Values come
     /// from the live `serving` stats (or `—` when metrics are absent) plus the
     /// container CPU/RSS. Kept pure/allocating so it's unit-testable.
-    fn panel_rows(&self) -> Vec<(String, Color)> {
+    ///
+    /// `include_requests` gates the "requests" group (running/queued/served/
+    /// errors): when the swimlane region is drawn it already shows per-request
+    /// state, so the caller passes `false` to avoid repeating it in the panel.
+    fn panel_rows(&self, include_requests: bool) -> Vec<(String, Color)> {
         let header = colors::rgb(120, 180, 200); // muted teal group headers
         let val = colors::TEXT_PRIMARY;
         let mut rows: Vec<(String, Color)> = Vec::new();
@@ -187,12 +191,16 @@ impl ServingCreature {
         rows.push((format!("  decode   {dec}"), val));
         rows.push((format!("  prefill  {pre}"), val));
         rows.push((String::new(), val));
-        hdr(&mut rows, "requests");
-        rows.push((format!("  running  {run}"), val));
-        rows.push((format!("  queued   {wait}"), val));
-        rows.push((format!("  served   {served}"), val));
-        rows.push((format!("  errors   {errs}"), val));
-        rows.push((String::new(), val));
+        // The swimlane region (when drawn) owns per-request state, so this group
+        // is emitted only when the caller isn't already showing swimlanes.
+        if include_requests {
+            hdr(&mut rows, "requests");
+            rows.push((format!("  running  {run}"), val));
+            rows.push((format!("  queued   {wait}"), val));
+            rows.push((format!("  served   {served}"), val));
+            rows.push((format!("  errors   {errs}"), val));
+            rows.push((String::new(), val));
+        }
         hdr(&mut rows, "cache · latency");
         rows.push((format!("  KV cache {kv}"), val));
         rows.push((format!("  TTFT avg {ttft}"), val));
@@ -302,24 +310,19 @@ impl ServingCreature {
         let mid_rows = mid_bot - mid_top; // >= 1 (strip only claimed when room)
 
         // --- Timeline band: sparkline of tps_history + numeric tok/s ---
+        // The top rows sit above the snake/panel split (no divider up here), so
+        // the band spans the FULL width rather than clipping to `snake_right`.
         if has_timeline {
             let label = format!("tok/s {:.0} ", gen_tps);
-            put_str(&mut canvas, 0, 0, &label, colors::INFO, snake_right);
-            let spark_x = label.chars().count().min(snake_right);
-            let spark_w = snake_right.saturating_sub(spark_x);
+            put_str(&mut canvas, 0, 0, &label, colors::INFO, width);
+            let spark_x = label.chars().count().min(width);
+            let spark_w = width.saturating_sub(spark_x);
             if spark_w > 0 {
                 let spark = sparkline(self.tps_history(), spark_w);
-                put_str(
-                    &mut canvas,
-                    0,
-                    spark_x,
-                    &spark,
-                    colors::SUCCESS,
-                    snake_right,
-                );
+                put_str(&mut canvas, 0, spark_x, &spark, colors::SUCCESS, width);
                 // Second row: a dimmer full-width continuation of the same trace.
-                let wide = sparkline(self.tps_history(), snake_right);
-                put_str(&mut canvas, 1, 0, &wide, dim, snake_right);
+                let wide = sparkline(self.tps_history(), width);
+                put_str(&mut canvas, 1, 0, &wide, dim, width);
             }
         }
 
@@ -461,7 +464,12 @@ impl ServingCreature {
             for row in canvas.iter_mut().take(mid_bot).skip(mid_top) {
                 row[div] = ('│', dim);
             }
-            for (r, (text, color)) in self.panel_rows().into_iter().enumerate() {
+            // When the swimlane region is drawn it already carries per-request
+            // state, so omit the panel's "requests" group to avoid duplication;
+            // keep it only when swimlanes are collapsed away (info never fully
+            // disappears).
+            let include_requests = swim_h == 0;
+            for (r, (text, color)) in self.panel_rows(include_requests).into_iter().enumerate() {
                 let row = mid_top + r;
                 if row >= mid_bot {
                     break;
@@ -639,11 +647,19 @@ mod tests {
             "throughput group"
         );
         assert!(text.contains("842 tok/s"), "decode rate");
+        // At 80x24 the swimlane region draws (width >= 70), so it owns per-request
+        // state and the panel omits its "requests" group to avoid duplication.
+        // Prove the request info is present exactly once — in the swimlane region,
+        // via its "requests" header and a "#1" lane label — not in the panel.
+        assert!(text.contains("requests"), "swimlane requests header");
         assert!(
-            text.contains("requests") && text.contains("running"),
-            "requests group"
+            text.contains("#1"),
+            "swimlane lane label (request shown once)"
         );
-        assert!(text.contains("served"), "served row");
+        assert!(
+            !text.contains("running"),
+            "panel must not repeat the requests group when swimlanes draw"
+        );
         assert!(
             text.contains("container") && text.contains("CPU"),
             "container group"
@@ -700,6 +716,8 @@ mod tests {
             s.prefill_avg_s = 1.0;
             s.decode_avg_s = 3.0;
         }
+        // Two ticks so the throughput ring has samples for the timeline sparkline.
+        c.update(&svc, 1453, &chips);
         c.update(&svc, 1454, &chips);
         let big: String = c
             .render(100, 30)
@@ -710,7 +728,15 @@ mod tests {
         assert!(big.contains("tok/s"), "timeline / stats"); // timeline / stats
         assert!(big.contains("requests"), "swimlane header"); // swimlane header
         assert!(big.contains("BH0"), "chip strip"); // chip strip
-                                                    // Degrade: tiny sizes must not panic and must still show the label.
+                                                    // Pin the timeline band: a sparkline glyph must be present (not satisfied
+                                                    // by the stats panel alone).
+        assert!(
+            big.chars().any(|ch| "▁▂▃▄▅▆▇█".contains(ch)),
+            "timeline sparkline glyph"
+        );
+        // Pin the swimlane region: a "#1" lane label (also panel-independent).
+        assert!(big.contains("#1"), "swimlane lane label");
+        // Degrade: tiny sizes must not panic and must still show the label.
         for (w, h) in [(100, 6), (60, 10), (30, 8), (10, 4), (0, 0)] {
             let _ = c.render(w, h);
         }
