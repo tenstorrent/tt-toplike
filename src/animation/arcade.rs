@@ -122,15 +122,27 @@ impl ArcadeVisualization {
         let flow_start = castle_end + 1;
         let flow_end = flow_start + flow_height;
 
+        // Embedded sub-visualizations render with chrome OFF: each one drops its
+        // own per-device W/°C header so the composite view isn't printing the
+        // same telemetry ~3×.  Arcade renders ONE shared telemetry strip (Row 1)
+        // instead.  Standalone modes keep chrome on (their default).
+        let mut starfield = HardwareStarfield::new(width, starfield_height);
+        starfield.set_chrome(false);
+        let mut memory_castle =
+            MemoryCastle::new_with_density(castle_col_w, castle_height, 200, 10);
+        memory_castle.set_chrome(false);
+        let mut memory_flow = MemoryFlowVis::new_with_density(width, flow_height, 100);
+        memory_flow.set_chrome(false);
+
         Self {
             width,
             height,
-            starfield: HardwareStarfield::new(width, starfield_height),
-            memory_castle: MemoryCastle::new_with_density(castle_col_w, castle_height, 200, 10),
+            starfield,
+            memory_castle,
             defrag: DefragVis::new(defrag_col_w, castle_height),
             castle_col_w,
             defrag_col_w,
-            memory_flow: MemoryFlowVis::new_with_density(width, flow_height, 100),
+            memory_flow,
             hero_x: width as f32 / 2.0,
             hero_y: height as f32 / 2.0,
             hero_target_x: width as f32 / 2.0,
@@ -520,13 +532,13 @@ impl ArcadeVisualization {
     pub fn render(&self, backend: &dyn TelemetryBackend) -> Vec<Line<'static>> {
         let mut lines = Vec::with_capacity(self.height);
 
-        // Header: exactly 2 rows — title bar + topology (or blank).
+        // Header: exactly 2 rows — title bar + Row 1.
+        //
+        // Row 1 carries the single shared telemetry strip (the embedded sections
+        // no longer print their own W/°C).  The topology diagram shares the row
+        // when both fit; otherwise the strip wins.
         lines.push(self.render_header(backend));
-        if let Some(diagram) = self.topology_diagram_line(backend) {
-            lines.push(diagram);
-        } else {
-            lines.push(Line::from(""));
-        }
+        lines.push(self.render_row1(backend));
 
         // Render Starfield region — separator first, then content
         let starfield_lines = self.starfield.render();
@@ -584,6 +596,115 @@ impl ArcadeVisualization {
 
         // Overlay hero character and trail on the composite canvas
         self.overlay_hero(lines, backend)
+    }
+
+    /// Build the single shared per-device telemetry strip.
+    ///
+    /// Format: `Dev0 92W 78°C 1.35GHz · Dev1 …`.  Fields a device does not
+    /// report are skipped.  Character-safe: when the devices don't fit in
+    /// `width` display columns the string is truncated on a character boundary
+    /// and a trailing `…` appended.  Returns an empty string when there are no
+    /// devices.  This is the ONE place Arcade prints per-device W/°C — the
+    /// embedded sections render with chrome off.
+    fn telemetry_strip(backend: &dyn TelemetryBackend, width: usize) -> String {
+        const SEP: &str = " · ";
+        let mut entries: Vec<String> = Vec::new();
+        for (i, device) in backend.devices().iter().enumerate() {
+            let telem = backend.telemetry(device.index);
+            // "Dev{n}" label always present for orientation; each numeric field
+            // is added only when the device actually reports it.
+            let mut parts: Vec<String> = vec![format!("Dev{}", i)];
+            if let Some(t) = telem {
+                if let Some(p) = t.power {
+                    parts.push(format!("{:.0}W", p));
+                }
+                if let Some(temp) = t.asic_temperature {
+                    parts.push(format!("{:.0}°C", temp));
+                }
+                if let Some(clk) = t.aiclk {
+                    parts.push(format!("{:.2}GHz", clk as f32 / 1000.0));
+                }
+            }
+            entries.push(parts.join(" "));
+        }
+
+        let full = entries.join(SEP);
+        if UnicodeWidthStr::width(full.as_str()) <= width {
+            return full;
+        }
+        if width == 0 {
+            return String::new();
+        }
+
+        // Reserve one column for the ellipsis; walk chars by display width so
+        // wide glyphs (°, …) never split and the result never exceeds `width`.
+        let budget = width.saturating_sub(1);
+        let mut out = String::new();
+        let mut used = 0usize;
+        for ch in full.chars() {
+            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+            if used + cw > budget {
+                break;
+            }
+            used += cw;
+            out.push(ch);
+        }
+        out.push('…');
+        out
+    }
+
+    /// Color the plain telemetry strip into themed spans (per-device chunks in
+    /// the primary text color, `·` separators dimmed).
+    fn strip_spans(strip: &str) -> Vec<Span<'static>> {
+        const SEP: &str = " · ";
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        for (i, entry) in strip.split(SEP).enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(
+                    SEP.to_string(),
+                    Style::default().fg(colors::text_secondary()),
+                ));
+            }
+            spans.push(Span::styled(
+                entry.to_string(),
+                Style::default().fg(colors::text_primary()),
+            ));
+        }
+        spans
+    }
+
+    /// Render Arcade's Row 1: the shared telemetry strip, with the topology
+    /// diagram to its right when both fit the row (else the strip wins).  Falls
+    /// back to the topology line (or a blank row) when there are no devices.
+    fn render_row1(&self, backend: &dyn TelemetryBackend) -> Line<'static> {
+        let strip = Self::telemetry_strip(backend, self.width);
+        let topo = self.topology_diagram_line(backend);
+
+        if strip.is_empty() {
+            // Nothing to summarize — preserve the prior behavior.
+            return topo.unwrap_or_else(|| Line::from(""));
+        }
+
+        let strip_w = UnicodeWidthStr::width(strip.as_str());
+        let strip_spans = Self::strip_spans(&strip);
+
+        if let Some(topo_line) = topo {
+            let topo_w: usize = topo_line
+                .spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            const GAP: usize = 2;
+            if strip_w + GAP + topo_w <= self.width {
+                let mut spans = strip_spans;
+                spans.push(Span::raw("  "));
+                spans.extend(topo_line.spans);
+                return Line::from(spans);
+            }
+        }
+
+        // Strip wins — topology dropped this frame.
+        Line::from(strip_spans)
     }
 
     /// Render header for Arcade mode
@@ -972,5 +1093,52 @@ mod tests {
         // Both must satisfy the no-overlap invariant
         assert!(vis0.starfield_end <= vis0.castle_start);
         assert!(vis1.starfield_end <= vis1.castle_start);
+    }
+
+    /// Regression for the duplicate-telemetry bug: the embedded starfield /
+    /// castle / flow used to each print their own per-device W/°C header, so a
+    /// single Arcade frame showed each device's readout ~3×.  Now the embedded
+    /// sections render with chrome off and Arcade prints ONE shared strip, so
+    /// each device's `°C` appears at most once across the whole render.
+    #[test]
+    fn arcade_prints_each_device_telemetry_once() {
+        let mut backend = crate::backend::mock::MockBackend::new(2);
+        backend.init().unwrap();
+        backend.update().unwrap();
+        let mut a = ArcadeVisualization::new(120, 40);
+        a.update(&backend);
+        let text: String = a
+            .render(&backend)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        // Device 0's readout appears exactly once (the shared strip), not once
+        // per embedded section (was 3x).
+        let w_readouts = text.matches("°C").count();
+        assert!(
+            w_readouts <= backend.devices().len(),
+            "expected ≤1 °C readout per device in arcade, got {w_readouts}"
+        );
+    }
+
+    /// Guard the standalone path: with chrome at its default (`true`), a
+    /// standalone Memory Castle must still print its per-device W/°C header —
+    /// the dedup only applies to the embedded (chrome off) instances.
+    #[test]
+    fn standalone_castle_keeps_telemetry_header() {
+        let mut backend = crate::backend::mock::MockBackend::new(2);
+        backend.init().unwrap();
+        backend.update().unwrap();
+        let mut castle = MemoryCastle::new(120, 20);
+        castle.update(&backend);
+        let text: String = castle
+            .render(&backend)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(
+            text.contains("°C"),
+            "standalone MemoryCastle (chrome default) must still show °C"
+        );
     }
 }

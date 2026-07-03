@@ -228,6 +228,12 @@ pub struct HardwareStarfield {
     /// Number of devices the starfield was last initialised with.
     /// Controls fleet-mode threshold check in render().
     device_count: usize,
+
+    /// Render section chrome (the standalone header label).  `true` for the
+    /// standalone Starfield mode (default, byte-identical to today); Arcade sets
+    /// this `false` so the composite view owns a single shared telemetry strip
+    /// instead of each embedded section printing its own header.
+    chrome: bool,
 }
 
 impl HardwareStarfield {
@@ -251,7 +257,15 @@ impl HardwareStarfield {
             device_temps: HashMap::new(),
             device_powers: HashMap::new(),
             device_count: 0,
+            chrome: true,
         }
+    }
+
+    /// Toggle section chrome (header label).  `true` = standalone look
+    /// (default); `false` suppresses the section header so a composite view
+    /// (Arcade) can render one shared telemetry strip instead.
+    pub fn set_chrome(&mut self, chrome: bool) {
+        self.chrome = chrome;
     }
 
     /// Set the animation sensitivity multiplier.
@@ -740,7 +754,10 @@ impl HardwareStarfield {
 
         for row in 0..self.height {
             // ── Header row (one row above chip grid) ───────────────────────
-            if row == top_pad && top_pad > 0 {
+            // Suppressed when chrome is off (embedded in Arcade) so the
+            // composite view owns the single shared telemetry strip; the row
+            // then falls through to a background nebula row, preserving height.
+            if row == top_pad && top_pad > 0 && self.chrome {
                 let label = format!(
                     " ✦ Galaxy Fleet — {} chips · ·=cool ●=active ● =hot ",
                     self.device_count

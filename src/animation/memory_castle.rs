@@ -222,6 +222,11 @@ pub struct MemoryCastle {
     /// Board topology for topology-aware column separators and board labels.
     /// `║` is used at board boundaries; `│` between chips on the same board.
     board_topology: Option<BoardTopology>,
+    /// Emit per-device power/temperature telemetry in the headers.  `true` for
+    /// the standalone Memory Castle mode (default, byte-identical to today);
+    /// Arcade sets this `false` so the composite view owns a single shared
+    /// telemetry strip instead of each embedded section printing its own W/°C.
+    chrome: bool,
 }
 
 /// Per-device column budget for the full castle rendering (existing look).
@@ -304,7 +309,16 @@ impl MemoryCastle {
             max_particles,
             environment,
             board_topology: None,
+            chrome: true,
         }
+    }
+
+    /// Toggle per-device power/temp telemetry in the headers.  `true` = the
+    /// standalone look (default); `false` suppresses the duplicate W/°C readouts
+    /// so a composite view (Arcade) can render one shared telemetry strip.
+    /// Orientation labels (`Dev{n}`) are always kept.
+    pub fn set_chrome(&mut self, chrome: bool) {
+        self.chrome = chrome;
     }
 
     /// Set the animation sensitivity multiplier.
@@ -608,7 +622,14 @@ impl MemoryCastle {
                     .unwrap_or((idx as f32 * 90.0) % 360.0);
                 let color = hsv_to_rgb(hue, 0.8, 0.9);
 
-                let device_info = format!(" Dev{:<2} {:>3.0}W {:>3.0}°C ", idx, power, temp);
+                // Standalone shows the per-device W/°C header; embedded
+                // (chrome off) keeps only the Dev{n} orientation label — the
+                // Arcade shared strip owns the telemetry readout.
+                let device_info = if self.chrome {
+                    format!(" Dev{:<2} {:>3.0}W {:>3.0}°C ", idx, power, temp)
+                } else {
+                    format!(" Dev{:<2} ", idx)
+                };
                 let padding_needed = col_width.saturating_sub(device_info.len());
                 let padding = " ".repeat(padding_needed / 2);
 
@@ -912,7 +933,14 @@ impl MemoryCastle {
                     .unwrap_or((idx as f32 * 90.0) % 360.0);
                 let color = hsv_to_rgb(hue, 0.8, 0.9);
 
-                let device_info = format!("D{} {:>3.0}W", idx, power);
+                // Standalone shows the compact `D{n} {W}W` label; embedded
+                // (chrome off) drops the wattage but keeps the `D{n}` label for
+                // orientation — the Arcade shared strip owns the readout.
+                let device_info = if self.chrome {
+                    format!("D{} {:>3.0}W", idx, power)
+                } else {
+                    format!("D{}", idx)
+                };
                 let padding_needed = col_width.saturating_sub(device_info.len());
                 let left_pad = " ".repeat(padding_needed / 2);
                 let right_pad = " ".repeat(padding_needed - padding_needed / 2);
@@ -1302,12 +1330,18 @@ impl MemoryCastle {
                         .fg(bar_color)
                         .add_modifier(Modifier::BOLD),
                 ));
-                spans.push(Span::styled(
-                    format!(" {:5.1}W {:5.1}°C", power, temp),
-                    Style::default()
-                        .bg(colors::rgb(0, 0, 0))
-                        .fg(colors::rgb(180, 180, 180)),
-                ));
+                // The numeric W/°C readout is per-device telemetry; suppress it
+                // when embedded (chrome off) so it isn't duplicated by the Arcade
+                // shared strip. The temperature-tinted power bar (above) stays as
+                // the visual signal.
+                if self.chrome {
+                    spans.push(Span::styled(
+                        format!(" {:5.1}W {:5.1}°C", power, temp),
+                        Style::default()
+                            .bg(colors::rgb(0, 0, 0))
+                            .fg(colors::rgb(180, 180, 180)),
+                    ));
+                }
 
                 // Column separator (not after the last column in a row)
                 if col + 1 < grid_cols && (row * grid_cols + col + 1) < n {
@@ -1481,32 +1515,36 @@ impl MemoryCastle {
 
         spans.push(Span::raw("│ "));
 
-        // Temperature
         if let Some(t) = telem {
-            let temp = t.temp_c();
-            let temp_color = if temp > 80.0 {
-                colors::rgb(255, 100, 100)
-            } else if temp > 65.0 {
-                colors::rgb(255, 180, 100)
-            } else {
-                colors::rgb(100, 220, 100)
-            };
-            spans.push(Span::styled(
-                format!("🌡 {:5.1}°C ", temp),
-                Style::default().bg(colors::rgb(0, 0, 0)).fg(temp_color),
-            ));
+            // Temperature + Power are per-device telemetry: shown standalone,
+            // suppressed when embedded (chrome off) so the Arcade shared strip
+            // owns those readouts. Current (⚙A) is not in the strip, so it stays.
+            if self.chrome {
+                let temp = t.temp_c();
+                let temp_color = if temp > 80.0 {
+                    colors::rgb(255, 100, 100)
+                } else if temp > 65.0 {
+                    colors::rgb(255, 180, 100)
+                } else {
+                    colors::rgb(100, 220, 100)
+                };
+                spans.push(Span::styled(
+                    format!("🌡 {:5.1}°C ", temp),
+                    Style::default().bg(colors::rgb(0, 0, 0)).fg(temp_color),
+                ));
 
-            spans.push(Span::raw("│ "));
+                spans.push(Span::raw("│ "));
 
-            // Power
-            spans.push(Span::styled(
-                format!("⚡ {:5.1}W ", t.power_w()),
-                Style::default()
-                    .bg(colors::rgb(0, 0, 0))
-                    .fg(colors::rgb(255, 220, 100)),
-            ));
+                // Power
+                spans.push(Span::styled(
+                    format!("⚡ {:5.1}W ", t.power_w()),
+                    Style::default()
+                        .bg(colors::rgb(0, 0, 0))
+                        .fg(colors::rgb(255, 220, 100)),
+                ));
 
-            spans.push(Span::raw("│ "));
+                spans.push(Span::raw("│ "));
+            }
 
             // Current
             spans.push(Span::styled(
