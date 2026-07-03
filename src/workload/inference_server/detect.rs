@@ -73,6 +73,19 @@ fn published_port(toks: &[&str]) -> Option<u16> {
     None
 }
 
+/// Extract the model from the container's `--model <X>` or `--model=X` arg.
+fn model_arg(toks: &[&str]) -> Option<String> {
+    for (i, t) in toks.iter().enumerate() {
+        if let Some(v) = t.strip_prefix("--model=") {
+            return Some(v.to_string());
+        }
+        if *t == "--model" {
+            return value_after(toks, i).map(|s| s.to_string());
+        }
+    }
+    None
+}
+
 /// Recognize a TT inference server from `name` + full `cmdline`, or `None`.
 /// v1 only recognizes the `docker run` form.
 pub fn parse_inference_server(name: &str, cmdline: &str) -> Option<InferenceServer> {
@@ -103,7 +116,10 @@ pub fn parse_inference_server(name: &str, cmdline: &str) -> Option<InferenceServ
     Some(InferenceServer {
         source: Source::Docker { container },
         image,
-        model: env_value(&toks, "MODEL"),
+        // Prefer `-e MODEL=…`; fall back to the container's `--model <X>` (or
+        // `--model=X`) arg, which is how vLLM/LLM deployments pass the model
+        // (e.g. Qwen/Qwen3-32B) rather than an env var.
+        model: env_value(&toks, "MODEL").or_else(|| model_arg(&toks)),
         mesh: env_value(&toks, "MESH_DEVICE"),
         arch: env_value(&toks, "ARCH_NAME"),
         device: env_value(&toks, "DEVICE"),
@@ -133,6 +149,24 @@ mod tests {
         assert_eq!(s.port, Some(8000));
         assert!(s.uses_tt_device);
         assert!(s.image.contains("tt-media-inference-server"));
+    }
+
+    // A real vLLM/LLM deployment: the model is a container CLI arg
+    // (`--model Qwen/Qwen3-32B`), NOT a `-e MODEL=` env var; the only env vars
+    // are `MODEL_WEIGHTS_DIR`/`HF_HOME` (must not be mistaken for MODEL).
+    const DOCKER_RUN_VLLM: &str = "docker run --rm --name tt-inference-server-2269d4f6 \
+        --device /dev/tenstorrent:/dev/tenstorrent --publish 0.0.0.0:8002:8002 \
+        -e MODEL_WEIGHTS_DIR=/x -e HF_HOME=/y \
+        ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.14.0 \
+        --model Qwen/Qwen3-32B --tt-device p300x2 --no-auth --service-port 8002";
+
+    #[test]
+    fn parses_model_from_cli_arg_when_no_env() {
+        let s = parse_inference_server("docker", DOCKER_RUN_VLLM).expect("should detect");
+        assert_eq!(s.model.as_deref(), Some("Qwen/Qwen3-32B"));
+        assert_eq!(s.port, Some(8002));
+        assert!(s.image.contains("tt-inference-server"));
+        assert!(s.uses_tt_device);
     }
 
     #[test]

@@ -92,6 +92,12 @@ pub const SERVERS: &[ServiceDef] = &[
     },
 ];
 
+/// Human-readable label from a model id: strip any HuggingFace org prefix,
+/// e.g. `"Qwen/Qwen3-32B"` → `"Qwen3-32B"`. Left unchanged when there's no `/`.
+pub fn model_basename(model: &str) -> &str {
+    model.rsplit('/').next().unwrap_or(model).trim()
+}
+
 /// Normalize a model name for comparison: lowercase; `.`, `_`, whitespace → `-`.
 fn norm(s: &str) -> String {
     s.trim().to_lowercase().replace(['.', '_', ' '], "-")
@@ -108,6 +114,13 @@ pub fn service_for(model: Option<&str>) -> Option<&'static ServiceDef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn model_basename_strips_org_prefix() {
+        assert_eq!(model_basename("Qwen/Qwen3-32B"), "Qwen3-32B");
+        assert_eq!(model_basename("meta-llama/Llama-3.1-8B"), "Llama-3.1-8B");
+        assert_eq!(model_basename("FLUX.1-schnell"), "FLUX.1-schnell");
+    }
+
     #[test]
     fn maps_each_model_exactly_no_false_positives() {
         assert_eq!(

@@ -1,6 +1,6 @@
 [package]
 name = "tt-toplike"
-version = "0.7.6"
+version = "0.7.7"
 edition = "2021"
 authors = ["Tenstorrent"]
 license = "Apache-2.0"

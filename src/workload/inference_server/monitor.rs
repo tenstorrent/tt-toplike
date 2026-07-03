@@ -28,7 +28,7 @@ use crate::workload::inference_server::probe::{
     count_lines, parse_docker_stats, parse_env_var, parse_liveness, top_process, ContainerProbe,
     DockerProbe, Readiness, TickSample,
 };
-use crate::workload::inference_server::services::{service_for, ServiceDef};
+use crate::workload::inference_server::services::{model_basename, service_for};
 use crate::workload::inference_server::state::{
     estimate_progress, is_alarm, ModelProfile, Phase, ServiceState,
 };
@@ -135,7 +135,12 @@ pub(crate) fn fold_tick(
 /// Gather one tick's raw [`TickSample`] for `container` via `probe`, given
 /// the service's static port/health-path definition. All I/O; the only logic
 /// here is parsing what the probe returns (via the pure parsers in `probe.rs`).
-fn build_sample(probe: &dyn ContainerProbe, container: &str, def: &ServiceDef) -> TickSample {
+fn build_sample(
+    probe: &dyn ContainerProbe,
+    container: &str,
+    port: u16,
+    health_path: &str,
+) -> TickSample {
     // Only run the (slower) exec'd `find` when the container actually has
     // TT_METAL_HOME set — e.g. `prompt-server` doesn't, and would otherwise
     // pay for a doomed `find` every tick.
@@ -152,7 +157,7 @@ fn build_sample(probe: &dyn ContainerProbe, container: &str, def: &ServiceDef) -
     let top_proc = top.map(|(comm, _cpu, _rss)| comm);
     let python_alive = top_proc.as_deref().is_some_and(|c| c.contains("python"));
 
-    let (status, body) = probe.http(def.port, def.health_path);
+    let (status, body) = probe.http(port, health_path);
     let readiness = parse_liveness(status, &body);
 
     // Trail: `ContainerProbe` has no docker-logs method yet, so there's no
@@ -193,15 +198,43 @@ pub(crate) fn rebuild_snapshot(
     let mut next_states = Vec::with_capacity(detected.len());
     for server in detected {
         let Source::Docker { container } = &server.source;
-        let Some(def) = service_for(server.model.as_deref()) else {
-            continue; // unrecognized model → not tracked
-        };
-        let sample = build_sample(probe, container, def);
+        // Resolve to a curated SERVERS entry when the model matches (nicer label
+        // + known port/health path); otherwise track the container generically
+        // so ANY detected tt-inference-server appears — LLM/vLLM deployments run
+        // arbitrary `--model` values (e.g. Qwen/Qwen3-32B) not in the table, and
+        // dropping them left the [i] view cold while the server was actually up.
+        let (key, label, port, health_path): (String, String, u16, &str) =
+            match service_for(server.model.as_deref()) {
+                Some(def) => (
+                    def.key.to_string(),
+                    def.label.to_string(),
+                    def.port,
+                    def.health_path,
+                ),
+                None => {
+                    let label = server
+                        .model
+                        .as_deref()
+                        .map(|m| model_basename(m).to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| container.clone());
+                    // Key by the (unique, stable) container name so prev-state
+                    // lookup and flat-tick accumulation persist across ticks.
+                    // Port from the parsed `--publish`, defaulting to 8000.
+                    (
+                        container.clone(),
+                        label,
+                        server.port.unwrap_or(8000),
+                        "/health",
+                    )
+                }
+            };
+        let sample = build_sample(probe, container, port, health_path);
         let prev_state = prev
             .iter()
-            .find(|s| s.key == def.key)
+            .find(|s| s.key == key)
             .cloned()
-            .unwrap_or_else(|| fresh_state(def.key, def.label));
+            .unwrap_or_else(|| fresh_state(&key, &label));
         next_states.push(fold_tick(
             &prev_state,
             sample,
@@ -402,6 +435,36 @@ mod tests {
         // when nothing is detected, the rebuild must return an empty snapshot (no stale carryover)
         let cleared = rebuild_snapshot(&[], &one, &FakeProbe, 5);
         assert!(cleared.is_empty());
+    }
+
+    /// Regression: a detected TT inference-server whose `--model` isn't in the
+    /// curated SERVERS table (e.g. a generic vLLM `Qwen/Qwen3-32B`) must still
+    /// be tracked — previously it was dropped, so the [i] view sat cold while
+    /// the container was actually up. It's tracked generically, keyed by the
+    /// container name, labeled from the model basename.
+    #[test]
+    fn tracks_detected_server_not_in_servers_table() {
+        let srv = InferenceServer {
+            source: Source::Docker {
+                container: "tt-inference-server-2269d4f6".into(),
+            },
+            image: "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release:0.14.0"
+                .into(),
+            model: Some("Qwen/Qwen3-32B".into()), // not in SERVERS
+            mesh: None,
+            arch: None,
+            device: None,
+            port: Some(8002),
+            uses_tt_device: true,
+        };
+        let snap = rebuild_snapshot(std::slice::from_ref(&srv), &[], &FakeProbe, 5);
+        assert_eq!(snap.len(), 1, "unrecognized model must still be tracked");
+        assert_eq!(snap[0].key, "tt-inference-server-2269d4f6");
+        assert!(
+            snap[0].label.contains("Qwen3-32B"),
+            "label derived from model basename, got {:?}",
+            snap[0].label
+        );
     }
 
     #[test]

@@ -88,10 +88,12 @@ pub fn format_service_row(st: &ServiceState) -> String {
 /// doc's "the panel shows every known service with its state; a service with
 /// no running container shows Down gracefully."
 ///
-/// Returns rows in `SERVERS` order (not snapshot order) so the panel doesn't
-/// reshuffle as services come and go.
+/// Returns the curated `SERVERS` entries first, in table order (so the panel
+/// doesn't reshuffle as services come and go), followed by any detected servers
+/// whose key isn't in the table (generic vLLM/LLM deployments), appended in
+/// snapshot order.
 pub fn service_rows(snapshot: &[ServiceState]) -> Vec<ServiceState> {
-    SERVERS
+    let mut rows: Vec<ServiceState> = SERVERS
         .iter()
         .map(|def| {
             snapshot
@@ -100,7 +102,16 @@ pub fn service_rows(snapshot: &[ServiceState]) -> Vec<ServiceState> {
                 .cloned()
                 .unwrap_or_else(|| down_placeholder(def.key, def.label))
         })
-        .collect()
+        .collect();
+    // Append detected servers that aren't in the curated SERVERS table (e.g. a
+    // generic vLLM `--model Qwen/Qwen3-32B`). Without this they'd drive the
+    // cold→hot decision but never show in the live list once Ready.
+    for s in snapshot {
+        if !SERVERS.iter().any(|def| def.key == s.key) {
+            rows.push(s.clone());
+        }
+    }
+    rows
 }
 
 /// A `Down`, never-probed placeholder for a known service with no running
@@ -275,6 +286,22 @@ mod tests {
             featured_loading(&[alarm]).map(|s| s.key.as_str()),
             Some("z")
         );
+    }
+
+    #[test]
+    fn service_rows_includes_servers_not_in_table() {
+        // A generic (non-SERVERS) running server, e.g. vLLM Qwen3-32B.
+        let mut generic = base();
+        generic.key = "tt-inference-server-abc".into();
+        generic.label = "Qwen3-32B".into();
+        generic.phase = Phase::Ready;
+        let rows = service_rows(std::slice::from_ref(&generic));
+        assert!(
+            rows.iter().any(|r| r.key == "tt-inference-server-abc"),
+            "generic detected server must appear in the live list"
+        );
+        // curated SERVERS entries still present (as Down placeholders).
+        assert!(rows.iter().any(|r| r.key == "flux"));
     }
 
     #[test]
