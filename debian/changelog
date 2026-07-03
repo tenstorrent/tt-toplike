@@ -1,3 +1,19 @@
+tt-toplike (0.7.17) noble; urgency=medium
+
+  * Arcade: the hero now duels the inference snake — a telemetry-true
+    tug-of-war strip when a model is serving. The ⚔ marker slides toward
+    whichever side dominates (chip power/util vs tokens/s + queue depth);
+    the hero lunges on real power spikes above the learned baseline, the
+    snake lunges on completed requests, and its glow tracks KV-cache load.
+  * Arcade: per-device power/temp now appears exactly once (a shared strip)
+    instead of once per embedded section.
+  * Memory Castle: a compact tier (8-col towers) before the fleet-grid
+    fallback — a 120-col terminal now fits 14 castles instead of 7.
+  * Chrome: 1990s BBS/demoscene ANSI styling — ╔══[ SECTION ]══▓▒░ rules
+    with dither fades (never right-side walls), themed under grayskull.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sat, 04 Jul 2026 08:00:00 +0000
+
 tt-toplike (0.7.16) noble; urgency=medium
 
   * New app-wide `/theme grayskull` (a.k.a. greyskull): collapses the whole

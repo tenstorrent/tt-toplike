@@ -258,12 +258,11 @@ pub(crate) fn castle_tier(width: usize, devices: usize) -> CastleTier {
         return CastleTier::FleetGrid;
     }
     let per = usable / devices;
-    // Strict `>` here (not `>=`): at exactly MIN_CHIP_COL_WIDTH cols/device
-    // (e.g. 122-wide terminal, 8 devices → per == 15) the tower is at its
-    // tightest still-"full" width, but the tier ladder reserves that
-    // boundary for Compact so there's a visible step down before towers
-    // hit their true minimum. `>= MIN_COMPACT_COL_WIDTH` stays inclusive —
-    // Compact's own floor is meant to include its exact threshold.
+    // `>=` on both rungs: exactly MIN_CHIP_COL_WIDTH cols/device (e.g. a
+    // 122-wide terminal with 8 devices → per == 15) stays Full — this is
+    // byte-for-byte the original pre-ladder dispatch boundary
+    // (`devices <= usable/15` ⇔ `per >= 15`), so adding the Compact rung
+    // changed nothing for layouts that used to render Full.
     if per >= MIN_CHIP_COL_WIDTH {
         CastleTier::Full
     } else if per >= MIN_COMPACT_COL_WIDTH {
