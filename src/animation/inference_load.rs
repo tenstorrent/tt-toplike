@@ -513,6 +513,7 @@ mod tests {
             last_log: None,
             progress: None,
             flat_ticks: 0,
+            serving: None,
         }
     }
 

@@ -78,6 +78,7 @@ fn fresh_state(key: &str, label: &str) -> ServiceState {
         last_log: None,
         progress: None,
         flat_ticks: 0,
+        serving: None,
     }
 }
 
@@ -114,6 +115,20 @@ pub(crate) fn fold_tick(
 
     let progress = estimate_progress(phase, sample.kernel_count, sample.rss_bytes, profile);
 
+    // `None` when this tick's `/metrics` scrape carried no `vllm:` lines (not
+    // a vLLM server, or the service is down); prior counters (if any) seed
+    // the rate computation so the very first tick with metrics reports 0
+    // rates rather than a spurious spike from "0 -> current".
+    let serving = crate::workload::inference_server::parse_vllm_metrics(&sample.metrics_text).map(
+        |cur| {
+            crate::workload::inference_server::ServingStats::fold(
+                prev.serving.as_ref().map(|s| &s.counters),
+                &cur,
+                cadence_secs,
+            )
+        },
+    );
+
     ServiceState {
         key: prev.key.clone(),
         label: prev.label.clone(),
@@ -129,6 +144,7 @@ pub(crate) fn fold_tick(
         last_log: sample.last_log,
         progress,
         flat_ticks,
+        serving,
     }
 }
 
@@ -165,6 +181,11 @@ fn build_sample(
     // documents the intended wiring for when a `logs()` probe method lands.
     let last_log = last_non_health_line(&[]);
 
+    // Best-effort vLLM Prometheus scrape. A non-vLLM server (or any non-200)
+    // just yields text that `parse_vllm_metrics` can't find `vllm:` lines in,
+    // which folds to `serving: None` downstream — so the status is ignored here.
+    let (_status, metrics_text) = probe.http(port, "/metrics");
+
     TickSample {
         cpu_pct,
         rss_bytes,
@@ -174,6 +195,7 @@ fn build_sample(
         top_proc,
         python_alive,
         last_log,
+        metrics_text,
     }
 }
 
@@ -350,6 +372,24 @@ mod tests {
             top_proc: state.top_proc.clone(),
             python_alive: true,
             last_log: state.last_log.clone(),
+            metrics_text: String::new(),
+        }
+    }
+
+    /// Clone of [`sample_like`]'s shape but driven by raw `/metrics` text
+    /// instead of a prior `ServiceState`, for tests exercising the vLLM
+    /// serving-stats fold in `fold_tick`.
+    fn sample_with_metrics(text: &str) -> TickSample {
+        TickSample {
+            cpu_pct: 0.0,
+            rss_bytes: 0,
+            kernel_count: 0,
+            safetensors_fds: 0,
+            readiness: Readiness::NotReady,
+            top_proc: None,
+            python_alive: true,
+            last_log: None,
+            metrics_text: text.into(),
         }
     }
 
@@ -365,6 +405,7 @@ mod tests {
             top_proc: Some("python3".into()),
             python_alive: true,
             last_log: None,
+            metrics_text: String::new(),
         };
         let next = fold_tick(&prev, sample, &ModelProfile::default(), 5);
         assert_eq!(
@@ -391,6 +432,40 @@ mod tests {
         assert_eq!(next.label, "FLUX.1-schnell");
     }
 
+    #[test]
+    fn fold_tick_populates_serving_from_metrics() {
+        let prev = ServiceState_zeroed("k", "L");
+        let s1 = fold_tick(
+            &prev,
+            sample_with_metrics(
+                "vllm:generation_tokens_total{m=\"M\"} 1000.0\nvllm:num_requests_running{m=\"M\"} 2.0\n",
+            ),
+            &ModelProfile::default(),
+            5,
+        );
+        assert!(s1.serving.is_some(), "serving populated when metrics present");
+        assert_eq!(s1.serving.unwrap().requests_running, 2);
+        // Next tick: +4210 gen tokens over 5s ≈ 842 tok/s (rate needs prev counters).
+        let s2 = fold_tick(
+            &s1,
+            sample_with_metrics("vllm:generation_tokens_total{m=\"M\"} 5210.0\n"),
+            &ModelProfile::default(),
+            5,
+        );
+        assert!((s2.serving.unwrap().generation_tps - 842.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn fold_tick_serving_none_without_metrics() {
+        let s = fold_tick(
+            &ServiceState_zeroed("k", "L"),
+            sample_with_metrics(""),
+            &ModelProfile::default(),
+            5,
+        );
+        assert!(s.serving.is_none());
+    }
+
     /// A fake `ContainerProbe` that returns steady, plausible readings for
     /// every call, regardless of the container name — good enough to drive
     /// `rebuild_snapshot` without a real docker daemon.
@@ -405,8 +480,17 @@ mod tests {
         fn exec(&self, _c: &str, _sh: &str) -> String {
             "5\n".into() // kernel count
         }
-        fn http(&self, _port: u16, _path: &str) -> (u16, String) {
-            (405, "{\"detail\":\"Model is not ready\"}".into())
+        fn http(&self, _port: u16, path: &str) -> (u16, String) {
+            if path == "/metrics" {
+                (
+                    200,
+                    "vllm:generation_tokens_total{model_name=\"M\"} 1000.0\n\
+                     vllm:num_requests_running{model_name=\"M\"} 2.0\n"
+                        .into(),
+                )
+            } else {
+                (405, "{\"detail\":\"Model is not ready\"}".into())
+            }
         }
     }
 

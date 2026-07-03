@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
+use crate::workload::inference_server::metrics::ServingStats;
 use crate::workload::inference_server::probe::Readiness;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +95,9 @@ pub struct ServiceState {
     pub last_log: Option<String>,
     pub progress: Option<f32>,
     pub flat_ticks: u32,
+    /// Folded vLLM `/metrics` telemetry (rates/gauges), `None` when the
+    /// service doesn't serve a `/metrics` endpoint or it hasn't parsed yet.
+    pub serving: Option<ServingStats>,
 }
 
 #[cfg(test)]

@@ -135,6 +135,7 @@ fn down_placeholder(key: &'static str, label: &'static str) -> ServiceState {
         last_log: None,
         progress: None,
         flat_ticks: 0,
+        serving: None,
     }
 }
 
@@ -367,6 +368,7 @@ mod tests {
             last_log: None,
             progress: Some(0.68),
             flat_ticks: 0,
+            serving: None,
         }
     }
 

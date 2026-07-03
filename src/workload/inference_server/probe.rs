@@ -109,6 +109,10 @@ pub struct TickSample {
     pub top_proc: Option<String>,
     pub python_alive: bool,
     pub last_log: Option<String>,
+    /// Raw body text from the `/metrics` scrape (empty/unparseable → no
+    /// serving stats this tick). Parsing happens in `fold_tick`, not here,
+    /// so `probe.rs` stays a pure-parser + I/O-trait module.
+    pub metrics_text: String,
 }
 
 /// Abstract container access so the monitor is testable with a fake. Trail: a
