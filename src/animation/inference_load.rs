@@ -10,8 +10,17 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::time::Instant;
 
+use crate::animation::{hsv_to_rgb, value_to_block_char};
 use crate::ui::colors;
 use crate::workload::inference_server::{is_alarm, Phase, ServiceState};
+
+/// Hue (degrees) along the cold→ready journey: teal (compile) → amber → gold.
+/// `t` is clamped to [0,1]. Feed to `hsv_to_rgb(journey_hue(t), s, v)`.
+pub fn journey_hue(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    // 170° teal → 45° gold, linear.
+    crate::animation::lerp(170.0, 45.0, t)
+}
 
 /// Momentum "briskness" references: a per-tick delta at/above this reads as a
 /// strong surge. Compile counts `.o` kernels; load counts RSS bytes.
@@ -344,6 +353,9 @@ impl LoadSnake {
                     *fill,
                     *open,
                     is_active,
+                    self.frame,
+                    i,
+                    is_active && alarm,
                 );
             }
 
@@ -424,6 +436,9 @@ fn draw_chamber(
     fill: f32,
     open: bool,
     is_active: bool,
+    frame: u64,
+    chamber_index: usize,
+    alarm_fill: bool,
 ) {
     if x1 <= x0 || box_h == 0 {
         return;
@@ -481,13 +496,43 @@ fn draw_chamber(
             };
             let y = 1 + r;
             let x = x0 + 1 + cx;
-            // Head glyph rides the frontier of the active chamber; body elsewhere.
+
+            // --- ANSI-art shading -------------------------------------------
+            // Block ramp: deep interior cells read solid (█▓), the leading edge
+            // stays mid/light (▒░·) so the frontier dithers into a gradient. A
+            // small per-cell shimmer jitters neighbours so the boundary sparkles
+            // rather than banding into flat rings.
+            let dist = filled.saturating_sub(idx + 1) as f32; // 0 at the frontier
+            let ramp = (dist / 4.0).min(1.0); // 0 (edge) → 1 (~4 cells deep)
+            let shimmer = 0.15 * (frame as f32 * 0.2 + x as f32).sin();
+            let intensity = (ramp + shimmer).clamp(0.0, 1.0);
+
+            // Hue sweep: `global_t` is the cell's position along the whole
+            // compile→load→ready track (0 at the very start, 1 at ready), so the
+            // palette flows teal→amber→gold across the three chambers rather than
+            // three flat colors. Brightness rises toward the frontier so the
+            // leading edge glows.
+            let local_frac = if total > 1 {
+                idx as f32 / (total - 1) as f32
+            } else {
+                0.0
+            };
+            let global_t = (chamber_index as f32 + local_frac) / 3.0;
+            let brightness = (1.0 - 0.35 * ramp).clamp(0.4, 1.0);
+            let cell_color = if alarm_fill {
+                colors::ERROR // a stalled box stays red, sweep and all
+            } else {
+                hsv_to_rgb(journey_hue(global_t), 0.8, brightness)
+            };
+
+            // Head glyph rides the frontier of the active chamber; body cells
+            // take the block-ramp glyph for the shaded/dithered fill.
             let glyph = if is_active && idx + 1 == filled {
                 '▶'
             } else {
-                '●'
+                value_to_block_char(intensity)
             };
-            canvas[y][x] = (glyph, color);
+            canvas[y][x] = (glyph, cell_color);
         }
     }
 }
@@ -740,5 +785,39 @@ mod tests {
     fn render_zero_dims_does_not_panic() {
         let s = LoadSnake::new(0, 0);
         let _ = s.render(); // must not panic
+    }
+
+    #[test]
+    fn journey_hue_sweeps_compile_to_ready() {
+        // Cool (compile) at the start, warm (load/ready) at the end; monotone-ish.
+        let cold = journey_hue(0.0);
+        let hot = journey_hue(1.0);
+        assert!(
+            cold > hot,
+            "hue moves from teal (~170) down toward gold (~45)"
+        );
+        assert!((journey_hue(0.5) - journey_hue(0.5)).abs() < 1e-9); // deterministic
+        assert!(journey_hue(-1.0) == journey_hue(0.0)); // clamped
+        assert!(journey_hue(2.0) == journey_hue(1.0));
+    }
+
+    #[test]
+    fn render_loading_has_shaded_blocks() {
+        // A normal-size Loading render should paint ANSI-shaded block glyphs
+        // (block ramp + dithered frontier), not just the old flat `●`.
+        let mut s = LoadSnake::new(80, 20);
+        let mut l = svc(Phase::Loading);
+        l.label = "FLUX".into();
+        l.progress = Some(0.5);
+        s.update(&l, 2);
+        let text: String = s
+            .render()
+            .iter()
+            .flat_map(|ln| ln.spans.iter().map(|sp| sp.content.to_string()))
+            .collect();
+        assert!(
+            text.contains('▓') || text.contains('▒'),
+            "loading render should contain shaded block chars, got: {text:?}"
+        );
     }
 }
