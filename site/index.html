@@ -933,12 +933,13 @@
 <!-- ── Modes ──────────────────────────────────────────────────────────────── -->
 <section class="section edge" id="modes">
   <p class="section-label">Visualization modes</p>
-  <h2 class="section-heading">Seven ways to watch your hardware think</h2>
+  <h2 class="section-heading">Eight ways to watch your hardware think</h2>
   <p class="section-sub">
     Press <code>v</code> to cycle, or jump directly with <code>a</code> (Arcade),
-    <code>d</code> (Defrag), <code>g</code> (Insights). Every mode reads the same
-    live telemetry — power, temperature, aiclk, DDR state — and renders it differently.
-    Recordings below are from real 4× Blackhole hardware.
+    <code>d</code> (Defrag), <code>g</code> (Insights), or <code>i</code> (Inference
+    Server Monitor). Every mode reads the same live telemetry — power, temperature,
+    aiclk, DDR state — and renders it differently. Recordings below are from real
+    4× Blackhole hardware during live LLM inference.
   </p>
 
   <div class="modes-grid">
@@ -1069,7 +1070,10 @@
           block map side-by-side (middle 30%), Memory Flow (bottom 30%).
           A <code>@</code> hero character roams the canvas — X position = current draw,
           Y position = power, color = temperature, speed and trail length = aiclk and
-          ETH link count. The fullest picture of what your hardware is doing.
+          ETH link count. The fullest picture of what your hardware is doing. And when a
+          model is serving locally, the hero squares off against the inference snake in a
+          telemetry-true tug-of-war — the <code>⚔</code> marker slides toward whichever
+          side dominates (chip power vs tokens/s and queue depth).
         </p>
         <div class="mode-hints">
           <span class="mode-hint"><kbd>a</kbd> jump here directly</span>
@@ -1077,7 +1081,96 @@
           <span class="mode-hint"><kbd>!</kbd> explain signals</span>
         </div>
       </div>
-      <img src="assets/gifs/06-arcade.gif" alt="Arcade mode demo" class="mode-gif" loading="lazy">
+      <video class="mode-gif" src="assets/gifs/11-arcade-duel.webm" autoplay muted loop playsinline
+             aria-label="Arcade mode — the hero character duels the inference snake while a model serves"></video>
+    </div>
+
+    <hr class="mode-divider">
+
+    <!-- Inference Server Monitor — cold -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">i · cold</span>
+        <p class="mode-title">Inference Monitor — waiting</p>
+        <p class="mode-desc">
+          Press <code>i</code> for the Inference Server Monitor: one "snake" that threads
+          through every state of a tt-inference-server. Idle, a hungry snake roams a
+          starfield of the model catalog — each star a model that runs on your
+          architecture. The screensaver, waiting for work to arrive.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>i</kbd> inference monitor</span>
+          <span class="mode-hint"><kbd>l</kbd> legend</span>
+        </div>
+      </div>
+      <video class="mode-gif" src="assets/gifs/08-inference-cold.webm" autoplay muted loop playsinline
+             aria-label="Inference monitor cold state — snake roaming the model-catalog starfield"></video>
+    </div>
+
+    <hr class="mode-divider">
+
+    <!-- Inference Server Monitor — loading -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">i · loading</span>
+        <p class="mode-title">Inference Monitor — loading</p>
+        <p class="mode-desc">
+          When a model loads, the snake coils and grows through the compile → load → ready
+          journey, shaded with classic ANSI block-ramp gradients. This is the wait the
+          tool was born to fill: concrete evidence of progress instead of a silent log
+          during a long first-run kernel compile.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>i</kbd> inference monitor</span>
+        </div>
+      </div>
+      <video class="mode-gif" src="assets/gifs/09-inference-load.webm" autoplay muted loop playsinline
+             aria-label="Inference monitor loading state — ANSI block-shaded loading animation"></video>
+    </div>
+
+    <hr class="mode-divider">
+
+    <!-- Inference Server Monitor — serving -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">i · serving</span>
+        <p class="mode-title">Inference Monitor — serving</p>
+        <p class="mode-desc">
+          Once serving, it becomes a live dashboard driven by the vLLM
+          <code>/metrics</code> endpoint and per-chip telemetry: a throughput timeline,
+          the token-exhaust snake, request swimlanes (queue → prefill → decode), a stats
+          panel, and a silicon strip correlating tokens with real power and temperature.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>i</kbd> inference monitor</span>
+          <span class="mode-hint"><kbd>l</kbd> legend</span>
+          <span class="mode-hint"><kbd>!</kbd> explain signals</span>
+        </div>
+      </div>
+      <video class="mode-gif" src="assets/gifs/10-inference-serving.webm" autoplay muted loop playsinline
+             aria-label="Inference monitor serving state — live vLLM dashboard"></video>
+    </div>
+
+    <hr class="mode-divider">
+
+    <!-- Grayskull theme -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">/theme grayskull</span>
+        <p class="mode-title">Grayskull theme</p>
+        <p class="mode-desc">
+          Type <code>/theme grayskull</code> to collapse the whole palette, app-wide, to
+          a thousand shades of grey — with a cyan tint for cool signals, a little purple,
+          and hot pink as the only truly hot color. Shown here over the Arcade duel.
+          <code>/theme default</code> restores full color.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>/theme grayskull</kbd></span>
+          <span class="mode-hint"><kbd>/theme default</kbd></span>
+        </div>
+      </div>
+      <video class="mode-gif" src="assets/gifs/12-arcade-grayskull.webm" autoplay muted loop playsinline
+             aria-label="Grayskull theme — the arcade duel rendered in grayscale with hot-pink accents"></video>
     </div>
 
     <hr class="mode-divider">
