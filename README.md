@@ -288,11 +288,14 @@ tt-toplike --devices 0,2
 | `a` | Jump directly to Arcade |
 | `d` | Jump directly to Defrag |
 | `g` | Jump directly to Grid (Insights table) |
-| `b` | Cycle backend (live switching) |
-| `/` | Command bar — type `/mode defrag`, `/fps 30`, `/quit`, etc. |
+| `i` | Toggle the Inference Server Monitor (the unified serving snake) — enter from **any** view, `i` or `Esc` to return. Not part of the `v` cycle. |
+| `b` | Cycle backend (live switching): Hybrid → Sysfs → JSON → Luwen → Mock → Host → Hybrid. ⚠️ **includes Luwen** — a direct-PCI backend that may disrupt a running LLM/training job; `b` will step onto it. |
+| `/` | Command bar — type `/mode defrag`, `/fps 30`, `/theme grayskull`, `/quit`, etc. |
 | `l` | Toggle legend overlay (what each signal means in the current mode) |
 | `?` | Toggle help overlay (full key reference) |
 | `!` | Toggle explain overlay (how visualizations map to hardware signals) |
+
+Command bar verbs (type `/` then the verb): `/fps <1–120>`, `/datafps <1–30>`, `/mode <insights\|grid\|starfield\|castle\|flow\|arcade\|defrag>`, `/theme <grayskull\|default>` (bare `/theme` toggles), `/legend` (`l`), `/explain`, `/throttle`, `/idle-on-blur`, `/help` (`?`), `/quit` (`q`).
 
 **Insights mode only:**
 
@@ -311,8 +314,35 @@ tt-toplike --devices 0,2
 - **Memory Castle** — roguelike dungeon with 600 particles per chip representing the DDR→L2→L1→Tensix memory hierarchy. Four particle types (Read/Write/CacheHit/CacheMiss) with trails; density and speed driven by live power. Colors rotate through the spectrum each inference burst.
 - **Memory Flow** — NoC particle streams flowing left-to-right across GDDR channel bars. One row per DDR channel (up to 12 on Blackhole); bar fill = trained/active state; particle speed and density = bandwidth.
 - **Defrag** — Norton SpeedDisk-style block map: one row per GDDR channel, blocks fill left→right as weights DMA in. During inference, blocks glow reactively — brightness rises with inference power, saturation increases with GDDR temperature, and the palette shifts warmer under sustained thermal load (per-channel hue drifts up to +40° with channel temp; global palette shifts up to +25° warmer as the chip heats). Scatter bursts flash 5–12 random cells per channel on power spikes, giving each inference token a visible beat. `EVICT` animation plays when power returns to idle baseline (model unloaded) — blocks dissolve right→left at prime-staggered rates per channel, then DMA rebuild restarts from scratch.
-- **Arcade** — unified split-screen combining Starfield (top 40%), Memory Castle + Defrag block map side-by-side (middle 30%), and Memory Flow (bottom 30%); a `@` hero character roams the canvas driven by real telemetry: X = current draw, Y = power consumption, color = ASIC temperature; hero speed and trail length reflect aiclk and live ETH link count.
+- **Arcade** — unified split-screen combining Starfield (top 40%), Memory Castle + Defrag block map side-by-side (middle 30%), and Memory Flow (bottom 30%); a `@` hero character roams the canvas driven by real telemetry: X = current draw, Y = power consumption, color = ASIC temperature; hero speed and trail length reflect aiclk and live ETH link count. When a model is **serving locally**, a hero `⚔` snake duel lights up: a telemetry-true tug-of-war strip where the `⚔` marker slides toward whichever side dominates (chip power/util vs the snake's tokens/s + queue depth), the hero lunges on real power spikes and the snake lunges on completed requests. Per-device power/temp appears exactly once as one shared strip, and every section wears BBS/demoscene ANSI chrome (`╔══[ SECTION ]══▓▒░`, left-side bars only). The duel is suppressed under `--remote` (local serving vs remote silicon would be incoherent).
 - **tt-toplike-app** — native desktop window hosting the full TUI in a PTY (GPU-accelerated via eframe; Wayland/X11).
+
+### Inference Server Monitor (`[i]`)
+
+Press `i` from any view to open the flagship **Inference Server Monitor** — one unified "snake" that reflects your whole fleet through three telemetry-true states. It's not a mode in the `v` rotation; `i` (or `Esc`) toggles it in and out, landing you back wherever you were. Press `l` for the legend, `/explain` for the mapping overlay.
+
+- **Cold** (nothing loading or serving) — a hungry snake roams a drifting starfield of the **model catalog**. The catalog is a bundled compatibility snapshot (the offline floor) refreshed in the background from Tenstorrent's live copy, and the footer tallies `N of M models run on your <arch>` for the silicon you actually have.
+- **Loading** (a model is compiling/loading) — the snake coils into a boxed loading journey through `compile → load → ready`, drawn with ANSI shading, capped by a gold burst the instant the model reports Ready.
+- **Serving** (a model is Ready) — a live dashboard driven by the server's vLLM `/metrics`: a throughput timeline, a token-exhaust snake, per-request swimlanes, a stats panel, and a TT silicon strip (one reading per detected chip).
+
+```
+   cold ······· hungry snake roams the model-catalog starfield
+                footer: "7 of 42 models run on your Blackhole"
+loading ▓▒░ compile → load → ready ░▒▓  (gold burst on Ready)
+serving ▶───────  tok/s ▁▂▅▇█▅▂  ⚔ swimlanes · live vLLM /metrics
+```
+
+The snapshot the snake reads is a local Docker/HTTP probe of *this* machine, so under `--remote` the `[i]` view still describes the box you're running on, not the remote chips.
+
+### Gallery — recorded sessions
+
+`assets/casts/` holds 7 [asciinema](https://asciinema.org/) recordings you can replay in your own terminal (no TT hardware needed) with:
+
+```bash
+asciinema play assets/casts/06-arcade.cast
+```
+
+The set: `01-insights`, `02-starfield`, `03-memory-castle`, `04-memory-flow`, `05-defrag`, `06-arcade`, `07-host-cpu`. They're regenerated by the local `record-casts.sh` helper.
 
 ### Backend System (Safe by Default)
 
@@ -373,7 +403,7 @@ dpkg-deb --info ../tt-toplike_*_amd64.deb
 dpkg-deb --contents ../tt-toplike_*_amd64.deb
 ```
 
-The `vendor/` directory (~80 MB) is committed to git for reproducible offline builds. The `debian/rules` uses `--frozen` to enforce no network fetches at build time, matching Debian build daemon behavior.
+The `vendor/` directory is **not committed** (it was through v0.7.18, but 1.1 GB / 35k files made clones hostile). `build-deb.sh` regenerates it via `cargo vendor` for reproducible offline builds; `--quick` reuses a `vendor/` that's already present. The `debian/rules` uses `--frozen` to enforce no network fetches at build time, matching Debian build daemon behavior.
 
 ## Architecture
 

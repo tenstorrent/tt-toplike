@@ -4,21 +4,20 @@ tt-toplike detects which processes are using Tenstorrent hardware by scanning `/
 
 ## What It Shows
 
-In Normal mode, a **Hardware Usage** section appears below the telemetry table when any processes are active:
+The **Insights screen** (the default view) carries a **process panel** alongside the per-chip portraits. It lists processes by resource use and tags any that match a known inference runtime (ollama, vLLM, llama.cpp, MLX, ComfyUI, …); on TT hardware it additionally attributes per-process device usage and serving metrics. (The old "Hardware Usage" box that lived under the retired Normal-mode telemetry table is gone — its detection logic now feeds this panel.)
 
 ```
-┌─────────────────────────────────────────────────────┐
-│ 🔧 Hardware Usage                                   │
-│ Device 0: 1 process                                 │
-│   └─ python3 [42315] vllm.entrypoints.openai...    │
-│      (hugepages: 8 x 1GB)                          │
-│ Device 1: 2 processes                               │
-│   ├─ python3 [42316] vllm.worker --model...        │
-│   └─ and 3 more...                                  │
-└─────────────────────────────────────────────────────┘
+╔══[ PROCESSES ]══▓▒░
+║ Device 0                                            
+║   python3 [42315]  vllm.entrypoints.openai...  ⟶ vLLM
+║      (hugepages: 8 × 1GB)
+║ Device 1
+║   python3 [42316]  vllm.worker --model...       ⟶ vLLM
+║   … and 3 more
+╚══════════════════════════════════════════════
 ```
 
-The section is hidden when no processes are detected, preserving space for the device table.
+Navigate the list with `↑`/`↓`; `k` silences the selected process's alerts and `K` kills it (Linux). The panel is populated only when processes are detected.
 
 ## Detection Methods
 
@@ -48,7 +47,7 @@ cargo build --bin tt-toplike-tui --no-default-features --features tui,json-backe
 
 - Non-root users may not see all processes
 - Shows the container host process (e.g., `containerd-shim`), not processes inside containers
-- Displays up to 2 processes per device to avoid UI bloat
+- The Insights process panel shows up to 12 rows: inference-matched processes are always kept, and the remaining slots are filled by the busiest processes
 
 ## Manual Inspection
 

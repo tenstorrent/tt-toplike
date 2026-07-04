@@ -1,5 +1,7 @@
 # TT-Toplike GUI Features
 
+> ⚠️ **Legacy iced GUI — prefer `tt-toplike-app`.** This document describes the older standalone iced-based GUI. The supported desktop path is now **`tt-toplike-app`**, which hosts the full-fidelity TUI (every visualization, the `[i]` snake, Insights) inside a native, GPU-accelerated eframe window (Wayland/X11) via a PTY. Reach for `tt-toplike-app` for a desktop experience; this page is retained for historical reference.
+
 ## Overview
 
 The native GUI application provides a beautiful Wayland/X11 interface for monitoring Tenstorrent hardware with real-time updates, historical charts, and GPU-accelerated visualizations.

@@ -1,0 +1,88 @@
+name: 🐛 Bug report
+description: Something in tt-toplike misbehaved — help us reproduce it.
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug! The more concrete the repro, the faster we can fix it.
+        (For security-sensitive reports, please follow `SECURITY.md` instead of this form.)
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you see? Include the exact behavior, and a screenshot or asciicast if the visualization looked wrong.
+      placeholder: The Insights process panel showed…
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+      placeholder: I expected the panel to…
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact command(s) and keypresses. A minimal repro is worth a thousand words.
+      placeholder: |
+        1. Run `tt-toplike --mock --mock-devices 4`
+        2. Press `i`
+        3. …
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: tt-toplike version
+      description: Output of `tt-toplike --version`.
+      placeholder: "tt-toplike 0.7.18"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: Distro + version, or macOS/Windows version.
+      placeholder: "Ubuntu 24.04 (Noble)"
+    validations:
+      required: true
+
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal emulator
+      description: Which terminal (and multiplexer, if any) — colors and Unicode vary a lot.
+      placeholder: "Windows Terminal / kitty / tmux + Alacritty"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: hardware
+    attributes:
+      label: Hardware / backend
+      description: What is tt-toplike watching?
+      options:
+        - Tenstorrent device (local — Grayskull)
+        - Tenstorrent device (local — Wormhole)
+        - Tenstorrent device (local — Blackhole)
+        - "--host (this machine's CPU/GPU/ANE, no TT hardware)"
+        - "--mock (simulated telemetry)"
+        - "--remote (watching another box over the LAN)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or output
+      description: Anything from stderr, or from running with `-v`. This is automatically formatted as code.
+      render: shell

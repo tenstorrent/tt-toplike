@@ -41,9 +41,28 @@ We welcome feature suggestions! Please open a [GitHub Issue](https://github.com/
 
 ### Prerequisites
 
-- Rust 1.75 or later
+- **Rust toolchain** — pinned by `rust-toolchain.toml` (channel `1.93.0`, with `rustfmt` + `clippy`). If you use `rustup`, it auto-installs and selects that toolchain the first time you build in the repo, so you don't need to manage it by hand. (The exact minimum supported version below 1.93.0 hasn't been established — treat the pinned toolchain as the supported floor.)
 - Cargo
 - For Debian packaging: `debhelper`, `devscripts`
+
+### Before you push — the CI gates
+
+CI runs exactly these three checks. Run them locally and you'll match the pipeline:
+
+```bash
+# Tests (default feature set)
+cargo test --locked --lib --features tui
+
+# Clippy — warnings are hard errors
+cargo clippy --locked --lib --bin tt-toplike-tui --features tui -- -D warnings
+
+# Formatting — CI only checks PR-changed files, but formatting everything is safe
+cargo fmt
+```
+
+CI additionally runs the test suite once with the minimal feature set
+(`--no-default-features --features tui,json-backend`) to keep the `cfg`-gated
+paths honest.
 
 ### Building
 
@@ -65,6 +84,31 @@ cargo test --lib --features tui
 > **Note**: `--all-features` will not work because several features are mutually
 > exclusive or require hardware that is unavailable in a build environment.
 
+### Repository map
+
+Where things live, so you know which directory to reach for:
+
+- **`src/animation/`** — the visualizations. Starfield, Memory Castle, Memory Flow, Defrag, Arcade (+ the `⚔` `duel`), and the `[i]` Inference Server Monitor's `snake` (which composes `model_starfield` for the cold roam, `inference_load` for the loading journey, and `serving_creature`/`serving_panels` for the live dashboard). Pure rendering + telemetry-driven state — no I/O.
+- **`src/backend/`** — telemetry sources behind the `TelemetryBackend` trait: `sysfs` (hwmon), `json` (`tt-smi -s`), `hybrid` (sysfs + background JSON), `host` (CPU/RAM/GPU/ANE), `mock`, `ws` (remote), and `luwen`. **Safety note:** `luwen` does direct PCI BAR0 access and can disrupt a running workload — `factory.rs` deliberately keeps it out of auto-detect (it is reachable only via explicit `--backend luwen`, or by stepping onto it in the `b` backend cycle).
+- **`src/workload/`** — process + inference detection: `process_monitor`/`host_processes` enumerate processes, `inference_match` tags known runtimes, and **`inference_server/`** probes local model servers (Docker/HTTP detection, vLLM `/metrics`, readiness/liveness) that feed the `[i]` snake. `model_catalog` maintains the bundled + background-refreshed compatibility catalog.
+- **`src/ui/tui/`** — the TUI rendering and event loop (`mod.rs` owns key handling, the command bar, and the mode/overlay state machine); `chip_portrait`, `inference_panel`, `perf`, `throttle`, `bench` are its helpers.
+
+### Local helper scripts
+
+These are convenience scripts for local development, not part of CI:
+
+- `test-modes.sh` / `test-egui.sh` — quick manual smoke-runs of the visualizations / GUI
+- `record-casts.sh` — regenerates the `assets/casts/*.cast` asciinema recordings
+- `build-deb.sh` — full `.deb` build (see the vendoring note below)
+
+### Vendored dependencies
+
+`vendor/` is **not committed** (it was through v0.7.18, but at ~1.1 GB / 35k
+files it made clones hostile — it's now in `.gitignore`). `build-deb.sh`
+regenerates it on demand via `cargo vendor` so the Debian package builds fully
+offline; `build-deb.sh --quick` reuses a `vendor/` that's already present.
+Normal `cargo build`/`cargo test` don't need it at all.
+
 ### Code Style
 
 - Follow standard Rust formatting conventions (`cargo fmt`)
@@ -78,7 +122,7 @@ cargo test --lib --features tui
 ### Testing
 
 - Write unit tests for new functionality
-- Ensure existing tests pass: `cargo test`
+- Ensure existing tests pass: `cargo test --locked --lib --features tui`
 - Test with the mock backend: `cargo run -- --mock --mock-devices 4`
 
 ## Code of Conduct
