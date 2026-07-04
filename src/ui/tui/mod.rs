@@ -3091,8 +3091,8 @@ fn render_insights(
     //
     // The old toggle-able `[i]` Inference Servers strip that used to live here
     // has been retired in favor of the dedicated full-screen
-    // `DisplayMode::InferenceMonitor` view (see `render_inference_monitor_view`
-    // and `inference_panel::render_inference_monitor`), entered via `i`/`I`.
+    // `DisplayMode::InferenceMonitor` view (the unified serving snake — see
+    // `render_snake_view`), entered via `i`/`I`.
     let cards_h = device_panels_height(panel_devices, area.width);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -3130,60 +3130,6 @@ fn render_insights(
     if let Some(ref kc) = kill_confirm {
         render_kill_dialog(f, area, kc);
     }
-}
-
-/// Render the dedicated, full-screen Inference Server Monitor view
-/// (`DisplayMode::InferenceMonitor`, entered via `i`/`I`). Supersedes the old
-/// `[i]` toggle strip that used to live inside the Insights screen: this view
-/// owns the whole terminal, so there's no height budget to fight over with
-/// the chip portraits or process panel.
-///
-/// `snapshot` is the raw (possibly empty) live snapshot from
-/// `InferenceServerMonitor` — this function hands it to
-/// `inference_panel::render_inference_monitor`, which merges it with the
-/// static `SERVERS` table (via `service_rows`) so every known service is
-/// always listed, showing `Down` for anything not currently detected. Off
-/// Linux, `snapshot` is always empty, so the view renders every known
-/// service as `Down` rather than an empty screen.
-fn render_inference_monitor_view(
-    f: &mut Frame,
-    snapshot: &[crate::workload::inference_server::ServiceState],
-    service_cursor: usize,
-) {
-    use ratatui::style::Color;
-
-    let area = f.area();
-
-    let title_rect = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: 1,
-    };
-    let title = "tt-toplike  [Inference Servers]  i to return  │  q to quit";
-    // Truncate by `char`, not byte index: the title contains a multi-byte
-    // box-drawing glyph ('│'), so a byte-offset slice (`&title[..n]`) could
-    // land mid-character on a narrow terminal and panic.
-    let max_w = area.width as usize;
-    let truncated: String = title.chars().take(max_w).collect();
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!("{truncated:<max_w$}"),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ))),
-        title_rect,
-    );
-
-    let body_rect = Rect {
-        x: area.x,
-        y: area.y + 1,
-        width: area.width,
-        height: area.height.saturating_sub(1),
-    };
-    let lines = inference_panel::render_inference_monitor(snapshot, service_cursor);
-    f.render_widget(Paragraph::new(lines), body_rect);
 }
 
 /// Full-screen render of the unified serving snake (see `crate::animation::Snake`).
@@ -4805,13 +4751,31 @@ pub fn run_render_bench(
         }));
     }
 
-    // Inference Monitor (data, 10 fps) — empty snapshot (as on non-Linux, or
-    // Linux with no detected containers) exercises the all-Down render path.
+    // Inference Monitor (anim, 10 fps) — the live `[i]` view is the unified
+    // serving snake (`render_snake_view`), not the retired text list. Drive it
+    // with an empty snapshot + empty catalog (as on non-Linux, or Linux with no
+    // detected containers), which resolves to the Roaming behavior — the same
+    // path the real UI takes with nothing serving. Keep the "inference-monitor"
+    // mode label so `--bench` output stays comparable across releases.
     {
         let mut term = mk_term();
+        let mut snake = crate::animation::Snake::new();
+        let arch = backend
+            .devices()
+            .first()
+            .map(|d| d.architecture.name())
+            .unwrap_or("Unknown");
         results.push(measure("inference-monitor", 10, frames, || {
-            term.draw(|f| render_inference_monitor_view(f, &[], 0))
-                .unwrap();
+            snake.update(&crate::animation::SnakeWorld {
+                rows: &[],
+                catalog: &[],
+                arch,
+                chips: &[],
+                cadence_secs: 5,
+                width: width as usize,
+                height: height as usize,
+            });
+            term.draw(|f| render_snake_view(f, &snake)).unwrap();
         }));
     }
 

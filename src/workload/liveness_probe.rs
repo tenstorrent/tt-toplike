@@ -274,13 +274,6 @@ fn judge_data_nonempty(status: u16, body: &[u8]) -> bool {
     status == 200 && json_array_nonempty(body, "data")
 }
 
-/// A bare readiness endpoint (e.g. tt-inference-server `/health`): 200 ⇒ ready,
-/// anything else (notably 503 "Model not ready") ⇒ not ready. Body is ignored.
-#[allow(dead_code)]
-fn judge_http_ok(status: u16, _body: &[u8]) -> bool {
-    status == 200
-}
-
 /// Blocking HTTP/1.0 GET to localhost with connect + read timeouts. `Connection:
 /// close` lets us `read_to_end` without chunked/keep-alive handling.
 fn http_get_localhost(port: u16, path: &str, timeout: Duration) -> std::io::Result<Vec<u8>> {
@@ -504,14 +497,6 @@ mod tests {
         assert!(!judge_models_nonempty(500, br#"{"models":[{"name":"x"}]}"#));
         // malformed ⇒ not active (no false positive).
         assert!(!judge_models_nonempty(200, b"not json"));
-    }
-
-    #[test]
-    fn health_judge_is_status_only() {
-        // tt-inference-server /health: 200 ⇒ model ready, 503 ⇒ not ready.
-        assert!(judge_http_ok(200, b""));
-        assert!(!judge_http_ok(503, b"Model not ready"));
-        assert!(!judge_http_ok(500, b""));
     }
 
     #[test]
