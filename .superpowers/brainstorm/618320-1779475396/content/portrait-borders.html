@@ -1,0 +1,124 @@
+<h2>Chip portrait — border & label styles</h2>
+<p class="subtitle">BH = Blackhole (17×12), WH = Wormhole (10×12). Architecture name spelled in full. Click to select.</p>
+
+<style>
+  .chip-demo {
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    line-height: 1.35;
+    background: #0d1117;
+    display: inline-block;
+    white-space: pre;
+  }
+  /* Cell type colors */
+  .dram     { color: #3B82F6; }
+  .eth      { color: #27AE60; }
+  .pcie     { color: #F4C471; }
+  .tx-idle  { color: #2d4a55; }
+  .tx-warm  { color: #4FD1C5; }
+  .tx-hot   { color: #F4C471; }
+  /* Particles */
+  .p-read   { color: #4FD1C5; }
+  .p-write  { color: #EC96B8; }
+  /* Border styles */
+  .border-warm { color: #F4C471; }
+  .border-cool { color: #4FD1C5; }
+  .border-dim  { color: #374151; }
+  /* Name label */
+  .arch-label-teal { color: #4FD1C5; font-weight: bold; }
+  .arch-label-gold { color: #F4C471; font-weight: bold; }
+  .arch-label-dim  { color: #607D8B; }
+  .arch-label-dram { color: #3B82F6; font-weight: bold; }
+  /* Stats line */
+  .stat { color: #607D8B; font-size: 11px; }
+  .stat-val { color: #B0C4DE; }
+  .cards { display: flex; flex-wrap: wrap; gap: 16px; justify-content: flex-start; }
+  .card { min-width: 260px; }
+  .card-image { padding: 14px 14px 8px; background: #0d1117; border-radius: 6px 6px 0 0; }
+</style>
+
+<div class="cards">
+
+  <!-- Option A: Current ╔║╚ box, name in header -->
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="chip-demo"><span class="border-warm">╔══════════════════</span>
+<span class="border-warm">║</span> <span class="arch-label-gold">BLACKHOLE</span>  Dev 0  <span class="stat-val">64°</span>
+<span class="border-warm">║</span><span class="dram">▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪</span>
+<span class="border-warm">║</span><span class="eth">●</span><span class="tx-idle">░░░░░░░</span><span class="pcie">╋</span><span class="tx-warm">∘</span><span class="tx-idle">░░░░░░░</span><span class="eth">●</span>
+<span class="border-warm">║</span><span class="eth">●</span><span class="tx-idle">░░░</span><span class="p-read">·</span><span class="tx-idle">░░░</span><span class="pcie">╋</span><span class="tx-idle">░░░</span><span class="p-write">∘</span><span class="tx-idle">░░░</span><span class="eth">●</span>
+<span class="border-warm">║</span><span class="eth">●</span><span class="tx-warm">▒▒</span><span class="tx-idle">░░░</span><span class="p-read">○</span><span class="pcie">╋</span><span class="tx-idle">░░░░</span><span class="tx-warm">▒▒</span><span class="eth">●</span>
+<span class="border-warm">║</span><span class="eth">●</span><span class="tx-idle">░░░░░░░</span><span class="pcie">╋</span><span class="tx-idle">░░░░░░░</span><span class="eth">●</span>
+<span class="border-warm">║</span><span class="eth">●</span><span class="tx-idle">░░░</span><span class="p-read">∘</span><span class="tx-idle">░░░</span><span class="pcie">╋</span><span class="tx-idle">░░░░░░░</span><span class="eth">●</span>
+<span class="border-warm">║</span><span class="eth">●</span><span class="tx-idle">░░░░░░░</span><span class="pcie">╋</span><span class="p-write">·</span><span class="tx-idle">░░░░░░</span><span class="eth">●</span>
+<span class="border-warm">║</span><span class="dram">▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪</span>
+<span class="border-warm">╚══════════════════</span></div>
+    </div>
+    <div class="card-body">
+      <h3>A — current box border</h3>
+      <p>╔║╚ in temperature color. Name in header row inside the box. Familiar, chunky.</p>
+    </div>
+  </div>
+
+  <!-- Option B: No box, arch name as DRAM-colored gutter label -->
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="chip-demo">  <span class="arch-label-dram">B·L·A·C·K·H·O·L·E</span>  Dev 0  <span class="stat-val">64°</span>
+<span class="dram">▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪</span>
+<span class="eth">●</span><span class="tx-idle">░░░░░░░</span><span class="pcie">╋</span><span class="tx-warm">∘</span><span class="tx-idle">░░░░░░░</span><span class="eth">●</span>
+<span class="eth">●</span><span class="tx-idle">░░░</span><span class="p-read">·</span><span class="tx-idle">░░░</span><span class="pcie">╋</span><span class="tx-idle">░░░</span><span class="p-write">∘</span><span class="tx-idle">░░░</span><span class="eth">●</span>
+<span class="eth">●</span><span class="tx-warm">▒▒</span><span class="tx-idle">░░░</span><span class="p-read">○</span><span class="pcie">╋</span><span class="tx-idle">░░░░</span><span class="tx-warm">▒▒</span><span class="eth">●</span>
+<span class="eth">●</span><span class="tx-idle">░░░░░░░</span><span class="pcie">╋</span><span class="tx-idle">░░░░░░░</span><span class="eth">●</span>
+<span class="eth">●</span><span class="tx-idle">░░░</span><span class="p-read">∘</span><span class="tx-idle">░░░</span><span class="pcie">╋</span><span class="tx-idle">░░░░░░░</span><span class="eth">●</span>
+<span class="eth">●</span><span class="tx-idle">░░░░░░░</span><span class="pcie">╋</span><span class="p-write">·</span><span class="tx-idle">░░░░░░</span><span class="eth">●</span>
+<span class="dram">▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪</span>
+  <span class="arch-label-dim">62W · 64°C · 0/24 ETH</span></div>
+    </div>
+    <div class="card-body">
+      <h3>B — no box, name above DRAM</h3>
+      <p>DRAM row acts as natural top/bottom edge. Arch name dotted above in DRAM blue. Stats below in dim. No border characters at all.</p>
+    </div>
+  </div>
+
+  <!-- Option C: Thin left gutter bar, arch name vertical -->
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="chip-demo"><span class="border-warm">▏</span><span class="dram">▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪</span>
+<span class="border-warm">▏</span><span class="eth">●</span><span class="tx-idle">░░░░░░░</span><span class="pcie">╋</span><span class="tx-warm">∘</span><span class="tx-idle">░░░░░░░</span><span class="eth">●</span>
+<span class="border-warm">▏</span><span class="eth">●</span><span class="tx-idle">░░░</span><span class="p-read">·</span><span class="tx-idle">░░░</span><span class="pcie">╋</span><span class="tx-idle">░░░</span><span class="p-write">∘</span><span class="tx-idle">░░░</span><span class="eth">●</span>
+<span class="border-warm">▏</span><span class="eth">●</span><span class="tx-warm">▒▒</span><span class="tx-idle">░░░</span><span class="p-read">○</span><span class="pcie">╋</span><span class="tx-idle">░░░░</span><span class="tx-warm">▒▒</span><span class="eth">●</span>
+<span class="border-warm">▏</span><span class="eth">●</span><span class="tx-idle">░░░░░░░</span><span class="pcie">╋</span><span class="tx-idle">░░░░░░░</span><span class="eth">●</span>
+<span class="border-warm">▏</span><span class="eth">●</span><span class="tx-idle">░░░</span><span class="p-read">∘</span><span class="tx-idle">░░░</span><span class="pcie">╋</span><span class="tx-idle">░░░░░░░</span><span class="eth">●</span>
+<span class="border-warm">▏</span><span class="eth">●</span><span class="tx-idle">░░░░░░░</span><span class="pcie">╋</span><span class="p-write">·</span><span class="tx-idle">░░░░░░</span><span class="eth">●</span>
+<span class="border-warm">▏</span><span class="dram">▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪</span>
+<span class="border-warm">▏</span><span class="arch-label-gold">BLACKHOLE</span> <span class="arch-label-dim">Dev 0  62W  64°C</span></div>
+    </div>
+    <div class="card-body">
+      <h3>C — thin left bar, name in footer</h3>
+      <p>Single ▏ in temperature color acts as left margin. No top/bottom cap. Arch name + stats in a footer line. Lightest footprint.</p>
+    </div>
+  </div>
+
+  <!-- Option D: Arch name as top separator, dashes use DRAM color -->
+  <div class="card" data-choice="d" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="chip-demo"><span class="arch-label-teal">── BLACKHOLE · Dev 0 · 64°C ──</span>
+<span class="dram">▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪</span>
+<span class="eth">●</span><span class="tx-idle">░░░░░░░</span><span class="pcie">╋</span><span class="tx-warm">∘</span><span class="tx-idle">░░░░░░░</span><span class="eth">●</span>
+<span class="eth">●</span><span class="tx-idle">░░░</span><span class="p-read">·</span><span class="tx-idle">░░░</span><span class="pcie">╋</span><span class="tx-idle">░░░</span><span class="p-write">∘</span><span class="tx-idle">░░░</span><span class="eth">●</span>
+<span class="eth">●</span><span class="tx-warm">▒▒</span><span class="tx-idle">░░░</span><span class="p-read">○</span><span class="pcie">╋</span><span class="tx-idle">░░░░</span><span class="tx-warm">▒▒</span><span class="eth">●</span>
+<span class="eth">●</span><span class="tx-idle">░░░░░░░</span><span class="pcie">╋</span><span class="tx-idle">░░░░░░░</span><span class="eth">●</span>
+<span class="eth">●</span><span class="tx-idle">░░░</span><span class="p-read">∘</span><span class="tx-idle">░░░</span><span class="pcie">╋</span><span class="tx-idle">░░░░░░░</span><span class="eth">●</span>
+<span class="eth">●</span><span class="tx-idle">░░░░░░░</span><span class="pcie">╋</span><span class="p-write">·</span><span class="tx-idle">░░░░░░</span><span class="eth">●</span>
+<span class="dram">▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪</span>
+<span class="arch-label-dim">──────────────────────────────</span></div>
+    </div>
+    <div class="card-body">
+      <h3>D — ruled header, arch + temp inline</h3>
+      <p>Top rule embeds arch name + temperature inline (color-codes with temp heatmap). DRAM row lands right below. Bottom rule is a dim hairline. No box at all.</p>
+    </div>
+  </div>
+
+</div>
+
+<p class="subtitle" style="margin-top:14px;">Note: teal ·∘○ = read particles streaming in, pink ∘· = write particles streaming out. ETH ● green = live, dim = down. PCIe ╋ amber = center column.</p>

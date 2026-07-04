@@ -1,0 +1,141 @@
+<h2>Animated chip portrait — which direction?</h2>
+<p class="subtitle">Each option uses temperature-colored ╔║╚ borders. The difference is how data flow and memory activity are shown inside the portrait.</p>
+
+<style>
+.chip-art {
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  background: #0a0f14;
+  padding: 10px 14px;
+  border-radius: 4px;
+  display: inline-block;
+}
+.chip-art .row { display: block; white-space: pre; }
+
+.bc  { color: #4FD1C5; }   /* border cool  */
+.bw  { color: #F4C471; }   /* border warm  */
+.bh  { color: #FF6B6B; }   /* border hot   */
+.dr  { color: #3B82F6; }   /* dram blue    */
+.et  { color: #27AE60; }   /* eth green    */
+.pc  { color: #F4C471; }   /* pcie amber   */
+.t0  { color: #1e3040; }   /* tensix idle  */
+.t1  { color: #2a4a60; }   /* tensix low   */
+.t2  { color: #3a6070; }   /* tensix mid   */
+.t3  { color: #4FD1C5; }   /* tensix high  */
+.pr  { color: #4FD1C5; }   /* read particle teal  */
+.pw  { color: #EC96B8; }   /* write particle pink */
+.dim { color: #1a3040; }   /* dim trail           */
+.st  { color: #4a6070; font-size: 11px; }  /* stat label */
+.sv  { color: #93c5fd; font-size: 11px; }  /* stat value */
+
+/* DRAM row breathing animation for Option A */
+@keyframes dram-breathe {
+  0%, 100% { color: #3B82F6; }
+  50%       { color: #93c5fd; }
+}
+.dr-a { animation: dram-breathe 1.8s ease-in-out infinite; }
+.dr-b { animation: dram-breathe 2.2s ease-in-out infinite 0.6s; }
+
+/* Particle fade-in-out to suggest movement */
+@keyframes p-blink {
+  0%, 100% { opacity: 0.1; }
+  50%       { opacity: 1.0; }
+}
+.pa { animation: p-blink 1.0s ease-in-out infinite; }
+.pb { animation: p-blink 1.0s ease-in-out infinite 0.25s; }
+.pc2{ animation: p-blink 1.0s ease-in-out infinite 0.50s; }
+.pd { animation: p-blink 1.0s ease-in-out infinite 0.75s; }
+
+/* L1 fill bar colors for Option C */
+.f1 { color: #1a4a5a; }
+.f2 { color: #245a70; }
+.f3 { color: #2e6e88; }
+</style>
+
+<div class="cards">
+
+<!-- ============================================================ OPTION A -->
+<div class="card" data-choice="a" onclick="toggleSelect(this)">
+  <div class="card-image" style="padding:16px 14px 12px;">
+    <div class="label-sm" style="font-size:11px;color:#607D8B;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Option A — DRAM breathing, no particles</div>
+    <div class="chip-art">
+<span class="row"><span class="bw">╔══════════════</span>  <span class="st">BH Dev0</span> <span class="sv">67°C</span></span>
+<span class="row"><span class="bw">║</span> <span class="dr-a">▪▪▪▪▪▪▪▪▪▪▪▪▪▪</span></span>
+<span class="row"><span class="bw">║</span> <span class="et">●</span><span class="t1">░</span><span class="t2">▒</span><span class="t1">░</span><span class="t2">░</span><span class="t1">░</span><span class="t2">░</span><span class="pc">╋</span><span class="t2">░</span><span class="t3">▓</span><span class="t2">▒</span><span class="t1">░</span><span class="t2">▒</span><span class="t1">░</span><span class="et">●</span></span>
+<span class="row"><span class="bw">║</span> <span class="et">●</span><span class="t2">▒</span><span class="t3">▓</span><span class="t1">░</span><span class="t2">▒</span><span class="t1">░</span><span class="t2">░</span><span class="t1">░</span><span class="t2">▒</span><span class="t1">░</span><span class="t3">▓</span><span class="t2">▒</span><span class="t1">░</span><span class="t0">·</span><span class="et">●</span></span>
+<span class="row"><span class="bw">║</span> <span class="et">●</span><span class="t0">·</span><span class="t1">░</span><span class="t0">·</span><span class="t1">░</span><span class="t0">·</span><span class="t1">░</span><span class="t0">·</span><span class="t1">░</span><span class="t0">·</span><span class="t1">░</span><span class="t0">·</span><span class="t1">░</span><span class="t0">·</span><span class="et">●</span></span>
+<span class="row"><span class="bw">║</span> <span class="et">●</span><span class="t1">░</span><span class="t0">·</span><span class="t1">░</span><span class="t2">▒</span><span class="t1">░</span><span class="t0">·</span><span class="t1">░</span><span class="t0">·</span><span class="t2">▒</span><span class="t1">░</span><span class="t0">·</span><span class="t1">░</span><span class="t0">·</span><span class="et">●</span></span>
+<span class="row"><span class="bw">║</span> <span class="dr-b">▪▪▪▪▪▪▪▪▪▪▪▪▪▪</span></span>
+<span class="row"><span class="bw">╚══════════════</span></span>
+<span class="row"><span class="st">⚡</span><span class="sv">43W</span> <span class="st">🌡</span><span class="sv">67°C</span> <span class="st">ETH</span><span class="sv">▪▪▪·</span></span>
+    </div>
+    <p style="font-size:11px;color:#4a6070;margin-top:8px;">DRAM rows (▪▪▪) pulse brighter when bandwidth is high. ░▒▓ = Tensix utilization from power. No particle movement.</p>
+  </div>
+  <div class="card-body">
+    <h3>DRAM rows breathe</h3>
+    <p>Bandwidth encoded as character brightness. Simplest motion. Border teal→gold→red by ASIC temp.</p>
+    <div class="pros-cons" style="font-size:12px;">
+      <div class="pros"><h4>Pros</h4><ul><li>No flicker/noise</li><li>Easy to scan at a glance</li><li>Low impl complexity</li></ul></div>
+      <div class="cons"><h4>Cons</h4><ul><li>No read/write direction</li><li>Less alive feeling</li></ul></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ OPTION B -->
+<div class="card" data-choice="b" onclick="toggleSelect(this)">
+  <div class="card-image" style="padding:16px 14px 12px;">
+    <div class="label-sm" style="font-size:11px;color:#607D8B;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Option B — Teal reads · Pink writes</div>
+    <div class="chip-art">
+<span class="row"><span class="bh">╔══════════════</span>  <span class="st">BH Dev0</span> <span class="sv">78°C</span></span>
+<span class="row"><span class="bh">║</span> <span class="dr">▪</span><span class="pr pa">∘</span><span class="dr">▪▪</span><span class="pr pb">○</span><span class="dr">▪▪</span><span class="pr pc2">·</span><span class="dr">▪▪</span><span class="pw pd">∘</span><span class="dr">▪▪▪</span></span>
+<span class="row"><span class="bh">║</span> <span class="et">●</span><span class="t2">▒</span><span class="pr pb">·</span><span class="t2">▒</span><span class="t3">▓</span><span class="t2">░</span><span class="t1">░</span><span class="pc">╋</span><span class="t2">▒</span><span class="pw pa">·</span><span class="t3">▓</span><span class="t2">▒</span><span class="t1">░</span><span class="t2">▒</span><span class="et">●</span></span>
+<span class="row"><span class="bh">║</span> <span class="et">●</span><span class="t1">░</span><span class="t2">▒</span><span class="pr pc2">∘</span><span class="t2">▒</span><span class="t1">░</span><span class="t2">░</span><span class="t1">░</span><span class="pw pb">∘</span><span class="t2">▒</span><span class="t1">░</span><span class="t2">▒</span><span class="t1">░</span><span class="t0">·</span><span class="et">●</span></span>
+<span class="row"><span class="bh">║</span> <span class="et">●</span><span class="t0">·</span><span class="t1">░</span><span class="pw pc2">·</span><span class="t1">░</span><span class="t0">·</span><span class="t1">░</span><span class="t0">·</span><span class="pr pd">·</span><span class="t1">░</span><span class="t0">·</span><span class="t1">░</span><span class="t0">·</span><span class="t1">░</span><span class="et">●</span></span>
+<span class="row"><span class="bh">║</span> <span class="et">●</span><span class="t1">░</span><span class="t0">·</span><span class="t1">░</span><span class="t0">·</span><span class="t1">░</span><span class="t0">·</span><span class="t1">░</span><span class="t0">·</span><span class="t1">░</span><span class="t0">·</span><span class="t1">░</span><span class="t0">·</span><span class="t1">░</span><span class="et">●</span></span>
+<span class="row"><span class="bh">║</span> <span class="dr">▪▪▪</span><span class="pw pa">·</span><span class="dr">▪▪</span><span class="pw pc2">∘</span><span class="dr">▪▪</span><span class="pr pb">·</span><span class="dr">▪▪▪</span></span>
+<span class="row"><span class="bh">╚══════════════</span></span>
+<span class="row"><span class="st">⚡</span><span class="sv">71W</span> <span class="st">🌡</span><span class="sv">78°C</span> <span class="st">ETH</span><span class="sv">▪▪▪▪</span></span>
+    </div>
+    <p style="font-size:11px;color:#4a6070;margin-top:8px;"><span style="color:#4FD1C5">∘○·</span> teal = DRAM→Tensix reads &nbsp; <span style="color:#EC96B8">∘○·</span> pink = Tensix→DRAM writes. Density = power proxy.</p>
+  </div>
+  <div class="card-body">
+    <h3>Teal reads + pink writes</h3>
+    <p>Particles (· ∘ ○) travel between DRAM rows and Tensix interior. Direction and color encode read vs write. Closest to tensix-viz feel.</p>
+    <div class="pros-cons" style="font-size:12px;">
+      <div class="pros"><h4>Pros</h4><ul><li>Conveys direction</li><li>Reads vs writes distinct</li><li>Matches tensix-viz feel</li></ul></div>
+      <div class="cons"><h4>Cons</h4><ul><li>BW is power proxy (not real BW)</li><li>More visual noise</li></ul></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ OPTION C -->
+<div class="card" data-choice="c" onclick="toggleSelect(this)">
+  <div class="card-image" style="padding:16px 14px 12px;">
+    <div class="label-sm" style="font-size:11px;color:#607D8B;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Option C — Particles + Tensix fill bars</div>
+    <div class="chip-art">
+<span class="row"><span class="bc">╔══════════════</span>  <span class="st">BH Dev0</span> <span class="sv">38°C</span></span>
+<span class="row"><span class="bc">║</span> <span class="dr">▪</span><span class="pr pa">·</span><span class="dr">▪▪▪</span><span class="pr pd">∘</span><span class="dr">▪▪▪</span><span class="pw pb">·</span><span class="dr">▪▪▪▪</span></span>
+<span class="row"><span class="bc">║</span> <span class="et">●</span><span class="f1">▁</span><span class="f2">▂</span><span class="f1">▁</span><span class="f2">▂</span><span class="f1">▁</span><span class="f1">▁</span><span class="pc">╋</span><span class="f1">▁</span><span class="f2">▂</span><span class="f1">▁</span><span class="f2">▂</span><span class="f1">▁</span><span class="f1">▁</span><span class="et">●</span></span>
+<span class="row"><span class="bc">║</span> <span class="et">●</span><span class="f2">▂</span><span class="pr pc2">·</span><span class="f2">▂</span><span class="f3">▃</span><span class="f2">▂</span><span class="f1">▁</span><span class="f2">▂</span><span class="pw pa">·</span><span class="f2">▂</span><span class="f1">▁</span><span class="f2">▂</span><span class="f1">▁</span><span class="f1">▁</span><span class="et">●</span></span>
+<span class="row"><span class="bc">║</span> <span class="et">●</span><span class="f1">▁</span><span class="f1">▁</span><span class="f1">▁</span><span class="f1">▁</span><span class="f1">▁</span><span class="f1">▁</span><span class="f1">▁</span><span class="f1">▁</span><span class="f1">▁</span><span class="f1">▁</span><span class="f1">▁</span><span class="f1">▁</span><span class="f1">▁</span><span class="et">●</span></span>
+<span class="row"><span class="bc">║</span> <span class="et">●</span><span class="f1">▁</span><span class="f1">▁</span><span class="f1">▁</span><span class="f2">▂</span><span class="f1">▁</span><span class="f1">▁</span><span class="f1">▁</span><span class="f2">▂</span><span class="f1">▁</span><span class="f1">▁</span><span class="f1">▁</span><span class="f1">▁</span><span class="f1">▁</span><span class="et">●</span></span>
+<span class="row"><span class="bc">║</span> <span class="dr">▪▪▪▪</span><span class="pw pa">·</span><span class="dr">▪▪</span><span class="pw pc2">∘</span><span class="dr">▪▪▪▪▪</span></span>
+<span class="row"><span class="bc">╚══════════════</span></span>
+<span class="row"><span class="st">⚡</span><span class="sv">18W</span> <span class="st">🌡</span><span class="sv">38°C</span> <span class="st">ETH</span><span class="sv">▪▪··</span></span>
+    </div>
+    <p style="font-size:11px;color:#4a6070;margin-top:8px;"><span style="color:#4FD1C5">∘·</span> teal reads &nbsp; <span style="color:#EC96B8">∘·</span> pink writes &nbsp; <span style="color:#2e6e88">▁▂▃</span> per-cell fill bars (L1 proxy from power)</p>
+  </div>
+  <div class="card-body">
+    <h3>Particles + L1 fill bars</h3>
+    <p>Same particles as B, but Tensix cells show ▁▂▃ fill bars instead of ░▒▓ blocks — encoding per-cell activity separately from color. Most information-dense.</p>
+    <div class="pros-cons" style="font-size:12px;">
+      <div class="pros"><h4>Pros</h4><ul><li>Highest info density</li><li>L1 vs DRAM activity visually separate</li><li>Faithful to tensix-viz</li></ul></div>
+      <div class="cons"><h4>Cons</h4><ul><li>Most complex</li><li>No real per-core L1 data — all proxied</li></ul></div>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<p class="subtitle" style="margin-top:16px;">Particle animations are simulated here — real impl drives density from <code>power_w</code>. Click to select, or describe in terminal what to adjust.</p>

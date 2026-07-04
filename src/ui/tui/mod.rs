@@ -540,6 +540,18 @@ fn run_app(
                         crate::workload::inference_server::ServingStats,
                     > = None;
 
+                    // Under --remote the chips on screen belong to the REMOTE
+                    // box, but the serving snapshot is a LOCAL Docker/HTTP probe
+                    // of *this* machine. Pitting local serving against remote
+                    // silicon in the hero ⚔ duel is incoherent, so suppress the
+                    // serving feed under Remote (no-op off-Linux, where it's
+                    // already None).
+                    let serving = if backend_type == BackendType::Remote {
+                        None
+                    } else {
+                        serving
+                    };
+
                     if let Some(ref mut arc) = arcade {
                         arc.set_serving(serving);
                         arc.update(backend);

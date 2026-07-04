@@ -49,7 +49,8 @@ pub mod mock;
 pub mod smbus_smooth; // EMA smoothing for numeric SMBUS fields
 #[cfg(target_os = "linux")]
 pub mod sysfs; // Sysfs backend for Linux hwmon sensors (non-invasive)
-pub mod ws; // WebSocket backend: remote QuietBox telemetry over the LAN (opt-in --remote)
+#[cfg(feature = "remote")]
+pub mod ws; // WebSocket backend: remote QuietBox telemetry over the LAN (opt-in --remote, `remote` feature)
 
 use crate::error::BackendResult;
 use crate::models::{Device, SmbusTelemetry, Telemetry};
@@ -295,6 +296,16 @@ impl BackendConfig {
     /// Set max errors
     pub fn with_max_errors(mut self, max_errors: usize) -> Self {
         self.max_consecutive_errors = max_errors;
+        self
+    }
+
+    /// Set the telemetry read timeout in milliseconds.
+    ///
+    /// Used by backends that wait on a data source — notably `WsBackend`, whose
+    /// connect / first-frame wait derives from this value. Without wiring this,
+    /// `--timeout` had no effect and the WS path was stuck at the 5000ms default.
+    pub fn with_read_timeout_ms(mut self, read_timeout_ms: u64) -> Self {
+        self.read_timeout_ms = read_timeout_ms;
         self
     }
 

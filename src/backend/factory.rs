@@ -9,6 +9,7 @@
 use crate::backend::host::HostBackend;
 use crate::backend::json::JSONBackend;
 use crate::backend::mock::MockBackend;
+#[cfg(feature = "remote")]
 use crate::backend::ws::WsBackend;
 use crate::backend::{BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
@@ -94,6 +95,9 @@ pub fn create_backend(
         // Remote QuietBox — opt-in only, entered exclusively via --remote <HOST:PORT>.
         // Never reached from auto-detect or Tab-cycling (create_auto_backend and
         // next_backend deliberately omit it), preserving the additive contract.
+        // The variant is unconditional (cfg-gating an enum variant would ripple
+        // through every match arm); the WS backend behind it is gated instead.
+        #[cfg(feature = "remote")]
         BackendType::Remote => {
             let spec = cli.remote.as_deref().ok_or_else(|| {
                 BackendError::Initialization(
@@ -104,6 +108,10 @@ pub fn create_backend(
             backend.init()?;
             Ok(Box::new(backend))
         }
+        #[cfg(not(feature = "remote"))]
+        BackendType::Remote => Err(BackendError::Initialization(
+            "Remote backend not compiled (built without the 'remote' feature)".to_string(),
+        )),
     }
 }
 

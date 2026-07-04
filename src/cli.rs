@@ -254,11 +254,18 @@ pub enum BackendType {
     Remote,
 }
 
-/// True when the active backend represents real TT hardware, so the process
-/// panel should list only TT-attributed processes. Host shows host CPU procs;
-/// Mock is exempt (no real /dev/tenstorrent fds — keep --mock demos non-blank).
+/// True when the active backend represents real *local* TT hardware, so the
+/// process panel should list only TT-attributed processes. Host shows host CPU
+/// procs; Mock is exempt (no real /dev/tenstorrent fds — keep --mock demos
+/// non-blank); Remote is exempt too — the process list is read from the LOCAL
+/// machine and cannot correspond to the remote box's chips, so filtering it to
+/// "TT processes" would wrongly blank out the local processes we can actually
+/// see. Remote therefore shows unfiltered local processes, like Host/Mock.
 pub fn backend_shows_only_tt(bt: BackendType) -> bool {
-    !matches!(bt, BackendType::Host | BackendType::Mock)
+    !matches!(
+        bt,
+        BackendType::Host | BackendType::Mock | BackendType::Remote
+    )
 }
 
 /// Visualization mode selection
@@ -765,6 +772,9 @@ mod tests {
         use super::*;
         assert!(!backend_shows_only_tt(BackendType::Host));
         assert!(!backend_shows_only_tt(BackendType::Mock));
+        // Remote: process list is the LOCAL machine's, not the remote chips' —
+        // show it unfiltered like Host/Mock.
+        assert!(!backend_shows_only_tt(BackendType::Remote));
         assert!(backend_shows_only_tt(BackendType::Json));
         assert!(backend_shows_only_tt(BackendType::Luwen));
 

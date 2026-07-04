@@ -48,14 +48,18 @@ resolution was NOT implemented (documented as the optional follow-up in the desi
 No existing backend, the trait, the default, or the auto-detect/Tab-cycle order
 changed. The `json.rs` change is a pure refactor: all pre-existing JSON tests pass
 unchanged, and `JSONBackend`'s subprocess path preserves append-only device merge.
-Full lib suite: **351 passed, 0 failed**. Backend module: 54 passed (incl. an
-in-process fake-server end-to-end test + inject-based unit tests). `cargo build`
-OK; `cargo clippy` clean on touched files; `cargo fmt --check` clean.
+The full lib suite passes green (exact counts drift as tests are added — run
+`cargo test --lib --features tui` for the current tally), including the backend
+module's in-process fake-server end-to-end test and the inject-based WS unit
+tests. `cargo build` OK; `cargo clippy` clean on touched files; `cargo fmt --check`
+clean.
 
 ## Concerns / notes
 
-- `tokio-tungstenite = "0.24"` + `futures-util` added as hard (cross-platform)
-  dependencies. Adds build weight but is unconditional per the design (no cfg gate).
+- `tokio-tungstenite = "0.24"` + `futures-util` are optional, gated behind the
+  `remote` cargo feature (in `default`, so normal builds/UX are unchanged).
+  Packagers who don't want the WS stack build with `--no-default-features`; the
+  `Remote` variant then returns a clean "built without the 'remote' feature" error.
 - WS stream is unauthed (matches the design's v1 decision, consistent with the box's
   unauthed `/status`/`/models`). Fine on a trusted LAN; not for open networks.
 - `WsBackend::init` blocks up to `--timeout` ms for the first frame; a slow/absent

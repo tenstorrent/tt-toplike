@@ -50,6 +50,11 @@ struct Shared {
     generation: AtomicU64,
     /// Whether the WebSocket is currently connected (for status display).
     connected: AtomicBool,
+    /// Instant the most recent frame landed. `None` until the first arrives.
+    /// Lets `backend_info()` detect a *silent stall* — socket still open but
+    /// frames stopped — which `connected` alone can't see. Same Mutex pattern
+    /// as `latest`; touched once per frame, off the hot render path.
+    last_frame_at: Mutex<Option<Instant>>,
     /// Most recent connection/parse error message, for `backend_info()` context.
     last_error: Mutex<Option<String>>,
 }
@@ -57,6 +62,7 @@ struct Shared {
 impl Shared {
     fn set_frame(&self, frame: String) {
         *self.latest.lock().unwrap() = Some(frame);
+        *self.last_frame_at.lock().unwrap() = Some(Instant::now());
         self.generation.fetch_add(1, Ordering::Release);
     }
 
@@ -283,18 +289,54 @@ impl TelemetryBackend for WsBackend {
     }
 
     fn backend_info(&self) -> String {
-        let state = if self.shared.connected.load(Ordering::Relaxed) {
-            "connected"
-        } else {
-            "disconnected"
-        };
-        format!(
-            "remote QuietBox @ {}:{} ({}, {} device(s))",
-            self.host,
-            self.port,
-            state,
-            self.devices.len()
-        )
+        let connected = self.shared.connected.load(Ordering::Relaxed);
+        let last_frame_at = *self.shared.last_frame_at.lock().unwrap();
+        let devices = self.devices.len();
+
+        if !connected {
+            return format!(
+                "remote QuietBox @ {}:{} (disconnected, {} device(s))",
+                self.host, self.port, devices
+            );
+        }
+
+        // Connected: distinguish a live stream from a silent stall using the
+        // age of the last frame. `staleness_word` decides "connected" vs "stale".
+        match last_frame_at {
+            Some(t) => {
+                let age = t.elapsed().as_secs();
+                let interval_secs = self.config.update_interval_ms / 1000;
+                format!(
+                    "remote QuietBox @ {}:{} ({}, last frame {}s ago, {} device(s))",
+                    self.host,
+                    self.port,
+                    staleness_word(age, interval_secs),
+                    age,
+                    devices
+                )
+            }
+            // Socket up but no frame has arrived yet.
+            None => format!(
+                "remote QuietBox @ {}:{} (connected, awaiting first frame, {} device(s))",
+                self.host, self.port, devices
+            ),
+        }
+    }
+}
+
+/// Freshness word for `backend_info`, given the age of the last frame and the
+/// expected inter-frame interval (both in seconds).
+///
+/// A frame is "stale" once it is older than 3× the expected interval, with a
+/// 5-second floor so a fast configured interval doesn't flap the label on
+/// ordinary network jitter. Pure and side-effect-free so it's unit-testable
+/// without a live socket.
+fn staleness_word(age_secs: u64, interval_secs: u64) -> &'static str {
+    let threshold = interval_secs.saturating_mul(3).max(5);
+    if age_secs > threshold {
+        "stale"
+    } else {
+        "connected"
     }
 }
 
@@ -434,6 +476,23 @@ mod tests {
             }
         }]
     }"#;
+
+    /// The pure age→wording helper: "stale" only past 3× interval, 5s floor.
+    #[test]
+    fn test_staleness_word() {
+        // With a tiny (or zero) interval, the 5s floor governs.
+        assert_eq!(staleness_word(0, 0), "connected");
+        assert_eq!(staleness_word(5, 0), "connected"); // exactly at floor, not past it
+        assert_eq!(staleness_word(6, 0), "stale"); // past the 5s floor
+
+        // With a larger interval, threshold is 3× interval (10s → 30s).
+        assert_eq!(staleness_word(29, 10), "connected");
+        assert_eq!(staleness_word(30, 10), "connected"); // exactly 3× is not yet stale
+        assert_eq!(staleness_word(31, 10), "stale");
+
+        // Saturating multiply: an absurd interval must not overflow/panic.
+        assert_eq!(staleness_word(u64::MAX, u64::MAX), "connected");
+    }
 
     #[test]
     fn test_host_port_parsing() {

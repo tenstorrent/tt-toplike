@@ -1,0 +1,166 @@
+<h2>Animated chip portrait — which direction?</h2>
+<p class="subtitle">All three use temperature-colored borders (╔║╚ in teal→gold→red). The difference is how bandwidth and memory activity are shown inside the portrait.</p>
+
+<style>
+  .chip-demo {
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    line-height: 1.4;
+    background: #0d1117;
+    padding: 10px 12px;
+    border-radius: 4px;
+    display: inline-block;
+    min-width: 220px;
+  }
+  /* Temperature border colors (teal=cool, gold=warm, red=hot) */
+  .border-cool  { color: #4FD1C5; }
+  .border-warm  { color: #F4C471; }
+  .border-hot   { color: #FF6B6B; }
+  /* Cell types */
+  .dram         { color: #3B82F6; }
+  .dram-active  { color: #60a5fa; font-weight: bold; }
+  .eth          { color: #27AE60; }
+  .pcie         { color: #F4C471; }
+  .tensix-idle  { color: #374151; }
+  .tensix-low   { color: #4a6070; }
+  .tensix-mid   { color: #5a7a8a; }
+  .tensix-high  { color: #4FD1C5; }
+  .tensix-hot   { color: #F4C471; }
+  /* Particles */
+  .p-read       { color: #4FD1C5; }
+  .p-write      { color: #EC96B8; }
+  .p-trail      { color: #2a4a50; }
+  .stat-row     { color: #607D8B; font-size: 11px; margin-top:3px; }
+  .stat-val     { color: #B0C4DE; }
+  .label-sm     { font-size: 11px; color: #607D8B; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+  .chip-wrap    { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+
+  /* Animation for Option B particles */
+  @keyframes drift-right {
+    0%   { transform: translateX(0px);   opacity: 1; }
+    100% { transform: translateX(60px);  opacity: 0; }
+  }
+  @keyframes drift-left {
+    0%   { transform: translateX(0px);   opacity: 1; }
+    100% { transform: translateX(-55px); opacity: 0; }
+  }
+  @keyframes drift-down {
+    0%   { transform: translateY(0px);   opacity: 1; }
+    100% { transform: translateY(40px);  opacity: 0; }
+  }
+  @keyframes drift-up {
+    0%   { transform: translateY(0px);   opacity: 1; }
+    100% { transform: translateY(-40px); opacity: 0; }
+  }
+  @keyframes dram-pulse {
+    0%, 100% { color: #3B82F6; }
+    50%       { color: #60d0ff; }
+  }
+  @keyframes dram-breathe-fast {
+    0%, 100% { color: #3B82F6; letter-spacing: 0; }
+    50%       { color: #93c5fd; letter-spacing: 0.5px; }
+  }
+  .p-move-r { display: inline; animation: drift-right 1.2s linear infinite; }
+  .p-move-l { display: inline; animation: drift-left  1.0s linear infinite; }
+  .p-move-d { display: inline; animation: drift-down  0.9s linear infinite; }
+  .p-move-u { display: inline; animation: drift-up    1.1s linear infinite; }
+  .dram-anim { animation: dram-breathe-fast 1.8s ease-in-out infinite; }
+  .dram-anim2 { animation: dram-breathe-fast 2.4s ease-in-out infinite 0.5s; }
+</style>
+
+<div class="cards">
+
+  <!-- Option A: Temperature borders + DRAM breathing only -->
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:16px 12px 12px;">
+      <div class="label-sm">Option A — DRAM Breathing</div>
+      <div class="chip-wrap">
+        <div class="chip-demo">
+<span class="border-warm">╔</span><span class="border-warm">══════════════</span><span class="stat-row"> BH Dev0 67°C</span>
+<span class="border-warm">║ </span><span class="dram-anim">▪▪▪▪▪</span><span class="dram-anim2">▪▪▪▪▪</span><span class="dram-anim">▪▪▪</span>
+<span class="border-warm">║ </span><span class="eth">●</span><span class="tensix-mid">░▒</span><span class="tensix-high">▓</span><span class="tensix-mid">░░</span><span class="pcie">╋</span><span class="tensix-mid">░░</span><span class="tensix-high">▓</span><span class="tensix-mid">▒░</span><span class="eth">●</span>
+<span class="border-warm">║ </span><span class="eth">●</span><span class="tensix-low">░</span><span class="tensix-mid">▒▒</span><span class="tensix-low">░░░</span><span class="tensix-mid">▒</span><span class="tensix-low">░░░░</span><span class="eth">●</span>
+<span class="border-warm">║ </span><span class="eth">●</span><span class="tensix-mid">▒</span><span class="tensix-high">▓</span><span class="tensix-mid">░▒░</span><span class="tensix-high">▓</span><span class="tensix-mid">░▒</span><span class="tensix-high">▓</span><span class="tensix-mid">▒░</span><span class="eth">●</span>
+<span class="border-warm">║ </span><span class="eth">●</span><span class="tensix-low">░░░░░░░░░░░░</span><span class="eth">●</span>
+<span class="border-warm">║ </span><span class="dram-anim2">▪▪▪▪▪</span><span class="dram-anim">▪▪▪▪▪</span><span class="dram-anim2">▪▪▪</span>
+<span class="border-warm">╚══════════════</span>
+<div class="stat-row">⚡ <span class="stat-val">43W</span>  🌡 <span class="stat-val">67°C</span>  ETH <span class="stat-val">▪▪▪·</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>DRAM rows breathe</h3>
+      <p>DRAM rows (▪) pulse brighter when bandwidth is high. Tensix cells show ░▒▓ fill by power. Border color = ASIC temp (teal→gold→red). No moving particles.</p>
+      <div class="pros-cons" style="font-size:12px;">
+        <div class="pros"><h4>Pros</h4><ul><li>Low complexity</li><li>No flicker</li><li>Readable at a glance</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>No sense of direction</li><li>Reads vs writes indistinguishable</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Option B: Temperature borders + teal/pink particle stream -->
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:16px 12px 12px; position:relative; overflow:hidden;">
+      <div class="label-sm">Option B — Teal/Pink Particle Stream</div>
+      <div class="chip-wrap">
+        <div class="chip-demo" style="position:relative;">
+<span class="border-hot">╔</span><span class="border-hot">══════════════</span><span class="stat-row"> BH Dev0 78°C</span>
+<span class="border-hot">║ </span><span class="dram">▪</span><span class="p-read p-move-r" style="animation-delay:0.0s">∘</span><span class="dram">▪▪</span><span class="p-read p-move-r" style="animation-delay:0.4s">○</span><span class="dram">▪</span><span class="p-read p-move-d" style="animation-delay:0.2s">·</span><span class="dram">▪▪</span><span class="p-write p-move-u" style="animation-delay:0.6s">∘</span><span class="dram">▪▪▪</span>
+<span class="border-hot">║ </span><span class="eth">●</span><span class="tensix-high">▓</span><span class="p-read p-move-r" style="animation-delay:0.3s;font-size:10px">·</span><span class="tensix-high">▒</span><span class="tensix-mid">░░</span><span class="pcie">╋</span><span class="p-write p-move-l" style="animation-delay:0.7s;font-size:10px">·</span><span class="tensix-mid">░</span><span class="tensix-high">▓▒</span><span class="tensix-mid">░</span><span class="eth">●</span>
+<span class="border-hot">║ </span><span class="eth">●</span><span class="tensix-mid">▒░</span><span class="p-read p-move-d" style="animation-delay:0.1s;font-size:10px">○</span><span class="tensix-mid">▒░░░</span><span class="p-write p-move-u" style="animation-delay:0.5s;font-size:10px">∘</span><span class="tensix-mid">▒░░</span><span class="eth">●</span>
+<span class="border-hot">║ </span><span class="eth">●</span><span class="tensix-mid">░░░░░░░░░░░░</span><span class="eth">●</span>
+<span class="border-hot">║ </span><span class="dram">▪▪</span><span class="p-write p-move-u" style="animation-delay:0.0s">∘</span><span class="dram">▪▪</span><span class="p-write p-move-u" style="animation-delay:0.8s">·</span><span class="dram">▪▪</span><span class="p-read p-move-d" style="animation-delay:0.3s">○</span><span class="dram">▪▪▪</span>
+<span class="border-hot">╚══════════════</span>
+<div class="stat-row">⚡ <span class="stat-val">71W</span>  🌡 <span class="stat-val">78°C</span>  ETH <span class="stat-val">▪▪▪▪</span></div>
+        </div>
+      </div>
+      <div style="margin-top:8px;font-size:11px;">
+        <span class="p-read">● teal = DRAM→Tensix read</span> &nbsp;
+        <span class="p-write">● pink = Tensix→DRAM write</span>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Moving particles (reads + writes)</h3>
+      <p>Teal particles (∘ ○ ·) drift from DRAM rows inward. Pink particles drift outward toward DRAM. Particle density = estimated bandwidth from power_w. Border = ASIC temp.</p>
+      <div class="pros-cons" style="font-size:12px;">
+        <div class="pros"><h4>Pros</h4><ul><li>Conveys direction of data flow</li><li>Reads vs writes visually distinct</li><li>Matches tensix-viz feel</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>More screen noise</li><li>Bandwidth is inferred (power proxy)</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Option C: Full motion + L1 fill bars in Tensix cells -->
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:16px 12px 12px;">
+      <div class="label-sm">Option C — Full: particles + Tensix fill bars</div>
+      <div class="chip-wrap">
+        <div class="chip-demo" style="position:relative;">
+<span class="border-cool">╔</span><span class="border-cool">══════════════</span><span class="stat-row"> BH Dev0 38°C</span>
+<span class="border-cool">║ </span><span class="dram-anim">▪</span><span class="p-read p-move-r" style="animation-delay:0.0s">·</span><span class="dram-anim2">▪▪▪</span><span class="p-read p-move-d" style="animation-delay:0.5s">∘</span><span class="dram-anim">▪▪</span><span class="dram-anim2">▪▪▪▪</span>
+<span class="border-cool">║ </span><span class="eth">●</span><span style="color:#1d5a6a">▁</span><span style="color:#246a7e">▂</span><span style="color:#1d5a6a">▁</span><span style="color:#246a7e">▂</span><span style="color:#2d7a94">▃</span><span class="pcie">╋</span><span style="color:#246a7e">▂</span><span style="color:#1d5a6a">▁</span><span style="color:#2d7a94">▃</span><span style="color:#246a7e">▂</span><span style="color:#1d5a6a">▁</span><span class="eth">●</span>
+<span class="border-cool">║ </span><span class="eth">●</span><span style="color:#246a7e">▂</span><span class="p-read p-move-r" style="animation-delay:0.2s;font-size:10px">·</span><span style="color:#1d5a6a">▁</span><span style="color:#246a7e">▂▂</span><span style="color:#1d5a6a">▁</span><span style="color:#246a7e">▂</span><span class="p-write p-move-l" style="animation-delay:0.7s;font-size:10px">∘</span><span style="color:#1d5a6a">▁</span><span style="color:#246a7e">▂</span><span class="eth">●</span>
+<span class="border-cool">║ </span><span class="eth">●</span><span style="color:#1d5a6a">▁▁▁▁▁▁▁▁▁▁▁▁</span><span class="eth">●</span>
+<span class="border-cool">║ </span><span class="dram-anim2">▪▪▪</span><span class="p-write p-move-u" style="animation-delay:0.4s">·</span><span class="dram-anim">▪▪▪</span><span class="p-write p-move-u" style="animation-delay:0.9s">∘</span><span class="dram-anim2">▪▪▪▪</span>
+<span class="border-cool">╚══════════════</span>
+<div class="stat-row">⚡ <span class="stat-val">18W</span>  🌡 <span class="stat-val">38°C</span>  ETH <span class="stat-val">▪▪··</span></div>
+        </div>
+      </div>
+      <div style="margin-top:8px;font-size:11px;">
+        <span style="color:#4FD1C5">● teal particles</span> &nbsp;
+        <span style="color:#EC96B8">● pink particles</span> &nbsp;
+        <span style="color:#2d7a94">▁▂▃ = L1 fill bars</span>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Full: particles + L1 fill bars</h3>
+      <p>Adds per-Tensix-cell fill bars (▁▂▃▄▅) showing relative L1 cache activity, alongside particles. Border color = temp. Closest to the original tensix-viz model.</p>
+      <div class="pros-cons" style="font-size:12px;">
+        <div class="pros"><h4>Pros</h4><ul><li>Most information-dense</li><li>Per-cell L1 activity visible</li><li>Faithful to tensix-viz</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>Most complex to implement</li><li>tt-smi doesn't expose per-core L1 — must proxy from power distribution</li><li>Risk of visual clutter</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<p class="subtitle" style="margin-top:16px;">Note: animations are illustrative — actual speed/density will be driven by telemetry (power_w as BW proxy). Click to select your preference, or describe in terminal what to adjust.</p>

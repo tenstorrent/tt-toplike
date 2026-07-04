@@ -63,9 +63,11 @@ tokio = { version = "1.49", features = ["full"] }
 tokio-util = "0.7"
 
 # WebSocket client for the remote QuietBox (WsBackend) telemetry stream.
-# Additive: only the opt-in --remote path uses it; every other backend is unaffected.
-tokio-tungstenite = "0.24"
-futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+# Additive and OPTIONAL: only the opt-in --remote path uses these, gated behind
+# the `remote` feature (in `default`, so normal builds are unchanged). Packagers
+# who don't want the WS stack can opt out with --no-default-features.
+tokio-tungstenite = { version = "0.24", optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"], optional = true }
 
 # JSON parsing (for JSON backend fallback)
 serde = { version = "1.0", features = ["derive"] }
@@ -132,7 +134,7 @@ tempfile = "3.13"
 [features]
 # Default features: Safe, non-invasive backends only
 # Luwen backend excluded from default to prevent hardware disruption
-default = ["tui", "json-backend", "linux-procfs"]
+default = ["tui", "json-backend", "linux-procfs", "remote"]
 
 # Frontend features
 tui = ["ratatui", "crossterm"]  # Terminal UI with Ratatui
@@ -147,6 +149,9 @@ app = ["eframe", "egui_plot", "portable-pty", "vte"]  # Native terminal window
 luwen-backend = ["all-smi-luwen-core", "all-smi-luwen-if", "all-smi-luwen-ref"]   # Direct hardware access (EXPLICIT ONLY)
 json-backend = []               # Subprocess tt-smi + JSON (SAFE)
 linux-procfs = ["procfs"]       # Enhanced Linux process detection
+# Remote QuietBox WebSocket backend (--remote). In `default`; opt out with
+# --no-default-features. When off, the Remote variant returns a clean error.
+remote = ["tokio-tungstenite", "futures-util"]
 
 # ── Debian packaging metadata (used by `cargo deb` for quick developer .debs)
 # For PPA/official builds use dpkg-buildpackage via build-deb.sh instead.
@@ -161,8 +166,9 @@ recommends = "tt-smi, tenstorrent-dkms"
 suggests = "tt-toplike-egui, tenstorrent-tools"
 section = "utils"
 priority = "optional"
-# Build with safe defaults — no Luwen, no iced GUI
-features = ["tui", "json-backend", "linux-procfs"]
+# Build with safe defaults — no Luwen, no iced GUI. Includes `remote` so packaged
+# builds keep --remote (it was unconditional before the feature gate was added).
+features = ["tui", "json-backend", "linux-procfs", "remote"]
 assets = [
   # Binary renamed: tt-toplike-tui → tt-toplike (shorter, global name)
   ["target/release/tt-toplike-tui", "usr/bin/tt-toplike", "755"],

@@ -140,6 +140,10 @@ that streams the verbatim `tt-smi -s` snapshot on an interval; tt-toplike's
 `Telemetry`/`SmbusTelemetry` structs, same render path, every visualization
 unchanged. It's the "QuietBox on your desk, on your Mac's screen" view.
 
+Note that the process panel and the `[i]` inference monitor describe the **local**
+machine you're running tt-toplike on, not the remote box — remote process and
+serving detail isn't carried in the v1 telemetry frames.
+
 This is **strictly additive**: `--remote` is a new backend alongside the local
 ones, opt-in only (never entered by auto-detect or Tab-cycling); everything else
 is untouched. What you get remotely is the chip-level telemetry `tt-smi -s`

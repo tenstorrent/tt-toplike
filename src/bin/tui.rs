@@ -48,10 +48,13 @@ fn main() {
         println!();
     }
 
-    // Create backend configuration
+    // Create backend configuration. `--timeout` (milliseconds) drives the read
+    // timeout, which the WsBackend also uses for its connect/first-frame wait —
+    // without this it was stuck at the 5000ms default.
     let config = BackendConfig::default()
         .with_interval(cli.interval)
-        .with_max_errors(cli.max_errors);
+        .with_max_errors(cli.max_errors)
+        .with_read_timeout_ms(cli.timeout);
 
     // --bench: headless render benchmark — does NOT require a TTY. Dispatch here,
     // before the backend selection / TUI path, so it works in CI and scripts.
@@ -192,7 +195,10 @@ fn main() {
         }
         // Remote QuietBox — opt-in only via --remote <HOST:PORT>. Consumes the
         // box's streamed `tt-smi -s` frames over WebSocket exactly like local
-        // telemetry. Never entered by auto-detect or Tab-cycling.
+        // telemetry. Never entered by auto-detect or Tab-cycling. Gated behind
+        // the `remote` feature (in default); when off, the variant still exists
+        // but fails cleanly rather than referencing the un-compiled ws module.
+        #[cfg(feature = "remote")]
         BackendType::Remote => {
             let spec = cli.remote.clone().unwrap_or_default();
             log::info!("Initializing WsBackend (remote QuietBox @ {})", spec);
@@ -203,6 +209,12 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+        }
+        #[cfg(not(feature = "remote"))]
+        BackendType::Remote => {
+            eprintln!("Error: --remote not available (built without the 'remote' feature)");
+            eprintln!("Rebuild with: cargo build --features remote");
+            std::process::exit(1);
         }
     }
 }
