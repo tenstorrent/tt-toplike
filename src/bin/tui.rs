@@ -23,7 +23,15 @@ use tt_toplike::{
 use tt_toplike::backend::luwen::LuwenBackend;
 
 fn main() {
-    // Parse command-line arguments
+    // Parse command-line arguments.
+    //
+    // `mut` only in the `remote` build: the `--remote` arm rewrites `cli.remote`
+    // to the resolved HOST:PORT so the TUI's factory pass doesn't re-run
+    // discovery (see the BackendType::Remote arm). Split by cfg so the non-remote
+    // build doesn't trip the `unused_mut` lint under `-D warnings`.
+    #[cfg(feature = "remote")]
+    let mut cli = Cli::parse_args();
+    #[cfg(not(feature = "remote"))]
     let cli = Cli::parse_args();
 
     // Validate arguments
@@ -210,6 +218,14 @@ fn main() {
                     std::process::exit(1);
                 }
             };
+            // Collapse the double startup discovery: `run_with_backend` → `run_tui`
+            // rebuilds the backend via the factory (the accepted, backend-agnostic
+            // double-build pattern — see sysfs.rs), and for Remote that factory
+            // pass would shell `tt --json discover` a SECOND time. Rewrite
+            // `cli.remote` to the already-resolved HOST:PORT so the factory's
+            // `resolve_remote_spec` sees an explicit address and passes it through
+            // without another mDNS browse.
+            cli.remote = Some(resolved.clone());
             log::info!("Initializing WsBackend (remote QuietBox @ {})", resolved);
             match tt_toplike::backend::ws::WsBackend::from_host_port(&resolved, config) {
                 Ok(mut backend) => run_with_backend(&mut backend, &cli),

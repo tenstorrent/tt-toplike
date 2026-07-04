@@ -1,7 +1,6 @@
 # Remote-box DISCOVERY + CONNECT UX — implementation report
 
 Additive `--remote` UX on top of the existing `--remote HOST:PORT` `WsBackend`.
-Branch: `inference-server-monitoring`. Nothing pushed.
 
 ## What shipped
 
@@ -43,6 +42,14 @@ exactly as now" — the strict error lives in the pure fn (and is what the TUI
   **hot-swaps the live backend** to a new `WsBackend` via `WsBackend::init()`,
   setting `backend_type = Remote` and resetting per-mode visualizations.
 
+**Off the render thread:** both operations run on a worker `std::thread`; the
+render loop shows a `discovering…`/`connecting…` status line and polls a
+`std::sync::mpsc` receiver once per tick with `try_recv()`. The blocking work
+(mDNS discovery, WebSocket connect + `init()`) never freezes the UI; the
+backend hot-swap and viz reset happen on the main thread when the worker
+reports back. Esc while pending cancels the wait (drops the receiver; the
+worker finishes and its send is discarded).
+
 **Why hot-swap over relaunch:** the runtime backend-swap machinery already
 exists — the `b` key does `*backend = new_backend` at runtime. `/remote` reuses
 that exact mechanism (`*backend = Box::new(ws)`), so no relaunch/exec is needed
@@ -78,23 +85,12 @@ the current backend untouched.
   to `nope:8000` ✓
 - `TT_BIN` missing → warns "discovery unavailable", falls back to bare host ✓
 
-## Build + test result
-- `cargo build` (default features) — clean.
-- `cargo build --no-default-features --features tui,json-backend,linux-procfs` — clean.
-- `cargo test --lib --bins --tests` — **380 passed, 0 failed** (371 lib + 9 integ).
-- clippy (touched files, both feature configs) — clean; `cargo fmt` applied.
-- Pre-existing (unrelated): the `gui_concept` example needs the `gui`/`iced`
-  feature, so a bare `cargo test` that builds examples fails there — not touched.
-
 ## Concerns / notes
-- A bare-name `--remote` now shells `tt --json discover` (mDNS browse ≈ a
-  timeout) before connecting; the `HOST:PORT` fast path is unaffected. Bare-host
-  usage pays this discovery cost too (unavoidable — a bare token is
-  syntactically indistinguishable from a name).
-- `bin/tui.rs` `main` and `run_tui` each resolve+connect once (pre-existing
-  double-connect for remote); a bare name therefore triggers discovery twice at
-  startup. Left as-is to keep the change additive.
-- Cargo.toml was being edited concurrently by the branch owner during this
-  work; a version bump to 0.7.19 is present in the working tree but Cargo.toml
-  is left **uncommitted** to avoid entangling my commits with that parallel
-  edit. The owner can commit Cargo.toml (with whatever version) themselves.
+- A bare-name `--remote` shells `tt --json discover` (mDNS browse ≈ a timeout)
+  before connecting; the `HOST:PORT` fast path is unaffected. Bare-host usage
+  pays this discovery cost too (unavoidable — a bare token is syntactically
+  indistinguishable from a name). Discovery is now bounded by a 10s timeout
+  (`DISCOVER_TIMEOUT`) so a wedged mDNS lookup can't hang the caller.
+- Startup discovery runs **once**: `bin/tui.rs` resolves + constructs the
+  `WsBackend` and hands it to the run path, which passes it through to the TUI
+  instead of letting the backend factory resolve `--remote` a second time.

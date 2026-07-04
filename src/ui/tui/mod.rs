@@ -356,6 +356,13 @@ fn run_app(
     #[cfg(feature = "remote")]
     let mut remote_boxes: Vec<crate::backend::discovery::DiscoveredBox> = Vec::new();
 
+    // In-flight `/remote` discovery/connect. The blocking work (mDNS discovery,
+    // WebSocket connect + init) runs on a worker thread; the loop polls this
+    // receiver once per tick with `try_recv()` so the render thread never
+    // stalls. `None` when idle. Dropping it (Esc) cancels the wait.
+    #[cfg(feature = "remote")]
+    let mut pending_remote: Option<std::sync::mpsc::Receiver<RemoteOutcome>> = None;
+
     // ── Floating overlay panel state ──────────────────────────────────────
     // Toggled by l (legend), ? (help), ! (explain).
     // Auto-dismissed on any other keypress — stays until explicit re-toggle.
@@ -805,8 +812,12 @@ fn run_app(
                                 // `/remote` is dispatched here (not in
                                 // execute_command) because connecting needs the
                                 // live backend/backend_type, which execute_command
-                                // doesn't get. Everything else flows through
-                                // execute_command unchanged.
+                                // doesn't get. It also runs OFF the render thread
+                                // (see spawn_remote_worker) so mDNS discovery and
+                                // the WebSocket connect never freeze the UI — the
+                                // outcome is applied later when the worker reports
+                                // back (see the pending_remote poll below).
+                                // Everything else flows through execute_command.
                                 let verb = cmd_buf
                                     .trim()
                                     .trim_start_matches('/')
@@ -815,78 +826,62 @@ fn run_app(
                                     .unwrap_or("")
                                     .to_lowercase();
 
-                                #[cfg(feature = "remote")]
-                                let remote_result = if verb == "remote" {
-                                    let arg = cmd_buf
-                                        .trim()
-                                        .trim_start_matches('/')
-                                        .split_once(char::is_whitespace)
-                                        .map(|(_, rest)| rest)
-                                        .unwrap_or("")
-                                        .trim()
-                                        .to_string();
-                                    Some(handle_remote_command(
-                                        &arg,
-                                        backend,
-                                        &mut backend_type,
-                                        &config,
-                                        &mut remote_boxes,
-                                    ))
+                                if verb == "remote" {
+                                    #[cfg(feature = "remote")]
+                                    {
+                                        let arg = cmd_buf
+                                            .trim()
+                                            .trim_start_matches('/')
+                                            .split_once(char::is_whitespace)
+                                            .map(|(_, rest)| rest)
+                                            .unwrap_or("")
+                                            .trim()
+                                            .to_string();
+                                        // Show progress immediately; the worker
+                                        // replaces this when it finishes.
+                                        cmd_message = Some((
+                                            if arg.is_empty() {
+                                                "discovering boxes…".to_string()
+                                            } else {
+                                                format!("connecting to {}…", arg)
+                                            },
+                                            false,
+                                        ));
+                                        pending_remote = Some(spawn_remote_worker(
+                                            arg,
+                                            remote_boxes.clone(),
+                                            config.clone(),
+                                        ));
+                                    }
+                                    #[cfg(not(feature = "remote"))]
+                                    {
+                                        cmd_message = Some((
+                                            "remote unavailable (built without the 'remote' feature)"
+                                                .to_string(),
+                                            true,
+                                        ));
+                                    }
                                 } else {
-                                    None
-                                };
-                                #[cfg(not(feature = "remote"))]
-                                let remote_result: Option<(
-                                    String,
-                                    bool,
-                                    bool,
-                                )> = if verb == "remote" {
-                                    Some((
-                                        "remote unavailable (built without the 'remote' feature)"
-                                            .to_string(),
-                                        true,
-                                        false,
-                                    ))
-                                } else {
-                                    None
-                                };
-
-                                let (msg, is_err, should_quit) =
-                                    if let Some((m, e, swapped)) = remote_result {
-                                        // A successful hot-swap replaced the backend;
-                                        // reset per-mode visualizations so they rebuild
-                                        // against the new device set (mirrors the `b`
-                                        // backend-cycle handler).
-                                        if swapped {
-                                            starfield = None;
-                                            memory_castle = None;
-                                            memory_flow = None;
-                                            arcade = None;
-                                            defrag = None;
-                                            force_redraw = true;
-                                        }
-                                        (m, e, false)
+                                    let (msg, is_err, should_quit) = execute_command(
+                                        &cmd_buf,
+                                        &mut display_mode,
+                                        &mut ui_poll_rate_anim,
+                                        &mut ui_poll_rate_data,
+                                        anim_cfg.sensitivity,
+                                        &mut overlay,
+                                        &mut throttle_state,
+                                    );
+                                    if should_quit {
+                                        return Ok(());
+                                    }
+                                    // Empty message (e.g. /help opens overlay) →
+                                    // don't leave a blank command bar on screen.
+                                    cmd_message = if msg.is_empty() {
+                                        None
                                     } else {
-                                        execute_command(
-                                            &cmd_buf,
-                                            &mut display_mode,
-                                            &mut ui_poll_rate_anim,
-                                            &mut ui_poll_rate_data,
-                                            anim_cfg.sensitivity,
-                                            &mut overlay,
-                                            &mut throttle_state,
-                                        )
+                                        Some((msg, is_err))
                                     };
-                                if should_quit {
-                                    return Ok(());
                                 }
-                                // Empty message (e.g. /help opens overlay) → don't
-                                // leave a blank command bar stuck on screen.
-                                cmd_message = if msg.is_empty() {
-                                    None
-                                } else {
-                                    Some((msg, is_err))
-                                };
                                 cmd_mode = false;
                                 cmd_buf.clear();
                             }
@@ -957,6 +952,17 @@ fn run_app(
                                 return Ok(());
                             }
                             KeyCode::Esc => {
+                                // Cancel an in-flight /remote wait first: drop the
+                                // receiver so the worker's send fails harmlessly
+                                // (it finishes on its own), then clear the
+                                // "discovering…/connecting…" status line.
+                                #[cfg(feature = "remote")]
+                                if pending_remote.take().is_some() {
+                                    cmd_message = Some(("remote cancelled".to_string(), false));
+                                    // Handled — skip the dismiss chain below.
+                                    force_redraw = true;
+                                    continue;
+                                }
                                 // Dismiss command message, zoom, kill confirm (in that order).
                                 // Overlays are already dismissed by the take() above.
                                 if prior_overlay.is_some() {
@@ -1208,6 +1214,78 @@ fn run_app(
                 } // end Event::Key
                 _ => {}
             } // end match event::read()
+        }
+
+        // ── Poll the in-flight /remote worker (non-blocking) ────────────────
+        // One cheap `try_recv()` per loop tick (the 16ms input poll wakes us).
+        // While pending, the "discovering…/connecting…" status line set at
+        // dispatch stays up. On completion we apply the outcome here, on the
+        // main thread: discovery updates the picker cache + message; connect
+        // hot-swaps the (already-init()ed) backend and resets per-mode viz.
+        #[cfg(feature = "remote")]
+        if let Some(rx) = pending_remote.as_ref() {
+            match rx.try_recv() {
+                Ok(RemoteOutcome::Discovered(Ok(boxes))) if boxes.is_empty() => {
+                    remote_boxes.clear();
+                    cmd_message = Some((
+                        "no boxes discovered — try /remote <host:port>".to_string(),
+                        false,
+                    ));
+                    pending_remote = None;
+                    force_redraw = true;
+                }
+                Ok(RemoteOutcome::Discovered(Ok(boxes))) => {
+                    let mut lines =
+                        vec!["discovered boxes — /remote <n|name> to connect:".to_string()];
+                    for (i, b) in boxes.iter().enumerate() {
+                        lines.push(format!("  {}. {}", i + 1, b.summary_line()));
+                    }
+                    remote_boxes = boxes;
+                    cmd_message = Some((lines.join("\n"), false));
+                    pending_remote = None;
+                    force_redraw = true;
+                }
+                Ok(RemoteOutcome::Discovered(Err(e))) => {
+                    remote_boxes.clear();
+                    cmd_message = Some((format!("discover failed: {}", e), true));
+                    pending_remote = None;
+                    force_redraw = true;
+                }
+                Ok(RemoteOutcome::Connected { target, result }) => {
+                    match result {
+                        Ok(ws) => {
+                            // Hot-swap the live backend to the WsBackend the worker
+                            // already constructed + init()ed (Box<WsBackend> unsizes
+                            // to Box<dyn TelemetryBackend> on assignment).
+                            *backend = ws;
+                            backend_type = BackendType::Remote;
+                            log::info!("/remote: hot-swapped to WsBackend @ {}", target);
+                            // Reset per-mode visualizations so they rebuild against
+                            // the new device set (mirrors the `b` backend-cycle path).
+                            starfield = None;
+                            memory_castle = None;
+                            memory_flow = None;
+                            arcade = None;
+                            defrag = None;
+                            cmd_message = Some((format!("connected to {}", target), false));
+                        }
+                        Err(e) => {
+                            cmd_message = Some((e, true));
+                        }
+                    }
+                    pending_remote = None;
+                    force_redraw = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Still working — leave the progress message up.
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // Worker vanished without sending (shouldn't happen).
+                    cmd_message = Some(("remote operation failed unexpectedly".to_string(), true));
+                    pending_remote = None;
+                    force_redraw = true;
+                }
+            }
         }
 
         // Update backend data
@@ -2840,8 +2918,9 @@ fn explain_lines(
 /// ```
 ///
 /// Note: `/remote` is intentionally NOT handled here — connecting needs the live
-/// backend, which this function doesn't receive. It is dispatched in the event
-/// loop's Enter handler (see `handle_remote_command`).
+/// backend, which this function doesn't receive, and it runs off the render
+/// thread. It is dispatched in the event loop's Enter handler (see
+/// `spawn_remote_worker`).
 /// Returns `(message, is_error, should_quit)`.
 fn execute_command(
     cmd: &str,
@@ -3044,92 +3123,100 @@ fn resolve_remote_pick(
     Err(format!("'{}' is not a listed box or HOST:PORT", arg))
 }
 
-/// Handle the `/remote` slash command (discover + connect at runtime).
+/// Result of an off-thread `/remote` operation, handed back to the render loop
+/// over an [`std::sync::mpsc`] channel.
 ///
-/// Returns `(message, is_error, swapped)` where `swapped` is true only when the
-/// live backend was hot-swapped to a new [`WsBackend`], so the caller can reset
-/// per-mode visualizations. Discovery/connect failures are reported via the
-/// message and leave the current backend untouched.
-///
-/// * `/remote` (no arg) → run `tt --json discover` and show a numbered picker.
-/// * `/remote <n|name|host:port>` → connect to that box (hot-swap, no relaunch).
+/// Both `/remote` operations (discovery and connect) run on a worker thread so
+/// the render loop never blocks on mDNS (seconds) or a WebSocket connect. The
+/// worker performs all the impure/blocking work; the main thread only applies
+/// the outcome (update the picker cache, or hot-swap the backend).
 #[cfg(feature = "remote")]
-fn handle_remote_command(
-    arg: &str,
-    backend: &mut Box<dyn TelemetryBackend>,
-    backend_type: &mut BackendType,
-    config: &BackendConfig,
-    remote_boxes: &mut Vec<crate::backend::discovery::DiscoveredBox>,
-) -> (String, bool, bool) {
-    use crate::backend::discovery;
-    let arg = arg.trim();
-
-    // No arg → discover and present the picker.
-    if arg.is_empty() {
-        match discovery::discover_boxes() {
-            Ok(boxes) if boxes.is_empty() => {
-                remote_boxes.clear();
-                (
-                    "no boxes discovered — try /remote <host:port>".to_string(),
-                    false,
-                    false,
-                )
-            }
-            Ok(boxes) => {
-                let mut lines = vec!["discovered boxes — /remote <n|name> to connect:".to_string()];
-                for (i, b) in boxes.iter().enumerate() {
-                    lines.push(format!("  {}. {}", i + 1, b.summary_line()));
-                }
-                *remote_boxes = boxes;
-                (lines.join("\n"), false, false)
-            }
-            Err(e) => {
-                remote_boxes.clear();
-                (format!("discover failed: {}", e), true, false)
-            }
-        }
-    } else {
-        // Arg present → resolve to a HOST:PORT, then connect.
-        let target = match resolve_remote_pick(remote_boxes, arg) {
-            Ok(t) => t,
-            Err(pick_err) => {
-                // Not in the cached list — try a fresh discovery-by-name so
-                // `/remote <name>` works even without a prior `/remote`.
-                match discovery::run_tt_discover()
-                    .and_then(|json| discovery::resolve_remote_target(&json, arg))
-                {
-                    Ok(t) => t,
-                    Err(e) => return (format!("{}; {}", pick_err, e), true, false),
-                }
-            }
-        };
-        connect_remote(&target, backend, backend_type, config)
-    }
+enum RemoteOutcome {
+    /// `/remote` (no arg) discovery finished with either a box list or an error.
+    Discovered(Result<Vec<crate::backend::discovery::DiscoveredBox>, String>),
+    /// `/remote <n|name|host:port>` connect finished. On `Ok` the [`WsBackend`]
+    /// has already been constructed **and `init()`ed** on the worker (boxed to
+    /// keep this enum small); the main thread just needs to hot-swap it in. On
+    /// `Err` the string is a ready-to-display message. `target` is the resolved
+    /// `HOST:PORT` (or the raw arg when resolution itself failed) for the status
+    /// line.
+    Connected {
+        target: String,
+        result: Result<Box<crate::backend::ws::WsBackend>, String>,
+    },
 }
 
-/// Hot-swap the live backend to a [`WsBackend`] pointed at `target`
-/// (`HOST:PORT`). On success, replaces `*backend`, sets `*backend_type` to
-/// `Remote`, and returns `swapped = true`. On failure the current backend is
-/// left in place.
+/// Spawn the worker thread that services one `/remote` command off the render
+/// thread, returning the receiver the loop polls with `try_recv()`.
+///
+/// * `arg` empty → discovery (`tt --json discover`, blocking mDNS).
+/// * `arg` present → resolve to a `HOST:PORT` (against the cached `boxes`, with
+///   a fresh discovery-by-name fallback) then build + `init()` a [`WsBackend`].
+///
+/// The worker owns clones of everything it needs (`boxes`, `config`) so it never
+/// touches main-thread state. If the loop cancels (drops the receiver on Esc),
+/// the final `send` fails harmlessly and the thread just exits.
 #[cfg(feature = "remote")]
-fn connect_remote(
+fn spawn_remote_worker(
+    arg: String,
+    boxes: Vec<crate::backend::discovery::DiscoveredBox>,
+    config: BackendConfig,
+) -> std::sync::mpsc::Receiver<RemoteOutcome> {
+    use crate::backend::discovery;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = if arg.is_empty() {
+            // No arg → discover and let the main thread present the picker.
+            RemoteOutcome::Discovered(discovery::discover_boxes())
+        } else {
+            // Arg present → resolve to a HOST:PORT, then build + init the backend.
+            let target = match resolve_remote_pick(&boxes, &arg) {
+                Ok(t) => Ok(t),
+                Err(pick_err) => {
+                    // Not in the cached list — try a fresh discovery-by-name so
+                    // `/remote <name>` works even without a prior `/remote`.
+                    discovery::run_tt_discover()
+                        .and_then(|json| discovery::resolve_remote_target(&json, &arg))
+                        .map_err(|e| format!("{}; {}", pick_err, e))
+                }
+            };
+            match target {
+                Ok(target) => {
+                    let result = build_ws_backend(&target, &config);
+                    RemoteOutcome::Connected { target, result }
+                }
+                // Resolution failed — report against the raw arg.
+                Err(e) => RemoteOutcome::Connected {
+                    target: arg,
+                    result: Err(e),
+                },
+            }
+        };
+        // Send may fail if the loop cancelled the wait (Esc) and dropped the
+        // receiver. That's fine — the work is done and simply discarded.
+        let _ = tx.send(outcome);
+    });
+    rx
+}
+
+/// Construct and initialize a [`WsBackend`] for `target` (`HOST:PORT`).
+///
+/// Runs entirely on the `/remote` worker thread (both `from_host_port` and the
+/// blocking `init()` connect/first-frame wait). Returns the live backend on
+/// success or a ready-to-display error string; the caller hot-swaps it in on
+/// the main thread.
+#[cfg(feature = "remote")]
+fn build_ws_backend(
     target: &str,
-    backend: &mut Box<dyn TelemetryBackend>,
-    backend_type: &mut BackendType,
     config: &BackendConfig,
-) -> (String, bool, bool) {
+) -> Result<Box<crate::backend::ws::WsBackend>, String> {
     use crate::backend::ws::WsBackend;
     match WsBackend::from_host_port(target, config.clone()) {
         Ok(mut ws) => match ws.init() {
-            Ok(()) => {
-                *backend = Box::new(ws);
-                *backend_type = BackendType::Remote;
-                log::info!("/remote: hot-swapped to WsBackend @ {}", target);
-                (format!("connected to {}", target), false, true)
-            }
-            Err(e) => (format!("connect to {} failed: {}", target, e), true, false),
+            Ok(()) => Ok(Box::new(ws)),
+            Err(e) => Err(format!("connect to {} failed: {}", target, e)),
         },
-        Err(e) => (format!("bad remote target {}: {}", target, e), true, false),
+        Err(e) => Err(format!("bad remote target {}: {}", target, e)),
     }
 }
 

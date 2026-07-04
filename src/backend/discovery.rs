@@ -31,6 +31,16 @@
 //! the explicit `/remote` slash command. It never touches auto-detect or Tab.
 
 use serde::Deserialize;
+use std::time::Duration;
+
+/// Max wall-clock time to wait for `tt --json discover` before giving up and
+/// killing the child. mDNS discovery can wedge on a misbehaving network; a
+/// frozen `tt` must never freeze the caller (the TUI runs this on a worker
+/// thread, but a hung worker would still leak a zombie and never report back).
+pub const DISCOVER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often to poll the child for exit while waiting (cheap, coarse).
+const DISCOVER_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// One box as reported by `tt --json discover`.
 ///
@@ -163,12 +173,24 @@ pub fn tt_bin() -> String {
 /// Shell out to `tt --json discover` and return its raw stdout.
 ///
 /// Impure (spawns a process); deliberately excluded from unit tests. Surfaces a
-/// clear error when `tt` is missing from PATH or exits non-zero.
+/// clear error when `tt` is missing from PATH, exits non-zero, or **hangs past
+/// [`DISCOVER_TIMEOUT`]** — instead of `Command::output()`'s unbounded wait we
+/// spawn the child and poll `try_wait()` every [`DISCOVER_POLL_INTERVAL`],
+/// killing it on timeout so a wedged mDNS lookup can't block forever.
+///
+/// Output is small (a one-line JSON array), so reading the piped stdout only
+/// after the child exits cannot deadlock on a full pipe buffer.
 pub fn run_tt_discover() -> Result<String, String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
     let bin = tt_bin();
-    let output = std::process::Command::new(&bin)
+    let mut child = Command::new(&bin)
         .args(["--json", "discover"])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 format!(
@@ -180,15 +202,47 @@ pub fn run_tt_discover() -> Result<String, String> {
             }
         })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    // Poll for exit up to the timeout. The arithmetic is deliberately trivial:
+    // a single `elapsed() >= DISCOVER_TIMEOUT` compare per ~50ms tick.
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if start.elapsed() >= DISCOVER_TIMEOUT {
+                    // Give up: kill the child and reap it so we don't leak a zombie.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "`{} --json discover` timed out after {}s",
+                        bin,
+                        DISCOVER_TIMEOUT.as_secs()
+                    ));
+                }
+                std::thread::sleep(DISCOVER_POLL_INTERVAL);
+            }
+            Err(e) => return Err(format!("failed while waiting on `{}`: {}", bin, e)),
+        }
+    };
+
+    // Child exited within the timeout — drain its captured stdout/stderr.
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_string(&mut stdout);
+    }
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_string(&mut stderr);
+    }
+
+    if !status.success() {
         return Err(format!(
             "`{} --json discover` failed: {}",
             bin,
             stderr.trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(stdout)
 }
 
 /// Convenience for the `/remote` picker: run discovery and parse it in one step.
