@@ -213,7 +213,8 @@ pub struct Cli {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum BackendType {
     /// Automatically detect best backend (SAFE MODE: Sysfs → JSON → Mock)
-    /// Note: Auto-detect NEVER tries Luwen (invasive). Use --backend luwen explicitly.
+    /// Note: Auto-detect NEVER tries Luwen (Luwen/UMD arbitration unresolved upstream).
+    /// Use --backend luwen explicitly; the live `b` cycle also skips it.
     Auto,
 
     /// Use mock backend (no hardware required)

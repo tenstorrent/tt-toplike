@@ -1,3 +1,17 @@
+tt-toplike (0.7.20) noble; urgency=medium
+
+  * Safety: the live `b` backend cycle no longer steps onto Luwen. Cycling
+    into it re-ran chip detection + a first-read ARC mailbox message mid-
+    workload — the Luwen/UMD contention window that is still unresolved
+    upstream (DEVINFRA-4445). Luwen is now launch-only (`--backend luwen`),
+    mirroring how Remote already behaved.
+  * Docs: the Luwen warnings now describe the real mechanism — kernel-
+    mediated (tt-kmd) mostly-passive reads, one ARC message per chip on
+    first read (Wormhole/Grayskull, none on Blackhole) — instead of the
+    blanket "direct PCI BAR0 may disrupt" wording.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sat, 04 Jul 2026 16:00:00 +0000
+
 tt-toplike (0.7.19) noble; urgency=medium
 
   * Remote UX: `/remote` slash command discovers boxes on the LAN (via

@@ -263,7 +263,8 @@ tt-toplike --backend json     # tt-smi subprocess
 tt-toplike --mock --mock-devices 4
 
 # Luwen (direct PCI access) — explicit only, never auto-detected
-# WARNING: may disrupt running workloads (LLMs, training)
+# CAUTION: Luwen/UMD arbitration is unresolved upstream — avoid during
+# workloads, especially on multi-chip/galaxy topologies
 tt-toplike --backend luwen
 
 # Visualization modes
@@ -289,7 +290,7 @@ tt-toplike --devices 0,2
 | `d` | Jump directly to Defrag |
 | `g` | Jump directly to Grid (Insights table) |
 | `i` | Toggle the Inference Server Monitor (the unified serving snake) — enter from **any** view, `i` or `Esc` to return. Not part of the `v` cycle. |
-| `b` | Cycle backend (live switching): Hybrid → Sysfs → JSON → Luwen → Mock → Host → Hybrid. ⚠️ **includes Luwen** — a direct-PCI backend that may disrupt a running LLM/training job; `b` will step onto it. |
+| `b` | Cycle backend (live switching): Hybrid → Sysfs → JSON → Mock → Host → Hybrid. Luwen and Remote are launch-only — the cycle never steps onto them. |
 | `/` | Command bar — type `/mode defrag`, `/fps 30`, `/theme grayskull`, `/quit`, etc. |
 | `l` | Toggle legend overlay (what each signal means in the current mode) |
 | `?` | Toggle help overlay (full key reference) |
@@ -354,7 +355,7 @@ Auto-detect order: **Hybrid (sysfs + background JSON) → JSON → Mock** on Lin
 | JSON    | `tt-smi -s` subprocess | ✅ Yes | None |
 | Host    | CPU/RAM via sysinfo (+ hwmon/RAPL on Linux) — Linux/macOS/Windows | ✅ N/A | None |
 | Mock    | Simulated telemetry | ✅ N/A | None |
-| Luwen   | Direct PCI BAR0 access | ⚠️ May disrupt | root / ttkmd |
+| Luwen   | tt-kmd-mediated reads (one ARC msg on first read, WH/GS) | ⚠️ Contention risk under workloads | root / ttkmd |
 
 Luwen is only accessible with `--backend luwen` and never used in auto-detect, preventing accidental interference with running LLMs or training jobs.
 

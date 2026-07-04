@@ -1,6 +1,6 @@
 # tt-toplike Quick Start
 
-**Version**: 0.7.19
+**Version**: 0.7.20
 **Last Updated**: June 30, 2026
 
 ---
@@ -99,7 +99,8 @@ tt-toplike --mock --mock-devices 4
 ```bash
 tt-toplike --backend luwen
 ```
-- Direct PCI BAR0 access — ⚠️ may disrupt running workloads
+- Kernel-mediated (tt-kmd) reads; mostly passive, but Luwen/UMD arbitration is
+  unresolved upstream — ⚠️ avoid during workloads, especially multi-chip/galaxy
 - Never used in auto-detect; must be requested explicitly
 
 ---
@@ -125,7 +126,7 @@ tt-toplike --host --mode arcade             # your real CPU/RAM in arcade mode (
 | `v` | Cycle visualization modes: Insights → Flow → Starfield → Castle → Arcade → Defrag → Insights |
 | `i` | Toggle the Inference Server Monitor (the serving snake) — from any view; `i`/`Esc` to exit. Not in the `v` cycle |
 | `l` | Toggle legend overlay for the current view |
-| `b` | Cycle backend live: Hybrid → Sysfs → JSON → **Luwen** → Mock → Host → Hybrid. ⚠️ steps onto Luwen (direct PCI — may disrupt a running LLM/training job) |
+| `b` | Cycle backend live: Hybrid → Sysfs → JSON → Mock → Host → Hybrid. Luwen and Remote are launch-only — the cycle never steps onto them |
 | `r` | Force refresh |
 | `q` / `ESC` | Quit |
 

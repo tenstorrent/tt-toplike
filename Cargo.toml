@@ -1,6 +1,6 @@
 [package]
 name = "tt-toplike"
-version = "0.7.19"
+version = "0.7.20"
 edition = "2021"
 # MSRV: the pinned toolchain (1.93) is the only version we actually build/test
 # against, so it's the only verified floor. Bump this in lockstep with CI's
@@ -42,7 +42,9 @@ path = "src/lib.rs"
 
 [dependencies]
 # Tenstorrent hardware access (OPTIONAL - invasive, requires explicit --backend luwen)
-# WARNING: Luwen backend requires direct PCI BAR0 access and may interfere with running workloads
+# NOTE: Luwen telemetry is kernel-mediated (tt-kmd) and mostly passive reads, but
+# Luwen/UMD resource arbitration is unresolved upstream (DEVINFRA-4445): first-read
+# sends an ARC mailbox message on WH/GS, and concurrent use can contend with workloads
 # Only use with --backend luwen flag, never in auto-detect mode
 all-smi-luwen-core = { version = "0.2.0", optional = true }  # Luwen core types
 all-smi-luwen-if = { version = "0.7.9", optional = true }  # Luwen interface library
@@ -151,7 +153,8 @@ app = ["eframe", "egui_plot", "portable-pty", "vte"]  # Native terminal window
 
 # Backend features
 # IMPORTANT: luwen-backend is OPTIONAL and must be explicitly enabled
-# It requires direct PCI access and may disrupt running workloads
+# Its Luwen/UMD contention story is unresolved upstream; avoid during workloads,
+# especially on multi-chip/galaxy topologies
 # Only use with explicit --backend luwen flag
 luwen-backend = ["all-smi-luwen-core", "all-smi-luwen-if", "all-smi-luwen-ref"]   # Direct hardware access (EXPLICIT ONLY)
 json-backend = []               # Subprocess tt-smi + JSON (SAFE)
