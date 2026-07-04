@@ -22,34 +22,8 @@ jobs:
           components: rustfmt, clippy
 
       - name: Check formatting
-        run: |
-          # Run fmt check on the whole codebase but only fail for files changed
-          # in this PR — pre-existing formatting debt in untouched files does
-          # not block contributors.
-          git fetch origin main --depth=1
-          BASE=$(git merge-base HEAD origin/main)
-          CHANGED=$(git diff --name-only "$BASE" HEAD -- '*.rs' | grep -v '^vendor/' | sort || true)
-
-          set +e
-          FMT_OUT=$(cargo fmt --check 2>&1)
-          FMT_EXIT=$?
-          set -e
-
-          if [ $FMT_EXIT -eq 0 ]; then
-            echo "All files properly formatted."
-            exit 0
-          fi
-
-          # Extract failing paths (cargo fmt prints absolute paths); strip cwd prefix.
-          FAILING=$(echo "$FMT_OUT" | grep "^Diff in " | sed "s|Diff in $(pwd)/||" | cut -d: -f1 | sort -u)
-          BLOCKING=$(comm -12 <(echo "$CHANGED") <(echo "$FAILING"))
-
-          if [ -n "$BLOCKING" ]; then
-            echo "Formatting errors in PR-changed files — run 'cargo fmt' locally:"
-            echo "$BLOCKING"
-            exit 1
-          fi
-          echo "Formatting ok (pre-existing issues in untouched files are ignored)."
+        # Strict gate: the whole tree is fmt-clean, so any drift fails the build.
+        run: cargo fmt --check
 
       - name: Clippy (TUI, zero warnings)
         run: cargo clippy --locked --lib --bin tt-toplike-tui --features tui -- -D warnings
@@ -96,3 +70,108 @@ jobs:
       # which Wine can't emulate. A non-zero exit here fails the job.
       - name: Runtime smoke (headless --bench)
         run: cargo run --locked --bin tt-toplike-tui --no-default-features --features tui,json-backend -- --bench --mock
+
+  # ── Feature-combination compile coverage ────────────────────────────────────
+  # The default Test job only exercises the tui/json path. These combos make sure
+  # the optional frontends (iced `gui`, egui `egui`, PTY-hosted `app`) and the
+  # invasive `luwen-backend` still compile with zero warnings, so a change to
+  # shared code can't silently break a frontend we don't build by default.
+  # The GUI stacks compile on the stock ubuntu-24.04 image without extra apt
+  # packages — same as the `Build GUI binary` step in the Test job, which we
+  # mirror here. luwen-backend is compile-only (`cargo check`): it needs real PCI
+  # hardware to run, but it must still typecheck.
+  feature-combos:
+    name: Feature combos (clippy)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Clippy — iced GUI (gui)
+        run: cargo clippy --locked --lib --bin tt-toplike-gui --features gui -- -D warnings
+
+      - name: Clippy — egui dashboard (egui)
+        run: cargo clippy --locked --lib --bin tt-toplike-egui --features egui -- -D warnings
+
+      - name: Clippy — PTY app host (app)
+        run: cargo clippy --locked --lib --bin tt-toplike-app --features app -- -D warnings
+
+      - name: Check — luwen-backend (compile-only, no hardware in CI)
+        run: cargo check --locked --features luwen-backend
+
+  # ── macOS smoke (Apple-silicon host path) ───────────────────────────────────
+  # Cheap PR insurance for the macOS-only code (the ANE power sampler via the
+  # private IOReport framework, core-foundation interop). Runs the safe
+  # tui + json-backend feature set on Apple-silicon macos-14.
+  test-macos:
+    name: Test (macOS)
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Run library tests
+        run: cargo test --locked --lib --no-default-features --features tui,json-backend
+
+      - name: Clippy (TUI, zero warnings)
+        run: cargo clippy --locked --lib --bin tt-toplike-tui --no-default-features --features tui,json-backend -- -D warnings
+
+  # ── Dependency vulnerability audit (advisory-only for now) ───────────────────
+  # NON-BLOCKING for now: `continue-on-error` surfaces any new RUSTSEC advisory in
+  # the logs without failing PRs. Once the current advisories are triaged and the
+  # tree is clean, drop `continue-on-error` to turn this into a hard gate.
+  audit:
+    name: cargo audit (advisory)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit dependencies
+        run: cargo audit
+
+  # ── Version consistency ──────────────────────────────────────────────────────
+  # Cargo.toml is the source of truth for the version; the docs and the Debian
+  # changelog must agree with it. scripts/bump-version.sh keeps all four in
+  # lockstep — this job guards against a hand-edit that forgets one of them.
+  version-consistency:
+    name: Version consistency
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert version matches across Cargo.toml, docs, and changelog
+        run: |
+          set -euo pipefail
+          CARGO=$(grep -m1 '^version = ' Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          QS=$(grep -m1 '\*\*Version\*\*:' QUICK_START.md | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          SITE=$(grep 'hero-eyebrow' site/index.html | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1 | tr -d v)
+          DEB=$(head -1 debian/changelog | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          echo "Cargo.toml:       $CARGO"
+          echo "QUICK_START.md:   $QS"
+          echo "site/index.html:  $SITE"
+          echo "debian/changelog: $DEB"
+          fail=0
+          [ "$QS" = "$CARGO" ]   || { echo "::error::QUICK_START.md version ($QS) != Cargo.toml ($CARGO)"; fail=1; }
+          [ "$SITE" = "$CARGO" ] || { echo "::error::site/index.html version ($SITE) != Cargo.toml ($CARGO)"; fail=1; }
+          [ "$DEB" = "$CARGO" ]  || { echo "::error::debian/changelog version ($DEB) != Cargo.toml ($CARGO)"; fail=1; }
+          [ "$fail" -eq 0 ] || { echo "Version mismatch — run scripts/bump-version.sh <version> to fix."; exit 1; }
+          echo "All version strings agree: $CARGO"

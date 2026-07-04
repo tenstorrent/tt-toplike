@@ -1,11 +1,18 @@
 [package]
 name = "tt-toplike"
-version = "0.7.18"
+version = "0.7.19"
 edition = "2021"
-authors = ["Tenstorrent"]
+# MSRV: the pinned toolchain (1.93) is the only version we actually build/test
+# against, so it's the only verified floor. Bump this in lockstep with CI's
+# toolchain if we ever raise it.
+rust-version = "1.93"
+authors = ["Tenstorrent <software@tenstorrent.com>"]
 license = "Apache-2.0"
 description = "Real-time hardware monitoring for Tenstorrent silicon"
 repository = "https://github.com/tenstorrent/tt-toplike"
+readme = "README.md"
+keywords = ["tenstorrent", "monitoring", "tui", "hardware", "telemetry"]
+categories = ["command-line-utilities", "visualization"]
 
 # Multiple binaries - TUI and GUI frontends
 [[bin]]
@@ -162,8 +169,10 @@ copyright = "2026, Tenstorrent Inc."
 license-file = ["LICENSE", "3"]
 # $auto expands to dh_shlibdeps-style detected library deps at build time
 depends = "$auto"
-recommends = "tt-smi, tenstorrent-dkms"
-suggests = "tt-toplike-egui, tenstorrent-tools"
+recommends = "tt-smi, tenstorrent-dkms, curl"
+# NB: debian/control no longer builds a tt-toplike-egui package (the egui bin was
+# dropped in favour of the PTY-hosted tt-toplike-app), so don't suggest it here.
+suggests = "tenstorrent-tools"
 section = "utils"
 priority = "optional"
 # Build with safe defaults — no Luwen, no iced GUI. Includes `remote` so packaged

@@ -1,4 +1,4 @@
-tt-toplike (0.7.18) noble; urgency=medium
+tt-toplike (0.7.19) noble; urgency=medium
 
   * New: --remote <host[:port]> — watch a remote QuietBox's telemetry over a
     WebSocket stream (plaintext, unauthed: trusted-LAN only). All the

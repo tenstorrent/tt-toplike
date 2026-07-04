@@ -1,6 +1,6 @@
 # tt-toplike Quick Start
 
-**Version**: 0.7.18
+**Version**: 0.7.19
 **Last Updated**: June 30, 2026
 
 ---
