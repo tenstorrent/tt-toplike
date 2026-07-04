@@ -1,5 +1,23 @@
 tt-toplike (0.7.19) noble; urgency=medium
 
+  * Remote UX: `/remote` slash command discovers boxes on the LAN (via
+    `tt discover`) and hot-connects — discovery and connect run off the
+    render thread (no UI freeze), the discover subprocess is bounded by a
+    10s timeout, and `--remote <name>` resolves via discovery exactly once
+    at startup.
+  * Housekeeping: the retired [i] text-list render path is gone (the bench
+    now measures the live snake view); vendor/ is no longer committed
+    (build-deb.sh regenerates it); README/QUICK_START document the [i]
+    snake dashboard, /theme, and the real key map; issue/PR templates and
+    a root CHANGELOG added; CI gains strict fmt, gui/egui/app clippy, a
+    macOS job, cargo-audit, and a version-consistency check; MSRV pinned
+    at 1.93; a latent luwen-backend build break fixed; patent notice
+    folded into NOTICE.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sat, 04 Jul 2026 14:00:00 +0000
+
+tt-toplike (0.7.18) noble; urgency=medium
+
   * New: --remote <host[:port]> — watch a remote QuietBox's telemetry over a
     WebSocket stream (plaintext, unauthed: trusted-LAN only). All the
     visualizations run against the remote chips; the process panel and [i]
