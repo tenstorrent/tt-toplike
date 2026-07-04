@@ -1,3 +1,19 @@
+tt-toplike (0.7.18) noble; urgency=medium
+
+  * New: --remote <host[:port]> — watch a remote QuietBox's telemetry over a
+    WebSocket stream (plaintext, unauthed: trusted-LAN only). All the
+    visualizations run against the remote chips; the process panel and [i]
+    inference monitor still describe the LOCAL machine.
+  * Remote hardening after review: the process panel no longer TT-filters
+    local processes under --remote (they can't correspond to remote chips);
+    the Arcade duel is suppressed under --remote (local serving vs remote
+    silicon would be incoherent); backend status now reports last-frame age
+    and flags a stale stream; --timeout now governs the WS read/init timeout.
+  * Packaging: WS support is a default-on 'remote' cargo feature — packagers
+    can opt out with --no-default-features.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sat, 04 Jul 2026 10:00:00 +0000
+
 tt-toplike (0.7.17) noble; urgency=medium
 
   * Arcade: the hero now duels the inference snake — a telemetry-true
