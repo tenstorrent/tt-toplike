@@ -349,6 +349,13 @@ fn run_app(
     let mut cmd_buf = String::new();
     let mut cmd_message: Option<(String, bool)> = None; // (text, is_error)
 
+    // `/remote` discovery picker: boxes from the most recent `/remote` (no-arg)
+    // discovery, retained so `/remote <n>` can select by list position. Empty
+    // until the user runs `/remote`. Only touched by the explicit `/remote`
+    // command — never by auto-detect or Tab (additive-safety).
+    #[cfg(feature = "remote")]
+    let mut remote_boxes: Vec<crate::backend::discovery::DiscoveredBox> = Vec::new();
+
     // ── Floating overlay panel state ──────────────────────────────────────
     // Toggled by l (legend), ? (help), ! (explain).
     // Auto-dismissed on any other keypress — stays until explicit re-toggle.
@@ -795,15 +802,81 @@ fn run_app(
                                 cmd_message = None;
                             }
                             KeyCode::Enter => {
-                                let (msg, is_err, should_quit) = execute_command(
-                                    &cmd_buf,
-                                    &mut display_mode,
-                                    &mut ui_poll_rate_anim,
-                                    &mut ui_poll_rate_data,
-                                    anim_cfg.sensitivity,
-                                    &mut overlay,
-                                    &mut throttle_state,
-                                );
+                                // `/remote` is dispatched here (not in
+                                // execute_command) because connecting needs the
+                                // live backend/backend_type, which execute_command
+                                // doesn't get. Everything else flows through
+                                // execute_command unchanged.
+                                let verb = cmd_buf
+                                    .trim()
+                                    .trim_start_matches('/')
+                                    .split_whitespace()
+                                    .next()
+                                    .unwrap_or("")
+                                    .to_lowercase();
+
+                                #[cfg(feature = "remote")]
+                                let remote_result = if verb == "remote" {
+                                    let arg = cmd_buf
+                                        .trim()
+                                        .trim_start_matches('/')
+                                        .split_once(char::is_whitespace)
+                                        .map(|(_, rest)| rest)
+                                        .unwrap_or("")
+                                        .trim()
+                                        .to_string();
+                                    Some(handle_remote_command(
+                                        &arg,
+                                        backend,
+                                        &mut backend_type,
+                                        &config,
+                                        &mut remote_boxes,
+                                    ))
+                                } else {
+                                    None
+                                };
+                                #[cfg(not(feature = "remote"))]
+                                let remote_result: Option<(
+                                    String,
+                                    bool,
+                                    bool,
+                                )> = if verb == "remote" {
+                                    Some((
+                                        "remote unavailable (built without the 'remote' feature)"
+                                            .to_string(),
+                                        true,
+                                        false,
+                                    ))
+                                } else {
+                                    None
+                                };
+
+                                let (msg, is_err, should_quit) =
+                                    if let Some((m, e, swapped)) = remote_result {
+                                        // A successful hot-swap replaced the backend;
+                                        // reset per-mode visualizations so they rebuild
+                                        // against the new device set (mirrors the `b`
+                                        // backend-cycle handler).
+                                        if swapped {
+                                            starfield = None;
+                                            memory_castle = None;
+                                            memory_flow = None;
+                                            arcade = None;
+                                            defrag = None;
+                                            force_redraw = true;
+                                        }
+                                        (m, e, false)
+                                    } else {
+                                        execute_command(
+                                            &cmd_buf,
+                                            &mut display_mode,
+                                            &mut ui_poll_rate_anim,
+                                            &mut ui_poll_rate_data,
+                                            anim_cfg.sensitivity,
+                                            &mut overlay,
+                                            &mut throttle_state,
+                                        )
+                                    };
                                 if should_quit {
                                     return Ok(());
                                 }
@@ -1805,29 +1878,37 @@ fn render_command_bar(f: &mut Frame, cmd_buf: &str, msg: Option<(&str, bool)>) {
     if area.height < 2 {
         return;
     }
-    // Place the bar at the very bottom row.
-    let bar_area = Rect {
-        x: 0,
-        y: area.height.saturating_sub(1),
-        width: area.width,
-        height: 1,
-    };
 
-    let spans = if let Some((text, is_error)) = msg {
+    // A result message may span multiple lines (the `/remote` picker list); the
+    // input prompt is always a single line. Build the lines, then anchor a bar
+    // of that height at the bottom of the screen.
+    let (lines, bar_h): (Vec<Line>, u16) = if let Some((text, is_error)) = msg {
         let color = if is_error {
             colors::rgb(255, 100, 100)
         } else {
             colors::rgb(80, 220, 140)
         };
-        vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                text.to_string(),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-        ]
+        // Cap the bar height so a long list never eats the whole screen.
+        let max_rows = area.height.saturating_sub(1).clamp(1, 12) as usize;
+        let msg_lines: Vec<&str> = text.lines().collect();
+        let shown = msg_lines.len().min(max_rows);
+        let lines: Vec<Line> = msg_lines
+            .iter()
+            .take(shown)
+            .map(|l| {
+                Line::from(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled(
+                        (*l).to_string(),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    ),
+                ])
+            })
+            .collect();
+        let h = shown.max(1) as u16;
+        (lines, h)
     } else {
-        vec![
+        let spans = vec![
             Span::styled(
                 "  / ",
                 Style::default()
@@ -1841,16 +1922,24 @@ fn render_command_bar(f: &mut Frame, cmd_buf: &str, msg: Option<(&str, bool)>) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("_", Style::default().fg(colors::rgb(200, 200, 80))),
-        ]
+        ];
+        (vec![Line::from(spans)], 1)
     };
 
-    // Clear the bar row with a dark background, then render text.
+    let bar_area = Rect {
+        x: 0,
+        y: area.height.saturating_sub(bar_h),
+        width: area.width,
+        height: bar_h,
+    };
+
+    // Clear the bar rows with a dark background, then render text.
     f.render_widget(
         Block::default().style(Style::default().bg(colors::rgb(15, 20, 30))),
         bar_area,
     );
     f.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(colors::rgb(15, 20, 30))),
+        Paragraph::new(lines).style(Style::default().bg(colors::rgb(15, 20, 30))),
         bar_area,
     );
 }
@@ -2000,6 +2089,11 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 row!(
                     " /idle-on-blur",
                     "drop to 2 FPS when terminal unfocused",
+                    lbl
+                ),
+                row!(
+                    " /remote [n|box]",
+                    "discover + connect to a remote box",
                     lbl
                 ),
             ]
@@ -2744,6 +2838,10 @@ fn explain_lines(
 /// /throttle         toggle anim FPS throttle under heavy CPU load (60→30)
 /// /idle-on-blur     toggle drop to 2 FPS when terminal loses focus
 /// ```
+///
+/// Note: `/remote` is intentionally NOT handled here — connecting needs the live
+/// backend, which this function doesn't receive. It is dispatched in the event
+/// loop's Enter handler (see `handle_remote_command`).
 /// Returns `(message, is_error, should_quit)`.
 fn execute_command(
     cmd: &str,
@@ -2908,6 +3006,130 @@ fn execute_command(
             true,
             false,
         ),
+    }
+}
+
+/// Resolve a `/remote <arg>` selection against the cached picker list.
+///
+/// Pure (no I/O) so it is unit-testable. Resolution order:
+/// 1. A 1-based **index** into the last `/remote` listing (`/remote 2`).
+/// 2. A **name** matching a listed box (`/remote qb2-lab`).
+/// 3. An explicit **HOST:PORT** (`/remote 10.0.0.7:8765`) — passthrough.
+///
+/// Anything else is an error (the caller then tries a fresh discovery-by-name
+/// so `/remote <name>` still works without a prior `/remote`).
+#[cfg(feature = "remote")]
+fn resolve_remote_pick(
+    boxes: &[crate::backend::discovery::DiscoveredBox],
+    arg: &str,
+) -> Result<String, String> {
+    let arg = arg.trim();
+    // 1-based index into the shown list.
+    if let Ok(n) = arg.parse::<usize>() {
+        if (1..=boxes.len()).contains(&n) {
+            return Ok(boxes[n - 1].host_port());
+        }
+        if !boxes.is_empty() {
+            return Err(format!("pick 1–{} (got {})", boxes.len(), n));
+        }
+    }
+    // Name match against the cached list.
+    if let Some(b) = boxes.iter().find(|b| b.name == arg) {
+        return Ok(b.host_port());
+    }
+    // Explicit HOST:PORT passthrough.
+    if crate::backend::discovery::looks_like_host_port(arg) {
+        return Ok(arg.to_string());
+    }
+    Err(format!("'{}' is not a listed box or HOST:PORT", arg))
+}
+
+/// Handle the `/remote` slash command (discover + connect at runtime).
+///
+/// Returns `(message, is_error, swapped)` where `swapped` is true only when the
+/// live backend was hot-swapped to a new [`WsBackend`], so the caller can reset
+/// per-mode visualizations. Discovery/connect failures are reported via the
+/// message and leave the current backend untouched.
+///
+/// * `/remote` (no arg) → run `tt --json discover` and show a numbered picker.
+/// * `/remote <n|name|host:port>` → connect to that box (hot-swap, no relaunch).
+#[cfg(feature = "remote")]
+fn handle_remote_command(
+    arg: &str,
+    backend: &mut Box<dyn TelemetryBackend>,
+    backend_type: &mut BackendType,
+    config: &BackendConfig,
+    remote_boxes: &mut Vec<crate::backend::discovery::DiscoveredBox>,
+) -> (String, bool, bool) {
+    use crate::backend::discovery;
+    let arg = arg.trim();
+
+    // No arg → discover and present the picker.
+    if arg.is_empty() {
+        match discovery::discover_boxes() {
+            Ok(boxes) if boxes.is_empty() => {
+                remote_boxes.clear();
+                (
+                    "no boxes discovered — try /remote <host:port>".to_string(),
+                    false,
+                    false,
+                )
+            }
+            Ok(boxes) => {
+                let mut lines = vec!["discovered boxes — /remote <n|name> to connect:".to_string()];
+                for (i, b) in boxes.iter().enumerate() {
+                    lines.push(format!("  {}. {}", i + 1, b.summary_line()));
+                }
+                *remote_boxes = boxes;
+                (lines.join("\n"), false, false)
+            }
+            Err(e) => {
+                remote_boxes.clear();
+                (format!("discover failed: {}", e), true, false)
+            }
+        }
+    } else {
+        // Arg present → resolve to a HOST:PORT, then connect.
+        let target = match resolve_remote_pick(remote_boxes, arg) {
+            Ok(t) => t,
+            Err(pick_err) => {
+                // Not in the cached list — try a fresh discovery-by-name so
+                // `/remote <name>` works even without a prior `/remote`.
+                match discovery::run_tt_discover()
+                    .and_then(|json| discovery::resolve_remote_target(&json, arg))
+                {
+                    Ok(t) => t,
+                    Err(e) => return (format!("{}; {}", pick_err, e), true, false),
+                }
+            }
+        };
+        connect_remote(&target, backend, backend_type, config)
+    }
+}
+
+/// Hot-swap the live backend to a [`WsBackend`] pointed at `target`
+/// (`HOST:PORT`). On success, replaces `*backend`, sets `*backend_type` to
+/// `Remote`, and returns `swapped = true`. On failure the current backend is
+/// left in place.
+#[cfg(feature = "remote")]
+fn connect_remote(
+    target: &str,
+    backend: &mut Box<dyn TelemetryBackend>,
+    backend_type: &mut BackendType,
+    config: &BackendConfig,
+) -> (String, bool, bool) {
+    use crate::backend::ws::WsBackend;
+    match WsBackend::from_host_port(target, config.clone()) {
+        Ok(mut ws) => match ws.init() {
+            Ok(()) => {
+                *backend = Box::new(ws);
+                *backend_type = BackendType::Remote;
+                log::info!("/remote: hot-swapped to WsBackend @ {}", target);
+                (format!("connected to {}", target), false, true)
+            }
+            Err(e) => (format!("connect to {} failed: {}", target, e), true, false),
+        },
+        Err(e) => (format!("bad remote target {}: {}", target, e), true, false),
     }
 }
 
@@ -4539,6 +4761,83 @@ mod cmd_tests {
             &mut ts,
         );
         assert!(!ts.idle_on_blur, "toggled off via alias");
+    }
+
+    // ── /remote picker-selection logic (pure) ───────────────────────────────
+    //
+    // The full runtime hot-swap / connect path spawns a WsBackend against a live
+    // socket, so it is verified manually (see REMOTE_UX_REPORT.md). Here we cover
+    // the pure selection logic that decides *what* to connect to.
+
+    #[cfg(feature = "remote")]
+    mod remote {
+        use super::super::resolve_remote_pick;
+        use crate::backend::discovery::DiscoveredBox;
+
+        fn boxes() -> Vec<DiscoveredBox> {
+            vec![
+                DiscoveredBox {
+                    name: "qb2-lab".into(),
+                    host: "192.168.1.42".into(),
+                    ctrl_port: 8899,
+                    chips: "4xBH".into(),
+                    status: "idle".into(),
+                    apiver: 1,
+                },
+                DiscoveredBox {
+                    name: "qb-serving".into(),
+                    host: "10.0.0.7".into(),
+                    ctrl_port: 8765,
+                    chips: "8xWH".into(),
+                    status: "serving:llama3".into(),
+                    apiver: 1,
+                },
+            ]
+        }
+
+        #[test]
+        fn picks_by_one_based_index() {
+            let b = boxes();
+            assert_eq!(resolve_remote_pick(&b, "1").unwrap(), "192.168.1.42:8899");
+            assert_eq!(resolve_remote_pick(&b, "2").unwrap(), "10.0.0.7:8765");
+        }
+
+        #[test]
+        fn out_of_range_index_errors() {
+            let b = boxes();
+            assert!(resolve_remote_pick(&b, "0").is_err());
+            assert!(resolve_remote_pick(&b, "3").is_err());
+        }
+
+        #[test]
+        fn picks_by_name() {
+            let b = boxes();
+            assert_eq!(
+                resolve_remote_pick(&b, "qb-serving").unwrap(),
+                "10.0.0.7:8765"
+            );
+        }
+
+        #[test]
+        fn host_port_passes_through() {
+            let b = boxes();
+            assert_eq!(
+                resolve_remote_pick(&b, "1.2.3.4:9000").unwrap(),
+                "1.2.3.4:9000"
+            );
+            // Works with no cached list too (e.g. `/remote host:port` cold).
+            assert_eq!(
+                resolve_remote_pick(&[], "1.2.3.4:9000").unwrap(),
+                "1.2.3.4:9000"
+            );
+        }
+
+        #[test]
+        fn unknown_name_without_list_errors() {
+            // Not an index, not a listed name, not host:port → error (the caller
+            // then falls back to a fresh discovery-by-name).
+            assert!(resolve_remote_pick(&[], "mystery-box").is_err());
+        }
     }
 }
 
