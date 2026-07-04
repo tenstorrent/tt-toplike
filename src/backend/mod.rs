@@ -36,6 +36,8 @@
 
 #[cfg(target_os = "macos")]
 pub mod ane_macos; // Apple ANE power via private IOReport (no sudo)
+#[cfg(feature = "remote")]
+pub mod discovery; // Remote-box discovery via `tt --json discover` (--remote <name>, /remote)
 pub mod factory;
 #[cfg(target_os = "macos")]
 pub mod gpu_macos; // Apple GPU stats via ioreg (no sudo)

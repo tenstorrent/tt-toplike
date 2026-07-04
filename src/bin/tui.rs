@@ -201,11 +201,20 @@ fn main() {
         #[cfg(feature = "remote")]
         BackendType::Remote => {
             let spec = cli.remote.clone().unwrap_or_default();
-            log::info!("Initializing WsBackend (remote QuietBox @ {})", spec);
-            match tt_toplike::backend::ws::WsBackend::from_host_port(&spec, config) {
+            // Resolve a bare box name (`--remote qb2-lab`) via `tt --json
+            // discover`; HOST:PORT passes straight through.
+            let resolved = match tt_toplike::backend::discovery::resolve_remote_spec(&spec) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: could not resolve --remote '{}': {}", spec, e);
+                    std::process::exit(1);
+                }
+            };
+            log::info!("Initializing WsBackend (remote QuietBox @ {})", resolved);
+            match tt_toplike::backend::ws::WsBackend::from_host_port(&resolved, config) {
                 Ok(mut backend) => run_with_backend(&mut backend, &cli),
                 Err(e) => {
-                    eprintln!("Error: invalid --remote target '{}': {}", spec, e);
+                    eprintln!("Error: invalid --remote target '{}': {}", resolved, e);
                     std::process::exit(1);
                 }
             }

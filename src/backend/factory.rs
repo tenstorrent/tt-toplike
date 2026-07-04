@@ -104,7 +104,11 @@ pub fn create_backend(
                     "Remote backend requires --remote <HOST:PORT>".to_string(),
                 )
             })?;
-            let mut backend = WsBackend::from_host_port(spec, config)?;
+            // Resolve a bare box name (`--remote qb2-lab`) via `tt --json
+            // discover`; a HOST:PORT passes straight through untouched.
+            let resolved = crate::backend::discovery::resolve_remote_spec(spec)
+                .map_err(BackendError::Initialization)?;
+            let mut backend = WsBackend::from_host_port(&resolved, config)?;
             backend.init()?;
             Ok(Box::new(backend))
         }
