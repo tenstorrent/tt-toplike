@@ -140,7 +140,70 @@ and the runtime). With the feature off, `--serve`/`/serve` report "not compiled 
 - **Modify** `src/ui/tui/mod.rs` — `/serve` command (`ServeOutcome` off-thread bind), the status
   indicator, and the per-tick `broadcast` call; hold the optional `TelemetryPublisher`.
 
+## REVISION (2026-07-05): richer tt-toplike frame (full remote picture)
+
+Field feedback: under `--remote`, only the *chips* reflect the remote box — the process panel shows
+**local** processes and the `[i]` tab probes **local** docker, because the stream carries only
+`tt-smi -s` telemetry. That's confusing ("looks like I'm watching the box, but the processes are my
+laptop's"). This revision makes `tt-toplike --serve` broadcast the **full** picture, keeps agentd's
+plain tt-smi stream working as a telemetry-only fallback, and labels the fallback honestly.
+
+### Frame protocol — tt-smi + optional `tt_toplike` extension
+
+The `/telemetry` frame stays valid `tt-smi -s` JSON, with **one optional added top-level key**,
+`tt_toplike`, that plain tt-smi consumers ignore (serde ignores unknown fields):
+
+```json
+{
+  "time": "...", "device_info": [ /* tt-smi, unchanged */ ], /* …tt-smi fields… */,
+  "tt_toplike": {                    // OPTIONAL; absent from agentd's current plain frames
+    "schema": 1,
+    "processes": [ { "pid": 123, "name": "python3", "cmd": "…",
+                     "uses_tt": true, "cpu_pct": 30.0, "mem_bytes": 8000000000 } ],
+    "inference":  [ /* ServiceState-shaped: key,label,phase,progress,serving{…} */ ]
+  }
+}
+```
+
+- **Backward compatible / one schema:** a richer frame is still parseable `tt-smi` JSON (telemetry
+  path unchanged); the extension is additive. agentd's current frames simply lack the key.
+- **`snapshot_json()` on the serve side** emits the richer frame: the tt-smi telemetry (raw
+  passthrough / relay as before) **plus** the `tt_toplike` object built from the running app's own
+  `host_proc_monitor` TT-process rows and `inference_monitor` snapshot. Producing it must not block
+  the render thread (built on the data tick, off the 60fps path).
+
+### Consuming remote processes + inference (with local fallback + labeling)
+
+`WsBackend` gains, alongside its telemetry parse, an optional decode of the `tt_toplike` extension,
+exposed as `remote_processes()` / `remote_inference()` (empty/None when absent).
+
+Under `--remote`:
+- **Process panel:** if `remote_processes()` is present → render the **remote** box's TT process
+  rows; else render local processes **labeled "LOCAL — remote processes not streamed"** so nothing
+  masquerades as the box.
+- **`[i]` tab:** if `remote_inference()` is present → drive the snake/roster from the **remote**
+  `ServiceState`s (no local docker probing needed); else the `[i]` tab shows a clear "remote box's
+  inference isn't in this stream (telemetry-only source)" state rather than silently probing local
+  docker.
+
+### Honest-labeling first (independent, shippable now)
+
+Even before the richer frame lands, the misleading local-masquerade is fixed as the **first task**:
+under `--remote` with a telemetry-only stream, the process panel is labeled LOCAL and the `[i]` tab
+is gated/labeled so it doesn't imply it's the remote box's inference. This ships immediately and is
+subsumed by the richer-frame path once present.
+
+### tt-station coordination
+
+`tt-station`'s `tt-station-agentd` should emit the **same `tt_toplike` extension** on its
+`/telemetry` frames so its `--remote` sessions also show the box's processes + inference — see
+`~/code/tt-station/TT_TOPLIKE_STREAM.md` (this feature's brief for that repo). Until it does, agentd
+stays telemetry-only and tt-toplike falls back+labels as above. The schema is owned here (tt-toplike
+is the reference producer/consumer); agentd mirrors it.
+
 ## Deferred follow-ups
 
-- Serialize `Host`/`Sysfs`/`Luwen` snapshots into the tt-smi schema so any backend can broadcast.
+- Serialize `Host`/`Sysfs`/`Luwen` *telemetry* into the tt-smi schema so a non-tt-smi box can also
+  broadcast (the `tt_toplike` extension is backend-independent; only the tt-smi telemetry base needs
+  this).
 - Optional bearer-token auth to match agentd's paired mode, for untrusted networks.
