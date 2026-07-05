@@ -234,14 +234,20 @@ impl WsBackend {
     /// arrived yet. Cheap: a clone of already-decoded state, safe to call
     /// from the render loop.
     pub fn remote_processes(&self) -> Option<Vec<RemoteProc>> {
-        self.remote_ext.as_ref().map(|ext| ext.processes.clone())
+        // `None` when there's no extension OR the producer didn't stream
+        // processes (missing sub-key) — both mean "fall back to local".
+        self.remote_ext
+            .as_ref()
+            .and_then(|ext| ext.processes.clone())
     }
 
     /// Decoded remote inference workloads from the `tt_toplike` extension on
     /// the latest applied frame. See [`Self::remote_processes`] for the
     /// `None` conditions and cost.
     pub fn remote_inference(&self) -> Option<Vec<RemoteInference>> {
-        self.remote_ext.as_ref().map(|ext| ext.inference.clone())
+        self.remote_ext
+            .as_ref()
+            .and_then(|ext| ext.inference.clone())
     }
 
     /// Spawn the background reader runtime + task. Idempotent-ish: only called
@@ -683,21 +689,21 @@ mod tests {
 
         let ext = TtToplikeExt {
             schema: TT_TOPLIKE_SCHEMA,
-            processes: vec![RemoteProc {
+            processes: Some(vec![RemoteProc {
                 pid: 4242,
                 name: "tt-inference-server".to_string(),
                 cmd: "/usr/bin/tt-inference-server --port 8080".to_string(),
                 uses_tt: true,
                 cpu_pct: 87.5,
                 mem_bytes: 12_884_901_888,
-            }],
-            inference: vec![RemoteInference {
+            }]),
+            inference: Some(vec![RemoteInference {
                 key: "vllm-llama3-70b".to_string(),
                 label: "Llama-3 70B (vLLM)".to_string(),
                 phase: "ready".to_string(),
                 progress: None,
                 serving: None,
-            }],
+            }]),
         };
         let frame_with_ext = inject_extension(FRAME, &ext);
 

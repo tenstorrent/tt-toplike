@@ -55,9 +55,20 @@ pub struct TtToplikeExt {
     /// Schema version this payload was produced with. See [`TT_TOPLIKE_SCHEMA`].
     pub schema: u32,
     /// Processes on the remote box (host process list, TT-using or not).
-    pub processes: Vec<RemoteProc>,
-    /// Inference workloads detected on the remote box.
-    pub inference: Vec<RemoteInference>,
+    ///
+    /// `None` means "this producer does not stream processes" → the consumer
+    /// falls back to its LOCAL process list (and labels it). `Some(vec![])`
+    /// means "streamed, and there are none" — an authoritative empty. This
+    /// distinction is the wire contract: a producer that only knows about some
+    /// sub-keys (e.g. tt-station-agentd emitting processes but not inference)
+    /// omits the others entirely rather than sending an empty list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processes: Option<Vec<RemoteProc>>,
+    /// Inference workloads detected on the remote box. Same `None` (not
+    /// streamed → local fallback) vs `Some(vec![])` (streamed, none) contract
+    /// as [`Self::processes`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference: Option<Vec<RemoteInference>>,
 }
 
 /// One process entry, as shown in the local process panel.
@@ -189,15 +200,15 @@ mod tests {
     fn sample_ext() -> TtToplikeExt {
         TtToplikeExt {
             schema: TT_TOPLIKE_SCHEMA,
-            processes: vec![RemoteProc {
+            processes: Some(vec![RemoteProc {
                 pid: 4242,
                 name: "tt-inference-server".to_string(),
                 cmd: "/usr/bin/tt-inference-server --port 8080".to_string(),
                 uses_tt: true,
                 cpu_pct: 87.5,
                 mem_bytes: 12_884_901_888,
-            }],
-            inference: vec![RemoteInference {
+            }]),
+            inference: Some(vec![RemoteInference {
                 key: "vllm-llama3-70b".to_string(),
                 label: "Llama-3 70B (vLLM)".to_string(),
                 phase: "ready".to_string(),
@@ -218,7 +229,7 @@ mod tests {
                     prefix_hit_rate: 0.61,
                     preemptions_delta: 2,
                 }),
-            }],
+            }]),
         }
     }
 
@@ -281,5 +292,39 @@ mod tests {
     #[test]
     fn parse_on_malformed_json_returns_none() {
         assert_eq!(parse_extension("not json at all"), None);
+    }
+
+    /// tt-station contract (per TT_TOPLIKE_STREAM.md): a producer may stream a
+    /// SUBSET of sub-keys. agentd emits `processes` but OMITS `inference`. A
+    /// missing sub-key must decode to `None` ("not streamed → local fallback"),
+    /// never a spurious empty list ("streamed, zero"). The whole extension must
+    /// still decode (we must not drop the processes we DID get).
+    #[test]
+    fn missing_inference_subkey_is_none_not_empty() {
+        // A frame whose tt_toplike carries processes but no `inference` key.
+        let frame = r#"{"time":"t","device_info":[],
+            "tt_toplike":{"schema":1,"processes":[
+              {"pid":7,"name":"python3","cmd":"vllm","uses_tt":true,"cpu_pct":9.0,"mem_bytes":100}
+            ]}}"#;
+        let ext =
+            parse_extension(frame).expect("extension with only `processes` must still decode");
+        assert!(ext.processes.is_some(), "streamed processes present");
+        assert_eq!(ext.processes.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            ext.inference, None,
+            "a missing inference sub-key is `None` (not streamed → local fallback), not Some([])"
+        );
+    }
+
+    /// The inverse: a producer that streams `inference` but no `processes`
+    /// decodes with `processes == None` (fall back to local processes).
+    #[test]
+    fn missing_processes_subkey_is_none() {
+        let frame = r#"{"tt_toplike":{"schema":1,"inference":[
+              {"key":"k","label":"M","phase":"ready","progress":null,"serving":null}
+            ]}}"#;
+        let ext = parse_extension(frame).expect("extension with only `inference` must decode");
+        assert_eq!(ext.processes, None);
+        assert!(ext.inference.is_some());
     }
 }
