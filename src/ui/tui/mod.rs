@@ -368,6 +368,60 @@ fn run_app(
     #[cfg(feature = "remote")]
     let mut pending_remote: Option<std::sync::mpsc::Receiver<RemoteOutcome>> = None;
 
+    // ── `--serve` / `/serve` telemetry publisher (feature = "remote") ──────
+    // Holds the in-app publisher, started either right here (a `--serve` flag
+    // given at a real TTY — see the auto-start block immediately below) or
+    // later via the `/serve` command (see the key-handler dispatch). `None`
+    // means "not serving". Dropping it (`/serve off`/`/serve stop`, or simply
+    // exiting the TUI) stops the publisher's background accept loop and every
+    // connected client's task (see `TelemetryPublisher`'s `Drop`).
+    #[cfg(feature = "remote")]
+    let mut publisher: Option<crate::backend::TelemetryPublisher> = None;
+
+    // Shared "can't serve" message: a publisher can only broadcast a backend
+    // that retains verbatim `tt-smi -s` JSON — see
+    // `TelemetryBackend::snapshot_json`'s doc comment for which backends
+    // qualify (json/hybrid/ws) and which don't (mock/host/sysfs/luwen, which
+    // have nothing to broadcast). Shared by both the `--serve` auto-start
+    // below and the `/serve` command dispatch so the wording never drifts
+    // between the two call sites.
+    #[cfg(feature = "remote")]
+    const SERVE_NEEDS_JSON_HYBRID: &str =
+        "needs the json or hybrid backend (tt-smi); relaunch with --backend hybrid or --backend json";
+
+    // `--serve` given at a real TTY: start the publisher immediately, inline
+    // on this thread. Unlike `/remote`'s discovery (mDNS, seconds), a slow
+    // off-thread worker is unnecessary here — `TelemetryPublisher::spawn`
+    // binds synchronously and returns fast (a plain `TcpListener::bind` plus
+    // spawning its own dedicated Tokio runtime), so there is nothing to hide
+    // behind an mpsc worker. `--serve` given WITHOUT a TTY never reaches this
+    // function at all — see `bin/tui.rs::run_headless_serve`, which handles
+    // that case before the TUI is ever entered.
+    #[cfg(feature = "remote")]
+    if let Some(spec) = cli.serve.as_deref() {
+        if backend.snapshot_json().is_none() {
+            cmd_message = Some((format!("--serve {SERVE_NEEDS_JSON_HYBRID}"), true));
+        } else {
+            match crate::cli::parse_serve_bind(spec).and_then(|addr| {
+                crate::backend::TelemetryPublisher::spawn(addr).map_err(|e| e.to_string())
+            }) {
+                Ok(p) => {
+                    cmd_message = Some((
+                        format!(
+                            "serving on {} — plaintext, unauthed, trusted-LAN only",
+                            p.bind_addr()
+                        ),
+                        false,
+                    ));
+                    publisher = Some(p);
+                }
+                Err(e) => {
+                    cmd_message = Some((e, true));
+                }
+            }
+        }
+    }
+
     // ── Floating overlay panel state ──────────────────────────────────────
     // Toggled by l (legend), ? (help), ! (explain).
     // Auto-dismissed on any other keypress — stays until explicit re-toggle.
@@ -715,6 +769,24 @@ fn run_app(
             // returns Option<&'static str> so no lifetime issue, but keep pattern consistent
             // with perf_arg to avoid any future borrow conflicts inside the closure).
             let throttle_hint = throttle_state.status_hint();
+            // `/serve` status indicator: `◉ serving :PORT · N clients` while a
+            // publisher is held, absent otherwise. Built as an owned `String`
+            // (rather than borrowed inside the draw closure) for the same
+            // borrow-safety/consistency reasons as `perf_arg`/`throttle_hint`
+            // above — `client_count()` also changes every tick, so this is
+            // recomputed fresh each draw rather than cached.
+            #[cfg(feature = "remote")]
+            let serve_status = publisher.as_ref().map(|p| {
+                format!(
+                    "◉ serving :{} · {} clients",
+                    p.bind_addr().port(),
+                    p.client_count()
+                )
+            });
+            #[cfg(feature = "remote")]
+            let serve_hint = serve_status.as_deref();
+            #[cfg(not(feature = "remote"))]
+            let serve_hint: Option<&str> = None;
             // Whether `proc_rows` above was actually built via the TT-filtered
             // path this cycle — only possible on Linux/procfs builds (see the
             // proc_rows assignments). Drives the process panel's empty-state
@@ -793,7 +865,14 @@ fn run_app(
                     }
 
                     // ── Global status bar (all modes) ─────────────────────────
-                    render_global_statusbar(f, backend, display_mode, perf_arg, throttle_hint);
+                    render_global_statusbar(
+                        f,
+                        backend,
+                        display_mode,
+                        perf_arg,
+                        throttle_hint,
+                        serve_hint,
+                    );
 
                     // ── Command bar overlay (all modes) ───────────────────────
                     if cmd_mode || cmd_message.is_some() {
@@ -891,6 +970,99 @@ fn run_app(
                                     {
                                         cmd_message = Some((
                                             "remote unavailable (built without the 'remote' feature)"
+                                                .to_string(),
+                                            true,
+                                        ));
+                                    }
+                                } else if verb == "serve" {
+                                    // `/serve` is dispatched here (not in
+                                    // execute_command) for the same reason
+                                    // `/remote` is: starting/stopping needs the
+                                    // live backend (for `snapshot_json()`) and
+                                    // mutates the loop's `publisher` slot,
+                                    // neither of which execute_command has
+                                    // access to. Unlike `/remote` this runs
+                                    // INLINE (no off-thread worker) because
+                                    // `TelemetryPublisher::spawn` binds
+                                    // synchronously and returns fast — see the
+                                    // `--serve` auto-start comment above for
+                                    // why that's safe on the render thread.
+                                    #[cfg(feature = "remote")]
+                                    {
+                                        let arg = cmd_buf
+                                            .trim()
+                                            .trim_start_matches('/')
+                                            .split_once(char::is_whitespace)
+                                            .map(|(_, rest)| rest)
+                                            .unwrap_or("")
+                                            .trim()
+                                            .to_string();
+                                        match parse_serve_command(&arg) {
+                                            ServeCmd::Stop => {
+                                                cmd_message = Some((
+                                                    if publisher.take().is_some() {
+                                                        "stopped serving".to_string()
+                                                    } else {
+                                                        "not serving".to_string()
+                                                    },
+                                                    false,
+                                                ));
+                                            }
+                                            ServeCmd::Bad(reason) => {
+                                                cmd_message = Some((reason, true));
+                                            }
+                                            ServeCmd::Start(spec) => {
+                                                if let Some(existing) = publisher.as_ref() {
+                                                    cmd_message = Some((
+                                                        format!(
+                                                            "already serving on {}",
+                                                            existing.bind_addr()
+                                                        ),
+                                                        false,
+                                                    ));
+                                                } else if backend.snapshot_json().is_none() {
+                                                    cmd_message = Some((
+                                                        format!(
+                                                            "/serve: broadcast {SERVE_NEEDS_JSON_HYBRID}"
+                                                        ),
+                                                        true,
+                                                    ));
+                                                } else {
+                                                    let bind_spec = spec.unwrap_or_else(|| {
+                                                        format!(
+                                                            "0.0.0.0:{}",
+                                                            crate::cli::DEFAULT_SERVE_PORT
+                                                        )
+                                                    });
+                                                    match crate::cli::parse_serve_bind(&bind_spec)
+                                                        .and_then(|addr| {
+                                                            crate::backend::TelemetryPublisher::spawn(
+                                                                addr,
+                                                            )
+                                                            .map_err(|e| e.to_string())
+                                                        }) {
+                                                        Ok(p) => {
+                                                            cmd_message = Some((
+                                                                format!(
+                                                                    "serving on {} — plaintext, unauthed, trusted-LAN only",
+                                                                    p.bind_addr()
+                                                                ),
+                                                                false,
+                                                            ));
+                                                            publisher = Some(p);
+                                                        }
+                                                        Err(e) => {
+                                                            cmd_message = Some((e, true));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    #[cfg(not(feature = "remote"))]
+                                    {
+                                        cmd_message = Some((
+                                            "serve unavailable (built without the 'remote' feature)"
                                                 .to_string(),
                                             true,
                                         ));
@@ -1410,6 +1582,33 @@ fn run_app(
                 enrich_proc_rows_tt(&mut proc_rows, &process_monitor);
             }
 
+            // `/serve` per-tick broadcast. Same 2s cadence as the process/
+            // inference refresh above — NOT the 60fps render loop — so
+            // clients get one fresh frame per refresh instead of the same
+            // frame re-sent dozens of times a second for no visible benefit.
+            // `proc_rows` is current as of just above; the inference snapshot
+            // is re-read here (cheap: an `ArcSwap` load + clone, see
+            // `InferenceServerMonitor::snapshot`) rather than threaded out of
+            // the `#[cfg(target_os = "linux")]` block above, since that block
+            // computes it only to detect the model-unload edge and doesn't
+            // otherwise need to survive past that check.
+            #[cfg(feature = "remote")]
+            if let Some(pub_handle) = publisher.as_ref() {
+                if let Some(frame) = backend.snapshot_json() {
+                    #[cfg(target_os = "linux")]
+                    let inference_snapshot_for_broadcast = inference_monitor.snapshot();
+                    #[cfg(not(target_os = "linux"))]
+                    let inference_snapshot_for_broadcast: Vec<
+                        crate::workload::inference_server::ServiceState,
+                    > = Vec::new();
+                    let ext = crate::backend::build_extension(
+                        &proc_rows,
+                        &inference_snapshot_for_broadcast,
+                    );
+                    pub_handle.broadcast(crate::backend::inject_extension(&frame, &ext));
+                }
+            }
+
             sys_monitor.refresh_cpu_usage();
             sys_monitor.refresh_memory();
             host_cpu_pct = sys_monitor.global_cpu_usage();
@@ -1773,6 +1972,7 @@ fn render_global_statusbar(
     mode: DisplayMode,
     perf: Option<&str>,
     throttle_hint: Option<&str>,
+    serve_hint: Option<&str>,
 ) {
     use crate::models::telemetry::parse_hex_or_dec;
 
@@ -1975,6 +2175,19 @@ fn render_global_statusbar(
         left.push(Span::styled(
             hint.to_string(),
             Style::default().fg(colors::rgb(100, 100, 120)),
+        ));
+    }
+
+    // `/serve` indicator (`◉ serving :PORT · N clients`), shown bright (not
+    // dim like the hints above) since an active publisher is broadcasting
+    // this box's telemetry over the LAN — worth staying visible at a glance.
+    if let Some(hint) = serve_hint {
+        left.push(Span::styled("  │  ", Style::default().fg(sep_fg)));
+        left.push(Span::styled(
+            hint.to_string(),
+            Style::default()
+                .fg(colors::rgb(120, 220, 140))
+                .add_modifier(Modifier::BOLD),
         ));
     }
 
@@ -2216,6 +2429,12 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "discover + connect to a remote box",
                     lbl
                 ),
+                row!(
+                    " /serve [bind:port]",
+                    "broadcast telemetry (plaintext, trusted-LAN)",
+                    lbl
+                ),
+                row!(" /serve off", "stop broadcasting", lbl),
             ]
         }
 
@@ -3128,6 +3347,54 @@ fn execute_command(
             false,
         ),
     }
+}
+
+/// Parsed intent of a `/serve` command's argument (the text after `/serve `).
+///
+/// Pure and testable without any I/O — binding a socket and mutating the
+/// loop's `publisher` slot both need the live backend (for `snapshot_json()`)
+/// and happen in the key-handler's special-cased `serve` dispatch (mirroring
+/// `/remote`, which needs the live backend/config for the same reason —
+/// `execute_command` never sees either).
+#[cfg(feature = "remote")]
+#[derive(Debug, Clone, PartialEq)]
+enum ServeCmd {
+    /// `/serve` (bare) → `None` (caller binds the default `0.0.0.0:{DEFAULT_SERVE_PORT}`).
+    /// `/serve <spec>` → `Some(spec)`, a raw BIND\[:PORT\]/PORT/HOST string not
+    /// yet validated — that's [`crate::cli::parse_serve_bind`]'s job, run only
+    /// when the command actually dispatches (it can trigger DNS resolution
+    /// for a bare hostname, so it deliberately doesn't happen in this pure
+    /// parse).
+    Start(Option<String>),
+    /// `/serve off` | `/serve stop` (case-insensitive) — drop the publisher.
+    Stop,
+    /// Malformed input the dispatcher should report as an error without ever
+    /// attempting to bind (e.g. trailing garbage after the bind spec).
+    Bad(String),
+}
+
+/// Pure parse of a `/serve` command's argument into a [`ServeCmd`].
+///
+/// - Empty (or whitespace-only) → `Start(None)`.
+/// - `off` / `stop` (case-insensitive) → `Stop`.
+/// - A single token → `Start(Some(token))`; validity of that token as a bind
+///   address is checked later by [`crate::cli::parse_serve_bind`], not here.
+/// - More than one whitespace-separated token → `Bad(..)`, so `/serve 9000
+///   oops` reports a clear error instead of silently binding on 9000 and
+///   swallowing "oops".
+#[cfg(feature = "remote")]
+fn parse_serve_command(arg: &str) -> ServeCmd {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return ServeCmd::Start(None);
+    }
+    if arg.eq_ignore_ascii_case("off") || arg.eq_ignore_ascii_case("stop") {
+        return ServeCmd::Stop;
+    }
+    if arg.split_whitespace().count() > 1 {
+        return ServeCmd::Bad(format!("/serve: unexpected extra argument(s) in '{arg}'"));
+    }
+    ServeCmd::Start(Some(arg.to_string()))
 }
 
 /// Resolve a `/remote <arg>` selection against the cached picker list.
@@ -5135,6 +5402,81 @@ mod cmd_tests {
             // Not an index, not a listed name, not host:port → error (the caller
             // then falls back to a fresh discovery-by-name).
             assert!(resolve_remote_pick(&[], "mystery-box").is_err());
+        }
+    }
+
+    // ── /serve command parsing (pure) ───────────────────────────────────────
+    //
+    // Binding/spawning the publisher needs the live backend (for
+    // `snapshot_json()`) and mutates the loop's `publisher` slot, so — like
+    // `/remote` — the actual dispatch lives in the key-handler match, not
+    // `execute_command`. This only covers the pure argument→intent mapping.
+
+    #[cfg(feature = "remote")]
+    mod parse_serve_command_tests {
+        use super::super::{parse_serve_command, ServeCmd};
+
+        #[test]
+        fn bare_serve_starts_with_default_bind() {
+            assert_eq!(parse_serve_command(""), ServeCmd::Start(None));
+        }
+
+        #[test]
+        fn whitespace_only_is_also_default_start() {
+            assert_eq!(parse_serve_command("   "), ServeCmd::Start(None));
+        }
+
+        #[test]
+        fn bare_port_is_a_start_spec() {
+            assert_eq!(
+                parse_serve_command("9000"),
+                ServeCmd::Start(Some("9000".to_string()))
+            );
+        }
+
+        #[test]
+        fn host_port_is_a_start_spec() {
+            assert_eq!(
+                parse_serve_command("1.2.3.4:9000"),
+                ServeCmd::Start(Some("1.2.3.4:9000".to_string()))
+            );
+        }
+
+        #[test]
+        fn off_stops() {
+            assert_eq!(parse_serve_command("off"), ServeCmd::Stop);
+        }
+
+        #[test]
+        fn stop_stops() {
+            assert_eq!(parse_serve_command("stop"), ServeCmd::Stop);
+        }
+
+        #[test]
+        fn stop_is_case_insensitive() {
+            assert_eq!(parse_serve_command("OFF"), ServeCmd::Stop);
+            assert_eq!(parse_serve_command("Stop"), ServeCmd::Stop);
+        }
+
+        #[test]
+        fn unresolvable_host_is_still_a_start_spec() {
+            // `parse_serve_command` is a pure string-shape parse — it never
+            // does DNS resolution (that's `cli::parse_serve_bind`'s job, run
+            // only once the command actually dispatches), so a bogus host
+            // still comes back as a `Start` spec for the caller to validate
+            // and reject.
+            assert_eq!(
+                parse_serve_command("wat"),
+                ServeCmd::Start(Some("wat".to_string()))
+            );
+        }
+
+        #[test]
+        fn trailing_garbage_is_bad() {
+            assert!(matches!(
+                parse_serve_command("9000 extra"),
+                ServeCmd::Bad(_)
+            ));
         }
     }
 }
