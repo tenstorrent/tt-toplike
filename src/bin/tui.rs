@@ -13,6 +13,9 @@
 //! - Adaptive baseline learning for universal hardware sensitivity
 //! - Dark-mode optimized color palette
 
+#[cfg(feature = "remote")]
+use std::io::IsTerminal;
+
 use tt_toplike::{
     backend::{json::JSONBackend, mock::MockBackend, BackendConfig, TelemetryBackend},
     cli::{BackendType, Cli},
@@ -88,6 +91,24 @@ fn main() {
             }
         }
         return;
+    }
+
+    // `--serve` without a TTY (piped output, backgrounded, run under a process
+    // supervisor, etc.): a headless telemetry publisher, no TUI at all. This is
+    // the "run as a service" path — contrast with `--serve` at a real TTY,
+    // which starts the TUI AND a publisher together (a later task, wired inside
+    // `run_tui`). Dispatch here, before backend selection, since the headless
+    // path builds and drives its own backend rather than handing off to
+    // `run_with_backend`/`run_tui`.
+    #[cfg(feature = "remote")]
+    if cli.serve.is_some() && !std::io::stdout().is_terminal() {
+        run_headless_serve(&cli, config.clone());
+        return;
+    }
+    #[cfg(not(feature = "remote"))]
+    if cli.serve.is_some() {
+        eprintln!("Error: --serve not available (build with --features remote)");
+        std::process::exit(1);
     }
 
     // Select and initialize backend based on CLI arguments
@@ -287,6 +308,151 @@ fn run_with_backend<B: TelemetryBackend>(backend: &mut B, cli: &Cli) {
     if let Err(e) = tt_toplike::ui::run_tui(cli) {
         eprintln!("TUI error: {}", e);
         std::process::exit(1);
+    }
+}
+
+/// Headless `--serve`: no TUI, no terminal — just poll the backend and fan
+/// its telemetry out over `/telemetry` until the process is killed.
+///
+/// This is the "run as a background service" counterpart to the TTY path
+/// (which starts the TUI *and* a publisher together — wired inside `run_tui`
+/// in a later task). Every panic-risk edge here degrades to a logged warning
+/// and "keep looping" rather than crashing the service: a single failed
+/// `backend.update()` (e.g. a transient `tt-smi` hiccup) shouldn't take the
+/// whole publisher down, since other clients may still be relying on the
+/// last-broadcast frame.
+///
+/// Ctrl-C handling: deliberately a plain loop with no `SIGINT` handler. There
+/// is nothing to flush or persist on shutdown — the publisher's `Drop` (never
+/// reached on a hard kill) only matters for a graceful in-process shutdown,
+/// and the OS reclaiming the socket on process exit is sufficient for this
+/// v1. A future revision can add a signal handler if a clean "N clients said
+/// goodbye" log on shutdown becomes worth the extra dependency.
+#[cfg(feature = "remote")]
+fn run_headless_serve(cli: &Cli, config: BackendConfig) {
+    // Step 1: resolve the bind address. `cli.serve.is_some()` was already
+    // checked by the caller, but `parse_serve_bind` still owns validating the
+    // BIND[:PORT]/PORT/HOST shape (see cli::parse_serve_bind's doc comment).
+    let spec = cli.serve.as_deref().unwrap_or_default();
+    let bind = match tt_toplike::cli::parse_serve_bind(spec) {
+        Ok(addr) => addr,
+        Err(e) => {
+            eprintln!("Error: invalid --serve address '{}': {}", spec, e);
+            std::process::exit(1);
+        }
+    };
+
+    // Step 2: build + init the backend exactly like the normal (TUI) path
+    // does via the factory, then prime it with one `update()` — mirroring
+    // `run_with_backend`'s init-then-update sequence — so a raw-JSON-capable
+    // backend (JSON/Hybrid/Ws) actually has a frame cached before the
+    // capability check below runs. Without this priming update, `snapshot_json()`
+    // would read `None` even for `--backend json` (its raw frame is only
+    // cached by `update()`, not `init()`), which would make every headless
+    // launch fail the very check meant to distinguish JSON/Hybrid from
+    // Mock/Host/Sysfs.
+    let backend_type = cli.effective_backend();
+    let mut backend = match tt_toplike::backend::factory::create_backend(backend_type, config, cli)
+    {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("✗ Backend initialization failed: {}", e);
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = backend.update() {
+        eprintln!("✗ Failed to read telemetry: {}", e);
+        std::process::exit(1);
+    }
+
+    // Step 3: only a backend that can hand back verbatim `tt-smi -s` JSON
+    // (JSON, Hybrid, Ws) can be broadcast — the wire format IS that JSON, plus
+    // the additive `tt_toplike` extension. Mock/Host/Sysfs never populate
+    // `snapshot_json()` (see their `TelemetryBackend` impls / the trait's
+    // `None` default), so fail fast with a clear remedy rather than silently
+    // publishing nothing useful.
+    if backend.snapshot_json().is_none() {
+        eprintln!(
+            "Error: --serve needs the json or hybrid backend (tt-smi); \
+             relaunch with --backend hybrid or --backend json"
+        );
+        std::process::exit(1);
+    }
+
+    // Step 4: bind and start serving `/telemetry`.
+    let publisher = match tt_toplike::backend::TelemetryPublisher::spawn(bind) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Error: failed to start --serve publisher: {}", e);
+            std::process::exit(1);
+        }
+    };
+    log::info!(
+        "--serve: telemetry publisher listening on ws://{}/telemetry",
+        publisher.bind_addr()
+    );
+    println!(
+        "Serving telemetry on ws://{}/telemetry (headless — no TTY detected)",
+        publisher.bind_addr()
+    );
+
+    // Step 5: local process + inference-server monitors, mirroring how
+    // `run_tui` (src/ui/tui/mod.rs) constructs `host_proc_monitor` +
+    // `inference_monitor` — these feed the richer `tt_toplike` extension
+    // riding along on each broadcast frame. `InferenceServerMonitor` mirrors
+    // the TTY path's `#[cfg(target_os = "linux")]` gate (its `DockerProbe`
+    // backend targets Linux container hosts); non-Linux headless servers
+    // still broadcast processes, just with an always-empty inference list.
+    let mut host_proc_monitor = tt_toplike::workload::HostProcessMonitor::new();
+    host_proc_monitor.update();
+    let liveness_prober = tt_toplike::workload::LivenessProber::spawn();
+    liveness_prober.submit(host_proc_monitor.detected_runtimes());
+    #[cfg(target_os = "linux")]
+    let inference_monitor = tt_toplike::workload::InferenceServerMonitor::spawn();
+    #[cfg(target_os = "linux")]
+    inference_monitor.submit(host_proc_monitor.detected_inference_servers());
+
+    // Headless has no fixed panel height (no TUI to size rows for), so cap
+    // generously rather than reusing the TUI's `PROC_PANEL_MAX_ROWS`.
+    const HEADLESS_PROC_ROWS_MAX: usize = 64;
+    let mut last_client_log = std::time::Instant::now();
+
+    // Step 6: loop until killed. Each tick: refresh backend + monitors, build
+    // the enriched frame, broadcast it, and periodically log the connected
+    // client count (useful for confirming a remote peer actually attached
+    // without needing a debugger).
+    loop {
+        if let Err(e) = backend.update() {
+            // A transient read failure shouldn't take the publisher down —
+            // clients just keep seeing the last-broadcast frame until the
+            // next successful update.
+            log::warn!("--serve: backend update failed: {}", e);
+        }
+
+        host_proc_monitor.update();
+        liveness_prober.submit(host_proc_monitor.detected_runtimes());
+        #[cfg(target_os = "linux")]
+        inference_monitor.submit(host_proc_monitor.detected_inference_servers());
+
+        let proc_rows =
+            host_proc_monitor.rows(HEADLESS_PROC_ROWS_MAX, &liveness_prober.fresh_verdicts());
+        #[cfg(target_os = "linux")]
+        let inference_snapshot = inference_monitor.snapshot();
+        #[cfg(not(target_os = "linux"))]
+        let inference_snapshot: Vec<tt_toplike::workload::inference_server::ServiceState> =
+            Vec::new();
+
+        let ext = tt_toplike::backend::build_extension(&proc_rows, &inference_snapshot);
+        let base_json = backend.snapshot_json().unwrap_or_default();
+        let frame = tt_toplike::backend::inject_extension(&base_json, &ext);
+        publisher.broadcast(frame);
+
+        if last_client_log.elapsed() >= std::time::Duration::from_secs(10) {
+            log::info!("--serve: {} client(s) connected", publisher.client_count());
+            last_client_log = std::time::Instant::now();
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(cli.interval));
     }
 }
 

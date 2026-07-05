@@ -121,6 +121,93 @@ pub struct RemoteServing {
     pub preemptions_delta: u32,
 }
 
+/// Build a [`TtToplikeExt`] payload from this box's local process list and
+/// inference-server snapshot, ready to hand to [`inject_extension`].
+///
+/// Unlike a partial producer (e.g. tt-station-agentd, which may stream only
+/// `processes`), tt-toplike itself always knows both — so both sub-keys come
+/// back `Some(...)`, even when empty, per the wire contract documented on
+/// [`TtToplikeExt::processes`]/[`TtToplikeExt::inference`].
+pub fn build_extension(
+    procs: &[crate::workload::host_processes::ProcRow],
+    inference: &[crate::workload::inference_server::ServiceState],
+) -> TtToplikeExt {
+    TtToplikeExt {
+        schema: TT_TOPLIKE_SCHEMA,
+        processes: Some(procs.iter().map(remote_proc_from_row).collect()),
+        inference: Some(inference.iter().map(remote_inference_from_state).collect()),
+    }
+}
+
+/// Map one local [`ProcRow`](crate::workload::host_processes::ProcRow) to the
+/// wire [`RemoteProc`] shape.
+///
+/// `ProcRow` has no separate `cmd` field (just `name`), so `cmd` is populated
+/// with a clone of `name` — good enough for a remote viewer's display, which
+/// is all `cmd` is used for.
+fn remote_proc_from_row(row: &crate::workload::host_processes::ProcRow) -> RemoteProc {
+    RemoteProc {
+        // PIDs are conceptually unsigned on the wire; a negative `pid` (not
+        // expected in practice, but `ProcRow::pid` is a plain `i32`) clamps to
+        // 0 rather than wrapping into a huge u32 via `as` on a negative value.
+        pid: row.pid.max(0) as u32,
+        name: row.name.clone(),
+        cmd: row.name.clone(),
+        uses_tt: row.tt.is_some(),
+        cpu_pct: row.cpu_pct,
+        mem_bytes: row.mem_bytes,
+    }
+}
+
+/// Map one local `ServiceState` to the wire [`RemoteInference`] shape.
+fn remote_inference_from_state(
+    state: &crate::workload::inference_server::ServiceState,
+) -> RemoteInference {
+    RemoteInference {
+        key: state.key.clone(),
+        label: state.label.clone(),
+        phase: phase_str(state.phase).to_string(),
+        progress: state.progress,
+        serving: state.serving.as_ref().map(remote_serving_from_stats),
+    }
+}
+
+/// Lowercase wire name for a [`Phase`](crate::workload::inference_server::Phase).
+fn phase_str(phase: crate::workload::inference_server::Phase) -> &'static str {
+    use crate::workload::inference_server::Phase;
+    match phase {
+        Phase::Down => "down",
+        Phase::Compiling => "compiling",
+        Phase::Loading => "loading",
+        Phase::Ready => "ready",
+        Phase::Alarm => "alarm",
+    }
+}
+
+/// Map the display fields of `ServingStats` field-by-field onto the wire
+/// [`RemoteServing`] shape (see the module doc for why the raw counters are
+/// deliberately excluded).
+fn remote_serving_from_stats(
+    stats: &crate::workload::inference_server::metrics::ServingStats,
+) -> RemoteServing {
+    RemoteServing {
+        generation_tps: stats.generation_tps,
+        prompt_tps: stats.prompt_tps,
+        requests_running: stats.requests_running,
+        requests_waiting: stats.requests_waiting,
+        kv_cache_usage: stats.kv_cache_usage,
+        ttft_avg_s: stats.ttft_avg_s,
+        queue_avg_s: stats.queue_avg_s,
+        prefill_avg_s: stats.prefill_avg_s,
+        decode_avg_s: stats.decode_avg_s,
+        tpot_avg_s: stats.tpot_avg_s,
+        completed_delta: stats.completed_delta,
+        errored_delta: stats.errored_delta,
+        prefix_hit_rate: stats.prefix_hit_rate,
+        preemptions_delta: stats.preemptions_delta,
+    }
+}
+
 /// The top-level JSON key the extension lives under.
 const EXT_KEY: &str = "tt_toplike";
 
@@ -326,5 +413,76 @@ mod tests {
         let ext = parse_extension(frame).expect("extension with only `inference` must decode");
         assert_eq!(ext.processes, None);
         assert!(ext.inference.is_some());
+    }
+
+    /// `build_extension` maps one `ProcRow` (TT-using) and one Ready
+    /// `ServiceState` (with `serving` populated) into the wire shape:
+    /// tt-toplike always streams both sub-keys as `Some(...)` (never omits
+    /// like a partial producer would), `uses_tt` reflects `tt.is_some()`, and
+    /// the phase lowercases per the `Phase` → wire-string mapping.
+    #[test]
+    fn build_extension_maps_proc_and_inference() {
+        use crate::workload::host_processes::{ProcRow, TtProcInfo};
+        use crate::workload::inference_server::metrics::ServingStats;
+        use crate::workload::inference_server::{Phase, Readiness, ServiceState};
+
+        let procs = vec![ProcRow {
+            pid: 4242,
+            name: "tt-inference-server".to_string(),
+            cpu_pct: 87.5,
+            mem_bytes: 12_884_901_888,
+            inference: Some("vllm"),
+            active: true,
+            tt: Some(TtProcInfo {
+                device_indices: vec![0],
+                hugepages_1g: 4,
+                hugepages_2m: 0,
+            }),
+        }];
+
+        let inference = vec![ServiceState {
+            key: "vllm-llama3-70b".to_string(),
+            label: "Llama-3 70B (vLLM)".to_string(),
+            phase: Phase::Ready,
+            cpu_pct: 42.0,
+            rss_bytes: 1024,
+            rss_delta: 0,
+            kernel_count: 0,
+            kernel_delta: 0,
+            safetensors_fds: 3,
+            readiness: Readiness::Ready { runner: None },
+            top_proc: None,
+            last_log: None,
+            progress: None,
+            flat_ticks: 0,
+            serving: Some(ServingStats {
+                generation_tps: 512.3,
+                prompt_tps: 1024.7,
+                completed_delta: 27,
+                errored_delta: 0,
+                requests_running: 3,
+                requests_waiting: 1,
+                kv_cache_usage: 0.42,
+                ttft_avg_s: 0.35,
+                queue_avg_s: 0.02,
+                prefill_avg_s: 0.11,
+                decode_avg_s: 0.05,
+                tpot_avg_s: 0.03,
+                prefix_hit_rate: 0.61,
+                preemptions_delta: 2,
+                counters: Default::default(),
+            }),
+        }];
+
+        let ext = build_extension(&procs, &inference);
+
+        let processes = ext.processes.expect("tt-toplike always streams processes");
+        assert_eq!(processes.len(), 1);
+        assert!(processes[0].uses_tt, "ProcRow.tt was Some(...)");
+
+        let inference_out = ext.inference.expect("tt-toplike always streams inference");
+        assert_eq!(inference_out.len(), 1);
+        assert_eq!(inference_out[0].phase, "ready");
+        assert!(inference_out[0].serving.is_some());
     }
 }
