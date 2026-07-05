@@ -52,6 +52,10 @@ pub mod mock;
 mod remote_ext; // tt_toplike frame extension: processes + inference riding on /telemetry frames
 #[cfg(feature = "remote")]
 pub use remote_ext::*;
+#[cfg(feature = "remote")]
+mod serve; // TelemetryPublisher: /telemetry WebSocket server (the --serve side of remote QuietBox)
+#[cfg(feature = "remote")]
+pub use serve::TelemetryPublisher;
 pub mod smbus_smooth; // EMA smoothing for numeric SMBUS fields
 #[cfg(target_os = "linux")]
 pub mod sysfs; // Sysfs backend for Linux hwmon sensors (non-invasive)
