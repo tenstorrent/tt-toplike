@@ -48,6 +48,10 @@ pub mod json; // JSON backend for tt-smi subprocess
 #[cfg(feature = "luwen-backend")]
 pub mod luwen; // Luwen backend for direct hardware access
 pub mod mock;
+#[cfg(feature = "remote")]
+mod remote_ext; // tt_toplike frame extension: processes + inference riding on /telemetry frames
+#[cfg(feature = "remote")]
+pub use remote_ext::*;
 pub mod smbus_smooth; // EMA smoothing for numeric SMBUS fields
 #[cfg(target_os = "linux")]
 pub mod sysfs; // Sysfs backend for Linux hwmon sensors (non-invasive)
