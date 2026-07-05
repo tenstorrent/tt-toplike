@@ -147,18 +147,35 @@ impl ServingStats {
             ),
             None => (0.0, 0.0, 0, 0),
         };
-        let ttft_avg_s = if cur.ttft_count > 0 {
-            (cur.ttft_sum / cur.ttft_count as f64) as f32
-        } else {
-            0.0
-        };
-        let avg = |sum: f64, count: u64| -> f32 {
-            if count > 0 {
-                (sum / count as f64) as f32
+        // Windowed latency average: mean over just this tick's completed
+        // requests (cur − prev), so a slow request actually moves the number
+        // instead of being drowned by the lifetime mean of every request since
+        // server start. Falls back to the lifetime mean when nothing completed
+        // this window (idle) or on the first tick, so the display holds the last
+        // steady value rather than dropping to 0.
+        let wavg = |cur_sum: f64, cur_count: u64, prev_sum: f64, prev_count: u64| -> f32 {
+            let d_count = cur_count.saturating_sub(prev_count);
+            if d_count > 0 {
+                ((cur_sum - prev_sum).max(0.0) / d_count as f64) as f32
+            } else if cur_count > 0 {
+                (cur_sum / cur_count as f64) as f32
             } else {
                 0.0
             }
         };
+        let avg = |cur_sum: f64,
+                   cur_count: u64,
+                   ps: fn(&VllmCounters) -> f64,
+                   pc: fn(&VllmCounters) -> u64|
+         -> f32 {
+            wavg(cur_sum, cur_count, prev.map_or(0.0, ps), prev.map_or(0, pc))
+        };
+        let ttft_avg_s = avg(
+            cur.ttft_sum,
+            cur.ttft_count,
+            |c| c.ttft_sum,
+            |c| c.ttft_count,
+        );
         let prefix_hit_rate = if cur.prefix_queries_total > 0 {
             (cur.prefix_hits_total as f64 / cur.prefix_queries_total as f64) as f32
         } else {
@@ -177,10 +194,30 @@ impl ServingStats {
             requests_waiting: cur.requests_waiting,
             kv_cache_usage: cur.kv_cache_usage,
             ttft_avg_s,
-            queue_avg_s: avg(cur.queue_time_sum, cur.queue_time_count),
-            prefill_avg_s: avg(cur.prefill_time_sum, cur.prefill_time_count),
-            decode_avg_s: avg(cur.decode_time_sum, cur.decode_time_count),
-            tpot_avg_s: avg(cur.tpot_sum, cur.tpot_count),
+            queue_avg_s: avg(
+                cur.queue_time_sum,
+                cur.queue_time_count,
+                |c| c.queue_time_sum,
+                |c| c.queue_time_count,
+            ),
+            prefill_avg_s: avg(
+                cur.prefill_time_sum,
+                cur.prefill_time_count,
+                |c| c.prefill_time_sum,
+                |c| c.prefill_time_count,
+            ),
+            decode_avg_s: avg(
+                cur.decode_time_sum,
+                cur.decode_time_count,
+                |c| c.decode_time_sum,
+                |c| c.decode_time_count,
+            ),
+            tpot_avg_s: avg(
+                cur.tpot_sum,
+                cur.tpot_count,
+                |c| c.tpot_sum,
+                |c| c.tpot_count,
+            ),
             prefix_hit_rate,
             preemptions_delta,
             counters: *cur,
@@ -258,6 +295,36 @@ vllm:time_to_first_token_seconds_sum{engine=\"0\",model_name=\"M\"} 0.88
         assert_eq!(s.requests_running, 1);
         assert_eq!(s.requests_waiting, 2);
         assert!((s.ttft_avg_s - (1.10 / 6.0) as f32).abs() < 1e-4);
+    }
+
+    #[test]
+    fn latency_avg_is_windowed_not_lifetime() {
+        // Lifetime mean is a calm 0.1s over 10 requests; this window has ONE new
+        // request that took 2.0s. A windowed average must surface the 2.0s spike,
+        // not drown it in the lifetime mean (which would read ~0.27s).
+        let prev = VllmCounters {
+            ttft_sum: 1.0,
+            ttft_count: 10,
+            ..Default::default()
+        };
+        let cur = VllmCounters {
+            ttft_sum: 3.0, // +2.0s for the one new request
+            ttft_count: 11,
+            ..Default::default()
+        };
+        let s = ServingStats::fold(Some(&prev), &cur, 5);
+        assert!(
+            (s.ttft_avg_s - 2.0).abs() < 1e-4,
+            "windowed TTFT should reflect this tick's one 2.0s request, got {}",
+            s.ttft_avg_s
+        );
+        // Idle tick (no new requests): hold the last steady lifetime mean, not 0.
+        let idle = ServingStats::fold(Some(&cur), &cur, 5);
+        assert!(
+            (idle.ttft_avg_s - (3.0 / 11.0) as f32).abs() < 1e-4,
+            "idle window should fall back to lifetime mean, got {}",
+            idle.ttft_avg_s
+        );
     }
 
     #[test]

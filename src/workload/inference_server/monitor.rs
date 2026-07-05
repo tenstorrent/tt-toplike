@@ -25,8 +25,8 @@ use std::time::{Duration, Instant};
 use crate::workload::inference_server::detect::{InferenceServer, Source};
 use crate::workload::inference_server::logs::last_non_health_line;
 use crate::workload::inference_server::probe::{
-    count_lines, parse_docker_stats, parse_env_var, parse_liveness, top_process, ContainerProbe,
-    DockerProbe, Readiness, TickSample,
+    contains_python, count_lines, parse_docker_stats, parse_env_var, parse_liveness, top_process,
+    ContainerProbe, DockerProbe, Readiness, TickSample,
 };
 use crate::workload::inference_server::services::{model_basename, service_for};
 use crate::workload::inference_server::state::{
@@ -168,9 +168,14 @@ fn build_sample(
 
     let (cpu_pct, rss_bytes) = parse_docker_stats(&probe.stats(container)).unwrap_or((0.0, 0));
 
-    let top = top_process(&probe.exec(container, TOP_PROC_CMD));
+    // One `ps` snapshot serves both the display (top-CPU process) and the
+    // liveness check. `python_alive` scans ALL rows, not just the top: a
+    // loading server is often IO-bound and not the CPU leader, so keying
+    // liveness off the top row alone flapped a loading service to Down.
+    let ps_output = probe.exec(container, TOP_PROC_CMD);
+    let top = top_process(&ps_output);
     let top_proc = top.map(|(comm, _cpu, _rss)| comm);
-    let python_alive = top_proc.as_deref().is_some_and(|c| c.contains("python"));
+    let python_alive = contains_python(&ps_output);
 
     let (status, body) = probe.http(port, health_path);
     let readiness = parse_liveness(status, &body);
@@ -266,6 +271,32 @@ pub(crate) fn rebuild_snapshot(
     next_states
 }
 
+/// Union host-process detections (`submitted`) with containers the probe
+/// enumerated directly (`enumerated`), deduped by container name. Host-process
+/// detection only sees a foreground `docker run`; enumeration (docker ps) also
+/// finds detached / compose / systemd containers — so the union covers real
+/// deployments the process scan alone would miss. Pure → unit-tested.
+fn merge_detections(
+    submitted: &[InferenceServer],
+    enumerated: Vec<InferenceServer>,
+) -> Vec<InferenceServer> {
+    let mut out = submitted.to_vec();
+    let mut seen: std::collections::HashSet<String> = out
+        .iter()
+        .map(|s| {
+            let Source::Docker { container } = &s.source;
+            container.clone()
+        })
+        .collect();
+    for s in enumerated {
+        let Source::Docker { container } = &s.source;
+        if seen.insert(container.clone()) {
+            out.push(s);
+        }
+    }
+    out
+}
+
 /// Owns the background probe thread and a lock-free cache of per-service state.
 ///
 /// Submit the currently-detected servers each refresh; read a fresh snapshot
@@ -319,11 +350,17 @@ impl InferenceServerMonitor {
                         continue;
                     }
 
-                    // Rebuild unconditionally (even when `detected` is empty) so a
+                    // Union the submitted host-process detections with containers
+                    // the probe enumerates directly (docker ps), so detached /
+                    // compose / systemd containers — which have no foreground
+                    // `docker run` process — are monitored too.
+                    let all = merge_detections(&detected, probe.list_servers());
+
+                    // Rebuild unconditionally (even when `all` is empty) so a
                     // fully-stopped fleet clears the snapshot instead of leaving
                     // the last-known states cached forever.
                     let snapshot =
-                        rebuild_snapshot(&detected, &prev_snapshot, probe.as_ref(), CADENCE_SECS);
+                        rebuild_snapshot(&all, &prev_snapshot, probe.as_ref(), CADENCE_SECS);
                     cache_bg.store(Arc::new(snapshot.clone()));
                     prev_snapshot = snapshot;
                     last_tick = Some(Instant::now());
@@ -551,6 +588,46 @@ mod tests {
             "label derived from model basename, got {:?}",
             snap[0].label
         );
+    }
+
+    fn srv(container: &str, model: &str) -> InferenceServer {
+        InferenceServer {
+            source: Source::Docker {
+                container: container.into(),
+            },
+            image: "ghcr.io/tenstorrent/tt-inference-server/vllm:0.14.0".into(),
+            model: Some(model.into()),
+            mesh: None,
+            arch: None,
+            device: None,
+            port: Some(8000),
+            uses_tt_device: true,
+        }
+    }
+
+    #[test]
+    fn merge_detections_unions_and_dedupes_by_container() {
+        // A detached container the process scan missed, plus a foreground one.
+        let submitted = vec![srv("fg-container", "FLUX.1-schnell")];
+        let enumerated = vec![
+            srv("fg-container", "FLUX.1-schnell"), // dup of submitted → dropped
+            srv("detached-vllm", "Qwen/Qwen3-32B"), // new → kept
+        ];
+        let merged = merge_detections(&submitted, enumerated);
+        assert_eq!(
+            merged.len(),
+            2,
+            "dup container collapses, detached one added"
+        );
+        let containers: Vec<&str> = merged
+            .iter()
+            .map(|s| {
+                let Source::Docker { container } = &s.source;
+                container.as_str()
+            })
+            .collect();
+        assert!(containers.contains(&"fg-container"));
+        assert!(containers.contains(&"detached-vllm"));
     }
 
     #[test]

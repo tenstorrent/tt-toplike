@@ -27,7 +27,7 @@ pub struct InferenceServer {
 
 /// True if `image_or_name` names a TT inference server. Central recognizer so
 /// new variants (vLLM-native, Triton, …) are a one-line addition here.
-fn is_tt_inference_image(token: &str) -> bool {
+pub(crate) fn is_tt_inference_image(token: &str) -> bool {
     let t = token.to_lowercase();
     t.contains("inference-server")
         || t.contains("tt-media-inference")
@@ -128,6 +128,89 @@ pub fn parse_inference_server(name: &str, cmdline: &str) -> Option<InferenceServ
     })
 }
 
+/// Parse `docker inspect <container>` JSON (a one-element array) into an
+/// [`InferenceServer`]. This is the path for **detached** containers (`docker
+/// run -d`, `docker compose`, systemd) that have no foreground `docker run`
+/// host process for [`parse_inference_server`] to see — the monitor enumerates
+/// running containers with `docker ps` and inspects each. Returns `None` on
+/// malformed JSON or a non-TT image. Pure (no I/O), so it's unit-tested.
+pub fn parse_inspect(json: &str) -> Option<InferenceServer> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let obj = v.as_array()?.first()?;
+    let config = obj.get("Config")?;
+    let image = config.get("Image")?.as_str()?.to_string();
+    if !is_tt_inference_image(&image) {
+        return None;
+    }
+    let container = obj
+        .get("Name")
+        .and_then(|n| n.as_str())
+        .map(|n| n.trim_start_matches('/').to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Config.Env is ["KEY=VALUE", …]; Config.Cmd is the container's argv.
+    let env: Vec<&str> = config
+        .get("Env")
+        .and_then(|e| e.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+        .unwrap_or_default();
+    let env_val = |key: &str| -> Option<String> {
+        env.iter().find_map(|kv| {
+            let (k, val) = kv.split_once('=')?;
+            (k == key).then(|| val.to_string())
+        })
+    };
+    let cmd: Vec<&str> = config
+        .get("Cmd")
+        .and_then(|c| c.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+        .unwrap_or_default();
+
+    // uses_tt_device: any HostConfig.Devices entry mapping /dev/tenstorrent.
+    let uses_tt_device = obj
+        .get("HostConfig")
+        .and_then(|h| h.get("Devices"))
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter().any(|dev| {
+                dev.get("PathOnHost")
+                    .and_then(|p| p.as_str())
+                    .is_some_and(|p| p.contains("/dev/tenstorrent"))
+            })
+        })
+        .unwrap_or(false);
+
+    // Published port: HostConfig.PortBindings maps "8002/tcp" → [{HostPort:"8002"}].
+    // We probe localhost, so the HostPort is what matters.
+    let port = obj
+        .get("HostConfig")
+        .and_then(|h| h.get("PortBindings"))
+        .and_then(|pb| pb.as_object())
+        .and_then(|map| {
+            map.values().find_map(|binds| {
+                binds
+                    .as_array()?
+                    .first()?
+                    .get("HostPort")?
+                    .as_str()?
+                    .parse::<u16>()
+                    .ok()
+            })
+        });
+
+    Some(InferenceServer {
+        source: Source::Docker { container },
+        image,
+        // Prefer `-e MODEL=`; fall back to the container's `--model` arg (vLLM).
+        model: env_val("MODEL").or_else(|| model_arg(&cmd)),
+        mesh: env_val("MESH_DEVICE"),
+        arch: env_val("ARCH_NAME"),
+        device: env_val("DEVICE"),
+        port,
+        uses_tt_device,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +257,71 @@ mod tests {
         assert!(parse_inference_server("uvicorn", "uvicorn --host 0.0.0.0 main:app").is_none());
         assert!(parse_inference_server("bash", "docker ps").is_none());
         assert!(parse_inference_server("node", "node server.js").is_none());
+    }
+
+    // A detached vLLM container as `docker inspect` reports it: model is in
+    // Config.Cmd (not an env var), device + port in HostConfig.
+    const INSPECT_VLLM: &str = r#"[{
+        "Name": "/tt-inference-server-2269d4f6",
+        "Config": {
+            "Image": "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.14.0",
+            "Env": ["MODEL_WEIGHTS_DIR=/x", "HF_HOME=/y", "ARCH_NAME=blackhole", "PATH=/usr/bin"],
+            "Cmd": ["--model", "Qwen/Qwen3-32B", "--tt-device", "p300x2", "--no-auth"]
+        },
+        "HostConfig": {
+            "Devices": [{"PathOnHost": "/dev/tenstorrent", "PathInContainer": "/dev/tenstorrent"}],
+            "PortBindings": {"8002/tcp": [{"HostIp": "0.0.0.0", "HostPort": "8002"}]}
+        }
+    }]"#;
+
+    #[test]
+    fn parses_detached_container_from_inspect() {
+        let s = parse_inspect(INSPECT_VLLM).expect("detached vLLM container should parse");
+        assert_eq!(
+            s.source,
+            Source::Docker {
+                container: "tt-inference-server-2269d4f6".into()
+            }
+        );
+        assert_eq!(s.model.as_deref(), Some("Qwen/Qwen3-32B")); // from Cmd
+        assert_eq!(s.arch.as_deref(), Some("blackhole"));
+        assert_eq!(s.port, Some(8002)); // from PortBindings HostPort
+        assert!(s.uses_tt_device);
+        assert!(s.image.contains("tt-inference-server"));
+    }
+
+    // A media server inspected: model is an env var, no Cmd model arg.
+    const INSPECT_MEDIA: &str = r#"[{
+        "Name": "/tt-inference-server-5edd00ce",
+        "Config": {
+            "Image": "ghcr.io/tenstorrent/tt-media-inference-server:0.17.0-8c48a10",
+            "Env": ["MODEL=FLUX.1-schnell", "MESH_DEVICE=P300x2", "NO_AUTH=1"],
+            "Cmd": null
+        },
+        "HostConfig": {
+            "Devices": [{"PathOnHost": "/dev/tenstorrent"}],
+            "PortBindings": {"8000/tcp": [{"HostPort": "8000"}]}
+        }
+    }]"#;
+
+    #[test]
+    fn parses_detached_media_server_model_from_env() {
+        let s = parse_inspect(INSPECT_MEDIA).expect("media container should parse");
+        assert_eq!(s.model.as_deref(), Some("FLUX.1-schnell")); // from -e MODEL=
+        assert_eq!(s.mesh.as_deref(), Some("P300x2"));
+        assert_eq!(s.port, Some(8000));
+        assert!(s.uses_tt_device);
+    }
+
+    #[test]
+    fn inspect_rejects_non_tt_and_malformed() {
+        // A random container image is not a TT inference server.
+        let other = r#"[{"Name":"/pg","Config":{"Image":"postgres:16","Env":[],"Cmd":null},"HostConfig":{}}]"#;
+        assert!(parse_inspect(other).is_none());
+        // Malformed / empty JSON → None, never a panic.
+        assert!(parse_inspect("").is_none());
+        assert!(parse_inspect("not json").is_none());
+        assert!(parse_inspect("[]").is_none());
+        assert!(parse_inspect("{}").is_none());
     }
 }

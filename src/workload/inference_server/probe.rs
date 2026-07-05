@@ -73,6 +73,18 @@ pub fn count_lines(s: &str) -> usize {
     s.lines().filter(|l| !l.trim().is_empty()).count()
 }
 
+/// True if ANY process in `ps -eo pcpu,rss,comm …` output is a python server.
+/// The server can sit near 0% CPU while it mmaps/loads weights (IO-bound), so
+/// another process may top the CPU chart — deriving liveness from only the top
+/// row (as we once did) mis-reads a loading server as Down. Scan every data row.
+pub fn contains_python(ps_output: &str) -> bool {
+    ps_output
+        .lines()
+        .skip(1) // header
+        .filter_map(|l| l.split_whitespace().nth(2)) // comm column
+        .any(|comm| comm.contains("python"))
+}
+
 /// First data row of `ps -eo pcpu,rss,comm --sort=-pcpu` → (comm, cpu%, rss bytes).
 /// rss is KiB in ps output. Skips the header line.
 pub fn top_process(ps_output: &str) -> Option<(String, f32, u64)> {
@@ -127,6 +139,15 @@ pub trait ContainerProbe: Send {
     /// GET `path` on the container's published `port`. `(status, body)`;
     /// status `0` means unreachable (down or timed out).
     fn http(&self, port: u16, path: &str) -> (u16, String);
+
+    /// Enumerate running TT inference-server containers directly (via `docker
+    /// ps` + `docker inspect`), independent of any foreground `docker run` host
+    /// process — this is how **detached** (`-d`), `docker compose`, and
+    /// systemd-managed containers get found. Default returns empty so test
+    /// fakes opt out; only [`DockerProbe`] implements it.
+    fn list_servers(&self) -> Vec<super::InferenceServer> {
+        Vec::new()
+    }
 }
 
 /// Real `docker`-CLI-backed [`ContainerProbe`]. All calls shell out; every
@@ -154,6 +175,26 @@ impl ContainerProbe for DockerProbe {
         // Reuse the crate's localhost HTTP helper (liveness_probe) for status+body.
         crate::workload::liveness_probe::http_get_status_body(port, path)
     }
+
+    fn list_servers(&self) -> Vec<super::InferenceServer> {
+        // List running containers (name + image), keep TT inference images, and
+        // inspect each match into a structured record. All docker I/O — only
+        // ever called on the monitor's background thread, never the render path.
+        let listing = docker(&["ps", "--no-trunc", "--format", "{{.Names}}\t{{.Image}}"]);
+        let mut out = Vec::new();
+        for line in listing.lines() {
+            let Some((name, image)) = line.split_once('\t') else {
+                continue;
+            };
+            if !super::detect::is_tt_inference_image(image) {
+                continue;
+            }
+            if let Some(s) = super::detect::parse_inspect(&docker(&["inspect", name.trim()])) {
+                out.push(s);
+            }
+        }
+        out
+    }
 }
 
 /// Run `docker <args>`, returning stdout as a lossy UTF-8 string. Any spawn
@@ -169,6 +210,21 @@ fn docker(args: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn contains_python_scans_all_rows_not_just_top() {
+        // A loading server: some other process tops CPU, python idles lower down.
+        let ps = "PCPU  RSS COMMAND\n \
+                  93.0 1000 tt-metal-build\n \
+                  0.2 90000000 python3\n \
+                  0.0 500 sh\n";
+        assert!(contains_python(ps), "python below the top row must count");
+        // No python anywhere → false.
+        let no_py = "PCPU RSS COMMAND\n50.0 100 node\n0.1 200 bash\n";
+        assert!(!contains_python(no_py));
+        // Header only / empty → false, no panic.
+        assert!(!contains_python("PCPU RSS COMMAND\n"));
+        assert!(!contains_python(""));
+    }
     #[test]
     fn parses_docker_stats_line() {
         // `docker stats --no-stream --format '{{.CPUPerc}}|{{.MemUsage}}'`
