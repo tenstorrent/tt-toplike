@@ -47,3 +47,6 @@ tmp/
 Thumbs.db
 .Spotlight-V100
 .Trashes
+
+# Superpowers scratch (SDD ledgers, brainstorm sessions, review diffs) — local only
+.superpowers/
