@@ -5358,21 +5358,21 @@ pub fn run_render_bench(
         }));
     }
 
-    // Inference Monitor (anim, 10 fps) — the live `[i]` view is the unified
-    // serving snake (`render_snake_view`), not the retired text list. Drive it
-    // with an empty snapshot + empty catalog (as on non-Linux, or Linux with no
-    // detected containers), which resolves to the Roaming behavior — the same
-    // path the real UI takes with nothing serving. Keep the "inference-monitor"
-    // mode label so `--bench` output stays comparable across releases.
+    // Inference Monitor (anim, 60 fps — the `[i]` view is in is_anim_mode). The
+    // live view is the unified serving snake (`render_snake_view`). We bench two
+    // states: `inference-monitor` = the cheap Roaming screensaver (empty
+    // snapshot, as on non-Linux or with no containers), and `inference-serving`
+    // = the heaviest realistic frame — a 4-model roster above the featured
+    // serving dashboard (timeline + swimlanes + silicon strip).
+    let arch = backend
+        .devices()
+        .first()
+        .map(|d| d.architecture.name())
+        .unwrap_or("Unknown");
     {
         let mut term = mk_term();
         let mut snake = crate::animation::Snake::new();
-        let arch = backend
-            .devices()
-            .first()
-            .map(|d| d.architecture.name())
-            .unwrap_or("Unknown");
-        results.push(measure("inference-monitor", 10, frames, || {
+        results.push(measure("inference-monitor", 60, frames, || {
             snake.update(&crate::animation::SnakeWorld {
                 rows: &[],
                 catalog: &[],
@@ -5383,6 +5383,73 @@ pub fn run_render_bench(
                 height: height as usize,
             });
             term.draw(|f| render_snake_view(f, &snake, &[])).unwrap();
+        }));
+    }
+    {
+        use crate::workload::inference_server::{
+            Phase, Readiness, ServiceState, ServingStats, VllmCounters,
+        };
+        let counters = VllmCounters {
+            generation_tokens_total: 100_000,
+            prompt_tokens_total: 20_000,
+            requests_running: 6,
+            requests_waiting: 2,
+            kv_cache_usage: 0.42,
+            ttft_sum: 3.0,
+            ttft_count: 20,
+            ..Default::default()
+        };
+        let stats = ServingStats::fold(None, &counters, 5);
+        let mk = |key: &str, label: &str, serving| ServiceState {
+            key: key.into(),
+            label: label.into(),
+            phase: Phase::Ready,
+            cpu_pct: 30.0,
+            rss_bytes: 8_000_000_000,
+            rss_delta: 0,
+            kernel_count: 500,
+            kernel_delta: 0,
+            safetensors_fds: 0,
+            readiness: Readiness::Ready { runner: None },
+            top_proc: Some("python3".into()),
+            last_log: None,
+            progress: None,
+            flat_ticks: 0,
+            serving,
+        };
+        // 4 models → the featured one Feeds the full serving dashboard, and the
+        // roster lists all four (the multi-model case the view now handles).
+        let rows = vec![
+            mk("a", "Llama-3.1-8B", Some(stats)),
+            mk("b", "Qwen3-32B", Some(stats)),
+            mk("c", "Mistral-7B-Instruct", None),
+            mk("d", "gemma-3-1b-it", None),
+        ];
+        let chips: Vec<crate::animation::ChipReading> = (0..4)
+            .map(|i| crate::animation::ChipReading {
+                index: i,
+                arch,
+                power_w: Some(64.0),
+                temp_c: Some(59.0),
+                aiclk_mhz: Some(1000),
+            })
+            .collect();
+        let roster = inference_roster_lines(&rows, width as usize);
+        let roster_h = roster.len();
+        let mut term = mk_term();
+        let mut snake = crate::animation::Snake::new();
+        results.push(measure("inference-serving", 60, frames, || {
+            snake.update(&crate::animation::SnakeWorld {
+                rows: &rows,
+                catalog: &[],
+                arch,
+                chips: &chips,
+                cadence_secs: 5,
+                width: width as usize,
+                height: (height as usize).saturating_sub(1 + roster_h),
+            });
+            term.draw(|f| render_snake_view(f, &snake, &roster))
+                .unwrap();
         }));
     }
 
