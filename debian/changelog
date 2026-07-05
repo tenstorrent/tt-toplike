@@ -1,3 +1,14 @@
+tt-toplike (0.7.22) noble; urgency=medium
+
+  * [i] multi-model roster: when 2+ inference services are detected, a compact
+    roster now sits above the featured snake listing ALL of them — a phase tag
+    (compile/loading/serving/stalled/down), the model label, and a live stat
+    (tok/s + running when serving, load % otherwise); the featured service is
+    marked ▸. The snake still features one (loading wins, else the first Ready),
+    and the single-model view is unchanged.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sun, 05 Jul 2026 20:00:00 +0000
+
 tt-toplike (0.7.21) noble; urgency=medium
 
   * [i] Inference Monitor — reliability: the loading view no longer flaps back
