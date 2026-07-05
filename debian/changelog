@@ -1,3 +1,34 @@
+tt-toplike (0.7.21) noble; urgency=medium
+
+  * [i] Inference Monitor — reliability: the loading view no longer flaps back
+    to the cold model-catalog while a model is actively loading. python-alive
+    is now detected across ALL container processes (a loading server is often
+    IO-bound and not the top-CPU process), detached/compose/systemd containers
+    are found via `docker ps`+`docker inspect` (not just a foreground
+    `docker run`), and the loading state holds for a 15s grace across a
+    transient probe hiccup.
+  * [i] loading snake recolored to the greyskull palette — calm greys + a cyan
+    tint with hot pink the only hot accent, instead of the teal→amber→gold
+    neon sweep.
+  * [i] serving latency (TTFT / queue / prefill / decode / TPOT) is now
+    windowed over each tick's completed requests instead of a lifetime mean,
+    so a slow request actually moves the number.
+  * Arcade duel capped to a compact strip so the hero-vs-snake tug-of-war
+    stays tight and readable on large terminals (was stretching across half
+    the screen).
+  * Robustness: fixed a render-path panic on the fleet-zoom drill-down after a
+    device-count drop; bounded the remote WS device list + message size
+    against a hostile frame; --remote now opens a single WS connection for the
+    session; per-endpoint HTTP/docker probe timeouts so one wedged endpoint
+    can't stall the monitor.
+  * Packaging: the .deb builds locally again (the apt Build-Depends check is
+    skipped when a rustup toolchain provides rustc); `tt-toplike-app
+    --version`/`--help` work headless (no window init); CI is green again
+    (macOS aiclk guard, egui/app clippy, cargo-audit advisory ignore, protoc
+    for the luwen check).
+
+ -- Tenstorrent <software@tenstorrent.com>  Sun, 05 Jul 2026 18:00:00 +0000
+
 tt-toplike (0.7.20) noble; urgency=medium
 
   * Safety: the live `b` backend cycle no longer steps onto Luwen. Cycling
