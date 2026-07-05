@@ -347,6 +347,7 @@ mod tests {
             json: false,
             host: false,
             remote: None,
+            serve: None,
             tt_smi_path: std::path::PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,

@@ -108,6 +108,18 @@ pub struct Cli {
     )]
     pub remote: Option<String>,
 
+    /// Publish local telemetry over WebSocket for other tt-toplike instances to watch.
+    ///
+    /// `--serve` alone binds all interfaces on the default port
+    /// (`0.0.0.0:8770`). `--serve BIND:PORT` binds a specific address/port,
+    /// `--serve PORT` binds all interfaces on that port, and `--serve HOST`
+    /// binds the default port on that host. IPv6: `[::1]:8770`.
+    ///
+    /// A box can `--serve` while also watching a `--remote` peer — that's the
+    /// relay case, so the two flags do not conflict.
+    #[arg(long, value_name = "BIND:PORT", num_args = 0..=1, default_missing_value = "0.0.0.0:8770")]
+    pub serve: Option<String>,
+
     /// Path to tt-smi executable
     ///
     /// Only used with JSON backend. Defaults to "tt-smi" in PATH.
@@ -273,6 +285,71 @@ pub fn backend_shows_only_tt(bt: BackendType) -> bool {
     )
 }
 
+/// Default port for `--serve` / `/serve` telemetry publishing.
+///
+/// Distinct from `--remote`'s default of 8000 (the tt-station-agentd control
+/// port) so a `--serve`d tt-toplike and a `tt-station-agentd` can coexist on
+/// the same box without a port clash.
+pub const DEFAULT_SERVE_PORT: u16 = 8770;
+
+/// Parse a `--serve`/`/serve` bind-address spec into a `SocketAddr`.
+///
+/// Accepts, in order of preference:
+/// - `BIND:PORT` (e.g. `192.168.1.5:9000`) — used as-is.
+/// - `[IPV6]:PORT` (e.g. `[::1]:8770`) — bracketed IPv6 with an explicit port.
+/// - `PORT` alone (e.g. `8770`) — binds all interfaces (`0.0.0.0`) on that port.
+/// - `BIND` alone (e.g. `192.168.1.5` or a hostname) — binds
+///   [`DEFAULT_SERVE_PORT`] on that address.
+///
+/// Resolution is delegated to [`std::net::ToSocketAddrs`], so bare IP
+/// literals resolve synchronously (no DNS) while hostnames go through normal
+/// system resolution; the first resolved address is returned. Never panics —
+/// garbage input (empty string, non-numeric port, unresolvable host) yields
+/// `Err` with a human-readable message.
+pub fn parse_serve_bind(spec: &str) -> Result<std::net::SocketAddr, String> {
+    use std::net::ToSocketAddrs;
+
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err("--serve requires a BIND[:PORT] (or a bare PORT)".to_string());
+    }
+
+    // Bracketed IPv6: [addr] or [addr]:port
+    let host_port = if let Some(rest) = spec.strip_prefix('[') {
+        let (addr, tail) = rest
+            .split_once(']')
+            .ok_or_else(|| format!("malformed IPv6 bind address: {spec}"))?;
+        match tail.strip_prefix(':') {
+            Some(port) => format!("[{addr}]:{port}"),
+            None if tail.is_empty() => format!("[{addr}]:{DEFAULT_SERVE_PORT}"),
+            None => return Err(format!("malformed bind address: {spec}")),
+        }
+    } else if spec.parse::<u16>().is_ok() {
+        // Bare PORT: bind all interfaces.
+        format!("0.0.0.0:{spec}")
+    } else {
+        match spec.rsplit_once(':') {
+            Some((host, port)) if !host.is_empty() => {
+                // Validate the port before handing off to resolution, so a
+                // typo like "nonsense:x" fails fast with a clear message
+                // instead of triggering a (possibly slow) DNS lookup on the
+                // bogus "host" half.
+                port.parse::<u16>()
+                    .map_err(|_| format!("invalid port in bind address: {spec}"))?;
+                spec.to_string()
+            }
+            // Bare HOST (no colon): default the port.
+            _ => format!("{spec}:{DEFAULT_SERVE_PORT}"),
+        }
+    };
+
+    host_port
+        .to_socket_addrs()
+        .map_err(|e| format!("failed to resolve bind address '{spec}': {e}"))?
+        .next()
+        .ok_or_else(|| format!("no address resolved for bind address '{spec}'"))
+}
+
 /// Visualization mode selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum VisualizationMode {
@@ -421,6 +498,7 @@ impl Cli {
             json: false,
             host: false,
             remote: None,
+            serve: None,
             tt_smi_path: std::path::PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -490,6 +568,7 @@ mod tests {
             json: false,
             host: false,
             remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -524,6 +603,7 @@ mod tests {
             json: false,
             host: false,
             remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -553,6 +633,7 @@ mod tests {
             json: true,
             host: false,
             remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -582,6 +663,7 @@ mod tests {
             json: false,
             host: false,
             remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: Some(vec![0, 2, 4]),
@@ -615,6 +697,7 @@ mod tests {
             json: false,
             host: false,
             remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -641,6 +724,7 @@ mod tests {
             json: false,
             host: false,
             remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -670,6 +754,7 @@ mod tests {
             json: false,
             host: false,
             remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -699,6 +784,7 @@ mod tests {
             json: false,
             host: false,
             remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -725,6 +811,7 @@ mod tests {
             json: false,
             host: false,
             remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -753,6 +840,7 @@ mod tests {
             json: false,
             host: false,
             remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -806,5 +894,48 @@ mod tests {
 
         // mock=Some(1): edge — 1 > 0 so inline count wins
         assert_eq!(mock_cli_with(Some(1), 5).effective_mock_devices(), 1);
+    }
+
+    #[test]
+    fn parse_serve_bind_bare_port_binds_all_interfaces() {
+        assert_eq!(
+            parse_serve_bind("8770").unwrap(),
+            "0.0.0.0:8770".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_serve_bind_host_and_port_used_as_is() {
+        assert_eq!(
+            parse_serve_bind("127.0.0.1:9000").unwrap(),
+            "127.0.0.1:9000".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_serve_bind_bare_host_defaults_port() {
+        assert_eq!(
+            parse_serve_bind("192.168.1.5").unwrap(),
+            "192.168.1.5:8770".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_serve_bind_bracketed_ipv6() {
+        let addr = parse_serve_bind("[::1]:8770").unwrap();
+        assert!(addr.is_ipv6());
+        assert_eq!(addr.port(), 8770);
+        assert_eq!(addr.ip(), "::1".parse::<std::net::IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn parse_serve_bind_rejects_garbage() {
+        assert!(parse_serve_bind("nonsense:x").is_err());
+        assert!(parse_serve_bind("").is_err());
+    }
+
+    #[test]
+    fn parse_serve_bind_default_port_constant() {
+        assert_eq!(DEFAULT_SERVE_PORT, 8770);
     }
 }
