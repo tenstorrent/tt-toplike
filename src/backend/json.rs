@@ -281,6 +281,16 @@ pub struct JSONBackend {
 
     /// Consecutive error count (for backoff)
     error_count: usize,
+
+    /// Verbatim stdout of the last *successfully parsed* `tt-smi -s` run.
+    ///
+    /// Retained for the `--serve` telemetry publisher: it needs to broadcast
+    /// "current telemetry" as raw tt-smi JSON, byte-identical to what tt-smi
+    /// produced, rather than re-serializing our parsed `Telemetry`/`SmbusTelemetry`
+    /// structs (lossy — we don't round-trip every tt-smi field). Left untouched on
+    /// a parse error so a single bad tick doesn't blank out the last known-good
+    /// snapshot.
+    last_raw: Option<String>,
 }
 
 impl JSONBackend {
@@ -305,6 +315,7 @@ impl JSONBackend {
             config: BackendConfig::default(),
             last_update: Instant::now(),
             error_count: 0,
+            last_raw: None,
         }
     }
 
@@ -319,6 +330,7 @@ impl JSONBackend {
             config,
             last_update: Instant::now(),
             error_count: 0,
+            last_raw: None,
         }
     }
 
@@ -403,6 +415,41 @@ impl JSONBackend {
         for (idx, smbus) in parsed.smbus {
             self.smbus_telemetry.insert(idx, smbus);
         }
+    }
+
+    /// Parse a raw `tt-smi -s` output string, merge it into cached state, and —
+    /// only on successful parse — retain it verbatim for `snapshot_json()`.
+    ///
+    /// This is the shared core of `update()`: the subprocess path
+    /// (`run_tt_smi()` → this) and the `#[cfg(test)]` seam below both funnel
+    /// through here, so a test driving the seam exercises the exact same
+    /// parse/merge/retain logic that a live `update()` runs — the only thing the
+    /// seam skips is actually spawning `tt-smi`.
+    fn apply_raw_snapshot(&mut self, json_output: String) -> BackendResult<()> {
+        match parse_tt_smi_snapshot(&json_output) {
+            Ok(parsed) => {
+                self.merge_parsed(parsed);
+                self.last_raw = Some(json_output);
+                self.last_update = Instant::now();
+                self.error_count = 0; // Reset error count on success
+                Ok(())
+            }
+            Err(e) => {
+                self.error_count += 1;
+                if self.config.verbose {
+                    log::debug!("JSONBackend: Parse error: {}", e);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Test-only: drive `apply_raw_snapshot` with canned `tt-smi -s` output,
+    /// without spawning a real subprocess. See [`apply_raw_snapshot`] for why
+    /// this is "the real update() path" minus the subprocess boundary.
+    #[cfg(test)]
+    pub(crate) fn apply_raw_snapshot_pub(&mut self, json_output: &str) -> BackendResult<()> {
+        self.apply_raw_snapshot(json_output.to_string())
     }
 }
 
@@ -597,20 +644,7 @@ impl TelemetryBackend for JSONBackend {
         // Run tt-smi to get fresh telemetry
         match self.run_tt_smi() {
             Ok(json_output) => {
-                match parse_tt_smi_snapshot(&json_output) {
-                    Ok(parsed) => {
-                        self.merge_parsed(parsed);
-                        self.last_update = Instant::now();
-                        self.error_count = 0; // Reset error count on success
-                    }
-                    Err(e) => {
-                        self.error_count += 1;
-                        if self.config.verbose {
-                            log::debug!("JSONBackend: Parse error: {}", e);
-                        }
-                        return Err(e);
-                    }
-                }
+                self.apply_raw_snapshot(json_output)?;
             }
             Err(e) => {
                 self.error_count += 1;
@@ -643,6 +677,10 @@ impl TelemetryBackend for JSONBackend {
 
     fn backend_info(&self) -> String {
         format!("JSON ({} via {})", self.devices.len(), self.tt_smi_path)
+    }
+
+    fn snapshot_json(&self) -> Option<String> {
+        self.last_raw.clone()
     }
 }
 
@@ -1180,6 +1218,51 @@ mod tests {
     #[test]
     fn test_parse_tt_smi_snapshot_bad_json_errors() {
         assert!(parse_tt_smi_snapshot("not json at all").is_err());
+    }
+
+    /// `snapshot_json()` must be `None` before any successful update, and must
+    /// return the exact raw `tt-smi -s` output after one. Drives the same
+    /// parse+merge+store-raw logic `update()` uses (via the `apply_raw_snapshot`
+    /// test seam), just without spawning a real `tt-smi` subprocess — mirroring
+    /// the existing `update_from_json_pub` white-box pattern in this file.
+    #[test]
+    fn test_snapshot_json_returns_last_raw_after_update() {
+        let mut backend = JSONBackend::new("tt-smi");
+        assert_eq!(
+            backend.snapshot_json(),
+            None,
+            "snapshot_json should be None before any successful update"
+        );
+
+        backend
+            .apply_raw_snapshot_pub(REAL_TTSMI_JSON)
+            .expect("apply_raw_snapshot should succeed on well-formed JSON");
+
+        assert_eq!(
+            backend.snapshot_json(),
+            Some(REAL_TTSMI_JSON.to_string()),
+            "snapshot_json must return the exact raw tt-smi JSON byte-identical"
+        );
+    }
+
+    /// A parse failure must not clobber a previously stored good snapshot, and
+    /// must not fabricate a snapshot out of unparseable output.
+    #[test]
+    fn test_snapshot_json_unchanged_on_parse_error() {
+        let mut backend = JSONBackend::new("tt-smi");
+
+        backend
+            .apply_raw_snapshot_pub(REAL_TTSMI_JSON)
+            .expect("first apply should succeed");
+        assert_eq!(backend.snapshot_json(), Some(REAL_TTSMI_JSON.to_string()));
+
+        // A bad frame errors and must not overwrite the last good snapshot.
+        assert!(backend.apply_raw_snapshot_pub("not json at all").is_err());
+        assert_eq!(
+            backend.snapshot_json(),
+            Some(REAL_TTSMI_JSON.to_string()),
+            "a failed parse must not clobber the last known-good snapshot"
+        );
     }
 
     #[test]

@@ -349,6 +349,17 @@ impl TelemetryBackend for WsBackend {
             ),
         }
     }
+
+    fn snapshot_json(&self) -> Option<String> {
+        // Relay the last raw frame received from the remote publisher — itself
+        // verbatim `tt-smi -s` stdout by contract (see module docs). Deliberately
+        // independent of `apply_latest`/`last_gen`: this always reflects the
+        // newest bytes the reader task has seen, even if that frame failed to
+        // parse (a --serve re-broadcaster downstream may have a newer/different
+        // parser than we do; we don't want a local parse hiccup to blank the
+        // relay). `.lock().ok()` — never panics on a poisoned lock.
+        self.shared.latest.lock().ok().and_then(|g| g.clone())
+    }
 }
 
 /// Freshness word for `backend_info`, given the age of the last frame and the
@@ -596,6 +607,25 @@ mod tests {
         assert!(b.update().is_ok());
         assert_eq!(b.last_gen, gen_after_first, "generation must not advance");
         assert_eq!(b.devices().len(), 1);
+    }
+
+    /// `snapshot_json()` relays the last received frame verbatim, independent of
+    /// whether `update()`/`apply_latest()` has run.
+    #[test]
+    fn test_snapshot_json_relays_last_frame() {
+        let b = WsBackend::new_for_test();
+        assert_eq!(
+            b.snapshot_json(),
+            None,
+            "no frame received yet — snapshot_json must be None"
+        );
+
+        b.test_inject(FRAME);
+        assert_eq!(
+            b.snapshot_json(),
+            Some(FRAME.to_string()),
+            "snapshot_json must relay the exact injected frame"
+        );
     }
 
     /// A malformed frame is surfaced as an error, never a panic.

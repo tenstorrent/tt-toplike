@@ -252,6 +252,28 @@ pub trait TelemetryBackend: Send + Sync {
     fn has_smbus_telemetry(&self, device_idx: usize) -> bool {
         self.smbus_telemetry(device_idx).is_some()
     }
+
+    /// Get the current telemetry snapshot as raw `tt-smi -s` JSON, if available.
+    ///
+    /// This is the passthrough/relay hook for the `--serve` telemetry publisher:
+    /// a publisher broadcasts "current telemetry" by grabbing whatever the active
+    /// backend last saw as `tt-smi -s` output, without re-deriving JSON from the
+    /// backend's parsed `Telemetry`/`SmbusTelemetry` structs (which would be lossy
+    /// and backend-specific).
+    ///
+    /// - [`json::JSONBackend`](crate::backend::json::JSONBackend) and
+    ///   [`hybrid::HybridBackend`](crate::backend::hybrid::HybridBackend) return the
+    ///   verbatim stdout of their last successful `tt-smi -s` run.
+    /// - [`ws::WsBackend`](crate::backend::ws::WsBackend) relays the last frame it
+    ///   received from a remote publisher (itself verbatim `tt-smi -s` stdout).
+    /// - Every other backend (mock/host/sysfs/luwen) has no `tt-smi` JSON source
+    ///   and keeps this default, returning `None`.
+    ///
+    /// Cheap by design: a getter over already-retained state, never spawns a
+    /// subprocess or blocks — safe to call from a hot loop.
+    fn snapshot_json(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Backend configuration options
@@ -342,6 +364,16 @@ impl TelemetryBackend for Box<dyn TelemetryBackend> {
 
     fn backend_info(&self) -> String {
         (**self).backend_info()
+    }
+
+    fn snapshot_json(&self) -> Option<String> {
+        // Without this explicit forward, the default `{ None }` body from the
+        // trait definition would apply here (it never touches `self`), silently
+        // discarding whatever the boxed concrete backend (JSON/Hybrid/Ws) has
+        // retained. Every app surface stores its backend as `Box<dyn
+        // TelemetryBackend>` (TUI, egui, iced GUI), so this forward is what makes
+        // `snapshot_json()` actually reach the real backend in practice.
+        (**self).snapshot_json()
     }
 }
 
