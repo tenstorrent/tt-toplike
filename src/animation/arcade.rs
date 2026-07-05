@@ -790,7 +790,13 @@ impl ArcadeVisualization {
         // When something is serving, Row 1 becomes the duel: the strip claims
         // the left ~half and the shared telemetry strip fills the remainder.
         if self.serving.is_some() {
-            let duel_w = self.width / 2;
+            // Keep the duel a tight, readable strip. Left unbounded (width/2) it
+            // stretches the hero and snake to opposite ends of half a huge
+            // terminal, scattering the tug-of-war across dozens of empty cells;
+            // capping it keeps the battle compact on any size, with the shared
+            // telemetry strip filling whatever remains.
+            const DUEL_MAX_W: usize = 44;
+            let duel_w = (self.width / 2).min(DUEL_MAX_W);
             let strip_w = self.width.saturating_sub(duel_w);
             let duel = self.duel.render_strip(duel_w);
             let mut spans = self.duel_strip_spans(&duel);

@@ -10,7 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::time::Instant;
 
-use crate::animation::{hsv_to_rgb, value_to_block_char};
+use crate::animation::{hsv_to_grayskull, value_to_block_char};
 use crate::ui::colors;
 use crate::workload::inference_server::{is_alarm, Phase, ServiceState};
 
@@ -315,7 +315,15 @@ impl LoadSnake {
         }
 
         let bg = colors::rgb(0, 0, 0);
-        let gold = Color::Rgb(246, 188, 66);
+        // Greyskull loading palette: calm greys + a cyan tint, with hot pink as
+        // the single hot accent — replaces the old teal→amber→gold neon sweep.
+        let gs = |r: u8, g: u8, b: u8| -> Color {
+            let (r, g, b) = colors::grayskull_rgb(r, g, b);
+            Color::Rgb(r, g, b)
+        };
+        let hot = gs(255, 48, 96); // hot pink — head, ready burst, alarm
+        let cool = gs(90, 200, 220); // cyan-grey — compile chamber
+        let mid = gs(165, 165, 165); // grey — load chamber
         let dim = colors::rgb(90, 90, 90);
         let alarm = self.is_alarm();
 
@@ -333,11 +341,7 @@ impl LoadSnake {
         let title_full = format!("{}  {}  {}", self.label, phase_word, fmt_elapsed(elapsed));
         // Char-safe truncation — labels may be multibyte, never byte-slice.
         let title: String = title_full.chars().take(self.width).collect();
-        let title_color = if alarm {
-            colors::error()
-        } else {
-            colors::text_primary()
-        };
+        let title_color = if alarm { hot } else { colors::text_primary() };
         lines.push(Line::from(Span::styled(
             title,
             Style::default()
@@ -362,18 +366,18 @@ impl LoadSnake {
             let chambers: [(&str, Color, f32, bool); 3] = [
                 (
                     "compile",
-                    colors::success(),
+                    cool,
                     self.compile_fill,
                     self.compile_fill > 0.0
                         || matches!(self.phase, Phase::Compiling | Phase::Loading | Phase::Ready),
                 ),
                 (
                     "load",
-                    colors::warning(),
+                    mid,
                     self.load_fill,
                     self.load_fill > 0.0 || matches!(self.phase, Phase::Loading | Phase::Ready),
                 ),
-                ("ready", gold, ready_fill, self.is_finishing()),
+                ("ready", hot, ready_fill, self.is_finishing()),
             ];
 
             let seg_w = self.width / 3;
@@ -442,11 +446,11 @@ impl LoadSnake {
                         let gy = (*py as usize).min(box_h - 1);
                         let seg = 1.0 - (j as f32 / n); // head brightest
                         let (glyph, color) = if j == 0 {
-                            ('◉', gold)
+                            ('◉', hot) // coil head — the hot-pink accent
                         } else {
                             (
                                 value_to_block_char(seg),
-                                hsv_to_rgb(hue, 0.8, 0.4 + 0.5 * seg),
+                                hsv_to_grayskull(hue, 0.8, 0.4 + 0.5 * seg),
                             )
                         };
                         canvas[gy][gx] = (glyph, color);
@@ -615,9 +619,11 @@ fn draw_chamber(
             let global_t = (chamber_index as f32 + local_frac) / 3.0;
             let brightness = (1.0 - 0.35 * ramp).clamp(0.4, 1.0);
             let cell_color = if alarm_fill {
-                colors::error() // a stalled box stays red, sweep and all
+                // a stalled box glows hot pink (greyskull's only hot color)
+                let (r, g, b) = colors::grayskull_rgb(255, 48, 96);
+                Color::Rgb(r, g, b)
             } else {
-                hsv_to_rgb(journey_hue(global_t), 0.8, brightness)
+                hsv_to_grayskull(journey_hue(global_t), 0.8, brightness)
             };
 
             // Head glyph rides the frontier of the active chamber; body cells

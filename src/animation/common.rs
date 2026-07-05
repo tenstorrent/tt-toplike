@@ -30,7 +30,10 @@ use ratatui::style::Color;
 /// let red = hsv_to_rgb(0.0, 1.0, 1.0);
 /// let cyan = hsv_to_rgb(180.0, 1.0, 1.0);
 /// ```
-pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
+/// Raw HSV→RGB bytes, WITHOUT the active-theme transform. Callers that want the
+/// themed color use [`hsv_to_rgb`]; callers that want a specific palette apply
+/// their own transform (e.g. [`hsv_to_grayskull`]).
+pub fn hsv_to_rgb_bytes(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
     let h = h % 360.0;
     let c = v * s;
     let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
@@ -50,11 +53,26 @@ pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
         (c, 0.0, x)
     };
 
-    colors::rgb(
+    (
         ((r + m) * 255.0) as u8,
         ((g + m) * 255.0) as u8,
         ((b + m) * 255.0) as u8,
     )
+}
+
+pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
+    let (r, g, b) = hsv_to_rgb_bytes(h, s, v);
+    colors::rgb(r, g, b)
+}
+
+/// HSV mapped ALWAYS through the greyskull palette (greys + a cyan tint for cool
+/// hues, a little purple, hot pink the only saturated color) — regardless of the
+/// active theme. Used by the loading snake so its journey reads calm and
+/// monochrome rather than a teal→amber→gold neon sweep.
+pub fn hsv_to_grayskull(h: f32, s: f32, v: f32) -> Color {
+    let (r, g, b) = hsv_to_rgb_bytes(h, s, v);
+    let (r, g, b) = colors::grayskull_rgb(r, g, b);
+    Color::Rgb(r, g, b)
 }
 
 /// Convert RGB color space to HSV

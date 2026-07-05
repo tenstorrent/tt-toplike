@@ -26,7 +26,7 @@
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::animation::{ChipReading, LoadSnake, ModelStarfield, ServingCreature};
 use crate::ui::tui::inference_panel::featured_loading;
@@ -101,7 +101,18 @@ pub struct Snake {
     /// Frame counter advanced only while Roaming, driving the hungry snake's
     /// horizontal drift across the cold starfield.
     roam_frame: u64,
+    /// When a featured loading service was last seen, and its last sample. Once
+    /// loading, we hold `Growing` for [`LOAD_GRACE`] after the last loading tick
+    /// so a single transient snapshot (a probe hiccup that briefly mis-derives
+    /// the phase) can't snap the view back to the cold model-catalog mid-load.
+    last_loading: Option<Instant>,
+    last_featured: Option<ServiceState>,
 }
+
+/// How long the loading snake sticks after the last featured-loading tick. The
+/// monitor cadence is ~5s, so this rides out a lost tick or two without lingering
+/// long once a load truly ends (or hands off to a Ready serving state).
+const LOAD_GRACE: Duration = Duration::from_secs(15);
 
 impl Default for Snake {
     fn default() -> Self {
@@ -120,6 +131,8 @@ impl Snake {
             behavior: Behavior::Roaming,
             served_since: None,
             roam_frame: 0,
+            last_loading: None,
+            last_featured: None,
         }
     }
 
@@ -152,21 +165,44 @@ impl Snake {
         // journey as a side effect, so calling it mid-load would reset the snake.
         if let Some(featured) = featured_loading(world.rows) {
             self.behavior = Behavior::Growing;
+            self.last_loading = Some(Instant::now());
+            self.last_featured = Some(featured.clone());
             self.load_snake.update(featured, world.cadence_secs);
         } else if self.load_snake.finish_if_ready(world.rows) {
             // Ready burst still playing — stay Growing so the gold celebration
             // renders before Feeding takes over.
             self.behavior = Behavior::Growing;
         } else if let Some(svc) = world.rows.iter().find(|s| s.phase == Phase::Ready) {
+            // A Ready service is a real handoff to serving — end any load grace.
+            self.last_loading = None;
             self.behavior = Behavior::Feeding;
             let uptime = self.uptime_for(&svc.key);
             self.serving_creature.update(svc, uptime, world.chips);
+        } else if self.within_load_grace() {
+            // The featured-loading service vanished from this snapshot but a load
+            // was in flight moments ago — almost certainly a transient probe
+            // hiccup (one missed tick), not a real end. Keep growing from the
+            // last sample instead of snapping back to the cold catalog; we only
+            // fall through to Roaming after LOAD_GRACE with no loading and no
+            // Ready service (a load that genuinely stopped).
+            self.behavior = Behavior::Growing;
+            if let Some(f) = self.last_featured.clone() {
+                self.load_snake.update(&f, world.cadence_secs);
+            }
         } else {
             self.behavior = Behavior::Roaming;
             self.served_since = None;
+            self.last_loading = None;
+            self.last_featured = None;
             self.roam_frame = self.roam_frame.wrapping_add(1);
             self.starfield.update(world.catalog, world.arch);
         }
+    }
+
+    /// True while we're still within [`LOAD_GRACE`] of the last featured-loading
+    /// tick — used to hold the loading snake across a transient snapshot gap.
+    fn within_load_grace(&self) -> bool {
+        self.last_loading.is_some_and(|t| t.elapsed() < LOAD_GRACE)
     }
 
     /// Elapsed seconds since `key` first became the fed Ready service. Resets
