@@ -37,6 +37,7 @@
 //! `--remote <HOST:PORT>` (`BackendType::Remote`), never by auto-detect or Tab.
 
 use crate::backend::json::{parse_tt_smi_snapshot, ParsedSnapshot};
+use crate::backend::remote_ext::{parse_extension, RemoteInference, RemoteProc, TtToplikeExt};
 use crate::backend::{BackendConfig, TelemetryBackend};
 use crate::error::{BackendError, BackendResult};
 use crate::models::{Device, SmbusTelemetry, Telemetry};
@@ -103,6 +104,15 @@ pub struct WsBackend {
     telemetry: HashMap<usize, Telemetry>,
     /// Current per-device SMBUS telemetry.
     smbus: HashMap<usize, SmbusTelemetry>,
+    /// Decoded `tt_toplike` extension (processes + inference) from the latest
+    /// *successfully applied* frame. `None` when that frame carried no
+    /// extension (a plain `tt-smi -s` frame, or a peer that isn't a
+    /// `tt-toplike --serve` publisher) or no frame has arrived yet. Re-derived
+    /// from scratch on every applied frame — see `apply_latest` — so this
+    /// always tracks the newest frame, never a stale union of past ones. Plain
+    /// field (not behind `Shared`'s mutex): only `apply_latest` (`&mut self`)
+    /// writes it, and the accessors below just clone out of it.
+    remote_ext: Option<TtToplikeExt>,
 
     /// Shared latest-frame buffer written by the reader task.
     shared: Arc<Shared>,
@@ -137,6 +147,7 @@ impl WsBackend {
             devices: Vec::new(),
             telemetry: HashMap::new(),
             smbus: HashMap::new(),
+            remote_ext: None,
             shared: Arc::new(Shared::default()),
             last_gen: 0,
             runtime: None,
@@ -203,6 +214,11 @@ impl WsBackend {
         match parse_tt_smi_snapshot(&frame) {
             Ok(parsed) => {
                 self.merge_parsed(parsed);
+                // Re-derive from this frame every time (not merged with the
+                // previous value): `None` here means *this* frame carried no
+                // extension, and that must be what the accessors report, even
+                // if an earlier frame had one.
+                self.remote_ext = parse_extension(&frame);
                 Ok(true)
             }
             Err(e) => {
@@ -210,6 +226,22 @@ impl WsBackend {
                 Err(e)
             }
         }
+    }
+
+    /// Decoded remote processes from the `tt_toplike` extension on the latest
+    /// applied frame. `None` if that frame carried no extension (a plain
+    /// `tt-smi -s` frame from a non-`tt-toplike` publisher) or none has
+    /// arrived yet. Cheap: a clone of already-decoded state, safe to call
+    /// from the render loop.
+    pub fn remote_processes(&self) -> Option<Vec<RemoteProc>> {
+        self.remote_ext.as_ref().map(|ext| ext.processes.clone())
+    }
+
+    /// Decoded remote inference workloads from the `tt_toplike` extension on
+    /// the latest applied frame. See [`Self::remote_processes`] for the
+    /// `None` conditions and cost.
+    pub fn remote_inference(&self) -> Option<Vec<RemoteInference>> {
+        self.remote_ext.as_ref().map(|ext| ext.inference.clone())
     }
 
     /// Spawn the background reader runtime + task. Idempotent-ish: only called
@@ -638,6 +670,61 @@ mod tests {
         // State stays empty; subsequent updates don't loop on the same bad frame.
         assert_eq!(b.devices().len(), 0);
         assert!(b.update().is_ok());
+    }
+
+    /// A frame carrying a `tt_toplike` extension decodes into
+    /// `remote_processes()` / `remote_inference()`; a plain tt-smi frame (no
+    /// extension) leaves both `None`.
+    #[test]
+    fn test_remote_extension_decoded_from_frame() {
+        use crate::backend::remote_ext::{
+            inject_extension, RemoteInference, RemoteProc, TtToplikeExt, TT_TOPLIKE_SCHEMA,
+        };
+
+        let ext = TtToplikeExt {
+            schema: TT_TOPLIKE_SCHEMA,
+            processes: vec![RemoteProc {
+                pid: 4242,
+                name: "tt-inference-server".to_string(),
+                cmd: "/usr/bin/tt-inference-server --port 8080".to_string(),
+                uses_tt: true,
+                cpu_pct: 87.5,
+                mem_bytes: 12_884_901_888,
+            }],
+            inference: vec![RemoteInference {
+                key: "vllm-llama3-70b".to_string(),
+                label: "Llama-3 70B (vLLM)".to_string(),
+                phase: "ready".to_string(),
+                progress: None,
+                serving: None,
+            }],
+        };
+        let frame_with_ext = inject_extension(FRAME, &ext);
+
+        let mut b = WsBackend::new_for_test();
+
+        // No frame applied yet: both accessors are None.
+        assert_eq!(b.remote_processes(), None);
+        assert_eq!(b.remote_inference(), None);
+
+        // (a) A frame WITH the extension decodes into both accessors.
+        b.test_inject(&frame_with_ext);
+        assert!(b.update().is_ok());
+
+        let processes = b.remote_processes().expect("processes should decode");
+        assert_eq!(processes.len(), 1);
+        assert_eq!(processes[0].name, "tt-inference-server");
+
+        let inference = b.remote_inference().expect("inference should decode");
+        assert_eq!(inference.len(), 1);
+        assert_eq!(inference[0].label, "Llama-3 70B (vLLM)");
+
+        // (b) A subsequent plain tt-smi frame (no extension) clears both back
+        // to None — the accessors reflect the *latest* applied frame only.
+        b.test_inject(FRAME);
+        assert!(b.update().is_ok());
+        assert_eq!(b.remote_processes(), None);
+        assert_eq!(b.remote_inference(), None);
     }
 
     /// End-to-end: an in-process tokio-tungstenite server pushes a frame; a real
