@@ -87,9 +87,13 @@ fn cpu_package_temp_c(socket: usize) -> Option<f32> {
     let entries = std::fs::read_dir(hwmon_root).ok()?;
     for entry in entries.flatten() {
         let base = entry.path();
-        // Only coretemp and k10temp expose package temperatures
+        // Only coretemp and k10temp expose package temperatures. Skip (don't
+        // abort the whole scan on) an hwmon node whose `name` is missing or
+        // unreadable — a later node may still be the coretemp/k10temp we want.
         let name_path = base.join("name");
-        let name = std::fs::read_to_string(&name_path).ok()?;
+        let Ok(name) = std::fs::read_to_string(&name_path) else {
+            continue;
+        };
         let name = name.trim();
         if name != "coretemp" && name != "k10temp" && name != "zenpower" {
             continue;

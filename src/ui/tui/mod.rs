@@ -4498,18 +4498,20 @@ fn render_device_panels(
                 .unwrap_or("—");
             let fw_short = fw_ver.trim_start_matches("fw_pack-");
             if compact {
-                // Compact: "F " + up to 16 chars (content_w=18).
-                let fw_display = &fw_short[..fw_short.len().min(16)];
+                // Compact: "F " + up to 16 chars (content_w=18). Truncate by
+                // chars, not bytes — a byte slice would panic mid-UTF-8 (fw
+                // strings are ASCII today, but this matches the rest of the UI).
+                let fw_display: String = fw_short.chars().take(16).collect();
                 stat_lines.push(Line::from(vec![
                     Span::styled("F ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(fw_display.to_string(), Style::default().fg(Color::White)),
+                    Span::styled(fw_display, Style::default().fg(Color::White)),
                 ]));
             } else {
                 // content_w is 30; "FW" label takes 8 chars, leaving 22 for the version string.
-                let fw_display = &fw_short[..fw_short.len().min(22)];
+                let fw_display: String = fw_short.chars().take(22).collect();
                 stat_lines.push(Line::from(vec![
                     Span::styled(format!("{:<8}", "FW"), Style::default().fg(Color::DarkGray)),
-                    Span::styled(fw_display.to_string(), Style::default().fg(Color::White)),
+                    Span::styled(fw_display, Style::default().fg(Color::White)),
                 ]));
             }
         }

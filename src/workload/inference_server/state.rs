@@ -13,7 +13,10 @@ pub enum Phase {
     Alarm,
 }
 
-/// Per-model baselines for the optional % estimate. v1 hardcodes a few; unknown → all None.
+/// Per-model baselines for the optional % estimate (compile kernels / weight
+/// footprint). No model→profile table is wired yet, so the monitor always
+/// passes `Default` (all `None`) and the `%` estimate stays dormant — the
+/// mechanism is here for when per-model baselines are measured and populated.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ModelProfile {
     pub o_baseline: Option<usize>,

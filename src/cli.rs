@@ -95,6 +95,10 @@ pub struct Cli {
     ///
     /// Accepts `HOST:PORT` (e.g. `192.168.1.42:8765`) or a bare `HOST`
     /// (defaults to port 8000, the agentd control port). IPv6: `[::1]:8765`.
+    ///
+    /// Transport is plaintext `ws://` with no authentication — frames are
+    /// trusted verbatim. Use only on a network you trust (a lab LAN), not across
+    /// the public internet.
     #[arg(
         long,
         value_name = "HOST:PORT",

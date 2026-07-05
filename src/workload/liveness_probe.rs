@@ -285,8 +285,34 @@ fn http_get_localhost(port: u16, path: &str, timeout: Duration) -> std::io::Resu
         "GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\nAccept: */*\r\n\r\n"
     );
     stream.write_all(req.as_bytes())?;
+
+    // Bound both total time and total bytes. The per-read timeout above caps a
+    // single `read`, but a server trickling bytes just under it could keep a
+    // plain `read_to_end` looping forever (slow-loris); and `/metrics` is
+    // semi-trusted, so an unbounded read is an allocation risk. Health/metrics
+    // bodies are tiny, so a 1 MiB / ~2s ceiling never truncates a real response.
+    const MAX_BODY: usize = 1 << 20;
+    let deadline = std::time::Instant::now() + timeout.saturating_mul(8);
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf)?;
+    let mut chunk = [0u8; 8192];
+    loop {
+        if buf.len() >= MAX_BODY || std::time::Instant::now() >= deadline {
+            break;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => break, // EOF (server honored Connection: close)
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            // A read timeout mid-stream (WouldBlock/TimedOut) → return what we
+            // have rather than spin; any other error propagates.
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                break
+            }
+            Err(e) => return Err(e),
+        }
+    }
     Ok(buf)
 }
 

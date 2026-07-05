@@ -227,12 +227,23 @@ fn main() {
             // without another mDNS browse.
             cli.remote = Some(resolved.clone());
             log::info!("Initializing WsBackend (remote QuietBox @ {})", resolved);
-            match tt_toplike::backend::ws::WsBackend::from_host_port(&resolved, config) {
-                Ok(mut backend) => run_with_backend(&mut backend, &cli),
-                Err(e) => {
-                    eprintln!("Error: invalid --remote target '{}': {}", resolved, e);
-                    std::process::exit(1);
+            // Unlike the local backends, a WsBackend is expensive to duplicate:
+            // each one owns a tokio runtime and a live WebSocket subscription to
+            // the box. `run_tui` builds its own via the factory, so for the TUI
+            // path we go straight there (one connection). Only `--print`, which
+            // needs a concrete backend to dump and then exits, builds a
+            // standalone one here.
+            if cli.print {
+                match tt_toplike::backend::ws::WsBackend::from_host_port(&resolved, config) {
+                    Ok(mut backend) => run_with_backend(&mut backend, &cli),
+                    Err(e) => {
+                        eprintln!("Error: invalid --remote target '{}': {}", resolved, e);
+                        std::process::exit(1);
+                    }
                 }
+            } else if let Err(e) = tt_toplike::ui::run_tui(&cli) {
+                eprintln!("TUI error: {}", e);
+                std::process::exit(1);
             }
         }
         #[cfg(not(feature = "remote"))]

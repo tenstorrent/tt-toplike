@@ -197,14 +197,31 @@ impl ContainerProbe for DockerProbe {
     }
 }
 
-/// Run `docker <args>`, returning stdout as a lossy UTF-8 string. Any spawn
-/// or exec failure (docker not installed, container gone) yields `""`.
+/// Hard cap on any single `docker` invocation. The monitor probes on one
+/// background thread, so without this a wedged docker daemon (or a `docker
+/// exec` into a hung container) would block *all* services' probing
+/// indefinitely. Generous — a healthy `docker stats`/`exec`/`inspect` returns
+/// well under a second.
+const DOCKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Run `docker <args>`, returning stdout as a lossy UTF-8 string. Any spawn or
+/// exec failure (docker not installed, container gone) yields `""`. Bounded by
+/// [`DOCKER_TIMEOUT`]: the call runs on a helper thread and we wait at most
+/// that long, so a hung docker can't stall the monitor tick (on timeout we
+/// return `""`; the orphaned thread finishes and exits when docker eventually
+/// does).
 fn docker(args: &[&str]) -> String {
-    Command::new("docker")
-        .args(args)
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default()
+    let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = Command::new("docker")
+            .args(&owned)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        let _ = tx.send(out);
+    });
+    rx.recv_timeout(DOCKER_TIMEOUT).unwrap_or_default()
 }
 
 #[cfg(test)]

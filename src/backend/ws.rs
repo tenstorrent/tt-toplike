@@ -10,6 +10,14 @@
 //! already parses — so this backend reuses the exact same parser
 //! ([`parse_tt_smi_snapshot`]). One schema, zero mapping.
 //!
+//! ## Security
+//!
+//! The transport is plaintext `ws://` with no authentication, and each frame is
+//! trusted and parsed verbatim. This is a **trusted-LAN-only** feature — do not
+//! point it across an untrusted network. As defense-in-depth against a
+//! malformed/hostile frame, incoming messages are size-capped (see the reader)
+//! and the device list is bounded ([`MAX_REMOTE_DEVICES`]).
+//!
 //! ## Architecture
 //!
 //! ```text
@@ -422,10 +430,21 @@ async fn reader_loop(
     verbose: bool,
 ) {
     use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
     use tokio_tungstenite::tungstenite::Message;
 
+    // Cap the incoming message/frame size well below tungstenite's 64 MiB
+    // default: a `tt-smi -s` frame is a few KB even for a Galaxy, and the peer
+    // is unauthenticated (trusted-LAN only), so a smaller ceiling bounds a
+    // hostile/oversized frame's transient allocation before it's ever parsed.
+    let ws_config = WebSocketConfig {
+        max_message_size: Some(4 << 20), // 4 MiB
+        max_frame_size: Some(4 << 20),
+        ..Default::default()
+    };
+
     while !stop.load(Ordering::Relaxed) {
-        match tokio_tungstenite::connect_async(&url).await {
+        match tokio_tungstenite::connect_async_with_config(&url, Some(ws_config), false).await {
             Ok((ws, _resp)) => {
                 shared.connected.store(true, Ordering::Relaxed);
                 if verbose {
