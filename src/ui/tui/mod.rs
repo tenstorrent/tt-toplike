@@ -270,6 +270,11 @@ fn run_app(
     #[cfg(target_os = "linux")]
     let mut prev_inference_snapshot: Vec<crate::workload::inference_server::ServiceState> =
         inference_monitor.snapshot();
+    // Multi-model roster lines for the `[i]` view, recomputed each monitor tick
+    // (in the InferenceMonitor update branch). Held here so the render pass —
+    // which must reserve the same number of rows the snake was sized against —
+    // reads the exact same set. Empty for 0/1 detected service.
+    let mut inference_roster: Vec<Line<'static>> = Vec::new();
     // Background model-catalog refresher: curl-refreshes the compatibility
     // catalog off the render path; feeds the cold-trail starfield screensaver.
     let catalog_refresher = crate::workload::CatalogRefresher::spawn();
@@ -615,6 +620,12 @@ fn run_app(
                             }
                         })
                         .collect();
+                    // Multi-model roster (empty for <2 services). The snake gets
+                    // the remaining height so `render_snake_view` can reserve the
+                    // same rows for the roster and the fixed-dim loading/roaming
+                    // renderers line up.
+                    inference_roster = inference_roster_lines(&rows, size.width as usize);
+                    let roster_h = inference_roster.len();
                     snake.update(&crate::animation::SnakeWorld {
                         rows: &rows,
                         catalog: &catalog,
@@ -622,7 +633,7 @@ fn run_app(
                         chips: &chips,
                         cadence_secs: crate::workload::inference_server::CADENCE_SECS,
                         width: size.width as usize,
-                        height: size.height as usize,
+                        height: (size.height as usize).saturating_sub(1 + roster_h),
                     });
                 }
                 DisplayMode::Defrag => {
@@ -729,7 +740,7 @@ fn run_app(
                             render_grid_mode(f, backend);
                         }
                         DisplayMode::InferenceMonitor => {
-                            render_snake_view(f, &snake);
+                            render_snake_view(f, &snake, &inference_roster);
                         }
                         DisplayMode::Starfield => {
                             if let Some(ref sf) = starfield {
@@ -3454,25 +3465,144 @@ fn render_insights(
 }
 
 /// Full-screen render of the unified serving snake (see `crate::animation::Snake`).
-fn render_snake_view(f: &mut Frame, snake: &crate::animation::Snake) {
+fn render_snake_view(f: &mut Frame, snake: &crate::animation::Snake, roster: &[Line<'static>]) {
     let area = f.area();
     f.render_widget(
         Block::default().style(Style::default().bg(colors::rgb(0, 0, 0))),
         area,
     );
-    // Reserve the bottom row for the global status bar (drawn on top afterwards);
-    // otherwise the creature's own footer (the serving stats line) lands on the
-    // absolute bottom row and gets painted over by that bar.
+    // Layout, top to bottom: the multi-model roster (0 rows when <2 services),
+    // then the featured snake, then the reserved bottom row for the global
+    // status bar (drawn on top afterwards — otherwise the creature's footer
+    // lands on the absolute bottom row and is painted over). The snake height
+    // here must match what `SnakeWorld` was built with (same `1 + roster_h`
+    // subtraction) so the fixed-dim loading/roaming renderers line up.
+    let roster_h = (roster.len() as u16).min(area.height);
+    if roster_h > 0 {
+        f.render_widget(
+            Paragraph::new(roster.to_vec()),
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: roster_h,
+            },
+        );
+    }
     let body = Rect {
         x: area.x,
-        y: area.y,
+        y: area.y + roster_h,
         width: area.width,
-        height: area.height.saturating_sub(1),
+        height: area.height.saturating_sub(1 + roster_h),
     };
     f.render_widget(
         Paragraph::new(snake.render(body.width as usize, body.height as usize)),
         body,
     );
+}
+
+/// Max inference services listed in the `[i]` roster (see below).
+const INFERENCE_ROSTER_MAX: usize = 8;
+
+/// Compact per-service roster for the `[i]` view, shown above the featured snake
+/// when 2+ inference services are detected — so a multi-model box surfaces ALL
+/// of them (the snake still *features* one; loading wins, else the first Ready).
+/// Returns empty for 0/1 service (the single snake already says it) so the common
+/// single-model view is uncluttered. One header line + up to
+/// [`INFERENCE_ROSTER_MAX`] service lines; the featured row is marked `▸`.
+fn inference_roster_lines(
+    rows: &[crate::workload::inference_server::ServiceState],
+    width: usize,
+) -> Vec<Line<'static>> {
+    use crate::workload::inference_server::Phase;
+    if rows.len() < 2 || width < 12 {
+        return Vec::new();
+    }
+    // Which service the snake is showing (mirror choose_behavior's priority).
+    let featured_key = inference_panel::featured_loading(rows)
+        .map(|s| s.key.clone())
+        .or_else(|| {
+            rows.iter()
+                .find(|s| s.phase == Phase::Ready)
+                .map(|s| s.key.clone())
+        });
+
+    let shown = rows.len().min(INFERENCE_ROSTER_MAX);
+    let hidden = rows.len() - shown;
+    let header = if hidden > 0 {
+        format!("inference services ({}, +{hidden} more)", rows.len())
+    } else {
+        format!("inference services ({})", rows.len())
+    };
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(shown + 1);
+    lines.push(Line::from(Span::styled(
+        header,
+        Style::default()
+            .fg(colors::text_secondary())
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    for s in rows.iter().take(INFERENCE_ROSTER_MAX) {
+        let featured = featured_key.as_ref() == Some(&s.key);
+        let (tag, tag_color) = match s.phase {
+            Phase::Down => ("down   ", colors::text_secondary()),
+            Phase::Compiling => ("compile", colors::info()),
+            Phase::Loading => ("loading", colors::info()),
+            Phase::Ready => ("serving", colors::success()),
+            Phase::Alarm => ("stalled", colors::error()),
+        };
+        // Per-service stat: live rate when serving, else a load %, else nothing.
+        let stat = match &s.serving {
+            Some(sv) => format!(
+                "{:.0} tok/s · {} run",
+                sv.generation_tps, sv.requests_running
+            ),
+            None => match s.progress {
+                Some(p) => format!("{:.0}%", (p * 100.0).clamp(0.0, 100.0)),
+                None => String::new(),
+            },
+        };
+        // Truncate the label (char-safe) so marker+tag+label+stat fit `width`.
+        let fixed = 2
+            + 7
+            + 2
+            + if stat.is_empty() {
+                0
+            } else {
+                2 + stat.chars().count()
+            };
+        let label_w = width.saturating_sub(fixed).max(4);
+        let label: String = s.label.chars().take(label_w).collect();
+
+        let mut spans = vec![
+            Span::styled(
+                if featured { "▸ " } else { "  " }.to_string(),
+                Style::default().fg(colors::primary()),
+            ),
+            Span::styled(
+                tag.to_string(),
+                Style::default().fg(tag_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                label,
+                Style::default().fg(if featured {
+                    colors::text_primary()
+                } else {
+                    colors::text_secondary()
+                }),
+            ),
+        ];
+        if !stat.is_empty() {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                stat,
+                Style::default().fg(colors::text_secondary()),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
 }
 
 /// Render a btop-style horizontal bar: `[████████░░░░░░░░]  42%`.
@@ -5005,6 +5135,79 @@ mod tests {
 /// Unlike the Linux-gated `tests` module above, these run on every platform —
 /// they guard the behaviour that matters off-Linux (e.g. `--host` on macOS).
 #[cfg(test)]
+mod inference_roster_tests {
+    use super::inference_roster_lines;
+    use crate::workload::inference_server::{Phase, Readiness, ServiceState};
+
+    fn svc(key: &str, label: &str, phase: Phase) -> ServiceState {
+        ServiceState {
+            key: key.into(),
+            label: label.into(),
+            phase,
+            cpu_pct: 0.0,
+            rss_bytes: 0,
+            rss_delta: 0,
+            kernel_count: 0,
+            kernel_delta: 0,
+            safetensors_fds: 0,
+            readiness: Readiness::Down,
+            top_proc: None,
+            last_log: None,
+            progress: None,
+            flat_ticks: 0,
+            serving: None,
+        }
+    }
+
+    fn text(line: &ratatui::text::Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn roster_empty_for_zero_or_one_service() {
+        assert!(inference_roster_lines(&[], 80).is_empty());
+        assert!(inference_roster_lines(&[svc("a", "A", Phase::Ready)], 80).is_empty());
+    }
+
+    #[test]
+    fn roster_lists_all_with_header_and_marks_the_featured_one() {
+        let rows = vec![
+            svc("a", "Model-A", Phase::Ready),   // serving
+            svc("b", "Model-B", Phase::Loading), // loading — featured (loading wins)
+            svc("c", "Model-C", Phase::Ready),
+            svc("d", "Model-D", Phase::Down),
+        ];
+        let lines = inference_roster_lines(&rows, 80);
+        assert_eq!(lines.len(), 5, "header + 4 service rows");
+        assert!(
+            text(&lines[0]).contains("inference services (4)"),
+            "header: {}",
+            text(&lines[0])
+        );
+        let featured: Vec<usize> = (1..5).filter(|&i| text(&lines[i]).contains('▸')).collect();
+        assert_eq!(featured.len(), 1, "exactly one featured row");
+        assert!(
+            text(&lines[featured[0]]).contains("Model-B"),
+            "the loading model is featured"
+        );
+    }
+
+    #[test]
+    fn roster_caps_and_notes_hidden_count() {
+        let rows: Vec<ServiceState> = (0..12)
+            .map(|i| svc(&format!("k{i}"), &format!("M{i}"), Phase::Ready))
+            .collect();
+        let lines = inference_roster_lines(&rows, 80);
+        assert_eq!(lines.len(), 1 + 8, "header + capped 8 rows");
+        assert!(
+            text(&lines[0]).contains("+4 more"),
+            "header notes the hidden services: {}",
+            text(&lines[0])
+        );
+    }
+}
+
+#[cfg(test)]
 mod host_default_screen_tests {
     use super::render_grid_mode;
     use crate::backend::host::HostBackend;
@@ -5179,7 +5382,7 @@ pub fn run_render_bench(
                 width: width as usize,
                 height: height as usize,
             });
-            term.draw(|f| render_snake_view(f, &snake)).unwrap();
+            term.draw(|f| render_snake_view(f, &snake, &[])).unwrap();
         }));
     }
 
