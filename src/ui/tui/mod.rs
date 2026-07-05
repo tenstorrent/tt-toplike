@@ -625,6 +625,24 @@ fn run_app(
                     // same rows for the roster and the fixed-dim loading/roaming
                     // renderers line up.
                     inference_roster = inference_roster_lines(&rows, size.width as usize);
+                    // Under `--remote` (until real remote data lands — see
+                    // `remote_local_fallback_note`) this view is still probing
+                    // LOCAL docker, not the remote box's serving stack. Prepend
+                    // a dim one-line banner so that's obvious, computed here
+                    // (not in `render_snake_view`) so the extra row is counted
+                    // in `roster_h` below and the snake's reserved height stays
+                    // in sync with what actually gets drawn.
+                    if let Some(note) = remote_local_fallback_note(backend_type, false) {
+                        inference_roster.insert(
+                            0,
+                            Line::from(Span::styled(
+                                note,
+                                Style::default()
+                                    .fg(colors::text_secondary())
+                                    .add_modifier(Modifier::DIM),
+                            )),
+                        );
+                    }
                     let roster_h = inference_roster.len();
                     snake.update(&crate::animation::SnakeWorld {
                         rows: &rows,
@@ -706,6 +724,10 @@ fn run_app(
             let tt_filtered = crate::cli::backend_shows_only_tt(backend_type);
             #[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
             let tt_filtered = false;
+            // Honest-labeling note for the process panel: under `--remote`
+            // (until real remote data lands) the list below is still LOCAL
+            // processes, not the remote box's — see `remote_local_fallback_note`.
+            let remote_note = remote_local_fallback_note(backend_type, false);
             let draw_start = Instant::now();
             terminal
                 .draw(|f| {
@@ -732,6 +754,7 @@ fn run_app(
                                 host_mem_used,
                                 host_mem_total,
                                 tt_filtered,
+                                remote_note,
                                 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                 &serving_metrics,
                             );
@@ -3396,6 +3419,9 @@ fn render_insights(
     // `backend_shows_only_tt`) — picks the process panel's empty-state
     // message. Always `false` off that path (nothing was filtered out).
     tt_filtered: bool,
+    // See `remote_local_fallback_note`: `Some` under `--remote` while the
+    // panel is still showing LOCAL processes rather than the remote box's.
+    remote_note: Option<&'static str>,
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
 ) {
@@ -3455,6 +3481,7 @@ fn render_insights(
         host_mem_used,
         host_mem_total,
         tt_filtered,
+        remote_note,
         #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
         serving_metrics,
     );
@@ -3499,6 +3526,27 @@ fn render_snake_view(f: &mut Frame, snake: &crate::animation::Snake, roster: &[L
         Paragraph::new(snake.render(body.width as usize, body.height as usize)),
         body,
     );
+}
+
+/// Under `--remote` the chips/telemetry on screen belong to the remote box,
+/// but (until the real remote-data plumbing lands) the process panel and the
+/// `[i]` inference view still read/probe *this* machine — so without a label
+/// it looks like we're fully watching the remote box when we aren't. Returns
+/// the honesty note to append to those panels' headers, or `None` when it
+/// isn't needed (any backend other than Remote, or once real remote data
+/// exists to display instead).
+///
+/// `has_remote_data` is always `false` for now — a later task wires it to
+/// `WsBackend::remote_*().is_some()` once the remote stream carries process/
+/// inference frames, at which point this note naturally stops firing.
+fn remote_local_fallback_note(
+    backend_type: crate::cli::BackendType,
+    has_remote_data: bool,
+) -> Option<&'static str> {
+    match (backend_type, has_remote_data) {
+        (crate::cli::BackendType::Remote, false) => Some("LOCAL — remote not streamed"),
+        _ => None,
+    }
 }
 
 /// Max inference services listed in the `[i]` roster (see below).
@@ -3664,6 +3712,9 @@ fn render_process_panel(
     host_mem_used: u64,
     host_mem_total: u64,
     tt_filtered: bool,
+    // See `remote_local_fallback_note`: `Some` under `--remote` while this
+    // panel is still showing LOCAL processes rather than the remote box's.
+    remote_note: Option<&'static str>,
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
 ) {
@@ -3717,11 +3768,23 @@ fn render_process_panel(
         }
     }
 
-    // Section label
-    lines.push(Line::from(vec![
+    // Section label. Under `--remote` (until real remote data lands — see
+    // `remote_local_fallback_note`) this list is still LOCAL processes, not
+    // the remote box's, so the label says so — otherwise it reads as if the
+    // remote box's processes were on screen.
+    let mut header_spans = vec![
         Span::raw("  "),
         Span::styled("Processes", Style::default().fg(Color::Gray)),
-    ]));
+    ];
+    if let Some(note) = remote_note {
+        header_spans.push(Span::styled(
+            format!(" · {note}"),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(ratatui::style::Modifier::DIM),
+        ));
+    }
+    lines.push(Line::from(header_spans));
 
     if rows.is_empty() {
         let empty_msg = if tt_filtered {
@@ -5207,6 +5270,24 @@ mod inference_roster_tests {
     }
 }
 
+/// Tests for the `--remote` "LOCAL, not streamed" honesty note (see
+/// `remote_local_fallback_note`) — cross-platform since the helper is pure.
+#[cfg(test)]
+mod remote_fallback_note_tests {
+    use super::remote_local_fallback_note;
+    use crate::cli::BackendType;
+
+    #[test]
+    fn remote_fallback_note_only_for_remote_without_data() {
+        assert_eq!(
+            remote_local_fallback_note(BackendType::Remote, false),
+            Some("LOCAL — remote not streamed")
+        );
+        assert_eq!(remote_local_fallback_note(BackendType::Remote, true), None); // remote data present
+        assert_eq!(remote_local_fallback_note(BackendType::Json, false), None); // local backend, no note
+    }
+}
+
 #[cfg(test)]
 mod host_default_screen_tests {
     use super::render_grid_mode;
@@ -5342,6 +5423,7 @@ pub fn run_render_bench(
                     0,
                     0,
                     false,
+                    None,
                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                     &std::collections::HashMap::new(),
                 );
