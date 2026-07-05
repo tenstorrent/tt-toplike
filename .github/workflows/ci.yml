@@ -144,8 +144,14 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
+      # Ignored advisories are quick-xml vulnerabilities reachable ONLY through the
+      # optional egui GUI's Linux accessibility chain (accesskit -> atspi -> zbus_xml
+      # -> quick-xml). They are absent from the shipped tt-toplike-tui binary (verify:
+      # `cargo tree --no-default-features --features tui,json-backend,remote` lists no
+      # quick-xml), and the parent crates pin quick-xml to versions with no patched
+      # release reachable in-range. Revisit when accesskit/atspi bump quick-xml.
       - name: Audit dependencies
-        run: cargo audit
+        run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
 
   # ── Version consistency ──────────────────────────────────────────────────────
   # Cargo.toml is the source of truth for the version; the docs and the Debian

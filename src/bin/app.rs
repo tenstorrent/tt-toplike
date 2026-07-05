@@ -194,8 +194,7 @@ fn ansi256_color(idx: u8) -> Color32 {
 
 fn apply_sgr(pen: &mut Pen, params: &Params) {
     let mut iter = params.iter();
-    loop {
-        let Some(p) = iter.next() else { break };
+    while let Some(p) = iter.next() {
         let code = p[0];
         match code {
             0 => *pen = Pen::default(),
@@ -793,9 +792,11 @@ impl eframe::App for TermApp {
                             // Character
                             if cell.ch != ' ' {
                                 let mut job = egui::text::LayoutJob::default();
-                                let mut fmt = egui::text::TextFormat::default();
-                                fmt.font_id = font_id.clone();
-                                fmt.color = cell.fg;
+                                let mut fmt = egui::text::TextFormat {
+                                    font_id: font_id.clone(),
+                                    color: cell.fg,
+                                    ..Default::default()
+                                };
                                 if cell.bold {
                                     fmt.color = brighten(cell.fg);
                                 }

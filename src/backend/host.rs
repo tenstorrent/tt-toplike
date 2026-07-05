@@ -601,7 +601,16 @@ mod tests {
         assert!(backend.telemetry(0).is_some());
 
         let t = backend.telemetry(0).unwrap();
+        // sysinfo reports per-core CPU frequency on Linux, but returns 0 on
+        // macOS (notably Apple Silicon) — so only require a non-zero aiclk where
+        // the OS actually exposes it. Elsewhere just require the field is present.
+        #[cfg(target_os = "linux")]
         assert!(t.aiclk.unwrap_or(0) > 0, "CPU frequency should be non-zero");
+        #[cfg(not(target_os = "linux"))]
+        assert!(
+            t.aiclk.is_some(),
+            "aiclk should be populated (may be 0 where CPU frequency is unavailable)"
+        );
         assert!(
             t.power.is_some(),
             "power (RAPL or proxy) should be available"

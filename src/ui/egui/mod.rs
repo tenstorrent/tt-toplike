@@ -42,7 +42,7 @@ struct Particle {
 impl Particle {
     fn new(width: f32, height: f32) -> Self {
         use std::f32::consts::PI;
-        let angle = (rand::random::<f32>() * 2.0 * PI);
+        let angle = rand::random::<f32>() * 2.0 * PI;
         Self {
             x: rand::random::<f32>() * width,
             y: rand::random::<f32>() * height,
@@ -117,7 +117,6 @@ struct CyberpunkTheme {
     neon_green: egui::Color32,
     dark_bg: egui::Color32,
     darker_bg: egui::Color32,
-    glow: egui::Color32,
 }
 
 impl CyberpunkTheme {
@@ -129,7 +128,6 @@ impl CyberpunkTheme {
             neon_green: egui::Color32::from_rgb(0, 255, 100),
             dark_bg: egui::Color32::from_rgb(10, 10, 26),
             darker_bg: egui::Color32::from_rgb(5, 5, 15),
-            glow: egui::Color32::from_rgba_premultiplied(100, 200, 255, 80),
         }
     }
 }
@@ -184,7 +182,7 @@ impl DeviceHistory {
         }
     }
 
-    fn power_points(&self) -> PlotPoints {
+    fn power_points(&self) -> PlotPoints<'_> {
         self.timestamps
             .iter()
             .zip(self.power.iter())
@@ -192,7 +190,7 @@ impl DeviceHistory {
             .collect()
     }
 
-    fn temp_points(&self) -> PlotPoints {
+    fn temp_points(&self) -> PlotPoints<'_> {
         self.timestamps
             .iter()
             .zip(self.temperature.iter())
@@ -200,7 +198,7 @@ impl DeviceHistory {
             .collect()
     }
 
-    fn current_points(&self) -> PlotPoints {
+    fn current_points(&self) -> PlotPoints<'_> {
         self.timestamps
             .iter()
             .zip(self.current.iter())
@@ -208,7 +206,7 @@ impl DeviceHistory {
             .collect()
     }
 
-    fn voltage_points(&self) -> PlotPoints {
+    fn voltage_points(&self) -> PlotPoints<'_> {
         self.timestamps
             .iter()
             .zip(self.voltage.iter())
@@ -344,7 +342,7 @@ impl eframe::App for DashboardApp {
         self.frame += 1;
 
         // Update particles
-        let screen_rect = ctx.screen_rect();
+        let screen_rect = ctx.content_rect();
         for particle in &mut self.particles {
             particle.update(screen_rect.width(), screen_rect.height(), dt * 60.0);
             // 60 FPS reference
@@ -404,7 +402,7 @@ impl eframe::App for DashboardApp {
         // Top panel: Title and status with rainbow gradient
         egui::TopBottomPanel::top("top_panel")
             .frame(
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(self.theme.darker_bg)
                     .stroke(egui::Stroke::new(3.0, self.theme.neon_cyan))
                     .inner_margin(10.0),
@@ -467,7 +465,7 @@ impl eframe::App for DashboardApp {
             egui::TopBottomPanel::bottom("process_panel")
                 .min_height(150.0)
                 .frame(
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(self.theme.darker_bg)
                         .stroke(egui::Stroke::new(2.0, self.theme.neon_yellow))
                         .inner_margin(10.0),
@@ -582,7 +580,7 @@ impl eframe::App for DashboardApp {
         // Central panel: Graphs with rainbow styling
         egui::CentralPanel::default()
             .frame(
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(self.theme.dark_bg)
                     .inner_margin(10.0),
             )
@@ -611,7 +609,7 @@ impl eframe::App for DashboardApp {
                         ui.set_height(plot_height);
 
                         // Frame for plot with neon border
-                        egui::Frame::none()
+                        egui::Frame::NONE
                             .stroke(egui::Stroke::new(2.0, self.theme.neon_cyan))
                             .inner_margin(5.0)
                             .show(ui, |ui| {
@@ -644,7 +642,7 @@ impl eframe::App for DashboardApp {
                         ui.set_width(plot_width);
                         ui.set_height(plot_height);
 
-                        egui::Frame::none()
+                        egui::Frame::NONE
                             .stroke(egui::Stroke::new(2.0, self.theme.neon_magenta))
                             .inner_margin(5.0)
                             .show(ui, |ui| {
@@ -685,7 +683,7 @@ impl eframe::App for DashboardApp {
                         ui.set_width(plot_width);
                         ui.set_height(plot_height);
 
-                        egui::Frame::none()
+                        egui::Frame::NONE
                             .stroke(egui::Stroke::new(2.0, self.theme.neon_yellow))
                             .inner_margin(5.0)
                             .show(ui, |ui| {
@@ -719,7 +717,7 @@ impl eframe::App for DashboardApp {
                         ui.set_width(plot_width);
                         ui.set_height(plot_height);
 
-                        egui::Frame::none()
+                        egui::Frame::NONE
                             .stroke(egui::Stroke::new(2.0, self.theme.neon_green))
                             .inner_margin(5.0)
                             .show(ui, |ui| {
