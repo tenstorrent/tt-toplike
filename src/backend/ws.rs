@@ -37,6 +37,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Upper bound on devices tracked from a remote peer. The WS stream is
+/// unauthenticated plaintext (trusted-LAN only); this caps persistent state so a
+/// malformed/hostile frame can't OOM us. Far above any real topology (a
+/// Blackhole Galaxy is 32 chips).
+const MAX_REMOTE_DEVICES: usize = 256;
+
 /// State shared between the synchronous backend and the async WS reader task.
 ///
 /// The reader writes the newest frame + bumps `generation`; `update()` reads it.
@@ -144,15 +150,28 @@ impl WsBackend {
     /// updates); telemetry and SMBUS maps replaced per-index. Identical semantics
     /// to `JSONBackend`, so every visualization consumes this backend unchanged.
     fn merge_parsed(&mut self, parsed: ParsedSnapshot) {
+        // The WS stream is unauthenticated (trusted-LAN only), so a malformed or
+        // hostile frame must not grow our state without bound. Real hardware tops
+        // out far below MAX_REMOTE_DEVICES (a Blackhole Galaxy is 32 chips), so
+        // this cap never bites a legitimate box while defusing an OOM vector.
         for device in parsed.devices {
+            if self.devices.len() >= MAX_REMOTE_DEVICES {
+                break;
+            }
             if !self.devices.iter().any(|d| d.index == device.index) {
                 self.devices.push(device);
             }
         }
         for (idx, telem) in parsed.telemetry {
+            if self.telemetry.len() >= MAX_REMOTE_DEVICES && !self.telemetry.contains_key(&idx) {
+                continue;
+            }
             self.telemetry.insert(idx, telem);
         }
         for (idx, smbus) in parsed.smbus {
+            if self.smbus.len() >= MAX_REMOTE_DEVICES && !self.smbus.contains_key(&idx) {
+                continue;
+            }
             self.smbus.insert(idx, smbus);
         }
     }

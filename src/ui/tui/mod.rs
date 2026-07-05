@@ -1071,6 +1071,10 @@ fn run_app(
                                         if let DisplayMode::Defrag = display_mode {
                                             defrag = None;
                                         }
+                                        // Drop any fleet drill-down: the new backend
+                                        // may expose a different (smaller) device count.
+                                        fleet_zoom_start = None;
+                                        fleet_cursor = 0;
                                     }
                                     Err(e) => {
                                         log::error!("Failed to switch backend: {}", e);
@@ -1267,6 +1271,10 @@ fn run_app(
                             memory_flow = None;
                             arcade = None;
                             defrag = None;
+                            // Drop any fleet drill-down: the remote box likely has a
+                            // different (smaller) device count than we were zoomed into.
+                            fleet_zoom_start = None;
+                            fleet_cursor = 0;
                             cmd_message = Some((format!("connected to {}", target), false));
                         }
                         Err(e) => {
@@ -3385,6 +3393,10 @@ fn render_insights(
 
     // When zoomed in, the panel height is based on the slice, not the full list.
     let panel_devices: &[crate::models::Device] = if let Some(start) = fleet_zoom_start {
+        // Clamp start: the device count can shrink beneath a stale zoom offset
+        // (backend swap via `b`/`/remote`, or a remote fleet losing a device),
+        // which would otherwise make `start > end` and panic on the slice.
+        let start = start.min(devices.len());
         let end = (start + FLEET_PAGE_SIZE).min(devices.len());
         &devices[start..end]
     } else {
@@ -4045,6 +4057,10 @@ fn render_device_panels(
     // Zoomed view: FLEET_PAGE_SIZE devices starting at fleet_zoom_start.
     // Normal view: all devices (< FLEET_DEVICE_THRESHOLD).
     let devices: &[crate::models::Device] = if let Some(start) = fleet_zoom_start {
+        // Clamp start: the device count can shrink beneath a stale zoom offset
+        // (backend swap via `b`/`/remote`, or a remote fleet losing a device),
+        // which would otherwise make `start > end` and panic on the slice.
+        let start = start.min(all_devices.len());
         let end = (start + FLEET_PAGE_SIZE).min(all_devices.len());
         &all_devices[start..end]
     } else {
