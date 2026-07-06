@@ -399,6 +399,16 @@ fn run_app(
     // that case before the TUI is ever entered.
     #[cfg(feature = "remote")]
     if let Some(spec) = cli.serve.as_deref() {
+        // Prime the backend with one `update()` before checking capability —
+        // mirroring `run_headless_serve`'s Step-2 priming (bin/tui.rs). `init()`
+        // alone does NOT cache a raw JSON frame for JSONBackend/HybridBackend
+        // (only `update()` → `apply_raw_snapshot` does), so without this,
+        // `snapshot_json()` would read `None` here even for `--backend json`,
+        // failing the very check meant to distinguish JSON/Hybrid from
+        // Mock/Host/Sysfs. Errors are ignored here — a failed first sample
+        // just means the check below reports the same "needs json/hybrid"
+        // message it always would if the backend truly lacks a raw snapshot.
+        let _ = backend.update();
         if backend.snapshot_json().is_none() {
             cmd_message = Some((format!("--serve {SERVE_NEEDS_JSON_HYBRID}"), true));
         } else {
@@ -546,6 +556,16 @@ fn run_app(
         #[cfg(not(feature = "remote"))]
         let remote_proc_rows: Option<Vec<ProcRow>> = None;
         let has_remote_proc_rows = remote_proc_rows.is_some();
+        // If the stream just started delivering remote process rows (e.g. a
+        // local→remote panel switch mid-session), drop any kill-confirm
+        // dialog that's still open — it would otherwise keep naming an
+        // earlier LOCAL pid while remote rows are now on screen (see M1 in
+        // the final review). The legitimate local kill path (dialog opened
+        // and confirmed while `!has_remote_proc_rows` throughout) is
+        // untouched — this only fires once remote rows appear.
+        if has_remote_proc_rows {
+            kill_confirm = None;
+        }
         // Length of whatever the process panel is *actually* showing this
         // iteration — the remote list when present, else `proc_rows` — used
         // to keep cursor clamping in sync with the on-screen rows (see the
@@ -1677,17 +1697,31 @@ fn run_app(
             #[cfg(feature = "remote")]
             if let Some(pub_handle) = publisher.as_ref() {
                 if let Some(frame) = backend.snapshot_json() {
-                    #[cfg(target_os = "linux")]
-                    let inference_snapshot_for_broadcast = inference_monitor.snapshot();
-                    #[cfg(not(target_os = "linux"))]
-                    let inference_snapshot_for_broadcast: Vec<
-                        crate::workload::inference_server::ServiceState,
-                    > = Vec::new();
-                    let ext = crate::backend::build_extension(
-                        &proc_rows,
-                        &inference_snapshot_for_broadcast,
-                    );
-                    pub_handle.broadcast(crate::backend::inject_extension(&frame, &ext));
+                    if backend_type == BackendType::Remote {
+                        // Relay: re-broadcast the origin's frame verbatim so
+                        // downstream viewers see the WATCHED box's processes/
+                        // inference, not this relay host's. `snapshot_json()`
+                        // already IS the origin peer's raw frame (which may
+                        // carry the origin's own `tt_toplike`); injecting our
+                        // local `build_extension` here would overwrite that
+                        // key with our laptop's scan, misattributing it to
+                        // the box being watched (see I1 in the final review).
+                        pub_handle.broadcast(frame);
+                    } else {
+                        // Local source of truth: enrich our own telemetry
+                        // with our own process/inference monitors.
+                        #[cfg(target_os = "linux")]
+                        let inference_snapshot_for_broadcast = inference_monitor.snapshot();
+                        #[cfg(not(target_os = "linux"))]
+                        let inference_snapshot_for_broadcast: Vec<
+                            crate::workload::inference_server::ServiceState,
+                        > = Vec::new();
+                        let ext = crate::backend::build_extension(
+                            &proc_rows,
+                            &inference_snapshot_for_broadcast,
+                        );
+                        pub_handle.broadcast(crate::backend::inject_extension(&frame, &ext));
+                    }
                 }
             }
 
