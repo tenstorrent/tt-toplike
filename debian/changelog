@@ -1,3 +1,34 @@
+tt-toplike (0.7.23) noble; urgency=medium
+
+  * --serve [BIND:PORT] + in-app /serve command: tt-toplike can now BE a
+    telemetry source, not just consume one. It runs a WebSocket server on
+    /telemetry broadcasting frames that are valid `tt-smi -s` JSON plus an
+    optional additive `tt_toplike` key carrying the box's process list and
+    [i] inference state — the same shape tt-station-agentd emits. Any
+    tt-toplike --remote can connect to it directly, so the remote data
+    source is no longer a single agent. Serves while you watch (at a TTY the
+    TUI runs and publishes in one process) or headless (no TTY → a quiet
+    collector loop). Default bind 0.0.0.0:8770; plaintext/unauthed,
+    trusted-LAN posture matching --remote. Requires the json or hybrid
+    backend (the only ones that retain a raw tt-smi frame to relay).
+  * --remote now renders the WATCHED box fully: the process panel shows the
+    publisher's processes and the [i] tab shows its inference workload, both
+    read from the streamed `tt_toplike` extension. When the stream carries
+    only chip telemetry (e.g. an agent that hasn't adopted the extension),
+    the panels fall back to the local machine's data with an honest LOCAL
+    label — no more silently showing your laptop's processes as if they were
+    the box's. A missing extension sub-key means "not streamed → fall back",
+    a present-but-empty one means "authoritatively zero".
+  * Relay (--serve together with --remote): the origin box's frame is
+    re-broadcast verbatim, so downstream viewers see the watched box's
+    processes/inference rather than the relay host's.
+  * All new code is behind the default-on `remote` cargo feature; the crate
+    still builds and is clippy-clean with --no-default-features. Panic-free
+    on untrusted frames; the WS server, socket binds, and broadcasts run off
+    the render thread on the publisher's own Tokio runtime.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sun, 05 Jul 2026 21:00:00 +0000
+
 tt-toplike (0.7.22) noble; urgency=medium
 
   * [i] multi-model roster: when 2+ inference services are detected, a compact

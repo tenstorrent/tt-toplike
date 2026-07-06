@@ -140,17 +140,53 @@ that streams the verbatim `tt-smi -s` snapshot on an interval; tt-toplike's
 `Telemetry`/`SmbusTelemetry` structs, same render path, every visualization
 unchanged. It's the "QuietBox on your desk, on your Mac's screen" view.
 
-Note that the process panel and the `[i]` inference monitor describe the **local**
-machine you're running tt-toplike on, not the remote box — remote process and
-serving detail isn't carried in the v1 telemetry frames.
+If the publisher enriches its stream with the optional `tt_toplike` extension
+(both a tt-toplike `--serve` and a suitably-updated `tt-station-agentd` do — see
+below), the process panel and the `[i]` inference monitor also describe the
+**remote box**: you see its processes and its serving workload, not your laptop's.
+When the stream carries only chip telemetry, those two panels fall back to the
+**local** machine's data and say so with a `LOCAL` label — so you're never misled
+about whose processes you're looking at.
 
 This is **strictly additive**: `--remote` is a new backend alongside the local
 ones, opt-in only (never entered by auto-detect or Tab-cycling); everything else
-is untouched. What you get remotely is the chip-level telemetry `tt-smi -s`
-exposes (temps, power, clocks, DDR/GDDR/ARC status, serving state) — which is
-what every visualization already derives from. Discovery of boxes by name
-(`_tenstorrent._tcp`) and live serving-swimlane detail are the next steps; see
-`docs/REMOTE_QUIETBOX_DESIGN.md`. Telemetry is unauthed today — trusted-LAN only.
+is untouched. Telemetry is unauthed today — trusted-LAN only. See
+`docs/REMOTE_QUIETBOX_DESIGN.md`.
+
+---
+
+## Be the box: publish your own telemetry (`--serve`, experimental)
+
+The flip side of `--remote`: any tt-toplike can *serve* a `/telemetry` stream that
+another tt-toplike (or anything speaking the same WebSocket) connects to. The
+remote data source is no longer a single `tt-station` agent — every box running
+tt-toplike can broadcast itself.
+
+```
+tt-toplike --serve                       # bind 0.0.0.0:8770 AND run the TUI (serve while you watch)
+tt-toplike --serve 0.0.0.0:9000          # custom BIND:PORT
+tt-toplike --serve --backend json | cat  # no TTY → headless collector loop, no UI
+```
+
+At a real terminal, `--serve` runs the normal TUI *and* publishes in the same
+process — the status bar shows `◉ serving :PORT · N clients`. Piped/headless (no
+TTY), it becomes a quiet collector loop with no UI. You can also start/stop it
+live from inside the app with `/serve [BIND:PORT]` and `/serve off`, mirroring
+`/remote`.
+
+The published frame is valid `tt-smi -s` JSON plus one optional additive
+top-level key, `tt_toplike` (`{schema, processes[], inference[]}`), carrying this
+box's process list and `[i]` inference state. Older consumers that only read
+telemetry ignore the extra key; a tt-toplike `--remote` renders the full box from
+it. `--serve` requires the `json` or `hybrid` backend (the only ones that retain a
+raw tt-smi frame to relay). Combined with `--remote`, tt-toplike acts as a relay:
+it re-broadcasts the watched box's frame verbatim, so downstream viewers see the
+origin box, not the relay host.
+
+Default bind `0.0.0.0:8770`; plaintext and unauthed, same trusted-LAN posture as
+`--remote`. Everything is behind the default-on `remote` cargo feature. See
+`docs/superpowers/specs/2026-07-05-serve-broadcast-design.md` for the frame
+contract and the `tt-station-agentd` coordination notes.
 
 ---
 
@@ -333,7 +369,7 @@ loading ▓▒░ compile → load → ready ░▒▓  (gold burst on Ready)
 serving ▶───────  tok/s ▁▂▅▇█▅▂  ⚔ swimlanes · live vLLM /metrics
 ```
 
-The snapshot the snake reads is a local Docker/HTTP probe of *this* machine, so under `--remote` the `[i]` view still describes the box you're running on, not the remote chips.
+The snapshot the snake reads is a local Docker/HTTP probe of *this* machine. Under `--remote`, if the publisher streams the `tt_toplike` extension the `[i]` view describes the **remote** box's inference; otherwise it falls back to this machine's probe with a `LOCAL` label.
 
 ### Gallery — recorded sessions
 
