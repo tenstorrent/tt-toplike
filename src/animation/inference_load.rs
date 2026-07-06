@@ -10,16 +10,19 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::time::Instant;
 
-use crate::animation::{hsv_to_grayskull, value_to_block_char};
+use crate::animation::{hsv_to_rgb_bytes, value_to_block_char};
 use crate::ui::colors;
 use crate::workload::inference_server::{is_alarm, Phase, ServiceState};
 
-/// Hue (degrees) along the cold→ready journey: teal (compile) → amber → gold.
-/// `t` is clamped to [0,1]. Feed to `hsv_to_rgb(journey_hue(t), s, v)`.
+/// Hue (degrees) along the cold→ready journey. A synthwave "heat rising" sweep
+/// up the cool→hot side of the wheel that deliberately skips green AND yellow:
+/// cyan-teal (compile) → blue → violet → magenta → hot pink (ready). `t` is
+/// clamped to [0,1]. Feed to `hsv_to_rgb_bytes(journey_hue(t), s, v)`.
 pub fn journey_hue(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
-    // 170° teal → 45° gold, linear.
-    crate::animation::lerp(170.0, 45.0, t)
+    // 188° cyan-teal → 336° rose-pink, linear. Every hue in this range is ≥188°,
+    // so the green band (~75–165°) and the neon-yellow band never appear.
+    crate::animation::lerp(188.0, 336.0, t)
 }
 
 /// Segments in the coiling loading snake (head + trailing body).
@@ -73,8 +76,8 @@ const COMPILE_REF: i64 = 50; // kernels/tick
 const LOAD_REF: i64 = 200 * 1024 * 1024; // 200 MiB/tick
 const BASE_STEP: f32 = 0.02; // momentum head advance per active tick (before scaling)
 const FILL_CAP: f32 = 0.95; // momentum never claims a full box
-/// Ready-burst duration in update frames (cosmetic gold celebration). Tuned for
-/// the 60 FPS anim cadence the `[i]` view now runs at (~1.5s of gold).
+/// Ready-burst duration in update frames (cosmetic hot-pink celebration). Tuned
+/// for the 60 FPS anim cadence the `[i]` view now runs at (~1.5s of the burst).
 const BURST_FRAMES: u32 = 96;
 
 /// Momentum increment for the active box given this tick's `delta` and the
@@ -256,7 +259,7 @@ impl LoadSnake {
         }
     }
 
-    /// After the featured service leaves the loading phases, play a brief gold
+    /// After the featured service leaves the loading phases, play a brief hot-pink
     /// burst if it reached Ready. Returns true while the burst is in progress.
     /// Clears the journey when the burst ends or the service vanished.
     pub fn finish_if_ready(&mut self, rows: &[ServiceState]) -> bool {
@@ -315,16 +318,14 @@ impl LoadSnake {
         }
 
         let bg = colors::rgb(0, 0, 0);
-        // Greyskull loading palette: calm greys + a cyan tint, with hot pink as
-        // the single hot accent — replaces the old teal→amber→gold neon sweep.
-        let gs = |r: u8, g: u8, b: u8| -> Color {
-            let (r, g, b) = colors::grayskull_rgb(r, g, b);
-            Color::Rgb(r, g, b)
-        };
-        let hot = gs(255, 48, 96); // hot pink — head, ready burst, alarm
-        let cool = gs(90, 200, 220); // cyan-grey — compile chamber
-        let mid = gs(165, 165, 165); // grey — load chamber
-        let dim = colors::rgb(90, 90, 90);
+        // Synthwave loading palette: a colorful cyan→violet→magenta→pink ramp
+        // that skips green and the neon-yellow/gold it replaced. Rendered as raw
+        // RGB (not theme-mapped) so this decorative view stays vivid regardless
+        // of the active hardware theme.
+        let hot = Color::Rgb(255, 48, 96); // hot pink — head, ready burst, alarm
+        let cool = Color::Rgb(64, 196, 224); // cyan-teal — compile chamber
+        let mid = Color::Rgb(158, 104, 232); // violet — load chamber
+        let dim = Color::Rgb(78, 82, 128); // dim slate-violet — spent trail
         let alarm = self.is_alarm();
 
         let mut lines: Vec<Line<'static>> = Vec::new();
@@ -448,10 +449,10 @@ impl LoadSnake {
                         let (glyph, color) = if j == 0 {
                             ('◉', hot) // coil head — the hot-pink accent
                         } else {
-                            (
-                                value_to_block_char(seg),
-                                hsv_to_grayskull(hue, 0.8, 0.4 + 0.5 * seg),
-                            )
+                            {
+                                let (r, g, b) = hsv_to_rgb_bytes(hue, 0.8, 0.4 + 0.5 * seg);
+                                (value_to_block_char(seg), Color::Rgb(r, g, b))
+                            }
                         };
                         canvas[gy][gx] = (glyph, color);
                     }
@@ -608,9 +609,9 @@ fn draw_chamber(
 
             // Hue sweep: `global_t` is the cell's position along the whole
             // compile→load→ready track (0 at the very start, 1 at ready), so the
-            // palette flows teal→amber→gold across the three chambers rather than
-            // three flat colors. Brightness rises toward the frontier so the
-            // leading edge glows.
+            // palette flows cyan→violet→magenta→pink across the three chambers
+            // rather than three flat colors. Brightness rises toward the frontier
+            // so the leading edge glows.
             let local_frac = if total > 1 {
                 idx as f32 / (total - 1) as f32
             } else {
@@ -619,11 +620,11 @@ fn draw_chamber(
             let global_t = (chamber_index as f32 + local_frac) / 3.0;
             let brightness = (1.0 - 0.35 * ramp).clamp(0.4, 1.0);
             let cell_color = if alarm_fill {
-                // a stalled box glows hot pink (greyskull's only hot color)
-                let (r, g, b) = colors::grayskull_rgb(255, 48, 96);
-                Color::Rgb(r, g, b)
+                // a stalled box glows hot pink — the palette's alarm accent
+                Color::Rgb(255, 48, 96)
             } else {
-                hsv_to_grayskull(journey_hue(global_t), 0.8, brightness)
+                let (r, g, b) = hsv_to_rgb_bytes(journey_hue(global_t), 0.8, brightness);
+                Color::Rgb(r, g, b)
             };
 
             // Head glyph rides the frontier of the active chamber; body cells
@@ -936,14 +937,24 @@ mod tests {
     }
 
     #[test]
-    fn journey_hue_sweeps_compile_to_ready() {
-        // Cool (compile) at the start, warm (load/ready) at the end; monotone-ish.
+    fn journey_hue_sweeps_cyan_to_pink_avoiding_green() {
+        // Cyan-teal (compile) at the start, hot pink (ready) at the end; the sweep
+        // climbs the wheel (cold < hot), opposite the old teal→gold descent.
         let cold = journey_hue(0.0);
         let hot = journey_hue(1.0);
         assert!(
-            cold > hot,
-            "hue moves from teal (~170) down toward gold (~45)"
+            cold < hot,
+            "hue climbs from cyan (~188) up toward pink (~336)"
         );
+        // Every hue on the journey must sit above the green/yellow bands so the
+        // loading palette never shows green or neon-yellow.
+        for i in 0..=20 {
+            let h = journey_hue(i as f32 / 20.0);
+            assert!(
+                (166.0..=345.0).contains(&h),
+                "hue {h} strayed into the green/yellow arc"
+            );
+        }
         assert!((journey_hue(0.5) - journey_hue(0.5)).abs() < 1e-9); // deterministic
         assert!(journey_hue(-1.0) == journey_hue(0.0)); // clamped
         assert!(journey_hue(2.0) == journey_hue(1.0));

@@ -1,3 +1,15 @@
+tt-toplike (0.7.24) noble; urgency=medium
+
+  * [i] Inference Monitor — loading palette: the greyscale "greyskull" loading
+    look was too flat, so the loading snake/chambers now sweep a colorful
+    synthwave ramp — cyan-teal → blue → violet → magenta → hot pink — that
+    climbs the cool→hot side of the color wheel and deliberately skips the
+    green AND neon-yellow arcs entirely (every hue ≥188°). Rendered as raw RGB
+    so the view stays vivid regardless of the active hardware theme; the
+    ready-burst and stall accent stay hot pink.
+
+ -- Tenstorrent <software@tenstorrent.com>  Mon, 06 Jul 2026 12:00:00 +0000
+
 tt-toplike (0.7.23) noble; urgency=medium
 
   * --serve [BIND:PORT] + in-app /serve command: tt-toplike can now BE a

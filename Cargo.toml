@@ -1,6 +1,6 @@
 [package]
 name = "tt-toplike"
-version = "0.7.23"
+version = "0.7.24"
 edition = "2021"
 # MSRV: the pinned toolchain (1.93) is the only version we actually build/test
 # against, so it's the only verified floor. Bump this in lockstep with CI's
