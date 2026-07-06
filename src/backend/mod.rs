@@ -282,6 +282,28 @@ pub trait TelemetryBackend: Send + Sync {
     fn snapshot_json(&self) -> Option<String> {
         None
     }
+
+    /// Decoded remote process list from the `tt_toplike` frame extension, if
+    /// this backend is streaming one.
+    ///
+    /// Only [`ws::WsBackend`](crate::backend::ws::WsBackend) overrides this
+    /// (it decodes the extension from the latest `--serve` frame). Every other
+    /// backend keeps this default `None`, which the UI treats identically to
+    /// "extension present but this sub-key wasn't streamed": fall back to the
+    /// LOCAL process scan. Cheap by contract — a clone of already-decoded
+    /// state, never a probe — safe to call every render tick.
+    #[cfg(feature = "remote")]
+    fn remote_processes(&self) -> Option<Vec<crate::backend::RemoteProc>> {
+        None
+    }
+
+    /// Decoded remote inference-workload list from the `tt_toplike` frame
+    /// extension, if this backend is streaming one. See
+    /// [`Self::remote_processes`] for the `None` contract and cost.
+    #[cfg(feature = "remote")]
+    fn remote_inference(&self) -> Option<Vec<crate::backend::RemoteInference>> {
+        None
+    }
 }
 
 /// Backend configuration options
@@ -383,6 +405,20 @@ impl TelemetryBackend for Box<dyn TelemetryBackend> {
         // `snapshot_json()` actually reach the real backend in practice.
         (**self).snapshot_json()
     }
+
+    // Same rationale as `snapshot_json` above: without an explicit forward,
+    // the boxed concrete backend's (WsBackend's) override would never be
+    // reached through `Box<dyn TelemetryBackend>` — every app surface stores
+    // its backend that way.
+    #[cfg(feature = "remote")]
+    fn remote_processes(&self) -> Option<Vec<crate::backend::RemoteProc>> {
+        (**self).remote_processes()
+    }
+
+    #[cfg(feature = "remote")]
+    fn remote_inference(&self) -> Option<Vec<crate::backend::RemoteInference>> {
+        (**self).remote_inference()
+    }
 }
 
 #[cfg(test)]
@@ -408,5 +444,84 @@ mod tests {
         assert_eq!(config.update_interval_ms, 50);
         assert_eq!(config.max_consecutive_errors, 20);
         assert!(config.verbose);
+    }
+
+    /// Backends that don't override `remote_processes`/`remote_inference`
+    /// (i.e. everything except `WsBackend`) must keep the trait default of
+    /// `None` — that's what tells the UI to fall back to LOCAL data.
+    #[cfg(feature = "remote")]
+    #[test]
+    fn test_remote_accessors_default_to_none() {
+        use crate::backend::mock::MockBackend;
+        let mock = MockBackend::new(1);
+        assert_eq!(mock.remote_processes(), None);
+        assert_eq!(mock.remote_inference(), None);
+    }
+
+    /// `WsBackend`'s decoded extension must still be reachable through
+    /// `Box<dyn TelemetryBackend>` — the shape every app surface actually
+    /// stores its backend as. Without the explicit forwarding methods on
+    /// `impl TelemetryBackend for Box<dyn TelemetryBackend>`, this would
+    /// silently fall back to the trait's default `None` regardless of what
+    /// the concrete `WsBackend` decoded.
+    #[cfg(feature = "remote")]
+    #[test]
+    fn test_boxed_backend_forwards_remote_accessors() {
+        use crate::backend::remote_ext::{
+            inject_extension, RemoteInference, RemoteProc, TtToplikeExt, TT_TOPLIKE_SCHEMA,
+        };
+        use crate::backend::ws::WsBackend;
+
+        const MINIMAL_FRAME: &str = r#"{
+            "device_info": [{
+                "board_info": { "board_type": "p150a", "bus_id": "0000:01:00.0", "coords": "(0,0)" },
+                "telemetry": { "voltage": "0.85", "current": "30.0", "power": "145.0",
+                    "aiclk": "800", "asic_temperature": "52.0", "heartbeat": "1234" },
+                "smbus_telem": { "DDR_STATUS": "0x55555555" }
+            }]
+        }"#;
+        let ext = TtToplikeExt {
+            schema: TT_TOPLIKE_SCHEMA,
+            processes: Some(vec![RemoteProc {
+                pid: 1,
+                name: "p".into(),
+                cmd: "p".into(),
+                uses_tt: true,
+                cpu_pct: 1.0,
+                mem_bytes: 1,
+            }]),
+            inference: Some(vec![RemoteInference {
+                key: "k".into(),
+                label: "L".into(),
+                phase: "ready".into(),
+                progress: None,
+                serving: None,
+            }]),
+        };
+        let frame = inject_extension(MINIMAL_FRAME, &ext);
+
+        let mut ws = WsBackend::new_for_test();
+        ws.test_inject(&frame);
+        assert!(ws.update().is_ok());
+
+        // Sanity: the concrete backend decoded it.
+        assert!(ws.remote_processes().is_some());
+
+        // The real assertion: boxing must not lose the override.
+        let boxed: Box<dyn TelemetryBackend> = Box::new(ws);
+        assert_eq!(
+            boxed
+                .remote_processes()
+                .expect("boxed backend should forward to WsBackend's decoded extension")
+                .len(),
+            1
+        );
+        assert_eq!(
+            boxed
+                .remote_inference()
+                .expect("boxed backend should forward to WsBackend's decoded extension")
+                .len(),
+            1
+        );
     }
 }

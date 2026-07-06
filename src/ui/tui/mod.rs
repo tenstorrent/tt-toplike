@@ -519,6 +519,44 @@ fn run_app(
         // of redrawing the full screen on every 16 ms input-poll wakeup.
         let do_draw = should_tick || std::mem::take(&mut force_redraw);
 
+        // Under `--remote`, prefer the box's actual process list carried on
+        // the `tt_toplike` frame extension over this machine's own process
+        // scan for the *process panel display*. This is deliberately never
+        // substituted into `proc_rows` itself — `proc_rows` also feeds the
+        // `/serve` broadcast (`build_extension` below), which must always
+        // describe what THIS machine is actually running, independent of
+        // what `--remote` happens to be displaying. `None` here means the
+        // peer isn't streaming that sub-key (or isn't a `tt-toplike --serve`
+        // publisher at all) — fall back to `proc_rows` and let
+        // `remote_local_fallback_note` label it as such.
+        //
+        // Computed once per loop iteration (not only inside `do_draw`) so the
+        // kill-dialog handlers further down — which index by `process_cursor`
+        // into whichever list is currently on screen — can tell the two apart
+        // and refuse to signal a local PID that merely happens to share the
+        // highlighted row's index with an unrelated remote process.
+        #[cfg(feature = "remote")]
+        let remote_proc_rows: Option<Vec<ProcRow>> = if backend_type == BackendType::Remote {
+            backend
+                .remote_processes()
+                .map(|procs| procs.iter().map(remote_proc_to_row).collect())
+        } else {
+            None
+        };
+        #[cfg(not(feature = "remote"))]
+        let remote_proc_rows: Option<Vec<ProcRow>> = None;
+        let has_remote_proc_rows = remote_proc_rows.is_some();
+        // Length of whatever the process panel is *actually* showing this
+        // iteration — the remote list when present, else `proc_rows` — used
+        // to keep cursor clamping in sync with the on-screen rows (see the
+        // `Down` handler below). Only consumed by the Linux/procfs cursor
+        // navigation code, hence the matching cfg (kept unused otherwise).
+        #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+        let displayed_proc_row_len = remote_proc_rows
+            .as_ref()
+            .map(Vec::len)
+            .unwrap_or(proc_rows.len());
+
         // Initialize or update visualizations (only on tick to match target FPS)
         let size = terminal
             .size()
@@ -644,11 +682,41 @@ fn run_app(
                     // exist on Linux (the design is Docker/TT-only); off Linux we
                     // hand it an empty slice, so it simply roams the catalog.
                     #[cfg(target_os = "linux")]
-                    let rows = inference_monitor.snapshot();
+                    let local_rows = inference_monitor.snapshot();
                     #[cfg(not(target_os = "linux"))]
-                    let rows: Vec<
+                    let local_rows: Vec<
                         crate::workload::inference_server::ServiceState,
                     > = Vec::new();
+                    // Under `--remote`, prefer the box's authoritative inference
+                    // data carried on the `tt_toplike` frame extension over this
+                    // machine's own Docker probe. `None` means the peer isn't
+                    // streaming that sub-key (or isn't a `tt-toplike --serve`
+                    // publisher at all) — fall back to `local_rows` and let
+                    // `remote_local_fallback_note` below label it as such.
+                    // (The non-`remote`-feature arm skips the `Option`
+                    // round-trip entirely rather than hard-coding a `None` to
+                    // `unwrap_or` — clippy flags an unwrap of a statically-known
+                    // `None` as dead code.)
+                    #[cfg(feature = "remote")]
+                    let (rows, has_remote_rows): (
+                        Vec<crate::workload::inference_server::ServiceState>,
+                        bool,
+                    ) = {
+                        let remote_rows = if backend_type == BackendType::Remote {
+                            backend.remote_inference().map(|list| {
+                                list.iter().map(remote_inference_to_service_state).collect()
+                            })
+                        } else {
+                            None
+                        };
+                        let has_remote_rows = remote_rows.is_some();
+                        (remote_rows.unwrap_or(local_rows), has_remote_rows)
+                    };
+                    #[cfg(not(feature = "remote"))]
+                    let (rows, has_remote_rows): (
+                        Vec<crate::workload::inference_server::ServiceState>,
+                        bool,
+                    ) = (local_rows, false);
                     let catalog = catalog_refresher.snapshot();
                     let arch = backend
                         .devices()
@@ -679,14 +747,14 @@ fn run_app(
                     // same rows for the roster and the fixed-dim loading/roaming
                     // renderers line up.
                     inference_roster = inference_roster_lines(&rows, size.width as usize);
-                    // Under `--remote` (until real remote data lands — see
-                    // `remote_local_fallback_note`) this view is still probing
-                    // LOCAL docker, not the remote box's serving stack. Prepend
-                    // a dim one-line banner so that's obvious, computed here
-                    // (not in `render_snake_view`) so the extra row is counted
-                    // in `roster_h` below and the snake's reserved height stays
-                    // in sync with what actually gets drawn.
-                    if let Some(note) = remote_local_fallback_note(backend_type, false) {
+                    // Under `--remote`, while `remote_rows` is `None` (the peer
+                    // isn't streaming inference data) this view is still
+                    // probing LOCAL docker, not the remote box's serving stack.
+                    // Prepend a dim one-line banner so that's obvious, computed
+                    // here (not in `render_snake_view`) so the extra row is
+                    // counted in `roster_h` below and the snake's reserved
+                    // height stays in sync with what actually gets drawn.
+                    if let Some(note) = remote_local_fallback_note(backend_type, has_remote_rows) {
                         inference_roster.insert(
                             0,
                             Line::from(Span::styled(
@@ -796,10 +864,14 @@ fn run_app(
             let tt_filtered = crate::cli::backend_shows_only_tt(backend_type);
             #[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
             let tt_filtered = false;
-            // Honest-labeling note for the process panel: under `--remote`
-            // (until real remote data lands) the list below is still LOCAL
-            // processes, not the remote box's — see `remote_local_fallback_note`.
-            let remote_note = remote_local_fallback_note(backend_type, false);
+            // Honest-labeling note for the process panel: `Some` only while
+            // `remote_proc_rows` (computed above) is `None` under `--remote` —
+            // i.e. the list below is still LOCAL processes, not the remote
+            // box's. See `remote_local_fallback_note`.
+            let remote_note = remote_local_fallback_note(backend_type, has_remote_proc_rows);
+            // The rows the panel actually renders this frame: the remote list
+            // when present, else the local scan.
+            let display_proc_rows: &[ProcRow] = remote_proc_rows.as_deref().unwrap_or(&proc_rows);
             let draw_start = Instant::now();
             terminal
                 .draw(|f| {
@@ -814,7 +886,7 @@ fn run_app(
                             render_insights(
                                 f,
                                 backend,
-                                &proc_rows,
+                                display_proc_rows,
                                 process_cursor,
                                 kill_confirm.as_ref(),
                                 cli,
@@ -1311,9 +1383,11 @@ fn run_app(
                                 } else {
                                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_none() {
-                                        // Clamp to proc_rows — the SAME list the panel renders,
-                                        // so the cursor always matches the highlighted row.
-                                        let max = proc_rows.len().saturating_sub(1);
+                                        // Clamp to `displayed_proc_row_len` — the SAME list the
+                                        // panel renders this iteration (remote rows under
+                                        // `--remote` when present, else `proc_rows`) — so the
+                                        // cursor always matches the highlighted row.
+                                        let max = displayed_proc_row_len.saturating_sub(1);
                                         process_cursor = (process_cursor + 1).min(max);
                                     }
                                 }
@@ -1367,7 +1441,11 @@ fn run_app(
                             }
                             #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                             KeyCode::Char('k') if display_mode == DisplayMode::Insights => {
-                                if kill_confirm.is_none() {
+                                // Never under a remote-sourced panel: `proc_rows` (the only
+                                // list `kill_pid` can act on — it signals a LOCAL PID) would
+                                // diverge from what's highlighted on screen, so `process_cursor`
+                                // could pick an unrelated local process by coincidence of index.
+                                if kill_confirm.is_none() && !has_remote_proc_rows {
                                     // Use proc_rows (the rendered list) so the kill target
                                     // always matches the highlighted row — not flat_process_list
                                     // (PID-ascending, uncapped) which diverges from the display.
@@ -1393,13 +1471,17 @@ fn run_app(
                                         libc::SIGKILL,
                                     );
                                     kill_confirm = None;
-                                } else if let Some(row) = proc_rows.get(process_cursor) {
+                                } else if !has_remote_proc_rows {
                                     // Outside dialog: SIGKILL immediately using proc_rows
-                                    // (the rendered list) so highlight == kill target.
-                                    let _ = crate::workload::process_monitor::kill_pid(
-                                        row.pid,
-                                        libc::SIGKILL,
-                                    );
+                                    // (the rendered list) so highlight == kill target. Guarded
+                                    // the same way as `k` above — never act on a local PID
+                                    // while a remote-sourced list is what's actually on screen.
+                                    if let Some(row) = proc_rows.get(process_cursor) {
+                                        let _ = crate::workload::process_monitor::kill_pid(
+                                            row.pid,
+                                            libc::SIGKILL,
+                                        );
+                                    }
                                 }
                             }
                             #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
@@ -3803,9 +3885,11 @@ fn render_snake_view(f: &mut Frame, snake: &crate::animation::Snake, roster: &[L
 /// isn't needed (any backend other than Remote, or once real remote data
 /// exists to display instead).
 ///
-/// `has_remote_data` is always `false` for now — a later task wires it to
-/// `WsBackend::remote_*().is_some()` once the remote stream carries process/
-/// inference frames, at which point this note naturally stops firing.
+/// `has_remote_data` reflects whether the relevant sub-key of the
+/// `tt_toplike` frame extension was actually decoded from the latest frame
+/// (`WsBackend::remote_processes()`/`remote_inference()` — see call sites):
+/// `true` once a `--serve` peer streams that data, at which point this note
+/// naturally stops firing for that panel.
 fn remote_local_fallback_note(
     backend_type: crate::cli::BackendType,
     has_remote_data: bool,
@@ -3813,6 +3897,119 @@ fn remote_local_fallback_note(
     match (backend_type, has_remote_data) {
         (crate::cli::BackendType::Remote, false) => Some("LOCAL — remote not streamed"),
         _ => None,
+    }
+}
+
+/// Parse a `tt_toplike` wire phase string back into
+/// [`Phase`](crate::workload::inference_server::Phase). An unrecognized
+/// string (future schema bump on the producer side, or a corrupt frame) maps
+/// to `Down` rather than panicking or guessing — the safest "nothing is
+/// happening" reading for an unknown state.
+#[cfg(feature = "remote")]
+fn phase_from_str(s: &str) -> crate::workload::inference_server::Phase {
+    use crate::workload::inference_server::Phase;
+    match s {
+        "compiling" => Phase::Compiling,
+        "loading" => Phase::Loading,
+        "ready" => Phase::Ready,
+        "alarm" => Phase::Alarm,
+        // "down" and anything unrecognized both read as Down.
+        _ => Phase::Down,
+    }
+}
+
+/// Map one remote process (from the `tt_toplike` frame extension) to the
+/// process panel's row type. `inference`/`active` are always `None`/`false`:
+/// the remote producer doesn't classify inference runtimes the way the local
+/// `HostProcessMonitor` heuristic does, and `tt` is `None` for the same
+/// reason — `RemoteProc::uses_tt` is a bare bool, not the detailed
+/// `TtProcInfo` (device indices / hugepage counts) the local scan produces,
+/// so there is nothing honest to synthesize into that field.
+#[cfg(feature = "remote")]
+fn remote_proc_to_row(rp: &crate::backend::RemoteProc) -> crate::workload::ProcRow {
+    crate::workload::ProcRow {
+        pid: rp.pid as i32,
+        name: rp.name.clone(),
+        cpu_pct: rp.cpu_pct,
+        mem_bytes: rp.mem_bytes,
+        inference: None,
+        active: false,
+        tt: None,
+    }
+}
+
+/// Map the wire [`RemoteServing`](crate::backend::RemoteServing) shape back
+/// onto the local display struct
+/// [`ServingStats`](crate::workload::inference_server::metrics::ServingStats).
+/// `counters` (the raw vLLM counters used only to compute local deltas) has
+/// no remote equivalent — deliberately excluded from the wire shape, see
+/// `remote_ext`'s module docs — so it's always `Default::default()` here.
+#[cfg(feature = "remote")]
+fn remote_serving_to_stats(
+    rs: &crate::backend::RemoteServing,
+) -> crate::workload::inference_server::metrics::ServingStats {
+    crate::workload::inference_server::metrics::ServingStats {
+        generation_tps: rs.generation_tps,
+        prompt_tps: rs.prompt_tps,
+        completed_delta: rs.completed_delta,
+        errored_delta: rs.errored_delta,
+        requests_running: rs.requests_running,
+        requests_waiting: rs.requests_waiting,
+        kv_cache_usage: rs.kv_cache_usage,
+        ttft_avg_s: rs.ttft_avg_s,
+        queue_avg_s: rs.queue_avg_s,
+        prefill_avg_s: rs.prefill_avg_s,
+        decode_avg_s: rs.decode_avg_s,
+        tpot_avg_s: rs.tpot_avg_s,
+        prefix_hit_rate: rs.prefix_hit_rate,
+        preemptions_delta: rs.preemptions_delta,
+        counters: Default::default(),
+    }
+}
+
+/// Map one remote inference workload (from the `tt_toplike` frame extension)
+/// to the local [`ServiceState`](crate::workload::inference_server::ServiceState)
+/// the `[i]` view's snake/roster already know how to render.
+///
+/// Fields the wire shape doesn't carry (`cpu_pct`, `rss_bytes`/`rss_delta`,
+/// `kernel_count`/`kernel_delta`, `safetensors_fds`, `top_proc`, `last_log`,
+/// `flat_ticks`) are the *local* Docker-probe internals used to derive phase
+/// transitions and the Alarm escalation on THIS box — meaningless for a
+/// remote workload whose phase is already authoritative on the wire, so they
+/// are zeroed/`None` rather than guessed. `readiness` is reconstructed from
+/// `phase` (the wire's source of truth) since `Readiness` itself isn't part
+/// of the wire shape: `Ready` -> `Ready { runner: None }` (no remote runner
+/// name to carry), `Down` -> `Down`, anything else -> `NotReady` (matches
+/// `Phase::derive`'s own Ready/Down/otherwise shape).
+#[cfg(feature = "remote")]
+fn remote_inference_to_service_state(
+    ri: &crate::backend::RemoteInference,
+) -> crate::workload::inference_server::ServiceState {
+    use crate::workload::inference_server::{Phase, Readiness, ServiceState};
+
+    let phase = phase_from_str(&ri.phase);
+    let readiness = match phase {
+        Phase::Ready => Readiness::Ready { runner: None },
+        Phase::Down => Readiness::Down,
+        Phase::Compiling | Phase::Loading | Phase::Alarm => Readiness::NotReady,
+    };
+
+    ServiceState {
+        key: ri.key.clone(),
+        label: ri.label.clone(),
+        phase,
+        cpu_pct: 0.0,
+        rss_bytes: 0,
+        rss_delta: 0,
+        kernel_count: 0,
+        kernel_delta: 0,
+        safetensors_fds: 0,
+        readiness,
+        top_proc: None,
+        last_log: None,
+        progress: ri.progress,
+        flat_ticks: 0,
+        serving: ri.serving.as_ref().map(remote_serving_to_stats),
     }
 }
 
@@ -5627,6 +5824,156 @@ mod remote_fallback_note_tests {
         );
         assert_eq!(remote_local_fallback_note(BackendType::Remote, true), None); // remote data present
         assert_eq!(remote_local_fallback_note(BackendType::Json, false), None); // local backend, no note
+    }
+}
+
+/// Tests for the pure `RemoteProc`/`RemoteInference` -> local-type mapper
+/// helpers that back the `--remote` process panel and `[i]` view (see the
+/// call sites in the main loop).
+#[cfg(all(test, feature = "remote"))]
+mod remote_mapper_tests {
+    use super::{phase_from_str, remote_inference_to_service_state, remote_proc_to_row};
+    use crate::backend::{RemoteInference, RemoteProc, RemoteServing};
+    use crate::workload::inference_server::{Phase, Readiness};
+
+    #[test]
+    fn phase_from_str_maps_every_known_wire_value() {
+        assert_eq!(phase_from_str("down"), Phase::Down);
+        assert_eq!(phase_from_str("compiling"), Phase::Compiling);
+        assert_eq!(phase_from_str("loading"), Phase::Loading);
+        assert_eq!(phase_from_str("ready"), Phase::Ready);
+        assert_eq!(phase_from_str("alarm"), Phase::Alarm);
+    }
+
+    #[test]
+    fn phase_from_str_unknown_reads_as_down() {
+        // A future schema's new phase name, or a corrupt frame, must degrade
+        // to the safest "nothing happening" reading rather than panic/guess.
+        assert_eq!(phase_from_str("quiescent"), Phase::Down);
+        assert_eq!(phase_from_str(""), Phase::Down);
+        assert_eq!(phase_from_str("READY"), Phase::Down); // case-sensitive by wire contract
+    }
+
+    #[test]
+    fn remote_proc_to_row_maps_fields_and_never_synthesizes_tt_info() {
+        let rp = RemoteProc {
+            pid: 4242,
+            name: "tt-inference-server".to_string(),
+            cmd: "/usr/bin/tt-inference-server --port 8080".to_string(),
+            uses_tt: true,
+            cpu_pct: 87.5,
+            mem_bytes: 12_884_901_888,
+        };
+        let row = remote_proc_to_row(&rp);
+        assert_eq!(row.pid, 4242);
+        assert_eq!(row.name, "tt-inference-server");
+        assert_eq!(row.cpu_pct, 87.5);
+        assert_eq!(row.mem_bytes, 12_884_901_888);
+        // Deliberately not carried: the remote wire shape has no detailed
+        // TtProcInfo (device indices / hugepages), and no inference-runtime
+        // classification.
+        assert!(row.tt.is_none());
+        assert!(row.inference.is_none());
+        assert!(!row.active);
+    }
+
+    #[test]
+    fn remote_inference_to_service_state_maps_ready_with_serving() {
+        let serving = RemoteServing {
+            generation_tps: 842.0,
+            prompt_tps: 20.0,
+            requests_running: 1,
+            requests_waiting: 2,
+            kv_cache_usage: 0.04,
+            ttft_avg_s: 0.18,
+            queue_avg_s: 0.01,
+            prefill_avg_s: 1.0,
+            decode_avg_s: 3.0,
+            tpot_avg_s: 0.02,
+            completed_delta: 2,
+            errored_delta: 0,
+            prefix_hit_rate: 0.75,
+            preemptions_delta: 1,
+        };
+        let ri = RemoteInference {
+            key: "vllm-llama3-70b".to_string(),
+            label: "Llama-3 70B (vLLM)".to_string(),
+            phase: "ready".to_string(),
+            progress: Some(1.0),
+            serving: Some(serving),
+        };
+        let state = remote_inference_to_service_state(&ri);
+        assert_eq!(state.key, "vllm-llama3-70b");
+        assert_eq!(state.label, "Llama-3 70B (vLLM)");
+        assert_eq!(state.phase, Phase::Ready);
+        assert_eq!(state.progress, Some(1.0));
+        assert_eq!(state.readiness, Readiness::Ready { runner: None });
+        // No remote equivalent for these locally-derived probe internals.
+        assert_eq!(state.cpu_pct, 0.0);
+        assert_eq!(state.rss_bytes, 0);
+        assert_eq!(state.kernel_count, 0);
+        assert_eq!(state.flat_ticks, 0);
+        assert!(state.top_proc.is_none());
+        let stats = state.serving.expect("serving should map through");
+        assert_eq!(stats.generation_tps, 842.0);
+        assert_eq!(stats.prompt_tps, 20.0);
+        assert_eq!(stats.requests_running, 1);
+        assert_eq!(stats.requests_waiting, 2);
+        assert_eq!(stats.kv_cache_usage, 0.04);
+        assert_eq!(stats.ttft_avg_s, 0.18);
+        assert_eq!(stats.queue_avg_s, 0.01);
+        assert_eq!(stats.prefill_avg_s, 1.0);
+        assert_eq!(stats.decode_avg_s, 3.0);
+        assert_eq!(stats.tpot_avg_s, 0.02);
+        assert_eq!(stats.completed_delta, 2);
+        assert_eq!(stats.errored_delta, 0);
+        assert_eq!(stats.prefix_hit_rate, 0.75);
+        assert_eq!(stats.preemptions_delta, 1);
+        // No remote equivalent for the raw vLLM counters (deltas are computed
+        // locally only) — always the zeroed default.
+        assert_eq!(stats.counters, Default::default());
+    }
+
+    #[test]
+    fn remote_inference_to_service_state_maps_down_and_loading_readiness() {
+        let down = RemoteInference {
+            key: "k".into(),
+            label: "L".into(),
+            phase: "down".into(),
+            progress: None,
+            serving: None,
+        };
+        let state = remote_inference_to_service_state(&down);
+        assert_eq!(state.phase, Phase::Down);
+        assert_eq!(state.readiness, Readiness::Down);
+        assert!(state.serving.is_none());
+        assert!(state.progress.is_none());
+
+        let loading = RemoteInference {
+            key: "k".into(),
+            label: "L".into(),
+            phase: "loading".into(),
+            progress: Some(0.4),
+            serving: None,
+        };
+        let state = remote_inference_to_service_state(&loading);
+        assert_eq!(state.phase, Phase::Loading);
+        assert_eq!(state.readiness, Readiness::NotReady);
+        assert_eq!(state.progress, Some(0.4));
+    }
+
+    #[test]
+    fn remote_inference_to_service_state_unknown_phase_reads_as_down() {
+        let ri = RemoteInference {
+            key: "k".into(),
+            label: "L".into(),
+            phase: "totally-unknown".into(),
+            progress: None,
+            serving: None,
+        };
+        let state = remote_inference_to_service_state(&ri);
+        assert_eq!(state.phase, Phase::Down);
+        assert_eq!(state.readiness, Readiness::Down);
     }
 }
 

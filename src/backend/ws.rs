@@ -228,28 +228,6 @@ impl WsBackend {
         }
     }
 
-    /// Decoded remote processes from the `tt_toplike` extension on the latest
-    /// applied frame. `None` if that frame carried no extension (a plain
-    /// `tt-smi -s` frame from a non-`tt-toplike` publisher) or none has
-    /// arrived yet. Cheap: a clone of already-decoded state, safe to call
-    /// from the render loop.
-    pub fn remote_processes(&self) -> Option<Vec<RemoteProc>> {
-        // `None` when there's no extension OR the producer didn't stream
-        // processes (missing sub-key) — both mean "fall back to local".
-        self.remote_ext
-            .as_ref()
-            .and_then(|ext| ext.processes.clone())
-    }
-
-    /// Decoded remote inference workloads from the `tt_toplike` extension on
-    /// the latest applied frame. See [`Self::remote_processes`] for the
-    /// `None` conditions and cost.
-    pub fn remote_inference(&self) -> Option<Vec<RemoteInference>> {
-        self.remote_ext
-            .as_ref()
-            .and_then(|ext| ext.inference.clone())
-    }
-
     /// Spawn the background reader runtime + task. Idempotent-ish: only called
     /// once from `init()`.
     fn spawn_reader(&mut self) -> BackendResult<()> {
@@ -397,6 +375,28 @@ impl TelemetryBackend for WsBackend {
         // parser than we do; we don't want a local parse hiccup to blank the
         // relay). `.lock().ok()` — never panics on a poisoned lock.
         self.shared.latest.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Decoded remote processes from the `tt_toplike` extension on the latest
+    /// applied frame. `None` if that frame carried no extension (a plain
+    /// `tt-smi -s` frame from a non-`tt-toplike` publisher) or none has
+    /// arrived yet. Cheap: a clone of already-decoded state, safe to call
+    /// from the render loop.
+    fn remote_processes(&self) -> Option<Vec<RemoteProc>> {
+        // `None` when there's no extension OR the producer didn't stream
+        // processes (missing sub-key) — both mean "fall back to local".
+        self.remote_ext
+            .as_ref()
+            .and_then(|ext| ext.processes.clone())
+    }
+
+    /// Decoded remote inference workloads from the `tt_toplike` extension on
+    /// the latest applied frame. See [`Self::remote_processes`] for the
+    /// `None` conditions and cost.
+    fn remote_inference(&self) -> Option<Vec<RemoteInference>> {
+        self.remote_ext
+            .as_ref()
+            .and_then(|ext| ext.inference.clone())
     }
 }
 
