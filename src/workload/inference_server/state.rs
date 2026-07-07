@@ -30,6 +30,7 @@ impl Phase {
         kernel_delta: i64,
         python_alive: bool,
         rss_delta: i64,
+        loaded_delta: i64,
         readiness: &Readiness,
     ) -> Phase {
         if let Readiness::Ready { .. } = readiness {
@@ -43,7 +44,10 @@ impl Phase {
         if kernel_delta > 0 {
             return Phase::Compiling;
         }
-        if rss_delta > 0 {
+        // Weight-load progress shows as either host RSS growth or new
+        // `.tensorbin` shards being written (device-loaded weights may not grow
+        // host RSS), so either climbing means Loading.
+        if rss_delta > 0 || loaded_delta > 0 {
             return Phase::Loading;
         }
         // not ready, nothing moving, but process alive → provisional Loading;
@@ -92,6 +96,10 @@ pub struct ServiceState {
     pub rss_delta: i64,
     pub kernel_count: usize,
     pub kernel_delta: i64,
+    /// Loaded weight shards (`.tensorbin`) and per-tick change — the weight-load
+    /// counterpart to `kernel_count`/`kernel_delta`'s compile signal.
+    pub loaded_count: usize,
+    pub loaded_delta: i64,
     pub safetensors_fds: usize,
     pub readiness: Readiness,
     pub top_proc: Option<String>,
@@ -109,17 +117,23 @@ mod tests {
     use crate::workload::inference_server::probe::Readiness;
     #[test]
     fn phase_derivation() {
-        assert_eq!(Phase::derive(0, false, 0, &Readiness::Down), Phase::Down);
+        assert_eq!(Phase::derive(0, false, 0, 0, &Readiness::Down), Phase::Down);
         assert_eq!(
-            Phase::derive(12, true, 0, &Readiness::NotReady),
+            Phase::derive(12, true, 0, 0, &Readiness::NotReady),
             Phase::Compiling
         ); // kernels growing
         assert_eq!(
-            Phase::derive(0, true, 700_000_000, &Readiness::NotReady),
+            Phase::derive(0, true, 700_000_000, 0, &Readiness::NotReady),
             Phase::Loading
         ); // RSS growing
+           // Weight shards being written (`.tensorbin`) also reads as Loading, even
+           // when host RSS is flat (weights land on the device, not host memory).
         assert_eq!(
-            Phase::derive(0, true, 0, &Readiness::Ready { runner: None }),
+            Phase::derive(0, true, 0, 40, &Readiness::NotReady),
+            Phase::Loading
+        );
+        assert_eq!(
+            Phase::derive(0, true, 0, 0, &Readiness::Ready { runner: None }),
             Phase::Ready
         );
     }

@@ -1,7 +1,7 @@
 # tt-toplike Quick Start
 
-**Version**: 0.7.27
-**Last Updated**: June 30, 2026
+**Version**: 0.7.28
+**Last Updated**: July 7, 2026
 
 ---
 
@@ -55,8 +55,8 @@ tt-toplike --mode normal # alias — "normal" now maps to Insights
 ```bash
 # from any view, just press:  i
 ```
-- The flagship unified serving **snake** with three telemetry-true states: **cold** (a hungry snake roams the model-catalog starfield — footer "N of M models run on your <arch>"), **loading** (a coiling boxed snake through compile → load → ready, gold burst on Ready), and **serving** (a live dashboard from the server's vLLM `/metrics`: throughput timeline, token-exhaust snake, request swimlanes, stats panel, TT silicon strip)
-- `i` or `Esc` returns to where you came from — it is **not** part of the `v` cycle. Press `l` for the legend, `/explain` for the mapping overlay
+- The flagship unified serving **snake** with three telemetry-true states: **cold** (a hungry snake roams the model-catalog starfield — footer "N of M models run on your <arch>"), **loading** (a coiling boxed snake through compile → load → ready in a synthwave palette + hot-pink burst on Ready, with a footer band explaining the phase and showing **compiled** kernels vs **loaded** weight shards), and **serving** (a live dashboard from the server's vLLM `/metrics`: green **READY** header, throughput timeline, token-exhaust snake, request swimlanes, stats panel, TT silicon strip)
+- `i` while in it jumps to Insights; `Esc` backs out to where you came from. It also sits at the tail of the `v` cycle. Press `l` for the legend, `/explain` for the mapping overlay
 
 ---
 
@@ -123,8 +123,8 @@ tt-toplike --host --mode arcade             # your real CPU/RAM in arcade mode (
 
 | Key | Action |
 |-----|--------|
-| `v` | Cycle visualization modes: Insights → Flow → Starfield → Castle → Arcade → Defrag → Insights |
-| `i` | Toggle the Inference Server Monitor (the serving snake) — from any view; `i`/`Esc` to exit. Not in the `v` cycle |
+| `v` | Cycle visualization modes: Insights → Flow → Starfield → Castle → Arcade → Defrag → Inference → Insights |
+| `i` | Open the Inference Server Monitor from any view; `i` while in it jumps to Insights, `Esc` backs out to where you came from. Also at the tail of the `v` cycle |
 | `l` | Toggle legend overlay for the current view |
 | `b` | Cycle backend live: Hybrid → Sysfs → JSON → Mock → Host → Hybrid. Luwen and Remote are launch-only — the cycle never steps onto them |
 | `r` | Force refresh |

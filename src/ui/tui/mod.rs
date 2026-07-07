@@ -4093,6 +4093,10 @@ fn remote_inference_to_service_state(
         rss_delta: 0,
         kernel_count: 0,
         kernel_delta: 0,
+        // Not carried on the wire — a remote peer streams phase/serving, not the
+        // container's raw compile/load file counts.
+        loaded_count: 0,
+        loaded_delta: 0,
         safetensors_fds: 0,
         readiness,
         top_proc: None,
@@ -5847,6 +5851,8 @@ mod inference_roster_tests {
             rss_delta: 0,
             kernel_count: 0,
             kernel_delta: 0,
+            loaded_count: 0,
+            loaded_delta: 0,
             safetensors_fds: 0,
             readiness: Readiness::Down,
             top_proc: None,
@@ -6306,6 +6312,8 @@ pub fn run_render_bench(
             rss_delta: 0,
             kernel_count: 500,
             kernel_delta: 0,
+            loaded_count: 1400,
+            loaded_delta: 0,
             safetensors_fds: 0,
             readiness: Readiness::Ready { runner: None },
             top_proc: Some("python3".into()),

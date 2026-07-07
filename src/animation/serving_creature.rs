@@ -265,26 +265,33 @@ impl ServingCreature {
             .iter()
             .map(|c| c.arch)
             .find(|a| !a.is_empty() && *a != "Unknown");
-        let title_full = match arch {
-            Some(a) => format!(
-                "{}  serving · READY · up {} · {}",
-                self.label,
-                fmt_elapsed(self.uptime_secs),
-                a
-            ),
-            None => format!(
-                "{}  serving · READY · up {}",
-                self.label,
-                fmt_elapsed(self.uptime_secs)
-            ),
+        // Title is three spans so "READY" reads in green while the rest stays
+        // primary: "{label}  serving · " + green "READY" + " · up {elapsed}[· {arch}]".
+        // The label is budgeted to what's left after the fixed parts so the line
+        // stays within `width` (char-safe, no multibyte slicing); ratatui clips
+        // any residual overflow at the pane edge.
+        let mid = "  serving · ";
+        let ready = "READY";
+        let suffix = match arch {
+            Some(a) => format!(" · up {} · {}", fmt_elapsed(self.uptime_secs), a),
+            None => format!(" · up {}", fmt_elapsed(self.uptime_secs)),
         };
-        let title: String = title_full.chars().take(width).collect();
-        lines.push(Line::from(Span::styled(
-            title,
-            Style::default()
-                .fg(colors::text_primary())
-                .add_modifier(Modifier::BOLD),
-        )));
+        let fixed = mid.chars().count() + ready.chars().count() + suffix.chars().count();
+        let label_budget = width.saturating_sub(fixed);
+        let label: String = self.label.chars().take(label_budget).collect();
+        let primary = Style::default()
+            .fg(colors::text_primary())
+            .add_modifier(Modifier::BOLD);
+        lines.push(Line::from(vec![
+            Span::styled(format!("{label}{mid}"), primary),
+            Span::styled(
+                ready.to_string(),
+                Style::default()
+                    .fg(colors::success())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(suffix, primary),
+        ]));
 
         // --- Body canvas (only the title row is reserved) ---
         let body_rows = height.saturating_sub(1);
@@ -651,6 +658,8 @@ mod tests {
             rss_delta: 0,
             kernel_count: 0,
             kernel_delta: 0,
+            loaded_count: 0,
+            loaded_delta: 0,
             safetensors_fds: 0,
             readiness: Readiness::Ready { runner: None },
             top_proc: None,
@@ -848,5 +857,22 @@ mod tests {
         assert!(text.contains("READY"), "title shows readiness");
         assert!(!text.contains("tok/s"), "no rate shown without metrics");
         assert!(text.contains('—'), "metric rows show em-dash placeholders");
+    }
+
+    #[test]
+    fn ready_word_renders_green() {
+        // The title's "READY" token is styled with the success (green) color,
+        // distinct from the primary-colored rest of the title.
+        let mut c = ServingCreature::new();
+        let svc = ready_svc("Qwen3-32B", 10.0, 8_000_000_000, None);
+        c.update(&svc, 60, &[]);
+        let ready_green = c
+            .render(80, 24)
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .any(|s| {
+                s.content.contains("READY") && s.style.fg == Some(crate::ui::colors::success())
+            });
+        assert!(ready_green, "READY renders in the success/green color");
     }
 }

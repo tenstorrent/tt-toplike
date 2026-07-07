@@ -1,3 +1,21 @@
+tt-toplike (0.7.28) noble; urgency=medium
+
+  * [i] Inference Monitor — compiled vs loaded: the loading footer now shows
+    compiled kernels AND loaded weight shards side by side ("compiled N · loaded
+    M"), so the compile→load handoff is visible (compiled climbs first, loaded
+    follows). Fixes a latent bug: the compiled-kernel count searched
+    $TT_METAL_HOME/built, which is empty on tt-inference-server 0.14.0+ (the JIT
+    cache moved to $HOME/.cache/tt-metal-cache) — it was silently reading 0,
+    which also starved the Compiling-phase signal. Loaded weights are counted
+    from .tensorbin shards under $CACHE_ROOT, and weight-load now registers as
+    the Loading phase even when host RSS is flat (weights land on-device).
+  * [i] serving view: the READY header now renders in green.
+  * Docs: README + QUICK_START refreshed for the education band, the compiled/
+    loaded footer, the synthwave loading palette + hot-pink ready burst, and the
+    updated v/i navigation (Inference is in the v cycle; i pairs with Insights).
+
+ -- Tenstorrent <software@tenstorrent.com>  Tue, 07 Jul 2026 21:00:00 +0000
+
 tt-toplike (0.7.27) noble; urgency=medium
 
   * [i] Inference Monitor — faster detection: the background monitor now probes

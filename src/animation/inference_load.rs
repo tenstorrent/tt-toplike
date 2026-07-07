@@ -154,6 +154,8 @@ pub struct LoadSnake {
     // Footer stats snapshot (read by render, Task 3).
     pub(crate) kernel_count: usize,
     pub(crate) kernel_delta: i64,
+    pub(crate) loaded_count: usize,
+    pub(crate) loaded_delta: i64,
     pub(crate) rss_bytes: u64,
     pub(crate) rss_delta: i64,
     pub(crate) progress: Option<f32>,
@@ -176,6 +178,8 @@ impl LoadSnake {
             started: None,
             kernel_count: 0,
             kernel_delta: 0,
+            loaded_count: 0,
+            loaded_delta: 0,
             rss_bytes: 0,
             rss_delta: 0,
             progress: None,
@@ -203,6 +207,8 @@ impl LoadSnake {
         self.label = featured.label.clone();
         self.kernel_count = featured.kernel_count;
         self.kernel_delta = featured.kernel_delta;
+        self.loaded_count = featured.loaded_count;
+        self.loaded_delta = featured.loaded_delta;
         self.rss_bytes = featured.rss_bytes;
         self.rss_delta = featured.rss_delta;
         self.progress = featured.progress;
@@ -486,19 +492,25 @@ impl LoadSnake {
         }
 
         // --- Footer: determinate shows %, momentum shows signal rates instead ---
+        // "compiled" = JIT kernels (climbs first), "loaded" = weight shards
+        // (climbs during the weight-load phase) — the two are shown side by side
+        // so the compile→load handoff is visible.
         let mut footer = if let Some(p) = self.progress {
             format!(
-                "kernels {}  rss {} {}  {:.0}%",
+                "compiled {}  loaded {}  rss {} {}  {:.0}%",
                 group_thousands(self.kernel_count),
+                group_thousands(self.loaded_count),
                 fmt_bytes(self.rss_bytes),
                 fmt_rate_per_sec(self.rss_delta, self.cadence_secs),
                 p * 100.0,
             )
         } else {
             format!(
-                "kernels {} ↑{}  rss {} ↑{}",
+                "compiled {} ↑{}  loaded {} ↑{}  rss {} ↑{}",
                 group_thousands(self.kernel_count),
                 fmt_rate_per_sec(self.kernel_delta, self.cadence_secs),
+                group_thousands(self.loaded_count),
+                fmt_rate_per_sec(self.loaded_delta, self.cadence_secs),
                 fmt_bytes(self.rss_bytes),
                 fmt_rate_per_sec(self.rss_delta, self.cadence_secs),
             )
@@ -654,6 +666,8 @@ mod tests {
             rss_delta: 0,
             kernel_count: 0,
             kernel_delta: 0,
+            loaded_count: 0,
+            loaded_delta: 0,
             safetensors_fds: 0,
             readiness: Readiness::NotReady,
             top_proc: None,
@@ -881,6 +895,28 @@ mod tests {
             text.contains("1,842") || text.contains("1842"),
             "shows raw kernel count"
         );
+    }
+
+    #[test]
+    fn footer_shows_compiled_and_loaded_counts() {
+        // The loading footer differentiates compiled kernels from loaded weight
+        // shards so the compile→load handoff is visible in one line.
+        let mut s = LoadSnake::new(90, 16);
+        let mut c = svc(Phase::Loading);
+        c.kernel_count = 1658;
+        c.kernel_delta = 12;
+        c.loaded_count = 1472;
+        c.loaded_delta = 40;
+        s.update(&c, 5);
+        let text: String = s
+            .render()
+            .iter()
+            .flat_map(|ln| ln.spans.iter().map(|sp| sp.content.to_string()))
+            .collect();
+        assert!(text.contains("compiled"), "footer labels the compile count");
+        assert!(text.contains("loaded"), "footer labels the load count");
+        assert!(text.contains("1,658"), "shows compiled kernel count");
+        assert!(text.contains("1,472"), "shows loaded weight count");
     }
 
     #[test]

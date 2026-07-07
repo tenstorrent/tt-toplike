@@ -52,10 +52,22 @@ pub const CADENCE_SECS: u32 = TICK_INTERVAL.as_secs() as u32;
 const NEVER_OBSERVED_KERNEL_COUNT: usize = i64::MAX as usize;
 
 /// The shell command run inside the container to count compiled-kernel
-/// artifacts. `$TT_METAL_HOME` is expanded by the container's own shell (via
-/// `sh -c`), not substituted here — we only use the host-side `env` dump to
-/// decide *whether* to run this at all (see `build_sample`).
-const KERNEL_FIND_CMD: &str = "find \"$TT_METAL_HOME/built\" -name '*.dephash' 2>/dev/null";
+/// artifacts (one `.dephash` per JIT-compiled kernel program). Both roots are
+/// searched because the location moved across tt-inference-server releases:
+/// older images cached under `$TT_METAL_HOME/built`, while 0.14.0+ uses the
+/// per-user JIT cache at `$HOME/.cache/tt-metal-cache` (the old `built/` is
+/// empty there, which silently zeroed this count before). `$TT_METAL_HOME`/
+/// `$HOME` are expanded by the container's own shell (via `sh -c`), not here —
+/// the host-side `env` dump only decides *whether* to run this (see `build_sample`).
+const KERNEL_FIND_CMD: &str =
+    "find \"$TT_METAL_HOME/built\" \"$HOME/.cache/tt-metal-cache\" -name '*.dephash' 2>/dev/null";
+
+/// The shell command that counts *loaded* weight shards — the device-format
+/// tensor binaries (`.tensorbin`) the runtime writes under `$CACHE_ROOT` as it
+/// converts and loads a model's weights. Distinct from compiled kernels: this
+/// climbs during the weight-load phase, after (and alongside) the compile
+/// phase. Gated on `$CACHE_ROOT` being set (see `build_sample`).
+const LOADED_FIND_CMD: &str = "find \"$CACHE_ROOT\" -name '*.tensorbin' 2>/dev/null";
 /// `ps` invocation whose first data row is the container's top CPU consumer.
 const TOP_PROC_CMD: &str = "ps -eo pcpu,rss,comm --sort=-pcpu";
 
@@ -72,6 +84,11 @@ fn fresh_state(key: &str, label: &str) -> ServiceState {
         rss_delta: 0,
         kernel_count: NEVER_OBSERVED_KERNEL_COUNT,
         kernel_delta: 0,
+        // Same never-observed sentinel: a rediscovered service may already have
+        // `.tensorbin` shards from a prior run, so its first count must not read
+        // as "N loaded this session".
+        loaded_count: NEVER_OBSERVED_KERNEL_COUNT,
+        loaded_delta: 0,
         safetensors_fds: 0,
         readiness: Readiness::Down,
         top_proc: None,
@@ -100,14 +117,16 @@ pub(crate) fn fold_tick(
 ) -> ServiceState {
     let rss_delta = sample.rss_bytes as i64 - prev.rss_bytes as i64;
     let kernel_delta = sample.kernel_count as i64 - prev.kernel_count as i64;
+    let loaded_delta = sample.loaded_count as i64 - prev.loaded_count as i64;
     let mut phase = Phase::derive(
         kernel_delta,
         sample.python_alive,
         rss_delta,
+        loaded_delta,
         &sample.readiness,
     );
 
-    let moved = kernel_delta > 0 || rss_delta > 0;
+    let moved = kernel_delta > 0 || rss_delta > 0 || loaded_delta > 0;
     let flat_ticks = if moved { 0 } else { prev.flat_ticks + 1 };
     if is_alarm(flat_ticks, cadence_secs, &sample.readiness) {
         phase = Phase::Alarm;
@@ -137,6 +156,8 @@ pub(crate) fn fold_tick(
         rss_delta,
         kernel_count: sample.kernel_count,
         kernel_delta,
+        loaded_count: sample.loaded_count,
+        loaded_delta,
         safetensors_fds: sample.safetensors_fds,
         readiness: sample.readiness,
         top_proc: sample.top_proc,
@@ -162,6 +183,13 @@ fn build_sample(
     let env = probe.env(container);
     let kernel_count = if parse_env_var(&env, "TT_METAL_HOME").is_some() {
         count_lines(&probe.exec(container, KERNEL_FIND_CMD))
+    } else {
+        0
+    };
+    // Loaded weight shards live under `$CACHE_ROOT`; only probe when that's set
+    // (e.g. `prompt-server` has no such cache and would pay for a doomed `find`).
+    let loaded_count = if parse_env_var(&env, "CACHE_ROOT").is_some() {
+        count_lines(&probe.exec(container, LOADED_FIND_CMD))
     } else {
         0
     };
@@ -194,6 +222,7 @@ fn build_sample(
         cpu_pct,
         rss_bytes,
         kernel_count,
+        loaded_count,
         safetensors_fds: 0, // trail: FD-count probe not wired yet
         readiness,
         top_proc,
@@ -434,6 +463,7 @@ mod tests {
             cpu_pct: state.cpu_pct,
             rss_bytes: state.rss_bytes,
             kernel_count: state.kernel_count,
+            loaded_count: state.loaded_count,
             safetensors_fds: state.safetensors_fds,
             readiness: state.readiness.clone(),
             top_proc: state.top_proc.clone(),
@@ -451,6 +481,7 @@ mod tests {
             cpu_pct: 0.0,
             rss_bytes: 0,
             kernel_count: 0,
+            loaded_count: 0,
             safetensors_fds: 0,
             readiness: Readiness::NotReady,
             top_proc: None,
@@ -467,6 +498,7 @@ mod tests {
             cpu_pct: 33.0,
             rss_bytes: 9_000_000_000,
             kernel_count: 500,
+            loaded_count: 0,
             safetensors_fds: 2,
             readiness: Readiness::NotReady,
             top_proc: Some("python3".into()),

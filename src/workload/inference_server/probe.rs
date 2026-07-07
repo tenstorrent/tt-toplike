@@ -116,6 +116,9 @@ pub struct TickSample {
     pub cpu_pct: f32,
     pub rss_bytes: u64,
     pub kernel_count: usize,
+    /// Count of loaded weight shards (`.tensorbin` under `$CACHE_ROOT`) — the
+    /// weight-load-phase counterpart to `kernel_count`'s compile signal.
+    pub loaded_count: usize,
     pub safetensors_fds: usize,
     pub readiness: Readiness,
     pub top_proc: Option<String>,

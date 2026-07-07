@@ -321,11 +321,11 @@ tt-toplike --devices 0,2
 |-----|--------|
 | `q` / `ESC` | Quit |
 | `r` | Force refresh |
-| `v` | Cycle visualization mode: Insights → Flow → Starfield → Castle → Arcade → Defrag → Insights |
+| `v` | Cycle visualization mode: Insights → Flow → Starfield → Castle → Arcade → Defrag → Inference → Insights |
 | `a` | Jump directly to Arcade |
 | `d` | Jump directly to Defrag |
 | `g` | Jump directly to Grid (Insights table) |
-| `i` | Toggle the Inference Server Monitor (the unified serving snake) — enter from **any** view, `i` or `Esc` to return. Not part of the `v` cycle. |
+| `i` | Open the Inference Server Monitor from **any** view; `i` while in it jumps to Insights (a quick back-and-forth), `Esc` backs out to where you came from. Also sits at the tail of the `v` cycle. |
 | `b` | Cycle backend (live switching): Hybrid → Sysfs → JSON → Mock → Host → Hybrid. Luwen and Remote are launch-only — the cycle never steps onto them. |
 | `/` | Command bar — type `/mode defrag`, `/fps 30`, `/theme grayskull`, `/quit`, etc. |
 | `l` | Toggle legend overlay (what each signal means in the current mode) |
@@ -356,16 +356,16 @@ Command bar verbs (type `/` then the verb): `/fps <1–120>`, `/datafps <1–30>
 
 ### Inference Server Monitor (`[i]`)
 
-Press `i` from any view to open the flagship **Inference Server Monitor** — one unified "snake" that reflects your whole fleet through three telemetry-true states. It's not a mode in the `v` rotation; `i` (or `Esc`) toggles it in and out, landing you back wherever you were. Press `l` for the legend, `/explain` for the mapping overlay.
+Press `i` from any view to open the flagship **Inference Server Monitor** — one unified "snake" that reflects your whole fleet through three telemetry-true states. `i` while in it jumps to Insights (a quick back-and-forth); `Esc` backs out to wherever you came from; and it also sits at the tail of the `v` rotation. Press `l` for the legend, `/explain` for the mapping overlay.
 
 - **Cold** (nothing loading or serving) — a hungry snake roams a drifting starfield of the **model catalog**. The catalog is a bundled compatibility snapshot (the offline floor) refreshed in the background from Tenstorrent's live copy, and the footer tallies `N of M models run on your <arch>` for the silicon you actually have.
-- **Loading** (a model is compiling/loading) — the snake coils into a boxed loading journey through `compile → load → ready`, drawn with ANSI shading, capped by a gold burst the instant the model reports Ready.
-- **Serving** (a model is Ready) — a live dashboard driven by the server's vLLM `/metrics`: a throughput timeline, a token-exhaust snake, per-request swimlanes, a stats panel, and a TT silicon strip (one reading per detected chip).
+- **Loading** (a model is compiling/loading) — the snake coils into a boxed loading journey through `compile → load → ready` in a synthwave palette (cyan→violet→magenta→pink), capped by a hot-pink burst the instant the model reports Ready. A footer band explains what the current phase is actually doing (drawn from in-tree education copy) and shows live progress — **compiled** kernels and **loaded** weight shards side by side, so you can watch the compile count climb first and the load count follow.
+- **Serving** (a model is Ready) — a live dashboard driven by the server's vLLM `/metrics`: a green **READY** header, a throughput timeline, a token-exhaust snake, per-request swimlanes, a stats panel, and a TT silicon strip (one reading per detected chip).
 
 ```
    cold ······· hungry snake roams the model-catalog starfield
                 footer: "7 of 42 models run on your Blackhole"
-loading ▓▒░ compile → load → ready ░▒▓  (gold burst on Ready)
+loading ▓▒░ compile → load → ready ░▒▓  compiled 1,658 · loaded 1,472
 serving ▶───────  tok/s ▁▂▅▇█▅▂  ⚔ swimlanes · live vLLM /metrics
 ```
 

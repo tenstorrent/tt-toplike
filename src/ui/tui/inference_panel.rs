@@ -128,6 +128,8 @@ mod tests {
             rss_delta: 700 * 1024 * 1024,
             kernel_count: 500,
             kernel_delta: 0,
+            loaded_count: 1400,
+            loaded_delta: 0,
             safetensors_fds: 3,
             readiness: Readiness::NotReady,
             top_proc: Some("python3".to_string()),

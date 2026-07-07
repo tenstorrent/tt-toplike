@@ -285,6 +285,8 @@ mod tests {
             rss_delta: 0,
             kernel_count: 0,
             kernel_delta: 0,
+            loaded_count: 0,
+            loaded_delta: 0,
             safetensors_fds: 0,
             readiness: Readiness::NotReady,
             top_proc: None,
