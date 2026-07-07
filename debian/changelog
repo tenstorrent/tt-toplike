@@ -1,3 +1,17 @@
+tt-toplike (0.7.26) noble; urgency=medium
+
+  * [i] Inference Monitor — education band: while a model loads, a footer band
+    under the loading snake now explains what the current phase is actually
+    doing (Compiling execution graphs / Loading model weights / stalled), with
+    a duration hint, the model's tagline + key stats, and a rotating "did you
+    know" TT fact. The copy is a proof-of-concept education set brought in-tree
+    (owned here, not synced) under assets/education/, embedded at build time.
+    The band is phase-synced (it describes the same service the snake features),
+    char-safe, and degrades gracefully on small terminals — dropping the fact,
+    then the header, then itself, so the snake always fits above the status bar.
+
+ -- Tenstorrent <software@tenstorrent.com>  Tue, 07 Jul 2026 15:00:00 +0000
+
 tt-toplike (0.7.25) noble; urgency=medium
 
   * Startup latency: the TUI painted its first frame ~1.3s after launch (and
