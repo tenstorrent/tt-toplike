@@ -1,0 +1,32 @@
+{
+  "initialization": {
+    "title": "Starting up",
+    "explanation": "The Docker container is being created and the runtime environment is initializing. The Tenstorrent drivers are loading and verifying your hardware is ready to receive work.",
+    "duration_hint": "~5–15s"
+  },
+  "setup": {
+    "title": "Configuring the inference server",
+    "explanation": "The API server is starting and loading its configuration. It's reading your model's settings — quantization format, context length, parallelism strategy — so it knows how to slice the work across Tensix cores.",
+    "duration_hint": "~10–30s"
+  },
+  "model_preparation": {
+    "title": "Loading model weights",
+    "explanation": "The model's billions of learned parameters are being read from disk and transferred to the chip's SRAM over PCIe. A 70B model weighs ~35 GB in 4-bit format — this is why large models take longer here.",
+    "duration_hint": "30s – several hours if downloading for the first time"
+  },
+  "container_setup": {
+    "title": "Compiling execution graphs",
+    "explanation": "TT Metal compiles separate execution graphs for 10 different context lengths — from 128 to 65,000+ tokens. Once captured, every future inference replays a pre-built trace with zero Python overhead. This one-time cost makes all subsequent requests fast.",
+    "duration_hint": "1–5 min depending on model size"
+  },
+  "finalizing": {
+    "title": "Warming up",
+    "explanation": "The model is running a few silent test passes to pre-fill caches and ensure the hardware is at operating temperature. The first real request will be fast because this warmup already happened.",
+    "duration_hint": "~15–30s"
+  },
+  "complete": {
+    "title": "Ready",
+    "explanation": "The model is live and accepting requests.",
+    "duration_hint": ""
+  }
+}

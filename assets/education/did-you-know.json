@@ -1,0 +1,91 @@
+{
+  "cards": [
+    {
+      "headline": "Tensix: 108 independent compute cores per chip",
+      "body": "Each TT chip packs 108 Tensix cores in a 12×9 grid. Every core has 1.5 MB local SRAM and a matrix/vector unit that runs independently — no shared register file, no cache coherence overhead. This is why TT hardware scales linearly with chip count.",
+      "tag": "Hardware"
+    },
+    {
+      "headline": "100 Gb/s on-package Ethernet",
+      "body": "TT chips connect via Ethernet fabric at 100 Gb/s. An allreduce across 4 chips takes ~1 µs — far less than one transformer layer's compute time. No proprietary interconnect license required.",
+      "tag": "Hardware"
+    },
+    {
+      "headline": "TT Metal: zero Python overhead at inference",
+      "body": "TT Metal compiles ops into a static kernel-dispatch sequence. At inference time there is zero Python GIL overhead — the compiled trace replays RISC-V dispatches directly. This is why the trace capture stage during loading is worth the wait.",
+      "tag": "Software"
+    },
+    {
+      "headline": "Trace capture = JIT compilation",
+      "body": "The trace_capture stage compiles separate graphs for 10 context lengths (128 → 65408 tokens). After capture, every inference replays a pre-built trace — no re-compilation per request. The first request after loading is just as fast as the thousandth.",
+      "tag": "Inference"
+    },
+    {
+      "headline": "Paged KV attention keeps batches full",
+      "body": "KV cache is divided into 16-token blocks, eliminating fragmentation. New requests join mid-generation without stalling existing decodes — hardware utilization stays high across concurrent users.",
+      "tag": "Inference"
+    },
+    {
+      "headline": "Wormhole vs Blackhole generations",
+      "body": "Wormhole (N150/N300/T3K) shipped 2022. Blackhole (P100/P150/P300) shipped 2024 with larger per-core SRAM, faster interconnect, and better int8 throughput. Both run the same TT Metal stack.",
+      "tag": "Hardware"
+    },
+    {
+      "headline": "Column-parallel weight sharding",
+      "body": "Attention matrices are sharded column-wise across chips: each holds Q_proj of shape [hidden × (hidden÷N)]. Activations flow over Ethernet fabric — not through host DRAM — reducing round-trip latency ~100×.",
+      "tag": "Architecture"
+    },
+    {
+      "headline": "GQA reduces KV bandwidth 8×",
+      "body": "Grouped-Query Attention shares KV heads across query groups. Llama-3 uses 8 KV heads for 64 query heads — 8× smaller KV cache and matching reduction in decode memory bandwidth. This is why Llama models can sustain high batch sizes.",
+      "tag": "Architecture",
+      "families": ["Llama"]
+    },
+    {
+      "headline": "HF cache: no re-download after first pull",
+      "body": "Model weights cached in ~/.cache/huggingface are mounted read-only into the Docker container. Weights stream disk→chip at ~7 GB/s via PCIe — no internet required after the first download.",
+      "tag": "Workflow"
+    },
+    {
+      "headline": "tt-smi: device management in one command",
+      "body": "'tt-smi -s' gives a JSON snapshot of temperature, utilization, and firmware. 'tt-smi -r' soft-resets all TT devices — required when switching between model families that use incompatible memory layouts.",
+      "tag": "Workflow"
+    },
+    {
+      "headline": "Mixture of Experts: only 13B active per token",
+      "body": "Mixtral 8×7B has 45B total parameters but only 13B are active per token. The MoE router selects 2 of 8 expert FFN blocks per token — same quality as a dense 13B model at a fraction of the compute.",
+      "tag": "Architecture",
+      "families": ["Mixtral"]
+    },
+    {
+      "headline": "Whisper was trained on 680,000 hours of audio",
+      "body": "OpenAI's Whisper is a sequence-to-sequence transformer trained on 680K hours of multilingual audio. The large-v3 variant supports 99 languages and achieves near-human accuracy on clean speech.",
+      "tag": "Model",
+      "families": ["Whisper"]
+    },
+    {
+      "headline": "Vision transformers: no convolutions needed",
+      "body": "ViT splits an image into 16×16 patches and treats them as tokens — the same self-attention mechanism as a language model, applied to image patches. Google's original ViT-Base uses 86M parameters.",
+      "tag": "Architecture",
+      "families": ["ViT"]
+    },
+    {
+      "headline": "FLUX uses flow matching, not diffusion",
+      "body": "FLUX.1 uses flow matching instead of the traditional DDPM diffusion process. This allows high-quality generation in as few as 4 steps (schnell variant) vs. 20–50 steps for older diffusion models.",
+      "tag": "Architecture",
+      "families": ["FLUX"]
+    },
+    {
+      "headline": "Embeddings turn text into searchable geometry",
+      "body": "BGE and Qwen3-Embedding models convert text into vectors where semantic similarity = cosine similarity. Two sentences about the same topic land close together in this space — even if they share no words.",
+      "tag": "Model",
+      "families": ["BGE", "Qwen3-Embedding"]
+    },
+    {
+      "headline": "State-space models: no attention required",
+      "body": "Mamba uses a selective state-space model instead of attention. Inference scales linearly with sequence length (not quadratically), making it fast for very long contexts with a constant-size state.",
+      "tag": "Architecture",
+      "families": ["Mamba"]
+    }
+  ]
+}

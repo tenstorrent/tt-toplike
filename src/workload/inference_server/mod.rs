@@ -6,6 +6,7 @@
 //! `docs/superpowers/specs/2026-07-02-tt-inference-server-monitoring-design.md`.
 
 mod detect;
+pub mod education;
 mod logs;
 pub mod metrics;
 mod monitor;

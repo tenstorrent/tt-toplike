@@ -1,0 +1,513 @@
+{
+ "Llama-3.3-70B-Instruct": {
+  "tagline": "Stronger structured tasks, tool use, and reasoning than prior Llama generations.",
+  "key_stats": {
+   "context": "128K",
+   "params": "70B",
+   "license": "Apache 2.0"
+  }
+ },
+ "Llama-3.1-70B-Instruct": {
+  "tagline": "Complex reasoning, coding, and agentic pipelines \u2014 no license restrictions.",
+  "key_stats": {
+   "context": "128K",
+   "params": "70B",
+   "license": "Llama 3.1 Community"
+  }
+ },
+ "Llama-3.1-8B-Instruct": {
+  "tagline": "Multilingual instruction following, tool use, and function calling.",
+  "key_stats": {
+   "context": "128K",
+   "params": "8B",
+   "license": "Llama 3.1 Community"
+  }
+ },
+ "Mistral-7B-Instruct-v0.3": {
+  "tagline": "Function-calling and instruction following for production and agentic use.",
+  "key_stats": {
+   "context": "32K",
+   "params": "7B",
+   "license": "Apache 2.0"
+  }
+ },
+ "Mixtral-8x7B-Instruct-v0.1": {
+  "tagline": "Instruction-tuned MoE \u2014 strong reasoning at 13B active-token compute.",
+  "key_stats": {
+   "context": "32K",
+   "params": "45B total / 13B active",
+   "license": "Apache 2.0"
+  }
+ },
+ "whisper-large-v3": {
+  "tagline": "99 languages, 680K hours of training audio \u2014 built for robust speech recognition.",
+  "key_stats": {
+   "languages": "99",
+   "params": "1.5B",
+   "training_hours": "680K"
+  }
+ },
+ "Qwen2.5-72B-Instruct": {
+  "tagline": "Instruction-tuned across Chinese, English, coding, and structured output at scale.",
+  "key_stats": {
+   "context": "128K",
+   "params": "72B",
+   "license": "Qwen License"
+  }
+ },
+ "DeepSeek-R1-0528": {
+  "tagline": "Reasons via extended chain-of-thought \u2014 built for math and science at fully open weights.",
+  "key_stats": {
+   "params": "685B",
+   "license": "MIT",
+   "specialty": "Chain-of-thought"
+  }
+ },
+ "Wan-2.2-T2V-14B": {
+  "tagline": "High-quality text-to-video generation at 14B parameters.",
+  "key_stats": {
+   "params": "14B",
+   "output": "480p video",
+   "license": "Apache 2.0"
+  }
+ },
+ "FLUX.1-schnell": {
+  "tagline": "Fast, high-quality text-to-image generation.",
+  "key_stats": {
+   "output": "Up to 1024px",
+   "steps": "1\u20134",
+   "license": "Apache 2.0"
+  }
+ },
+ "SpeechT5-TTS": {
+  "tagline": "Neural text-to-speech with natural prosody.",
+  "key_stats": {
+   "architecture": "Encoder-decoder",
+   "license": "MIT"
+  }
+ },
+ "DeepSeek-R1-Distill-Llama-70B": {
+  "tagline": "DeepSeek's reasoning distilled into the Llama 3 architecture.",
+  "key_stats": {
+   "params": "70B",
+   "license": "MIT",
+   "specialty": "Distilled reasoning"
+  }
+ },
+ "distil-large-v3": {
+  "tagline": "Half the size of Whisper Large v3 \u2014 nearly the same accuracy.",
+  "key_stats": {
+   "params": "756M",
+   "speedup": "5.8\u00d7",
+   "license": "MIT"
+  }
+ },
+ "FLUX.1-dev": {
+  "tagline": "The full-quality FLUX model \u2014 highest fidelity, slowest generation.",
+  "key_stats": {
+   "output": "Up to 2048px",
+   "steps": "20\u201350",
+   "license": "FLUX.1-dev"
+  }
+ },
+ "Llama-3.1-70B": {
+  "tagline": "The base model \u2014 ideal for fine-tuning and custom instruction formats.",
+  "key_stats": {
+   "context": "128K",
+   "params": "70B",
+   "license": "Llama 3.1 Community"
+  }
+ },
+ "Llama-3.1-8B": {
+  "tagline": "The base 8B \u2014 efficient, open weights, ready to fine-tune.",
+  "key_stats": {
+   "context": "128K",
+   "params": "8B",
+   "license": "Llama 3.1 Community"
+  }
+ },
+ "mochi-1-preview": {
+  "tagline": "Open-source text-to-video at 10B parameters.",
+  "key_stats": {
+   "params": "10B",
+   "license": "Apache 2.0",
+   "output": "480p video"
+  }
+ },
+ "Motif-Image-6B-Preview": {
+  "tagline": "Native image generation from Motif Technologies \u2014 6B parameter preview model.",
+  "key_stats": {
+   "params": "6B",
+   "provider": "Motif Technologies",
+   "stage": "Preview"
+  }
+ },
+ "Qwen3-32B": {
+  "tagline": "Qwen3's largest dense model \u2014 thinking mode for hard problems, fast mode for everything else.",
+  "key_stats": {
+   "context": "128K",
+   "params": "32B",
+   "license": "Apache 2.0"
+  }
+ },
+ "stable-diffusion-3.5-large": {
+  "tagline": "Stability AI's most capable SD3 model \u2014 typography, style, and detail.",
+  "key_stats": {
+   "params": "8B",
+   "license": "Stability Non-Commercial",
+   "output": "Up to 1024px"
+  }
+ },
+ "stable-diffusion-xl-1.0-inpainting-0.1": {
+  "tagline": "SDXL inpainting \u2014 fill, replace, and remove objects in existing images.",
+  "key_stats": {
+   "base": "SDXL 1.0",
+   "task": "Inpainting",
+   "license": "SDXL Research"
+  }
+ },
+ "stable-diffusion-xl-base-1.0": {
+  "tagline": "The SDXL base \u2014 wide ecosystem, strong quality at 1024px.",
+  "key_stats": {
+   "params": "2.6B",
+   "output": "1024px",
+   "license": "SDXL Research"
+  }
+ },
+ "stable-diffusion-xl-base-1.0-img-2-img": {
+  "tagline": "SDXL image-to-image \u2014 guide generation with a reference image.",
+  "key_stats": {
+   "base": "SDXL 1.0",
+   "task": "Image-to-image",
+   "license": "SDXL Research"
+  }
+ },
+ "Wan2.2-T2V-A14B-Diffusers": {
+  "tagline": "Wan 2.2 \u2014 high-motion-quality video from text at 14B scale.",
+  "key_stats": {
+   "params": "14B",
+   "output": "480p video",
+   "license": "Apache 2.0"
+  }
+ },
+ "Llama-3.2-11B-Vision": {
+  "tagline": "Llama 3.2 with vision \u2014 image understanding at 11B parameters.",
+  "key_stats": {
+   "context": "128K",
+   "params": "11B",
+   "license": "Llama 3.2 Community"
+  }
+ },
+ "Llama-3.2-11B-Vision-Instruct": {
+  "tagline": "Instruction-tuned Llama 3.2 Vision \u2014 follow visual instructions naturally.",
+  "key_stats": {
+   "context": "128K",
+   "params": "11B",
+   "license": "Llama 3.2 Community"
+  }
+ },
+ "Llama-3.2-1B": {
+  "tagline": "1B base model \u2014 fits on a single chip, fast inference, easy to fine-tune.",
+  "key_stats": {
+   "context": "128K",
+   "params": "1B",
+   "license": "Llama 3.2 Community"
+  }
+ },
+ "Llama-3.2-1B-Instruct": {
+  "tagline": "1B instruction model \u2014 lowest latency, deployable anywhere.",
+  "key_stats": {
+   "context": "128K",
+   "params": "1B",
+   "license": "Llama 3.2 Community"
+  }
+ },
+ "Llama-3.2-3B": {
+  "tagline": "3B base model \u2014 a sweet spot between size and quality.",
+  "key_stats": {
+   "context": "128K",
+   "params": "3B",
+   "license": "Llama 3.2 Community"
+  }
+ },
+ "Llama-3.2-3B-Instruct": {
+  "tagline": "Instruction-tuned 3B \u2014 chat quality in a small, fast package.",
+  "key_stats": {
+   "context": "128K",
+   "params": "3B",
+   "license": "Llama 3.2 Community"
+  }
+ },
+ "Llama-3.2-90B-Vision": {
+  "tagline": "90B multimodal base \u2014 the most capable open vision-language model.",
+  "key_stats": {
+   "context": "128K",
+   "params": "90B",
+   "license": "Llama 3.2 Community"
+  }
+ },
+ "Llama-3.2-90B-Vision-Instruct": {
+  "tagline": "90B vision instruction model \u2014 complex visual tasks, naturally prompted.",
+  "key_stats": {
+   "context": "128K",
+   "params": "90B",
+   "license": "Llama 3.2 Community"
+  }
+ },
+ "Qwen-Image": {
+  "tagline": "Qwen's visual understanding model for general image tasks.",
+  "key_stats": {
+   "provider": "Alibaba",
+   "modalities": "Text + Image",
+   "license": "Qwen License"
+  }
+ },
+ "Qwen-Image-2512": {
+  "tagline": "Qwen Image with enhanced high-resolution understanding.",
+  "key_stats": {
+   "provider": "Alibaba",
+   "resolution": "High-res",
+   "license": "Qwen License"
+  }
+ },
+ "Qwen2.5-72B": {
+  "tagline": "72B base model \u2014 Alibaba's strongest open-weights Qwen generation.",
+  "key_stats": {
+   "context": "128K",
+   "params": "72B",
+   "license": "Qwen License"
+  }
+ },
+ "Qwen2.5-VL-72B-Instruct": {
+  "tagline": "72B instruction VLM \u2014 Qwen's most capable multimodal model.",
+  "key_stats": {
+   "context": "128K",
+   "params": "72B",
+   "license": "Qwen License"
+  }
+ },
+ "Qwen3-8B": {
+  "tagline": "Qwen3 8B \u2014 thinking and non-thinking modes in a compact package.",
+  "key_stats": {
+   "context": "128K",
+   "params": "8B",
+   "license": "Apache 2.0"
+  }
+ },
+ "QwQ-32B": {
+  "tagline": "Qwen's reasoning model \u2014 extended deliberation for hard problems.",
+  "key_stats": {
+   "context": "32K",
+   "params": "32B",
+   "license": "Apache 2.0"
+  }
+ },
+ "AFM-4.5B": {
+  "tagline": "Arcee AI's 4.5B foundation model \u2014 small, efficient, enterprise-grade.",
+  "key_stats": {
+   "params": "4.5B",
+   "provider": "Arcee AI",
+   "focus": "Enterprise"
+  }
+ },
+ "bge-large-en-v1.5": {
+  "tagline": "BGE Large \u2014 high-quality English text embeddings for retrieval.",
+  "key_stats": {
+   "params": "335M",
+   "dim": "1024",
+   "license": "MIT"
+  }
+ },
+ "efficientnet": {
+  "tagline": "Efficient CNN scaling \u2014 strong image classification with minimal compute.",
+  "key_stats": {
+   "architecture": "EfficientNet",
+   "task": "Image classification",
+   "license": "Apache 2.0"
+  }
+ },
+ "gemma-3-1b-it": {
+  "tagline": "Google's smallest Gemma 3 instruction model \u2014 runs on one chip.",
+  "key_stats": {
+   "context": "32K",
+   "params": "1B",
+   "license": "Gemma Terms"
+  }
+ },
+ "gemma-3-27b-it": {
+  "tagline": "Google's 27B instruction Gemma 3 \u2014 strong reasoning with long context.",
+  "key_stats": {
+   "context": "128K",
+   "params": "27B",
+   "license": "Gemma Terms"
+  }
+ },
+ "gemma-3-4b-it": {
+  "tagline": "Gemma 3 4B instruction \u2014 capable and compact.",
+  "key_stats": {
+   "context": "128K",
+   "params": "4B",
+   "license": "Gemma Terms"
+  }
+ },
+ "gpt-oss-120b": {
+  "tagline": "OpenAI's open-source 120B model \u2014 reasoning at scale.",
+  "key_stats": {
+   "params": "120B",
+   "provider": "OpenAI",
+   "license": "Open"
+  }
+ },
+ "gpt-oss-20b": {
+  "tagline": "OpenAI's 20B open-source model \u2014 quality at a deployable scale.",
+  "key_stats": {
+   "params": "20B",
+   "provider": "OpenAI",
+   "license": "Open"
+  }
+ },
+ "medgemma-27b-it": {
+  "tagline": "Google's 27B medical-domain Gemma \u2014 clinical reasoning and biomedical text.",
+  "key_stats": {
+   "context": "128K",
+   "params": "27B",
+   "domain": "Medical"
+  }
+ },
+ "medgemma-4b-it": {
+  "tagline": "4B medical Gemma \u2014 fast clinical text processing.",
+  "key_stats": {
+   "context": "128K",
+   "params": "4B",
+   "domain": "Medical"
+  }
+ },
+ "mobilenetv2": {
+  "tagline": "Lightweight image classification \u2014 runs on a single chip with high throughput.",
+  "key_stats": {
+   "params": "3.4M",
+   "task": "Classification",
+   "license": "Apache 2.0"
+  }
+ },
+ "Qwen2.5-7B": {
+  "tagline": "Qwen2.5 7B base \u2014 compact, multilingual, and code-strong.",
+  "key_stats": {
+   "context": "128K",
+   "params": "7B",
+   "license": "Apache 2.0"
+  }
+ },
+ "Qwen2.5-7B-Instruct": {
+  "tagline": "Qwen2.5 7B instruction model \u2014 multilingual, coding, and structured tasks.",
+  "key_stats": {
+   "context": "128K",
+   "params": "7B",
+   "license": "Apache 2.0"
+  }
+ },
+ "Qwen2.5-Coder-32B-Instruct": {
+  "tagline": "Qwen's 32B code-specialized model \u2014 generation, debugging, and explanation.",
+  "key_stats": {
+   "context": "128K",
+   "params": "32B",
+   "license": "Apache 2.0"
+  }
+ },
+ "Qwen2.5-VL-32B-Instruct": {
+  "tagline": "32B vision-language model from Qwen \u2014 detailed image analysis.",
+  "key_stats": {
+   "context": "128K",
+   "params": "32B",
+   "license": "Qwen License"
+  }
+ },
+ "Qwen2.5-VL-3B-Instruct": {
+  "tagline": "Compact 3B VLM \u2014 vision-language on a single chip.",
+  "key_stats": {
+   "context": "128K",
+   "params": "3B",
+   "license": "Qwen License"
+  }
+ },
+ "Qwen2.5-VL-7B-Instruct": {
+  "tagline": "7B vision-language model \u2014 solid quality at an accessible size.",
+  "key_stats": {
+   "context": "128K",
+   "params": "7B",
+   "license": "Qwen License"
+  }
+ },
+ "Qwen3-Embedding-4B": {
+  "tagline": "Qwen3's 4B embedding model \u2014 dense text retrieval at scale.",
+  "key_stats": {
+   "params": "4B",
+   "provider": "Alibaba",
+   "license": "Apache 2.0"
+  }
+ },
+ "Qwen3-Embedding-8B": {
+  "tagline": "Qwen3's 8B embedding model \u2014 highest-quality dense vectors from the Qwen family.",
+  "key_stats": {
+   "params": "8B",
+   "provider": "Alibaba",
+   "license": "Apache 2.0"
+  }
+ },
+ "resnet-50": {
+  "tagline": "ResNet-50 \u2014 the canonical residual network for image classification.",
+  "key_stats": {
+   "params": "25M",
+   "task": "Classification",
+   "license": "Apache 2.0"
+  }
+ },
+ "segformer": {
+  "tagline": "Hierarchical transformer for efficient semantic segmentation.",
+  "key_stats": {
+   "task": "Segmentation",
+   "license": "Apache 2.0",
+   "architecture": "Transformer"
+  }
+ },
+ "unet": {
+  "tagline": "The original encoder-decoder segmentation network \u2014 still the medical AI standard.",
+  "key_stats": {
+   "task": "Segmentation",
+   "domain": "Biomedical",
+   "license": "MIT"
+  }
+ },
+ "vit": {
+  "tagline": "Vision Transformer \u2014 patch-based image classification without convolutions.",
+  "key_stats": {
+   "architecture": "Transformer",
+   "task": "Classification",
+   "license": "Apache 2.0"
+  }
+ },
+ "vovnet": {
+  "tagline": "One-shot aggregation CNN \u2014 faster than VGG, stronger than MobileNet.",
+  "key_stats": {
+   "architecture": "VoVNet",
+   "task": "Classification/Detection",
+   "license": "Apache 2.0"
+  }
+ },
+ "Qwen3-VL-32B-Instruct": {
+  "tagline": "Qwen3's flagship vision-language model \u2014 32B, instruction-tuned.",
+  "key_stats": {
+   "context": "128K",
+   "params": "32B",
+   "license": "Apache 2.0"
+  }
+ },
+ "Qwen3-4B": {
+  "tagline": "Qwen3 4B \u2014 compact dual-mode model for thinking and fast inference.",
+  "key_stats": {
+   "context": "128K",
+   "params": "4B",
+   "license": "Apache 2.0"
+  }
+ }
+}
