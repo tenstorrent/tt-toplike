@@ -114,6 +114,26 @@ fn main() {
     // Select and initialize backend based on CLI arguments
     let backend_type = cli.effective_backend();
 
+    // Interactive TUI is the common path, and `run_tui` creates and owns its
+    // backend exactly once (via `factory::create_backend`, which does its own
+    // Auto cascade). Building a backend HERE too — as the per-type arms below
+    // do — would initialize it two or three times before the first frame, and
+    // each Sysfs/Hybrid init shells out to `tt-smi` (~0.4s), so the old flow
+    // paid ~1.3s (and 3× the tt-smi load under concurrent instances) before
+    // painting. Route straight to `run_tui` and skip the throwaway
+    // construction. Two cases still fall through to the match below: `--print`
+    // (needs a populated backend in hand to dump) and `Remote` (its arm resolves
+    // the `--remote` host spec via `tt --json discover` and rewrites `cli.remote`
+    // to the explicit address before `run_tui`, so the factory doesn't
+    // re-discover — see that arm).
+    if !cli.print && backend_type != BackendType::Remote {
+        if let Err(e) = tt_toplike::ui::run_tui(&cli) {
+            eprintln!("TUI error: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
     match backend_type {
         BackendType::Mock => {
             log::info!(

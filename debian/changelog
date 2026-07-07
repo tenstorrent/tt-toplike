@@ -1,3 +1,19 @@
+tt-toplike (0.7.25) noble; urgency=medium
+
+  * Startup latency: the TUI painted its first frame ~1.3s after launch (and
+    noticeably worse when a few instances started at once). The backend was
+    being created and initialized up to THREE times before the first frame —
+    once to auto-select in `main`, once in `run_with_backend`, and once more in
+    `run_tui` (which owns the backend it actually uses) — and each Sysfs/Hybrid
+    init shells out to `tt-smi` (~0.4s), so the wasted passes dominated boot and
+    multiplied the `tt-smi` load under concurrency. The interactive path now
+    routes straight to `run_tui`, which builds the backend exactly once; the
+    per-backend construction in `main` is kept only for `--print`, and the
+    `--remote` host-spec resolution is preserved. First paint drops to ~0.4s and
+    stays flat when several instances start together.
+
+ -- Tenstorrent <software@tenstorrent.com>  Tue, 07 Jul 2026 10:00:00 +0000
+
 tt-toplike (0.7.24) noble; urgency=medium
 
   * [i] Inference Monitor — loading palette: the greyscale "greyskull" loading
