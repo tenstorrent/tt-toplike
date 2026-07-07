@@ -275,6 +275,12 @@ fn run_app(
     // which must reserve the same number of rows the snake was sized against —
     // reads the exact same set. Empty for 0/1 detected service.
     let mut inference_roster: Vec<Line<'static>> = Vec::new();
+    // Education footer band for the [i] loading view (composed on the inference
+    // tick, like `inference_roster`). `band_rotation` advances each recompute; the
+    // visible fact changes every `BAND_ROTATE_EVERY` recomputes (~8s at the ~2s
+    // inference cadence).
+    let mut inference_band: Vec<Line<'static>> = Vec::new();
+    let mut band_rotation: usize = 0;
     // Background model-catalog refresher: curl-refreshes the compatibility
     // catalog off the render path; feeds the cold-trail starfield screensaver.
     let catalog_refresher = crate::workload::CatalogRefresher::spawn();
@@ -786,6 +792,33 @@ fn run_app(
                         );
                     }
                     let roster_h = inference_roster.len();
+                    // Education band: describe the featured *loading* service.
+                    band_rotation = band_rotation.wrapping_add(1);
+                    inference_band = {
+                        use crate::workload::inference_server::{education, Phase};
+                        let featured = inference_panel::featured_loading(&rows);
+                        match featured {
+                            Some(s)
+                                if matches!(
+                                    s.phase,
+                                    Phase::Compiling | Phase::Loading | Phase::Alarm
+                                ) =>
+                            {
+                                let avail = (size.height as usize)
+                                    .saturating_sub(1 + roster_h + 3) // status + roster + min snake
+                                    .min(INFERENCE_BAND_MAX_H);
+                                education::compose_band(
+                                    &s.label,
+                                    s.phase,
+                                    size.width as usize,
+                                    avail,
+                                    band_rotation / BAND_ROTATE_EVERY,
+                                )
+                            }
+                            _ => Vec::new(),
+                        }
+                    };
+                    let band_h = inference_band.len();
                     snake.update(&crate::animation::SnakeWorld {
                         rows: &rows,
                         catalog: &catalog,
@@ -793,7 +826,7 @@ fn run_app(
                         chips: &chips,
                         cadence_secs: crate::workload::inference_server::CADENCE_SECS,
                         width: size.width as usize,
-                        height: (size.height as usize).saturating_sub(1 + roster_h),
+                        height: (size.height as usize).saturating_sub(1 + roster_h + band_h),
                     });
                 }
                 DisplayMode::Defrag => {
@@ -927,7 +960,7 @@ fn run_app(
                             render_grid_mode(f, backend);
                         }
                         DisplayMode::InferenceMonitor => {
-                            render_snake_view(f, &snake, &inference_roster);
+                            render_snake_view(f, &snake, &inference_roster, &inference_band);
                         }
                         DisplayMode::Starfield => {
                             if let Some(ref sf) = starfield {
@@ -3875,18 +3908,25 @@ fn render_insights(
 }
 
 /// Full-screen render of the unified serving snake (see `crate::animation::Snake`).
-fn render_snake_view(f: &mut Frame, snake: &crate::animation::Snake, roster: &[Line<'static>]) {
+fn render_snake_view(
+    f: &mut Frame,
+    snake: &crate::animation::Snake,
+    roster: &[Line<'static>],
+    band: &[Line<'static>],
+) {
     let area = f.area();
     f.render_widget(
         Block::default().style(Style::default().bg(colors::rgb(0, 0, 0))),
         area,
     );
     // Layout, top to bottom: the multi-model roster (0 rows when <2 services),
-    // then the featured snake, then the reserved bottom row for the global
-    // status bar (drawn on top afterwards — otherwise the creature's footer
-    // lands on the absolute bottom row and is painted over). The snake height
-    // here must match what `SnakeWorld` was built with (same `1 + roster_h`
-    // subtraction) so the fixed-dim loading/roaming renderers line up.
+    // then the featured snake, then the education band (0 rows unless a
+    // service is compiling/loading/alarming), then the reserved bottom row
+    // for the global status bar (drawn on top afterwards — otherwise the
+    // creature's footer lands on the absolute bottom row and is painted
+    // over). The snake height here must match what `SnakeWorld` was built
+    // with (same `1 + roster_h + band_h` subtraction) so the fixed-dim
+    // loading/roaming renderers line up.
     let roster_h = (roster.len() as u16).min(area.height);
     if roster_h > 0 {
         f.render_widget(
@@ -3899,16 +3939,29 @@ fn render_snake_view(f: &mut Frame, snake: &crate::animation::Snake, roster: &[L
             },
         );
     }
+    // Education band sits just above the bottom status row.
+    let band_h = (band.len() as u16).min(area.height.saturating_sub(roster_h + 1));
     let body = Rect {
         x: area.x,
         y: area.y + roster_h,
         width: area.width,
-        height: area.height.saturating_sub(1 + roster_h),
+        height: area.height.saturating_sub(1 + roster_h + band_h),
     };
     f.render_widget(
         Paragraph::new(snake.render(body.width as usize, body.height as usize)),
         body,
     );
+    if band_h > 0 {
+        f.render_widget(
+            Paragraph::new(band.to_vec()),
+            Rect {
+                x: area.x,
+                y: area.y + area.height.saturating_sub(1 + band_h),
+                width: area.width,
+                height: band_h,
+            },
+        );
+    }
 }
 
 /// Under `--remote` the chips/telemetry on screen belong to the remote box,
@@ -4049,6 +4102,12 @@ fn remote_inference_to_service_state(
 
 /// Max inference services listed in the `[i]` roster (see below).
 const INFERENCE_ROSTER_MAX: usize = 8;
+
+/// Recompose ticks between education-fact rotations (~8s at the ~2s inference
+/// cadence). Keeps a long compile/load from showing one stale fact the whole time.
+const BAND_ROTATE_EVERY: usize = 4;
+/// Max rows the education band may claim in the [i] loading pane.
+const INFERENCE_BAND_MAX_H: usize = 5;
 
 /// Compact per-service roster for the `[i]` view, shown above the featured snake
 /// when 2+ inference services are detected — so a multi-model box surfaces ALL
@@ -6067,6 +6126,35 @@ mod host_default_screen_tests {
     }
 }
 
+/// Regression: `render_snake_view` gained a 4th `band` param (the education
+/// footer). A tiny terminal where the band + status row would exceed the
+/// available height must shrink/clip gracefully rather than panic.
+#[cfg(test)]
+mod snake_band_tests {
+    use ratatui::backend::TestBackend;
+    use ratatui::text::Line;
+    use ratatui::Terminal;
+
+    #[test]
+    fn render_snake_view_with_band_does_not_panic() {
+        let snake = crate::animation::Snake::new();
+        let roster: Vec<Line<'static>> = Vec::new();
+        let band = crate::workload::inference_server::education::compose_band(
+            "Llama-3.1-8B-Instruct",
+            crate::workload::inference_server::Phase::Loading,
+            80,
+            5,
+            0,
+        );
+        // A tiny terminal must also not panic (band + status exceed height).
+        for (w, h) in [(80u16, 24u16), (40, 8), (20, 3)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| super::render_snake_view(f, &snake, &roster, &band))
+                .unwrap();
+        }
+    }
+}
+
 /// Headless render benchmark: render each screen into a `TestBackend` for
 /// `frames` frames, timing the per-frame update+draw, and return per-mode cost.
 /// No raw mode, no TTY — safe to call from `--bench` or tests.
@@ -6187,7 +6275,8 @@ pub fn run_render_bench(
                 width: width as usize,
                 height: height as usize,
             });
-            term.draw(|f| render_snake_view(f, &snake, &[])).unwrap();
+            term.draw(|f| render_snake_view(f, &snake, &[], &[]))
+                .unwrap();
         }));
     }
     {
@@ -6253,7 +6342,7 @@ pub fn run_render_bench(
                 width: width as usize,
                 height: (height as usize).saturating_sub(1 + roster_h),
             });
-            term.draw(|f| render_snake_view(f, &snake, &roster))
+            term.draw(|f| render_snake_view(f, &snake, &roster, &[]))
                 .unwrap();
         }));
     }
