@@ -1259,16 +1259,17 @@ fn run_app(
                                 force_redraw = true;
                             }
                             KeyCode::Char('i') | KeyCode::Char('I') => {
-                                // Enter/exit the dedicated full-screen Inference Server
-                                // Monitor view (the unified serving snake). On entry,
-                                // remember the mode we came from so exit lands back there
-                                // rather than a hardcoded Insights. There's no roster list
-                                // or cursor anymore — the snake reflects the whole fleet.
+                                // Toggle between the dedicated Inference Server Monitor and
+                                // Insights: `i` from anywhere opens the monitor (remembering
+                                // where we came from), and `i` while in the monitor lands on
+                                // Insights specifically — the two pair as a quick back-and-forth.
+                                // (Esc, by contrast, backs out to `prev_mode` — wherever you
+                                // came from — see the Esc handler.)
                                 if display_mode != DisplayMode::InferenceMonitor {
                                     prev_mode = display_mode;
                                     display_mode = DisplayMode::InferenceMonitor;
                                 } else {
-                                    display_mode = prev_mode;
+                                    display_mode = DisplayMode::Insights;
                                 }
                                 force_redraw = true;
                             }
@@ -1346,9 +1347,11 @@ fn run_app(
                                         DisplayMode::Arcade
                                     }
                                     DisplayMode::Arcade => DisplayMode::Defrag,
-                                    DisplayMode::Defrag => DisplayMode::Insights,
-                                    // Deliberately not part of the rotation (entered only via
-                                    // `i`/`I`) — `v` from here just returns to Insights.
+                                    // Defrag and the Inference Server Monitor round out the
+                                    // rotation just before it wraps back to Insights, so both
+                                    // are reachable by cycling with `v` (the monitor is also
+                                    // still a direct toggle via `i`).
+                                    DisplayMode::Defrag => DisplayMode::InferenceMonitor,
                                     DisplayMode::InferenceMonitor => DisplayMode::Insights,
                                 };
                                 log::info!("Switched to {:?} mode", display_mode);

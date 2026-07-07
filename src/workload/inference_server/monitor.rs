@@ -307,6 +307,25 @@ pub struct InferenceServerMonitor {
     tx: Sender<Vec<InferenceServer>>,
 }
 
+/// A cheap, order-independent signature of a detected server set: two sets with
+/// the same members (by image + model + port) compare equal, so the monitor can
+/// tell "the fleet changed" (probe now) from "same fleet, routine re-poll".
+fn detected_sig(servers: &[InferenceServer]) -> Vec<String> {
+    let mut v: Vec<String> = servers
+        .iter()
+        .map(|s| {
+            format!(
+                "{}|{}|{:?}",
+                s.image,
+                s.model.as_deref().unwrap_or(""),
+                s.port
+            )
+        })
+        .collect();
+    v.sort();
+    v
+}
+
 impl InferenceServerMonitor {
     /// Spawn the background thread. The thread coalesces queued detections to
     /// the latest set, then at most once per `TICK_INTERVAL` probes each
@@ -332,6 +351,13 @@ impl InferenceServerMonitor {
                 let mut detected: Vec<InferenceServer> = Vec::new();
                 let mut prev_snapshot: Vec<ServiceState> = Vec::new();
                 let mut last_tick: Option<Instant> = None;
+                // Signature of the detected set we last acted on. When a
+                // submission changes it (a server just launched or stopped), we
+                // probe immediately rather than waiting out the rest of the 5s
+                // steady-state interval — so the `[i]` view flips from the cold
+                // catalog to the loading snake within a refresh tick of launch,
+                // not up to `TICK_INTERVAL` later.
+                let mut prev_sig: Vec<String> = Vec::new();
                 loop {
                     match rx.recv_timeout(TICK_INTERVAL) {
                         Ok(mut d) => {
@@ -345,10 +371,15 @@ impl InferenceServerMonitor {
                         Err(RecvTimeoutError::Disconnected) => break,
                     }
 
-                    let due = last_tick.is_none_or(|l| l.elapsed() >= TICK_INTERVAL);
+                    // Probe now if the fleet changed (fast detection of a
+                    // just-launched server), else hold to the steady cadence.
+                    let sig = detected_sig(&detected);
+                    let changed = sig != prev_sig;
+                    let due = changed || last_tick.is_none_or(|l| l.elapsed() >= TICK_INTERVAL);
                     if !due {
                         continue;
                     }
+                    prev_sig = sig;
 
                     // Union the submitted host-process detections with containers
                     // the probe enumerates directly (docker ps), so detached /
@@ -603,6 +634,22 @@ mod tests {
             port: Some(8000),
             uses_tt_device: true,
         }
+    }
+
+    #[test]
+    fn detected_sig_is_order_independent_and_tracks_membership() {
+        // Same members in a different order → equal signature (routine re-poll,
+        // no forced probe).
+        let a = vec![srv("c1", "Llama-3.1-8B-Instruct"), srv("c2", "Qwen3-32B")];
+        let b = vec![srv("c2", "Qwen3-32B"), srv("c1", "Llama-3.1-8B-Instruct")];
+        assert_eq!(detected_sig(&a), detected_sig(&b));
+        // A new server appears → signature changes (the monitor probes now
+        // instead of waiting out the 5s interval).
+        let mut c = a.clone();
+        c.push(srv("c3", "Mistral-7B-Instruct-v0.3"));
+        assert_ne!(detected_sig(&a), detected_sig(&c));
+        // Empty vs non-empty differ (fleet came up / went away).
+        assert_ne!(detected_sig(&[]), detected_sig(&a));
     }
 
     #[test]

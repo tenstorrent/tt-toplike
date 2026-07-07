@@ -1,3 +1,20 @@
+tt-toplike (0.7.27) noble; urgency=medium
+
+  * [i] Inference Monitor — faster detection: the background monitor now probes
+    immediately when the detected server set changes (a model just launched or
+    stopped) instead of always waiting out the 5s steady-state interval. So the
+    [i] view flips from the cold model-catalog to the loading snake within a
+    refresh tick of starting tt-inference-server, not up to 5s later. Steady
+    cadence is unchanged.
+  * Mode cycling: `v` now includes Defrag AND the Inference Server Monitor at
+    the tail of the rotation, just before it wraps back to Insights
+    (… → Arcade → Defrag → Inference → Insights) — both are reachable by cycling.
+  * `i` now pairs specifically with Insights: `i` from anywhere opens the
+    Inference Server Monitor, and `i` while in it lands on Insights (a quick
+    back-and-forth). Esc still backs out to wherever you came from.
+
+ -- Tenstorrent <software@tenstorrent.com>  Tue, 07 Jul 2026 18:00:00 +0000
+
 tt-toplike (0.7.26) noble; urgency=medium
 
   * [i] Inference Monitor — education band: while a model loads, a footer band
