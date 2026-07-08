@@ -132,10 +132,24 @@ pub fn parse_port_from_cmdline(cmdline: &str) -> Option<u16> {
                 }
             }
         }
-        // host:port form, e.g. 127.0.0.1:8000
-        if let Some((_, p)) = tok.rsplit_once(':') {
-            if let Ok(p) = p.parse::<u16>() {
-                return Some(p);
+        // host:port form, e.g. `127.0.0.1:8000` — but ONLY when the host part
+        // actually looks like a network binding, or the token is the value of a
+        // `--host`/`--url` flag. Without this guard any `foo:1234` token matches
+        // (e.g. `--served-model-name my-model:v2`), yielding a bogus port that
+        // first-match-wins could return ahead of a real `--port`.
+        if let Some((host, p)) = tok.rsplit_once(':') {
+            let prev = i.checked_sub(1).and_then(|j| toks.get(j)).copied();
+            let after_host_flag = matches!(prev, Some("--host") | Some("--url"));
+            // Strip any scheme/path (`http://127.0.0.1` → `127.0.0.1`).
+            let host_tail = host.rsplit('/').next().unwrap_or(host);
+            let is_ipv4 = host_tail.split('.').count() == 4
+                && host_tail.split('.').all(|o| o.parse::<u8>().is_ok());
+            let looks_like_host =
+                is_ipv4 || host_tail == "localhost" || host.ends_with("localhost");
+            if after_host_flag || looks_like_host {
+                if let Ok(p) = p.parse::<u16>() {
+                    return Some(p);
+                }
             }
         }
     }
@@ -460,6 +474,27 @@ mod tests {
             Some(7070)
         );
         assert_eq!(parse_port_from_cmdline("ollama serve"), None);
+    }
+
+    #[test]
+    fn host_port_fallback_ignores_non_host_tokens() {
+        // A colon in a non-host arg must NOT be read as a port.
+        assert_eq!(
+            parse_port_from_cmdline("vllm serve model --served-model-name my-model:v2"),
+            None
+        );
+        // A bogus `foo:1234` token is skipped, so a real later `--port` wins.
+        assert_eq!(
+            parse_port_from_cmdline("vllm serve --served-model-name foo:1234 --port 8080"),
+            Some(8080)
+        );
+        // Genuine host bindings still resolve.
+        assert_eq!(parse_port_from_cmdline("srv 127.0.0.1:8000"), Some(8000));
+        assert_eq!(parse_port_from_cmdline("srv localhost:9001"), Some(9001));
+        assert_eq!(
+            parse_port_from_cmdline("srv --url http://localhost:8000"),
+            Some(8000)
+        );
     }
 
     #[test]

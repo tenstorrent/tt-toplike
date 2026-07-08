@@ -1,3 +1,25 @@
+tt-toplike (0.7.29) noble; urgency=medium
+
+  * Address PR #20 review (ezietlow), inference-server detection hardening:
+    - detect: `--publish` parsing now takes the HOST port (the side the monitor
+      probes), not the container port — an asymmetric `0.0.0.0:8000:8001` mapping
+      was probing 8001 and reading Down.
+    - monitor: when a container is seen by both the host-process scan and the
+      docker-inspect path, prefer the record with a resolved host port so a
+      foreground `docker run` with no `--publish` isn't probed at the default 8000.
+    - probe: `docker()` now caps stdout at 8 MiB and kills the child on timeout,
+      so a huge `find` output or a wedged `docker exec` can't leak a thread or
+      balloon memory each tick.
+    - metrics: Prometheus value parsing takes the value field explicitly, so an
+      optional trailing timestamp is no longer parsed as the value (latent).
+    - liveness: the `host:port` cmdline fallback only fires on host-looking
+      tokens (dotted IP / localhost, or a `--host`/`--url` value), so a
+      `--served-model-name foo:v2` no longer yields a bogus port.
+    +tests for each (asymmetric publish, port-preferring dedup, timestamped
+    metric line, non-host token rejection).
+
+ -- Tenstorrent <software@tenstorrent.com>  Wed, 08 Jul 2026 12:00:00 +0000
+
 tt-toplike (0.7.28) noble; urgency=medium
 
   * [i] Inference Monitor — compiled vs loaded: the loading footer now shows

@@ -207,24 +207,56 @@ impl ContainerProbe for DockerProbe {
 /// well under a second.
 const DOCKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// Hard cap on bytes read from one `docker` invocation's stdout. `KERNEL_FIND_CMD`
+/// / `LOADED_FIND_CMD` run `find` inside the container, so a pathologically large
+/// cache directory could otherwise buffer unboundedly; the counts we derive (line
+/// counts, short JSON) never approach this. Mirrors the 1 MiB cap in
+/// `liveness_probe::http_get_localhost`, but larger since a big kernel cache is
+/// a legitimate many-thousand-line listing.
+const MAX_DOCKER_OUTPUT: u64 = 8 * 1024 * 1024;
+
 /// Run `docker <args>`, returning stdout as a lossy UTF-8 string. Any spawn or
-/// exec failure (docker not installed, container gone) yields `""`. Bounded by
-/// [`DOCKER_TIMEOUT`]: the call runs on a helper thread and we wait at most
-/// that long, so a hung docker can't stall the monitor tick (on timeout we
-/// return `""`; the orphaned thread finishes and exits when docker eventually
-/// does).
+/// exec failure (docker not installed, container gone) yields `""`. Bounded two
+/// ways: the reader caps stdout at [`MAX_DOCKER_OUTPUT`], and the whole call is
+/// bounded by [`DOCKER_TIMEOUT`] — on timeout we **kill the child**, which both
+/// frees the process and closes the pipe so the reader thread hits EOF and
+/// exits (no orphaned thread or unbounded allocation from a wedged docker).
 fn docker(args: &[&str]) -> String {
+    use std::io::Read;
+    use std::process::Stdio;
+
     let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let mut child = match Command::new("docker")
+        .args(&owned)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+    // Only the pipe moves into the reader thread; `child` stays here so a
+    // timeout can kill it.
+    let stdout = child.stdout.take();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let out = Command::new("docker")
-            .args(&owned)
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default();
-        let _ = tx.send(out);
+        let mut buf = Vec::new();
+        if let Some(mut so) = stdout {
+            let _ = so.by_ref().take(MAX_DOCKER_OUTPUT).read_to_end(&mut buf);
+        }
+        let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
     });
-    rx.recv_timeout(DOCKER_TIMEOUT).unwrap_or_default()
+    match rx.recv_timeout(DOCKER_TIMEOUT) {
+        Ok(s) => {
+            let _ = child.wait();
+            s
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            String::new()
+        }
+    }
 }
 
 #[cfg(test)]

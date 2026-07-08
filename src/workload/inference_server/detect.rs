@@ -55,17 +55,26 @@ fn env_value(toks: &[&str], key: &str) -> Option<String> {
     None
 }
 
-/// Extract the container port from `--publish [host:]ctr[/proto]`, e.g.
-/// `--publish 0.0.0.0:8000:8000` → 8000 (last numeric segment before any `/`).
+/// Extract the HOST port from `--publish [ip:][hostPort:]containerPort[/proto]`,
+/// e.g. `--publish 0.0.0.0:8000:8001` → 8000. The monitor probes
+/// `127.0.0.1:<port>` — the host side of the mapping — so we take the host port,
+/// which is the second-from-last `:`-segment when one is given. With only a
+/// container port (`--publish 8000`) Docker assigns a random host port we can't
+/// read from the cmdline, so we fall back to that segment as a best effort
+/// (`parse_inspect`'s HostPort is authoritative when the inspect path resolves it).
 fn published_port(toks: &[&str]) -> Option<u16> {
     for (i, t) in toks.iter().enumerate() {
         if *t == "--publish" || *t == "-p" {
             if let Some(spec) = value_after(toks, i) {
                 let spec = spec.split('/').next().unwrap_or(spec);
-                if let Some(seg) = spec.rsplit(':').next() {
-                    if let Ok(p) = seg.parse::<u16>() {
-                        return Some(p);
-                    }
+                let segs: Vec<&str> = spec.split(':').collect();
+                let host_seg = if segs.len() >= 2 {
+                    segs[segs.len() - 2]
+                } else {
+                    segs[0]
+                };
+                if let Ok(p) = host_seg.parse::<u16>() {
+                    return Some(p);
                 }
             }
         }
@@ -220,6 +229,24 @@ mod tests {
         --device /dev/tenstorrent:/dev/tenstorrent --publish 0.0.0.0:8000:8000 \
         -e MODEL=FLUX.1-schnell -e MESH_DEVICE=P300x2 -e ARCH_NAME=blackhole \
         -e DEVICE=p300x2 -e NO_AUTH=1 ghcr.io/tenstorrent/tt-media-inference-server:0.17.0-8c48a10";
+
+    #[test]
+    fn published_port_takes_host_side_of_mapping() {
+        // ip:hostPort:containerPort → the HOST port (middle segment), which is
+        // what the monitor probes at 127.0.0.1 — not the container port (8001).
+        assert_eq!(
+            published_port(&["--publish", "0.0.0.0:8000:8001"]),
+            Some(8000)
+        );
+        // hostPort:containerPort → host port (first segment).
+        assert_eq!(published_port(&["-p", "9000:8000"]), Some(9000));
+        // container port only → best-effort that segment (Docker picks a random
+        // host port we can't read from the cmdline).
+        assert_eq!(published_port(&["--publish", "8000"]), Some(8000));
+        // /proto suffix is stripped.
+        assert_eq!(published_port(&["-p", "0.0.0.0:8000:8001/tcp"]), Some(8000));
+        assert_eq!(published_port(&["run", "--rm"]), None);
+    }
 
     #[test]
     fn parses_tt_inference_docker_run() {

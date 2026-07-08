@@ -309,18 +309,31 @@ fn merge_detections(
     submitted: &[InferenceServer],
     enumerated: Vec<InferenceServer>,
 ) -> Vec<InferenceServer> {
-    let mut out = submitted.to_vec();
-    let mut seen: std::collections::HashSet<String> = out
-        .iter()
-        .map(|s| {
-            let Source::Docker { container } = &s.source;
-            container.clone()
-        })
-        .collect();
-    for s in enumerated {
+    let container_of = |s: &InferenceServer| -> String {
         let Source::Docker { container } = &s.source;
-        if seen.insert(container.clone()) {
-            out.push(s);
+        container.clone()
+    };
+    let mut out = submitted.to_vec();
+    let mut seen: std::collections::HashSet<String> = out.iter().map(&container_of).collect();
+    // When a container is seen by BOTH paths, the host-process scan (`submitted`)
+    // often lacks the published host port (`port: None`) while the inspect path
+    // (`enumerated`, via docker inspect HostPort) resolves it. Prefer the
+    // resolved port so the monitor probes the right endpoint instead of the
+    // default 8000. First pass: backfill missing ports on matching records.
+    for e in &enumerated {
+        let c = container_of(e);
+        if e.port.is_some() {
+            for existing in out.iter_mut() {
+                if container_of(existing) == c && existing.port.is_none() {
+                    existing.port = e.port;
+                }
+            }
+        }
+    }
+    // Second pass: append containers only the inspect path saw (order-preserving).
+    for e in enumerated {
+        if seen.insert(container_of(&e)) {
+            out.push(e);
         }
     }
     out
@@ -666,6 +679,23 @@ mod tests {
             port: Some(8000),
             uses_tt_device: true,
         }
+    }
+
+    #[test]
+    fn merge_detections_prefers_resolved_host_port() {
+        // Host-process scan saw the container but couldn't resolve its port...
+        let mut submitted = srv("vllm", "Qwen/Qwen3-32B");
+        submitted.port = None;
+        // ...while the inspect path (docker inspect HostPort) did.
+        let mut enumerated = srv("vllm", "Qwen/Qwen3-32B");
+        enumerated.port = Some(8001);
+        let merged = merge_detections(&[submitted], vec![enumerated]);
+        assert_eq!(merged.len(), 1, "same container collapses to one record");
+        assert_eq!(
+            merged[0].port,
+            Some(8001),
+            "the resolved host port is preferred over the unresolved None"
+        );
     }
 
     #[test]

@@ -30,10 +30,18 @@ pub struct VllmCounters {
     pub preemptions_total: u64,
 }
 
-/// The numeric value at the end of a Prometheus sample line (after the last
-/// space). vLLM formats integers as floats (`826.0`), so parse as f64.
+/// The numeric value of a Prometheus sample line — the field right after the
+/// `metric{labels}` head, NOT the last field. The exposition format allows an
+/// optional trailing timestamp (`metric{..} 5.0 1739000000000`); taking the
+/// last field would parse that timestamp as the value. Splitting after the
+/// closing `}` (when labels are present) also tolerates spaces inside quoted
+/// label values. vLLM formats integers as floats (`826.0`), so parse as f64.
 fn line_value(line: &str) -> Option<f64> {
-    line.rsplit(' ').next()?.trim().parse::<f64>().ok()
+    let value_field = match line.rfind('}') {
+        Some(i) => line[i + 1..].split_whitespace().next(),
+        None => line.split_whitespace().nth(1),
+    };
+    value_field?.parse::<f64>().ok()
 }
 
 /// True if `line`'s metric name (before any `{labels}` or space) equals `name`.
@@ -244,6 +252,19 @@ vllm:request_success_total{engine=\"0\",finished_reason=\"error\",model_name=\"M
 vllm:time_to_first_token_seconds_count{engine=\"0\",model_name=\"M\"} 4.0
 vllm:time_to_first_token_seconds_sum{engine=\"0\",model_name=\"M\"} 0.88
 ";
+
+    #[test]
+    fn line_value_takes_value_not_trailing_timestamp() {
+        // An optional Prometheus timestamp after the value must be ignored, not
+        // parsed as the value.
+        assert_eq!(line_value("vllm:x{a=\"b\"} 5.0 1739000000000"), Some(5.0));
+        // Labels present, no timestamp.
+        assert_eq!(line_value("vllm:x{a=\"b\"} 42.0"), Some(42.0));
+        // No labels at all.
+        assert_eq!(line_value("some_metric 7"), Some(7.0));
+        // A quoted label value containing a space doesn't derail the split.
+        assert_eq!(line_value("m{who=\"a b\"} 9.0"), Some(9.0));
+    }
 
     #[test]
     fn parses_the_vllm_counters() {
