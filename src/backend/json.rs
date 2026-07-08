@@ -513,9 +513,12 @@ fn parse_json_devices(json_str: &str) -> BackendResult<Vec<TTSMIDeviceJSON>> {
         return Ok(vec![device]);
     }
 
+    // Truncate for the error message by *characters*, not bytes: `json_str`
+    // can be untrusted remote input (a WsBackend frame), and byte-slicing at a
+    // fixed offset panics if it lands inside a multi-byte UTF-8 sequence.
     Err(BackendError::ParseError(format!(
         "Failed to parse JSON output: {}",
-        &json_str[..json_str.len().min(100)]
+        json_str.chars().take(100).collect::<String>()
     )))
 }
 
@@ -1274,5 +1277,23 @@ mod tests {
             smbus.gddr_temps.iter().all(|t| t.is_none()),
             "old format should leave gddr_temps as None"
         );
+    }
+
+    /// Regression: unparseable input whose 100-byte boundary lands inside a
+    /// multi-byte UTF-8 sequence must not panic. `parse_json_devices` truncates
+    /// the error message by *characters*, not bytes — a byte-slice at offset 100
+    /// would panic ("byte index 100 is not a char boundary") on frames like the
+    /// untrusted ones a remote `WsBackend` peer can send.
+    #[test]
+    fn test_parse_error_truncation_is_char_boundary_safe() {
+        // 99 ASCII bytes, then a 4-byte emoji straddling byte offset 100 — the
+        // old `&json_str[..100]` slice landed mid-codepoint here.
+        let mut junk = "x".repeat(99);
+        junk.push('🚀'); // bytes 99..103; a fixed byte-slice at 100 splits it
+        junk.push_str(" not json");
+
+        let err = parse_json_devices(&junk).expect_err("garbage must fail to parse");
+        // Message is produced without panicking and carries the char-truncated tail.
+        assert!(matches!(err, BackendError::ParseError(_)));
     }
 }
