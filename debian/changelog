@@ -1,3 +1,18 @@
+tt-toplike (0.7.30) noble; urgency=medium
+
+  * Startup latency (under load): the Sysfs backend's board-name enrichment
+    shelled `tt-smi --version` + `tt-smi -s` synchronously during init, with no
+    timeout. While a model is compiling/loading, tt-smi contends with the
+    workload for ARC/CPU and can take several seconds per call — so starting
+    tt-toplike during a load stalled the first frame by ~10 s. The enrichment
+    now runs on a helper thread bounded to 1.2 s; on timeout it's skipped and
+    the device keeps its hwmon arch name (same graceful degradation as when
+    tt-smi is absent), so the TUI paints promptly regardless of load. Idle
+    behavior is unchanged (the probe completes well under the cap). The parse
+    is now a pure, unit-tested helper.
+
+ -- Tenstorrent <software@tenstorrent.com>  Wed, 08 Jul 2026 14:00:00 +0000
+
 tt-toplike (0.7.29) noble; urgency=medium
 
   * Address PR #20 review (ezietlow), inference-server detection hardening:

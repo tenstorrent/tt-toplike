@@ -178,80 +178,27 @@ impl SysfsBackend {
     /// devices by PCI bus_id to fill in the real product name. Fails silently if
     /// tt-smi is unavailable or its output cannot be parsed.
     ///
+    /// **Bounded.** tt-smi shells out and, while a model is compiling/loading, can
+    /// take several seconds to respond (ARC + CPU contention with the workload) —
+    /// and this runs on the startup path, before the first frame. So the whole
+    /// (version-gated) probe runs on a helper thread and we wait only briefly; on
+    /// timeout we skip enrichment and the device keeps its hwmon arch name, the
+    /// same graceful degradation as when tt-smi is absent, rather than stalling
+    /// the entire TUI from painting for ~10 s. The orphaned probe (rare) finishes
+    /// and exits on its own; this is a one-shot init call, not a per-tick poll.
+    ///
     /// Only tt-smi v4+ is used. Earlier versions access hardware invasively via
     /// direct PCI reads, which can disrupt running workloads. v4+ switched to a
     /// safe snapshot mode that reads from the kernel driver.
     fn try_enrich_board_types_from_tt_smi(&mut self) {
-        // Gate on tt-smi major version >= 4 before calling -s.
-        // `tt-smi --version` prints just the version string, e.g. "5.2.0".
-        let ver_out = match Command::new("tt-smi").arg("--version").output() {
-            Ok(o) if o.status.success() => o,
-            _ => return, // tt-smi not found or --version failed
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(sku_map_from_tt_smi());
+        });
+        let sku_by_bus = match rx.recv_timeout(std::time::Duration::from_millis(1200)) {
+            Ok(Some(m)) if !m.is_empty() => m,
+            _ => return, // timed out, tt-smi absent/<v4, or nothing parsed → skip
         };
-        let ver_str = String::from_utf8_lossy(&ver_out.stdout);
-        let major: u32 = ver_str
-            .trim()
-            .split('.')
-            .next()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        if major < 4 {
-            log::warn!(
-                "SysfsBackend: tt-smi version {} is < 4 — skipping board-type enrichment \
-                 to avoid invasive PCI access",
-                ver_str.trim()
-            );
-            return;
-        }
-
-        #[derive(serde::Deserialize)]
-        struct BoardInfo {
-            bus_id: Option<String>,
-            board_type: Option<String>,
-        }
-        #[derive(serde::Deserialize)]
-        struct RawDev {
-            board_info: Option<BoardInfo>,
-        }
-        #[derive(serde::Deserialize)]
-        struct Snapshot {
-            device_info: Option<Vec<RawDev>>,
-        }
-
-        let output = Command::new("tt-smi").arg("-s").output();
-        let output = match output {
-            Ok(o) if o.status.success() => o,
-            _ => return, // tt-smi not available — silently skip
-        };
-        let json = match std::str::from_utf8(&output.stdout) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let snapshot: Snapshot = match serde_json::from_str(json) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let raw_devs = match snapshot.device_info {
-            Some(d) => d,
-            None => return,
-        };
-
-        // Build a map: normalized bus_id → board_type
-        let mut sku_by_bus: HashMap<String, String> = HashMap::new();
-        for raw in raw_devs {
-            if let Some(bi) = raw.board_info {
-                if let (Some(bus), Some(bt)) = (bi.bus_id, bi.board_type) {
-                    let bus_norm = bus.trim().to_lowercase();
-                    if !bus_norm.is_empty() && !bt.is_empty() {
-                        sku_by_bus.insert(bus_norm, bt);
-                    }
-                }
-            }
-        }
-        if sku_by_bus.is_empty() {
-            return;
-        }
-
         for device in &mut self.devices {
             let bus_norm = device.bus_id.trim().to_lowercase();
             if let Some(sku) = sku_by_bus.get(&bus_norm) {
@@ -450,6 +397,76 @@ impl TelemetryBackend for SysfsBackend {
     }
 }
 
+/// Version-gated `tt-smi -s` → `{ normalized bus_id → board_type }`. Does all the
+/// subprocess I/O + JSON parse and takes no `self`, so it can run on a helper
+/// thread under a timeout (see [`SysfsBackend::try_enrich_board_types_from_tt_smi`]).
+/// `None` when tt-smi is absent, older than v4 (invasive PCI reads), or its
+/// output can't be parsed.
+fn sku_map_from_tt_smi() -> Option<HashMap<String, String>> {
+    // Gate on tt-smi major version >= 4 before calling -s. `--version` prints
+    // just the version string, e.g. "5.2.0".
+    let ver_out = Command::new("tt-smi").arg("--version").output().ok()?;
+    if !ver_out.status.success() {
+        return None;
+    }
+    let ver_str = String::from_utf8_lossy(&ver_out.stdout);
+    let major: u32 = ver_str
+        .trim()
+        .split('.')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    if major < 4 {
+        log::warn!(
+            "SysfsBackend: tt-smi version {} is < 4 — skipping board-type enrichment \
+             to avoid invasive PCI access",
+            ver_str.trim()
+        );
+        return None;
+    }
+    let output = Command::new("tt-smi").arg("-s").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let json = std::str::from_utf8(&output.stdout).ok()?;
+    Some(parse_sku_map(json))
+}
+
+/// Parse a `tt-smi -s` snapshot into `{ normalized bus_id → board_type }`. Pure
+/// (no I/O), so it's unit-testable against canned JSON. Unknown/empty fields are
+/// skipped; a malformed document yields an empty map.
+fn parse_sku_map(json: &str) -> HashMap<String, String> {
+    #[derive(serde::Deserialize)]
+    struct BoardInfo {
+        bus_id: Option<String>,
+        board_type: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawDev {
+        board_info: Option<BoardInfo>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Snapshot {
+        device_info: Option<Vec<RawDev>>,
+    }
+
+    let mut sku_by_bus: HashMap<String, String> = HashMap::new();
+    let Ok(snapshot) = serde_json::from_str::<Snapshot>(json) else {
+        return sku_by_bus;
+    };
+    for raw in snapshot.device_info.unwrap_or_default() {
+        if let Some(bi) = raw.board_info {
+            if let (Some(bus), Some(bt)) = (bi.bus_id, bi.board_type) {
+                let bus_norm = bus.trim().to_lowercase();
+                if !bus_norm.is_empty() && !bt.is_empty() {
+                    sku_by_bus.insert(bus_norm, bt);
+                }
+            }
+        }
+    }
+    sku_by_bus
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,4 +486,30 @@ mod tests {
     }
 
     // Note: Actual device detection tests require real hardware or mocked filesystem
+
+    #[test]
+    fn parse_sku_map_extracts_board_types_by_bus() {
+        let json = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:07:00.0", "board_type": "p300c"}},
+                {"board_info": {"bus_id": "0000:0A:00.0", "board_type": "p150a"}},
+                {"board_info": {"bus_id": "  ", "board_type": "ignored-empty-bus"}},
+                {"board_info": {"bus_id": "0000:0B:00.0", "board_type": ""}},
+                {"board_info": null}
+            ]
+        }"#;
+        let m = parse_sku_map(json);
+        // bus_id is normalized (trimmed + lowercased) so uppercase hex matches.
+        assert_eq!(m.get("0000:07:00.0").map(String::as_str), Some("p300c"));
+        assert_eq!(m.get("0000:0a:00.0").map(String::as_str), Some("p150a"));
+        // Empty bus_id or board_type entries are skipped; null board_info too.
+        assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    fn parse_sku_map_tolerates_garbage_and_empty() {
+        assert!(parse_sku_map("not json").is_empty());
+        assert!(parse_sku_map("{}").is_empty());
+        assert!(parse_sku_map(r#"{"device_info": []}"#).is_empty());
+    }
 }
