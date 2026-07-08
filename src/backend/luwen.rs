@@ -249,6 +249,10 @@ impl TelemetryBackend for LuwenBackend {
                             input_power: None,
                             board_power_limit: None,
                             therm_trip_count: None,
+                            // Newer GDDR/harvesting/ETH-enable fields have no
+                            // all-smi Telemetry source yet — default them to None
+                            // so this literal stays complete as the model grows.
+                            ..Default::default()
                         };
 
                         // Cache the telemetry data

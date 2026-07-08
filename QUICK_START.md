@@ -1,7 +1,7 @@
 # tt-toplike Quick Start
 
-**Version**: 0.7.0
-**Last Updated**: June 30, 2026
+**Version**: 0.7.30
+**Last Updated**: July 7, 2026
 
 ---
 
@@ -40,19 +40,30 @@ tt-toplike --mode flow
 - Particles stream between the DDR perimeter and Tensix core grid
 - Density = traffic, color = temperature, speed = current draw
 
-### Normal (Table View)
+### Insights (Default)
 ```bash
 tt-toplike               # default
-tt-toplike --mode normal
+tt-toplike --mode normal # alias — "normal" now maps to Insights
 ```
-- Classical htop-style table with color-coded power/temp/current/voltage/AICLK/ARC health
+- Split-panel view: a **chip portrait** per processor (CPU/GPU/ANE/TT as a device card) with live power, temperature, DDR/training status, and an accuracy/activity trend
+- A **TT-process panel** lists processes by resource use and tags any that match a known inference runtime (ollama, vLLM, llama.cpp, MLX, ComfyUI, …); on TT hardware it also attributes per-process device usage and serving metrics
+- `↑`/`↓` navigate the process list; `k` silences the selected process's alerts, `K` kills it (Linux)
+- `Enter` zooms into the selected chip portrait; `Esc` zooms back out
+- At **32+ devices** the portraits collapse into a fleet heatmap grid; `←`/`→` page through the fleet
+
+### Inference Server Monitor (`[i]`)
+```bash
+# from any view, just press:  i
+```
+- The flagship unified serving **snake** with three telemetry-true states: **cold** (a hungry snake roams the model-catalog starfield — footer "N of M models run on your <arch>"), **loading** (a coiling boxed snake through compile → load → ready in a synthwave palette + hot-pink burst on Ready, with a footer band explaining the phase and showing **compiled** kernels vs **loaded** weight shards), and **serving** (a live dashboard from the server's vLLM `/metrics`: green **READY** header, throughput timeline, token-exhaust snake, request swimlanes, stats panel, TT silicon strip)
+- `i` while in it jumps to Insights; `Esc` backs out to where you came from. It also sits at the tail of the `v` cycle. Press `l` for the legend, `/explain` for the mapping overlay
 
 ---
 
 ## Backend Options
 
 ### Auto-detect (Safe Mode — default)
-Tries: **Sysfs → JSON → Mock** (Luwen is never auto-detected)
+Tries: **Hybrid (sysfs + background JSON) → JSON → Mock** on Linux (Luwen is never auto-detected)
 
 ### Sysfs (Non-invasive)
 ```bash
@@ -88,7 +99,8 @@ tt-toplike --mock --mock-devices 4
 ```bash
 tt-toplike --backend luwen
 ```
-- Direct PCI BAR0 access — ⚠️ may disrupt running workloads
+- Kernel-mediated (tt-kmd) reads; mostly passive, but Luwen/UMD arbitration is
+  unresolved upstream — ⚠️ avoid during workloads, especially multi-chip/galaxy
 - Never used in auto-detect; must be requested explicitly
 
 ---
@@ -111,10 +123,23 @@ tt-toplike --host --mode arcade             # your real CPU/RAM in arcade mode (
 
 | Key | Action |
 |-----|--------|
-| `v` | Cycle visualization modes |
-| `b` | Cycle backend live (Sysfs → JSON → Luwen → Mock) |
-| `q` / `ESC` | Quit |
+| `v` | Cycle visualization modes: Insights → Flow → Starfield → Castle → Arcade → Defrag → Inference → Insights |
+| `i` | Open the Inference Server Monitor from any view; `i` while in it jumps to Insights, `Esc` backs out to where you came from. Also at the tail of the `v` cycle |
+| `l` | Toggle legend overlay for the current view |
+| `b` | Cycle backend live: Hybrid → Sysfs → JSON → Mock → Host → Hybrid. Luwen and Remote are launch-only — the cycle never steps onto them |
 | `r` | Force refresh |
+| `q` / `ESC` | Quit |
+
+### Slash-commands (press `/` then type)
+
+| Command | Action |
+|---------|--------|
+| `/fps <1–120>` | Set animation frame rate |
+| `/datafps <1–30>` | Set telemetry poll rate |
+| `/mode <name>` | Jump to a mode: `insights`, `grid`, `starfield`, `castle`, `flow`, `arcade`, `defrag` |
+| `/theme grayskull` | App-wide grayscale — a thousand shades of grey with cyan/purple accents and hot pink as the only hot color (`/theme default` restores, bare `/theme` toggles) |
+| `/legend` | Toggle the legend overlay (same as `l`) |
+| `/explain` | Toggle the "how it maps to hardware" overlay |
 
 ---
 

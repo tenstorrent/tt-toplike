@@ -194,8 +194,7 @@ fn ansi256_color(idx: u8) -> Color32 {
 
 fn apply_sgr(pen: &mut Pen, params: &Params) {
     let mut iter = params.iter();
-    loop {
-        let Some(p) = iter.next() else { break };
+    while let Some(p) = iter.next() {
         let code = p[0];
         match code {
             0 => *pen = Pen::default(),
@@ -793,9 +792,11 @@ impl eframe::App for TermApp {
                             // Character
                             if cell.ch != ' ' {
                                 let mut job = egui::text::LayoutJob::default();
-                                let mut fmt = egui::text::TextFormat::default();
-                                fmt.font_id = font_id.clone();
-                                fmt.color = cell.fg;
+                                let mut fmt = egui::text::TextFormat {
+                                    font_id: font_id.clone(),
+                                    color: cell.fg,
+                                    ..Default::default()
+                                };
                                 if cell.bold {
                                     fmt.color = brighten(cell.fg);
                                 }
@@ -835,6 +836,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Collect args after `--` separator as child args.
     // e.g.: tt-toplike-app -- --mode arcade --mock --mock-devices 4
     let args: Vec<String> = std::env::args().collect();
+
+    // Answer --version / --help before touching eframe: creating the window
+    // needs a display, so without this a headless `tt-toplike-app --version`
+    // (packaging smoke tests, CI, SSH boxes) errors out on winit init instead
+    // of printing. Only honor flags BEFORE the `--` separator — anything after
+    // it belongs to the embedded tt-toplike, not this host.
+    let app_flags: Vec<&String> = args.iter().skip(1).take_while(|a| *a != "--").collect();
+    if app_flags.iter().any(|a| *a == "--version" || *a == "-V") {
+        println!("tt-toplike-app {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if app_flags.iter().any(|a| *a == "--help" || *a == "-h") {
+        println!(
+            "tt-toplike-app {} — native window host for tt-toplike (PTY terminal)\n\n\
+             Opens a native window running tt-toplike inside a pseudo-terminal.\n\
+             Everything after `--` is forwarded to tt-toplike (default: --mode arcade).\n\n\
+             Usage:   tt-toplike-app [-- <tt-toplike args>]\n\
+             Example: tt-toplike-app -- --mock --mock-devices 4 --mode arcade\n\n\
+             Options:\n  \
+               -h, --help     Print this help and exit\n  \
+               -V, --version  Print version and exit",
+            env!("CARGO_PKG_VERSION")
+        );
+        return Ok(());
+    }
+
     let tui_args: Vec<String> = args
         .iter()
         .skip_while(|a| *a != "--")

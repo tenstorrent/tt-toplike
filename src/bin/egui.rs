@@ -9,7 +9,7 @@
 use clap::Parser;
 use eframe::egui;
 use tt_toplike::backend::{factory, BackendConfig};
-use tt_toplike::cli::{BackendType, Cli};
+use tt_toplike::cli::Cli;
 use tt_toplike::ui::egui::DashboardApp;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

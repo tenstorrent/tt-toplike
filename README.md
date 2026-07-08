@@ -99,7 +99,7 @@ tt-toplike --host --mode flow
 
 > **The observer effect is real here.** On a TT accelerator the visualizer runs on the host CPU and watches a *separate* chip, so it barely perturbs what it measures. In `--host` mode the visualizer and the thing it's visualizing are the same CPU — rendering Arcade at a high frame rate burns cycles that then show up *in the visualization itself* as higher utilization, frequency, and temperature. You're partly watching tt-toplike watch itself. That feedback loop is a quirk of host mode, not a bug; switch modes or lower the FPS (`/fps 10`) to damp it. It also makes a quiet point: nothing you do to a real TT card from the host steals compute from the workload the way it does here.
 
-**Runs on Linux, macOS, and Windows.** `--host` is the one non-mock backend that needs no Tenstorrent hardware and no Linux kernel interfaces, so it's the way to explore tt-toplike on a laptop. What's available depends on the OS:
+**Runs on Linux and macOS; Windows is built in CI with a headless runtime smoke** (`--bench` on `windows-latest`), though the interactive TUI hasn't been hand-tested on Windows yet — treat it as best-effort. Linux-only pieces — procfs, the `/proc` socket table, the `libc` kill panel — are `cfg`-gated out on Windows. `--host` is the one non-mock backend that needs no Tenstorrent hardware and no Linux kernel interfaces, so it's the way to explore tt-toplike on a laptop. What's available depends on the OS:
 
 | Metric | Linux | macOS / Windows |
 |--------|-------|-----------------|
@@ -121,6 +121,72 @@ extra devices — both **without sudo**. Caveats: ANE shows power-derived activi
 not a true utilization % (no API exposes one); its "16 cores" is Apple's stated
 figure used only for the star grid; GPU power/temperature/frequency aren't
 available without sudo; and GPU utilization is whole-device, not per-process.
+
+---
+
+## Watch a box remotely over the LAN (`--remote`, experimental)
+
+If a Tenstorrent box on your network runs the **tt-station** agent, you can watch
+it from another machine — your Mac, a laptop — with no local TT hardware:
+
+```
+tt-toplike --remote qb2-lab.local:8765      # or any HOST:PORT (bare host → :8000)
+tt-toplike --remote 192.168.1.42:8765 --mode starfield
+```
+
+The box's `tt-station-agentd` publishes a WebSocket at `ws://<host>:<port>/telemetry`
+that streams the verbatim `tt-smi -s` snapshot on an interval; tt-toplike's
+`--remote` backend consumes those frames **exactly like local telemetry** — same
+`Telemetry`/`SmbusTelemetry` structs, same render path, every visualization
+unchanged. It's the "QuietBox on your desk, on your Mac's screen" view.
+
+If the publisher enriches its stream with the optional `tt_toplike` extension
+(both a tt-toplike `--serve` and a suitably-updated `tt-station-agentd` do — see
+below), the process panel and the `[i]` inference monitor also describe the
+**remote box**: you see its processes and its serving workload, not your laptop's.
+When the stream carries only chip telemetry, those two panels fall back to the
+**local** machine's data and say so with a `LOCAL` label — so you're never misled
+about whose processes you're looking at.
+
+This is **strictly additive**: `--remote` is a new backend alongside the local
+ones, opt-in only (never entered by auto-detect or Tab-cycling); everything else
+is untouched. Telemetry is unauthed today — trusted-LAN only. See
+`docs/REMOTE_QUIETBOX_DESIGN.md`.
+
+---
+
+## Be the box: publish your own telemetry (`--serve`, experimental)
+
+The flip side of `--remote`: any tt-toplike can *serve* a `/telemetry` stream that
+another tt-toplike (or anything speaking the same WebSocket) connects to. The
+remote data source is no longer a single `tt-station` agent — every box running
+tt-toplike can broadcast itself.
+
+```
+tt-toplike --serve                       # bind 0.0.0.0:8770 AND run the TUI (serve while you watch)
+tt-toplike --serve 0.0.0.0:9000          # custom BIND:PORT
+tt-toplike --serve --backend json | cat  # no TTY → headless collector loop, no UI
+```
+
+At a real terminal, `--serve` runs the normal TUI *and* publishes in the same
+process — the status bar shows `◉ serving :PORT · N clients`. Piped/headless (no
+TTY), it becomes a quiet collector loop with no UI. You can also start/stop it
+live from inside the app with `/serve [BIND:PORT]` and `/serve off`, mirroring
+`/remote`.
+
+The published frame is valid `tt-smi -s` JSON plus one optional additive
+top-level key, `tt_toplike` (`{schema, processes[], inference[]}`), carrying this
+box's process list and `[i]` inference state. Older consumers that only read
+telemetry ignore the extra key; a tt-toplike `--remote` renders the full box from
+it. `--serve` requires the `json` or `hybrid` backend (the only ones that retain a
+raw tt-smi frame to relay). Combined with `--remote`, tt-toplike acts as a relay:
+it re-broadcasts the watched box's frame verbatim, so downstream viewers see the
+origin box, not the relay host.
+
+Default bind `0.0.0.0:8770`; plaintext and unauthed, same trusted-LAN posture as
+`--remote`. Everything is behind the default-on `remote` cargo feature. See
+`docs/superpowers/specs/2026-07-05-serve-broadcast-design.md` for the frame
+contract and the `tt-station-agentd` coordination notes.
 
 ---
 
@@ -168,6 +234,21 @@ xattr -dr com.apple.quarantine tt-toplike-tui
 ```
 
 On Apple Silicon, `--host` also surfaces the GPU and Neural Engine as extra devices (no sudo). See [Try it on any machine](#try-it-on-any-machine--no-tt-hardware-required-experimental) for the field mapping and the host-mode observer-effect caveat.
+
+### Windows — download the x86_64 binary (experimental)
+
+Each release ships a Windows x86_64 build of the TUI (`--host` preview path). CI builds it on `windows-latest` and runs a headless `--bench` smoke to confirm it executes, but the interactive TUI hasn't been hand-tested on Windows yet — best-effort.
+
+```powershell
+# Download + unzip this release's Windows binary
+gh release download --repo tenstorrent/tt-toplike --pattern "tt-toplike-tui-*-windows-x86_64.zip"
+Expand-Archive tt-toplike-tui-*-windows-x86_64.zip -DestinationPath tt-toplike
+
+# Run in Windows Terminal (host mode — no TT hardware needed)
+./tt-toplike/tt-toplike-tui.exe --host --mode arcade
+```
+
+Best in [Windows Terminal](https://aka.ms/terminal) (truecolor + Unicode); the legacy `conhost` console renders the visualizations poorly.
 
 ### Debian / Ubuntu — build from the debian/ tree
 
@@ -218,7 +299,8 @@ tt-toplike --backend json     # tt-smi subprocess
 tt-toplike --mock --mock-devices 4
 
 # Luwen (direct PCI access) — explicit only, never auto-detected
-# WARNING: may disrupt running workloads (LLMs, training)
+# CAUTION: Luwen/UMD arbitration is unresolved upstream — avoid during
+# workloads, especially on multi-chip/galaxy topologies
 tt-toplike --backend luwen
 
 # Visualization modes
@@ -239,15 +321,18 @@ tt-toplike --devices 0,2
 |-----|--------|
 | `q` / `ESC` | Quit |
 | `r` | Force refresh |
-| `v` | Cycle visualization mode: Insights → Flow → Starfield → Castle → Arcade → Defrag → Insights |
+| `v` | Cycle visualization mode: Insights → Flow → Starfield → Castle → Arcade → Defrag → Inference → Insights |
 | `a` | Jump directly to Arcade |
 | `d` | Jump directly to Defrag |
 | `g` | Jump directly to Grid (Insights table) |
-| `b` | Cycle backend (live switching) |
-| `/` | Command bar — type `/mode defrag`, `/fps 30`, `/quit`, etc. |
+| `i` | Open the Inference Server Monitor from **any** view; `i` while in it jumps to Insights (a quick back-and-forth), `Esc` backs out to where you came from. Also sits at the tail of the `v` cycle. |
+| `b` | Cycle backend (live switching): Hybrid → Sysfs → JSON → Mock → Host → Hybrid. Luwen and Remote are launch-only — the cycle never steps onto them. |
+| `/` | Command bar — type `/mode defrag`, `/fps 30`, `/theme grayskull`, `/quit`, etc. |
 | `l` | Toggle legend overlay (what each signal means in the current mode) |
 | `?` | Toggle help overlay (full key reference) |
 | `!` | Toggle explain overlay (how visualizations map to hardware signals) |
+
+Command bar verbs (type `/` then the verb): `/fps <1–120>`, `/datafps <1–30>`, `/mode <insights\|grid\|starfield\|castle\|flow\|arcade\|defrag>`, `/theme <grayskull\|default>` (bare `/theme` toggles), `/legend` (`l`), `/explain`, `/throttle`, `/idle-on-blur`, `/help` (`?`), `/quit` (`q`).
 
 **Insights mode only:**
 
@@ -266,8 +351,35 @@ tt-toplike --devices 0,2
 - **Memory Castle** — roguelike dungeon with 600 particles per chip representing the DDR→L2→L1→Tensix memory hierarchy. Four particle types (Read/Write/CacheHit/CacheMiss) with trails; density and speed driven by live power. Colors rotate through the spectrum each inference burst.
 - **Memory Flow** — NoC particle streams flowing left-to-right across GDDR channel bars. One row per DDR channel (up to 12 on Blackhole); bar fill = trained/active state; particle speed and density = bandwidth.
 - **Defrag** — Norton SpeedDisk-style block map: one row per GDDR channel, blocks fill left→right as weights DMA in. During inference, blocks glow reactively — brightness rises with inference power, saturation increases with GDDR temperature, and the palette shifts warmer under sustained thermal load (per-channel hue drifts up to +40° with channel temp; global palette shifts up to +25° warmer as the chip heats). Scatter bursts flash 5–12 random cells per channel on power spikes, giving each inference token a visible beat. `EVICT` animation plays when power returns to idle baseline (model unloaded) — blocks dissolve right→left at prime-staggered rates per channel, then DMA rebuild restarts from scratch.
-- **Arcade** — unified split-screen combining Starfield (top 40%), Memory Castle + Defrag block map side-by-side (middle 30%), and Memory Flow (bottom 30%); a `@` hero character roams the canvas driven by real telemetry: X = current draw, Y = power consumption, color = ASIC temperature; hero speed and trail length reflect aiclk and live ETH link count.
+- **Arcade** — unified split-screen combining Starfield (top 40%), Memory Castle + Defrag block map side-by-side (middle 30%), and Memory Flow (bottom 30%); a `@` hero character roams the canvas driven by real telemetry: X = current draw, Y = power consumption, color = ASIC temperature; hero speed and trail length reflect aiclk and live ETH link count. When a model is **serving locally**, a hero `⚔` snake duel lights up: a telemetry-true tug-of-war strip where the `⚔` marker slides toward whichever side dominates (chip power/util vs the snake's tokens/s + queue depth), the hero lunges on real power spikes and the snake lunges on completed requests. Per-device power/temp appears exactly once as one shared strip, and every section wears BBS/demoscene ANSI chrome (`╔══[ SECTION ]══▓▒░`, left-side bars only). The duel is suppressed under `--remote` (local serving vs remote silicon would be incoherent).
 - **tt-toplike-app** — native desktop window hosting the full TUI in a PTY (GPU-accelerated via eframe; Wayland/X11).
+
+### Inference Server Monitor (`[i]`)
+
+Press `i` from any view to open the flagship **Inference Server Monitor** — one unified "snake" that reflects your whole fleet through three telemetry-true states. `i` while in it jumps to Insights (a quick back-and-forth); `Esc` backs out to wherever you came from; and it also sits at the tail of the `v` rotation. Press `l` for the legend, `/explain` for the mapping overlay.
+
+- **Cold** (nothing loading or serving) — a hungry snake roams a drifting starfield of the **model catalog**. The catalog is a bundled compatibility snapshot (the offline floor) refreshed in the background from Tenstorrent's live copy, and the footer tallies `N of M models run on your <arch>` for the silicon you actually have.
+- **Loading** (a model is compiling/loading) — the snake coils into a boxed loading journey through `compile → load → ready` in a synthwave palette (cyan→violet→magenta→pink), capped by a hot-pink burst the instant the model reports Ready. A footer band explains what the current phase is actually doing (drawn from in-tree education copy) and shows live progress — **compiled** kernels and **loaded** weight shards side by side, so you can watch the compile count climb first and the load count follow.
+- **Serving** (a model is Ready) — a live dashboard driven by the server's vLLM `/metrics`: a green **READY** header, a throughput timeline, a token-exhaust snake, per-request swimlanes, a stats panel, and a TT silicon strip (one reading per detected chip).
+
+```
+   cold ······· hungry snake roams the model-catalog starfield
+                footer: "7 of 42 models run on your Blackhole"
+loading ▓▒░ compile → load → ready ░▒▓  compiled 1,658 · loaded 1,472
+serving ▶───────  tok/s ▁▂▅▇█▅▂  ⚔ swimlanes · live vLLM /metrics
+```
+
+The snapshot the snake reads is a local Docker/HTTP probe of *this* machine. Under `--remote`, if the publisher streams the `tt_toplike` extension the `[i]` view describes the **remote** box's inference; otherwise it falls back to this machine's probe with a `LOCAL` label.
+
+### Gallery — recorded sessions
+
+`assets/casts/` holds 7 [asciinema](https://asciinema.org/) recordings you can replay in your own terminal (no TT hardware needed) with:
+
+```bash
+asciinema play assets/casts/06-arcade.cast
+```
+
+The set: `01-insights`, `02-starfield`, `03-memory-castle`, `04-memory-flow`, `05-defrag`, `06-arcade`, `07-host-cpu`. They're regenerated by the local `record-casts.sh` helper.
 
 ### Backend System (Safe by Default)
 
@@ -279,7 +391,7 @@ Auto-detect order: **Hybrid (sysfs + background JSON) → JSON → Mock** on Lin
 | JSON    | `tt-smi -s` subprocess | ✅ Yes | None |
 | Host    | CPU/RAM via sysinfo (+ hwmon/RAPL on Linux) — Linux/macOS/Windows | ✅ N/A | None |
 | Mock    | Simulated telemetry | ✅ N/A | None |
-| Luwen   | Direct PCI BAR0 access | ⚠️ May disrupt | root / ttkmd |
+| Luwen   | tt-kmd-mediated reads (one ARC msg on first read, WH/GS) | ⚠️ Contention risk under workloads | root / ttkmd |
 
 Luwen is only accessible with `--backend luwen` and never used in auto-detect, preventing accidental interference with running LLMs or training jobs.
 
@@ -328,7 +440,7 @@ dpkg-deb --info ../tt-toplike_*_amd64.deb
 dpkg-deb --contents ../tt-toplike_*_amd64.deb
 ```
 
-The `vendor/` directory (~80 MB) is committed to git for reproducible offline builds. The `debian/rules` uses `--frozen` to enforce no network fetches at build time, matching Debian build daemon behavior.
+The `vendor/` directory is **not committed** (it was through v0.7.18, but 1.1 GB / 35k files made clones hostile). `build-deb.sh` regenerates it via `cargo vendor` for reproducible offline builds; `--quick` reuses a `vendor/` that's already present. The `debian/rules` uses `--frozen` to enforce no network fetches at build time, matching Debian build daemon behavior.
 
 ## Architecture
 

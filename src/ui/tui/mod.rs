@@ -17,6 +17,7 @@ pub mod perf;
 pub use perf::PerfMeter;
 pub mod throttle;
 pub use throttle::ThrottleState;
+pub(crate) mod inference_panel;
 
 use crate::animation::{
     ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis,
@@ -25,9 +26,11 @@ use crate::backend::{factory, BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
 use crate::error::TTTopError;
 use crate::ui::colors;
-use crate::workload::{HostProcessMonitor, InferenceEngine, ProcRow};
+use crate::workload::{HostProcessMonitor, ProcRow};
+// InferenceEngine + the /proc-based probes are only used on the Linux/TT path,
+// so gate the import to match (keeps non-Linux builds warning-clean under -D warnings).
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-use crate::workload::{InferenceServerProbe, ProcessMonitor, ServingMetrics};
+use crate::workload::{InferenceEngine, InferenceServerProbe, ProcessMonitor, ServingMetrics};
 use crossterm::{
     event::{self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyEventKind},
     execute,
@@ -76,6 +79,11 @@ enum DisplayMode {
     Arcade,
     /// Defrag view — model-loading visualization (inspired by disk defragmenters)
     Defrag,
+    /// Dedicated full-screen Inference Server Monitor — entered via `i`/`I`
+    /// only (deliberately excluded from the `v`-cycle rotation, see the `v`
+    /// key handler below). Supersedes the old `[i]` overlay strip that used
+    /// to live inside the Insights screen.
+    InferenceMonitor,
 }
 
 /// Floating overlay panel type — toggled by hotkeys, auto-dismissed on any other keypress.
@@ -245,7 +253,55 @@ fn run_app(
     // enriched by PID with TT device attribution (see the refresh tick).
     let mut host_proc_monitor = HostProcessMonitor::new();
     host_proc_monitor.update();
-    let mut proc_rows: Vec<ProcRow> = host_proc_monitor.rows(PROC_PANEL_MAX_ROWS);
+    // Background liveness prober: confirms server runtimes (vllm, ollama) via
+    // their local API off the render path. First cycle has no verdicts yet, so
+    // rows() relies on the cheap snapshot tier until the worker reports back.
+    let liveness_prober = crate::workload::LivenessProber::spawn();
+    liveness_prober.submit(host_proc_monitor.detected_runtimes());
+    // Background inference-server monitor: probes detected TT inference-server
+    // containers (docker stats + /health) off the render path. Not yet read by
+    // any panel — used by the [i] panel in the next task.
+    #[cfg(target_os = "linux")]
+    let inference_monitor = crate::workload::InferenceServerMonitor::spawn();
+    #[cfg(target_os = "linux")]
+    inference_monitor.submit(host_proc_monitor.detected_inference_servers());
+    // Previous inference snapshot, for detecting the model-unload edge that
+    // triggers the Defrag EVICT animation.
+    #[cfg(target_os = "linux")]
+    let mut prev_inference_snapshot: Vec<crate::workload::inference_server::ServiceState> =
+        inference_monitor.snapshot();
+    // Multi-model roster lines for the `[i]` view, recomputed each monitor tick
+    // (in the InferenceMonitor update branch). Held here so the render pass —
+    // which must reserve the same number of rows the snake was sized against —
+    // reads the exact same set. Empty for 0/1 detected service.
+    let mut inference_roster: Vec<Line<'static>> = Vec::new();
+    // Education footer band for the [i] loading view (composed on the inference
+    // tick, like `inference_roster`). `band_rotation` advances each recompute; the
+    // visible fact changes every `BAND_ROTATE_EVERY` recomputes (~8s at the ~2s
+    // inference cadence).
+    let mut inference_band: Vec<Line<'static>> = Vec::new();
+    let mut band_rotation: usize = 0;
+    // Background model-catalog refresher: curl-refreshes the compatibility
+    // catalog off the render path; feeds the cold-trail starfield screensaver.
+    let catalog_refresher = crate::workload::CatalogRefresher::spawn();
+    let mut proc_rows: Vec<ProcRow> =
+        host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts());
+    // Linux/TT: seed /proc attribution immediately so a TT-attributed backend
+    // (Sysfs/Hybrid/Json/Luwen — anything but --host/--mock, per
+    // `backend_shows_only_tt`) shows the TT-filtered process list from the
+    // very first frame, not just after the first 2s refresh tick below.
+    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+    {
+        process_monitor.update();
+        if crate::cli::backend_shows_only_tt(backend_type) {
+            let tt_pids: std::collections::HashSet<i32> = flat_process_list(&process_monitor)
+                .iter()
+                .map(|p| p.pid)
+                .collect();
+            proc_rows = host_proc_monitor.tt_rows(PROC_PANEL_MAX_ROWS, &tt_pids);
+        }
+        enrich_proc_rows_tt(&mut proc_rows, &process_monitor);
+    }
     let mut last_proc_rows_update = Instant::now();
 
     // Host CPU / RAM monitoring — sampled on the same 2s cadence as processes.
@@ -289,6 +345,11 @@ fn run_app(
     let mut arcade: Option<ArcadeVisualization> = None;
     let mut defrag: Option<DefragVis> = None;
     let mut prev_display_mode = display_mode;
+    // The mode to return to when `i`/`I`/`Esc` exits the dedicated
+    // `DisplayMode::InferenceMonitor` view — captured at entry so `i` (or
+    // `Esc`) always lands back wherever the user came from, not a hardcoded
+    // Insights. Only meaningful while `display_mode == InferenceMonitor`.
+    let mut prev_mode = DisplayMode::Insights;
 
     // ── Slash command state ────────────────────────────────────────────────
     // Press '/' from any mode to open the command bar at the bottom of the
@@ -298,6 +359,84 @@ fn run_app(
     let mut cmd_mode = false;
     let mut cmd_buf = String::new();
     let mut cmd_message: Option<(String, bool)> = None; // (text, is_error)
+
+    // `/remote` discovery picker: boxes from the most recent `/remote` (no-arg)
+    // discovery, retained so `/remote <n>` can select by list position. Empty
+    // until the user runs `/remote`. Only touched by the explicit `/remote`
+    // command — never by auto-detect or Tab (additive-safety).
+    #[cfg(feature = "remote")]
+    let mut remote_boxes: Vec<crate::backend::discovery::DiscoveredBox> = Vec::new();
+
+    // In-flight `/remote` discovery/connect. The blocking work (mDNS discovery,
+    // WebSocket connect + init) runs on a worker thread; the loop polls this
+    // receiver once per tick with `try_recv()` so the render thread never
+    // stalls. `None` when idle. Dropping it (Esc) cancels the wait.
+    #[cfg(feature = "remote")]
+    let mut pending_remote: Option<std::sync::mpsc::Receiver<RemoteOutcome>> = None;
+
+    // ── `--serve` / `/serve` telemetry publisher (feature = "remote") ──────
+    // Holds the in-app publisher, started either right here (a `--serve` flag
+    // given at a real TTY — see the auto-start block immediately below) or
+    // later via the `/serve` command (see the key-handler dispatch). `None`
+    // means "not serving". Dropping it (`/serve off`/`/serve stop`, or simply
+    // exiting the TUI) stops the publisher's background accept loop and every
+    // connected client's task (see `TelemetryPublisher`'s `Drop`).
+    #[cfg(feature = "remote")]
+    let mut publisher: Option<crate::backend::TelemetryPublisher> = None;
+
+    // Shared "can't serve" message: a publisher can only broadcast a backend
+    // that retains verbatim `tt-smi -s` JSON — see
+    // `TelemetryBackend::snapshot_json`'s doc comment for which backends
+    // qualify (json/hybrid/ws) and which don't (mock/host/sysfs/luwen, which
+    // have nothing to broadcast). Shared by both the `--serve` auto-start
+    // below and the `/serve` command dispatch so the wording never drifts
+    // between the two call sites.
+    #[cfg(feature = "remote")]
+    const SERVE_NEEDS_JSON_HYBRID: &str =
+        "needs the json or hybrid backend (tt-smi); relaunch with --backend hybrid or --backend json";
+
+    // `--serve` given at a real TTY: start the publisher immediately, inline
+    // on this thread. Unlike `/remote`'s discovery (mDNS, seconds), a slow
+    // off-thread worker is unnecessary here — `TelemetryPublisher::spawn`
+    // binds synchronously and returns fast (a plain `TcpListener::bind` plus
+    // spawning its own dedicated Tokio runtime), so there is nothing to hide
+    // behind an mpsc worker. `--serve` given WITHOUT a TTY never reaches this
+    // function at all — see `bin/tui.rs::run_headless_serve`, which handles
+    // that case before the TUI is ever entered.
+    #[cfg(feature = "remote")]
+    if let Some(spec) = cli.serve.as_deref() {
+        // Prime the backend with one `update()` before checking capability —
+        // mirroring `run_headless_serve`'s Step-2 priming (bin/tui.rs). `init()`
+        // alone does NOT cache a raw JSON frame for JSONBackend/HybridBackend
+        // (only `update()` → `apply_raw_snapshot` does), so without this,
+        // `snapshot_json()` would read `None` here even for `--backend json`,
+        // failing the very check meant to distinguish JSON/Hybrid from
+        // Mock/Host/Sysfs. Errors are ignored here — a failed first sample
+        // just means the check below reports the same "needs json/hybrid"
+        // message it always would if the backend truly lacks a raw snapshot.
+        let _ = backend.update();
+        if backend.snapshot_json().is_none() {
+            cmd_message = Some((format!("--serve {SERVE_NEEDS_JSON_HYBRID}"), true));
+        } else {
+            match crate::cli::parse_serve_bind(spec).and_then(|addr| {
+                crate::backend::TelemetryPublisher::spawn(addr).map_err(|e| e.to_string())
+            }) {
+                Ok(p) => {
+                    cmd_message = Some((
+                        format!(
+                            "serving on {} — plaintext, unauthed, trusted-LAN only",
+                            p.bind_addr()
+                        ),
+                        false,
+                    ));
+                    publisher = Some(p);
+                }
+                Err(e) => {
+                    cmd_message = Some((e, true));
+                }
+            }
+        }
+    }
 
     // ── Floating overlay panel state ──────────────────────────────────────
     // Toggled by l (legend), ? (help), ! (explain).
@@ -345,6 +484,14 @@ fn run_app(
     let mut fleet_cursor: usize = 0;
     let mut fleet_zoom_start: Option<usize> = None;
 
+    // The `[i]` Inference Server Monitor view is one unified creature: it roams
+    // the model-catalog starfield when nothing serves, grows the boxed-snake
+    // while a model loads, and feeds on live serving telemetry once Ready. All
+    // behavior selection, resizing, and the loading→ready burst live inside
+    // `Snake` (see `crate::animation::snake`); the loop just feeds it a
+    // `SnakeWorld` each tick and hands it the terminal at render time.
+    let mut snake = crate::animation::Snake::new();
+
     loop {
         // Decide whether to advance animations this iteration.
         // nvtop-style trick: input always polls at INPUT_POLL_MS (16 ms) so
@@ -359,6 +506,10 @@ fn run_app(
                 | DisplayMode::MemoryCastle
                 | DisplayMode::MemoryFlow
                 | DisplayMode::Arcade
+                // The [i] view is a live animated dashboard (snake wave, token
+                // exhaust, timeline, coiling loader) — it must redraw at anim
+                // cadence, not the 10 FPS data rate, or it reads as frozen.
+                | DisplayMode::InferenceMonitor
         ) || (display_mode == DisplayMode::Defrag && defrag_is_animated);
         let render_interval = if is_anim_mode {
             throttle_state.effective_anim_interval(ui_poll_rate_anim)
@@ -383,6 +534,54 @@ fn run_app(
         // tick below) by this is what keeps the data screens at ~10 FPS instead
         // of redrawing the full screen on every 16 ms input-poll wakeup.
         let do_draw = should_tick || std::mem::take(&mut force_redraw);
+
+        // Under `--remote`, prefer the box's actual process list carried on
+        // the `tt_toplike` frame extension over this machine's own process
+        // scan for the *process panel display*. This is deliberately never
+        // substituted into `proc_rows` itself — `proc_rows` also feeds the
+        // `/serve` broadcast (`build_extension` below), which must always
+        // describe what THIS machine is actually running, independent of
+        // what `--remote` happens to be displaying. `None` here means the
+        // peer isn't streaming that sub-key (or isn't a `tt-toplike --serve`
+        // publisher at all) — fall back to `proc_rows` and let
+        // `remote_local_fallback_note` label it as such.
+        //
+        // Computed once per loop iteration (not only inside `do_draw`) so the
+        // kill-dialog handlers further down — which index by `process_cursor`
+        // into whichever list is currently on screen — can tell the two apart
+        // and refuse to signal a local PID that merely happens to share the
+        // highlighted row's index with an unrelated remote process.
+        #[cfg(feature = "remote")]
+        let remote_proc_rows: Option<Vec<ProcRow>> = if backend_type == BackendType::Remote {
+            backend
+                .remote_processes()
+                .map(|procs| procs.iter().map(remote_proc_to_row).collect())
+        } else {
+            None
+        };
+        #[cfg(not(feature = "remote"))]
+        let remote_proc_rows: Option<Vec<ProcRow>> = None;
+        let has_remote_proc_rows = remote_proc_rows.is_some();
+        // If the stream just started delivering remote process rows (e.g. a
+        // local→remote panel switch mid-session), drop any kill-confirm
+        // dialog that's still open — it would otherwise keep naming an
+        // earlier LOCAL pid while remote rows are now on screen (see M1 in
+        // the final review). The legitimate local kill path (dialog opened
+        // and confirmed while `!has_remote_proc_rows` throughout) is
+        // untouched — this only fires once remote rows appear.
+        if has_remote_proc_rows {
+            kill_confirm = None;
+        }
+        // Length of whatever the process panel is *actually* showing this
+        // iteration — the remote list when present, else `proc_rows` — used
+        // to keep cursor clamping in sync with the on-screen rows (see the
+        // `Down` handler below). Only consumed by the Linux/procfs cursor
+        // navigation code, hence the matching cfg (kept unused otherwise).
+        #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+        let displayed_proc_row_len = remote_proc_rows
+            .as_ref()
+            .map(Vec::len)
+            .unwrap_or(proc_rows.len());
 
         // Initialize or update visualizations (only on tick to match target FPS)
         let size = terminal
@@ -459,7 +658,39 @@ fn run_app(
                         arc.initialize_topology(backend);
                         arcade = Some(arc);
                     }
+                    // Thread the first Ready inference service's serving stats
+                    // into the hero ⚔ snake duel. Zero new probing: this only
+                    // reads the monitor snapshot already maintained on Linux.
+                    // The design is Docker/TT-only, so off-Linux there is never
+                    // a serving model — hand the duel None.
+                    #[cfg(target_os = "linux")]
+                    let serving = {
+                        use crate::workload::inference_server::Phase;
+                        inference_monitor
+                            .snapshot()
+                            .iter()
+                            .find(|s| s.phase == Phase::Ready)
+                            .and_then(|s| s.serving)
+                    };
+                    #[cfg(not(target_os = "linux"))]
+                    let serving: Option<
+                        crate::workload::inference_server::ServingStats,
+                    > = None;
+
+                    // Under --remote the chips on screen belong to the REMOTE
+                    // box, but the serving snapshot is a LOCAL Docker/HTTP probe
+                    // of *this* machine. Pitting local serving against remote
+                    // silicon in the hero ⚔ duel is incoherent, so suppress the
+                    // serving feed under Remote (no-op off-Linux, where it's
+                    // already None).
+                    let serving = if backend_type == BackendType::Remote {
+                        None
+                    } else {
+                        serving
+                    };
+
                     if let Some(ref mut arc) = arcade {
+                        arc.set_serving(serving);
                         arc.update(backend);
                     }
                 }
@@ -469,6 +700,134 @@ fn run_app(
                 }
                 DisplayMode::Grid => {
                     // Grid mode doesn't need special init
+                }
+                DisplayMode::InferenceMonitor => {
+                    // Feed the unified snake a fresh view of the world; it owns
+                    // behavior selection (roaming/growing/feeding) and the
+                    // loading→ready burst internally. The live service rows only
+                    // exist on Linux (the design is Docker/TT-only); off Linux we
+                    // hand it an empty slice, so it simply roams the catalog.
+                    #[cfg(target_os = "linux")]
+                    let local_rows = inference_monitor.snapshot();
+                    #[cfg(not(target_os = "linux"))]
+                    let local_rows: Vec<
+                        crate::workload::inference_server::ServiceState,
+                    > = Vec::new();
+                    // Under `--remote`, prefer the box's authoritative inference
+                    // data carried on the `tt_toplike` frame extension over this
+                    // machine's own Docker probe. `None` means the peer isn't
+                    // streaming that sub-key (or isn't a `tt-toplike --serve`
+                    // publisher at all) — fall back to `local_rows` and let
+                    // `remote_local_fallback_note` below label it as such.
+                    // (The non-`remote`-feature arm skips the `Option`
+                    // round-trip entirely rather than hard-coding a `None` to
+                    // `unwrap_or` — clippy flags an unwrap of a statically-known
+                    // `None` as dead code.)
+                    #[cfg(feature = "remote")]
+                    let (rows, has_remote_rows): (
+                        Vec<crate::workload::inference_server::ServiceState>,
+                        bool,
+                    ) = {
+                        let remote_rows = if backend_type == BackendType::Remote {
+                            backend.remote_inference().map(|list| {
+                                list.iter().map(remote_inference_to_service_state).collect()
+                            })
+                        } else {
+                            None
+                        };
+                        let has_remote_rows = remote_rows.is_some();
+                        (remote_rows.unwrap_or(local_rows), has_remote_rows)
+                    };
+                    #[cfg(not(feature = "remote"))]
+                    let (rows, has_remote_rows): (
+                        Vec<crate::workload::inference_server::ServiceState>,
+                        bool,
+                    ) = (local_rows, false);
+                    let catalog = catalog_refresher.snapshot();
+                    let arch = backend
+                        .devices()
+                        .first()
+                        .map(|d| d.architecture.name())
+                        // Matches Architecture::name()'s "Unknown" for a
+                        // detected-but-unknown device (consistent footer casing).
+                        .unwrap_or("Unknown");
+                    // Per-chip telemetry snapshot for the Feeding silicon strip:
+                    // one reading per detected device, with power/temp/clock when
+                    // the backend exposes them (all `None` otherwise).
+                    let chips: Vec<crate::animation::ChipReading> = backend
+                        .devices()
+                        .iter()
+                        .map(|d| {
+                            let t = backend.telemetry(d.index);
+                            crate::animation::ChipReading {
+                                index: d.index,
+                                arch: d.architecture.name(),
+                                power_w: t.and_then(|t| t.power),
+                                temp_c: t.and_then(|t| t.asic_temperature),
+                                aiclk_mhz: t.and_then(|t| t.aiclk),
+                            }
+                        })
+                        .collect();
+                    // Multi-model roster (empty for <2 services). The snake gets
+                    // the remaining height so `render_snake_view` can reserve the
+                    // same rows for the roster and the fixed-dim loading/roaming
+                    // renderers line up.
+                    inference_roster = inference_roster_lines(&rows, size.width as usize);
+                    // Under `--remote`, while `remote_rows` is `None` (the peer
+                    // isn't streaming inference data) this view is still
+                    // probing LOCAL docker, not the remote box's serving stack.
+                    // Prepend a dim one-line banner so that's obvious, computed
+                    // here (not in `render_snake_view`) so the extra row is
+                    // counted in `roster_h` below and the snake's reserved
+                    // height stays in sync with what actually gets drawn.
+                    if let Some(note) = remote_local_fallback_note(backend_type, has_remote_rows) {
+                        inference_roster.insert(
+                            0,
+                            Line::from(Span::styled(
+                                note,
+                                Style::default()
+                                    .fg(colors::text_secondary())
+                                    .add_modifier(Modifier::DIM),
+                            )),
+                        );
+                    }
+                    let roster_h = inference_roster.len();
+                    // Education band: describe the featured *loading* service.
+                    band_rotation = band_rotation.wrapping_add(1);
+                    inference_band = {
+                        use crate::workload::inference_server::{education, Phase};
+                        let featured = inference_panel::featured_loading(&rows);
+                        match featured {
+                            Some(s)
+                                if matches!(
+                                    s.phase,
+                                    Phase::Compiling | Phase::Loading | Phase::Alarm
+                                ) =>
+                            {
+                                let avail = (size.height as usize)
+                                    .saturating_sub(1 + roster_h + 3) // status + roster + min snake
+                                    .min(INFERENCE_BAND_MAX_H);
+                                education::compose_band(
+                                    &s.label,
+                                    s.phase,
+                                    size.width as usize,
+                                    avail,
+                                    band_rotation / BAND_ROTATE_EVERY,
+                                )
+                            }
+                            _ => Vec::new(),
+                        }
+                    };
+                    let band_h = inference_band.len();
+                    snake.update(&crate::animation::SnakeWorld {
+                        rows: &rows,
+                        catalog: &catalog,
+                        arch,
+                        chips: &chips,
+                        cadence_secs: crate::workload::inference_server::CADENCE_SECS,
+                        width: size.width as usize,
+                        height: (size.height as usize).saturating_sub(1 + roster_h + band_h),
+                    });
                 }
                 DisplayMode::Defrag => {
                     if defrag.is_none() {
@@ -531,6 +890,41 @@ fn run_app(
             // returns Option<&'static str> so no lifetime issue, but keep pattern consistent
             // with perf_arg to avoid any future borrow conflicts inside the closure).
             let throttle_hint = throttle_state.status_hint();
+            // `/serve` status indicator: `◉ serving :PORT · N clients` while a
+            // publisher is held, absent otherwise. Built as an owned `String`
+            // (rather than borrowed inside the draw closure) for the same
+            // borrow-safety/consistency reasons as `perf_arg`/`throttle_hint`
+            // above — `client_count()` also changes every tick, so this is
+            // recomputed fresh each draw rather than cached.
+            #[cfg(feature = "remote")]
+            let serve_status = publisher.as_ref().map(|p| {
+                format!(
+                    "◉ serving :{} · {} clients",
+                    p.bind_addr().port(),
+                    p.client_count()
+                )
+            });
+            #[cfg(feature = "remote")]
+            let serve_hint = serve_status.as_deref();
+            #[cfg(not(feature = "remote"))]
+            let serve_hint: Option<&str> = None;
+            // Whether `proc_rows` above was actually built via the TT-filtered
+            // path this cycle — only possible on Linux/procfs builds (see the
+            // proc_rows assignments). Drives the process panel's empty-state
+            // message so "no TT processes" reads differently from "no host
+            // processes at all".
+            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+            let tt_filtered = crate::cli::backend_shows_only_tt(backend_type);
+            #[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
+            let tt_filtered = false;
+            // Honest-labeling note for the process panel: `Some` only while
+            // `remote_proc_rows` (computed above) is `None` under `--remote` —
+            // i.e. the list below is still LOCAL processes, not the remote
+            // box's. See `remote_local_fallback_note`.
+            let remote_note = remote_local_fallback_note(backend_type, has_remote_proc_rows);
+            // The rows the panel actually renders this frame: the remote list
+            // when present, else the local scan.
+            let display_proc_rows: &[ProcRow] = remote_proc_rows.as_deref().unwrap_or(&proc_rows);
             let draw_start = Instant::now();
             terminal
                 .draw(|f| {
@@ -545,7 +939,7 @@ fn run_app(
                             render_insights(
                                 f,
                                 backend,
-                                &proc_rows,
+                                display_proc_rows,
                                 process_cursor,
                                 kill_confirm.as_ref(),
                                 cli,
@@ -556,12 +950,17 @@ fn run_app(
                                 host_cpu_pct,
                                 host_mem_used,
                                 host_mem_total,
+                                tt_filtered,
+                                remote_note,
                                 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                 &serving_metrics,
                             );
                         }
                         DisplayMode::Grid => {
                             render_grid_mode(f, backend);
+                        }
+                        DisplayMode::InferenceMonitor => {
+                            render_snake_view(f, &snake, &inference_roster, &inference_band);
                         }
                         DisplayMode::Starfield => {
                             if let Some(ref sf) = starfield {
@@ -591,7 +990,14 @@ fn run_app(
                     }
 
                     // ── Global status bar (all modes) ─────────────────────────
-                    render_global_statusbar(f, backend, display_mode, perf_arg, throttle_hint);
+                    render_global_statusbar(
+                        f,
+                        backend,
+                        display_mode,
+                        perf_arg,
+                        throttle_hint,
+                        serve_hint,
+                    );
 
                     // ── Command bar overlay (all modes) ───────────────────────
                     if cmd_mode || cmd_message.is_some() {
@@ -641,25 +1047,172 @@ fn run_app(
                                 cmd_message = None;
                             }
                             KeyCode::Enter => {
-                                let (msg, is_err, should_quit) = execute_command(
-                                    &cmd_buf,
-                                    &mut display_mode,
-                                    &mut ui_poll_rate_anim,
-                                    &mut ui_poll_rate_data,
-                                    anim_cfg.sensitivity,
-                                    &mut overlay,
-                                    &mut throttle_state,
-                                );
-                                if should_quit {
-                                    return Ok(());
-                                }
-                                // Empty message (e.g. /help opens overlay) → don't
-                                // leave a blank command bar stuck on screen.
-                                cmd_message = if msg.is_empty() {
-                                    None
+                                // `/remote` is dispatched here (not in
+                                // execute_command) because connecting needs the
+                                // live backend/backend_type, which execute_command
+                                // doesn't get. It also runs OFF the render thread
+                                // (see spawn_remote_worker) so mDNS discovery and
+                                // the WebSocket connect never freeze the UI — the
+                                // outcome is applied later when the worker reports
+                                // back (see the pending_remote poll below).
+                                // Everything else flows through execute_command.
+                                let verb = cmd_buf
+                                    .trim()
+                                    .trim_start_matches('/')
+                                    .split_whitespace()
+                                    .next()
+                                    .unwrap_or("")
+                                    .to_lowercase();
+
+                                if verb == "remote" {
+                                    #[cfg(feature = "remote")]
+                                    {
+                                        let arg = cmd_buf
+                                            .trim()
+                                            .trim_start_matches('/')
+                                            .split_once(char::is_whitespace)
+                                            .map(|(_, rest)| rest)
+                                            .unwrap_or("")
+                                            .trim()
+                                            .to_string();
+                                        // Show progress immediately; the worker
+                                        // replaces this when it finishes.
+                                        cmd_message = Some((
+                                            if arg.is_empty() {
+                                                "discovering boxes…".to_string()
+                                            } else {
+                                                format!("connecting to {}…", arg)
+                                            },
+                                            false,
+                                        ));
+                                        pending_remote = Some(spawn_remote_worker(
+                                            arg,
+                                            remote_boxes.clone(),
+                                            config.clone(),
+                                        ));
+                                    }
+                                    #[cfg(not(feature = "remote"))]
+                                    {
+                                        cmd_message = Some((
+                                            "remote unavailable (built without the 'remote' feature)"
+                                                .to_string(),
+                                            true,
+                                        ));
+                                    }
+                                } else if verb == "serve" {
+                                    // `/serve` is dispatched here (not in
+                                    // execute_command) for the same reason
+                                    // `/remote` is: starting/stopping needs the
+                                    // live backend (for `snapshot_json()`) and
+                                    // mutates the loop's `publisher` slot,
+                                    // neither of which execute_command has
+                                    // access to. Unlike `/remote` this runs
+                                    // INLINE (no off-thread worker) because
+                                    // `TelemetryPublisher::spawn` binds
+                                    // synchronously and returns fast — see the
+                                    // `--serve` auto-start comment above for
+                                    // why that's safe on the render thread.
+                                    #[cfg(feature = "remote")]
+                                    {
+                                        let arg = cmd_buf
+                                            .trim()
+                                            .trim_start_matches('/')
+                                            .split_once(char::is_whitespace)
+                                            .map(|(_, rest)| rest)
+                                            .unwrap_or("")
+                                            .trim()
+                                            .to_string();
+                                        match parse_serve_command(&arg) {
+                                            ServeCmd::Stop => {
+                                                cmd_message = Some((
+                                                    if publisher.take().is_some() {
+                                                        "stopped serving".to_string()
+                                                    } else {
+                                                        "not serving".to_string()
+                                                    },
+                                                    false,
+                                                ));
+                                            }
+                                            ServeCmd::Bad(reason) => {
+                                                cmd_message = Some((reason, true));
+                                            }
+                                            ServeCmd::Start(spec) => {
+                                                if let Some(existing) = publisher.as_ref() {
+                                                    cmd_message = Some((
+                                                        format!(
+                                                            "already serving on {}",
+                                                            existing.bind_addr()
+                                                        ),
+                                                        false,
+                                                    ));
+                                                } else if backend.snapshot_json().is_none() {
+                                                    cmd_message = Some((
+                                                        format!(
+                                                            "/serve: broadcast {SERVE_NEEDS_JSON_HYBRID}"
+                                                        ),
+                                                        true,
+                                                    ));
+                                                } else {
+                                                    let bind_spec = spec.unwrap_or_else(|| {
+                                                        format!(
+                                                            "0.0.0.0:{}",
+                                                            crate::cli::DEFAULT_SERVE_PORT
+                                                        )
+                                                    });
+                                                    match crate::cli::parse_serve_bind(&bind_spec)
+                                                        .and_then(|addr| {
+                                                            crate::backend::TelemetryPublisher::spawn(
+                                                                addr,
+                                                            )
+                                                            .map_err(|e| e.to_string())
+                                                        }) {
+                                                        Ok(p) => {
+                                                            cmd_message = Some((
+                                                                format!(
+                                                                    "serving on {} — plaintext, unauthed, trusted-LAN only",
+                                                                    p.bind_addr()
+                                                                ),
+                                                                false,
+                                                            ));
+                                                            publisher = Some(p);
+                                                        }
+                                                        Err(e) => {
+                                                            cmd_message = Some((e, true));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    #[cfg(not(feature = "remote"))]
+                                    {
+                                        cmd_message = Some((
+                                            "serve unavailable (built without the 'remote' feature)"
+                                                .to_string(),
+                                            true,
+                                        ));
+                                    }
                                 } else {
-                                    Some((msg, is_err))
-                                };
+                                    let (msg, is_err, should_quit) = execute_command(
+                                        &cmd_buf,
+                                        &mut display_mode,
+                                        &mut ui_poll_rate_anim,
+                                        &mut ui_poll_rate_data,
+                                        anim_cfg.sensitivity,
+                                        &mut overlay,
+                                        &mut throttle_state,
+                                    );
+                                    if should_quit {
+                                        return Ok(());
+                                    }
+                                    // Empty message (e.g. /help opens overlay) →
+                                    // don't leave a blank command bar on screen.
+                                    cmd_message = if msg.is_empty() {
+                                        None
+                                    } else {
+                                        Some((msg, is_err))
+                                    };
+                                }
                                 cmd_mode = false;
                                 cmd_buf.clear();
                             }
@@ -705,6 +1258,21 @@ fn run_app(
                                 show_perf = !show_perf;
                                 force_redraw = true;
                             }
+                            KeyCode::Char('i') | KeyCode::Char('I') => {
+                                // Toggle between the dedicated Inference Server Monitor and
+                                // Insights: `i` from anywhere opens the monitor (remembering
+                                // where we came from), and `i` while in the monitor lands on
+                                // Insights specifically — the two pair as a quick back-and-forth.
+                                // (Esc, by contrast, backs out to `prev_mode` — wherever you
+                                // came from — see the Esc handler.)
+                                if display_mode != DisplayMode::InferenceMonitor {
+                                    prev_mode = display_mode;
+                                    display_mode = DisplayMode::InferenceMonitor;
+                                } else {
+                                    display_mode = DisplayMode::Insights;
+                                }
+                                force_redraw = true;
+                            }
                             KeyCode::Char('/') => {
                                 // Open command bar — clears any previous result message
                                 cmd_mode = true;
@@ -716,6 +1284,17 @@ fn run_app(
                                 return Ok(());
                             }
                             KeyCode::Esc => {
+                                // Cancel an in-flight /remote wait first: drop the
+                                // receiver so the worker's send fails harmlessly
+                                // (it finishes on its own), then clear the
+                                // "discovering…/connecting…" status line.
+                                #[cfg(feature = "remote")]
+                                if pending_remote.take().is_some() {
+                                    cmd_message = Some(("remote cancelled".to_string(), false));
+                                    // Handled — skip the dismiss chain below.
+                                    force_redraw = true;
+                                    continue;
+                                }
                                 // Dismiss command message, zoom, kill confirm (in that order).
                                 // Overlays are already dismissed by the take() above.
                                 if prior_overlay.is_some() {
@@ -725,6 +1304,11 @@ fn run_app(
                                 } else if fleet_zoom_start.is_some() {
                                     // Zoom out from portrait drill-down back to galaxy overview.
                                     fleet_zoom_start = None;
+                                } else if display_mode == DisplayMode::InferenceMonitor {
+                                    // Back out of the dedicated Inference Server Monitor
+                                    // view to wherever the user came from (see the
+                                    // `i`/`I` handler above) rather than quitting.
+                                    display_mode = prev_mode;
                                 } else {
                                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_some() {
@@ -763,7 +1347,12 @@ fn run_app(
                                         DisplayMode::Arcade
                                     }
                                     DisplayMode::Arcade => DisplayMode::Defrag,
-                                    DisplayMode::Defrag => DisplayMode::Insights,
+                                    // Defrag and the Inference Server Monitor round out the
+                                    // rotation just before it wraps back to Insights, so both
+                                    // are reachable by cycling with `v` (the monitor is also
+                                    // still a direct toggle via `i`).
+                                    DisplayMode::Defrag => DisplayMode::InferenceMonitor,
+                                    DisplayMode::InferenceMonitor => DisplayMode::Insights,
                                 };
                                 log::info!("Switched to {:?} mode", display_mode);
                             }
@@ -816,6 +1405,10 @@ fn run_app(
                                         if let DisplayMode::Defrag = display_mode {
                                             defrag = None;
                                         }
+                                        // Drop any fleet drill-down: the new backend
+                                        // may expose a different (smaller) device count.
+                                        fleet_zoom_start = None;
+                                        fleet_cursor = 0;
                                     }
                                     Err(e) => {
                                         log::error!("Failed to switch backend: {}", e);
@@ -846,9 +1439,11 @@ fn run_app(
                                 } else {
                                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_none() {
-                                        // Clamp to proc_rows — the SAME list the panel renders,
-                                        // so the cursor always matches the highlighted row.
-                                        let max = proc_rows.len().saturating_sub(1);
+                                        // Clamp to `displayed_proc_row_len` — the SAME list the
+                                        // panel renders this iteration (remote rows under
+                                        // `--remote` when present, else `proc_rows`) — so the
+                                        // cursor always matches the highlighted row.
+                                        let max = displayed_proc_row_len.saturating_sub(1);
                                         process_cursor = (process_cursor + 1).min(max);
                                     }
                                 }
@@ -902,7 +1497,11 @@ fn run_app(
                             }
                             #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                             KeyCode::Char('k') if display_mode == DisplayMode::Insights => {
-                                if kill_confirm.is_none() {
+                                // Never under a remote-sourced panel: `proc_rows` (the only
+                                // list `kill_pid` can act on — it signals a LOCAL PID) would
+                                // diverge from what's highlighted on screen, so `process_cursor`
+                                // could pick an unrelated local process by coincidence of index.
+                                if kill_confirm.is_none() && !has_remote_proc_rows {
                                     // Use proc_rows (the rendered list) so the kill target
                                     // always matches the highlighted row — not flat_process_list
                                     // (PID-ascending, uncapped) which diverges from the display.
@@ -928,13 +1527,17 @@ fn run_app(
                                         libc::SIGKILL,
                                     );
                                     kill_confirm = None;
-                                } else if let Some(row) = proc_rows.get(process_cursor) {
+                                } else if !has_remote_proc_rows {
                                     // Outside dialog: SIGKILL immediately using proc_rows
-                                    // (the rendered list) so highlight == kill target.
-                                    let _ = crate::workload::process_monitor::kill_pid(
-                                        row.pid,
-                                        libc::SIGKILL,
-                                    );
+                                    // (the rendered list) so highlight == kill target. Guarded
+                                    // the same way as `k` above — never act on a local PID
+                                    // while a remote-sourced list is what's actually on screen.
+                                    if let Some(row) = proc_rows.get(process_cursor) {
+                                        let _ = crate::workload::process_monitor::kill_pid(
+                                            row.pid,
+                                            libc::SIGKILL,
+                                        );
+                                    }
                                 }
                             }
                             #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
@@ -959,6 +1562,82 @@ fn run_app(
                 } // end Event::Key
                 _ => {}
             } // end match event::read()
+        }
+
+        // ── Poll the in-flight /remote worker (non-blocking) ────────────────
+        // One cheap `try_recv()` per loop tick (the 16ms input poll wakes us).
+        // While pending, the "discovering…/connecting…" status line set at
+        // dispatch stays up. On completion we apply the outcome here, on the
+        // main thread: discovery updates the picker cache + message; connect
+        // hot-swaps the (already-init()ed) backend and resets per-mode viz.
+        #[cfg(feature = "remote")]
+        if let Some(rx) = pending_remote.as_ref() {
+            match rx.try_recv() {
+                Ok(RemoteOutcome::Discovered(Ok(boxes))) if boxes.is_empty() => {
+                    remote_boxes.clear();
+                    cmd_message = Some((
+                        "no boxes discovered — try /remote <host:port>".to_string(),
+                        false,
+                    ));
+                    pending_remote = None;
+                    force_redraw = true;
+                }
+                Ok(RemoteOutcome::Discovered(Ok(boxes))) => {
+                    let mut lines =
+                        vec!["discovered boxes — /remote <n|name> to connect:".to_string()];
+                    for (i, b) in boxes.iter().enumerate() {
+                        lines.push(format!("  {}. {}", i + 1, b.summary_line()));
+                    }
+                    remote_boxes = boxes;
+                    cmd_message = Some((lines.join("\n"), false));
+                    pending_remote = None;
+                    force_redraw = true;
+                }
+                Ok(RemoteOutcome::Discovered(Err(e))) => {
+                    remote_boxes.clear();
+                    cmd_message = Some((format!("discover failed: {}", e), true));
+                    pending_remote = None;
+                    force_redraw = true;
+                }
+                Ok(RemoteOutcome::Connected { target, result }) => {
+                    match result {
+                        Ok(ws) => {
+                            // Hot-swap the live backend to the WsBackend the worker
+                            // already constructed + init()ed (Box<WsBackend> unsizes
+                            // to Box<dyn TelemetryBackend> on assignment).
+                            *backend = ws;
+                            backend_type = BackendType::Remote;
+                            log::info!("/remote: hot-swapped to WsBackend @ {}", target);
+                            // Reset per-mode visualizations so they rebuild against
+                            // the new device set (mirrors the `b` backend-cycle path).
+                            starfield = None;
+                            memory_castle = None;
+                            memory_flow = None;
+                            arcade = None;
+                            defrag = None;
+                            // Drop any fleet drill-down: the remote box likely has a
+                            // different (smaller) device count than we were zoomed into.
+                            fleet_zoom_start = None;
+                            fleet_cursor = 0;
+                            cmd_message = Some((format!("connected to {}", target), false));
+                        }
+                        Err(e) => {
+                            cmd_message = Some((e, true));
+                        }
+                    }
+                    pending_remote = None;
+                    force_redraw = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Still working — leave the progress message up.
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // Worker vanished without sending (shouldn't happen).
+                    cmd_message = Some(("remote operation failed unexpectedly".to_string(), true));
+                    pending_remote = None;
+                    force_redraw = true;
+                }
+            }
         }
 
         // Update backend data
@@ -994,10 +1673,36 @@ fn run_app(
         // Cross-platform: the host CPU/RAM bars and process panel work on macOS.
         if last_proc_rows_update.elapsed() >= Duration::from_secs(2) {
             host_proc_monitor.update();
-            proc_rows = host_proc_monitor.rows(PROC_PANEL_MAX_ROWS);
+            // Refresh the prober's target set; read back last cycle's verdicts.
+            liveness_prober.submit(host_proc_monitor.detected_runtimes());
+            // Refresh the inference-server monitor's target set (containers only).
+            #[cfg(target_os = "linux")]
+            inference_monitor.submit(host_proc_monitor.detected_inference_servers());
+            // Model-unload edge → kick off the Defrag EVICT animation. The
+            // power-EMA heuristic can't detect unload on Blackhole (see
+            // DefragVis::trigger_evict), so we drive it from this discrete signal.
+            #[cfg(target_os = "linux")]
+            {
+                let cur_inf = inference_monitor.snapshot();
+                if inference_panel::model_unloaded(&prev_inference_snapshot, &cur_inf) {
+                    if let Some(dv) = defrag.as_mut() {
+                        dv.trigger_evict();
+                    }
+                }
+                prev_inference_snapshot = cur_inf;
+            }
+            // Non-Linux / no-procfs: always the cross-platform host snapshot —
+            // TT filtering needs the /proc device-fd attribution below, which
+            // doesn't exist on these builds.
+            #[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
+            {
+                proc_rows =
+                    host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts());
+            }
 
-            // Linux/TT: refresh /proc attribution + serving probes, then merge
-            // TT device info into proc_rows by PID.
+            // Linux/TT: refresh /proc attribution + serving probes, choose the
+            // TT-filtered or full host row set by backend, then merge TT device
+            // info into proc_rows by PID.
             #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
             {
                 process_monitor.update();
@@ -1005,7 +1710,55 @@ fn run_app(
                 // hammering HTTP endpoints on every backend tick.
                 let flat = flat_process_list(&process_monitor);
                 serving_metrics = inference_probe.update(&flat);
+                proc_rows = if crate::cli::backend_shows_only_tt(backend_type) {
+                    let tt_pids: std::collections::HashSet<i32> =
+                        flat.iter().map(|p| p.pid).collect();
+                    host_proc_monitor.tt_rows(PROC_PANEL_MAX_ROWS, &tt_pids)
+                } else {
+                    host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts())
+                };
                 enrich_proc_rows_tt(&mut proc_rows, &process_monitor);
+            }
+
+            // `/serve` per-tick broadcast. Same 2s cadence as the process/
+            // inference refresh above — NOT the 60fps render loop — so
+            // clients get one fresh frame per refresh instead of the same
+            // frame re-sent dozens of times a second for no visible benefit.
+            // `proc_rows` is current as of just above; the inference snapshot
+            // is re-read here (cheap: an `ArcSwap` load + clone, see
+            // `InferenceServerMonitor::snapshot`) rather than threaded out of
+            // the `#[cfg(target_os = "linux")]` block above, since that block
+            // computes it only to detect the model-unload edge and doesn't
+            // otherwise need to survive past that check.
+            #[cfg(feature = "remote")]
+            if let Some(pub_handle) = publisher.as_ref() {
+                if let Some(frame) = backend.snapshot_json() {
+                    if backend_type == BackendType::Remote {
+                        // Relay: re-broadcast the origin's frame verbatim so
+                        // downstream viewers see the WATCHED box's processes/
+                        // inference, not this relay host's. `snapshot_json()`
+                        // already IS the origin peer's raw frame (which may
+                        // carry the origin's own `tt_toplike`); injecting our
+                        // local `build_extension` here would overwrite that
+                        // key with our laptop's scan, misattributing it to
+                        // the box being watched (see I1 in the final review).
+                        pub_handle.broadcast(frame);
+                    } else {
+                        // Local source of truth: enrich our own telemetry
+                        // with our own process/inference monitors.
+                        #[cfg(target_os = "linux")]
+                        let inference_snapshot_for_broadcast = inference_monitor.snapshot();
+                        #[cfg(not(target_os = "linux"))]
+                        let inference_snapshot_for_broadcast: Vec<
+                            crate::workload::inference_server::ServiceState,
+                        > = Vec::new();
+                        let ext = crate::backend::build_extension(
+                            &proc_rows,
+                            &inference_snapshot_for_broadcast,
+                        );
+                        pub_handle.broadcast(crate::backend::inject_extension(&frame, &ext));
+                    }
+                }
             }
 
             sys_monitor.refresh_cpu_usage();
@@ -1112,9 +1865,9 @@ fn render_visualization_header(
 ) {
     let status = starfield.baseline_status();
     let status_color = if starfield.is_baseline_established() {
-        colors::SUCCESS
+        colors::success()
     } else {
-        colors::WARNING
+        colors::warning()
     };
 
     let header_text = vec![Line::from(vec![
@@ -1371,6 +2124,7 @@ fn render_global_statusbar(
     mode: DisplayMode,
     perf: Option<&str>,
     throttle_hint: Option<&str>,
+    serve_hint: Option<&str>,
 ) {
     use crate::models::telemetry::parse_hex_or_dec;
 
@@ -1576,6 +2330,19 @@ fn render_global_statusbar(
         ));
     }
 
+    // `/serve` indicator (`◉ serving :PORT · N clients`), shown bright (not
+    // dim like the hints above) since an active publisher is broadcasting
+    // this box's telemetry over the LAN — worth staying visible at a glance.
+    if let Some(hint) = serve_hint {
+        left.push(Span::styled("  │  ", Style::default().fg(sep_fg)));
+        left.push(Span::styled(
+            hint.to_string(),
+            Style::default()
+                .fg(colors::rgb(120, 220, 140))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     left.extend(right);
 
     f.render_widget(Block::default().style(Style::default().bg(bg)), bar_area);
@@ -1596,29 +2363,37 @@ fn render_command_bar(f: &mut Frame, cmd_buf: &str, msg: Option<(&str, bool)>) {
     if area.height < 2 {
         return;
     }
-    // Place the bar at the very bottom row.
-    let bar_area = Rect {
-        x: 0,
-        y: area.height.saturating_sub(1),
-        width: area.width,
-        height: 1,
-    };
 
-    let spans = if let Some((text, is_error)) = msg {
+    // A result message may span multiple lines (the `/remote` picker list); the
+    // input prompt is always a single line. Build the lines, then anchor a bar
+    // of that height at the bottom of the screen.
+    let (lines, bar_h): (Vec<Line>, u16) = if let Some((text, is_error)) = msg {
         let color = if is_error {
             colors::rgb(255, 100, 100)
         } else {
             colors::rgb(80, 220, 140)
         };
-        vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                text.to_string(),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-        ]
+        // Cap the bar height so a long list never eats the whole screen.
+        let max_rows = area.height.saturating_sub(1).clamp(1, 12) as usize;
+        let msg_lines: Vec<&str> = text.lines().collect();
+        let shown = msg_lines.len().min(max_rows);
+        let lines: Vec<Line> = msg_lines
+            .iter()
+            .take(shown)
+            .map(|l| {
+                Line::from(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled(
+                        (*l).to_string(),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    ),
+                ])
+            })
+            .collect();
+        let h = shown.max(1) as u16;
+        (lines, h)
     } else {
-        vec![
+        let spans = vec![
             Span::styled(
                 "  / ",
                 Style::default()
@@ -1632,16 +2407,24 @@ fn render_command_bar(f: &mut Frame, cmd_buf: &str, msg: Option<(&str, bool)>) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("_", Style::default().fg(colors::rgb(200, 200, 80))),
-        ]
+        ];
+        (vec![Line::from(spans)], 1)
     };
 
-    // Clear the bar row with a dark background, then render text.
+    let bar_area = Rect {
+        x: 0,
+        y: area.height.saturating_sub(bar_h),
+        width: area.width,
+        height: bar_h,
+    };
+
+    // Clear the bar rows with a dark background, then render text.
     f.render_widget(
         Block::default().style(Style::default().bg(colors::rgb(15, 20, 30))),
         bar_area,
     );
     f.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(colors::rgb(15, 20, 30))),
+        Paragraph::new(lines).style(Style::default().bg(colors::rgb(15, 20, 30))),
         bar_area,
     );
 }
@@ -1770,6 +2553,7 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 row!(" a  A", "jump to Arcade", key),
                 row!(" d  D", "jump to Defrag", key),
                 row!(" g", "jump to Grid", key),
+                row!(" i  I", "Inference Servers monitor", key),
                 row!(" b", "cycle backend", key),
                 ln!(vec![Span::styled(
                     "──────────────────────────────────────",
@@ -1792,6 +2576,17 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "drop to 2 FPS when terminal unfocused",
                     lbl
                 ),
+                row!(
+                    " /remote [n|box]",
+                    "discover + connect to a remote box",
+                    lbl
+                ),
+                row!(
+                    " /serve [bind:port]",
+                    "broadcast telemetry (plaintext, trusted-LAN)",
+                    lbl
+                ),
+                row!(" /serve off", "stop broadcasting", lbl),
             ]
         }
 
@@ -1802,6 +2597,9 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 DisplayMode::MemoryCastle => castle_legend_lines(bar, bg, dim),
                 DisplayMode::Defrag => defrag_legend_lines(bar, bg, dim, key),
                 DisplayMode::MemoryFlow => flow_legend_lines(bar, bg, dim),
+                DisplayMode::InferenceMonitor => inference_legend_lines(bar, bg, dim),
+                DisplayMode::Insights => insights_legend_lines(bar, bg, dim),
+                DisplayMode::Grid => grid_legend_lines(bar, bg, dim),
                 DisplayMode::Arcade => {
                     // All four combined.
                     let mut v = Vec::new();
@@ -1832,18 +2630,6 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     v.push(sep!("@ Hero"));
                     v.extend(hero_legend_lines(bar, bg, dim));
                     v
-                }
-                _ => {
-                    vec![
-                        ln!(vec![Span::styled(
-                            "no legend for this view",
-                            Style::default().fg(dim)
-                        )]),
-                        ln!(vec![Span::styled(
-                            "try v to switch to a viz mode",
-                            Style::default().fg(dim)
-                        )]),
-                    ]
                 }
             }
         }
@@ -2012,11 +2798,228 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "Press v to continue cycling modes.",
                 ],
             ),
+            DisplayMode::InferenceMonitor => explain_lines(
+                bar,
+                bg,
+                dim,
+                lbl,
+                &[
+                    "Inference Server Monitor",
+                    "",
+                    "One creature across the whole lifecycle of",
+                    "a TT inference-server (docker-detected):",
+                    "",
+                    "COLD  — no model up: a hungry snake roams",
+                    "  the model-catalog starfield (what could",
+                    "  run on your hardware).",
+                    "LOADING — compiling kernels / streaming",
+                    "  weights: the snake grows + coils through",
+                    "  compile→load, then uncoils at ready.",
+                    "SERVING — live dashboard from vLLM /metrics:",
+                    "  throughput timeline, the token-exhaust",
+                    "  snake, request swimlanes (queue→prefill→",
+                    "  decode), and a TT silicon strip tying",
+                    "  tokens/s to real chip power/temp/clock.",
+                    "ALARM — stalled 5+ min: the snake reddens.",
+                    "",
+                    "Press l for the symbol legend · i to return.",
+                ],
+            ),
         },
     }
 }
 
 // ── Per-view legend line builders ─────────────────────────────────────────────
+
+/// Legend for Grid mode: a full-screen grid of chip portraits, no process panel.
+fn grid_legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    macro_rules! ln {
+        ($spans:expr) => {{
+            let mut v: Vec<Span<'static>> =
+                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            v.extend($spans);
+            Line::from(v)
+        }};
+    }
+    vec![
+        ln!(vec![
+            Span::styled("cell ", Style::default().fg(colors::rgb(120, 200, 255))),
+            Span::styled(
+                "= one chip portrait per device (all at once)",
+                Style::default().fg(dim),
+            ),
+        ]),
+        ln!(vec![
+            Span::styled(
+                "particles ",
+                Style::default().fg(colors::rgb(120, 200, 255)),
+            ),
+            Span::styled("= Tensix compute activity", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("cyan→red ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled(
+                "= cool→hot (core temperature / power)",
+                Style::default().fg(dim),
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("v ", Style::default().fg(colors::warning())),
+            Span::styled(
+                "= cycle to the next visualization",
+                Style::default().fg(dim)
+            ),
+        ]),
+    ]
+}
+
+/// Legend for the Insights (default) screen: chip portraits + process panel.
+fn insights_legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    macro_rules! ln {
+        ($spans:expr) => {{
+            let mut v: Vec<Span<'static>> =
+                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            v.extend($spans);
+            Line::from(v)
+        }};
+    }
+    vec![
+        ln!(vec![
+            Span::styled("portrait ", Style::default().fg(colors::rgb(120, 200, 255))),
+            Span::styled(
+                "= one panel per TT chip (power/temp/clock/DDR)",
+                Style::default().fg(dim),
+            ),
+        ]),
+        ln!(vec![
+            Span::styled(
+                "particles ",
+                Style::default().fg(colors::rgb(120, 200, 255)),
+            ),
+            Span::styled("= live compute activity", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("cyan→red ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled("= cool→hot (temperature / power)", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled(
+                "proc list ",
+                Style::default().fg(colors::rgb(180, 230, 180)),
+            ),
+            Span::styled(
+                "= processes using TT devices (↑↓ to select)",
+                Style::default().fg(dim),
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("k / K ", Style::default().fg(colors::error())),
+            Span::styled(
+                "= SIGTERM / SIGKILL the selected process",
+                Style::default().fg(dim),
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("fleet grid ", Style::default().fg(colors::warning())),
+            Span::styled(
+                "= per-chip heatmap at 32+ devices (Enter=zoom)",
+                Style::default().fg(dim),
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("i ", Style::default().fg(colors::rgb(120, 200, 255))),
+            Span::styled(
+                "= open the Inference Server Monitor",
+                Style::default().fg(dim),
+            ),
+        ]),
+    ]
+}
+
+/// Legend for the `[i]` Inference Server Monitor (the unified snake dashboard).
+fn inference_legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    macro_rules! ln {
+        ($spans:expr) => {{
+            let mut v: Vec<Span<'static>> =
+                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            v.extend($spans);
+            Line::from(v)
+        }};
+    }
+    vec![
+        ln!(vec![
+            Span::styled("● ", Style::default().fg(colors::rgb(80, 160, 150))),
+            Span::styled(
+                "cold — hungry snake roams the model-star field",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("◉ ", Style::default().fg(colors::rgb(246, 188, 66))),
+            Span::styled(
+                "loading — coils compile→load, then uncoils",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("▶ ", Style::default().fg(colors::warning())),
+            Span::styled(
+                "serving — head of the live feeding snake",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("█▓▒░ ", Style::default().fg(colors::success())),
+            Span::styled(
+                "= body/fill (teal→amber→gold journey)",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("» · ", Style::default().fg(colors::text_secondary())),
+            Span::styled(
+                "= token exhaust (rate = tokens/s)",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("✦ ", Style::default().fg(colors::text_primary())),
+            Span::styled("= a request completed  ", Style::default().fg(dim)),
+            Span::styled("✗ ", Style::default().fg(colors::error())),
+            Span::styled("= error/stall", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("swimlanes ", Style::default().fg(colors::warning())),
+            Span::styled(
+                "= queue→prefill→decode (avg times)",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("timeline ", Style::default().fg(colors::success())),
+            Span::styled("= tok/s over time (▁▂▃▄▅▆▇█)", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("silicon ", Style::default().fg(colors::rgb(120, 180, 200))),
+            Span::styled(
+                "= per-chip power/temp/AICLK (live)",
+                Style::default().fg(dim)
+            ),
+        ]),
+    ]
+}
 
 fn starfield_legend_lines(
     bar: ratatui::style::Color,
@@ -2326,6 +3329,11 @@ fn explain_lines(
 /// /throttle         toggle anim FPS throttle under heavy CPU load (60→30)
 /// /idle-on-blur     toggle drop to 2 FPS when terminal loses focus
 /// ```
+///
+/// Note: `/remote` is intentionally NOT handled here — connecting needs the live
+/// backend, which this function doesn't receive, and it runs off the render
+/// thread. It is dispatched in the event loop's Enter handler (see
+/// `spawn_remote_worker`).
 /// Returns `(message, is_error, should_quit)`.
 fn execute_command(
     cmd: &str,
@@ -2387,6 +3395,38 @@ fn execute_command(
             }
             _ => (
                 "mode: insights|grid|starfield|castle|flow|arcade|defrag".to_string(),
+                true,
+                false,
+            ),
+        },
+        // App-wide color theme. `grayskull` collapses the rainbow to a thousand
+        // shades of grey (+ cyan/purple accents), with hot pink the only hot
+        // color; `default` restores full color; bare `/theme` toggles.
+        "theme" => match arg {
+            "grayskull" | "greyskull" | "grey" | "gray" | "grayscale" | "greyscale" => {
+                colors::set_theme(colors::Theme::Grayskull);
+                (
+                    "theme: grayskull 🩶 — a thousand shades of grey (pink runs hot)".to_string(),
+                    false,
+                    false,
+                )
+            }
+            "default" | "rainbow" | "color" | "colour" | "off" => {
+                colors::set_theme(colors::Theme::Default);
+                ("theme: default (full color)".to_string(), false, false)
+            }
+            "" => match colors::current_theme() {
+                colors::Theme::Default => {
+                    colors::set_theme(colors::Theme::Grayskull);
+                    ("theme: grayskull 🩶".to_string(), false, false)
+                }
+                colors::Theme::Grayskull => {
+                    colors::set_theme(colors::Theme::Default);
+                    ("theme: default (full color)".to_string(), false, false)
+                }
+            },
+            _ => (
+                "theme: grayskull | default  (or /theme to toggle)".to_string(),
                 true,
                 false,
             ),
@@ -2458,6 +3498,186 @@ fn execute_command(
             true,
             false,
         ),
+    }
+}
+
+/// Parsed intent of a `/serve` command's argument (the text after `/serve `).
+///
+/// Pure and testable without any I/O — binding a socket and mutating the
+/// loop's `publisher` slot both need the live backend (for `snapshot_json()`)
+/// and happen in the key-handler's special-cased `serve` dispatch (mirroring
+/// `/remote`, which needs the live backend/config for the same reason —
+/// `execute_command` never sees either).
+#[cfg(feature = "remote")]
+#[derive(Debug, Clone, PartialEq)]
+enum ServeCmd {
+    /// `/serve` (bare) → `None` (caller binds the default `0.0.0.0:{DEFAULT_SERVE_PORT}`).
+    /// `/serve <spec>` → `Some(spec)`, a raw BIND\[:PORT\]/PORT/HOST string not
+    /// yet validated — that's [`crate::cli::parse_serve_bind`]'s job, run only
+    /// when the command actually dispatches (it can trigger DNS resolution
+    /// for a bare hostname, so it deliberately doesn't happen in this pure
+    /// parse).
+    Start(Option<String>),
+    /// `/serve off` | `/serve stop` (case-insensitive) — drop the publisher.
+    Stop,
+    /// Malformed input the dispatcher should report as an error without ever
+    /// attempting to bind (e.g. trailing garbage after the bind spec).
+    Bad(String),
+}
+
+/// Pure parse of a `/serve` command's argument into a [`ServeCmd`].
+///
+/// - Empty (or whitespace-only) → `Start(None)`.
+/// - `off` / `stop` (case-insensitive) → `Stop`.
+/// - A single token → `Start(Some(token))`; validity of that token as a bind
+///   address is checked later by [`crate::cli::parse_serve_bind`], not here.
+/// - More than one whitespace-separated token → `Bad(..)`, so `/serve 9000
+///   oops` reports a clear error instead of silently binding on 9000 and
+///   swallowing "oops".
+#[cfg(feature = "remote")]
+fn parse_serve_command(arg: &str) -> ServeCmd {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return ServeCmd::Start(None);
+    }
+    if arg.eq_ignore_ascii_case("off") || arg.eq_ignore_ascii_case("stop") {
+        return ServeCmd::Stop;
+    }
+    if arg.split_whitespace().count() > 1 {
+        return ServeCmd::Bad(format!("/serve: unexpected extra argument(s) in '{arg}'"));
+    }
+    ServeCmd::Start(Some(arg.to_string()))
+}
+
+/// Resolve a `/remote <arg>` selection against the cached picker list.
+///
+/// Pure (no I/O) so it is unit-testable. Resolution order:
+/// 1. A 1-based **index** into the last `/remote` listing (`/remote 2`).
+/// 2. A **name** matching a listed box (`/remote qb2-lab`).
+/// 3. An explicit **HOST:PORT** (`/remote 10.0.0.7:8765`) — passthrough.
+///
+/// Anything else is an error (the caller then tries a fresh discovery-by-name
+/// so `/remote <name>` still works without a prior `/remote`).
+#[cfg(feature = "remote")]
+fn resolve_remote_pick(
+    boxes: &[crate::backend::discovery::DiscoveredBox],
+    arg: &str,
+) -> Result<String, String> {
+    let arg = arg.trim();
+    // 1-based index into the shown list.
+    if let Ok(n) = arg.parse::<usize>() {
+        if (1..=boxes.len()).contains(&n) {
+            return Ok(boxes[n - 1].host_port());
+        }
+        if !boxes.is_empty() {
+            return Err(format!("pick 1–{} (got {})", boxes.len(), n));
+        }
+    }
+    // Name match against the cached list.
+    if let Some(b) = boxes.iter().find(|b| b.name == arg) {
+        return Ok(b.host_port());
+    }
+    // Explicit HOST:PORT passthrough.
+    if crate::backend::discovery::looks_like_host_port(arg) {
+        return Ok(arg.to_string());
+    }
+    Err(format!("'{}' is not a listed box or HOST:PORT", arg))
+}
+
+/// Result of an off-thread `/remote` operation, handed back to the render loop
+/// over an [`std::sync::mpsc`] channel.
+///
+/// Both `/remote` operations (discovery and connect) run on a worker thread so
+/// the render loop never blocks on mDNS (seconds) or a WebSocket connect. The
+/// worker performs all the impure/blocking work; the main thread only applies
+/// the outcome (update the picker cache, or hot-swap the backend).
+#[cfg(feature = "remote")]
+enum RemoteOutcome {
+    /// `/remote` (no arg) discovery finished with either a box list or an error.
+    Discovered(Result<Vec<crate::backend::discovery::DiscoveredBox>, String>),
+    /// `/remote <n|name|host:port>` connect finished. On `Ok` the [`WsBackend`]
+    /// has already been constructed **and `init()`ed** on the worker (boxed to
+    /// keep this enum small); the main thread just needs to hot-swap it in. On
+    /// `Err` the string is a ready-to-display message. `target` is the resolved
+    /// `HOST:PORT` (or the raw arg when resolution itself failed) for the status
+    /// line.
+    Connected {
+        target: String,
+        result: Result<Box<crate::backend::ws::WsBackend>, String>,
+    },
+}
+
+/// Spawn the worker thread that services one `/remote` command off the render
+/// thread, returning the receiver the loop polls with `try_recv()`.
+///
+/// * `arg` empty → discovery (`tt --json discover`, blocking mDNS).
+/// * `arg` present → resolve to a `HOST:PORT` (against the cached `boxes`, with
+///   a fresh discovery-by-name fallback) then build + `init()` a [`WsBackend`].
+///
+/// The worker owns clones of everything it needs (`boxes`, `config`) so it never
+/// touches main-thread state. If the loop cancels (drops the receiver on Esc),
+/// the final `send` fails harmlessly and the thread just exits.
+#[cfg(feature = "remote")]
+fn spawn_remote_worker(
+    arg: String,
+    boxes: Vec<crate::backend::discovery::DiscoveredBox>,
+    config: BackendConfig,
+) -> std::sync::mpsc::Receiver<RemoteOutcome> {
+    use crate::backend::discovery;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = if arg.is_empty() {
+            // No arg → discover and let the main thread present the picker.
+            RemoteOutcome::Discovered(discovery::discover_boxes())
+        } else {
+            // Arg present → resolve to a HOST:PORT, then build + init the backend.
+            let target = match resolve_remote_pick(&boxes, &arg) {
+                Ok(t) => Ok(t),
+                Err(pick_err) => {
+                    // Not in the cached list — try a fresh discovery-by-name so
+                    // `/remote <name>` works even without a prior `/remote`.
+                    discovery::run_tt_discover()
+                        .and_then(|json| discovery::resolve_remote_target(&json, &arg))
+                        .map_err(|e| format!("{}; {}", pick_err, e))
+                }
+            };
+            match target {
+                Ok(target) => {
+                    let result = build_ws_backend(&target, &config);
+                    RemoteOutcome::Connected { target, result }
+                }
+                // Resolution failed — report against the raw arg.
+                Err(e) => RemoteOutcome::Connected {
+                    target: arg,
+                    result: Err(e),
+                },
+            }
+        };
+        // Send may fail if the loop cancelled the wait (Esc) and dropped the
+        // receiver. That's fine — the work is done and simply discarded.
+        let _ = tx.send(outcome);
+    });
+    rx
+}
+
+/// Construct and initialize a [`WsBackend`] for `target` (`HOST:PORT`).
+///
+/// Runs entirely on the `/remote` worker thread (both `from_host_port` and the
+/// blocking `init()` connect/first-frame wait). Returns the live backend on
+/// success or a ready-to-display error string; the caller hot-swaps it in on
+/// the main thread.
+#[cfg(feature = "remote")]
+fn build_ws_backend(
+    target: &str,
+    config: &BackendConfig,
+) -> Result<Box<crate::backend::ws::WsBackend>, String> {
+    use crate::backend::ws::WsBackend;
+    match WsBackend::from_host_port(target, config.clone()) {
+        Ok(mut ws) => match ws.init() {
+            Ok(()) => Ok(Box::new(ws)),
+            Err(e) => Err(format!("connect to {} failed: {}", target, e)),
+        },
+        Err(e) => Err(format!("bad remote target {}: {}", target, e)),
     }
 }
 
@@ -2614,6 +3834,13 @@ fn render_insights(
     host_cpu_pct: f32,
     host_mem_used: u64,
     host_mem_total: u64,
+    // True when `rows` was built by the TT-filtered path (Linux/procfs +
+    // `backend_shows_only_tt`) — picks the process panel's empty-state
+    // message. Always `false` off that path (nothing was filtered out).
+    tt_filtered: bool,
+    // See `remote_local_fallback_note`: `Some` under `--remote` while the
+    // panel is still showing LOCAL processes rather than the remote box's.
+    remote_note: Option<&'static str>,
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
 ) {
@@ -2622,6 +3849,10 @@ fn render_insights(
 
     // When zoomed in, the panel height is based on the slice, not the full list.
     let panel_devices: &[crate::models::Device] = if let Some(start) = fleet_zoom_start {
+        // Clamp start: the device count can shrink beneath a stale zoom offset
+        // (backend swap via `b`/`/remote`, or a remote fleet losing a device),
+        // which would otherwise make `start > end` and panic on the slice.
+        let start = start.min(devices.len());
         let end = (start + FLEET_PAGE_SIZE).min(devices.len());
         &devices[start..end]
     } else {
@@ -2632,8 +3863,13 @@ fn render_insights(
     //
     // Cards use Constraint::Length so they always get the exact height needed to
     // show all chip panels (including a 2×2 grid when 4 chips don't fit in one row).
-    // The process panel takes whatever remains; it may be zero on very short terminals
-    // but the chip panels are never truncated.
+    // The process panel takes whatever remains; it may be zero on very short
+    // terminals but the chip panels are never truncated.
+    //
+    // The old toggle-able `[i]` Inference Servers strip that used to live here
+    // has been retired in favor of the dedicated full-screen
+    // `DisplayMode::InferenceMonitor` view (the unified serving snake — see
+    // `render_snake_view`), entered via `i`/`I`.
     let cards_h = device_panels_height(panel_devices, area.width);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2663,6 +3899,8 @@ fn render_insights(
         host_cpu_pct,
         host_mem_used,
         host_mem_total,
+        tt_filtered,
+        remote_note,
         #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
         serving_metrics,
     );
@@ -2670,6 +3908,313 @@ fn render_insights(
     if let Some(ref kc) = kill_confirm {
         render_kill_dialog(f, area, kc);
     }
+}
+
+/// Full-screen render of the unified serving snake (see `crate::animation::Snake`).
+fn render_snake_view(
+    f: &mut Frame,
+    snake: &crate::animation::Snake,
+    roster: &[Line<'static>],
+    band: &[Line<'static>],
+) {
+    let area = f.area();
+    f.render_widget(
+        Block::default().style(Style::default().bg(colors::rgb(0, 0, 0))),
+        area,
+    );
+    // Layout, top to bottom: the multi-model roster (0 rows when <2 services),
+    // then the featured snake, then the education band (0 rows unless a
+    // service is compiling/loading/alarming), then the reserved bottom row
+    // for the global status bar (drawn on top afterwards — otherwise the
+    // creature's footer lands on the absolute bottom row and is painted
+    // over). The snake height here must match what `SnakeWorld` was built
+    // with (same `1 + roster_h + band_h` subtraction) so the fixed-dim
+    // loading/roaming renderers line up.
+    let roster_h = (roster.len() as u16).min(area.height);
+    if roster_h > 0 {
+        f.render_widget(
+            Paragraph::new(roster.to_vec()),
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: roster_h,
+            },
+        );
+    }
+    // Education band sits just above the bottom status row.
+    let band_h = (band.len() as u16).min(area.height.saturating_sub(roster_h + 1));
+    let body = Rect {
+        x: area.x,
+        y: area.y + roster_h,
+        width: area.width,
+        height: area.height.saturating_sub(1 + roster_h + band_h),
+    };
+    f.render_widget(
+        Paragraph::new(snake.render(body.width as usize, body.height as usize)),
+        body,
+    );
+    if band_h > 0 {
+        f.render_widget(
+            Paragraph::new(band.to_vec()),
+            Rect {
+                x: area.x,
+                y: area.y + area.height.saturating_sub(1 + band_h),
+                width: area.width,
+                height: band_h,
+            },
+        );
+    }
+}
+
+/// Under `--remote` the chips/telemetry on screen belong to the remote box,
+/// but (until the real remote-data plumbing lands) the process panel and the
+/// `[i]` inference view still read/probe *this* machine — so without a label
+/// it looks like we're fully watching the remote box when we aren't. Returns
+/// the honesty note to append to those panels' headers, or `None` when it
+/// isn't needed (any backend other than Remote, or once real remote data
+/// exists to display instead).
+///
+/// `has_remote_data` reflects whether the relevant sub-key of the
+/// `tt_toplike` frame extension was actually decoded from the latest frame
+/// (`WsBackend::remote_processes()`/`remote_inference()` — see call sites):
+/// `true` once a `--serve` peer streams that data, at which point this note
+/// naturally stops firing for that panel.
+fn remote_local_fallback_note(
+    backend_type: crate::cli::BackendType,
+    has_remote_data: bool,
+) -> Option<&'static str> {
+    match (backend_type, has_remote_data) {
+        (crate::cli::BackendType::Remote, false) => Some("LOCAL — remote not streamed"),
+        _ => None,
+    }
+}
+
+/// Parse a `tt_toplike` wire phase string back into
+/// [`Phase`](crate::workload::inference_server::Phase). An unrecognized
+/// string (future schema bump on the producer side, or a corrupt frame) maps
+/// to `Down` rather than panicking or guessing — the safest "nothing is
+/// happening" reading for an unknown state.
+#[cfg(feature = "remote")]
+fn phase_from_str(s: &str) -> crate::workload::inference_server::Phase {
+    use crate::workload::inference_server::Phase;
+    match s {
+        "compiling" => Phase::Compiling,
+        "loading" => Phase::Loading,
+        "ready" => Phase::Ready,
+        "alarm" => Phase::Alarm,
+        // "down" and anything unrecognized both read as Down.
+        _ => Phase::Down,
+    }
+}
+
+/// Map one remote process (from the `tt_toplike` frame extension) to the
+/// process panel's row type. `inference`/`active` are always `None`/`false`:
+/// the remote producer doesn't classify inference runtimes the way the local
+/// `HostProcessMonitor` heuristic does, and `tt` is `None` for the same
+/// reason — `RemoteProc::uses_tt` is a bare bool, not the detailed
+/// `TtProcInfo` (device indices / hugepage counts) the local scan produces,
+/// so there is nothing honest to synthesize into that field.
+#[cfg(feature = "remote")]
+fn remote_proc_to_row(rp: &crate::backend::RemoteProc) -> crate::workload::ProcRow {
+    crate::workload::ProcRow {
+        pid: rp.pid as i32,
+        name: rp.name.clone(),
+        cpu_pct: rp.cpu_pct,
+        mem_bytes: rp.mem_bytes,
+        inference: None,
+        active: false,
+        tt: None,
+    }
+}
+
+/// Map the wire [`RemoteServing`](crate::backend::RemoteServing) shape back
+/// onto the local display struct
+/// [`ServingStats`](crate::workload::inference_server::metrics::ServingStats).
+/// `counters` (the raw vLLM counters used only to compute local deltas) has
+/// no remote equivalent — deliberately excluded from the wire shape, see
+/// `remote_ext`'s module docs — so it's always `Default::default()` here.
+#[cfg(feature = "remote")]
+fn remote_serving_to_stats(
+    rs: &crate::backend::RemoteServing,
+) -> crate::workload::inference_server::metrics::ServingStats {
+    crate::workload::inference_server::metrics::ServingStats {
+        generation_tps: rs.generation_tps,
+        prompt_tps: rs.prompt_tps,
+        completed_delta: rs.completed_delta,
+        errored_delta: rs.errored_delta,
+        requests_running: rs.requests_running,
+        requests_waiting: rs.requests_waiting,
+        kv_cache_usage: rs.kv_cache_usage,
+        ttft_avg_s: rs.ttft_avg_s,
+        queue_avg_s: rs.queue_avg_s,
+        prefill_avg_s: rs.prefill_avg_s,
+        decode_avg_s: rs.decode_avg_s,
+        tpot_avg_s: rs.tpot_avg_s,
+        prefix_hit_rate: rs.prefix_hit_rate,
+        preemptions_delta: rs.preemptions_delta,
+        counters: Default::default(),
+    }
+}
+
+/// Map one remote inference workload (from the `tt_toplike` frame extension)
+/// to the local [`ServiceState`](crate::workload::inference_server::ServiceState)
+/// the `[i]` view's snake/roster already know how to render.
+///
+/// Fields the wire shape doesn't carry (`cpu_pct`, `rss_bytes`/`rss_delta`,
+/// `kernel_count`/`kernel_delta`, `safetensors_fds`, `top_proc`, `last_log`,
+/// `flat_ticks`) are the *local* Docker-probe internals used to derive phase
+/// transitions and the Alarm escalation on THIS box — meaningless for a
+/// remote workload whose phase is already authoritative on the wire, so they
+/// are zeroed/`None` rather than guessed. `readiness` is reconstructed from
+/// `phase` (the wire's source of truth) since `Readiness` itself isn't part
+/// of the wire shape: `Ready` -> `Ready { runner: None }` (no remote runner
+/// name to carry), `Down` -> `Down`, anything else -> `NotReady` (matches
+/// `Phase::derive`'s own Ready/Down/otherwise shape).
+#[cfg(feature = "remote")]
+fn remote_inference_to_service_state(
+    ri: &crate::backend::RemoteInference,
+) -> crate::workload::inference_server::ServiceState {
+    use crate::workload::inference_server::{Phase, Readiness, ServiceState};
+
+    let phase = phase_from_str(&ri.phase);
+    let readiness = match phase {
+        Phase::Ready => Readiness::Ready { runner: None },
+        Phase::Down => Readiness::Down,
+        Phase::Compiling | Phase::Loading | Phase::Alarm => Readiness::NotReady,
+    };
+
+    ServiceState {
+        key: ri.key.clone(),
+        label: ri.label.clone(),
+        phase,
+        cpu_pct: 0.0,
+        rss_bytes: 0,
+        rss_delta: 0,
+        kernel_count: 0,
+        kernel_delta: 0,
+        // Not carried on the wire — a remote peer streams phase/serving, not the
+        // container's raw compile/load file counts.
+        loaded_count: 0,
+        loaded_delta: 0,
+        safetensors_fds: 0,
+        readiness,
+        top_proc: None,
+        last_log: None,
+        progress: ri.progress,
+        flat_ticks: 0,
+        serving: ri.serving.as_ref().map(remote_serving_to_stats),
+    }
+}
+
+/// Max inference services listed in the `[i]` roster (see below).
+const INFERENCE_ROSTER_MAX: usize = 8;
+
+/// Recompose ticks between education-fact rotations (~8s at the ~2s inference
+/// cadence). Keeps a long compile/load from showing one stale fact the whole time.
+const BAND_ROTATE_EVERY: usize = 4;
+/// Max rows the education band may claim in the [i] loading pane.
+const INFERENCE_BAND_MAX_H: usize = 5;
+
+/// Compact per-service roster for the `[i]` view, shown above the featured snake
+/// when 2+ inference services are detected — so a multi-model box surfaces ALL
+/// of them (the snake still *features* one; loading wins, else the first Ready).
+/// Returns empty for 0/1 service (the single snake already says it) so the common
+/// single-model view is uncluttered. One header line + up to
+/// [`INFERENCE_ROSTER_MAX`] service lines; the featured row is marked `▸`.
+fn inference_roster_lines(
+    rows: &[crate::workload::inference_server::ServiceState],
+    width: usize,
+) -> Vec<Line<'static>> {
+    use crate::workload::inference_server::Phase;
+    if rows.len() < 2 || width < 12 {
+        return Vec::new();
+    }
+    // Which service the snake is showing (mirror choose_behavior's priority).
+    let featured_key = inference_panel::featured_loading(rows)
+        .map(|s| s.key.clone())
+        .or_else(|| {
+            rows.iter()
+                .find(|s| s.phase == Phase::Ready)
+                .map(|s| s.key.clone())
+        });
+
+    let shown = rows.len().min(INFERENCE_ROSTER_MAX);
+    let hidden = rows.len() - shown;
+    let header = if hidden > 0 {
+        format!("inference services ({}, +{hidden} more)", rows.len())
+    } else {
+        format!("inference services ({})", rows.len())
+    };
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(shown + 1);
+    lines.push(Line::from(Span::styled(
+        header,
+        Style::default()
+            .fg(colors::text_secondary())
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    for s in rows.iter().take(INFERENCE_ROSTER_MAX) {
+        let featured = featured_key.as_ref() == Some(&s.key);
+        let (tag, tag_color) = match s.phase {
+            Phase::Down => ("down   ", colors::text_secondary()),
+            Phase::Compiling => ("compile", colors::info()),
+            Phase::Loading => ("loading", colors::info()),
+            Phase::Ready => ("serving", colors::success()),
+            Phase::Alarm => ("stalled", colors::error()),
+        };
+        // Per-service stat: live rate when serving, else a load %, else nothing.
+        let stat = match &s.serving {
+            Some(sv) => format!(
+                "{:.0} tok/s · {} run",
+                sv.generation_tps, sv.requests_running
+            ),
+            None => match s.progress {
+                Some(p) => format!("{:.0}%", (p * 100.0).clamp(0.0, 100.0)),
+                None => String::new(),
+            },
+        };
+        // Truncate the label (char-safe) so marker+tag+label+stat fit `width`.
+        let fixed = 2
+            + 7
+            + 2
+            + if stat.is_empty() {
+                0
+            } else {
+                2 + stat.chars().count()
+            };
+        let label_w = width.saturating_sub(fixed).max(4);
+        let label: String = s.label.chars().take(label_w).collect();
+
+        let mut spans = vec![
+            Span::styled(
+                if featured { "▸ " } else { "  " }.to_string(),
+                Style::default().fg(colors::primary()),
+            ),
+            Span::styled(
+                tag.to_string(),
+                Style::default().fg(tag_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                label,
+                Style::default().fg(if featured {
+                    colors::text_primary()
+                } else {
+                    colors::text_secondary()
+                }),
+            ),
+        ];
+        if !stat.is_empty() {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                stat,
+                Style::default().fg(colors::text_secondary()),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
 }
 
 /// Render a btop-style horizontal bar: `[████████░░░░░░░░]  42%`.
@@ -2730,6 +4275,10 @@ fn render_process_panel(
     host_cpu_pct: f32,
     host_mem_used: u64,
     host_mem_total: u64,
+    tt_filtered: bool,
+    // See `remote_local_fallback_note`: `Some` under `--remote` while this
+    // panel is still showing LOCAL processes rather than the remote box's.
+    remote_note: Option<&'static str>,
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
 ) {
@@ -2783,19 +4332,33 @@ fn render_process_panel(
         }
     }
 
-    // Section label
-    lines.push(Line::from(vec![
+    // Section label. Under `--remote` (until real remote data lands — see
+    // `remote_local_fallback_note`) this list is still LOCAL processes, not
+    // the remote box's, so the label says so — otherwise it reads as if the
+    // remote box's processes were on screen.
+    let mut header_spans = vec![
         Span::raw("  "),
         Span::styled("Processes", Style::default().fg(Color::Gray)),
-    ]));
+    ];
+    if let Some(note) = remote_note {
+        header_spans.push(Span::styled(
+            format!(" · {note}"),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(ratatui::style::Modifier::DIM),
+        ));
+    }
+    lines.push(Line::from(header_spans));
 
     if rows.is_empty() {
+        let empty_msg = if tt_filtered {
+            "No processes using TT devices detected"
+        } else {
+            "nothing is feeding the chips right now"
+        };
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(
-                "nothing is feeding the chips right now",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(empty_msg, Style::default().fg(Color::DarkGray)),
         ]));
     } else {
         let clamped_cursor = cursor.min(rows.len().saturating_sub(1));
@@ -3251,6 +4814,10 @@ fn render_device_panels(
     // Zoomed view: FLEET_PAGE_SIZE devices starting at fleet_zoom_start.
     // Normal view: all devices (< FLEET_DEVICE_THRESHOLD).
     let devices: &[crate::models::Device] = if let Some(start) = fleet_zoom_start {
+        // Clamp start: the device count can shrink beneath a stale zoom offset
+        // (backend swap via `b`/`/remote`, or a remote fleet losing a device),
+        // which would otherwise make `start > end` and panic on the slice.
+        let start = start.min(all_devices.len());
         let end = (start + FLEET_PAGE_SIZE).min(all_devices.len());
         &all_devices[start..end]
     } else {
@@ -3360,7 +4927,7 @@ fn render_device_panels(
         let board_raw = device.board_type.to_lowercase();
         let arch_lower = device.architecture.name().to_lowercase();
         let label = if !board_raw.is_empty() && board_raw != arch_lower && board_raw != "unknown" {
-            let board_trim = &device.board_type[..device.board_type.len().min(7)];
+            let board_trim = truncate(&device.board_type, 7);
             format!(
                 "── {} · D{} · {} ·{:>3}°C ",
                 arch_name, idx, board_trim, temp_i
@@ -3688,18 +5255,20 @@ fn render_device_panels(
                 .unwrap_or("—");
             let fw_short = fw_ver.trim_start_matches("fw_pack-");
             if compact {
-                // Compact: "F " + up to 16 chars (content_w=18).
-                let fw_display = &fw_short[..fw_short.len().min(16)];
+                // Compact: "F " + up to 16 chars (content_w=18). Truncate by
+                // chars, not bytes — a byte slice would panic mid-UTF-8 (fw
+                // strings are ASCII today, but this matches the rest of the UI).
+                let fw_display: String = fw_short.chars().take(16).collect();
                 stat_lines.push(Line::from(vec![
                     Span::styled("F ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(fw_display.to_string(), Style::default().fg(Color::White)),
+                    Span::styled(fw_display, Style::default().fg(Color::White)),
                 ]));
             } else {
                 // content_w is 30; "FW" label takes 8 chars, leaving 22 for the version string.
-                let fw_display = &fw_short[..fw_short.len().min(22)];
+                let fw_display: String = fw_short.chars().take(22).collect();
                 stat_lines.push(Line::from(vec![
                     Span::styled(format!("{:<8}", "FW"), Style::default().fg(Color::DarkGray)),
-                    Span::styled(fw_display.to_string(), Style::default().fg(Color::White)),
+                    Span::styled(fw_display, Style::default().fg(Color::White)),
                 ]));
             }
         }
@@ -3745,7 +5314,9 @@ fn render_grid_mode(f: &mut Frame, backend: &dyn TelemetryBackend) {
         Paragraph::new(Line::from(Span::styled(
             format!(
                 "{:<w$}",
-                &title[..title.len().min(area.width as usize)],
+                // Char-safe: the title contains a multibyte `│`, so a byte
+                // slice could land mid-character and panic on a narrow grid.
+                truncate(&title, area.width as usize),
                 w = area.width as usize
             ),
             Style::default()
@@ -3814,7 +5385,7 @@ fn render_grid_mode(f: &mut Frame, backend: &dyn TelemetryBackend) {
         let label = format!(
             "{} {}",
             device.architecture.abbrev(),
-            &device.board_type[..device.board_type.len().min(6)]
+            truncate(&device.board_type, 6)
         );
         let label_rect = Rect {
             x: cell_x + 1,
@@ -3824,7 +5395,7 @@ fn render_grid_mode(f: &mut Frame, backend: &dyn TelemetryBackend) {
         };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                format!("{:<w$}", &label[..label.len().min(p_cols)], w = p_cols),
+                format!("{:<w$}", truncate(&label, p_cols), w = p_cols),
                 Style::default().fg(Color::Gray),
             ))),
             label_rect,
@@ -4053,6 +5624,158 @@ mod cmd_tests {
         );
         assert!(!ts.idle_on_blur, "toggled off via alias");
     }
+
+    // ── /remote picker-selection logic (pure) ───────────────────────────────
+    //
+    // The full runtime hot-swap / connect path spawns a WsBackend against a live
+    // socket, so it is verified manually (see REMOTE_UX_REPORT.md). Here we cover
+    // the pure selection logic that decides *what* to connect to.
+
+    #[cfg(feature = "remote")]
+    mod remote {
+        use super::super::resolve_remote_pick;
+        use crate::backend::discovery::DiscoveredBox;
+
+        fn boxes() -> Vec<DiscoveredBox> {
+            vec![
+                DiscoveredBox {
+                    name: "qb2-lab".into(),
+                    host: "192.168.1.42".into(),
+                    ctrl_port: 8899,
+                    chips: "4xBH".into(),
+                    status: "idle".into(),
+                    apiver: 1,
+                },
+                DiscoveredBox {
+                    name: "qb-serving".into(),
+                    host: "10.0.0.7".into(),
+                    ctrl_port: 8765,
+                    chips: "8xWH".into(),
+                    status: "serving:llama3".into(),
+                    apiver: 1,
+                },
+            ]
+        }
+
+        #[test]
+        fn picks_by_one_based_index() {
+            let b = boxes();
+            assert_eq!(resolve_remote_pick(&b, "1").unwrap(), "192.168.1.42:8899");
+            assert_eq!(resolve_remote_pick(&b, "2").unwrap(), "10.0.0.7:8765");
+        }
+
+        #[test]
+        fn out_of_range_index_errors() {
+            let b = boxes();
+            assert!(resolve_remote_pick(&b, "0").is_err());
+            assert!(resolve_remote_pick(&b, "3").is_err());
+        }
+
+        #[test]
+        fn picks_by_name() {
+            let b = boxes();
+            assert_eq!(
+                resolve_remote_pick(&b, "qb-serving").unwrap(),
+                "10.0.0.7:8765"
+            );
+        }
+
+        #[test]
+        fn host_port_passes_through() {
+            let b = boxes();
+            assert_eq!(
+                resolve_remote_pick(&b, "1.2.3.4:9000").unwrap(),
+                "1.2.3.4:9000"
+            );
+            // Works with no cached list too (e.g. `/remote host:port` cold).
+            assert_eq!(
+                resolve_remote_pick(&[], "1.2.3.4:9000").unwrap(),
+                "1.2.3.4:9000"
+            );
+        }
+
+        #[test]
+        fn unknown_name_without_list_errors() {
+            // Not an index, not a listed name, not host:port → error (the caller
+            // then falls back to a fresh discovery-by-name).
+            assert!(resolve_remote_pick(&[], "mystery-box").is_err());
+        }
+    }
+
+    // ── /serve command parsing (pure) ───────────────────────────────────────
+    //
+    // Binding/spawning the publisher needs the live backend (for
+    // `snapshot_json()`) and mutates the loop's `publisher` slot, so — like
+    // `/remote` — the actual dispatch lives in the key-handler match, not
+    // `execute_command`. This only covers the pure argument→intent mapping.
+
+    #[cfg(feature = "remote")]
+    mod parse_serve_command_tests {
+        use super::super::{parse_serve_command, ServeCmd};
+
+        #[test]
+        fn bare_serve_starts_with_default_bind() {
+            assert_eq!(parse_serve_command(""), ServeCmd::Start(None));
+        }
+
+        #[test]
+        fn whitespace_only_is_also_default_start() {
+            assert_eq!(parse_serve_command("   "), ServeCmd::Start(None));
+        }
+
+        #[test]
+        fn bare_port_is_a_start_spec() {
+            assert_eq!(
+                parse_serve_command("9000"),
+                ServeCmd::Start(Some("9000".to_string()))
+            );
+        }
+
+        #[test]
+        fn host_port_is_a_start_spec() {
+            assert_eq!(
+                parse_serve_command("1.2.3.4:9000"),
+                ServeCmd::Start(Some("1.2.3.4:9000".to_string()))
+            );
+        }
+
+        #[test]
+        fn off_stops() {
+            assert_eq!(parse_serve_command("off"), ServeCmd::Stop);
+        }
+
+        #[test]
+        fn stop_stops() {
+            assert_eq!(parse_serve_command("stop"), ServeCmd::Stop);
+        }
+
+        #[test]
+        fn stop_is_case_insensitive() {
+            assert_eq!(parse_serve_command("OFF"), ServeCmd::Stop);
+            assert_eq!(parse_serve_command("Stop"), ServeCmd::Stop);
+        }
+
+        #[test]
+        fn unresolvable_host_is_still_a_start_spec() {
+            // `parse_serve_command` is a pure string-shape parse — it never
+            // does DNS resolution (that's `cli::parse_serve_bind`'s job, run
+            // only once the command actually dispatches), so a bogus host
+            // still comes back as a `Start` spec for the caller to validate
+            // and reject.
+            assert_eq!(
+                parse_serve_command("wat"),
+                ServeCmd::Start(Some("wat".to_string()))
+            );
+        }
+
+        #[test]
+        fn trailing_garbage_is_bad() {
+            assert!(matches!(
+                parse_serve_command("9000 extra"),
+                ServeCmd::Bad(_)
+            ));
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
@@ -4114,6 +5837,249 @@ mod tests {
 /// Unlike the Linux-gated `tests` module above, these run on every platform —
 /// they guard the behaviour that matters off-Linux (e.g. `--host` on macOS).
 #[cfg(test)]
+mod inference_roster_tests {
+    use super::inference_roster_lines;
+    use crate::workload::inference_server::{Phase, Readiness, ServiceState};
+
+    fn svc(key: &str, label: &str, phase: Phase) -> ServiceState {
+        ServiceState {
+            key: key.into(),
+            label: label.into(),
+            phase,
+            cpu_pct: 0.0,
+            rss_bytes: 0,
+            rss_delta: 0,
+            kernel_count: 0,
+            kernel_delta: 0,
+            loaded_count: 0,
+            loaded_delta: 0,
+            safetensors_fds: 0,
+            readiness: Readiness::Down,
+            top_proc: None,
+            last_log: None,
+            progress: None,
+            flat_ticks: 0,
+            serving: None,
+        }
+    }
+
+    fn text(line: &ratatui::text::Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn roster_empty_for_zero_or_one_service() {
+        assert!(inference_roster_lines(&[], 80).is_empty());
+        assert!(inference_roster_lines(&[svc("a", "A", Phase::Ready)], 80).is_empty());
+    }
+
+    #[test]
+    fn roster_lists_all_with_header_and_marks_the_featured_one() {
+        let rows = vec![
+            svc("a", "Model-A", Phase::Ready),   // serving
+            svc("b", "Model-B", Phase::Loading), // loading — featured (loading wins)
+            svc("c", "Model-C", Phase::Ready),
+            svc("d", "Model-D", Phase::Down),
+        ];
+        let lines = inference_roster_lines(&rows, 80);
+        assert_eq!(lines.len(), 5, "header + 4 service rows");
+        assert!(
+            text(&lines[0]).contains("inference services (4)"),
+            "header: {}",
+            text(&lines[0])
+        );
+        let featured: Vec<usize> = (1..5).filter(|&i| text(&lines[i]).contains('▸')).collect();
+        assert_eq!(featured.len(), 1, "exactly one featured row");
+        assert!(
+            text(&lines[featured[0]]).contains("Model-B"),
+            "the loading model is featured"
+        );
+    }
+
+    #[test]
+    fn roster_caps_and_notes_hidden_count() {
+        let rows: Vec<ServiceState> = (0..12)
+            .map(|i| svc(&format!("k{i}"), &format!("M{i}"), Phase::Ready))
+            .collect();
+        let lines = inference_roster_lines(&rows, 80);
+        assert_eq!(lines.len(), 1 + 8, "header + capped 8 rows");
+        assert!(
+            text(&lines[0]).contains("+4 more"),
+            "header notes the hidden services: {}",
+            text(&lines[0])
+        );
+    }
+}
+
+/// Tests for the `--remote` "LOCAL, not streamed" honesty note (see
+/// `remote_local_fallback_note`) — cross-platform since the helper is pure.
+#[cfg(test)]
+mod remote_fallback_note_tests {
+    use super::remote_local_fallback_note;
+    use crate::cli::BackendType;
+
+    #[test]
+    fn remote_fallback_note_only_for_remote_without_data() {
+        assert_eq!(
+            remote_local_fallback_note(BackendType::Remote, false),
+            Some("LOCAL — remote not streamed")
+        );
+        assert_eq!(remote_local_fallback_note(BackendType::Remote, true), None); // remote data present
+        assert_eq!(remote_local_fallback_note(BackendType::Json, false), None); // local backend, no note
+    }
+}
+
+/// Tests for the pure `RemoteProc`/`RemoteInference` -> local-type mapper
+/// helpers that back the `--remote` process panel and `[i]` view (see the
+/// call sites in the main loop).
+#[cfg(all(test, feature = "remote"))]
+mod remote_mapper_tests {
+    use super::{phase_from_str, remote_inference_to_service_state, remote_proc_to_row};
+    use crate::backend::{RemoteInference, RemoteProc, RemoteServing};
+    use crate::workload::inference_server::{Phase, Readiness};
+
+    #[test]
+    fn phase_from_str_maps_every_known_wire_value() {
+        assert_eq!(phase_from_str("down"), Phase::Down);
+        assert_eq!(phase_from_str("compiling"), Phase::Compiling);
+        assert_eq!(phase_from_str("loading"), Phase::Loading);
+        assert_eq!(phase_from_str("ready"), Phase::Ready);
+        assert_eq!(phase_from_str("alarm"), Phase::Alarm);
+    }
+
+    #[test]
+    fn phase_from_str_unknown_reads_as_down() {
+        // A future schema's new phase name, or a corrupt frame, must degrade
+        // to the safest "nothing happening" reading rather than panic/guess.
+        assert_eq!(phase_from_str("quiescent"), Phase::Down);
+        assert_eq!(phase_from_str(""), Phase::Down);
+        assert_eq!(phase_from_str("READY"), Phase::Down); // case-sensitive by wire contract
+    }
+
+    #[test]
+    fn remote_proc_to_row_maps_fields_and_never_synthesizes_tt_info() {
+        let rp = RemoteProc {
+            pid: 4242,
+            name: "tt-inference-server".to_string(),
+            cmd: "/usr/bin/tt-inference-server --port 8080".to_string(),
+            uses_tt: true,
+            cpu_pct: 87.5,
+            mem_bytes: 12_884_901_888,
+        };
+        let row = remote_proc_to_row(&rp);
+        assert_eq!(row.pid, 4242);
+        assert_eq!(row.name, "tt-inference-server");
+        assert_eq!(row.cpu_pct, 87.5);
+        assert_eq!(row.mem_bytes, 12_884_901_888);
+        // Deliberately not carried: the remote wire shape has no detailed
+        // TtProcInfo (device indices / hugepages), and no inference-runtime
+        // classification.
+        assert!(row.tt.is_none());
+        assert!(row.inference.is_none());
+        assert!(!row.active);
+    }
+
+    #[test]
+    fn remote_inference_to_service_state_maps_ready_with_serving() {
+        let serving = RemoteServing {
+            generation_tps: 842.0,
+            prompt_tps: 20.0,
+            requests_running: 1,
+            requests_waiting: 2,
+            kv_cache_usage: 0.04,
+            ttft_avg_s: 0.18,
+            queue_avg_s: 0.01,
+            prefill_avg_s: 1.0,
+            decode_avg_s: 3.0,
+            tpot_avg_s: 0.02,
+            completed_delta: 2,
+            errored_delta: 0,
+            prefix_hit_rate: 0.75,
+            preemptions_delta: 1,
+        };
+        let ri = RemoteInference {
+            key: "vllm-llama3-70b".to_string(),
+            label: "Llama-3 70B (vLLM)".to_string(),
+            phase: "ready".to_string(),
+            progress: Some(1.0),
+            serving: Some(serving),
+        };
+        let state = remote_inference_to_service_state(&ri);
+        assert_eq!(state.key, "vllm-llama3-70b");
+        assert_eq!(state.label, "Llama-3 70B (vLLM)");
+        assert_eq!(state.phase, Phase::Ready);
+        assert_eq!(state.progress, Some(1.0));
+        assert_eq!(state.readiness, Readiness::Ready { runner: None });
+        // No remote equivalent for these locally-derived probe internals.
+        assert_eq!(state.cpu_pct, 0.0);
+        assert_eq!(state.rss_bytes, 0);
+        assert_eq!(state.kernel_count, 0);
+        assert_eq!(state.flat_ticks, 0);
+        assert!(state.top_proc.is_none());
+        let stats = state.serving.expect("serving should map through");
+        assert_eq!(stats.generation_tps, 842.0);
+        assert_eq!(stats.prompt_tps, 20.0);
+        assert_eq!(stats.requests_running, 1);
+        assert_eq!(stats.requests_waiting, 2);
+        assert_eq!(stats.kv_cache_usage, 0.04);
+        assert_eq!(stats.ttft_avg_s, 0.18);
+        assert_eq!(stats.queue_avg_s, 0.01);
+        assert_eq!(stats.prefill_avg_s, 1.0);
+        assert_eq!(stats.decode_avg_s, 3.0);
+        assert_eq!(stats.tpot_avg_s, 0.02);
+        assert_eq!(stats.completed_delta, 2);
+        assert_eq!(stats.errored_delta, 0);
+        assert_eq!(stats.prefix_hit_rate, 0.75);
+        assert_eq!(stats.preemptions_delta, 1);
+        // No remote equivalent for the raw vLLM counters (deltas are computed
+        // locally only) — always the zeroed default.
+        assert_eq!(stats.counters, Default::default());
+    }
+
+    #[test]
+    fn remote_inference_to_service_state_maps_down_and_loading_readiness() {
+        let down = RemoteInference {
+            key: "k".into(),
+            label: "L".into(),
+            phase: "down".into(),
+            progress: None,
+            serving: None,
+        };
+        let state = remote_inference_to_service_state(&down);
+        assert_eq!(state.phase, Phase::Down);
+        assert_eq!(state.readiness, Readiness::Down);
+        assert!(state.serving.is_none());
+        assert!(state.progress.is_none());
+
+        let loading = RemoteInference {
+            key: "k".into(),
+            label: "L".into(),
+            phase: "loading".into(),
+            progress: Some(0.4),
+            serving: None,
+        };
+        let state = remote_inference_to_service_state(&loading);
+        assert_eq!(state.phase, Phase::Loading);
+        assert_eq!(state.readiness, Readiness::NotReady);
+        assert_eq!(state.progress, Some(0.4));
+    }
+
+    #[test]
+    fn remote_inference_to_service_state_unknown_phase_reads_as_down() {
+        let ri = RemoteInference {
+            key: "k".into(),
+            label: "L".into(),
+            phase: "totally-unknown".into(),
+            progress: None,
+            serving: None,
+        };
+        let state = remote_inference_to_service_state(&ri);
+        assert_eq!(state.phase, Phase::Down);
+        assert_eq!(state.readiness, Readiness::Down);
+    }
+}
+
+#[cfg(test)]
 mod host_default_screen_tests {
     use super::render_grid_mode;
     use crate::backend::host::HostBackend;
@@ -4149,6 +6115,52 @@ mod host_default_screen_tests {
             glyphs > 20,
             "host default screen must not be blank (only {glyphs} non-space glyphs)"
         );
+    }
+
+    /// Regression: the Grid title / device labels contain a multibyte `│`, so a
+    /// byte-offset truncation could land mid-character and panic on a narrow
+    /// terminal. Render across small widths (including ones that would slice
+    /// inside the `│`) and assert no panic.
+    #[test]
+    fn grid_mode_narrow_terminal_does_not_panic() {
+        let mut backend = HostBackend::new();
+        backend.init().expect("host init");
+        backend.update().expect("host update");
+        for (w, h) in [(1, 4), (5, 6), (12, 8), (40, 3), (80, 24)] {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
+            terminal
+                .draw(|f| render_grid_mode(f, &backend))
+                .expect("draw must not panic");
+        }
+    }
+}
+
+/// Regression: `render_snake_view` gained a 4th `band` param (the education
+/// footer). A tiny terminal where the band + status row would exceed the
+/// available height must shrink/clip gracefully rather than panic.
+#[cfg(test)]
+mod snake_band_tests {
+    use ratatui::backend::TestBackend;
+    use ratatui::text::Line;
+    use ratatui::Terminal;
+
+    #[test]
+    fn render_snake_view_with_band_does_not_panic() {
+        let snake = crate::animation::Snake::new();
+        let roster: Vec<Line<'static>> = Vec::new();
+        let band = crate::workload::inference_server::education::compose_band(
+            "Llama-3.1-8B-Instruct",
+            crate::workload::inference_server::Phase::Loading,
+            80,
+            5,
+            0,
+        );
+        // A tiny terminal must also not panic (band + status exceed height).
+        for (w, h) in [(80u16, 24u16), (40, 8), (20, 3)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| super::render_snake_view(f, &snake, &roster, &band))
+                .unwrap();
+        }
     }
 }
 
@@ -4205,7 +6217,7 @@ pub fn run_render_bench(
         let mut term = mk_term();
         let mut hpm = crate::workload::HostProcessMonitor::new();
         hpm.update(); // one scan, not timed
-        let rows = hpm.rows(12); // snapshot, not timed
+        let rows = hpm.rows(12, &std::collections::HashMap::new()); // snapshot, not timed
         let particles: std::collections::HashMap<
             usize,
             Vec<crate::ui::tui::chip_portrait::Particle>,
@@ -4230,6 +6242,8 @@ pub fn run_render_bench(
                     0.0,
                     0,
                     0,
+                    false,
+                    None,
                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                     &std::collections::HashMap::new(),
                 );
@@ -4243,6 +6257,104 @@ pub fn run_render_bench(
         let mut term = mk_term();
         results.push(measure("grid", 10, frames, || {
             term.draw(|f| render_grid_mode(f, backend)).unwrap();
+        }));
+    }
+
+    // Inference Monitor (anim, 60 fps — the `[i]` view is in is_anim_mode). The
+    // live view is the unified serving snake (`render_snake_view`). We bench two
+    // states: `inference-monitor` = the cheap Roaming screensaver (empty
+    // snapshot, as on non-Linux or with no containers), and `inference-serving`
+    // = the heaviest realistic frame — a 4-model roster above the featured
+    // serving dashboard (timeline + swimlanes + silicon strip).
+    let arch = backend
+        .devices()
+        .first()
+        .map(|d| d.architecture.name())
+        .unwrap_or("Unknown");
+    {
+        let mut term = mk_term();
+        let mut snake = crate::animation::Snake::new();
+        results.push(measure("inference-monitor", 60, frames, || {
+            snake.update(&crate::animation::SnakeWorld {
+                rows: &[],
+                catalog: &[],
+                arch,
+                chips: &[],
+                cadence_secs: 5,
+                width: width as usize,
+                height: height as usize,
+            });
+            term.draw(|f| render_snake_view(f, &snake, &[], &[]))
+                .unwrap();
+        }));
+    }
+    {
+        use crate::workload::inference_server::{
+            Phase, Readiness, ServiceState, ServingStats, VllmCounters,
+        };
+        let counters = VllmCounters {
+            generation_tokens_total: 100_000,
+            prompt_tokens_total: 20_000,
+            requests_running: 6,
+            requests_waiting: 2,
+            kv_cache_usage: 0.42,
+            ttft_sum: 3.0,
+            ttft_count: 20,
+            ..Default::default()
+        };
+        let stats = ServingStats::fold(None, &counters, 5);
+        let mk = |key: &str, label: &str, serving| ServiceState {
+            key: key.into(),
+            label: label.into(),
+            phase: Phase::Ready,
+            cpu_pct: 30.0,
+            rss_bytes: 8_000_000_000,
+            rss_delta: 0,
+            kernel_count: 500,
+            kernel_delta: 0,
+            loaded_count: 1400,
+            loaded_delta: 0,
+            safetensors_fds: 0,
+            readiness: Readiness::Ready { runner: None },
+            top_proc: Some("python3".into()),
+            last_log: None,
+            progress: None,
+            flat_ticks: 0,
+            serving,
+        };
+        // 4 models → the featured one Feeds the full serving dashboard, and the
+        // roster lists all four (the multi-model case the view now handles).
+        let rows = vec![
+            mk("a", "Llama-3.1-8B", Some(stats)),
+            mk("b", "Qwen3-32B", Some(stats)),
+            mk("c", "Mistral-7B-Instruct", None),
+            mk("d", "gemma-3-1b-it", None),
+        ];
+        let chips: Vec<crate::animation::ChipReading> = (0..4)
+            .map(|i| crate::animation::ChipReading {
+                index: i,
+                arch,
+                power_w: Some(64.0),
+                temp_c: Some(59.0),
+                aiclk_mhz: Some(1000),
+            })
+            .collect();
+        let roster = inference_roster_lines(&rows, width as usize);
+        let roster_h = roster.len();
+        let mut term = mk_term();
+        let mut snake = crate::animation::Snake::new();
+        results.push(measure("inference-serving", 60, frames, || {
+            snake.update(&crate::animation::SnakeWorld {
+                rows: &rows,
+                catalog: &[],
+                arch,
+                chips: &chips,
+                cadence_secs: 5,
+                width: width as usize,
+                height: (height as usize).saturating_sub(1 + roster_h),
+            });
+            term.draw(|f| render_snake_view(f, &snake, &roster, &[]))
+                .unwrap();
         }));
     }
 

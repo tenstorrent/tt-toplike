@@ -1,3 +1,392 @@
+tt-toplike (0.7.30) noble; urgency=medium
+
+  * Startup latency (under load): the Sysfs backend's board-name enrichment
+    shelled `tt-smi --version` + `tt-smi -s` synchronously during init, with no
+    timeout. While a model is compiling/loading, tt-smi contends with the
+    workload for ARC/CPU and can take several seconds per call — so starting
+    tt-toplike during a load stalled the first frame by ~10 s. The enrichment
+    now runs on a helper thread bounded to 1.2 s; on timeout it's skipped and
+    the device keeps its hwmon arch name (same graceful degradation as when
+    tt-smi is absent), so the TUI paints promptly regardless of load. Idle
+    behavior is unchanged (the probe completes well under the cap). The parse
+    is now a pure, unit-tested helper.
+
+ -- Tenstorrent <software@tenstorrent.com>  Wed, 08 Jul 2026 14:00:00 +0000
+
+tt-toplike (0.7.29) noble; urgency=medium
+
+  * Address PR #20 review (ezietlow), inference-server detection hardening:
+    - detect: `--publish` parsing now takes the HOST port (the side the monitor
+      probes), not the container port — an asymmetric `0.0.0.0:8000:8001` mapping
+      was probing 8001 and reading Down.
+    - monitor: when a container is seen by both the host-process scan and the
+      docker-inspect path, prefer the record with a resolved host port so a
+      foreground `docker run` with no `--publish` isn't probed at the default 8000.
+    - probe: `docker()` now caps stdout at 8 MiB and kills the child on timeout,
+      so a huge `find` output or a wedged `docker exec` can't leak a thread or
+      balloon memory each tick.
+    - metrics: Prometheus value parsing takes the value field explicitly, so an
+      optional trailing timestamp is no longer parsed as the value (latent).
+    - liveness: the `host:port` cmdline fallback only fires on host-looking
+      tokens (dotted IP / localhost, or a `--host`/`--url` value), so a
+      `--served-model-name foo:v2` no longer yields a bogus port.
+    +tests for each (asymmetric publish, port-preferring dedup, timestamped
+    metric line, non-host token rejection).
+
+ -- Tenstorrent <software@tenstorrent.com>  Wed, 08 Jul 2026 12:00:00 +0000
+
+tt-toplike (0.7.28) noble; urgency=medium
+
+  * [i] Inference Monitor — compiled vs loaded: the loading footer now shows
+    compiled kernels AND loaded weight shards side by side ("compiled N · loaded
+    M"), so the compile→load handoff is visible (compiled climbs first, loaded
+    follows). Fixes a latent bug: the compiled-kernel count searched
+    $TT_METAL_HOME/built, which is empty on tt-inference-server 0.14.0+ (the JIT
+    cache moved to $HOME/.cache/tt-metal-cache) — it was silently reading 0,
+    which also starved the Compiling-phase signal. Loaded weights are counted
+    from .tensorbin shards under $CACHE_ROOT, and weight-load now registers as
+    the Loading phase even when host RSS is flat (weights land on-device).
+  * [i] serving view: the READY header now renders in green.
+  * Docs: README + QUICK_START refreshed for the education band, the compiled/
+    loaded footer, the synthwave loading palette + hot-pink ready burst, and the
+    updated v/i navigation (Inference is in the v cycle; i pairs with Insights).
+
+ -- Tenstorrent <software@tenstorrent.com>  Tue, 07 Jul 2026 21:00:00 +0000
+
+tt-toplike (0.7.27) noble; urgency=medium
+
+  * [i] Inference Monitor — faster detection: the background monitor now probes
+    immediately when the detected server set changes (a model just launched or
+    stopped) instead of always waiting out the 5s steady-state interval. So the
+    [i] view flips from the cold model-catalog to the loading snake within a
+    refresh tick of starting tt-inference-server, not up to 5s later. Steady
+    cadence is unchanged.
+  * Mode cycling: `v` now includes Defrag AND the Inference Server Monitor at
+    the tail of the rotation, just before it wraps back to Insights
+    (… → Arcade → Defrag → Inference → Insights) — both are reachable by cycling.
+  * `i` now pairs specifically with Insights: `i` from anywhere opens the
+    Inference Server Monitor, and `i` while in it lands on Insights (a quick
+    back-and-forth). Esc still backs out to wherever you came from.
+
+ -- Tenstorrent <software@tenstorrent.com>  Tue, 07 Jul 2026 18:00:00 +0000
+
+tt-toplike (0.7.26) noble; urgency=medium
+
+  * [i] Inference Monitor — education band: while a model loads, a footer band
+    under the loading snake now explains what the current phase is actually
+    doing (Compiling execution graphs / Loading model weights / stalled), with
+    a duration hint, the model's tagline + key stats, and a rotating "did you
+    know" TT fact. The copy is a proof-of-concept education set brought in-tree
+    (owned here, not synced) under assets/education/, embedded at build time.
+    The band is phase-synced (it describes the same service the snake features),
+    char-safe, and degrades gracefully on small terminals — dropping the fact,
+    then the header, then itself, so the snake always fits above the status bar.
+
+ -- Tenstorrent <software@tenstorrent.com>  Tue, 07 Jul 2026 15:00:00 +0000
+
+tt-toplike (0.7.25) noble; urgency=medium
+
+  * Startup latency: the TUI painted its first frame ~1.3s after launch (and
+    noticeably worse when a few instances started at once). The backend was
+    being created and initialized up to THREE times before the first frame —
+    once to auto-select in `main`, once in `run_with_backend`, and once more in
+    `run_tui` (which owns the backend it actually uses) — and each Sysfs/Hybrid
+    init shells out to `tt-smi` (~0.4s), so the wasted passes dominated boot and
+    multiplied the `tt-smi` load under concurrency. The interactive path now
+    routes straight to `run_tui`, which builds the backend exactly once; the
+    per-backend construction in `main` is kept only for `--print`, and the
+    `--remote` host-spec resolution is preserved. First paint drops to ~0.4s and
+    stays flat when several instances start together.
+
+ -- Tenstorrent <software@tenstorrent.com>  Tue, 07 Jul 2026 10:00:00 +0000
+
+tt-toplike (0.7.24) noble; urgency=medium
+
+  * [i] Inference Monitor — loading palette: the greyscale "greyskull" loading
+    look was too flat, so the loading snake/chambers now sweep a colorful
+    synthwave ramp — cyan-teal → blue → violet → magenta → hot pink — that
+    climbs the cool→hot side of the color wheel and deliberately skips the
+    green AND neon-yellow arcs entirely (every hue ≥188°). Rendered as raw RGB
+    so the view stays vivid regardless of the active hardware theme; the
+    ready-burst and stall accent stay hot pink.
+
+ -- Tenstorrent <software@tenstorrent.com>  Mon, 06 Jul 2026 12:00:00 +0000
+
+tt-toplike (0.7.23) noble; urgency=medium
+
+  * --serve [BIND:PORT] + in-app /serve command: tt-toplike can now BE a
+    telemetry source, not just consume one. It runs a WebSocket server on
+    /telemetry broadcasting frames that are valid `tt-smi -s` JSON plus an
+    optional additive `tt_toplike` key carrying the box's process list and
+    [i] inference state — the same shape tt-station-agentd emits. Any
+    tt-toplike --remote can connect to it directly, so the remote data
+    source is no longer a single agent. Serves while you watch (at a TTY the
+    TUI runs and publishes in one process) or headless (no TTY → a quiet
+    collector loop). Default bind 0.0.0.0:8770; plaintext/unauthed,
+    trusted-LAN posture matching --remote. Requires the json or hybrid
+    backend (the only ones that retain a raw tt-smi frame to relay).
+  * --remote now renders the WATCHED box fully: the process panel shows the
+    publisher's processes and the [i] tab shows its inference workload, both
+    read from the streamed `tt_toplike` extension. When the stream carries
+    only chip telemetry (e.g. an agent that hasn't adopted the extension),
+    the panels fall back to the local machine's data with an honest LOCAL
+    label — no more silently showing your laptop's processes as if they were
+    the box's. A missing extension sub-key means "not streamed → fall back",
+    a present-but-empty one means "authoritatively zero".
+  * Relay (--serve together with --remote): the origin box's frame is
+    re-broadcast verbatim, so downstream viewers see the watched box's
+    processes/inference rather than the relay host's.
+  * All new code is behind the default-on `remote` cargo feature; the crate
+    still builds and is clippy-clean with --no-default-features. Panic-free
+    on untrusted frames; the WS server, socket binds, and broadcasts run off
+    the render thread on the publisher's own Tokio runtime.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sun, 05 Jul 2026 21:00:00 +0000
+
+tt-toplike (0.7.22) noble; urgency=medium
+
+  * [i] multi-model roster: when 2+ inference services are detected, a compact
+    roster now sits above the featured snake listing ALL of them — a phase tag
+    (compile/loading/serving/stalled/down), the model label, and a live stat
+    (tok/s + running when serving, load % otherwise); the featured service is
+    marked ▸. The snake still features one (loading wins, else the first Ready),
+    and the single-model view is unchanged.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sun, 05 Jul 2026 20:00:00 +0000
+
+tt-toplike (0.7.21) noble; urgency=medium
+
+  * [i] Inference Monitor — reliability: the loading view no longer flaps back
+    to the cold model-catalog while a model is actively loading. python-alive
+    is now detected across ALL container processes (a loading server is often
+    IO-bound and not the top-CPU process), detached/compose/systemd containers
+    are found via `docker ps`+`docker inspect` (not just a foreground
+    `docker run`), and the loading state holds for a 15s grace across a
+    transient probe hiccup.
+  * [i] loading snake recolored to the greyskull palette — calm greys + a cyan
+    tint with hot pink the only hot accent, instead of the teal→amber→gold
+    neon sweep.
+  * [i] serving latency (TTFT / queue / prefill / decode / TPOT) is now
+    windowed over each tick's completed requests instead of a lifetime mean,
+    so a slow request actually moves the number.
+  * Arcade duel capped to a compact strip so the hero-vs-snake tug-of-war
+    stays tight and readable on large terminals (was stretching across half
+    the screen).
+  * Robustness: fixed a render-path panic on the fleet-zoom drill-down after a
+    device-count drop; bounded the remote WS device list + message size
+    against a hostile frame; --remote now opens a single WS connection for the
+    session; per-endpoint HTTP/docker probe timeouts so one wedged endpoint
+    can't stall the monitor.
+  * Packaging: the .deb builds locally again (the apt Build-Depends check is
+    skipped when a rustup toolchain provides rustc); `tt-toplike-app
+    --version`/`--help` work headless (no window init); CI is green again
+    (macOS aiclk guard, egui/app clippy, cargo-audit advisory ignore, protoc
+    for the luwen check).
+
+ -- Tenstorrent <software@tenstorrent.com>  Sun, 05 Jul 2026 18:00:00 +0000
+
+tt-toplike (0.7.20) noble; urgency=medium
+
+  * Safety: the live `b` backend cycle no longer steps onto Luwen. Cycling
+    into it re-ran chip detection + a first-read ARC mailbox message mid-
+    workload — the Luwen/UMD contention window that is still unresolved
+    upstream (DEVINFRA-4445). Luwen is now launch-only (`--backend luwen`),
+    mirroring how Remote already behaved.
+  * Docs: the Luwen warnings now describe the real mechanism — kernel-
+    mediated (tt-kmd) mostly-passive reads, one ARC message per chip on
+    first read (Wormhole/Grayskull, none on Blackhole) — instead of the
+    blanket "direct PCI BAR0 may disrupt" wording.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sat, 04 Jul 2026 16:00:00 +0000
+
+tt-toplike (0.7.19) noble; urgency=medium
+
+  * Remote UX: `/remote` slash command discovers boxes on the LAN (via
+    `tt discover`) and hot-connects — discovery and connect run off the
+    render thread (no UI freeze), the discover subprocess is bounded by a
+    10s timeout, and `--remote <name>` resolves via discovery exactly once
+    at startup.
+  * Housekeeping: the retired [i] text-list render path is gone (the bench
+    now measures the live snake view); vendor/ is no longer committed
+    (build-deb.sh regenerates it); README/QUICK_START document the [i]
+    snake dashboard, /theme, and the real key map; issue/PR templates and
+    a root CHANGELOG added; CI gains strict fmt, gui/egui/app clippy, a
+    macOS job, cargo-audit, and a version-consistency check; MSRV pinned
+    at 1.93; a latent luwen-backend build break fixed; patent notice
+    folded into NOTICE.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sat, 04 Jul 2026 14:00:00 +0000
+
+tt-toplike (0.7.18) noble; urgency=medium
+
+  * New: --remote <host[:port]> — watch a remote QuietBox's telemetry over a
+    WebSocket stream (plaintext, unauthed: trusted-LAN only). All the
+    visualizations run against the remote chips; the process panel and [i]
+    inference monitor still describe the LOCAL machine.
+  * Remote hardening after review: the process panel no longer TT-filters
+    local processes under --remote (they can't correspond to remote chips);
+    the Arcade duel is suppressed under --remote (local serving vs remote
+    silicon would be incoherent); backend status now reports last-frame age
+    and flags a stale stream; --timeout now governs the WS read/init timeout.
+  * Packaging: WS support is a default-on 'remote' cargo feature — packagers
+    can opt out with --no-default-features.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sat, 04 Jul 2026 10:00:00 +0000
+
+tt-toplike (0.7.17) noble; urgency=medium
+
+  * Arcade: the hero now duels the inference snake — a telemetry-true
+    tug-of-war strip when a model is serving. The ⚔ marker slides toward
+    whichever side dominates (chip power/util vs tokens/s + queue depth);
+    the hero lunges on real power spikes above the learned baseline, the
+    snake lunges on completed requests, and its glow tracks KV-cache load.
+  * Arcade: per-device power/temp now appears exactly once (a shared strip)
+    instead of once per embedded section.
+  * Memory Castle: a compact tier (8-col towers) before the fleet-grid
+    fallback — a 120-col terminal now fits 14 castles instead of 7.
+  * Chrome: 1990s BBS/demoscene ANSI styling — ╔══[ SECTION ]══▓▒░ rules
+    with dither fades (never right-side walls), themed under grayskull.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sat, 04 Jul 2026 08:00:00 +0000
+
+tt-toplike (0.7.16) noble; urgency=medium
+
+  * New app-wide `/theme grayskull` (a.k.a. greyskull): collapses the whole
+    palette to a thousand shades of grey — greys everywhere, a cyan tint for
+    cool hues, a faint purple for violets, and HOT PINK as the only saturated
+    "hot" color. `/theme default` restores full color; bare `/theme` toggles.
+    Applies across every view via a single color transform in the palette.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sat, 04 Jul 2026 05:00:00 +0000
+
+tt-toplike (0.7.15) noble; urgency=medium
+
+  * Serving swimlanes: when a model is idle (no in-flight requests) but has
+    served some, the region now shows a representative dim "avg" lane built
+    from the average per-stage times, plus the cumulative served count in the
+    header — instead of going blank. Live lanes still appear per in-flight
+    request.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sat, 04 Jul 2026 04:00:00 +0000
+
+tt-toplike (0.7.14) noble; urgency=medium
+
+  * Add a legend for Grid mode. Every view now has a symbol legend (press l);
+    the "no legend for this view" fallback is gone.
+  * Fix the [i] legend's snake-head entry: the head glyph is state-specific —
+    ● (cold, roaming), ◉ (loading, coiling), ▶ (serving) — not a single ◉.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sat, 04 Jul 2026 03:00:00 +0000
+
+tt-toplike (0.7.13) noble; urgency=medium
+
+  * The Insights (default) screen now has a symbol legend (press l): chip
+    portraits, cyan→red temperature/power scale, the TT-process list, kill
+    keys, the fleet heatmap, and the i shortcut.
+
+ -- Tenstorrent <software@tenstorrent.com>  Sat, 04 Jul 2026 02:00:00 +0000
+
+tt-toplike (0.7.12) noble; urgency=medium
+
+  * Fix: the [i] Inference Server Monitor no longer appears frozen — it now
+    redraws at animation cadence (60 FPS) instead of the 10 FPS data rate. The
+    serving snake gently breathes at rest and the throughput timeline samples
+    on a wall-clock cadence so it spans a useful window.
+  * The loading snake now coils and chases its tail while compiling/loading,
+    then uncoils and straightens into the ready box as the load resolves.
+  * The [i] view has a proper explain overlay (rewritten for the unified
+    snake) and a symbol legend (press l).
+
+ -- Tenstorrent <software@tenstorrent.com>  Sat, 04 Jul 2026 01:00:00 +0000
+
+tt-toplike (0.7.11) noble; urgency=medium
+
+  * Serving view is now a full adaptive dashboard: a throughput timeline
+    (scrolling tok/s + request sparklines), the token-exhaust snake, request
+    swimlanes (queue→prefill→decode, from average per-stage vLLM latencies),
+    a live stats panel (throughput/cache/latency/container), and a TT silicon
+    strip correlating serving activity with real per-chip power/temp/AICLK.
+    Regions collapse gracefully on smaller terminals.
+  * vLLM /metrics parsing extended: per-stage latency, inter-token time,
+    prefix-cache hit rate, preemptions.
+  * Loading sequence reskinned with ANSI-art shading: block-ramp gradients and
+    a compile→load→ready teal→gold hue sweep with a bright leading edge.
+
+ -- Tenstorrent <software@tenstorrent.com>  Fri, 03 Jul 2026 23:00:00 +0000
+
+tt-toplike (0.7.10) noble; urgency=medium
+
+  * Serving view: the snake now sits beside a verbose, grouped info panel
+    (throughput: decode/prefill tok/s · requests: running/queued/served/errors
+    · cache·latency: KV% / TTFT · container: CPU/RSS/token totals), replacing
+    the single-line footer. Falls back to snake-only on narrow terminals; shows
+    em-dash placeholders when a server exposes no vLLM metrics.
+
+ -- Tenstorrent <software@tenstorrent.com>  Fri, 03 Jul 2026 21:00:00 +0000
+
+tt-toplike (0.7.9) noble; urgency=medium
+
+  * Fix: the serving-snake stats line (tok/s · running · queued · KV · TTFT ·
+    served) was rendered on the absolute bottom row and painted over by the
+    global status bar, so it never appeared. The snake view now reserves that
+    row for the status bar; its footer stats are visible just above it.
+
+ -- Tenstorrent <software@tenstorrent.com>  Fri, 03 Jul 2026 20:00:00 +0000
+
+tt-toplike (0.7.8) noble; urgency=medium
+
+  * The [i] Inference Server Monitor is now one unified "snake" across all
+    three states, replacing the Down-roster list:
+    - cold  → a hungry snake roams the model-catalog starfield;
+    - loading → the snake grows through the compile→load journey (gold burst
+      at ready);
+    - serving → a calm living creature whose form encodes live vLLM signals
+      directly (body length = in-flight requests, wave = tokens/s, colour =
+      KV-cache load, a pulse per completed request, a fray on errors), with a
+      stats line: tok/s · running · queued · KV% · TTFT · served. Near-still
+      when idle.
+  * New: scrape the vLLM Prometheus /metrics endpoint per tick and fold live
+    ServingStats (rates from counter deltas) onto each inference service.
+
+ -- Tenstorrent <software@tenstorrent.com>  Fri, 03 Jul 2026 18:00:00 +0000
+
+tt-toplike (0.7.7) noble; urgency=medium
+
+  * Fix: the [i] Inference Server Monitor no longer sits on the cold-trail
+    starfield while a tt-inference-server container is actually running. The
+    monitor now tracks ANY detected container, not just the curated media
+    models: generic vLLM/LLM deployments (arbitrary `--model`, e.g.
+    Qwen/Qwen3-32B, passed as a container arg rather than a MODEL env var) are
+    now parsed and shown, keyed by container name and labeled from the model.
+
+ -- Tenstorrent <software@tenstorrent.com>  Fri, 03 Jul 2026 15:00:00 +0000
+
+tt-toplike (0.7.6) noble; urgency=medium
+
+  * Reword the process-panel empty state (TT-filtered) to "No processes
+    using TT devices detected".
+
+ -- Tenstorrent <software@tenstorrent.com>  Fri, 03 Jul 2026 13:00:00 +0000
+
+tt-toplike (0.7.5) noble; urgency=medium
+
+  * Inference Server Monitor [i] view is now a tri-state surface:
+    - cold trail (nothing running) shows a model-catalog starfield
+      screensaver: the Tenstorrent compatibility catalog as drifting stars,
+      with models that run on the detected hardware lit up ("N of M models
+      run on your <arch>"). Bundled snapshot + background curl refresh.
+    - a compiling/loading service takes over full-screen with a boxed-snake
+      progress visualization (compile -> load -> ready), filling by true %
+      when a baseline exists else by live kernel/RSS momentum, and turning
+      red when a load stalls (Alarm).
+    - otherwise the live service list, as before.
+  * Process list: outside --host mode, only processes contributing to TT
+    hardware load are shown; `i` opens the Inference Server Monitor.
+  * Defrag EVICT now fires on model unload / after a load surge.
+  * New dependency (Recommends): curl, for the catalog refresh (HTTPS).
+
+ -- Tenstorrent <software@tenstorrent.com>  Fri, 03 Jul 2026 12:00:00 +0000
+
 tt-toplike (0.7.0) noble; urgency=medium
 
   * Animation FPS throttles: --throttle (load-based) and --idle-on-blur
@@ -9,6 +398,9 @@ tt-toplike (0.7.0) noble; urgency=medium
   * docs: mark --host and macOS/Windows builds as experimental; note the host
     mode observer effect (the visualiser shares the CPU it measures) and the
     per-hardware uniqueness of each device type, in README and project site.
+  * Change: default log level is now Warn (was Info). This is global, not
+    macOS-specific, so quieter startup output on Linux too; pass -v/--verbose
+    for Debug-level logging, or -q/--quiet to silence entirely.
 
  -- Tenstorrent <software@tenstorrent.com>  Tue, 30 Jun 2026 12:00:00 +0000
 

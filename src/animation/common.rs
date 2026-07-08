@@ -30,7 +30,10 @@ use ratatui::style::Color;
 /// let red = hsv_to_rgb(0.0, 1.0, 1.0);
 /// let cyan = hsv_to_rgb(180.0, 1.0, 1.0);
 /// ```
-pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
+/// Raw HSV→RGB bytes, WITHOUT the active-theme transform. Callers that want the
+/// themed color use [`hsv_to_rgb`]; callers that want a specific palette apply
+/// their own transform (e.g. [`hsv_to_grayskull`]).
+pub fn hsv_to_rgb_bytes(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
     let h = h % 360.0;
     let c = v * s;
     let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
@@ -50,11 +53,26 @@ pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
         (c, 0.0, x)
     };
 
-    colors::rgb(
+    (
         ((r + m) * 255.0) as u8,
         ((g + m) * 255.0) as u8,
         ((b + m) * 255.0) as u8,
     )
+}
+
+pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
+    let (r, g, b) = hsv_to_rgb_bytes(h, s, v);
+    colors::rgb(r, g, b)
+}
+
+/// HSV mapped ALWAYS through the greyskull palette (greys + a cyan tint for cool
+/// hues, a little purple, hot pink the only saturated color) — regardless of the
+/// active theme. Used by the loading snake so its journey reads calm and
+/// monochrome rather than a teal→amber→gold neon sweep.
+pub fn hsv_to_grayskull(h: f32, s: f32, v: f32) -> Color {
+    let (r, g, b) = hsv_to_rgb_bytes(h, s, v);
+    let (r, g, b) = colors::grayskull_rgb(r, g, b);
+    Color::Rgb(r, g, b)
 }
 
 /// Convert RGB color space to HSV
@@ -159,6 +177,48 @@ pub const ACCRETION_CHARS: [char; 4] = ['◐', '◑', '◒', '◓'];
 /// Singularity characters (gravitational intensity)
 /// Used for Blackhole L1 SRAM cores near event horizon
 pub const SINGULARITY_CHARS: [char; 5] = ['·', '∘', '○', '●', '◉'];
+
+/// One 1990s-BBS-style horizontal rule: `╔══[ LABEL ]══════▓▒░` — double-line
+/// lead, boxed label, rule body, and a dither fade on the right (this project
+/// never draws right-side walls). Char-exact `width`; label truncated char-safe
+/// when it doesn't fit; empty at width 0.
+pub fn bbs_rule(label: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let fade = "▓▒░";
+    let lead = "╔══[ ";
+    let close = " ]";
+    let fixed = lead.chars().count() + close.chars().count() + fade.chars().count();
+    let label_room = width.saturating_sub(fixed);
+    let label_cut: String = label.chars().take(label_room).collect();
+    let mut s = String::new();
+    s.push_str(lead);
+    s.push_str(&label_cut);
+    s.push_str(close);
+    let used = s.chars().count() + fade.chars().count();
+    for _ in used..width {
+        s.push('═');
+    }
+    s.push_str(fade);
+    // Degenerate widths: hard-clamp to exactly `width` chars.
+    s.chars().take(width).collect()
+}
+
+/// BBS-style title bookends: `░▒▓ TEXT ▓▒░` centered-ish, padded/clamped to
+/// exactly `width` chars.
+pub fn bbs_title(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let core = format!("░▒▓ {text} ▓▒░");
+    let mut s: String = core.chars().take(width).collect();
+    let pad = width.saturating_sub(s.chars().count());
+    for _ in 0..pad {
+        s.push('▄');
+    }
+    s
+}
 
 /// Map value to standard block character
 pub fn value_to_block_char(value: f32) -> char {
@@ -384,5 +444,25 @@ mod tests {
     fn test_portal_chars() {
         assert_eq!(value_to_portal_char(0.0), '◯'); // Closed portal
         assert_eq!(value_to_portal_char(1.0), '◉'); // Open portal
+    }
+
+    #[test]
+    fn bbs_rule_boxes_label_and_fades_right() {
+        let r = bbs_rule("STARFIELD", 40);
+        assert_eq!(r.chars().count(), 40, "exact width");
+        assert!(r.starts_with("╔══[ "), "double-line lead-in + label box");
+        assert!(r.contains("STARFIELD ]"));
+        assert!(r.ends_with("▓▒░"), "dither fade, never a right wall");
+        // Degenerate widths: char-safe, exact width, no panic.
+        assert_eq!(bbs_rule("STARFIELD", 6).chars().count(), 6);
+        assert_eq!(bbs_rule("X", 0), "");
+    }
+
+    #[test]
+    fn bbs_title_bookends_and_clamps() {
+        let t = bbs_title("tt-toplike", 30);
+        assert_eq!(t.chars().count(), 30);
+        assert!(t.contains("▓ tt-toplike ▓") || t.contains("█ tt-toplike █"));
+        assert_eq!(bbs_title("tt-toplike", 4).chars().count(), 4);
     }
 }

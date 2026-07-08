@@ -1,0 +1,38 @@
+name: ✨ Feature request
+description: Suggest a new visualization, backend, key, or improvement.
+title: "[feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have an idea for a new visualization, a telemetry signal we should surface, or a key/command? We'd love to hear it.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: The use case or pain point behind the request. What can't you do (or see) today?
+      placeholder: When I'm watching a serving fleet I can't tell…
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like tt-toplike to do? Describe the behavior — a sketch or ASCII mock is welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you thought about, or how you work around this today.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else — related hardware, links, prior art in other tools.

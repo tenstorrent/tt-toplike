@@ -9,6 +9,8 @@
 use crate::backend::host::HostBackend;
 use crate::backend::json::JSONBackend;
 use crate::backend::mock::MockBackend;
+#[cfg(feature = "remote")]
+use crate::backend::ws::WsBackend;
 use crate::backend::{BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
 use crate::error::{BackendError, BackendResult};
@@ -90,12 +92,36 @@ pub fn create_backend(
             backend.init()?;
             Ok(Box::new(backend))
         }
+        // Remote QuietBox — opt-in only, entered exclusively via --remote <HOST:PORT>.
+        // Never reached from auto-detect or Tab-cycling (create_auto_backend and
+        // next_backend deliberately omit it), preserving the additive contract.
+        // The variant is unconditional (cfg-gating an enum variant would ripple
+        // through every match arm); the WS backend behind it is gated instead.
+        #[cfg(feature = "remote")]
+        BackendType::Remote => {
+            let spec = cli.remote.as_deref().ok_or_else(|| {
+                BackendError::Initialization(
+                    "Remote backend requires --remote <HOST:PORT>".to_string(),
+                )
+            })?;
+            // Resolve a bare box name (`--remote qb2-lab`) via `tt --json
+            // discover`; a HOST:PORT passes straight through untouched.
+            let resolved = crate::backend::discovery::resolve_remote_spec(spec)
+                .map_err(BackendError::Initialization)?;
+            let mut backend = WsBackend::from_host_port(&resolved, config)?;
+            backend.init()?;
+            Ok(Box::new(backend))
+        }
+        #[cfg(not(feature = "remote"))]
+        BackendType::Remote => Err(BackendError::Initialization(
+            "Remote backend not compiled (built without the 'remote' feature)".to_string(),
+        )),
     }
 }
 
 /// Auto-detect backend (tries backends in order until one succeeds)
 ///
-/// SAFE MODE: Never tries Luwen backend (invasive, requires PCI BAR0 access)
+/// SAFE MODE: Never tries Luwen (its Luwen/UMD arbitration is unresolved upstream)
 /// Order: Hybrid (sysfs + background JSON) → JSON (tt-smi) → Mock
 /// Use --backend luwen explicitly if you need direct hardware access.
 /// Use --backend sysfs if you want sysfs-only without any JSON background thread.
@@ -137,8 +163,9 @@ fn create_auto_backend(
 
 /// Get the next backend in the cycle
 ///
-/// Cycle order (Linux): Hybrid → Sysfs → JSON → Luwen → Mock → Hybrid
-/// Cycle order (other): JSON → Luwen → Mock → JSON
+/// Cycle order (Linux): Hybrid → Sysfs → JSON → Mock → Host → Hybrid
+/// Cycle order (other): JSON → Mock → Host → JSON
+/// Luwen and Remote are launch-only and never cycled into (see the arms below).
 pub fn next_backend(current: BackendType) -> BackendType {
     match current {
         #[cfg(target_os = "linux")]
@@ -147,11 +174,14 @@ pub fn next_backend(current: BackendType) -> BackendType {
         #[cfg(target_os = "linux")]
         BackendType::Sysfs => BackendType::Json,
 
-        BackendType::Json => BackendType::Luwen,
+        // Luwen is deliberately skipped: cycling into it would run a fresh
+        // chip-detect/init + first-read ARC mailbox message mid-workload —
+        // exactly the Luwen/UMD contention window that is still unresolved
+        // upstream (DEVINFRA-4445; pyluwen is warned off multi-host topologies
+        // entirely). Like Remote, Luwen is launch-only: reachable via
+        // `--backend luwen`, and cycling FROM it exits into the normal cycle.
+        BackendType::Json => BackendType::Mock,
 
-        #[cfg(feature = "luwen-backend")]
-        BackendType::Luwen => BackendType::Mock,
-        #[cfg(not(feature = "luwen-backend"))]
         BackendType::Luwen => BackendType::Mock,
 
         BackendType::Mock => BackendType::Host,
@@ -169,13 +199,26 @@ pub fn next_backend(current: BackendType) -> BackendType {
             #[cfg(not(target_os = "linux"))]
             return BackendType::Json;
         }
+
+        // Remote is a sticky, explicit mode: it is NEVER a target of the cycle
+        // (no other arm returns Remote), so Tab-cycling can never enter it. If a
+        // user who launched with --remote presses Tab, we drop them into the
+        // normal local cycle start and never return to Remote — preserving the
+        // additive rule that remote is opt-in only.
+        BackendType::Remote => {
+            #[cfg(target_os = "linux")]
+            return BackendType::Hybrid;
+            #[cfg(not(target_os = "linux"))]
+            return BackendType::Json;
+        }
     }
 }
 
 /// Try to create the next available backend, skipping unavailable ones
 ///
 /// This function cycles through backends until it finds one that initializes successfully.
-/// Linux cycle has 6 steps (Hybrid→Sysfs→Json→Luwen→Mock→Host); non-Linux has fewer.
+/// Linux cycle has 5 steps (Hybrid→Sysfs→Json→Mock→Host — Luwen and Remote are
+/// launch-only, never cycled into); non-Linux has fewer.
 /// We try up to 7 times to cover a full Linux cycle plus one retry margin.
 pub fn switch_to_next_backend(
     current: BackendType,
@@ -212,7 +255,9 @@ mod tests {
 
     #[test]
     fn test_next_backend_cycle() {
-        // Full Linux cycle: Hybrid → Sysfs → Json → Luwen → Mock → Host → Hybrid
+        // Full Linux cycle: Hybrid → Sysfs → Json → Mock → Host → Hybrid.
+        // Luwen is NOT in the live cycle: its ARC-mailbox/UMD contention story
+        // is unresolved upstream (DEVINFRA-4445), so it stays launch-only.
         #[cfg(target_os = "linux")]
         {
             let b1 = next_backend(BackendType::Hybrid);
@@ -222,16 +267,41 @@ mod tests {
             assert!(matches!(b2, BackendType::Json));
 
             let b3 = next_backend(b2);
-            assert!(matches!(b3, BackendType::Luwen));
+            assert!(matches!(b3, BackendType::Mock));
 
             let b4 = next_backend(b3);
-            assert!(matches!(b4, BackendType::Mock));
+            assert!(matches!(b4, BackendType::Host));
 
             let b5 = next_backend(b4);
-            assert!(matches!(b5, BackendType::Host));
+            assert!(matches!(b5, BackendType::Hybrid));
+        }
+    }
 
-            let b6 = next_backend(b5);
-            assert!(matches!(b6, BackendType::Hybrid));
+    /// Luwen is launch-only sticky (like Remote): cycling FROM it exits into
+    /// the normal cycle, and no arm ever returns to it — pressing `b` mid-
+    /// workload must never initiate a fresh Luwen chip-detect/init.
+    #[test]
+    fn test_luwen_is_launch_only() {
+        assert!(matches!(
+            next_backend(BackendType::Luwen),
+            BackendType::Mock
+        ));
+        // No backend cycles INTO Luwen.
+        let starts = [
+            BackendType::Json,
+            BackendType::Mock,
+            BackendType::Host,
+            BackendType::Auto,
+        ];
+        for s in starts {
+            let mut cur = s;
+            for _ in 0..16 {
+                cur = next_backend(cur);
+                assert!(
+                    !matches!(cur, BackendType::Luwen),
+                    "cycle from {s:?} must never enter Luwen"
+                );
+            }
         }
     }
 
@@ -242,11 +312,8 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn test_next_backend_cycle_non_linux() {
-        // Json → Luwen → Mock → Host → Json
-        assert!(matches!(
-            next_backend(BackendType::Json),
-            BackendType::Luwen
-        ));
+        // Json → Mock → Host → Json (Luwen is launch-only, never cycled into).
+        assert!(matches!(next_backend(BackendType::Json), BackendType::Mock));
         assert!(matches!(
             next_backend(BackendType::Luwen),
             BackendType::Mock
@@ -264,7 +331,7 @@ mod tests {
             cur = next_backend(cur);
             seen.insert(format!("{:?}", cur));
         }
-        for expected in ["Json", "Luwen", "Mock", "Host"] {
+        for expected in ["Json", "Mock", "Host"] {
             assert!(seen.contains(expected), "cycle should visit {expected}");
         }
     }
@@ -279,6 +346,8 @@ mod tests {
             mock: Some(0),
             json: false,
             host: false,
+            remote: None,
+            serve: None,
             tt_smi_path: std::path::PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,

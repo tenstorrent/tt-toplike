@@ -50,18 +50,39 @@ fn find_dict_int(output: &str, key: &str) -> Option<u64> {
     rest[..end].parse().ok()
 }
 
+/// Isolate the single `ioreg` node block that actually reports GPU utilization.
+///
+/// `ioreg -r` prints one block per matching node, each introduced by the `+-o `
+/// tree marker. A Mac with more than one `IOAccelerator` (e.g. an Intel Mac with
+/// integrated + discrete GPUs) would otherwise let a global first-match splice
+/// `model` from one node with `Device Utilization %` from another. We scope to
+/// the block containing the utilization field so every field comes from the
+/// same GPU. When there's no marker (a single block, or a trimmed test fixture)
+/// the whole input is used if it carries the field.
+fn node_with_utilization(output: &str) -> Option<&str> {
+    const MARKER: &str = "+-o ";
+    const UTIL: &str = "Device Utilization %";
+    if !output.contains(MARKER) {
+        return output.contains(UTIL).then_some(output);
+    }
+    output.split(MARKER).find(|block| block.contains(UTIL))
+}
+
 /// Parse `ioreg -rc IOAccelerator` output into a [`GpuSample`].
 ///
 /// Returns `None` if the GPU utilization field is absent (not an Apple GPU node
 /// or unexpected format) so the caller can skip adding a GPU device.
 pub fn parse_ioreg(output: &str) -> Option<GpuSample> {
-    let util_pct = find_dict_int(output, "Device Utilization %")? as f32;
+    // Scope all field lookups to one node so a second IOAccelerator can't splice
+    // its values into this sample.
+    let node = node_with_utilization(output)?;
+    let util_pct = find_dict_int(node, "Device Utilization %")? as f32;
     Some(GpuSample {
-        model: find_quoted(output, "model").unwrap_or_else(|| "Apple GPU".to_string()),
-        core_count: find_int_assign(output, "gpu-core-count").unwrap_or(0) as usize,
+        model: find_quoted(node, "model").unwrap_or_else(|| "Apple GPU".to_string()),
+        core_count: find_int_assign(node, "gpu-core-count").unwrap_or(0) as usize,
         util_pct,
-        mem_in_use_bytes: find_dict_int(output, "In use system memory").unwrap_or(0),
-        mem_alloc_bytes: find_dict_int(output, "Alloc system memory").unwrap_or(0),
+        mem_in_use_bytes: find_dict_int(node, "In use system memory").unwrap_or(0),
+        mem_alloc_bytes: find_dict_int(node, "Alloc system memory").unwrap_or(0),
     })
 }
 
@@ -98,5 +119,30 @@ mod tests {
     #[test]
     fn returns_none_on_garbage() {
         assert!(parse_ioreg("no gpu here").is_none());
+    }
+
+    // Two IOAccelerator nodes: a first one WITHOUT utilization (wrong GPU) and
+    // the real Apple GPU node with it. We must read every field from the node
+    // that reports utilization, never splice the first node's model in.
+    const MULTI_NODE: &str = r#"
+  +-o IOAccelerator@0  <class IOAccelerator>
+  | |   "model" = "Intel HD Graphics"
+  | |   "gpu-core-count" = 8
+  +-o IOAccelerator@1  <class IOAccelerator>
+  | |   "model" = "Apple M4 Pro"
+  | |   "gpu-core-count" = 20
+  | |   "PerformanceStatistics" = {"Alloc system memory"=5043453952,"Device Utilization %"=27,"In use system memory"=650788864}
+"#;
+
+    #[test]
+    fn multi_accelerator_reads_from_the_utilization_node() {
+        let s = parse_ioreg(MULTI_NODE).expect("should parse the util-bearing node");
+        assert_eq!(
+            s.model, "Apple M4 Pro",
+            "must not splice the other node's model"
+        );
+        assert_eq!(s.core_count, 20);
+        assert_eq!(s.util_pct, 27.0);
+        assert_eq!(s.mem_in_use_bytes, 650_788_864);
     }
 }

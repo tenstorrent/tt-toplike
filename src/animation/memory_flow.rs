@@ -195,6 +195,12 @@ pub struct MemoryFlowVis {
     /// Grid dimensions (architecture-specific)
     grid_rows: usize,
     grid_cols: usize,
+
+    /// Emit the power/temperature fields in the fleet stats line.  `true` for
+    /// the standalone Memory Flow mode (default, byte-identical to today);
+    /// Arcade sets this `false` so the composite view owns a single shared
+    /// telemetry strip instead of each embedded section printing W/°C.
+    chrome: bool,
 }
 
 impl MemoryFlowVis {
@@ -216,7 +222,16 @@ impl MemoryFlowVis {
             core_heat: vec![0.0; 16 * 14], // Max size (Blackhole)
             grid_rows: 0,
             grid_cols: 0,
+            chrome: true,
         }
+    }
+
+    /// Toggle the power/temp fields in the fleet stats line.  `true` = the
+    /// standalone look (default); `false` drops the W/°C fields (particle and
+    /// current stats stay) so a composite view (Arcade) can render one shared
+    /// telemetry strip.
+    pub fn set_chrome(&mut self, chrome: bool) {
+        self.chrome = chrome;
     }
 
     /// Set the animation sensitivity multiplier.
@@ -712,14 +727,26 @@ impl MemoryFlowVis {
         } else {
             format!("{}×{}", n, devices[0].architecture.abbrev())
         };
-        let stats = format!(
-            " {} | particles:{:3} | power:{:5.1}W | temp:{:3.0}°C | current:{:5.1}A",
-            arch_label,
-            self.particles.len(),
-            total_power,
-            avg_temp,
-            total_current,
-        );
+        // Standalone shows the full stats line; embedded (chrome off) drops the
+        // power/temp fields — those are owned by the Arcade shared strip — while
+        // keeping the flow-specific particle count and current draw.
+        let stats = if self.chrome {
+            format!(
+                " {} | particles:{:3} | power:{:5.1}W | temp:{:3.0}°C | current:{:5.1}A",
+                arch_label,
+                self.particles.len(),
+                total_power,
+                avg_temp,
+                total_current,
+            )
+        } else {
+            format!(
+                " {} | particles:{:3} | current:{:5.1}A",
+                arch_label,
+                self.particles.len(),
+                total_current,
+            )
+        };
         Line::from(vec![Span::styled(
             stats,
             Style::default()

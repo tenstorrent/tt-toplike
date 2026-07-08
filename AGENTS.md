@@ -3769,3 +3769,78 @@ The Arcade mode achieves the rare combination of **aesthetic delight** and **inf
 *Last Updated: March 19, 2026*
 *Phase: Arcade Mode - Unified Psychedelic Visualization Complete ✅ (17/17 phases done)*
 *Status: **Production Ready** - Unified visualization with hero character and improved contrast*
+
+---
+
+## Phase 22: Inference Server Monitor (planned — 2026-07-02)
+
+**Origin:** Taylor hit a real pain point waiting for Z-Image-Turbo (first-run TTNN kernel compilation on P150X4) to become ready. The server log goes silent for 90+ minutes during weight loading with no signal of progress — only a heartbeat of `405 Method Not Allowed` liveness polls. He wants tt-toplike to fill that gap.
+
+**Goal:** Add a live inference server panel alongside the existing chip telemetry so operators can see _what phase_ a model is in (compiling kernels / loading weights / ready / failed) and get concrete evidence of progress rather than just watching a clock.
+
+### What to instrument
+
+**Phase detection** — determined by combining signals:
+- `g++` process alive inside container → kernel compilation phase
+- `g++` gone, Python alive, RSS growing → weight loading phase
+- liveness endpoint returns 200 → ready
+- RSS flat + g++ gone + no 200 for 5+ min → alarm (possible hang/OOM)
+
+**Metrics to surface:**
+- Container CPU % and RSS (from `docker stats`)
+- `.o` file count in TTNN cache dir inside container (proxy for compile progress; needs `docker exec find … | wc -l` or Docker API)
+- RSS delta per tick (weight loading rate in GB/min)
+- Liveness endpoint status (000 / 405 / 200)
+- Top process name inside container (`docker exec ps aux`)
+- Server log tail (last non-health-check line)
+
+**Heartbeat indicator:** flag any tick where _nothing changed_ (RSS flat, .o count flat, same top process) as a warning — real work always moves at least one of these needles.
+
+**"% complete" estimate:**
+- Compile phase: `.o` count / baseline (profile a completed run once, hardcode per model)
+- Load phase: RSS delta / total model size (model disk footprint is known)
+
+### Existing art / prior work
+- `tt-forge-compiletron` (`~/code/tt-forge-compiletron`) — Textual TUI with per-chip compile queue and live progress; good inspiration
+- `ttnn-visualizer` — post-hoc analysis, not live
+- `nvtop` — real-time chip utilization, no inference-server awareness
+- No tool currently watches kernel compilation progress or model loading in real time (confirmed via Glean/Confluence search July 2026)
+
+### Integration notes
+- Docker access: shell out to `docker stats --no-stream` and `docker exec` — no daemon socket needed
+- Service list: mirror the `SERVERS` dict from `tt-local-generator/app/server_manager.py` (or read a config file); the services are wan2.2, motif, flux, skyreels, z-image-turbo, animate, prompt-server
+- Liveness URL: `http://localhost:{port}/tt-liveness` — port per service (all currently 8000 except prompt-server on 8001)
+- The panel should work even when no container is running (show "no server" state gracefully)
+
+### Suggested UI layout (new panel, toggled with a key)
+
+```
+╔══════════════════════════════════════════════════════
+║  Inference Server                   [i] to toggle
+║  Container: tt-inference-server-1702dd1a  Up 2h
+║
+║  Model:     Z-Image-Turbo (P150X4)
+║  Phase:     Loading weights
+║  Progress:  RSS 42.8 GB / ~63 GB est.  [~~68%]
+║             +700 MB/30s  ✓ progressing
+║  Liveness:  405  →  ETA ~8 min
+║
+║  Services
+║  wan2.2        ● 8000  ready
+║  prompt-server ● 8001  ready
+║  z-image-turbo ◌ 8000  loading…
+╚══════════════════════════════════════════════════════
+```
+
+### Key insight from the pain point
+
+The discriminating signal for "stuck vs. working" is NOT CPU% (a tight loop looks the same as g++ compiling). The three independent progress probes are:
+1. `.o` file count growing (compile phase)
+2. RSS growing (load phase)
+3. open `.safetensors` file descriptors present (load phase cross-check)
+
+A hung process shows CPU at 0% or 100% but ALL THREE flat — that's the alarm condition.
+
+---
+
+*Phase 22 status: **PLANNED** — Claude sesssion in tt-local-generator, July 2, 2026*

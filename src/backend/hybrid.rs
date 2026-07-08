@@ -113,6 +113,15 @@ pub struct HybridBackend {
     /// Handle to the reader thread.
     /// Wrapped in Mutex so HybridBackend implements Sync (JoinHandle is !Sync).
     refresh_handle: Mutex<Option<thread::JoinHandle<()>>>,
+
+    /// Verbatim stdout of the last successful `tt-smi -s` run made by the
+    /// background reader thread. Retained for the `--serve` telemetry publisher
+    /// (see [`TelemetryBackend::snapshot_json`]) so Hybrid can relay the same raw
+    /// JSON that `JSONBackend` would, even though Hybrid's primary telemetry path
+    /// is sysfs. `None` until the first successful background poll completes, or
+    /// permanently if `tt-smi` was never found on PATH (sysfs-only mode) — never
+    /// fabricated from sysfs data.
+    last_raw: Arc<Mutex<Option<String>>>,
 }
 
 impl HybridBackend {
@@ -145,6 +154,7 @@ impl HybridBackend {
             smbus_ema: HashMap::new(),
             stop_flag: Arc::new(AtomicBool::new(false)),
             refresh_handle: Mutex::new(None),
+            last_raw: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -202,6 +212,7 @@ impl TelemetryBackend for HybridBackend {
         let device_meta_shared = Arc::clone(&self.device_meta_shared);
         let smbus_generation = Arc::clone(&self.smbus_generation);
         let stop_flag = Arc::clone(&self.stop_flag);
+        let last_raw = Arc::clone(&self.last_raw);
 
         let handle = thread::Builder::new()
             .name("hybrid-smbus-reader".to_string())
@@ -227,6 +238,18 @@ impl TelemetryBackend for HybridBackend {
                     {
                         Ok(out) if out.status.success() => {
                             let json_str = String::from_utf8_lossy(&out.stdout);
+
+                            // Retain the verbatim tt-smi output for snapshot_json()
+                            // (the --serve relay), regardless of what the SMBUS
+                            // parse below finds — this is exactly what tt-smi
+                            // printed, so there's nothing to fabricate. Off the
+                            // render hot path: this lock is only ever touched by
+                            // this background thread (writer) and an occasional
+                            // snapshot_json() caller (reader), never per-frame.
+                            if let Ok(mut guard) = last_raw.lock() {
+                                *guard = Some(json_str.to_string());
+                            }
+
                             // Single parse pass — extracts SMBUS and firmware/limits together.
                             let snapshot = json::parse_snapshot(&json_str);
                             if !snapshot.smbus.is_empty() {
@@ -377,6 +400,11 @@ impl TelemetryBackend for HybridBackend {
             format!("Hybrid ({} via sysfs+json)", n)
         }
     }
+
+    fn snapshot_json(&self) -> Option<String> {
+        // `.lock().ok()` — never panics on a poisoned lock (panic-free contract).
+        self.last_raw.lock().ok().and_then(|g| g.clone())
+    }
 }
 
 impl Drop for HybridBackend {
@@ -456,6 +484,30 @@ mod tests {
         assert_eq!(
             backend.smbus_blended[&0].arc0_health.as_deref(),
             Some("100")
+        );
+    }
+
+    /// `snapshot_json()` must relay whatever the background reader thread last
+    /// deposited into `last_raw`, and be `None` until the first successful
+    /// tt-smi poll. Simulates the reader thread's deposit (as
+    /// `test_ema_applied_on_new_generation` above simulates its SMBUS deposit)
+    /// rather than spinning up a real subprocess + thread in a unit test.
+    #[test]
+    fn test_snapshot_json_relays_reader_thread_deposit() {
+        let backend = HybridBackend::new("tt-smi");
+        assert_eq!(
+            backend.snapshot_json(),
+            None,
+            "no background poll has completed yet"
+        );
+
+        let raw = r#"{"device_info": [{"board_info": {"board_type": "p150a"}}]}"#;
+        *backend.last_raw.lock().unwrap() = Some(raw.to_string());
+
+        assert_eq!(
+            backend.snapshot_json(),
+            Some(raw.to_string()),
+            "snapshot_json must relay the exact raw tt-smi output"
         );
     }
 

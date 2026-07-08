@@ -86,6 +86,40 @@ pub struct Cli {
     #[arg(long, conflicts_with = "mock", conflicts_with = "json")]
     pub host: bool,
 
+    /// Connect to a remote Tenstorrent box over WebSocket (remote QuietBox).
+    ///
+    /// Reads telemetry from `ws://<HOST:PORT>/telemetry`, where a
+    /// tt-station-agentd publisher pushes frames that are the verbatim stdout of
+    /// `tt-smi -s` — consumed exactly like local telemetry. Opt-in only: this
+    /// backend is never entered by auto-detect or Tab-cycling.
+    ///
+    /// Accepts `HOST:PORT` (e.g. `192.168.1.42:8765`) or a bare `HOST`
+    /// (defaults to port 8000, the agentd control port). IPv6: `[::1]:8765`.
+    ///
+    /// Transport is plaintext `ws://` with no authentication — frames are
+    /// trusted verbatim. Use only on a network you trust (a lab LAN), not across
+    /// the public internet.
+    #[arg(
+        long,
+        value_name = "HOST:PORT",
+        conflicts_with = "mock",
+        conflicts_with = "json",
+        conflicts_with = "host"
+    )]
+    pub remote: Option<String>,
+
+    /// Publish local telemetry over WebSocket for other tt-toplike instances to watch.
+    ///
+    /// `--serve` alone binds all interfaces on the default port
+    /// (`0.0.0.0:8770`). `--serve BIND:PORT` binds a specific address/port,
+    /// `--serve PORT` binds all interfaces on that port, and `--serve HOST`
+    /// binds the default port on that host. IPv6: `[::1]:8770`.
+    ///
+    /// A box can `--serve` while also watching a `--remote` peer — that's the
+    /// relay case, so the two flags do not conflict.
+    #[arg(long, value_name = "BIND:PORT", num_args = 0..=1, default_missing_value = "0.0.0.0:8770")]
+    pub serve: Option<String>,
+
     /// Path to tt-smi executable
     ///
     /// Only used with JSON backend. Defaults to "tt-smi" in PATH.
@@ -195,7 +229,8 @@ pub struct Cli {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum BackendType {
     /// Automatically detect best backend (SAFE MODE: Sysfs → JSON → Mock)
-    /// Note: Auto-detect NEVER tries Luwen (invasive). Use --backend luwen explicitly.
+    /// Note: Auto-detect NEVER tries Luwen (Luwen/UMD arbitration unresolved upstream).
+    /// Use --backend luwen explicitly; the live `b` cycle also skips it.
     Auto,
 
     /// Use mock backend (no hardware required)
@@ -227,6 +262,92 @@ pub enum BackendType {
     /// All visualisations work — they describe your CPU instead of a TT accelerator.
     /// Great for demos, screenshots, or exploring tt-toplike before you have hardware.
     Host,
+
+    /// Use Remote WebSocket backend (remote QuietBox telemetry over the LAN)
+    ///
+    /// Connects to `ws://<host:port>/telemetry` and consumes the streamed
+    /// `tt-smi -s` frames as if they were local telemetry. Selected only via the
+    /// explicit `--remote <HOST:PORT>` flag; never auto-detected or Tab-cycled.
+    Remote,
+}
+
+/// True when the active backend represents real *local* TT hardware, so the
+/// process panel should list only TT-attributed processes. Host shows host CPU
+/// procs; Mock is exempt (no real /dev/tenstorrent fds — keep --mock demos
+/// non-blank); Remote is exempt too — the process list is read from the LOCAL
+/// machine and cannot correspond to the remote box's chips, so filtering it to
+/// "TT processes" would wrongly blank out the local processes we can actually
+/// see. Remote therefore shows unfiltered local processes, like Host/Mock.
+pub fn backend_shows_only_tt(bt: BackendType) -> bool {
+    !matches!(
+        bt,
+        BackendType::Host | BackendType::Mock | BackendType::Remote
+    )
+}
+
+/// Default port for `--serve` / `/serve` telemetry publishing.
+///
+/// Distinct from `--remote`'s default of 8000 (the tt-station-agentd control
+/// port) so a `--serve`d tt-toplike and a `tt-station-agentd` can coexist on
+/// the same box without a port clash.
+pub const DEFAULT_SERVE_PORT: u16 = 8770;
+
+/// Parse a `--serve`/`/serve` bind-address spec into a `SocketAddr`.
+///
+/// Accepts, in order of preference:
+/// - `BIND:PORT` (e.g. `192.168.1.5:9000`) — used as-is.
+/// - `[IPV6]:PORT` (e.g. `[::1]:8770`) — bracketed IPv6 with an explicit port.
+/// - `PORT` alone (e.g. `8770`) — binds all interfaces (`0.0.0.0`) on that port.
+/// - `BIND` alone (e.g. `192.168.1.5` or a hostname) — binds
+///   [`DEFAULT_SERVE_PORT`] on that address.
+///
+/// Resolution is delegated to [`std::net::ToSocketAddrs`], so bare IP
+/// literals resolve synchronously (no DNS) while hostnames go through normal
+/// system resolution; the first resolved address is returned. Never panics —
+/// garbage input (empty string, non-numeric port, unresolvable host) yields
+/// `Err` with a human-readable message.
+pub fn parse_serve_bind(spec: &str) -> Result<std::net::SocketAddr, String> {
+    use std::net::ToSocketAddrs;
+
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err("--serve requires a BIND[:PORT] (or a bare PORT)".to_string());
+    }
+
+    // Bracketed IPv6: [addr] or [addr]:port
+    let host_port = if let Some(rest) = spec.strip_prefix('[') {
+        let (addr, tail) = rest
+            .split_once(']')
+            .ok_or_else(|| format!("malformed IPv6 bind address: {spec}"))?;
+        match tail.strip_prefix(':') {
+            Some(port) => format!("[{addr}]:{port}"),
+            None if tail.is_empty() => format!("[{addr}]:{DEFAULT_SERVE_PORT}"),
+            None => return Err(format!("malformed bind address: {spec}")),
+        }
+    } else if spec.parse::<u16>().is_ok() {
+        // Bare PORT: bind all interfaces.
+        format!("0.0.0.0:{spec}")
+    } else {
+        match spec.rsplit_once(':') {
+            Some((host, port)) if !host.is_empty() => {
+                // Validate the port before handing off to resolution, so a
+                // typo like "nonsense:x" fails fast with a clear message
+                // instead of triggering a (possibly slow) DNS lookup on the
+                // bogus "host" half.
+                port.parse::<u16>()
+                    .map_err(|_| format!("invalid port in bind address: {spec}"))?;
+                spec.to_string()
+            }
+            // Bare HOST (no colon): default the port.
+            _ => format!("{spec}:{DEFAULT_SERVE_PORT}"),
+        }
+    };
+
+    host_port
+        .to_socket_addrs()
+        .map_err(|e| format!("failed to resolve bind address '{spec}': {e}"))?
+        .next()
+        .ok_or_else(|| format!("no address resolved for bind address '{spec}'"))
 }
 
 /// Visualization mode selection
@@ -272,6 +393,8 @@ impl Cli {
             cli.backend = BackendType::Json;
         } else if cli.host {
             cli.backend = BackendType::Host;
+        } else if cli.remote.is_some() {
+            cli.backend = BackendType::Remote;
         }
 
         cli
@@ -287,6 +410,8 @@ impl Cli {
             BackendType::Json
         } else if self.host {
             BackendType::Host
+        } else if self.remote.is_some() {
+            BackendType::Remote
         } else {
             self.backend
         }
@@ -357,6 +482,7 @@ impl Cli {
             #[cfg(target_os = "linux")]
             BackendType::Hybrid => "Hybrid (sysfs + tt-smi cache)",
             BackendType::Host => "Host (CPU/RAM via sysinfo)",
+            BackendType::Remote => "Remote (WebSocket QuietBox)",
         }
     }
 
@@ -371,6 +497,8 @@ impl Cli {
             mock: Some(0),
             json: false,
             host: false,
+            remote: None,
+            serve: None,
             tt_smi_path: std::path::PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -439,6 +567,8 @@ mod tests {
             mock: None,
             json: false,
             host: false,
+            remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -472,6 +602,8 @@ mod tests {
             mock: Some(0),
             json: false,
             host: false,
+            remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -500,6 +632,8 @@ mod tests {
             mock: None,
             json: true,
             host: false,
+            remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -528,6 +662,8 @@ mod tests {
             mock: None,
             json: false,
             host: false,
+            remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: Some(vec![0, 2, 4]),
@@ -560,6 +696,8 @@ mod tests {
             mock: None,
             json: false,
             host: false,
+            remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -585,6 +723,8 @@ mod tests {
             mock: None,
             json: false,
             host: false,
+            remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -613,6 +753,8 @@ mod tests {
             mock: None,
             json: false,
             host: false,
+            remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -641,6 +783,8 @@ mod tests {
             mock: None,
             json: false,
             host: false,
+            remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -666,6 +810,8 @@ mod tests {
             mock: Some(0),
             json: false,
             host: false,
+            remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -693,6 +839,8 @@ mod tests {
             mock,
             json: false,
             host: false,
+            remote: None,
+            serve: None,
             tt_smi_path: PathBuf::from("tt-smi"),
             interval: 100,
             devices: None,
@@ -713,6 +861,24 @@ mod tests {
     }
 
     #[test]
+    fn tt_filter_applies_to_real_tt_backends_only() {
+        use super::*;
+        assert!(!backend_shows_only_tt(BackendType::Host));
+        assert!(!backend_shows_only_tt(BackendType::Mock));
+        // Remote: process list is the LOCAL machine's, not the remote chips' —
+        // show it unfiltered like Host/Mock.
+        assert!(!backend_shows_only_tt(BackendType::Remote));
+        assert!(backend_shows_only_tt(BackendType::Json));
+        assert!(backend_shows_only_tt(BackendType::Luwen));
+
+        #[cfg(target_os = "linux")]
+        {
+            assert!(backend_shows_only_tt(BackendType::Sysfs));
+            assert!(backend_shows_only_tt(BackendType::Hybrid));
+        }
+    }
+
+    #[test]
     fn test_effective_mock_devices() {
         // mock=None: falls back to mock_devices default
         assert_eq!(mock_cli_with(None, 3).effective_mock_devices(), 3);
@@ -728,5 +894,48 @@ mod tests {
 
         // mock=Some(1): edge — 1 > 0 so inline count wins
         assert_eq!(mock_cli_with(Some(1), 5).effective_mock_devices(), 1);
+    }
+
+    #[test]
+    fn parse_serve_bind_bare_port_binds_all_interfaces() {
+        assert_eq!(
+            parse_serve_bind("8770").unwrap(),
+            "0.0.0.0:8770".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_serve_bind_host_and_port_used_as_is() {
+        assert_eq!(
+            parse_serve_bind("127.0.0.1:9000").unwrap(),
+            "127.0.0.1:9000".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_serve_bind_bare_host_defaults_port() {
+        assert_eq!(
+            parse_serve_bind("192.168.1.5").unwrap(),
+            "192.168.1.5:8770".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_serve_bind_bracketed_ipv6() {
+        let addr = parse_serve_bind("[::1]:8770").unwrap();
+        assert!(addr.is_ipv6());
+        assert_eq!(addr.port(), 8770);
+        assert_eq!(addr.ip(), "::1".parse::<std::net::IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn parse_serve_bind_rejects_garbage() {
+        assert!(parse_serve_bind("nonsense:x").is_err());
+        assert!(parse_serve_bind("").is_err());
+    }
+
+    #[test]
+    fn parse_serve_bind_default_port_constant() {
+        assert_eq!(DEFAULT_SERVE_PORT, 8770);
     }
 }

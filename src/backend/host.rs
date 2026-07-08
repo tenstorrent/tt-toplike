@@ -87,9 +87,13 @@ fn cpu_package_temp_c(socket: usize) -> Option<f32> {
     let entries = std::fs::read_dir(hwmon_root).ok()?;
     for entry in entries.flatten() {
         let base = entry.path();
-        // Only coretemp and k10temp expose package temperatures
+        // Only coretemp and k10temp expose package temperatures. Skip (don't
+        // abort the whole scan on) an hwmon node whose `name` is missing or
+        // unreadable — a later node may still be the coretemp/k10temp we want.
         let name_path = base.join("name");
-        let name = std::fs::read_to_string(&name_path).ok()?;
+        let Ok(name) = std::fs::read_to_string(&name_path) else {
+            continue;
+        };
         let name = name.trim();
         if name != "coretemp" && name != "k10temp" && name != "zenpower" {
             continue;
@@ -286,7 +290,11 @@ impl HostBackend {
         };
 
         // Telemetry: utilization → "current" proxy; GPU memory drives DDR bars.
-        let mem_total = s.mem_alloc_bytes.max(1);
+        // Fill % is GPU-in-use against *total system (unified) memory* — the real
+        // capacity on Apple Silicon — rather than against the dynamically-growing
+        // "Alloc system memory", which made the bar read near-full regardless of
+        // actual pressure. Falls back to the allocation if total is unavailable.
+        let mem_total = self.sys.total_memory().max(s.mem_alloc_bytes).max(1);
         let fill_pct = ((s.mem_in_use_bytes as f64 / mem_total as f64) * 100.0)
             .min(100.0)
             .round() as u32;
@@ -597,7 +605,16 @@ mod tests {
         assert!(backend.telemetry(0).is_some());
 
         let t = backend.telemetry(0).unwrap();
+        // sysinfo reports per-core CPU frequency on Linux, but returns 0 on
+        // macOS (notably Apple Silicon) — so only require a non-zero aiclk where
+        // the OS actually exposes it. Elsewhere just require the field is present.
+        #[cfg(target_os = "linux")]
         assert!(t.aiclk.unwrap_or(0) > 0, "CPU frequency should be non-zero");
+        #[cfg(not(target_os = "linux"))]
+        assert!(
+            t.aiclk.is_some(),
+            "aiclk should be populated (may be 0 where CPU frequency is unavailable)"
+        );
         assert!(
             t.power.is_some(),
             "power (RAPL or proxy) should be available"

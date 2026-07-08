@@ -173,6 +173,14 @@ fn inference_match_tags_known_runtimes_via_public_api() {
         inference_match("WindowServer", "/System/WindowServer"),
         None
     );
+    // tt-inference-server is recognised and wins over the vllm it runs internally.
+    assert_eq!(
+        inference_match(
+            "python",
+            "python -m tt_inference_server --port 8001 # vllm backend"
+        ),
+        Some("tt-inference-server")
+    );
     // A process whose name is exactly the label is tagged (haystack is padded so
     // the tight word-boundary needles " torch" / " jax " match a bare name).
     assert_eq!(inference_match("torch", ""), Some("torch"));
@@ -187,7 +195,7 @@ fn host_process_monitor_lists_this_process() {
     let mut m = HostProcessMonitor::new();
     m.update();
     // The test binary itself should appear among the rows.
-    let rows = m.rows(64);
+    let rows = m.rows(64, &std::collections::HashMap::new());
     assert!(!rows.is_empty(), "should enumerate at least one process");
     assert!(rows.iter().all(|r| r.pid > 0));
 }

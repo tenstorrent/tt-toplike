@@ -136,9 +136,9 @@ impl MemoryPlanet {
     /// Get color for this memory level
     pub fn get_color(&self) -> Color {
         match self.level {
-            0 => colors::rgb(100, 180, 255), // L1 - blue (was colors::INFO)
-            1 => colors::rgb(255, 180, 100), // L2 - orange (was colors::WARNING)
-            2 => colors::rgb(255, 100, 100), // DDR - red (was colors::ERROR)
+            0 => colors::rgb(100, 180, 255), // L1 - blue (was colors::info())
+            1 => colors::rgb(255, 180, 100), // L2 - orange (was colors::warning())
+            2 => colors::rgb(255, 100, 100), // DDR - red (was colors::error())
             _ => colors::rgb(160, 160, 160), // Fallback grey
         }
     }
@@ -228,6 +228,12 @@ pub struct HardwareStarfield {
     /// Number of devices the starfield was last initialised with.
     /// Controls fleet-mode threshold check in render().
     device_count: usize,
+
+    /// Render section chrome (the standalone header label).  `true` for the
+    /// standalone Starfield mode (default, byte-identical to today); Arcade sets
+    /// this `false` so the composite view owns a single shared telemetry strip
+    /// instead of each embedded section printing its own header.
+    chrome: bool,
 }
 
 impl HardwareStarfield {
@@ -251,7 +257,15 @@ impl HardwareStarfield {
             device_temps: HashMap::new(),
             device_powers: HashMap::new(),
             device_count: 0,
+            chrome: true,
         }
+    }
+
+    /// Toggle section chrome (header label).  `true` = standalone look
+    /// (default); `false` suppresses the section header so a composite view
+    /// (Arcade) can render one shared telemetry strip instead.
+    pub fn set_chrome(&mut self, chrome: bool) {
+        self.chrome = chrome;
     }
 
     /// Set the animation sensitivity multiplier.
@@ -356,7 +370,7 @@ impl HardwareStarfield {
                             device_idx,
                             core_idx: row * grid_cols + col,
                             brightness: 0.3, // Start dim
-                            color: colors::PRIMARY,
+                            color: colors::primary(),
                             phase: (row + col) as f32 * 0.5, // Varied animation phases
                             depth: depth.clamp(0.3, 1.0),
                             phase2: (row * 3 + col * 7) as f32 * 0.3, // Different frequency
@@ -388,7 +402,7 @@ impl HardwareStarfield {
                         level: 2, // DDR
                         channel_idx: i,
                         activity: 0.0,
-                        color: colors::ERROR,
+                        color: colors::error(),
                         angle,
                         radius,
                         pulse: i as f32 * 0.4, // Varied pulsing phases
@@ -415,7 +429,7 @@ impl HardwareStarfield {
                         level: 1, // L2
                         channel_idx: i,
                         activity: 0.0,
-                        color: colors::WARNING,
+                        color: colors::warning(),
                         angle,
                         radius,
                         pulse: i as f32 * 0.5 + 0.3, // Varied pulsing phases
@@ -442,7 +456,7 @@ impl HardwareStarfield {
                         level: 0, // L1
                         channel_idx: i,
                         activity: 0.0,
-                        color: colors::INFO,
+                        color: colors::info(),
                         angle,
                         radius,
                         pulse: i as f32 * 0.7 + 0.6, // Varied pulsing phases
@@ -740,7 +754,10 @@ impl HardwareStarfield {
 
         for row in 0..self.height {
             // ── Header row (one row above chip grid) ───────────────────────
-            if row == top_pad && top_pad > 0 {
+            // Suppressed when chrome is off (embedded in Arcade) so the
+            // composite view owns the single shared telemetry strip; the row
+            // then falls through to a background nebula row, preserving height.
+            if row == top_pad && top_pad > 0 && self.chrome {
                 let label = format!(
                     " ✦ Galaxy Fleet — {} chips · ·=cool ●=active ● =hot ",
                     self.device_count
@@ -949,7 +966,7 @@ impl HardwareStarfield {
 
         // Create internal canvas (same as render())
         let mut canvas: Vec<Vec<(char, Color)>> =
-            vec![vec![(' ', colors::TEXT_SECONDARY); self.width]; self.height];
+            vec![vec![(' ', colors::text_secondary()); self.width]; self.height];
 
         // Render stars
         for star in &self.stars {
@@ -1043,7 +1060,7 @@ mod tests {
             device_idx: 0,
             core_idx: 0,
             brightness: 0.0,
-            color: colors::PRIMARY,
+            color: colors::primary(),
             phase: 0.0,
             depth: 1.0,
             phase2: 0.0,
@@ -1068,7 +1085,7 @@ mod tests {
             level: 0,
             channel_idx: 0,
             activity: 0.5,
-            color: colors::INFO,
+            color: colors::info(),
             angle: 0.0,
             radius: 10.0,
             pulse: 0.0,
@@ -1082,7 +1099,7 @@ mod tests {
             level: 1,
             channel_idx: 0,
             activity: 0.5,
-            color: colors::WARNING,
+            color: colors::warning(),
             angle: 0.0,
             radius: 10.0,
             pulse: 0.0,

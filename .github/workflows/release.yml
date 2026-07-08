@@ -5,6 +5,15 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      build_macos:
+        description: "Also build the macOS universal binary (uses a costly macOS runner)"
+        type: boolean
+        default: false
+      build_windows:
+        description: "Also build the Windows x86_64 binary"
+        type: boolean
+        default: false
 
 permissions:
   contents: write   # upload release assets
@@ -111,6 +120,10 @@ jobs:
   build-macos:
     name: Build macOS (universal)
     runs-on: macos-14
+    # Only spend costly macOS-runner minutes for real tagged releases, or when a
+    # manual dispatch explicitly opts in (build_macos=true). A bare workflow_dispatch
+    # no longer builds this by default.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.build_macos == 'true'
 
     steps:
       - uses: actions/checkout@v4
@@ -169,3 +182,54 @@ jobs:
             "$TARBALL" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
+
+  # ── Build the Windows x86_64 binary (experimental --host preview) ──────────
+  #
+  # Native build on a windows-latest runner (x86_64-pc-windows-msvc). We ship the
+  # TUI only — same safe feature set that cross-compiles cleanly (tui + json-backend,
+  # no linux-procfs). The headless `--bench` smoke gives runtime proof on real
+  # Windows (it exercises sysinfo's PDH path that Wine can't emulate); a failure
+  # there fails the job before we publish anything.
+  build-windows:
+    name: Build Windows (x86_64)
+    runs-on: windows-latest
+    # Only build on tagged releases or an opt-in manual dispatch.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.build_windows == 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build TUI (release)
+        run: cargo build --release --locked --bin tt-toplike-tui --no-default-features --features tui,json-backend
+
+      - name: Runtime smoke (headless --bench)
+        run: cargo run --release --locked --bin tt-toplike-tui --no-default-features --features tui,json-backend -- --bench --mock
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          if (-not $version) { $version = "dev" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/tt-toplike-tui.exe dist/
+          Copy-Item LICENSE, NOTICE, README.md dist/
+          $zip = "tt-toplike-tui-$version-windows-x86_64.zip"
+          Compress-Archive -Path dist/* -DestinationPath $zip -Force
+          "ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Get-FileHash $zip -Algorithm SHA256
+
+      - name: Ensure release exists, then upload zip
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          # Race-tolerant: another build job may create the release first.
+          gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --title $env:GITHUB_REF_NAME --generate-notes --verify-tag
+          }
+          gh release upload $env:GITHUB_REF_NAME $env:ZIP --repo $env:GITHUB_REPOSITORY --clobber

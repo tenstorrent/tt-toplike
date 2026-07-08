@@ -8,6 +8,7 @@
 //! Linux/TT path may enrich by PID with device-fd attribution.
 
 use crate::workload::inference_match;
+use std::collections::HashMap;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
 /// TT-specific per-process info, merged in by PID on TT hardware. Primitives
@@ -57,13 +58,24 @@ fn is_ollama_runner(name: &str, cmdline: &str) -> bool {
 
 /// Decide whether a matched inference runtime is actively working.
 ///
-/// Cheap, pure, and snapshot-driven — no network calls on the hot path:
+/// Precedence: a fresh authoritative probe verdict wins; otherwise fall back to
+/// the cheap, pure, snapshot-driven signal (no network calls on the hot path):
 /// - Any matched process above `IDLE_CPU_PCT` is active (covers every runtime).
 /// - For runtimes whose idle/active shape we *know*, corroborate at ~0% CPU:
 ///   ollama's `serve` daemon idles permanently with no model loaded, so it's
 ///   only active when a model-runner worker is present in the same snapshot.
 /// - Runtimes with no known idle shape fall back to the CPU signal alone.
-fn runtime_active(label: &str, cpu_pct: f32, ollama_runner_present: bool) -> bool {
+fn runtime_active(
+    label: &str,
+    cpu_pct: f32,
+    ollama_runner_present: bool,
+    probe: Option<bool>,
+) -> bool {
+    // An authoritative probe (e.g. ollama /api/ps, vllm /v1/models) is the truth
+    // when available — it catches a server holding a model at ~0% CPU.
+    if let Some(ready) = probe {
+        return ready;
+    }
     if cpu_pct > IDLE_CPU_PCT {
         return true;
     }
@@ -99,11 +111,90 @@ impl HostProcessMonitor {
         );
     }
 
+    /// The inference runtimes detected in the current snapshot (deduped by label),
+    /// as cheap `(label, pid, cmdline)` records — no socket or network I/O here.
+    /// Feed these to a [`crate::workload::LivenessProber`] each refresh; the
+    /// prober's background thread resolves each one's real listening port and
+    /// probes it. Confirm-only: every record corresponds to a process we saw.
+    pub fn detected_runtimes(&self) -> Vec<crate::workload::DetectedRuntime> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for (pid, p) in self.sys.processes() {
+            let name = p.name().to_string_lossy().to_string();
+            let cmdline = p
+                .cmd()
+                .iter()
+                .map(|s| s.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if let Some(label) = inference_match(&name, &cmdline) {
+                if seen.insert(label) {
+                    out.push(crate::workload::DetectedRuntime {
+                        label: label.to_string(),
+                        pid: i32::try_from(pid.as_u32()).unwrap_or(i32::MAX),
+                        cmdline,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// The TT inference-server containers detected in the current snapshot
+    /// (deduped by container name), as structured [`crate::workload::InferenceServer`]
+    /// records — no docker or network I/O here. Feed these to a
+    /// [`crate::workload::InferenceServerMonitor`] each refresh; the monitor's
+    /// background thread probes each container's readiness/health.
+    #[cfg(target_os = "linux")]
+    pub fn detected_inference_servers(&self) -> Vec<crate::workload::InferenceServer> {
+        use crate::workload::inference_server::{parse_inference_server, Source};
+
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for p in self.sys.processes().values() {
+            let name = p.name().to_string_lossy().to_string();
+            let cmdline = p
+                .cmd()
+                .iter()
+                .map(|s| s.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if let Some(server) = parse_inference_server(&name, &cmdline) {
+                let Source::Docker { container } = &server.source;
+                if seen.insert(container.clone()) {
+                    out.push(server);
+                }
+            }
+        }
+        out
+    }
+
     /// Build selected rows: all *actively-working* inference runtimes (force-kept),
     /// plus the busiest remaining processes filling the slots up to `max` total.
     /// Idle resident daemons (e.g. `ollama serve` with no model) are not
     /// force-kept — see `select_rows`.
-    pub fn rows(&self, max: usize) -> Vec<ProcRow> {
+    ///
+    /// `probe_verdicts` maps a runtime label to an authoritative `active` verdict
+    /// from a [`crate::workload::LivenessProber`]; pass an empty map to rely solely
+    /// on the cheap snapshot tier.
+    pub fn rows(&self, max: usize, probe_verdicts: &HashMap<String, bool>) -> Vec<ProcRow> {
+        select_rows(self.build_all_rows(probe_verdicts), max)
+    }
+
+    /// Rows for TT-attributed processes only (real-TT backends). `tt_pids` is the
+    /// set of PIDs holding a /dev/tenstorrent fd (from `flat_process_list`). Rows are
+    /// not TT-enriched here — the caller runs `enrich_proc_rows_tt` afterward as usual.
+    pub fn tt_rows(&self, max: usize, tt_pids: &std::collections::HashSet<i32>) -> Vec<ProcRow> {
+        let all = self.build_all_rows(&HashMap::new());
+        select_tt_rows(all, tt_pids, max)
+    }
+
+    /// Build the full, untrimmed set of `ProcRow`s for the current snapshot,
+    /// tagging each with its matched inference runtime (if any) and whether
+    /// that runtime looks actively busy right now. Shared by `rows()` (host
+    /// path, uses `probe_verdicts`) and `tt_rows()` (TT path, no probe
+    /// verdicts — the panel is filtered by device-fd attribution instead).
+    fn build_all_rows(&self, probe_verdicts: &HashMap<String, bool>) -> Vec<ProcRow> {
         // First pass: pull the raw fields once (name + cmdline + cpu/mem). We
         // need the whole snapshot before we can judge liveness, because some
         // "busy" signals are cross-process (e.g. an ollama model-runner worker
@@ -135,12 +226,17 @@ impl HostProcessMonitor {
             .iter()
             .any(|(_, name, cmdline, _, _)| is_ollama_runner(name, cmdline));
 
-        let all: Vec<ProcRow> = raw
-            .into_iter()
+        raw.into_iter()
             .map(|(pid, name, cmdline, cpu_pct, mem_bytes)| {
                 let inference = inference_match(&name, &cmdline);
-                let active =
-                    inference.is_some_and(|l| runtime_active(l, cpu_pct, ollama_runner_present));
+                let active = inference.is_some_and(|l| {
+                    runtime_active(
+                        l,
+                        cpu_pct,
+                        ollama_runner_present,
+                        probe_verdicts.get(l).copied(),
+                    )
+                });
                 ProcRow {
                     pid,
                     inference,
@@ -151,8 +247,7 @@ impl HostProcessMonitor {
                     tt: None,
                 }
             })
-            .collect();
-        select_rows(all, max)
+            .collect()
     }
 }
 
@@ -181,6 +276,24 @@ pub(crate) fn select_rows(mut all: Vec<ProcRow>, max: usize) -> Vec<ProcRow> {
     let remaining = max.saturating_sub(kept.len());
     kept.extend(rest.into_iter().take(remaining));
     kept
+}
+
+/// Pure: keep only rows whose PID is in `tt_pids` (attributed to a TT device),
+/// sorted by CPU desc, capped at `max`. Used on real-TT backends so the panel
+/// shows only processes contributing to TT load.
+pub(crate) fn select_tt_rows(
+    mut all: Vec<ProcRow>,
+    tt_pids: &std::collections::HashSet<i32>,
+    max: usize,
+) -> Vec<ProcRow> {
+    all.retain(|r| tt_pids.contains(&r.pid));
+    all.sort_by(|a, b| {
+        b.cpu_pct
+            .partial_cmp(&a.cpu_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    all.truncate(max);
+    all
 }
 
 #[cfg(test)]
@@ -239,9 +352,12 @@ mod tests {
 
     #[test]
     fn runtime_active_uses_cpu_threshold_for_any_runtime() {
-        assert!(runtime_active("vllm", 5.0, false), "busy runtime is active");
         assert!(
-            !runtime_active("vllm", 0.0, false),
+            runtime_active("vllm", 5.0, false, None),
+            "busy runtime is active"
+        );
+        assert!(
+            !runtime_active("vllm", 0.0, false, None),
             "idle unknown-shape runtime is inactive"
         );
     }
@@ -249,9 +365,18 @@ mod tests {
     #[test]
     fn ollama_idle_without_runner_is_inactive() {
         // The lone `ollama serve` daemon at 0% cpu, no model-runner present.
-        assert!(!runtime_active("ollama", 0.0, false));
+        assert!(!runtime_active("ollama", 0.0, false, None));
         // ...but a loaded model (runner present) makes it active even at 0% cpu.
-        assert!(runtime_active("ollama", 0.0, true));
+        assert!(runtime_active("ollama", 0.0, true, None));
+    }
+
+    #[test]
+    fn fresh_probe_verdict_overrides_cheap_signal() {
+        // A server holding a model at 0% cpu with no known subprocess shape would
+        // read idle on the cheap tier, but a probe says "ready" → active.
+        assert!(runtime_active("vllm", 0.0, false, Some(true)));
+        // And a probe can authoritatively say "idle" even if cpu briefly spiked.
+        assert!(!runtime_active("vllm", 50.0, false, Some(false)));
     }
 
     #[test]
@@ -262,5 +387,36 @@ mod tests {
         ));
         assert!(is_ollama_runner("ollama_llama_server", ""));
         assert!(!is_ollama_runner("ollama", "/usr/local/bin/ollama serve"));
+    }
+
+    #[test]
+    fn select_tt_rows_keeps_only_attributed_pids_sorted_by_cpu() {
+        use std::collections::HashSet;
+        let all = vec![
+            row(1, 10.0, None, false),
+            row(2, 90.0, None, false), // high cpu but NOT a TT pid
+            row(3, 50.0, Some("vllm"), true),
+            row(4, 20.0, None, false),
+        ];
+        let tt: HashSet<i32> = [1, 3, 4].into_iter().collect();
+        let out = select_tt_rows(all, &tt, 10);
+        // only TT pids, sorted by cpu desc: 3 (50), 4 (20), 1 (10)
+        assert_eq!(out.iter().map(|r| r.pid).collect::<Vec<_>>(), vec![3, 4, 1]);
+        // empty pid set → empty
+        assert!(select_tt_rows(vec![row(1, 5.0, None, false)], &HashSet::new(), 10).is_empty());
+    }
+
+    /// Smoke test: `detected_inference_servers` must not panic against a real
+    /// process snapshot on whatever box CI happens to run on, and — since it's
+    /// almost certainly not running a `docker run ... tt-inference-server ...`
+    /// process — should return an empty (or at least non-panicking) `Vec`.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn detected_inference_servers_smoke() {
+        let mut mon = HostProcessMonitor::new();
+        mon.update();
+        let servers = mon.detected_inference_servers();
+        // No assertion on contents — just confirm the call is safe and typed.
+        let _: Vec<crate::workload::InferenceServer> = servers;
     }
 }

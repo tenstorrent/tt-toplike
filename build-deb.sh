@@ -107,12 +107,16 @@ echo "🔨 Building .deb packages with dpkg-buildpackage..."
 echo "   (This will take 1–5 minutes for release compilation)"
 echo ""
 
-# In CI the Rust toolchain is provided by rustup, not apt, so dpkg's
-# Build-Depends check would fail. Skip it there; keep it for local builds
-# so missing packaging deps are caught early.
+# dpkg-checkbuilddeps validates Build-Depends against APT packages, but this
+# build uses whatever `rustc`/`cargo` is on PATH — which is normally a rustup
+# toolchain (rust-toolchain.toml pins 1.93). Ubuntu noble's apt `rustc` is only
+# 1.75, so it can never satisfy `rustc (>= 1.93)` even though the real toolchain
+# does. Skip the apt-based check whenever rustc isn't the apt one (rustup/CI);
+# the top-of-script check already confirmed cargo/dpkg-buildpackage/dh exist.
 SKIP_DEP_FLAG=""
-if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+if [ "${GITHUB_ACTIONS:-}" = "true" ] || [ "$(command -v rustc)" != "/usr/bin/rustc" ]; then
     SKIP_DEP_FLAG="-d"
+    echo "ℹ  Skipping apt Build-Depends check (toolchain on PATH: $(command -v rustc))"
 fi
 
 dpkg-buildpackage -us -uc -b -jauto $SKIP_DEP_FLAG

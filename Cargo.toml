@@ -1,11 +1,18 @@
 [package]
 name = "tt-toplike"
-version = "0.7.0"
+version = "0.7.30"
 edition = "2021"
-authors = ["Tenstorrent"]
+# MSRV: the pinned toolchain (1.93) is the only version we actually build/test
+# against, so it's the only verified floor. Bump this in lockstep with CI's
+# toolchain if we ever raise it.
+rust-version = "1.93"
+authors = ["Tenstorrent <software@tenstorrent.com>"]
 license = "Apache-2.0"
 description = "Real-time hardware monitoring for Tenstorrent silicon"
 repository = "https://github.com/tenstorrent/tt-toplike"
+readme = "README.md"
+keywords = ["tenstorrent", "monitoring", "tui", "hardware", "telemetry"]
+categories = ["command-line-utilities", "visualization"]
 
 # Multiple binaries - TUI and GUI frontends
 [[bin]]
@@ -35,7 +42,9 @@ path = "src/lib.rs"
 
 [dependencies]
 # Tenstorrent hardware access (OPTIONAL - invasive, requires explicit --backend luwen)
-# WARNING: Luwen backend requires direct PCI BAR0 access and may interfere with running workloads
+# NOTE: Luwen telemetry is kernel-mediated (tt-kmd) and mostly passive reads, but
+# Luwen/UMD resource arbitration is unresolved upstream (DEVINFRA-4445): first-read
+# sends an ARC mailbox message on WH/GS, and concurrent use can contend with workloads
 # Only use with --backend luwen flag, never in auto-detect mode
 all-smi-luwen-core = { version = "0.2.0", optional = true }  # Luwen core types
 all-smi-luwen-if = { version = "0.7.9", optional = true }  # Luwen interface library
@@ -61,6 +70,13 @@ vte = { version = "0.13", optional = true }             # ANSI/VT parser (alacri
 # Async runtime
 tokio = { version = "1.49", features = ["full"] }
 tokio-util = "0.7"
+
+# WebSocket client for the remote QuietBox (WsBackend) telemetry stream.
+# Additive and OPTIONAL: only the opt-in --remote path uses these, gated behind
+# the `remote` feature (in `default`, so normal builds are unchanged). Packagers
+# who don't want the WS stack can opt out with --no-default-features.
+tokio-tungstenite = { version = "0.24", optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"], optional = true }
 
 # JSON parsing (for JSON backend fallback)
 serde = { version = "1.0", features = ["derive"] }
@@ -127,7 +143,7 @@ tempfile = "3.13"
 [features]
 # Default features: Safe, non-invasive backends only
 # Luwen backend excluded from default to prevent hardware disruption
-default = ["tui", "json-backend", "linux-procfs"]
+default = ["tui", "json-backend", "linux-procfs", "remote"]
 
 # Frontend features
 tui = ["ratatui", "crossterm"]  # Terminal UI with Ratatui
@@ -137,11 +153,15 @@ app = ["eframe", "egui_plot", "portable-pty", "vte"]  # Native terminal window
 
 # Backend features
 # IMPORTANT: luwen-backend is OPTIONAL and must be explicitly enabled
-# It requires direct PCI access and may disrupt running workloads
+# Its Luwen/UMD contention story is unresolved upstream; avoid during workloads,
+# especially on multi-chip/galaxy topologies
 # Only use with explicit --backend luwen flag
 luwen-backend = ["all-smi-luwen-core", "all-smi-luwen-if", "all-smi-luwen-ref"]   # Direct hardware access (EXPLICIT ONLY)
 json-backend = []               # Subprocess tt-smi + JSON (SAFE)
 linux-procfs = ["procfs"]       # Enhanced Linux process detection
+# Remote QuietBox WebSocket backend (--remote). In `default`; opt out with
+# --no-default-features. When off, the Remote variant returns a clean error.
+remote = ["tokio-tungstenite", "futures-util"]
 
 # ── Debian packaging metadata (used by `cargo deb` for quick developer .debs)
 # For PPA/official builds use dpkg-buildpackage via build-deb.sh instead.
@@ -152,12 +172,15 @@ copyright = "2026, Tenstorrent Inc."
 license-file = ["LICENSE", "3"]
 # $auto expands to dh_shlibdeps-style detected library deps at build time
 depends = "$auto"
-recommends = "tt-smi, tenstorrent-dkms"
-suggests = "tt-toplike-egui, tenstorrent-tools"
+recommends = "tt-smi, tenstorrent-dkms, curl"
+# NB: debian/control no longer builds a tt-toplike-egui package (the egui bin was
+# dropped in favour of the PTY-hosted tt-toplike-app), so don't suggest it here.
+suggests = "tenstorrent-tools"
 section = "utils"
 priority = "optional"
-# Build with safe defaults — no Luwen, no iced GUI
-features = ["tui", "json-backend", "linux-procfs"]
+# Build with safe defaults — no Luwen, no iced GUI. Includes `remote` so packaged
+# builds keep --remote (it was unconditional before the feature gate was added).
+features = ["tui", "json-backend", "linux-procfs", "remote"]
 assets = [
   # Binary renamed: tt-toplike-tui → tt-toplike (shorter, global name)
   ["target/release/tt-toplike-tui", "usr/bin/tt-toplike", "755"],

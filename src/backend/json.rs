@@ -281,6 +281,16 @@ pub struct JSONBackend {
 
     /// Consecutive error count (for backoff)
     error_count: usize,
+
+    /// Verbatim stdout of the last *successfully parsed* `tt-smi -s` run.
+    ///
+    /// Retained for the `--serve` telemetry publisher: it needs to broadcast
+    /// "current telemetry" as raw tt-smi JSON, byte-identical to what tt-smi
+    /// produced, rather than re-serializing our parsed `Telemetry`/`SmbusTelemetry`
+    /// structs (lossy — we don't round-trip every tt-smi field). Left untouched on
+    /// a parse error so a single bad tick doesn't blank out the last known-good
+    /// snapshot.
+    last_raw: Option<String>,
 }
 
 impl JSONBackend {
@@ -305,6 +315,7 @@ impl JSONBackend {
             config: BackendConfig::default(),
             last_update: Instant::now(),
             error_count: 0,
+            last_raw: None,
         }
     }
 
@@ -319,6 +330,7 @@ impl JSONBackend {
             config,
             last_update: Instant::now(),
             error_count: 0,
+            last_raw: None,
         }
     }
 
@@ -359,64 +371,15 @@ impl JSONBackend {
         Ok(json_output)
     }
 
-    /// Parse JSON output from tt-smi into device telemetry
+    /// Parse JSON output from tt-smi into the intermediate device list.
+    ///
+    /// Thin instance-method wrapper around the pure free function
+    /// [`parse_json_devices`] so existing white-box tests that call
+    /// `backend.parse_json(..)` keep working unchanged. Test-only: the runtime
+    /// paths (`init`/`update`) call `parse_tt_smi_snapshot` directly.
+    #[cfg(test)]
     fn parse_json(&self, json_str: &str) -> BackendResult<Vec<TTSMIDeviceJSON>> {
-        // Try to parse as tt-smi snapshot format with "device_info" key (modern format)
-        #[derive(Deserialize)]
-        struct TTSMISnapshot {
-            device_info: Option<Vec<TTSMIDeviceRaw>>,
-        }
-
-        if let Ok(snapshot) = serde_json::from_str::<TTSMISnapshot>(json_str) {
-            if let Some(raw_devices) = snapshot.device_info {
-                // Transform raw format to flattened format with indices
-                let devices: Vec<TTSMIDeviceJSON> = raw_devices
-                    .into_iter()
-                    .enumerate()
-                    .map(|(idx, raw)| {
-                        let board_info = raw.board_info.as_ref();
-                        TTSMIDeviceJSON {
-                            index: Some(idx),
-                            board_type: board_info.and_then(|b| b.board_type.clone()),
-                            bus_id: board_info.and_then(|b| b.bus_id.clone()),
-                            coords: board_info.and_then(|b| b.coords.clone()),
-                            telemetry: raw.telemetry,
-                            smbus: raw.smbus_telem,
-                            firmwares: raw.firmwares,
-                            limits: raw.limits,
-                        }
-                    })
-                    .collect();
-                return Ok(devices);
-            }
-        }
-
-        // Try to parse as array of devices (legacy format)
-        if let Ok(devices) = serde_json::from_str::<Vec<TTSMIDeviceJSON>>(json_str) {
-            return Ok(devices);
-        }
-
-        // Try to parse as object with "devices" key (legacy format)
-        #[derive(Deserialize)]
-        struct Wrapper {
-            devices: Option<Vec<TTSMIDeviceJSON>>,
-        }
-
-        if let Ok(wrapper) = serde_json::from_str::<Wrapper>(json_str) {
-            if let Some(devices) = wrapper.devices {
-                return Ok(devices);
-            }
-        }
-
-        // Try to parse as single device (last resort, as it's most permissive)
-        if let Ok(device) = serde_json::from_str::<TTSMIDeviceJSON>(json_str) {
-            return Ok(vec![device]);
-        }
-
-        Err(BackendError::ParseError(format!(
-            "Failed to parse JSON output: {}",
-            &json_str[..json_str.len().min(100)]
-        )))
+        parse_json_devices(json_str)
     }
 
     /// Test-only: expose update_from_json for white-box testing.
@@ -425,64 +388,234 @@ impl JSONBackend {
         self.update_from_json(devices)
     }
 
-    /// Update internal state from parsed JSON devices
+    /// Test-only: build a `ParsedSnapshot` from an already-parsed device list and
+    /// merge it into this backend, preserving the historical append-only device
+    /// semantics that `init()`/`update()` rely on.
+    #[cfg(test)]
     fn update_from_json(&mut self, json_devices: Vec<TTSMIDeviceJSON>) -> BackendResult<()> {
-        for json_dev in json_devices {
-            let idx = json_dev.index.unwrap_or(0);
-
-            // Create device if not exists
-            if self.devices.is_empty() || !self.devices.iter().any(|d| d.index == idx) {
-                let board_type = json_dev
-                    .board_type
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string());
-                let bus_id = json_dev
-                    .bus_id
-                    .clone()
-                    .unwrap_or_else(|| format!("0000:0{}:00.0", idx + 1));
-                let coords = json_dev
-                    .coords
-                    .clone()
-                    .unwrap_or_else(|| format!("({},{})", idx / 4, idx % 4));
-
-                // Parse firmwares and limits blocks (tt-smi 5.2.0+), falling back to
-                // None for older snapshots that don't include these keys.
-                let firmwares = json_dev.firmwares.as_ref().and_then(|v| {
-                    serde_json::from_value::<crate::models::telemetry::FirmwaresInfo>(v.clone())
-                        .ok()
-                });
-                let limits = json_dev.limits.as_ref().and_then(|v| {
-                    serde_json::from_value::<crate::models::telemetry::DeviceLimits>(v.clone()).ok()
-                });
-                let mut device = Device::new(idx, board_type, bus_id, coords);
-                device.firmwares = firmwares;
-                device.limits = limits;
-                self.devices.push(device);
-            }
-
-            // Update telemetry if present
-            if let Some(telem_json) = json_dev.telemetry {
-                let telemetry = Telemetry {
-                    voltage: telem_json.voltage,
-                    current: telem_json.current,
-                    power: telem_json.power,
-                    asic_temperature: telem_json.asic_temperature,
-                    aiclk: telem_json.aiclk,
-                    heartbeat: telem_json.heartbeat,
-                    timestamp: Utc::now(),
-                };
-                self.telemetry.insert(idx, telemetry);
-            }
-
-            // Update SMBUS telemetry if present
-            if let Some(smbus_json) = json_dev.smbus {
-                self.smbus_telemetry
-                    .insert(idx, smbus_from_json_fields(smbus_json));
-            }
-        }
-
+        self.merge_parsed(parsed_from_json_devices(json_devices));
         Ok(())
     }
+
+    /// Merge a parsed snapshot into the backend's cached state.
+    ///
+    /// Device list is append-only and keyed by index (devices never disappear
+    /// across updates); telemetry and SMBUS maps are replaced per-index. This
+    /// reproduces the exact behaviour of the previous `update_from_json`, so the
+    /// subprocess path is unchanged by the refactor to a shared parser.
+    fn merge_parsed(&mut self, parsed: ParsedSnapshot) {
+        for device in parsed.devices {
+            if !self.devices.iter().any(|d| d.index == device.index) {
+                self.devices.push(device);
+            }
+        }
+        for (idx, telem) in parsed.telemetry {
+            self.telemetry.insert(idx, telem);
+        }
+        for (idx, smbus) in parsed.smbus {
+            self.smbus_telemetry.insert(idx, smbus);
+        }
+    }
+
+    /// Parse a raw `tt-smi -s` output string, merge it into cached state, and —
+    /// only on successful parse — retain it verbatim for `snapshot_json()`.
+    ///
+    /// This is the shared core of `update()`: the subprocess path
+    /// (`run_tt_smi()` → this) and the `#[cfg(test)]` seam below both funnel
+    /// through here, so a test driving the seam exercises the exact same
+    /// parse/merge/retain logic that a live `update()` runs — the only thing the
+    /// seam skips is actually spawning `tt-smi`.
+    fn apply_raw_snapshot(&mut self, json_output: String) -> BackendResult<()> {
+        match parse_tt_smi_snapshot(&json_output) {
+            Ok(parsed) => {
+                self.merge_parsed(parsed);
+                self.last_raw = Some(json_output);
+                self.last_update = Instant::now();
+                self.error_count = 0; // Reset error count on success
+                Ok(())
+            }
+            Err(e) => {
+                self.error_count += 1;
+                if self.config.verbose {
+                    log::debug!("JSONBackend: Parse error: {}", e);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Test-only: drive `apply_raw_snapshot` with canned `tt-smi -s` output,
+    /// without spawning a real subprocess. See [`apply_raw_snapshot`] for why
+    /// this is "the real update() path" minus the subprocess boundary.
+    #[cfg(test)]
+    pub(crate) fn apply_raw_snapshot_pub(&mut self, json_output: &str) -> BackendResult<()> {
+        self.apply_raw_snapshot(json_output.to_string())
+    }
+}
+
+/// Pure parse of tt-smi snapshot JSON into the intermediate device list.
+///
+/// Supports every format `tt-smi` (and its legacy variants) can emit:
+/// - modern snapshot: `{"device_info": [ {board_info, telemetry, smbus_telem, ..} ]}`
+/// - legacy array:     `[{device1}, {device2}]`
+/// - legacy wrapper:   `{"devices": [..]}`
+/// - single device:    `{device}`
+fn parse_json_devices(json_str: &str) -> BackendResult<Vec<TTSMIDeviceJSON>> {
+    // Try to parse as tt-smi snapshot format with "device_info" key (modern format)
+    #[derive(Deserialize)]
+    struct TTSMISnapshot {
+        device_info: Option<Vec<TTSMIDeviceRaw>>,
+    }
+
+    if let Ok(snapshot) = serde_json::from_str::<TTSMISnapshot>(json_str) {
+        if let Some(raw_devices) = snapshot.device_info {
+            // Transform raw format to flattened format with indices
+            let devices: Vec<TTSMIDeviceJSON> = raw_devices
+                .into_iter()
+                .enumerate()
+                .map(|(idx, raw)| {
+                    let board_info = raw.board_info.as_ref();
+                    TTSMIDeviceJSON {
+                        index: Some(idx),
+                        board_type: board_info.and_then(|b| b.board_type.clone()),
+                        bus_id: board_info.and_then(|b| b.bus_id.clone()),
+                        coords: board_info.and_then(|b| b.coords.clone()),
+                        telemetry: raw.telemetry,
+                        smbus: raw.smbus_telem,
+                        firmwares: raw.firmwares,
+                        limits: raw.limits,
+                    }
+                })
+                .collect();
+            return Ok(devices);
+        }
+    }
+
+    // Try to parse as array of devices (legacy format)
+    if let Ok(devices) = serde_json::from_str::<Vec<TTSMIDeviceJSON>>(json_str) {
+        return Ok(devices);
+    }
+
+    // Try to parse as object with "devices" key (legacy format)
+    #[derive(Deserialize)]
+    struct Wrapper {
+        devices: Option<Vec<TTSMIDeviceJSON>>,
+    }
+
+    if let Ok(wrapper) = serde_json::from_str::<Wrapper>(json_str) {
+        if let Some(devices) = wrapper.devices {
+            return Ok(devices);
+        }
+    }
+
+    // Try to parse as single device (last resort, as it's most permissive)
+    if let Ok(device) = serde_json::from_str::<TTSMIDeviceJSON>(json_str) {
+        return Ok(vec![device]);
+    }
+
+    // Truncate for the error message by *characters*, not bytes: `json_str`
+    // can be untrusted remote input (a WsBackend frame), and byte-slicing at a
+    // fixed offset panics if it lands inside a multi-byte UTF-8 sequence.
+    Err(BackendError::ParseError(format!(
+        "Failed to parse JSON output: {}",
+        json_str.chars().take(100).collect::<String>()
+    )))
+}
+
+/// Build a `Device` from a single parsed JSON entry, applying the same
+/// bus-id / coords fallbacks and firmware/limits decoding the JSON backend has
+/// always used.
+fn device_from_json(json_dev: &TTSMIDeviceJSON) -> Device {
+    let idx = json_dev.index.unwrap_or(0);
+    let board_type = json_dev
+        .board_type
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let bus_id = json_dev
+        .bus_id
+        .clone()
+        .unwrap_or_else(|| format!("0000:0{}:00.0", idx + 1));
+    let coords = json_dev
+        .coords
+        .clone()
+        .unwrap_or_else(|| format!("({},{})", idx / 4, idx % 4));
+
+    // Parse firmwares and limits blocks (tt-smi 5.2.0+), falling back to
+    // None for older snapshots that don't include these keys.
+    let firmwares = json_dev.firmwares.as_ref().and_then(|v| {
+        serde_json::from_value::<crate::models::telemetry::FirmwaresInfo>(v.clone()).ok()
+    });
+    let limits = json_dev.limits.as_ref().and_then(|v| {
+        serde_json::from_value::<crate::models::telemetry::DeviceLimits>(v.clone()).ok()
+    });
+
+    let mut device = Device::new(idx, board_type, bus_id, coords);
+    device.firmwares = firmwares;
+    device.limits = limits;
+    device
+}
+
+/// Convert a parsed telemetry block into the `Telemetry` model, stamping "now".
+fn telemetry_from_json(telem_json: &TelemetryJSON) -> Telemetry {
+    Telemetry {
+        voltage: telem_json.voltage,
+        current: telem_json.current,
+        power: telem_json.power,
+        asic_temperature: telem_json.asic_temperature,
+        aiclk: telem_json.aiclk,
+        heartbeat: telem_json.heartbeat,
+        timestamp: Utc::now(),
+    }
+}
+
+/// Fully parsed tt-smi snapshot: the exact triad every backend serves.
+///
+/// This is the shared parse result that both `JSONBackend` (subprocess path)
+/// and `WsBackend` (WebSocket path) build their state from — one schema, one
+/// parser, zero mapping.
+pub(crate) struct ParsedSnapshot {
+    /// Devices in array order (index == position), with firmwares/limits decoded.
+    pub devices: Vec<Device>,
+    /// Per-device core telemetry (only present devices are keyed).
+    pub telemetry: HashMap<usize, Telemetry>,
+    /// Per-device SMBUS telemetry (only present devices are keyed).
+    pub smbus: HashMap<usize, SmbusTelemetry>,
+}
+
+/// Build a `ParsedSnapshot` from an already-parsed intermediate device list.
+fn parsed_from_json_devices(json_devices: Vec<TTSMIDeviceJSON>) -> ParsedSnapshot {
+    let mut devices = Vec::with_capacity(json_devices.len());
+    let mut telemetry = HashMap::new();
+    let mut smbus = HashMap::new();
+
+    for json_dev in json_devices {
+        let idx = json_dev.index.unwrap_or(0);
+        devices.push(device_from_json(&json_dev));
+        if let Some(telem_json) = json_dev.telemetry {
+            telemetry.insert(idx, telemetry_from_json(&telem_json));
+        }
+        if let Some(smbus_json) = json_dev.smbus {
+            smbus.insert(idx, smbus_from_json_fields(smbus_json));
+        }
+    }
+
+    ParsedSnapshot {
+        devices,
+        telemetry,
+        smbus,
+    }
+}
+
+/// Pure parsing entry point: verbatim `tt-smi -s` stdout → the `Device` /
+/// `Telemetry` / `SmbusTelemetry` triad every backend serves.
+///
+/// This is the single shared parser. `JSONBackend` feeds it the stdout of the
+/// `tt-smi` subprocess; `WsBackend` feeds it each WebSocket frame (which is,
+/// by contract, that same verbatim stdout). Returns a `ParseError` if none of
+/// the supported JSON shapes match.
+pub(crate) fn parse_tt_smi_snapshot(json_str: &str) -> BackendResult<ParsedSnapshot> {
+    let json_devices = parse_json_devices(json_str)?;
+    Ok(parsed_from_json_devices(json_devices))
 }
 
 impl TelemetryBackend for JSONBackend {
@@ -494,8 +627,8 @@ impl TelemetryBackend for JSONBackend {
 
         // Run tt-smi to get initial device list
         let json_output = self.run_tt_smi()?;
-        let devices = self.parse_json(&json_output)?;
-        self.update_from_json(devices)?;
+        let parsed = parse_tt_smi_snapshot(&json_output)?;
+        self.merge_parsed(parsed);
 
         if self.devices.is_empty() {
             return Err(BackendError::DeviceNotFound(
@@ -514,20 +647,7 @@ impl TelemetryBackend for JSONBackend {
         // Run tt-smi to get fresh telemetry
         match self.run_tt_smi() {
             Ok(json_output) => {
-                match self.parse_json(&json_output) {
-                    Ok(devices) => {
-                        self.update_from_json(devices)?;
-                        self.last_update = Instant::now();
-                        self.error_count = 0; // Reset error count on success
-                    }
-                    Err(e) => {
-                        self.error_count += 1;
-                        if self.config.verbose {
-                            log::debug!("JSONBackend: Parse error: {}", e);
-                        }
-                        return Err(e);
-                    }
-                }
+                self.apply_raw_snapshot(json_output)?;
             }
             Err(e) => {
                 self.error_count += 1;
@@ -560,6 +680,10 @@ impl TelemetryBackend for JSONBackend {
 
     fn backend_info(&self) -> String {
         format!("JSON ({} via {})", self.devices.len(), self.tt_smi_path)
+    }
+
+    fn snapshot_json(&self) -> Option<String> {
+        self.last_raw.clone()
     }
 }
 
@@ -685,7 +809,11 @@ fn smbus_from_json_fields(smbus_json: SmbusTelemetryJSON) -> SmbusTelemetry {
 
 /// Parse result from a single tt-smi JSON snapshot, extracting both SMBUS
 /// telemetry and device metadata (firmwares, limits) in one pass.
-pub(crate) struct ParsedSnapshot {
+///
+/// Used by `HybridBackend`, whose background reader only needs the SMBUS map
+/// plus firmware/limits metadata (it gets its live device list from sysfs).
+/// Distinct from [`ParsedSnapshot`], which carries the full device triad.
+pub(crate) struct SnapshotParts {
     pub smbus: HashMap<usize, SmbusTelemetry>,
     pub meta: HashMap<
         usize,
@@ -699,13 +827,12 @@ pub(crate) struct ParsedSnapshot {
 /// Parse a tt-smi JSON snapshot once and extract both SMBUS telemetry and
 /// device metadata.  Replaces the previous two-function pattern that parsed
 /// the same JSON document twice per background poll cycle.
-pub(crate) fn parse_snapshot(json_str: &str) -> ParsedSnapshot {
-    let helper = JSONBackend::new("");
-    let devices = match helper.parse_json(json_str) {
+pub(crate) fn parse_snapshot(json_str: &str) -> SnapshotParts {
+    let devices = match parse_json_devices(json_str) {
         Ok(d) => d,
         Err(e) => {
             log::debug!("parse_snapshot: parse error: {}", e);
-            return ParsedSnapshot {
+            return SnapshotParts {
                 smbus: HashMap::new(),
                 meta: HashMap::new(),
             };
@@ -728,7 +855,7 @@ pub(crate) fn parse_snapshot(json_str: &str) -> ParsedSnapshot {
             meta_map.insert(idx, (firmwares, limits));
         }
     }
-    ParsedSnapshot {
+    SnapshotParts {
         smbus: smbus_map,
         meta: meta_map,
     }
@@ -1058,6 +1185,89 @@ mod tests {
         );
     }
 
+    /// The shared pure parser must yield the full device triad — the exact
+    /// state `JSONBackend` and `WsBackend` both serve. Protects the refactor
+    /// that lifted parsing out of the subprocess backend.
+    #[test]
+    fn test_parse_tt_smi_snapshot_full_triad() {
+        let parsed = parse_tt_smi_snapshot(TTSMI_52_JSON).expect("parse failed");
+
+        // One device, with architecture derived from board_type.
+        assert_eq!(parsed.devices.len(), 1);
+        let dev = &parsed.devices[0];
+        assert_eq!(dev.index, 0);
+        assert_eq!(dev.board_type, "p150a");
+        assert_eq!(dev.architecture, crate::models::Architecture::Blackhole);
+        // Firmwares/limits decoded onto the device.
+        assert_eq!(
+            dev.firmwares.as_ref().and_then(|f| f.eth_fw.as_deref()),
+            Some("6.16.0.0")
+        );
+        assert_eq!(dev.limits.as_ref().and_then(|l| l.asic_fmax), Some(800));
+
+        // Core telemetry populated (values arrive as quoted strings in tt-smi).
+        let telem = parsed.telemetry.get(&0).expect("telemetry missing");
+        assert_eq!(telem.power, Some(145.0));
+        assert_eq!(telem.asic_temperature, Some(52.0));
+        assert_eq!(telem.aiclk, Some(800));
+
+        // SMBUS telemetry populated.
+        let smbus = parsed.smbus.get(&0).expect("smbus missing");
+        assert_eq!(smbus.eth_live_status, Some(0xFF_u64));
+        assert_eq!(smbus.enabled_tensix_col, Some(0x3FFF_u32));
+    }
+
+    /// Malformed JSON must surface as an error, not a panic.
+    #[test]
+    fn test_parse_tt_smi_snapshot_bad_json_errors() {
+        assert!(parse_tt_smi_snapshot("not json at all").is_err());
+    }
+
+    /// `snapshot_json()` must be `None` before any successful update, and must
+    /// return the exact raw `tt-smi -s` output after one. Drives the same
+    /// parse+merge+store-raw logic `update()` uses (via the `apply_raw_snapshot`
+    /// test seam), just without spawning a real `tt-smi` subprocess — mirroring
+    /// the existing `update_from_json_pub` white-box pattern in this file.
+    #[test]
+    fn test_snapshot_json_returns_last_raw_after_update() {
+        let mut backend = JSONBackend::new("tt-smi");
+        assert_eq!(
+            backend.snapshot_json(),
+            None,
+            "snapshot_json should be None before any successful update"
+        );
+
+        backend
+            .apply_raw_snapshot_pub(REAL_TTSMI_JSON)
+            .expect("apply_raw_snapshot should succeed on well-formed JSON");
+
+        assert_eq!(
+            backend.snapshot_json(),
+            Some(REAL_TTSMI_JSON.to_string()),
+            "snapshot_json must return the exact raw tt-smi JSON byte-identical"
+        );
+    }
+
+    /// A parse failure must not clobber a previously stored good snapshot, and
+    /// must not fabricate a snapshot out of unparseable output.
+    #[test]
+    fn test_snapshot_json_unchanged_on_parse_error() {
+        let mut backend = JSONBackend::new("tt-smi");
+
+        backend
+            .apply_raw_snapshot_pub(REAL_TTSMI_JSON)
+            .expect("first apply should succeed");
+        assert_eq!(backend.snapshot_json(), Some(REAL_TTSMI_JSON.to_string()));
+
+        // A bad frame errors and must not overwrite the last good snapshot.
+        assert!(backend.apply_raw_snapshot_pub("not json at all").is_err());
+        assert_eq!(
+            backend.snapshot_json(),
+            Some(REAL_TTSMI_JSON.to_string()),
+            "a failed parse must not clobber the last known-good snapshot"
+        );
+    }
+
     #[test]
     fn test_old_format_still_parses_ok() {
         // Existing pre-5.2 snapshot (no GDDR fields) must still parse without error.
@@ -1067,5 +1277,23 @@ mod tests {
             smbus.gddr_temps.iter().all(|t| t.is_none()),
             "old format should leave gddr_temps as None"
         );
+    }
+
+    /// Regression: unparseable input whose 100-byte boundary lands inside a
+    /// multi-byte UTF-8 sequence must not panic. `parse_json_devices` truncates
+    /// the error message by *characters*, not bytes — a byte-slice at offset 100
+    /// would panic ("byte index 100 is not a char boundary") on frames like the
+    /// untrusted ones a remote `WsBackend` peer can send.
+    #[test]
+    fn test_parse_error_truncation_is_char_boundary_safe() {
+        // 99 ASCII bytes, then a 4-byte emoji straddling byte offset 100 — the
+        // old `&json_str[..100]` slice landed mid-codepoint here.
+        let mut junk = "x".repeat(99);
+        junk.push('🚀'); // bytes 99..103; a fixed byte-slice at 100 splits it
+        junk.push_str(" not json");
+
+        let err = parse_json_devices(&junk).expect_err("garbage must fail to parse");
+        // Message is produced without panicking and carries the char-truncated tail.
+        assert!(matches!(err, BackendError::ParseError(_)));
     }
 }

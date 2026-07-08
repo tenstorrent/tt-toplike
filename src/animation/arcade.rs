@@ -19,11 +19,12 @@
 //! - BOLD white character for maximum visibility
 
 use crate::animation::{
-    hsv_to_rgb, lerp, temp_to_hue, AdaptiveBaseline, BoardTopology, DefragVis, HardwareStarfield,
-    MemoryCastle, MemoryFlowVis,
+    bbs_rule, hsv_to_rgb, lerp, temp_to_hue, AdaptiveBaseline, BoardTopology, DefragVis, DuelState,
+    HardwareStarfield, MemoryCastle, MemoryFlowVis,
 };
 use crate::backend::TelemetryBackend;
 use crate::ui::colors;
+use crate::workload::inference_server::ServingStats;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -84,6 +85,17 @@ pub struct ArcadeVisualization {
 
     /// Board topology — used to render the header topology diagram line.
     board_topology: Option<BoardTopology>,
+
+    // ── Hero ⚔ snake duel ──────────────────────────────────────────────────
+    /// Live serving telemetry of the first Ready inference service, threaded in
+    /// from the TUI. `None` when nothing is serving — the duel strip is hidden
+    /// and Row 1 stays exactly as Task 3 left it.
+    serving: Option<ServingStats>,
+    /// Motion + glyph state for the duel strip.
+    duel: DuelState,
+    /// Running peak of observed device power (W), floored at 1.0. Normalizes the
+    /// hardware-headroom signal so the duel is sensitive on any hardware.
+    power_peak: f32,
 }
 
 impl ArcadeVisualization {
@@ -122,15 +134,27 @@ impl ArcadeVisualization {
         let flow_start = castle_end + 1;
         let flow_end = flow_start + flow_height;
 
+        // Embedded sub-visualizations render with chrome OFF: each one drops its
+        // own per-device W/°C header so the composite view isn't printing the
+        // same telemetry ~3×.  Arcade renders ONE shared telemetry strip (Row 1)
+        // instead.  Standalone modes keep chrome on (their default).
+        let mut starfield = HardwareStarfield::new(width, starfield_height);
+        starfield.set_chrome(false);
+        let mut memory_castle =
+            MemoryCastle::new_with_density(castle_col_w, castle_height, 200, 10);
+        memory_castle.set_chrome(false);
+        let mut memory_flow = MemoryFlowVis::new_with_density(width, flow_height, 100);
+        memory_flow.set_chrome(false);
+
         Self {
             width,
             height,
-            starfield: HardwareStarfield::new(width, starfield_height),
-            memory_castle: MemoryCastle::new_with_density(castle_col_w, castle_height, 200, 10),
+            starfield,
+            memory_castle,
             defrag: DefragVis::new(defrag_col_w, castle_height),
             castle_col_w,
             defrag_col_w,
-            memory_flow: MemoryFlowVis::new_with_density(width, flow_height, 100),
+            memory_flow,
             hero_x: width as f32 / 2.0,
             hero_y: height as f32 / 2.0,
             hero_target_x: width as f32 / 2.0,
@@ -153,7 +177,18 @@ impl ArcadeVisualization {
             flow_start,
             flow_end,
             board_topology: None,
+            serving: None,
+            duel: DuelState::new(),
+            power_peak: 1.0,
         }
+    }
+
+    /// Thread the first Ready inference service's serving stats into the duel.
+    ///
+    /// `Some(stats)` lights up the Row 1 duel strip; `None` hides it and leaves
+    /// Row 1 as the plain telemetry strip. Called once per tick from the TUI.
+    pub fn set_serving(&mut self, serving: Option<ServingStats>) {
+        self.serving = serving;
     }
 
     /// Propagate a sensitivity multiplier to all three sub-visualizations.
@@ -470,6 +505,59 @@ impl ArcadeVisualization {
 
         // Update trail
         self.update_trail();
+
+        // ── Duel signals ──────────────────────────────────────────────────
+        // Every offset below traces back to live telemetry — no scripted motion.
+        //
+        // hw = mean over devices of power / running-peak. We take the same
+        // SMBUS-preferred power reading the hero uses, update the running peak
+        // (floored at 1.0), then normalize so the duel is sensitive on any card.
+        let mut powers: Vec<f32> = Vec::new();
+        for device in backend.devices() {
+            if let Some(telemetry) = backend.telemetry(device.index) {
+                let smbus = backend.smbus_telemetry(device.index);
+                let power = smbus
+                    .and_then(|s| s.tdp_watts())
+                    .unwrap_or_else(|| telemetry.power.unwrap_or(0.0));
+                self.power_peak = self.power_peak.max(power);
+                powers.push(power);
+            }
+        }
+        self.power_peak = self.power_peak.max(1.0);
+        let hw = if powers.is_empty() {
+            0.0
+        } else {
+            powers.iter().map(|p| p / self.power_peak).sum::<f32>() / powers.len() as f32
+        };
+
+        // hero_lunge fires only on a real power spike relative to the learned
+        // baseline (fed above for the first device). >15% deviation once the
+        // baseline is established.
+        let hero_lunge = match (backend.devices().first(), powers.first()) {
+            (Some(device), Some(&p0)) => {
+                self.baseline.is_established()
+                    && self.baseline.power_change(device.index, p0) > 0.15
+            }
+            _ => false,
+        };
+
+        // serve blends token throughput (weighted 0.7) with queue depth (0.3);
+        // snake_lunge fires when a request actually completed this tick; kv is
+        // the KV-cache usage that colors the snake's heat.
+        let (serve, snake_lunge, kv) = match self.serving {
+            Some(s) => {
+                let tps = (s.generation_tps / 200.0).min(1.0);
+                let load = ((s.requests_running + s.requests_waiting) as f32 / 8.0).min(1.0);
+                (
+                    0.7 * tps + 0.3 * load,
+                    s.completed_delta > 0,
+                    s.kv_cache_usage,
+                )
+            }
+            None => (0.0, false, 0.0),
+        };
+
+        self.duel.update(hw, serve, hero_lunge, snake_lunge, kv);
     }
 
     /// Calculate hero target position based on power and current
@@ -520,13 +608,13 @@ impl ArcadeVisualization {
     pub fn render(&self, backend: &dyn TelemetryBackend) -> Vec<Line<'static>> {
         let mut lines = Vec::with_capacity(self.height);
 
-        // Header: exactly 2 rows — title bar + topology (or blank).
+        // Header: exactly 2 rows — title bar + Row 1.
+        //
+        // Row 1 carries the single shared telemetry strip (the embedded sections
+        // no longer print their own W/°C).  The topology diagram shares the row
+        // when both fit; otherwise the strip wins.
         lines.push(self.render_header(backend));
-        if let Some(diagram) = self.topology_diagram_line(backend) {
-            lines.push(diagram);
-        } else {
-            lines.push(Line::from(""));
-        }
+        lines.push(self.render_row1(backend));
 
         // Render Starfield region — separator first, then content
         let starfield_lines = self.starfield.render();
@@ -586,6 +674,167 @@ impl ArcadeVisualization {
         self.overlay_hero(lines, backend)
     }
 
+    /// Build the single shared per-device telemetry strip.
+    ///
+    /// Format: `Dev0 92W 78°C 1.35GHz · Dev1 …`.  Fields a device does not
+    /// report are skipped.  Character-safe: when the devices don't fit in
+    /// `width` display columns the string is truncated on a character boundary
+    /// and a trailing `…` appended.  Returns an empty string when there are no
+    /// devices.  This is the ONE place Arcade prints per-device W/°C — the
+    /// embedded sections render with chrome off.
+    fn telemetry_strip(backend: &dyn TelemetryBackend, width: usize) -> String {
+        const SEP: &str = " · ";
+        let mut entries: Vec<String> = Vec::new();
+        for (i, device) in backend.devices().iter().enumerate() {
+            let telem = backend.telemetry(device.index);
+            // "Dev{n}" label always present for orientation; each numeric field
+            // is added only when the device actually reports it.
+            let mut parts: Vec<String> = vec![format!("Dev{}", i)];
+            if let Some(t) = telem {
+                if let Some(p) = t.power {
+                    parts.push(format!("{:.0}W", p));
+                }
+                if let Some(temp) = t.asic_temperature {
+                    parts.push(format!("{:.0}°C", temp));
+                }
+                if let Some(clk) = t.aiclk {
+                    parts.push(format!("{:.2}GHz", clk as f32 / 1000.0));
+                }
+            }
+            entries.push(parts.join(" "));
+        }
+
+        let full = entries.join(SEP);
+        if UnicodeWidthStr::width(full.as_str()) <= width {
+            return full;
+        }
+        if width == 0 {
+            return String::new();
+        }
+
+        // Reserve one column for the ellipsis; walk chars by display width so
+        // wide glyphs (°, …) never split and the result never exceeds `width`.
+        let budget = width.saturating_sub(1);
+        let mut out = String::new();
+        let mut used = 0usize;
+        for ch in full.chars() {
+            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+            if used + cw > budget {
+                break;
+            }
+            used += cw;
+            out.push(ch);
+        }
+        out.push('…');
+        out
+    }
+
+    /// Color the duel strip's glyphs into themed spans.
+    ///
+    /// - hero `@` → `colors::info()` (the silicon's cool accent), bold
+    /// - marker `⚔` → `colors::text_primary()`, bold
+    /// - snake glyphs (`▶ ● ◉ ~`) → heat color by KV-cache usage via
+    ///   `hsv_to_rgb`, so a busy cache runs the snake toward hot pink (the
+    ///   grayskull theme maps the hue automatically)
+    /// - blanks stay uncolored
+    fn duel_strip_spans(&self, strip: &str) -> Vec<Span<'static>> {
+        // KV 0 → cyan (200°), KV 1 → hot pink (330°): a live cache heats up.
+        let snake_hue = 200.0 + self.duel.kv.clamp(0.0, 1.0) * 130.0;
+        let snake_color = hsv_to_rgb(snake_hue, 0.85, 0.9);
+
+        let hero_style = Style::default()
+            .fg(colors::info())
+            .add_modifier(Modifier::BOLD);
+        let marker_style = Style::default()
+            .fg(colors::text_primary())
+            .add_modifier(Modifier::BOLD);
+        let snake_style = Style::default().fg(snake_color);
+
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(strip.chars().count());
+        for ch in strip.chars() {
+            let style = match ch {
+                '@' => hero_style,
+                '⚔' => marker_style,
+                '▶' | '●' | '◉' | '~' => snake_style,
+                _ => Style::default(),
+            };
+            spans.push(Span::styled(ch.to_string(), style));
+        }
+        spans
+    }
+
+    /// Color the plain telemetry strip into themed spans (per-device chunks in
+    /// the primary text color, `·` separators dimmed).
+    fn strip_spans(strip: &str) -> Vec<Span<'static>> {
+        const SEP: &str = " · ";
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        for (i, entry) in strip.split(SEP).enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(
+                    SEP.to_string(),
+                    Style::default().fg(colors::text_secondary()),
+                ));
+            }
+            spans.push(Span::styled(
+                entry.to_string(),
+                Style::default().fg(colors::text_primary()),
+            ));
+        }
+        spans
+    }
+
+    /// Render Arcade's Row 1: the shared telemetry strip, with the topology
+    /// diagram to its right when both fit the row (else the strip wins).  Falls
+    /// back to the topology line (or a blank row) when there are no devices.
+    fn render_row1(&self, backend: &dyn TelemetryBackend) -> Line<'static> {
+        // When something is serving, Row 1 becomes the duel: the strip claims
+        // the left ~half and the shared telemetry strip fills the remainder.
+        if self.serving.is_some() {
+            // Keep the duel a tight, readable strip. Left unbounded (width/2) it
+            // stretches the hero and snake to opposite ends of half a huge
+            // terminal, scattering the tug-of-war across dozens of empty cells;
+            // capping it keeps the battle compact on any size, with the shared
+            // telemetry strip filling whatever remains.
+            const DUEL_MAX_W: usize = 44;
+            let duel_w = (self.width / 2).min(DUEL_MAX_W);
+            let strip_w = self.width.saturating_sub(duel_w);
+            let duel = self.duel.render_strip(duel_w);
+            let mut spans = self.duel_strip_spans(&duel);
+            let strip = Self::telemetry_strip(backend, strip_w);
+            spans.extend(Self::strip_spans(&strip));
+            return Line::from(spans);
+        }
+
+        let strip = Self::telemetry_strip(backend, self.width);
+        let topo = self.topology_diagram_line(backend);
+
+        if strip.is_empty() {
+            // Nothing to summarize — preserve the prior behavior.
+            return topo.unwrap_or_else(|| Line::from(""));
+        }
+
+        let strip_w = UnicodeWidthStr::width(strip.as_str());
+        let strip_spans = Self::strip_spans(&strip);
+
+        if let Some(topo_line) = topo {
+            let topo_w: usize = topo_line
+                .spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            const GAP: usize = 2;
+            if strip_w + GAP + topo_w <= self.width {
+                let mut spans = strip_spans;
+                spans.push(Span::raw("  "));
+                spans.extend(topo_line.spans);
+                return Line::from(spans);
+            }
+        }
+
+        // Strip wins — topology dropped this frame.
+        Line::from(strip_spans)
+    }
+
     /// Render header for Arcade mode
     fn render_header(&self, backend: &dyn TelemetryBackend) -> Line<'static> {
         let device_count = backend.devices().len();
@@ -625,37 +874,34 @@ impl ArcadeVisualization {
     }
 
     /// Render region separator
+    ///
+    /// BBS-chrome rule (`bbs_rule`): `╔══[ LABEL ]══════▓▒░` — the boxed
+    /// label keeps the bright "active section" color, the rule/box-drawing
+    /// portion keeps the animated hue-cycling color, matching the previous
+    /// dash-separator's palette split.
     fn render_separator(&self, label: &str, _region_height: usize) -> Line<'static> {
         // Animated color cycling for separator
         let hue = (self.frame as f32 * 2.0) % 360.0;
         let separator_color = hsv_to_rgb(hue, 0.6, 0.8);
+        let label_color = Style::default()
+            .fg(colors::rgb(220, 240, 255))
+            .add_modifier(Modifier::BOLD);
+        let rule_color = Style::default()
+            .fg(separator_color)
+            .add_modifier(Modifier::BOLD);
 
-        // Use display width (columns) not byte length — emoji like 🏰 are 2 columns wide.
-        let label_display_width = UnicodeWidthStr::width(label) + 2; // " label "
-        let remaining = self.width.saturating_sub(label_display_width);
-        let left_width = remaining / 2;
-        let right_width = remaining - left_width; // absorbs odd remainder so total == self.width
-
-        Line::from(vec![
-            Span::styled(
-                "─".repeat(left_width),
-                Style::default()
-                    .fg(separator_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" {} ", label),
-                Style::default()
-                    .fg(colors::rgb(220, 240, 255))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "─".repeat(right_width),
-                Style::default()
-                    .fg(separator_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])
+        let rule = bbs_rule(label, self.width);
+        // Split the boxed label back out so it can keep its distinct color;
+        // if the label got char-truncated (narrow width) it won't be found
+        // verbatim, so fall back to coloring the whole rule uniformly.
+        match rule.find(label) {
+            Some(idx) => Line::from(vec![
+                Span::styled(rule[..idx].to_string(), rule_color),
+                Span::styled(label.to_string(), label_color),
+                Span::styled(rule[idx + label.len()..].to_string(), rule_color),
+            ]),
+            None => Line::from(vec![Span::styled(rule, rule_color)]),
+        }
     }
 
     /// Splice a single styled character into an existing line at a given column.
@@ -975,5 +1221,90 @@ mod tests {
         // Both must satisfy the no-overlap invariant
         assert!(vis0.starfield_end <= vis0.castle_start);
         assert!(vis1.starfield_end <= vis1.castle_start);
+    }
+
+    /// Regression for the duplicate-telemetry bug: the embedded starfield /
+    /// castle / flow used to each print their own per-device W/°C header, so a
+    /// single Arcade frame showed each device's readout ~3×.  Now the embedded
+    /// sections render with chrome off and Arcade prints ONE shared strip, so
+    /// each device's `°C` appears at most once across the whole render.
+    #[test]
+    fn arcade_prints_each_device_telemetry_once() {
+        let mut backend = crate::backend::mock::MockBackend::new(2);
+        backend.init().unwrap();
+        backend.update().unwrap();
+        let mut a = ArcadeVisualization::new(120, 40);
+        a.update(&backend);
+        let text: String = a
+            .render(&backend)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        // Device 0's readout appears exactly once (the shared strip), not once
+        // per embedded section (was 3x).
+        let w_readouts = text.matches("°C").count();
+        assert!(
+            w_readouts <= backend.devices().len(),
+            "expected ≤1 °C readout per device in arcade, got {w_readouts}"
+        );
+    }
+
+    /// The duel strip appears on Row 1 only when a service is serving. With
+    /// `set_serving(Some(..))` the render must contain the `⚔` balance marker;
+    /// with `None` it must not (Row 1 stays the plain telemetry strip).
+    #[test]
+    fn duel_strip_shows_only_when_serving() {
+        use crate::workload::inference_server::{ServingStats, VllmCounters};
+
+        let mut backend = crate::backend::mock::MockBackend::new(2);
+        backend.init().unwrap();
+        backend.update().unwrap();
+
+        let render_text = |a: &ArcadeVisualization| -> String {
+            a.render(&backend)
+                .iter()
+                .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+                .collect()
+        };
+
+        // Serving → duel strip present.
+        let stats = ServingStats::fold(None, &VllmCounters::default(), 5);
+        let mut serving = ArcadeVisualization::new(120, 40);
+        serving.set_serving(Some(stats));
+        serving.update(&backend);
+        assert!(
+            render_text(&serving).contains('⚔'),
+            "serving arcade must render the duel marker"
+        );
+
+        // Not serving → no duel strip.
+        let mut idle = ArcadeVisualization::new(120, 40);
+        idle.set_serving(None);
+        idle.update(&backend);
+        assert!(
+            !render_text(&idle).contains('⚔'),
+            "non-serving arcade must not render the duel marker"
+        );
+    }
+
+    /// Guard the standalone path: with chrome at its default (`true`), a
+    /// standalone Memory Castle must still print its per-device W/°C header —
+    /// the dedup only applies to the embedded (chrome off) instances.
+    #[test]
+    fn standalone_castle_keeps_telemetry_header() {
+        let mut backend = crate::backend::mock::MockBackend::new(2);
+        backend.init().unwrap();
+        backend.update().unwrap();
+        let mut castle = MemoryCastle::new(120, 20);
+        castle.update(&backend);
+        let text: String = castle
+            .render(&backend)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(
+            text.contains("°C"),
+            "standalone MemoryCastle (chrome default) must still show °C"
+        );
     }
 }
