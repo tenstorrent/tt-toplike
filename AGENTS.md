@@ -4,6 +4,92 @@
 
 This document tracks the development of tt-toplike-rs, a Rust implementation of tt-top (Python) for real-time Tenstorrent hardware monitoring.
 
+Binaries: `tt-toplike` (dispatcher), `tt-toplike-tui`, `tt-toplike-app`/`tt-toplike-egui` (egui GUI).
+
+> **Agent guidance lives in this file.** This project uses `AGENTS.md` (not a
+> separate `CLAUDE.md`) as the single source of project notes, conventions, and
+> the development log.
+
+---
+
+## Build & test gotchas (current)
+
+* A `build-deb.sh` run leaves an **untracked** `.cargo/config.toml` + partial
+  `vendor/` in the tree that redirects all crate lookups to `vendor/` for
+  network-free dpkg builds. That vendor set is incomplete (missing
+  `all-smi-luwen-*` and most deps), so a normal `cargo build` fails with
+  *"no matching package named `all-smi-luwen-core`"*. Move `.cargo/config.toml`
+  aside to build/test against the real registry cache, then restore it.
+* After `cargo build --release`, copy every shipped binary into `~/.local/bin`
+  (`cp target/release/tt-toplike{,-tui} ~/.local/bin/`) or a stale one already
+  on `$PATH` shadows it. `install.sh` handles `tt-toplike-tui`/`tt-toplike-egui`
+  via `cargo install` but not the `tt-toplike` dispatcher — copy that by hand.
+* `all-smi-luwen-*` crates are **optional**, gated behind the `luwen-backend`
+  feature — default builds don't need them.
+* Adding a field to `ServiceState` / `TickSample` / `RemoteInference` is a
+  compile error at **every** struct literal, including test-only ones — update
+  all enumerated sites (the test build is where a missing field bites).
+* TUI convention: **left-side and bottom borders only, never right-side border
+  characters** (`╔`/`║`/`╚`) — variable-width box glyphs wrap when the terminal
+  is even one column narrower than expected. Panels/overlays must size to their
+  widest content in real display columns (unicode-width), never clip.
+
+---
+
+## July 2026 — legend/sidebar truncation + SkyReels media/diffusion monitoring (v0.7.31–0.7.33)
+
+Prompt: "the text in our legends (and other little sidebars) keeps getting
+truncated!" — plus a follow-up that `[i]` inference mode showed nothing for a
+SkyReels model.
+
+* **Legend/overlay truncation (v0.7.31).** `render_overlay_panel` (legend / help
+  / explain overlay in `src/ui/tui/mod.rs`) hardcoded `PANEL_W = 42`, but content
+  lines run 50–66 display columns. `Paragraph` clips (doesn't wrap), so every long
+  line lost its tail (e.g. the `/serve` help line dropped "(plaintext,
+  trusted-LAN)"). Now the panel measures its widest content line in real display
+  columns (new `line_cols` helper via `unicode-width`, matching `arcade.rs`) and
+  sizes itself to fit, clamped to the terminal. Regression test:
+  `overlay_panel_does_not_truncate_wide_content`. The kill-confirm dialog
+  (`render_kill_dialog`, also 42-wide) is fine — it deliberately truncates the
+  process name to 14 chars.
+
+* **SkyReels / media-server metrics (v0.7.32 initial cut, corrected in v0.7.33).**
+  The metrics layer only parsed the `vllm:` namespace, so diffusion/video servers
+  (**tt-media-inference-server**: SkyReels, SDXL, z-image) showed a blank `[i]`
+  panel — they expose a *different* namespace, `tt_media_server_*`, on the same
+  `/metrics` endpoint the monitor already scrapes, and tokens/sec is meaningless
+  for diffusion anyway. Added `parse_media_metrics` + `MediaCounters`/`MediaStats`
+  (+ `fold`) in `metrics.rs`; `ServiceState.media: Option<MediaStats>`, folded in
+  `monitor.rs` alongside `serving` (mutually exclusive — a scrape carries one
+  namespace or the other); reused the Feeding snake (`serving_creature.rs`) via a
+  workload-agnostic `CreatureDrive` (headline generations/min + seconds-per-gen;
+  the LLM path is byte-for-byte unchanged, and swimlanes are gated to vLLM so a
+  diffusion box never draws empty "requests" lanes). Remote wire: `RemoteMedia` on
+  `RemoteInference` (`#[serde(default)]` for back-compat), mapped both directions.
+
+* **Metric names corrected against a LIVE server (v0.7.33).** The 0.7.32 parser
+  used doc-derived names that don't exist on the real
+  `tt-media-inference-server:0.15.0` — so a live SkyReels box showed nothing when
+  load was sent. Curled the real `:8000/metrics` and fixed against ground truth:
+  - Real signals: `tt_media_server_requests_base_total` (completed),
+    **`tt_media_server_jobs_in_progress`** (in-flight gauge — the "acking" signal
+    that was missing), `tt_media_server_requests_base_duration_seconds_total`
+    histogram (end-to-end per-gen wall time), `tt_media_server_post_processing_*`.
+    The doc names `model_inference_total`/`pre_processing`/`device_warmup` are
+    NOT emitted (parsed best-effort, shown only if non-zero).
+  - **Duplicate-series gotcha:** that build (prometheus multiprocess) emits every
+    series *twice*, byte-identical. The summing parser doubled everything → now
+    dedupes by `name{labels}` identity while still summing distinct label sets.
+  - `jobs_in_progress` drives the snake body length + keeps it animated while
+    work is in flight (rate/completions are rare — a clip takes minutes). Panel
+    leads with "in flight N"; roster shows "N in flight · M done".
+  - Live readiness: `/health`→200 `{}`, `/tt-liveness`→`model_ready:true` +
+    `queue_size` + `runner_in_use`; generic tracking uses `/health` (200→Ready).
+  - Verified end-to-end: real full `/metrics` → `requests_total=1,
+    jobs_in_progress=2, duration=612s` (no doubling).
+  - ⚠️ Metric shape is version-specific; re-curl `/metrics` when the server image
+    changes.
+
 ---
 
 ## Phase 21: Hardware Plurality — Single-Chip Cards + Multi-Distro .deb (April 29, 2026)
