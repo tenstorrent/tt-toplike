@@ -2429,29 +2429,58 @@ fn render_command_bar(f: &mut Frame, cmd_buf: &str, msg: Option<(&str, bool)>) {
     );
 }
 
+/// Display width (terminal columns) of a fully-styled line: the sum of every
+/// span's unicode display width, so box-drawing, arrows and emoji count as the
+/// columns they actually occupy rather than as byte or `char` counts.
+fn line_cols(line: &Line<'_>) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    line.spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum()
+}
+
 /// Render the floating overlay panel (legend / help / explain) anchored to the
 /// bottom-right corner.  No right-side border characters per project convention.
 ///
 /// The panel composites over whatever view is underneath — it does not consume
-/// any layout rows.  Width is fixed at 40 columns; height grows with content.
+/// any layout rows.  Width adapts to the widest content line (clamped to the
+/// terminal) so legend/help text is never clipped; height grows with content.
 fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
     let area = f.area();
-    const PANEL_W: u16 = 42;
     // Enforce minimum terminal size — skip if it would leave no room.
-    if area.width < PANEL_W + 4 || area.height < 6 {
+    if area.width < 24 || area.height < 6 {
         return;
     }
 
     let lines = overlay_panel_lines(kind, mode);
+
+    // Title + accent per panel kind (used for the header and to size the panel).
+    let (title, border_color) = match kind {
+        OverlayPanel::Legend => ("LEGEND", colors::rgb(79, 209, 197)), // teal
+        OverlayPanel::Help => ("HELP", colors::rgb(220, 180, 80)),     // gold
+        OverlayPanel::Explain => ("EXPLAIN", colors::rgb(180, 140, 255)), // lavender
+    };
+
+    // Width adapts to the widest content line so nothing is clipped. Content
+    // lines already include the "║ " left border (there is no right border per
+    // project convention), so the widest line's display width is exactly the
+    // width the panel needs. The header ("╔═ TITLE ═…") sets a floor. Add one
+    // trailing padding column, then clamp to the terminal so a narrow screen
+    // can't push the panel off-screen.
+    let title_floor = title.chars().count() + 6; // "╔═ " + title + " " + a little rule
+    let content_max = lines.iter().map(line_cols).max().unwrap_or(0);
+    let panel_w = ((content_max.max(title_floor) + 1) as u16).min(area.width.saturating_sub(2));
+
     let panel_h = (lines.len() as u16 + 2).min(area.height.saturating_sub(2)); // +2 for top/bottom border
 
-    let x = area.width.saturating_sub(PANEL_W);
+    let x = area.width.saturating_sub(panel_w);
     let y = area.height.saturating_sub(panel_h + 1); // +1 keeps above command bar row
 
     let panel_rect = Rect {
         x,
         y,
-        width: PANEL_W,
+        width: panel_w,
         height: panel_h,
     };
 
@@ -2462,13 +2491,8 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
     );
 
     // Build full display: top border + content lines + bottom border.
-    let (title, border_color) = match kind {
-        OverlayPanel::Legend => ("LEGEND", colors::rgb(79, 209, 197)), // teal
-        OverlayPanel::Help => ("HELP", colors::rgb(220, 180, 80)),     // gold
-        OverlayPanel::Explain => ("EXPLAIN", colors::rgb(180, 140, 255)), // lavender
-    };
-    let inner_w = PANEL_W.saturating_sub(2) as usize; // ╔ takes 1 col, no right border
-    let top_rule = "═".repeat(inner_w.saturating_sub(title.len() + 2));
+    // Header = "╔═ TITLE " (title.chars().count() + 4 cols) then a rule to panel_w.
+    let top_rule = "═".repeat((panel_w as usize).saturating_sub(title.chars().count() + 4));
     let mut display_lines: Vec<Line> = Vec::with_capacity(panel_h as usize);
 
     display_lines.push(Line::from(vec![
@@ -2486,7 +2510,7 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
         display_lines.push(line.clone());
     }
 
-    let bottom_rule = "═".repeat(PANEL_W.saturating_sub(1) as usize);
+    let bottom_rule = "═".repeat((panel_w as usize).saturating_sub(1));
     display_lines.push(Line::from(Span::styled(
         format!("╚{}", bottom_rule),
         Style::default().fg(colors::rgb(40, 55, 70)),
@@ -4057,6 +4081,36 @@ fn remote_serving_to_stats(
     }
 }
 
+/// Map the wire [`RemoteMedia`](crate::backend::RemoteMedia) shape back onto
+/// the local [`MediaStats`](crate::workload::inference_server::metrics::MediaStats)
+/// display struct. The rate/latency fields carry over directly; the cumulative
+/// `completed_total`/`errored_total` are restored into
+/// `counters.requests_total`/`errored_total` (the fields the roster and media
+/// panel read for "N done" / "errors N") so remote clients show real totals.
+/// The remaining counters exist only to compute local deltas and have no wire
+/// equivalent, so they stay `Default::default()`.
+#[cfg(feature = "remote")]
+fn remote_media_to_stats(
+    rm: &crate::backend::RemoteMedia,
+) -> crate::workload::inference_server::metrics::MediaStats {
+    crate::workload::inference_server::metrics::MediaStats {
+        generations_per_min: rm.generations_per_min,
+        jobs_in_progress: rm.jobs_in_progress,
+        completed_delta: rm.completed_delta,
+        errored_delta: rm.errored_delta,
+        duration_avg_s: rm.duration_avg_s,
+        post_avg_s: rm.post_avg_s,
+        pre_avg_s: rm.pre_avg_s,
+        inference_avg_s: rm.inference_avg_s,
+        warmup_avg_s: rm.warmup_avg_s,
+        counters: crate::workload::inference_server::MediaCounters {
+            requests_total: rm.completed_total,
+            errored_total: rm.errored_total,
+            ..Default::default()
+        },
+    }
+}
+
 /// Map one remote inference workload (from the `tt_toplike` frame extension)
 /// to the local [`ServiceState`](crate::workload::inference_server::ServiceState)
 /// the `[i]` view's snake/roster already know how to render.
@@ -4104,6 +4158,7 @@ fn remote_inference_to_service_state(
         progress: ri.progress,
         flat_ticks: 0,
         serving: ri.serving.as_ref().map(remote_serving_to_stats),
+        media: ri.media.as_ref().map(remote_media_to_stats),
     }
 }
 
@@ -4163,13 +4218,18 @@ fn inference_roster_lines(
             Phase::Ready => ("serving", colors::success()),
             Phase::Alarm => ("stalled", colors::error()),
         };
-        // Per-service stat: live rate when serving, else a load %, else nothing.
-        let stat = match &s.serving {
-            Some(sv) => format!(
+        // Per-service stat: live rate when serving (tok/s for vLLM, gen/min for
+        // media/diffusion), else a load %, else nothing.
+        let stat = match (&s.serving, &s.media) {
+            (Some(sv), _) => format!(
                 "{:.0} tok/s · {} run",
                 sv.generation_tps, sv.requests_running
             ),
-            None => match s.progress {
+            (None, Some(m)) => format!(
+                "{} in flight · {} done",
+                m.jobs_in_progress, m.counters.requests_total
+            ),
+            (None, None) => match s.progress {
                 Some(p) => format!("{:.0}%", (p * 100.0).clamp(0.0, 100.0)),
                 None => String::new(),
             },
@@ -5860,6 +5920,7 @@ mod inference_roster_tests {
             progress: None,
             flat_ticks: 0,
             serving: None,
+            media: None,
         }
     }
 
@@ -5908,6 +5969,78 @@ mod inference_roster_tests {
             "header notes the hidden services: {}",
             text(&lines[0])
         );
+    }
+
+    #[test]
+    fn roster_stat_is_gen_in_flight_for_media_tok_s_for_vllm() {
+        use crate::workload::inference_server::metrics::{MediaStats, ServingStats};
+
+        // A vLLM service reports tok/s + running; a media service reports the
+        // in-flight/done generations (never tok/s, which is meaningless for it).
+        let mut vllm = svc("v", "Qwen3-32B", Phase::Ready);
+        vllm.serving = Some(ServingStats {
+            generation_tps: 842.0,
+            requests_running: 3,
+            ..serving_zero()
+        });
+        let mut media = svc("m", "SkyReels-V2-I2V", Phase::Ready);
+        media.media = Some(MediaStats {
+            jobs_in_progress: 2,
+            counters: crate::workload::inference_server::MediaCounters {
+                requests_total: 43,
+                ..Default::default()
+            },
+            ..media_zero()
+        });
+
+        let lines = inference_roster_lines(&[vllm, media], 100);
+        let joined: String = lines.iter().map(text).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("842 tok/s · 3 run"), "vLLM row: {joined}");
+        assert!(
+            joined.contains("2 in flight · 43 done"),
+            "media row: {joined}"
+        );
+        assert!(
+            !joined.contains("tok/s · 43") && !joined.contains("SkyReels-V2-I2V  842"),
+            "media row must not borrow the vLLM tok/s formatting"
+        );
+    }
+
+    /// All-zero `ServingStats` so a test overrides only the fields it cares about.
+    fn serving_zero() -> crate::workload::inference_server::metrics::ServingStats {
+        crate::workload::inference_server::metrics::ServingStats {
+            generation_tps: 0.0,
+            prompt_tps: 0.0,
+            requests_running: 0,
+            requests_waiting: 0,
+            kv_cache_usage: 0.0,
+            ttft_avg_s: 0.0,
+            queue_avg_s: 0.0,
+            prefill_avg_s: 0.0,
+            decode_avg_s: 0.0,
+            tpot_avg_s: 0.0,
+            completed_delta: 0,
+            errored_delta: 0,
+            prefix_hit_rate: 0.0,
+            preemptions_delta: 0,
+            counters: Default::default(),
+        }
+    }
+
+    /// All-zero `MediaStats` so a test overrides only the fields it cares about.
+    fn media_zero() -> crate::workload::inference_server::metrics::MediaStats {
+        crate::workload::inference_server::metrics::MediaStats {
+            generations_per_min: 0.0,
+            jobs_in_progress: 0,
+            completed_delta: 0,
+            errored_delta: 0,
+            duration_avg_s: 0.0,
+            post_avg_s: 0.0,
+            pre_avg_s: 0.0,
+            inference_avg_s: 0.0,
+            warmup_avg_s: 0.0,
+            counters: Default::default(),
+        }
     }
 }
 
@@ -6003,6 +6136,7 @@ mod remote_mapper_tests {
             phase: "ready".to_string(),
             progress: Some(1.0),
             serving: Some(serving),
+            media: None,
         };
         let state = remote_inference_to_service_state(&ri);
         assert_eq!(state.key, "vllm-llama3-70b");
@@ -6044,6 +6178,7 @@ mod remote_mapper_tests {
             phase: "down".into(),
             progress: None,
             serving: None,
+            media: None,
         };
         let state = remote_inference_to_service_state(&down);
         assert_eq!(state.phase, Phase::Down);
@@ -6057,6 +6192,7 @@ mod remote_mapper_tests {
             phase: "loading".into(),
             progress: Some(0.4),
             serving: None,
+            media: None,
         };
         let state = remote_inference_to_service_state(&loading);
         assert_eq!(state.phase, Phase::Loading);
@@ -6072,10 +6208,50 @@ mod remote_mapper_tests {
             phase: "totally-unknown".into(),
             progress: None,
             serving: None,
+            media: None,
         };
         let state = remote_inference_to_service_state(&ri);
         assert_eq!(state.phase, Phase::Down);
         assert_eq!(state.readiness, Readiness::Down);
+    }
+
+    #[test]
+    fn remote_media_maps_through_with_completed_total_for_done_count() {
+        // Regression (PR #21 review): a remote media workload must NOT read
+        // "0 done". `completed_total` crosses the wire and is restored into
+        // `counters.requests_total` (the field the roster/panel show as "done").
+        let ri = RemoteInference {
+            key: "sky".into(),
+            label: "SkyReels-V2-I2V".into(),
+            phase: "ready".into(),
+            progress: None,
+            serving: None,
+            media: Some(crate::backend::RemoteMedia {
+                generations_per_min: 2.1,
+                jobs_in_progress: 2,
+                completed_total: 43,
+                errored_total: 2,
+                completed_delta: 1,
+                errored_delta: 0,
+                duration_avg_s: 612.0,
+                post_avg_s: 0.32,
+                pre_avg_s: 0.0,
+                inference_avg_s: 0.0,
+                warmup_avg_s: 0.0,
+            }),
+        };
+        let state = remote_inference_to_service_state(&ri);
+        assert!(state.serving.is_none());
+        let m = state.media.expect("media maps through");
+        assert_eq!(m.jobs_in_progress, 2);
+        assert_eq!(
+            m.counters.requests_total, 43,
+            "completed_total restored into counters → roster shows '43 done', not 0"
+        );
+        assert_eq!(
+            m.counters.errored_total, 2,
+            "errored_total restored into counters → media panel shows 'errors 2', not 0"
+        );
     }
 }
 
@@ -6115,6 +6291,61 @@ mod host_default_screen_tests {
             glyphs > 20,
             "host default screen must not be blank (only {glyphs} non-space glyphs)"
         );
+    }
+
+    /// Regression: the legend/help/explain overlay panel was a fixed 42 columns
+    /// wide while its content lines are 50–66 display columns, so `Paragraph`
+    /// (which clips, not wraps) silently truncated the tail of every long line
+    /// — e.g. the `/serve` help line lost "(plaintext, trusted-LAN)". The panel
+    /// now sizes itself to the widest content line. Render each overlay on a
+    /// roomy terminal and assert the full text of the widest line survives.
+    #[test]
+    fn overlay_panel_does_not_truncate_wide_content() {
+        use super::{
+            line_cols, overlay_panel_lines, render_overlay_panel, DisplayMode, OverlayPanel,
+        };
+
+        // Terminal wide enough that the panel is never terminal-clamped.
+        let (w, h) = (140u16, 44u16);
+        let cases = [
+            (OverlayPanel::Help, DisplayMode::Insights),
+            (OverlayPanel::Legend, DisplayMode::Insights),
+            (OverlayPanel::Legend, DisplayMode::InferenceMonitor),
+            (OverlayPanel::Explain, DisplayMode::Insights),
+        ];
+        for (kind, mode) in cases {
+            // The widest content line for this panel, as plain text.
+            let widest: String = overlay_panel_lines(kind, mode)
+                .into_iter()
+                .max_by_key(|l| line_cols(l))
+                .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+                .unwrap_or_default();
+            // Trim the "║ " border prefix and surrounding whitespace for the search.
+            let needle: String = widest.trim_start_matches('║').trim().to_string();
+
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
+            terminal
+                .draw(|f| render_overlay_panel(f, kind, mode))
+                .expect("draw");
+
+            // Flatten the buffer row-by-row so a single on-screen line stays contiguous.
+            let buf = terminal.backend().buffer().clone();
+            let mut rows: Vec<String> = Vec::new();
+            for y in 0..buf.area.height {
+                let mut row = String::new();
+                for x in 0..buf.area.width {
+                    row.push_str(buf[(x, y)].symbol());
+                }
+                rows.push(row);
+            }
+            let painted = rows.join("\n");
+
+            assert!(
+                painted.contains(&needle),
+                "{kind:?}/{mode:?}: widest legend line was truncated.\n\
+                 expected to find: {needle:?}\nrendered:\n{painted}"
+            );
+        }
     }
 
     /// Regression: the Grid title / device labels contain a multibyte `│`, so a
@@ -6321,6 +6552,7 @@ pub fn run_render_bench(
             progress: None,
             flat_ticks: 0,
             serving,
+            media: None,
         };
         // 4 models → the featured one Feeds the full serving dashboard, and the
         // roster lists all four (the multi-model case the view now handles).

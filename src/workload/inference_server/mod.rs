@@ -16,7 +16,9 @@ mod state;
 
 pub use detect::{parse_inference_server, InferenceServer, Source};
 pub use logs::last_non_health_line;
-pub use metrics::{parse_vllm_metrics, ServingStats, VllmCounters};
+pub use metrics::{
+    parse_media_metrics, parse_vllm_metrics, MediaCounters, MediaStats, ServingStats, VllmCounters,
+};
 pub use monitor::{InferenceServerMonitor, CADENCE_SECS};
 pub use probe::{
     count_lines, parse_docker_stats, parse_env_var, parse_liveness, top_process, ContainerProbe,

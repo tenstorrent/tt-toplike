@@ -94,8 +94,14 @@ pub struct RemoteInference {
     pub phase: String,
     /// Compile/load progress in `[0.0, 1.0]`, if known (`None` outside those phases).
     pub progress: Option<f32>,
-    /// Live serving metrics, present only once the workload is actually serving.
+    /// Live vLLM serving metrics, present only once an LLM workload is serving.
     pub serving: Option<RemoteServing>,
+    /// Live media/diffusion metrics (tt-media-inference-server, e.g. SkyReels),
+    /// present only once such a workload is serving. Mutually exclusive with
+    /// `serving`. `#[serde(default)]` so a frame from a peer that predates this
+    /// field still decodes (the key is simply absent → `None`).
+    #[serde(default)]
+    pub media: Option<RemoteMedia>,
 }
 
 /// Serving metrics mirrored from the *display* fields of
@@ -119,6 +125,36 @@ pub struct RemoteServing {
     pub errored_delta: u32,
     pub prefix_hit_rate: f32,
     pub preemptions_delta: u32,
+}
+
+/// Media/diffusion metrics mirrored from the *display* fields of
+/// `crate::workload::inference_server::metrics::MediaStats`. As with
+/// [`RemoteServing`], the raw histogram/rate `MediaCounters` used only to
+/// compute local deltas are excluded — except the two **cumulative** counters
+/// the UI displays directly: `completed_total` ("N done") and `errored_total`
+/// ("errors N"). Both are carried so a remote client shows real totals instead
+/// of the default 0 the counters would otherwise reconstruct to.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RemoteMedia {
+    pub generations_per_min: f32,
+    /// In-flight generations (the `jobs_in_progress` gauge) — the acking signal.
+    pub jobs_in_progress: u32,
+    /// Cumulative completed generations, shown as "N done". `#[serde(default)]`
+    /// so a frame from a peer that predates this field decodes to 0.
+    #[serde(default)]
+    pub completed_total: u64,
+    /// Cumulative errored generations, shown as "errors N". `#[serde(default)]`
+    /// for the same back-compat reason as `completed_total`.
+    #[serde(default)]
+    pub errored_total: u64,
+    pub completed_delta: u32,
+    pub errored_delta: u32,
+    /// End-to-end per-generation wall time (seconds).
+    pub duration_avg_s: f32,
+    pub post_avg_s: f32,
+    pub pre_avg_s: f32,
+    pub inference_avg_s: f32,
+    pub warmup_avg_s: f32,
 }
 
 /// Build a [`TtToplikeExt`] payload from this box's local process list and
@@ -169,6 +205,7 @@ fn remote_inference_from_state(
         phase: phase_str(state.phase).to_string(),
         progress: state.progress,
         serving: state.serving.as_ref().map(remote_serving_from_stats),
+        media: state.media.as_ref().map(remote_media_from_stats),
     }
 }
 
@@ -205,6 +242,27 @@ fn remote_serving_from_stats(
         errored_delta: stats.errored_delta,
         prefix_hit_rate: stats.prefix_hit_rate,
         preemptions_delta: stats.preemptions_delta,
+    }
+}
+
+/// Map the display fields of `MediaStats` onto the wire [`RemoteMedia`] shape.
+/// The cumulative `completed_total` is carried (it's a displayed "N done");
+/// the rest of the raw counters are excluded, as with `remote_serving_from_stats`.
+fn remote_media_from_stats(
+    stats: &crate::workload::inference_server::metrics::MediaStats,
+) -> RemoteMedia {
+    RemoteMedia {
+        generations_per_min: stats.generations_per_min,
+        jobs_in_progress: stats.jobs_in_progress,
+        completed_total: stats.counters.requests_total,
+        errored_total: stats.counters.errored_total,
+        completed_delta: stats.completed_delta,
+        errored_delta: stats.errored_delta,
+        duration_avg_s: stats.duration_avg_s,
+        post_avg_s: stats.post_avg_s,
+        pre_avg_s: stats.pre_avg_s,
+        inference_avg_s: stats.inference_avg_s,
+        warmup_avg_s: stats.warmup_avg_s,
     }
 }
 
@@ -316,6 +374,7 @@ mod tests {
                     prefix_hit_rate: 0.61,
                     preemptions_delta: 2,
                 }),
+                media: None,
             }]),
         }
     }
@@ -474,6 +533,7 @@ mod tests {
                 preemptions_delta: 2,
                 counters: Default::default(),
             }),
+            media: None,
         }];
 
         let ext = build_extension(&procs, &inference);
@@ -486,5 +546,97 @@ mod tests {
         assert_eq!(inference_out.len(), 1);
         assert_eq!(inference_out[0].phase, "ready");
         assert!(inference_out[0].serving.is_some());
+    }
+
+    /// A media/diffusion `ServiceState` must survive the full wire trip
+    /// (`build_extension` → `inject_extension` → `parse_extension`) with its
+    /// media stats — crucially the in-flight `jobs_in_progress` gauge — intact,
+    /// `serving` absent, and the whole frame byte-stable through serde.
+    #[test]
+    fn build_extension_round_trips_media_workload() {
+        use crate::workload::inference_server::metrics::MediaStats;
+        use crate::workload::inference_server::{Phase, Readiness, ServiceState};
+
+        let inference = vec![ServiceState {
+            key: "tt-skyreels-v2-i2v".to_string(),
+            label: "SkyReels-V2-I2V".to_string(),
+            phase: Phase::Ready,
+            cpu_pct: 12.0,
+            rss_bytes: 1024,
+            rss_delta: 0,
+            kernel_count: 0,
+            kernel_delta: 0,
+            loaded_count: 0,
+            loaded_delta: 0,
+            safetensors_fds: 0,
+            readiness: Readiness::Ready { runner: None },
+            top_proc: None,
+            last_log: None,
+            progress: None,
+            flat_ticks: 0,
+            serving: None,
+            media: Some(MediaStats {
+                generations_per_min: 2.1,
+                jobs_in_progress: 3,
+                completed_delta: 1,
+                errored_delta: 0,
+                duration_avg_s: 612.0,
+                post_avg_s: 0.32,
+                pre_avg_s: 0.0,
+                inference_avg_s: 0.0,
+                warmup_avg_s: 0.0,
+                counters: crate::workload::inference_server::MediaCounters {
+                    requests_total: 43,
+                    errored_total: 2,
+                    ..Default::default()
+                },
+            }),
+        }];
+
+        // build → inject → parse round-trips the media sub-shape through serde.
+        let ext = build_extension(&[], &inference);
+        let frame = inject_extension(MINIMAL_TTSMI_JSON, &ext);
+        let parsed = parse_extension(&frame).expect("extension parses back out");
+
+        let out = parsed.inference.expect("inference present");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].phase, "ready");
+        assert!(
+            out[0].serving.is_none(),
+            "media workload carries no serving"
+        );
+        let m = out[0].media.as_ref().expect("media stats survive the wire");
+        assert_eq!(m.jobs_in_progress, 3, "the in-flight gauge round-trips");
+        assert_eq!(m.completed_delta, 1);
+        assert_eq!(
+            m.completed_total, 43,
+            "cumulative 'done' count crosses the wire (not reset to 0)"
+        );
+        assert_eq!(
+            m.errored_total, 2,
+            "cumulative 'errors' count crosses the wire too"
+        );
+        assert!((m.generations_per_min - 2.1).abs() < 1e-6);
+        assert!((m.duration_avg_s - 612.0).abs() < 1e-4);
+    }
+
+    /// Back-compat: a frame from a peer that predates the `media` field (key
+    /// simply absent) must still decode, with `media` defaulting to `None`
+    /// rather than failing the whole parse. Guards the `#[serde(default)]`.
+    #[test]
+    fn inference_without_media_key_decodes_as_none() {
+        let frame = inject_extension(MINIMAL_TTSMI_JSON, &sample_ext());
+        // Strip the `media` key from every inference entry to mimic an older peer.
+        let mut value: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        for inf in value["tt_toplike"]["inference"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+        {
+            inf.as_object_mut().unwrap().remove("media");
+        }
+        let stripped = serde_json::to_string(&value).unwrap();
+        let parsed = parse_extension(&stripped).expect("older-peer frame still parses");
+        assert!(parsed.inference.unwrap()[0].media.is_none());
     }
 }

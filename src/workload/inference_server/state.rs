@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-use crate::workload::inference_server::metrics::ServingStats;
+use crate::workload::inference_server::metrics::{MediaStats, ServingStats};
 use crate::workload::inference_server::probe::Readiness;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +109,10 @@ pub struct ServiceState {
     /// Folded vLLM `/metrics` telemetry (rates/gauges), `None` when the
     /// service doesn't serve a `/metrics` endpoint or it hasn't parsed yet.
     pub serving: Option<ServingStats>,
+    /// Folded tt-media-inference-server `/metrics` telemetry (diffusion/video
+    /// models like SkyReels), `None` for vLLM/non-media servers. Mutually
+    /// exclusive with `serving` — a server exposes one namespace or the other.
+    pub media: Option<MediaStats>,
 }
 
 #[cfg(test)]
