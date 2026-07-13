@@ -610,9 +610,19 @@ mod tests {
             &ModelProfile::default(),
             5,
         );
-        assert!(s1.media.is_some(), "media populated when media metrics present");
-        assert!(s1.serving.is_none(), "media scrape must not populate serving");
-        assert_eq!(s1.media.unwrap().jobs_in_progress, 2, "in-flight gauge folded");
+        assert!(
+            s1.media.is_some(),
+            "media populated when media metrics present"
+        );
+        assert!(
+            s1.serving.is_none(),
+            "media scrape must not populate serving"
+        );
+        assert_eq!(
+            s1.media.unwrap().jobs_in_progress,
+            2,
+            "in-flight gauge folded"
+        );
         // Next tick: +1 completed generation over 5s = 12/min (rate needs prev).
         let s2 = fold_tick(
             &s1,

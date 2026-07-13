@@ -546,8 +546,7 @@ impl ServingCreature {
         // A media workload has `running = jobs_in_progress` but no such stage
         // times, so gate on `serving` — otherwise a diffusion box with jobs in
         // flight would draw a bogus "requests"/"#1" region with zero-width bars.
-        let want_swim =
-            self.serving.is_some() && width >= 70 && mid_rows >= 6 && snake_right >= 8;
+        let want_swim = self.serving.is_some() && width >= 70 && mid_rows >= 6 && snake_right >= 8;
         let max_lanes = if want_swim {
             5usize.min(mid_rows.saturating_sub(2)).max(1)
         } else {
@@ -1021,9 +1020,17 @@ mod tests {
         // The snake body length must track in-flight jobs (the acking signal),
         // so sending load visibly lengthens/animates the creature.
         let mut idle = ServingCreature::new();
-        idle.update(&ready_media_svc("SkyReels", media_stats(0.0, 5, 0, 0)), 60, &[]);
+        idle.update(
+            &ready_media_svc("SkyReels", media_stats(0.0, 5, 0, 0)),
+            60,
+            &[],
+        );
         let mut busy = ServingCreature::new();
-        busy.update(&ready_media_svc("SkyReels", media_stats(0.0, 5, 3, 0)), 60, &[]);
+        busy.update(
+            &ready_media_svc("SkyReels", media_stats(0.0, 5, 3, 0)),
+            60,
+            &[],
+        );
         assert_eq!(idle.drive().running, 0, "no jobs → base body");
         assert_eq!(busy.drive().running, 3, "3 jobs in flight → longer body");
         assert!(

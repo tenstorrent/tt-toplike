@@ -583,7 +583,10 @@ mod tests {
         let out = parsed.inference.expect("inference present");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].phase, "ready");
-        assert!(out[0].serving.is_none(), "media workload carries no serving");
+        assert!(
+            out[0].serving.is_none(),
+            "media workload carries no serving"
+        );
         let m = out[0].media.as_ref().expect("media stats survive the wire");
         assert_eq!(m.jobs_in_progress, 3, "the in-flight gauge round-trips");
         assert_eq!(m.completed_delta, 1);

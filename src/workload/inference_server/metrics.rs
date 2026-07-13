@@ -210,21 +210,36 @@ pub fn parse_media_metrics(text: &str) -> Option<MediaCounters> {
         } else if is_metric(line, "tt_media_server_jobs_in_progress") {
             // A gauge (not cumulative); summed across model_type for a fleet total.
             c.jobs_in_progress += v.max(0.0) as u32;
-        } else if is_metric(line, "tt_media_server_requests_base_duration_seconds_total_sum") {
+        } else if is_metric(
+            line,
+            "tt_media_server_requests_base_duration_seconds_total_sum",
+        ) {
             c.duration_sum += v.max(0.0);
-        } else if is_metric(line, "tt_media_server_requests_base_duration_seconds_total_count") {
+        } else if is_metric(
+            line,
+            "tt_media_server_requests_base_duration_seconds_total_count",
+        ) {
             c.duration_count += v.max(0.0) as u64;
         } else if is_metric(line, "tt_media_server_post_processing_duration_seconds_sum") {
             c.post_sum += v.max(0.0);
-        } else if is_metric(line, "tt_media_server_post_processing_duration_seconds_count") {
+        } else if is_metric(
+            line,
+            "tt_media_server_post_processing_duration_seconds_count",
+        ) {
             c.post_count += v.max(0.0) as u64;
         } else if is_metric(line, "tt_media_server_pre_processing_duration_seconds_sum") {
             c.pre_sum += v.max(0.0);
-        } else if is_metric(line, "tt_media_server_pre_processing_duration_seconds_count") {
+        } else if is_metric(
+            line,
+            "tt_media_server_pre_processing_duration_seconds_count",
+        ) {
             c.pre_count += v.max(0.0) as u64;
         } else if is_metric(line, "tt_media_server_model_inference_duration_seconds_sum") {
             c.inference_sum += v.max(0.0);
-        } else if is_metric(line, "tt_media_server_model_inference_duration_seconds_count") {
+        } else if is_metric(
+            line,
+            "tt_media_server_model_inference_duration_seconds_count",
+        ) {
             c.inference_count += v.max(0.0) as u64;
         } else if is_metric(line, "tt_media_server_device_warmup_duration_seconds_sum") {
             c.warmup_sum += v.max(0.0);
@@ -319,7 +334,12 @@ impl MediaStats {
                 |c| c.duration_sum,
                 |c| c.duration_count,
             ),
-            post_avg_s: avg(cur.post_sum, cur.post_count, |c| c.post_sum, |c| c.post_count),
+            post_avg_s: avg(
+                cur.post_sum,
+                cur.post_count,
+                |c| c.post_sum,
+                |c| c.post_count,
+            ),
             pre_avg_s: avg(cur.pre_sum, cur.pre_count, |c| c.pre_sum, |c| c.pre_count),
             inference_avg_s: avg(
                 cur.inference_sum,
@@ -715,7 +735,10 @@ tt_media_server_jobs_in_progress{model_type=\"m\",device_id=\"3\"} 2.0
 tt_media_server_jobs_in_progress{model_type=\"m\",device_id=\"2\"} 1.0
 ";
         let c = parse_media_metrics(text).unwrap();
-        assert_eq!(c.jobs_in_progress, 3, "1 (dev2) + 2 (dev3); dup dev2 ignored");
+        assert_eq!(
+            c.jobs_in_progress, 3,
+            "1 (dev2) + 2 (dev3); dup dev2 ignored"
+        );
     }
 
     #[test]
@@ -727,7 +750,10 @@ tt_media_server_jobs_in_progress{model_type=\"m\",device_id=\"2\"} 1.0
         // (a ~1.78e9 unix timestamp) leaked into any sum it would be enormous.
         assert_eq!(c.duration_count, 1);
         assert!(c.duration_sum < 1_000.0, "no _created timestamp leaked in");
-        assert!(c.requests_total < 10, "no _created leaked into requests_total");
+        assert!(
+            c.requests_total < 10,
+            "no _created leaked into requests_total"
+        );
     }
 
     #[test]

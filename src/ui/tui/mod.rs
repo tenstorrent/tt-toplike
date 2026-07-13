@@ -2470,8 +2470,7 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
     // can't push the panel off-screen.
     let title_floor = title.chars().count() + 6; // "╔═ " + title + " " + a little rule
     let content_max = lines.iter().map(line_cols).max().unwrap_or(0);
-    let panel_w =
-        ((content_max.max(title_floor) + 1) as u16).min(area.width.saturating_sub(2));
+    let panel_w = ((content_max.max(title_floor) + 1) as u16).min(area.width.saturating_sub(2));
 
     let panel_h = (lines.len() as u16 + 2).min(area.height.saturating_sub(2)); // +2 for top/bottom border
 
@@ -2493,8 +2492,7 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
 
     // Build full display: top border + content lines + bottom border.
     // Header = "╔═ TITLE " (title.chars().count() + 4 cols) then a rule to panel_w.
-    let top_rule =
-        "═".repeat((panel_w as usize).saturating_sub(title.chars().count() + 4));
+    let top_rule = "═".repeat((panel_w as usize).saturating_sub(title.chars().count() + 4));
     let mut display_lines: Vec<Line> = Vec::with_capacity(panel_h as usize);
 
     display_lines.push(Line::from(vec![
@@ -4215,7 +4213,10 @@ fn inference_roster_lines(
         // Per-service stat: live rate when serving (tok/s for vLLM, gen/min for
         // media/diffusion), else a load %, else nothing.
         let stat = match (&s.serving, &s.media) {
-            (Some(sv), _) => format!("{:.0} tok/s · {} run", sv.generation_tps, sv.requests_running),
+            (Some(sv), _) => format!(
+                "{:.0} tok/s · {} run",
+                sv.generation_tps, sv.requests_running
+            ),
             (None, Some(m)) => format!(
                 "{} in flight · {} done",
                 m.jobs_in_progress, m.counters.requests_total
@@ -5987,7 +5988,10 @@ mod inference_roster_tests {
         let lines = inference_roster_lines(&[vllm, media], 100);
         let joined: String = lines.iter().map(text).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("842 tok/s · 3 run"), "vLLM row: {joined}");
-        assert!(joined.contains("2 in flight · 43 done"), "media row: {joined}");
+        assert!(
+            joined.contains("2 in flight · 43 done"),
+            "media row: {joined}"
+        );
         assert!(
             !joined.contains("tok/s · 43") && !joined.contains("SkyReels-V2-I2V  842"),
             "media row must not borrow the vLLM tok/s formatting"
