@@ -252,7 +252,7 @@ impl ServingCreature {
             CreatureDrive {
                 timeline_value: m.generations_per_min,
                 timeline_label: "gen/min",
-                value_decimals: 2,
+                value_decimals: 1,
                 amp_norm: amp,
                 // A short exhaust plume while work is in flight; a completion
                 // this tick also fires the head pulse (see `update`).
@@ -314,7 +314,7 @@ impl ServingCreature {
         }
         rows.push((String::new(), val));
         hdr(&mut rows, "throughput");
-        rows.push((format!("  gen/min  {:.2}", m.generations_per_min), val));
+        rows.push((format!("  gen/min  {:.1}", m.generations_per_min), val));
         rows.push((format!("  per gen  {}", secs(m.duration_avg_s)), val));
         rows.push((String::new(), val));
         // Pipeline stages: show only the ones this server actually reports

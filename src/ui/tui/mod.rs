@@ -4083,8 +4083,11 @@ fn remote_serving_to_stats(
 
 /// Map the wire [`RemoteMedia`](crate::backend::RemoteMedia) shape back onto
 /// the local [`MediaStats`](crate::workload::inference_server::metrics::MediaStats)
-/// display struct. As with [`remote_serving_to_stats`], `counters` has no wire
-/// equivalent and stays `Default::default()`.
+/// display struct. The rate/latency fields carry over directly; the cumulative
+/// `completed_total` is restored into `counters.requests_total` (the field the
+/// roster and media panel read for "N done") so remote clients show the real
+/// completed count. The remaining counters exist only to compute local deltas
+/// and have no wire equivalent, so they stay `Default::default()`.
 #[cfg(feature = "remote")]
 fn remote_media_to_stats(
     rm: &crate::backend::RemoteMedia,
@@ -4099,7 +4102,10 @@ fn remote_media_to_stats(
         pre_avg_s: rm.pre_avg_s,
         inference_avg_s: rm.inference_avg_s,
         warmup_avg_s: rm.warmup_avg_s,
-        counters: Default::default(),
+        counters: crate::workload::inference_server::MediaCounters {
+            requests_total: rm.completed_total,
+            ..Default::default()
+        },
     }
 }
 
@@ -6205,6 +6211,40 @@ mod remote_mapper_tests {
         let state = remote_inference_to_service_state(&ri);
         assert_eq!(state.phase, Phase::Down);
         assert_eq!(state.readiness, Readiness::Down);
+    }
+
+    #[test]
+    fn remote_media_maps_through_with_completed_total_for_done_count() {
+        // Regression (PR #21 review): a remote media workload must NOT read
+        // "0 done". `completed_total` crosses the wire and is restored into
+        // `counters.requests_total` (the field the roster/panel show as "done").
+        let ri = RemoteInference {
+            key: "sky".into(),
+            label: "SkyReels-V2-I2V".into(),
+            phase: "ready".into(),
+            progress: None,
+            serving: None,
+            media: Some(crate::backend::RemoteMedia {
+                generations_per_min: 2.1,
+                jobs_in_progress: 2,
+                completed_total: 43,
+                completed_delta: 1,
+                errored_delta: 0,
+                duration_avg_s: 612.0,
+                post_avg_s: 0.32,
+                pre_avg_s: 0.0,
+                inference_avg_s: 0.0,
+                warmup_avg_s: 0.0,
+            }),
+        };
+        let state = remote_inference_to_service_state(&ri);
+        assert!(state.serving.is_none());
+        let m = state.media.expect("media maps through");
+        assert_eq!(m.jobs_in_progress, 2);
+        assert_eq!(
+            m.counters.requests_total, 43,
+            "completed_total restored into counters → roster shows '43 done', not 0"
+        );
     }
 }
 

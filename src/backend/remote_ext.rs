@@ -128,14 +128,21 @@ pub struct RemoteServing {
 }
 
 /// Media/diffusion metrics mirrored from the *display* fields of
-/// `crate::workload::inference_server::metrics::MediaStats` — like
-/// [`RemoteServing`], the raw [`MediaCounters`] are excluded since they exist
-/// only to compute local deltas.
+/// `crate::workload::inference_server::metrics::MediaStats`. As with
+/// [`RemoteServing`], the raw histogram/rate `MediaCounters` used only to
+/// compute local deltas are excluded — with one exception: `completed_total`,
+/// the cumulative completed-generation count, IS carried because the roster and
+/// media panel display it directly ("N done"). Without it a remote client would
+/// always read "0 done" (the counters otherwise reconstruct to their default).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RemoteMedia {
     pub generations_per_min: f32,
     /// In-flight generations (the `jobs_in_progress` gauge) — the acking signal.
     pub jobs_in_progress: u32,
+    /// Cumulative completed generations, shown as "N done". `#[serde(default)]`
+    /// so a frame from a peer that predates this field decodes to 0.
+    #[serde(default)]
+    pub completed_total: u64,
     pub completed_delta: u32,
     pub errored_delta: u32,
     /// End-to-end per-generation wall time (seconds).
@@ -234,14 +241,16 @@ fn remote_serving_from_stats(
     }
 }
 
-/// Map the display fields of `MediaStats` onto the wire [`RemoteMedia`] shape
-/// (raw counters deliberately excluded, as with [`remote_serving_from_stats`]).
+/// Map the display fields of `MediaStats` onto the wire [`RemoteMedia`] shape.
+/// The cumulative `completed_total` is carried (it's a displayed "N done");
+/// the rest of the raw counters are excluded, as with `remote_serving_from_stats`.
 fn remote_media_from_stats(
     stats: &crate::workload::inference_server::metrics::MediaStats,
 ) -> RemoteMedia {
     RemoteMedia {
         generations_per_min: stats.generations_per_min,
         jobs_in_progress: stats.jobs_in_progress,
+        completed_total: stats.counters.requests_total,
         completed_delta: stats.completed_delta,
         errored_delta: stats.errored_delta,
         duration_avg_s: stats.duration_avg_s,
@@ -571,7 +580,10 @@ mod tests {
                 pre_avg_s: 0.0,
                 inference_avg_s: 0.0,
                 warmup_avg_s: 0.0,
-                counters: Default::default(),
+                counters: crate::workload::inference_server::MediaCounters {
+                    requests_total: 43,
+                    ..Default::default()
+                },
             }),
         }];
 
@@ -590,6 +602,10 @@ mod tests {
         let m = out[0].media.as_ref().expect("media stats survive the wire");
         assert_eq!(m.jobs_in_progress, 3, "the in-flight gauge round-trips");
         assert_eq!(m.completed_delta, 1);
+        assert_eq!(
+            m.completed_total, 43,
+            "cumulative 'done' count crosses the wire (not reset to 0)"
+        );
         assert!((m.generations_per_min - 2.1).abs() < 1e-6);
         assert!((m.duration_avg_s - 612.0).abs() < 1e-4);
     }
