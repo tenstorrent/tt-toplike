@@ -79,8 +79,9 @@ struct CreatureDrive {
     exhaust: usize,
     /// Snake colour heat in `[0, 1]` (cool blue → hot red).
     heat: f32,
-    /// In-flight request count (snake body length) and queued count (trailing
-    /// pellets). Both 0 for media (no such gauge).
+    /// In-flight count (snake body length): vLLM `requests_running`, or the
+    /// media `jobs_in_progress` gauge. `waiting` (queued pellets) is
+    /// vLLM-only — media has no queue gauge, so it's 0 there.
     running: u32,
     waiting: u32,
     /// Completions this tick (fires the head pulse).
@@ -223,10 +224,11 @@ impl ServingCreature {
     /// workload-agnostic signals the animated snake reads, so the render path
     /// stays single. Returns all-zero calm defaults when neither is present.
     ///
-    /// For media there is no in-flight/queue gauge, so `running`/`waiting` are 0
-    /// (the snake shows its base length, gently breathing); throughput is
-    /// generations-per-minute rather than tok/s, and "heat" tracks activity
-    /// since diffusion servers expose no KV-cache gauge.
+    /// For media, `running` is driven by the `jobs_in_progress` gauge (so the
+    /// snake body grows with in-flight generations, just like vLLM
+    /// `requests_running`); there is no queue gauge, so `waiting` stays 0.
+    /// Throughput is generations-per-minute rather than tok/s, and "heat" tracks
+    /// activity since diffusion servers expose no KV-cache gauge.
     fn drive(&self) -> CreatureDrive {
         if let Some(s) = &self.serving {
             CreatureDrive {
