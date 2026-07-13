@@ -496,6 +496,7 @@ mod tests {
                 phase: "ready".into(),
                 progress: None,
                 serving: None,
+                media: None,
             }]),
         };
         let frame = inject_extension(MINIMAL_FRAME, &ext);

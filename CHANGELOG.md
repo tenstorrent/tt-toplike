@@ -14,6 +14,19 @@ git tag                        # released versions
 
 ## Recent releases
 
+### 0.7.33
+- **[i] media/diffusion monitoring** — SkyReels / SDXL / z-image servers
+  (tt-media-inference-server) now show live telemetry instead of a blank panel.
+  They expose a `tt_media_server_*` Prometheus namespace (not `vllm:`), so a
+  dedicated parser reads completed generations, the **in-flight `jobs_in_progress`
+  gauge**, and per-generation timing. The Feeding snake is reused: headline is
+  generations/min + seconds-per-gen, the body tracks in-flight jobs, and the
+  panel shows in-flight/done + stage times (no tok/s). Verified against a live
+  0.15.0 SkyReels box; dedupes the duplicate series that build emits.
+- Fix: the legend / help / explain overlay panel truncated its own text (fixed
+  42-col width vs 50–66-col content, and `Paragraph` clips instead of wrapping).
+  It now measures its widest line and sizes to fit, clamped to the terminal.
+
 ### 0.7.18
 - **`--remote <host[:port]>`** — watch a remote QuietBox's telemetry over a
   WebSocket stream (plaintext, unauthed: trusted-LAN only). Every visualization

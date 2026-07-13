@@ -703,6 +703,7 @@ mod tests {
                 phase: "ready".to_string(),
                 progress: None,
                 serving: None,
+                media: None,
             }]),
         };
         let frame_with_ext = inject_extension(FRAME, &ext);

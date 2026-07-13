@@ -27,7 +27,7 @@ use crate::animation::{
     value_to_char_intensity, ChipReading, BLOCK_CHARS,
 };
 use crate::ui::colors;
-use crate::workload::inference_server::{ServiceState, ServingStats};
+use crate::workload::inference_server::{MediaStats, ServiceState, ServingStats};
 use std::time::Instant;
 
 /// Frames a completion "pulse" glyph stays lit after `completed_delta > 0`.
@@ -36,6 +36,11 @@ const PULSE_FRAMES: u32 = 6;
 const FRAY_FRAMES: u32 = 8;
 /// `generation_tps` at/above which the wave reaches full amplitude/speed.
 const GEN_TPS_REF: f32 = 200.0;
+/// Media/diffusion analog of [`GEN_TPS_REF`]: generations-per-minute at/above
+/// which the wave reaches full amplitude. Diffusion throughput is orders of
+/// magnitude lower than token throughput (SkyReels ≈2 clips/min per device), so
+/// a busy multi-device box lands near full tilt without pinning a single one.
+const MEDIA_GEN_REF: f32 = 6.0;
 /// Max samples kept in the bounded throughput-history ring (the timeline the
 /// compositor sparklines). Oldest samples are dropped once this is exceeded.
 const HISTORY_CAP: usize = 64;
@@ -56,6 +61,41 @@ pub fn is_active(s: &ServingStats) -> bool {
     s.generation_tps > 0.5 || s.requests_running > 0 || s.requests_waiting > 0
 }
 
+/// Workload-agnostic drive signals the animated snake reads, so the render
+/// path is single across vLLM and media/diffusion workloads. Built by
+/// [`ServingCreature::drive`]; see there for the per-workload mapping.
+#[derive(Default)]
+struct CreatureDrive {
+    /// Timeline headline number and its unit label ("tok/s" | "gen/min").
+    timeline_value: f32,
+    timeline_label: &'static str,
+    /// Decimal places to render `timeline_value` with (tok/s is integer-ish,
+    /// gen/min wants one decimal).
+    value_decimals: usize,
+    /// Wave amplitude/speed normalization in `[0, 1]` (throughput vs a
+    /// per-workload reference).
+    amp_norm: f32,
+    /// Particle-exhaust glyph count trailing the head.
+    exhaust: usize,
+    /// Snake colour heat in `[0, 1]` (cool blue → hot red).
+    heat: f32,
+    /// In-flight request count (snake body length) and queued count (trailing
+    /// pellets). Both 0 for media (no such gauge).
+    running: u32,
+    waiting: u32,
+    /// Completions this tick (fires the head pulse).
+    completed: u32,
+}
+
+impl CreatureDrive {
+    fn timeline_label_text(&self) -> String {
+        format!(
+            "{} {:.*} ",
+            self.timeline_label, self.value_decimals, self.timeline_value
+        )
+    }
+}
+
 /// The Feeding creature: a horizontal serving snake driven by live vLLM stats,
 /// beside a verbose info panel.
 pub struct ServingCreature {
@@ -71,6 +111,10 @@ pub struct ServingCreature {
     rss_bytes: u64,
     /// Latest serving stats; `None` = ready but no metrics yet (calm state).
     serving: Option<ServingStats>,
+    /// Latest media/diffusion stats (tt-media-inference-server, e.g. SkyReels).
+    /// Mutually exclusive with `serving` — a service exposes one namespace or
+    /// the other — and drives the same snake via a workload-agnostic `drive()`.
+    media: Option<MediaStats>,
     /// Frames left on the completion pulse (a bright head glyph).
     pulse_left: u32,
     /// Frames left on the frayed error tail.
@@ -100,6 +144,7 @@ impl ServingCreature {
             cpu_pct: 0.0,
             rss_bytes: 0,
             serving: None,
+            media: None,
             pulse_left: 0,
             fray_left: 0,
             chips: Vec::new(),
@@ -138,6 +183,7 @@ impl ServingCreature {
         self.cpu_pct = svc.cpu_pct;
         self.rss_bytes = svc.rss_bytes;
         self.serving = svc.serving;
+        self.media = svc.media;
 
         // Refresh the silicon strip every tick; sample the throughput history
         // on a wall-clock cadence (not every frame) so the timeline spans a
@@ -150,21 +196,149 @@ impl ServingCreature {
             .map(|t| now.duration_since(t).as_millis() >= HISTORY_SAMPLE_MS)
             .unwrap_or(true);
         if due {
-            self.push_history(self.serving.map(|s| s.generation_tps).unwrap_or(0.0));
+            // History tracks whichever throughput is live (tok/s or gen/min).
+            self.push_history(self.drive().timeline_value);
             self.last_history_push = Some(now);
         }
 
-        // Decay any live effect, then re-arm it if this tick earned it.
+        // Decay any live effect, then re-arm it if this tick earned it. The
+        // completion/error deltas come from whichever workload is live so a
+        // finished generation pulses the head just like a finished request.
         self.pulse_left = self.pulse_left.saturating_sub(1);
         self.fray_left = self.fray_left.saturating_sub(1);
-        if let Some(s) = &svc.serving {
-            if s.completed_delta > 0 {
-                self.pulse_left = PULSE_FRAMES;
-            }
-            if s.errored_delta > 0 {
-                self.fray_left = FRAY_FRAMES;
-            }
+        let (completed, errored) = svc
+            .serving
+            .map(|s| (s.completed_delta, s.errored_delta))
+            .or_else(|| svc.media.map(|m| (m.completed_delta, m.errored_delta)))
+            .unwrap_or((0, 0));
+        if completed > 0 {
+            self.pulse_left = PULSE_FRAMES;
         }
+        if errored > 0 {
+            self.fray_left = FRAY_FRAMES;
+        }
+    }
+
+    /// Collapse whichever workload is live (vLLM `serving` or media) into the
+    /// workload-agnostic signals the animated snake reads, so the render path
+    /// stays single. Returns all-zero calm defaults when neither is present.
+    ///
+    /// For media there is no in-flight/queue gauge, so `running`/`waiting` are 0
+    /// (the snake shows its base length, gently breathing); throughput is
+    /// generations-per-minute rather than tok/s, and "heat" tracks activity
+    /// since diffusion servers expose no KV-cache gauge.
+    fn drive(&self) -> CreatureDrive {
+        if let Some(s) = &self.serving {
+            CreatureDrive {
+                timeline_value: s.generation_tps,
+                timeline_label: "tok/s",
+                value_decimals: 0,
+                amp_norm: (s.generation_tps / GEN_TPS_REF).clamp(0.0, 1.0),
+                exhaust: exhaust_count(s.generation_tps),
+                heat: s.kv_cache_usage.clamp(0.0, 1.0),
+                running: s.requests_running,
+                waiting: s.requests_waiting,
+                completed: s.completed_delta,
+            }
+        } else if let Some(m) = &self.media {
+            // Diffusion throughput (gen/min) is tiny and completions are rare
+            // (a clip can take minutes), so activity is driven mainly by the
+            // in-flight `jobs_in_progress` gauge — that's the immediate "it's
+            // working on my load" signal. A busy box (jobs running) animates
+            // even between completions; the generation rate adds a little more.
+            let rate_amp = (m.generations_per_min / MEDIA_GEN_REF).clamp(0.0, 1.0);
+            let busy_amp = if m.jobs_in_progress > 0 { 0.55 } else { 0.0 };
+            let amp = rate_amp.max(busy_amp);
+            CreatureDrive {
+                timeline_value: m.generations_per_min,
+                timeline_label: "gen/min",
+                value_decimals: 2,
+                amp_norm: amp,
+                // A short exhaust plume while work is in flight; a completion
+                // this tick also fires the head pulse (see `update`).
+                exhaust: if m.jobs_in_progress > 0 {
+                    (m.jobs_in_progress as usize).clamp(1, 4)
+                } else {
+                    0
+                },
+                // No KV gauge on media servers — warm the creature with activity
+                // so a box actively generating still reads "hot".
+                heat: (0.15 + amp * 0.55).clamp(0.0, 1.0),
+                // Body length grows with in-flight generations (the acking
+                // signal), exactly as it grows with vLLM `requests_running`.
+                running: m.jobs_in_progress,
+                waiting: 0,
+                completed: m.completed_delta,
+            }
+        } else {
+            CreatureDrive::default()
+        }
+    }
+
+    /// Build the media/diffusion info panel — the counterpart to
+    /// [`panel_rows`](Self::panel_rows) for servers where tok/s is meaningless.
+    /// Headline throughput is generations/min plus seconds-per-generation, then
+    /// generation tallies, the pipeline stage times
+    /// (warmup→preprocess→inference→postprocess), and the container group.
+    fn media_panel_rows(&self, m: &MediaStats) -> Vec<(String, Color)> {
+        let header = colors::rgb(120, 180, 200);
+        let val = colors::text_primary();
+        let mut rows: Vec<(String, Color)> = Vec::new();
+        let hdr = |rows: &mut Vec<(String, Color)>, t: &str| rows.push((t.to_string(), header));
+        // Seconds formatter: sub-minute in seconds, longer warmups in minutes.
+        let secs = |s: f32| -> String {
+            if s >= 90.0 {
+                format!("{:.1} min", s / 60.0)
+            } else {
+                format!("{:.1} s", s)
+            }
+        };
+        hdr(&mut rows, "generations");
+        // In-flight first — the live "it's working on my load" signal.
+        rows.push((format!("  in flight {}", m.jobs_in_progress), val));
+        rows.push((
+            format!(
+                "  done     {}",
+                group_thousands(m.counters.requests_total as usize)
+            ),
+            val,
+        ));
+        if m.counters.errored_total > 0 {
+            rows.push((
+                format!(
+                    "  errors   {}",
+                    group_thousands(m.counters.errored_total as usize)
+                ),
+                val,
+            ));
+        }
+        rows.push((String::new(), val));
+        hdr(&mut rows, "throughput");
+        rows.push((format!("  gen/min  {:.2}", m.generations_per_min), val));
+        rows.push((format!("  per gen  {}", secs(m.duration_avg_s)), val));
+        rows.push((String::new(), val));
+        // Pipeline stages: show only the ones this server actually reports
+        // (post is always present on the current build; the others appear only
+        // if the runner emits them, so we don't print misleading 0.0s rows).
+        let stages: [(&str, f32); 4] = [
+            ("warmup", m.warmup_avg_s),
+            ("pre", m.pre_avg_s),
+            ("infer", m.inference_avg_s),
+            ("post", m.post_avg_s),
+        ];
+        if stages.iter().any(|(_, v)| *v > 0.0) {
+            hdr(&mut rows, "stages");
+            for (name, v) in stages {
+                if v > 0.0 {
+                    rows.push((format!("  {name:<8} {}", secs(v)), val));
+                }
+            }
+            rows.push((String::new(), val));
+        }
+        hdr(&mut rows, "container");
+        rows.push((format!("  CPU      {:.1}%", self.cpu_pct), val));
+        rows.push((format!("  RSS      {}", fmt_bytes(self.rss_bytes)), val));
+        rows
     }
 
     /// Build the verbose info panel: grouped key/value rows drawn beside the
@@ -300,22 +474,25 @@ impl ServingCreature {
         }
         let mut canvas: Vec<Vec<(char, Color)>> = vec![vec![(' ', bg); width]; body_rows];
 
-        // Live serving signals (all degrade to 0 when metrics are absent).
-        let (gen_tps, kv, running, waiting, q_avg, p_avg, d_avg, completed, served) =
-            match &self.serving {
-                Some(s) => (
-                    s.generation_tps,
-                    s.kv_cache_usage,
-                    s.requests_running,
-                    s.requests_waiting,
-                    s.queue_avg_s,
-                    s.prefill_avg_s,
-                    s.decode_avg_s,
-                    s.completed_delta,
-                    s.counters.requests_succeeded_total,
-                ),
-                None => (0.0, 0.0, 0, 0, 0.0, 0.0, 0.0, 0, 0),
-            };
+        // Workload-agnostic drive (tok/s or gen/min); all zero when calm.
+        let drive = self.drive();
+        let running = drive.running;
+        let waiting = drive.waiting;
+        let completed = drive.completed;
+        // Snake heat: KV-cache for vLLM, activity for media (see `drive`).
+        let kv = drive.heat;
+        // vLLM-only swimlane inputs (queue/prefill/decode stage times + served
+        // count). All zero for a media workload, so its per-request swimlane
+        // region simply never appears — the stage times show in the panel.
+        let (q_avg, p_avg, d_avg, served) = match &self.serving {
+            Some(s) => (
+                s.queue_avg_s,
+                s.prefill_avg_s,
+                s.decode_avg_s,
+                s.counters.requests_succeeded_total,
+            ),
+            None => (0.0, 0.0, 0.0, 0),
+        };
 
         // Column split: a fixed-ish info panel on the right when there's room,
         // else snake-only. `panel_x` is the first panel column; the left region
@@ -336,7 +513,8 @@ impl ServingCreature {
         // Full-width throughput timeline (2 rows) at the top, only with room and
         // live metrics (so the "tok/s" label never appears in a calm no-metrics
         // view). Full-width silicon strip (1 row) at the bottom.
-        let has_timeline = self.serving.is_some() && body_rows >= 10 && width >= 60;
+        let has_workload = self.serving.is_some() || self.media.is_some();
+        let has_timeline = has_workload && body_rows >= 10 && width >= 60;
         let timeline_h = if has_timeline { 2 } else { 0 };
         let has_strip = body_rows >= timeline_h + 5;
         let strip_h = if has_strip { 1 } else { 0 };
@@ -344,11 +522,12 @@ impl ServingCreature {
         let mid_bot = body_rows - strip_h; // exclusive
         let mid_rows = mid_bot - mid_top; // >= 1 (strip only claimed when room)
 
-        // --- Timeline band: sparkline of tps_history + numeric tok/s ---
+        // --- Timeline band: sparkline of throughput history + numeric headline ---
         // The top rows sit above the snake/panel split (no divider up here), so
         // the band spans the FULL width rather than clipping to `snake_right`.
+        // Label + units come from `drive` ("tok/s" for vLLM, "gen/min" for media).
         if has_timeline {
-            let label = format!("tok/s {:.0} ", gen_tps);
+            let label = drive.timeline_label_text();
             put_str(&mut canvas, 0, 0, &label, colors::info(), width);
             let spark_x = label.chars().count().min(width);
             let spark_w = width.saturating_sub(spark_x);
@@ -363,7 +542,12 @@ impl ServingCreature {
 
         // --- Swimlanes (center-right, when wide) claim the bottom of the middle
         // left region; the snake gets the rows above them. ---
-        let want_swim = width >= 70 && mid_rows >= 6 && snake_right >= 8;
+        // Swimlanes are a vLLM-only concept (per-request queue→prefill→decode).
+        // A media workload has `running = jobs_in_progress` but no such stage
+        // times, so gate on `serving` — otherwise a diffusion box with jobs in
+        // flight would draw a bogus "requests"/"#1" region with zero-width bars.
+        let want_swim =
+            self.serving.is_some() && width >= 70 && mid_rows >= 6 && snake_right >= 8;
         let max_lanes = if want_swim {
             5usize.min(mid_rows.saturating_sub(2)).max(1)
         } else {
@@ -396,7 +580,7 @@ impl ServingCreature {
         let snake_last = snake_top + snake_rows - 1; // snake_rows >= 1
         let max_len = snake_right.saturating_sub(1);
         let len = body_len(running, max_len);
-        let amp_norm = (gen_tps / GEN_TPS_REF).clamp(0.0, 1.0);
+        let amp_norm = drive.amp_norm;
         let max_amp = (snake_rows.saturating_sub(1)) as f32 / 2.0;
         // A small always-on idle amplitude so the creature gently breathes even
         // at rest (never fully frozen), rising with throughput. The y-write is
@@ -434,10 +618,10 @@ impl ServingCreature {
                 head_y = y;
             }
         }
-        // Token exhaust: `exhaust_count(gen_tps)` dim glyphs drifting right of the
-        // head, frame-indexed so they animate; none at 0 tps. Bounds-clamped.
+        // Throughput exhaust: `drive.exhaust` dim glyphs drifting right of the
+        // head, frame-indexed so they animate; none at rest. Bounds-clamped.
         if head_x > 0 {
-            let n = exhaust_count(gen_tps);
+            let n = drive.exhaust;
             // Slow the drift cycle for the 60 FPS cadence so particles stream
             // rather than strobe.
             let drift = (self.frame as usize / 4) % 3;
@@ -527,12 +711,16 @@ impl ServingCreature {
             for row in canvas.iter_mut().take(mid_bot).skip(mid_top) {
                 row[div] = ('│', dim);
             }
-            // When the swimlane region is drawn it already carries per-request
-            // state, so omit the panel's "requests" group to avoid duplication;
-            // keep it only when swimlanes are collapsed away (info never fully
-            // disappears).
-            let include_requests = swim_h == 0;
-            for (r, (text, color)) in self.panel_rows(include_requests).into_iter().enumerate() {
+            // Media workloads get the diffusion panel (gen/min, per-gen time,
+            // stage durations); vLLM workloads get the token/request panel. For
+            // vLLM, when the swimlane region is drawn it already carries
+            // per-request state, so the panel omits its "requests" group to
+            // avoid duplication (info never fully disappears).
+            let rows = match &self.media {
+                Some(m) => self.media_panel_rows(m),
+                None => self.panel_rows(swim_h == 0),
+            };
+            for (r, (text, color)) in rows.into_iter().enumerate() {
                 let row = mid_top + r;
                 if row >= mid_bot {
                     break;
@@ -624,8 +812,36 @@ mod tests {
     use super::*;
     use crate::animation::ChipReading;
     use crate::workload::inference_server::{
-        Phase, Readiness, ServiceState, ServingStats, VllmCounters,
+        MediaCounters, MediaStats, Phase, Readiness, ServiceState, ServingStats, VllmCounters,
     };
+
+    /// A media/diffusion stats sample (SkyReels-shaped): a modest generations
+    /// rate, `jobs` in flight, `done` completed, a long end-to-end per-gen time.
+    fn media_stats(gen_per_min: f32, done: u64, jobs: u32, completed: u32) -> MediaStats {
+        MediaStats {
+            generations_per_min: gen_per_min,
+            jobs_in_progress: jobs,
+            completed_delta: completed,
+            errored_delta: 0,
+            duration_avg_s: 612.0,
+            post_avg_s: 0.32,
+            pre_avg_s: 0.0,
+            inference_avg_s: 0.0,
+            warmup_avg_s: 0.0,
+            counters: MediaCounters {
+                requests_total: done,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// A Ready `ServiceState` carrying media stats instead of vLLM serving.
+    fn ready_media_svc(label: &str, media: MediaStats) -> ServiceState {
+        ServiceState {
+            media: Some(media),
+            ..ready_svc(label, 12.0, 40 * 1024 * 1024 * 1024, None)
+        }
+    }
 
     fn stats(running: u32, tps: f32, completed: u32, errored: u32) -> ServingStats {
         ServingStats {
@@ -667,6 +883,7 @@ mod tests {
             progress: None,
             flat_ticks: 0,
             serving,
+            media: None,
         }
     }
 
@@ -735,6 +952,84 @@ mod tests {
         );
         let _ = c.render(0, 0); // must not panic
         let _ = c.render(20, 8); // narrow (snake-only fallback) must not panic
+    }
+
+    #[test]
+    fn media_workload_shows_diffusion_panel_not_tokens() {
+        // Regression: a media/diffusion server (SkyReels) reports the
+        // `tt_media_server_*` namespace, not vLLM tokens — the panel must show
+        // generations + stage durations, and NEVER "tok/s".
+        let mut c = ServingCreature::new();
+        // 2 jobs in flight, 43 done — the "acking" case the user hit.
+        let svc = ready_media_svc("SkyReels-V2-I2V", media_stats(2.1, 43, 2, 1));
+        c.update(&svc, 720, &[]);
+        let text: String = c
+            .render(80, 24)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(text.contains("SkyReels-V2-I2V"), "title label");
+        // The in-flight gauge must surface — that's the acking signal.
+        assert!(
+            text.contains("in flight") && text.contains("generations"),
+            "in-flight generations group"
+        );
+        // Headline throughput as generations, not tokens.
+        assert!(text.contains("gen/min"), "generations-per-minute headline");
+        assert!(text.contains("2.1"), "the actual gen/min value");
+        // Only stages the server reports appear (post here; no misleading 0.0s
+        // warmup/pre/infer rows on this build).
+        assert!(text.contains("per gen"), "end-to-end per-generation time");
+        assert!(
+            !text.contains("tok/s"),
+            "tok/s is meaningless for diffusion and must not appear"
+        );
+        assert!(
+            !text.contains("KV cache"),
+            "no KV-cache group for a media workload"
+        );
+        // Swimlanes are vLLM-only (per-request queue→prefill→decode). Even with
+        // jobs in flight at a wide size, a media workload must NOT draw the
+        // "requests" swimlane header or numbered "#1" lanes — those are the
+        // stat-panel's job here (regression guard for the gating fix).
+        assert!(
+            !text.contains("#1") && !text.contains("requests"),
+            "media workload must not render vLLM request swimlanes:\n{text}"
+        );
+        // Must not panic across a zero and a narrow grid either.
+        let _ = c.render(0, 0);
+        let _ = c.render(20, 8);
+    }
+
+    #[test]
+    fn media_timeline_history_tracks_generations() {
+        // The throughput history ring should track gen/min for a media workload
+        // (so the timeline sparkline is meaningful), seeded on the first update.
+        let mut c = ServingCreature::new();
+        let svc = ready_media_svc("SkyReels", media_stats(3.0, 10, 1, 1));
+        c.update(&svc, 60, &[]);
+        assert_eq!(c.tps_history().len(), 1, "first update seeds history");
+        assert!(
+            (c.tps_history()[0] - 3.0).abs() < 1e-4,
+            "history sample is the gen/min rate, got {}",
+            c.tps_history()[0]
+        );
+    }
+
+    #[test]
+    fn media_snake_body_grows_with_in_flight_jobs() {
+        // The snake body length must track in-flight jobs (the acking signal),
+        // so sending load visibly lengthens/animates the creature.
+        let mut idle = ServingCreature::new();
+        idle.update(&ready_media_svc("SkyReels", media_stats(0.0, 5, 0, 0)), 60, &[]);
+        let mut busy = ServingCreature::new();
+        busy.update(&ready_media_svc("SkyReels", media_stats(0.0, 5, 3, 0)), 60, &[]);
+        assert_eq!(idle.drive().running, 0, "no jobs → base body");
+        assert_eq!(busy.drive().running, 3, "3 jobs in flight → longer body");
+        assert!(
+            busy.drive().amp_norm > idle.drive().amp_norm,
+            "in-flight work animates the creature even at 0 gen/min"
+        );
     }
 
     #[test]

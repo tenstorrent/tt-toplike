@@ -294,6 +294,7 @@ mod tests {
             progress: None,
             flat_ticks: 0,
             serving: None,
+            media: None,
         }
     }
 

@@ -137,6 +137,7 @@ mod tests {
             progress: Some(0.68),
             flat_ticks: 0,
             serving: None,
+            media: None,
         }
     }
 }

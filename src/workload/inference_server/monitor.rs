@@ -96,6 +96,7 @@ fn fresh_state(key: &str, label: &str) -> ServiceState {
         progress: None,
         flat_ticks: 0,
         serving: None,
+        media: None,
     }
 }
 
@@ -147,6 +148,18 @@ pub(crate) fn fold_tick(
             )
         });
 
+    // Same shape for diffusion/video servers (tt-media-inference-server), which
+    // expose the `tt_media_server_*` namespace instead of `vllm:`. A given
+    // scrape only ever carries one namespace, so at most one of these is `Some`.
+    let media =
+        crate::workload::inference_server::parse_media_metrics(&sample.metrics_text).map(|cur| {
+            crate::workload::inference_server::MediaStats::fold(
+                prev.media.as_ref().map(|m| &m.counters),
+                &cur,
+                cadence_secs,
+            )
+        });
+
     ServiceState {
         key: prev.key.clone(),
         label: prev.label.clone(),
@@ -165,6 +178,7 @@ pub(crate) fn fold_tick(
         progress,
         flat_ticks,
         serving,
+        media,
     }
 }
 
@@ -579,6 +593,56 @@ mod tests {
             5,
         );
         assert!(s.serving.is_none());
+    }
+
+    #[test]
+    fn fold_tick_populates_media_from_metrics_not_serving() {
+        // A media/diffusion scrape (`tt_media_server_*`) must fold into `media`,
+        // leave `serving` empty (the two are mutually exclusive), and surface the
+        // in-flight `jobs_in_progress` gauge — the "acking" signal. Two ticks so
+        // the completion rate has a prior tick to delta against.
+        let s1 = fold_tick(
+            &ServiceState_zeroed("k", "L"),
+            sample_with_metrics(
+                "tt_media_server_requests_base_total{m=\"M\"} 1.0\n\
+                 tt_media_server_jobs_in_progress{m=\"M\"} 2.0\n",
+            ),
+            &ModelProfile::default(),
+            5,
+        );
+        assert!(s1.media.is_some(), "media populated when media metrics present");
+        assert!(s1.serving.is_none(), "media scrape must not populate serving");
+        assert_eq!(s1.media.unwrap().jobs_in_progress, 2, "in-flight gauge folded");
+        // Next tick: +1 completed generation over 5s = 12/min (rate needs prev).
+        let s2 = fold_tick(
+            &s1,
+            sample_with_metrics(
+                "tt_media_server_requests_base_total{m=\"M\"} 2.0\n\
+                 tt_media_server_jobs_in_progress{m=\"M\"} 1.0\n",
+            ),
+            &ModelProfile::default(),
+            5,
+        );
+        let m = s2.media.unwrap();
+        assert_eq!(m.jobs_in_progress, 1);
+        assert!(
+            (m.generations_per_min - 12.0).abs() < 0.5,
+            "1 gen / 5s = 12/min, got {}",
+            m.generations_per_min
+        );
+    }
+
+    #[test]
+    fn fold_tick_media_none_for_vllm_scrape() {
+        // Conversely, a vLLM scrape leaves `media` empty (populates `serving`).
+        let s = fold_tick(
+            &ServiceState_zeroed("k", "L"),
+            sample_with_metrics("vllm:num_requests_running{m=\"M\"} 1.0\n"),
+            &ModelProfile::default(),
+            5,
+        );
+        assert!(s.media.is_none(), "vLLM scrape must not populate media");
+        assert!(s.serving.is_some());
     }
 
     /// A fake `ContainerProbe` that returns steady, plausible readings for
