@@ -130,10 +130,10 @@ pub struct RemoteServing {
 /// Media/diffusion metrics mirrored from the *display* fields of
 /// `crate::workload::inference_server::metrics::MediaStats`. As with
 /// [`RemoteServing`], the raw histogram/rate `MediaCounters` used only to
-/// compute local deltas are excluded — with one exception: `completed_total`,
-/// the cumulative completed-generation count, IS carried because the roster and
-/// media panel display it directly ("N done"). Without it a remote client would
-/// always read "0 done" (the counters otherwise reconstruct to their default).
+/// compute local deltas are excluded — except the two **cumulative** counters
+/// the UI displays directly: `completed_total` ("N done") and `errored_total`
+/// ("errors N"). Both are carried so a remote client shows real totals instead
+/// of the default 0 the counters would otherwise reconstruct to.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RemoteMedia {
     pub generations_per_min: f32,
@@ -143,6 +143,10 @@ pub struct RemoteMedia {
     /// so a frame from a peer that predates this field decodes to 0.
     #[serde(default)]
     pub completed_total: u64,
+    /// Cumulative errored generations, shown as "errors N". `#[serde(default)]`
+    /// for the same back-compat reason as `completed_total`.
+    #[serde(default)]
+    pub errored_total: u64,
     pub completed_delta: u32,
     pub errored_delta: u32,
     /// End-to-end per-generation wall time (seconds).
@@ -251,6 +255,7 @@ fn remote_media_from_stats(
         generations_per_min: stats.generations_per_min,
         jobs_in_progress: stats.jobs_in_progress,
         completed_total: stats.counters.requests_total,
+        errored_total: stats.counters.errored_total,
         completed_delta: stats.completed_delta,
         errored_delta: stats.errored_delta,
         duration_avg_s: stats.duration_avg_s,
@@ -582,6 +587,7 @@ mod tests {
                 warmup_avg_s: 0.0,
                 counters: crate::workload::inference_server::MediaCounters {
                     requests_total: 43,
+                    errored_total: 2,
                     ..Default::default()
                 },
             }),
@@ -605,6 +611,10 @@ mod tests {
         assert_eq!(
             m.completed_total, 43,
             "cumulative 'done' count crosses the wire (not reset to 0)"
+        );
+        assert_eq!(
+            m.errored_total, 2,
+            "cumulative 'errors' count crosses the wire too"
         );
         assert!((m.generations_per_min - 2.1).abs() < 1e-6);
         assert!((m.duration_avg_s - 612.0).abs() < 1e-4);

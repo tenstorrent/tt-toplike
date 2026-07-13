@@ -4084,10 +4084,11 @@ fn remote_serving_to_stats(
 /// Map the wire [`RemoteMedia`](crate::backend::RemoteMedia) shape back onto
 /// the local [`MediaStats`](crate::workload::inference_server::metrics::MediaStats)
 /// display struct. The rate/latency fields carry over directly; the cumulative
-/// `completed_total` is restored into `counters.requests_total` (the field the
-/// roster and media panel read for "N done") so remote clients show the real
-/// completed count. The remaining counters exist only to compute local deltas
-/// and have no wire equivalent, so they stay `Default::default()`.
+/// `completed_total`/`errored_total` are restored into
+/// `counters.requests_total`/`errored_total` (the fields the roster and media
+/// panel read for "N done" / "errors N") so remote clients show real totals.
+/// The remaining counters exist only to compute local deltas and have no wire
+/// equivalent, so they stay `Default::default()`.
 #[cfg(feature = "remote")]
 fn remote_media_to_stats(
     rm: &crate::backend::RemoteMedia,
@@ -4104,6 +4105,7 @@ fn remote_media_to_stats(
         warmup_avg_s: rm.warmup_avg_s,
         counters: crate::workload::inference_server::MediaCounters {
             requests_total: rm.completed_total,
+            errored_total: rm.errored_total,
             ..Default::default()
         },
     }
@@ -6228,6 +6230,7 @@ mod remote_mapper_tests {
                 generations_per_min: 2.1,
                 jobs_in_progress: 2,
                 completed_total: 43,
+                errored_total: 2,
                 completed_delta: 1,
                 errored_delta: 0,
                 duration_avg_s: 612.0,
@@ -6244,6 +6247,10 @@ mod remote_mapper_tests {
         assert_eq!(
             m.counters.requests_total, 43,
             "completed_total restored into counters → roster shows '43 done', not 0"
+        );
+        assert_eq!(
+            m.counters.errored_total, 2,
+            "errored_total restored into counters → media panel shows 'errors 2', not 0"
         );
     }
 }
