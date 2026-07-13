@@ -174,6 +174,12 @@ pub fn parse_media_metrics(text: &str) -> Option<MediaCounters> {
     // duplicates would double every value (jobs_in_progress 2→4, etc.), so we
     // count each distinct series (name + full label block) at most once. Genuine
     // multi-device/model_type series have different label blocks → still summed.
+    //
+    // The key is the exact `name{labels}` byte substring, so this assumes the
+    // exporter emits a given series with a *stable label order* (true for the
+    // prometheus client's multiprocess output). If a series were re-emitted with
+    // its labels reordered, the two forms would key differently and double-count
+    // — not a concern for this exporter, but noted since fleet totals rest on it.
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for line in text.lines() {
         let line = line.trim();
