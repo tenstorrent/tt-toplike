@@ -5,6 +5,7 @@
 //! docs/superpowers/specs/2026-07-14-hivemindsweeper-design.md.
 
 pub mod classify;
+pub mod collector;
 pub mod event;
 pub mod grid;
 
