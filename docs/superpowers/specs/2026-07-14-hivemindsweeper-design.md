@@ -88,23 +88,27 @@ driver  ··  ··  ··  ··   ░░
 - Default: filtered, scrolling event feed for the **selected cell**.
 - `f` toggles to the **unified feed** — all sources merged, timestamped, color-coded
   (the tcpdump view).
-- `/` filters the feed by substring; `s` cycles a severity floor (hide Trace/Info).
+- `s` cycles a severity floor (hide Trace/Info). Substring filtering is deferred to a
+  later phase to avoid colliding with the `/` command bar (see below).
 
 ### Activation (opt-in, never default)
 
 - Hotkey `~` enters the mode from Insights/Grid; excluded from the `v`-cycle, exactly like
   `i` for `InferenceMonitor`. `Esc`/`~` exits to the previous mode.
-- Slash/command line: `:hivemind`.
-- CLI: `--mode hivemindsweeper`.
+- Slash command: `/hivemind`, via the TUI's existing `/` command bar (the same bar that
+  hosts `/remote`, `/serve`). This matches the "hotkey or slash command" activation.
 
-### Point-at-target commands (from the `:` line, live)
+### Point-at-target commands (via the `/` command bar, live)
 
-- `:watch <path>` — tail a file into a dedicated lane; source classified from content.
-- `:watch pid <n>` — attach to a PID: read `/proc/<n>/fd` and cmdline, best-effort follow
+- `/watch <path>` — tail a file into a dedicated lane; source classified from content.
+- `/watch pid <n>` — attach to a PID: read `/proc/<n>/fd` and cmdline, best-effort follow
   its open log files.
-- `:wrap <command…>` — spawn the command, capture stdout+stderr live into an `Emission`
-  lane. This is the `:wrap ttl export mykernel.py` case that streams emitted C++/MLIR.
+- `/wrap <command…>` — spawn the command, capture stdout+stderr live into an `Emission`
+  lane. This is the `/wrap ttl export mykernel.py` case that streams emitted C++/MLIR.
   Gated behind a one-line confirmation because it has a side effect (running a process).
+
+These three dispatch inline in the command-bar Enter handler (like `/serve`), because they
+mutate the loop's live `Hivemind` engine. `/mode hivemind` is also accepted as an alias.
 - Each target becomes its own row, or merges into an existing source row if it classifies
   as one.
 
@@ -147,10 +151,12 @@ struct SniffEvent {
 
 ### Event bus and heat grid
 
-- Collectors are producers on a `crossbeam` channel. The engine drains it each `poll()`
-  into a bounded `VecDeque<SniffEvent>` (cap ~4096; oldest dropped).
-- Back-pressure: a full channel drops the **newest** event for that collector and bumps a
-  per-collector `dropped` counter shown in the header — no silent truncation (house rule).
+- Collectors are producers on a bounded `std::sync::mpsc::sync_channel` (no new crate
+  dependency). The engine drains it each `poll()` into a bounded `VecDeque<SniffEvent>`
+  (cap ~4096; oldest dropped).
+- Back-pressure: `try_send` on a full channel drops the **newest** event for that collector
+  and bumps a per-collector `dropped` counter shown in the header — no silent truncation
+  (house rule).
 - Heat: each drained event increments a decaying float `grid[source][device]`; decay runs
   per frame (`heat *= 0.9`) so idle cells fade to cold.
 
@@ -168,10 +174,10 @@ Each implements `Collector { name(), run(tx, shutdown), device_hint() }`.
   device column) and for open `.safetensors`/`.o` files; read `cmdline`/`comm` to classify.
   Polls ~1 s; emits `Process`/`Fd` events on **change** (open/close), so steady state is
   quiet. Builds on `workload/process_monitor.rs`.
-- **cache_watch** — `notify`-based watch on `TT_METAL_CACHE`, `tt_metal_cache/`,
-  `tt_dit_cache`/`TT_DIT_CACHE_DIR`, and `generated/` under `TT_METAL_HOME`/cwd. Emits
-  `Compile` events on `.o`/artifact creation. Device column parsed from
-  `cache_{model}/{device_type}/` when present, else `host`.
+- **cache_watch** — polls (via directory scan + seen-set, no `notify` dependency)
+  `TT_METAL_CACHE`, `tt_metal_cache/`, `tt_dit_cache`/`TT_DIT_CACHE_DIR`, and `generated/`
+  under `TT_METAL_HOME`/cwd. Emits `Compile` events on newly-seen `.o`/artifact files.
+  Device column parsed from `cache_{model}/{device_type}/` when present, else `host`.
 - **log_tail** — reuses `inference_server/logs.rs` health-poll filtering and the docker-logs
   helper; tails discovered server logs plus reachable ttnn/tt-metal loguru stderr. Docker
   per-container → device column when the container is device-pinned. **Also the pickup
