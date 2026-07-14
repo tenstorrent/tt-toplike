@@ -289,6 +289,17 @@ mod pid_attach {
                 .ok()
                 .map(|s| s.comm)
                 .unwrap_or_else(|| format!("pid{pid}"));
+            // `comm` is frequently a generic interpreter name (`python3`,
+            // `node`) that carries no classification signal on its own —
+            // `cmdline` (e.g. `python3 -m vllm.entrypoints.openai.api_server`)
+            // is where the actual framework/server identity lives. Same idiom
+            // `workload::process_monitor` already uses for its own cmdline
+            // read (`cmdline()` -> `Result<Vec<String>>`, joined with spaces).
+            let cmdline = process
+                .cmdline()
+                .ok()
+                .map(|v| v.join(" "))
+                .unwrap_or_default();
 
             let mut current_devices: HashSet<u8> = HashSet::new();
             if let Ok(fds) = process.fd() {
@@ -321,7 +332,7 @@ mod pid_attach {
                 if seen_devices.insert(dev) {
                     let _ = tx.try_send(SniffEvent {
                         ts: Instant::now(),
-                        source: classify(Some(&proc_name), ""),
+                        source: classify(Some(&proc_name), &cmdline),
                         device: Some(dev),
                         severity: Severity::Info,
                         kind: EventKind::Fd,
