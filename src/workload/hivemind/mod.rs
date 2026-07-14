@@ -6,6 +6,7 @@
 
 pub mod classify;
 pub mod collector;
+pub mod collectors;
 pub mod event;
 pub mod grid;
 

@@ -36,6 +36,8 @@ pub fn classify(process_name: Option<&str>, line: &str) -> Source {
         ("metalium", Source::TtMetal),
         ("tenstorrent", Source::Driver),
         ("tt_kmd", Source::Driver),
+        ("pcie", Source::Driver),
+        ("aer", Source::Driver),
     ];
     for (needle, src) in RULES {
         if hay.contains(needle) {
