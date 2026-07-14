@@ -360,8 +360,11 @@ fn run_app(
 
     // ── HivemindSweeper state (`~` to activate) ─────────────────────────────
     // `None` until first entered — `~`'s key handler does
-    // `hivemind.get_or_insert_with(Hivemind::new).start()` on entry and
-    // `hivemind.as_mut().map(|h| h.stop())` on exit (both `~` again and Esc),
+    // `hivemind.get_or_insert_with(Hivemind::new).start()` on entry. Exit is
+    // handled once, centrally, by the mode-transition choke point (near the
+    // `prev_display_mode` update below): any change of `display_mode` away
+    // from `HivemindSweeper` — via `~`, Esc, `v`, `a`/`A`, `d`/`D`, `g`,
+    // `i`/`I`, or `/mode <x>` — calls `hivemind.as_mut().map(|h| h.stop())`,
     // so the five collector threads only ever run while this mode is active.
     // `hm_cursor`/`hm_unified`/`hm_sev` select and filter the feed pane;
     // cursor movement / unified toggle / severity-floor keys land in a later
@@ -880,6 +883,21 @@ fn run_app(
 
         // Clear terminal when switching modes to remove artifacts
         if display_mode != prev_display_mode {
+            // Single choke point for tearing down the HivemindSweeper engine:
+            // `Hivemind` has no `Drop` impl and spawns five collector threads
+            // (including possible `docker logs -f` children) in `start()`, so
+            // ANY transition away from the sweeper — regardless of which key
+            // or command caused it (~, Esc, v, a/A, d/D, g, i/I, /mode, …) —
+            // must call `stop()` exactly once. Centralizing here (rather than
+            // scattering `stop()` into every individual exit handler) means
+            // new exit paths can never forget to tear the engine down.
+            if prev_display_mode == DisplayMode::HivemindSweeper
+                && display_mode != DisplayMode::HivemindSweeper
+            {
+                if let Some(h) = hivemind.as_mut() {
+                    h.stop();
+                }
+            }
             terminal.clear().ok();
             prev_display_mode = display_mode;
         }
@@ -1326,12 +1344,11 @@ fn run_app(
                             KeyCode::Char('~') => {
                                 // Toggle the HivemindSweeper board+feed view — mirrors
                                 // the `i`/`I` handler above: entering remembers
-                                // `prev_mode` and starts the engine; leaving (via `~`
-                                // again) stops it. `Hivemind` has no `Drop` impl, so
-                                // skipping `stop()` here would leave its five collector
-                                // threads running invisibly after the user leaves the
-                                // mode — this is a correctness requirement, not
-                                // optional (see the matching Esc branch below).
+                                // `prev_mode` and starts the engine. Leaving (via `~`
+                                // again) hands off teardown to the mode-transition
+                                // choke point above (`Hivemind` has no `Drop` impl, so
+                                // *something* must call `stop()` on every exit path —
+                                // that's now centralized rather than living here).
                                 if display_mode != DisplayMode::HivemindSweeper {
                                     prev_mode = display_mode;
                                     display_mode = DisplayMode::HivemindSweeper;
@@ -1340,9 +1357,6 @@ fn run_app(
                                         .start();
                                 } else {
                                     display_mode = prev_mode;
-                                    if let Some(h) = hivemind.as_mut() {
-                                        h.stop();
-                                    }
                                 }
                                 force_redraw = true;
                             }
@@ -1379,12 +1393,9 @@ fn run_app(
                                     fleet_zoom_start = None;
                                 } else if display_mode == DisplayMode::HivemindSweeper {
                                     // Back out of the sniffer view to wherever the user
-                                    // came from, and stop the engine's collector threads
-                                    // — same lifecycle contract as the `~` handler above.
+                                    // came from; the mode-transition choke point above
+                                    // stops the engine's collector threads.
                                     display_mode = prev_mode;
-                                    if let Some(h) = hivemind.as_mut() {
-                                        h.stop();
-                                    }
                                 } else if display_mode == DisplayMode::InferenceMonitor {
                                     // Back out of the dedicated Inference Server Monitor
                                     // view to wherever the user came from (see the
@@ -1436,49 +1447,30 @@ fn run_app(
                                     DisplayMode::InferenceMonitor => DisplayMode::Insights,
                                     // HivemindSweeper is deliberately excluded from the
                                     // `v`-cycle rotation (only reachable via `~`), but `v`
-                                    // is a global hotkey, so if it's pressed while the
-                                    // sweeper happens to be active, stop its collector
-                                    // threads before leaving — same lifecycle contract as
-                                    // the `~`/Esc handlers.
-                                    DisplayMode::HivemindSweeper => {
-                                        if let Some(h) = hivemind.as_mut() {
-                                            h.stop();
-                                        }
-                                        DisplayMode::Insights
-                                    }
+                                    // is a global hotkey, so pressing it while the sweeper
+                                    // happens to be active still needs to leave cleanly;
+                                    // the mode-transition choke point above stops its
+                                    // collector threads.
+                                    DisplayMode::HivemindSweeper => DisplayMode::Insights,
                                 };
                                 log::info!("Switched to {:?} mode", display_mode);
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
-                                // Jump directly to Defrag mode. If the sweeper happens to
-                                // be active, stop its collector threads first — same
-                                // lifecycle contract as the `~`/Esc/`v` handlers.
-                                if display_mode == DisplayMode::HivemindSweeper {
-                                    if let Some(h) = hivemind.as_mut() {
-                                        h.stop();
-                                    }
-                                }
+                                // Jump directly to Defrag mode. If the sweeper happens
+                                // to be active, the mode-transition choke point stops
+                                // its collector threads.
                                 defrag = None; // reinit at new frame
                                 display_mode = DisplayMode::Defrag;
                                 log::info!("Switched directly to Defrag mode");
                             }
                             KeyCode::Char('g') => {
-                                if display_mode == DisplayMode::HivemindSweeper {
-                                    if let Some(h) = hivemind.as_mut() {
-                                        h.stop();
-                                    }
-                                }
                                 display_mode = DisplayMode::Grid;
                                 log::info!("Switched to Grid mode");
                             }
                             KeyCode::Char('a') | KeyCode::Char('A') => {
                                 // Jump directly to Arcade mode. Same HivemindSweeper
-                                // teardown guard as the Defrag/Grid jumps above.
-                                if display_mode == DisplayMode::HivemindSweeper {
-                                    if let Some(h) = hivemind.as_mut() {
-                                        h.stop();
-                                    }
-                                }
+                                // teardown guard as the Defrag/Grid jumps above (now
+                                // handled by the mode-transition choke point).
                                 arcade = None; // Reset arcade to reinitialize
                                 display_mode = DisplayMode::Arcade;
                                 log::info!("Switched directly to Arcade mode");
