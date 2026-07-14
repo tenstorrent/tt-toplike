@@ -5,3 +5,5 @@
 
 pub mod cache_watch;
 pub mod kmsg;
+pub mod log_tail;
+pub mod procfs;
