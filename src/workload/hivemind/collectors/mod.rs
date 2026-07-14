@@ -8,3 +8,4 @@ pub mod inspector;
 pub mod kmsg;
 pub mod log_tail;
 pub mod procfs;
+pub mod wrap;

@@ -19,6 +19,7 @@ use collector::{CollectorStatus, Handle};
 use collectors::{
     cache_watch::CacheWatchCollector, inspector::InspectorCollector, kmsg::KmsgCollector,
     log_tail::LogTailCollector, procfs::ProcfsCollector,
+    wrap::{WrapCollector, WrapKind},
 };
 pub use grid::HeatGrid;
 
@@ -139,29 +140,51 @@ impl Hivemind {
         self.grid.decay();
     }
 
-    /// Register a host log file to tail. Stubbed until Task 10 wires a
-    /// dedicated wrap/watch collector capable of accepting targets after
-    /// `start()`; for now this only records intent and is a documented no-op.
-    // wired in Task 10
-    pub fn add_watch_path(&mut self, _path: PathBuf) {
-        // TODO(Task 10): hand off to a live-updatable collector (or restart
-        // LogTailCollector::with_static_targets including this path).
+    /// Register a host log file to tail (`/watch <path>`). Ensures the
+    /// engine is running — `start()` is documented as idempotent/safe to
+    /// call unconditionally — then spawns a `WrapCollector { kind:
+    /// WrapKind::File(path) }` on the engine's live channel, pushing its
+    /// handle alongside the auto-detected collectors' so a later `stop()`
+    /// tears it down too.
+    pub fn add_watch_path(&mut self, path: PathBuf) {
+        self.start();
+        let tx = self.tx.clone().expect("start() guarantees tx is Some");
+        self.handles
+            .push(collector::spawn(Box::new(WrapCollector::new(WrapKind::File(path))), tx));
     }
 
-    /// Register a PID whose device fd activity should be watched. Stubbed
-    /// until Task 10; see `add_watch_path`.
-    // wired in Task 10
-    pub fn add_watch_pid(&mut self, _pid: i32) {
-        // TODO(Task 10): wire to the future PID-focused collector.
+    /// Register a PID whose device-fd activity (and best-effort open log
+    /// files) should be watched (`/watch pid <n>`). Same running/spawn
+    /// contract as `add_watch_path`.
+    pub fn add_watch_pid(&mut self, pid: i32) {
+        self.start();
+        let tx = self.tx.clone().expect("start() guarantees tx is Some");
+        self.handles
+            .push(collector::spawn(Box::new(WrapCollector::new(WrapKind::Pid(pid))), tx));
     }
 
-    /// Spawn a wrapped-command collector (`tt-toplike sniff -- <argv>`).
-    /// Stubbed until Task 10 provides `WrapCollector`; returns `Ok(())` so
-    /// callers can integrate the CLI/keybinding now and get real behavior
-    /// once Task 10 lands.
-    // wired in Task 10
-    pub fn add_wrap(&mut self, _argv: Vec<String>) -> Result<(), String> {
-        // TODO(Task 10): collector::spawn(Box::new(WrapCollector::new(argv)), tx)
+    /// Spawn a wrapped-command collector (`/wrap <command…>`, i.e.
+    /// `tt-toplike sniff -- <argv>`). Same running/spawn contract as
+    /// `add_watch_path`. The only validation failure this returns is an
+    /// empty `argv` (nothing to spawn) — `collector::spawn` itself can't
+    /// fail (a panicking collector is caught and marked, not propagated as
+    /// an `Err` here).
+    ///
+    /// **Side effect**: unlike `add_watch_path`/`add_watch_pid`, this runs
+    /// the caller-supplied command directly (no shell, no env injection —
+    /// see `collectors::wrap::run_command`). The UI confirmation gate for
+    /// this lives in a later task; this method assumes the caller has
+    /// already obtained consent.
+    pub fn add_wrap(&mut self, argv: Vec<String>) -> Result<(), String> {
+        if argv.is_empty() {
+            return Err("add_wrap: empty command".to_string());
+        }
+        self.start();
+        let tx = self.tx.clone().expect("start() guarantees tx is Some");
+        self.handles.push(collector::spawn(
+            Box::new(WrapCollector::new(WrapKind::Command(argv))),
+            tx,
+        ));
         Ok(())
     }
 
@@ -323,6 +346,69 @@ mod engine_tests {
         );
         assert!(h.grid().heat(Source::TtMetal, Column::Device(2)) > 0.0);
         assert!(h.grid().heat(Source::Ttnn, Column::Host) > 0.0);
+
+        h.stop();
+        assert!(!h.is_running());
+    }
+
+    /// Task 10 integration: `add_wrap` on a fresh (not-yet-started) engine
+    /// auto-starts it (per `add_watch_path`'s doc comment — `start()` is
+    /// idempotent/safe to call unconditionally) and actually spawns a live
+    /// `WrapCollector` on the engine's channel, whose output reaches
+    /// `poll()`'s ring exactly like every other collector's. Also checks the
+    /// one validation `add_wrap` performs itself: an empty argv is rejected
+    /// before anything starts or spawns.
+    #[test]
+    fn add_wrap_auto_starts_and_spawns_collector() {
+        let mut h = Hivemind::new();
+        assert!(!h.is_running());
+
+        assert!(h.add_wrap(vec![]).is_err());
+        assert!(!h.is_running(), "an empty argv must not start the engine");
+
+        h.add_wrap(vec!["echo".into(), "wrapped-hello".into()])
+            .expect("non-empty argv spawns fine");
+        assert!(h.is_running());
+        // 5 auto-detected collectors (kmsg, cache_watch, log_tail, procfs,
+        // inspector) plus the one wrap collector just spawned.
+        assert_eq!(h.statuses().len(), 6);
+
+        let mut found = false;
+        for _ in 0..100 {
+            h.poll();
+            if h.events().iter().any(|e| {
+                e.kind == EventKind::Emission && e.text.contains("wrapped-hello")
+            }) {
+                found = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            found,
+            "expected the wrapped echo's stdout to land in the ring as an Emission"
+        );
+
+        h.stop();
+        assert!(!h.is_running());
+    }
+
+    /// Task 10 integration: `add_watch_path`/`add_watch_pid` follow the same
+    /// auto-start + spawn-and-register contract as `add_wrap` (checked above
+    /// end-to-end); this just confirms both also auto-start a fresh engine
+    /// and register their collector handle, without duplicating the full
+    /// poll-for-output dance (the File/Pid tailing behavior itself is
+    /// covered by `collectors::wrap`'s own unit tests).
+    #[test]
+    fn add_watch_path_and_pid_auto_start_and_register() {
+        let mut h = Hivemind::new();
+        assert!(!h.is_running());
+        h.add_watch_path(PathBuf::from("/nonexistent-hivemind-watch-path"));
+        assert!(h.is_running());
+        assert_eq!(h.statuses().len(), 6);
+
+        h.add_watch_pid(i32::MAX - 1);
+        assert_eq!(h.statuses().len(), 7);
 
         h.stop();
         assert!(!h.is_running());
