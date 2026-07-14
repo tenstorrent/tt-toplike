@@ -3,4 +3,5 @@
 
 //! Individual activity collectors. Each is behind the `Collector` trait.
 
+pub mod cache_watch;
 pub mod kmsg;
