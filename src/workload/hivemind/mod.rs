@@ -6,6 +6,7 @@
 
 pub mod classify;
 pub mod event;
+pub mod grid;
 
 use std::collections::VecDeque;
 pub use event::{EventKind, Severity, SniffEvent, Source};
