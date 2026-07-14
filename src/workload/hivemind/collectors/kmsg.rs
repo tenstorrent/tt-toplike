@@ -5,7 +5,7 @@
 //! events that no userspace log carries. Read-only.
 
 use crate::workload::hivemind::classify::classify;
-use crate::workload::hivemind::event::{EventKind, Severity, SniffEvent, Source};
+use crate::workload::hivemind::event::{EventKind, Severity, SniffEvent};
 use std::time::Instant;
 
 /// Parse one raw kmsg line into a driver SniffEvent, or None if not TT-relevant.
@@ -55,6 +55,7 @@ fn parse_device_hint(low: &str) -> Option<u8> {
 
 use crate::workload::hivemind::collector::{Collector, Tx};
 use std::io::{BufRead, BufReader};
+use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -65,8 +66,16 @@ impl Collector for KmsgCollector {
         "kmsg"
     }
     fn run(&mut self, tx: Tx, shutdown: Arc<AtomicBool>) {
-        // Open non-blocking so we can poll shutdown; fall back silently if denied.
-        let file = match std::fs::File::open("/dev/kmsg") {
+        // Open with O_NONBLOCK so a `read_line` that reaches the live tail
+        // returns WouldBlock instead of blocking in the kernel until the next
+        // record arrives — that would otherwise stall this thread past the
+        // point where we can notice `shutdown` was requested. Fall back
+        // silently if denied.
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open("/dev/kmsg")
+        {
             Ok(f) => f,
             Err(_) => return, // engine marks PermDenied via its own probe (Task 9)
         };
@@ -83,6 +92,16 @@ impl Collector for KmsgCollector {
                         }
                     }
                 }
+                // No data available right now (we've caught up to the live
+                // tail). Sleep briefly and loop back to the top so the
+                // shutdown flag is re-checked ~5x/sec instead of blocking
+                // indefinitely in the kernel.
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(200))
+                }
+                // Any other transient error (e.g. EPIPE if the ring buffer
+                // wrapped past our read position) — sleep and keep going
+                // rather than exiting, so a hiccup doesn't kill the collector.
                 Err(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
             }
         }
@@ -92,6 +111,7 @@ impl Collector for KmsgCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workload::hivemind::event::Source;
 
     #[test]
     fn ignores_irrelevant_lines() {
