@@ -1,0 +1,497 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+//! Rendering for the HivemindSweeper TUI mode (`~` to activate): a
+//! source × column heat board plus a filtered live event feed underneath.
+//!
+//! `board_rows` is a pure helper (no terminal needed) so the board layout is
+//! independently testable; `render_hivemind` does the actual Ratatui drawing.
+//! Follows the project's left/bottom-border-only convention (see the module
+//! doc in `crate::ui::tui`) — never a right-side box glyph, and the panel is
+//! sized to the terminal `area` it is given rather than a hardcoded width.
+
+use ratatui::{
+    layout::Rect,
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::Paragraph,
+    Frame,
+};
+
+use crate::ui::colors;
+use crate::workload::hivemind::{
+    collector::CollectorStatus,
+    event::{Severity, SniffEvent, Source},
+    grid::{heat_char, Column},
+    Hivemind,
+};
+
+/// One row of the source × column heat board: the emitting `Source`, and one
+/// `(Column, glyph)` cell per active column (`Device(0)..=max_device`, then
+/// `Host`).
+pub struct BoardRow {
+    pub source: Source,
+    pub cells: Vec<(Column, char)>,
+}
+
+/// Build the board's rows straight from the engine's heat grid — pure and
+/// terminal-free so it's unit-testable on its own (see `tests` below).
+///
+/// Rows are `hive.grid().active_sources()`, in first-seen order. Columns are
+/// every `Column::Device(0..=max_device)` (omitted entirely if no device has
+/// ever been seen) followed by `Column::Host` — every row gets the same
+/// column set, so the board reads as a proper table even for sources that
+/// haven't touched every column yet (those cells are simply cold/zero heat).
+pub fn board_rows(hive: &Hivemind) -> Vec<BoardRow> {
+    let grid = hive.grid();
+    let mut columns: Vec<Column> = Vec::new();
+    if let Some(max_device) = grid.max_device() {
+        for d in 0..=max_device {
+            columns.push(Column::Device(d));
+        }
+    }
+    columns.push(Column::Host);
+
+    grid.active_sources()
+        .into_iter()
+        .map(|source| {
+            let cells = columns
+                .iter()
+                .map(|&col| (col, heat_char(grid.heat(source, col))))
+                .collect();
+            BoardRow { source, cells }
+        })
+        .collect()
+}
+
+/// Short column header label: "D0", "D1", … or "Host".
+fn col_label(col: Column) -> String {
+    match col {
+        Column::Device(d) => format!("D{d}"),
+        Column::Host => "Host".to_string(),
+    }
+}
+
+/// Given the board rows and the current cursor `(row, col)` (clamped into
+/// range), the `(Source, Column)` pair the cursor is sitting on — `None` if
+/// the board is empty (no active sources yet).
+fn selected_cell(rows: &[BoardRow], cursor: (usize, usize)) -> Option<(Source, Column)> {
+    if rows.is_empty() {
+        return None;
+    }
+    let row = &rows[cursor.0.min(rows.len() - 1)];
+    if row.cells.is_empty() {
+        return None;
+    }
+    let (col, _) = row.cells[cursor.1.min(row.cells.len() - 1)];
+    Some((row.source, col))
+}
+
+fn severity_label(sev: Severity) -> &'static str {
+    match sev {
+        Severity::Trace => "trace",
+        Severity::Info => "info",
+        Severity::Notice => "notice",
+        Severity::Warn => "warn",
+        Severity::Error => "error",
+    }
+}
+
+fn severity_style(sev: Severity) -> Style {
+    let c = match sev {
+        Severity::Trace => colors::rgb(110, 110, 130),
+        Severity::Info => colors::rgb(140, 200, 255),
+        Severity::Notice => colors::rgb(210, 210, 120),
+        Severity::Warn => colors::rgb(255, 180, 80),
+        Severity::Error => colors::rgb(255, 100, 100),
+    };
+    Style::default().fg(c)
+}
+
+fn collector_glyph(status: &CollectorStatus) -> (&'static str, Color) {
+    match status {
+        CollectorStatus::Ok => ("●", colors::rgb(90, 220, 140)),
+        CollectorStatus::PermDenied(_) => ("▲", colors::rgb(230, 190, 90)),
+        CollectorStatus::Err(_) => ("✗", colors::rgb(255, 100, 100)),
+    }
+}
+
+/// Take as many leading chars of `s` as fit in `max_w` display columns
+/// (unicode-width aware — an emoji or box glyph counts as the columns it
+/// actually occupies, not as one `char`). Used for the feed pane so an
+/// arbitrarily long log/event line never pushes the row past the panel's
+/// right edge — we truncate deliberately and visibly rather than let
+/// `Paragraph` clip it silently.
+fn truncate_to_width(s: &str, max_w: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    if max_w == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(1);
+        if w + cw > max_w {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out
+}
+
+/// Does this event belong on the given `(source, column)` cell?
+fn event_matches_cell(ev: &SniffEvent, source: Source, col: Column) -> bool {
+    if ev.source != source {
+        return false;
+    }
+    match col {
+        Column::Host => ev.device.is_none(),
+        Column::Device(d) => ev.device == Some(d),
+    }
+}
+
+/// Draw the HivemindSweeper board + feed into `area`.
+///
+/// - `cursor` selects a `(row, col)` board cell; when `unified` is false the
+///   feed pane is filtered to just that cell's `(source, column)`. When
+///   `unified` is true every event (subject to `sev_floor`) is shown instead.
+/// - `sev_floor` is an inclusive floor: events strictly below it are hidden
+///   from the feed (the board itself is unaffected — heat is severity-blind).
+///
+/// Left/bottom borders only (`╔═…` / `║ …` / `╚═…`) — no right-side glyph —
+/// per the project's TUI convention; the panel fills exactly the `area` it's
+/// given rather than a fixed width, and the board's label/column widths are
+/// sized to their actual content so nothing is silently truncated the way a
+/// hardcoded panel width has bitten this project before.
+pub fn render_hivemind(
+    f: &mut Frame,
+    area: Rect,
+    hive: &Hivemind,
+    cursor: (usize, usize),
+    unified: bool,
+    sev_floor: Severity,
+) {
+    if area.width < 12 || area.height < 6 {
+        return; // Nothing sensible to draw in a sliver of a terminal.
+    }
+
+    let width = area.width as usize;
+    let content_w = width.saturating_sub(2); // minus the "║ " left border
+    let content_rows = (area.height as usize).saturating_sub(2); // minus top/bottom border rows
+
+    let rows = board_rows(hive);
+    let selected = selected_cell(&rows, cursor);
+
+    // Column label width sized to the widest label actually in use ("Host" is
+    // 4 cols; "D0".."D9" are 2, "D10"+ are 3) so multi-digit device indices
+    // never get clipped.
+    let col_w = rows
+        .first()
+        .map(|r| {
+            r.cells
+                .iter()
+                .map(|(c, _)| unicode_width::UnicodeWidthStr::width(col_label(*c).as_str()))
+                .max()
+                .unwrap_or(4)
+        })
+        .unwrap_or(4)
+        .max(4);
+    // Source label width sized to the widest label in play (all ASCII labels
+    // today, but measured via unicode-width for the same reason as col_w —
+    // consistency, and safety if a future Source label isn't ASCII).
+    let label_w = rows
+        .iter()
+        .map(|r| unicode_width::UnicodeWidthStr::width(r.source.label()))
+        .max()
+        .unwrap_or(6)
+        .max(6);
+
+    let dim = colors::rgb(120, 130, 150);
+    let head = colors::rgb(200, 220, 255);
+    let accent = colors::rgb(120, 220, 200);
+    let selected_bg = colors::rgb(40, 70, 70);
+
+    let mut header_body: Vec<Line> = Vec::new();
+
+    // ── Title / counters line ───────────────────────────────────────────
+    let running_note = if hive.is_running() { "" } else { " [stopped]" };
+    header_body.push(Line::from(vec![
+        Span::styled(
+            "HIVEMINDSWEEPER",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "  events:{}  dropped:{}{}",
+                hive.events().len(),
+                hive.dropped(),
+                running_note
+            ),
+            Style::default().fg(dim),
+        ),
+    ]));
+
+    // ── Collector status line ───────────────────────────────────────────
+    let mut collector_spans: Vec<Span> = Vec::new();
+    for (name, status) in hive.statuses() {
+        let (glyph, color) = collector_glyph(&status);
+        collector_spans.push(Span::styled(format!("{name} "), Style::default().fg(dim)));
+        collector_spans.push(Span::styled(glyph, Style::default().fg(color)));
+        collector_spans.push(Span::raw("  "));
+    }
+    if collector_spans.is_empty() {
+        collector_spans.push(Span::styled(
+            "(no collectors spawned)",
+            Style::default().fg(dim),
+        ));
+    }
+    header_body.push(Line::from(collector_spans));
+
+    // ── Rule ─────────────────────────────────────────────────────────────
+    header_body.push(rule_line(content_w, dim));
+
+    // ── Column header + board rows ──────────────────────────────────────
+    if rows.is_empty() {
+        header_body.push(Line::from(Span::styled(
+            "  (no activity observed yet — waiting on collectors)",
+            Style::default().fg(dim),
+        )));
+    } else {
+        let mut hdr_spans = vec![Span::raw(format!("{:label_w$}", ""))];
+        for (col, _) in &rows[0].cells {
+            hdr_spans.push(Span::raw("  "));
+            hdr_spans.push(Span::styled(
+                format!("{:>col_w$}", col_label(*col)),
+                Style::default().fg(head).add_modifier(Modifier::BOLD),
+            ));
+        }
+        header_body.push(Line::from(hdr_spans));
+
+        for (ri, row) in rows.iter().enumerate() {
+            let mut spans = vec![Span::styled(
+                format!("{:label_w$}", row.source.label()),
+                Style::default().fg(head),
+            )];
+            for (ci, (_, glyph)) in row.cells.iter().enumerate() {
+                spans.push(Span::raw("  "));
+                let is_selected = !unified && ri == cursor.0.min(rows.len() - 1) && {
+                    let last_ci = row.cells.len().saturating_sub(1);
+                    ci == cursor.1.min(last_ci)
+                };
+                let mut style = Style::default().fg(accent);
+                if is_selected {
+                    style = style.bg(selected_bg).add_modifier(Modifier::BOLD);
+                }
+                spans.push(Span::styled(format!("{:>col_w$}", glyph), style));
+            }
+            header_body.push(Line::from(spans));
+        }
+    }
+
+    // ── Rule ─────────────────────────────────────────────────────────────
+    header_body.push(rule_line(content_w, dim));
+
+    // ── Feed header ──────────────────────────────────────────────────────
+    let feed_title = if unified {
+        format!("FEED — unified · severity ≥ {}", severity_label(sev_floor))
+    } else if let Some((src, col)) = selected {
+        format!(
+            "FEED — {} · {} · severity ≥ {}",
+            src.label(),
+            col_label(col),
+            severity_label(sev_floor)
+        )
+    } else {
+        format!("FEED · severity ≥ {}", severity_label(sev_floor))
+    };
+    header_body.push(Line::from(Span::styled(
+        feed_title,
+        Style::default().fg(head).add_modifier(Modifier::BOLD),
+    )));
+
+    // ── Feed lines ───────────────────────────────────────────────────────
+    let feed_h = content_rows.saturating_sub(header_body.len());
+    let matches: Vec<&SniffEvent> = hive
+        .events()
+        .iter()
+        .filter(|ev| {
+            ev.severity >= sev_floor
+                && (unified
+                    || selected.map_or(true, |(src, col)| event_matches_cell(ev, src, col)))
+        })
+        .collect();
+    let start = matches.len().saturating_sub(feed_h);
+    let mut feed_lines: Vec<Line> = Vec::new();
+    for ev in &matches[start..] {
+        let dev_str = match ev.device {
+            Some(d) => format!("D{d}"),
+            None => "host".to_string(),
+        };
+        let prefix_w = 7 /* severity */ + 1 + label_w + 1 + 4 /* dev field */ + 1;
+        let text_w = content_w.saturating_sub(prefix_w);
+        feed_lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<7}", severity_label(ev.severity)),
+                severity_style(ev.severity),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("{:label_w$}", ev.source.label()),
+                Style::default().fg(dim),
+            ),
+            Span::raw(" "),
+            Span::styled(format!("{:<4}", dev_str), Style::default().fg(dim)),
+            Span::raw(" "),
+            Span::raw(truncate_to_width(&ev.text, text_w)),
+        ]));
+    }
+
+    let mut body = header_body;
+    body.extend(feed_lines);
+
+    // ── Wrap with the left/bottom-only border and render ────────────────
+    let border_style = Style::default().fg(colors::rgb(60, 80, 100));
+    let mut display_lines: Vec<Line> = Vec::with_capacity(body.len() + 2);
+    display_lines.push(Line::from(Span::styled(
+        format!("╔{}", "═".repeat(width.saturating_sub(1))),
+        border_style,
+    )));
+    for line in body.into_iter().take(content_rows) {
+        let mut spans = vec![Span::styled("║ ", border_style)];
+        spans.extend(line.spans);
+        display_lines.push(Line::from(spans));
+    }
+    display_lines.push(Line::from(Span::styled(
+        format!("╚{}", "═".repeat(width.saturating_sub(1))),
+        border_style,
+    )));
+
+    f.render_widget(Paragraph::new(display_lines), area);
+}
+
+fn rule_line(content_w: usize, dim: Color) -> Line<'static> {
+    Line::from(Span::styled(
+        "─".repeat(content_w),
+        Style::default().fg(dim),
+    ))
+}
+
+/// Legend lines for the `l` overlay while in HivemindSweeper — mirrors the
+/// `{mode}_legend_lines` free functions in `crate::ui::tui` (e.g.
+/// `castle_legend_lines`), just kept local to this module since the board's
+/// symbols are entirely defined here.
+pub(crate) fn legend_lines(
+    bar: Color,
+    bg: Color,
+    dim: Color,
+) -> Vec<Line<'static>> {
+    macro_rules! ln {
+        ($spans:expr) => {{
+            let mut v: Vec<Span<'static>> =
+                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            v.extend($spans);
+            Line::from(v)
+        }};
+    }
+    vec![
+        ln!(vec![
+            Span::styled("rows   ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled("= active sources (ttnn, metal, …)", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("cols   ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled("= per-device columns + Host", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("░▒▓█   ", Style::default().fg(colors::rgb(120, 220, 200))),
+            Span::styled("= decaying activity heat per cell", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled(
+                "feed   ",
+                Style::default().fg(colors::rgb(200, 230, 255))
+            ),
+            Span::styled(
+                "= live events for the selected cell",
+                Style::default().fg(dim)
+            ),
+        ]),
+    ]
+}
+
+/// Explain-panel body for HivemindSweeper (`!` overlay) — passed to the
+/// shared `explain_lines(bar, bg, dim, lbl, TEXT)` builder in `mod.rs`.
+pub(crate) const EXPLAIN_TEXT: &[&str] = &[
+    "HivemindSweeper — Activity Sniffer",
+    "",
+    "Opt-in, read-only sniffer that correlates driver",
+    "messages, compile-cache churn, log tails, and /proc",
+    "activity into one source × device/host heat board.",
+    "",
+    "Each cell's glyph (░▒▓█) decays over time — a cold",
+    "cell just hasn't seen activity recently.",
+    "",
+    "The feed pane below shows live events for whichever",
+    "cell is selected (or every event, in unified mode).",
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workload::hivemind::{event::*, grid::Column, Hivemind};
+
+    #[test]
+    fn board_lists_active_sources_with_host_and_device_columns() {
+        let mut h = Hivemind::new();
+        h.bump_grid_for_test(Source::TtMetal, Some(0));
+        h.bump_grid_for_test(Source::Ttnn, None);
+        let rows = board_rows(&h);
+        let sources: Vec<_> = rows.iter().map(|r| r.source).collect();
+        assert_eq!(sources, vec![Source::TtMetal, Source::Ttnn]);
+        // Column set spans D0..=max_device plus Host.
+        assert!(rows[0].cells.iter().any(|(c, _)| *c == Column::Device(0)));
+        assert!(rows[0].cells.iter().any(|(c, _)| *c == Column::Host));
+    }
+
+    /// Rendering smoke test (mirrors `grid_mode_narrow_terminal_does_not_panic`
+    /// / `render_snake_view_with_band_does_not_panic` in `mod.rs`): draw both
+    /// an empty engine and one with injected activity, across a range of
+    /// terminal sizes down to tiny, in both unified and per-cell-filtered
+    /// modes, and confirm none of it panics.
+    #[test]
+    fn render_hivemind_does_not_panic_across_sizes_and_states() {
+        use ratatui::{backend::TestBackend, Terminal};
+        use std::time::Instant;
+
+        let empty = Hivemind::new();
+
+        let mut active = Hivemind::new();
+        active.bump_grid_for_test(Source::TtMetal, Some(0));
+        active.bump_grid_for_test(Source::Ttnn, None);
+        active.push_for_test(SniffEvent {
+            ts: Instant::now(),
+            source: Source::TtMetal,
+            device: Some(0),
+            severity: Severity::Warn,
+            kind: EventKind::Compile,
+            text: "brisc.cpp.o compiled in 1.2s (this line is intentionally very long to exercise feed-text truncation at the panel's right edge)".to_string(),
+            origin: "cache_watch".to_string(),
+        });
+
+        for (w, h) in [(120u16, 40u16), (60, 20), (20, 8), (12, 6), (5, 4)] {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
+            for hive in [&empty, &active] {
+                for unified in [false, true] {
+                    terminal
+                        .draw(|f| {
+                            let area = f.area();
+                            render_hivemind(f, area, hive, (0, 0), unified, Severity::Trace);
+                        })
+                        .expect("draw must not panic");
+                }
+            }
+        }
+    }
+}

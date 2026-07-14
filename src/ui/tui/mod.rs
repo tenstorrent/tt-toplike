@@ -18,6 +18,7 @@ pub use perf::PerfMeter;
 pub mod throttle;
 pub use throttle::ThrottleState;
 pub(crate) mod inference_panel;
+mod hivemind_view;
 
 use crate::animation::{
     ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis,
@@ -84,6 +85,12 @@ enum DisplayMode {
     /// key handler below). Supersedes the old `[i]` overlay strip that used
     /// to live inside the Insights screen.
     InferenceMonitor,
+    /// HivemindSweeper — opt-in passive activity sniffer board + feed.
+    /// Entered via `~` only (like `InferenceMonitor`, excluded from the
+    /// `v`-cycle rotation): `~` toggles in (remembering `prev_mode`) and
+    /// back out again, Esc also backs out to `prev_mode`. Both exit paths
+    /// stop the engine's collector threads — see the `~` and Esc handlers.
+    HivemindSweeper,
 }
 
 /// Floating overlay panel type — toggled by hotkeys, auto-dismissed on any other keypress.
@@ -351,6 +358,26 @@ fn run_app(
     // Insights. Only meaningful while `display_mode == InferenceMonitor`.
     let mut prev_mode = DisplayMode::Insights;
 
+    // ── HivemindSweeper state (`~` to activate) ─────────────────────────────
+    // `None` until first entered — `~`'s key handler does
+    // `hivemind.get_or_insert_with(Hivemind::new).start()` on entry and
+    // `hivemind.as_mut().map(|h| h.stop())` on exit (both `~` again and Esc),
+    // so the five collector threads only ever run while this mode is active.
+    // `hm_cursor`/`hm_unified`/`hm_sev` select and filter the feed pane;
+    // cursor movement / unified toggle / severity-floor keys land in a later
+    // task — for now they're wired into `render_hivemind` at their defaults.
+    let mut hivemind: Option<crate::workload::hivemind::Hivemind> = None;
+    // `mut` unused until Task 12 wires up cursor movement / unified toggle /
+    // severity-floor keys — `#[allow]` rather than dropping `mut` now (which
+    // Task 12 would just have to re-add) keeps this block matching the
+    // brief's wiring verbatim.
+    #[allow(unused_mut)]
+    let mut hm_cursor = (0usize, 0usize);
+    #[allow(unused_mut)]
+    let mut hm_unified = false;
+    #[allow(unused_mut)]
+    let mut hm_sev = crate::workload::hivemind::Severity::Trace;
+
     // ── Slash command state ────────────────────────────────────────────────
     // Press '/' from any mode to open the command bar at the bottom of the
     // screen.  Type a command, press Enter to execute, Esc to cancel.
@@ -510,6 +537,9 @@ fn run_app(
                 // exhaust, timeline, coiling loader) — it must redraw at anim
                 // cadence, not the 10 FPS data rate, or it reads as frozen.
                 | DisplayMode::InferenceMonitor
+                // The heat board decays every tick and the feed pane streams
+                // live events — same "must redraw at anim cadence" reasoning.
+                | DisplayMode::HivemindSweeper
         ) || (display_mode == DisplayMode::Defrag && defrag_is_animated);
         let render_interval = if is_anim_mode {
             throttle_state.effective_anim_interval(ui_poll_rate_anim)
@@ -837,6 +867,14 @@ fn run_app(
                         dv.update(backend);
                     }
                 }
+                DisplayMode::HivemindSweeper => {
+                    // The engine is started on `~` entry (see the key handler)
+                    // and stopped on exit — here we just drain its channel
+                    // into the ring/heat grid and let the grid decay a step.
+                    if let Some(h) = hivemind.as_mut() {
+                        h.poll();
+                    }
+                }
             }
         } // end if should_tick
 
@@ -985,6 +1023,18 @@ fn run_app(
                         DisplayMode::Defrag => {
                             if let Some(ref dv) = defrag {
                                 ui_defrag(f, dv, backend);
+                            }
+                        }
+                        DisplayMode::HivemindSweeper => {
+                            if let Some(ref h) = hivemind {
+                                hivemind_view::render_hivemind(
+                                    f,
+                                    f.area(),
+                                    h,
+                                    hm_cursor,
+                                    hm_unified,
+                                    hm_sev,
+                                );
                             }
                         }
                     }
@@ -1273,6 +1323,29 @@ fn run_app(
                                 }
                                 force_redraw = true;
                             }
+                            KeyCode::Char('~') => {
+                                // Toggle the HivemindSweeper board+feed view — mirrors
+                                // the `i`/`I` handler above: entering remembers
+                                // `prev_mode` and starts the engine; leaving (via `~`
+                                // again) stops it. `Hivemind` has no `Drop` impl, so
+                                // skipping `stop()` here would leave its five collector
+                                // threads running invisibly after the user leaves the
+                                // mode — this is a correctness requirement, not
+                                // optional (see the matching Esc branch below).
+                                if display_mode != DisplayMode::HivemindSweeper {
+                                    prev_mode = display_mode;
+                                    display_mode = DisplayMode::HivemindSweeper;
+                                    hivemind
+                                        .get_or_insert_with(crate::workload::hivemind::Hivemind::new)
+                                        .start();
+                                } else {
+                                    display_mode = prev_mode;
+                                    if let Some(h) = hivemind.as_mut() {
+                                        h.stop();
+                                    }
+                                }
+                                force_redraw = true;
+                            }
                             KeyCode::Char('/') => {
                                 // Open command bar — clears any previous result message
                                 cmd_mode = true;
@@ -1304,6 +1377,14 @@ fn run_app(
                                 } else if fleet_zoom_start.is_some() {
                                     // Zoom out from portrait drill-down back to galaxy overview.
                                     fleet_zoom_start = None;
+                                } else if display_mode == DisplayMode::HivemindSweeper {
+                                    // Back out of the sniffer view to wherever the user
+                                    // came from, and stop the engine's collector threads
+                                    // — same lifecycle contract as the `~` handler above.
+                                    display_mode = prev_mode;
+                                    if let Some(h) = hivemind.as_mut() {
+                                        h.stop();
+                                    }
                                 } else if display_mode == DisplayMode::InferenceMonitor {
                                     // Back out of the dedicated Inference Server Monitor
                                     // view to wherever the user came from (see the
@@ -1353,21 +1434,51 @@ fn run_app(
                                     // still a direct toggle via `i`).
                                     DisplayMode::Defrag => DisplayMode::InferenceMonitor,
                                     DisplayMode::InferenceMonitor => DisplayMode::Insights,
+                                    // HivemindSweeper is deliberately excluded from the
+                                    // `v`-cycle rotation (only reachable via `~`), but `v`
+                                    // is a global hotkey, so if it's pressed while the
+                                    // sweeper happens to be active, stop its collector
+                                    // threads before leaving — same lifecycle contract as
+                                    // the `~`/Esc handlers.
+                                    DisplayMode::HivemindSweeper => {
+                                        if let Some(h) = hivemind.as_mut() {
+                                            h.stop();
+                                        }
+                                        DisplayMode::Insights
+                                    }
                                 };
                                 log::info!("Switched to {:?} mode", display_mode);
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
-                                // Jump directly to Defrag mode
+                                // Jump directly to Defrag mode. If the sweeper happens to
+                                // be active, stop its collector threads first — same
+                                // lifecycle contract as the `~`/Esc/`v` handlers.
+                                if display_mode == DisplayMode::HivemindSweeper {
+                                    if let Some(h) = hivemind.as_mut() {
+                                        h.stop();
+                                    }
+                                }
                                 defrag = None; // reinit at new frame
                                 display_mode = DisplayMode::Defrag;
                                 log::info!("Switched directly to Defrag mode");
                             }
                             KeyCode::Char('g') => {
+                                if display_mode == DisplayMode::HivemindSweeper {
+                                    if let Some(h) = hivemind.as_mut() {
+                                        h.stop();
+                                    }
+                                }
                                 display_mode = DisplayMode::Grid;
                                 log::info!("Switched to Grid mode");
                             }
                             KeyCode::Char('a') | KeyCode::Char('A') => {
-                                // Jump directly to Arcade mode
+                                // Jump directly to Arcade mode. Same HivemindSweeper
+                                // teardown guard as the Defrag/Grid jumps above.
+                                if display_mode == DisplayMode::HivemindSweeper {
+                                    if let Some(h) = hivemind.as_mut() {
+                                        h.stop();
+                                    }
+                                }
                                 arcade = None; // Reset arcade to reinitialize
                                 display_mode = DisplayMode::Arcade;
                                 log::info!("Switched directly to Arcade mode");
@@ -2578,6 +2689,7 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 row!(" d  D", "jump to Defrag", key),
                 row!(" g", "jump to Grid", key),
                 row!(" i  I", "Inference Servers monitor", key),
+                row!(" ~", "HivemindSweeper activity sniffer", key),
                 row!(" b", "cycle backend", key),
                 ln!(vec![Span::styled(
                     "──────────────────────────────────────",
@@ -2624,6 +2736,7 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 DisplayMode::InferenceMonitor => inference_legend_lines(bar, bg, dim),
                 DisplayMode::Insights => insights_legend_lines(bar, bg, dim),
                 DisplayMode::Grid => grid_legend_lines(bar, bg, dim),
+                DisplayMode::HivemindSweeper => hivemind_view::legend_lines(bar, bg, dim),
                 DisplayMode::Arcade => {
                     // All four combined.
                     let mut v = Vec::new();
@@ -2849,6 +2962,9 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "Press l for the symbol legend · i to return.",
                 ],
             ),
+            DisplayMode::HivemindSweeper => {
+                explain_lines(bar, bg, dim, lbl, hivemind_view::EXPLAIN_TEXT)
+            }
         },
     }
 }
