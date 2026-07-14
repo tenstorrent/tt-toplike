@@ -4,6 +4,7 @@
 //! Individual activity collectors. Each is behind the `Collector` trait.
 
 pub mod cache_watch;
+pub mod inspector;
 pub mod kmsg;
 pub mod log_tail;
 pub mod procfs;
