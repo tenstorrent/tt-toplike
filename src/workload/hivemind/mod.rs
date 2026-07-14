@@ -4,6 +4,7 @@
 //! Hivemindsweeper: opt-in passive activity sniffer. See
 //! docs/superpowers/specs/2026-07-14-hivemindsweeper-design.md.
 
+pub mod classify;
 pub mod event;
 
 use std::collections::VecDeque;
