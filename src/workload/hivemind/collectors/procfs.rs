@@ -513,8 +513,11 @@ mod real {
     /// throttle fired; otherwise an empty `Vec` (see `HOLDING_INTERVAL`'s
     /// docs for why this must be throttled rather than emitted every poll).
     ///
-    /// `Severity::Trace` is deliberate: it lets the severity floor hide
-    /// these heartbeats from the feed by default while still bumping the
+    /// `Severity::Trace` is deliberate: it is the LOWEST severity, so a
+    /// steady holder's heartbeat row shows in the feed at the default floor
+    /// (`Trace`, i.e. `severity >= Trace` is true) — making the holder
+    /// visible by default — yet is the first thing dropped when the operator
+    /// raises the severity floor with `s`. Each heartbeat also bumps the
     /// board cell's heat (the engine's `poll()` bumps heat for every event
     /// regardless of severity), keeping a steady holder's cell warm/live
     /// instead of decaying to cold the moment its one-time OPEN event ages
