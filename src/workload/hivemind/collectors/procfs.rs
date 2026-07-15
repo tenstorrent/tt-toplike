@@ -130,9 +130,6 @@ mod real {
                 }
             }
             let current_keys: HashSet<(i32, u8)> = current.keys().copied().collect();
-            // Which pids still hold *some* device fd open this poll — used
-            // below to decide when an `open_cache` entry can be dropped.
-            let active_pids: HashSet<i32> = current_keys.iter().map(|&(pid, _)| pid).collect();
 
             let mut events = Vec::new();
             // Newly opened: in `current` but not `seen`. Classify from BOTH
@@ -156,35 +153,83 @@ mod real {
                     });
                 }
             }
-            // Newly closed: in `seen` but not `current` any more. The process
-            // may already be gone by now, so reuse whatever was cached at
-            // open time (see `close_event_source`) instead of hardcoding
-            // `Unknown` for every close.
-            for &(pid, dev) in &self.seen {
-                if !current_keys.contains(&(pid, dev)) {
-                    let (source, text) = close_event_source(self.open_cache.get(&pid), pid, dev);
-                    events.push(SniffEvent {
-                        ts: Instant::now(),
-                        source,
-                        device: Some(dev),
-                        severity: Severity::Info,
-                        kind: EventKind::Fd,
-                        text,
-                        origin: "procfs".into(),
-                    });
-                    // Only forget this pid once it holds no more device fds
-                    // at all — a pid with several devices open must keep its
-                    // cached classification for the remaining closes, not
-                    // just the first one.
-                    if !active_pids.contains(&pid) {
-                        self.open_cache.remove(&pid);
-                    }
-                }
+            // Newly closed: in `seen` but not `current` any more. Delegated to
+            // the pure `close_events_and_evictions` helper below — see its
+            // docs for why eviction must happen only *after* every close in
+            // this poll has been generated.
+            let (close_ev, evict) =
+                close_events_and_evictions(&self.seen, &current_keys, &self.open_cache);
+            events.extend(close_ev);
+            for pid in evict {
+                self.open_cache.remove(&pid);
             }
 
             self.seen = current_keys;
             events
         }
+    }
+
+    /// Pure close-event generation for one poll: given the `(pid, dev)` pairs
+    /// held open last poll (`seen`), the ones still open now (`current_keys`),
+    /// and the `open_cache` recorded at OPEN time, produce the CLOSE
+    /// `SniffEvent`s for this poll, plus the set of pids whose `open_cache`
+    /// entry should now be evicted.
+    ///
+    /// Eviction is returned rather than performed inline for a specific
+    /// reason: a pid that closes *several* devices in the very same poll
+    /// (e.g. a `tt-smi -s` snapshot on a multi-chip box exiting while it
+    /// still held every `/dev/tenstorrent/*` node) shows up as multiple
+    /// `(pid, dev)` entries in `seen`, all processed in this one loop. If the
+    /// cache entry were removed as soon as the *first* of those closes was
+    /// handled, every subsequent close for that same pid in the same poll
+    /// would miss the cache and collapse to `Source::Unknown` — exactly the
+    /// "unknown" churn this cache exists to eliminate. Looking the entry up
+    /// without removing it lets every close in the poll see the same cached
+    /// classification: a pid with several devices open must keep its cached
+    /// classification for *all* of its closes this poll, not just the first
+    /// one. Only after the whole loop has generated every close event is a
+    /// pid's cache entry safe to drop — and only if `current_keys` shows it
+    /// holds no device fd at all any more (a pid still present there is a
+    /// staggered close across polls — one device closed now, another still
+    /// open next poll — and must keep its cached classification for later).
+    ///
+    /// Pure (no `/proc` access, no `&mut self`), so this poll-boundary
+    /// interaction is unit-testable with a synthetic `seen`/`current_keys`/
+    /// `open_cache` — no live process or `ProcessMonitor` required.
+    ///
+    /// `pub(super)` (rather than private) purely so the `tests` module —
+    /// which lives as a sibling of `mod real` in this file, not inside it —
+    /// can call it directly with synthetic data.
+    pub(super) fn close_events_and_evictions(
+        seen: &HashSet<(i32, u8)>,
+        current_keys: &HashSet<(i32, u8)>,
+        open_cache: &HashMap<i32, (String, Source)>,
+    ) -> (Vec<SniffEvent>, HashSet<i32>) {
+        let active_pids: HashSet<i32> = current_keys.iter().map(|&(pid, _)| pid).collect();
+
+        let mut events = Vec::new();
+        let mut closed_pids: HashSet<i32> = HashSet::new();
+        for &(pid, dev) in seen {
+            if !current_keys.contains(&(pid, dev)) {
+                let (source, text) = close_event_source(open_cache.get(&pid), pid, dev);
+                events.push(SniffEvent {
+                    ts: Instant::now(),
+                    source,
+                    device: Some(dev),
+                    severity: Severity::Info,
+                    kind: EventKind::Fd,
+                    text,
+                    origin: "procfs".into(),
+                });
+                closed_pids.insert(pid);
+            }
+        }
+
+        let evict: HashSet<i32> = closed_pids
+            .into_iter()
+            .filter(|pid| !active_pids.contains(pid))
+            .collect();
+        (events, evict)
     }
 
     impl Default for ProcfsCollector {
@@ -277,5 +322,48 @@ mod tests {
         let (source, text) = close_event_source(None, 4242, 0);
         assert_eq!(source, Source::Unknown);
         assert_eq!(text, "pid 4242 closed /dev/tenstorrent/0");
+    }
+
+    /// Regression test for the eviction-timing bug: a single pid (a
+    /// `tt-smi -s` snapshot on a 4-chip box, here reduced to 2 devices)
+    /// holds TWO device fds open, `(pid, 0)` and `(pid, 1)`, both closing in
+    /// the SAME poll (`current` is empty — the process has exited). Before
+    /// the fix, processing `(pid, 0)`'s close would evict the `open_cache`
+    /// entry immediately (since the pid holds no fd in `current` either
+    /// way), so the close for `(pid, 1)` — processed later in the same
+    /// iteration over `seen` — would miss the cache and fall back to
+    /// `Source::Unknown`. Both closes must instead see the cached
+    /// `("tt-smi", Source::TtSmi)` classification, and the pid must be
+    /// evicted from `open_cache` afterward (not left to leak).
+    #[test]
+    fn same_poll_multi_device_close_keeps_cached_source_for_every_close() {
+        use std::collections::{HashMap, HashSet};
+
+        let pid = 4242;
+        let seen: HashSet<(i32, u8)> = [(pid, 0), (pid, 1)].into_iter().collect();
+        let current_keys: HashSet<(i32, u8)> = HashSet::new(); // process has exited entirely
+        let mut open_cache: HashMap<i32, (String, Source)> = HashMap::new();
+        open_cache.insert(pid, ("tt-smi".to_string(), Source::TtSmi));
+
+        let (events, evict) = real::close_events_and_evictions(&seen, &current_keys, &open_cache);
+
+        // Both closes generated, both still classified via the cache.
+        assert_eq!(events.len(), 2);
+        for ev in &events {
+            assert_eq!(ev.source, Source::TtSmi, "close event: {:?}", ev.text);
+            assert!(
+                ev.text
+                    .starts_with("tt-smi (pid 4242) closed /dev/tenstorrent/"),
+                "unexpected text: {}",
+                ev.text
+            );
+        }
+        let mut devices: Vec<Option<u8>> = events.iter().map(|e| e.device).collect();
+        devices.sort();
+        assert_eq!(devices, vec![Some(0), Some(1)]);
+
+        // Pid holds no device fd in `current_keys`, so it must be marked for
+        // eviction after all its closes were generated.
+        assert_eq!(evict, [pid].into_iter().collect());
     }
 }
