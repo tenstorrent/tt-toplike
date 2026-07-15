@@ -259,6 +259,17 @@ impl FeedAgg {
             .collect()
     }
 
+    /// Sum of every tracked row's current events/sec `rate` — a cheap "how
+    /// much is happening right now, across the whole board" figure. Used by
+    /// the HivemindSweeper view's KITT scanner bar (see
+    /// `crate::ui::tui::hivemind_view::kitt_activity_norm`) to drive its
+    /// sweep speed, focus width, and brightness. Deliberately ignores any
+    /// `sev_floor`/cell filter — the scanner reflects TOTAL board activity,
+    /// not whatever the feed pane happens to be filtered to.
+    pub fn total_rate(&self) -> f32 {
+        self.rows.values().map(|r| r.rate).sum()
+    }
+
     /// Drop the least-recently-active row once we're over `MAX_ROWS`. Rows
     /// are coalesced aggregates, not history, so this is memory hygiene, not
     /// event loss — it never touches `Hivemind`'s own ring/drop counter.
@@ -434,6 +445,21 @@ mod tests {
         let rows = agg.rows(None, Severity::Warn);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].source, Source::TtMetal);
+    }
+
+    #[test]
+    fn total_rate_sums_row_rates() {
+        let mut agg = FeedAgg::new();
+        let t0 = Instant::now();
+        agg.ingest(&ev(Source::Vllm, Some(0), Severity::Info, "a"), t0);
+        agg.ingest(&ev(Source::Vllm, Some(0), Severity::Info, "a"), t0);
+        agg.ingest(&ev(Source::TtMetal, Some(1), Severity::Info, "b"), t0);
+        agg.tick(t0 + Duration::from_secs(1));
+
+        let rows = agg.rows(None, Severity::Trace);
+        let manual_sum: f32 = rows.iter().map(|r| r.rate).sum();
+        assert!(manual_sum > 0.0, "expect nonzero rate right after a tick");
+        assert_eq!(agg.total_rate(), manual_sum);
     }
 
     #[test]

@@ -182,6 +182,132 @@ fn truncate_to_width(s: &str, max_w: usize) -> String {
     out
 }
 
+/// Rolling total events/sec across the whole board (see
+/// `FeedAgg::total_rate`) that reads as "fully active" for the KITT scanner
+/// bar — beyond this reading the beam is already at its slowest/tightest/
+/// brightest, so a louder burst doesn't push it any further.
+const KITT_FULL_RATE: f32 = 12.0;
+
+/// Per-frame sweep step at zero activity. Tuned against the ~60 FPS animated-
+/// mode redraw cadence (`ui_poll_rate_anim` in `crate::ui::tui::run_tui`) so
+/// an idle full left-right sweep (`pos` 0.0→1.0) takes roughly 1.5-2.5s —
+/// brisk enough to read as alive, not so fast it's distracting.
+const KITT_SPEED_IDLE: f32 = 0.009;
+
+/// At full activity the sweep slows to this fraction of its idle speed (see
+/// `KittScanner::speed`) — "more hardware activity = a slower, more
+/// deliberate beam."
+const KITT_ACTIVE_SPEED_FRACTION: f32 = 0.3;
+
+/// Overall brightness floor/ceiling (0..1) the beam's bright center reaches
+/// at zero vs. full activity. A low idle floor keeps it subtle and dark; the
+/// active ceiling is fully saturated red.
+const KITT_IDLE_FLOOR: f32 = 0.12;
+const KITT_ACTIVE_MAX: f32 = 1.0;
+
+/// Gaussian falloff `sigma`, as a fraction of the beam's width, at zero vs.
+/// full activity — wide/diffuse when idle, tight/sharp when active, so the
+/// bright spot visibly "focuses" as hardware activity rises.
+const KITT_SIGMA_WIDE_IDLE: f32 = 0.22;
+const KITT_SIGMA_NARROW_ACTIVE: f32 = 0.05;
+
+/// Normalize a rolling total events/sec figure (`FeedAgg::total_rate`) into
+/// the 0..1 `activity` reading the KITT scanner's speed/focus/brightness are
+/// all driven by. Pure and shared so the per-frame `KittScanner::advance`
+/// step (in `crate::ui::tui::run_tui`) and the `beam_cells` render step below
+/// always agree on the same activity reading for a given frame.
+pub fn kitt_activity_norm(total_rate: f32) -> f32 {
+    (total_rate / KITT_FULL_RATE).clamp(0.0, 1.0)
+}
+
+/// Persistent animation state for the KITT-style (Knight Rider) red-gradient
+/// scanner bar drawn on a dedicated row at the bottom of the HivemindSweeper
+/// view (see `render_hivemind` and `beam_cells`). `pos` is the bright
+/// center's position across the beam's content width, normalized to
+/// 0.0..=1.0; `dir` is the direction of travel (`+1.0` or `-1.0`), flipped
+/// whenever `pos` reaches an edge.
+///
+/// Owned as a loop-local in `run_tui` (next to `hm_cursor`), persisting
+/// across frames and mode toggles the same way other per-mode animation
+/// state (starfield, arcade, …) does.
+#[derive(Clone, Copy, Debug)]
+pub struct KittScanner {
+    pub pos: f32,
+    pub dir: f32,
+}
+
+impl KittScanner {
+    pub fn new() -> Self {
+        Self { pos: 0.0, dir: 1.0 }
+    }
+
+    /// Per-frame step size at a given normalized `activity` (0..1) — larger
+    /// (faster sweep) at idle, smaller (slower, more deliberate) at full
+    /// activity: "more hardware activity = a slower, sharper, brighter beam."
+    pub fn speed(activity: f32) -> f32 {
+        KITT_SPEED_IDLE * (1.0 - (1.0 - KITT_ACTIVE_SPEED_FRACTION) * activity.clamp(0.0, 1.0))
+    }
+
+    /// Advance `pos` by one frame's step at the given `activity`, bouncing
+    /// `dir` at the 0.0/1.0 edges. Call once per animated redraw (see the
+    /// `DisplayMode::HivemindSweeper` draw branch in `crate::ui::tui`).
+    pub fn advance(&mut self, activity: f32) {
+        self.pos += self.dir * Self::speed(activity);
+        if self.pos >= 1.0 {
+            self.pos = 1.0;
+            self.dir = -1.0;
+        } else if self.pos <= 0.0 {
+            self.pos = 0.0;
+            self.dir = 1.0;
+        }
+    }
+}
+
+impl Default for KittScanner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Render the KITT scanner bar as `width` `(glyph, color)` cells: a bright
+/// center at `pos * width` with a red-gradient falloff to near-black at the
+/// edges. `activity` (0..1, see `kitt_activity_norm`) drives both the
+/// falloff width (`sigma` — wide/diffuse at idle, narrow/sharp when active)
+/// and the overall brightness ceiling (a dim, subtle drift at idle; a vivid
+/// red beam at full activity). The color formula is dominantly red at every
+/// brightness, with faint green/blue only near a fully-bright core (reading
+/// as a slightly hot-white-red center rather than pure red at max value).
+///
+/// Pure — no terminal/`Frame` involved — so it's directly unit-testable (see
+/// `tests` below).
+pub fn beam_cells(width: usize, pos: f32, activity: f32) -> Vec<(char, Color)> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let activity = activity.clamp(0.0, 1.0);
+    let center = pos.clamp(0.0, 1.0) * width.saturating_sub(1) as f32;
+    let sigma =
+        (crate::animation::common::lerp(KITT_SIGMA_WIDE_IDLE, KITT_SIGMA_NARROW_ACTIVE, activity)
+            * width as f32)
+            .max(0.5); // guard against a degenerate zero-width falloff at tiny widths
+    let brightness = crate::animation::common::lerp(KITT_IDLE_FLOOR, KITT_ACTIVE_MAX, activity);
+
+    (0..width)
+        .map(|x| {
+            let d = (x as f32 - center).abs();
+            let intensity = (-(d / sigma).powi(2)).exp();
+            let v = (brightness * intensity).clamp(0.0, 1.0);
+            let glyph = crate::animation::common::value_to_block_char(v);
+            let color = Color::Rgb(
+                (40.0 + v * 215.0) as u8,
+                (v * v * 40.0) as u8,
+                (v * v * 30.0) as u8,
+            );
+            (glyph, color)
+        })
+        .collect()
+}
+
 /// Draw the HivemindSweeper board + feed into `area`.
 ///
 /// - `cursor` selects a `(row, col)` board cell; when `unified` is false the
@@ -214,6 +340,7 @@ pub fn render_hivemind(
     cursor: (usize, usize),
     unified: bool,
     sev_floor: Severity,
+    kitt: &KittScanner,
 ) {
     if area.width < 12 || area.height < 6 {
         return; // Nothing sensible to draw in a sliver of a terminal.
@@ -223,6 +350,13 @@ pub fn render_hivemind(
     let width = area.width as usize;
     let content_w = width.saturating_sub(2); // minus the "║ " left border
     let content_rows = (area.height as usize).saturating_sub(2); // minus top/bottom border rows
+                                                                 // Reserve exactly one content row, just above the bottom border, for the
+                                                                 // KITT scanner bar (see `beam_cells`) — it never steals space from the
+                                                                 // board or feed rendering below. If there's truly no room (shouldn't
+                                                                 // happen given the `area.height < 6` guard above, which always leaves
+                                                                 // >= 4 content rows), skip the beam gracefully rather than clip or panic.
+    let beam_reserved = content_rows > 0;
+    let body_rows_avail = content_rows.saturating_sub(if beam_reserved { 1 } else { 0 });
 
     let rows = board_rows(hive, now);
     let selected = selected_cell(&rows, cursor);
@@ -391,7 +525,7 @@ pub fn render_hivemind(
     // recent events/sec rate, rather than flooding the pane with dozens of
     // near-duplicate lines. `rows()` is already newest-first, so the most
     // recently active row renders at the top of the pane.
-    let feed_h = content_rows.saturating_sub(header_body.len());
+    let feed_h = body_rows_avail.saturating_sub(header_body.len());
     let cell_filter = if unified {
         None
     } else {
@@ -439,14 +573,25 @@ pub fn render_hivemind(
 
     // ── Wrap with the left/bottom-only border and render ────────────────
     let border_style = Style::default().fg(colors::rgb(60, 80, 100));
-    let mut display_lines: Vec<Line> = Vec::with_capacity(body.len() + 2);
+    let mut display_lines: Vec<Line> = Vec::with_capacity(body.len() + 3);
     display_lines.push(Line::from(Span::styled(
         format!("╔{}", "═".repeat(width.saturating_sub(1))),
         border_style,
     )));
-    for line in body.into_iter().take(content_rows) {
+    for line in body.into_iter().take(body_rows_avail) {
         let mut spans = vec![Span::styled("║ ", border_style)];
         spans.extend(line.spans);
+        display_lines.push(Line::from(spans));
+    }
+    // ── KITT scanner bar: one dedicated row, just above the bottom border ──
+    // Driven by total board activity (`FeedAgg::total_rate`) — idle reads as
+    // dim/wide/brisk, busy reads as bright/tight/deliberate.
+    if beam_reserved {
+        let activity = kitt_activity_norm(hive.feed().total_rate());
+        let mut spans = vec![Span::styled("║ ", border_style)];
+        for (glyph, color) in beam_cells(content_w, kitt.pos, activity) {
+            spans.push(Span::styled(glyph.to_string(), Style::default().fg(color)));
+        }
         display_lines.push(Line::from(spans));
     }
     display_lines.push(Line::from(Span::styled(
@@ -547,6 +692,16 @@ pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'stati
                 Style::default().fg(dim)
             ),
         ]),
+        ln!(vec![
+            Span::styled(
+                "bottom bar ",
+                Style::default().fg(colors::rgb(200, 230, 255))
+            ),
+            Span::styled(
+                "= KITT scanner — dim/wide/brisk idle, bright/tight/slow when busy",
+                Style::default().fg(dim)
+            ),
+        ]),
     ]
 }
 
@@ -578,6 +733,11 @@ pub(crate) const EXPLAIN_TEXT: &[&str] = &[
     "/wrap <cmd…> spawns and captures a command — the one",
     "side effect here, so it asks for confirmation first",
     "(repeat the same /wrap to confirm).",
+    "",
+    "A red KITT-style scanner bar sweeps the bottom row,",
+    "grounding the view. It reflects TOTAL board activity:",
+    "idle is dim, wide, and brisk; busy activity makes it",
+    "slow down, focus into a tighter beam, and brighten.",
 ];
 
 #[cfg(test)]
@@ -615,6 +775,124 @@ mod tests {
         assert!(cell.pulsing, "a just-bumped cell should be pulsing");
     }
 
+    // ── KITT scanner bar ─────────────────────────────────────────────────
+
+    /// Extract the red channel from a `beam_cells` color — with the color
+    /// formula `R = 40 + v*215` this is a monotonic (linear) proxy for the
+    /// cell's underlying brightness `v`, so tests can compare cells without
+    /// `beam_cells` needing to expose `v` directly.
+    fn red_channel(color: Color) -> u8 {
+        match color {
+            Color::Rgb(r, _, _) => r,
+            other => panic!("expected Color::Rgb, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn beam_center_is_brightest_cell() {
+        let width = 41;
+        let cells = beam_cells(width, 0.5, 0.5);
+        let center = width / 2; // pos=0.5 * (width-1) == 20.0 exactly for width=41
+        let center_r = red_channel(cells[center].1);
+        for (i, (_, color)) in cells.iter().enumerate() {
+            assert!(
+                red_channel(*color) <= center_r,
+                "cell {i} brighter than the center cell {center}"
+            );
+        }
+    }
+
+    #[test]
+    fn beam_edges_are_dark() {
+        let width = 41;
+        let cells = beam_cells(width, 0.5, 0.5);
+        let center_r = red_channel(cells[width / 2].1);
+        assert!(
+            red_channel(cells[0].1) < center_r,
+            "left edge should be dark"
+        );
+        assert!(
+            red_channel(cells[width - 1].1) < center_r,
+            "right edge should be dark"
+        );
+    }
+
+    /// For the SAME `pos`, full activity should yield a brighter peak AND a
+    /// narrower bright region than idle — "more activity = slower, sharper,
+    /// brighter beam."
+    #[test]
+    fn activity_brightens_and_narrows_the_beam() {
+        let width = 61;
+        let pos = 0.5;
+        let idle = beam_cells(width, pos, 0.0);
+        let active = beam_cells(width, pos, 1.0);
+        let center = width / 2;
+
+        let idle_peak = red_channel(idle[center].1);
+        let active_peak = red_channel(active[center].1);
+        assert!(
+            active_peak > idle_peak,
+            "active peak ({active_peak}) should be brighter than idle peak ({idle_peak})"
+        );
+
+        // Count cells whose red channel clears a fixed threshold (chosen
+        // below both peaks' brightness so each distribution has some cells
+        // above it) as a proxy for the bright region's width.
+        let threshold = 55u8;
+        let count_bright = |cells: &[(char, Color)]| {
+            cells
+                .iter()
+                .filter(|(_, c)| red_channel(*c) > threshold)
+                .count()
+        };
+        let idle_count = count_bright(&idle);
+        let active_count = count_bright(&active);
+        assert!(
+            active_count < idle_count,
+            "active bright region ({active_count} cells) should be narrower than idle's ({idle_count} cells)"
+        );
+    }
+
+    #[test]
+    fn scanner_speed_slows_down_with_activity() {
+        assert!(
+            KittScanner::speed(1.0) < KittScanner::speed(0.0),
+            "full activity should sweep slower than idle"
+        );
+    }
+
+    #[test]
+    fn scanner_advance_bounces_at_edges() {
+        let mut kitt = KittScanner::new();
+        assert_eq!(kitt.pos, 0.0);
+        assert_eq!(kitt.dir, 1.0);
+
+        // Drive it up to the right edge, stopping as soon as `pos` reaches
+        // it — `advance` clamps internally on the step that crosses 1.0, so
+        // once the loop observes `pos >= 1.0` it must be exactly 1.0 with
+        // `dir` already flipped, not merely "close" (continuing to advance
+        // past that point would just bounce it back down, which a naive
+        // "run N steps then assert == 1.0" test would miss).
+        for _ in 0..10_000 {
+            if kitt.pos >= 1.0 {
+                break;
+            }
+            kitt.advance(0.0);
+        }
+        assert_eq!(kitt.pos, 1.0);
+        assert_eq!(kitt.dir, -1.0);
+
+        // ...and back down to the left edge, same reasoning.
+        for _ in 0..10_000 {
+            if kitt.pos <= 0.0 {
+                break;
+            }
+            kitt.advance(0.0);
+        }
+        assert_eq!(kitt.pos, 0.0);
+        assert_eq!(kitt.dir, 1.0);
+    }
+
     /// Rendering smoke test (mirrors `grid_mode_narrow_terminal_does_not_panic`
     /// / `render_snake_view_with_band_does_not_panic` in `mod.rs`): draw both
     /// an empty engine and one with injected activity, across a range of
@@ -647,7 +925,15 @@ mod tests {
                     terminal
                         .draw(|f| {
                             let area = f.area();
-                            render_hivemind(f, area, hive, (0, 0), unified, Severity::Trace);
+                            render_hivemind(
+                                f,
+                                area,
+                                hive,
+                                (0, 0),
+                                unified,
+                                Severity::Trace,
+                                &KittScanner::new(),
+                            );
                         })
                         .expect("draw must not panic");
                 }

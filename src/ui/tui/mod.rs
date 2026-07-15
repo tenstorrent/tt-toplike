@@ -377,6 +377,13 @@ fn run_app(
     let mut hm_cursor = (0usize, 0usize);
     let mut hm_unified = false;
     let mut hm_sev = crate::workload::hivemind::Severity::Trace;
+    // KITT-style (Knight Rider) red-gradient scanner bar drawn along the
+    // bottom row of the HivemindSweeper view (see
+    // `hivemind_view::{KittScanner, beam_cells}`). Persists across frames the
+    // same way other per-mode animation state (starfield, arcade, …) does;
+    // advanced once per animated redraw in the draw branch below, driven by
+    // total board activity (`FeedAgg::total_rate`).
+    let mut kitt = hivemind_view::KittScanner::new();
     // Stashed argv from a first `/wrap <argv…>` — `/wrap` is the one command
     // in this subsystem with a real side effect (it spawns the given
     // command), so it's gated behind a confirmation: typing the exact same
@@ -1050,6 +1057,14 @@ fn run_app(
                         }
                         DisplayMode::HivemindSweeper => {
                             if let Some(ref h) = hivemind {
+                                // KITT scanner bar: advanced once per animated
+                                // redraw, driven by total board activity (see
+                                // `FeedAgg::total_rate`) — idle is brisk, dim,
+                                // and wide; busy slows down and focuses into a
+                                // bright core (see `hivemind_view::KittScanner`).
+                                let kitt_activity =
+                                    hivemind_view::kitt_activity_norm(h.feed().total_rate());
+                                kitt.advance(kitt_activity);
                                 hivemind_view::render_hivemind(
                                     f,
                                     f.area(),
@@ -1057,6 +1072,7 @@ fn run_app(
                                     hm_cursor,
                                     hm_unified,
                                     hm_sev,
+                                    &kitt,
                                 );
                             }
                         }
