@@ -257,6 +257,16 @@ mod real {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    /// Throttle cadence for the persistent device-holder heartbeat (see
+    /// `holding_events` below): a process that keeps a `/dev/tenstorrent/*`
+    /// fd open across many polls would otherwise go silent after its
+    /// one-time OPEN event, fading its board cell back to cold even though
+    /// it's still actively holding the device. Emitting on every ~1s poll
+    /// would be far too chatty (the whole point of the open/close diffing
+    /// above is to stay quiet in steady state), so this is deliberately
+    /// coarser than the poll interval.
+    const HOLDING_INTERVAL: Duration = Duration::from_secs(3);
+
     /// Polls `ProcessMonitor::update()` about once a second and diffs the set
     /// of `(pid, device index)` pairs it reports against the previous poll,
     /// emitting an `Fd` `SniffEvent` for each newly-opened or newly-closed
@@ -278,6 +288,10 @@ mod real {
         /// removed once that pid holds no more device fds (see `poll()`) so
         /// this can't grow unbounded.
         open_cache: HashMap<i32, (String, Source)>,
+        /// Last time a `holding` heartbeat batch was emitted (see
+        /// `holding_events`), throttling that heartbeat to roughly once
+        /// every `HOLDING_INTERVAL` rather than every ~1s poll.
+        last_holding_emit: Instant,
     }
 
     impl ProcfsCollector {
@@ -286,6 +300,10 @@ mod real {
                 monitor: ProcessMonitor::new(),
                 seen: HashSet::new(),
                 open_cache: HashMap::new(),
+                // Start the clock at construction so the very first
+                // heartbeat batch fires after one full HOLDING_INTERVAL, not
+                // immediately alongside every device's initial OPEN event.
+                last_holding_emit: Instant::now(),
             }
         }
 
@@ -348,6 +366,33 @@ mod real {
             for pid in evict {
                 self.open_cache.remove(&pid);
             }
+
+            // Persistent-holder heartbeat: every pid still holding a device
+            // fd should already be in `open_cache` from the "newly opened"
+            // loop above (the very first poll treats every current holder as
+            // newly-opened, since `self.seen` starts empty). Classify any
+            // stragglers defensively so a holder is never left unlabeled —
+            // classifying only the uncached ones (not re-reading
+            // `/proc/<pid>/maps` for pids already cached) keeps this cheap.
+            for &(pid, dev) in &current_keys {
+                if let std::collections::hash_map::Entry::Vacant(e) = self.open_cache.entry(pid) {
+                    if let Some((name, cmdline)) = current.get(&(pid, dev)) {
+                        let source = Self::classify_open(pid, name, cmdline);
+                        let label = concise_process_label(name, cmdline);
+                        e.insert((label, source));
+                    }
+                }
+            }
+
+            let throttle_fired = self.last_holding_emit.elapsed() >= HOLDING_INTERVAL;
+            if throttle_fired {
+                self.last_holding_emit = Instant::now();
+            }
+            events.extend(holding_events(
+                &current_keys,
+                &self.open_cache,
+                throttle_fired,
+            ));
 
             self.seen = current_keys;
             events
@@ -458,6 +503,57 @@ mod real {
             .filter(|pid| !active_pids.contains(pid))
             .collect();
         (events, evict)
+    }
+
+    /// Pure holding-heartbeat generation for one poll: given the `(pid,
+    /// dev)` pairs currently held (`current_keys`), the cached `(label,
+    /// Source)` recorded at OPEN time for each pid (`open_cache`), and
+    /// whether the throttle has fired this poll, produce one Trace-severity
+    /// `Process` `SniffEvent` per currently-held pair — but only when the
+    /// throttle fired; otherwise an empty `Vec` (see `HOLDING_INTERVAL`'s
+    /// docs for why this must be throttled rather than emitted every poll).
+    ///
+    /// `Severity::Trace` is deliberate: it lets the severity floor hide
+    /// these heartbeats from the feed by default while still bumping the
+    /// board cell's heat (the engine's `poll()` bumps heat for every event
+    /// regardless of severity), keeping a steady holder's cell warm/live
+    /// instead of decaying to cold the moment its one-time OPEN event ages
+    /// out.
+    ///
+    /// A pid with no `open_cache` entry is silently skipped rather than
+    /// falling back to `Source::Unknown` — by the time this runs in `poll()`
+    /// every currently-held pid has already been classified (see the
+    /// straggler-classification loop there), so a missing entry here would
+    /// only mean the caller didn't uphold that precondition; there's nothing
+    /// useful to say about an unlabeled holder that the open/close events
+    /// don't already say better.
+    ///
+    /// Pure (no `/proc` access, no `&mut self`), so it's unit-testable with
+    /// synthetic `current_keys`/`open_cache` and an explicit throttle flag —
+    /// no real `Instant` timing required.
+    pub(super) fn holding_events(
+        current_keys: &HashSet<(i32, u8)>,
+        open_cache: &HashMap<i32, (String, Source)>,
+        throttle_fired: bool,
+    ) -> Vec<SniffEvent> {
+        if !throttle_fired {
+            return Vec::new();
+        }
+        let mut events = Vec::new();
+        for &(pid, dev) in current_keys {
+            if let Some((label, source)) = open_cache.get(&pid) {
+                events.push(SniffEvent {
+                    ts: Instant::now(),
+                    source: *source,
+                    device: Some(dev),
+                    severity: Severity::Trace,
+                    kind: EventKind::Process,
+                    text: format!("{label} holding /dev/tenstorrent/{dev}"),
+                    origin: "procfs".into(),
+                });
+            }
+        }
+        events
     }
 
     impl Default for ProcfsCollector {
@@ -659,6 +755,84 @@ mod tests {
     #[test]
     fn concise_process_label_falls_back_to_name_when_cmdline_adds_nothing() {
         assert_eq!(concise_process_label("tt-smi", "tt-smi -s"), "tt-smi");
+    }
+
+    /// Two `(pid, dev)` pairs are currently held, both cached under
+    /// `Source::TtMetal` labels, and the throttle has fired: exactly two
+    /// Trace/Process holding events come back, one per held pair, tagged
+    /// with the cached source and text naming the device.
+    #[test]
+    fn holding_events_emits_one_trace_event_per_held_pair_when_throttle_fires() {
+        use std::collections::{HashMap, HashSet};
+
+        let current_keys: HashSet<(i32, u8)> = [(100, 0), (200, 1)].into_iter().collect();
+        let mut open_cache: HashMap<i32, (String, Source)> = HashMap::new();
+        open_cache.insert(
+            100,
+            (
+                "python pytest test_model_forward.py".to_string(),
+                Source::TtMetal,
+            ),
+        );
+        open_cache.insert(
+            200,
+            (
+                "python pytest test_model_forward.py".to_string(),
+                Source::TtMetal,
+            ),
+        );
+
+        let events = real::holding_events(&current_keys, &open_cache, true);
+
+        assert_eq!(events.len(), 2);
+        for ev in &events {
+            assert_eq!(ev.source, Source::TtMetal);
+            assert_eq!(
+                ev.severity,
+                crate::workload::hivemind::event::Severity::Trace
+            );
+            assert_eq!(
+                ev.kind,
+                crate::workload::hivemind::event::EventKind::Process
+            );
+            assert!(
+                ev.text.contains("holding /dev/tenstorrent/"),
+                "unexpected text: {}",
+                ev.text
+            );
+        }
+        let mut devices: Vec<Option<u8>> = events.iter().map(|e| e.device).collect();
+        devices.sort();
+        assert_eq!(devices, vec![Some(0), Some(1)]);
+    }
+
+    /// Same held pairs and cache, but the throttle has NOT fired this poll:
+    /// zero holding events, so a holder doesn't get re-announced on every
+    /// ~1s poll.
+    #[test]
+    fn holding_events_emits_nothing_when_throttle_has_not_fired() {
+        use std::collections::{HashMap, HashSet};
+
+        let current_keys: HashSet<(i32, u8)> = [(100, 0), (200, 1)].into_iter().collect();
+        let mut open_cache: HashMap<i32, (String, Source)> = HashMap::new();
+        open_cache.insert(
+            100,
+            (
+                "python pytest test_model_forward.py".to_string(),
+                Source::TtMetal,
+            ),
+        );
+        open_cache.insert(
+            200,
+            (
+                "python pytest test_model_forward.py".to_string(),
+                Source::TtMetal,
+            ),
+        );
+
+        let events = real::holding_events(&current_keys, &open_cache, false);
+
+        assert!(events.is_empty());
     }
 
     /// The maps-based classification fallback, exercised end to end (still

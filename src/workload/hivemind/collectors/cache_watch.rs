@@ -120,7 +120,7 @@ pub struct CacheWatchCollector {
 impl CacheWatchCollector {
     pub fn new() -> Self {
         Self {
-            roots: resolve_roots(),
+            roots: resolve_roots(std::env::var("HOME").ok()),
         }
     }
 }
@@ -133,10 +133,23 @@ impl Default for CacheWatchCollector {
 
 /// Build the list of directories to poll. Explicit cache-dir env vars are
 /// taken as-is; the remaining candidates are conventional subdirectory names
-/// resolved relative to `TT_METAL_HOME` (or `cwd` if that's unset). Missing
-/// directories are kept in the list — `walk` treats an unreadable root as
-/// simply having nothing to report, so no filesystem probing happens here.
-fn resolve_roots() -> Vec<PathBuf> {
+/// resolved relative to `TT_METAL_HOME` (or `cwd` if that's unset), PLUS
+/// `~/.cache/tt-metal-cache` — tt-metal's own DEFAULT compile-cache
+/// location when `TT_METAL_CACHE` is unset (see
+/// `tt_metal/third_party/umd`-adjacent docs / `tt_metal/common/base_metal.cpp`'s
+/// cache-path default). Without this, a model run with no `TT_METAL_CACHE`
+/// override — the common case — writes its kernel `.o` artifacts somewhere
+/// this collector never looks, so compile activity goes invisible even
+/// though the process is clearly compiling kernels. Missing directories are
+/// kept in the list — `walk` treats an unreadable root as simply having
+/// nothing to report, so no filesystem probing happens here. Already-present
+/// paths are de-duplicated so an explicit env var pointing at the same
+/// default path doesn't produce a redundant duplicate root.
+///
+/// `home` is threaded in explicitly (rather than reading `$HOME` inline)
+/// purely so this function stays unit-testable against a synthetic home
+/// directory without mutating real process-wide environment state.
+fn resolve_roots(home: Option<String>) -> Vec<PathBuf> {
     let mut roots = Vec::new();
 
     if let Ok(p) = std::env::var("TT_METAL_CACHE") {
@@ -153,7 +166,17 @@ fn resolve_roots() -> Vec<PathBuf> {
         roots.push(base.join(sub));
     }
 
-    roots
+    if let Some(home) = home {
+        roots.push(PathBuf::from(home).join(".cache").join("tt-metal-cache"));
+    }
+
+    let mut deduped = Vec::with_capacity(roots.len());
+    for root in roots {
+        if !deduped.contains(&root) {
+            deduped.push(root);
+        }
+    }
+    deduped
 }
 
 impl Collector for CacheWatchCollector {
@@ -215,5 +238,46 @@ mod tests {
         assert_eq!(device_col_from_path(&p), Some(2));
         let p2 = PathBuf::from("/x/cache_llama/p150/brisc.o");
         assert_eq!(device_col_from_path(&p2), None);
+    }
+
+    /// tt-metal's DEFAULT compile-cache location (used whenever
+    /// `TT_METAL_CACHE` is unset — the common case for a model run with no
+    /// special environment) must always be among the resolved roots, so
+    /// kernel-compile artifacts are visible without any env var overrides.
+    #[test]
+    fn resolve_roots_includes_default_tt_metal_cache_under_home() {
+        let roots = resolve_roots(Some("/home/testuser".to_string()));
+        assert!(
+            roots.contains(&PathBuf::from("/home/testuser/.cache/tt-metal-cache")),
+            "expected ~/.cache/tt-metal-cache among roots, got: {roots:?}"
+        );
+    }
+
+    /// No `$HOME` available (e.g. a minimal/sandboxed environment): the
+    /// default-cache root is simply omitted rather than guessed at or
+    /// panicking, and the rest of the resolution still succeeds.
+    #[test]
+    fn resolve_roots_omits_default_cache_when_home_unset() {
+        let roots = resolve_roots(None);
+        assert!(
+            !roots.iter().any(|p| p.ends_with("tt-metal-cache")),
+            "did not expect a tt-metal-cache root without HOME, got: {roots:?}"
+        );
+    }
+
+    /// Root list has no duplicate entries even when candidates would
+    /// otherwise coincide (e.g. `TT_METAL_HOME` pointed straight at the
+    /// default cache's parent).
+    #[test]
+    fn resolve_roots_deduplicates() {
+        let roots = resolve_roots(Some("/home/testuser".to_string()));
+        let mut deduped = roots.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(
+            roots.len(),
+            deduped.len(),
+            "roots contained duplicates: {roots:?}"
+        );
     }
 }
