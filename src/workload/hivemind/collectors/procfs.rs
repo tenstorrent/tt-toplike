@@ -12,6 +12,189 @@
 //! for every other target/feature combination so callers — in particular
 //! Task 9's collector-registration engine — can construct a `ProcfsCollector`
 //! unconditionally without their own cfg-gating.
+//!
+//! One exception to "never re-walks `/proc` itself": as a fallback when a
+//! device-holding process's cmdline carries no TT-specific token (e.g. a
+//! pytest-based test harness that pulls in `ttnn`/`tt_metal` only via Python
+//! imports), this collector does its own single, targeted
+//! `/proc/<pid>/maps` read to look for loaded TT shared libraries — see
+//! `classify_from_so_paths` and `real::ProcfsCollector::classify_open`.
+
+use std::collections::HashSet;
+
+use crate::workload::hivemind::classify::classify;
+use crate::workload::hivemind::event::Source;
+
+/// Substrings that mark a loaded shared-object path as TT-related for the
+/// purposes of the maps-based classification fallback (see
+/// `classify_from_so_paths` below). Deliberately broader than
+/// `classify::RULES`'s own needle list — this is a *prefilter* that narrows
+/// a process's (potentially huge) set of mapped libraries down to a small,
+/// plausibly-TT candidate set; `classify()` itself makes the final call on
+/// what `Source` (if any) those candidates imply. A path can pass this
+/// prefilter (e.g. `libdevice.so` in isolation) yet still classify as
+/// `Unknown` once handed to `classify()` — that's fine, it just means the
+/// caller falls through to the `Source::Workload` catch-all.
+const TT_SO_NEEDLES: &[&str] = &[
+    "tt-metal",
+    "tt_metal",
+    "ttnn",
+    "_ttnn",
+    "libdevice",
+    "tt-mlir",
+    "tt_lib",
+    "metalium",
+];
+
+/// Cap on how many matched `.so` paths get folded into the string handed to
+/// `classify()`, so a process with an unusually large library set can't
+/// balloon allocation/CPU on every fallback classification.
+const MAX_TT_SO_PATHS: usize = 40;
+
+/// Parse the contents of `/proc/<pid>/maps` (or any string in that format)
+/// into the distinct mapped file paths that look like shared objects
+/// (`....so` or a versioned `....so.N`). Pure string parsing — no `/proc`
+/// access here — so it's unit-testable against a literal sample of `maps`
+/// content, independent of any live process.
+///
+/// A `/proc/pid/maps` line looks like:
+/// `7f1234500000-7f1234700000 r-xp 00000000 08:01 1234  /path/to/lib.so`
+/// The mapped path, when present, is the final whitespace-separated field;
+/// anonymous mappings (`[heap]`, `[stack]`, `[vdso]`, or no pathname at all)
+/// have no real path there, so lines whose last field lacks a `/` are
+/// skipped rather than misread as a path.
+pub fn parse_maps_so_paths(maps_content: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for line in maps_content.lines() {
+        let Some(path) = line.split_whitespace().last() else {
+            continue;
+        };
+        if !path.contains('/') {
+            continue; // no path field on this line (anonymous mapping, etc.)
+        }
+        let is_versioned_so = path
+            .rsplit_once(".so.")
+            .map(|(_, suffix)| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+            .unwrap_or(false);
+        if !(path.ends_with(".so") || is_versioned_so) {
+            continue;
+        }
+        if seen.insert(path.to_string()) {
+            out.push(path.to_string());
+        }
+    }
+    out
+}
+
+/// Given a process name and the set of its mapped shared-object paths,
+/// decide a `Source` by re-purposing `classify()`'s existing needle rules
+/// against the TT-related subset of those paths (see `TT_SO_NEEDLES`).
+///
+/// This is the fallback for processes whose `argv` carries no TT token at
+/// all — e.g. a pytest-based test harness
+/// (`python -m pytest tests/test_model_forward.py`) that pulls in
+/// `ttnn`/`tt_metal` purely via Python imports, never naming them on the
+/// command line, but which has `.../third-party/tt-metal/build/lib/_ttnn.so`
+/// mapped into its address space.
+///
+/// Pure (no `/proc` access, just the paths handed in), so it's
+/// unit-testable with literal path strings — no live process required.
+pub fn classify_from_so_paths(process_name: Option<&str>, so_paths: &[String]) -> Source {
+    let matched: Vec<&str> = so_paths
+        .iter()
+        .map(String::as_str)
+        .filter(|p| {
+            let lower = p.to_lowercase();
+            TT_SO_NEEDLES.iter().any(|needle| lower.contains(needle))
+        })
+        .take(MAX_TT_SO_PATHS)
+        .collect();
+    if matched.is_empty() {
+        return Source::Unknown;
+    }
+    let joined = matched.join(" ");
+    classify(process_name, &joined)
+}
+
+/// Build a concise, human-readable label for an OPEN event's text,
+/// preferring a hint pulled from the full cmdline over the bare process
+/// name (`comm`) when the cmdline adds identifying information. This
+/// matters most for interpreter-hosted workloads — `comm` is just "python"
+/// whether the process is a vLLM server or a pytest harness, but the
+/// module/script argument is the detail an operator actually wants to see
+/// in the feed (e.g. `python pytest test_model_forward.py` rather than the
+/// bare `python`).
+///
+/// Pure string manipulation, no `/proc` access, so it's unit-testable with
+/// literal name/cmdline strings.
+pub fn concise_process_label(name: &str, cmdline: &str) -> String {
+    /// A positional argument (no leading `-`) that either contains a path
+    /// separator or ends in `.py` "looks like" a script/test file worth
+    /// naming. Deliberately narrow: a bare `.`-check would also match
+    /// option *values* that merely contain a dot (an IP address, a version
+    /// string), mistaking them for a script.
+    fn looks_like_script(tok: &str) -> bool {
+        !tok.starts_with('-') && (tok.contains('/') || tok.ends_with(".py"))
+    }
+
+    /// Append `tok`'s basename to `parts` unless it's already present
+    /// (e.g. the module name and the trailing script happen to coincide).
+    fn push_unique(parts: &mut Vec<String>, tok: &str) {
+        let base = tok.rsplit('/').next().unwrap_or(tok).to_string();
+        if !parts.contains(&base) {
+            parts.push(base);
+        }
+    }
+
+    let tokens: Vec<&str> = cmdline.split_whitespace().collect();
+    let Some(&first) = tokens.first() else {
+        return name.to_string();
+    };
+    let interpreter = first.rsplit('/').next().unwrap_or(first);
+    let mut parts = vec![interpreter.to_string()];
+
+    match tokens.iter().position(|&t| t == "-m") {
+        // `-m <module>`: the module name is the identifying detail, kept
+        // verbatim (dotted module paths like `vllm.entrypoints.openai` are
+        // informative in full, unlike a filesystem path).
+        Some(pos) => {
+            if let Some(&module) = tokens.get(pos + 1) {
+                push_unique(&mut parts, module);
+            }
+        }
+        // No `-m`: the first positional argument is usually the script
+        // itself, e.g. `python train.py --epochs 10`.
+        None => {
+            if let Some(&second) = tokens.get(1) {
+                if looks_like_script(second) {
+                    push_unique(&mut parts, second);
+                }
+            }
+        }
+    }
+    // Either way, a trailing script/test-file argument (e.g. the test file
+    // in `python -m pytest tests/test_model_forward.py`) is usually the
+    // most identifying detail left, so consider it too.
+    if let Some(&last) = tokens.last() {
+        if looks_like_script(last) {
+            push_unique(&mut parts, last);
+        }
+    }
+
+    if parts.len() <= 1 {
+        // Nothing more specific than the bare interpreter name was found in
+        // the cmdline: prefer `name` (comm) verbatim, which may already
+        // carry more identity than the interpreter basename alone (e.g. a
+        // renamed binary).
+        return if name.is_empty() {
+            interpreter.to_string()
+        } else {
+            name.to_string()
+        };
+    }
+    parts.join(" ")
+}
 
 /// Parse a `/proc/<pid>/fd/<n>` symlink target (as reported by
 /// `procfs::process::FDTarget::Path`) into the Tenstorrent device index it
@@ -44,17 +227,17 @@ pub fn device_from_fd_target(link: &str) -> Option<u8> {
 /// `device_from_fd_target` above — it's compiled and unit-testable
 /// regardless of the `linux-procfs` feature gate.
 pub fn close_event_source(
-    cached: Option<&(String, crate::workload::hivemind::event::Source)>,
+    cached: Option<&(String, Source)>,
     pid: i32,
     dev: u8,
-) -> (crate::workload::hivemind::event::Source, String) {
+) -> (Source, String) {
     match cached {
         Some((name, source)) => (
             *source,
             format!("{name} (pid {pid}) closed /dev/tenstorrent/{dev}"),
         ),
         None => (
-            crate::workload::hivemind::event::Source::Unknown,
+            Source::Unknown,
             format!("pid {pid} closed /dev/tenstorrent/{dev}"),
         ),
     }
@@ -62,7 +245,9 @@ pub fn close_event_source(
 
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 mod real {
-    use super::close_event_source;
+    use super::{
+        classify_from_so_paths, close_event_source, concise_process_label, parse_maps_so_paths,
+    };
     use crate::workload::hivemind::classify::classify;
     use crate::workload::hivemind::collector::{Collector, Tx};
     use crate::workload::hivemind::event::{EventKind, Severity, SniffEvent, Source};
@@ -132,23 +317,23 @@ mod real {
             let current_keys: HashSet<(i32, u8)> = current.keys().copied().collect();
 
             let mut events = Vec::new();
-            // Newly opened: in `current` but not `seen`. Classify from BOTH
-            // `comm` and the full cmdline — `comm` alone is frequently a bare
-            // interpreter name (`python`) that carries no signal, while the
-            // cmdline (e.g. `tt-smi -s`, `python -m vllm...`) is where the
-            // actual identity lives. Cache the result so the matching close
-            // (once the process may be long gone) can reuse it verbatim.
+            // Newly opened: in `current` but not `seen`. Classify via the
+            // cmdline -> loaded-libraries -> Workload fallback chain (see
+            // `Self::classify_open`) and cache the FINAL resolved source so
+            // the matching close (once the process may be long gone) can
+            // reuse it verbatim.
             for (&(pid, dev), (name, cmdline)) in &current {
                 if !self.seen.contains(&(pid, dev)) {
-                    let source = classify(Some(name), cmdline);
-                    self.open_cache.insert(pid, (name.clone(), source));
+                    let source = Self::classify_open(pid, name, cmdline);
+                    let label = concise_process_label(name, cmdline);
+                    self.open_cache.insert(pid, (label.clone(), source));
                     events.push(SniffEvent {
                         ts: Instant::now(),
                         source,
                         device: Some(dev),
                         severity: Severity::Info,
                         kind: EventKind::Fd,
-                        text: format!("{name} (pid {pid}) opened /dev/tenstorrent/{dev}"),
+                        text: format!("{label} (pid {pid}) opened /dev/tenstorrent/{dev}"),
                         origin: "procfs".into(),
                     });
                 }
@@ -166,6 +351,49 @@ mod real {
 
             self.seen = current_keys;
             events
+        }
+
+        /// Classify a newly-opened device-holding pid via a three-stage
+        /// fallback chain:
+        ///
+        /// 1. **cmdline** — `classify(Some(name), cmdline)`, as before. Most
+        ///    processes (`tt-smi`, `vllm`, anything invoking `ttnn`/
+        ///    `tt_metal` on the command line) resolve here.
+        /// 2. **loaded libraries** — only reached when (1) is `Unknown`.
+        ///    Reads `/proc/<pid>/maps` (a single, targeted read — not a
+        ///    process-wide `/proc` walk) and re-classifies from the paths of
+        ///    its mapped TT-related shared objects (`classify_from_so_paths`).
+        ///    This is what identifies a process like
+        ///    `python -m pytest tests/test_model_forward.py`: its `argv`
+        ///    carries no `ttnn`/`tt_metal` token, but it has
+        ///    `.../third-party/tt-metal/build/lib/_ttnn.so` mapped in,
+        ///    because the test imports the framework rather than naming it
+        ///    on the command line.
+        /// 3. **`Source::Workload`** — reached only when both (1) and (2)
+        ///    come back `Unknown`. The pid is, unconditionally, a confirmed
+        ///    `/dev/tenstorrent/*` holder (that's the only reason this
+        ///    method is being called at all), so it's tagged as a generic
+        ///    workload rather than left as `Unknown`.
+        ///
+        /// The `/proc/<pid>/maps` read can fail (permission denied, or the
+        /// process has already exited) — treated as "no match" rather than
+        /// an error, falling straight through to `Source::Workload`.
+        fn classify_open(pid: i32, name: &str, cmdline: &str) -> Source {
+            let cmdline_source = classify(Some(name), cmdline);
+            if cmdline_source != Source::Unknown {
+                return cmdline_source;
+            }
+            let maps_source = std::fs::read_to_string(format!("/proc/{pid}/maps"))
+                .ok()
+                .map(|maps_content| {
+                    let so_paths = parse_maps_so_paths(&maps_content);
+                    classify_from_so_paths(Some(name), &so_paths)
+                })
+                .unwrap_or(Source::Unknown);
+            if maps_source != Source::Unknown {
+                return maps_source;
+            }
+            Source::Workload
         }
     }
 
@@ -301,6 +529,7 @@ impl crate::workload::hivemind::collector::Collector for ProcfsCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workload::hivemind::classify::classify;
     use crate::workload::hivemind::event::Source;
 
     #[test]
@@ -365,5 +594,94 @@ mod tests {
         // Pid holds no device fd in `current_keys`, so it must be marked for
         // eviction after all its closes were generated.
         assert_eq!(evict, [pid].into_iter().collect());
+    }
+
+    #[test]
+    fn parse_maps_so_paths_extracts_deduped_shared_objects_only() {
+        // Includes: a repeated libc mapping (dedup), an anonymous mapping
+        // with no path field, a `[heap]`/`[stack]` pseudo-path, and a
+        // TT-related extension module nested under a `third-party` build
+        // tree -- the exact shape a real `/proc/<pid>/maps` takes for a
+        // Python process that has loaded a compiled `ttnn` extension.
+        let maps = "\
+7f0000000000-7f0000010000 r-xp 00000000 08:01 1 /usr/lib/x86_64-linux-gnu/libc.so.6
+7f0000010000-7f0000020000 r-xp 00000000 08:01 1 /usr/lib/x86_64-linux-gnu/libc.so.6
+7f0000020000-7f0000030000 rw-p 00000000 00:00 0
+7f0000030000-7f0000040000 rw-p 00000000 00:00 0 [heap]
+7f0000040000-7f0000050000 r-xp 00000000 08:01 3 /opt/venv/third-party/tt-metal/build/lib/_ttnn.so
+7f0000050000-7f0000060000 rw-p 00000000 00:00 0 [stack]
+";
+        assert_eq!(
+            parse_maps_so_paths(maps),
+            vec![
+                "/usr/lib/x86_64-linux-gnu/libc.so.6".to_string(),
+                "/opt/venv/third-party/tt-metal/build/lib/_ttnn.so".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn classify_from_so_paths_recognizes_tt_metal_build_tree() {
+        let so_paths = vec![
+            "/usr/lib/x86_64-linux-gnu/libc.so.6".to_string(),
+            "/opt/venv/lib/python3.10/site-packages/pyarrow/libarrow.so.1600".to_string(),
+            "/opt/venv/third-party/tt-metal/build/lib/_ttnn.so".to_string(),
+        ];
+        assert_eq!(
+            classify_from_so_paths(Some("python"), &so_paths),
+            Source::Ttnn
+        );
+    }
+
+    #[test]
+    fn classify_from_so_paths_ignores_non_tt_libraries() {
+        let so_paths = vec![
+            "/opt/venv/lib/python3.10/site-packages/pyarrow/libarrow.so.1600".to_string(),
+            "/usr/lib/x86_64-linux-gnu/libc.so.6".to_string(),
+        ];
+        assert_eq!(
+            classify_from_so_paths(Some("python"), &so_paths),
+            Source::Unknown
+        );
+    }
+
+    #[test]
+    fn concise_process_label_prefers_module_and_script_over_bare_comm() {
+        assert_eq!(
+            concise_process_label(
+                "python",
+                ".venv-qwythos/bin/python -m pytest tests/test_model_forward.py",
+            ),
+            "python pytest test_model_forward.py"
+        );
+    }
+
+    #[test]
+    fn concise_process_label_falls_back_to_name_when_cmdline_adds_nothing() {
+        assert_eq!(concise_process_label("tt-smi", "tt-smi -s"), "tt-smi");
+    }
+
+    /// The maps-based classification fallback, exercised end to end (still
+    /// purely, with a literal `maps`-format string rather than a live
+    /// process): a `python -m pytest tests/test_model_forward.py` cmdline
+    /// classifies as `Unknown` on its own (no `ttnn`/`tt_metal` token in
+    /// `argv`), but the same process's loaded `_ttnn.so` -- as it would be
+    /// read from `/proc/<pid>/maps` -- resolves it to `Source::Ttnn`. This
+    /// is the exact case the maps fallback exists for: a model workload run
+    /// through a test harness, where the framework is used via Python
+    /// imports rather than named on the command line.
+    #[test]
+    fn maps_fallback_classifies_pytest_model_workload_as_ttnn() {
+        let cmdline = ".venv-qwythos/bin/python -m pytest tests/test_model_forward.py";
+        assert_eq!(classify(Some("python"), cmdline), Source::Unknown);
+
+        let maps = "\
+7f0000040000-7f0000050000 r-xp 00000000 08:01 3 /opt/venv/third-party/tt-metal/build/lib/_ttnn.so
+";
+        let so_paths = parse_maps_so_paths(maps);
+        assert_eq!(
+            classify_from_so_paths(Some("python"), &so_paths),
+            Source::Ttnn
+        );
     }
 }

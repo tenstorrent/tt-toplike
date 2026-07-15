@@ -13,6 +13,14 @@ pub enum Source {
     TtForge,
     TtXla,
     Vllm,
+    /// A process confirmed to be holding a `/dev/tenstorrent/*` fd, but which
+    /// neither its cmdline nor its loaded shared libraries could pin to a
+    /// more specific component (see
+    /// `collectors::procfs`'s cmdline -> loaded-library -> `Workload`
+    /// fallback chain). Distinct from `Unknown`: a `Workload` process is
+    /// *known* to be a TT device user, just not attributable to a named
+    /// framework.
+    Workload,
     TtSmi,
     Driver,
     Inspector,
@@ -29,6 +37,7 @@ impl Source {
             Source::TtForge => "tt-forge",
             Source::TtXla => "tt-xla",
             Source::Vllm => "vLLM",
+            Source::Workload => "workload",
             Source::TtSmi => "tt-smi",
             Source::Driver => "driver",
             Source::Inspector => "inspect",
