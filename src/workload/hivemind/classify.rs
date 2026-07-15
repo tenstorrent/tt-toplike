@@ -34,6 +34,12 @@ pub fn classify(process_name: Option<&str>, line: &str) -> Source {
         ("tt_metal", Source::TtMetal),
         ("tt-metal", Source::TtMetal),
         ("metalium", Source::TtMetal),
+        // Must come before the generic "tenstorrent"/"tt_kmd" driver entries
+        // below: `tt-smi` itself (and its cmdline args) never contain those
+        // substrings, but placing it first keeps the ordering invariant
+        // obvious and future-proofs against a cmdline that happens to
+        // mention a `/dev/tenstorrent/N` path.
+        ("tt-smi", Source::TtSmi),
         ("tenstorrent", Source::Driver),
         ("tt_kmd", Source::Driver),
         ("pcie", Source::Driver),
@@ -72,5 +78,10 @@ mod tests {
     #[test]
     fn unknown_when_nothing_matches() {
         assert_eq!(classify(Some("bash"), "hello world"), Source::Unknown);
+    }
+
+    #[test]
+    fn tt_smi_process_classifies_as_tt_smi() {
+        assert_eq!(classify(Some("tt-smi"), "tt-smi -s"), Source::TtSmi);
     }
 }

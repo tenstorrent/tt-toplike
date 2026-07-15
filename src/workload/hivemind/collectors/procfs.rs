@@ -28,11 +28,44 @@ pub fn device_from_fd_target(link: &str) -> Option<u8> {
     link.strip_prefix("/dev/tenstorrent/")?.parse::<u8>().ok()
 }
 
+/// Decide the `(Source, text)` for a CLOSE event given whatever was cached
+/// from the matching OPEN (the process's name and the `Source` it was
+/// classified as at that time), or `None` if this pid was never observed
+/// opening the device in the first place (e.g. it was already holding the fd
+/// when this collector started polling). Reusing the open's classification
+/// — rather than reclassifying from scratch — matters because by the time a
+/// CLOSE is noticed the process may already be gone, so `comm`/cmdline are no
+/// longer readable; falling back to `Source::Unknown` only in the genuinely
+/// unknown case (rather than always, as the old hardcoded close path did)
+/// lets a downstream coalescer fold an open+close pair into one row keyed by
+/// source.
+///
+/// Pure and OS-independent (no `/proc` access), so — like
+/// `device_from_fd_target` above — it's compiled and unit-testable
+/// regardless of the `linux-procfs` feature gate.
+pub fn close_event_source(
+    cached: Option<&(String, crate::workload::hivemind::event::Source)>,
+    pid: i32,
+    dev: u8,
+) -> (crate::workload::hivemind::event::Source, String) {
+    match cached {
+        Some((name, source)) => (
+            *source,
+            format!("{name} (pid {pid}) closed /dev/tenstorrent/{dev}"),
+        ),
+        None => (
+            crate::workload::hivemind::event::Source::Unknown,
+            format!("pid {pid} closed /dev/tenstorrent/{dev}"),
+        ),
+    }
+}
+
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 mod real {
+    use super::close_event_source;
     use crate::workload::hivemind::classify::classify;
     use crate::workload::hivemind::collector::{Collector, Tx};
-    use crate::workload::hivemind::event::{EventKind, Severity, SniffEvent};
+    use crate::workload::hivemind::event::{EventKind, Severity, SniffEvent, Source};
     use crate::workload::process_monitor::ProcessMonitor;
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,6 +84,15 @@ mod real {
         /// carried across polls purely to diff against — never read outside
         /// `run()`.
         seen: HashSet<(i32, u8)>,
+        /// `pid -> (name, classified Source)` recorded the moment an OPEN
+        /// event is emitted for that pid, so a later CLOSE for the same pid
+        /// (by which point the process may already be gone, leaving `comm`/
+        /// cmdline unreadable) classifies identically instead of collapsing
+        /// to `Unknown`. Keyed by pid alone (not `(pid, dev)`) since a
+        /// process's classification doesn't vary per device; entries are
+        /// removed once that pid holds no more device fds (see `poll()`) so
+        /// this can't grow unbounded.
+        open_cache: HashMap<i32, (String, Source)>,
     }
 
     impl ProcfsCollector {
@@ -58,6 +100,7 @@ mod real {
             Self {
                 monitor: ProcessMonitor::new(),
                 seen: HashSet::new(),
+                open_cache: HashMap::new(),
             }
         }
 
@@ -70,28 +113,41 @@ mod real {
         fn poll(&mut self) -> Vec<SniffEvent> {
             self.monitor.update();
 
-            // (pid, device) -> process name, for every device the monitor
-            // currently reports as in-use.
-            let mut current: HashMap<(i32, u8), String> = HashMap::new();
+            // (pid, device) -> (process name, full cmdline), for every device
+            // the monitor currently reports as in-use. `ProcessInfo` already
+            // carries both (populated by `ProcessMonitor::update()`'s own
+            // `/proc/<pid>/cmdline` read), so no second `/proc` scan is
+            // needed here just to get classification signal.
+            let mut current: HashMap<(i32, u8), (String, String)> = HashMap::new();
             for idx in self.monitor.device_indices() {
                 let Ok(dev) = u8::try_from(idx) else {
                     continue; // device index somehow > u8::MAX: skip rather than panic
                 };
                 if let Some(procs) = self.monitor.get_processes_for_device(idx) {
                     for p in procs {
-                        current.insert((p.pid, dev), p.name.clone());
+                        current.insert((p.pid, dev), (p.name.clone(), p.cmdline.clone()));
                     }
                 }
             }
             let current_keys: HashSet<(i32, u8)> = current.keys().copied().collect();
+            // Which pids still hold *some* device fd open this poll — used
+            // below to decide when an `open_cache` entry can be dropped.
+            let active_pids: HashSet<i32> = current_keys.iter().map(|&(pid, _)| pid).collect();
 
             let mut events = Vec::new();
-            // Newly opened: in `current` but not `seen`.
-            for (&(pid, dev), name) in &current {
+            // Newly opened: in `current` but not `seen`. Classify from BOTH
+            // `comm` and the full cmdline — `comm` alone is frequently a bare
+            // interpreter name (`python`) that carries no signal, while the
+            // cmdline (e.g. `tt-smi -s`, `python -m vllm...`) is where the
+            // actual identity lives. Cache the result so the matching close
+            // (once the process may be long gone) can reuse it verbatim.
+            for (&(pid, dev), (name, cmdline)) in &current {
                 if !self.seen.contains(&(pid, dev)) {
+                    let source = classify(Some(name), cmdline);
+                    self.open_cache.insert(pid, (name.clone(), source));
                     events.push(SniffEvent {
                         ts: Instant::now(),
-                        source: classify(Some(name), ""),
+                        source,
                         device: Some(dev),
                         severity: Severity::Info,
                         kind: EventKind::Fd,
@@ -100,20 +156,29 @@ mod real {
                     });
                 }
             }
-            // Newly closed: in `seen` but not `current` any more. Name is
-            // unknown at this point (the process may have exited), so the
-            // event is attributed generically rather than guessing a stale name.
+            // Newly closed: in `seen` but not `current` any more. The process
+            // may already be gone by now, so reuse whatever was cached at
+            // open time (see `close_event_source`) instead of hardcoding
+            // `Unknown` for every close.
             for &(pid, dev) in &self.seen {
                 if !current_keys.contains(&(pid, dev)) {
+                    let (source, text) = close_event_source(self.open_cache.get(&pid), pid, dev);
                     events.push(SniffEvent {
                         ts: Instant::now(),
-                        source: crate::workload::hivemind::event::Source::Unknown,
+                        source,
                         device: Some(dev),
                         severity: Severity::Info,
                         kind: EventKind::Fd,
-                        text: format!("pid {pid} closed /dev/tenstorrent/{dev}"),
+                        text,
                         origin: "procfs".into(),
                     });
+                    // Only forget this pid once it holds no more device fds
+                    // at all — a pid with several devices open must keep its
+                    // cached classification for the remaining closes, not
+                    // just the first one.
+                    if !active_pids.contains(&pid) {
+                        self.open_cache.remove(&pid);
+                    }
                 }
             }
 
@@ -191,9 +256,26 @@ impl crate::workload::hivemind::collector::Collector for ProcfsCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workload::hivemind::event::Source;
+
     #[test]
     fn parses_device_fd_target() {
         assert_eq!(device_from_fd_target("/dev/tenstorrent/3"), Some(3));
         assert_eq!(device_from_fd_target("/dev/null"), None);
+    }
+
+    #[test]
+    fn close_reuses_cached_open_source() {
+        let cached = Some(("tt-smi".to_string(), Source::TtSmi));
+        let (source, text) = close_event_source(cached.as_ref(), 4242, 0);
+        assert_eq!(source, Source::TtSmi);
+        assert_eq!(text, "tt-smi (pid 4242) closed /dev/tenstorrent/0");
+    }
+
+    #[test]
+    fn close_falls_back_to_unknown_when_pid_was_never_cached() {
+        let (source, text) = close_event_source(None, 4242, 0);
+        assert_eq!(source, Source::Unknown);
+        assert_eq!(text, "pid 4242 closed /dev/tenstorrent/0");
     }
 }
