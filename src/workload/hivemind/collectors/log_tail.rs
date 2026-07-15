@@ -281,7 +281,9 @@ impl Collector for LogTailCollector {
         for (origin, path, device) in self.static_targets.clone() {
             let tx = tx.clone();
             let sd = shutdown.clone();
-            file_handles.push(thread::spawn(move || tail_file(&origin, &path, device, tx, sd)));
+            file_handles.push(thread::spawn(move || {
+                tail_file(&origin, &path, device, tx, sd)
+            }));
         }
 
         // Docker containers are discovered on a poll (rather than once at
@@ -344,8 +346,7 @@ mod tests {
 
     #[test]
     fn surfaces_real_error_line() {
-        let ev = event_from_log("docker:z", Some("vllm"), "ERROR weight load failed: OOM")
-            .unwrap();
+        let ev = event_from_log("docker:z", Some("vllm"), "ERROR weight load failed: OOM").unwrap();
         assert_eq!(ev.source, Source::Vllm);
         assert_eq!(ev.severity, Severity::Error);
         assert_eq!(ev.kind, EventKind::Log);

@@ -17,8 +17,8 @@ pub mod perf;
 pub use perf::PerfMeter;
 pub mod throttle;
 pub use throttle::ThrottleState;
-pub(crate) mod inference_panel;
 mod hivemind_view;
+pub(crate) mod inference_panel;
 
 use crate::animation::{
     ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis,
@@ -370,8 +370,9 @@ fn run_app(
     // `hivemind.as_mut().map(|h| h.stop())`, so the five collector threads
     // only ever run while this mode is active.
     // `hm_cursor`/`hm_unified`/`hm_sev` select and filter the feed pane;
-    // moved/toggled by the in-mode key handlers (hjkl/arrows, `f`, `s`) —
-    // see the "HivemindSweeper in-mode keys" block in the non-cmd_mode match.
+    // moved/toggled by the in-mode key handlers (arrows + vim `h`/`j`/`k`, `f`,
+    // `s`; `l` opens the legend as everywhere else) — see the "HivemindSweeper
+    // in-mode keys" block in the non-cmd_mode match.
     let mut hivemind: Option<crate::workload::hivemind::Hivemind> = None;
     let mut hm_cursor = (0usize, 0usize);
     let mut hm_unified = false;
@@ -1296,9 +1297,12 @@ fn run_app(
                                         display_mode = DisplayMode::HivemindSweeper;
                                     }
                                     hivemind
-                                        .get_or_insert_with(crate::workload::hivemind::Hivemind::new)
+                                        .get_or_insert_with(
+                                            crate::workload::hivemind::Hivemind::new,
+                                        )
                                         .start();
-                                    cmd_message = Some(("hivemindsweeper active".to_string(), false));
+                                    cmd_message =
+                                        Some(("hivemindsweeper active".to_string(), false));
                                 } else if verb == "watch" {
                                     let arg = cmd_buf
                                         .trim()
@@ -1338,7 +1342,8 @@ fn run_app(
                                                 Some((format!("watching pid {}", pid), false));
                                         }
                                         HmCmd::Bad(reason) => {
-                                            cmd_message = Some((format!("watch: {}", reason), true));
+                                            cmd_message =
+                                                Some((format!("watch: {}", reason), true));
                                         }
                                         HmCmd::Wrap(_) => {
                                             unreachable!("parse_hivemind_cmd never returns Wrap")
@@ -1376,10 +1381,7 @@ fn run_app(
                                                                 DisplayMode::HivemindSweeper;
                                                         }
                                                         cmd_message = Some((
-                                                            format!(
-                                                                "wrapping: {}",
-                                                                argv.join(" ")
-                                                            ),
+                                                            format!("wrapping: {}", argv.join(" ")),
                                                             false,
                                                         ));
                                                     }
@@ -1454,23 +1456,20 @@ fn run_app(
                         match key.code {
                             // ── HivemindSweeper in-mode keys (cursor/feed) ─────────
                             // Scoped to `display_mode == HivemindSweeper` via match
-                            // guards so these never shadow the same letters'
-                            // meanings elsewhere (`l` = toggle legend globally, `k`/`K`
-                            // = kill-confirm in Insights, arrows = fleet nav in
-                            // Insights — all guarded to their own modes below/above).
-                            // Placed ahead of the unguarded `l` arm specifically so
-                            // `l` moves the cursor right while in this mode instead of
-                            // toggling the legend (the guard on that arm would never
-                            // be reached otherwise, since match arms are tried in
-                            // order and the first matching pattern+guard wins).
+                            // guards so these never shadow the same letters' meanings
+                            // elsewhere (`k`/`K` = kill-confirm in Insights, arrows =
+                            // fleet nav in Insights — all guarded to their own modes).
+                            // Cursor-right is bound to the Right arrow only, NOT `l`:
+                            // `l` intentionally falls through to the unguarded legend
+                            // toggle below, so it opens the legend here exactly as it
+                            // does in every other mode (vim `h`/`j`/`k` still move the
+                            // cursor, and Right covers rightward movement).
                             KeyCode::Char('h') | KeyCode::Left
                                 if display_mode == DisplayMode::HivemindSweeper =>
                             {
                                 hm_cursor.1 = hm_cursor.1.saturating_sub(1);
                             }
-                            KeyCode::Char('l') | KeyCode::Right
-                                if display_mode == DisplayMode::HivemindSweeper =>
-                            {
+                            KeyCode::Right if display_mode == DisplayMode::HivemindSweeper => {
                                 if let Some(h) = hivemind.as_ref() {
                                     let rows = hivemind_view::board_rows(h);
                                     if let Some(max_col) =
@@ -1494,17 +1493,13 @@ fn run_app(
                                     hm_cursor.0 = (hm_cursor.0 + 1).min(max_row);
                                 }
                             }
-                            KeyCode::Char('f')
-                                if display_mode == DisplayMode::HivemindSweeper =>
-                            {
+                            KeyCode::Char('f') if display_mode == DisplayMode::HivemindSweeper => {
                                 // Toggle unified feed: show every event (subject to
                                 // the severity floor) instead of just the selected
                                 // board cell's.
                                 hm_unified = !hm_unified;
                             }
-                            KeyCode::Char('s')
-                                if display_mode == DisplayMode::HivemindSweeper =>
-                            {
+                            KeyCode::Char('s') if display_mode == DisplayMode::HivemindSweeper => {
                                 // Cycle the feed's severity floor upward, wrapping
                                 // back to Trace after Error.
                                 use crate::workload::hivemind::Severity;
@@ -1569,7 +1564,9 @@ fn run_app(
                                     prev_mode = display_mode;
                                     display_mode = DisplayMode::HivemindSweeper;
                                     hivemind
-                                        .get_or_insert_with(crate::workload::hivemind::Hivemind::new)
+                                        .get_or_insert_with(
+                                            crate::workload::hivemind::Hivemind::new,
+                                        )
                                         .start();
                                 } else {
                                     display_mode = prev_mode;
@@ -6302,7 +6299,10 @@ mod hm_cmd_tests {
     #[test]
     fn watch_pid_is_case_insensitive_and_trims() {
         assert!(matches!(parse_hivemind_cmd("PID 7"), HmCmd::WatchPid(7)));
-        assert!(matches!(parse_hivemind_cmd("  pid   9  "), HmCmd::WatchPid(9)));
+        assert!(matches!(
+            parse_hivemind_cmd("  pid   9  "),
+            HmCmd::WatchPid(9)
+        ));
     }
 
     #[test]

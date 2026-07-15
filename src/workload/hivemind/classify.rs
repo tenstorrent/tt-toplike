@@ -63,7 +63,10 @@ mod tests {
     #[test]
     fn recognizes_from_log_line_only() {
         assert_eq!(classify(None, "ttnn.matmul dispatched"), Source::Ttnn);
-        assert_eq!(classify(None, "kmd: tenstorrent device reset"), Source::Driver);
+        assert_eq!(
+            classify(None, "kmd: tenstorrent device reset"),
+            Source::Driver
+        );
     }
 
     #[test]

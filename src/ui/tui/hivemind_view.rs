@@ -318,8 +318,7 @@ pub fn render_hivemind(
         .iter()
         .filter(|ev| {
             ev.severity >= sev_floor
-                && (unified
-                    || selected.map_or(true, |(src, col)| event_matches_cell(ev, src, col)))
+                && (unified || selected.map_or(true, |(src, col)| event_matches_cell(ev, src, col)))
         })
         .collect();
     let start = matches.len().saturating_sub(feed_h);
@@ -382,11 +381,7 @@ fn rule_line(content_w: usize, dim: Color) -> Line<'static> {
 /// `{mode}_legend_lines` free functions in `crate::ui::tui` (e.g.
 /// `castle_legend_lines`), just kept local to this module since the board's
 /// symbols are entirely defined here.
-pub(crate) fn legend_lines(
-    bar: Color,
-    bg: Color,
-    dim: Color,
-) -> Vec<Line<'static>> {
+pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'static>> {
     macro_rules! ln {
         ($spans:expr) => {{
             let mut v: Vec<Span<'static>> =
@@ -398,7 +393,10 @@ pub(crate) fn legend_lines(
     vec![
         ln!(vec![
             Span::styled("rows   ", Style::default().fg(colors::rgb(200, 230, 255))),
-            Span::styled("= active sources (ttnn, metal, …)", Style::default().fg(dim)),
+            Span::styled(
+                "= active sources (ttnn, metal, …)",
+                Style::default().fg(dim)
+            ),
         ]),
         ln!(vec![
             Span::styled("cols   ", Style::default().fg(colors::rgb(200, 230, 255))),
@@ -406,13 +404,13 @@ pub(crate) fn legend_lines(
         ]),
         ln!(vec![
             Span::styled("░▒▓█   ", Style::default().fg(colors::rgb(120, 220, 200))),
-            Span::styled("= decaying activity heat per cell", Style::default().fg(dim)),
+            Span::styled(
+                "= decaying activity heat per cell",
+                Style::default().fg(dim)
+            ),
         ]),
         ln!(vec![
-            Span::styled(
-                "feed   ",
-                Style::default().fg(colors::rgb(200, 230, 255))
-            ),
+            Span::styled("feed   ", Style::default().fg(colors::rgb(200, 230, 255))),
             Span::styled(
                 "= live events for the selected cell",
                 Style::default().fg(dim)
@@ -420,27 +418,43 @@ pub(crate) fn legend_lines(
         ]),
         ln!(vec![
             Span::styled(
-                "hjkl ←↑↓→  ",
+                "←↑↓→ / hjk ",
                 Style::default().fg(colors::rgb(200, 230, 255))
             ),
             Span::styled("= move the board cursor", Style::default().fg(dim)),
         ]),
         ln!(vec![
-            Span::styled("f          ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled(
+                "l / ?      ",
+                Style::default().fg(colors::rgb(200, 230, 255))
+            ),
+            Span::styled("= this legend / help", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled(
+                "f          ",
+                Style::default().fg(colors::rgb(200, 230, 255))
+            ),
             Span::styled(
                 "= toggle unified feed (all cells vs. selected)",
                 Style::default().fg(dim)
             ),
         ]),
         ln!(vec![
-            Span::styled("s          ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled(
+                "s          ",
+                Style::default().fg(colors::rgb(200, 230, 255))
+            ),
             Span::styled(
                 "= cycle severity floor (trace→info→notice→warn→error)",
                 Style::default().fg(dim)
             ),
         ]),
         ln!(vec![
-            Span::styled("/watch /wrap  ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled(
+                "/watch /wrap  ",
+                Style::default().fg(colors::rgb(200, 230, 255))
+            ),
             Span::styled(
                 "= point the sniffer at a path/pid/command",
                 Style::default().fg(dim)
@@ -464,8 +478,9 @@ pub(crate) const EXPLAIN_TEXT: &[&str] = &[
     "The feed pane below shows live events for whichever",
     "cell is selected (or every event, in unified mode).",
     "",
-    "Controls: hjkl/arrows move the cursor, f toggles the",
-    "unified feed, s raises the severity floor.",
+    "Controls: arrows (or vim h/j/k) move the cursor, f",
+    "toggles the unified feed, s raises the severity floor,",
+    "l opens this legend.",
     "",
     "/watch <path> or /watch pid <n> points the sniffer at",
     "a log file or a process's device fds + open logs.",

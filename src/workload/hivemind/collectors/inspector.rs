@@ -197,8 +197,7 @@ mod tests {
     use crate::workload::hivemind::event::{EventKind, Source};
     #[test]
     fn compile_finished_maps_to_compile_kind() {
-        let ev = event_from_inspector_line(
-            "program 12 kernel brisc compile finished").unwrap();
+        let ev = event_from_inspector_line("program 12 kernel brisc compile finished").unwrap();
         assert_eq!(ev.source, Source::Inspector);
         assert_eq!(ev.kind, EventKind::Compile);
     }

@@ -191,7 +191,10 @@ mod tests {
         let roots = vec![dir.clone()];
         let first = scan_new_artifacts(&roots, &mut seen);
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].kind, crate::workload::hivemind::event::EventKind::Compile);
+        assert_eq!(
+            first[0].kind,
+            crate::workload::hivemind::event::EventKind::Compile
+        );
 
         // Second scan: nothing new.
         let second = scan_new_artifacts(&roots, &mut seen);
