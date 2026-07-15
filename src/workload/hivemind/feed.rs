@@ -440,24 +440,60 @@ mod tests {
     fn row_cap_evicts_least_recently_active() {
         let mut agg = FeedAgg::new();
         let t0 = Instant::now();
-        for d in 0..(MAX_ROWS + 5) {
-            let dev = (d % 255) as u8;
+        let total = MAX_ROWS + 5;
+
+        // Need `total` strictly DISTINCT `(source, device, pattern)` keys so
+        // the cap is actually exceeded and eviction fires. Two traps to
+        // avoid here (both present in the original, broken version of this
+        // test):
+        //   1. `device` is a `u8` (only 256 distinct values) — varying it
+        //      alone caps out at 256 keys, well under `MAX_ROWS` (400), so
+        //      the eviction branch would never trigger.
+        //   2. A numeric suffix in the TEXT doesn't help either: `generic_fold`
+        //      (deliberately) replaces every digit run with a single `#`, so
+        //      "pattern-7" and "pattern-42" both fold to the same
+        //      "pattern-#" and collapse into one row.
+        // A letter-run has no digits, so `generic_fold` leaves it untouched,
+        // and it's unique per iteration by length — keeping `source`/`device`
+        // fixed isolates the assertions to pattern-driven eviction only.
+        let pattern_for = |i: usize| format!("distinct-pattern-{}", "a".repeat(i + 1));
+
+        for i in 0..total {
             agg.ingest(
-                &ev(
-                    Source::Vllm,
-                    Some(dev),
-                    Severity::Info,
-                    "distinct-pattern-x",
-                ),
-                t0 + Duration::from_millis(d as u64),
+                &ev(Source::Vllm, Some(0), Severity::Info, &pattern_for(i)),
+                t0 + Duration::from_millis(i as u64),
             );
         }
+
         let rows = agg.rows(None, Severity::Trace);
-        assert!(
-            rows.len() <= MAX_ROWS,
-            "row count {} should never exceed the cap {}",
+        assert_eq!(
             rows.len(),
-            MAX_ROWS
+            MAX_ROWS,
+            "row count should be capped at exactly {MAX_ROWS} once the cap is exceeded, got {}",
+            rows.len()
         );
+
+        // Eviction always removes the least-recently-active (smallest
+        // `last`) row, so only the most-recently-ingested `MAX_ROWS`
+        // iterations should survive; every earlier iteration must be gone.
+        // This is the assertion that would actually fail if eviction were
+        // broken or absent (it would instead see all `total` rows present).
+        let surviving: std::collections::HashSet<String> =
+            rows.iter().map(|r| r.display.clone()).collect();
+        let evicted_cutoff = total - MAX_ROWS;
+        for i in 0..evicted_cutoff {
+            let pattern = pattern_for(i);
+            assert!(
+                !surviving.contains(&pattern),
+                "oldest row (iteration {i}, pattern {pattern:?}) should have been evicted"
+            );
+        }
+        for i in evicted_cutoff..total {
+            let pattern = pattern_for(i);
+            assert!(
+                surviving.contains(&pattern),
+                "recently-ingested row (iteration {i}, pattern {pattern:?}) should still be present"
+            );
+        }
     }
 }

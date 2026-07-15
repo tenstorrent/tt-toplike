@@ -241,9 +241,10 @@ fn run_command(argv: Vec<String>, tx: Tx, shutdown: Arc<AtomicBool>) {
 mod pid_attach {
     use super::{tail_file_into, Tx};
     use crate::workload::hivemind::classify::classify;
+    use crate::workload::hivemind::collectors::procfs::close_event_source;
     use crate::workload::hivemind::event::{EventKind, Severity, SniffEvent, Source};
     use procfs::process::{FDTarget, Process};
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -279,6 +280,20 @@ mod pid_attach {
         let mut seen_devices: HashSet<u8> = HashSet::new();
         let mut tailing: HashSet<PathBuf> = HashSet::new();
         let mut tail_handles: Vec<JoinHandle<()>> = Vec::new();
+        // `pid` is fixed for this attach loop's whole lifetime, so this cache
+        // never holds more than the one entry — it's a `HashMap` (rather than
+        // a bare `Option`) purely to match `collectors::procfs::open_cache`'s
+        // shape and let both collectors share `close_event_source`. Populated
+        // the moment an OPEN is emitted for a device fd; looked up (not
+        // removed) when that fd later closes, so the close event reuses the
+        // OPEN's classification even if `stat()`/`cmdline()` would now return
+        // different or empty data (e.g. the process has gone zombie between
+        // polls). Evicted only *after* a poll's closes are fully processed —
+        // and only once this pid holds no device fd at all any more — so a
+        // pid closing several device fds in the very same poll (the same
+        // eviction-timing bug `collectors::procfs` already hit and fixed)
+        // doesn't lose its cached classification partway through.
+        let mut open_cache: HashMap<i32, (String, Source)> = HashMap::new();
 
         while !shutdown.load(Ordering::SeqCst) {
             let Ok(process) = Process::new(pid) else {
@@ -330,9 +345,15 @@ mod pid_attach {
 
             for &dev in &current_devices {
                 if seen_devices.insert(dev) {
+                    let source = classify(Some(&proc_name), &cmdline);
+                    // Cache this pid's classification so a later close (by
+                    // which point `stat()`/`cmdline()` may no longer be
+                    // trustworthy) reuses it verbatim — see `open_cache`'s
+                    // doc comment above.
+                    open_cache.insert(pid, (proc_name.clone(), source));
                     let _ = tx.try_send(SniffEvent {
                         ts: Instant::now(),
-                        source: classify(Some(&proc_name), &cmdline),
+                        source,
                         device: Some(dev),
                         severity: Severity::Info,
                         kind: EventKind::Fd,
@@ -342,25 +363,24 @@ mod pid_attach {
                 }
             }
             // Devices that were open last poll but aren't any more: closed.
-            // Attribution is unknown at this point (the fd is already gone),
-            // same as `collectors::procfs::ProcfsCollector`'s close path.
-            let close_origin = origin.clone();
-            let tx_close = tx.clone();
-            seen_devices.retain(|dev| {
-                if current_devices.contains(dev) {
-                    return true;
-                }
-                let _ = tx_close.try_send(SniffEvent {
-                    ts: Instant::now(),
-                    source: Source::Unknown,
-                    device: Some(*dev),
-                    severity: Severity::Info,
-                    kind: EventKind::Fd,
-                    text: format!("pid {pid} closed /dev/tenstorrent/{dev}"),
-                    origin: close_origin.clone(),
-                });
-                false
-            });
+            // Delegated to the pure `close_events_and_eviction` helper below
+            // — see its docs for why the cache eviction decision must be
+            // acted on only *after* every close this poll has been produced.
+            let (close_events, should_evict) = close_events_and_eviction(
+                &seen_devices,
+                &current_devices,
+                &open_cache,
+                pid,
+                &origin,
+            );
+            for ev in close_events {
+                let _ = tx.try_send(ev);
+                // channel full: drop newest (engine counts drops)
+            }
+            seen_devices.retain(|dev| current_devices.contains(dev));
+            if should_evict {
+                open_cache.remove(&pid);
+            }
 
             thread::sleep(POLL_INTERVAL);
         }
@@ -368,6 +388,57 @@ mod pid_attach {
         for h in tail_handles {
             let _ = h.join();
         }
+    }
+
+    /// Pure close-event generation for one `/watch pid` poll: given the
+    /// device indices this pid held open last poll (`seen_devices`), the
+    /// ones still open now (`current_devices`), and the `(name, Source)`
+    /// cached at OPEN time (`open_cache`, keyed by `pid` — see `run`'s
+    /// `open_cache` doc comment), produce the CLOSE `SniffEvent`s for this
+    /// poll, plus whether `open_cache`'s entry for `pid` should now be
+    /// evicted.
+    ///
+    /// Mirrors `collectors::procfs::close_events_and_evictions` (see its docs
+    /// for the full rationale, which applies identically here): a pid closing
+    /// SEVERAL device fds in the very same poll must see the same cached
+    /// classification for every one of those closes, so `open_cache` is only
+    /// ever looked up here, never removed mid-loop — eviction is returned as
+    /// a bool (true once `current_devices` is empty, i.e. this pid holds no
+    /// device fd at all any more) for the caller to act on only after every
+    /// close this poll has already been generated.
+    ///
+    /// Pure (no `/proc` access, no `&mut self`), so — like its `procfs`
+    /// sibling — this poll-boundary interaction is unit-testable with
+    /// synthetic `seen_devices`/`current_devices`/`open_cache` and no live
+    /// process required.
+    ///
+    /// `pub(super)` (rather than private) purely so a sibling test module in
+    /// this file can call it directly with synthetic data — mirroring
+    /// `collectors::procfs::close_events_and_evictions`'s own `pub(super)`.
+    pub(super) fn close_events_and_eviction(
+        seen_devices: &HashSet<u8>,
+        current_devices: &HashSet<u8>,
+        open_cache: &HashMap<i32, (String, Source)>,
+        pid: i32,
+        origin: &str,
+    ) -> (Vec<SniffEvent>, bool) {
+        let mut events = Vec::new();
+        for &dev in seen_devices {
+            if current_devices.contains(&dev) {
+                continue;
+            }
+            let (source, text) = close_event_source(open_cache.get(&pid), pid, dev);
+            events.push(SniffEvent {
+                ts: Instant::now(),
+                source,
+                device: Some(dev),
+                severity: Severity::Info,
+                kind: EventKind::Fd,
+                text,
+                origin: origin.to_string(),
+            });
+        }
+        (events, current_devices.is_empty())
     }
 
     /// Heuristic for "looks like a log file" among a pid's other open
@@ -530,6 +601,120 @@ mod tests {
         assert_eq!(
             WrapCollector::new(WrapKind::Command(vec!["x".into()])).name(),
             "wrap:command"
+        );
+    }
+}
+
+/// Tests for `pid_attach`'s pure close-event/eviction helper. Gated
+/// identically to the `pid_attach::real`-equivalent module itself (it's the
+/// only target/feature combination where that code exists to test), mirroring
+/// how `collectors::procfs` gates its own `mod real` unit tests.
+#[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+#[cfg(test)]
+mod pid_attach_tests {
+    use super::pid_attach;
+    use crate::workload::hivemind::event::Source;
+    use std::collections::{HashMap, HashSet};
+
+    /// Regression test mirroring `collectors::procfs`'s
+    /// `same_poll_multi_device_close_keeps_cached_source_for_every_close`:
+    /// a single `/watch pid` attach holds TWO device fds open, both closing
+    /// in the SAME poll (`current_devices` is empty — every fd this pid held
+    /// is now gone). Before this fix, the close path hardcoded
+    /// `Source::Unknown` regardless of what the OPEN was classified as, so a
+    /// `vLLM` open+close pair landed in two separate coalesced feed rows
+    /// instead of folding into one (see `feed.rs`'s `coalesce_key`, keyed on
+    /// `(source, device, pattern)`). Both closes here must instead see the
+    /// cached `("python", Source::Vllm)` classification, and the pid's cache
+    /// entry must be marked for eviction afterward (it holds no device fd in
+    /// `current_devices` any more).
+    #[test]
+    fn pid_attach_close_reuses_cached_open_source_for_every_close_in_one_poll() {
+        let pid = 4242;
+        let seen_devices: HashSet<u8> = [0, 1].into_iter().collect();
+        let current_devices: HashSet<u8> = HashSet::new(); // every fd closed this poll
+        let mut open_cache: HashMap<i32, (String, Source)> = HashMap::new();
+        open_cache.insert(pid, ("python".to_string(), Source::Vllm));
+
+        let (events, should_evict) = pid_attach::close_events_and_eviction(
+            &seen_devices,
+            &current_devices,
+            &open_cache,
+            pid,
+            "wrap:pid:4242",
+        );
+
+        assert_eq!(events.len(), 2);
+        for ev in &events {
+            assert_eq!(ev.source, Source::Vllm, "close event: {:?}", ev.text);
+            assert!(
+                ev.text
+                    .starts_with("python (pid 4242) closed /dev/tenstorrent/"),
+                "unexpected text: {}",
+                ev.text
+            );
+        }
+        let mut devices: Vec<Option<u8>> = events.iter().map(|e| e.device).collect();
+        devices.sort();
+        assert_eq!(devices, vec![Some(0), Some(1)]);
+
+        assert!(
+            should_evict,
+            "pid holds no device fd in current_devices, so its cache entry should be evicted"
+        );
+    }
+
+    /// A pid never observed opening (e.g. it already held the fd when the
+    /// attach loop started) has nothing cached, so its close falls back to
+    /// `Source::Unknown` — the same "genuinely unknown" fallback
+    /// `close_event_source` documents, not the old "always Unknown" bug.
+    #[test]
+    fn pid_attach_close_falls_back_to_unknown_when_never_cached() {
+        let pid = 777;
+        let seen_devices: HashSet<u8> = [0].into_iter().collect();
+        let current_devices: HashSet<u8> = HashSet::new();
+        let open_cache: HashMap<i32, (String, Source)> = HashMap::new();
+
+        let (events, should_evict) = pid_attach::close_events_and_eviction(
+            &seen_devices,
+            &current_devices,
+            &open_cache,
+            pid,
+            "wrap:pid:777",
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].source, Source::Unknown);
+        assert_eq!(events[0].text, "pid 777 closed /dev/tenstorrent/0");
+        assert!(should_evict);
+    }
+
+    /// Staggered close across polls: two devices open, only one closes this
+    /// poll — the pid still holds an fd for the other one in
+    /// `current_devices`, so its cache entry must survive (not be evicted)
+    /// for the still-pending close on the other device next poll.
+    #[test]
+    fn pid_attach_close_keeps_cache_when_pid_still_holds_a_device() {
+        let pid = 55;
+        let seen_devices: HashSet<u8> = [0, 1].into_iter().collect();
+        let current_devices: HashSet<u8> = [1].into_iter().collect();
+        let mut open_cache: HashMap<i32, (String, Source)> = HashMap::new();
+        open_cache.insert(pid, ("python".to_string(), Source::Vllm));
+
+        let (events, should_evict) = pid_attach::close_events_and_eviction(
+            &seen_devices,
+            &current_devices,
+            &open_cache,
+            pid,
+            "wrap:pid:55",
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].device, Some(0));
+        assert_eq!(events[0].source, Source::Vllm);
+        assert!(
+            !should_evict,
+            "pid still holds device 1 open, cache must survive"
         );
     }
 }
