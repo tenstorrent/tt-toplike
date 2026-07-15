@@ -1471,7 +1471,7 @@ fn run_app(
                             }
                             KeyCode::Right if display_mode == DisplayMode::HivemindSweeper => {
                                 if let Some(h) = hivemind.as_ref() {
-                                    let rows = hivemind_view::board_rows(h);
+                                    let rows = hivemind_view::board_rows(h, Instant::now());
                                     if let Some(max_col) =
                                         rows.first().map(|r| r.cells.len().saturating_sub(1))
                                     {
@@ -1488,7 +1488,7 @@ fn run_app(
                                 if display_mode == DisplayMode::HivemindSweeper =>
                             {
                                 if let Some(h) = hivemind.as_ref() {
-                                    let rows = hivemind_view::board_rows(h);
+                                    let rows = hivemind_view::board_rows(h, Instant::now());
                                     let max_row = rows.len().saturating_sub(1);
                                     hm_cursor.0 = (hm_cursor.0 + 1).min(max_row);
                                 }

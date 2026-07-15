@@ -8,12 +8,14 @@ pub mod classify;
 pub mod collector;
 pub mod collectors;
 pub mod event;
+pub mod feed;
 pub mod grid;
 
 pub use event::{EventKind, Severity, SniffEvent, Source};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::time::Instant;
 
 use collector::{CollectorStatus, Handle};
 use collectors::{
@@ -24,6 +26,7 @@ use collectors::{
     procfs::ProcfsCollector,
     wrap::{WrapCollector, WrapKind},
 };
+pub use feed::FeedAgg;
 pub use grid::HeatGrid;
 
 /// Capacity of the bounded channel collectors push `SniffEvent`s into. This
@@ -43,6 +46,10 @@ pub struct Hivemind {
 
     /// Decaying (source × device/host) activity heat, fed by `poll()`.
     grid: HeatGrid,
+    /// Coalesced live event feed (count+rate rows), fed by `poll()`
+    /// alongside `grid` — see `feed.rs` module docs for why the raw
+    /// `events()` ring alone floods the UI.
+    feed: FeedAgg,
     /// Sending half handed to every spawned collector (cloned per-collector).
     /// `None` when not running; dropping it (on `stop`) lets any collector
     /// still mid-send observe a closed channel rather than blocking forever.
@@ -62,6 +69,7 @@ impl Hivemind {
             events: VecDeque::with_capacity(256),
             dropped: 0,
             grid: HeatGrid::new(),
+            feed: FeedAgg::new(),
             tx: None,
             rx: None,
             handles: Vec::new(),
@@ -136,21 +144,32 @@ impl Hivemind {
     }
 
     /// Drain every `SniffEvent` currently queued on the channel into the ring
-    /// (bumping the heat grid for each), then decay the grid once. Infallible
-    /// and non-blocking: a `None` receiver (not running) or an empty channel
-    /// both just fall through to the decay step.
+    /// (bumping the heat grid and folding into the coalesced feed for each),
+    /// then decay the grid and roll the grid/feed spark buckets once.
+    /// Infallible and non-blocking: a `None` receiver (not running) or an
+    /// empty channel both just fall through to the decay/tick steps.
+    ///
+    /// A single `now` is captured once per call and shared across every
+    /// drained event and both `tick()` calls, rather than re-reading the
+    /// clock per event — this keeps events from the same poll cycle in the
+    /// same spark bucket instead of splitting across a bucket boundary purely
+    /// from call overhead.
     pub fn poll(&mut self) {
+        let now = Instant::now();
         if let Some(rx) = &self.rx {
             let mut drained = Vec::new();
             while let Ok(ev) = rx.try_recv() {
                 drained.push(ev);
             }
             for ev in drained {
-                self.grid.bump(ev.source, ev.device);
+                self.grid.bump_at(ev.source, ev.device, now);
+                self.feed.ingest(&ev, now);
                 self.ingest(ev);
             }
         }
         self.grid.decay();
+        self.grid.tick(now);
+        self.feed.tick(now);
     }
 
     /// Register a host log file to tail (`/watch <path>`). Ensures the
@@ -207,6 +226,14 @@ impl Hivemind {
 
     pub fn grid(&self) -> &HeatGrid {
         &self.grid
+    }
+
+    /// The coalesced live event feed (count+rate rows) — see `feed.rs`.
+    /// `render_hivemind` renders this instead of iterating `events()`
+    /// directly, so the feed pane shows folded rows rather than every raw
+    /// line.
+    pub fn feed(&self) -> &FeedAgg {
+        &self.feed
     }
 
     /// Current status of every spawned collector, in spawn order.

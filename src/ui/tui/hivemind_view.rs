@@ -10,6 +10,8 @@
 //! doc in `crate::ui::tui`) — never a right-side box glyph, and the panel is
 //! sized to the terminal `area` it is given rather than a hardcoded width.
 
+use std::time::Instant;
+
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -21,17 +23,37 @@ use ratatui::{
 use crate::ui::colors;
 use crate::workload::hivemind::{
     collector::CollectorStatus,
-    event::{Severity, SniffEvent, Source},
-    grid::{heat_char, Column},
+    event::{Severity, Source},
+    grid::{self, heat_char, Column},
     Hivemind,
 };
 
+/// Map a recent per-second activity count (a `grid::spark`/feed-row bucket
+/// value) to a block glyph. Uses the same intensity ramp as `heat_char` but
+/// over a much smaller range (a handful of events/sec is already "a lot" for
+/// a sparkline bucket, vs. heat's decaying 0..=8 scale), and treats zero as
+/// the coldest glyph in the ramp (a quiet second, not "no data") so a cell's
+/// sparkline reads as a continuous waveform rather than blanks.
+pub fn spark_char(count: u8) -> char {
+    crate::animation::common::value_to_block_char((count as f32 / 4.0).clamp(0.0, 1.0))
+}
+
+/// One board cell: which `Column` it is, its decaying heat glyph, its recent
+/// per-second activity sparkline, and whether it was active recently enough
+/// to "pulse" (render brighter/bold).
+#[derive(Clone, Copy)]
+pub struct BoardCell {
+    pub col: Column,
+    pub glyph: char,
+    pub spark: [u8; grid::SPARK_W],
+    pub pulsing: bool,
+}
+
 /// One row of the source × column heat board: the emitting `Source`, and one
-/// `(Column, glyph)` cell per active column (`Device(0)..=max_device`, then
-/// `Host`).
+/// cell per active column (`Device(0)..=max_device`, then `Host`).
 pub struct BoardRow {
     pub source: Source,
-    pub cells: Vec<(Column, char)>,
+    pub cells: Vec<BoardCell>,
 }
 
 /// Build the board's rows straight from the engine's heat grid — pure and
@@ -42,7 +64,11 @@ pub struct BoardRow {
 /// ever been seen) followed by `Column::Host` — every row gets the same
 /// column set, so the board reads as a proper table even for sources that
 /// haven't touched every column yet (those cells are simply cold/zero heat).
-pub fn board_rows(hive: &Hivemind) -> Vec<BoardRow> {
+///
+/// `now` drives the pulse check (`grid::HeatGrid::is_pulsing`) — passed in
+/// explicitly (rather than read internally via `Instant::now()`) so this
+/// stays a pure function of its inputs and is fully deterministic in tests.
+pub fn board_rows(hive: &Hivemind, now: Instant) -> Vec<BoardRow> {
     let grid = hive.grid();
     let mut columns: Vec<Column> = Vec::new();
     if let Some(max_device) = grid.max_device() {
@@ -57,7 +83,12 @@ pub fn board_rows(hive: &Hivemind) -> Vec<BoardRow> {
         .map(|source| {
             let cells = columns
                 .iter()
-                .map(|&col| (col, heat_char(grid.heat(source, col))))
+                .map(|&col| BoardCell {
+                    col,
+                    glyph: heat_char(grid.heat(source, col)),
+                    spark: grid.spark(source, col),
+                    pulsing: grid.is_pulsing(source, col, now),
+                })
                 .collect();
             BoardRow { source, cells }
         })
@@ -83,8 +114,18 @@ fn selected_cell(rows: &[BoardRow], cursor: (usize, usize)) -> Option<(Source, C
     if row.cells.is_empty() {
         return None;
     }
-    let (col, _) = row.cells[cursor.1.min(row.cells.len() - 1)];
-    Some((row.source, col))
+    let cell = row.cells[cursor.1.min(row.cells.len() - 1)];
+    Some((row.source, cell.col))
+}
+
+/// A board `Column` as the `(Source, Option<device>)` shape
+/// `FeedAgg::rows`/`Hivemind::feed` filters on — `Column::Host` has no device
+/// index, `Column::Device(d)` carries it.
+fn column_to_device(col: Column) -> Option<u8> {
+    match col {
+        Column::Device(d) => Some(d),
+        Column::Host => None,
+    }
 }
 
 fn severity_label(sev: Severity) -> &'static str {
@@ -141,17 +182,6 @@ fn truncate_to_width(s: &str, max_w: usize) -> String {
     out
 }
 
-/// Does this event belong on the given `(source, column)` cell?
-fn event_matches_cell(ev: &SniffEvent, source: Source, col: Column) -> bool {
-    if ev.source != source {
-        return false;
-    }
-    match col {
-        Column::Host => ev.device.is_none(),
-        Column::Device(d) => ev.device == Some(d),
-    }
-}
-
 /// Draw the HivemindSweeper board + feed into `area`.
 ///
 /// - `cursor` selects a `(row, col)` board cell; when `unified` is false the
@@ -160,11 +190,23 @@ fn event_matches_cell(ev: &SniffEvent, source: Source, col: Column) -> bool {
 /// - `sev_floor` is an inclusive floor: events strictly below it are hidden
 ///   from the feed (the board itself is unaffected — heat is severity-blind).
 ///
+/// The feed pane renders `hive.feed().rows(...)` — coalesced count+rate rows
+/// (see `workload::hivemind::feed`), newest-first — rather than iterating the
+/// raw event ring, so repeated/near-identical events (device-poll open/close
+/// churn above all) fold into one line instead of flooding the pane. Each
+/// board cell also shows a tiny recent-activity sparkline next to its heat
+/// glyph, and pulses brighter/bold immediately after a bump
+/// (`grid::HeatGrid::is_pulsing`), so the board visibly animates even when
+/// heat itself changes slowly.
+///
 /// Left/bottom borders only (`╔═…` / `║ …` / `╚═…`) — no right-side glyph —
 /// per the project's TUI convention; the panel fills exactly the `area` it's
 /// given rather than a fixed width, and the board's label/column widths are
 /// sized to their actual content so nothing is silently truncated the way a
-/// hardcoded panel width has bitten this project before.
+/// hardcoded panel width has bitten this project before. The per-cell
+/// sparkline reuses column width that was already reserved (every column is
+/// padded to fit the "Host" label, 4 columns, even though a glyph alone is
+/// only 1) — so adding it never widens the board past what it already drew.
 pub fn render_hivemind(
     f: &mut Frame,
     area: Rect,
@@ -177,11 +219,12 @@ pub fn render_hivemind(
         return; // Nothing sensible to draw in a sliver of a terminal.
     }
 
+    let now = Instant::now();
     let width = area.width as usize;
     let content_w = width.saturating_sub(2); // minus the "║ " left border
     let content_rows = (area.height as usize).saturating_sub(2); // minus top/bottom border rows
 
-    let rows = board_rows(hive);
+    let rows = board_rows(hive, now);
     let selected = selected_cell(&rows, cursor);
 
     // Column label width sized to the widest label actually in use ("Host" is
@@ -192,12 +235,18 @@ pub fn render_hivemind(
         .map(|r| {
             r.cells
                 .iter()
-                .map(|(c, _)| unicode_width::UnicodeWidthStr::width(col_label(*c).as_str()))
+                .map(|c| unicode_width::UnicodeWidthStr::width(col_label(c.col).as_str()))
                 .max()
                 .unwrap_or(4)
         })
         .unwrap_or(4)
         .max(4);
+    // How many trailing spark-bucket columns fit inside `col_w` once the
+    // 1-column heat glyph is accounted for, capped at the grid's actual
+    // spark width. This is space `col_w` already reserves (every column is
+    // padded to the "Host" label's width regardless of its own glyph width),
+    // so showing the spark here never widens the board.
+    let spark_show = col_w.saturating_sub(1).min(grid::SPARK_W);
     // Source label width sized to the widest label in play (all ASCII labels
     // today, but measured via unicode-width for the same reason as col_w —
     // consistency, and safety if a future Source label isn't ASCII).
@@ -217,6 +266,11 @@ pub fn render_hivemind(
 
     // ── Title / counters line ───────────────────────────────────────────
     let running_note = if hive.is_running() { "" } else { " [stopped]" };
+    // `rows:` is the coalesced feed's row count (distinct source/device/
+    // pattern combinations currently tracked) — a cheap, useful sanity
+    // signal that the folding is actually collapsing the raw event count
+    // down, without duplicating the whole raw feed on screen.
+    let feed_row_count = hive.feed().rows(None, Severity::Trace).len();
     header_body.push(Line::from(vec![
         Span::styled(
             "HIVEMINDSWEEPER",
@@ -224,9 +278,10 @@ pub fn render_hivemind(
         ),
         Span::styled(
             format!(
-                "  events:{}  dropped:{}{}",
+                "  events:{}  dropped:{}  rows:{}{}",
                 hive.events().len(),
                 hive.dropped(),
+                feed_row_count,
                 running_note
             ),
             Style::default().fg(dim),
@@ -260,31 +315,49 @@ pub fn render_hivemind(
         )));
     } else {
         let mut hdr_spans = vec![Span::raw(format!("{:label_w$}", ""))];
-        for (col, _) in &rows[0].cells {
+        for cell in &rows[0].cells {
             hdr_spans.push(Span::raw("  "));
             hdr_spans.push(Span::styled(
-                format!("{:>col_w$}", col_label(*col)),
+                format!("{:>col_w$}", col_label(cell.col)),
                 Style::default().fg(head).add_modifier(Modifier::BOLD),
             ));
         }
         header_body.push(Line::from(hdr_spans));
+
+        // Brighter pulse color for a cell that was bumped within the last
+        // `PULSE_WINDOW` — makes the board visibly animate on every event,
+        // not just when the decaying heat glyph itself changes level.
+        let pulse_accent = colors::rgb(190, 255, 235);
 
         for (ri, row) in rows.iter().enumerate() {
             let mut spans = vec![Span::styled(
                 format!("{:label_w$}", row.source.label()),
                 Style::default().fg(head),
             )];
-            for (ci, (_, glyph)) in row.cells.iter().enumerate() {
+            for (ci, cell) in row.cells.iter().enumerate() {
                 spans.push(Span::raw("  "));
                 let is_selected = !unified && ri == cursor.0.min(rows.len() - 1) && {
                     let last_ci = row.cells.len().saturating_sub(1);
                     ci == cursor.1.min(last_ci)
                 };
                 let mut style = Style::default().fg(accent);
+                if cell.pulsing {
+                    style = style.fg(pulse_accent).add_modifier(Modifier::BOLD);
+                }
                 if is_selected {
                     style = style.bg(selected_bg).add_modifier(Modifier::BOLD);
                 }
-                spans.push(Span::styled(format!("{:>col_w$}", glyph), style));
+                // Cell content is the heat glyph followed by up to
+                // `spark_show` of its most recent activity buckets
+                // (oldest-of-the-shown first, so time still reads
+                // left-to-right) — e.g. "▓░▒█" instead of a lone "▓".
+                let spark_tail = &cell.spark[grid::SPARK_W - spark_show..];
+                let mut cell_str = String::with_capacity(1 + spark_show);
+                cell_str.push(cell.glyph);
+                for &v in spark_tail {
+                    cell_str.push(spark_char(v));
+                }
+                spans.push(Span::styled(format!("{:>col_w$}", cell_str), style));
             }
             header_body.push(Line::from(spans));
         }
@@ -312,38 +385,52 @@ pub fn render_hivemind(
     )));
 
     // ── Feed lines ───────────────────────────────────────────────────────
+    // Coalesced rows (see `workload::hivemind::feed`) instead of the raw
+    // event ring: repeated/near-identical events — device-poll open/close
+    // churn above all — fold into one line with a running count and a
+    // recent events/sec rate, rather than flooding the pane with dozens of
+    // near-duplicate lines. `rows()` is already newest-first, so the most
+    // recently active row renders at the top of the pane.
     let feed_h = content_rows.saturating_sub(header_body.len());
-    let matches: Vec<&SniffEvent> = hive
-        .events()
-        .iter()
-        .filter(|ev| {
-            ev.severity >= sev_floor
-                && (unified || selected.map_or(true, |(src, col)| event_matches_cell(ev, src, col)))
-        })
-        .collect();
-    let start = matches.len().saturating_sub(feed_h);
+    let cell_filter = if unified {
+        None
+    } else {
+        selected.map(|(src, col)| (src, column_to_device(col)))
+    };
+    let feed_rows = hive.feed().rows(cell_filter, sev_floor);
     let mut feed_lines: Vec<Line> = Vec::new();
-    for ev in &matches[start..] {
-        let dev_str = match ev.device {
+    for row in feed_rows.iter().take(feed_h) {
+        let dev_str = match row.device {
             Some(d) => format!("D{d}"),
             None => "host".to_string(),
         };
+        // Trailing "x<count>  <rate>/s  <spark>" summary — a coalesced row's
+        // whole point is showing how often it's firing, not just its text.
+        let count_str = format!("x{}", row.count);
+        let rate_str = format!("{:.1}/s", row.rate);
+        let spark_str: String = row.spark.iter().map(|&c| spark_char(c)).collect();
+        let trailing = format!("  {count_str}  {rate_str}  {spark_str}");
+        let trailing_w = unicode_width::UnicodeWidthStr::width(trailing.as_str());
+
         let prefix_w = 7 /* severity */ + 1 + label_w + 1 + 4 /* dev field */ + 1;
-        let text_w = content_w.saturating_sub(prefix_w);
+        let text_w = content_w
+            .saturating_sub(prefix_w)
+            .saturating_sub(trailing_w);
         feed_lines.push(Line::from(vec![
             Span::styled(
-                format!("{:<7}", severity_label(ev.severity)),
-                severity_style(ev.severity),
+                format!("{:<7}", severity_label(row.max_severity)),
+                severity_style(row.max_severity),
             ),
             Span::raw(" "),
             Span::styled(
-                format!("{:label_w$}", ev.source.label()),
+                format!("{:label_w$}", row.source.label()),
                 Style::default().fg(dim),
             ),
             Span::raw(" "),
             Span::styled(format!("{:<4}", dev_str), Style::default().fg(dim)),
             Span::raw(" "),
-            Span::raw(truncate_to_width(&ev.text, text_w)),
+            Span::raw(truncate_to_width(&row.display, text_w)),
+            Span::styled(trailing, Style::default().fg(accent)),
         ]));
     }
 
@@ -405,14 +492,14 @@ pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'stati
         ln!(vec![
             Span::styled("░▒▓█   ", Style::default().fg(colors::rgb(120, 220, 200))),
             Span::styled(
-                "= decaying activity heat per cell",
+                "= decaying heat + a tiny recent-activity spark; pulses on new events",
                 Style::default().fg(dim)
             ),
         ]),
         ln!(vec![
             Span::styled("feed   ", Style::default().fg(colors::rgb(200, 230, 255))),
             Span::styled(
-                "= live events for the selected cell",
+                "= coalesced events (count/rate/spark) for the selected cell",
                 Style::default().fg(dim)
             ),
         ]),
@@ -473,10 +560,14 @@ pub(crate) const EXPLAIN_TEXT: &[&str] = &[
     "activity into one source × device/host heat board.",
     "",
     "Each cell's glyph (░▒▓█) decays over time — a cold",
-    "cell just hasn't seen activity recently.",
+    "cell just hasn't seen activity recently. A cell also",
+    "shows a tiny recent-activity spark and briefly pulses",
+    "brighter right after a new event.",
     "",
-    "The feed pane below shows live events for whichever",
-    "cell is selected (or every event, in unified mode).",
+    "The feed pane below coalesces repeated/near-identical",
+    "events (e.g. device-poll open/close churn) into one",
+    "row with a running count and events/sec rate, for",
+    "whichever cell is selected (or every row, unified).",
     "",
     "Controls: arrows (or vim h/j/k) move the cursor, f",
     "toggles the unified feed, s raises the severity floor,",
@@ -499,12 +590,29 @@ mod tests {
         let mut h = Hivemind::new();
         h.bump_grid_for_test(Source::TtMetal, Some(0));
         h.bump_grid_for_test(Source::Ttnn, None);
-        let rows = board_rows(&h);
+        let rows = board_rows(&h, Instant::now());
         let sources: Vec<_> = rows.iter().map(|r| r.source).collect();
         assert_eq!(sources, vec![Source::TtMetal, Source::Ttnn]);
         // Column set spans D0..=max_device plus Host.
-        assert!(rows[0].cells.iter().any(|(c, _)| *c == Column::Device(0)));
-        assert!(rows[0].cells.iter().any(|(c, _)| *c == Column::Host));
+        assert!(rows[0].cells.iter().any(|c| c.col == Column::Device(0)));
+        assert!(rows[0].cells.iter().any(|c| c.col == Column::Host));
+    }
+
+    /// A cell bumped just before `board_rows` is built should read as
+    /// pulsing — this is the "board barely animates" complaint's fix: every
+    /// event should visibly nudge its cell, not just the slow-decaying heat
+    /// glyph.
+    #[test]
+    fn recently_bumped_cell_is_pulsing_in_board_rows() {
+        let mut h = Hivemind::new();
+        h.bump_grid_for_test(Source::TtMetal, Some(0));
+        let rows = board_rows(&h, Instant::now());
+        let cell = rows[0]
+            .cells
+            .iter()
+            .find(|c| c.col == Column::Device(0))
+            .expect("Device(0) column present");
+        assert!(cell.pulsing, "a just-bumped cell should be pulsing");
     }
 
     /// Rendering smoke test (mirrors `grid_mode_narrow_terminal_does_not_panic`
