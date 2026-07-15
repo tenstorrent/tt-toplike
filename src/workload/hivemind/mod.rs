@@ -10,23 +10,29 @@ pub mod collectors;
 pub mod event;
 pub mod grid;
 
+pub use event::{EventKind, Severity, SniffEvent, Source};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-pub use event::{EventKind, Severity, SniffEvent, Source};
 
 use collector::{CollectorStatus, Handle};
 use collectors::{
-    cache_watch::CacheWatchCollector, inspector::InspectorCollector, kmsg::KmsgCollector,
-    log_tail::LogTailCollector, procfs::ProcfsCollector,
+    cache_watch::CacheWatchCollector,
+    inspector::InspectorCollector,
+    kmsg::KmsgCollector,
+    log_tail::LogTailCollector,
+    procfs::ProcfsCollector,
     wrap::{WrapCollector, WrapKind},
 };
 pub use grid::HeatGrid;
 
-/// Capacity of the bounded channel collectors push `SniffEvent`s into. Sized
-/// generously above the ring capacity so a burst doesn't need to spill into
-/// the channel's own backpressure before `poll()` gets a chance to drain it;
-/// actual overflow accounting happens at the ring (`ingest`), not here.
+/// Capacity of the bounded channel collectors push `SniffEvent`s into. This
+/// is a backpressure buffer, not a history store — it only needs to absorb
+/// the gap between a collector's sends and the next `poll()` drain, not hold
+/// a burst the size of the whole ring. It is smaller than `RING_CAP` (1024 vs
+/// 4096) by design; overflow accounting (drops) happens at the ring
+/// (`ingest`), not here — a full channel just makes `try_send` fail and the
+/// collector counts that as a drop of its own.
 const CHANNEL_CAP: usize = 1024;
 
 /// Bounded event history + drop accounting, plus the live collector engine:
@@ -97,13 +103,20 @@ impl Hivemind {
         self.tx = Some(tx.clone());
         self.rx = Some(rx);
 
-        self.handles.push(collector::spawn(Box::new(KmsgCollector), tx.clone()));
         self.handles
-            .push(collector::spawn(Box::new(CacheWatchCollector::new()), tx.clone()));
-        self.handles
-            .push(collector::spawn(Box::new(LogTailCollector::new()), tx.clone()));
-        self.handles
-            .push(collector::spawn(Box::new(ProcfsCollector::new()), tx.clone()));
+            .push(collector::spawn(Box::new(KmsgCollector), tx.clone()));
+        self.handles.push(collector::spawn(
+            Box::new(CacheWatchCollector::new()),
+            tx.clone(),
+        ));
+        self.handles.push(collector::spawn(
+            Box::new(LogTailCollector::new()),
+            tx.clone(),
+        ));
+        self.handles.push(collector::spawn(
+            Box::new(ProcfsCollector::new()),
+            tx.clone(),
+        ));
         self.handles
             .push(collector::spawn(Box::new(InspectorCollector::new()), tx));
 
@@ -149,8 +162,10 @@ impl Hivemind {
     pub fn add_watch_path(&mut self, path: PathBuf) {
         self.start();
         let tx = self.tx.clone().expect("start() guarantees tx is Some");
-        self.handles
-            .push(collector::spawn(Box::new(WrapCollector::new(WrapKind::File(path))), tx));
+        self.handles.push(collector::spawn(
+            Box::new(WrapCollector::new(WrapKind::File(path))),
+            tx,
+        ));
     }
 
     /// Register a PID whose device-fd activity (and best-effort open log
@@ -159,8 +174,10 @@ impl Hivemind {
     pub fn add_watch_pid(&mut self, pid: i32) {
         self.start();
         let tx = self.tx.clone().expect("start() guarantees tx is Some");
-        self.handles
-            .push(collector::spawn(Box::new(WrapCollector::new(WrapKind::Pid(pid))), tx));
+        self.handles.push(collector::spawn(
+            Box::new(WrapCollector::new(WrapKind::Pid(pid))),
+            tx,
+        ));
     }
 
     /// Spawn a wrapped-command collector (`/wrap <command…>`, i.e.
@@ -220,6 +237,20 @@ impl Hivemind {
     #[cfg(test)]
     pub fn test_sender(&self) -> SyncSender<SniffEvent> {
         self.tx.clone().expect("test_sender called before start()")
+    }
+}
+
+/// Belt-and-suspenders teardown: the render loop's mode-transition choke
+/// point (see `ui/tui/mod.rs`) already calls `stop()` on every path out of
+/// `DisplayMode::HivemindSweeper`, but a hard app-quit (`q`, a quit command)
+/// returns out of the loop entirely without passing through that choke
+/// point. Without this, `Hivemind`'s collector threads (and any `docker logs
+/// -f` children spawned under them) would detach and outlive the process's
+/// intent to exit. `stop()` is idempotent — it drains `handles`, so if the
+/// choke point already ran, this is a harmless no-op, not a double-join.
+impl Drop for Hivemind {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -376,9 +407,10 @@ mod engine_tests {
         let mut found = false;
         for _ in 0..100 {
             h.poll();
-            if h.events().iter().any(|e| {
-                e.kind == EventKind::Emission && e.text.contains("wrapped-hello")
-            }) {
+            if h.events()
+                .iter()
+                .any(|e| e.kind == EventKind::Emission && e.text.contains("wrapped-hello"))
+            {
                 found = true;
                 break;
             }

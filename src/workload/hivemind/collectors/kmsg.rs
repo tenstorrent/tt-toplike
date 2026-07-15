@@ -19,7 +19,12 @@ pub fn parse_kmsg_line(line: &str) -> Option<SniffEvent> {
         return None;
     }
     // /dev/kmsg format: "prio,seq,ts,flag;message". Take the message half if present.
-    let text = line.splitn(2, ';').nth(1).unwrap_or(line).trim().to_string();
+    let text = line
+        .split_once(';')
+        .map(|x| x.1)
+        .unwrap_or(line)
+        .trim()
+        .to_string();
     let severity = if low.contains("error") || low.contains("fail") || low.contains("aer") {
         Severity::Error
     } else if low.contains("warn") || low.contains("reset") {
@@ -54,8 +59,6 @@ fn parse_device_hint(low: &str) -> Option<u8> {
 }
 
 use crate::workload::hivemind::collector::{Collector, Tx};
-use std::io::{BufRead, BufReader};
-use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -65,7 +68,19 @@ impl Collector for KmsgCollector {
     fn name(&self) -> &'static str {
         "kmsg"
     }
+
+    /// Real, unix-only implementation: tails `/dev/kmsg` non-blockingly.
+    /// `/dev/kmsg` (and the `O_NONBLOCK` open flag) are a Linux/unix concept —
+    /// this is `cfg(unix)` rather than `cfg(target_os = "linux")` so it still
+    /// builds (and simply fails the `open()`, handled below) on macOS; the
+    /// engine constructs `KmsgCollector` unconditionally on every platform
+    /// (see `Hivemind::start()`), so only genuinely non-unix targets (i.e.
+    /// Windows) need the no-op fallback below.
+    #[cfg(unix)]
     fn run(&mut self, tx: Tx, shutdown: Arc<AtomicBool>) {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::fs::OpenOptionsExt;
+
         // Open with O_NONBLOCK so a `read_line` that reaches the live tail
         // returns WouldBlock instead of blocking in the kernel until the next
         // record arrives — that would otherwise stall this thread past the
@@ -106,6 +121,18 @@ impl Collector for KmsgCollector {
             }
         }
     }
+
+    /// No-op stand-in for non-unix targets (Windows). `/dev/kmsg` and
+    /// `O_NONBLOCK` don't exist there, so there's nothing to tail — just
+    /// idle, re-checking `shutdown` at the same ~5x/sec cadence as the real
+    /// collector, so the engine's spawn/join lifecycle behaves identically
+    /// across platforms.
+    #[cfg(not(unix))]
+    fn run(&mut self, _tx: Tx, shutdown: Arc<AtomicBool>) {
+        while !shutdown.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -120,8 +147,7 @@ mod tests {
 
     #[test]
     fn parses_driver_reset_with_device_hint() {
-        let ev =
-            parse_kmsg_line("4,200,999,-;tenstorrent!1: watchdog reset issued").unwrap();
+        let ev = parse_kmsg_line("4,200,999,-;tenstorrent!1: watchdog reset issued").unwrap();
         assert_eq!(ev.source, Source::Driver);
         assert_eq!(ev.device, Some(1));
         assert_eq!(ev.severity, Severity::Warn);
@@ -131,8 +157,7 @@ mod tests {
 
     #[test]
     fn pcie_aer_is_error() {
-        let ev = parse_kmsg_line("3,201,1000,-;pcie 0000:01:00.0: AER: corrected error")
-            .unwrap();
+        let ev = parse_kmsg_line("3,201,1000,-;pcie 0000:01:00.0: AER: corrected error").unwrap();
         assert_eq!(ev.severity, Severity::Error);
     }
 }
