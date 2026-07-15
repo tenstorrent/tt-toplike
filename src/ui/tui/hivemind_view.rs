@@ -418,6 +418,34 @@ pub(crate) fn legend_lines(
                 Style::default().fg(dim)
             ),
         ]),
+        ln!(vec![
+            Span::styled(
+                "hjkl ←↑↓→  ",
+                Style::default().fg(colors::rgb(200, 230, 255))
+            ),
+            Span::styled("= move the board cursor", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("f          ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled(
+                "= toggle unified feed (all cells vs. selected)",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("s          ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled(
+                "= cycle severity floor (trace→info→notice→warn→error)",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("/watch /wrap  ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled(
+                "= point the sniffer at a path/pid/command",
+                Style::default().fg(dim)
+            ),
+        ]),
     ]
 }
 
@@ -435,6 +463,15 @@ pub(crate) const EXPLAIN_TEXT: &[&str] = &[
     "",
     "The feed pane below shows live events for whichever",
     "cell is selected (or every event, in unified mode).",
+    "",
+    "Controls: hjkl/arrows move the cursor, f toggles the",
+    "unified feed, s raises the severity floor.",
+    "",
+    "/watch <path> or /watch pid <n> points the sniffer at",
+    "a log file or a process's device fds + open logs.",
+    "/wrap <cmd…> spawns and captures a command — the one",
+    "side effect here, so it asks for confirmation first",
+    "(repeat the same /wrap to confirm).",
 ];
 
 #[cfg(test)]

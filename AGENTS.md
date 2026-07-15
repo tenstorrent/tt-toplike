@@ -3930,3 +3930,114 @@ A hung process shows CPU at 0% or 100% but ALL THREE flat — that's the alarm c
 ---
 
 *Phase 22 status: **PLANNED** — Claude sesssion in tt-local-generator, July 2, 2026*
+
+---
+
+## Phase 23 — Hivemindsweeper: activity sniffer TUI mode (July 14, 2026, v0.7.34)
+
+**What it is**: a new opt-in, read-only `DisplayMode::HivemindSweeper` (press
+`~`) that correlates driver messages, tt-metal compile-cache churn, host/docker
+log tails, `/proc` device-fd activity, and the tt-metal Inspector log into one
+`source × device/host` decaying-heat board plus a live, filterable event feed
+— a minesweeper-style board for "what is touching my hardware right now,"
+built entirely from a 12-task spec-driven plan (`.superpowers/sdd/`).
+
+### Architecture (Tasks 1–11, landed earlier in this session)
+
+- **Event model + ring buffer** (`src/workload/hivemind/event.rs`,
+  `mod.rs`): `SniffEvent { source, device, severity, kind, text, origin }`,
+  a bounded `VecDeque` ring with a drop counter so a channel-full burst never
+  blocks a collector.
+- **Source classifier** (`classify.rs`): frontend-over-generic precedence
+  (ttnn, tt-metal, tt-lang, tt-forge, tt-xla, vLLM, driver, inspector, host,
+  unknown) from a process name + a line of text.
+- **Decaying heat grid** (`grid.rs`): `source × Column` (`Device(n)`/`Host`)
+  cells that light up on activity and fade over time — `heat_char` renders
+  `· ░ ▒ ▓ █`.
+- **Panic-isolated `Collector` trait + `spawn`** (`collector.rs`): every
+  collector runs on its own thread behind `catch_unwind`; a panicking
+  collector reports `CollectorStatus::Err` instead of taking down the engine.
+- **Five auto-spawned collectors** (`collectors/`): `kmsg` (`/dev/kmsg` driver
+  messages, non-blocking so shutdown is honored), `cache_watch` (tt-metal
+  compile-cache artifact churn, polling), `log_tail` (host + `docker logs -f`
+  tails), `procfs` (`/proc/*/fd` Tenstorrent device-fd open/close), `inspector`
+  (tt-metal Inspector log file). All read-only; graceful degrade
+  (`PermDenied` status) when a source isn't accessible.
+- **`wrap` collector** (`collectors/wrap.rs`): three modes — `File(path)`
+  (tail), `Pid(n)` (device-fd diff + best-effort log tail via `/proc`,
+  Linux-gated), `Command(argv)` (spawn + capture stdout/stderr as `Emission`
+  events — the only mode with a real side effect, no shell/no env injection).
+- **Engine** (`Hivemind` in `mod.rs`): `start()`/`stop()`/`poll()` own the
+  channel and all collector handles; `add_watch_path`/`add_watch_pid`/
+  `add_wrap` auto-start the engine (idempotent) and push a `wrap` collector
+  handle alongside the five auto-detected ones, so one `stop()` tears
+  everything down.
+- **TUI board + feed** (`src/ui/tui/hivemind_view.rs`): `render_hivemind`
+  draws the heat board (rows = active sources, columns = `D0..Dn` + `Host`)
+  and a feed pane beneath it, filtered by the selected cell (or unified) and
+  a severity floor. Left/bottom-border-only, sized to the terminal — no
+  hardcoded panel width. `~` activation, choke-point `stop()` on every mode
+  transition (`~`/Esc/`v`/jump keys/`/mode <x>`) so the five-plus collector
+  threads never leak.
+
+### This task (12, final): cursor/feed controls + commands + docs
+
+- **`HmCmd` parser** (`src/ui/tui/mod.rs`): `parse_hivemind_cmd(rest)` parses
+  `/watch`'s argument (`pid <n>` → `WatchPid`, anything else → `WatchPath`),
+  `parse_hivemind_cmd_wrap(rest)` splits `/wrap`'s argv on whitespace (no
+  shell semantics — matches the collector's own no-shell `Command::new`
+  contract). TDD'd first (red: undeclared `HmCmd`/functions; green: 7 tests
+  in `hm_cmd_tests`, including the spec's verbatim case).
+- **Command-bar dispatch** (inline in the Enter handler, alongside the
+  existing `/remote`/`/serve` special-cases, because starting the engine
+  needs the loop's live `hivemind: Option<Hivemind>` slot that
+  `execute_command` doesn't have): `/hivemind` (and `/mode hivemind`, which
+  is specifically intercepted *before* falling through to
+  `execute_command`'s generic `"mode"` match, precisely so it can start the
+  engine) enters the mode; `/watch <path>` / `/watch pid <n>` spawn the
+  matching collector and jump into the mode; `/wrap <cmd…>` is gated behind
+  a confirmation — the first `/wrap <argv>` stashes `argv` in
+  `hm_pending_wrap` and reports "re-run /wrap <argv> to confirm"; typing the
+  *exact same* `/wrap <argv>` again is what actually calls `add_wrap`. Any
+  other command clears a pending confirmation, so a stale `/wrap` prompt
+  can't be silently confirmed by an unrelated later `/wrap`.
+  `execute_command`'s `"mode"` match also gained a `"hivemind"` arm as a
+  thin, documented alias (sets `display_mode` only — can't start the engine
+  without the loop's `hivemind` slot) for any caller that reaches it
+  directly.
+- **In-mode keys** (`hjkl`/arrows move `hm_cursor` clamped to
+  `hivemind_view::board_rows` dimensions, `f` toggles `hm_unified`, `s`
+  cycles `hm_sev` Trace→Info→Notice→Warn→Error→Trace): all four guarded with
+  `if display_mode == DisplayMode::HivemindSweeper` match arms placed ahead
+  of the unguarded global `l` (legend toggle) arm — Rust tries match arms in
+  order, so `l` moves the cursor right while in this mode instead of
+  toggling the legend (still reachable via `/legend`). `h`/`j`/`f`/`s` had no
+  prior global bindings; `k`/arrows already had mode-guarded meanings
+  elsewhere (Insights kill-confirm/fleet-nav) that this mode's guard doesn't
+  collide with.
+- **Overlays**: Legend gained lines for the heat ramp, `hjkl`/arrows, `f`,
+  `s`, and `/watch`/`/wrap`; Help gained rows for `/hivemind`, `/watch
+  <path>`, `/watch pid <n>`, `/wrap <cmd…>`; Explain gained a paragraph on
+  controls and the `/wrap` confirmation.
+- **Manual smoke** (mock backend, 4 devices, tmux): `~` → board renders,
+  collectors all `●`; `f`/`s` → feed header flips to "unified" and the
+  severity floor advances; `/wrap echo hello` → confirmation message, then
+  the same command again → `wrap:command` collector appears and an
+  `Emission` lane shows `info unknown host hello` in the feed; `/watch
+  <file>` → `wrap:file` collector appears and an appended line shows up
+  live; `hjkl` cursor movement doesn't panic on a 1×1 board; `/legend` and
+  `/explain` render the updated overlay text; `q` exits the process
+  cleanly.
+- **Version bump**: `scripts/bump-version.sh 0.7.34` (Cargo.toml,
+  QUICK_START.md, site/index.html, debian/changelog's top-stanza version
+  token) — the script only rewrites the version token, so the
+  `debian/changelog` stanza body was hand-edited to describe the whole
+  Hivemindsweeper feature (Tasks 1–12), since this is the point the mode
+  became fully interactive/user-facing.
+
+Full task-by-task detail and TDD evidence: `.superpowers/sdd/task-12-report.md`
+(this task) and `task-1..11-report.md` (the rest of the subsystem).
+
+---
+
+*Phase 23 status: **COMPLETE** — 12/12 tasks done, v0.7.34*

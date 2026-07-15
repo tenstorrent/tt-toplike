@@ -1,37 +1,26 @@
-tt-toplike (0.7.33) noble; urgency=medium
+tt-toplike (0.7.34) noble; urgency=medium
 
-  * [i] Inference Monitor — media/diffusion servers (SkyReels, SDXL, z-image on
-    tt-media-inference-server) now show live telemetry instead of a blank panel.
-    They expose a different Prometheus namespace (`tt_media_server_*`) on the
-    same `/metrics` endpoint the monitor already scrapes, and tokens/sec is
-    meaningless for image/video generation, so a dedicated parser + stats path
-    was added:
-    - `parse_media_metrics` + `MediaCounters`/`MediaStats` (folded per tick like
-      the vLLM path) parse `requests_base_total` (completed), the
-      `jobs_in_progress` gauge (in-flight — the "is it working on my load"
-      signal), the `requests_base_duration_seconds_total` histogram (end-to-end
-      per-generation wall time), and `post_processing` stage times, summing
-      across `model_type`/`device_id` label sets.
-    - Metric names verified against a LIVE tt-media-inference-server 0.15.0
-      SkyReels box (the vendored docs listed names that build doesn't emit).
-    - That build (prometheus multiprocess mode) emits every series twice,
-      byte-identical; the parser dedupes by `name{labels}` identity so values
-      aren't doubled, while still summing genuinely distinct label sets.
-    - Rendering reuses the Feeding snake via a workload-agnostic drive: headline
-      is generations/min + seconds-per-generation, the snake body/animation
-      track in-flight jobs, and the panel shows in-flight/done + pipeline stage
-      times. The vLLM path (tok/s, KV cache, queue→prefill→decode swimlanes) is
-      unchanged; swimlanes are gated to vLLM so a diffusion box never draws
-      empty "requests" lanes. Roster shows "N in flight · M done".
-    - Remote (`--remote`/`--serve`) carries a `RemoteMedia` wire shape
-      (`#[serde(default)]` for back-compat with older peers).
-  * Fix: the legend / help / explain overlay panel truncated its own text — it
-    was a fixed 42 columns wide while content lines run 50–66 display columns,
-    and `Paragraph` clips rather than wraps (so e.g. the `/serve` help line lost
-    "(plaintext, trusted-LAN)"). The panel now measures its widest content line
-    in real display columns and sizes to fit, clamped to the terminal.
+  * HivemindSweeper — a new opt-in, read-only activity sniffer mode (press
+    `~`). Correlates driver messages (`/dev/kmsg`), tt-metal compile-cache
+    churn, host/docker log tails, `/proc` device-fd activity, and the
+    Inspector log into one source × device/host decaying-heat board plus a
+    live filtered event feed underneath. Five collectors auto-spawn on
+    entry and are torn down whenever the mode is left (centralized at the
+    mode-transition choke point — `~`, Esc, `v`, jump keys, and `/mode <x>`
+    all tear down cleanly, never leaking the collector threads).
+    - In-mode controls: `hjkl`/arrow keys move the board cursor, `f` toggles
+      the unified feed (all cells vs. just the selected one), `s` cycles the
+      feed's severity floor (trace→info→notice→warn→error).
+    - `/hivemind` enters the mode and starts the engine from the command
+      bar (same as `~`); `/watch <path>` tails an arbitrary host log file,
+      `/watch pid <n>` attaches to a PID's device fds + best-effort open
+      logs, and `/wrap <cmd…>` spawns and captures a command's stdout/stderr
+      as an Emission lane — the one command with a real side effect, so it's
+      gated behind a confirmation (type the same `/wrap` a second time).
+    - Legend/Help/Explain overlays document the board's heat glyphs
+      (`░▒▓█`) and every new key/command.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 13 Jul 2026 15:44:38 +0000
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 14 Jul 2026 00:00:00 +0000
 
 tt-toplike (0.7.30) noble; urgency=medium
 

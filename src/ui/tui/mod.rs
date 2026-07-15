@@ -48,6 +48,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io::{self, IsTerminal};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// Pending kill confirmation state.
@@ -360,26 +361,29 @@ fn run_app(
 
     // ── HivemindSweeper state (`~` to activate) ─────────────────────────────
     // `None` until first entered — `~`'s key handler does
-    // `hivemind.get_or_insert_with(Hivemind::new).start()` on entry. Exit is
-    // handled once, centrally, by the mode-transition choke point (near the
-    // `prev_display_mode` update below): any change of `display_mode` away
-    // from `HivemindSweeper` — via `~`, Esc, `v`, `a`/`A`, `d`/`D`, `g`,
-    // `i`/`I`, or `/mode <x>` — calls `hivemind.as_mut().map(|h| h.stop())`,
-    // so the five collector threads only ever run while this mode is active.
+    // `hivemind.get_or_insert_with(Hivemind::new).start()` on entry (as does
+    // the `/hivemind` and `/watch`/`/wrap` command-bar dispatch — see the
+    // Enter handler below). Exit is handled once, centrally, by the
+    // mode-transition choke point (near the `prev_display_mode` update
+    // below): any change of `display_mode` away from `HivemindSweeper` — via
+    // `~`, Esc, `v`, `a`/`A`, `d`/`D`, `g`, `i`/`I`, or `/mode <x>` — calls
+    // `hivemind.as_mut().map(|h| h.stop())`, so the five collector threads
+    // only ever run while this mode is active.
     // `hm_cursor`/`hm_unified`/`hm_sev` select and filter the feed pane;
-    // cursor movement / unified toggle / severity-floor keys land in a later
-    // task — for now they're wired into `render_hivemind` at their defaults.
+    // moved/toggled by the in-mode key handlers (hjkl/arrows, `f`, `s`) —
+    // see the "HivemindSweeper in-mode keys" block in the non-cmd_mode match.
     let mut hivemind: Option<crate::workload::hivemind::Hivemind> = None;
-    // `mut` unused until Task 12 wires up cursor movement / unified toggle /
-    // severity-floor keys — `#[allow]` rather than dropping `mut` now (which
-    // Task 12 would just have to re-add) keeps this block matching the
-    // brief's wiring verbatim.
-    #[allow(unused_mut)]
     let mut hm_cursor = (0usize, 0usize);
-    #[allow(unused_mut)]
     let mut hm_unified = false;
-    #[allow(unused_mut)]
     let mut hm_sev = crate::workload::hivemind::Severity::Trace;
+    // Stashed argv from a first `/wrap <argv…>` — `/wrap` is the one command
+    // in this subsystem with a real side effect (it spawns the given
+    // command), so it's gated behind a confirmation: typing the exact same
+    // `/wrap <argv…>` a second time (while this still matches) is what
+    // actually calls `add_wrap`. Cleared whenever any *other* command is
+    // submitted, so a stale pending confirmation can't be silently confirmed
+    // by an unrelated later `/wrap` with different args typed after it.
+    let mut hm_pending_wrap: Option<Vec<String>> = None;
 
     // ── Slash command state ────────────────────────────────────────────────
     // Press '/' from any mode to open the command bar at the bottom of the
@@ -1132,6 +1136,14 @@ fn run_app(
                                     .unwrap_or("")
                                     .to_lowercase();
 
+                                // Any command other than a repeated `/wrap` drops a
+                                // pending wrap confirmation — see the `wrap` branch
+                                // below for why one might be stashed, and `hm_pending_wrap`'s
+                                // declaration for the reasoning on clearing it here.
+                                if verb != "wrap" {
+                                    hm_pending_wrap = None;
+                                }
+
                                 if verb == "remote" {
                                     #[cfg(feature = "remote")]
                                     {
@@ -1260,6 +1272,146 @@ fn run_app(
                                             true,
                                         ));
                                     }
+                                } else if verb == "hivemind"
+                                    || (verb == "mode"
+                                        && cmd_buf
+                                            .trim()
+                                            .trim_start_matches('/')
+                                            .split_once(char::is_whitespace)
+                                            .map(|(_, rest)| rest.trim())
+                                            .unwrap_or("")
+                                            == "hivemind")
+                                {
+                                    // `/hivemind` and `/mode hivemind` both land here (not
+                                    // in `execute_command`'s "mode" match) because entering
+                                    // needs to *start the engine*, and `execute_command`
+                                    // has no access to the loop's `hivemind` slot. This
+                                    // mirrors the `~` key handler exactly: remember where
+                                    // we came from, switch, start (idempotent — safe even
+                                    // if already running). See `execute_command`'s
+                                    // `"hivemind"` mode-arm doc comment for the thin-alias
+                                    // fallback this leaves in place for direct callers.
+                                    if display_mode != DisplayMode::HivemindSweeper {
+                                        prev_mode = display_mode;
+                                        display_mode = DisplayMode::HivemindSweeper;
+                                    }
+                                    hivemind
+                                        .get_or_insert_with(crate::workload::hivemind::Hivemind::new)
+                                        .start();
+                                    cmd_message = Some(("hivemindsweeper active".to_string(), false));
+                                } else if verb == "watch" {
+                                    let arg = cmd_buf
+                                        .trim()
+                                        .trim_start_matches('/')
+                                        .split_once(char::is_whitespace)
+                                        .map(|(_, rest)| rest)
+                                        .unwrap_or("")
+                                        .trim()
+                                        .to_string();
+                                    match parse_hivemind_cmd(&arg) {
+                                        HmCmd::WatchPath(path) => {
+                                            hivemind
+                                                .get_or_insert_with(
+                                                    crate::workload::hivemind::Hivemind::new,
+                                                )
+                                                .add_watch_path(path.clone());
+                                            if display_mode != DisplayMode::HivemindSweeper {
+                                                prev_mode = display_mode;
+                                                display_mode = DisplayMode::HivemindSweeper;
+                                            }
+                                            cmd_message = Some((
+                                                format!("watching {}", path.display()),
+                                                false,
+                                            ));
+                                        }
+                                        HmCmd::WatchPid(pid) => {
+                                            hivemind
+                                                .get_or_insert_with(
+                                                    crate::workload::hivemind::Hivemind::new,
+                                                )
+                                                .add_watch_pid(pid);
+                                            if display_mode != DisplayMode::HivemindSweeper {
+                                                prev_mode = display_mode;
+                                                display_mode = DisplayMode::HivemindSweeper;
+                                            }
+                                            cmd_message =
+                                                Some((format!("watching pid {}", pid), false));
+                                        }
+                                        HmCmd::Bad(reason) => {
+                                            cmd_message = Some((format!("watch: {}", reason), true));
+                                        }
+                                        HmCmd::Wrap(_) => {
+                                            unreachable!("parse_hivemind_cmd never returns Wrap")
+                                        }
+                                    }
+                                } else if verb == "wrap" {
+                                    let arg = cmd_buf
+                                        .trim()
+                                        .trim_start_matches('/')
+                                        .split_once(char::is_whitespace)
+                                        .map(|(_, rest)| rest)
+                                        .unwrap_or("")
+                                        .trim()
+                                        .to_string();
+                                    match parse_hivemind_cmd_wrap(&arg) {
+                                        HmCmd::Wrap(argv) => {
+                                            if hm_pending_wrap.as_ref() == Some(&argv) {
+                                                // Confirmed — same argv typed twice in a
+                                                // row. This is the one place in
+                                                // HivemindSweeper that spawns a process,
+                                                // hence the gate.
+                                                hm_pending_wrap = None;
+                                                match hivemind
+                                                    .get_or_insert_with(
+                                                        crate::workload::hivemind::Hivemind::new,
+                                                    )
+                                                    .add_wrap(argv.clone())
+                                                {
+                                                    Ok(()) => {
+                                                        if display_mode
+                                                            != DisplayMode::HivemindSweeper
+                                                        {
+                                                            prev_mode = display_mode;
+                                                            display_mode =
+                                                                DisplayMode::HivemindSweeper;
+                                                        }
+                                                        cmd_message = Some((
+                                                            format!(
+                                                                "wrapping: {}",
+                                                                argv.join(" ")
+                                                            ),
+                                                            false,
+                                                        ));
+                                                    }
+                                                    Err(e) => {
+                                                        cmd_message =
+                                                            Some((format!("wrap: {}", e), true));
+                                                    }
+                                                }
+                                            } else {
+                                                // First ask: stash it and require the
+                                                // exact same command again to confirm —
+                                                // nothing is spawned yet.
+                                                hm_pending_wrap = Some(argv.clone());
+                                                cmd_message = Some((
+                                                    format!(
+                                                        "wrap runs `{}` — re-run /wrap {} to confirm",
+                                                        argv.join(" "),
+                                                        argv.join(" ")
+                                                    ),
+                                                    false,
+                                                ));
+                                            }
+                                        }
+                                        HmCmd::Bad(reason) => {
+                                            cmd_message = Some((format!("wrap: {}", reason), true));
+                                        }
+                                        HmCmd::WatchPath(_) | HmCmd::WatchPid(_) => {
+                                            unreachable!(
+                                                "parse_hivemind_cmd_wrap never returns Watch*"
+                                            )
+                                        }
+                                    }
                                 } else {
                                     let (msg, is_err, should_quit) = execute_command(
                                         &cmd_buf,
@@ -1300,6 +1452,70 @@ fn run_app(
                         let prior_overlay = overlay.take();
 
                         match key.code {
+                            // ── HivemindSweeper in-mode keys (cursor/feed) ─────────
+                            // Scoped to `display_mode == HivemindSweeper` via match
+                            // guards so these never shadow the same letters'
+                            // meanings elsewhere (`l` = toggle legend globally, `k`/`K`
+                            // = kill-confirm in Insights, arrows = fleet nav in
+                            // Insights — all guarded to their own modes below/above).
+                            // Placed ahead of the unguarded `l` arm specifically so
+                            // `l` moves the cursor right while in this mode instead of
+                            // toggling the legend (the guard on that arm would never
+                            // be reached otherwise, since match arms are tried in
+                            // order and the first matching pattern+guard wins).
+                            KeyCode::Char('h') | KeyCode::Left
+                                if display_mode == DisplayMode::HivemindSweeper =>
+                            {
+                                hm_cursor.1 = hm_cursor.1.saturating_sub(1);
+                            }
+                            KeyCode::Char('l') | KeyCode::Right
+                                if display_mode == DisplayMode::HivemindSweeper =>
+                            {
+                                if let Some(h) = hivemind.as_ref() {
+                                    let rows = hivemind_view::board_rows(h);
+                                    if let Some(max_col) =
+                                        rows.first().map(|r| r.cells.len().saturating_sub(1))
+                                    {
+                                        hm_cursor.1 = (hm_cursor.1 + 1).min(max_col);
+                                    }
+                                }
+                            }
+                            KeyCode::Char('k') | KeyCode::Up
+                                if display_mode == DisplayMode::HivemindSweeper =>
+                            {
+                                hm_cursor.0 = hm_cursor.0.saturating_sub(1);
+                            }
+                            KeyCode::Char('j') | KeyCode::Down
+                                if display_mode == DisplayMode::HivemindSweeper =>
+                            {
+                                if let Some(h) = hivemind.as_ref() {
+                                    let rows = hivemind_view::board_rows(h);
+                                    let max_row = rows.len().saturating_sub(1);
+                                    hm_cursor.0 = (hm_cursor.0 + 1).min(max_row);
+                                }
+                            }
+                            KeyCode::Char('f')
+                                if display_mode == DisplayMode::HivemindSweeper =>
+                            {
+                                // Toggle unified feed: show every event (subject to
+                                // the severity floor) instead of just the selected
+                                // board cell's.
+                                hm_unified = !hm_unified;
+                            }
+                            KeyCode::Char('s')
+                                if display_mode == DisplayMode::HivemindSweeper =>
+                            {
+                                // Cycle the feed's severity floor upward, wrapping
+                                // back to Trace after Error.
+                                use crate::workload::hivemind::Severity;
+                                hm_sev = match hm_sev {
+                                    Severity::Trace => Severity::Info,
+                                    Severity::Info => Severity::Notice,
+                                    Severity::Notice => Severity::Warn,
+                                    Severity::Warn => Severity::Error,
+                                    Severity::Error => Severity::Trace,
+                                };
+                            }
                             // ── Overlay toggle hotkeys (l / ? / !) ─────────────────
                             KeyCode::Char('l') => {
                                 overlay = if prior_overlay == Some(OverlayPanel::Legend) {
@@ -2715,6 +2931,26 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     lbl
                 ),
                 row!(" /serve off", "stop broadcasting", lbl),
+                row!(
+                    " /hivemind",
+                    "enter HivemindSweeper + start the engine",
+                    lbl
+                ),
+                row!(
+                    " /watch <path>",
+                    "tail a host log file in HivemindSweeper",
+                    lbl
+                ),
+                row!(
+                    " /watch pid <n>",
+                    "attach to a PID's device fds + logs",
+                    lbl
+                ),
+                row!(
+                    " /wrap <cmd…>",
+                    "spawn + capture a command (confirm: repeat it)",
+                    lbl
+                ),
             ]
         }
 
@@ -3454,12 +3690,16 @@ fn explain_lines(
 /// ```
 /// /fps <n>          set animation FPS (1–120)
 /// /datafps <n>      set data-mode FPS (1–30)
-/// /mode <name>      switch display mode (insights|grid|starfield|castle|flow|arcade|defrag)
+/// /mode <name>      switch display mode (insights|grid|starfield|castle|flow|arcade|defrag|hivemind)
 /// /legend           toggle legend overlay      (hotkey: l)
 /// /explain          toggle explain overlay     (hotkey: !)
 /// /help             list commands              (hotkey: ?)
 /// /throttle         toggle anim FPS throttle under heavy CPU load (60→30)
 /// /idle-on-blur     toggle drop to 2 FPS when terminal loses focus
+/// /hivemind         enter HivemindSweeper + start the engine  (hotkey: ~)
+/// /watch <path>     tail a host log file in HivemindSweeper
+/// /watch pid <n>    attach HivemindSweeper to a PID's device fds + logs
+/// /wrap <argv…>     spawn + capture a command's output (confirm: repeat it)
 /// ```
 ///
 /// Note: `/remote` is intentionally NOT handled here — connecting needs the live
@@ -3525,8 +3765,26 @@ fn execute_command(
                 *display_mode = DisplayMode::Defrag;
                 ("→ defrag".to_string(), false, false)
             }
+            // Thin alias only: this function has no access to the loop's
+            // `hivemind: Option<Hivemind>` slot, so it can't call `start()`.
+            // The Enter key-handler intercepts `/mode hivemind` *before*
+            // falling through to `execute_command` specifically so the
+            // interactive path starts the engine (see the `hivemind`/`mode`
+            // branch there) — this arm exists so "hivemind" is still a
+            // recognized mode name (not an "unknown command" error) for any
+            // other caller of `execute_command` directly. Reached that way,
+            // the board renders but is empty/`[stopped]` until `~` or
+            // `/hivemind` is used to actually start the collectors.
+            "hivemind" => {
+                *display_mode = DisplayMode::HivemindSweeper;
+                (
+                    "→ hivemindsweeper (engine not started — press ~ or /hivemind)".to_string(),
+                    false,
+                    false,
+                )
+            }
             _ => (
-                "mode: insights|grid|starfield|castle|flow|arcade|defrag".to_string(),
+                "mode: insights|grid|starfield|castle|flow|arcade|defrag|hivemind".to_string(),
                 true,
                 false,
             ),
@@ -3679,6 +3937,70 @@ fn parse_serve_command(arg: &str) -> ServeCmd {
         return ServeCmd::Bad(format!("/serve: unexpected extra argument(s) in '{arg}'"));
     }
     ServeCmd::Start(Some(arg.to_string()))
+}
+
+/// Parsed intent of a HivemindSweeper `/watch` or `/wrap` command's argument
+/// (the text after `/watch `/`/wrap `).
+///
+/// Pure and testable without any I/O — actually spawning a collector needs
+/// the live `hivemind: Option<Hivemind>` loop slot, which `execute_command`
+/// doesn't have, so (like `/remote`/`/serve`) the real dispatch lives in the
+/// Enter key-handler's special-cased branches, not `execute_command`. This
+/// only covers the pure argument→intent mapping.
+#[derive(Debug, Clone, PartialEq)]
+enum HmCmd {
+    /// `/watch <path>` → tail a host log file.
+    WatchPath(PathBuf),
+    /// `/watch pid <n>` → attach to a PID's device fds + best-effort log files.
+    WatchPid(i32),
+    /// `/wrap <argv…>` → the parsed command to spawn (the one deliberate side
+    /// effect in this subsystem — gated behind a confirmation, see the Enter
+    /// handler's `wrap` branch).
+    Wrap(Vec<String>),
+    /// Malformed input the dispatcher should report as an error without
+    /// touching the engine.
+    Bad(String),
+}
+
+/// Pure parse of a `/watch` command's argument into an [`HmCmd`].
+///
+/// - `pid <n>` (case-insensitive `pid` token) → `WatchPid(n)`, or `Bad(..)`
+///   if `<n>` doesn't parse as an `i32`.
+/// - Anything else (non-empty) → `WatchPath(..)`, taken as a literal path —
+///   validity (does it exist? is it readable?) is the collector's problem at
+///   spawn time, not this parse's.
+/// - Empty (or whitespace-only) → `Bad(..)`.
+fn parse_hivemind_cmd(rest: &str) -> HmCmd {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return HmCmd::Bad("watch: expected <path> or 'pid <n>'".to_string());
+    }
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let first = parts.next().unwrap_or("");
+    if first.eq_ignore_ascii_case("pid") {
+        let pid_arg = parts.next().unwrap_or("").trim();
+        return match pid_arg.parse::<i32>() {
+            Ok(n) => HmCmd::WatchPid(n),
+            Err(_) => HmCmd::Bad(format!("watch: invalid pid '{}'", pid_arg)),
+        };
+    }
+    HmCmd::WatchPath(PathBuf::from(rest))
+}
+
+/// Pure parse of a `/wrap` command's argument into an [`HmCmd::Wrap`] argv
+/// (or `Bad` if empty).
+///
+/// Splits on whitespace only — no shell quoting/escaping semantics, matching
+/// `WrapCollector`'s own no-shell `Command::new(&argv[0]).args(&argv[1..])`
+/// contract (see `workload::hivemind::collectors::wrap`), so what you type is
+/// exactly the argv that gets spawned.
+fn parse_hivemind_cmd_wrap(rest: &str) -> HmCmd {
+    let argv: Vec<String> = rest.split_whitespace().map(|s| s.to_string()).collect();
+    if argv.is_empty() {
+        HmCmd::Bad("wrap: expected a command to run".to_string())
+    } else {
+        HmCmd::Wrap(argv)
+    }
 }
 
 /// Resolve a `/remote <arg>` selection against the cached picker list.
@@ -5942,6 +6264,72 @@ mod cmd_tests {
                 parse_serve_command("9000 extra"),
                 ServeCmd::Bad(_)
             ));
+        }
+    }
+}
+
+// ── HivemindSweeper `/watch` and `/wrap` command parsing (pure) ────────────
+//
+// Spawning the collector needs the live `hivemind: Option<Hivemind>` loop
+// slot, so — like `/remote`/`/serve` — the actual dispatch lives in the Enter
+// key-handler's special-cased branches, not `execute_command`. This only
+// covers the pure argument→intent mapping.
+#[cfg(test)]
+mod hm_cmd_tests {
+    use super::*;
+
+    #[test]
+    fn parses_watch_and_wrap() {
+        assert!(matches!(parse_hivemind_cmd("pid 42"), HmCmd::WatchPid(42)));
+        assert!(matches!(
+            parse_hivemind_cmd("/var/log/run.log"),
+            HmCmd::WatchPath(_)
+        ));
+        match parse_hivemind_cmd_wrap("ttl export k.py") {
+            HmCmd::Wrap(v) => assert_eq!(v, vec!["ttl", "export", "k.py"]),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn watch_path_captures_the_literal_path() {
+        match parse_hivemind_cmd("/var/log/run.log") {
+            HmCmd::WatchPath(p) => assert_eq!(p, PathBuf::from("/var/log/run.log")),
+            other => panic!("expected WatchPath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn watch_pid_is_case_insensitive_and_trims() {
+        assert!(matches!(parse_hivemind_cmd("PID 7"), HmCmd::WatchPid(7)));
+        assert!(matches!(parse_hivemind_cmd("  pid   9  "), HmCmd::WatchPid(9)));
+    }
+
+    #[test]
+    fn watch_invalid_pid_is_bad() {
+        assert!(matches!(
+            parse_hivemind_cmd("pid notanumber"),
+            HmCmd::Bad(_)
+        ));
+    }
+
+    #[test]
+    fn watch_empty_is_bad() {
+        assert!(matches!(parse_hivemind_cmd(""), HmCmd::Bad(_)));
+        assert!(matches!(parse_hivemind_cmd("   "), HmCmd::Bad(_)));
+    }
+
+    #[test]
+    fn wrap_empty_is_bad() {
+        assert!(matches!(parse_hivemind_cmd_wrap(""), HmCmd::Bad(_)));
+        assert!(matches!(parse_hivemind_cmd_wrap("   "), HmCmd::Bad(_)));
+    }
+
+    #[test]
+    fn wrap_single_token() {
+        match parse_hivemind_cmd_wrap("echo") {
+            HmCmd::Wrap(v) => assert_eq!(v, vec!["echo"]),
+            other => panic!("expected Wrap, got {other:?}"),
         }
     }
 }
