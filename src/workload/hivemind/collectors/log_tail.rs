@@ -202,7 +202,17 @@ fn spawn_docker_logs_tail(
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let stdout = child.stdout.take()?;
+    // We requested a piped stdout, so `take()` should always be `Some`. But if
+    // it somehow isn't, don't leak the spawned `docker logs -f` — kill and reap
+    // the child before bailing rather than dropping it un-terminated.
+    let stdout = match child.stdout.take() {
+        Some(s) => s,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
     let origin = format!("docker:{}", target.container);
     let proc_name = target.proc_name.clone();
     let device = target.device;
