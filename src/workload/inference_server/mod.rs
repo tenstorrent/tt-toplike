@@ -5,12 +5,16 @@
 //! state to the Insights screen. See
 //! `docs/superpowers/specs/2026-07-02-tt-inference-server-monitoring-design.md`.
 
-mod detect;
+// `detect` and `probe` are `pub(crate)` (not private) so `workload::hivemind`'s
+// `log_tail` collector can reuse the same container-recognition/inspect parsing
+// and the hardened, timeout-guarded `docker()` shell-out helper, rather than
+// duplicating docker-CLI plumbing. Neither is re-exported outside the crate.
+pub(crate) mod detect;
 pub mod education;
 mod logs;
 pub mod metrics;
 mod monitor;
-mod probe;
+pub(crate) mod probe;
 mod services;
 mod state;
 

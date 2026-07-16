@@ -465,7 +465,7 @@
       margin-top: 0.15rem;
     }
 
-    .install-body { flex: 1; }
+    .install-body { flex: 1; min-width: 0; }
 
     .install-body p {
       font-size: 0.93rem;
@@ -767,7 +767,7 @@
 ·∘○◉         ●◉○∘·∘○◉●
 ◉●∘·  ·∘○◉●◉○∘·  ·∘○◉</div>
 
-      <p class="hero-eyebrow">Tenstorrent Hardware Monitor · v0.7.33 · Rust</p>
+      <p class="hero-eyebrow">Tenstorrent Hardware Monitor · v0.7.40 · Rust</p>
 
       <h1 class="hero-title">
         Watch<br>
@@ -933,13 +933,14 @@
 <!-- ── Modes ──────────────────────────────────────────────────────────────── -->
 <section class="section edge" id="modes">
   <p class="section-label">Visualization modes</p>
-  <h2 class="section-heading">Eight ways to watch your hardware think</h2>
+  <h2 class="section-heading">Nine ways to watch your hardware think</h2>
   <p class="section-sub">
     Press <code>v</code> to cycle, or jump directly with <code>a</code> (Arcade),
-    <code>d</code> (Defrag), <code>g</code> (Insights), or <code>i</code> (Inference
-    Server Monitor). Every mode reads the same live telemetry — power, temperature,
-    aiclk, DDR state — and renders it differently. Recordings below are from real
-    4× Blackhole hardware during live LLM inference.
+    <code>d</code> (Defrag), <code>g</code> (Insights), <code>i</code> (Inference
+    Server Monitor), or <code>~</code> (HivemindSweeper). Every mode reads the same
+    live telemetry — power, temperature, aiclk, DDR state — and renders it
+    differently. Recordings below are from real 4× Blackhole hardware during live
+    LLM inference.
   </p>
 
   <div class="modes-grid">
@@ -1180,6 +1181,37 @@
 
     <hr class="mode-divider">
 
+    <!-- HivemindSweeper -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">~ · hivemind</span>
+        <p class="mode-title">HivemindSweeper</p>
+        <p class="mode-desc">
+          An opt-in, read-only activity sniffer for <em>"what's touching my hardware
+          right now — and is it making progress?"</em> — built for when the
+          interesting work isn't logging where you're watching. It folds driver
+          messages, tt-metal compile-cache churn, <code>/proc</code> device-fd
+          activity, log tails (incl. <code>docker logs</code>), and the tt-metal
+          Inspector into one <em>source × device</em> board and a coalesced feed:
+          repeats collapse to a single row with a live count, rate, and sparkline —
+          <code>metal · ncrisc.elf ×136</code>, <code>vLLM · holding …</code>,
+          serving throughput dug out of DEBUG logs. The red KITT scanner slows and
+          focuses as activity climbs.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>f</kbd> unified feed</span>
+          <span class="mode-hint"><kbd>s</kbd> severity floor</span>
+          <span class="mode-hint"><kbd>/watch</kbd> · <kbd>/wrap</kbd> point at a target</span>
+          <span class="mode-hint"><kbd>l</kbd> legend</span>
+        </div>
+      </div>
+      <img class="mode-gif" src="assets/tt-toplike-hivemindsweeper.gif"
+           alt="HivemindSweeper demo — vLLM serving throughput, device-holder heartbeats, and tt-metal kernel compiles coalesced into one source × device feed on 4× Blackhole"
+           loading="lazy">
+    </div>
+
+    <hr class="mode-divider">
+
     <!-- Host / CPU mode -->
     <div class="mode-row">
       <div class="mode-meta">
@@ -1224,18 +1256,22 @@
 
   <div class="gallery-grid">
     <div class="gallery-item wide">
-      <video autoplay muted loop playsinline
-             aria-label="tt-toplike Insights screen — four Blackhole chips at 58–77W under live LLM inference, showing chip portraits with real-time power and temperature">
-        <source src="assets/tt-toplike-insights.webm" type="video/webm">
-        <img src="assets/tt-toplike-with-info-with-activity.png" alt="tt-toplike Insights screen with four Blackhole chips under inference load">
-      </video>
-      <span class="gallery-caption">Insights mode — 4× Blackhole at 58–77W, live LLM inference</span>
+      <img src="assets/tt-toplike-insights.png"
+           alt="tt-toplike Insights screen — four Blackhole chips at 59–79W under live Llama-3.3-70B inference, showing per-chip Tensix portraits with real-time power, temperature, DDR training, and the vLLM engine using all four devices"
+           loading="lazy">
+      <span class="gallery-caption">Insights mode — 4× Blackhole under live Llama-3.3-70B inference (vLLM across all four chips)</span>
     </div>
     <div class="gallery-item">
       <img src="assets/tt-toplike-arcade-active.png"
            alt="tt-toplike arcade mode — four Blackhole chips at 58–66W under live inference load, showing Tensix starfield, memory castle particle hierarchy, and NoC flow"
            loading="lazy">
       <span class="gallery-caption">Arcade mode — 4× Blackhole at 58–66W, live LLM inference</span>
+    </div>
+    <div class="gallery-item">
+      <img src="assets/tt-toplike-hivemindsweeper.png"
+           alt="HivemindSweeper on 4× Blackhole — vLLM serving throughput surfaced from docker DEBUG logs, device-holder heartbeats across all four chips, and dozens of tt-metal kernel-compile artifacts, all coalesced into one source × device feed"
+           loading="lazy">
+      <span class="gallery-caption">HivemindSweeper — vLLM serving + kernel compiles surfaced live on 4× Blackhole</span>
     </div>
     <div class="gallery-item">
       <img src="assets/tt-toplike-rs.png"
@@ -1444,7 +1480,7 @@
   <p class="section-label">Get started</p>
   <h2 class="section-heading">Install</h2>
   <p class="section-sub">
-    Grab the Debian package for the fastest path. Or build from source with Cargo.
+    Add the Tenstorrent apt repository for the newest version — or grab a <code>.deb</code> from Releases, or build from source with Cargo.
   </p>
 
   <div class="install-block">
@@ -1452,15 +1488,15 @@
       <span class="install-num">1</span>
       <div class="install-body">
         <p>
-          Download the packages that match your Ubuntu version.
-          Two variants ship per release:
-          <code>_noble.deb</code> for Ubuntu 24.04+,
-          <code>_jammy.deb</code> for Ubuntu 22.04+.
+          Add the Tenstorrent apt repository (<code>ppa.tenstorrent.com</code>) —
+          the easiest way to get the latest version and stay current with
+          <code>apt upgrade</code>.
         </p>
         <div class="cmd-wrap">
-          <code class="cmd" id="cmd1">SUITE=$(. /etc/os-release && echo "$UBUNTU_CODENAME")
-[ "$SUITE" = "noble" ] || SUITE="jammy"
-gh release download --repo tenstorrent/tt-toplike --pattern "*_amd64_${SUITE}.deb"</code>
+          <code class="cmd" id="cmd1">sudo install -m 0755 -d /etc/apt/keyrings
+sudo wget -qO /etc/apt/keyrings/tt-pkg-key.asc https://ppa.tenstorrent.com/tt-pkg-key.asc
+echo "deb [signed-by=/etc/apt/keyrings/tt-pkg-key.asc] https://ppa.tenstorrent.com/ubuntu/ $(. /etc/os-release && echo $VERSION_CODENAME) main" | sudo tee /etc/apt/sources.list.d/tenstorrent.list
+sudo apt update</code>
           <button class="cmd-copy" data-target="cmd1">Copy</button>
         </div>
       </div>
@@ -1468,9 +1504,10 @@ gh release download --repo tenstorrent/tt-toplike --pattern "*_amd64_${SUITE}.de
     <div class="install-row">
       <span class="install-num">2</span>
       <div class="install-body">
-        <p>Install both packages:</p>
+        <p>Install the TUI — plus the optional native window host:</p>
         <div class="cmd-wrap">
-          <code class="cmd" id="cmd2">sudo dpkg -i tt-toplike_*_amd64_${SUITE}.deb tt-toplike-app_*_amd64_${SUITE}.deb</code>
+          <code class="cmd" id="cmd2">sudo apt install tt-toplike        # TUI monitor
+sudo apt install tt-toplike-app    # optional native window</code>
           <button class="cmd-copy" data-target="cmd2">Copy</button>
         </div>
       </div>

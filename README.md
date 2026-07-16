@@ -192,9 +192,31 @@ contract and the `tt-station-agentd` coordination notes.
 
 ## Installation
 
-### Debian / Ubuntu — download pre-built packages (easiest)
+### Debian / Ubuntu — apt (Tenstorrent PPA, recommended)
 
-Each release ships two variants. Pick the one that matches your Ubuntu version:
+`tt-toplike` is published in the **Tenstorrent apt repository** at `ppa.tenstorrent.com` — the easiest way to get the latest version and keep it current with `apt upgrade`. Add the repository once, then install:
+
+```bash
+# Add Tenstorrent's package-signing key and apt repository
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo wget -qO /etc/apt/keyrings/tt-pkg-key.asc https://ppa.tenstorrent.com/tt-pkg-key.asc
+echo "deb [signed-by=/etc/apt/keyrings/tt-pkg-key.asc] https://ppa.tenstorrent.com/ubuntu/ $(. /etc/os-release && echo "$VERSION_CODENAME") main" \
+  | sudo tee /etc/apt/sources.list.d/tenstorrent.list
+sudo apt update
+
+# Install
+sudo apt install tt-toplike        # TUI monitor
+sudo apt install tt-toplike-app    # optional native window host (needs a display)
+
+# Verify
+tt-toplike --mock --mock-devices 4
+```
+
+Installing from the repo also surfaces the tools tt-toplike works with (`tt-smi`, `tenstorrent-dkms`) as `Recommends`, so apt pulls them in by default. The same repository hosts the whole Tenstorrent stack; the all-in-one [`tt-installer`](https://github.com/tenstorrent/tt-installer) sets it up along with the kernel driver and firmware if you want everything at once.
+
+### Debian / Ubuntu — download a specific .deb
+
+Prefer a pinned version, or on an air-gapped box? Each release also ships standalone `.deb` packages. Pick the one that matches your Ubuntu version:
 
 | Package suffix | Ubuntu version | glibc requirement |
 |---------------|----------------|-------------------|
@@ -309,6 +331,7 @@ tt-toplike --mode arcade      # Arcade — split-screen with all visualizers
 tt-toplike --mode castle      # Memory Castle — roguelike dungeon particles
 tt-toplike --mode starfield   # Starfield — Tensix cores as stars
 tt-toplike --mode flow        # Memory Flow — NoC DDR channel streams
+tt-toplike --mode hivemind    # HivemindSweeper — read-only activity sniffer (or press ~)
 tt-toplike                    # then press d  — Defrag (no --mode flag; use keypress)
 
 # Filter to specific devices
@@ -371,6 +394,22 @@ serving ▶───────  tok/s ▁▂▅▇█▅▂  ⚔ swimlanes · 
 
 The snapshot the snake reads is a local Docker/HTTP probe of *this* machine. Under `--remote`, if the publisher streams the `tt_toplike` extension the `[i]` view describes the **remote** box's inference; otherwise it falls back to this machine's probe with a `LOCAL` label.
 
+### HivemindSweeper — the signs-of-life sniffer (`~`)
+
+<img src="assets/tt-toplike-hivemindsweeper.png" alt="HivemindSweeper on 4× Blackhole — vLLM serving throughput surfaced from docker DEBUG logs, device-holder heartbeats across all four chips, and dozens of tt-metal kernel-compile artifacts, all coalesced into one source × device feed" width="100%" />
+
+Press `~` (or launch with `--mode hivemind`) for **HivemindSweeper** — an opt-in, **read-only** activity sniffer answering *"what is touching my TT hardware right now, and is it making progress?"*
+
+It's built for the moment when the interesting work **isn't logging where you're watching**: kernel compilation with no progress bar, weights loading in silence, a model quietly holding the device, or serving throughput buried in a container's DEBUG logs. HivemindSweeper correlates five passive, non-invasive sources — `/dev/kmsg` driver messages, tt-metal **compile-cache churn**, `/proc` process + device-fd activity, **log tails** (including `docker logs`), and the tt-metal **Inspector** — into one `source × device` heat board with a **coalesced event feed**: repeated events fold into a single row with a live **count + rate + sparkline**, so a flood of near-identical lines becomes one legible `metal · ncrisc.elf ×136` or `vLLM · Avg generation throughput …`.
+
+The screenshot above (4× Blackhole, live) shows all three at once: a **vLLM** engine identified and holding all four devices, its serving throughput surfaced from docker DEBUG logs, and the model's tt-metal kernel compiles (`trisc.o`, `ncrisc.elf`, `brisc.elf`) coalesced by count.
+
+- **Classification that sees through interpreters.** A model run as `python -m pytest …` with no framework name in its argv is still identified — by cmdline, by its loaded TT libraries (`/proc/<pid>/maps`), or, failing that, as a generic `workload` holding the device (never a bare "unknown").
+- **Point it at a target.** `/watch <path>` tails a log file; `/watch pid <n>` attaches to a process; `/wrap <cmd…>` runs and captures a command (e.g. `/wrap ttl export mykernel.py` to watch emitted C++).
+- **Controls.** `f` toggles the unified feed (all sources) vs. the selected cell · `s` raises the severity floor · arrows / `hjk` move the cursor · `l` legend · `!` explain.
+- **Zero idle cost, safe by default.** Collectors spawn only while the mode is active and stop on exit; everything is read-only — it never sets a debug env var or touches a device buffer, so it's safe to point at a box mid-training.
+- The red **KITT scanner** along the bottom idles dim and diffuse, then slows, focuses, and brightens as total activity climbs — a peripheral pulse for "is anything happening?"
+
 ### Gallery — recorded sessions
 
 `assets/casts/` holds 7 [asciinema](https://asciinema.org/) recordings you can replay in your own terminal (no TT hardware needed) with:
@@ -416,15 +455,15 @@ Particle density reflects real power differentials (e.g. 12W vs 18W across 4 Bla
 
 ## Package Dependencies
 
-`tt-toplike` is distributed as standalone `.deb` packages from [GitHub Releases](https://github.com/tenstorrent/tt-toplike/releases) — **not via `apt install`** or a PPA. Install the .deb directly (see Installation above), then install the tools it works with:
+`tt-toplike` is distributed from the **Tenstorrent apt repository** (`ppa.tenstorrent.com`, recommended — see Installation above) and as standalone `.deb` packages from [GitHub Releases](https://github.com/tenstorrent/tt-toplike/releases). It works alongside these tools:
 
 | Dependency | Purpose | How to get |
 |-----------|---------|-----------|
-| `tt-smi` | Required for JSON backend | Tenstorrent software stack |
-| `tenstorrent-dkms` | Required for sysfs hwmon driver | Tenstorrent software stack |
-| `tt-toplike-app` | Optional native window app | Same GitHub Releases page |
+| `tt-smi` | Required for JSON backend | `apt install tt-smi` (same repo) |
+| `tenstorrent-dkms` | Required for sysfs hwmon driver | `apt install tenstorrent-dkms` (same repo) |
+| `tt-toplike-app` | Optional native window app | `apt install tt-toplike-app` (same repo) |
 
-The `.deb` package declares these as `Recommends`/`Suggests` so package managers surface them, but they are not pulled in automatically.
+The package declares `tt-smi` and `tenstorrent-dkms` as `Recommends`, so an `apt install tt-toplike` pulls them in by default (apt installs `Recommends` unless configured otherwise). With the standalone `.deb`, install them separately.
 
 ## Building .deb Packages
 

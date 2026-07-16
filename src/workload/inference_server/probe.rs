@@ -221,7 +221,7 @@ const MAX_DOCKER_OUTPUT: u64 = 8 * 1024 * 1024;
 /// bounded by [`DOCKER_TIMEOUT`] — on timeout we **kill the child**, which both
 /// frees the process and closes the pipe so the reader thread hits EOF and
 /// exits (no orphaned thread or unbounded allocation from a wedged docker).
-fn docker(args: &[&str]) -> String {
+pub(crate) fn docker(args: &[&str]) -> String {
     use std::io::Read;
     use std::process::Stdio;
 

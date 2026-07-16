@@ -1,7 +1,28 @@
 # tt-toplike Quick Start
 
-**Version**: 0.7.33
-**Last Updated**: July 7, 2026
+**Version**: 0.7.40
+**Last Updated**: July 15, 2026
+
+---
+
+## Install
+
+The quickest path on Ubuntu is the **Tenstorrent apt repository** (`ppa.tenstorrent.com`) — always the newest version, updated with `apt upgrade`:
+
+```bash
+# Add Tenstorrent's signing key + apt repository (one time)
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo wget -qO /etc/apt/keyrings/tt-pkg-key.asc https://ppa.tenstorrent.com/tt-pkg-key.asc
+echo "deb [signed-by=/etc/apt/keyrings/tt-pkg-key.asc] https://ppa.tenstorrent.com/ubuntu/ $(. /etc/os-release && echo "$VERSION_CODENAME") main" \
+  | sudo tee /etc/apt/sources.list.d/tenstorrent.list
+sudo apt update
+
+# Install
+sudo apt install tt-toplike        # TUI monitor
+sudo apt install tt-toplike-app    # optional native window host
+```
+
+Prefer a pinned `.deb`, macOS, or building from source? See the [README](README.md#installation).
 
 ---
 
@@ -57,6 +78,18 @@ tt-toplike --mode normal # alias — "normal" now maps to Insights
 ```
 - The flagship unified serving **snake** with three telemetry-true states: **cold** (a hungry snake roams the model-catalog starfield — footer "N of M models run on your <arch>"), **loading** (a coiling boxed snake through compile → load → ready in a synthwave palette + hot-pink burst on Ready, with a footer band explaining the phase and showing **compiled** kernels vs **loaded** weight shards), and **serving** (a live dashboard from the server's vLLM `/metrics`: green **READY** header, throughput timeline, token-exhaust snake, request swimlanes, stats panel, TT silicon strip)
 - `i` while in it jumps to Insights; `Esc` backs out to where you came from. It also sits at the tail of the `v` cycle. Press `l` for the legend, `/explain` for the mapping overlay
+
+### HivemindSweeper (`~`)
+```bash
+tt-toplike --mode hivemind    # or press ~ in any mode
+```
+- Opt-in, **read-only** activity sniffer: *"what's touching my TT hardware right now — and is it making progress?"*
+- Built for **finding signs of life** when the interesting work isn't logging where you're watching — silent kernel compiles, a model holding the device, or serving throughput buried in docker DEBUG logs
+- Correlates five passive sources — `/dev/kmsg` driver messages, tt-metal compile-cache churn, `/proc` process + device-fd activity, log tails (incl. `docker logs`), and the tt-metal Inspector — into a **source × device** heat board + a **coalesced feed**: repeats fold into one row with a live count · rate · sparkline (e.g. `metal · ncrisc.elf ×136`, `vLLM · holding /dev/tenstorrent/#`, `vLLM · Avg generation throughput …`)
+- Identifies interpreter-hosted workloads by cmdline **and loaded TT libraries** (`/proc/<pid>/maps`), so a `python -m pytest …` shows as `metal`/`ttnn`, never a bare "unknown"
+- Point it at a target: `/watch <path>`, `/watch pid <n>`, `/wrap <cmd…>`. `f` unified feed · `s` severity floor · arrows/`hjk` cursor · `l` legend
+- The red **KITT scanner** along the bottom slows, focuses, and brightens as total activity climbs
+- Safe: collectors spawn only while the mode is active and stop on exit; never sets a debug env var or reads a device buffer
 
 ---
 
