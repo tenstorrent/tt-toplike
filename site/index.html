@@ -465,7 +465,7 @@
       margin-top: 0.15rem;
     }
 
-    .install-body { flex: 1; }
+    .install-body { flex: 1; min-width: 0; }
 
     .install-body p {
       font-size: 0.93rem;
@@ -970,37 +970,6 @@
 
     <hr class="mode-divider">
 
-    <!-- HivemindSweeper -->
-    <div class="mode-row">
-      <div class="mode-meta">
-        <span class="mode-key">~ · hivemind</span>
-        <p class="mode-title">HivemindSweeper</p>
-        <p class="mode-desc">
-          An opt-in, read-only activity sniffer for <em>"what's touching my hardware
-          right now — and is it making progress?"</em> — built for when the
-          interesting work isn't logging where you're watching. It folds driver
-          messages, tt-metal compile-cache churn, <code>/proc</code> device-fd
-          activity, log tails (incl. <code>docker logs</code>), and the tt-metal
-          Inspector into one <em>source × device</em> board and a coalesced feed:
-          repeats collapse to a single row with a live count, rate, and sparkline —
-          <code>metal · ncrisc.elf ×136</code>, <code>vLLM · holding …</code>,
-          serving throughput dug out of DEBUG logs. The red KITT scanner slows and
-          focuses as activity climbs.
-        </p>
-        <div class="mode-hints">
-          <span class="mode-hint"><kbd>f</kbd> unified feed</span>
-          <span class="mode-hint"><kbd>s</kbd> severity floor</span>
-          <span class="mode-hint"><kbd>/watch</kbd> · <kbd>/wrap</kbd> point at a target</span>
-          <span class="mode-hint"><kbd>l</kbd> legend</span>
-        </div>
-      </div>
-      <img class="mode-gif" src="assets/tt-toplike-hivemindsweeper.gif"
-           alt="HivemindSweeper demo — vLLM serving throughput, device-holder heartbeats, and tt-metal kernel compiles coalesced into one source × device feed on 4× Blackhole"
-           loading="lazy">
-    </div>
-
-    <hr class="mode-divider">
-
     <!-- Starfield -->
     <div class="mode-row">
       <div class="mode-meta">
@@ -1212,6 +1181,37 @@
 
     <hr class="mode-divider">
 
+    <!-- HivemindSweeper -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">~ · hivemind</span>
+        <p class="mode-title">HivemindSweeper</p>
+        <p class="mode-desc">
+          An opt-in, read-only activity sniffer for <em>"what's touching my hardware
+          right now — and is it making progress?"</em> — built for when the
+          interesting work isn't logging where you're watching. It folds driver
+          messages, tt-metal compile-cache churn, <code>/proc</code> device-fd
+          activity, log tails (incl. <code>docker logs</code>), and the tt-metal
+          Inspector into one <em>source × device</em> board and a coalesced feed:
+          repeats collapse to a single row with a live count, rate, and sparkline —
+          <code>metal · ncrisc.elf ×136</code>, <code>vLLM · holding …</code>,
+          serving throughput dug out of DEBUG logs. The red KITT scanner slows and
+          focuses as activity climbs.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>f</kbd> unified feed</span>
+          <span class="mode-hint"><kbd>s</kbd> severity floor</span>
+          <span class="mode-hint"><kbd>/watch</kbd> · <kbd>/wrap</kbd> point at a target</span>
+          <span class="mode-hint"><kbd>l</kbd> legend</span>
+        </div>
+      </div>
+      <img class="mode-gif" src="assets/tt-toplike-hivemindsweeper.gif"
+           alt="HivemindSweeper demo — vLLM serving throughput, device-holder heartbeats, and tt-metal kernel compiles coalesced into one source × device feed on 4× Blackhole"
+           loading="lazy">
+    </div>
+
+    <hr class="mode-divider">
+
     <!-- Host / CPU mode -->
     <div class="mode-row">
       <div class="mode-meta">
@@ -1256,12 +1256,10 @@
 
   <div class="gallery-grid">
     <div class="gallery-item wide">
-      <video autoplay muted loop playsinline
-             aria-label="tt-toplike Insights screen — four Blackhole chips at 58–77W under live LLM inference, showing chip portraits with real-time power and temperature">
-        <source src="assets/tt-toplike-insights.webm" type="video/webm">
-        <img src="assets/tt-toplike-with-info-with-activity.png" alt="tt-toplike Insights screen with four Blackhole chips under inference load">
-      </video>
-      <span class="gallery-caption">Insights mode — 4× Blackhole at 58–77W, live LLM inference</span>
+      <img src="assets/tt-toplike-insights.png"
+           alt="tt-toplike Insights screen — four Blackhole chips at 59–79W under live Llama-3.3-70B inference, showing per-chip Tensix portraits with real-time power, temperature, DDR training, and the vLLM engine using all four devices"
+           loading="lazy">
+      <span class="gallery-caption">Insights mode — 4× Blackhole under live Llama-3.3-70B inference (vLLM across all four chips)</span>
     </div>
     <div class="gallery-item">
       <img src="assets/tt-toplike-arcade-active.png"
