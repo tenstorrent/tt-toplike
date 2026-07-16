@@ -33,9 +33,11 @@ pub use grid::HeatGrid;
 /// is a backpressure buffer, not a history store — it only needs to absorb
 /// the gap between a collector's sends and the next `poll()` drain, not hold
 /// a burst the size of the whole ring. It is smaller than `RING_CAP` (1024 vs
-/// 4096) by design; overflow accounting (drops) happens at the ring
-/// (`ingest`), not here — a full channel just makes `try_send` fail and the
-/// collector counts that as a drop of its own.
+/// 4096) by design. Ring-eviction drops are accounted at the ring (`ingest`,
+/// surfaced via `dropped()`); a full channel just makes `try_send` fail and
+/// the newest event is discarded. That channel-overflow path is currently
+/// uncounted — it needs more than `CHANNEL_CAP` events between two frame-rate
+/// drains, so it is rare in practice.
 const CHANNEL_CAP: usize = 1024;
 
 /// Bounded event history + drop accounting, plus the live collector engine:

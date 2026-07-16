@@ -574,7 +574,7 @@ mod real {
             while !shutdown.load(Ordering::SeqCst) {
                 for ev in self.poll() {
                     if tx.try_send(ev).is_err() {
-                        // channel full: drop newest (engine counts drops)
+                        // channel full: drop newest (uncounted; only ring eviction bumps dropped())
                     }
                 }
                 std::thread::sleep(Duration::from_secs(1));

@@ -168,7 +168,7 @@ fn tail_file(origin: &str, path: &Path, device: Option<u8>, tx: Tx, shutdown: Ar
                 if let Some(mut ev) = event_from_log(origin, None, &line) {
                     ev.device = device;
                     if tx.try_send(ev).is_err() {
-                        // channel full: drop newest (engine counts drops)
+                        // channel full: drop newest (uncounted; only ring eviction bumps dropped())
                     }
                 }
             }
@@ -220,7 +220,7 @@ fn spawn_docker_logs_tail(
                     if let Some(mut ev) = event_from_log(&origin, Some(&proc_name), &line) {
                         ev.device = device;
                         if tx.try_send(ev).is_err() {
-                            // channel full: drop newest (engine counts drops)
+                            // channel full: drop newest (uncounted; only ring eviction bumps dropped())
                         }
                     }
                 }

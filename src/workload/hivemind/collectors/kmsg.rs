@@ -103,7 +103,7 @@ impl Collector for KmsgCollector {
                 Ok(_) => {
                     if let Some(ev) = parse_kmsg_line(&line) {
                         if tx.try_send(ev).is_err() {
-                            // channel full: drop newest (engine counts drops)
+                            // channel full: drop newest (uncounted; only ring eviction bumps dropped())
                         }
                     }
                 }

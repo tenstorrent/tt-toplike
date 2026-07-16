@@ -99,7 +99,7 @@ fn tail_file_into(
                 if let Some(mut ev) = event_from_log(origin, proc_name, &line) {
                     ev.device = device;
                     if tx.try_send(ev).is_err() {
-                        // channel full: drop newest (engine counts drops)
+                        // channel full: drop newest (uncounted; only ring eviction bumps dropped())
                     }
                 }
             }
@@ -150,7 +150,7 @@ fn spawn_pipe_reader<R: std::io::Read + Send + 'static>(
                         origin: origin.clone(),
                     };
                     if tx.try_send(ev).is_err() {
-                        // channel full: drop newest (engine counts drops)
+                        // channel full: drop newest (uncounted; only ring eviction bumps dropped())
                     }
                 }
                 Err(_) => break,
@@ -375,7 +375,7 @@ mod pid_attach {
             );
             for ev in close_events {
                 let _ = tx.try_send(ev);
-                // channel full: drop newest (engine counts drops)
+                // channel full: drop newest (uncounted; only ring eviction bumps dropped())
             }
             seen_devices.retain(|dev| current_devices.contains(dev));
             if should_evict {

@@ -189,7 +189,7 @@ impl Collector for CacheWatchCollector {
         while !shutdown.load(Ordering::SeqCst) {
             for ev in scan_new_artifacts(&self.roots, &mut seen) {
                 if tx.try_send(ev).is_err() {
-                    // channel full: drop newest (engine counts drops)
+                    // channel full: drop newest (uncounted; only ring eviction bumps dropped())
                 }
             }
             std::thread::sleep(std::time::Duration::from_secs(1));

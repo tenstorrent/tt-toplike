@@ -85,7 +85,7 @@ fn tail_file(path: &Path, tx: Tx, shutdown: Arc<AtomicBool>) {
             Ok(_) => {
                 if let Some(ev) = event_from_inspector_line(&line) {
                     if tx.try_send(ev).is_err() {
-                        // channel full: drop newest (engine counts drops)
+                        // channel full: drop newest (uncounted; only ring eviction bumps dropped())
                     }
                 }
             }

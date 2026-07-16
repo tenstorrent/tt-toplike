@@ -896,13 +896,15 @@ fn run_app(
         // Clear terminal when switching modes to remove artifacts
         if display_mode != prev_display_mode {
             // Single choke point for tearing down the HivemindSweeper engine:
-            // `Hivemind` has no `Drop` impl and spawns five collector threads
-            // (including possible `docker logs -f` children) in `start()`, so
-            // ANY transition away from the sweeper — regardless of which key
-            // or command caused it (~, Esc, v, a/A, d/D, g, i/I, /mode, …) —
-            // must call `stop()` exactly once. Centralizing here (rather than
-            // scattering `stop()` into every individual exit handler) means
-            // new exit paths can never forget to tear the engine down.
+            // `start()` spawns five collector threads (including possible
+            // `docker logs -f` children). `Hivemind::drop` is a process-exit
+            // backstop, but to stop collectors PROMPTLY when you leave the
+            // sweeper for another screen (rather than leaving them running
+            // until process exit), ANY transition away from the sweeper —
+            // regardless of which key or command caused it (~, Esc, v, a/A,
+            // d/D, g, i/I, /mode, …) — calls `stop()` here, exactly once.
+            // Centralizing (rather than scattering `stop()` into every exit
+            // handler) means new exit paths can never forget to tear it down.
             if prev_display_mode == DisplayMode::HivemindSweeper
                 && display_mode != DisplayMode::HivemindSweeper
             {
@@ -1573,9 +1575,9 @@ fn run_app(
                                 // the `i`/`I` handler above: entering remembers
                                 // `prev_mode` and starts the engine. Leaving (via `~`
                                 // again) hands off teardown to the mode-transition
-                                // choke point above (`Hivemind` has no `Drop` impl, so
-                                // *something* must call `stop()` on every exit path —
-                                // that's now centralized rather than living here).
+                                // choke point above — every exit path must call
+                                // `stop()` to stop collectors promptly, and that's
+                                // now centralized there rather than living here.
                                 if display_mode != DisplayMode::HivemindSweeper {
                                     prev_mode = display_mode;
                                     display_mode = DisplayMode::HivemindSweeper;
