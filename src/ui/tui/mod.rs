@@ -343,6 +343,7 @@ fn run_app(
             crate::cli::VisualizationMode::Castle => DisplayMode::MemoryCastle,
             crate::cli::VisualizationMode::Flow => DisplayMode::MemoryFlow,
             crate::cli::VisualizationMode::Arcade => DisplayMode::Arcade,
+            crate::cli::VisualizationMode::Hivemind => DisplayMode::HivemindSweeper,
         }
     } else {
         DisplayMode::Insights // default is now Insights
@@ -377,6 +378,16 @@ fn run_app(
     let mut hm_cursor = (0usize, 0usize);
     let mut hm_unified = false;
     let mut hm_sev = crate::workload::hivemind::Severity::Trace;
+    // Launched directly into HivemindSweeper via `--mode hivemind`? Start the
+    // engine now. Normally `~`/`/hivemind` starts it on entry, but a CLI launch
+    // sets `display_mode` before any keypress, so nothing else would spawn the
+    // collectors. Exit still tears down centrally via the mode-transition choke
+    // point below (and `Hivemind::drop` is the process-exit backstop).
+    if display_mode == DisplayMode::HivemindSweeper {
+        hivemind
+            .get_or_insert_with(crate::workload::hivemind::Hivemind::new)
+            .start();
+    }
     // KITT-style (Knight Rider) red-gradient scanner bar drawn along the
     // bottom row of the HivemindSweeper view (see
     // `hivemind_view::{KittScanner, beam_cells}`). Persists across frames the

@@ -174,7 +174,7 @@ pub struct Cli {
     /// Launch directly into specific visualization mode
     ///
     /// Skip the normal table view and start in a specific mode.
-    /// Available modes: normal, starfield, castle, flow, arcade
+    /// Available modes: normal, starfield, castle, flow, arcade, hivemind
     #[arg(short = 'm', long, value_enum)]
     pub mode: Option<VisualizationMode>,
 
@@ -369,6 +369,11 @@ pub enum VisualizationMode {
 
     /// Arcade mode (unified visualization with hero character)
     Arcade,
+
+    /// HivemindSweeper — opt-in passive activity sniffer (source × device
+    /// board + coalesced event feed). Also reachable in-app with `~`.
+    #[value(alias = "hive", alias = "sniff", alias = "hivemindsweeper")]
+    Hivemind,
 }
 
 impl Cli {

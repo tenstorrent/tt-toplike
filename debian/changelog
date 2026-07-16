@@ -1,4 +1,4 @@
-tt-toplike (0.7.39) noble; urgency=medium
+tt-toplike (0.7.40) noble; urgency=medium
 
   * HivemindSweeper — a new opt-in, read-only activity sniffer mode (press
     `~`). Correlates driver messages (`/dev/kmsg`), tt-metal compile-cache

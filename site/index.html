@@ -767,7 +767,7 @@
 ·∘○◉         ●◉○∘·∘○◉●
 ◉●∘·  ·∘○◉●◉○∘·  ·∘○◉</div>
 
-      <p class="hero-eyebrow">Tenstorrent Hardware Monitor · v0.7.39 · Rust</p>
+      <p class="hero-eyebrow">Tenstorrent Hardware Monitor · v0.7.40 · Rust</p>
 
       <h1 class="hero-title">
         Watch<br>
@@ -933,13 +933,14 @@
 <!-- ── Modes ──────────────────────────────────────────────────────────────── -->
 <section class="section edge" id="modes">
   <p class="section-label">Visualization modes</p>
-  <h2 class="section-heading">Eight ways to watch your hardware think</h2>
+  <h2 class="section-heading">Nine ways to watch your hardware think</h2>
   <p class="section-sub">
     Press <code>v</code> to cycle, or jump directly with <code>a</code> (Arcade),
-    <code>d</code> (Defrag), <code>g</code> (Insights), or <code>i</code> (Inference
-    Server Monitor). Every mode reads the same live telemetry — power, temperature,
-    aiclk, DDR state — and renders it differently. Recordings below are from real
-    4× Blackhole hardware during live LLM inference.
+    <code>d</code> (Defrag), <code>g</code> (Insights), <code>i</code> (Inference
+    Server Monitor), or <code>~</code> (HivemindSweeper). Every mode reads the same
+    live telemetry — power, temperature, aiclk, DDR state — and renders it
+    differently. Recordings below are from real 4× Blackhole hardware during live
+    LLM inference.
   </p>
 
   <div class="modes-grid">
@@ -965,6 +966,37 @@
       </div>
       <video class="mode-gif" src="assets/gifs/01-insights.webm" autoplay muted loop playsinline
              aria-label="Insights mode demo"></video>
+    </div>
+
+    <hr class="mode-divider">
+
+    <!-- HivemindSweeper -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">~ · hivemind</span>
+        <p class="mode-title">HivemindSweeper</p>
+        <p class="mode-desc">
+          An opt-in, read-only activity sniffer for <em>"what's touching my hardware
+          right now — and is it making progress?"</em> — built for when the
+          interesting work isn't logging where you're watching. It folds driver
+          messages, tt-metal compile-cache churn, <code>/proc</code> device-fd
+          activity, log tails (incl. <code>docker logs</code>), and the tt-metal
+          Inspector into one <em>source × device</em> board and a coalesced feed:
+          repeats collapse to a single row with a live count, rate, and sparkline —
+          <code>metal · ncrisc.elf ×136</code>, <code>vLLM · holding …</code>,
+          serving throughput dug out of DEBUG logs. The red KITT scanner slows and
+          focuses as activity climbs.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>f</kbd> unified feed</span>
+          <span class="mode-hint"><kbd>s</kbd> severity floor</span>
+          <span class="mode-hint"><kbd>/watch</kbd> · <kbd>/wrap</kbd> point at a target</span>
+          <span class="mode-hint"><kbd>l</kbd> legend</span>
+        </div>
+      </div>
+      <img class="mode-gif" src="assets/tt-toplike-hivemindsweeper.gif"
+           alt="HivemindSweeper demo — vLLM serving throughput, device-holder heartbeats, and tt-metal kernel compiles coalesced into one source × device feed on 4× Blackhole"
+           loading="lazy">
     </div>
 
     <hr class="mode-divider">
@@ -1236,6 +1268,12 @@
            alt="tt-toplike arcade mode — four Blackhole chips at 58–66W under live inference load, showing Tensix starfield, memory castle particle hierarchy, and NoC flow"
            loading="lazy">
       <span class="gallery-caption">Arcade mode — 4× Blackhole at 58–66W, live LLM inference</span>
+    </div>
+    <div class="gallery-item">
+      <img src="assets/tt-toplike-hivemindsweeper.png"
+           alt="HivemindSweeper on 4× Blackhole — vLLM serving throughput surfaced from docker DEBUG logs, device-holder heartbeats across all four chips, and dozens of tt-metal kernel-compile artifacts, all coalesced into one source × device feed"
+           loading="lazy">
+      <span class="gallery-caption">HivemindSweeper — vLLM serving + kernel compiles surfaced live on 4× Blackhole</span>
     </div>
     <div class="gallery-item">
       <img src="assets/tt-toplike-rs.png"

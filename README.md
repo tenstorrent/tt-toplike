@@ -331,6 +331,7 @@ tt-toplike --mode arcade      # Arcade — split-screen with all visualizers
 tt-toplike --mode castle      # Memory Castle — roguelike dungeon particles
 tt-toplike --mode starfield   # Starfield — Tensix cores as stars
 tt-toplike --mode flow        # Memory Flow — NoC DDR channel streams
+tt-toplike --mode hivemind    # HivemindSweeper — read-only activity sniffer (or press ~)
 tt-toplike                    # then press d  — Defrag (no --mode flag; use keypress)
 
 # Filter to specific devices
@@ -392,6 +393,22 @@ serving ▶───────  tok/s ▁▂▅▇█▅▂  ⚔ swimlanes · 
 ```
 
 The snapshot the snake reads is a local Docker/HTTP probe of *this* machine. Under `--remote`, if the publisher streams the `tt_toplike` extension the `[i]` view describes the **remote** box's inference; otherwise it falls back to this machine's probe with a `LOCAL` label.
+
+### HivemindSweeper — the signs-of-life sniffer (`~`)
+
+<img src="assets/tt-toplike-hivemindsweeper.png" alt="HivemindSweeper on 4× Blackhole — vLLM serving throughput surfaced from docker DEBUG logs, device-holder heartbeats across all four chips, and dozens of tt-metal kernel-compile artifacts, all coalesced into one source × device feed" width="100%" />
+
+Press `~` (or launch with `--mode hivemind`) for **HivemindSweeper** — an opt-in, **read-only** activity sniffer answering *"what is touching my TT hardware right now, and is it making progress?"*
+
+It's built for the moment when the interesting work **isn't logging where you're watching**: kernel compilation with no progress bar, weights loading in silence, a model quietly holding the device, or serving throughput buried in a container's DEBUG logs. HivemindSweeper correlates five passive, non-invasive sources — `/dev/kmsg` driver messages, tt-metal **compile-cache churn**, `/proc` process + device-fd activity, **log tails** (including `docker logs`), and the tt-metal **Inspector** — into one `source × device` heat board with a **coalesced event feed**: repeated events fold into a single row with a live **count + rate + sparkline**, so a flood of near-identical lines becomes one legible `metal · ncrisc.elf ×136` or `vLLM · Avg generation throughput …`.
+
+The screenshot above (4× Blackhole, live) shows all three at once: a **vLLM** engine identified and holding all four devices, its serving throughput surfaced from docker DEBUG logs, and the model's tt-metal kernel compiles (`trisc.o`, `ncrisc.elf`, `brisc.elf`) coalesced by count.
+
+- **Classification that sees through interpreters.** A model run as `python -m pytest …` with no framework name in its argv is still identified — by cmdline, by its loaded TT libraries (`/proc/<pid>/maps`), or, failing that, as a generic `workload` holding the device (never a bare "unknown").
+- **Point it at a target.** `/watch <path>` tails a log file; `/watch pid <n>` attaches to a process; `/wrap <cmd…>` runs and captures a command (e.g. `/wrap ttl export mykernel.py` to watch emitted C++).
+- **Controls.** `f` toggles the unified feed (all sources) vs. the selected cell · `s` raises the severity floor · arrows / `hjk` move the cursor · `l` legend · `!` explain.
+- **Zero idle cost, safe by default.** Collectors spawn only while the mode is active and stop on exit; everything is read-only — it never sets a debug env var or touches a device buffer, so it's safe to point at a box mid-training.
+- The red **KITT scanner** along the bottom idles dim and diffuse, then slows, focuses, and brightens as total activity climbs — a peripheral pulse for "is anything happening?"
 
 ### Gallery — recorded sessions
 
