@@ -5732,20 +5732,19 @@ fn render_device_panels(
             ]));
         }
 
-        // Fan RPM row (full mode only)
+        // Fan RPM row (full mode only). `fan_rpm()` returns None for the
+        // firmware all-ones "no fan" sentinel (0xFFFF / 0xFFFFFFFF) and 0, so
+        // fanless cards (e.g. p150 Blackhole) simply show no fan line instead
+        // of a nonsensical "65535 RPM".
         if !compact {
-            if let Some(rpm_str) = smbus.and_then(|s| s.fan_speed.as_deref()) {
-                if let Ok(rpm) = rpm_str.trim().parse::<u32>() {
-                    if rpm > 0 {
-                        stat_lines.push(Line::from(vec![
-                            Span::styled(
-                                format!("{:<8}", "Fan"),
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                            Span::styled(format!("{} RPM", rpm), Style::default().fg(Color::White)),
-                        ]));
-                    }
-                }
+            if let Some(rpm) = smbus.and_then(|s| s.fan_rpm()) {
+                stat_lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{:<8}", "Fan"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(format!("{} RPM", rpm), Style::default().fg(Color::White)),
+                ]));
             }
         }
 

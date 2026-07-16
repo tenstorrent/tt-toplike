@@ -452,6 +452,23 @@ impl SmbusTelemetry {
         }
     }
 
+    /// Fan speed in RPM, or `None` when there is no valid reading.
+    ///
+    /// Cards with no controllable/readable fan (e.g. p150-class Blackhole)
+    /// report the firmware all-ones sentinel `0xFFFFFFFF`, which tt-smi masks
+    /// to `65535` (`0xFFFF`) in its decimal `fan_speed` field and sysfs exposes
+    /// raw as `4294967295`. None of those — nor `0` — is a real RPM, so we map
+    /// them to `None` instead of rendering a nonsensical "65535 RPM". Accepts
+    /// both decimal and hex ("0xffffffff") strings.
+    pub fn fan_rpm(&self) -> Option<u32> {
+        let rpm = parse_hex_or_dec(self.fan_speed.as_deref()?)?;
+        if rpm == 0 || rpm == 0xFFFF || rpm == 0xFFFF_FFFF {
+            None
+        } else {
+            Some(rpm)
+        }
+    }
+
     /// Firmware-reported measured power in Watts from the SMBUS TDP register.
     ///
     /// Despite the name ("Thermal Design Power"), SMBUS TDP on BH/WH is a
@@ -561,6 +578,30 @@ mod tests {
         assert_eq!(telem.current_a(), 25.5);
         assert_eq!(telem.aiclk_mhz(), 1000);
         assert!(telem.arc_healthy());
+    }
+
+    #[test]
+    fn fan_rpm_filters_all_ones_sentinel() {
+        let mut smbus = SmbusTelemetry::new();
+        // A real reading passes through unchanged.
+        smbus.fan_speed = Some("3000".to_string());
+        assert_eq!(smbus.fan_rpm(), Some(3000));
+        // Cards with no readable fan (e.g. p150 Blackhole) report the firmware
+        // all-ones sentinel 0xFFFFFFFF; tt-smi masks it to 65535 (0xFFFF) in its
+        // decimal fan_speed field. Neither is a real RPM.
+        smbus.fan_speed = Some("65535".to_string());
+        assert_eq!(smbus.fan_rpm(), None);
+        // Raw u32 all-ones (e.g. straight from sysfs fan1_input = 4294967295).
+        smbus.fan_speed = Some("4294967295".to_string());
+        assert_eq!(smbus.fan_rpm(), None);
+        // Hex all-ones form (tt-smi FAN_RPM = "0xffffffff").
+        smbus.fan_speed = Some("0xffffffff".to_string());
+        assert_eq!(smbus.fan_rpm(), None);
+        // Zero / absent → no reading.
+        smbus.fan_speed = Some("0".to_string());
+        assert_eq!(smbus.fan_rpm(), None);
+        smbus.fan_speed = None;
+        assert_eq!(smbus.fan_rpm(), None);
     }
 
     #[test]
