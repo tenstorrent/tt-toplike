@@ -105,9 +105,19 @@ mod tests {
     fn panic_is_contained_and_marks_status() {
         let (tx, _rx) = sync_channel(4);
         let h = spawn(Box::new(Panicky), tx);
-        // Give the thread a moment to run and panic.
-        thread::sleep(Duration::from_millis(50));
-        let st = h.status.lock().unwrap().clone();
+        // Poll for the contained panic rather than assuming a fixed sleep is
+        // long enough. A single `sleep(50ms)` was flaky on slow CI schedulers
+        // (Windows in particular) where the spawned thread hadn't run + panicked
+        // + recorded its status yet. Poll up to ~2s, breaking as soon as the
+        // status changes.
+        let mut st = CollectorStatus::Ok;
+        for _ in 0..200 {
+            st = h.status.lock().unwrap().clone();
+            if st != CollectorStatus::Ok {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
         h.stop();
         assert_eq!(st, CollectorStatus::Err("collector panicked".into()));
     }
