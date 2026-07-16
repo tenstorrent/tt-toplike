@@ -14,9 +14,10 @@
 //! - `WrapKind::Command` is the one deliberate side effect in the whole
 //!   hivemindsweeper subsystem: it spawns a user-supplied argv directly (no
 //!   shell, no env injection) and kills the child on shutdown so nothing is
-//!   ever orphaned. The UI confirmation gate for this lives in a later task
-//!   (see the design doc's "`:wrap` confirmation" note) — this collector's
-//!   job is only to run correctly once asked to.
+//!   ever orphaned. The UI confirmation gate for `/wrap` is implemented in the
+//!   TUI command bar (it stashes `hm_pending_wrap` and requires the same
+//!   `/wrap` argv to be entered twice before spawning) — this collector's job
+//!   is only to run correctly once asked to.
 
 use crate::workload::hivemind::classify::classify;
 use crate::workload::hivemind::collector::{Collector, Tx};

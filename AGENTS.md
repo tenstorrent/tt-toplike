@@ -4041,3 +4041,44 @@ Full task-by-task detail and TDD evidence: `.superpowers/sdd/task-12-report.md`
 ---
 
 *Phase 23 status: **COMPLETE** — 12/12 tasks done, v0.7.34*
+
+---
+
+## Phase 24 — Hivemindsweeper hardening, real-world tuning + release (July 15–16, 2026, v0.7.35 → v0.7.40)
+
+Phase 23 introduced the mode at **v0.7.34**; Phase 24 is the run of fixes and
+enhancements — driven by real bring-up/serving sessions on 4× Blackhole — that
+took it to the **v0.7.40** release on the Tenstorrent apt repo. (The Phase 23
+heading keeps `v0.7.34` deliberately: that's when the mode landed, not the
+release version — this section records the path to 0.7.40.)
+
+* **v0.7.35** — `l` restored to the legend inside the sweeper (Task 12 had
+  bound it to cursor-right, shadowing the global legend key); cursor is now
+  arrows + vim `h`/`j`/`k`. Also rustfmt'd the collector files (latent drift).
+* **v0.7.36** — the "everything shows as `unknown`" fix: procfs classifies fd
+  events by **cmdline** (not just `comm`) + a pid→(name,source) cache so closes
+  reuse the open's source (with a Critical fix for multi-fd-close-in-one-poll);
+  plus the **coalesced count+rate feed** (`feed.rs` — repeats fold into one row,
+  device-poll churn folded) and per-cell **sparkline + pulse** animation.
+* **v0.7.37** — classify device-holders by their loaded TT libraries
+  (`/proc/<pid>/maps`) + a `Source::Workload` fallback, so a `python -m pytest`
+  workload isn't `unknown`; a throttled **holder heartbeat** keeps steady
+  device-holders visible; cache_watch now also scans `~/.cache/tt-metal-cache`.
+* **v0.7.38** — the **KITT** red-gradient scanner bar (idle-dim; slows, focuses,
+  and brightens with total activity).
+* **v0.7.39** — fan-RPM fix: `SmbusTelemetry::fan_rpm()` filters the firmware
+  all-ones sentinel (`0xFFFF`/`0xFFFFFFFF`) so fanless cards don't show
+  "65535 RPM" on the Insights screen.
+* **v0.7.40** — `--mode hivemind` launches straight into the mode (CLI alias for
+  `~`); documented HivemindSweeper in README/QUICK_START/site with a live
+  4× Blackhole capture; documented apt-repo install (`ppa.tenstorrent.com`).
+  Release `.deb`s validated in a clean noble container.
+
+CI note: every CI job runs `cargo … --locked`, so a version bump must
+regenerate `Cargo.lock` **before** committing — otherwise the lockfile lags
+`Cargo.toml` and all `--locked` jobs fail with "cannot update the lock file"
+(this bit the 0.7.38→0.7.39 push once; fixed by committing the synced lock).
+
+---
+
+*Phase 24 status: **COMPLETE** — shipped as v0.7.40 on ppa.tenstorrent.com*

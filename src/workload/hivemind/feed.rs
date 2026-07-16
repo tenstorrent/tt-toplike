@@ -163,6 +163,10 @@ impl FeedAgg {
     pub fn ingest(&mut self, ev: &SniffEvent, now: Instant) {
         let pattern = coalesce_key(ev.source, ev.device, ev.kind, &ev.text);
         let key = (ev.source, ev.device, pattern.clone());
+        // Only a brand-new key can push the map over `MAX_ROWS`; folding into an
+        // existing row never grows it. Track that so we can skip the O(n) LRU
+        // scan in `evict_if_over_cap()` on the common fold path (below).
+        let is_new_row = !self.rows.contains_key(&key);
         let row = self.rows.entry(key).or_insert_with(|| FeedRow {
             source: ev.source,
             device: ev.device,
@@ -180,7 +184,10 @@ impl FeedAgg {
         if ev.severity > row.max_severity {
             row.max_severity = ev.severity;
         }
-        self.evict_if_over_cap();
+        // Eviction can only be needed when the map actually grew.
+        if is_new_row {
+            self.evict_if_over_cap();
+        }
     }
 
     /// Roll the per-second rate/spark buckets on a ~1s cadence. Safe to call
@@ -521,5 +528,41 @@ mod tests {
                 "recently-ingested row (iteration {i}, pattern {pattern:?}) should still be present"
             );
         }
+    }
+
+    #[test]
+    fn folding_into_existing_row_never_evicts() {
+        // Regression guard for the "only evict when a new row is inserted"
+        // optimization: fill exactly to the cap, then fold many events into one
+        // existing row. Folds don't grow the map, so eviction must never fire —
+        // the row count stays at MAX_ROWS, no row is dropped, and the folded
+        // row's count keeps climbing.
+        let mut agg = FeedAgg::new();
+        let t0 = Instant::now();
+        let pattern_for = |i: usize| format!("row-{}", "a".repeat(i + 1));
+        for i in 0..MAX_ROWS {
+            agg.ingest(
+                &ev(Source::Vllm, Some(0), Severity::Info, &pattern_for(i)),
+                t0 + Duration::from_millis(i as u64),
+            );
+        }
+        assert_eq!(agg.rows(None, Severity::Trace).len(), MAX_ROWS);
+
+        // Fold 50 more events into the FIRST (oldest) row. If eviction ran on
+        // the fold path it could drop rows — including this very one.
+        let first = pattern_for(0);
+        for k in 0..50u64 {
+            agg.ingest(
+                &ev(Source::Vllm, Some(0), Severity::Info, &first),
+                t0 + Duration::from_millis(1000 + k),
+            );
+        }
+        let rows = agg.rows(None, Severity::Trace);
+        assert_eq!(rows.len(), MAX_ROWS, "folds must not change the row count");
+        let folded = rows
+            .iter()
+            .find(|r| r.display == first)
+            .expect("the folded (oldest) row must still be present — never evicted");
+        assert_eq!(folded.count, 51, "1 initial + 50 folded ingests");
     }
 }
