@@ -192,9 +192,31 @@ contract and the `tt-station-agentd` coordination notes.
 
 ## Installation
 
-### Debian / Ubuntu — download pre-built packages (easiest)
+### Debian / Ubuntu — apt (Tenstorrent PPA, recommended)
 
-Each release ships two variants. Pick the one that matches your Ubuntu version:
+`tt-toplike` is published in the **Tenstorrent apt repository** at `ppa.tenstorrent.com` — the easiest way to get the latest version and keep it current with `apt upgrade`. Add the repository once, then install:
+
+```bash
+# Add Tenstorrent's package-signing key and apt repository
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo wget -qO /etc/apt/keyrings/tt-pkg-key.asc https://ppa.tenstorrent.com/tt-pkg-key.asc
+echo "deb [signed-by=/etc/apt/keyrings/tt-pkg-key.asc] https://ppa.tenstorrent.com/ubuntu/ $(. /etc/os-release && echo "$VERSION_CODENAME") main" \
+  | sudo tee /etc/apt/sources.list.d/tenstorrent.list
+sudo apt update
+
+# Install
+sudo apt install tt-toplike        # TUI monitor
+sudo apt install tt-toplike-app    # optional native window host (needs a display)
+
+# Verify
+tt-toplike --mock --mock-devices 4
+```
+
+Installing from the repo also surfaces the tools tt-toplike works with (`tt-smi`, `tenstorrent-dkms`) as `Recommends`, so apt pulls them in by default. The same repository hosts the whole Tenstorrent stack; the all-in-one [`tt-installer`](https://github.com/tenstorrent/tt-installer) sets it up along with the kernel driver and firmware if you want everything at once.
+
+### Debian / Ubuntu — download a specific .deb
+
+Prefer a pinned version, or on an air-gapped box? Each release also ships standalone `.deb` packages. Pick the one that matches your Ubuntu version:
 
 | Package suffix | Ubuntu version | glibc requirement |
 |---------------|----------------|-------------------|
@@ -416,15 +438,15 @@ Particle density reflects real power differentials (e.g. 12W vs 18W across 4 Bla
 
 ## Package Dependencies
 
-`tt-toplike` is distributed as standalone `.deb` packages from [GitHub Releases](https://github.com/tenstorrent/tt-toplike/releases) — **not via `apt install`** or a PPA. Install the .deb directly (see Installation above), then install the tools it works with:
+`tt-toplike` is distributed from the **Tenstorrent apt repository** (`ppa.tenstorrent.com`, recommended — see Installation above) and as standalone `.deb` packages from [GitHub Releases](https://github.com/tenstorrent/tt-toplike/releases). It works alongside these tools:
 
 | Dependency | Purpose | How to get |
 |-----------|---------|-----------|
-| `tt-smi` | Required for JSON backend | Tenstorrent software stack |
-| `tenstorrent-dkms` | Required for sysfs hwmon driver | Tenstorrent software stack |
-| `tt-toplike-app` | Optional native window app | Same GitHub Releases page |
+| `tt-smi` | Required for JSON backend | `apt install tt-smi` (same repo) |
+| `tenstorrent-dkms` | Required for sysfs hwmon driver | `apt install tenstorrent-dkms` (same repo) |
+| `tt-toplike-app` | Optional native window app | `apt install tt-toplike-app` (same repo) |
 
-The `.deb` package declares these as `Recommends`/`Suggests` so package managers surface them, but they are not pulled in automatically.
+The package declares `tt-smi` and `tenstorrent-dkms` as `Recommends`, so an `apt install tt-toplike` pulls them in by default (apt installs `Recommends` unless configured otherwise). With the standalone `.deb`, install them separately.
 
 ## Building .deb Packages
 

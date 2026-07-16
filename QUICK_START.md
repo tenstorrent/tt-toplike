@@ -1,7 +1,28 @@
 # tt-toplike Quick Start
 
 **Version**: 0.7.39
-**Last Updated**: July 7, 2026
+**Last Updated**: July 15, 2026
+
+---
+
+## Install
+
+The quickest path on Ubuntu is the **Tenstorrent apt repository** (`ppa.tenstorrent.com`) — always the newest version, updated with `apt upgrade`:
+
+```bash
+# Add Tenstorrent's signing key + apt repository (one time)
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo wget -qO /etc/apt/keyrings/tt-pkg-key.asc https://ppa.tenstorrent.com/tt-pkg-key.asc
+echo "deb [signed-by=/etc/apt/keyrings/tt-pkg-key.asc] https://ppa.tenstorrent.com/ubuntu/ $(. /etc/os-release && echo "$VERSION_CODENAME") main" \
+  | sudo tee /etc/apt/sources.list.d/tenstorrent.list
+sudo apt update
+
+# Install
+sudo apt install tt-toplike        # TUI monitor
+sudo apt install tt-toplike-app    # optional native window host
+```
+
+Prefer a pinned `.deb`, macOS, or building from source? See the [README](README.md#installation).
 
 ---
 
