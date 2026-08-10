@@ -5761,6 +5761,119 @@ fn render_device_panels(
             }
         }
 
+        // Current row (full mode only): firmware-measured amps vs. the TDC
+        // ceiling from the limits block / hwmon curr1_max.
+        if !compact {
+            if let Some(amps) = telemetry.and_then(|t| t.current) {
+                let tdc = device.limits.as_ref().and_then(|l| l.tdc_limit);
+                let lim_txt = tdc.map(|a| format!(" (lim {:.0}A)", a)).unwrap_or_default();
+                stat_lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{:<8}", "Current"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(format!("{:.0}A", amps), Style::default().fg(Color::White)),
+                    Span::styled(lim_txt, Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+        }
+
+        // Board power row (full mode only): whole-card input power (tt-smi ≥ 6,
+        // dual-asic p300 boards) — only shown when it differs from asic power.
+        if !compact {
+            if let Some(bw) = telemetry.and_then(|t| t.board_power) {
+                stat_lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{:<8}", "Board"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(format!("{:.0}W", bw), Style::default().fg(Color::White)),
+                    Span::styled(" total", Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+        }
+
+        // PCIe row (full mode only): link geometry from board_info plus live
+        // bandwidth from the kmd counters (sysfs/hybrid backends only).
+        if !compact {
+            let link = match (device.pcie_speed.as_deref(), device.pcie_width) {
+                (Some(gen), Some(w)) => Some(format!("{} x{}", gen, w)),
+                (Some(gen), None) => Some(gen.to_string()),
+                _ => None,
+            };
+            let bw = backend.pcie_bandwidth(idx);
+            if link.is_some() || bw.is_some() {
+                let mut spans = vec![Span::styled(
+                    format!("{:<8}", "PCIe"),
+                    Style::default().fg(Color::DarkGray),
+                )];
+                if let Some(l) = link {
+                    spans.push(Span::styled(l, Style::default().fg(Color::White)));
+                }
+                if let Some(bw) = bw {
+                    use crate::backend::pcie_counters::format_bandwidth;
+                    spans.push(Span::styled(
+                        format!(
+                            " ▼{} ▲{}",
+                            format_bandwidth(bw.rx_bytes_per_sec),
+                            format_bandwidth(bw.tx_bytes_per_sec)
+                        ),
+                        Style::default().fg(Color::Rgb(79, 209, 197)),
+                    ));
+                }
+                stat_lines.push(Line::from(spans));
+            }
+        }
+
+        // GDDR ECC row (full mode only): shown only when any error counter is
+        // non-zero — uncorrectable errors are the headline diagnostic and go red.
+        if !compact {
+            if let Some(s) = smbus {
+                let corr: u32 = s.gddr_corr_errs.iter().flatten().sum();
+                let uncorr = s.gddr_uncorr_errs.unwrap_or(0);
+                if corr > 0 || uncorr > 0 {
+                    let color = if uncorr > 0 {
+                        Color::Rgb(255, 80, 80) // uncorrectable — data corruption risk
+                    } else {
+                        Color::Rgb(244, 196, 113) // correctable only — watch it
+                    };
+                    stat_lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("{:<8}", "ECC"),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::styled(
+                            format!("{} uncorr · {} corr", uncorr, corr),
+                            Style::default().fg(color),
+                        ),
+                    ]));
+                }
+            }
+        }
+
+        // Thermal-trip row (full mode only): lifetime trip counter — any
+        // non-zero value means the card hit hardware thermal shutdown at least
+        // once and deserves attention.
+        if !compact {
+            if let Some(trips) = smbus
+                .and_then(|s| s.therm_trip_count.as_deref())
+                .and_then(crate::models::telemetry::parse_hex_or_dec)
+            {
+                if trips > 0 {
+                    stat_lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("{:<8}", "Trips"),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::styled(
+                            format!("{} thermal", trips),
+                            Style::default().fg(Color::Rgb(255, 80, 80)),
+                        ),
+                    ]));
+                }
+            }
+        }
+
         // Firmware row — shown in both full and compact mode.
         {
             let fw_ver = device
