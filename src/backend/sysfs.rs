@@ -60,6 +60,10 @@ pub struct SysfsBackend {
     /// Cached valid sensor file paths per device — populated in init().
     sensor_paths: HashMap<usize, SensorPaths>,
 
+    /// tt-kmd class-attribute dir per device (tt_aiclk, tt_heartbeat,
+    /// pcie_perf_counters/, …). Absent on kmd < 2.7.
+    tt_class_dirs: HashMap<usize, PathBuf>,
+
     /// Cached telemetry data (per device index)
     telemetry_cache: HashMap<usize, Telemetry>,
 }
@@ -77,6 +81,7 @@ impl SysfsBackend {
             devices: Vec::new(),
             hwmon_paths: HashMap::new(),
             sensor_paths: HashMap::new(),
+            tt_class_dirs: HashMap::new(),
             telemetry_cache: HashMap::new(),
         }
     }
@@ -93,6 +98,7 @@ impl SysfsBackend {
         self.devices.clear();
         self.hwmon_paths.clear();
         self.sensor_paths.clear();
+        self.tt_class_dirs.clear();
         self.telemetry_cache.clear();
 
         let hwmon_base = Path::new("/sys/class/hwmon");
@@ -291,6 +297,34 @@ impl SysfsBackend {
             .and_then(|s| s.trim().parse::<u64>().ok())
     }
 
+    /// Locate the tt-kmd class-attribute directory for a hwmon device.
+    ///
+    /// tt-kmd registers a second sysfs surface alongside hwmon:
+    /// `/sys/class/tenstorrent/tenstorrent!N/` with `tt_aiclk`, `tt_heartbeat`,
+    /// `tt_card_type`, `pcie_perf_counters/`, … . It lives under the SAME PCI
+    /// device dir the hwmon `device` symlink points at, as
+    /// `<pci-dir>/tenstorrent/<single subdir>`. Resolving through the PCI dir
+    /// (rather than globbing /sys/class/tenstorrent) pins the hwmon↔class-dev
+    /// correlation to the same physical card. None on kmd < 2.7 (attrs absent).
+    fn find_tt_class_dir(hwmon_path: &Path) -> Option<PathBuf> {
+        let pci_dir = fs::canonicalize(hwmon_path.join("device")).ok()?;
+        let tt_parent = pci_dir.join("tenstorrent");
+        let mut entries = fs::read_dir(&tt_parent).ok()?;
+        // Exactly one tenstorrent!N subdir exists per PCI function.
+        entries.find_map(|e| {
+            let p = e.ok()?.path();
+            p.is_dir().then_some(p)
+        })
+    }
+
+    /// Read a trimmed string attribute (e.g. tt_card_type = "p300c\n" → "p300c").
+    /// None for missing/empty files.
+    fn read_string_attr(dir: &Path, name: &str) -> Option<String> {
+        let s = fs::read_to_string(dir.join(name)).ok()?;
+        let s = s.trim();
+        (!s.is_empty()).then(|| s.to_string())
+    }
+
     /// Read the hwmon `*_max` limit files into a DeviceLimits.
     ///
     /// tt-kmd ≥ 2.9.0 exposes firmware-provided limits on Blackhole too:
@@ -379,14 +413,49 @@ impl SysfsBackend {
 impl TelemetryBackend for SysfsBackend {
     fn init(&mut self) -> BackendResult<()> {
         self.detect_devices()?;
-        // Attempt to replace generic arch names (e.g. "blackhole") with real
-        // board SKUs (e.g. "p300c") using a one-shot tt-smi -s call.
-        self.try_enrich_board_types_from_tt_smi();
         // Cache valid sensor paths so update() never retries missing indices.
         for (device_idx, hwmon_path) in &self.hwmon_paths {
             let paths = Self::discover_sensor_paths(hwmon_path);
             self.sensor_paths.insert(*device_idx, paths);
         }
+
+        // Discover the tt-kmd class-attribute dirs and use their static attrs
+        // for device enrichment (no subprocess needed).
+        let mut all_have_card_type = !self.devices.is_empty();
+        for device in &mut self.devices {
+            let Some(hwmon_path) = self.hwmon_paths.get(&device.index) else {
+                all_have_card_type = false;
+                continue;
+            };
+            let Some(tt_dir) = Self::find_tt_class_dir(hwmon_path) else {
+                all_have_card_type = false;
+                continue;
+            };
+            // Board SKU straight from the driver (tt_card_type = "p300c") —
+            // supersedes the generic hwmon arch name AND the tt-smi probe.
+            if let Some(card) = Self::read_string_attr(&tt_dir, "tt_card_type") {
+                device.board_type = card;
+            } else {
+                all_have_card_type = false;
+            }
+            // FW bundle version → same Device.firmwares slot the JSON limits
+            // block fills, so the Insights FW row works in sysfs-only mode.
+            if device.firmwares.is_none() {
+                if let Some(fw) = Self::read_string_attr(&tt_dir, "tt_fw_bundle_ver") {
+                    device.firmwares = Some(crate::models::telemetry::FirmwaresInfo {
+                        fw_bundle_version: Some(fw),
+                        ..Default::default()
+                    });
+                }
+            }
+            self.tt_class_dirs.insert(device.index, tt_dir);
+        }
+        if !all_have_card_type {
+            // Older kmd without tt_card_type — fall back to the bounded
+            // tt-smi -s probe (unchanged behavior).
+            self.try_enrich_board_types_from_tt_smi();
+        }
+
         Ok(())
     }
 
@@ -623,5 +692,58 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         stdfs::write(td.path().join("name"), "blackhole").unwrap();
         assert!(SysfsBackend::read_hwmon_limits(td.path()).is_none());
+    }
+
+    /// Build the tenstorrent class-attribute dir the way tt-kmd lays it out:
+    /// <pci-dir>/tenstorrent/tenstorrent!0/tt_* — reached from a hwmon dir via
+    /// its `device` symlink.
+    fn fake_tt_class(hwmon_dir: &Path) -> PathBuf {
+        let pci_dir = hwmon_dir.parent().unwrap().join("pcidev");
+        let tt_dir = pci_dir.join("tenstorrent").join("tenstorrent!0");
+        stdfs::create_dir_all(&tt_dir).unwrap();
+        std::os::unix::fs::symlink(&pci_dir, hwmon_dir.join("device")).unwrap();
+        for (f, v) in [
+            ("tt_card_type", "p300c"),
+            ("tt_serial", "0000046131924062"),
+            ("tt_fw_bundle_ver", "19.11.0.0"),
+            ("tt_aiclk", "800"),
+            ("tt_axiclk", "960"),
+            ("tt_arcclk", "800"),
+            ("tt_heartbeat", "43874"),
+            ("tt_therm_trip_count", "0"),
+        ] {
+            stdfs::write(tt_dir.join(f), format!("{}\n", v)).unwrap();
+        }
+        tt_dir
+    }
+
+    #[test]
+    fn find_tt_class_dir_via_device_symlink() {
+        let td = tempfile::tempdir().unwrap();
+        let hwmon = td.path().join("hwmon2");
+        stdfs::create_dir_all(&hwmon).unwrap();
+        fake_hwmon(&hwmon);
+        let expected = fake_tt_class(&hwmon);
+        assert_eq!(SysfsBackend::find_tt_class_dir(&hwmon), Some(expected));
+    }
+
+    #[test]
+    fn find_tt_class_dir_absent_returns_none() {
+        let td = tempfile::tempdir().unwrap();
+        let hwmon = td.path().join("hwmon2");
+        stdfs::create_dir_all(&hwmon).unwrap();
+        fake_hwmon(&hwmon); // no device symlink at all
+        assert_eq!(SysfsBackend::find_tt_class_dir(&hwmon), None);
+    }
+
+    #[test]
+    fn read_string_attr_trims() {
+        let td = tempfile::tempdir().unwrap();
+        stdfs::write(td.path().join("tt_card_type"), "p300c\n").unwrap();
+        assert_eq!(
+            SysfsBackend::read_string_attr(td.path(), "tt_card_type"),
+            Some("p300c".to_string())
+        );
+        assert_eq!(SysfsBackend::read_string_attr(td.path(), "tt_missing"), None);
     }
 }
