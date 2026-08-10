@@ -876,21 +876,41 @@ fn smbus_from_json_fields(smbus_json: SmbusTelemetryJSON) -> SmbusTelemetry {
     }
 }
 
+/// Per-device metadata carried alongside SMBUS telemetry in a [`SnapshotParts`]
+/// — everything `HybridBackend` needs to enrich its sysfs-sourced `Device`s
+/// and telemetry with fields sysfs/hwmon can't see.
+///
+/// `firmwares`/`limits`/`pcie_speed`/`pcie_width` are static-ish device
+/// metadata (copied onto `Device` once per snapshot); `board_power` is a
+/// live *measurement* (tt-smi's whole-card telemetry reading) and gets
+/// overlaid onto `Telemetry` every tick instead — see the two different
+/// call sites in `HybridBackend::update()`.
+///
+/// Replaces a bare `(Option<FirmwaresInfo>, Option<DeviceLimits>)` tuple —
+/// that was already an awkward shape before PCIe link geometry and board
+/// power needed to ride along too; a 5-tuple would have been worse.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DeviceMeta {
+    pub firmwares: Option<crate::models::telemetry::FirmwaresInfo>,
+    pub limits: Option<crate::models::telemetry::DeviceLimits>,
+    /// PCIe generation, pre-formatted as "Gen4" — matches `device_from_json`
+    /// so the hybrid and pure-JSON backends render identical link text.
+    pub pcie_speed: Option<String>,
+    pub pcie_width: Option<u8>,
+    /// Whole-card input power (tt-smi ≥ 6.0.0 `telemetry.board_power`).
+    pub board_power: Option<f32>,
+}
+
 /// Parse result from a single tt-smi JSON snapshot, extracting both SMBUS
-/// telemetry and device metadata (firmwares, limits) in one pass.
+/// telemetry and device metadata (firmwares, limits, PCIe link, board power)
+/// in one pass.
 ///
 /// Used by `HybridBackend`, whose background reader only needs the SMBUS map
-/// plus firmware/limits metadata (it gets its live device list from sysfs).
+/// plus this metadata (it gets its live device list from sysfs).
 /// Distinct from [`ParsedSnapshot`], which carries the full device triad.
 pub(crate) struct SnapshotParts {
     pub smbus: HashMap<usize, SmbusTelemetry>,
-    pub meta: HashMap<
-        usize,
-        (
-            Option<crate::models::telemetry::FirmwaresInfo>,
-            Option<crate::models::telemetry::DeviceLimits>,
-        ),
-    >,
+    pub meta: HashMap<usize, DeviceMeta>,
 }
 
 /// Parse a tt-smi JSON snapshot once and extract both SMBUS telemetry and
@@ -920,8 +940,31 @@ pub(crate) fn parse_snapshot(json_str: &str) -> SnapshotParts {
         let limits = dev.limits.as_ref().and_then(|v| {
             serde_json::from_value::<crate::models::telemetry::DeviceLimits>(v.clone()).ok()
         });
-        if firmwares.is_some() || limits.is_some() {
-            meta_map.insert(idx, (firmwares, limits));
+        // PCIe link info (board_info, tt-smi 5.x): speed is the PCIe
+        // generation number; render as "Gen4" to match tt-smi's own display
+        // and `device_from_json` (the pure-JSON backend's equivalent path),
+        // so hybrid and json render identically.
+        let pcie_speed = dev.pcie_speed.map(|g| format!("Gen{}", g));
+        let pcie_width = dev.pcie_width.and_then(|w| u8::try_from(w).ok());
+        // Whole-card power lives in the telemetry block, not board_info —
+        // `.as_ref()` avoids fighting the `dev.smbus` partial move above.
+        let board_power = dev.telemetry.as_ref().and_then(|t| t.board_power);
+        if firmwares.is_some()
+            || limits.is_some()
+            || pcie_speed.is_some()
+            || pcie_width.is_some()
+            || board_power.is_some()
+        {
+            meta_map.insert(
+                idx,
+                DeviceMeta {
+                    firmwares,
+                    limits,
+                    pcie_speed,
+                    pcie_width,
+                    board_power,
+                },
+            );
         }
     }
     SnapshotParts {
@@ -1239,19 +1282,47 @@ mod tests {
             "eth_live_status should be populated"
         );
         // Meta path (used by HybridBackend, not covered by other tests)
-        let (fw, lim) = snap.meta.get(&0).expect("meta for device 0 missing");
-        let fw = fw.as_ref().expect("firmwares should be Some");
+        let meta = snap.meta.get(&0).expect("meta for device 0 missing");
+        let fw = meta.firmwares.as_ref().expect("firmwares should be Some");
         assert_eq!(
             fw.fw_bundle_version.as_deref(),
             Some("fw_pack-19.9.0"),
             "parse_snapshot fw_bundle_version mismatch"
         );
-        let lim = lim.as_ref().expect("limits should be Some");
+        let lim = meta.limits.as_ref().expect("limits should be Some");
         assert_eq!(
             lim.tdp_limit,
             Some(300.0_f32),
             "parse_snapshot tdp_limit mismatch"
         );
+    }
+
+    /// Regression for the finding that PCIe link geometry and board power
+    /// never reached the Hybrid backend: `parse_snapshot()` — the function
+    /// `HybridBackend`'s reader thread actually calls — must extract
+    /// `pcie_speed`/`pcie_width` (from `board_info`) and `board_power`
+    /// (from `telemetry`) into `DeviceMeta`, formatted identically to the
+    /// pure-JSON path (`device_from_json`'s "Gen4" rendering).
+    #[test]
+    fn parse_snapshot_meta_carries_pcie_link_and_board_power() {
+        let json = r#"{
+            "device_info": [{
+                "board_info": {
+                    "bus_id": "0000:01:00.0", "board_type": "p300c",
+                    "pcie_speed": 4, "pcie_width": "4"
+                },
+                "telemetry": {"power": " 16.0", "board_power": " 42.0"}
+            }]
+        }"#;
+        let snap = parse_snapshot(json);
+        let meta = snap.meta.get(&0).expect("meta for device 0 missing");
+        assert_eq!(
+            meta.pcie_speed.as_deref(),
+            Some("Gen4"),
+            "pcie_speed must be pre-formatted as tt-smi's own \"GenN\" display"
+        );
+        assert_eq!(meta.pcie_width, Some(4));
+        assert_eq!(meta.board_power, Some(42.0));
     }
 
     /// The shared pure parser must yield the full device triad — the exact

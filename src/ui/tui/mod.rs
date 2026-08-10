@@ -5275,6 +5275,60 @@ fn render_fleet_heatmap_panel(
     f.render_widget(widget, area);
 }
 
+/// Pure assembly of the Insights sidebar's PCIe row(s): link geometry (e.g.
+/// "Gen4 x16", from board_info) and/or live bandwidth (e.g. "▼1.23 GB/s
+/// ▲340 MB/s", from the kmd counters). Split out from rendering so the
+/// width-budget decision below is unit-testable without a terminal.
+///
+/// The full-mode sidebar's content width is 30 cols; the label column is 8
+/// (`format!("{:<8}", "PCIe")`), leaving 22 for content on a labeled row.
+/// Link geometry alone (worst realistic case "Gen5 x16", 8 cols) and
+/// bandwidth alone (worst realistic case "▼999 MB/s ▲999 MB/s", ~20 cols)
+/// each fit that 22-col budget solo — but concatenated on one row they don't
+/// (e.g. "Gen4 x16 ▼1.23 GB/s ▲1.23 GB/s" is 30 cols of content alone,
+/// 38 total with the label — a hard overflow that used to truncate mid-number).
+///
+/// So: when both are present, they're split across two lines — link on the
+/// labeled row, bandwidth on an unlabeled continuation row indented to the
+/// label-column width (8 spaces) instead of repeating "PCIe". That gives the
+/// continuation row the *full* 30-col budget instead of sharing 22 with the
+/// link text; worst case "▼1.23 GB/s ▲1.23 GB/s" content is well under it
+/// (see `pcie_row_parts_worst_case_fits_budget` below). When only one piece
+/// of data is present, it stays alone on the single labeled row exactly as
+/// before — no continuation line is emitted.
+///
+/// Returns one entry per row to render, as `(is_continuation, content,
+/// is_bandwidth)`:
+/// - `is_continuation`: render an 8-space indent instead of the "PCIe" label.
+/// - `is_bandwidth`: render in the teal accent color instead of white — lets
+///   the render site style link geometry and bandwidth differently without
+///   this helper knowing anything about `ratatui`.
+fn pcie_row_parts(
+    link: Option<String>,
+    bw: Option<crate::backend::pcie_counters::PcieBandwidth>,
+) -> Vec<(bool, String, bool)> {
+    use crate::backend::pcie_counters::format_bandwidth;
+    let bw_text = bw.map(|b| {
+        format!(
+            "▼{} ▲{}",
+            format_bandwidth(b.rx_bytes_per_sec),
+            format_bandwidth(b.tx_bytes_per_sec)
+        )
+    });
+    match (link, bw_text) {
+        // Both present: split across two rows (see doc comment above).
+        (Some(l), Some(b)) => vec![(false, l, false), (true, b, true)],
+        // Link only: single labeled row, unchanged from before this fix.
+        (Some(l), None) => vec![(false, l, false)],
+        // Bandwidth only: single labeled row. The leading space keeps the
+        // same visual gap after the "PCIe" label that the link-present case
+        // gets naturally from the space between link text and "▼".
+        (None, Some(b)) => vec![(false, format!(" {}", b), true)],
+        // Neither present: no row at all.
+        (None, None) => vec![],
+    }
+}
+
 /// Render Insights device panels — one per device, each with a chip portrait on the
 /// left and a stats sidebar on the right.
 ///
@@ -5795,6 +5849,12 @@ fn render_device_panels(
 
         // PCIe row (full mode only): link geometry from board_info plus live
         // bandwidth from the kmd counters (sysfs/hybrid backends only).
+        //
+        // Link geometry and bandwidth together can overflow the 30-col
+        // sidebar content width (e.g. "Gen4 x16 ▼1.23 GB/s ▲1.23 GB/s" is
+        // well past budget after the 8-col label), so `pcie_row_parts` — a
+        // pure, unit-tested helper — decides whether they share one row or
+        // split across two; see its doc comment for the exact width math.
         if !compact {
             let link = match (device.pcie_speed.as_deref(), device.pcie_width) {
                 (Some(gen), Some(w)) => Some(format!("{} x{}", gen, w)),
@@ -5802,26 +5862,26 @@ fn render_device_panels(
                 _ => None,
             };
             let bw = backend.pcie_bandwidth(idx);
-            if link.is_some() || bw.is_some() {
-                let mut spans = vec![Span::styled(
-                    format!("{:<8}", "PCIe"),
-                    Style::default().fg(Color::DarkGray),
-                )];
-                if let Some(l) = link {
-                    spans.push(Span::styled(l, Style::default().fg(Color::White)));
-                }
-                if let Some(bw) = bw {
-                    use crate::backend::pcie_counters::format_bandwidth;
-                    spans.push(Span::styled(
-                        format!(
-                            " ▼{} ▲{}",
-                            format_bandwidth(bw.rx_bytes_per_sec),
-                            format_bandwidth(bw.tx_bytes_per_sec)
-                        ),
-                        Style::default().fg(Color::Rgb(79, 209, 197)),
-                    ));
-                }
-                stat_lines.push(Line::from(spans));
+            for (continuation, content, is_bandwidth) in pcie_row_parts(link, bw) {
+                let label = if continuation {
+                    // Indent to the label-column width instead of repeating
+                    // "PCIe" — this is a continuation of the row above.
+                    Span::raw(" ".repeat(8))
+                } else {
+                    Span::styled(
+                        format!("{:<8}", "PCIe"),
+                        Style::default().fg(Color::DarkGray),
+                    )
+                };
+                let value_color = if is_bandwidth {
+                    Color::Rgb(79, 209, 197)
+                } else {
+                    Color::White
+                };
+                stat_lines.push(Line::from(vec![
+                    label,
+                    Span::styled(content, Style::default().fg(value_color)),
+                ]));
             }
         }
 
@@ -6526,6 +6586,102 @@ mod tests {
         let (stats_w, _, cols_per_row) = panel_layout(9, BH_PORTRAIT_W, 160);
         assert_eq!(stats_w, 31);
         assert_eq!(cols_per_row, 3, "9 chips → 3×3 grid");
+    }
+}
+
+/// Tests for `pcie_row_parts` — the pure width-budget decision behind the
+/// Insights sidebar's PCIe row(s). Fixes a real overflow: the previous
+/// single-row layout truncated mid-number once both link geometry and live
+/// bandwidth were populated (which the companion hybrid-backend fix in this
+/// same change makes the common case, not a rare one).
+#[cfg(test)]
+mod pcie_row_parts_tests {
+    use super::pcie_row_parts;
+    use crate::backend::pcie_counters::PcieBandwidth;
+    use unicode_width::UnicodeWidthStr;
+
+    /// Full-mode sidebar content width; the label column reserves 8 of it.
+    const CONTENT_W: usize = 30;
+    const LABEL_W: usize = 8;
+
+    #[test]
+    fn neither_present_yields_no_rows() {
+        assert_eq!(pcie_row_parts(None, None), Vec::new());
+    }
+
+    #[test]
+    fn link_only_stays_on_one_labeled_row() {
+        let rows = pcie_row_parts(Some("Gen4 x4".to_string()), None);
+        assert_eq!(rows, vec![(false, "Gen4 x4".to_string(), false)]);
+    }
+
+    #[test]
+    fn bandwidth_only_stays_on_one_labeled_row() {
+        let bw = PcieBandwidth {
+            rx_bytes_per_sec: 590.0,
+            tx_bytes_per_sec: 1400.0,
+        };
+        let rows = pcie_row_parts(None, Some(bw));
+        assert_eq!(rows.len(), 1);
+        let (continuation, content, is_bandwidth) = &rows[0];
+        assert!(!continuation);
+        assert!(is_bandwidth);
+        assert_eq!(content, " ▼590 B/s ▲1.4 kB/s");
+    }
+
+    #[test]
+    fn both_present_split_into_link_row_and_continuation_row() {
+        let bw = PcieBandwidth {
+            rx_bytes_per_sec: 1_230_000_000.0,
+            tx_bytes_per_sec: 1_230_000_000.0,
+        };
+        let rows = pcie_row_parts(Some("Gen4 x16".to_string()), Some(bw));
+        assert_eq!(
+            rows,
+            vec![
+                (false, "Gen4 x16".to_string(), false),
+                (true, "▼1.23 GB/s ▲1.23 GB/s".to_string(), true),
+            ],
+            "both present must split: link on the labeled row, bandwidth on \
+             an indented continuation row — sharing one row overflows (see \
+             pcie_row_parts_worst_case_fits_budget)"
+        );
+    }
+
+    /// The regression this whole fix is about: at Task 8's original single-row
+    /// width, "Gen4 x16 ▼1.23 GB/s ▲1.23 GB/s" silently overflowed the 30-col
+    /// sidebar and got clipped mid-number. Verify the two-row split actually
+    /// fits — every row's rendered width (label/indent + content) must be
+    /// <= the 30-col content budget, using worst-case realistic inputs
+    /// (max lane width "Gen4 x16" + the fixture bandwidth in both directions).
+    #[test]
+    fn pcie_row_parts_worst_case_fits_budget() {
+        let bw = PcieBandwidth {
+            rx_bytes_per_sec: 1_230_000_000.0,
+            tx_bytes_per_sec: 1_230_000_000.0,
+        };
+        let rows = pcie_row_parts(Some("Gen4 x16".to_string()), Some(bw));
+        assert_eq!(rows.len(), 2, "worst case must produce the two-row split");
+        for (continuation, content, _) in &rows {
+            // Every row — labeled ("PCIe    ") or continuation (8 spaces) —
+            // reserves the same 8-col prefix before its content.
+            let total_w = LABEL_W + UnicodeWidthStr::width(content.as_str());
+            assert!(
+                total_w <= CONTENT_W,
+                "row {:?} (continuation={continuation}) is {total_w} display \
+                 cols, over the {CONTENT_W}-col sidebar budget",
+                content
+            );
+        }
+        // The continuation row specifically must fit within 22 cols of
+        // content on top of the 8-col indent, per the width math in
+        // `pcie_row_parts`'s doc comment.
+        let (_, bw_content, _) = &rows[1];
+        assert!(
+            UnicodeWidthStr::width(bw_content.as_str()) <= 22,
+            "bandwidth continuation content {:?} exceeds the 22-col budget",
+            bw_content
+        );
     }
 }
 

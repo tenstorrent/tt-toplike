@@ -73,19 +73,11 @@ pub struct HybridBackend {
     /// with a single lock-free atomic operation.
     smbus_shared: Arc<ArcSwap<HashMap<usize, SmbusTelemetry>>>,
 
-    /// Per-device firmware + limits metadata from the same JSON snapshot.
-    /// Populated by the reader thread; update() copies it into sysfs devices.
-    device_meta_shared: Arc<
-        ArcSwap<
-            HashMap<
-                usize,
-                (
-                    Option<crate::models::telemetry::FirmwaresInfo>,
-                    Option<crate::models::telemetry::DeviceLimits>,
-                ),
-            >,
-        >,
-    >,
+    /// Per-device metadata (firmwares, limits, PCIe link, board power) from
+    /// the same JSON snapshot. Populated by the reader thread; `update()`
+    /// copies the static fields into sysfs devices and overlays the
+    /// measurement field (`board_power`) onto telemetry every tick.
+    device_meta_shared: Arc<ArcSwap<HashMap<usize, json::DeviceMeta>>>,
 
     /// The render thread's private view of the latest background snapshot.
     /// Updated via `Arc::clone()` — one atomic ref-count increment, zero
@@ -133,15 +125,7 @@ impl HybridBackend {
     /// Create a new Hybrid backend with explicit configuration.
     pub fn with_config(tt_smi_path: impl Into<String>, _config: BackendConfig) -> Self {
         let empty: Arc<HashMap<usize, SmbusTelemetry>> = Arc::new(HashMap::new());
-        let empty_meta: Arc<
-            HashMap<
-                usize,
-                (
-                    Option<crate::models::telemetry::FirmwaresInfo>,
-                    Option<crate::models::telemetry::DeviceLimits>,
-                ),
-            >,
-        > = Arc::new(HashMap::new());
+        let empty_meta: Arc<HashMap<usize, json::DeviceMeta>> = Arc::new(HashMap::new());
         Self {
             sysfs: SysfsBackend::new(),
             tt_smi_path: tt_smi_path.into(),
@@ -319,23 +303,35 @@ impl TelemetryBackend for HybridBackend {
             self.smbus_ema
                 .retain(|k, _| self.smbus_latest.contains_key(k));
 
-            // Enrich sysfs device list with firmwares/limits from JSON snapshot.
-            // Always overwrite (not just when None) so a firmware upgrade applied
-            // while the tool is running is reflected without restarting.
+            // Enrich sysfs device list with firmwares/limits/PCIe link from the
+            // JSON snapshot. Always overwrite (not just when None) so a firmware
+            // upgrade or hot-plugged link renegotiation applied while the tool
+            // is running is reflected without restarting.
             //
             // Note: device_meta_shared is only stored when the snapshot contains
             // non-empty meta (reader thread, line above). If a degraded snapshot
-            // omits the firmwares block, the previously stored values are retained
-            // rather than reverting to None — intentional, since firmware versions
-            // don't regress and a momentary ARC issue shouldn't blank the FW row.
+            // omits a field, the previously stored value is retained rather than
+            // reverting to None — intentional, since firmware versions and PCIe
+            // link geometry don't regress and a momentary ARC issue shouldn't
+            // blank these rows.
+            //
+            // `board_power` is deliberately NOT copied here — it's a live
+            // measurement, not static metadata, and is overlaid onto telemetry
+            // every tick below instead (see the TDP/TDC overlay).
             let meta = self.device_meta_shared.load_full();
             for device in self.sysfs.devices_mut() {
-                if let Some((fw, lim)) = meta.get(&device.index) {
-                    if fw.is_some() {
-                        device.firmwares = fw.clone();
+                if let Some(dm) = meta.get(&device.index) {
+                    if dm.firmwares.is_some() {
+                        device.firmwares = dm.firmwares.clone();
                     }
-                    if lim.is_some() {
-                        device.limits = lim.clone();
+                    if dm.limits.is_some() {
+                        device.limits = dm.limits.clone();
+                    }
+                    if dm.pcie_speed.is_some() {
+                        device.pcie_speed = dm.pcie_speed.clone();
+                    }
+                    if dm.pcie_width.is_some() {
+                        device.pcie_width = dm.pcie_width;
                     }
                 }
             }
@@ -358,7 +354,7 @@ impl TelemetryBackend for HybridBackend {
             smbus_smooth::apply_ema(&mut self.smbus_ema, *idx, target, existing);
         }
 
-        // ── Overlay SMBUS TDP/TDC onto sysfs telemetry ───────────────────────
+        // ── Overlay SMBUS TDP/TDC + whole-card board power onto sysfs telemetry ──
         //
         // The hwmon driver exposes only the Tensix VDD rail via power1_input.
         // On Blackhole (and newer firmwares) the firmware-reported TDP register
@@ -373,6 +369,20 @@ impl TelemetryBackend for HybridBackend {
                 }
                 if let Some(a) = smbus.tdc_amperes() {
                     telem.current = Some(a);
+                }
+            }
+        }
+        // board_power comes from tt-smi's `telemetry` block (not SMBUS), and
+        // — unlike firmwares/limits/pcie link above — is a per-tick
+        // measurement rather than static metadata, so it's applied here,
+        // every tick, in lockstep with the TDP/TDC overlay, instead of only
+        // when the SMBUS generation advances. A cheap lock-free ArcSwap load;
+        // safe to repeat every frame.
+        let meta_for_power = self.device_meta_shared.load_full();
+        for (idx, dm) in meta_for_power.iter() {
+            if let Some(bp) = dm.board_power {
+                if let Some(telem) = self.sysfs.telemetry_cache_mut(*idx) {
+                    telem.board_power = Some(bp);
                 }
             }
         }
@@ -406,7 +416,10 @@ impl TelemetryBackend for HybridBackend {
         self.last_raw.lock().ok().and_then(|g| g.clone())
     }
 
-    fn pcie_bandwidth(&self, device_idx: usize) -> Option<crate::backend::pcie_counters::PcieBandwidth> {
+    fn pcie_bandwidth(
+        &self,
+        device_idx: usize,
+    ) -> Option<crate::backend::pcie_counters::PcieBandwidth> {
         self.sysfs.pcie_bandwidth(device_idx)
     }
 }
