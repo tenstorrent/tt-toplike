@@ -13,6 +13,6 @@ pub mod telemetry;
 // Re-export commonly used types
 pub use device::{Architecture, Device};
 pub use telemetry::{
-    tensix_col_harvested, unpack_gddr_temps, DeviceLimits, FirmwaresInfo, GddrTempPair,
-    SmbusTelemetry, Telemetry, BH_TENSIX_COL_COUNT,
+    tensix_col_harvested, unpack_gddr_temps, DeviceLimits, DeviceProcess, FirmwaresInfo,
+    GddrTempPair, SmbusTelemetry, Telemetry, BH_TENSIX_COL_COUNT,
 };

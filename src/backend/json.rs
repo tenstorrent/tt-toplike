@@ -153,6 +153,11 @@ struct TelemetryJSON {
     pub aiclk: Option<u32>,
     #[serde(default, deserialize_with = "de_opt_u32_str")]
     pub heartbeat: Option<u32>,
+    /// Total board input power in watts (tt-smi ≥ 6.0.0). See
+    /// [`Telemetry::board_power`](crate::models::Telemetry) for the
+    /// per-asic-vs-whole-board distinction.
+    #[serde(default, deserialize_with = "de_opt_f32_str")]
+    pub board_power: Option<f32>,
 }
 
 /// SMBUS telemetry JSON structure — matches actual tt-smi SCREAMING_SNAKE_CASE key names.
@@ -286,6 +291,10 @@ pub struct JSONBackend {
     /// SMBUS telemetry for each device
     smbus_telemetry: HashMap<usize, SmbusTelemetry>,
 
+    /// Top-level per-device process attribution (tt-smi ≥ 6.0.0 `processes[]`).
+    /// Empty for older tt-smi snapshots that predate the field.
+    processes: Vec<crate::models::DeviceProcess>,
+
     /// Configuration
     config: BackendConfig,
 
@@ -325,6 +334,7 @@ impl JSONBackend {
             devices: Vec::new(),
             telemetry: HashMap::new(),
             smbus_telemetry: HashMap::new(),
+            processes: Vec::new(),
             config: BackendConfig::default(),
             last_update: Instant::now(),
             error_count: 0,
@@ -340,6 +350,7 @@ impl JSONBackend {
             devices: Vec::new(),
             telemetry: HashMap::new(),
             smbus_telemetry: HashMap::new(),
+            processes: Vec::new(),
             config,
             last_update: Instant::now(),
             error_count: 0,
@@ -388,11 +399,12 @@ impl JSONBackend {
     ///
     /// Thin instance-method wrapper around the pure free function
     /// [`parse_json_devices`] so existing white-box tests that call
-    /// `backend.parse_json(..)` keep working unchanged. Test-only: the runtime
+    /// `backend.parse_json(..)` keep working unchanged (they don't care about
+    /// process attribution, so it's discarded here). Test-only: the runtime
     /// paths (`init`/`update`) call `parse_tt_smi_snapshot` directly.
     #[cfg(test)]
     fn parse_json(&self, json_str: &str) -> BackendResult<Vec<TTSMIDeviceJSON>> {
-        parse_json_devices(json_str)
+        parse_json_devices(json_str).map(|(devices, _processes)| devices)
     }
 
     /// Test-only: expose update_from_json for white-box testing.
@@ -428,6 +440,14 @@ impl JSONBackend {
         for (idx, smbus) in parsed.smbus {
             self.smbus_telemetry.insert(idx, smbus);
         }
+        // Unlike telemetry/smbus (keyed maps merged per-device), `processes[]`
+        // is a whole-system snapshot each tick — replace wholesale rather than
+        // accumulate, so an exited process doesn't linger forever. A snapshot
+        // shape that predates the field parses to an empty Vec, which would
+        // otherwise wipe a previously-seen process list on a single old-format
+        // frame; in practice this never happens mid-stream (the tt-smi version
+        // is fixed for the process's lifetime), so this stays a plain replace.
+        self.processes = parsed.processes;
     }
 
     /// Parse a raw `tt-smi -s` output string, merge it into cached state, and —
@@ -466,18 +486,27 @@ impl JSONBackend {
     }
 }
 
-/// Pure parse of tt-smi snapshot JSON into the intermediate device list.
+/// Pure parse of tt-smi snapshot JSON into the intermediate device list, plus
+/// any top-level per-device process attribution (tt-smi ≥ 6.0.0 `processes[]`).
 ///
 /// Supports every format `tt-smi` (and its legacy variants) can emit:
-/// - modern snapshot: `{"device_info": [ {board_info, telemetry, smbus_telem, ..} ]}`
+/// - modern snapshot: `{"device_info": [ {board_info, telemetry, smbus_telem, ..} ], "processes": [..]}`
 /// - legacy array:     `[{device1}, {device2}]`
 /// - legacy wrapper:   `{"devices": [..]}`
 /// - single device:    `{device}`
-fn parse_json_devices(json_str: &str) -> BackendResult<Vec<TTSMIDeviceJSON>> {
+///
+/// Only the modern snapshot shape carries `processes[]` — every legacy branch
+/// returns an empty process list (those tt-smi versions predate the field).
+fn parse_json_devices(
+    json_str: &str,
+) -> BackendResult<(Vec<TTSMIDeviceJSON>, Vec<crate::models::DeviceProcess>)> {
     // Try to parse as tt-smi snapshot format with "device_info" key (modern format)
     #[derive(Deserialize)]
     struct TTSMISnapshot {
         device_info: Option<Vec<TTSMIDeviceRaw>>,
+        /// tt-smi ≥ 6.0.0: top-level per-device process attribution.
+        #[serde(default)]
+        processes: Option<Vec<crate::models::DeviceProcess>>,
     }
 
     if let Ok(snapshot) = serde_json::from_str::<TTSMISnapshot>(json_str) {
@@ -502,13 +531,13 @@ fn parse_json_devices(json_str: &str) -> BackendResult<Vec<TTSMIDeviceJSON>> {
                     }
                 })
                 .collect();
-            return Ok(devices);
+            return Ok((devices, snapshot.processes.unwrap_or_default()));
         }
     }
 
     // Try to parse as array of devices (legacy format)
     if let Ok(devices) = serde_json::from_str::<Vec<TTSMIDeviceJSON>>(json_str) {
-        return Ok(devices);
+        return Ok((devices, Vec::new()));
     }
 
     // Try to parse as object with "devices" key (legacy format)
@@ -519,13 +548,13 @@ fn parse_json_devices(json_str: &str) -> BackendResult<Vec<TTSMIDeviceJSON>> {
 
     if let Ok(wrapper) = serde_json::from_str::<Wrapper>(json_str) {
         if let Some(devices) = wrapper.devices {
-            return Ok(devices);
+            return Ok((devices, Vec::new()));
         }
     }
 
     // Try to parse as single device (last resort, as it's most permissive)
     if let Ok(device) = serde_json::from_str::<TTSMIDeviceJSON>(json_str) {
-        return Ok(vec![device]);
+        return Ok((vec![device], Vec::new()));
     }
 
     // Truncate for the error message by *characters*, not bytes: `json_str`
@@ -584,6 +613,7 @@ fn telemetry_from_json(telem_json: &TelemetryJSON) -> Telemetry {
         aiclk: telem_json.aiclk,
         heartbeat: telem_json.heartbeat,
         timestamp: Utc::now(),
+        board_power: telem_json.board_power,
     }
 }
 
@@ -599,9 +629,17 @@ pub(crate) struct ParsedSnapshot {
     pub telemetry: HashMap<usize, Telemetry>,
     /// Per-device SMBUS telemetry (only present devices are keyed).
     pub smbus: HashMap<usize, SmbusTelemetry>,
+    /// Top-level per-device process attribution (tt-smi ≥ 6.0.0 `processes[]`).
+    /// Empty for snapshot shapes that predate the field.
+    pub processes: Vec<crate::models::DeviceProcess>,
 }
 
 /// Build a `ParsedSnapshot` from an already-parsed intermediate device list.
+///
+/// `processes[]` is a top-level sibling of `device_info` in the snapshot, not
+/// something derived from the per-device list, so this always yields an empty
+/// process list — `parse_tt_smi_snapshot` fills it in from what
+/// `parse_json_devices` returned alongside the device list.
 fn parsed_from_json_devices(json_devices: Vec<TTSMIDeviceJSON>) -> ParsedSnapshot {
     let mut devices = Vec::with_capacity(json_devices.len());
     let mut telemetry = HashMap::new();
@@ -622,19 +660,24 @@ fn parsed_from_json_devices(json_devices: Vec<TTSMIDeviceJSON>) -> ParsedSnapsho
         devices,
         telemetry,
         smbus,
+        processes: Vec::new(),
     }
 }
 
 /// Pure parsing entry point: verbatim `tt-smi -s` stdout → the `Device` /
-/// `Telemetry` / `SmbusTelemetry` triad every backend serves.
+/// `Telemetry` / `SmbusTelemetry` triad (plus top-level `processes[]`) every
+/// backend serves.
 ///
 /// This is the single shared parser. `JSONBackend` feeds it the stdout of the
 /// `tt-smi` subprocess; `WsBackend` feeds it each WebSocket frame (which is,
 /// by contract, that same verbatim stdout). Returns a `ParseError` if none of
 /// the supported JSON shapes match.
 pub(crate) fn parse_tt_smi_snapshot(json_str: &str) -> BackendResult<ParsedSnapshot> {
-    let json_devices = parse_json_devices(json_str)?;
-    Ok(parsed_from_json_devices(json_devices))
+    let (json_devices, processes) = parse_json_devices(json_str)?;
+    Ok(ParsedSnapshot {
+        processes,
+        ..parsed_from_json_devices(json_devices)
+    })
 }
 
 impl TelemetryBackend for JSONBackend {
@@ -703,6 +746,10 @@ impl TelemetryBackend for JSONBackend {
 
     fn snapshot_json(&self) -> Option<String> {
         self.last_raw.clone()
+    }
+
+    fn device_processes(&self) -> &[crate::models::DeviceProcess] {
+        &self.processes
     }
 }
 
@@ -850,7 +897,7 @@ pub(crate) struct SnapshotParts {
 /// device metadata.  Replaces the previous two-function pattern that parsed
 /// the same JSON document twice per background poll cycle.
 pub(crate) fn parse_snapshot(json_str: &str) -> SnapshotParts {
-    let devices = match parse_json_devices(json_str) {
+    let (devices, _processes) = match parse_json_devices(json_str) {
         Ok(d) => d,
         Err(e) => {
             log::debug!("parse_snapshot: parse error: {}", e);
@@ -1352,5 +1399,38 @@ mod tests {
         let err = parse_json_devices(&junk).expect_err("garbage must fail to parse");
         // Message is produced without panicking and carries the char-truncated tail.
         assert!(matches!(err, BackendError::ParseError(_)));
+    }
+
+    #[test]
+    fn tt_smi_6_processes_and_board_power_parse() {
+        let json = r#"{
+            "time": "2026-08-10T15:00:00",
+            "processes": [
+                {"pid": 4242, "user": "ttuser", "device": 0, "cmdline": "python -m vllm serve"},
+                {"pid": 4243, "device": 1}
+            ],
+            "device_info": [{
+                "board_info": {"bus_id": "0000:01:00.0", "board_type": "p300c"},
+                "telemetry": {"power": " 16.0", "board_power": " 42.0"}
+            }]
+        }"#;
+        let parsed = parse_tt_smi_snapshot(json).unwrap();
+        assert_eq!(parsed.processes.len(), 2);
+        assert_eq!(parsed.processes[0].pid, Some(4242));
+        assert_eq!(
+            parsed.processes[0].cmdline.as_deref(),
+            Some("python -m vllm serve")
+        );
+        assert_eq!(parsed.processes[1].user, None); // exclude_none omits fields
+        let t = parsed.telemetry.get(&0).unwrap();
+        assert_eq!(t.power, Some(16.0));
+        assert_eq!(t.board_power, Some(42.0));
+    }
+
+    #[test]
+    fn snapshots_without_processes_parse_as_empty() {
+        let json = r#"{"device_info": [{"board_info": {"bus_id": "x", "board_type": "p150a"}}]}"#;
+        let parsed = parse_tt_smi_snapshot(json).unwrap();
+        assert!(parsed.processes.is_empty());
     }
 }

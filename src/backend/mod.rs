@@ -291,6 +291,13 @@ pub trait TelemetryBackend: Send + Sync {
         None
     }
 
+    /// Per-device process attribution from the telemetry source, when the
+    /// source provides it (tt-smi ≥ 6.0.0 snapshot `processes[]`). Backends
+    /// without process data inherit the empty default.
+    fn device_processes(&self) -> &[crate::models::DeviceProcess] {
+        &[]
+    }
+
     /// Decoded remote process list from the `tt_toplike` frame extension, if
     /// this backend is streaming one.
     ///
@@ -416,6 +423,13 @@ impl TelemetryBackend for Box<dyn TelemetryBackend> {
 
     fn pcie_bandwidth(&self, device_idx: usize) -> Option<crate::backend::pcie_counters::PcieBandwidth> {
         (**self).pcie_bandwidth(device_idx)
+    }
+
+    fn device_processes(&self) -> &[crate::models::DeviceProcess] {
+        // Same rationale as `snapshot_json`/`pcie_bandwidth` above: without an
+        // explicit forward, the boxed concrete backend's (JSONBackend's)
+        // override would never be reached through `Box<dyn TelemetryBackend>`.
+        (**self).device_processes()
     }
 
     // Same rationale as `snapshot_json` above: without an explicit forward,

@@ -37,6 +37,15 @@ pub struct Telemetry {
     /// Timestamp when telemetry was captured
     #[serde(default = "chrono::Utc::now")]
     pub timestamp: DateTime<Utc>,
+
+    /// Total board input power in watts (tt-smi ≥ 6.0.0 `board_power`).
+    /// Distinct from `power`: on dual-asic boards (p300) `power` is this
+    /// asic's TDP measurement while `board_power` covers the whole card.
+    ///
+    /// `#[serde(default)]` keeps this back-compat on the wire (remote frames
+    /// and cached snapshots from older tt-smi/tt-toplike don't carry the key).
+    #[serde(default)]
+    pub board_power: Option<f32>,
 }
 
 impl Telemetry {
@@ -50,6 +59,7 @@ impl Telemetry {
             aiclk: None,
             heartbeat: None,
             timestamp: Utc::now(),
+            board_power: None,
         }
     }
 
@@ -88,6 +98,18 @@ impl Default for Telemetry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// One row of tt-smi ≥ 6.0.0's per-device process attribution
+/// (top-level `processes[]` in the snapshot). All fields optional —
+/// tt-smi serializes with exclude_none.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeviceProcess {
+    pub pid: Option<i64>,
+    pub user: Option<String>,
+    /// Index of the device this process has open.
+    pub device: Option<usize>,
+    pub cmdline: Option<String>,
 }
 
 /// SMBUS telemetry (low-level hardware status)
@@ -570,6 +592,7 @@ mod tests {
             aiclk: Some(1000),
             heartbeat: Some(1),
             timestamp: Utc::now(),
+            board_power: None,
         };
 
         assert!(telem.is_valid());

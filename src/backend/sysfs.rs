@@ -545,6 +545,9 @@ impl TelemetryBackend for SysfsBackend {
                 asic_temperature: temperature,
                 aiclk,
                 heartbeat,
+                // hwmon/tt-kmd doesn't expose a separate whole-board power
+                // rail distinct from the per-asic reading above.
+                board_power: None,
             };
 
             let smbus = Self::synthesize_smbus(tt_dir.map(|p| p.as_path()), paths.fan.as_deref());

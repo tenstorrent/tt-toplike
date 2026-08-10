@@ -192,6 +192,10 @@ impl TelemetryBackend for LuwenBackend {
                             asic_temperature: Some(luwen_telem.asic_temperature() as f32),
                             aiclk: Some(luwen_telem.ai_clk()),
                             heartbeat: Some(luwen_telem.arc0_health),
+                            // The current luwen-if telemetry struct doesn't expose a
+                            // separate whole-board power rail distinct from `power()`
+                            // above (revisit alongside the luwen 0.8.5 migration).
+                            board_power: None,
                         };
 
                         // Map all-smi Telemetry to our SmbusTelemetry model

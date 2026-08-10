@@ -538,6 +538,7 @@ mod tests {
                 aiclk: None,
                 heartbeat: None,
                 timestamp: chrono::Utc::now(),
+                board_power: None,
             },
         );
 

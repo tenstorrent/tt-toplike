@@ -40,7 +40,7 @@ use crate::backend::json::{parse_tt_smi_snapshot, ParsedSnapshot};
 use crate::backend::remote_ext::{parse_extension, RemoteInference, RemoteProc, TtToplikeExt};
 use crate::backend::{BackendConfig, TelemetryBackend};
 use crate::error::{BackendError, BackendResult};
-use crate::models::{Device, SmbusTelemetry, Telemetry};
+use crate::models::{Device, DeviceProcess, SmbusTelemetry, Telemetry};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -104,6 +104,12 @@ pub struct WsBackend {
     telemetry: HashMap<usize, Telemetry>,
     /// Current per-device SMBUS telemetry.
     smbus: HashMap<usize, SmbusTelemetry>,
+    /// Top-level per-device process attribution from the tt-smi snapshot
+    /// (tt-smi ≥ 6.0.0 `processes[]`), replaced wholesale on each applied
+    /// frame — same semantics as `JSONBackend::processes`. Distinct from
+    /// `remote_ext`'s `RemoteProc` list below, which comes from the separate
+    /// `tt_toplike` publisher extension, not raw tt-smi output.
+    processes: Vec<DeviceProcess>,
     /// Decoded `tt_toplike` extension (processes + inference) from the latest
     /// *successfully applied* frame. `None` when that frame carried no
     /// extension (a plain `tt-smi -s` frame, or a peer that isn't a
@@ -147,6 +153,7 @@ impl WsBackend {
             devices: Vec::new(),
             telemetry: HashMap::new(),
             smbus: HashMap::new(),
+            processes: Vec::new(),
             remote_ext: None,
             shared: Arc::new(Shared::default()),
             last_gen: 0,
@@ -193,6 +200,11 @@ impl WsBackend {
             }
             self.smbus.insert(idx, smbus);
         }
+        // Whole-system snapshot, not per-device keyed state — replace wholesale
+        // each frame, same as `JSONBackend::merge_parsed`. Already bounded by
+        // the frame size cap (this backend's messages are size-capped at the
+        // reader), so no separate MAX_REMOTE_DEVICES-style guard is needed here.
+        self.processes = parsed.processes;
     }
 
     /// Apply the newest received frame if it is fresher than the last applied one.
@@ -329,6 +341,10 @@ impl TelemetryBackend for WsBackend {
 
     fn smbus_telemetry(&self, device_idx: usize) -> Option<&SmbusTelemetry> {
         self.smbus.get(&device_idx)
+    }
+
+    fn device_processes(&self) -> &[DeviceProcess] {
+        &self.processes
     }
 
     fn backend_info(&self) -> String {
