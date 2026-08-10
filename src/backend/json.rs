@@ -91,6 +91,13 @@ struct BoardInfoJSON {
     pub board_type: Option<String>,
     pub bus_id: Option<String>,
     pub coords: Option<String>,
+    /// PCIe generation — a bare number (4) in tt-smi 5.3.0, but tolerate a
+    /// quoted string too (tt-smi has flip-flopped on number-vs-string before).
+    #[serde(default, deserialize_with = "de_opt_u32_str")]
+    pub pcie_speed: Option<u32>,
+    /// PCIe lane width — a STRING ("4") in tt-smi 5.3.0.
+    #[serde(default, deserialize_with = "de_opt_u32_str")]
+    pub pcie_width: Option<u32>,
 }
 
 /// Internal device representation (flattened from raw format)
@@ -120,6 +127,12 @@ struct TTSMIDeviceJSON {
     pub firmwares: Option<serde_json::Value>,
     /// Thermal/power limits (tt-smi 5.2.0+).
     pub limits: Option<serde_json::Value>,
+    /// PCIe generation from board_info (tt-smi 5.x).
+    #[serde(default)]
+    pub pcie_speed: Option<u32>,
+    /// PCIe lane width from board_info (tt-smi 5.x).
+    #[serde(default)]
+    pub pcie_width: Option<u32>,
 }
 
 /// Core telemetry JSON structure
@@ -484,6 +497,8 @@ fn parse_json_devices(json_str: &str) -> BackendResult<Vec<TTSMIDeviceJSON>> {
                         smbus: raw.smbus_telem,
                         firmwares: raw.firmwares,
                         limits: raw.limits,
+                        pcie_speed: board_info.and_then(|b| b.pcie_speed),
+                        pcie_width: board_info.and_then(|b| b.pcie_width),
                     }
                 })
                 .collect();
@@ -552,6 +567,10 @@ fn device_from_json(json_dev: &TTSMIDeviceJSON) -> Device {
     let mut device = Device::new(idx, board_type, bus_id, coords);
     device.firmwares = firmwares;
     device.limits = limits;
+    // PCIe link info (board_info, tt-smi 5.x): speed is the PCIe generation
+    // number; render as "Gen4" to match tt-smi's own display.
+    device.pcie_speed = json_dev.pcie_speed.map(|g| format!("Gen{}", g));
+    device.pcie_width = json_dev.pcie_width.and_then(|w| u8::try_from(w).ok());
     device
 }
 
@@ -719,7 +738,10 @@ fn smbus_from_json_fields(smbus_json: SmbusTelemetryJSON) -> SmbusTelemetry {
         m3_app_fw_version: smbus_json.dm_app_fw_version,
         m3_bl_fw_version: smbus_json.dm_bl_fw_version,
         tt_flash_version: smbus_json.tt_flash_version,
-        fan_speed: smbus_json.fan_speed,
+        // FAN_SPEED is the legacy percentage-or-RPM field; tt-smi ≥ 5.3.0
+        // reports RPM in FAN_RPM. Prefer FAN_SPEED when present (back-compat),
+        // fall back to FAN_RPM so RPM-only sources still drive the fan row.
+        fan_speed: smbus_json.fan_speed.or(smbus_json.fan_rpm),
         pcie_status: smbus_json.pcie_usage,
         board_power_limit: smbus_json.board_power_limit,
         therm_trip_count: smbus_json.therm_trip_count,
@@ -1266,6 +1288,41 @@ mod tests {
             Some(REAL_TTSMI_JSON.to_string()),
             "a failed parse must not clobber the last known-good snapshot"
         );
+    }
+
+    #[test]
+    fn board_info_pcie_and_dram_fields_parse() {
+        // pcie_speed is a bare NUMBER and pcie_width a STRING in real
+        // tt-smi 5.3.0 output — both shapes must parse.
+        let json = r#"{
+            "device_info": [{
+                "board_info": {
+                    "bus_id": "0000:01:00.0", "board_type": "p300c", "coords": "N/A",
+                    "dram_status": true, "dram_speed": "16G",
+                    "pcie_speed": 4, "pcie_width": "4"
+                },
+                "telemetry": {"power": " 16.0"}
+            }]
+        }"#;
+        let parsed = parse_tt_smi_snapshot(json).unwrap();
+        let dev = &parsed.devices[0];
+        assert_eq!(dev.pcie_speed.as_deref(), Some("Gen4"));
+        assert_eq!(dev.pcie_width, Some(4));
+    }
+
+    #[test]
+    fn fan_rpm_used_when_fan_speed_absent() {
+        // tt-smi 5.3.0 changed fan semantics to RPM; a source that only
+        // populates FAN_RPM must still drive the fan row.
+        let json = r#"{
+            "device_info": [{
+                "board_info": {"bus_id": "0000:01:00.0", "board_type": "p150a"},
+                "smbus_telem": {"FAN_RPM": "0xbb8"}
+            }]
+        }"#;
+        let parsed = parse_tt_smi_snapshot(json).unwrap();
+        let smbus = parsed.smbus.get(&0).unwrap();
+        assert_eq!(smbus.fan_rpm(), Some(3000)); // 0xbb8
     }
 
     #[test]
