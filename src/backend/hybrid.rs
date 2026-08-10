@@ -405,6 +405,10 @@ impl TelemetryBackend for HybridBackend {
         // `.lock().ok()` — never panics on a poisoned lock (panic-free contract).
         self.last_raw.lock().ok().and_then(|g| g.clone())
     }
+
+    fn pcie_bandwidth(&self, device_idx: usize) -> Option<crate::backend::pcie_counters::PcieBandwidth> {
+        self.sysfs.pcie_bandwidth(device_idx)
+    }
 }
 
 impl Drop for HybridBackend {

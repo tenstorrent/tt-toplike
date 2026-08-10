@@ -74,6 +74,12 @@ pub struct SysfsBackend {
     /// in sysfs-only mode; HybridBackend ignores it (it blends its own from
     /// tt-smi JSON).
     smbus_cache: HashMap<usize, SmbusTelemetry>,
+
+    /// Per-device PCIe counter rate trackers (needs two samples to produce a rate).
+    pcie_trackers: HashMap<usize, crate::backend::pcie_counters::PcieRateTracker>,
+
+    /// Last computed per-device PCIe bandwidth.
+    pcie_bandwidth: HashMap<usize, crate::backend::pcie_counters::PcieBandwidth>,
 }
 
 impl SysfsBackend {
@@ -92,6 +98,8 @@ impl SysfsBackend {
             tt_class_dirs: HashMap::new(),
             telemetry_cache: HashMap::new(),
             smbus_cache: HashMap::new(),
+            pcie_trackers: HashMap::new(),
+            pcie_bandwidth: HashMap::new(),
         }
     }
 
@@ -110,6 +118,8 @@ impl SysfsBackend {
         self.tt_class_dirs.clear();
         self.telemetry_cache.clear();
         self.smbus_cache.clear();
+        self.pcie_trackers.clear();
+        self.pcie_bandwidth.clear();
 
         let hwmon_base = Path::new("/sys/class/hwmon");
         if !hwmon_base.exists() {
@@ -541,6 +551,17 @@ impl TelemetryBackend for SysfsBackend {
             self.smbus_cache.insert(device_idx, smbus);
 
             self.telemetry_cache.insert(device_idx, telemetry);
+
+            // PCIe link bandwidth from the kmd counter files (passive reads).
+            if let Some(tt_dir) = self.tt_class_dirs.get(&device_idx) {
+                let counter_dir = tt_dir.join("pcie_perf_counters");
+                if let Some(snap) = crate::backend::pcie_counters::read_counters(&counter_dir) {
+                    let tracker = self.pcie_trackers.entry(device_idx).or_default();
+                    if let Some(bw) = tracker.sample(snap, std::time::Instant::now()) {
+                        self.pcie_bandwidth.insert(device_idx, bw);
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -565,6 +586,10 @@ impl TelemetryBackend for SysfsBackend {
 
     fn backend_info(&self) -> String {
         "Sysfs (hwmon sensors)".to_string()
+    }
+
+    fn pcie_bandwidth(&self, device_idx: usize) -> Option<crate::backend::pcie_counters::PcieBandwidth> {
+        self.pcie_bandwidth.get(&device_idx).copied()
     }
 }
 
@@ -654,6 +679,12 @@ mod tests {
         let config = BackendConfig::default().with_interval(50);
         let backend = SysfsBackend::with_config(config);
         assert_eq!(backend.config.update_interval_ms, 50);
+    }
+
+    #[test]
+    fn pcie_bandwidth_none_without_counter_dir() {
+        let backend = SysfsBackend::new();
+        assert!(backend.pcie_bandwidth(0).is_none());
     }
 
     // Note: Actual device detection tests require real hardware or mocked filesystem
