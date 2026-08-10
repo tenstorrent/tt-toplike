@@ -48,6 +48,7 @@ pub mod json; // JSON backend for tt-smi subprocess
 #[cfg(feature = "luwen-backend")]
 pub mod luwen; // Luwen backend for direct hardware access
 pub mod mock;
+pub mod pcie_counters; // PCIe data-word counters (tt-kmd sysfs) + link bandwidth derivation
 #[cfg(feature = "remote")]
 mod remote_ext; // tt_toplike frame extension: processes + inference riding on /telemetry frames
 #[cfg(feature = "remote")]
