@@ -36,6 +36,11 @@ struct SensorPaths {
     voltage: Option<PathBuf>,     // inN_input   (millivolts)
     power: Option<PathBuf>,       // powerN_input (microwatts)
     current: Option<PathBuf>,     // currN_input  (milliamperes)
+    // fanN_input (RPM; 0xFFFFFFFF sentinel = no fan present). Not yet consumed
+    // here — a later task (fan telemetry wiring) reads this field; discovery
+    // and unit tests land in this task so that consumer can rely on it.
+    #[allow(dead_code)]
+    fan: Option<PathBuf>,
 }
 
 /// Sysfs sensor backend implementation
@@ -140,7 +145,7 @@ impl SysfsBackend {
                         .extract_pci_address(&path)
                         .unwrap_or_else(|| format!("hwmon{}", device_idx));
 
-                    let device = Device {
+                    let mut device = Device {
                         index: device_idx,
                         board_type: name.to_string(),
                         bus_id: bus_id.clone(),
@@ -153,6 +158,10 @@ impl SysfsBackend {
                         grid_override: None,
                         channels_override: None,
                     };
+                    // Real firmware limits from hwmon *_max files (kmd ≥ 2.9.0).
+                    // HybridBackend later overwrites with the richer JSON limits
+                    // block when tt-smi is available; this covers sysfs-only mode.
+                    device.limits = Self::read_hwmon_limits(&path);
 
                     self.devices.push(device);
                     self.hwmon_paths.insert(device_idx, path);
@@ -229,41 +238,84 @@ impl SysfsBackend {
         None
     }
 
+    /// Pick the input file for one sensor class: prefer the candidate whose
+    /// `_label` file matches `preferred_label` (tt-kmd labels its sensors, e.g.
+    /// temp1_label=asic_temp), else the lowest-numbered existing input file.
+    ///
+    /// This matters because a device can expose *multiple* sensors of the same
+    /// class at different indices (e.g. temp1=vreg_temp, temp2=asic_temp) — the
+    /// old "lowest index wins" logic would silently pick the wrong one. Falling
+    /// back to lowest-index-existing preserves behavior for older/unlabeled
+    /// drivers that only expose a single sensor per class.
+    fn pick_sensor(
+        hwmon_path: &Path,
+        prefix: &str, // "temp" | "in" | "power" | "curr" | "fan"
+        range: std::ops::RangeInclusive<u32>,
+        preferred_label: &str,
+    ) -> Option<PathBuf> {
+        let mut first_existing: Option<PathBuf> = None;
+        for i in range {
+            let input = hwmon_path.join(format!("{}{}_input", prefix, i));
+            if !input.exists() {
+                continue;
+            }
+            let label_path = hwmon_path.join(format!("{}{}_label", prefix, i));
+            if let Ok(label) = fs::read_to_string(&label_path) {
+                if label.trim() == preferred_label {
+                    return Some(input); // exact label match wins immediately
+                }
+            }
+            if first_existing.is_none() {
+                first_existing = Some(input);
+            }
+        }
+        first_existing
+    }
+
     /// Find valid sensor file paths for one hwmon device.
     /// Called once in `init()` so `update()` can read directly without retrying.
     fn discover_sensor_paths(hwmon_path: &Path) -> SensorPaths {
-        let mut paths = SensorPaths::default();
-
-        for i in 1..=8 {
-            if paths.temperature.is_none() {
-                let p = hwmon_path.join(format!("temp{}_input", i));
-                if p.exists() {
-                    paths.temperature = Some(p);
-                }
-            }
-            if paths.power.is_none() {
-                let p = hwmon_path.join(format!("power{}_input", i));
-                if p.exists() {
-                    paths.power = Some(p);
-                }
-            }
-            if paths.current.is_none() {
-                let p = hwmon_path.join(format!("curr{}_input", i));
-                if p.exists() {
-                    paths.current = Some(p);
-                }
-            }
+        SensorPaths {
+            temperature: Self::pick_sensor(hwmon_path, "temp", 1..=8, "asic_temp"),
+            voltage: Self::pick_sensor(hwmon_path, "in", 0..=8, "vcore"),
+            power: Self::pick_sensor(hwmon_path, "power", 1..=8, "power"),
+            current: Self::pick_sensor(hwmon_path, "curr", 1..=8, "current"),
+            fan: Self::pick_sensor(hwmon_path, "fan", 1..=4, "fan_rpm"),
         }
-        for i in 0..=8 {
-            if paths.voltage.is_none() {
-                let p = hwmon_path.join(format!("in{}_input", i));
-                if p.exists() {
-                    paths.voltage = Some(p);
-                }
-            }
-        }
+    }
 
-        paths
+    /// Read a whole-number sysfs attribute file (plain decimal, e.g. "125000000").
+    fn read_u64_file(path: &Path) -> Option<u64> {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+    }
+
+    /// Read the hwmon `*_max` limit files into a DeviceLimits.
+    ///
+    /// tt-kmd ≥ 2.9.0 exposes firmware-provided limits on Blackhole too:
+    /// power1_max (µW), curr1_max (mA), temp1_max (m°C). These are the real
+    /// per-board ceilings (e.g. 125 W / 500 A / 90 °C on p300c) — far better
+    /// than the UI's hardcoded 300 W / 105 °C fallbacks. asic_fmax is not
+    /// exposed by hwmon; it stays None (the JSON limits block has it).
+    /// Returns None when no limit file exists (older driver) so callers can
+    /// leave `Device::limits` untouched.
+    fn read_hwmon_limits(hwmon_path: &Path) -> Option<crate::models::telemetry::DeviceLimits> {
+        let tdp_limit = Self::read_u64_file(&hwmon_path.join("power1_max"))
+            .map(|uw| uw as f32 / 1_000_000.0);
+        let tdc_limit =
+            Self::read_u64_file(&hwmon_path.join("curr1_max")).map(|ma| ma as f32 / 1000.0);
+        let thm_limit =
+            Self::read_u64_file(&hwmon_path.join("temp1_max")).map(|mc| mc as f32 / 1000.0);
+        if tdp_limit.is_none() && tdc_limit.is_none() && thm_limit.is_none() {
+            return None;
+        }
+        Some(crate::models::telemetry::DeviceLimits {
+            tdp_limit,
+            tdc_limit,
+            asic_fmax: None,
+            thm_limit,
+        })
     }
 
     /// Read a millicelsius sysfs file and convert to Celsius.
@@ -511,5 +563,65 @@ mod tests {
         assert!(parse_sku_map("not json").is_empty());
         assert!(parse_sku_map("{}").is_empty());
         assert!(parse_sku_map(r#"{"device_info": []}"#).is_empty());
+    }
+
+    use std::fs as stdfs;
+
+    /// Build a fake hwmon dir with the exact attribute set tt-kmd 2.9.0
+    /// exposes on Blackhole (values from a live p300c).
+    fn fake_hwmon(dir: &Path) {
+        for (f, v) in [
+            ("name", "blackhole"),
+            ("temp1_input", "38036"), ("temp1_label", "asic_temp"), ("temp1_max", "90000"),
+            ("in0_input", "718"), ("in0_label", "vcore"), ("in0_max", "900"),
+            ("power1_input", "16000000"), ("power1_label", "power"), ("power1_max", "125000000"),
+            ("curr1_input", "23000"), ("curr1_label", "current"), ("curr1_max", "500000"),
+            ("fan1_input", "4294967295"), ("fan1_label", "fan_rpm"),
+        ] {
+            stdfs::write(dir.join(f), v).unwrap();
+        }
+    }
+
+    #[test]
+    fn discover_sensor_paths_finds_fan() {
+        let td = tempfile::tempdir().unwrap();
+        fake_hwmon(td.path());
+        let paths = SysfsBackend::discover_sensor_paths(td.path());
+        assert!(paths.fan.is_some(), "fan1_input should be discovered");
+        assert!(paths.temperature.is_some());
+    }
+
+    #[test]
+    fn discover_sensor_paths_prefers_asic_temp_label() {
+        let td = tempfile::tempdir().unwrap();
+        fake_hwmon(td.path());
+        // Add a decoy lower-numbered sensor with a non-ASIC label. Label-aware
+        // discovery must skip it in favor of the one labelled asic_temp.
+        stdfs::write(td.path().join("temp1_label"), "vreg_temp").unwrap();
+        stdfs::write(td.path().join("temp2_input"), "40000").unwrap();
+        stdfs::write(td.path().join("temp2_label"), "asic_temp").unwrap();
+        let paths = SysfsBackend::discover_sensor_paths(td.path());
+        assert_eq!(
+            paths.temperature.as_deref(),
+            Some(td.path().join("temp2_input").as_path())
+        );
+    }
+
+    #[test]
+    fn read_hwmon_limits_converts_units() {
+        let td = tempfile::tempdir().unwrap();
+        fake_hwmon(td.path());
+        let lim = SysfsBackend::read_hwmon_limits(td.path()).unwrap();
+        assert_eq!(lim.tdp_limit, Some(125.0)); // 125000000 µW
+        assert_eq!(lim.tdc_limit, Some(500.0)); // 500000 mA
+        assert_eq!(lim.thm_limit, Some(90.0));  // 90000 m°C
+        assert_eq!(lim.asic_fmax, None);        // not exposed by hwmon
+    }
+
+    #[test]
+    fn read_hwmon_limits_absent_files_yield_none() {
+        let td = tempfile::tempdir().unwrap();
+        stdfs::write(td.path().join("name"), "blackhole").unwrap();
+        assert!(SysfsBackend::read_hwmon_limits(td.path()).is_none());
     }
 }
