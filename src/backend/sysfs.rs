@@ -16,7 +16,13 @@
 //! # Limitations
 //!
 //! - Only provides basic metrics (temperature, voltage, power if available)
-//! - No SMBUS telemetry (firmware versions, DDR status, etc.)
+//! - SMBUS telemetry is *partial*: on kmd ≥ 2.7, `smbus_telemetry()` returns a
+//!   `SmbusTelemetry` synthesized from tt-kmd's `tt_*` class attrs (AICLK,
+//!   AXICLK, ARCCLK, ARC heartbeat, therm trip count, board serial, M3 app FW
+//!   version) plus the hwmon fan reading — not the full SMBUS block tt-smi
+//!   exposes (no DDR training status, no per-ARC FW versions, no board/vreg
+//!   temps). On older kmd without the `tenstorrent` class dir, it's `None`
+//!   exactly as before.
 //! - Sensor naming/availability varies by kernel driver
 //! - May not detect all devices if driver doesn't expose hwmon
 
@@ -36,11 +42,7 @@ struct SensorPaths {
     voltage: Option<PathBuf>,     // inN_input   (millivolts)
     power: Option<PathBuf>,       // powerN_input (microwatts)
     current: Option<PathBuf>,     // currN_input  (milliamperes)
-    // fanN_input (RPM; 0xFFFFFFFF sentinel = no fan present). Not yet consumed
-    // here — a later task (fan telemetry wiring) reads this field; discovery
-    // and unit tests land in this task so that consumer can rely on it.
-    #[allow(dead_code)]
-    fan: Option<PathBuf>,
+    fan: Option<PathBuf>,         // fanN_input   (RPM; 0xFFFFFFFF sentinel = no fan present)
 }
 
 /// Sysfs sensor backend implementation
@@ -66,6 +68,12 @@ pub struct SysfsBackend {
 
     /// Cached telemetry data (per device index)
     telemetry_cache: HashMap<usize, Telemetry>,
+
+    /// SMBUS-shaped telemetry synthesized from tt-kmd sysfs attrs (partial —
+    /// only the fields the driver exposes). Serves the Insights fan/clock rows
+    /// in sysfs-only mode; HybridBackend ignores it (it blends its own from
+    /// tt-smi JSON).
+    smbus_cache: HashMap<usize, SmbusTelemetry>,
 }
 
 impl SysfsBackend {
@@ -83,6 +91,7 @@ impl SysfsBackend {
             sensor_paths: HashMap::new(),
             tt_class_dirs: HashMap::new(),
             telemetry_cache: HashMap::new(),
+            smbus_cache: HashMap::new(),
         }
     }
 
@@ -100,6 +109,7 @@ impl SysfsBackend {
         self.sensor_paths.clear();
         self.tt_class_dirs.clear();
         self.telemetry_cache.clear();
+        self.smbus_cache.clear();
 
         let hwmon_base = Path::new("/sys/class/hwmon");
         if !hwmon_base.exists() {
@@ -382,6 +392,29 @@ impl SysfsBackend {
             .ok()
             .and_then(|s| s.trim().parse::<i32>().ok().map(|ma| ma as f32 / 1000.0))
     }
+
+    /// Build a partial SmbusTelemetry from the tt-kmd class attrs + hwmon fan.
+    ///
+    /// Everything is stored as the same string shapes the JSON backend uses so
+    /// the existing accessors (fan_rpm(), arc0_health_value(), …) work
+    /// unchanged. tt_heartbeat maps to arc0_health: it's the same firmware
+    /// heartbeat counter TIMER_HEARTBEAT carries in tt-smi output.
+    fn synthesize_smbus(tt_dir: Option<&Path>, fan_path: Option<&Path>) -> SmbusTelemetry {
+        let mut s = SmbusTelemetry::new();
+        if let Some(dir) = tt_dir {
+            s.aiclk = Self::read_string_attr(dir, "tt_aiclk");
+            s.axiclk = Self::read_string_attr(dir, "tt_axiclk");
+            s.arcclk = Self::read_string_attr(dir, "tt_arcclk");
+            s.arc0_health = Self::read_string_attr(dir, "tt_heartbeat");
+            s.therm_trip_count = Self::read_string_attr(dir, "tt_therm_trip_count");
+            s.board_id = Self::read_string_attr(dir, "tt_serial");
+            s.m3_app_fw_version = Self::read_string_attr(dir, "tt_m3app_fw_ver");
+        }
+        if let Some(fan) = fan_path {
+            s.fan_speed = Self::read_u64_file(fan).map(|v| v.to_string());
+        }
+        s
+    }
 }
 
 impl Default for SysfsBackend {
@@ -421,7 +454,10 @@ impl TelemetryBackend for SysfsBackend {
 
         // Discover the tt-kmd class-attribute dirs and use their static attrs
         // for device enrichment (no subprocess needed).
-        let mut all_have_card_type = !self.devices.is_empty();
+        // detect_devices() above already errors out on an empty device list,
+        // so we always start from "all devices have it" and flip to false the
+        // first time one doesn't.
+        let mut all_have_card_type = true;
         for device in &mut self.devices {
             let Some(hwmon_path) = self.hwmon_paths.get(&device.index) else {
                 all_have_card_type = false;
@@ -480,15 +516,29 @@ impl TelemetryBackend for SysfsBackend {
                 _ => current,
             };
 
+            // Dynamic tt-kmd class attrs: AICLK + ARC heartbeat feed the core
+            // Telemetry (they were hardcoded None before kmd exposed them);
+            // the rest lands in the synthesized SMBUS block.
+            let tt_dir = self.tt_class_dirs.get(&device_idx);
+            let aiclk = tt_dir
+                .and_then(|d| Self::read_u64_file(&d.join("tt_aiclk")))
+                .map(|v| v as u32);
+            let heartbeat = tt_dir
+                .and_then(|d| Self::read_u64_file(&d.join("tt_heartbeat")))
+                .map(|v| v as u32);
+
             let telemetry = Telemetry {
                 timestamp: chrono::Utc::now(),
                 voltage,
                 current: calculated_current,
                 power,
                 asic_temperature: temperature,
-                aiclk: None,
-                heartbeat: None,
+                aiclk,
+                heartbeat,
             };
+
+            let smbus = Self::synthesize_smbus(tt_dir.map(|p| p.as_path()), paths.fan.as_deref());
+            self.smbus_cache.insert(device_idx, smbus);
 
             self.telemetry_cache.insert(device_idx, telemetry);
         }
@@ -508,9 +558,9 @@ impl TelemetryBackend for SysfsBackend {
         self.telemetry_cache.get(&device_idx)
     }
 
-    fn smbus_telemetry(&self, _device_idx: usize) -> Option<&SmbusTelemetry> {
-        // SMBUS telemetry not available via sysfs hwmon
-        None
+    fn smbus_telemetry(&self, device_idx: usize) -> Option<&SmbusTelemetry> {
+        // Partial SMBUS synthesized from tt-kmd sysfs attrs (kmd ≥ 2.7).
+        self.smbus_cache.get(&device_idx)
     }
 
     fn backend_info(&self) -> String {
@@ -745,5 +795,33 @@ mod tests {
             Some("p300c".to_string())
         );
         assert_eq!(SysfsBackend::read_string_attr(td.path(), "tt_missing"), None);
+    }
+
+    #[test]
+    fn synthesize_smbus_from_tt_attrs() {
+        let td = tempfile::tempdir().unwrap();
+        let hwmon = td.path().join("hwmon2");
+        stdfs::create_dir_all(&hwmon).unwrap();
+        fake_hwmon(&hwmon);
+        let tt_dir = fake_tt_class(&hwmon);
+        let fan_path = hwmon.join("fan1_input");
+        let smbus = SysfsBackend::synthesize_smbus(Some(&tt_dir), Some(fan_path.as_path()));
+        // Clocks come through as plain decimal strings (SmbusTelemetry stores strings).
+        assert_eq!(smbus.aiclk.as_deref(), Some("800"));
+        assert_eq!(smbus.axiclk.as_deref(), Some("960"));
+        assert_eq!(smbus.arcclk.as_deref(), Some("800"));
+        assert_eq!(smbus.therm_trip_count.as_deref(), Some("0"));
+        assert_eq!(smbus.arc0_health.as_deref(), Some("43874")); // tt_heartbeat
+        assert_eq!(smbus.board_id.as_deref(), Some("0000046131924062")); // tt_serial
+        // fan1_input = 4294967295 (no-fan sentinel) is stored verbatim; the
+        // existing fan_rpm() accessor maps it to None downstream.
+        assert_eq!(smbus.fan_speed.as_deref(), Some("4294967295"));
+        assert_eq!(smbus.fan_rpm(), None);
+    }
+
+    #[test]
+    fn synthesize_smbus_no_sources_is_all_none() {
+        let smbus = SysfsBackend::synthesize_smbus(None, None);
+        assert!(smbus.aiclk.is_none() && smbus.fan_speed.is_none());
     }
 }
