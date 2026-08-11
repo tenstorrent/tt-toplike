@@ -64,26 +64,50 @@ const OUT_COUNTERS: [&str; 6] = [
     "mst_nonposted_wr_data_word_sent1",
 ];
 
-/// Read and fold the counter directory. `None` if the directory (or every
-/// file in it) is unreadable — i.e. tt-kmd < 2.x without the attribute group.
-/// Individual missing files count as 0 so a partial set still reports.
+/// Sum the readable counters in `names`, reporting how many actually parsed.
+///
+/// `saturating_add` rather than `Iterator::sum`: these are firmware-owned u64
+/// registers, and a corrupted read summing past `u64::MAX` would panic in a
+/// debug build rather than render a wrong number.
+fn sum_counters(dir: &Path, names: &[&str]) -> (u64, usize) {
+    let mut total = 0u64;
+    let mut parsed = 0usize;
+    for name in names {
+        if let Some(v) = fs::read_to_string(dir.join(name))
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+        {
+            total = total.saturating_add(v);
+            parsed += 1;
+        }
+    }
+    (total, parsed)
+}
+
+/// Read and fold the counter directory.
+///
+/// `None` when the directory is absent (tt-kmd < 2.7, no attribute group) **or
+/// when not a single counter file in it could be read** — an unreadable set is
+/// "not measured", and reporting it as a snapshot made the UI render a confident
+/// `▼0 B/s ▲0 B/s` for a link nobody had actually sampled. Individual missing
+/// files still count as 0, so a partial set (a kernel that grew a counter, a
+/// permissions oddity on one file) reports the partial sum rather than nothing.
 pub fn read_counters(dir: &Path) -> Option<PcieCounterSnapshot> {
     if !dir.is_dir() {
         return None;
     }
-    let sum = |names: &[&str]| -> u64 {
-        names
-            .iter()
-            .filter_map(|n| {
-                fs::read_to_string(dir.join(n))
-                    .ok()
-                    .and_then(|s| s.trim().parse::<u64>().ok())
-            })
-            .sum()
-    };
+    let (words_in, in_parsed) = sum_counters(dir, &IN_COUNTERS);
+    let (words_out, out_parsed) = sum_counters(dir, &OUT_COUNTERS);
+    if in_parsed + out_parsed == 0 {
+        log::debug!(
+            "pcie_perf_counters at {} exists but no counter file was readable",
+            dir.display()
+        );
+        return None;
+    }
     Some(PcieCounterSnapshot {
-        words_in: sum(&IN_COUNTERS),
-        words_out: sum(&OUT_COUNTERS),
+        words_in,
+        words_out,
     })
 }
 
@@ -256,6 +280,38 @@ mod tests {
     #[test]
     fn read_counters_missing_dir_is_none() {
         assert!(read_counters(std::path::Path::new("/nonexistent-xyz")).is_none());
+    }
+
+    /// A directory that exists but yields no readable counter is "not measured",
+    /// not "zero traffic".
+    ///
+    /// Regression: the early return only covered `!dir.is_dir()`, and
+    /// `filter_map(..).sum()` turned a fully unreadable set into a valid-looking
+    /// `words_in: 0, words_out: 0` snapshot — which the rate tracker then
+    /// differentiated into a confident `▼0 B/s ▲0 B/s` for a link that had never
+    /// been sampled.
+    #[test]
+    fn read_counters_all_unreadable_is_none() {
+        let td = tempfile::tempdir().unwrap();
+        // Directory present, but none of the 12 expected files exist.
+        assert!(read_counters(td.path()).is_none());
+
+        // A file that exists but holds garbage doesn't count as a reading either.
+        fs::write(td.path().join("slv_rd_data_word_sent0"), "not-a-number").unwrap();
+        assert!(read_counters(td.path()).is_none());
+    }
+
+    /// A partial set still reports: the readable files are summed and the
+    /// missing ones count as 0.
+    #[test]
+    fn read_counters_partial_set_reports_partial_sum() {
+        let td = tempfile::tempdir().unwrap();
+        fs::write(td.path().join("mst_rd_data_word_received0"), "1200").unwrap();
+        fs::write(td.path().join("slv_rd_data_word_sent1"), "34").unwrap();
+
+        let snap = read_counters(td.path()).expect("one readable counter is enough");
+        assert_eq!(snap.words_in, 1200);
+        assert_eq!(snap.words_out, 34);
     }
 
     #[test]
