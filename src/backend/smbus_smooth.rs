@@ -32,6 +32,9 @@
 //!   copied verbatim — they carry no meaning as floats.
 //! - **When `incoming` is `None`**: the existing value and EMA state are left
 //!   unchanged (missing field in this snapshot doesn't mean the device lost it).
+//! - **`fan_speed`**: numeric, but a *reported* firmware sentinel (`0`,
+//!   `0xFFFF`, `0xFFFFFFFF`) means "no reading" and must replace rather than
+//!   blend — see [`blend_fan`].
 
 use crate::models::SmbusTelemetry;
 use std::collections::HashMap;
@@ -218,7 +221,7 @@ pub fn apply_ema(
     blend(&mut state.vcore, &incoming.vcore, &mut existing.vcore);
     blend(&mut state.tdp, &incoming.tdp, &mut existing.tdp);
     blend(&mut state.tdc, &incoming.tdc, &mut existing.tdc);
-    blend(
+    blend_fan(
         &mut state.fan_speed,
         &incoming.fan_speed,
         &mut existing.fan_speed,
@@ -301,6 +304,38 @@ fn blend(state: &mut FieldEma, incoming: &Option<String>, existing: &mut Option<
             *existing = Some(raw_str.to_owned());
         }
     }
+}
+
+/// [`blend`] for the fan field, which has a value class the generic path can't
+/// handle: a *reported non-reading*.
+///
+/// The firmware signals "no fan reading" with a sentinel register value (`0`,
+/// `0xFFFF`, `0xFFFFFFFF` — see `models::telemetry::is_fan_sentinel`), and those
+/// are numeric, so the generic EMA path would happily blend one in: a card whose
+/// fan stops goes `1882 → 1412 → 1059 → …`, a decaying sequence of entirely
+/// plausible-looking RPMs that `fan_rpm()` cannot recognise as bogus. The
+/// operator watching for a fan failure sees a fan slowing down, then a fan
+/// running at some low speed, indefinitely.
+///
+/// So a sentinel is copied through verbatim and the EMA accumulator is reset:
+/// `existing` becomes the honest register value, `fan_rpm()` filters it to
+/// `None`, and the Insights Fan row disappears — which is the correct report for
+/// a fan that isn't turning. Resetting the accumulator also means the *next*
+/// real reading lands immediately instead of being dragged up from the stale
+/// value.
+///
+/// `None` incoming still means "field absent from this snapshot" and preserves
+/// `existing`, exactly as for every other field.
+#[inline]
+fn blend_fan(state: &mut FieldEma, incoming: &Option<String>, existing: &mut Option<String>) {
+    if let Some(raw) = incoming {
+        if crate::models::telemetry::real_fan_rpm(raw).is_none() {
+            *state = None;
+            *existing = Some(raw.clone());
+            return;
+        }
+    }
+    blend(state, incoming, existing);
 }
 
 #[cfg(test)]
@@ -486,6 +521,92 @@ mod tests {
         assert_eq!(existing.max_gddr_temp, Some(71.0));
         assert_eq!(existing.eth_live_status, Some(0xFF));
         assert_eq!(existing.gddr_corr_errs[0], Some(3));
+    }
+
+    /// Regression (v0.8.1): a fan that stops must drop its row, not freeze at the
+    /// last healthy RPM.
+    ///
+    /// The sequence is the live p300c one: tt-smi reports a real
+    /// `FAN_RPM = 0x75a` (1882), the fan later stops and the register returns a
+    /// sentinel. With the sentinel collapsed to `None` at the parse boundary,
+    /// `blend`'s "absent → keep existing" rule pinned `Fan  1882 RPM` on screen
+    /// forever; with it EMA-blended, the value decayed through plausible RPMs
+    /// instead. Either way the operator watching for a fan failure saw a fan.
+    #[test]
+    fn fan_sentinel_clears_a_stale_healthy_rpm() {
+        let mut ema: SmbusEmaState = HashMap::new();
+        let mut existing = SmbusTelemetry::default();
+
+        // Several ticks of a real reading — enough for the EMA to settle on it.
+        let healthy = SmbusTelemetry {
+            fan_speed: Some("0x75a".to_owned()),
+            ..SmbusTelemetry::default()
+        };
+        for _ in 0..10 {
+            apply_ema(&mut ema, 0, &healthy, &mut existing);
+        }
+        assert_eq!(existing.fan_rpm(), Some(1882), "baseline: fan row renders");
+
+        // The fan stops: the register now reads the no-reading sentinel.
+        let stopped = SmbusTelemetry {
+            fan_speed: Some("0xffffffff".to_owned()),
+            ..SmbusTelemetry::default()
+        };
+        apply_ema(&mut ema, 0, &stopped, &mut existing);
+        assert_eq!(
+            existing.fan_rpm(),
+            None,
+            "a reported sentinel must clear the stale RPM, not preserve or decay it"
+        );
+        // …and stay cleared on subsequent ticks (no EMA tail dragging it back).
+        for _ in 0..5 {
+            apply_ema(&mut ema, 0, &stopped, &mut existing);
+        }
+        assert_eq!(existing.fan_rpm(), None);
+
+        // A real reading afterwards lands immediately — the accumulator was reset,
+        // so the recovering fan isn't dragged up from the stale 1882.
+        apply_ema(&mut ema, 0, &healthy, &mut existing);
+        assert_eq!(existing.fan_rpm(), Some(1882));
+    }
+
+    /// The fan field keeps the ordinary "absent this snapshot → keep what we
+    /// know" contract; only a *reported* sentinel clears.
+    #[test]
+    fn fan_absent_in_incoming_preserves_existing() {
+        let mut ema: SmbusEmaState = HashMap::new();
+        let mut existing = SmbusTelemetry {
+            fan_speed: Some("1882".to_owned()),
+            ..SmbusTelemetry::default()
+        };
+        apply_ema(&mut ema, 0, &SmbusTelemetry::default(), &mut existing);
+        assert_eq!(existing.fan_rpm(), Some(1882));
+    }
+
+    /// Real fan readings are still EMA-smoothed like any other numeric field.
+    #[test]
+    fn fan_real_readings_still_smooth() {
+        let mut ema: SmbusEmaState = HashMap::new();
+        let mut existing = SmbusTelemetry {
+            fan_speed: Some("1000".to_owned()),
+            ..SmbusTelemetry::default()
+        };
+        // Seed the accumulator at 1000, then step to 2000.
+        let seed = SmbusTelemetry {
+            fan_speed: Some("1000".to_owned()),
+            ..SmbusTelemetry::default()
+        };
+        apply_ema(&mut ema, 0, &seed, &mut existing);
+        let step = SmbusTelemetry {
+            fan_speed: Some("2000".to_owned()),
+            ..SmbusTelemetry::default()
+        };
+        apply_ema(&mut ema, 0, &step, &mut existing);
+        let v = existing.fan_rpm().unwrap();
+        assert!(
+            (1100..1500).contains(&v),
+            "one EMA step should land ~25% of the way (got {v})"
+        );
     }
 
     #[test]
