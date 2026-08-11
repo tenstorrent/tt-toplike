@@ -104,6 +104,43 @@ pub struct SysfsBackend {
 
     /// Last computed per-device PCIe bandwidth.
     pcie_bandwidth: HashMap<usize, crate::backend::pcie_counters::PcieBandwidth>,
+
+    /// When the slow lane (tt-kmd class attrs, synthesized SMBUS, PCIe
+    /// counters) last ran. `None` until the first `update()`, so the first tick
+    /// always populates everything. See [`slow_lane_due`].
+    last_slow_refresh: Option<std::time::Instant>,
+}
+
+/// How often the slow lane of [`SysfsBackend::update`] runs.
+///
+/// The fast lane (4 hwmon inputs per device: temp, volt, power, curr) runs every
+/// tick — at the UI's ~10 Hz that's what makes the power/temperature readouts
+/// feel live. The slow lane adds ~21 more reads per device (2 tt-kmd class
+/// attrs + 7 in `synthesize_smbus` + 12 PCIe counters); at 10 Hz on a 32-chip
+/// box that was ~8k synchronous `open`/`read`/`close` per second on the render
+/// thread, for values that are static (serial, FW version), coarse (AICLK), or
+/// better measured over a longer window (PCIe rates). 1 Hz is well inside the
+/// resolution any of these rows can convey.
+const SLOW_LANE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// Is the slow lane due to run?
+///
+/// Pure and timestamp-injectable so the cadence can be unit-tested without
+/// sleeping. `last == None` (first tick ever) is always due, so a single
+/// `update()` call — as `--print` and the tests do — still populates the
+/// SMBUS/PCIe/class-attr values.
+fn slow_lane_due(
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+    interval: std::time::Duration,
+) -> bool {
+    match last {
+        None => true,
+        // saturating_duration_since: a `now` that predates `last` (clock
+        // weirdness, an out-of-order caller) yields 0 rather than panicking,
+        // which simply defers the refresh to the next tick.
+        Some(prev) => now.saturating_duration_since(prev) >= interval,
+    }
 }
 
 impl SysfsBackend {
@@ -124,6 +161,7 @@ impl SysfsBackend {
             smbus_cache: HashMap::new(),
             pcie_trackers: HashMap::new(),
             pcie_bandwidth: HashMap::new(),
+            last_slow_refresh: None,
         }
     }
 
@@ -249,6 +287,9 @@ impl SysfsBackend {
         self.smbus_cache.clear();
         self.pcie_trackers.clear();
         self.pcie_bandwidth.clear();
+        // Re-detection must re-read the slow lane on the next tick, not wait out
+        // a stale interval against the previous device set.
+        self.last_slow_refresh = None;
 
         // Collect *then* sort *then* assign indices — every per-index map below
         // is populated from the same sorted sequence, so they stay consistent.
@@ -278,12 +319,17 @@ impl SysfsBackend {
                 grid_override: None,
                 channels_override: None,
             };
+            // Sensor discovery happens here (not in `init()`) because the
+            // `*_max` limits below must come from the *same* sensor indices
+            // `pick_sensor` selected — see `read_hwmon_limits`.
+            let paths = Self::discover_sensor_paths(&candidate.path);
             // Real firmware limits from hwmon *_max files (kmd ≥ 2.9.0).
             // HybridBackend later overwrites with the richer JSON limits
             // block when tt-smi is available; this covers sysfs-only mode.
-            device.limits = Self::read_hwmon_limits(&candidate.path);
+            device.limits = Self::read_hwmon_limits(&paths);
 
             self.devices.push(device);
+            self.sensor_paths.insert(device_idx, paths);
             self.hwmon_paths.insert(device_idx, candidate.path);
         }
 
@@ -443,22 +489,49 @@ impl SysfsBackend {
         (!s.is_empty()).then(|| s.to_string())
     }
 
+    /// The `*_max` ceiling that belongs to a specific `*_input` file
+    /// (`temp2_input` → `temp2_max`).
+    ///
+    /// Deriving the path from the *selected* input rather than hardcoding index 1
+    /// is what keeps a limit paired with the reading it bounds — see
+    /// [`Self::read_hwmon_limits`]. `None` when that sensor has no `_max`
+    /// attribute, so the caller reports "no limit" instead of borrowing another
+    /// sensor's ceiling.
+    fn limit_path_for(input: Option<&Path>) -> Option<PathBuf> {
+        let input = input?;
+        let stem = input.file_name()?.to_str()?.strip_suffix("_input")?;
+        Some(input.with_file_name(format!("{}_max", stem)))
+    }
+
     /// Read the hwmon `*_max` limit files into a DeviceLimits.
     ///
     /// tt-kmd ≥ 2.9.0 exposes firmware-provided limits on Blackhole too:
-    /// power1_max (µW), curr1_max (mA), temp1_max (m°C). These are the real
-    /// per-board ceilings (e.g. 125 W / 500 A / 90 °C on p300c) — far better
-    /// than the UI's hardcoded 300 W / 105 °C fallbacks. asic_fmax is not
+    /// `power<N>_max` (µW), `curr<N>_max` (mA), `temp<N>_max` (m°C). These are
+    /// the real per-board ceilings (e.g. 125 W / 500 A / 90 °C on p300c) — far
+    /// better than the UI's hardcoded 300 W / 105 °C fallbacks. asic_fmax is not
     /// exposed by hwmon; it stays None (the JSON limits block has it).
     /// Returns None when no limit file exists (older driver) so callers can
     /// leave `Device::limits` untouched.
-    fn read_hwmon_limits(hwmon_path: &Path) -> Option<crate::models::telemetry::DeviceLimits> {
-        let tdp_limit =
-            Self::read_u64_file(&hwmon_path.join("power1_max")).map(|uw| uw as f32 / 1_000_000.0);
-        let tdc_limit =
-            Self::read_u64_file(&hwmon_path.join("curr1_max")).map(|ma| ma as f32 / 1000.0);
-        let thm_limit =
-            Self::read_u64_file(&hwmon_path.join("temp1_max")).map(|mc| mc as f32 / 1000.0);
+    ///
+    /// **The limits follow the sensors `pick_sensor` chose**, they are not read
+    /// from index 1. A device can expose several sensors of one class — tt-kmd
+    /// labels them, and `discover_sensor_paths` is label-aware precisely because
+    /// `temp1_label=vreg_temp` can sit next to `temp2_label=asic_temp`. Reading
+    /// `temp1_max` unconditionally on such a driver compared the ASIC temperature
+    /// against the *VReg* ceiling (125 °C instead of 90 °C), so the Insights
+    /// limit annotation and the starfield thermal-headroom cue were both wrong in
+    /// the non-alarming direction — the worst way to be wrong about a thermal
+    /// limit.
+    fn read_hwmon_limits(paths: &SensorPaths) -> Option<crate::models::telemetry::DeviceLimits> {
+        let tdp_limit = Self::limit_path_for(paths.power.as_deref())
+            .and_then(|p| Self::read_u64_file(&p))
+            .map(|uw| uw as f32 / 1_000_000.0);
+        let tdc_limit = Self::limit_path_for(paths.current.as_deref())
+            .and_then(|p| Self::read_u64_file(&p))
+            .map(|ma| ma as f32 / 1000.0);
+        let thm_limit = Self::limit_path_for(paths.temperature.as_deref())
+            .and_then(|p| Self::read_u64_file(&p))
+            .map(|mc| mc as f32 / 1000.0);
         if tdp_limit.is_none() && tdc_limit.is_none() && thm_limit.is_none() {
             return None;
         }
@@ -523,6 +596,37 @@ impl SysfsBackend {
         }
         s
     }
+
+    /// Did [`Self::synthesize_smbus`] actually find anything?
+    ///
+    /// **Why this gate exists.** `smbus_telemetry()` returning `Some(block)` is
+    /// read across the UI as "SMBUS data is available for this device", and
+    /// several call sites branch on the *presence* of the block rather than on
+    /// the specific field they want:
+    ///
+    /// * `animation::memory_castle` paints the ARC dot from
+    ///   `is_arc0_healthy()`, which is `arc0_health.unwrap_or(0) > 0` — an
+    ///   all-`None` block reads as "ARC dead" and puts a red failure dot on a
+    ///   perfectly healthy card, where previously (`None`) the indicator was
+    ///   simply hidden.
+    /// * the Insights ETH row treats `Some` as "firmware said 0 ports enabled"
+    ///   (`0/? live`) and reserves its architectural-maximum fallback
+    ///   (`0/24 live`) for `None`.
+    ///
+    /// So on a driver that exposes neither the `tenstorrent` class dir (kmd <
+    /// 2.7) nor a fan sensor, this must stay `None` — exactly the pre-0.8.0
+    /// semantics. Only the fields `synthesize_smbus` fills are checked; the
+    /// remaining ~40 SMBUS fields are unreachable from sysfs by construction.
+    fn synthesized_smbus_has_data(s: &SmbusTelemetry) -> bool {
+        s.aiclk.is_some()
+            || s.axiclk.is_some()
+            || s.arcclk.is_some()
+            || s.arc0_health.is_some()
+            || s.therm_trip_count.is_some()
+            || s.board_id.is_some()
+            || s.m3_app_fw_version.is_some()
+            || s.fan_speed.is_some()
+    }
 }
 
 impl Default for SysfsBackend {
@@ -561,12 +665,10 @@ impl SysfsBackend {
 
 impl TelemetryBackend for SysfsBackend {
     fn init(&mut self) -> BackendResult<()> {
+        // `detect_devices` also caches the per-device sensor paths (so `update()`
+        // never retries missing indices) — it has to, because the hwmon `*_max`
+        // limits it reads must come from the sensors discovery selected.
         self.detect_devices()?;
-        // Cache valid sensor paths so update() never retries missing indices.
-        for (device_idx, hwmon_path) in &self.hwmon_paths {
-            let paths = Self::discover_sensor_paths(hwmon_path);
-            self.sensor_paths.insert(*device_idx, paths);
-        }
 
         // Discover the tt-kmd class-attribute dirs and use their static attrs
         // for device enrichment (no subprocess needed).
@@ -612,6 +714,14 @@ impl TelemetryBackend for SysfsBackend {
     }
 
     fn update(&mut self) -> BackendResult<()> {
+        // Decide once per tick whether the slow lane runs — see
+        // `slow_lane_due` for the cadence rationale.
+        let now = std::time::Instant::now();
+        let slow_lane = slow_lane_due(self.last_slow_refresh, now, SLOW_LANE_INTERVAL);
+        if slow_lane {
+            self.last_slow_refresh = Some(now);
+        }
+
         for device_idx in 0..self.devices.len() {
             let paths = match self.sensor_paths.get(&device_idx) {
                 Some(p) => p,
@@ -635,13 +745,26 @@ impl TelemetryBackend for SysfsBackend {
             // Dynamic tt-kmd class attrs: AICLK + ARC heartbeat feed the core
             // Telemetry (they were hardcoded None before kmd exposed them);
             // the rest lands in the synthesized SMBUS block.
+            //
+            // Slow lane: these are two more file opens per device per tick on
+            // top of the hwmon reads above, and neither is worth ~10 Hz — AICLK
+            // is a coarse DVFS clock and tt_heartbeat is a liveness counter.
+            // Between refreshes the previous values are carried forward so no
+            // row blinks out.
             let tt_dir = self.tt_class_dirs.get(&device_idx);
-            let aiclk = tt_dir
-                .and_then(|d| Self::read_u64_file(&d.join("tt_aiclk")))
-                .map(|v| v as u32);
-            let heartbeat = tt_dir
-                .and_then(|d| Self::read_u64_file(&d.join("tt_heartbeat")))
-                .map(|v| v as u32);
+            let (aiclk, heartbeat) = if slow_lane {
+                (
+                    tt_dir
+                        .and_then(|d| Self::read_u64_file(&d.join("tt_aiclk")))
+                        .map(|v| v as u32),
+                    tt_dir
+                        .and_then(|d| Self::read_u64_file(&d.join("tt_heartbeat")))
+                        .map(|v| v as u32),
+                )
+            } else {
+                let prev = self.telemetry_cache.get(&device_idx);
+                (prev.and_then(|t| t.aiclk), prev.and_then(|t| t.heartbeat))
+            };
 
             let telemetry = Telemetry {
                 timestamp: chrono::Utc::now(),
@@ -656,18 +779,38 @@ impl TelemetryBackend for SysfsBackend {
                 board_power: None,
             };
 
-            let smbus = Self::synthesize_smbus(tt_dir.map(|p| p.as_path()), paths.fan.as_deref());
-            self.smbus_cache.insert(device_idx, smbus);
+            // Slow lane: 7 more file reads per device (clocks, heartbeat, therm
+            // trip count, serial, M3 FW, fan) for fields that are static or
+            // slow-moving. The cached block is left untouched in between.
+            if slow_lane {
+                let smbus =
+                    Self::synthesize_smbus(tt_dir.map(|p| p.as_path()), paths.fan.as_deref());
+                // Only publish a block that actually carries data — an
+                // all-`None` block is read elsewhere as "SMBUS present, ARC
+                // dead"; see `synthesized_smbus_has_data`.
+                if Self::synthesized_smbus_has_data(&smbus) {
+                    self.smbus_cache.insert(device_idx, smbus);
+                } else {
+                    self.smbus_cache.remove(&device_idx);
+                }
+            }
 
             self.telemetry_cache.insert(device_idx, telemetry);
 
             // PCIe link bandwidth from the kmd counter files (passive reads).
-            if let Some(tt_dir) = self.tt_class_dirs.get(&device_idx) {
-                let counter_dir = tt_dir.join("pcie_perf_counters");
-                if let Some(snap) = crate::backend::pcie_counters::read_counters(&counter_dir) {
-                    let tracker = self.pcie_trackers.entry(device_idx).or_default();
-                    if let Some(bw) = tracker.sample(snap, std::time::Instant::now()) {
-                        self.pcie_bandwidth.insert(device_idx, bw);
+            //
+            // Slow lane: 12 counter files per device — by far the heaviest part
+            // of this loop. Sampling at ~1 Hz also *improves* the derived rate:
+            // the tracker computes its own dt, and a 1 s window smooths the
+            // quantization noise a 100 ms window shows on a bursty link.
+            if slow_lane {
+                if let Some(tt_dir) = self.tt_class_dirs.get(&device_idx) {
+                    let counter_dir = tt_dir.join("pcie_perf_counters");
+                    if let Some(snap) = crate::backend::pcie_counters::read_counters(&counter_dir) {
+                        let tracker = self.pcie_trackers.entry(device_idx).or_default();
+                        if let Some(bw) = tracker.sample(snap, now) {
+                            self.pcie_bandwidth.insert(device_idx, bw);
+                        }
                     }
                 }
             }
@@ -882,7 +1025,8 @@ mod tests {
     fn read_hwmon_limits_converts_units() {
         let td = tempfile::tempdir().unwrap();
         fake_hwmon(td.path());
-        let lim = SysfsBackend::read_hwmon_limits(td.path()).unwrap();
+        let paths = SysfsBackend::discover_sensor_paths(td.path());
+        let lim = SysfsBackend::read_hwmon_limits(&paths).unwrap();
         assert_eq!(lim.tdp_limit, Some(125.0)); // 125000000 µW
         assert_eq!(lim.tdc_limit, Some(500.0)); // 500000 mA
         assert_eq!(lim.thm_limit, Some(90.0)); // 90000 m°C
@@ -893,7 +1037,56 @@ mod tests {
     fn read_hwmon_limits_absent_files_yield_none() {
         let td = tempfile::tempdir().unwrap();
         stdfs::write(td.path().join("name"), "blackhole").unwrap();
-        assert!(SysfsBackend::read_hwmon_limits(td.path()).is_none());
+        let paths = SysfsBackend::discover_sensor_paths(td.path());
+        assert!(SysfsBackend::read_hwmon_limits(&paths).is_none());
+    }
+
+    /// Limits must come from the sensor `pick_sensor` selected, not from index 1.
+    ///
+    /// Regression: `read_hwmon_limits` read `temp1_max` unconditionally while the
+    /// *reading* came from the label-matched `temp2_input`. On a driver that
+    /// exposes `temp1_label=vreg_temp` alongside `temp2_label=asic_temp` (the
+    /// decoy layout `discover_sensor_paths_prefers_asic_temp_label` builds) the
+    /// ASIC temperature was therefore compared against the VReg ceiling —
+    /// 125 °C instead of 90 °C — making the Insights limit annotation and the
+    /// starfield thermal-headroom cue wrong in the *non-alarming* direction.
+    #[test]
+    fn read_hwmon_limits_follows_the_selected_sensor_not_index_1() {
+        let td = tempfile::tempdir().unwrap();
+        fake_hwmon(td.path());
+        // temp1 is the VReg decoy with a much higher ceiling; temp2 is the ASIC.
+        stdfs::write(td.path().join("temp1_label"), "vreg_temp").unwrap();
+        stdfs::write(td.path().join("temp1_max"), "125000").unwrap();
+        stdfs::write(td.path().join("temp2_input"), "40000").unwrap();
+        stdfs::write(td.path().join("temp2_label"), "asic_temp").unwrap();
+        stdfs::write(td.path().join("temp2_max"), "90000").unwrap();
+
+        let paths = SysfsBackend::discover_sensor_paths(td.path());
+        let lim = SysfsBackend::read_hwmon_limits(&paths).unwrap();
+        assert_eq!(
+            lim.thm_limit,
+            Some(90.0),
+            "the ASIC sensor's own ceiling must win over the VReg sensor's"
+        );
+    }
+
+    /// A selected sensor with no `_max` sibling reports no limit rather than
+    /// borrowing a different sensor's ceiling.
+    #[test]
+    fn read_hwmon_limits_missing_max_for_selected_sensor_is_none() {
+        let td = tempfile::tempdir().unwrap();
+        fake_hwmon(td.path());
+        // Same decoy layout, but the ASIC sensor has no ceiling of its own.
+        stdfs::write(td.path().join("temp1_label"), "vreg_temp").unwrap();
+        stdfs::write(td.path().join("temp1_max"), "125000").unwrap();
+        stdfs::write(td.path().join("temp2_input"), "40000").unwrap();
+        stdfs::write(td.path().join("temp2_label"), "asic_temp").unwrap();
+
+        let paths = SysfsBackend::discover_sensor_paths(td.path());
+        let lim = SysfsBackend::read_hwmon_limits(&paths).unwrap();
+        assert_eq!(lim.thm_limit, None, "must not fall back to temp1_max");
+        // The other classes still report (single unambiguous sensor each).
+        assert_eq!(lim.tdp_limit, Some(125.0));
     }
 
     /// Build the tenstorrent class-attribute dir the way tt-kmd lays it out:
@@ -978,6 +1171,157 @@ mod tests {
     fn synthesize_smbus_no_sources_is_all_none() {
         let smbus = SysfsBackend::synthesize_smbus(None, None);
         assert!(smbus.aiclk.is_none() && smbus.fan_speed.is_none());
+        assert!(
+            !SysfsBackend::synthesized_smbus_has_data(&smbus),
+            "an all-None block must never be published as SMBUS data"
+        );
+    }
+
+    /// `smbus_telemetry()` must stay `None` on a driver that exposes neither the
+    /// tt-kmd class dir nor a fan — the pre-0.8.0 semantics.
+    ///
+    /// Regression: `update()` inserted the synthesized block unconditionally, so
+    /// this returned `Some(all-None)`. Two concrete consequences, both visible on
+    /// a healthy card: `animation::memory_castle` paints its ARC dot from
+    /// `is_arc0_healthy()` (`arc0_health.unwrap_or(0) > 0`) and so showed a red
+    /// "ARC ○" failure indicator where it used to show nothing, and the Insights
+    /// ETH row's documented "SMBUS absent entirely → architectural max" fallback
+    /// became unreachable (`0/? live` instead of `0/24 live`). Via
+    /// `HybridBackend::smbus_telemetry`'s `.or_else()` this reached the *default*
+    /// Linux backend on any box without tt-smi installed.
+    #[test]
+    fn smbus_telemetry_is_none_without_class_dir_or_fan() {
+        let td = tempfile::tempdir().unwrap();
+        let hwmon = td.path().join("hwmon2");
+        stdfs::create_dir_all(&hwmon).unwrap();
+        // hwmon sensors only: no `device` symlink (→ no tt class dir) and no fan.
+        for (f, v) in [
+            ("name", "blackhole"),
+            ("temp1_input", "38036"),
+            ("temp1_label", "asic_temp"),
+            ("in0_input", "718"),
+            ("power1_input", "16000000"),
+            ("curr1_input", "23000"),
+        ] {
+            stdfs::write(hwmon.join(f), v).unwrap();
+        }
+
+        let mut backend = SysfsBackend::new();
+        backend.detect_devices_in(td.path()).unwrap();
+        backend.update().unwrap();
+
+        assert!(
+            backend.telemetry(0).is_some(),
+            "core hwmon telemetry must still be served"
+        );
+        assert_eq!(backend.telemetry(0).unwrap().asic_temperature, Some(38.036));
+        assert!(
+            backend.smbus_telemetry(0).is_none(),
+            "no class dir and no fan → no SMBUS block at all"
+        );
+    }
+
+    /// With the tt-kmd class dir present, the synthesized block *is* served.
+    #[test]
+    fn smbus_telemetry_is_some_with_class_dir() {
+        let td = tempfile::tempdir().unwrap();
+        let hwmon = td.path().join("hwmon2");
+        stdfs::create_dir_all(&hwmon).unwrap();
+        fake_hwmon(&hwmon);
+        fake_tt_class(&hwmon);
+
+        let mut backend = SysfsBackend::new();
+        backend.detect_devices_in(td.path()).unwrap();
+        // detect_devices_in doesn't resolve class dirs (init() does), so do it
+        // the way init() would — without the tt-smi enrichment subprocess.
+        let tt_dir = SysfsBackend::find_tt_class_dir(&hwmon).unwrap();
+        backend.tt_class_dirs.insert(0, tt_dir);
+        backend.update().unwrap();
+
+        let smbus = backend
+            .smbus_telemetry(0)
+            .expect("class-dir attrs must be published");
+        assert_eq!(smbus.aiclk.as_deref(), Some("800"));
+        assert_eq!(smbus.arc0_health.as_deref(), Some("43874"));
+        // And the core telemetry picked up the same attrs.
+        assert_eq!(backend.telemetry(0).unwrap().aiclk, Some(800));
+    }
+
+    /// Slow-lane cadence, asserted on injected timestamps — no sleeping.
+    #[test]
+    fn slow_lane_due_respects_the_interval() {
+        let t0 = std::time::Instant::now();
+        let interval = std::time::Duration::from_millis(1000);
+
+        // First tick ever: always due, so one-shot callers (`--print`) get a
+        // fully populated snapshot.
+        assert!(slow_lane_due(None, t0, interval));
+        // Inside the window: skipped (this is the ~10 Hz render path).
+        assert!(!slow_lane_due(
+            Some(t0),
+            t0 + std::time::Duration::from_millis(100),
+            interval
+        ));
+        assert!(!slow_lane_due(
+            Some(t0),
+            t0 + std::time::Duration::from_millis(999),
+            interval
+        ));
+        // Exactly at, and past, the interval: due again.
+        assert!(slow_lane_due(Some(t0), t0 + interval, interval));
+        assert!(slow_lane_due(
+            Some(t0),
+            t0 + std::time::Duration::from_millis(2500),
+            interval
+        ));
+        // A `now` that predates `last` defers rather than panicking.
+        assert!(!slow_lane_due(
+            Some(t0 + std::time::Duration::from_millis(500)),
+            t0,
+            interval
+        ));
+    }
+
+    /// The slow lane must not re-read on back-to-back ticks, and the values it
+    /// produced must survive the ticks that skip it (no flicker).
+    #[test]
+    fn update_retains_slow_lane_values_between_refreshes() {
+        let td = tempfile::tempdir().unwrap();
+        let hwmon = td.path().join("hwmon2");
+        stdfs::create_dir_all(&hwmon).unwrap();
+        fake_hwmon(&hwmon);
+        let tt_dir = fake_tt_class(&hwmon);
+
+        let mut backend = SysfsBackend::new();
+        backend.detect_devices_in(td.path()).unwrap();
+        backend
+            .tt_class_dirs
+            .insert(0, SysfsBackend::find_tt_class_dir(&hwmon).unwrap());
+
+        backend.update().unwrap(); // first tick: slow lane runs
+        assert_eq!(backend.telemetry(0).unwrap().aiclk, Some(800));
+
+        // Change the attr underneath us, then tick again immediately. The slow
+        // lane is not due, so the *previous* values must be carried forward —
+        // proving the reads were skipped, and that nothing blanks out.
+        stdfs::write(tt_dir.join("tt_aiclk"), "1350\n").unwrap();
+        backend.update().unwrap();
+        assert_eq!(
+            backend.telemetry(0).unwrap().aiclk,
+            Some(800),
+            "slow-lane values are retained between refreshes"
+        );
+        assert_eq!(
+            backend.smbus_telemetry(0).unwrap().aiclk.as_deref(),
+            Some("800"),
+            "the synthesized SMBUS block is retained too"
+        );
+
+        // Force the interval to have elapsed and the new value comes through.
+        backend.last_slow_refresh =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
+        backend.update().unwrap();
+        assert_eq!(backend.telemetry(0).unwrap().aiclk, Some(1350));
     }
 
     /// Create a fake hwmon dir whose `device` symlink resolves to `bus_id`,

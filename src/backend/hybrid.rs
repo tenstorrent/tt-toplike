@@ -6,8 +6,11 @@
 //! This backend combines the strengths of the Sysfs and JSON backends:
 //!
 //! - **Sysfs** provides fast, non-invasive real-time reads (temperature, power,
-//!   voltage, current) via Linux hwmon. These run on every `update()` call and
-//!   complete in microseconds, keeping the render loop smooth.
+//!   voltage, current) via Linux hwmon. These four reads per device run on every
+//!   `update()` call and complete in well under a millisecond, keeping the render
+//!   loop smooth. The heavier sysfs reads behind them (tt-kmd class attrs, the
+//!   synthesized SMBUS block, the twelve PCIe counters) are decimated to ~1 Hz
+//!   inside `SysfsBackend::update` — see its `SLOW_LANE_INTERVAL`.
 //!
 //! - **Streaming tt-smi** provides rich SMBUS telemetry (DDR status, ARC health,
 //!   board IDs, firmware versions). A persistent shell subprocess runs tt-smi
@@ -62,7 +65,9 @@ use std::time::Duration;
 
 /// Hybrid backend combining sysfs real-time + persistent streaming JSON enrichment.
 pub struct HybridBackend {
-    /// Primary real-time data source — never blocks more than a few µs.
+    /// Primary real-time data source — a handful of sysfs file reads per tick,
+    /// never a subprocess or a device open (see the module docs for the fast /
+    /// slow lane split).
     sysfs: SysfsBackend,
 
     /// Path to tt-smi executable (searched in PATH if bare name).
@@ -285,7 +290,8 @@ impl TelemetryBackend for HybridBackend {
     }
 
     fn update(&mut self) -> BackendResult<()> {
-        // Fast path: sysfs only — completes in microseconds.
+        // Fast path: sysfs only — four hwmon reads per device, plus the ~1 Hz
+        // slow lane (class attrs / SMBUS synthesis / PCIe counters) when due.
         self.sysfs.update()?;
 
         // ── Adopt new SMBUS target if the reader thread has one ───────────────

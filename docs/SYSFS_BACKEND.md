@@ -65,8 +65,8 @@ Reading the second surface is what closed most of this backend's historical tele
 | **Power** | hwmon `power*_input` (prefers label `power`) | Power consumption in W |
 | **Current** | hwmon `curr*_input` (prefers label `current`), else calculated | Amperes; falls back to P/V when the driver has no current sensor |
 | **Fan speed** | hwmon `fan*_input` (prefers label `fan_rpm`) | RPM; the all-ones sentinel (`0xFFFFFFFF`) on fanless cards is filtered downstream |
-| **Power / current / thermal limits** | hwmon `power1_max`, `curr1_max`, `temp1_max` | Real per-board ceilings (a p300c reports 125 W / 500 A / 90 °C) instead of the UI's hardcoded 300 W / 105 °C fallbacks. Requires **tt-kmd ≥ 2.9.0** on Blackhole |
-| **AICLK** | class attr `tt_aiclk` | Read every tick into `Telemetry::aiclk` |
+| **Power / current / thermal limits** | hwmon `*_max` beside the *selected* input (e.g. `temp2_max` when `temp2_label=asic_temp` won discovery) | Real per-board ceilings (a p300c reports 125 W / 500 A / 90 °C) instead of the UI's hardcoded 300 W / 105 °C fallbacks. Each limit comes from the same sensor as its reading, so a `vreg_temp` sensor's ceiling is never applied to the ASIC temperature. Requires **tt-kmd ≥ 2.9.0** on Blackhole |
+| **AICLK** | class attr `tt_aiclk` | Into `Telemetry::aiclk` (slow lane, ~1 Hz — see [Read cadence](#read-cadence)) |
 | **AXICLK / ARCCLK** | class attrs `tt_axiclk`, `tt_arcclk` | Into the synthesized SMBUS block |
 | **ARC firmware heartbeat** | class attr `tt_heartbeat` | Into `Telemetry::heartbeat` *and* `SmbusTelemetry::arc0_health` — the same firmware counter tt-smi reports as `TIMER_HEARTBEAT` |
 | **Board SKU** | class attr `tt_card_type` | The real product name (e.g. `p300c`), not just the hwmon arch name. **Replaces** the old ~1.2 s `tt-smi -s` startup probe on modern kmd |
@@ -74,7 +74,7 @@ Reading the second surface is what closed most of this backend's historical tele
 | **Board serial** | class attr `tt_serial` | Into `SmbusTelemetry::board_id` |
 | **Thermal-trip count** | class attr `tt_therm_trip_count` | Lifetime hardware-shutdown counter; Insights shows a row when non-zero |
 | **M3 app firmware version** | class attr `tt_m3app_fw_ver` | Best-effort; absent on some cards |
-| **PCIe bandwidth** | class subdir `pcie_perf_counters/` | Twelve data-word counters folded into in/out directions and differentiated between ticks → bytes/sec each way |
+| **PCIe bandwidth** | class subdir `pcie_perf_counters/` | Twelve data-word counters folded into in/out directions and differentiated between slow-lane samples (~1 Hz) → bytes/sec each way |
 | **Device count** | hwmon discovery | All Tenstorrent devices, **ordered by PCI bus id** |
 | **Architecture** | hwmon `name` | Grayskull / Wormhole / Blackhole from the name string |
 
@@ -149,7 +149,7 @@ Each hwmon directory's `device` symlink is canonicalized to the PCI device direc
 tt_card_type        # "p300c"            → Device::board_type (replaces the tt-smi probe)
 tt_fw_bundle_ver    # "19.11.0.0"        → Device::firmwares.fw_bundle_version
 
-# Dynamic — read every tick
+# Dynamic — read on the slow lane (~1 Hz), values retained in between
 tt_aiclk            # "800"   (MHz)      → Telemetry::aiclk
 tt_heartbeat        # "43874"            → Telemetry::heartbeat + SmbusTelemetry::arc0_health
 tt_axiclk           # "960"   (MHz)      → SmbusTelemetry::axiclk
@@ -162,6 +162,27 @@ tt_m3app_fw_ver     #                    → SmbusTelemetry::m3_app_fw_version
 If **any** device is missing `tt_card_type` (an older driver), the backend falls back to the bounded
 `tt-smi -s` board-type probe it used before — the same graceful degradation as when tt-smi is absent.
 
+If a driver exposes **neither** the class-attribute directory (kmd < 2.7) **nor** a fan sensor, there is
+nothing to synthesize and `smbus_telemetry()` returns `None` — not an all-`None` block. That distinction
+is load-bearing: several UI call sites read "an SMBUS block exists" as "the firmware answered", so an
+empty block would put a red ARC-failure dot on a healthy card and suppress the ETH row's
+architectural-maximum fallback.
+
+### Read cadence
+
+`update()` has two lanes, because not every attribute deserves the render loop's ~10 Hz:
+
+| Lane | Reads per device per sample | Cadence |
+|------|------------------------------|---------|
+| **Fast** — hwmon `temp/in/power/curr` inputs | 4 | every tick (default 100 ms) |
+| **Slow** — tt-kmd class attrs, synthesized SMBUS block, PCIe counters | ~21 | ~1 Hz (`SLOW_LANE_INTERVAL`) |
+
+The slow lane's previous values are retained between samples, so no row blinks out. This keeps a
+32-chip box at a few hundred file reads per second instead of ~8 k, and it *improves* the PCIe numbers:
+the rate tracker measures its own Δt, and a 1 s window is far less noisy than a 100 ms one on a bursty
+link. The first `update()` after init always runs both lanes, so one-shot callers (`--print`) still get
+a complete snapshot.
+
 ### PCIe Bandwidth
 
 `<class-dir>/pcie_perf_counters/` holds twelve monotonically-increasing counters of 32-bit data words
@@ -173,9 +194,11 @@ crossing the PCIe link, split by direction and initiator. They are folded into t
   `mst_{posted,nonposted}_wr_data_word_sent*` (device writing host memory).
 
 Each name has a `0` and `1` suffix (two PCIe controllers); both are summed. Bandwidth is
-`Δwords × 4 bytes ÷ Δt` between successive ticks — so the *first* tick after startup primes the
-tracker and reports nothing, and a counter that goes backwards (device reset) clamps its delta to
-zero rather than spiking. Reading these files is passive: no device open, no ARC message.
+`Δwords × 4 bytes ÷ Δt` between successive **slow-lane samples** (~1 Hz) — so the first sample after
+startup primes the tracker and reports nothing, and a counter that goes backwards (device reset) clamps
+its delta to zero rather than spiking. If the counter directory exists but not one file in it can be
+read, the sample is reported as unavailable rather than as a confident zero. Reading these files is
+passive: no device open, no ARC message.
 
 This is surfaced through `TelemetryBackend::pcie_bandwidth()`, which defaults to `None` and is
 implemented only by the sysfs and hybrid backends — the JSON backend has no access to the counter files.
@@ -285,8 +308,8 @@ ls -la /sys/class/hwmon/hwmon1/
 ## Performance
 
 ### Latency
-- **Read time**: <1ms per device (simple file reads)
-- **Update rate**: Configurable (default 100ms = 10 Hz)
+- **Read time**: <1 ms per device on the fast lane (4 file reads); the ~21-read slow lane runs at ~1 Hz
+- **Update rate**: Configurable (default 100 ms = 10 Hz) for the fast lane
 - **Sensor count**: Typically 1-4 sensors per device
 
 ### CPU Usage
