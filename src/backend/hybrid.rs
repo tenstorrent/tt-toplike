@@ -158,10 +158,40 @@ pub struct HybridBackend {
 ///   fell back to its hwmon directory name): positional join, logged at `warn`.
 /// * a snapshot entry with no bus id (a tt-smi old enough to omit
 ///   `board_info.bus_id`): that entry alone falls back to its position, logged
-///   at `warn`.
+///   at `warn` — but only if that index is still unclaimed, see below.
 /// * a snapshot entry whose bus id matches no sysfs device: **dropped**. sysfs
 ///   can't see that card, so there is no device to attribute it to; keying it by
 ///   position would put it on someone else's row.
+///
+/// ## Why the resolution runs in two ordered passes
+///
+/// The two rules above can want the same destination index. Given sysfs
+/// `{0000:01:00.0 → 0, 0000:02:00.0 → 1}` and a snapshot whose entry 0 carries no
+/// bus id (→ 0 by the positional fallback) while entry 1 carries
+/// `bus_id = 0000:01:00.0` (→ 0 by the bus-id join), a single pass that inserted
+/// both produced a *many-to-one* mapping, and `rekey_map`'s `collect()` into a
+/// `HashMap` then kept whichever pair the iterator happened to emit last —
+/// `HashMap` iteration order, i.e. effectively at random per process. One card's
+/// SMBUS/PCIe/board-power landed on the wrong index, the other showed none, and
+/// which one varied between runs: precisely the mis-attribution class this join
+/// exists to eliminate.
+///
+/// So resolution is ordered and the destination indices are *claimed*:
+///
+/// 1. **Pass 1 — bus-id matches.** A real identifier shared by both sides always
+///    beats a guess, regardless of where the entries sit in the array. Two entries
+///    claiming the same sysfs index (duplicate bus ids in one snapshot — shouldn't
+///    happen, but nothing in the format forbids it) resolve first-position-wins,
+///    the later one dropped with a `warn`.
+/// 2. **Pass 2 — positional fallback**, only onto indices pass 1 left unclaimed.
+///    A fallback that would land on a bus-id-resolved index is dropped with a
+///    `warn` instead: absent beats wrong, the same call `unmatched_bus_id_is_
+///    dropped_not_reassigned` makes for a card sysfs can't see.
+///
+/// Both passes walk `positions` (a `BTreeSet`, so ascending) and the resulting
+/// mapping is injective, which is what makes `rekey_map`'s `collect()` total and
+/// the whole join deterministic — same snapshot in, same attribution out, every
+/// run.
 fn rekey_snapshot_by_bus_id(
     parts: json::SnapshotParts,
     bus_to_index: &HashMap<String, usize>,
@@ -190,29 +220,71 @@ fn rekey_snapshot_by_bus_id(
         .copied()
         .collect();
 
+    // `{ snapshot position → sysfs device index }`, built to stay injective.
     let mut mapping: HashMap<usize, usize> = HashMap::new();
-    for pos in positions {
-        match bus_ids.get(&pos) {
-            Some(bus) => match bus_to_index.get(bus) {
-                Some(&device_idx) => {
-                    mapping.insert(pos, device_idx);
+    // `{ sysfs device index → the position that already owns it }`. Kept
+    // alongside `mapping` (rather than derived from it by a reverse scan) so
+    // every claim check is O(1) and the *reason* a claim was refused can be
+    // named in the warn.
+    let mut claimed: HashMap<usize, usize> = HashMap::new();
+
+    // ── Pass 1: bus-id matches — the authoritative join ───────────────────────
+    for &pos in &positions {
+        // Entries with no bus id are pass 2's business; skip without comment
+        // here so the fallback is logged exactly once, below.
+        let Some(bus) = bus_ids.get(&pos) else {
+            continue;
+        };
+        match bus_to_index.get(bus) {
+            Some(&device_idx) => match claimed.get(&device_idx) {
+                Some(&owner) => {
+                    // Two snapshot entries naming the same card. Nothing in the
+                    // format forbids it; first position wins so the outcome
+                    // doesn't depend on iteration order.
+                    log::warn!(
+                        "HybridBackend: tt-smi device_info[{pos}] (bus {bus}) resolves to \
+                         sysfs device {device_idx}, already claimed by device_info[{owner}] \
+                         — dropping the duplicate rather than overwriting that card's data"
+                    );
                 }
                 None => {
-                    log::debug!(
-                        "HybridBackend: tt-smi device_info[{pos}] (bus {bus}) has no \
-                         matching sysfs device — dropping its SMBUS/meta rather than \
-                         attributing it to another card"
-                    );
+                    mapping.insert(pos, device_idx);
+                    claimed.insert(device_idx, pos);
                 }
             },
             None => {
-                log::warn!(
-                    "HybridBackend: tt-smi device_info[{pos}] carries no bus_id — \
-                     falling back to a positional join for this entry"
+                log::debug!(
+                    "HybridBackend: tt-smi device_info[{pos}] (bus {bus}) has no \
+                     matching sysfs device — dropping its SMBUS/meta rather than \
+                     attributing it to another card"
                 );
-                mapping.insert(pos, pos);
             }
         }
+    }
+
+    // ── Pass 2: positional fallback, onto unclaimed indices only ──────────────
+    for &pos in &positions {
+        if bus_ids.contains_key(&pos) {
+            continue; // resolved (or deliberately dropped) in pass 1
+        }
+        if let Some(&owner) = claimed.get(&pos) {
+            // The guess collides with a card that identified itself. Dropping is
+            // the only safe move: attributing this entry here would overwrite
+            // real, bus-id-verified data with data belonging to another card.
+            log::warn!(
+                "HybridBackend: tt-smi device_info[{pos}] carries no bus_id and its \
+                 positional target (sysfs device {pos}) is already claimed by \
+                 device_info[{owner}] via bus id — dropping this entry rather than \
+                 mis-attributing it"
+            );
+            continue;
+        }
+        log::warn!(
+            "HybridBackend: tt-smi device_info[{pos}] carries no bus_id — \
+             falling back to a positional join for this entry"
+        );
+        mapping.insert(pos, pos);
+        claimed.insert(pos, pos);
     }
 
     json::SnapshotParts {
@@ -1156,6 +1228,73 @@ mod tests {
             parts.smbus.get(&1).and_then(|s| s.board_id.as_deref()),
             Some("0xB")
         );
+    }
+
+    /// A positional fallback must never land on an index a bus-id match already
+    /// owns — and the outcome must not depend on `HashMap` iteration order.
+    ///
+    /// Regression: the fallback did `mapping.insert(pos, pos)` unconditionally, so
+    /// this snapshot (entry 0 with no `bus_id` → index 0 by fallback; entry 1 with
+    /// `bus_id = 0000:01:00.0` → index 0 by the join) produced a many-to-one
+    /// mapping, and `rekey_map`'s `collect()` into a `HashMap` kept whichever pair
+    /// the iterator emitted last. One card's SMBUS/PCIe/board power landed on the
+    /// wrong index, the other showed none, and *which* varied per run.
+    ///
+    /// The loop is the point: with the old code the assertion passed or failed
+    /// depending on the `RandomState` of the map built inside `rekey_map`, so a
+    /// single construction could pass by luck. Every iteration re-parses and
+    /// re-joins from scratch, giving each attempt a fresh hasher seed.
+    #[test]
+    fn positional_fallback_never_steals_a_bus_id_matched_index() {
+        let mut bus_to_index = HashMap::new();
+        bus_to_index.insert("0000:01:00.0".to_string(), 0);
+        bus_to_index.insert("0000:02:00.0".to_string(), 1);
+
+        // Entry 0 carries no bus id (its positional guess is index 0); entry 1
+        // names 0000:01:00.0, which *is* index 0. They collide.
+        let json = r#"{
+            "device_info": [
+                {"smbus_telem": {"BOARD_ID_LOW": "0xNOBUS"}},
+                {"board_info": {"bus_id": "0000:01:00.0", "pcie_speed": 4},
+                 "smbus_telem": {"BOARD_ID_LOW": "0xCARD01"}}
+            ]
+        }"#;
+
+        for attempt in 0..64 {
+            let parts = rekey_snapshot_by_bus_id(json::parse_snapshot(json), &bus_to_index);
+
+            // The identified card wins index 0, every time.
+            assert_eq!(
+                parts.smbus.get(&0).and_then(|s| s.board_id.as_deref()),
+                Some("0xCARD01"),
+                "attempt {attempt}: the bus-id-matched entry must own index 0, not \
+                 lose it to a positional guess"
+            );
+            // Its meta rode along on the same mapping.
+            assert_eq!(
+                parts.meta.get(&0).and_then(|m| m.pcie_speed.as_deref()),
+                Some("Gen4"),
+                "attempt {attempt}: meta must follow the same join as SMBUS"
+            );
+            // The colliding guess is dropped outright — not relocated onto some
+            // other card's row, and never anywhere at all.
+            assert_eq!(
+                parts.smbus.len(),
+                1,
+                "attempt {attempt}: the colliding bus-id-less entry must be dropped"
+            );
+            assert!(
+                parts
+                    .smbus
+                    .values()
+                    .all(|s| s.board_id.as_deref() != Some("0xNOBUS")),
+                "attempt {attempt}: the dropped entry must not surface on any index"
+            );
+            assert!(
+                parts.smbus.get(&1).is_none(),
+                "attempt {attempt}: device 1 was never named by this snapshot"
+            );
+        }
     }
 
     /// A card tt-smi reports but sysfs can't see has nowhere to go — it is
