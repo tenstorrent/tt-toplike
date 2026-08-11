@@ -355,8 +355,8 @@ impl SysfsBackend {
     /// Returns None when no limit file exists (older driver) so callers can
     /// leave `Device::limits` untouched.
     fn read_hwmon_limits(hwmon_path: &Path) -> Option<crate::models::telemetry::DeviceLimits> {
-        let tdp_limit = Self::read_u64_file(&hwmon_path.join("power1_max"))
-            .map(|uw| uw as f32 / 1_000_000.0);
+        let tdp_limit =
+            Self::read_u64_file(&hwmon_path.join("power1_max")).map(|uw| uw as f32 / 1_000_000.0);
         let tdc_limit =
             Self::read_u64_file(&hwmon_path.join("curr1_max")).map(|ma| ma as f32 / 1000.0);
         let thm_limit =
@@ -591,7 +591,10 @@ impl TelemetryBackend for SysfsBackend {
         "Sysfs (hwmon sensors)".to_string()
     }
 
-    fn pcie_bandwidth(&self, device_idx: usize) -> Option<crate::backend::pcie_counters::PcieBandwidth> {
+    fn pcie_bandwidth(
+        &self,
+        device_idx: usize,
+    ) -> Option<crate::backend::pcie_counters::PcieBandwidth> {
         self.pcie_bandwidth.get(&device_idx).copied()
     }
 }
@@ -725,11 +728,20 @@ mod tests {
     fn fake_hwmon(dir: &Path) {
         for (f, v) in [
             ("name", "blackhole"),
-            ("temp1_input", "38036"), ("temp1_label", "asic_temp"), ("temp1_max", "90000"),
-            ("in0_input", "718"), ("in0_label", "vcore"), ("in0_max", "900"),
-            ("power1_input", "16000000"), ("power1_label", "power"), ("power1_max", "125000000"),
-            ("curr1_input", "23000"), ("curr1_label", "current"), ("curr1_max", "500000"),
-            ("fan1_input", "4294967295"), ("fan1_label", "fan_rpm"),
+            ("temp1_input", "38036"),
+            ("temp1_label", "asic_temp"),
+            ("temp1_max", "90000"),
+            ("in0_input", "718"),
+            ("in0_label", "vcore"),
+            ("in0_max", "900"),
+            ("power1_input", "16000000"),
+            ("power1_label", "power"),
+            ("power1_max", "125000000"),
+            ("curr1_input", "23000"),
+            ("curr1_label", "current"),
+            ("curr1_max", "500000"),
+            ("fan1_input", "4294967295"),
+            ("fan1_label", "fan_rpm"),
         ] {
             stdfs::write(dir.join(f), v).unwrap();
         }
@@ -767,8 +779,8 @@ mod tests {
         let lim = SysfsBackend::read_hwmon_limits(td.path()).unwrap();
         assert_eq!(lim.tdp_limit, Some(125.0)); // 125000000 µW
         assert_eq!(lim.tdc_limit, Some(500.0)); // 500000 mA
-        assert_eq!(lim.thm_limit, Some(90.0));  // 90000 m°C
-        assert_eq!(lim.asic_fmax, None);        // not exposed by hwmon
+        assert_eq!(lim.thm_limit, Some(90.0)); // 90000 m°C
+        assert_eq!(lim.asic_fmax, None); // not exposed by hwmon
     }
 
     #[test]
@@ -828,7 +840,10 @@ mod tests {
             SysfsBackend::read_string_attr(td.path(), "tt_card_type"),
             Some("p300c".to_string())
         );
-        assert_eq!(SysfsBackend::read_string_attr(td.path(), "tt_missing"), None);
+        assert_eq!(
+            SysfsBackend::read_string_attr(td.path(), "tt_missing"),
+            None
+        );
     }
 
     #[test]
@@ -847,8 +862,8 @@ mod tests {
         assert_eq!(smbus.therm_trip_count.as_deref(), Some("0"));
         assert_eq!(smbus.arc0_health.as_deref(), Some("43874")); // tt_heartbeat
         assert_eq!(smbus.board_id.as_deref(), Some("0000046131924062")); // tt_serial
-        // fan1_input = 4294967295 (no-fan sentinel) is stored verbatim; the
-        // existing fan_rpm() accessor maps it to None downstream.
+                                                                         // fan1_input = 4294967295 (no-fan sentinel) is stored verbatim; the
+                                                                         // existing fan_rpm() accessor maps it to None downstream.
         assert_eq!(smbus.fan_speed.as_deref(), Some("4294967295"));
         assert_eq!(smbus.fan_rpm(), None);
     }

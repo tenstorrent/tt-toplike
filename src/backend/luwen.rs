@@ -108,8 +108,11 @@ impl LuwenBackend {
             // Grayskull is #[deprecated] in luwen_def::Arch ("legacy architecture
             // that is no longer supported") but the variant still exists — keep
             // mapping it for completeness rather than silently dropping support.
-            #[allow(deprecated)]
+            // The allow is scoped to just this arm (upstream only deprecated
+            // that one variant; Wormhole/Blackhole shouldn't be silently
+            // exempted from future deprecation warnings too).
             let architecture = match arch {
+                #[allow(deprecated)]
                 Arch::Grayskull => Architecture::Grayskull,
                 Arch::Wormhole => Architecture::Wormhole,
                 Arch::Blackhole => Architecture::Blackhole,

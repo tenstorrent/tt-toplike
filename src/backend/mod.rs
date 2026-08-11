@@ -287,7 +287,10 @@ pub trait TelemetryBackend: Send + Sync {
     /// Instantaneous PCIe link bandwidth for one device, if the backend can
     /// measure it. Only the sysfs/hybrid path (tt-kmd `pcie_perf_counters/`)
     /// implements this; every other backend inherits the `None` default.
-    fn pcie_bandwidth(&self, _device_idx: usize) -> Option<crate::backend::pcie_counters::PcieBandwidth> {
+    fn pcie_bandwidth(
+        &self,
+        _device_idx: usize,
+    ) -> Option<crate::backend::pcie_counters::PcieBandwidth> {
         None
     }
 
@@ -421,7 +424,10 @@ impl TelemetryBackend for Box<dyn TelemetryBackend> {
         (**self).snapshot_json()
     }
 
-    fn pcie_bandwidth(&self, device_idx: usize) -> Option<crate::backend::pcie_counters::PcieBandwidth> {
+    fn pcie_bandwidth(
+        &self,
+        device_idx: usize,
+    ) -> Option<crate::backend::pcie_counters::PcieBandwidth> {
         (**self).pcie_bandwidth(device_idx)
     }
 
