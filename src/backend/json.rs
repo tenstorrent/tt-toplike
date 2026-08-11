@@ -948,13 +948,28 @@ impl TelemetryBackend for JSONBackend {
 ///
 /// Returns the winning field's **original string** so downstream parsing and
 /// EMA smoothing behave exactly as they do for any other SMBUS string field.
-/// Returns `None` when neither field holds a real reading (fanless card), so
-/// `SmbusTelemetry::fan_rpm()` reports "no fan" rather than a sentinel.
+///
+/// **When neither field holds a real reading**, this returns the first field
+/// that was *present* — the sentinel, verbatim — rather than `None`. That
+/// distinction matters one layer down: `SmbusTelemetry::fan_speed` is `None` for
+/// "tt-smi didn't report a fan field at all" and `Some(sentinel)` for "the
+/// firmware reported, and the reading is not an RPM". `smbus_smooth::blend`
+/// preserves the existing value on a `None` incoming (a field missing from one
+/// snapshot must not erase what we know), so collapsing a reported sentinel to
+/// `None` here made a fan that *stopped* keep rendering its last healthy RPM
+/// forever. The sentinel is filtered at the display boundary by
+/// `SmbusTelemetry::fan_rpm()`, which is the single place that decides what a
+/// real reading is — so a sentinel stored here still means "no Fan row", it just
+/// also means "clear whatever was there before".
+///
+/// `None` remains reserved for a snapshot that carries neither key.
 fn pick_fan_field(fan_speed: Option<&str>, fan_rpm: Option<&str>) -> Option<String> {
-    [fan_speed, fan_rpm]
+    let candidates = [fan_speed, fan_rpm];
+    candidates
         .into_iter()
         .flatten()
         .find(|s| crate::models::telemetry::real_fan_rpm(s).is_some())
+        .or_else(|| candidates.into_iter().flatten().next())
         .map(|s| s.to_string())
 }
 
@@ -1948,8 +1963,13 @@ mod tests {
         assert_eq!(smbus.fan_rpm(), Some(2500)); // 0x9c4
     }
 
-    /// Both fields sentinel (fanless p150-class card) → no fan reading at all,
-    /// and no sentinel string stored to be mis-rendered later.
+    /// Both fields sentinel (fanless p150-class card) → no fan reading at all.
+    ///
+    /// The sentinel *is* kept verbatim in `fan_speed`: it is what the firmware
+    /// reported, `fan_rpm()` filters it out of the display, and keeping it is what
+    /// lets `smbus_smooth::blend_fan` tell "reported, not a reading" (clear the
+    /// row) apart from "not reported this snapshot" (keep what we know) — see
+    /// `fan_sentinel_clears_a_stale_healthy_rpm`.
     #[test]
     fn both_fan_fields_sentinel_yields_none() {
         let json = r#"{
@@ -1960,7 +1980,75 @@ mod tests {
         }"#;
         let parsed = parse_tt_smi_snapshot(json).unwrap();
         let smbus = parsed.smbus.get(&0).unwrap();
-        assert_eq!(smbus.fan_speed, None, "sentinels must not be stored");
+        assert_eq!(
+            smbus.fan_speed.as_deref(),
+            Some("0x0"),
+            "a reported sentinel stays representable"
+        );
+        assert_eq!(smbus.fan_rpm(), None, "…and is not a fan reading");
+    }
+
+    /// End-to-end (parse → EMA blend), the shape the hybrid backend runs: a card
+    /// reporting a real RPM whose fan then stops must lose its Fan row.
+    ///
+    /// Regression (v0.8.1): `pick_fan_field` collapsed the stopped-fan sentinel to
+    /// `None`, `smbus_smooth::blend` read `None` as "field absent, keep what we
+    /// know", and the Insights sidebar rendered `Fan  1882 RPM` for the rest of
+    /// the session.
+    #[test]
+    fn fan_row_disappears_when_a_real_fan_stops() {
+        let spinning = r#"{
+            "device_info": [{
+                "board_info": {"bus_id": "0000:01:00.0", "board_type": "p300c"},
+                "smbus_telem": {"FAN_SPEED": "0x0", "FAN_RPM": "0x75a"}
+            }]
+        }"#;
+        let stopped = r#"{
+            "device_info": [{
+                "board_info": {"bus_id": "0000:01:00.0", "board_type": "p300c"},
+                "smbus_telem": {"FAN_SPEED": "0x0", "FAN_RPM": "0xffffffff"}
+            }]
+        }"#;
+
+        let first = parse_tt_smi_snapshot(spinning).unwrap();
+        let first = first.smbus.get(&0).unwrap().clone();
+        let second = parse_tt_smi_snapshot(stopped).unwrap();
+        let second = second.smbus.get(&0).unwrap();
+
+        // Mirrors HybridBackend::update: clone on first sight, then blend.
+        let mut ema = crate::backend::smbus_smooth::SmbusEmaState::new();
+        let mut blended = first.clone();
+        crate::backend::smbus_smooth::apply_ema(&mut ema, 0, &first, &mut blended);
+        assert_eq!(
+            blended.fan_rpm(),
+            Some(1882),
+            "baseline: the fan is spinning"
+        );
+
+        for _ in 0..5 {
+            crate::backend::smbus_smooth::apply_ema(&mut ema, 0, second, &mut blended);
+        }
+        assert_eq!(
+            blended.fan_rpm(),
+            None,
+            "a stopped fan must drop the row, not keep reporting 1882 RPM"
+        );
+    }
+
+    /// No fan key at all in the snapshot → `None`, which is a *different* state
+    /// from "reported a sentinel" and is the only one `blend` may treat as
+    /// "leave the previous value alone".
+    #[test]
+    fn absent_fan_fields_stay_none() {
+        let json = r#"{
+            "device_info": [{
+                "board_info": {"bus_id": "0000:01:00.0", "board_type": "p150a"},
+                "smbus_telem": {"AICLK": "0x320"}
+            }]
+        }"#;
+        let parsed = parse_tt_smi_snapshot(json).unwrap();
+        let smbus = parsed.smbus.get(&0).unwrap();
+        assert_eq!(smbus.fan_speed, None);
         assert_eq!(smbus.fan_rpm(), None);
     }
 
