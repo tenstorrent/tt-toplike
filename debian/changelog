@@ -91,12 +91,19 @@ tt-toplike (0.8.0) noble; urgency=medium
     hardware transport, so an early cut of this migration could not detect
     a device at all — enumeration now goes through
     `luwen_pci::detect_chips_silent`, which does its own PCI scan.
-    **This migration is compile-verified and reasoned from the official
-    crate sources only; hardware verification is still pending.** The
-    backend remains launch-only (never auto-detected, never touched by the
-    live `b` backend-cycle key) pending upstream arbitration between
-    Luwen's BAR0 mapping and a tt-kmd already serving an active workload —
-    which is also why no box was available to run it on.
+    **Verified on 4x Blackhole p300c (tt-kmd 2.9.0, idle):** all four chips
+    detected, and power, current, ASIC/GDDR temperatures and ETH link state
+    agree with the sysfs/hybrid path and `tt-smi -s`. Wormhole and Grayskull
+    are still unverified — no such silicon was available, so their register
+    layouts rest on unit tests over hand-built telemetry, with arch gating
+    to stop Blackhole-only tags being published as a confident zero on
+    Wormhole. Behaviour under load is likewise untested. The backend
+    remains launch-only (never auto-detected, never touched by the live `b`
+    backend-cycle key) pending upstream arbitration between Luwen's BAR0
+    mapping and a tt-kmd already serving an active workload. Expect slower
+    startup than sysfs (a PCI scan plus a scratch-register read per chip)
+    and no PCIe row, since the link counters and geometry have no luwen
+    source and are left absent rather than fabricated.
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 10 Aug 2026 00:00:00 +0000
 

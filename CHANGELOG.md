@@ -65,10 +65,17 @@ git tag                        # released versions
 - **luwen backend migrated** off the abandoned `all-smi-luwen-*` forks onto the
   official `luwen-api`/`luwen-pci`/`luwen-def` 0.8.5 crates, gaining Blackhole GDDR
   temps/ECC counters, harvesting and enabled masks, and thermal-trip count.
-  ⚠️ **Compile-verified and unit-tested only — this release never ran it against
-  hardware.** It stays explicit-only (`--backend luwen`, never auto-detected): on
-  tt-kmd ≥ 2.9/2.10, merely holding the device open participates in driver power-state
-  aggregation and can block `O_EXCL` openers like `tt-flash`.
+  **Verified on 4× Blackhole p300c**: all four chips detected, with power,
+  current, ASIC and GDDR temperatures and ETH link state agreeing with the
+  sysfs/hybrid path and `tt-smi -s`. Wormhole and Grayskull remain unverified
+  (no such silicon to hand — their register layouts are covered by unit tests
+  only), as does behaviour under load; every check so far ran against idle
+  cards. It stays explicit-only (`--backend luwen`, never auto-detected, never
+  in the `b` cycle): Luwen/UMD arbitration is unresolved upstream, and on
+  tt-kmd ≥ 2.9/2.10 merely holding the device open participates in driver
+  power-state aggregation and can block `O_EXCL` openers like `tt-flash`.
+  Expect slower startup than sysfs (it scans PCI and reads a scratch register
+  per chip) and no PCIe row (link counters and geometry have no luwen source).
 
 ### 0.7.33
 - **[i] media/diffusion monitoring** — SkyReels / SDXL / z-image servers

@@ -45,10 +45,35 @@
 //!
 //! # Verification status
 //!
-//! The 0.8.5 migration is **compile-verified and reasoned from crate source
-//! only** — it has not been exercised against hardware. This tool's own safety
-//! rule (luwen is explicit-only, never auto-detected) means the box it was
-//! developed on was serving live inference the whole time.
+//! **Exercised on hardware: 4× Blackhole p300c (tt-kmd 2.9.0), idle.** The
+//! backend detects all four chips and its readings agree with the sysfs/hybrid
+//! path and `tt-smi -s` for power, current, ASIC temperature, GDDR
+//! temperatures and ETH link state. Two mappings that this migration
+//! specifically had to get right were confirmed live: ARC health comes from
+//! `telemetry_heartbeat()` (Blackhole never assigns the per-ARC registers, so
+//! the raw fields would read 0 and paint every healthy card as firmware-
+//! stalled), and `ENABLED_ETH`/`EthLiveStatus` together render `12/12 live`
+//! rather than a dark `0/12`.
+//!
+//! Still unverified, deliberately:
+//! * **Wormhole and Grayskull** — no such silicon on the development box, so
+//!   the WH register layout is covered only by unit tests over hand-built
+//!   `Telemetry` values, and the arch gating in [`map_limits`] is what keeps WH
+//!   from publishing Blackhole-only tags as a confident `0`.
+//! * **Behaviour under load** — every hardware check so far ran against idle
+//!   cards. Luwen/UMD arbitration is unresolved upstream (DEVINFRA-4445), which
+//!   is why this backend stays explicit-only and is never auto-detected.
+//!
+//! # Differences from the safe backends
+//!
+//! Expect these, they are not faults:
+//! * **Slower startup.** Detection scans PCI and issues a scratch-register read
+//!   per chip, where sysfs just opens files — a visible fraction of a second
+//!   rather than instant.
+//! * **No PCIe row.** Link bandwidth comes from tt-kmd's `pcie_perf_counters/`
+//!   and the geometry from `tt-smi`'s `board_info`; neither has a luwen source,
+//!   so [`TelemetryBackend::pcie_bandwidth`] keeps the `None` default here and
+//!   the Insights PCIe row is absent rather than fabricated.
 
 #[cfg(feature = "luwen-backend")]
 use luwen_api::chip::{Chip, ChipImpl};

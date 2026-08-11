@@ -4171,11 +4171,24 @@ missing Blackhole telemetry tags entirely. Migrated to the crates.io
 GDDR temperatures and ECC counters, harvesting/enabled core masks, thermal
 trips, and input/board power-limit fields the forks never surfaced.
 
-> ⚠️ **Verification status: compile-verified + reasoned from crate source
-> only. Never run against hardware.** The whole reason Luwen is launch-only
-> (below) is also the reason there was no box to test it on — this machine
-> serves live inference on 4× Blackhole. Treat the whole luwen path as
-> unvalidated until someone runs it on an idle card.
+> ✅ **Verification status: run on 4× Blackhole p300c (tt-kmd 2.9.0) while the
+> cards were idle.** All four chips are detected and the readings agree with
+> the sysfs/hybrid path and `tt-smi -s` (power, current, ASIC + GDDR temps, ETH
+> link state). Two mappings this migration had to get right were confirmed
+> live: `arc0_health` from `telemetry_heartbeat()` — Blackhole never assigns
+> the per-ARC registers, so the raw fields read 0 and the Insights engine
+> declares every healthy card `Stalled` with high confidence — and
+> `ENABLED_ETH` + `EthLiveStatus` together yielding `12/12 live` instead of a
+> dark `0/12`.
+>
+> Still open: **Wormhole/Grayskull** (no such silicon here; their layouts rest
+> on unit tests over hand-built `Telemetry`, with arch gating so BH-only tags
+> aren't published as a confident `0` on WH) and **behaviour under load** —
+> every check so far was against idle cards, which is why the backend stays
+> launch-only. Comparing side-by-side against the safe backend is the cheapest
+> way to catch a bad register mapping: that is exactly how the missing
+> `Device::limits`/`firmwares` population was found (the Temp row showed the
+> generic `lim 105°C` instead of the board's real 90 °C).
 
 **Which crate does what** (this cost a bug — see below):
 - **`luwen-pci`** owns the PCIe transport *and* local enumeration:
@@ -4345,5 +4358,5 @@ the four backends:
 ---
 
 *Phase 25 status: **COMPLETE** — shipped as v0.8.0. Safe (sysfs/hybrid/json)
-path verified on 4× Blackhole; luwen path compile-verified only, hardware
-verification pending.*
+and luwen paths all verified on 4× Blackhole p300c; luwen remains explicit-only
+(never auto-detected) and unverified on Wormhole/Grayskull and under load.*
