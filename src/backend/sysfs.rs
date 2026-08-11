@@ -617,6 +617,18 @@ impl SysfsBackend {
     /// 2.7) nor a fan sensor, this must stay `None` — exactly the pre-0.8.0
     /// semantics. Only the fields `synthesize_smbus` fills are checked; the
     /// remaining ~40 SMBUS fields are unreachable from sysfs by construction.
+    ///
+    /// **The fan needs the sentinel-aware predicate, not a presence check.**
+    /// `synthesize_smbus` stores `fan1_input` verbatim (the honest raw register),
+    /// and on a fanless card — every p300c/p150a in the fleet — that raw value is
+    /// the firmware "no reading" sentinel `0xFFFFFFFF`. A bare
+    /// `fan_speed.is_some()` therefore counted that sentinel as real data, so a
+    /// card with an hwmon fan node but no class dir (kmd < 2.7, or a
+    /// `canonicalize` failure on the `device` symlink) published a block whose
+    /// only populated field was a non-reading — the precise all-`None`-in-effect
+    /// case this gate exists to suppress. Going through
+    /// [`SmbusTelemetry::fan_rpm`] keeps `models::telemetry`'s `real_fan_rpm` /
+    /// `is_fan_sentinel` the single source of truth about what a fan reading is.
     fn synthesized_smbus_has_data(s: &SmbusTelemetry) -> bool {
         s.aiclk.is_some()
             || s.axiclk.is_some()
@@ -625,7 +637,7 @@ impl SysfsBackend {
             || s.therm_trip_count.is_some()
             || s.board_id.is_some()
             || s.m3_app_fw_version.is_some()
-            || s.fan_speed.is_some()
+            || s.fan_rpm().is_some()
     }
 }
 
@@ -1228,6 +1240,72 @@ mod tests {
             backend.smbus_telemetry(0).is_none(),
             "no class dir and no fan → no SMBUS block at all"
         );
+    }
+
+    /// A fan node that only reports the fanless **sentinel** is not data either.
+    ///
+    /// Regression (v0.8.1): the gate used a raw `fan_speed.is_some()` presence
+    /// check, so this fixture — `fan1_input = 4294967295` (the value a live p300c
+    /// actually reports, see `fake_hwmon`) with no `device` symlink and therefore
+    /// no tt-kmd class dir — published an SMBUS block whose only populated field
+    /// was a non-reading. Downstream that is indistinguishable from an all-`None`
+    /// block: `memory_castle` paints a red "ARC dead" dot on a healthy card
+    /// (`is_arc0_healthy()` = `arc0_health.unwrap_or(0) > 0`) and the Insights ETH
+    /// row loses its architectural-max fallback (`0/? live` instead of
+    /// `0/24 live` — pinned in `ui::tui`'s
+    /// `eth_row_falls_back_to_arch_max_when_smbus_absent`, which is only
+    /// reachable while this stays `None`).
+    ///
+    /// `smbus_telemetry_is_none_without_class_dir_or_fan` cannot catch this: its
+    /// fixture omits the fan file entirely, so it never reaches the sentinel path.
+    #[test]
+    fn smbus_telemetry_is_none_when_only_fan_is_the_sentinel() {
+        let td = tempfile::tempdir().unwrap();
+        let hwmon = td.path().join("hwmon2");
+        stdfs::create_dir_all(&hwmon).unwrap();
+        // Full hwmon attr set (fan1_input = the 0xFFFFFFFF no-fan sentinel), but
+        // no `device` symlink → no tt class dir.
+        fake_hwmon(&hwmon);
+
+        let mut backend = SysfsBackend::new();
+        backend.detect_devices_in(td.path()).unwrap();
+        backend.update().unwrap();
+
+        // The raw fan value *is* readable — this is the sentinel path, not a
+        // missing-file path.
+        let synthesized = SysfsBackend::synthesize_smbus(None, Some(&hwmon.join("fan1_input")));
+        assert_eq!(synthesized.fan_speed.as_deref(), Some("4294967295"));
+        assert_eq!(synthesized.fan_rpm(), None, "sentinel is not an RPM");
+
+        assert!(
+            backend.telemetry(0).is_some(),
+            "core hwmon telemetry must still be served"
+        );
+        assert!(
+            backend.smbus_telemetry(0).is_none(),
+            "a sentinel-only fan reading must not publish an SMBUS block"
+        );
+    }
+
+    /// …but a fan node reporting a *real* RPM is data, even with no class dir:
+    /// the gate filters sentinels, it does not stop trusting the fan sensor.
+    #[test]
+    fn smbus_telemetry_is_some_when_fan_reports_a_real_rpm() {
+        let td = tempfile::tempdir().unwrap();
+        let hwmon = td.path().join("hwmon2");
+        stdfs::create_dir_all(&hwmon).unwrap();
+        fake_hwmon(&hwmon);
+        // Same fixture, but this card has a fan that is actually spinning.
+        stdfs::write(hwmon.join("fan1_input"), "1882").unwrap();
+
+        let mut backend = SysfsBackend::new();
+        backend.detect_devices_in(td.path()).unwrap();
+        backend.update().unwrap();
+
+        let smbus = backend
+            .smbus_telemetry(0)
+            .expect("a real fan reading must be published");
+        assert_eq!(smbus.fan_rpm(), Some(1882));
     }
 
     /// With the tt-kmd class dir present, the synthesized block *is* served.
