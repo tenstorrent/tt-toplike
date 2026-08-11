@@ -50,6 +50,15 @@ git tag                        # released versions
   whichever holds a non-sentinel reading now wins); tt-smi ≥ 6.0.0's top-level
   `processes[]` (per-device pid/user/cmdline attribution) and `telemetry.board_power`
   are parsed.
+- **Fix: the real per-board limits didn't actually reach every backend.**
+  `--backend json` silently dropped tt-smi's whole `limits` block (tt-smi emits
+  those numbers as quoted strings, which the parser rejected) and the luwen
+  backend never populated limits or the firmware version at all — both fell back
+  to the generic 300 W / 105 °C. Fixed in both, and the limit shown next to Temp
+  is now the ~90 °C *throttle* point on all four backends (it was tt-smi's 110 °C
+  shutdown trip on the JSON path), so the same row means the same thing however
+  you launch. luwen also gains the FW bundle version row; its limits are
+  Blackhole-only, reported as absent rather than 0 on Wormhole.
 - Both Prometheus scrapers accept either vLLM KV-cache metric name
   (`vllm:gpu_cache_usage_perc` or `vllm:kv_cache_usage_perc`) — vLLM renamed it and
   builds in the field ship one or the other.

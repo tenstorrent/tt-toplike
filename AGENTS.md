@@ -4290,6 +4290,58 @@ down to just the one arm (`Arch::Grayskull`) upstream actually deprecated.
   explicit `--backend sysfs`. It now falls back to the inner sysfs cache per
   device index, with the richer tt-smi blend still winning where present.
 
+### Two parity gaps found by running luwen against the safe backend
+
+Taylor put a `--features luwen-backend` build side by side with the default
+(hybrid) build on the same 4× Blackhole p300c box and diffed the Insights
+sidebar. Two of the release's headline features turned out not to reach two of
+the four backends:
+
+* **luwen never populated `Device::limits` / `Device::firmwares`.**
+  `detect_devices` hardcoded both to `None` while building each `Device`, even
+  though luwen's `Telemetry` carries all of it. Visible as `Temp 38.4°C (lim
+  105°C)` where the safe backend showed `(lim 90°C)` (105 is the UI's generic
+  fallback), a Current row with no `(lim 500A)` at all, and an FW row of `—`.
+  New `map_limits`/`map_firmwares` are fed by the telemetry read
+  `detect_devices` was *already* doing for the board type, so no second
+  hardware touch. Field names on `luwen_api::chip::Telemetry`:
+  `tdp_limit_max`, `tdc_limit_max`, `aiclk_limit_max`, `thm_limit_throttle`,
+  `fw_bundle_version`.
+  - **`thm_limit` comes from `thm_limit_throttle` (90 °C), not `thm_limits`
+    (110 °C).** Three different thermal numbers live within one register set:
+    the throttle trip (hwmon `temp1_max`, tt-smi `therm_trip_l1_limit`), the
+    shutdown trip (tt-smi `thm_limit`), and luwen's packed `thm_limits` word.
+    `DeviceLimits::thm_limit` is *the number the UI prints next to Temp*, so it
+    must be the throttle point on every backend or the same row means different
+    things depending on how you launched.
+  - **Limits stay `None` on Wormhole** — those four are BH telemetry *tags*
+    that WH's fixed-offset struct never assigns, so they read 0, and
+    `Some(0.0)` renders "(lim 0W)": worse than no annotation. (WH's throttle
+    point *is* derivable from the high half of its packed `thm_limits`, but
+    there's no WH source for TDP/TDC/fmax, so the block would still be mostly
+    invented.) `fw_bundle_version` is **not** arch-gated — WH populates it too
+    (telemetry offset 49, ARC fw ≥ 2.25.0.0) — but a zero register is treated
+    as "not reported" rather than decoded to a fake "0.0.0.0".
+  - The **PCIe row is legitimately absent** on luwen (no `pcie_bandwidth()`,
+    and no link speed/width source at all — only `PCIE_USAGE`, a lane count).
+    Documented in the module header instead of faked.
+
+* **`--backend json` never parsed the `limits` block at all.** tt-smi emits it
+  with **string** values (`"tdp_limit": "125"`, alongside bare-number
+  `bus_peak_limit: 0` — it is inconsistent *within one object*), and serde
+  fails the whole struct on one bad field, so `Device::limits` was `None` and
+  the pure-JSON path fell back to the generic 300 W / 105 °C this release
+  claims to have replaced. The hybrid path masked it for months because hwmon
+  `*_max` supplies its limits instead — **a bug in one backend's parse can hide
+  behind another backend's redundant source.** `DeviceLimits` now deserializes
+  through a tolerant `DeviceLimitsRaw` (`#[serde(from)]`), which is also where
+  the `therm_trip_l1_limit`-over-`thm_limit` preference lives, so every JSON
+  consumer gets the same semantics for free. The two number-or-string
+  deserializers moved from `backend/json.rs` to `models::serde_num` — models
+  must not depend on backend. tt-smi's `firmwares` block needed no change:
+  checked live, every member is a string and all four modelled fields are
+  `Option<String>`.
+
 ---
 
 *Phase 25 status: **COMPLETE** — shipped as v0.8.0. Safe (sysfs/hybrid/json)

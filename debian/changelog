@@ -44,6 +44,36 @@ tt-toplike (0.8.0) noble; urgency=medium
       (`gpu_cache_usage_perc` or `kv_cache_usage_perc`) via a shared
       `parse_kv_cache_line` helper — some deployments only expose one or
       the other.
+  * Cross-backend limit parity (found by diffing a luwen build against the
+    default hybrid build on the same 4× Blackhole box — two of this
+    release's headline features weren't reaching two of the four backends):
+    - `--backend json` never parsed tt-smi's `limits` block at all: tt-smi
+      emits those numbers as quoted strings (`"tdp_limit": "125"`) and
+      serde fails the whole struct on one bad field, so `Device::limits`
+      stayed `None` and the pure-JSON path fell back to the generic
+      300 W / 105 °C these limits were meant to replace. The hybrid path
+      masked the bug because hwmon `*_max` supplies its limits instead.
+      `DeviceLimits` now deserializes through a tolerant intermediate
+      (number-or-string, shared with the rest of the tt-smi parser via a
+      new `models::serde_num`).
+    - The displayed thermal limit is now the ~90 °C *throttle* trip point
+      on every backend. tt-smi's `thm_limit` is the harder 110 °C shutdown
+      trip; its `therm_trip_l1_limit` (90 °C) is what hwmon publishes as
+      `temp1_max`, so the JSON path is switched to prefer it and only falls
+      back to `thm_limit` for pre-5.3.0 snapshots.
+    - luwen backend populated neither `Device::limits` nor
+      `Device::firmwares` (both were hardcoded `None`), so its Insights
+      rows showed `(lim 105°C)` against the safe backend's `(lim 90°C)`,
+      dropped the Current row's `(lim 500A)` entirely, and rendered the FW
+      row as `—`. Both are now mapped from the telemetry read that detection
+      already performs for the board type (no extra hardware touch), using
+      `thm_limit_throttle` for consistency with hwmon and a new
+      `fw_bundle_version_string` decode of the packed FLASH_BUNDLE_VERSION
+      register. Limits are Blackhole-only — those registers are BH telemetry
+      tags Wormhole never assigns, so they stay absent there rather than
+      reporting a fabricated "(lim 0W)". The PCIe row remains legitimately
+      absent on luwen (no link speed/width source) and is now documented as
+      such rather than faked.
   * Device ordering fix (affects every multi-card box): the sysfs backend
     assigned device indices in raw `readdir` order, which is neither hwmon
     number nor PCI bus-id order and is not stable across boots. The hybrid
