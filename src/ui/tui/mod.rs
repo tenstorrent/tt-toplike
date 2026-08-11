@@ -4232,6 +4232,20 @@ const FLEET_CELL_W: u16 = 3;
 /// Used by both `panel_layout` and `render_device_panels` — single source of truth.
 const PANEL_INTER_COL_GAP: u16 = 1;
 
+/// Total height of one Insights device panel: 1 header rule + interior + 1
+/// footer hairline. Single source of truth for `render_device_panels` (layout)
+/// and `device_panels_height` (the area reservation the Insights screen makes).
+///
+/// The interior (`DEVICE_PANEL_H - 2`) has to hold **both** the 12-row chip
+/// portrait and the tallest possible stats sidebar. The sidebar is the binding
+/// constraint: its worst realistic case on a Blackhole with tt-smi ≥ 6 is 12
+/// rows (Power, ETH, GDDR T, Temp, Fan, Current, Board, PCIe link, PCIe
+/// bandwidth, ECC, Trips, FW), and `Paragraph` clips silently — at the previous
+/// height of 14 (interior 12) a 13th row would have dropped the Firmware row
+/// with no other symptom. 15 keeps a row of headroom;
+/// `stats_sidebar_worst_case_fits_panel_interior` fails if a future row eats it.
+const DEVICE_PANEL_H: u16 = 15;
+
 /// Fleet compact mode activates at this device count (matching the starfield galaxy mode).
 /// At 32+ devices the full-portrait grid almost always overflows a standard terminal.
 const FLEET_DEVICE_THRESHOLD: usize = 32;
@@ -4290,7 +4304,7 @@ fn device_panels_height(devices: &[crate::models::Device], area_width: u16) -> u
 
     let (_, _, cols_per_row) = panel_layout(n, portrait_w, area_width);
     let row_count = (n + cols_per_row - 1) / cols_per_row;
-    (row_count as u16) * 15 // panel_h(14) + inter-row gap(1)
+    (row_count as u16) * (DEVICE_PANEL_H + 1) // panel + inter-row gap(1)
 }
 
 /// Render Insights screen (full layout: chip portraits + process panel).
@@ -5333,6 +5347,422 @@ fn pcie_row_parts(
         (None, None) => vec![],
     }
 }
+/// Build the per-device stats sidebar rows for the Insights panel.
+///
+/// Pure: takes only what it renders, returns the rows in display order, and does
+/// no padding or clipping — the caller pads to the panel interior. Extracted from
+/// `render_device_panels` so the **row budget is testable**: `Paragraph` clips
+/// silently, so a row set that outgrows the panel interior would just drop its
+/// tail (the Firmware row) with no other symptom. See
+/// `stats_sidebar_worst_case_fits_panel_interior`, which fails if a newly added
+/// row pushes the worst case past `DEVICE_PANEL_H - 2`.
+///
+/// `compact` is the narrow-sidebar mode (`stats_w < 31`): core rows only, with
+/// shortened labels — see `panel_layout`.
+fn build_stats_sidebar_rows(
+    device: &crate::models::Device,
+    telemetry: Option<&crate::models::Telemetry>,
+    smbus: Option<&crate::models::SmbusTelemetry>,
+    pcie_bw: Option<crate::backend::pcie_counters::PcieBandwidth>,
+    compact: bool,
+) -> Vec<ratatui::text::Line<'static>> {
+    use ratatui::style::{Color, Style};
+    use ratatui::text::{Line, Span};
+
+    let mut stat_lines: Vec<Line> = Vec::new();
+    // Arch name, device index, and temperature live in the header rule above.
+    // Stats sidebar starts directly with telemetry data.
+
+    // Power row
+    let power_w_val = telemetry.map(|t| t.power_w()).unwrap_or(0.0);
+    // Use device directly — avoid redundant backend.devices() lookup.
+    let tdp = device
+        .limits
+        .as_ref()
+        .and_then(|l| l.tdp_limit)
+        .unwrap_or(300.0);
+    let power_frac = (power_w_val / tdp).min(1.0);
+    let power_color = if power_frac > 0.85 {
+        Color::Rgb(255, 80, 80)
+    } else if power_frac > 0.6 {
+        Color::Rgb(236, 150, 184)
+    } else if power_frac > 0.3 {
+        Color::Rgb(160, 120, 255)
+    } else {
+        Color::Rgb(79, 209, 197)
+    };
+    if compact {
+        // Compact: "⚡ bar(6) val" — fits in 18 chars total.
+        let bar_filled = (power_frac * 6.0) as usize;
+        let power_bar: String = (0..6)
+            .map(|i| if i < bar_filled { '█' } else { '░' })
+            .collect();
+        stat_lines.push(Line::from(vec![
+            Span::styled("⚡", Style::default().fg(Color::DarkGray)),
+            Span::styled(power_bar, Style::default().fg(power_color)),
+            Span::styled(
+                format!(" {:5.0}W", power_w_val),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+    } else {
+        let bar_filled = (power_frac * 10.0) as usize;
+        let power_bar: String = (0..10)
+            .map(|i| if i < bar_filled { '█' } else { '░' })
+            .collect();
+        stat_lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<8}", "Power"),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(power_bar, Style::default().fg(power_color)),
+            Span::styled(
+                format!(" {:5.0}W", power_w_val),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+    }
+
+    // ETH row — use ENABLED_ETH as the denominator (ports provisioned by
+    // firmware) rather than the architectural maximum.  On p300c cards
+    // ENABLED_ETH=0x3edf gives 12 enabled ports; showing 0/24 looks broken.
+    //
+    // Fallback hierarchy:
+    //   1. SMBUS present + ENABLED_ETH > 0  → use enabled count (accurate)
+    //   2. SMBUS present + ENABLED_ETH = 0  → show live/? (transient or no ports)
+    //   3. SMBUS absent entirely             → fall back to arch max (no data yet)
+    let eth_live_mask = smbus.and_then(|s| s.eth_live_status).unwrap_or(0);
+    let eth_enabled_mask = smbus.and_then(|s| s.enabled_eth).unwrap_or(0);
+    // Count only ports that are both enabled and live to prevent impossible
+    // displays like "15/14 live" if ETH_LIVE_STATUS has bits outside ENABLED_ETH.
+    let eth_live_count = if eth_enabled_mask > 0 {
+        (eth_live_mask & eth_enabled_mask as u64).count_ones()
+    } else {
+        eth_live_mask.count_ones()
+    };
+    let eth_total: Option<u32> = if eth_enabled_mask > 0 {
+        Some(eth_enabled_mask.count_ones())
+    } else if smbus.is_some() {
+        None // SMBUS present but ENABLED_ETH zero — don't invent a total
+    } else {
+        // No SMBUS data yet — show architectural max so the row isn't empty
+        Some(match device.architecture {
+            crate::models::Architecture::Blackhole => 24,
+            crate::models::Architecture::Wormhole => 20,
+            _ => 4,
+        })
+    };
+    let eth_total_display = eth_total
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let eth_color = match eth_total {
+        Some(t) if eth_live_count == t && t > 0 => Color::Rgb(79, 209, 197), // teal — all live
+        _ if eth_live_count > 0 => Color::Rgb(244, 196, 113),                // yellow — partial
+        _ => Color::Rgb(96, 125, 139), // muted gray — none live
+    };
+    if compact {
+        stat_lines.push(Line::from(vec![
+            Span::styled("E ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}/{}", eth_live_count, eth_total_display),
+                Style::default().fg(eth_color),
+            ),
+        ]));
+    } else {
+        const ETH_DOT_CAP: u32 = 16;
+        let dots_shown = eth_total.unwrap_or(ETH_DOT_CAP).min(ETH_DOT_CAP);
+        // Dot map: iterate enabled bits when available, else live bits.
+        let enabled_bits: Vec<u32> = if eth_enabled_mask > 0 {
+            (0..32)
+                .filter(|&b| (eth_enabled_mask >> b) & 1 == 1)
+                .collect()
+        } else {
+            (0..dots_shown).collect()
+        };
+        let eth_dots: String = enabled_bits
+            .iter()
+            .take(dots_shown as usize)
+            .map(|&bit| {
+                if (eth_live_mask >> bit) & 1 == 1 {
+                    '●'
+                } else {
+                    '·'
+                }
+            })
+            .collect();
+        let eth_suffix = match eth_total {
+            Some(t) if t > ETH_DOT_CAP => format!("+{}", t - ETH_DOT_CAP),
+            _ => String::new(),
+        };
+        stat_lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<8}", "ETH"),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("{}{}", eth_dots, eth_suffix),
+                Style::default().fg(eth_color),
+            ),
+            Span::styled(
+                format!(" {}/{} live", eth_live_count, eth_total_display),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+    }
+
+    // GDDR temp row (full mode only — too wide for compact)
+    if !compact {
+        if let Some(s) = smbus {
+            let temps: Vec<f32> = s
+                .gddr_temps
+                .iter()
+                .filter_map(|p| p.as_ref())
+                .flat_map(|p| p.0.iter().copied())
+                .filter(|&t| t > 0.0)
+                .collect();
+            if !temps.is_empty() {
+                let t_min = temps.iter().copied().fold(f32::INFINITY, f32::min);
+                let t_max = temps.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let max_color = if t_max > 70.0 {
+                    Color::Rgb(255, 80, 80)
+                } else if t_max > 50.0 {
+                    Color::Rgb(236, 150, 184)
+                } else {
+                    Color::Rgb(79, 209, 197)
+                };
+                stat_lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{:<8}", "GDDR T"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("{:.0}°→{:.0}°C", t_min, t_max),
+                        Style::default().fg(max_color),
+                    ),
+                ]));
+            }
+        }
+    }
+
+    // ASIC temp row
+    let asic_temp = telemetry.map(|t| t.temp_c()).unwrap_or(0.0);
+    // Use device directly — avoid redundant backend.devices() lookup.
+    let thm_limit = device
+        .limits
+        .as_ref()
+        .and_then(|l| l.thm_limit)
+        .unwrap_or(105.0);
+    let temp_color = crate::ui::colors::temp_color(asic_temp);
+    if compact {
+        // Compact: "T 42.1°C" — omit limit annotation.
+        stat_lines.push(Line::from(vec![
+            Span::styled("T ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{:.1}°C", asic_temp),
+                Style::default().fg(temp_color),
+            ),
+        ]));
+    } else {
+        stat_lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<8}", "Temp"),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("{:.1}°C", asic_temp),
+                Style::default().fg(temp_color),
+            ),
+            Span::styled(
+                format!(" (lim {:.0}°C)", thm_limit),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+
+    // Fan RPM row (full mode only). `fan_rpm()` returns None for the
+    // firmware all-ones "no fan" sentinel (0xFFFF / 0xFFFFFFFF) and 0, so
+    // fanless cards (e.g. p150 Blackhole) simply show no fan line instead
+    // of a nonsensical "65535 RPM".
+    if !compact {
+        if let Some(rpm) = smbus.and_then(|s| s.fan_rpm()) {
+            stat_lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{:<8}", "Fan"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(format!("{} RPM", rpm), Style::default().fg(Color::White)),
+            ]));
+        }
+    }
+
+    // Current row (full mode only): firmware-measured amps vs. the TDC
+    // ceiling from the limits block / hwmon curr1_max.
+    if !compact {
+        if let Some(amps) = telemetry.and_then(|t| t.current) {
+            let tdc = device.limits.as_ref().and_then(|l| l.tdc_limit);
+            let lim_txt = tdc.map(|a| format!(" (lim {:.0}A)", a)).unwrap_or_default();
+            stat_lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{:<8}", "Current"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(format!("{:.0}A", amps), Style::default().fg(Color::White)),
+                Span::styled(lim_txt, Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+    }
+
+    // Board power row (full mode only): whole-card input power (tt-smi ≥ 6,
+    // dual-asic p300 boards). Shown whenever the backend reports it —
+    // knowing total board draw is useful even when it sits close to the
+    // asic figure above, and on p300 the two are meaningfully different.
+    if !compact {
+        if let Some(bw) = telemetry.and_then(|t| t.board_power) {
+            stat_lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{:<8}", "Board"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(format!("{:.0}W", bw), Style::default().fg(Color::White)),
+                Span::styled(" total", Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+    }
+
+    // PCIe row (full mode only): link geometry from board_info plus live
+    // bandwidth from the kmd counters (sysfs/hybrid backends only).
+    //
+    // Link geometry and bandwidth together can overflow the 30-col
+    // sidebar content width (e.g. "Gen4 x16 ▼1.23 GB/s ▲1.23 GB/s" is
+    // well past budget after the 8-col label), so `pcie_row_parts` — a
+    // pure, unit-tested helper — decides whether they share one row or
+    // split across two; see its doc comment for the exact width math.
+    if !compact {
+        let link = match (device.pcie_speed.as_deref(), device.pcie_width) {
+            (Some(gen), Some(w)) => Some(format!("{} x{}", gen, w)),
+            (Some(gen), None) => Some(gen.to_string()),
+            _ => None,
+        };
+        let bw = pcie_bw;
+        for (continuation, content, is_bandwidth) in pcie_row_parts(link, bw) {
+            let label = if continuation {
+                // Indent to the label-column width instead of repeating
+                // "PCIe" — this is a continuation of the row above.
+                Span::raw(" ".repeat(8))
+            } else {
+                Span::styled(
+                    format!("{:<8}", "PCIe"),
+                    Style::default().fg(Color::DarkGray),
+                )
+            };
+            let value_color = if is_bandwidth {
+                Color::Rgb(79, 209, 197)
+            } else {
+                Color::White
+            };
+            stat_lines.push(Line::from(vec![
+                label,
+                Span::styled(content, Style::default().fg(value_color)),
+            ]));
+        }
+    }
+
+    // GDDR ECC row (full mode only): shown only when any error counter is
+    // non-zero — uncorrectable errors are the headline diagnostic and go red.
+    //
+    // Accumulation is saturating and drops the all-ones sentinel: an
+    // unimplemented/unpowered GDDR ECC register reads 0xFFFFFFFF (the same
+    // "no reading" convention the fan register uses), and four of those
+    // summed with `Iterator::sum` panics on overflow in a debug build.
+    // Unlike the fan filter, 0 and 0xFFFF are NOT filtered here — zero is
+    // the normal healthy count, and 65535 correctable errors is a plausible
+    // real reading on a degrading module.
+    if !compact {
+        if let Some(s) = smbus {
+            const ECC_NO_READING: u32 = u32::MAX;
+            let corr: u32 = s
+                .gddr_corr_errs
+                .iter()
+                .flatten()
+                .copied()
+                .filter(|&v| v != ECC_NO_READING)
+                .fold(0u32, u32::saturating_add);
+            let uncorr = s
+                .gddr_uncorr_errs
+                .filter(|&v| v != ECC_NO_READING)
+                .unwrap_or(0);
+            if corr > 0 || uncorr > 0 {
+                let color = if uncorr > 0 {
+                    Color::Rgb(255, 80, 80) // uncorrectable — data corruption risk
+                } else {
+                    Color::Rgb(244, 196, 113) // correctable only — watch it
+                };
+                stat_lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{:<8}", "ECC"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("{} uncorr · {} corr", uncorr, corr),
+                        Style::default().fg(color),
+                    ),
+                ]));
+            }
+        }
+    }
+
+    // Thermal-trip row (full mode only): lifetime trip counter — any
+    // non-zero value means the card hit hardware thermal shutdown at least
+    // once and deserves attention.
+    if !compact {
+        if let Some(trips) = smbus
+            .and_then(|s| s.therm_trip_count.as_deref())
+            .and_then(crate::models::telemetry::parse_hex_or_dec)
+        {
+            if trips > 0 {
+                stat_lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{:<8}", "Trips"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("{} thermal", trips),
+                        Style::default().fg(Color::Rgb(255, 80, 80)),
+                    ),
+                ]));
+            }
+        }
+    }
+
+    // Firmware row — shown in both full and compact mode.
+    {
+        let fw_ver = device
+            .firmwares
+            .as_ref()
+            .and_then(|fw| fw.fw_bundle_version.as_deref())
+            .unwrap_or("—");
+        let fw_short = fw_ver.trim_start_matches("fw_pack-");
+        if compact {
+            // Compact: "F " + up to 16 chars (content_w=18). Truncate by
+            // chars, not bytes — a byte slice would panic mid-UTF-8 (fw
+            // strings are ASCII today, but this matches the rest of the UI).
+            let fw_display: String = fw_short.chars().take(16).collect();
+            stat_lines.push(Line::from(vec![
+                Span::styled("F ", Style::default().fg(Color::DarkGray)),
+                Span::styled(fw_display, Style::default().fg(Color::White)),
+            ]));
+        } else {
+            // content_w is 30; "FW" label takes 8 chars, leaving 22 for the version string.
+            let fw_display: String = fw_short.chars().take(22).collect();
+            stat_lines.push(Line::from(vec![
+                Span::styled(format!("{:<8}", "FW"), Style::default().fg(Color::DarkGray)),
+                Span::styled(fw_display, Style::default().fg(Color::White)),
+            ]));
+        }
+    }
+
+    stat_lines
+}
 
 /// Render Insights device panels — one per device, each with a chip portrait on the
 /// left and a stats sidebar on the right.
@@ -5375,7 +5805,7 @@ fn render_device_panels(
         return;
     }
 
-    let panel_h: u16 = 14; // portrait 12 rows + 1 title row + 1 bottom border row
+    let panel_h: u16 = DEVICE_PANEL_H;
     let inter_row_gap: u16 = 1;
 
     // Fleet galaxy mode at 32+ devices (matching starfield threshold).
@@ -5594,398 +6024,28 @@ fn render_device_panels(
             height: interior_h,
         };
 
-        let mut stat_lines: Vec<Line> = Vec::new();
-        // Arch name, device index, and temperature live in the header rule above.
-        // Stats sidebar starts directly with telemetry data.
-
-        // Power row
-        let power_w_val = telemetry.map(|t| t.power_w()).unwrap_or(0.0);
-        // Use device directly — avoid redundant backend.devices() lookup.
-        let tdp = device
-            .limits
-            .as_ref()
-            .and_then(|l| l.tdp_limit)
-            .unwrap_or(300.0);
-        let power_frac = (power_w_val / tdp).min(1.0);
-        let power_color = if power_frac > 0.85 {
-            Color::Rgb(255, 80, 80)
-        } else if power_frac > 0.6 {
-            Color::Rgb(236, 150, 184)
-        } else if power_frac > 0.3 {
-            Color::Rgb(160, 120, 255)
-        } else {
-            Color::Rgb(79, 209, 197)
-        };
-        if compact {
-            // Compact: "⚡ bar(6) val" — fits in 18 chars total.
-            let bar_filled = (power_frac * 6.0) as usize;
-            let power_bar: String = (0..6)
-                .map(|i| if i < bar_filled { '█' } else { '░' })
-                .collect();
-            stat_lines.push(Line::from(vec![
-                Span::styled("⚡", Style::default().fg(Color::DarkGray)),
-                Span::styled(power_bar, Style::default().fg(power_color)),
-                Span::styled(
-                    format!(" {:5.0}W", power_w_val),
-                    Style::default().fg(Color::White),
-                ),
-            ]));
-        } else {
-            let bar_filled = (power_frac * 10.0) as usize;
-            let power_bar: String = (0..10)
-                .map(|i| if i < bar_filled { '█' } else { '░' })
-                .collect();
-            stat_lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{:<8}", "Power"),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(power_bar, Style::default().fg(power_color)),
-                Span::styled(
-                    format!(" {:5.0}W", power_w_val),
-                    Style::default().fg(Color::White),
-                ),
-            ]));
+        let mut stat_lines = build_stats_sidebar_rows(
+            device,
+            telemetry,
+            smbus,
+            backend.pcie_bandwidth(idx),
+            compact,
+        );
+        // Overflow is silent in `Paragraph` (it clips, it doesn't wrap or
+        // scroll), so say something loud rather than quietly losing the last
+        // row(s). `stats_sidebar_worst_case_fits_panel_interior` is the real
+        // guard — this is the belt to its braces for a row set no test foresaw.
+        if stat_lines.len() > interior_h as usize {
+            log::warn!(
+                "Insights sidebar for device {} needs {} rows but the panel \
+                 interior is {} — the last {} row(s) will be clipped; \
+                 raise DEVICE_PANEL_H",
+                idx,
+                stat_lines.len(),
+                interior_h,
+                stat_lines.len() - interior_h as usize
+            );
         }
-
-        // ETH row — use ENABLED_ETH as the denominator (ports provisioned by
-        // firmware) rather than the architectural maximum.  On p300c cards
-        // ENABLED_ETH=0x3edf gives 12 enabled ports; showing 0/24 looks broken.
-        //
-        // Fallback hierarchy:
-        //   1. SMBUS present + ENABLED_ETH > 0  → use enabled count (accurate)
-        //   2. SMBUS present + ENABLED_ETH = 0  → show live/? (transient or no ports)
-        //   3. SMBUS absent entirely             → fall back to arch max (no data yet)
-        let eth_live_mask = smbus.and_then(|s| s.eth_live_status).unwrap_or(0);
-        let eth_enabled_mask = smbus.and_then(|s| s.enabled_eth).unwrap_or(0);
-        // Count only ports that are both enabled and live to prevent impossible
-        // displays like "15/14 live" if ETH_LIVE_STATUS has bits outside ENABLED_ETH.
-        let eth_live_count = if eth_enabled_mask > 0 {
-            (eth_live_mask & eth_enabled_mask as u64).count_ones()
-        } else {
-            eth_live_mask.count_ones()
-        };
-        let eth_total: Option<u32> = if eth_enabled_mask > 0 {
-            Some(eth_enabled_mask.count_ones())
-        } else if smbus.is_some() {
-            None // SMBUS present but ENABLED_ETH zero — don't invent a total
-        } else {
-            // No SMBUS data yet — show architectural max so the row isn't empty
-            Some(match device.architecture {
-                crate::models::Architecture::Blackhole => 24,
-                crate::models::Architecture::Wormhole => 20,
-                _ => 4,
-            })
-        };
-        let eth_total_display = eth_total
-            .map(|t| t.to_string())
-            .unwrap_or_else(|| "?".to_string());
-        let eth_color = match eth_total {
-            Some(t) if eth_live_count == t && t > 0 => Color::Rgb(79, 209, 197), // teal — all live
-            _ if eth_live_count > 0 => Color::Rgb(244, 196, 113),                // yellow — partial
-            _ => Color::Rgb(96, 125, 139), // muted gray — none live
-        };
-        if compact {
-            stat_lines.push(Line::from(vec![
-                Span::styled("E ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("{}/{}", eth_live_count, eth_total_display),
-                    Style::default().fg(eth_color),
-                ),
-            ]));
-        } else {
-            const ETH_DOT_CAP: u32 = 16;
-            let dots_shown = eth_total.unwrap_or(ETH_DOT_CAP).min(ETH_DOT_CAP);
-            // Dot map: iterate enabled bits when available, else live bits.
-            let enabled_bits: Vec<u32> = if eth_enabled_mask > 0 {
-                (0..32)
-                    .filter(|&b| (eth_enabled_mask >> b) & 1 == 1)
-                    .collect()
-            } else {
-                (0..dots_shown).collect()
-            };
-            let eth_dots: String = enabled_bits
-                .iter()
-                .take(dots_shown as usize)
-                .map(|&bit| {
-                    if (eth_live_mask >> bit) & 1 == 1 {
-                        '●'
-                    } else {
-                        '·'
-                    }
-                })
-                .collect();
-            let eth_suffix = match eth_total {
-                Some(t) if t > ETH_DOT_CAP => format!("+{}", t - ETH_DOT_CAP),
-                _ => String::new(),
-            };
-            stat_lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{:<8}", "ETH"),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!("{}{}", eth_dots, eth_suffix),
-                    Style::default().fg(eth_color),
-                ),
-                Span::styled(
-                    format!(" {}/{} live", eth_live_count, eth_total_display),
-                    Style::default().fg(Color::White),
-                ),
-            ]));
-        }
-
-        // GDDR temp row (full mode only — too wide for compact)
-        if !compact {
-            if let Some(s) = smbus {
-                let temps: Vec<f32> = s
-                    .gddr_temps
-                    .iter()
-                    .filter_map(|p| p.as_ref())
-                    .flat_map(|p| p.0.iter().copied())
-                    .filter(|&t| t > 0.0)
-                    .collect();
-                if !temps.is_empty() {
-                    let t_min = temps.iter().copied().fold(f32::INFINITY, f32::min);
-                    let t_max = temps.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                    let max_color = if t_max > 70.0 {
-                        Color::Rgb(255, 80, 80)
-                    } else if t_max > 50.0 {
-                        Color::Rgb(236, 150, 184)
-                    } else {
-                        Color::Rgb(79, 209, 197)
-                    };
-                    stat_lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("{:<8}", "GDDR T"),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                        Span::styled(
-                            format!("{:.0}°→{:.0}°C", t_min, t_max),
-                            Style::default().fg(max_color),
-                        ),
-                    ]));
-                }
-            }
-        }
-
-        // ASIC temp row
-        let asic_temp = telemetry.map(|t| t.temp_c()).unwrap_or(0.0);
-        // Use device directly — avoid redundant backend.devices() lookup.
-        let thm_limit = device
-            .limits
-            .as_ref()
-            .and_then(|l| l.thm_limit)
-            .unwrap_or(105.0);
-        let temp_color = crate::ui::colors::temp_color(asic_temp);
-        if compact {
-            // Compact: "T 42.1°C" — omit limit annotation.
-            stat_lines.push(Line::from(vec![
-                Span::styled("T ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("{:.1}°C", asic_temp),
-                    Style::default().fg(temp_color),
-                ),
-            ]));
-        } else {
-            stat_lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{:<8}", "Temp"),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!("{:.1}°C", asic_temp),
-                    Style::default().fg(temp_color),
-                ),
-                Span::styled(
-                    format!(" (lim {:.0}°C)", thm_limit),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]));
-        }
-
-        // Fan RPM row (full mode only). `fan_rpm()` returns None for the
-        // firmware all-ones "no fan" sentinel (0xFFFF / 0xFFFFFFFF) and 0, so
-        // fanless cards (e.g. p150 Blackhole) simply show no fan line instead
-        // of a nonsensical "65535 RPM".
-        if !compact {
-            if let Some(rpm) = smbus.and_then(|s| s.fan_rpm()) {
-                stat_lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("{:<8}", "Fan"),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(format!("{} RPM", rpm), Style::default().fg(Color::White)),
-                ]));
-            }
-        }
-
-        // Current row (full mode only): firmware-measured amps vs. the TDC
-        // ceiling from the limits block / hwmon curr1_max.
-        if !compact {
-            if let Some(amps) = telemetry.and_then(|t| t.current) {
-                let tdc = device.limits.as_ref().and_then(|l| l.tdc_limit);
-                let lim_txt = tdc.map(|a| format!(" (lim {:.0}A)", a)).unwrap_or_default();
-                stat_lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("{:<8}", "Current"),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(format!("{:.0}A", amps), Style::default().fg(Color::White)),
-                    Span::styled(lim_txt, Style::default().fg(Color::DarkGray)),
-                ]));
-            }
-        }
-
-        // Board power row (full mode only): whole-card input power (tt-smi ≥ 6,
-        // dual-asic p300 boards). Shown whenever the backend reports it —
-        // knowing total board draw is useful even when it sits close to the
-        // asic figure above, and on p300 the two are meaningfully different.
-        if !compact {
-            if let Some(bw) = telemetry.and_then(|t| t.board_power) {
-                stat_lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("{:<8}", "Board"),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(format!("{:.0}W", bw), Style::default().fg(Color::White)),
-                    Span::styled(" total", Style::default().fg(Color::DarkGray)),
-                ]));
-            }
-        }
-
-        // PCIe row (full mode only): link geometry from board_info plus live
-        // bandwidth from the kmd counters (sysfs/hybrid backends only).
-        //
-        // Link geometry and bandwidth together can overflow the 30-col
-        // sidebar content width (e.g. "Gen4 x16 ▼1.23 GB/s ▲1.23 GB/s" is
-        // well past budget after the 8-col label), so `pcie_row_parts` — a
-        // pure, unit-tested helper — decides whether they share one row or
-        // split across two; see its doc comment for the exact width math.
-        if !compact {
-            let link = match (device.pcie_speed.as_deref(), device.pcie_width) {
-                (Some(gen), Some(w)) => Some(format!("{} x{}", gen, w)),
-                (Some(gen), None) => Some(gen.to_string()),
-                _ => None,
-            };
-            let bw = backend.pcie_bandwidth(idx);
-            for (continuation, content, is_bandwidth) in pcie_row_parts(link, bw) {
-                let label = if continuation {
-                    // Indent to the label-column width instead of repeating
-                    // "PCIe" — this is a continuation of the row above.
-                    Span::raw(" ".repeat(8))
-                } else {
-                    Span::styled(
-                        format!("{:<8}", "PCIe"),
-                        Style::default().fg(Color::DarkGray),
-                    )
-                };
-                let value_color = if is_bandwidth {
-                    Color::Rgb(79, 209, 197)
-                } else {
-                    Color::White
-                };
-                stat_lines.push(Line::from(vec![
-                    label,
-                    Span::styled(content, Style::default().fg(value_color)),
-                ]));
-            }
-        }
-
-        // GDDR ECC row (full mode only): shown only when any error counter is
-        // non-zero — uncorrectable errors are the headline diagnostic and go red.
-        //
-        // Accumulation is saturating and drops the all-ones sentinel: an
-        // unimplemented/unpowered GDDR ECC register reads 0xFFFFFFFF (the same
-        // "no reading" convention the fan register uses), and four of those
-        // summed with `Iterator::sum` panics on overflow in a debug build.
-        // Unlike the fan filter, 0 and 0xFFFF are NOT filtered here — zero is
-        // the normal healthy count, and 65535 correctable errors is a plausible
-        // real reading on a degrading module.
-        if !compact {
-            if let Some(s) = smbus {
-                const ECC_NO_READING: u32 = u32::MAX;
-                let corr: u32 = s
-                    .gddr_corr_errs
-                    .iter()
-                    .flatten()
-                    .copied()
-                    .filter(|&v| v != ECC_NO_READING)
-                    .fold(0u32, u32::saturating_add);
-                let uncorr = s
-                    .gddr_uncorr_errs
-                    .filter(|&v| v != ECC_NO_READING)
-                    .unwrap_or(0);
-                if corr > 0 || uncorr > 0 {
-                    let color = if uncorr > 0 {
-                        Color::Rgb(255, 80, 80) // uncorrectable — data corruption risk
-                    } else {
-                        Color::Rgb(244, 196, 113) // correctable only — watch it
-                    };
-                    stat_lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("{:<8}", "ECC"),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                        Span::styled(
-                            format!("{} uncorr · {} corr", uncorr, corr),
-                            Style::default().fg(color),
-                        ),
-                    ]));
-                }
-            }
-        }
-
-        // Thermal-trip row (full mode only): lifetime trip counter — any
-        // non-zero value means the card hit hardware thermal shutdown at least
-        // once and deserves attention.
-        if !compact {
-            if let Some(trips) = smbus
-                .and_then(|s| s.therm_trip_count.as_deref())
-                .and_then(crate::models::telemetry::parse_hex_or_dec)
-            {
-                if trips > 0 {
-                    stat_lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("{:<8}", "Trips"),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                        Span::styled(
-                            format!("{} thermal", trips),
-                            Style::default().fg(Color::Rgb(255, 80, 80)),
-                        ),
-                    ]));
-                }
-            }
-        }
-
-        // Firmware row — shown in both full and compact mode.
-        {
-            let fw_ver = device
-                .firmwares
-                .as_ref()
-                .and_then(|fw| fw.fw_bundle_version.as_deref())
-                .unwrap_or("—");
-            let fw_short = fw_ver.trim_start_matches("fw_pack-");
-            if compact {
-                // Compact: "F " + up to 16 chars (content_w=18). Truncate by
-                // chars, not bytes — a byte slice would panic mid-UTF-8 (fw
-                // strings are ASCII today, but this matches the rest of the UI).
-                let fw_display: String = fw_short.chars().take(16).collect();
-                stat_lines.push(Line::from(vec![
-                    Span::styled("F ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(fw_display, Style::default().fg(Color::White)),
-                ]));
-            } else {
-                // content_w is 30; "FW" label takes 8 chars, leaving 22 for the version string.
-                let fw_display: String = fw_short.chars().take(22).collect();
-                stat_lines.push(Line::from(vec![
-                    Span::styled(format!("{:<8}", "FW"), Style::default().fg(Color::DarkGray)),
-                    Span::styled(fw_display, Style::default().fg(Color::White)),
-                ]));
-            }
-        }
-
         // Pad to fill all interior rows (footer hairline is the visual bottom).
         while stat_lines.len() < interior_h as usize {
             stat_lines.push(Line::raw(""));
@@ -7474,4 +7534,181 @@ pub fn run_render_bench(
     }
 
     results
+}
+
+/// Tests for the Insights per-device stats sidebar's **row budget**.
+///
+/// `Paragraph` clips silently, so a sidebar that outgrows the panel interior
+/// loses its last row(s) with no other symptom — v0.8.0's new Board / PCIe
+/// bandwidth / ECC rows brought the worst realistic case to exactly the old
+/// interior height of 12, i.e. zero headroom, one row away from silently
+/// dropping the Firmware line. These tests fail instead.
+#[cfg(test)]
+mod stats_sidebar_tests {
+    use super::{build_stats_sidebar_rows, DEVICE_PANEL_H};
+    use crate::backend::pcie_counters::PcieBandwidth;
+    use crate::models::telemetry::{DeviceLimits, FirmwaresInfo, GddrTempPair};
+    use crate::models::{Device, SmbusTelemetry, Telemetry};
+
+    /// Rows available between the header rule and the footer hairline.
+    const INTERIOR_H: usize = (DEVICE_PANEL_H - 2) as usize;
+
+    /// A Blackhole card with **every** optional row populated: a fan, a live
+    /// PCIe link *and* live bandwidth (two rows), non-zero GDDR temps, non-zero
+    /// ECC counters, a past thermal trip, board power from tt-smi ≥ 6, a current
+    /// reading, firmware version and limits. All of this co-occurs on a real
+    /// p300c under load — it is not a synthetic maximum.
+    fn worst_case() -> (Device, Telemetry, SmbusTelemetry, Option<PcieBandwidth>) {
+        let mut device = Device::new(
+            0,
+            "p300c".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        );
+        device.limits = Some(DeviceLimits {
+            tdp_limit: Some(125.0),
+            tdc_limit: Some(500.0),
+            asic_fmax: Some(1350),
+            thm_limit: Some(90.0),
+        });
+        device.firmwares = Some(FirmwaresInfo {
+            fw_bundle_version: Some("fw_pack-19.11.0.0".to_string()),
+            ..Default::default()
+        });
+        device.pcie_speed = Some("Gen4".to_string());
+        device.pcie_width = Some(16);
+
+        let telemetry = Telemetry {
+            voltage: Some(0.72),
+            current: Some(88.0),
+            power: Some(96.0),
+            asic_temperature: Some(63.5),
+            aiclk: Some(1000),
+            heartbeat: Some(43874),
+            timestamp: chrono::Utc::now(),
+            board_power: Some(118.0),
+        };
+
+        let mut smbus = SmbusTelemetry::new();
+        smbus.eth_live_status = Some(0x3edf);
+        smbus.enabled_eth = Some(0x3edf);
+        smbus.gddr_temps[0] = Some(GddrTempPair([54.0, 56.0, 55.0, 57.0]));
+        smbus.gddr_temps[1] = Some(GddrTempPair([58.0, 59.0, 60.0, 61.0]));
+        smbus.max_gddr_temp = Some(61.0);
+        smbus.gddr_corr_errs = [Some(3), Some(0), Some(1), Some(0)];
+        smbus.gddr_uncorr_errs = Some(1);
+        smbus.fan_speed = Some("2400".to_string());
+        smbus.therm_trip_count = Some("2".to_string());
+
+        let bw = Some(PcieBandwidth {
+            rx_bytes_per_sec: 1.23e9,
+            tx_bytes_per_sec: 4.56e8,
+        });
+        (device, telemetry, smbus, bw)
+    }
+
+    /// The worst case must fit the panel interior — with headroom to spare, so a
+    /// single future row can be added without a layout change.
+    #[test]
+    fn stats_sidebar_worst_case_fits_panel_interior() {
+        let (device, telem, smbus, bw) = worst_case();
+        let rows = build_stats_sidebar_rows(&device, Some(&telem), Some(&smbus), bw, false);
+
+        // Sanity-check that the fixture really is the worst case, so this test
+        // can't quietly stop measuring anything: 12 rows = Power, ETH, GDDR T,
+        // Temp, Fan, Current, Board, PCIe link, PCIe bandwidth, ECC, Trips, FW.
+        assert_eq!(
+            rows.len(),
+            12,
+            "fixture must exercise every optional row; got {} rows",
+            rows.len()
+        );
+        // Strictly less, not `<=`: the worst case must leave headroom. Before
+        // this fix the interior was exactly 12 rows for exactly 12 worst-case
+        // rows, so the very next row added anywhere in the sidebar would have
+        // been clipped away silently. Requiring a spare row is what turns that
+        // into a test failure instead.
+        assert!(
+            rows.len() < INTERIOR_H,
+            "worst-case sidebar needs {} rows and the panel interior is {} — \
+             Paragraph clips silently, so raise DEVICE_PANEL_H to keep headroom",
+            rows.len(),
+            INTERIOR_H
+        );
+    }
+
+    /// Compact mode drops the secondary rows and must stay well inside budget.
+    #[test]
+    fn compact_sidebar_fits_panel_interior() {
+        let (device, telem, smbus, bw) = worst_case();
+        let rows = build_stats_sidebar_rows(&device, Some(&telem), Some(&smbus), bw, true);
+        // Compact keeps only Power, ETH, Temp and FW.
+        assert_eq!(rows.len(), 4);
+        assert!(rows.len() <= INTERIOR_H);
+    }
+
+    /// A device with no telemetry and no SMBUS yet (first frame, or a backend
+    /// that has nothing for it) still renders its core rows and nothing more.
+    #[test]
+    fn sidebar_with_no_data_renders_core_rows_only() {
+        let device = Device::new(
+            0,
+            "p150a".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        );
+        let rows = build_stats_sidebar_rows(&device, None, None, None, false);
+        // Power, ETH (architectural-max fallback), Temp and FW — the four rows
+        // that render unconditionally; no optional rows.
+        assert_eq!(rows.len(), 4);
+        assert!(rows.len() <= INTERIOR_H);
+    }
+
+    /// The ETH row's "SMBUS absent entirely → architectural maximum" fallback
+    /// must be reachable.
+    ///
+    /// Regression companion to the sysfs `Some(all-None)` fix: while
+    /// `smbus_telemetry()` returned an empty block for every device, this branch
+    /// was dead and the row rendered `0/? live` instead of `0/24 live` on
+    /// Blackhole. Asserted here on the row text because that branch is chosen by
+    /// `smbus.is_some()`.
+    #[test]
+    fn eth_row_falls_back_to_arch_max_when_smbus_absent() {
+        let device = Device::new(
+            0,
+            "p150a".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        );
+        assert_eq!(
+            device.architecture,
+            crate::models::Architecture::Blackhole,
+            "fixture must be a Blackhole for the 24-port maximum"
+        );
+
+        let rows = build_stats_sidebar_rows(&device, None, None, None, false);
+        let eth = rows[1]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(
+            eth.contains("0/24 live"),
+            "no SMBUS → architectural max denominator; got {eth:?}"
+        );
+
+        // With an SMBUS block present but ENABLED_ETH = 0, the row must NOT
+        // invent a total (this is the branch that was masking the one above).
+        let smbus = SmbusTelemetry::new();
+        let rows = build_stats_sidebar_rows(&device, None, Some(&smbus), None, false);
+        let eth = rows[1]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(
+            eth.contains("0/? live"),
+            "SMBUS present but no enabled mask → unknown total; got {eth:?}"
+        );
+    }
 }
