@@ -685,11 +685,16 @@ impl ArcadeVisualization {
     fn telemetry_strip(backend: &dyn TelemetryBackend, width: usize) -> String {
         const SEP: &str = " · ";
         let mut entries: Vec<String> = Vec::new();
-        for (i, device) in backend.devices().iter().enumerate() {
+        for device in backend.devices() {
             let telem = backend.telemetry(device.index);
             // "Dev{n}" label always present for orientation; each numeric field
-            // is added only when the device actually reports it.
-            let mut parts: Vec<String> = vec![format!("Dev{}", i)];
+            // is added only when the device actually reports it. The label is
+            // the device's own index, not its position in the strip: those
+            // differ whenever the index set is sparse (a salvaged tt-smi
+            // snapshot that dropped a malformed `device_info[]` entry, or a chip
+            // whose ARC never answered), and the label must name the card whose
+            // watts follow it.
+            let mut parts: Vec<String> = vec![format!("Dev{}", device.index)];
             if let Some(t) = telem {
                 if let Some(p) = t.power {
                     parts.push(format!("{:.0}W", p));

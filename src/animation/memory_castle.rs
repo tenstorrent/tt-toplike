@@ -342,9 +342,17 @@ impl MemoryCastle {
     pub fn update(&mut self, backend: &dyn TelemetryBackend) {
         self.frame = self.frame.wrapping_add(1);
 
-        // Update baseline for each device
-        for (idx, device) in backend.devices().iter().enumerate() {
-            if let Some(telem) = backend.telemetry(idx) {
+        // Update baseline for each device.
+        //
+        // Keyed by `device.index`, never by the device's position in the list:
+        // the backend's index set can be sparse (a salvaged tt-smi snapshot that
+        // dropped a malformed `device_info[]` entry, or a chip whose ARC never
+        // answered), so `devices()[0].index` is not always 0. Looking up by
+        // position there reads telemetry for a card that isn't in the list —
+        // usually `None`, which silently freezes the baseline at its idle guess
+        // and leaves the whole dungeon rendering as if the chip were asleep.
+        for device in backend.devices() {
+            if let Some(telem) = backend.telemetry(device.index) {
                 self.baseline.update(
                     device.index,
                     telem.power_w(),
@@ -356,7 +364,7 @@ impl MemoryCastle {
         }
 
         // Spawn new particles based on activity (spawn MANY more particles)
-        for (_idx, device) in backend.devices().iter().enumerate() {
+        for device in backend.devices() {
             if let Some(telem) = backend.telemetry(device.index) {
                 let power_change = self.baseline.power_change(device.index, telem.power_w());
                 let temp = telem.temp_c();
@@ -416,10 +424,21 @@ impl MemoryCastle {
             return self.render_multi_device(backend);
         }
 
-        // Single device mode: use full width (original behavior)
+        // Single device mode: use full width (original behavior).
+        //
+        // `devices[0]` is the first device *in the list*, whose own `index` is
+        // not necessarily 0. A tt-smi snapshot whose first `device_info[]` entry
+        // was unparseable is served as a one-element list carrying `index: 1`,
+        // with telemetry keyed at 1; a chip whose ARC never came up leaves the
+        // same hole. Looking the telemetry up positionally (`telemetry(0)`) then
+        // returns `None` for a card whose readings parsed perfectly, and the
+        // header rendered 0.0 W / 0.0 °C / 0.0 A with no ARC dot — a healthy
+        // card presented as dead silicon. Always address by the device's own
+        // index; that identity is the honest one, and renumbering to close the
+        // gap is exactly the mis-attribution this release exists to fix.
         let device = &devices[0];
-        let telem = backend.telemetry(0);
-        let smbus = backend.smbus_telemetry(0);
+        let telem = backend.telemetry(device.index);
+        let smbus = backend.smbus_telemetry(device.index);
 
         // Get metrics
         let power = telem.map(|t| t.power_w()).unwrap_or(0.0);
@@ -624,10 +643,17 @@ impl MemoryCastle {
                 // Standalone shows the per-device W/°C header; embedded
                 // (chrome off) keeps only the Dev{n} orientation label — the
                 // Arcade shared strip owns the telemetry readout.
+                //
+                // The label is `device.index`, not the column position: with a
+                // sparse index set (a salvaged snapshot, or a card whose ARC
+                // never answered) those differ, and a column labelled "Dev0"
+                // showing card 1's watts is precisely the mis-attribution this
+                // release is about. Matches the Compact/FleetGrid tiers, which
+                // already label by `device.index`.
                 let device_info = if self.chrome {
-                    format!(" Dev{:<2} {:>3.0}W {:>3.0}°C ", idx, power, temp)
+                    format!(" Dev{:<2} {:>3.0}W {:>3.0}°C ", device.index, power, temp)
                 } else {
-                    format!(" Dev{:<2} ", idx)
+                    format!(" Dev{:<2} ", device.index)
                 };
                 let padding_needed = col_width.saturating_sub(device_info.len());
                 let padding = " ".repeat(padding_needed / 2);
@@ -1942,5 +1968,79 @@ mod tests {
         for _ in 0..10 {
             castle.update(&backend);
         }
+    }
+
+    /// A backend whose device index set is **sparse** must still get its
+    /// telemetry rendered.
+    ///
+    /// The realistic producer of a sparse set is a tt-smi snapshot whose first
+    /// `device_info[]` entry was in a shape this build can't decode: the
+    /// element-wise salvage keeps array positions (deliberately — renumbering is
+    /// the mis-attribution class this release exists to fix), so the backend
+    /// serves a one-element device list carrying `index: 1`, with telemetry and
+    /// SMBUS keyed at 1. An ARC-dead chip skipped by the Luwen backend leaves
+    /// the same hole.
+    ///
+    /// Regression: the single-device path read `backend.telemetry(0)` /
+    /// `smbus_telemetry(0)` positionally, both `None` here, so the header
+    /// printed 0.0 °C / 0.0 W / 0.0 A and dropped the ARC dot for a card whose
+    /// telemetry had parsed perfectly — a healthy chip rendered as dead silicon.
+    #[test]
+    fn single_device_header_uses_device_index_not_list_position() {
+        // device_info[0] is undecodable (`"telemetry": true`); device_info[1] is
+        // a healthy card at 22.0 W / 44.0 °C / 12.5 A with a live ARC heartbeat.
+        const SNAPSHOT: &str = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"}, "telemetry": true},
+                {
+                    "board_info": {"bus_id": "0000:02:00.0", "board_type": "p300c"},
+                    "telemetry": {"power": " 22.0", "asic_temperature": " 44.0",
+                                  "current": " 12.5", "aiclk": " 1000"},
+                    "smbus_telem": {"TIMER_HEARTBEAT": "0x1234"}
+                }
+            ]
+        }"#;
+
+        let mut backend = crate::backend::json::JSONBackend::new("tt-smi");
+        backend
+            .apply_raw_snapshot_pub(SNAPSHOT)
+            .expect("the healthy sibling must still be salvaged");
+
+        // Precondition: exactly one device, and its index is NOT its position.
+        assert_eq!(backend.devices().len(), 1);
+        assert_eq!(
+            backend.devices()[0].index,
+            1,
+            "salvage keeps array position"
+        );
+
+        let castle = MemoryCastle::new(120, 24);
+        let lines = castle.render(&backend);
+        let header: String = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+
+        assert!(
+            header.contains("22.0W"),
+            "header must show the surviving card's real power, got: {header}"
+        );
+        assert!(
+            header.contains("44.0°C"),
+            "header must show the surviving card's real temperature, got: {header}"
+        );
+        assert!(
+            header.contains("12.5A"),
+            "header must show the surviving card's real current, got: {header}"
+        );
+        assert!(
+            header.contains("ARC: ●"),
+            "SMBUS must be found too, so the ARC dot renders healthy, got: {header}"
+        );
+        assert!(
+            header.contains("Device 1"),
+            "the header names the physical card, got: {header}"
+        );
     }
 }
