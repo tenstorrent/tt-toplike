@@ -96,9 +96,10 @@ pub struct HybridBackend {
     /// heap allocations — when the generation counter indicates new data.
     smbus_latest: Arc<HashMap<usize, SmbusTelemetry>>,
 
-    /// Incremented by the reader thread after each successful record parse.
-    /// The render thread compares against `smbus_snapshot_gen` before paying
-    /// even the cheap lock cost.
+    /// Incremented by the reader thread after each successful record parse —
+    /// once per *snapshot* deposited, whichever of the two payloads (SMBUS map,
+    /// device meta) that snapshot actually carried. The render thread compares
+    /// against `smbus_snapshot_gen` before paying even the cheap lock cost.
     smbus_generation: Arc<AtomicU64>,
 
     /// The generation reflected in `smbus_latest`.
@@ -356,10 +357,21 @@ fn board_power_is_fresh(
 ///
 /// Factored out of the reader-thread closure so the join is exercised by tests
 /// through the same code the thread runs, rather than a re-implementation of it.
-/// A snapshot whose SMBUS map comes out empty (unparseable output, or every
-/// entry dropped for want of a matching sysfs device) is *not* published: the
-/// previously deposited snapshot stays, so a single bad poll doesn't blank the
-/// SMBUS rows.
+///
+/// ## Each payload is gated on its own emptiness
+///
+/// A payload that came out empty (unparseable output, or every entry dropped for
+/// want of a matching sysfs device) is *not* stored: the previously deposited one
+/// stays, so a single bad poll doesn't blank rows that were right a moment ago.
+///
+/// The two payloads are gated **separately**, because they come from different
+/// blocks of the document and fail independently. `meta` is built from
+/// `board_info` / `telemetry` / `firmwares` / `limits`; `smbus` from
+/// `smbus_telem`. Making a non-empty SMBUS map the precondition for publishing
+/// *anything* meant a snapshot that parsed fine but carried no `smbus_telem`
+/// block — a permission-restricted run, or a card whose ARC didn't answer the
+/// SMBUS read — dropped the PCIe link row and the Board power row too, even
+/// though both had parsed and neither has anything to do with SMBUS.
 fn publish_snapshot(
     json_str: &str,
     bus_to_index: &HashMap<String, usize>,
@@ -369,7 +381,7 @@ fn publish_snapshot(
     smbus_generation: &AtomicU64,
 ) {
     let snapshot = rekey_snapshot_by_bus_id(json::parse_snapshot(json_str), bus_to_index);
-    if snapshot.smbus.is_empty() {
+    if snapshot.smbus.is_empty() && snapshot.meta.is_empty() {
         log::debug!("HybridBackend: tt-smi returned empty/unparseable JSON");
         return;
     }
@@ -378,12 +390,24 @@ fn publish_snapshot(
         // Stamp *when* this meta was measured. The static fields don't care, but
         // `board_power` is a live wattage and must expire rather than be
         // re-applied forever if this is the last poll that ever succeeds — see
-        // `BOARD_POWER_MAX_AGE`.
+        // `BOARD_POWER_MAX_AGE`. The stamp is stored under exactly the same
+        // condition as the meta itself, so the freshness check can never see a
+        // stamp that belongs to a different payload than the one it's judging.
         device_meta_stamp.store(Some(Arc::new(std::time::Instant::now())));
     }
-    smbus_shared.store(Arc::new(snapshot.smbus));
+    if !snapshot.smbus.is_empty() {
+        smbus_shared.store(Arc::new(snapshot.smbus));
+    }
+    // Bumped whenever *either* payload was stored, not just the SMBUS one: the
+    // counter is what tells `update()` a new snapshot landed, and the sysfs
+    // `Device` enrichment (firmwares / limits / PCIe link) it gates lives in the
+    // meta payload. Gating the bump on SMBUS alone meant a meta-only snapshot
+    // was deposited but never adopted, so the PCIe link row still didn't render.
+    // Re-adopting an unchanged SMBUS map on such a tick is free and idempotent —
+    // one `Arc::clone` of the same pointer, and the blend/EMA maps are retained
+    // against the same key set.
     smbus_generation.fetch_add(1, Ordering::Release);
-    log::debug!("HybridBackend: SMBUS snapshot updated");
+    log::debug!("HybridBackend: snapshot updated");
 }
 
 impl HybridBackend {
@@ -1295,6 +1319,82 @@ mod tests {
                 "attempt {attempt}: device 1 was never named by this snapshot"
             );
         }
+    }
+
+    /// A snapshot that parses fine but carries no `smbus_telem` block must still
+    /// publish its PCIe link geometry and board power.
+    ///
+    /// Regression: `publish_snapshot` returned early on an empty SMBUS map, before
+    /// storing the meta payload — so a permission-restricted run, or a card whose
+    /// ARC didn't answer the SMBUS read, lost the PCIe link row and the Board
+    /// power row too, even though both had parsed and neither comes from SMBUS.
+    #[test]
+    fn snapshot_without_smbus_still_publishes_pcie_and_board_power() {
+        use crate::models::{Device, Telemetry};
+
+        let mut backend = HybridBackend::new("tt-smi");
+        backend.sysfs.push_device_for_test(Device::new(
+            0,
+            "p300c".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        ));
+        backend.sysfs.insert_telemetry_for_test(
+            0,
+            Telemetry {
+                power: Some(21.0),
+                current: None,
+                voltage: Some(0.72),
+                asic_temperature: Some(40.0),
+                aiclk: None,
+                heartbeat: None,
+                timestamp: chrono::Utc::now(),
+                board_power: None,
+            },
+        );
+        backend.bus_to_index = backend.sysfs_bus_index();
+
+        // board_info + telemetry + limits, and deliberately no `smbus_telem`.
+        let json = r#"{
+            "device_info": [
+                {
+                    "board_info": {"bus_id": "0000:01:00.0", "board_type": "p300c",
+                                   "pcie_speed": 4, "pcie_width": "16"},
+                    "telemetry": {"power": " 21.0", "board_power": " 96.0"},
+                    "limits": {"tdp_limit": "125"}
+                }
+            ]
+        }"#;
+        publish_snapshot(
+            json,
+            &backend.bus_to_index,
+            &backend.smbus_shared,
+            &backend.device_meta_shared,
+            &backend.device_meta_stamp,
+            &backend.smbus_generation,
+        );
+        backend.update().expect("update should not fail");
+
+        assert_eq!(
+            backend.devices()[0].pcie_speed.as_deref(),
+            Some("Gen4"),
+            "PCIe geometry parsed and must not be gated on SMBUS"
+        );
+        assert_eq!(backend.devices()[0].pcie_width, Some(16));
+        assert!(
+            backend.devices()[0].limits.is_some(),
+            "board limits must not be gated on SMBUS either"
+        );
+        assert_eq!(
+            backend.telemetry(0).and_then(|t| t.board_power),
+            Some(96.0),
+            "board power comes from the telemetry block, not SMBUS"
+        );
+        // The SMBUS side stays genuinely empty — nothing is fabricated to get the
+        // meta published, and the fall-through to the sysfs synthesis (which this
+        // test never seeds) still reports nothing.
+        assert!(backend.smbus_blended.is_empty());
+        assert!(backend.smbus_telemetry(0).is_none());
     }
 
     /// A card tt-smi reports but sysfs can't see has nowhere to go — it is
