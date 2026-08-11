@@ -53,7 +53,20 @@ path = "src/lib.rs"
 # NOTE (kmd ≥ 2.9/2.10): holding /dev/tenstorrent/N open participates in
 # driver-managed power-state aggregation and blocks O_EXCL openers (tt-flash);
 # one more reason luwen stays explicit-only and out of auto-detect.
+#
+# Three crates are needed, not two:
+#   luwen-api — protocol/arch layer (Chip, ChipImpl, Telemetry decode). It has NO
+#               hardware transport: its dependency set contains no PCI/ttkmd
+#               crate, and `luwen_api::detect_chips_silent(root_chips, …)`
+#               enumerates *from its argument*, so calling it with an empty Vec
+#               returns Ok(vec![]) and no device is ever found.
+#   luwen-pci — the PCIe transport + the detection entry point that does its own
+#               `PciDevice::scan()` (`luwen_pci::detect_chips_silent(options)`).
+#               This is what upstream's own examples/tests use; without it the
+#               backend cannot see hardware at all.
+#   luwen-def — shared definitions (Arch).
 luwen-api = { version = "0.8.5", optional = true }
+luwen-pci = { version = "0.8.5", optional = true }
 luwen-def = { version = "0.8.5", optional = true }
 
 # TUI framework (optional - only needed for TUI frontend)
@@ -162,7 +175,10 @@ app = ["eframe", "egui_plot", "portable-pty", "vte"]  # Native terminal window
 # Its Luwen/UMD contention story is unresolved upstream; avoid during workloads,
 # especially on multi-chip/galaxy topologies
 # Only use with explicit --backend luwen flag
-luwen-backend = ["dep:luwen-api", "dep:luwen-def"]   # Direct hardware access (EXPLICIT ONLY)
+# Direct hardware access (EXPLICIT ONLY). luwen-pci carries the PCIe transport;
+# without it luwen-api can never enumerate a local device — see the dependency
+# comments above.
+luwen-backend = ["dep:luwen-api", "dep:luwen-pci", "dep:luwen-def"]
 json-backend = []               # Subprocess tt-smi + JSON (SAFE)
 linux-procfs = ["procfs"]       # Enhanced Linux process detection
 # Remote QuietBox WebSocket backend (--remote). In `default`; opt out with

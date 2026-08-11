@@ -385,11 +385,18 @@ pub(crate) fn parse_hex_or_dec(s: &str) -> Option<u32> {
 /// [`SmbusTelemetry::fan_rpm`] for where each comes from.
 pub(crate) fn real_fan_rpm(s: &str) -> Option<u32> {
     let rpm = parse_hex_or_dec(s)?;
-    if rpm == 0 || rpm == 0xFFFF || rpm == 0xFFFF_FFFF {
+    if is_fan_sentinel(rpm) {
         None
     } else {
         Some(rpm)
     }
+}
+
+/// `true` when a raw fan register value is a firmware "no reading" sentinel
+/// rather than an RPM. Shared by [`real_fan_rpm`] (string sources: tt-smi JSON,
+/// sysfs) and the luwen backend (which reads the registers as `u32` directly).
+pub(crate) fn is_fan_sentinel(rpm: u32) -> bool {
+    rpm == 0 || rpm == 0xFFFF || rpm == 0xFFFF_FFFF
 }
 
 /// Decode a raw SMBUS `THM_LIMITS` register into the thermal **shutdown** trip
