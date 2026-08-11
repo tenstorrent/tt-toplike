@@ -4082,3 +4082,281 @@ regenerate `Cargo.lock` **before** committing — otherwise the lockfile lags
 ---
 
 *Phase 24 status: **COMPLETE** — shipped as v0.7.40 on ppa.tenstorrent.com*
+
+---
+
+## Phase 25 — Telemetry expansion (August 2026, v0.8.0)
+
+**Origin**: with HivemindSweeper landed, the next gap was the telemetry
+backends themselves — the sysfs path (the safe, non-invasive default) was
+still missing fields that only tt-smi or Luwen could supply (AICLK, ARC
+heartbeat, real board limits, PCIe link state), and the Luwen path was
+sitting on a 13-months-stale third-party fork. Ten spec-driven tasks
+(`.superpowers/sdd/2026-08-10-telemetry-expansion/`) closed both gaps plus
+two smaller parsing debts (tt-smi 6.x's schema changes, a KV-cache metric
+name mismatch), landing as four work items.
+
+### 1. Sysfs backend: label-aware hwmon + the `/sys/class/tenstorrent` discovery (Tasks 1–3)
+
+The sysfs backend previously assumed a fixed sensor index (`temp1_input` =
+ASIC temp, `in0_input` = vcore, …), which is fragile across hwmon driver
+revisions. It now matches on the `*_label` sibling file instead, and reads
+real per-board limits from `*_max` attributes (125 W / 500 A / 90 °C on a
+p300c) rather than hardcoded constants.
+
+The bigger find: tt-kmd exposes a *second* sysfs surface beyond hwmon — a
+class-attribute directory at `/sys/class/tenstorrent/tenstorrent!N/` — that
+the hwmon node's `device` symlink resolves to. That directory carries two
+kinds of attribute:
+- **Static** (`tt_card_type`, `tt_fw_bundle_ver`): read once at startup.
+  `tt_card_type` gives the *real* board SKU — this **replaces** the old
+  ~1.2 s `tt-smi --version`/`tt-smi -s` startup probe from Phase (0.7.30)'s
+  fix, on any kmd new enough to expose it. No more shelling out just to
+  learn the board name.
+- **Dynamic** (`tt_aiclk`, `tt_heartbeat`): read every tick and fed into
+  the core `Telemetry` struct, which previously hardcoded these to `None`
+  in sysfs mode. A partial `SmbusTelemetry` is synthesized from the same
+  directory (clocks, fan, thermal-trip counters, serial) so sysfs is no
+  longer SMBUS-blind — it just has fewer fields than a full tt-smi/Luwen
+  read.
+
+### 2. Live PCIe bandwidth (Tasks 4–5)
+
+New `src/backend/pcie_counters.rs` reads tt-kmd's `pcie_perf_counters/`
+directory — twelve raw data-word counters — and folds them into inbound/
+outbound directions. Bandwidth is derived as `words × 4 bytes / dt` between
+ticks, with clamping so a counter reset (or wraparound) doesn't spike the
+reading to a nonsense value. This is exposed as a new, defaulted
+`TelemetryBackend::pcie_bandwidth(&self, device_idx) -> Option<PcieBandwidth>`
+trait method — every backend inherits `None` for free, and only sysfs/hybrid
+override it, since they're the only ones with kmd's raw counter files handy.
+
+### 3. tt-smi schema drift + Insights surfacing (Tasks 6–9)
+
+tt-smi's JSON output keeps changing shape underneath us:
+- `board_info` needed tolerant parsing (PCIe speed/width sometimes numbers,
+  sometimes strings across tt-smi releases).
+- tt-smi 5.3.0 changed fan telemetry semantics; the JSON backend now picks
+  whichever of `FAN_SPEED` / `FAN_RPM` holds a real (non-sentinel) RPM,
+  preferring `FAN_SPEED` for back-compat. **Not** an `Option::or` fallback:
+  live tt-smi emits *both* keys, so `or` never falls through, and on
+  Blackhole `FAN_SPEED` is the `0x0` sentinel while `FAN_RPM` carries the
+  reading (the committed fixture: `FAN_SPEED="0x0"`, `FAN_RPM="0x75a"` =
+  1882 RPM). One sentinel predicate — `real_fan_rpm` in
+  `models/telemetry.rs`, filtering `0`/`0xFFFF`/`0xFFFFFFFF` — is now shared
+  by the accessor, the JSON parser, and the luwen mapping.
+- tt-smi 6.x introduced a top-level `processes[]` array (new `DeviceProcess`
+  model, `device_processes()` trait method, wired through JSON *and*
+  WebSocket backends) and `telemetry.board_power`.
+- Both Prometheus scrapers (vLLM + the media-server path from the July
+  media-inference work) were only recognizing one of the two KV-cache
+  metric names different vLLM builds emit; a shared `parse_kv_cache_line`
+  helper now accepts either `gpu_cache_usage_perc` or `kv_cache_usage_perc`.
+
+All of the above needed somewhere to show up: the Insights sidebar gained
+Current (against the TDC limit), Board power, a two-row PCIe panel (link
+geometry + live ▼/▲ bandwidth from item 2), GDDR ECC (uncorrectable counts
+emphasized in red), and thermal-trip rows. A new `DeviceMeta` struct carries
+PCIe geometry + board power through the hybrid backend's sysfs/JSON merge,
+and `format_bandwidth` ships with a unit-tested, provably-bounded ≤9-char
+output so the panel layout can't wrap under any input.
+
+### 4. Luwen: fork → official crates (Task 10)
+
+`all-smi-luwen-core`/`-if`/`-ref` — the third-party forks the Luwen backend
+was built on since Phase 6 — had gone 13 months without a release and were
+missing Blackhole telemetry tags entirely. Migrated to the crates.io
+`luwen-api`/`luwen-pci`/`luwen-def` 0.8.5 crates published directly from
+`tenstorrent/luwen`. This is a straight upgrade in capability: Blackhole
+GDDR temperatures and ECC counters, harvesting/enabled core masks, thermal
+trips, and input/board power-limit fields the forks never surfaced.
+
+> ✅ **Verification status: run on 4× Blackhole p300c (tt-kmd 2.9.0) while the
+> cards were idle.** All four chips are detected and the readings agree with
+> the sysfs/hybrid path and `tt-smi -s` (power, current, ASIC + GDDR temps, ETH
+> link state). Two mappings this migration had to get right were confirmed
+> live: `arc0_health` from `telemetry_heartbeat()` — Blackhole never assigns
+> the per-ARC registers, so the raw fields read 0 and the Insights engine
+> declares every healthy card `Stalled` with high confidence — and
+> `ENABLED_ETH` + `EthLiveStatus` together yielding `12/12 live` instead of a
+> dark `0/12`.
+>
+> Still open: **Wormhole/Grayskull** (no such silicon here; their layouts rest
+> on unit tests over hand-built `Telemetry`, with arch gating so BH-only tags
+> aren't published as a confident `0` on WH) and **behaviour under load** —
+> every check so far was against idle cards, which is why the backend stays
+> launch-only. Comparing side-by-side against the safe backend is the cheapest
+> way to catch a bad register mapping: that is exactly how the missing
+> `Device::limits`/`firmwares` population was found (the Temp row showed the
+> generic `lim 105°C` instead of the board's real 90 °C).
+
+**Which crate does what** (this cost a bug — see below):
+- **`luwen-pci`** owns the PCIe transport *and* local enumeration:
+  `PciDevice::scan()` → `ExtendedPciDevice::open()` → `Chip::open()`, wrapped
+  as `luwen_pci::detect_chips_silent(options)`. This is the path upstream's
+  own `detect_chips`/`detect_local_chips` helpers and `examples/demo.rs`
+  take.
+- **`luwen-api`** owns only the protocol/arch layer (`Chip`,
+  `ChipImpl::get_telemetry`, the per-arch telemetry decode). It has **no
+  hardware transport** — no PCI/ttkmd crate anywhere in its dependency set.
+  Its same-named `detect_chips_silent(root_chips, options)` takes the root
+  chips as its *first argument* and enumerates outward from them, so calling
+  it with `Vec::new()` returns `Ok(vec![])`. The first cut of this migration
+  did exactly that and could therefore never detect a device: init always
+  failed "No devices found". Fixed by adding `luwen-pci` to the
+  `luwen-backend` feature and enumerating through it.
+- `luwen-kmd` comes in transitively (via `luwen-pci`) and isn't referenced
+  directly. The umbrella `luwen` crate is just re-exports of all four.
+
+Detection yields `UninitChip`s. We deliberately do **not** call
+`UninitChip::init()` — that re-runs `wait_for_init` and drives DRAM/ETH
+bring-up, which a read-only monitor has no business doing to a card that may
+be busy. Telemetry lives behind the ARC, so `arc_alive()` is the whole
+precondition and `upgrade()` just unwraps the already-open handle.
+
+**Blackhole vs Wormhole is load-bearing in the mapping.** BH assembles its
+`Telemetry` from a *tag table* and finishes with `..Default::default()`; WH
+reads a *fixed-offset* struct and likewise defaults the BH-only fields. So a
+field the other arch doesn't emit reads `0`, indistinguishable from a real
+zero — and the first cut published all of them unconditionally as `Some(0)`.
+Four consequences, all fixed and unit-tested against hand-built
+`luwen_api::chip::Telemetry` values (the only verification possible without
+hardware — see `map_smbus`/`map_telemetry`, extracted from `update()` for
+exactly this reason):
+- **`arc0..3_health` are never assigned on BH** (only `timer_heartbeat` is).
+  A permanent `Some(0)` fed `InferenceEngine`, whose stall signal *is* an
+  unchanging observed counter → every device classified `Stalled` with
+  `Confidence::High` after ~30 frames. `arc0_health` now comes from
+  `telemetry_heartbeat()` (the accessor that papers over the gap), matching
+  where both safe backends put it (json: `TIMER_HEARTBEAT`, sysfs:
+  `tt_heartbeat`); `arc1..3` stay `None` on BH so the detector reads them as
+  "not observed" rather than "frozen".
+- **`thm_limits` was a raw register** while every other backend writes
+  decoded °C — and `starfield.rs` uses it directly as a trip point, so it
+  evaluated to ~6.8M and the thermal-headroom cue could never fire. New
+  shared `thm_limit_shutdown_c` helper: WH packs throttle (high half) and
+  shutdown (low half) into one word, BH's `ThmLimits` tag is already plain
+  °C — matching tt-smi's own `get_chip_limits`/`get_bh_chip_limits`.
+- **ETH read "0/12 live" on a healthy card**: `enabled_eth` (denominator)
+  was populated but `eth_live_status` (numerator) left `None` — worse than
+  the honest `0/?` it replaced. On BH the numerator *is* there:
+  `blackhole.rs` maps `TelemetryTags::EthLiveStatus` into the `eth_status0`
+  field. Both are now published on BH; on WH, where neither mask exists,
+  both stay `None`.
+- **`pcie_status` and `fan_speed` came out blank/zero.** Downstream
+  `pcie_status` means PCIE_USAGE, a *lane count* (json.rs maps tt-smi's
+  `PCIE_USAGE` there; `defrag.rs` parses it as 4/8/16); BH publishes that as
+  the `PcieUsage` tag → `enabled_pcie`, and never assigns `pcie_status`.
+  Fan: BH leaves `FanSpeed` at the `0` sentinel and carries RPM in `FanRpm`
+  — the same split tt-smi shows, so it reuses the shared sentinel predicate.
+
+**Device-index ordering (found in the same review, affects the safe path).**
+`SysfsBackend::detect_devices` assigned indices in raw `fs::read_dir` order,
+which is neither hwmon-number nor bus-id order and isn't stable across boots
+(measured here: 04:00.0, 03:00.0, 01:00.0, 02:00.0). `HybridBackend` joins
+tt-smi metadata and SMBUS telemetry **by index**, and `tt-smi -s` orders
+`device_info[]` ascending by bus id — so every card displayed another card's
+DDR/ARC/GDDR/ECC/trips/fan/clocks plus this release's new PCIe geometry and
+board power. Discovery is now collect → sort by bus id → assign indices.
+**If you add another per-index map to that backend, populate it from the
+sorted sequence.**
+
+**Why Luwen stays launch-only.** Beyond the long-standing "direct PCI BAR0
+access can disrupt a running workload" reasoning from Phase 14, task 10's
+research surfaced a sharper, driver-specific reason to never fold Luwen into
+auto-detect or the live `b` backend-cycle key: on tt-kmd ≥ 2.9/2.10, simply
+holding `/dev/tenstorrent/N` open participates in driver-managed power-state
+aggregation across all openers, and can block `O_EXCL` openers like
+`tt-flash`. An idle monitoring tool has no business being a silent
+participant in another tool's exclusive-access contract — Luwen remains
+`--backend luwen` only, by explicit user request, exactly as it's been since
+Phase 14.
+
+### Release hygiene
+
+Also folded into this release (deferred minors flagged in earlier task
+reviews, not new work): a `cargo fmt` pass (several tasks' code came from
+plan snippets that weren't rustfmt-shaped, and CI's `cargo fmt --check` gate
+is strict); a `cli.rs` test (`test_luwen_validation`) that only asserted the
+correct thing under one of the two `luwen-backend` feature states; a stale
+CI comment still naming the abandoned `all-smi-luwen-if` fork; and narrowing
+an `#[allow(deprecated)]` in `luwen.rs` from covering a whole `match arch`
+down to just the one arm (`Arch::Grayskull`) upstream actually deprecated.
+
+### Two more traps the final review caught (both safe-path)
+
+* **`smbus_smooth::apply_ema` enumerates fields by hand**, and it carried none
+  of the ten *non-string* `SmbusTelemetry` fields (GDDR temps, ECC counters,
+  `max_gddr_temp`, the `enabled_*`/`eth_live_status`/`harvesting_state`
+  bitmasks). Since `HybridBackend` only clones the whole struct on the
+  **first** insert for a device, those froze at the first snapshot — so the
+  new GDDR ECC row was permanently inert (counters read 0 on a healthy boot,
+  and anything accruing later never showed). They're copied straight through
+  now; **none of them wants EMA** — counters are monotonic, `max_gddr_temp`
+  is a maximum (smoothing a max understates the peak), and an interpolated
+  bitmask is meaningless. **Adding a field to `SmbusTelemetry` means adding a
+  line here too** — the compiler will not tell you.
+* **`HybridBackend::smbus_telemetry()` returned only the tt-smi blend.** On a
+  modern-kmd box with no tt-smi installed, auto-detect still lands on Hybrid,
+  so it reported `None` for every device and item 1's whole sysfs synthesis
+  (fan, clocks, therm trips, serial, heartbeat) was reachable only via an
+  explicit `--backend sysfs`. It now falls back to the inner sysfs cache per
+  device index, with the richer tt-smi blend still winning where present.
+
+### Two parity gaps found by running luwen against the safe backend
+
+Taylor put a `--features luwen-backend` build side by side with the default
+(hybrid) build on the same 4× Blackhole p300c box and diffed the Insights
+sidebar. Two of the release's headline features turned out not to reach two of
+the four backends:
+
+* **luwen never populated `Device::limits` / `Device::firmwares`.**
+  `detect_devices` hardcoded both to `None` while building each `Device`, even
+  though luwen's `Telemetry` carries all of it. Visible as `Temp 38.4°C (lim
+  105°C)` where the safe backend showed `(lim 90°C)` (105 is the UI's generic
+  fallback), a Current row with no `(lim 500A)` at all, and an FW row of `—`.
+  New `map_limits`/`map_firmwares` are fed by the telemetry read
+  `detect_devices` was *already* doing for the board type, so no second
+  hardware touch. Field names on `luwen_api::chip::Telemetry`:
+  `tdp_limit_max`, `tdc_limit_max`, `aiclk_limit_max`, `thm_limit_throttle`,
+  `fw_bundle_version`.
+  - **`thm_limit` comes from `thm_limit_throttle` (90 °C), not `thm_limits`
+    (110 °C).** Three different thermal numbers live within one register set:
+    the throttle trip (hwmon `temp1_max`, tt-smi `therm_trip_l1_limit`), the
+    shutdown trip (tt-smi `thm_limit`), and luwen's packed `thm_limits` word.
+    `DeviceLimits::thm_limit` is *the number the UI prints next to Temp*, so it
+    must be the throttle point on every backend or the same row means different
+    things depending on how you launched.
+  - **Limits stay `None` on Wormhole** — those four are BH telemetry *tags*
+    that WH's fixed-offset struct never assigns, so they read 0, and
+    `Some(0.0)` renders "(lim 0W)": worse than no annotation. (WH's throttle
+    point *is* derivable from the high half of its packed `thm_limits`, but
+    there's no WH source for TDP/TDC/fmax, so the block would still be mostly
+    invented.) `fw_bundle_version` is **not** arch-gated — WH populates it too
+    (telemetry offset 49, ARC fw ≥ 2.25.0.0) — but a zero register is treated
+    as "not reported" rather than decoded to a fake "0.0.0.0".
+  - The **PCIe row is legitimately absent** on luwen (no `pcie_bandwidth()`,
+    and no link speed/width source at all — only `PCIE_USAGE`, a lane count).
+    Documented in the module header instead of faked.
+
+* **`--backend json` never parsed the `limits` block at all.** tt-smi emits it
+  with **string** values (`"tdp_limit": "125"`, alongside bare-number
+  `bus_peak_limit: 0` — it is inconsistent *within one object*), and serde
+  fails the whole struct on one bad field, so `Device::limits` was `None` and
+  the pure-JSON path fell back to the generic 300 W / 105 °C this release
+  claims to have replaced. The hybrid path masked it for months because hwmon
+  `*_max` supplies its limits instead — **a bug in one backend's parse can hide
+  behind another backend's redundant source.** `DeviceLimits` now deserializes
+  through a tolerant `DeviceLimitsRaw` (`#[serde(from)]`), which is also where
+  the `therm_trip_l1_limit`-over-`thm_limit` preference lives, so every JSON
+  consumer gets the same semantics for free. The two number-or-string
+  deserializers moved from `backend/json.rs` to `models::serde_num` — models
+  must not depend on backend. tt-smi's `firmwares` block needed no change:
+  checked live, every member is a string and all four modelled fields are
+  `Option<String>`.
+
+---
+
+*Phase 25 status: **COMPLETE** — shipped as v0.8.0. Safe (sysfs/hybrid/json)
+and luwen paths all verified on 4× Blackhole p300c; luwen remains explicit-only
+(never auto-detected) and unverified on Wormhole/Grayskull and under load.*

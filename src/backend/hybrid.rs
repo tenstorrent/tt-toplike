@@ -6,8 +6,11 @@
 //! This backend combines the strengths of the Sysfs and JSON backends:
 //!
 //! - **Sysfs** provides fast, non-invasive real-time reads (temperature, power,
-//!   voltage, current) via Linux hwmon. These run on every `update()` call and
-//!   complete in microseconds, keeping the render loop smooth.
+//!   voltage, current) via Linux hwmon. These four reads per device run on every
+//!   `update()` call and complete in well under a millisecond, keeping the render
+//!   loop smooth. The heavier sysfs reads behind them (tt-kmd class attrs, the
+//!   synthesized SMBUS block, the twelve PCIe counters) are decimated to ~1 Hz
+//!   inside `SysfsBackend::update` — see its `SLOW_LANE_INTERVAL`.
 //!
 //! - **Streaming tt-smi** provides rich SMBUS telemetry (DDR status, ARC health,
 //!   board IDs, firmware versions). A persistent shell subprocess runs tt-smi
@@ -62,7 +65,9 @@ use std::time::Duration;
 
 /// Hybrid backend combining sysfs real-time + persistent streaming JSON enrichment.
 pub struct HybridBackend {
-    /// Primary real-time data source — never blocks more than a few µs.
+    /// Primary real-time data source — a handful of sysfs file reads per tick,
+    /// never a subprocess or a device open (see the module docs for the fast /
+    /// slow lane split).
     sysfs: SysfsBackend,
 
     /// Path to tt-smi executable (searched in PATH if bare name).
@@ -73,19 +78,11 @@ pub struct HybridBackend {
     /// with a single lock-free atomic operation.
     smbus_shared: Arc<ArcSwap<HashMap<usize, SmbusTelemetry>>>,
 
-    /// Per-device firmware + limits metadata from the same JSON snapshot.
-    /// Populated by the reader thread; update() copies it into sysfs devices.
-    device_meta_shared: Arc<
-        ArcSwap<
-            HashMap<
-                usize,
-                (
-                    Option<crate::models::telemetry::FirmwaresInfo>,
-                    Option<crate::models::telemetry::DeviceLimits>,
-                ),
-            >,
-        >,
-    >,
+    /// Per-device metadata (firmwares, limits, PCIe link, board power) from
+    /// the same JSON snapshot. Populated by the reader thread; `update()`
+    /// copies the static fields into sysfs devices and overlays the
+    /// measurement field (`board_power`) onto telemetry every tick.
+    device_meta_shared: Arc<ArcSwap<HashMap<usize, json::DeviceMeta>>>,
 
     /// The render thread's private view of the latest background snapshot.
     /// Updated via `Arc::clone()` — one atomic ref-count increment, zero
@@ -122,6 +119,138 @@ pub struct HybridBackend {
     /// permanently if `tt-smi` was never found on PATH (sysfs-only mode) — never
     /// fabricated from sysfs data.
     last_raw: Arc<Mutex<Option<String>>>,
+
+    /// `{ normalized PCI bus id → sysfs device index }`, built from the sysfs
+    /// device list at `init()` (sysfs discovery is a one-shot, so this is stable
+    /// for the backend's lifetime). The reader thread gets a clone and uses it to
+    /// re-key each tt-smi snapshot onto these indices — see
+    /// [`rekey_snapshot_by_bus_id`] for why the join can't be positional.
+    bus_to_index: HashMap<String, usize>,
+}
+
+/// Re-key a tt-smi snapshot from tt-smi's **array positions** onto this
+/// backend's **sysfs device indices**, joining on normalized PCI bus id.
+///
+/// ## Why a bus-id join and not an index join
+///
+/// `parse_snapshot` keys SMBUS/meta by position in tt-smi's `device_info[]`, and
+/// sysfs discovery assigns its indices in ascending bus-id order specifically so
+/// those two sequences line up (see `SysfsBackend::collect_hwmon_candidates`).
+/// That agreement holds only while both sides enumerate the *same set* of cards.
+/// They can legitimately differ: a card that's busy or failed to enumerate is
+/// missing from tt-smi's list but still has a live hwmon node, an upstream
+/// `--devices` filter can trim the snapshot, and a hotplug event can change the
+/// count mid-run. With a positional join, one missing entry shifts every later
+/// card's SMBUS / PCIe link / board power onto its neighbour — the exact
+/// mis-attribution this release set out to eliminate, arrived at by a different
+/// route. Bus id is carried by both sides, so it is the join key.
+///
+/// ## Fallbacks
+///
+/// * `bus_to_index` empty (no sysfs bus ids resolvable at all — every device
+///   fell back to its hwmon directory name): positional join, logged at `warn`.
+/// * a snapshot entry with no bus id (a tt-smi old enough to omit
+///   `board_info.bus_id`): that entry alone falls back to its position, logged
+///   at `warn`.
+/// * a snapshot entry whose bus id matches no sysfs device: **dropped**. sysfs
+///   can't see that card, so there is no device to attribute it to; keying it by
+///   position would put it on someone else's row.
+fn rekey_snapshot_by_bus_id(
+    parts: json::SnapshotParts,
+    bus_to_index: &HashMap<String, usize>,
+) -> json::SnapshotParts {
+    if bus_to_index.is_empty() {
+        log::warn!(
+            "HybridBackend: no PCI bus ids resolved for the sysfs devices — \
+             falling back to a positional tt-smi join (per-device attribution \
+             may be wrong if tt-smi enumerates a different set of cards)"
+        );
+        return parts;
+    }
+
+    let json::SnapshotParts {
+        smbus,
+        meta,
+        bus_ids,
+    } = parts;
+
+    // Every position mentioned anywhere in the snapshot, resolved once.
+    // BTreeSet keeps the (rare) warn output in a stable order.
+    let positions: std::collections::BTreeSet<usize> = smbus
+        .keys()
+        .chain(meta.keys())
+        .chain(bus_ids.keys())
+        .copied()
+        .collect();
+
+    let mut mapping: HashMap<usize, usize> = HashMap::new();
+    for pos in positions {
+        match bus_ids.get(&pos) {
+            Some(bus) => match bus_to_index.get(bus) {
+                Some(&device_idx) => {
+                    mapping.insert(pos, device_idx);
+                }
+                None => {
+                    log::debug!(
+                        "HybridBackend: tt-smi device_info[{pos}] (bus {bus}) has no \
+                         matching sysfs device — dropping its SMBUS/meta rather than \
+                         attributing it to another card"
+                    );
+                }
+            },
+            None => {
+                log::warn!(
+                    "HybridBackend: tt-smi device_info[{pos}] carries no bus_id — \
+                     falling back to a positional join for this entry"
+                );
+                mapping.insert(pos, pos);
+            }
+        }
+    }
+
+    json::SnapshotParts {
+        smbus: rekey_map(smbus, &mapping),
+        meta: rekey_map(meta, &mapping),
+        bus_ids: rekey_map(bus_ids, &mapping),
+    }
+}
+
+/// Move every entry of a position-keyed map onto its joined device index,
+/// dropping entries the join couldn't resolve. Generic (rather than a closure)
+/// because it's applied to three maps with three different value types.
+fn rekey_map<V>(map: HashMap<usize, V>, mapping: &HashMap<usize, usize>) -> HashMap<usize, V> {
+    map.into_iter()
+        .filter_map(|(pos, v)| mapping.get(&pos).map(|&idx| (idx, v)))
+        .collect()
+}
+
+/// Parse one verbatim `tt-smi -s` document, re-key it onto sysfs device indices,
+/// and deposit it for the render thread.
+///
+/// Factored out of the reader-thread closure so the join is exercised by tests
+/// through the same code the thread runs, rather than a re-implementation of it.
+/// A snapshot whose SMBUS map comes out empty (unparseable output, or every
+/// entry dropped for want of a matching sysfs device) is *not* published: the
+/// previously deposited snapshot stays, so a single bad poll doesn't blank the
+/// SMBUS rows.
+fn publish_snapshot(
+    json_str: &str,
+    bus_to_index: &HashMap<String, usize>,
+    smbus_shared: &ArcSwap<HashMap<usize, SmbusTelemetry>>,
+    device_meta_shared: &ArcSwap<HashMap<usize, json::DeviceMeta>>,
+    smbus_generation: &AtomicU64,
+) {
+    let snapshot = rekey_snapshot_by_bus_id(json::parse_snapshot(json_str), bus_to_index);
+    if snapshot.smbus.is_empty() {
+        log::debug!("HybridBackend: tt-smi returned empty/unparseable JSON");
+        return;
+    }
+    if !snapshot.meta.is_empty() {
+        device_meta_shared.store(Arc::new(snapshot.meta));
+    }
+    smbus_shared.store(Arc::new(snapshot.smbus));
+    smbus_generation.fetch_add(1, Ordering::Release);
+    log::debug!("HybridBackend: SMBUS snapshot updated");
 }
 
 impl HybridBackend {
@@ -130,18 +259,28 @@ impl HybridBackend {
         Self::with_config(tt_smi_path, BackendConfig::default())
     }
 
+    /// `{ normalized sysfs bus id → sysfs device index }` — the join key map the
+    /// tt-smi side is matched against. Devices whose bus id couldn't be resolved
+    /// from the hwmon `device` symlink fall back to their hwmon directory name
+    /// (e.g. `"hwmon3"`), which no tt-smi bus id will ever match, so they simply
+    /// don't participate in the join.
+    fn sysfs_bus_index(&self) -> HashMap<String, usize> {
+        self.sysfs
+            .devices()
+            .iter()
+            .filter_map(|d| {
+                let bus = json::normalize_bus_id(&d.bus_id);
+                // Only PCI-shaped ids are usable keys; the hwmon-dirname
+                // fallback ("hwmon3") is deliberately excluded.
+                bus.contains(':').then_some((bus, d.index))
+            })
+            .collect()
+    }
+
     /// Create a new Hybrid backend with explicit configuration.
     pub fn with_config(tt_smi_path: impl Into<String>, _config: BackendConfig) -> Self {
         let empty: Arc<HashMap<usize, SmbusTelemetry>> = Arc::new(HashMap::new());
-        let empty_meta: Arc<
-            HashMap<
-                usize,
-                (
-                    Option<crate::models::telemetry::FirmwaresInfo>,
-                    Option<crate::models::telemetry::DeviceLimits>,
-                ),
-            >,
-        > = Arc::new(HashMap::new());
+        let empty_meta: Arc<HashMap<usize, json::DeviceMeta>> = Arc::new(HashMap::new());
         Self {
             sysfs: SysfsBackend::new(),
             tt_smi_path: tt_smi_path.into(),
@@ -155,6 +294,7 @@ impl HybridBackend {
             stop_flag: Arc::new(AtomicBool::new(false)),
             refresh_handle: Mutex::new(None),
             last_raw: Arc::new(Mutex::new(None)),
+            bus_to_index: HashMap::new(),
         }
     }
 }
@@ -213,6 +353,11 @@ impl TelemetryBackend for HybridBackend {
         let smbus_generation = Arc::clone(&self.smbus_generation);
         let stop_flag = Arc::clone(&self.stop_flag);
         let last_raw = Arc::clone(&self.last_raw);
+        // Join key map, snapshotted for the reader thread. Built now — after
+        // sysfs.init() above — because that is where the device list (and thus
+        // every bus id) comes from.
+        self.bus_to_index = self.sysfs_bus_index();
+        let bus_to_index = self.bus_to_index.clone();
 
         let handle = thread::Builder::new()
             .name("hybrid-smbus-reader".to_string())
@@ -250,20 +395,16 @@ impl TelemetryBackend for HybridBackend {
                                 *guard = Some(json_str.to_string());
                             }
 
-                            // Single parse pass — extracts SMBUS and firmware/limits together.
-                            let snapshot = json::parse_snapshot(&json_str);
-                            if !snapshot.smbus.is_empty() {
-                                if !snapshot.meta.is_empty() {
-                                    device_meta_shared.store(Arc::new(snapshot.meta));
-                                }
-                                smbus_shared.store(Arc::new(snapshot.smbus));
-                                smbus_generation.fetch_add(1, Ordering::Release);
-                                log::debug!("HybridBackend: SMBUS snapshot updated");
-                            } else {
-                                log::debug!(
-                                    "HybridBackend: tt-smi returned empty/unparseable JSON"
-                                );
-                            }
+                            // Single parse pass (SMBUS + firmware/limits/PCIe/
+                            // board power), re-keyed onto sysfs device indices by
+                            // bus id, then deposited for the render thread.
+                            publish_snapshot(
+                                &json_str,
+                                &bus_to_index,
+                                &smbus_shared,
+                                &device_meta_shared,
+                                &smbus_generation,
+                            );
                         }
                         Ok(out) => {
                             log::debug!("HybridBackend: tt-smi exited {:?}", out.status.code());
@@ -301,7 +442,8 @@ impl TelemetryBackend for HybridBackend {
     }
 
     fn update(&mut self) -> BackendResult<()> {
-        // Fast path: sysfs only — completes in microseconds.
+        // Fast path: sysfs only — four hwmon reads per device, plus the ~1 Hz
+        // slow lane (class attrs / SMBUS synthesis / PCIe counters) when due.
         self.sysfs.update()?;
 
         // ── Adopt new SMBUS target if the reader thread has one ───────────────
@@ -319,23 +461,35 @@ impl TelemetryBackend for HybridBackend {
             self.smbus_ema
                 .retain(|k, _| self.smbus_latest.contains_key(k));
 
-            // Enrich sysfs device list with firmwares/limits from JSON snapshot.
-            // Always overwrite (not just when None) so a firmware upgrade applied
-            // while the tool is running is reflected without restarting.
+            // Enrich sysfs device list with firmwares/limits/PCIe link from the
+            // JSON snapshot. Always overwrite (not just when None) so a firmware
+            // upgrade or hot-plugged link renegotiation applied while the tool
+            // is running is reflected without restarting.
             //
             // Note: device_meta_shared is only stored when the snapshot contains
             // non-empty meta (reader thread, line above). If a degraded snapshot
-            // omits the firmwares block, the previously stored values are retained
-            // rather than reverting to None — intentional, since firmware versions
-            // don't regress and a momentary ARC issue shouldn't blank the FW row.
+            // omits a field, the previously stored value is retained rather than
+            // reverting to None — intentional, since firmware versions and PCIe
+            // link geometry don't regress and a momentary ARC issue shouldn't
+            // blank these rows.
+            //
+            // `board_power` is deliberately NOT copied here — it's a live
+            // measurement, not static metadata, and is overlaid onto telemetry
+            // every tick below instead (see the TDP/TDC overlay).
             let meta = self.device_meta_shared.load_full();
             for device in self.sysfs.devices_mut() {
-                if let Some((fw, lim)) = meta.get(&device.index) {
-                    if fw.is_some() {
-                        device.firmwares = fw.clone();
+                if let Some(dm) = meta.get(&device.index) {
+                    if dm.firmwares.is_some() {
+                        device.firmwares = dm.firmwares.clone();
                     }
-                    if lim.is_some() {
-                        device.limits = lim.clone();
+                    if dm.limits.is_some() {
+                        device.limits = dm.limits.clone();
+                    }
+                    if dm.pcie_speed.is_some() {
+                        device.pcie_speed = dm.pcie_speed.clone();
+                    }
+                    if dm.pcie_width.is_some() {
+                        device.pcie_width = dm.pcie_width;
                     }
                 }
             }
@@ -358,7 +512,7 @@ impl TelemetryBackend for HybridBackend {
             smbus_smooth::apply_ema(&mut self.smbus_ema, *idx, target, existing);
         }
 
-        // ── Overlay SMBUS TDP/TDC onto sysfs telemetry ───────────────────────
+        // ── Overlay SMBUS TDP/TDC + whole-card board power onto sysfs telemetry ──
         //
         // The hwmon driver exposes only the Tensix VDD rail via power1_input.
         // On Blackhole (and newer firmwares) the firmware-reported TDP register
@@ -376,6 +530,20 @@ impl TelemetryBackend for HybridBackend {
                 }
             }
         }
+        // board_power comes from tt-smi's `telemetry` block (not SMBUS), and
+        // — unlike firmwares/limits/pcie link above — is a per-tick
+        // measurement rather than static metadata, so it's applied here,
+        // every tick, in lockstep with the TDP/TDC overlay, instead of only
+        // when the SMBUS generation advances. A cheap lock-free ArcSwap load;
+        // safe to repeat every frame.
+        let meta_for_power = self.device_meta_shared.load_full();
+        for (idx, dm) in meta_for_power.iter() {
+            if let Some(bp) = dm.board_power {
+                if let Some(telem) = self.sysfs.telemetry_cache_mut(*idx) {
+                    telem.board_power = Some(bp);
+                }
+            }
+        }
 
         Ok(())
     }
@@ -388,8 +556,23 @@ impl TelemetryBackend for HybridBackend {
         self.sysfs.telemetry(device_idx)
     }
 
+    /// SMBUS telemetry for a device, preferring the tt-smi-derived blend.
+    ///
+    /// Falls back to the inner sysfs backend's synthesized block for any device
+    /// the blend doesn't cover. That is the whole story on a modern-kmd box
+    /// *without* tt-smi installed — auto-detect still resolves to Hybrid on
+    /// Linux, so returning only `smbus_blended` there meant this method reported
+    /// `None` for every device and the tt-kmd-sourced fan/clock/therm-trip/
+    /// serial/heartbeat rows were reachable only via an explicit
+    /// `--backend sysfs`.
+    ///
+    /// The blend wins wherever it exists because tt-smi's data is strictly
+    /// richer (DDR status, GDDR temps/ECC, firmware versions, enabled masks)
+    /// than what the driver exposes through sysfs.
     fn smbus_telemetry(&self, device_idx: usize) -> Option<&SmbusTelemetry> {
-        self.smbus_blended.get(&device_idx)
+        self.smbus_blended
+            .get(&device_idx)
+            .or_else(|| self.sysfs.smbus_telemetry(device_idx))
     }
 
     fn backend_info(&self) -> String {
@@ -404,6 +587,13 @@ impl TelemetryBackend for HybridBackend {
     fn snapshot_json(&self) -> Option<String> {
         // `.lock().ok()` — never panics on a poisoned lock (panic-free contract).
         self.last_raw.lock().ok().and_then(|g| g.clone())
+    }
+
+    fn pcie_bandwidth(
+        &self,
+        device_idx: usize,
+    ) -> Option<crate::backend::pcie_counters::PcieBandwidth> {
+        self.sysfs.pcie_bandwidth(device_idx)
     }
 }
 
@@ -511,6 +701,254 @@ mod tests {
         );
     }
 
+    /// On a modern-kmd box with no tt-smi installed, `smbus_telemetry()` must
+    /// still surface the sysfs-synthesized block — auto-detect lands on Hybrid,
+    /// so returning only the (empty) tt-smi blend hid the tt-kmd fan/clock/
+    /// therm-trip/serial rows behind an explicit `--backend sysfs`.
+    #[test]
+    fn test_smbus_falls_back_to_sysfs_without_tt_smi() {
+        let mut backend = HybridBackend::new("tt-smi");
+
+        backend.sysfs.insert_smbus_for_test(
+            0,
+            SmbusTelemetry {
+                aiclk: Some("800".to_string()),
+                fan_speed: Some("2100".to_string()),
+                arc0_health: Some("43874".to_string()), // tt_heartbeat
+                ..SmbusTelemetry::default()
+            },
+        );
+
+        // No tt-smi record ever arrived, so the blend is empty.
+        assert!(backend.smbus_blended.is_empty());
+
+        let smbus = backend
+            .smbus_telemetry(0)
+            .expect("sysfs-synthesized SMBUS must be visible through Hybrid");
+        assert_eq!(smbus.aiclk.as_deref(), Some("800"));
+        assert_eq!(smbus.fan_rpm(), Some(2100));
+        assert_eq!(smbus.arc0_health.as_deref(), Some("43874"));
+
+        // Unknown device index is still None on both paths.
+        assert!(backend.smbus_telemetry(9).is_none());
+    }
+
+    /// When tt-smi data *is* present it must win — it is strictly richer than
+    /// the sysfs synthesis.
+    #[test]
+    fn test_json_blend_wins_over_sysfs_smbus() {
+        let mut backend = HybridBackend::new("tt-smi");
+        backend.sysfs.insert_smbus_for_test(
+            0,
+            SmbusTelemetry {
+                aiclk: Some("111".to_string()),
+                ..SmbusTelemetry::default()
+            },
+        );
+        backend.smbus_blended.insert(
+            0,
+            SmbusTelemetry {
+                aiclk: Some("800".to_string()),
+                ddr_status: Some("0x55555555".to_string()),
+                ..SmbusTelemetry::default()
+            },
+        );
+        let smbus = backend.smbus_telemetry(0).unwrap();
+        assert_eq!(smbus.aiclk.as_deref(), Some("800"));
+        assert_eq!(smbus.ddr_status.as_deref(), Some("0x55555555"));
+    }
+
+    /// The tt-smi ↔ sysfs join must be by PCI bus id, not by list position.
+    ///
+    /// Regression: `parse_snapshot` keys SMBUS/meta by tt-smi *array position*
+    /// and this backend looked them up by *sysfs device index*. That only agrees
+    /// while both sides enumerate the same cards. Here sysfs sees four cards and
+    /// tt-smi reports only the 2nd and 4th (a card busy or failed to enumerate,
+    /// `--devices` filtering, hotplug) — with the positional join, tt-smi's two
+    /// records landed on devices 0 and 1, i.e. **every card past the gap showed a
+    /// neighbour's SMBUS, PCIe link and board power**: the same mis-attribution
+    /// v0.8.0 set out to fix, reached by a different route.
+    ///
+    /// Drives the production path end to end: `publish_snapshot` (what the reader
+    /// thread calls) then `update()` (what the render loop calls), so the
+    /// board_power overlay is covered too.
+    #[test]
+    fn tt_smi_records_join_sysfs_devices_by_bus_id_not_position() {
+        use crate::models::{Device, Telemetry};
+
+        let mut backend = HybridBackend::new("tt-smi");
+
+        // Four cards visible via sysfs, indices assigned in bus-id order.
+        for (idx, bus) in [
+            "0000:01:00.0",
+            "0000:02:00.0",
+            "0000:03:00.0",
+            "0000:04:00.0",
+        ]
+        .iter()
+        .enumerate()
+        {
+            backend.sysfs.push_device_for_test(Device::new(
+                idx,
+                "p150a".to_string(),
+                bus.to_string(),
+                String::new(),
+            ));
+            backend.sysfs.insert_telemetry_for_test(
+                idx,
+                Telemetry {
+                    power: Some(20.0 + idx as f32),
+                    current: None,
+                    voltage: Some(0.72),
+                    asic_temperature: Some(40.0),
+                    aiclk: None,
+                    heartbeat: None,
+                    timestamp: chrono::Utc::now(),
+                    board_power: None,
+                },
+            );
+        }
+        backend.bus_to_index = backend.sysfs_bus_index();
+        assert_eq!(backend.bus_to_index.len(), 4);
+
+        // tt-smi reports only the 2nd and 4th card — note the *uppercase* hex in
+        // one bus id, which the normalized join key handles.
+        let json = r#"{
+            "device_info": [
+                {
+                    "board_info": {"bus_id": "0000:02:00.0", "board_type": "p150a",
+                                   "pcie_speed": 4, "pcie_width": "16"},
+                    "telemetry": {"power": " 21.0", "board_power": " 55.0"},
+                    "smbus_telem": {"BOARD_ID_LOW": "0xCARD02", "AICLK": "800"}
+                },
+                {
+                    "board_info": {"bus_id": "0000:04:00.0", "board_type": "p150a",
+                                   "pcie_speed": 5, "pcie_width": "8"},
+                    "telemetry": {"power": " 23.0", "board_power": " 77.0"},
+                    "smbus_telem": {"BOARD_ID_LOW": "0xCARD04", "AICLK": "1000"}
+                }
+            ]
+        }"#;
+        publish_snapshot(
+            json,
+            &backend.bus_to_index,
+            &backend.smbus_shared,
+            &backend.device_meta_shared,
+            &backend.smbus_generation,
+        );
+        backend.update().expect("update should not fail");
+
+        // ── SMBUS lands on the right cards ────────────────────────────────────
+        assert_eq!(
+            backend
+                .smbus_telemetry(1)
+                .and_then(|s| s.board_id.as_deref()),
+            Some("0xCARD02"),
+            "the 0000:02:00.0 record must land on sysfs device 1"
+        );
+        assert_eq!(
+            backend
+                .smbus_telemetry(3)
+                .and_then(|s| s.board_id.as_deref()),
+            Some("0xCARD04"),
+            "the 0000:04:00.0 record must land on sysfs device 3"
+        );
+        assert!(
+            backend.smbus_telemetry(0).is_none(),
+            "device 0 was absent from the snapshot — it must have no SMBUS, \
+             not device 1's"
+        );
+        assert!(backend.smbus_telemetry(2).is_none(), "same for device 2");
+
+        // ── PCIe link geometry follows the same join ──────────────────────────
+        let devices = backend.devices();
+        assert_eq!(devices[1].pcie_speed.as_deref(), Some("Gen4"));
+        assert_eq!(devices[1].pcie_width, Some(16));
+        assert_eq!(devices[3].pcie_speed.as_deref(), Some("Gen5"));
+        assert_eq!(devices[3].pcie_width, Some(8));
+        assert!(devices[0].pcie_speed.is_none() && devices[2].pcie_speed.is_none());
+
+        // ── board_power overlay (applied every tick) follows it too ───────────
+        assert_eq!(backend.telemetry(1).and_then(|t| t.board_power), Some(55.0));
+        assert_eq!(backend.telemetry(3).and_then(|t| t.board_power), Some(77.0));
+        assert!(
+            backend.telemetry(0).and_then(|t| t.board_power).is_none(),
+            "board power must not shift onto a card tt-smi never reported"
+        );
+        assert!(backend.telemetry(2).and_then(|t| t.board_power).is_none());
+    }
+
+    /// A snapshot entry with no `bus_id` at all (a tt-smi old enough to omit it)
+    /// falls back to a positional join for that entry rather than being dropped.
+    #[test]
+    fn snapshot_entries_without_bus_id_fall_back_to_positional_join() {
+        let mut bus_to_index = HashMap::new();
+        bus_to_index.insert("0000:01:00.0".to_string(), 0);
+        bus_to_index.insert("0000:02:00.0".to_string(), 1);
+
+        let json = r#"{
+            "device_info": [
+                {"smbus_telem": {"BOARD_ID_LOW": "0xNOBUS"}},
+                {"board_info": {"bus_id": "0000:02:00.0"},
+                 "smbus_telem": {"BOARD_ID_LOW": "0xCARD02"}}
+            ]
+        }"#;
+        let parts = rekey_snapshot_by_bus_id(json::parse_snapshot(json), &bus_to_index);
+        assert_eq!(
+            parts.smbus.get(&0).and_then(|s| s.board_id.as_deref()),
+            Some("0xNOBUS"),
+            "no bus id → keep the array position"
+        );
+        assert_eq!(
+            parts.smbus.get(&1).and_then(|s| s.board_id.as_deref()),
+            Some("0xCARD02")
+        );
+    }
+
+    /// With no resolvable sysfs bus ids (every device fell back to its hwmon
+    /// directory name) the join degrades to positional rather than dropping
+    /// everything.
+    #[test]
+    fn empty_bus_index_degrades_to_positional_join() {
+        let json = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"},
+                 "smbus_telem": {"BOARD_ID_LOW": "0xA"}},
+                {"board_info": {"bus_id": "0000:02:00.0"},
+                 "smbus_telem": {"BOARD_ID_LOW": "0xB"}}
+            ]
+        }"#;
+        let parts = rekey_snapshot_by_bus_id(json::parse_snapshot(json), &HashMap::new());
+        assert_eq!(
+            parts.smbus.get(&0).and_then(|s| s.board_id.as_deref()),
+            Some("0xA")
+        );
+        assert_eq!(
+            parts.smbus.get(&1).and_then(|s| s.board_id.as_deref()),
+            Some("0xB")
+        );
+    }
+
+    /// A card tt-smi reports but sysfs can't see has nowhere to go — it is
+    /// dropped, never attributed to some other index.
+    #[test]
+    fn unmatched_bus_id_is_dropped_not_reassigned() {
+        let mut bus_to_index = HashMap::new();
+        bus_to_index.insert("0000:01:00.0".to_string(), 0);
+
+        let json = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:09:00.0"},
+                 "smbus_telem": {"BOARD_ID_LOW": "0xGHOST"}}
+            ]
+        }"#;
+        let parts = rekey_snapshot_by_bus_id(json::parse_snapshot(json), &bus_to_index);
+        assert!(
+            parts.smbus.is_empty(),
+            "an unmatched card must not be attributed to device 0"
+        );
+    }
+
     /// HybridBackend must overlay SMBUS TDP/TDC onto sysfs telemetry.
     ///
     /// Verifies the fix for firmware versions (e.g. 19.10.0) where the SMBUS
@@ -534,6 +972,7 @@ mod tests {
                 aiclk: None,
                 heartbeat: None,
                 timestamp: chrono::Utc::now(),
+                board_power: None,
             },
         );
 

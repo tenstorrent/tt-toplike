@@ -250,7 +250,7 @@ pub enum BackendType {
     /// Use Hybrid backend (sysfs real-time + background JSON enrichment from tt-smi)
     ///
     /// Best default for Linux systems: sysfs provides fast non-invasive core metrics
-    /// (temp, power, voltage) while tt-smi is polled every 5s in the background for
+    /// (temp, power, voltage) while tt-smi is polled every 1.5s in the background for
     /// richer SMBUS data (DDR status, ARC health, board IDs).
     /// Falls back to sysfs-only if tt-smi is unavailable.
     #[cfg(target_os = "linux")]
@@ -778,7 +778,16 @@ mod tests {
             idle_on_blur: false,
         };
 
+        // `validate()` only rejects `--backend luwen` when the crate was built
+        // WITHOUT the `luwen-backend` feature (see `Cli::validate()` above) —
+        // when the feature is compiled in, luwen is a legitimate, if invasive,
+        // choice and validate() has nothing to say about it. Assert the
+        // behavior that actually matches each compile-time configuration
+        // rather than assuming rejection unconditionally.
+        #[cfg(not(feature = "luwen-backend"))]
         assert!(cli.validate().is_err());
+        #[cfg(feature = "luwen-backend")]
+        assert!(cli.validate().is_ok());
     }
 
     #[test]

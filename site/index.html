@@ -767,7 +767,7 @@
 ·∘○◉         ●◉○∘·∘○◉●
 ◉●∘·  ·∘○◉●◉○∘·  ·∘○◉</div>
 
-      <p class="hero-eyebrow">Tenstorrent Hardware Monitor · v0.7.40 · Rust</p>
+      <p class="hero-eyebrow">Tenstorrent Hardware Monitor · v0.8.0 · Rust</p>
 
       <h1 class="hero-title">
         Watch<br>
@@ -915,6 +915,18 @@
         with no spurious board labels — the board concept is suppressed entirely.
         Scales from 2 to 32+ chips: side-by-side columns up to terminal width,
         then a compact fleet grid with one power bar per chip.
+      </p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">⇅</div>
+      <p class="feature-title">PCIe Link Traffic</p>
+      <p class="feature-desc">
+        The driver keeps twelve data-word counters on the PCIe link, split by
+        direction and initiator. tt-toplike folds them into inbound and outbound
+        totals and differentiates them every tick, so the Insights panel shows the
+        link's geometry — <code>Gen4 x4</code> — above live ▼/▲ byte rates.
+        That's the host↔chip pipe itself: weights streaming in at load time,
+        activations and results coming back during inference.
       </p>
     </div>
     <div class="feature-card">
@@ -1414,10 +1426,13 @@
       <div class="feature-icon">🛡</div>
       <p class="feature-title">Non-Invasive by Default</p>
       <p class="feature-desc">
-        The default backend chain is Sysfs → JSON (tt-smi subprocess) → Mock.
-        Direct PCI access via Luwen is only attempted when <code>--backend luwen</code>
-        is passed explicitly. You can monitor an LLM inference job without
-        any risk of disturbing the hardware state.
+        The default backend chain on Linux is Hybrid (sysfs + background tt-smi)
+        → JSON (tt-smi subprocess) → Mock. Everything on that path is an ordinary
+        read of a kernel file: the hwmon sensors plus tt-kmd's own
+        <code>/sys/class/tenstorrent/</code> attributes — clocks, ARC heartbeat,
+        firmware limits, PCIe counters. Direct PCI access via Luwen is only
+        attempted when <code>--backend luwen</code> is passed explicitly. You can
+        monitor an LLM inference job without any risk of disturbing the hardware state.
       </p>
     </div>
     <div class="feature-card">

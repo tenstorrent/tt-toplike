@@ -37,6 +37,15 @@ pub struct Telemetry {
     /// Timestamp when telemetry was captured
     #[serde(default = "chrono::Utc::now")]
     pub timestamp: DateTime<Utc>,
+
+    /// Total board input power in watts (tt-smi ≥ 6.0.0 `board_power`).
+    /// Distinct from `power`: on dual-asic boards (p300) `power` is this
+    /// asic's TDP measurement while `board_power` covers the whole card.
+    ///
+    /// `#[serde(default)]` keeps this back-compat on the wire (remote frames
+    /// and cached snapshots from older tt-smi/tt-toplike don't carry the key).
+    #[serde(default)]
+    pub board_power: Option<f32>,
 }
 
 impl Telemetry {
@@ -50,6 +59,7 @@ impl Telemetry {
             aiclk: None,
             heartbeat: None,
             timestamp: Utc::now(),
+            board_power: None,
         }
     }
 
@@ -88,6 +98,59 @@ impl Default for Telemetry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// One row of tt-smi ≥ 6.0.0's per-device process attribution
+/// (top-level `processes[]` in the snapshot). All fields optional —
+/// tt-smi serializes with exclude_none.
+///
+/// The two numeric fields accept a bare JSON number *or* a quoted string:
+/// tt-smi has flip-flopped between the two representations for numeric values
+/// across releases (`"pcie_width": "4"` vs `"pcie_speed": 4` in the same
+/// document today), and a strict type here used to be able to fail the whole
+/// snapshot parse — see `TTSMISnapshot::processes` in `backend::json` for what
+/// that cost. Unparseable values decode as `None` rather than erroring.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeviceProcess {
+    #[serde(default, deserialize_with = "de_opt_i64_str")]
+    pub pid: Option<i64>,
+    pub user: Option<String>,
+    /// Index of the device this process has open.
+    #[serde(default, deserialize_with = "de_opt_usize_str")]
+    pub device: Option<usize>,
+    pub cmdline: Option<String>,
+}
+
+/// Deserialize an optional i64 from either a JSON number or a quoted string.
+fn de_opt_i64_str<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(i64),
+        Str(String),
+        Null,
+    }
+    Ok(match Option::<NumOrStr>::deserialize(d)? {
+        Some(NumOrStr::Num(v)) => Some(v),
+        Some(NumOrStr::Str(s)) => s.trim().parse::<i64>().ok(),
+        Some(NumOrStr::Null) | None => None,
+    })
+}
+
+/// Deserialize an optional usize from either a JSON number or a quoted string.
+fn de_opt_usize_str<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(usize),
+        Str(String),
+        Null,
+    }
+    Ok(match Option::<NumOrStr>::deserialize(d)? {
+        Some(NumOrStr::Num(v)) => Some(v),
+        Some(NumOrStr::Str(s)) => s.trim().parse::<usize>().ok(),
+        Some(NumOrStr::Null) | None => None,
+    })
 }
 
 /// SMBUS telemetry (low-level hardware status)
@@ -286,6 +349,17 @@ pub struct SmbusTelemetry {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct GddrTempPair(pub [f32; 4]);
 
+/// Unpack a raw GDDR_X_Y_TEMP register (4 packed temperature bytes) into °C.
+/// Bytes are extracted little-endian: byte0=LSB is temps[0].
+pub fn unpack_gddr_temps_u32(v: u32) -> GddrTempPair {
+    GddrTempPair([
+        (v & 0xFF) as f32,
+        ((v >> 8) & 0xFF) as f32,
+        ((v >> 16) & 0xFF) as f32,
+        ((v >> 24) & 0xFF) as f32,
+    ])
+}
+
 /// Unpack a GDDR_X_Y_TEMP hex string (e.g. "0x262a2c2c") into four °C values.
 /// Bytes are extracted little-endian: byte0=LSB is temps[0].
 /// Returns None if the string is empty, `"N/A"`, or not a valid hex value.
@@ -296,12 +370,7 @@ pub fn unpack_gddr_temps(s: &str) -> Option<GddrTempPair> {
     }
     let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
     let v = u32::from_str_radix(hex, 16).ok()?;
-    Some(GddrTempPair([
-        ((v >> 0) & 0xFF) as f32,
-        ((v >> 8) & 0xFF) as f32,
-        ((v >> 16) & 0xFF) as f32,
-        ((v >> 24) & 0xFF) as f32,
-    ]))
+    Some(unpack_gddr_temps_u32(v))
 }
 
 /// Number of Tensix columns in the Blackhole chip grid that can be harvested.
@@ -329,12 +398,94 @@ pub struct FirmwaresInfo {
 }
 
 /// Per-device thermal/power limits (from tt-smi 5.2.0 `limits` block).
+///
+/// # Cross-backend contract
+///
+/// `thm_limit` is the temperature the UI prints next to the Temp reading, and
+/// it must mean the same thing on every backend: the **throttle** trip point
+/// (90 °C on a p300c), which is what hwmon publishes as `temp1_max` and what
+/// tt-smi calls `therm_trip_l1_limit`. tt-smi *also* emits a field literally
+/// named `thm_limit`, but that is the harder **shutdown** trip (110 °C) — see
+/// the [`DeviceLimitsRaw`] conversion, which prefers `therm_trip_l1_limit` and
+/// only falls back to `thm_limit` for older snapshots that lack it.
+///
+/// Deserialization goes through [`DeviceLimitsRaw`] (via `#[serde(from)]`) so
+/// tt-smi's string-valued numbers parse; serialization stays derived, and the
+/// round trip is lossless because the fallback is a no-op when
+/// `therm_trip_l1_limit` is absent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(from = "DeviceLimitsRaw")]
 pub struct DeviceLimits {
     pub tdp_limit: Option<f32>,
     pub tdc_limit: Option<f32>,
     pub asic_fmax: Option<u32>,
     pub thm_limit: Option<f32>,
+}
+
+/// Wire shape of tt-smi's `limits` block, as actually emitted.
+///
+/// Two things differ from [`DeviceLimits`] and both caused real bugs:
+///
+/// 1. **Values are strings.** tt-smi 5.3.0 emits `"tdp_limit": "125"`, so plain
+///    `Option<f32>` fields failed — and serde fails the *whole struct* on one
+///    bad field, so the entire block was dropped and `Device::limits` stayed
+///    `None` on `--backend json` (masked on the hybrid path, which gets limits
+///    from hwmon `*_max` instead). Hence the tolerant deserializers.
+/// 2. **There are two thermal limits.** `therm_trip_l1_limit` (90 °C) is the
+///    throttle point; `thm_limit` (110 °C) is shutdown. The conversion picks
+///    the throttle point so the displayed limit matches sysfs/hybrid/luwen.
+///
+/// Every field is `#[serde(default)]` so snapshots missing any of them (older
+/// tt-smi, or a `limits` block trimmed by a future version) still parse.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct DeviceLimitsRaw {
+    #[serde(default, deserialize_with = "crate::models::serde_num::de_opt_f32_str")]
+    tdp_limit: Option<f32>,
+    #[serde(default, deserialize_with = "crate::models::serde_num::de_opt_f32_str")]
+    tdc_limit: Option<f32>,
+    #[serde(default, deserialize_with = "crate::models::serde_num::de_opt_u32_str")]
+    asic_fmax: Option<u32>,
+    /// tt-smi's thermal **shutdown** trip point (110 °C on a p300c).
+    #[serde(default, deserialize_with = "crate::models::serde_num::de_opt_f32_str")]
+    thm_limit: Option<f32>,
+    /// tt-smi's thermal **throttle** trip point (90 °C on a p300c) — the one
+    /// hwmon exposes as `temp1_max` and the one the UI should show.
+    #[serde(default, deserialize_with = "crate::models::serde_num::de_opt_f32_str")]
+    therm_trip_l1_limit: Option<f32>,
+}
+
+impl From<DeviceLimitsRaw> for DeviceLimits {
+    fn from(raw: DeviceLimitsRaw) -> Self {
+        Self {
+            tdp_limit: raw.tdp_limit,
+            tdc_limit: raw.tdc_limit,
+            asic_fmax: raw.asic_fmax,
+            // Throttle point preferred; shutdown only as a legacy fallback.
+            thm_limit: raw.therm_trip_l1_limit.or(raw.thm_limit),
+        }
+    }
+}
+
+/// Decode a packed SMBUS `FLASH_BUNDLE_VERSION` register into the dotted
+/// firmware-bundle version string tt-smi shows as `firmwares.fw_bundle_version`.
+///
+/// The register holds four version bytes, most-significant first. Ground truth
+/// from a live p300c (tt-smi 5.3.0, tt-kmd 2.9.0): `0x130b0000` renders as
+/// `"19.11.0.0"` (0x13 = 19, 0x0b = 11, then two zero lanes).
+///
+/// Only the luwen backend needs this — it reads the raw register out of luwen's
+/// `Telemetry::fw_bundle_version`, whereas tt-smi's JSON already carries the
+/// decoded string and sysfs has no equivalent register. It lives here, beside
+/// the other register decoders, so it is unit-testable without hardware and
+/// reusable if another raw-register source appears.
+pub fn fw_bundle_version_string(v: u32) -> String {
+    format!(
+        "{}.{}.{}.{}",
+        (v >> 24) & 0xFF,
+        (v >> 16) & 0xFF,
+        (v >> 8) & 0xFF,
+        v & 0xFF
+    )
 }
 
 /// Parse a string as u32, accepting both "0x1A2B" hex and plain decimal.
@@ -344,6 +495,60 @@ pub(crate) fn parse_hex_or_dec(s: &str) -> Option<u32> {
         u32::from_str_radix(hex, 16).ok()
     } else {
         s.parse().ok()
+    }
+}
+
+/// Parse a raw fan field and return it only if it looks like a *real* RPM.
+///
+/// The single source of truth for "is this a fan reading or a sentinel", shared
+/// by [`SmbusTelemetry::fan_rpm`] (the render-side accessor) and the tt-smi JSON
+/// parser, which has to choose between two competing fields (`FAN_SPEED` and
+/// `FAN_RPM`) and needs the same notion of "real". `0`, `0xFFFF` and
+/// `0xFFFFFFFF` are all firmware "no reading" sentinels — see
+/// [`SmbusTelemetry::fan_rpm`] for where each comes from.
+pub(crate) fn real_fan_rpm(s: &str) -> Option<u32> {
+    let rpm = parse_hex_or_dec(s)?;
+    if is_fan_sentinel(rpm) {
+        None
+    } else {
+        Some(rpm)
+    }
+}
+
+/// `true` when a raw fan register value is a firmware "no reading" sentinel
+/// rather than an RPM. Shared by [`real_fan_rpm`] (string sources: tt-smi JSON,
+/// sysfs) and the luwen backend (which reads the registers as `u32` directly).
+pub(crate) fn is_fan_sentinel(rpm: u32) -> bool {
+    rpm == 0 || rpm == 0xFFFF || rpm == 0xFFFF_FFFF
+}
+
+/// Decode a raw SMBUS `THM_LIMITS` register into the thermal **shutdown** trip
+/// point in °C, so every backend puts the same units in
+/// [`SmbusTelemetry::thm_limits`] (the starfield thermal-headroom cue reads it
+/// as a plain °C number).
+///
+/// * **Wormhole** packs two 16-bit limits into the register: the low half is the
+///   shutdown limit, the high half the throttle (therm-trip L1) limit. This
+///   matches tt-smi's own `get_chip_limits()`, which computes
+///   `thm_limit = THM_LIMITS & 0xFFFF` and
+///   `therm_trip_l1_limit = THM_LIMITS >> 16`.
+/// * **Blackhole**'s `ThmLimits` telemetry tag already carries a plain °C value —
+///   tt-smi's `get_bh_chip_limits()` uses it verbatim when `THM_LIMIT_SHUTDOWN`
+///   is absent, and exposes the throttle limit through the separate
+///   `THM_LIMIT_THROTTLE` tag. Nothing is unpacked here.
+///
+/// Unknown architectures are treated as packed (the conservative choice: it
+/// masks off a high half that would otherwise render as millions of °C).
+///
+/// Only the luwen backend needs this: it reads the raw register. The tt-smi JSON
+/// path gets the already-decoded `THM_LIMIT_SHUTDOWN` field straight from tt-smi
+/// (which applies this same decode internally), and sysfs gets a decoded °C
+/// value from hwmon `temp*_max`, so there is no third caller to share it with.
+#[cfg(any(feature = "luwen-backend", test))]
+pub(crate) fn thm_limit_shutdown_c(raw: u32, arch: super::device::Architecture) -> u32 {
+    match arch {
+        super::device::Architecture::Blackhole => raw,
+        _ => raw & 0xFFFF,
     }
 }
 
@@ -461,12 +666,7 @@ impl SmbusTelemetry {
     /// them to `None` instead of rendering a nonsensical "65535 RPM". Accepts
     /// both decimal and hex ("0xffffffff") strings.
     pub fn fan_rpm(&self) -> Option<u32> {
-        let rpm = parse_hex_or_dec(self.fan_speed.as_deref()?)?;
-        if rpm == 0 || rpm == 0xFFFF || rpm == 0xFFFF_FFFF {
-            None
-        } else {
-            Some(rpm)
-        }
+        real_fan_rpm(self.fan_speed.as_deref()?)
     }
 
     /// Firmware-reported measured power in Watts from the SMBUS TDP register.
@@ -570,6 +770,7 @@ mod tests {
             aiclk: Some(1000),
             heartbeat: Some(1),
             timestamp: Utc::now(),
+            board_power: None,
         };
 
         assert!(telem.is_valid());
@@ -578,6 +779,26 @@ mod tests {
         assert_eq!(telem.current_a(), 25.5);
         assert_eq!(telem.aiclk_mhz(), 1000);
         assert!(telem.arc_healthy());
+    }
+
+    /// The raw `THM_LIMITS` register must decode to the same plain-°C shutdown
+    /// limit every other backend writes, so starfield's thermal-headroom cue
+    /// compares like with like instead of against a ~6.8M "temperature".
+    #[test]
+    fn thm_limits_decode_matches_tt_smi_semantics() {
+        use crate::models::Architecture;
+        // A real packed Wormhole register: throttle 100 °C in the high half,
+        // shutdown 110 °C in the low half.
+        let packed = (100u32 << 16) | 110;
+        assert_eq!(thm_limit_shutdown_c(packed, Architecture::Wormhole), 110);
+        assert_eq!(thm_limit_shutdown_c(packed, Architecture::Grayskull), 110);
+        // Unknown arch is treated as packed rather than trusting the raw value.
+        assert_eq!(thm_limit_shutdown_c(packed, Architecture::Unknown), 110);
+        // Blackhole's ThmLimits tag is already plain °C — do not unpack it.
+        assert_eq!(thm_limit_shutdown_c(110, Architecture::Blackhole), 110);
+        // Regression guard: the undecoded packed value is nowhere near a
+        // plausible trip point (this is the bug being fixed).
+        assert!(packed > 6_000_000);
     }
 
     #[test]
@@ -670,6 +891,13 @@ mod tests {
         assert!(unpack_gddr_temps("").is_none());
     }
 
+    #[test]
+    fn test_gddr_temp_unpack_u32() {
+        // Same packing as the hex-string form: byte0 (LSB) = temps[0].
+        let pair = unpack_gddr_temps_u32(0x262a2c2c);
+        assert_eq!(pair.0, [44.0_f32, 44.0, 42.0, 38.0]);
+    }
+
     // ── tensix_col_harvested ──────────────────────────────────────────────────
 
     #[test]
@@ -715,5 +943,97 @@ mod tests {
         s.gddr_temps[1] = Some(GddrTempPair([50.0, 52.0, 48.0, 46.0]));
         let max = s.max_gddr_temp_computed();
         assert_eq!(max, Some(52.0_f32));
+    }
+
+    /// The SMBUS `FLASH_BUNDLE_VERSION` register is four packed version bytes,
+    /// MSB first — matching what tt-smi renders as `fw_bundle_version`. Ground
+    /// truth from a live p300c (tt-smi 5.3.0): 0x130b0000 → "19.11.0.0".
+    #[test]
+    fn fw_bundle_version_decodes_msb_first() {
+        assert_eq!(fw_bundle_version_string(0x130b_0000), "19.11.0.0");
+        // A zero register is "no version reported", not a real 0.0.0.0 — the
+        // callers gate on that, but the decode itself stays total.
+        assert_eq!(fw_bundle_version_string(0), "0.0.0.0");
+        // Every byte lane is distinct so a lane swap can't pass.
+        assert_eq!(fw_bundle_version_string(0x0102_0304), "1.2.3.4");
+    }
+
+    /// tt-smi 5.3.0 emits the `limits` block with **string** values. Verbatim
+    /// capture from a live p300c — this exact shape used to fail to
+    /// deserialize, which silently left `Device::limits` as `None` on
+    /// `--backend json` and fell the UI back to generic 300 W / 105 °C.
+    #[test]
+    fn device_limits_parses_tt_smi_string_values() {
+        let json = r#"{
+            "vdd_min": "0.70",
+            "vdd_max": "0.90",
+            "tdp_limit": "125",
+            "tdc_limit": "500",
+            "asic_fmax": "1350",
+            "therm_trip_l1_limit": "90",
+            "thm_limit": "110",
+            "bus_peak_limit": 0,
+            "fan_rpm_limit": 0
+        }"#;
+        let lim: DeviceLimits = serde_json::from_str(json).expect("live tt-smi limits must parse");
+        assert_eq!(lim.tdp_limit, Some(125.0));
+        assert_eq!(lim.tdc_limit, Some(500.0));
+        assert_eq!(lim.asic_fmax, Some(1350));
+        // The *displayed* limit must be the throttle trip point (90 °C, which
+        // is also hwmon's temp1_max), not tt-smi's harder `thm_limit`
+        // shutdown trip (110 °C) — otherwise the number next to Temp means a
+        // different thing on json than it does on sysfs/hybrid.
+        assert_eq!(lim.thm_limit, Some(90.0));
+    }
+
+    /// A future tt-smi that switches these back to JSON numbers must not
+    /// regress — the tolerant deserializer accepts either form.
+    #[test]
+    fn device_limits_parses_numeric_values() {
+        let json = r#"{
+            "tdp_limit": 125,
+            "tdc_limit": 500.0,
+            "asic_fmax": 1350,
+            "therm_trip_l1_limit": 90
+        }"#;
+        let lim: DeviceLimits = serde_json::from_str(json).expect("numeric limits must parse");
+        assert_eq!(lim.tdp_limit, Some(125.0));
+        assert_eq!(lim.tdc_limit, Some(500.0));
+        assert_eq!(lim.asic_fmax, Some(1350));
+        assert_eq!(lim.thm_limit, Some(90.0));
+    }
+
+    /// Older snapshots (tt-smi 5.2.0) carry only `thm_limit` and no
+    /// `therm_trip_l1_limit`; they must still parse, falling back to it.
+    #[test]
+    fn device_limits_falls_back_to_thm_limit_when_l1_absent() {
+        let lim: DeviceLimits =
+            serde_json::from_str(r#"{"tdp_limit": 300.0, "thm_limit": 105.0}"#).unwrap();
+        assert_eq!(lim.tdp_limit, Some(300.0));
+        assert_eq!(lim.thm_limit, Some(105.0));
+        assert_eq!(lim.tdc_limit, None);
+        assert_eq!(lim.asic_fmax, None);
+        // An entirely empty block is still valid (all fields default to None).
+        let empty: DeviceLimits = serde_json::from_str("{}").unwrap();
+        assert!(empty.thm_limit.is_none());
+    }
+
+    /// `DeviceLimits` is on the remote-session wire, so serialize→deserialize
+    /// must be lossless even though deserialization now goes through a
+    /// different (wider) shape than serialization emits.
+    #[test]
+    fn device_limits_round_trips_through_its_own_serialization() {
+        let lim = DeviceLimits {
+            tdp_limit: Some(125.0),
+            tdc_limit: Some(500.0),
+            asic_fmax: Some(1350),
+            thm_limit: Some(90.0),
+        };
+        let back: DeviceLimits =
+            serde_json::from_str(&serde_json::to_string(&lim).unwrap()).unwrap();
+        assert_eq!(back.tdp_limit, Some(125.0));
+        assert_eq!(back.tdc_limit, Some(500.0));
+        assert_eq!(back.asic_fmax, Some(1350));
+        assert_eq!(back.thm_limit, Some(90.0));
     }
 }

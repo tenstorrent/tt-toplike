@@ -18,13 +18,20 @@ The visualizations aren't decorative. Every particle, star, color shift, and bri
 
 ### The signals
 
-tt-toplike reads a small set of telemetry values from the chip — through the Linux hwmon kernel interface (sysfs), through `tt-smi`, or directly through Luwen — and drives everything from those:
+tt-toplike reads a small set of telemetry values from the chip — through the two sysfs surfaces the Tenstorrent kernel driver exposes (the standard Linux hwmon sensors, plus tt-kmd's own `/sys/class/tenstorrent/` attribute directory), through `tt-smi`, or directly through Luwen — and drives everything from those:
 
-- **Power (W)** — total chip power draw, measured continuously
+- **Power (W)** — total chip power draw, measured continuously. On boards that report it, whole-card *board* power is read alongside the per-ASIC figure
 - **Temperature (°C)** — die temperature from the ASIC thermal sensor
 - **Current (A)** — current draw; a fast-moving proxy for compute intensity
+- **Clock frequencies** — AICLK, AXICLK and ARCCLK, straight from the driver
+- **Firmware limits** — the board's real TDP / TDC / thermal ceilings (a p300c reports 125 W, 500 A, 90 °C), so "how hot is hot" is calibrated to *your* card instead of a generic reference number
 - **DDR training status** — per-channel bitmask from SMBUS: whether each DDR channel is idle, training, trained, or faulted
-- **ARC heartbeat** — the RISC-V management firmware pulses this register to signal it's alive
+- **GDDR ECC counters** — correctable and uncorrectable memory errors; the uncorrectable count is the one that means data corruption, so it's called out in red when it moves
+- **Thermal-trip count** — how many times the card has hit hardware thermal shutdown in its lifetime. Non-zero is a story
+- **PCIe link traffic** — the driver keeps data-word counters for both directions of the PCIe link; differentiating them between ~1 Hz samples gives live bytes/sec into and out of the chip, next to the link's generation and width
+- **ARC heartbeat** — the RISC-V management firmware pulses this counter to signal it's alive. A frozen heartbeat is how the tool tells "busy" from "wedged"
+
+Most of that arrives without shelling out to anything. The safe default backend reads the driver's sysfs attributes directly, so clocks, the ARC heartbeat, the board SKU, firmware version and PCIe counters all come for free — `tt-smi` is only needed for the deeper SMBUS block (DDR training detail, per-component firmware versions, GDDR sensors). Older drivers simply expose fewer attributes, and the corresponding readouts drop out rather than breaking anything; see [`docs/SYSFS_BACKEND.md`](docs/SYSFS_BACKEND.md) for exactly which fields come from where.
 
 There's also an **adaptive baseline**: for the first ~20 samples the tool learns your chip's idle state. After that, everything is shown as *relative change* from baseline rather than absolute values. A chip drawing 20W shows the same visual intensity as a chip drawing 80W at the same fraction above its idle state. This makes the tool work equally well across hardware generations.
 
@@ -316,7 +323,7 @@ tt-toplike --host             # reads CPU/RAM from sysinfo + Linux hwmon
 tt-toplike --host --mode arcade
 
 # Explicit TT backends
-tt-toplike --backend sysfs    # hwmon sensors — zero interference with running workloads
+tt-toplike --backend sysfs    # hwmon sensors + tt-kmd attrs — zero interference with running workloads
 tt-toplike --backend json     # tt-smi subprocess
 tt-toplike --mock --mock-devices 4
 
@@ -426,7 +433,7 @@ Auto-detect order: **Hybrid (sysfs + background JSON) → JSON → Mock** on Lin
 
 | Backend | Method | Safe on active HW? | Permissions |
 |---------|--------|--------------------|-------------|
-| Sysfs   | Linux hwmon (`/sys/class/hwmon/`) | ✅ Yes | None |
+| Sysfs   | Linux hwmon (`/sys/class/hwmon/`) + tt-kmd class attrs (`/sys/class/tenstorrent/`, incl. PCIe counters) | ✅ Yes | None |
 | JSON    | `tt-smi -s` subprocess | ✅ Yes | None |
 | Host    | CPU/RAM via sysinfo (+ hwmon/RAPL on Linux) — Linux/macOS/Windows | ✅ N/A | None |
 | Mock    | Simulated telemetry | ✅ N/A | None |

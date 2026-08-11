@@ -101,7 +101,7 @@ jobs:
       - name: Clippy — PTY app host (app)
         run: cargo clippy --locked --lib --bin tt-toplike-app --features app -- -D warnings
 
-      # all-smi-luwen-if's build script compiles protobufs, so it needs protoc.
+      # luwen-api's build script compiles protobufs, so it needs protoc.
       - name: Install protoc (for luwen-backend build)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 

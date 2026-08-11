@@ -34,44 +34,18 @@ use crate::backend::{BackendConfig, TelemetryBackend};
 use crate::error::{BackendError, BackendResult};
 use crate::models::{Device, SmbusTelemetry, Telemetry};
 use chrono::Utc;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
 // tt-smi encodes numeric telemetry values as quoted JSON strings, possibly with
-// leading whitespace (e.g. `"power": " 16.0"`).  These helpers accept either a
-// JSON number or a JSON string (trimmed) and return None for null / unparseable.
-
-fn de_opt_f32_str<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f32>, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum NumOrStr {
-        Num(f32),
-        Str(String),
-        Null,
-    }
-    Ok(match Option::<NumOrStr>::deserialize(d)? {
-        Some(NumOrStr::Num(v)) => Some(v),
-        Some(NumOrStr::Str(s)) => s.trim().parse::<f32>().ok(),
-        Some(NumOrStr::Null) | None => None,
-    })
-}
-
-fn de_opt_u32_str<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum NumOrStr {
-        Num(u32),
-        Str(String),
-        Null,
-    }
-    Ok(match Option::<NumOrStr>::deserialize(d)? {
-        Some(NumOrStr::Num(v)) => Some(v),
-        Some(NumOrStr::Str(s)) => s.trim().parse::<u32>().ok(),
-        Some(NumOrStr::Null) | None => None,
-    })
-}
+// leading whitespace (e.g. `"power": " 16.0"`). These helpers accept either a
+// JSON number or a JSON string (trimmed) and return None for null /
+// unparseable. They live in `models::serde_num` because `DeviceLimits` — a
+// model, which must not depend on this backend — needs exactly the same
+// tolerance for tt-smi's string-valued `limits` block.
+use crate::models::serde_num::{de_opt_f32_str, de_opt_u32_str};
 
 /// Actual tt-smi JSON format (from -s/--snapshot)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +65,13 @@ struct BoardInfoJSON {
     pub board_type: Option<String>,
     pub bus_id: Option<String>,
     pub coords: Option<String>,
+    /// PCIe generation — a bare number (4) in tt-smi 5.3.0, but tolerate a
+    /// quoted string too (tt-smi has flip-flopped on number-vs-string before).
+    #[serde(default, deserialize_with = "de_opt_u32_str")]
+    pub pcie_speed: Option<u32>,
+    /// PCIe lane width — a STRING ("4") in tt-smi 5.3.0.
+    #[serde(default, deserialize_with = "de_opt_u32_str")]
+    pub pcie_width: Option<u32>,
 }
 
 /// Internal device representation (flattened from raw format)
@@ -120,6 +101,12 @@ struct TTSMIDeviceJSON {
     pub firmwares: Option<serde_json::Value>,
     /// Thermal/power limits (tt-smi 5.2.0+).
     pub limits: Option<serde_json::Value>,
+    /// PCIe generation from board_info (tt-smi 5.x).
+    #[serde(default)]
+    pub pcie_speed: Option<u32>,
+    /// PCIe lane width from board_info (tt-smi 5.x).
+    #[serde(default)]
+    pub pcie_width: Option<u32>,
 }
 
 /// Core telemetry JSON structure
@@ -140,6 +127,11 @@ struct TelemetryJSON {
     pub aiclk: Option<u32>,
     #[serde(default, deserialize_with = "de_opt_u32_str")]
     pub heartbeat: Option<u32>,
+    /// Total board input power in watts (tt-smi ≥ 6.0.0). See
+    /// [`Telemetry::board_power`](crate::models::Telemetry) for the
+    /// per-asic-vs-whole-board distinction.
+    #[serde(default, deserialize_with = "de_opt_f32_str")]
+    pub board_power: Option<f32>,
 }
 
 /// SMBUS telemetry JSON structure — matches actual tt-smi SCREAMING_SNAKE_CASE key names.
@@ -273,6 +265,10 @@ pub struct JSONBackend {
     /// SMBUS telemetry for each device
     smbus_telemetry: HashMap<usize, SmbusTelemetry>,
 
+    /// Top-level per-device process attribution (tt-smi ≥ 6.0.0 `processes[]`).
+    /// Empty for older tt-smi snapshots that predate the field.
+    processes: Vec<crate::models::DeviceProcess>,
+
     /// Configuration
     config: BackendConfig,
 
@@ -312,6 +308,7 @@ impl JSONBackend {
             devices: Vec::new(),
             telemetry: HashMap::new(),
             smbus_telemetry: HashMap::new(),
+            processes: Vec::new(),
             config: BackendConfig::default(),
             last_update: Instant::now(),
             error_count: 0,
@@ -327,6 +324,7 @@ impl JSONBackend {
             devices: Vec::new(),
             telemetry: HashMap::new(),
             smbus_telemetry: HashMap::new(),
+            processes: Vec::new(),
             config,
             last_update: Instant::now(),
             error_count: 0,
@@ -375,11 +373,12 @@ impl JSONBackend {
     ///
     /// Thin instance-method wrapper around the pure free function
     /// [`parse_json_devices`] so existing white-box tests that call
-    /// `backend.parse_json(..)` keep working unchanged. Test-only: the runtime
+    /// `backend.parse_json(..)` keep working unchanged (they don't care about
+    /// process attribution, so it's discarded here). Test-only: the runtime
     /// paths (`init`/`update`) call `parse_tt_smi_snapshot` directly.
     #[cfg(test)]
     fn parse_json(&self, json_str: &str) -> BackendResult<Vec<TTSMIDeviceJSON>> {
-        parse_json_devices(json_str)
+        parse_json_devices(json_str).map(|(devices, _processes)| devices)
     }
 
     /// Test-only: expose update_from_json for white-box testing.
@@ -415,6 +414,14 @@ impl JSONBackend {
         for (idx, smbus) in parsed.smbus {
             self.smbus_telemetry.insert(idx, smbus);
         }
+        // Unlike telemetry/smbus (keyed maps merged per-device), `processes[]`
+        // is a whole-system snapshot each tick — replace wholesale rather than
+        // accumulate, so an exited process doesn't linger forever. A snapshot
+        // shape that predates the field parses to an empty Vec, which would
+        // otherwise wipe a previously-seen process list on a single old-format
+        // frame; in practice this never happens mid-stream (the tt-smi version
+        // is fixed for the process's lifetime), so this stays a plain replace.
+        self.processes = parsed.processes;
     }
 
     /// Parse a raw `tt-smi -s` output string, merge it into cached state, and —
@@ -453,47 +460,175 @@ impl JSONBackend {
     }
 }
 
-/// Pure parse of tt-smi snapshot JSON into the intermediate device list.
+/// Best-effort decode of the top-level `processes[]` block into typed rows.
+///
+/// Decoding is **per row**: a row tt-smi wrote in an unexpected shape is
+/// skipped, the rest still land, and nothing here can ever affect the device
+/// list (the caller has already parsed that). Anything that isn't a JSON array
+/// — `null`, an object, a number — yields an empty list, matching what older
+/// tt-smi versions (which don't emit the key at all) produce.
+///
+/// `DeviceProcess`'s own fields use tolerant number-or-string deserializers, so
+/// `"pid": "4242"` decodes rather than being skipped.
+fn decode_processes(value: Option<serde_json::Value>) -> Vec<crate::models::DeviceProcess> {
+    let Some(serde_json::Value::Array(rows)) = value else {
+        return Vec::new();
+    };
+    let total = rows.len();
+    let decoded: Vec<crate::models::DeviceProcess> = rows
+        .into_iter()
+        .filter_map(|row| serde_json::from_value::<crate::models::DeviceProcess>(row).ok())
+        .collect();
+    if decoded.len() != total {
+        log::warn!(
+            "tt-smi processes[]: decoded {} of {} rows; the rest had unexpected value shapes",
+            decoded.len(),
+            total
+        );
+    }
+    decoded
+}
+
+/// Salvage a document that carries `device_info` but failed the strict
+/// modern-shape parse, by decoding each `device_info[]` entry independently.
+///
+/// Returns `None` when the document isn't the modern shape at all (no
+/// `device_info` array) — the caller then continues down the legacy branches.
+/// Returns `Some` (possibly with fewer devices than the array had) when it is:
+/// one card whose telemetry block tt-smi emitted in an unexpected shape then
+/// costs only that card, instead of the whole document falling through to the
+/// single-device branch and reporting 1 phantom device for the entire box.
+///
+/// Index attribution is preserved by *array position*, not by "position among
+/// the entries that decoded": a skipped entry leaves its index unused rather
+/// than shifting every later card's SMBUS/limits onto its neighbour.
+fn salvage_modern_snapshot(
+    json_str: &str,
+) -> Option<(Vec<TTSMIDeviceJSON>, Vec<crate::models::DeviceProcess>)> {
+    let mut doc: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let obj = doc.as_object_mut()?;
+    let processes = decode_processes(obj.remove("processes"));
+    let entries = match obj.remove("device_info") {
+        Some(serde_json::Value::Array(entries)) => entries,
+        _ => return None,
+    };
+
+    let devices = entries
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, entry)| {
+            let raw = match serde_json::from_value::<TTSMIDeviceRaw>(entry) {
+                Ok(raw) => raw,
+                Err(e) => {
+                    log::warn!("tt-smi device_info[{idx}] could not be decoded ({e}); skipping");
+                    return None;
+                }
+            };
+            let board_info = raw.board_info.as_ref();
+            Some(TTSMIDeviceJSON {
+                index: Some(idx),
+                board_type: board_info.and_then(|b| b.board_type.clone()),
+                bus_id: board_info.and_then(|b| b.bus_id.clone()),
+                coords: board_info.and_then(|b| b.coords.clone()),
+                telemetry: raw.telemetry,
+                smbus: raw.smbus_telem,
+                firmwares: raw.firmwares,
+                limits: raw.limits,
+                pcie_speed: board_info.and_then(|b| b.pcie_speed),
+                pcie_width: board_info.and_then(|b| b.pcie_width),
+            })
+        })
+        .collect();
+
+    Some((devices, processes))
+}
+
+/// Pure parse of tt-smi snapshot JSON into the intermediate device list, plus
+/// any top-level per-device process attribution (tt-smi ≥ 6.0.0 `processes[]`).
 ///
 /// Supports every format `tt-smi` (and its legacy variants) can emit:
-/// - modern snapshot: `{"device_info": [ {board_info, telemetry, smbus_telem, ..} ]}`
+/// - modern snapshot: `{"device_info": [ {board_info, telemetry, smbus_telem, ..} ], "processes": [..]}`
 /// - legacy array:     `[{device1}, {device2}]`
 /// - legacy wrapper:   `{"devices": [..]}`
 /// - single device:    `{device}`
-fn parse_json_devices(json_str: &str) -> BackendResult<Vec<TTSMIDeviceJSON>> {
+///
+/// Only the modern snapshot shape carries `processes[]` — every legacy branch
+/// returns an empty process list (those tt-smi versions predate the field).
+fn parse_json_devices(
+    json_str: &str,
+) -> BackendResult<(Vec<TTSMIDeviceJSON>, Vec<crate::models::DeviceProcess>)> {
     // Try to parse as tt-smi snapshot format with "device_info" key (modern format)
     #[derive(Deserialize)]
     struct TTSMISnapshot {
         device_info: Option<Vec<TTSMIDeviceRaw>>,
+        /// tt-smi ≥ 6.0.0: top-level per-device process attribution.
+        ///
+        /// **Deliberately a raw `Value`, not `Vec<DeviceProcess>`.** This struct
+        /// is the gate for the entire modern-snapshot branch: if *any* value in
+        /// the document fails to fit its declared type, `from_str` fails, this
+        /// branch is skipped, and the permissive single-device fallthrough at the
+        /// bottom of this function succeeds instead — silently collapsing an
+        /// N-device box to one phantom device with a fabricated bus id and no
+        /// telemetry. `processes[]` is the least load-bearing block in the
+        /// snapshot but was the only one typed strictly (`pid: i64`,
+        /// `device: usize`), and tt-smi has repeatedly flip-flopped between bare
+        /// numbers and quoted strings for numeric fields (hence the
+        /// `de_opt_*_str` helpers above). Keeping it opaque here makes that
+        /// impossible; it is decoded best-effort, per row, afterwards.
+        #[serde(default)]
+        processes: Option<serde_json::Value>,
     }
 
-    if let Ok(snapshot) = serde_json::from_str::<TTSMISnapshot>(json_str) {
-        if let Some(raw_devices) = snapshot.device_info {
-            // Transform raw format to flattened format with indices
-            let devices: Vec<TTSMIDeviceJSON> = raw_devices
-                .into_iter()
-                .enumerate()
-                .map(|(idx, raw)| {
-                    let board_info = raw.board_info.as_ref();
-                    TTSMIDeviceJSON {
-                        index: Some(idx),
-                        board_type: board_info.and_then(|b| b.board_type.clone()),
-                        bus_id: board_info.and_then(|b| b.bus_id.clone()),
-                        coords: board_info.and_then(|b| b.coords.clone()),
-                        telemetry: raw.telemetry,
-                        smbus: raw.smbus_telem,
-                        firmwares: raw.firmwares,
-                        limits: raw.limits,
-                    }
-                })
-                .collect();
-            return Ok(devices);
+    match serde_json::from_str::<TTSMISnapshot>(json_str) {
+        Ok(snapshot) => {
+            if let Some(raw_devices) = snapshot.device_info {
+                // Transform raw format to flattened format with indices
+                let devices: Vec<TTSMIDeviceJSON> = raw_devices
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, raw)| {
+                        let board_info = raw.board_info.as_ref();
+                        TTSMIDeviceJSON {
+                            index: Some(idx),
+                            board_type: board_info.and_then(|b| b.board_type.clone()),
+                            bus_id: board_info.and_then(|b| b.bus_id.clone()),
+                            coords: board_info.and_then(|b| b.coords.clone()),
+                            telemetry: raw.telemetry,
+                            smbus: raw.smbus_telem,
+                            firmwares: raw.firmwares,
+                            limits: raw.limits,
+                            pcie_speed: board_info.and_then(|b| b.pcie_speed),
+                            pcie_width: board_info.and_then(|b| b.pcie_width),
+                        }
+                    })
+                    .collect();
+                return Ok((devices, decode_processes(snapshot.processes)));
+            }
+        }
+        Err(e) => {
+            // A document that *has* a `device_info` key must never slide quietly
+            // into the permissive single-device fallthrough at the bottom of this
+            // function: every `TTSMIDeviceJSON` field is `Option`, so `{...}`
+            // parses as "one device" no matter what it actually contains, and an
+            // N-device box would silently render as 1 phantom device with a
+            // fabricated bus id and no telemetry. Instead, salvage the modern
+            // shape element-by-element (see `salvage_modern_snapshot`) so one
+            // malformed card costs only that card, and say so at `warn` — the
+            // operator needs to know why a device went missing.
+            if let Some((devices, processes)) = salvage_modern_snapshot(json_str) {
+                log::warn!(
+                    "tt-smi snapshot did not fit the modern snapshot shape ({e}); \
+                     salvaged {} of its device_info[] entries element-wise",
+                    devices.len()
+                );
+                return Ok((devices, processes));
+            }
         }
     }
 
     // Try to parse as array of devices (legacy format)
     if let Ok(devices) = serde_json::from_str::<Vec<TTSMIDeviceJSON>>(json_str) {
-        return Ok(devices);
+        return Ok((devices, Vec::new()));
     }
 
     // Try to parse as object with "devices" key (legacy format)
@@ -504,13 +639,13 @@ fn parse_json_devices(json_str: &str) -> BackendResult<Vec<TTSMIDeviceJSON>> {
 
     if let Ok(wrapper) = serde_json::from_str::<Wrapper>(json_str) {
         if let Some(devices) = wrapper.devices {
-            return Ok(devices);
+            return Ok((devices, Vec::new()));
         }
     }
 
     // Try to parse as single device (last resort, as it's most permissive)
     if let Ok(device) = serde_json::from_str::<TTSMIDeviceJSON>(json_str) {
-        return Ok(vec![device]);
+        return Ok((vec![device], Vec::new()));
     }
 
     // Truncate for the error message by *characters*, not bytes: `json_str`
@@ -552,6 +687,10 @@ fn device_from_json(json_dev: &TTSMIDeviceJSON) -> Device {
     let mut device = Device::new(idx, board_type, bus_id, coords);
     device.firmwares = firmwares;
     device.limits = limits;
+    // PCIe link info (board_info, tt-smi 5.x): speed is the PCIe generation
+    // number; render as "Gen4" to match tt-smi's own display.
+    device.pcie_speed = json_dev.pcie_speed.map(|g| format!("Gen{}", g));
+    device.pcie_width = json_dev.pcie_width.and_then(|w| u8::try_from(w).ok());
     device
 }
 
@@ -565,6 +704,7 @@ fn telemetry_from_json(telem_json: &TelemetryJSON) -> Telemetry {
         aiclk: telem_json.aiclk,
         heartbeat: telem_json.heartbeat,
         timestamp: Utc::now(),
+        board_power: telem_json.board_power,
     }
 }
 
@@ -580,9 +720,17 @@ pub(crate) struct ParsedSnapshot {
     pub telemetry: HashMap<usize, Telemetry>,
     /// Per-device SMBUS telemetry (only present devices are keyed).
     pub smbus: HashMap<usize, SmbusTelemetry>,
+    /// Top-level per-device process attribution (tt-smi ≥ 6.0.0 `processes[]`).
+    /// Empty for snapshot shapes that predate the field.
+    pub processes: Vec<crate::models::DeviceProcess>,
 }
 
 /// Build a `ParsedSnapshot` from an already-parsed intermediate device list.
+///
+/// `processes[]` is a top-level sibling of `device_info` in the snapshot, not
+/// something derived from the per-device list, so this always yields an empty
+/// process list — `parse_tt_smi_snapshot` fills it in from what
+/// `parse_json_devices` returned alongside the device list.
 fn parsed_from_json_devices(json_devices: Vec<TTSMIDeviceJSON>) -> ParsedSnapshot {
     let mut devices = Vec::with_capacity(json_devices.len());
     let mut telemetry = HashMap::new();
@@ -603,19 +751,24 @@ fn parsed_from_json_devices(json_devices: Vec<TTSMIDeviceJSON>) -> ParsedSnapsho
         devices,
         telemetry,
         smbus,
+        processes: Vec::new(),
     }
 }
 
 /// Pure parsing entry point: verbatim `tt-smi -s` stdout → the `Device` /
-/// `Telemetry` / `SmbusTelemetry` triad every backend serves.
+/// `Telemetry` / `SmbusTelemetry` triad (plus top-level `processes[]`) every
+/// backend serves.
 ///
 /// This is the single shared parser. `JSONBackend` feeds it the stdout of the
 /// `tt-smi` subprocess; `WsBackend` feeds it each WebSocket frame (which is,
 /// by contract, that same verbatim stdout). Returns a `ParseError` if none of
 /// the supported JSON shapes match.
 pub(crate) fn parse_tt_smi_snapshot(json_str: &str) -> BackendResult<ParsedSnapshot> {
-    let json_devices = parse_json_devices(json_str)?;
-    Ok(parsed_from_json_devices(json_devices))
+    let (json_devices, processes) = parse_json_devices(json_str)?;
+    Ok(ParsedSnapshot {
+        processes,
+        ..parsed_from_json_devices(json_devices)
+    })
 }
 
 impl TelemetryBackend for JSONBackend {
@@ -685,6 +838,25 @@ impl TelemetryBackend for JSONBackend {
     fn snapshot_json(&self) -> Option<String> {
         self.last_raw.clone()
     }
+
+    fn device_processes(&self) -> &[crate::models::DeviceProcess] {
+        &self.processes
+    }
+}
+
+/// Choose between tt-smi's two fan fields, preferring the first that carries a
+/// real (non-sentinel) RPM.
+///
+/// Returns the winning field's **original string** so downstream parsing and
+/// EMA smoothing behave exactly as they do for any other SMBUS string field.
+/// Returns `None` when neither field holds a real reading (fanless card), so
+/// `SmbusTelemetry::fan_rpm()` reports "no fan" rather than a sentinel.
+fn pick_fan_field(fan_speed: Option<&str>, fan_rpm: Option<&str>) -> Option<String> {
+    [fan_speed, fan_rpm]
+        .into_iter()
+        .flatten()
+        .find(|s| crate::models::telemetry::real_fan_rpm(s).is_some())
+        .map(|s| s.to_string())
 }
 
 /// Build a `SmbusTelemetry` from the parsed JSON fields struct.
@@ -719,7 +891,17 @@ fn smbus_from_json_fields(smbus_json: SmbusTelemetryJSON) -> SmbusTelemetry {
         m3_app_fw_version: smbus_json.dm_app_fw_version,
         m3_bl_fw_version: smbus_json.dm_bl_fw_version,
         tt_flash_version: smbus_json.tt_flash_version,
-        fan_speed: smbus_json.fan_speed,
+        // FAN_SPEED is the legacy percentage-or-RPM field; tt-smi ≥ 5.3.0
+        // reports RPM in FAN_RPM. Both keys are normally *present*, so an
+        // `Option::or` chain never falls through — and on Blackhole FAN_SPEED
+        // is the `0x0` sentinel while FAN_RPM carries the real reading, which
+        // is exactly the case that left the Fan row blank. Pick whichever field
+        // yields a non-sentinel RPM, FAN_SPEED first for back-compat; when
+        // neither does, stay None rather than storing a sentinel.
+        fan_speed: pick_fan_field(
+            smbus_json.fan_speed.as_deref(),
+            smbus_json.fan_rpm.as_deref(),
+        ),
         pcie_status: smbus_json.pcie_usage,
         board_power_limit: smbus_json.board_power_limit,
         therm_trip_count: smbus_json.therm_trip_count,
@@ -807,41 +989,90 @@ fn smbus_from_json_fields(smbus_json: SmbusTelemetryJSON) -> SmbusTelemetry {
     }
 }
 
+/// Per-device metadata carried alongside SMBUS telemetry in a [`SnapshotParts`]
+/// — everything `HybridBackend` needs to enrich its sysfs-sourced `Device`s
+/// and telemetry with fields sysfs/hwmon can't see.
+///
+/// `firmwares`/`limits`/`pcie_speed`/`pcie_width` are static-ish device
+/// metadata (copied onto `Device` once per snapshot); `board_power` is a
+/// live *measurement* (tt-smi's whole-card telemetry reading) and gets
+/// overlaid onto `Telemetry` every tick instead — see the two different
+/// call sites in `HybridBackend::update()`.
+///
+/// Replaces a bare `(Option<FirmwaresInfo>, Option<DeviceLimits>)` tuple —
+/// that was already an awkward shape before PCIe link geometry and board
+/// power needed to ride along too; a 5-tuple would have been worse.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DeviceMeta {
+    pub firmwares: Option<crate::models::telemetry::FirmwaresInfo>,
+    pub limits: Option<crate::models::telemetry::DeviceLimits>,
+    /// PCIe generation, pre-formatted as "Gen4" — matches `device_from_json`
+    /// so the hybrid and pure-JSON backends render identical link text.
+    pub pcie_speed: Option<String>,
+    pub pcie_width: Option<u8>,
+    /// Whole-card input power (tt-smi ≥ 6.0.0 `telemetry.board_power`).
+    pub board_power: Option<f32>,
+}
+
 /// Parse result from a single tt-smi JSON snapshot, extracting both SMBUS
-/// telemetry and device metadata (firmwares, limits) in one pass.
+/// telemetry and device metadata (firmwares, limits, PCIe link, board power)
+/// in one pass.
 ///
 /// Used by `HybridBackend`, whose background reader only needs the SMBUS map
-/// plus firmware/limits metadata (it gets its live device list from sysfs).
+/// plus this metadata (it gets its live device list from sysfs).
 /// Distinct from [`ParsedSnapshot`], which carries the full device triad.
 pub(crate) struct SnapshotParts {
     pub smbus: HashMap<usize, SmbusTelemetry>,
-    pub meta: HashMap<
-        usize,
-        (
-            Option<crate::models::telemetry::FirmwaresInfo>,
-            Option<crate::models::telemetry::DeviceLimits>,
-        ),
-    >,
+    pub meta: HashMap<usize, DeviceMeta>,
+    /// tt-smi **array position** → that entry's normalized PCI bus id, for the
+    /// entries that carry one.
+    ///
+    /// `smbus`/`meta` above are keyed by array position, which is only a valid
+    /// join key against another list if both lists enumerate exactly the same
+    /// cards in the same order. `HybridBackend` gets its device list from sysfs,
+    /// which can legitimately see cards tt-smi doesn't (a card busy/failed to
+    /// enumerate, `--devices` filtering upstream, hotplug), so it re-keys these
+    /// maps onto its own device indices by bus id — the one identifier both
+    /// sides carry. See `hybrid::rekey_snapshot_by_bus_id`.
+    pub bus_ids: HashMap<usize, String>,
+}
+
+/// Canonical form of a PCI bus id for use as a join key: trimmed and lowercased
+/// (tt-smi has emitted uppercase hex, e.g. `0000:0A:00.0`, where sysfs uses
+/// lowercase). Every producer and consumer of a bus-id join key must go through
+/// this so the two sides can't disagree on case or padding.
+pub(crate) fn normalize_bus_id(bus_id: &str) -> String {
+    bus_id.trim().to_lowercase()
 }
 
 /// Parse a tt-smi JSON snapshot once and extract both SMBUS telemetry and
 /// device metadata.  Replaces the previous two-function pattern that parsed
 /// the same JSON document twice per background poll cycle.
 pub(crate) fn parse_snapshot(json_str: &str) -> SnapshotParts {
-    let devices = match parse_json_devices(json_str) {
+    let (devices, _processes) = match parse_json_devices(json_str) {
         Ok(d) => d,
         Err(e) => {
             log::debug!("parse_snapshot: parse error: {}", e);
             return SnapshotParts {
                 smbus: HashMap::new(),
                 meta: HashMap::new(),
+                bus_ids: HashMap::new(),
             };
         }
     };
     let mut smbus_map = HashMap::new();
     let mut meta_map = HashMap::new();
+    let mut bus_ids = HashMap::new();
     for dev in devices {
         let idx = dev.index.unwrap_or(0);
+        // Recorded before the per-block extraction below so a device that
+        // carries only a bus id (no smbus/meta) still contributes its join key.
+        if let Some(bus) = dev.bus_id.as_deref() {
+            let norm = normalize_bus_id(bus);
+            if !norm.is_empty() {
+                bus_ids.insert(idx, norm);
+            }
+        }
         if let Some(smbus_json) = dev.smbus {
             smbus_map.insert(idx, smbus_from_json_fields(smbus_json));
         }
@@ -851,13 +1082,37 @@ pub(crate) fn parse_snapshot(json_str: &str) -> SnapshotParts {
         let limits = dev.limits.as_ref().and_then(|v| {
             serde_json::from_value::<crate::models::telemetry::DeviceLimits>(v.clone()).ok()
         });
-        if firmwares.is_some() || limits.is_some() {
-            meta_map.insert(idx, (firmwares, limits));
+        // PCIe link info (board_info, tt-smi 5.x): speed is the PCIe
+        // generation number; render as "Gen4" to match tt-smi's own display
+        // and `device_from_json` (the pure-JSON backend's equivalent path),
+        // so hybrid and json render identically.
+        let pcie_speed = dev.pcie_speed.map(|g| format!("Gen{}", g));
+        let pcie_width = dev.pcie_width.and_then(|w| u8::try_from(w).ok());
+        // Whole-card power lives in the telemetry block, not board_info —
+        // `.as_ref()` avoids fighting the `dev.smbus` partial move above.
+        let board_power = dev.telemetry.as_ref().and_then(|t| t.board_power);
+        if firmwares.is_some()
+            || limits.is_some()
+            || pcie_speed.is_some()
+            || pcie_width.is_some()
+            || board_power.is_some()
+        {
+            meta_map.insert(
+                idx,
+                DeviceMeta {
+                    firmwares,
+                    limits,
+                    pcie_speed,
+                    pcie_width,
+                    board_power,
+                },
+            );
         }
     }
     SnapshotParts {
         smbus: smbus_map,
         meta: meta_map,
+        bus_ids,
     }
 }
 
@@ -1170,19 +1425,131 @@ mod tests {
             "eth_live_status should be populated"
         );
         // Meta path (used by HybridBackend, not covered by other tests)
-        let (fw, lim) = snap.meta.get(&0).expect("meta for device 0 missing");
-        let fw = fw.as_ref().expect("firmwares should be Some");
+        let meta = snap.meta.get(&0).expect("meta for device 0 missing");
+        let fw = meta.firmwares.as_ref().expect("firmwares should be Some");
         assert_eq!(
             fw.fw_bundle_version.as_deref(),
             Some("fw_pack-19.9.0"),
             "parse_snapshot fw_bundle_version mismatch"
         );
-        let lim = lim.as_ref().expect("limits should be Some");
+        let lim = meta.limits.as_ref().expect("limits should be Some");
         assert_eq!(
             lim.tdp_limit,
             Some(300.0_f32),
             "parse_snapshot tdp_limit mismatch"
         );
+    }
+
+    /// Regression for the finding that PCIe link geometry and board power
+    /// never reached the Hybrid backend: `parse_snapshot()` — the function
+    /// `HybridBackend`'s reader thread actually calls — must extract
+    /// `pcie_speed`/`pcie_width` (from `board_info`) and `board_power`
+    /// (from `telemetry`) into `DeviceMeta`, formatted identically to the
+    /// pure-JSON path (`device_from_json`'s "Gen4" rendering).
+    #[test]
+    fn parse_snapshot_meta_carries_pcie_link_and_board_power() {
+        let json = r#"{
+            "device_info": [{
+                "board_info": {
+                    "bus_id": "0000:01:00.0", "board_type": "p300c",
+                    "pcie_speed": 4, "pcie_width": "4"
+                },
+                "telemetry": {"power": " 16.0", "board_power": " 42.0"}
+            }]
+        }"#;
+        let snap = parse_snapshot(json);
+        let meta = snap.meta.get(&0).expect("meta for device 0 missing");
+        assert_eq!(
+            meta.pcie_speed.as_deref(),
+            Some("Gen4"),
+            "pcie_speed must be pre-formatted as tt-smi's own \"GenN\" display"
+        );
+        assert_eq!(meta.pcie_width, Some(4));
+        assert_eq!(meta.board_power, Some(42.0));
+    }
+
+    /// A `limits` block exactly as tt-smi 5.3.0 emits it on a live p300c:
+    /// numeric values as **quoted strings**, except `bus_peak_limit` /
+    /// `fan_rpm_limit` which are bare numbers.
+    ///
+    /// Regression for the finding that `--backend json` never got real limits:
+    /// `Option<f32>` fields rejected the string form, serde failed the whole
+    /// block, and `Device::limits` stayed `None` — so the Insights rows fell
+    /// back to the UI's generic 300 W / 105 °C. The hybrid path masked this
+    /// because hwmon `*_max` supplies its limits instead.
+    const TTSMI_53_STRING_LIMITS_JSON: &str = r#"{
+        "device_info": [{
+            "board_info": {
+                "board_type": "p300c",
+                "bus_id": "0000:01:00.0",
+                "coords": "(0,0)"
+            },
+            "telemetry": {"power": " 16.0", "asic_temperature": "38.4"},
+            "firmwares": {
+                "fw_bundle_version": "19.11.0.0",
+                "tt_flash_version": "N/A",
+                "cm_fw": "0.33.0.0",
+                "cm_fw_date": "2020-00-33",
+                "eth_fw": "1.11.0",
+                "dm_bl_fw": "0.0.0.0",
+                "dm_app_fw": "0.27.0.0",
+                "gddr_fw": "2.16"
+            },
+            "limits": {
+                "vdd_min": "0.70",
+                "vdd_max": "0.90",
+                "tdp_limit": "125",
+                "tdc_limit": "500",
+                "asic_fmax": "1350",
+                "therm_trip_l1_limit": "90",
+                "thm_limit": "110",
+                "bus_peak_limit": 0,
+                "fan_rpm_limit": 0
+            }
+        }]
+    }"#;
+
+    /// End-to-end through the pure-JSON parser: the string-valued limits must
+    /// land on `Device::limits`, with `thm_limit` carrying the 90 °C throttle
+    /// point (not tt-smi's 110 °C shutdown value) so the number printed next to
+    /// Temp means the same thing here as it does on sysfs/hybrid/luwen.
+    #[test]
+    fn json_path_parses_tt_smi_53_string_limits() {
+        let parsed =
+            parse_tt_smi_snapshot(TTSMI_53_STRING_LIMITS_JSON).expect("live snapshot must parse");
+        let dev = &parsed.devices[0];
+        let lim = dev
+            .limits
+            .as_ref()
+            .expect("string-valued limits block must reach Device::limits");
+        assert_eq!(lim.tdp_limit, Some(125.0));
+        assert_eq!(lim.tdc_limit, Some(500.0));
+        assert_eq!(lim.asic_fmax, Some(1350));
+        assert_eq!(lim.thm_limit, Some(90.0));
+        // The firmwares block (all-string on real hardware) must survive too.
+        assert_eq!(
+            dev.firmwares
+                .as_ref()
+                .and_then(|f| f.fw_bundle_version.as_deref()),
+            Some("19.11.0.0")
+        );
+    }
+
+    /// The hybrid backend's reader takes the `parse_snapshot` path instead, so
+    /// pin the same expectation there — a fix in only one of the two parse
+    /// sites would leave the other silently dropping limits.
+    #[test]
+    fn parse_snapshot_meta_parses_tt_smi_53_string_limits() {
+        let snap = parse_snapshot(TTSMI_53_STRING_LIMITS_JSON);
+        let meta = snap.meta.get(&0).expect("meta for device 0 missing");
+        let lim = meta
+            .limits
+            .as_ref()
+            .expect("string-valued limits block must reach DeviceMeta::limits");
+        assert_eq!(lim.tdp_limit, Some(125.0));
+        assert_eq!(lim.tdc_limit, Some(500.0));
+        assert_eq!(lim.asic_fmax, Some(1350));
+        assert_eq!(lim.thm_limit, Some(90.0));
     }
 
     /// The shared pure parser must yield the full device triad — the exact
@@ -1269,6 +1636,88 @@ mod tests {
     }
 
     #[test]
+    fn board_info_pcie_and_dram_fields_parse() {
+        // pcie_speed is a bare NUMBER and pcie_width a STRING in real
+        // tt-smi 5.3.0 output — both shapes must parse.
+        let json = r#"{
+            "device_info": [{
+                "board_info": {
+                    "bus_id": "0000:01:00.0", "board_type": "p300c", "coords": "N/A",
+                    "dram_status": true, "dram_speed": "16G",
+                    "pcie_speed": 4, "pcie_width": "4"
+                },
+                "telemetry": {"power": " 16.0"}
+            }]
+        }"#;
+        let parsed = parse_tt_smi_snapshot(json).unwrap();
+        let dev = &parsed.devices[0];
+        assert_eq!(dev.pcie_speed.as_deref(), Some("Gen4"));
+        assert_eq!(dev.pcie_width, Some(4));
+    }
+
+    #[test]
+    fn fan_rpm_used_when_fan_speed_absent() {
+        // tt-smi 5.3.0 changed fan semantics to RPM; a source that only
+        // populates FAN_RPM must still drive the fan row.
+        let json = r#"{
+            "device_info": [{
+                "board_info": {"bus_id": "0000:01:00.0", "board_type": "p150a"},
+                "smbus_telem": {"FAN_RPM": "0xbb8"}
+            }]
+        }"#;
+        let parsed = parse_tt_smi_snapshot(json).unwrap();
+        let smbus = parsed.smbus.get(&0).unwrap();
+        assert_eq!(smbus.fan_rpm(), Some(3000)); // 0xbb8
+    }
+
+    /// Regression: the committed real-world fixture has `FAN_SPEED = "0x0"`
+    /// alongside `FAN_RPM = "0x75a"` (1882 RPM) — the shape a live Blackhole
+    /// card actually emits. An `Option::or` chain kept the present-but-sentinel
+    /// FAN_SPEED and left the Fan row blank; the field must be chosen by whether
+    /// it holds a *real* reading.
+    #[test]
+    fn fan_rpm_wins_when_fan_speed_is_sentinel_zero() {
+        let result = parse_smbus_from_json(REAL_TTSMI_JSON);
+        let smbus = result.get(&0).expect("device 0 missing");
+        assert_eq!(
+            smbus.fan_rpm(),
+            Some(1882),
+            "FAN_RPM=0x75a must win over the FAN_SPEED=0x0 sentinel"
+        );
+    }
+
+    /// FAN_SPEED keeps priority when it holds a real reading (older tt-smi,
+    /// where FAN_SPEED is the only fan field).
+    #[test]
+    fn fan_speed_wins_when_real_and_fan_rpm_absent() {
+        let json = r#"{
+            "device_info": [{
+                "board_info": {"bus_id": "0000:01:00.0", "board_type": "n300"},
+                "smbus_telem": {"FAN_SPEED": "0x9c4"}
+            }]
+        }"#;
+        let parsed = parse_tt_smi_snapshot(json).unwrap();
+        let smbus = parsed.smbus.get(&0).unwrap();
+        assert_eq!(smbus.fan_rpm(), Some(2500)); // 0x9c4
+    }
+
+    /// Both fields sentinel (fanless p150-class card) → no fan reading at all,
+    /// and no sentinel string stored to be mis-rendered later.
+    #[test]
+    fn both_fan_fields_sentinel_yields_none() {
+        let json = r#"{
+            "device_info": [{
+                "board_info": {"bus_id": "0000:01:00.0", "board_type": "p150a"},
+                "smbus_telem": {"FAN_SPEED": "0x0", "FAN_RPM": "0xffffffff"}
+            }]
+        }"#;
+        let parsed = parse_tt_smi_snapshot(json).unwrap();
+        let smbus = parsed.smbus.get(&0).unwrap();
+        assert_eq!(smbus.fan_speed, None, "sentinels must not be stored");
+        assert_eq!(smbus.fan_rpm(), None);
+    }
+
+    #[test]
     fn test_old_format_still_parses_ok() {
         // Existing pre-5.2 snapshot (no GDDR fields) must still parse without error.
         let result = parse_smbus_from_json(REAL_TTSMI_JSON);
@@ -1295,5 +1744,126 @@ mod tests {
         let err = parse_json_devices(&junk).expect_err("garbage must fail to parse");
         // Message is produced without panicking and carries the char-truncated tail.
         assert!(matches!(err, BackendError::ParseError(_)));
+    }
+
+    #[test]
+    fn tt_smi_6_processes_and_board_power_parse() {
+        let json = r#"{
+            "time": "2026-08-10T15:00:00",
+            "processes": [
+                {"pid": 4242, "user": "ttuser", "device": 0, "cmdline": "python -m vllm serve"},
+                {"pid": 4243, "device": 1}
+            ],
+            "device_info": [{
+                "board_info": {"bus_id": "0000:01:00.0", "board_type": "p300c"},
+                "telemetry": {"power": " 16.0", "board_power": " 42.0"}
+            }]
+        }"#;
+        let parsed = parse_tt_smi_snapshot(json).unwrap();
+        assert_eq!(parsed.processes.len(), 2);
+        assert_eq!(parsed.processes[0].pid, Some(4242));
+        assert_eq!(
+            parsed.processes[0].cmdline.as_deref(),
+            Some("python -m vllm serve")
+        );
+        assert_eq!(parsed.processes[1].user, None); // exclude_none omits fields
+        let t = parsed.telemetry.get(&0).unwrap();
+        assert_eq!(t.power, Some(16.0));
+        assert_eq!(t.board_power, Some(42.0));
+    }
+
+    #[test]
+    fn snapshots_without_processes_parse_as_empty() {
+        let json = r#"{"device_info": [{"board_info": {"bus_id": "x", "board_type": "p150a"}}]}"#;
+        let parsed = parse_tt_smi_snapshot(json).unwrap();
+        assert!(parsed.processes.is_empty());
+    }
+
+    /// Two-device snapshot whose `processes[]` uses tt-smi's *other* habit for
+    /// numeric values — a quoted string `"pid": "4242"`.
+    ///
+    /// Regression: `processes` used to be typed `Option<Vec<DeviceProcess>>`
+    /// with `pid: Option<i64>`, so this document failed the modern-snapshot
+    /// parse outright, fell through to the permissive single-device branch (every
+    /// `TTSMIDeviceJSON` field is `Option`, so *any* object parses as one
+    /// device), and a 2-device box silently reported **1 phantom device** with a
+    /// fabricated bus id and no telemetry at all. The process list must never
+    /// cost the device list.
+    #[test]
+    fn string_typed_pid_in_processes_does_not_collapse_device_list() {
+        let json = r#"{
+            "device_info": [
+                {
+                    "board_info": {"bus_id": "0000:01:00.0", "board_type": "p150a"},
+                    "telemetry": {"power": " 16.0", "asic_temperature": " 41.5"}
+                },
+                {
+                    "board_info": {"bus_id": "0000:02:00.0", "board_type": "p150a"},
+                    "telemetry": {"power": " 22.0", "asic_temperature": " 44.0"}
+                }
+            ],
+            "processes": [
+                {"pid": "4242", "user": "ttuser", "device": "1", "cmdline": "python -m vllm serve"}
+            ]
+        }"#;
+        let parsed = parse_tt_smi_snapshot(json).expect("snapshot must parse");
+
+        assert_eq!(parsed.devices.len(), 2, "both devices must survive");
+        assert_eq!(parsed.devices[0].bus_id, "0000:01:00.0");
+        assert_eq!(parsed.devices[1].bus_id, "0000:02:00.0");
+        assert_eq!(parsed.telemetry.get(&0).and_then(|t| t.power), Some(16.0));
+        assert_eq!(parsed.telemetry.get(&1).and_then(|t| t.power), Some(22.0));
+
+        // The tolerant DeviceProcess deserializers also let the row itself
+        // through, so nothing is lost — but even an empty list would be fine
+        // here; what matters is that the devices are intact.
+        assert_eq!(parsed.processes.len(), 1);
+        assert_eq!(parsed.processes[0].pid, Some(4242));
+        assert_eq!(parsed.processes[0].device, Some(1));
+    }
+
+    /// Same guarantee for a `processes` block that isn't even an array (an object
+    /// keyed by pid, say): devices are untouched and the process list is empty.
+    #[test]
+    fn object_shaped_processes_block_does_not_harm_devices() {
+        let json = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"}, "telemetry": {"power": " 16.0"}},
+                {"board_info": {"bus_id": "0000:02:00.0"}, "telemetry": {"power": " 22.0"}}
+            ],
+            "processes": {"4242": {"device": 0}}
+        }"#;
+        let parsed = parse_tt_smi_snapshot(json).expect("snapshot must parse");
+        assert_eq!(parsed.devices.len(), 2);
+        assert_eq!(parsed.telemetry.get(&1).and_then(|t| t.power), Some(22.0));
+        assert!(
+            parsed.processes.is_empty(),
+            "a non-array processes block yields no rows"
+        );
+    }
+
+    /// A `device_info[]` entry tt-smi wrote in an unexpected shape costs only
+    /// that entry: the other card keeps its telemetry, and — crucially — the
+    /// document does NOT fall through to the single-device branch. Array
+    /// positions are preserved, so the survivor keeps index 1 rather than
+    /// sliding into the missing card's slot (that slide is exactly the
+    /// mis-attribution this release set out to fix).
+    #[test]
+    fn malformed_device_entry_is_skipped_not_collapsed() {
+        let json = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"}, "telemetry": true},
+                {"board_info": {"bus_id": "0000:02:00.0"}, "telemetry": {"power": " 22.0"}}
+            ]
+        }"#;
+        let parsed = parse_tt_smi_snapshot(json).expect("snapshot must salvage");
+        assert_eq!(parsed.devices.len(), 1, "only the bad entry is dropped");
+        assert_eq!(parsed.devices[0].index, 1, "array position is preserved");
+        assert_eq!(parsed.devices[0].bus_id, "0000:02:00.0");
+        assert_eq!(parsed.telemetry.get(&1).and_then(|t| t.power), Some(22.0));
+        assert!(
+            parsed.telemetry.get(&0).is_none(),
+            "no telemetry may be attributed to the dropped card's index"
+        );
     }
 }

@@ -259,6 +259,17 @@ impl MockBackend {
         let aiclk_variation = (time_factor.cos() * 100.0) as i32;
         let aiclk = (aiclk_base + aiclk_variation).clamp(900, 1200) as u32;
 
+        // Exercise `board_power` (tt-smi ≥ 6.0.0's whole-board power rail, as
+        // opposed to `power`'s per-asic TDP reading) on exactly one device so
+        // mock mode has UI coverage for the field without claiming every
+        // board reports it — real dual-asic boards (p300) are the exception,
+        // not the rule.
+        let board_power = if device_idx == 0 {
+            Some(power * 1.3)
+        } else {
+            None
+        };
+
         Telemetry {
             voltage: Some(voltage),
             current: Some(current),
@@ -267,6 +278,7 @@ impl MockBackend {
             aiclk: Some(aiclk),
             heartbeat: Some(1), // Always healthy in mock
             timestamp: Utc::now(),
+            board_power,
         }
     }
 

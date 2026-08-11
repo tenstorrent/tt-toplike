@@ -131,6 +131,46 @@ pub fn apply_ema(
     copy_field(&incoming.asic_tmon0, &mut existing.asic_tmon0);
     copy_field(&incoming.asic_tmon1, &mut existing.asic_tmon1);
 
+    // ── Non-string fields — copy verbatim, latest value wins ──────────────────
+    //
+    // These arrive already typed (u32/f32/bitmask/temperature arrays) rather
+    // than as numeric strings, so the string-based EMA machinery above can't
+    // carry them. They were previously not carried *at all*, which meant
+    // `HybridBackend` — whose only full-struct copy happens on the FIRST insert
+    // for a device — froze them at the first snapshot: GDDR ECC counters
+    // accrued during a run never appeared (they read 0 on a healthy boot), GDDR
+    // temperatures never moved, and an ETH link going down was never reflected.
+    //
+    // None of them wants EMA even in principle: the ECC fields are monotonic
+    // error counters, `max_gddr_temp` is a maximum (smoothing a max understates
+    // the peak, which is the whole point of the reading), and the rest are
+    // bitmasks where an interpolated value is meaningless.
+    copy_opt(&incoming.max_gddr_temp, &mut existing.max_gddr_temp);
+    copy_opt(&incoming.gddr_uncorr_errs, &mut existing.gddr_uncorr_errs);
+    copy_opt(&incoming.harvesting_state, &mut existing.harvesting_state);
+    copy_opt(&incoming.eth_live_status, &mut existing.eth_live_status);
+    copy_opt(&incoming.enabled_eth, &mut existing.enabled_eth);
+    copy_opt(&incoming.enabled_gddr, &mut existing.enabled_gddr);
+    copy_opt(&incoming.enabled_l2cpu, &mut existing.enabled_l2cpu);
+    copy_opt(
+        &incoming.enabled_tensix_col,
+        &mut existing.enabled_tensix_col,
+    );
+    for (src, dst) in incoming
+        .gddr_corr_errs
+        .iter()
+        .zip(existing.gddr_corr_errs.iter_mut())
+    {
+        copy_opt(src, dst);
+    }
+    for (src, dst) in incoming
+        .gddr_temps
+        .iter()
+        .zip(existing.gddr_temps.iter_mut())
+    {
+        copy_opt(src, dst);
+    }
+
     // ── Numeric fields — EMA blend ────────────────────────────────────────────
     blend(
         &mut state.ddr_speed,
@@ -214,6 +254,13 @@ pub fn apply_ema(
 /// incoming snapshot doesn't erase what we already know.
 #[inline]
 fn copy_field(src: &Option<String>, dst: &mut Option<String>) {
+    copy_opt(src, dst);
+}
+
+/// [`copy_field`] for any cloneable payload — used for the typed (non-string)
+/// SMBUS fields that the string EMA path can't carry.
+#[inline]
+fn copy_opt<T: Clone>(src: &Option<T>, dst: &mut Option<T>) {
     if src.is_some() {
         *dst = src.clone();
     }
@@ -348,6 +395,97 @@ mod tests {
             "stable DDR speed should converge to 16000, got {}",
             v
         );
+    }
+
+    /// Regression: the typed (non-string) SMBUS fields must reach the blended
+    /// output on every apply, not just via `HybridBackend`'s first-insert clone.
+    ///
+    /// `existing` starts as a healthy-boot snapshot (zero ECC counters, cool
+    /// GDDR); the second snapshot brings errors and a hotter maximum. Before the
+    /// fix, `apply_ema` never touched these fields, so the ECC row stayed
+    /// invisible for the whole session no matter how many errors accrued.
+    #[test]
+    fn typed_fields_are_carried_through_the_blend() {
+        use crate::models::telemetry::GddrTempPair;
+
+        let mut ema: SmbusEmaState = HashMap::new();
+        let mut existing = SmbusTelemetry {
+            max_gddr_temp: Some(48.0),
+            gddr_corr_errs: [Some(0), Some(0), None, None],
+            gddr_uncorr_errs: Some(0),
+            gddr_temps: [
+                Some(GddrTempPair([44.0, 45.0, 46.0, 47.0])),
+                None,
+                None,
+                None,
+            ],
+            eth_live_status: Some(0xFF),
+            enabled_eth: Some(0xFFF),
+            enabled_tensix_col: Some(0x3FFF),
+            harvesting_state: Some(0),
+            enabled_gddr: Some(0xFF),
+            enabled_l2cpu: Some(0xF),
+            ..SmbusTelemetry::default()
+        };
+        let incoming = SmbusTelemetry {
+            max_gddr_temp: Some(71.0),
+            gddr_corr_errs: [Some(3), Some(4), None, None],
+            gddr_uncorr_errs: Some(7),
+            gddr_temps: [
+                Some(GddrTempPair([70.0, 71.0, 69.0, 68.0])),
+                None,
+                None,
+                None,
+            ],
+            eth_live_status: Some(0x0F), // half the links dropped
+            enabled_eth: Some(0xFFF),
+            enabled_tensix_col: Some(0x3FFE), // a column got harvested
+            harvesting_state: Some(1),
+            enabled_gddr: Some(0xFE),
+            enabled_l2cpu: Some(0x7),
+            ..SmbusTelemetry::default()
+        };
+
+        // Second apply — the case HybridBackend actually hits after the first
+        // snapshot has already been cloned into `smbus_blended`.
+        apply_ema(&mut ema, 0, &incoming, &mut existing);
+        apply_ema(&mut ema, 0, &incoming, &mut existing);
+
+        assert_eq!(existing.gddr_uncorr_errs, Some(7), "uncorr ECC must update");
+        assert_eq!(existing.gddr_corr_errs[0], Some(3));
+        assert_eq!(existing.gddr_corr_errs[1], Some(4));
+        // Counters are copied straight through, never EMA-smoothed toward the
+        // new value — a 7 must read as exactly 7, not 1.75 rounded.
+        assert_eq!(existing.max_gddr_temp, Some(71.0), "max temp must not lag");
+        assert_eq!(
+            existing.gddr_temps[0],
+            Some(GddrTempPair([70.0, 71.0, 69.0, 68.0]))
+        );
+        assert_eq!(existing.eth_live_status, Some(0x0F), "link drop must show");
+        assert_eq!(existing.enabled_tensix_col, Some(0x3FFE));
+        assert_eq!(existing.harvesting_state, Some(1));
+        assert_eq!(existing.enabled_gddr, Some(0xFE));
+        assert_eq!(existing.enabled_l2cpu, Some(0x7));
+        assert_eq!(existing.enabled_eth, Some(0xFFF));
+    }
+
+    /// A field absent from the incoming snapshot must not erase what we know —
+    /// same contract as the string fields.
+    #[test]
+    fn typed_fields_absent_in_incoming_are_preserved() {
+        let mut ema: SmbusEmaState = HashMap::new();
+        let mut existing = SmbusTelemetry {
+            gddr_uncorr_errs: Some(7),
+            max_gddr_temp: Some(71.0),
+            eth_live_status: Some(0xFF),
+            gddr_corr_errs: [Some(3), None, None, None],
+            ..SmbusTelemetry::default()
+        };
+        apply_ema(&mut ema, 0, &SmbusTelemetry::default(), &mut existing);
+        assert_eq!(existing.gddr_uncorr_errs, Some(7));
+        assert_eq!(existing.max_gddr_temp, Some(71.0));
+        assert_eq!(existing.eth_live_status, Some(0xFF));
+        assert_eq!(existing.gddr_corr_errs[0], Some(3));
     }
 
     #[test]

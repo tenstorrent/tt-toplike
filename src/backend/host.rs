@@ -308,6 +308,7 @@ impl HostBackend {
                 aiclk: None,
                 heartbeat: Some(1),
                 timestamp: Utc::now(),
+                board_power: None,
             },
         );
         self.smbus.insert(
@@ -368,6 +369,7 @@ impl HostBackend {
                 aiclk: None,
                 heartbeat: Some(1),
                 timestamp: Utc::now(),
+                board_power: None,
             },
         );
         self.smbus.insert(
@@ -438,6 +440,7 @@ impl HostBackend {
             aiclk: Some(max_freq_mhz),
             heartbeat: Some(1),
             timestamp: Utc::now(),
+            board_power: None,
         };
 
         self.telemetry.insert(socket_idx, telem);
