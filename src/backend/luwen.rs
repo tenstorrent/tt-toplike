@@ -3,25 +3,35 @@
 
 //! Luwen backend for direct hardware access
 //!
-//! This backend uses the official Tenstorrent luwen library to communicate
-//! directly with hardware via PCIe, providing the fastest and most efficient
-//! telemetry access.
+//! This backend uses the official Tenstorrent `luwen-api`/`luwen-def` crates
+//! (crates.io, published from tenstorrent/luwen) to communicate directly with
+//! hardware via PCIe, providing the fastest and most efficient telemetry
+//! access.
+//!
+//! Previously this backend was built on the third-party `all-smi-luwen-*`
+//! forks, which have been stale since 2025-07 (missing Blackhole telemetry
+//! tags and a negative 16.16-fixed-point temperature decode fix). Migrated
+//! to the official 0.8.5 crates to pick up full Blackhole telemetry (GDDR
+//! temps/ECC, harvesting, enabled masks, therm trips, input/board power).
 //!
 //! # Architecture
 //!
-//! - Uses `luwen-if` for high-level chip detection and communication
+//! - Uses `luwen-api` for high-level chip detection and communication
 //! - Bypasses subprocess overhead (unlike JSON backend)
 //! - Direct memory-mapped I/O for telemetry reads
 //! - Supports all Tenstorrent architectures (Grayskull, Wormhole, Blackhole)
 
 #[cfg(feature = "luwen-backend")]
-use all_smi_luwen_if::chip::{Chip, ChipImpl};
+use luwen_api::chip::{Chip, ChipImpl};
 
 #[cfg(feature = "luwen-backend")]
-use all_smi_luwen_core::Arch;
+use luwen_api::ChipDetectOptions;
 
 #[cfg(feature = "luwen-backend")]
-use all_smi_luwen_if::ChipDetectOptions;
+use luwen_def::Arch;
+
+#[cfg(feature = "luwen-backend")]
+use crate::models::telemetry::unpack_gddr_temps_u32;
 
 use crate::backend::{BackendConfig, TelemetryBackend};
 use crate::error::{BackendError, BackendResult};
@@ -79,35 +89,30 @@ impl LuwenBackend {
         };
 
         log::info!("LuwenBackend: Trying noc_safe mode (non-invasive for active workloads)");
-        // Detect chips using all-smi-luwen-ref (returns UninitChip objects)
-        let uninit_chips = all_smi_luwen_ref::detect_chips_silent(options)
+        // Detect chips using the official luwen-api. Unlike the old all-smi-luwen-ref
+        // path, detect_chips_silent() returns fully-initialized Chip objects directly —
+        // no separate UninitChip/init-callback dance is needed.
+        let chips = luwen_api::detect_chips_silent(Vec::new(), options)
             .map_err(|e| BackendError::Initialization(format!("Device detection failed: {}", e)))?;
 
-        if uninit_chips.is_empty() {
+        if chips.is_empty() {
             return Err(BackendError::Initialization("No devices found".to_string()));
         }
 
-        log::info!(
-            "LuwenBackend: Found {} uninitialized devices",
-            uninit_chips.len()
-        );
+        log::info!("LuwenBackend: Found {} devices", chips.len());
 
-        // Initialize each chip
-        for (idx, uninit_chip) in uninit_chips.into_iter().enumerate() {
-            // Initialize the chip with a dummy callback (all-smi pattern)
-            let chip = uninit_chip
-                .init(&mut |_| Ok::<(), std::convert::Infallible>(()))
-                .map_err(|_| {
-                    BackendError::Initialization("Chip initialization failed".to_string())
-                })?;
-
+        // Register each already-initialized chip
+        for (idx, chip) in chips.into_iter().enumerate() {
             // Get architecture
             let arch = chip.get_arch();
+            // Grayskull is #[deprecated] in luwen_def::Arch ("legacy architecture
+            // that is no longer supported") but the variant still exists — keep
+            // mapping it for completeness rather than silently dropping support.
+            #[allow(deprecated)]
             let architecture = match arch {
                 Arch::Grayskull => Architecture::Grayskull,
                 Arch::Wormhole => Architecture::Wormhole,
                 Arch::Blackhole => Architecture::Blackhole,
-                _ => Architecture::Unknown,
             };
 
             // Get device info for better identification
@@ -176,14 +181,14 @@ impl TelemetryBackend for LuwenBackend {
     fn update(&mut self) -> BackendResult<()> {
         #[cfg(feature = "luwen-backend")]
         {
-            use all_smi_luwen_if::chip::ChipImpl;
+            use luwen_api::chip::ChipImpl;
 
             // Read telemetry from each chip
             for (idx, chip) in self.chips.iter().enumerate() {
                 match chip.get_telemetry() {
                     Ok(luwen_telem) => {
-                        // Map all-smi Telemetry to our Telemetry model
-                        // Note: luwen returns f64, but our model uses f32
+                        // Map official luwen Telemetry to our Telemetry model.
+                        // Note: luwen returns f64, but our model uses f32.
                         let telemetry = Telemetry {
                             timestamp: chrono::Utc::now(),
                             voltage: Some(luwen_telem.voltage() as f32),
@@ -191,15 +196,17 @@ impl TelemetryBackend for LuwenBackend {
                             power: Some(luwen_telem.power() as f32),
                             asic_temperature: Some(luwen_telem.asic_temperature() as f32),
                             aiclk: Some(luwen_telem.ai_clk()),
-                            heartbeat: Some(luwen_telem.arc0_health),
-                            // The current luwen-if telemetry struct doesn't expose a
-                            // separate whole-board power rail distinct from `power()`
-                            // above (revisit alongside the luwen 0.8.5 migration).
+                            // telemetry_heartbeat() falls back correctly on BH
+                            // where the per-ARC health registers don't exist.
+                            heartbeat: Some(luwen_telem.telemetry_heartbeat()),
+                            // The official luwen Telemetry has no distinct whole-board
+                            // power rail (it does have asic_power, but that's not the
+                            // same measurement as tt-smi's board_power) — leave None.
                             board_power: None,
                         };
 
-                        // Map all-smi Telemetry to our SmbusTelemetry model
-                        // Note: all-smi fields don't have smbus_tx_ prefix
+                        // Map official luwen Telemetry to our SmbusTelemetry model.
+                        // Field names carry over unchanged from the all-smi fork.
                         let smbus = SmbusTelemetry {
                             board_id: Some(luwen_telem.board_id.to_string()),
                             ddr_status: Some(luwen_telem.ddr_status.to_string()),
@@ -249,13 +256,31 @@ impl TelemetryBackend for LuwenBackend {
                             ),
                             wh_fw_date: Some(luwen_telem.wh_fw_date.to_string()),
                             aux_status: luwen_telem.aux_status.map(|v| v.to_string()),
-                            // Fields not in all-smi Telemetry
-                            input_power: None,
-                            board_power_limit: None,
-                            therm_trip_count: None,
-                            // Newer GDDR/harvesting/ETH-enable fields have no
-                            // all-smi Telemetry source yet — default them to None
-                            // so this literal stays complete as the model grows.
+                            input_power: Some(luwen_telem.input_power.to_string()),
+                            board_power_limit: Some(luwen_telem.board_power_limit.to_string()),
+                            therm_trip_count: Some(luwen_telem.therm_trip_count.to_string()),
+                            // ── GDDR temps / ECC / harvesting — new in official 0.8.x ──
+                            gddr_temps: [
+                                Some(unpack_gddr_temps_u32(luwen_telem.gddr01_temp)),
+                                Some(unpack_gddr_temps_u32(luwen_telem.gddr23_temp)),
+                                Some(unpack_gddr_temps_u32(luwen_telem.gddr45_temp)),
+                                Some(unpack_gddr_temps_u32(luwen_telem.gddr67_temp)),
+                            ],
+                            max_gddr_temp: Some(luwen_telem.max_gddr_temp as f32),
+                            gddr_corr_errs: [
+                                Some(luwen_telem.gddr01_corr_errs),
+                                Some(luwen_telem.gddr23_corr_errs),
+                                Some(luwen_telem.gddr45_corr_errs),
+                                Some(luwen_telem.gddr67_corr_errs),
+                            ],
+                            gddr_uncorr_errs: Some(luwen_telem.gddr_uncorr_errs),
+                            harvesting_state: Some(luwen_telem.harvesting_state),
+                            enabled_eth: Some(luwen_telem.enabled_eth),
+                            enabled_gddr: Some(luwen_telem.enabled_gddr),
+                            enabled_l2cpu: Some(luwen_telem.enabled_l2cpu),
+                            enabled_tensix_col: Some(luwen_telem.tensix_enabled_col),
+                            // eth_live_status is NOT in luwen Telemetry — tt-smi
+                            // derives it separately; stays None on this path.
                             ..Default::default()
                         };
 
@@ -321,6 +346,6 @@ mod tests {
     fn test_luwen_backend_with_config() {
         let config = BackendConfig::default().with_interval(50);
         let backend = LuwenBackend::with_config(config);
-        assert_eq!(backend.config.interval_ms, 50);
+        assert_eq!(backend.config.update_interval_ms, 50);
     }
 }

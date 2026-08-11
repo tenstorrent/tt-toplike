@@ -308,6 +308,17 @@ pub struct SmbusTelemetry {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct GddrTempPair(pub [f32; 4]);
 
+/// Unpack a raw GDDR_X_Y_TEMP register (4 packed temperature bytes) into °C.
+/// Bytes are extracted little-endian: byte0=LSB is temps[0].
+pub fn unpack_gddr_temps_u32(v: u32) -> GddrTempPair {
+    GddrTempPair([
+        (v & 0xFF) as f32,
+        ((v >> 8) & 0xFF) as f32,
+        ((v >> 16) & 0xFF) as f32,
+        ((v >> 24) & 0xFF) as f32,
+    ])
+}
+
 /// Unpack a GDDR_X_Y_TEMP hex string (e.g. "0x262a2c2c") into four °C values.
 /// Bytes are extracted little-endian: byte0=LSB is temps[0].
 /// Returns None if the string is empty, `"N/A"`, or not a valid hex value.
@@ -318,12 +329,7 @@ pub fn unpack_gddr_temps(s: &str) -> Option<GddrTempPair> {
     }
     let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
     let v = u32::from_str_radix(hex, 16).ok()?;
-    Some(GddrTempPair([
-        ((v >> 0) & 0xFF) as f32,
-        ((v >> 8) & 0xFF) as f32,
-        ((v >> 16) & 0xFF) as f32,
-        ((v >> 24) & 0xFF) as f32,
-    ]))
+    Some(unpack_gddr_temps_u32(v))
 }
 
 /// Number of Tensix columns in the Blackhole chip grid that can be harvested.
@@ -691,6 +697,13 @@ mod tests {
     fn test_gddr_temp_unpack_na() {
         assert!(unpack_gddr_temps("N/A").is_none());
         assert!(unpack_gddr_temps("").is_none());
+    }
+
+    #[test]
+    fn test_gddr_temp_unpack_u32() {
+        // Same packing as the hex-string form: byte0 (LSB) = temps[0].
+        let pair = unpack_gddr_temps_u32(0x262a2c2c);
+        assert_eq!(pair.0, [44.0_f32, 44.0, 42.0, 38.0]);
     }
 
     // ── tensix_col_harvested ──────────────────────────────────────────────────
