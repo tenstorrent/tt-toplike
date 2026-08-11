@@ -39,7 +39,15 @@ pub struct Star {
     /// Y position in terminal coordinates
     pub y: usize,
 
-    /// Device index this star belongs to
+    /// Device index this star belongs to.
+    ///
+    /// This is the device's **own** `Device::index` (the physical card
+    /// identity), not its position in `backend.devices()`. The two differ
+    /// whenever the index set is sparse — a salvaged tt-smi snapshot that
+    /// dropped a malformed `device_info[]` entry, or a chip whose ARC never
+    /// answered — and this field is used as a telemetry/baseline *key*, so it
+    /// must be the identity, never the position. Screen geometry uses the
+    /// position instead (see `fleet_pos` on `MemoryPlanet`).
     pub device_idx: usize,
 
     /// Core index within the device
@@ -93,8 +101,20 @@ pub struct MemoryPlanet {
     /// Y position in terminal coordinates
     pub y: usize,
 
-    /// Device index this planet belongs to
+    /// Device index this planet belongs to — the device's own `Device::index`,
+    /// used as the telemetry/baseline key. See `Star::device_idx`.
     pub device_idx: usize,
+
+    /// Position of the owning device within `backend.devices()`, i.e. which
+    /// screen column this planet orbits.
+    ///
+    /// Deliberately separate from `device_idx`: the orbital centre is recomputed
+    /// every tick from `width / devices.len()`, which is a *layout* quantity, so
+    /// it must track the device's slot in the row and not its physical index. On
+    /// a sparse index set (salvaged snapshot, ARC-dead chip) using the index
+    /// here would fling the planets off-screen or stack two devices' rings on
+    /// top of each other.
+    pub fleet_pos: usize,
 
     /// Memory level (0=L1, 1=L2, 2=DDR)
     pub level: usize,
@@ -324,9 +344,20 @@ impl HardwareStarfield {
         // Calculate device spacing across screen width
         let device_spacing = self.width / num_devices.max(1);
 
-        for (device_idx, device) in devices.iter().enumerate() {
+        // `fleet_pos` is the device's slot in the row (screen geometry);
+        // `device_idx` is its own `Device::index` (the telemetry/baseline key).
+        // These are equal on a healthy box and diverge the moment the index set
+        // goes sparse — a salvaged tt-smi snapshot that dropped a malformed
+        // `device_info[]` entry, or a chip whose ARC never answered. Conflating
+        // them used to leave every star of the surviving card looking up
+        // telemetry for a device that isn't in the list: `None`, so the whole
+        // starfield stayed at its dim initial brightness on a chip that was in
+        // fact running flat out.
+        for (fleet_pos, device) in devices.iter().enumerate() {
+            let device_idx = device.index;
+
             // Calculate center position for this device (horizontal only)
-            let device_center_x = (device_idx * device_spacing) + (device_spacing / 2);
+            let device_center_x = (fleet_pos * device_spacing) + (device_spacing / 2);
 
             // Get Tensix grid dimensions for this architecture
             let (grid_rows, grid_cols) = device.tensix_grid();
@@ -399,6 +430,7 @@ impl HardwareStarfield {
                         x: px as usize,
                         y: py as usize,
                         device_idx,
+                        fleet_pos,
                         level: 2, // DDR
                         channel_idx: i,
                         activity: 0.0,
@@ -426,6 +458,7 @@ impl HardwareStarfield {
                         x: px as usize,
                         y: py as usize,
                         device_idx,
+                        fleet_pos,
                         level: 1, // L2
                         channel_idx: i,
                         activity: 0.0,
@@ -453,6 +486,7 @@ impl HardwareStarfield {
                         x: px as usize,
                         y: py as usize,
                         device_idx,
+                        fleet_pos,
                         level: 0, // L1
                         channel_idx: i,
                         activity: 0.0,
@@ -465,13 +499,20 @@ impl HardwareStarfield {
             }
         }
 
-        // Initialize data streams between devices (if multiple devices)
+        // Initialize data streams between devices (if multiple devices).
+        //
+        // The loop walks *positions* (screen columns give the segment path), but
+        // `from_device`/`to_device` store the endpoints' own device indices —
+        // they're later used to key `device_activity` and to ask the topology
+        // which board a chip sits on, both of which are index-keyed.
         if num_devices > 1 {
             let device_spacing = self.width / num_devices;
-            for from_idx in 0..num_devices {
-                for to_idx in (from_idx + 1)..num_devices {
-                    let from_x = (from_idx * device_spacing) + (device_spacing / 2);
-                    let to_x = (to_idx * device_spacing) + (device_spacing / 2);
+            for from_pos in 0..num_devices {
+                for to_pos in (from_pos + 1)..num_devices {
+                    let from_x = (from_pos * device_spacing) + (device_spacing / 2);
+                    let to_x = (to_pos * device_spacing) + (device_spacing / 2);
+                    let from_idx = devices[from_pos].index;
+                    let to_idx = devices[to_pos].index;
 
                     // Determine topology relationship for this stream pair.
                     let intra = self
@@ -677,8 +718,11 @@ impl HardwareStarfield {
                 planet.angle += orbit_speed * (1.0 + planet.activity * 0.5);
 
                 // Calculate new orbital position
+                // Layout, not identity: the orbital centre follows the device's
+                // slot in the row (`fleet_pos`), while the telemetry above was
+                // read with its own index. See `MemoryPlanet::fleet_pos`.
                 let device_spacing = self.width / backend.devices().len().max(1);
-                let device_center_x = (planet.device_idx * device_spacing) + (device_spacing / 2);
+                let device_center_x = (planet.fleet_pos * device_spacing) + (device_spacing / 2);
                 let device_center_y = self.height / 2;
 
                 let px = device_center_x as f32 + planet.angle.cos() * planet.radius;
@@ -1082,6 +1126,7 @@ mod tests {
             x: 0,
             y: 0,
             device_idx: 0,
+            fleet_pos: 0,
             level: 0,
             channel_idx: 0,
             activity: 0.5,
@@ -1096,6 +1141,7 @@ mod tests {
             x: 0,
             y: 0,
             device_idx: 0,
+            fleet_pos: 0,
             level: 1,
             channel_idx: 0,
             activity: 0.5,
@@ -1130,5 +1176,67 @@ mod tests {
             intra_board: false,
         };
         assert_eq!(inter.get_char(), '═');
+    }
+
+    /// Stars and planets must key their telemetry by the device's **own** index,
+    /// not by its position in `backend.devices()`.
+    ///
+    /// The realistic producer of a sparse index set is a tt-smi snapshot whose
+    /// first `device_info[]` entry was undecodable: the element-wise salvage
+    /// keeps array positions on purpose, so the backend serves a one-element
+    /// device list carrying `index: 1` with telemetry keyed at 1. (An ARC-dead
+    /// chip skipped by the Luwen backend leaves the same hole.)
+    ///
+    /// Regression: `initialize_from_devices` stamped the *enumerate position*
+    /// into `Star::device_idx`, so every star of the surviving card looked up
+    /// `telemetry(0)` — `None` — and the entire telemetry branch was skipped: no
+    /// brightness, no temperature colour, a starfield frozen at its initial dim
+    /// state while the chip was in fact running flat out.
+    #[test]
+    fn sparse_device_index_still_drives_stars_and_planets() {
+        const SNAPSHOT: &str = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"}, "telemetry": true},
+                {
+                    "board_info": {"bus_id": "0000:02:00.0", "board_type": "p300c"},
+                    "telemetry": {"power": " 220.0", "asic_temperature": " 71.0",
+                                  "current": " 90.0", "aiclk": " 1350"}
+                }
+            ]
+        }"#;
+
+        let mut backend = crate::backend::json::JSONBackend::new("tt-smi");
+        backend
+            .apply_raw_snapshot_pub(SNAPSHOT)
+            .expect("the healthy sibling must still be salvaged");
+        assert_eq!(
+            backend.devices()[0].index,
+            1,
+            "salvage keeps array position"
+        );
+
+        let mut sf = HardwareStarfield::new(80, 24);
+        sf.initialize_from_devices(backend.devices());
+        assert!(!sf.stars.is_empty(), "stars must be created");
+        assert!(
+            sf.stars.iter().all(|s| s.device_idx == 1),
+            "stars carry the device's own index, not its list position"
+        );
+        assert!(
+            sf.planets
+                .iter()
+                .all(|p| p.device_idx == 1 && p.fleet_pos == 0),
+            "planets key telemetry by index but orbit by fleet position"
+        );
+
+        sf.update_from_telemetry(&backend);
+        assert!(
+            sf.stars.iter().any(|s| s.color != colors::primary()),
+            "the telemetry branch must run: stars leave their initial colour"
+        );
+        assert!(
+            sf.planets.iter().any(|p| p.pulse > 0.0),
+            "planets must be animated by the surviving card's telemetry"
+        );
     }
 }
