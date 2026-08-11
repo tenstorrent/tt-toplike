@@ -3205,6 +3205,27 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "Animated particles in each portrait",
                     "reflect the current compute activity.",
                     "",
+                    "The sidebar reads the driver directly, so",
+                    "power and temperature are compared against",
+                    "each board's real firmware limits (a p300c",
+                    "trips at 90°C / 125W, not a generic 105°C)",
+                    "and clocks come from tt-kmd rather than a",
+                    "tt-smi subprocess.",
+                    "",
+                    "PCIe shows the link's generation and width",
+                    "above live ▼ inbound / ▲ outbound byte",
+                    "rates, differentiated from the driver's own",
+                    "data-word counters — that's the host↔chip",
+                    "pipe: weights streaming in at load time,",
+                    "results coming back during inference.",
+                    "",
+                    "GDDR ECC and thermal-trip rows appear only",
+                    "when those counters are non-zero, because",
+                    "zero is the healthy answer and a quiet",
+                    "sidebar should stay quiet. Uncorrectable",
+                    "ECC errors are drawn in red: they mean",
+                    "data corruption, not just a corrected bit.",
+                    "",
                     "Use ↑↓ to navigate the process list.",
                     "k = SIGTERM,  K = SIGKILL.",
                     "At 32+ devices a compact fleet heatmap",
@@ -3364,6 +3385,45 @@ fn insights_legend_lines(
             Span::styled("fleet grid ", Style::default().fg(colors::warning())),
             Span::styled(
                 "= per-chip heatmap at 32+ devices (Enter=zoom)",
+                Style::default().fg(dim),
+            ),
+        ]),
+        // ── Sidebar rows ─────────────────────────────────────────────────────
+        // The per-chip sidebar carries rows that only appear when the hardware
+        // has something to say, so document the conditional ones here — an
+        // absent row is a healthy answer, not a missing feature.
+        ln!(vec![
+            Span::styled("(lim N) ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled(
+                "= the board's real firmware ceiling, not a default",
+                Style::default().fg(dim),
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("ETH ●·+N ", Style::default().fg(colors::rgb(79, 209, 197))),
+            Span::styled(
+                "= one dot per enabled port, ● live; +N won't fit",
+                Style::default().fg(dim),
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("PCIe ▼▲ ", Style::default().fg(colors::rgb(79, 209, 197))),
+            Span::styled(
+                "= host→chip / chip→host bytes/sec on the link",
+                Style::default().fg(dim),
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("ECC ", Style::default().fg(colors::error())),
+            Span::styled(
+                "= GDDR errors, shown only when non-zero (uncorr = red)",
+                Style::default().fg(dim),
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("Trips ", Style::default().fg(colors::error())),
+            Span::styled(
+                "= lifetime thermal shutdowns; absent means none",
                 Style::default().fg(dim),
             ),
         ]),
