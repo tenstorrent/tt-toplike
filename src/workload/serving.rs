@@ -477,7 +477,13 @@ fn probe_metrics(
             m.requests_decoding = Some(val as u32);
         } else if let Some(val) = parse_metric_line(line, "tt_num_active_sessions") {
             m.active_sessions = Some(val as u32);
-        } else if let Some(val) = parse_metric_line(line, "vllm:gpu_cache_usage_perc") {
+        } else if let Some(val) = parse_metric_line(line, "vllm:gpu_cache_usage_perc")
+            .or_else(|| parse_metric_line(line, "vllm:kv_cache_usage_perc"))
+        {
+            // vLLM renamed gpu_cache_usage_perc → kv_cache_usage_perc; TT
+            // builds in the field have shipped both. The old name keeps
+            // priority (it's what most deployed builds still emit); the new
+            // name is the fallback for builds that have picked up the rename.
             m.kv_cache_utilization = Some(val);
         } else if let Some(val) = parse_metric_line(line, "tt_prefix_cache_hit_rate") {
             m.prefix_cache_hit_rate = Some(val);
@@ -590,5 +596,20 @@ mod tests {
         assert_eq!(extract_port_arg(cmd, &["--port"]), Some(8001));
         let cmd2 = "server\0--port=9000";
         assert_eq!(extract_port_arg(cmd2, &["--port"]), Some(9000));
+    }
+
+    #[test]
+    fn kv_cache_accepts_new_metric_name() {
+        // vLLM renamed gpu_cache_usage_perc → kv_cache_usage_perc; TT builds
+        // in the field have shipped both. probe_metrics() tries the old name
+        // first, falling back to the new one via `.or_else()` (a private,
+        // HTTP-driven fn not unit-testable without mocking the probe) — this
+        // proves the underlying line parser recognizes the new metric name's
+        // exposition-format line, which is what the fallback branch depends on.
+        let line = "vllm:kv_cache_usage_perc{engine=\"0\"} 0.37";
+        assert_eq!(
+            parse_metric_line(line, "vllm:kv_cache_usage_perc"),
+            Some(0.37)
+        );
     }
 }

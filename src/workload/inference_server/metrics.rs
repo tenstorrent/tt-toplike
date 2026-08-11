@@ -70,7 +70,11 @@ pub fn parse_vllm_metrics(text: &str) -> Option<VllmCounters> {
             c.requests_running = v.max(0.0) as u32;
         } else if is_metric(line, "vllm:num_requests_waiting") {
             c.requests_waiting = v.max(0.0) as u32;
-        } else if is_metric(line, "vllm:kv_cache_usage_perc") {
+        } else if is_metric(line, "vllm:kv_cache_usage_perc")
+            || is_metric(line, "vllm:gpu_cache_usage_perc")
+        {
+            // vLLM renamed gpu_cache_usage_perc → kv_cache_usage_perc; TT
+            // builds in the field have shipped both. Accept either.
             c.kv_cache_usage = (v as f32).clamp(0.0, 1.0);
         } else if is_metric(line, "vllm:time_to_first_token_seconds_sum") {
             c.ttft_sum = v.max(0.0);
@@ -534,6 +538,19 @@ vllm:time_to_first_token_seconds_sum{engine=\"0\",model_name=\"M\"} 0.88
     fn none_when_no_vllm_metrics() {
         assert!(parse_vllm_metrics("# nothing here\nother_metric 5\n").is_none());
         assert!(parse_vllm_metrics("").is_none());
+    }
+
+    #[test]
+    fn kv_cache_accepts_both_metric_names() {
+        // vLLM renamed gpu_cache_usage_perc → kv_cache_usage_perc; TT builds
+        // in the field have shipped both. Accept either.
+        let old_name = "vllm:gpu_cache_usage_perc{engine=\"0\",model_name=\"M\"} 0.42\n";
+        let c = parse_vllm_metrics(old_name).expect("has vllm metrics");
+        assert_eq!(c.kv_cache_usage, 0.42);
+
+        let new_name = "vllm:kv_cache_usage_perc{engine=\"0\",model_name=\"M\"} 0.37\n";
+        let c = parse_vllm_metrics(new_name).expect("has vllm metrics");
+        assert_eq!(c.kv_cache_usage, 0.37);
     }
 
     #[test]
