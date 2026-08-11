@@ -45,6 +45,30 @@ struct SensorPaths {
     fan: Option<PathBuf>,         // fanN_input   (RPM; 0xFFFFFFFF sentinel = no fan present)
 }
 
+/// A Tenstorrent-looking hwmon directory found during discovery, before a
+/// device index has been assigned to it.
+///
+/// Discovery is deliberately two-phase (collect → sort → assign) because the
+/// device index is the join key `HybridBackend` uses against tt-smi's
+/// bus-id-ordered `device_info[]`; see
+/// [`SysfsBackend::collect_hwmon_candidates`].
+struct HwmonCandidate {
+    /// The hwmon directory itself (`/sys/class/hwmon/hwmon3`).
+    path: PathBuf,
+    /// The hwmon `name` attribute (e.g. `"blackhole"`); becomes the initial
+    /// `Device::board_type` until a tt_card_type / tt-smi SKU supersedes it.
+    name: String,
+    /// Architecture inferred from `name`.
+    architecture: Architecture,
+    /// PCI bus id from the `device` symlink; `None` when unresolvable.
+    bus_id: Option<String>,
+    /// Directory basename (`"hwmon3"`) — stable `bus_id` fallback.
+    dir_name: String,
+    /// Numeric part of `dir_name` (`u32::MAX` when unparseable) so unresolved
+    /// candidates sort numerically instead of lexicographically.
+    hwmon_num: u32,
+}
+
 /// Sysfs sensor backend implementation
 ///
 /// Reads telemetry from `/sys/class/hwmon/hwmon*` entries
@@ -103,13 +127,118 @@ impl SysfsBackend {
         }
     }
 
+    /// One hwmon directory that looks like a Tenstorrent device, captured
+    /// *before* any device index is assigned so that ordering can be decided
+    /// first — see [`SysfsBackend::collect_hwmon_candidates`].
+    fn hwmon_candidate(path: PathBuf) -> Option<HwmonCandidate> {
+        let name = fs::read_to_string(path.join("name")).ok()?;
+        let name = name.trim();
+
+        // Look for Tenstorrent-related hwmon names
+        // Common patterns: "tenstorrent", "tt_*", "grayskull", "wormhole", "blackhole"
+        if !(name.contains("tenstorrent")
+            || name.starts_with("tt_")
+            || name.contains("grayskull")
+            || name.contains("wormhole")
+            || name.contains("blackhole"))
+        {
+            return None;
+        }
+
+        // Try to determine architecture from name
+        let architecture = if name.contains("grayskull") {
+            Architecture::Grayskull
+        } else if name.contains("wormhole") {
+            Architecture::Wormhole
+        } else if name.contains("blackhole") {
+            Architecture::Blackhole
+        } else {
+            Architecture::Unknown
+        };
+
+        let dir_name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // Numeric hwmon index ("hwmon10" → 10) so unresolved-bus_id candidates
+        // sort numerically rather than lexicographically ("hwmon10" < "hwmon3").
+        let hwmon_num = dir_name
+            .trim_start_matches(|c: char| !c.is_ascii_digit())
+            .parse::<u32>()
+            .unwrap_or(u32::MAX);
+
+        Some(HwmonCandidate {
+            bus_id: Self::extract_pci_address(&path),
+            path,
+            name: name.to_string(),
+            architecture,
+            dir_name,
+            hwmon_num,
+        })
+    }
+
+    /// Scan `hwmon_base` for Tenstorrent hwmon directories and return the
+    /// candidates in a **deterministic, tt-smi-compatible order**.
+    ///
+    /// `fs::read_dir` yields entries in filesystem order, which is neither
+    /// hwmon-number order nor PCI bus-id order, and is not stable across boots.
+    /// (Measured on a 4× Blackhole box: readdir gave 04:00.0, 03:00.0, 01:00.0,
+    /// 02:00.0.) [`crate::backend::hybrid::HybridBackend`] joins tt-smi metadata
+    /// and SMBUS telemetry onto these devices **by index**, and `tt-smi -s`
+    /// emits `device_info[]` sorted ascending by PCI bus id — so assigning
+    /// indices in readdir order made every device display another card's
+    /// DDR/ARC/GDDR/ECC/PCIe/board-power data. Sorting by bus id here is what
+    /// keeps the two lists in agreement.
+    ///
+    /// Candidates whose bus id can't be resolved from the `device` symlink sort
+    /// last, ordered by hwmon number, so they still get a stable index.
+    fn collect_hwmon_candidates(hwmon_base: &Path) -> BackendResult<Vec<HwmonCandidate>> {
+        if !hwmon_base.exists() {
+            return Err(BackendError::Initialization(
+                "Hwmon sysfs not available (Linux-specific)".to_string(),
+            ));
+        }
+
+        let entries = fs::read_dir(hwmon_base).map_err(|e| {
+            BackendError::Initialization(format!("Failed to read hwmon dir: {}", e))
+        })?;
+
+        let mut candidates: Vec<HwmonCandidate> = entries
+            .flatten()
+            .filter_map(|entry| Self::hwmon_candidate(entry.path()))
+            .collect();
+
+        candidates.sort_by(|a, b| {
+            (
+                a.bus_id.is_none(),
+                a.bus_id.as_deref().unwrap_or(""),
+                a.hwmon_num,
+                a.dir_name.as_str(),
+            )
+                .cmp(&(
+                    b.bus_id.is_none(),
+                    b.bus_id.as_deref().unwrap_or(""),
+                    b.hwmon_num,
+                    b.dir_name.as_str(),
+                ))
+        });
+
+        Ok(candidates)
+    }
+
     /// Scan /sys/class/hwmon/ for Tenstorrent devices
     ///
     /// Clears existing state before scanning so that calling init() twice does not
     /// double-count devices. This happens in practice when the tui.rs binary pre-probes
     /// the backend and then run_with_backend() calls init() a second time.
     fn detect_devices(&mut self) -> BackendResult<()> {
-        log::info!("SysfsBackend: Scanning /sys/class/hwmon/");
+        self.detect_devices_in(Path::new("/sys/class/hwmon"))
+    }
+
+    /// [`Self::detect_devices`] with an injectable scan root (tests point it at
+    /// a temp dir of fake hwmon directories).
+    fn detect_devices_in(&mut self, hwmon_base: &Path) -> BackendResult<()> {
+        log::info!("SysfsBackend: Scanning {}", hwmon_base.display());
 
         // Clear any previously discovered state so repeated init() calls are idempotent.
         self.devices.clear();
@@ -121,79 +250,41 @@ impl SysfsBackend {
         self.pcie_trackers.clear();
         self.pcie_bandwidth.clear();
 
-        let hwmon_base = Path::new("/sys/class/hwmon");
-        if !hwmon_base.exists() {
-            return Err(BackendError::Initialization(
-                "Hwmon sysfs not available (Linux-specific)".to_string(),
-            ));
-        }
+        // Collect *then* sort *then* assign indices — every per-index map below
+        // is populated from the same sorted sequence, so they stay consistent.
+        let candidates = Self::collect_hwmon_candidates(hwmon_base)?;
 
-        let entries = fs::read_dir(hwmon_base).map_err(|e| {
-            BackendError::Initialization(format!("Failed to read hwmon dir: {}", e))
-        })?;
+        for (device_idx, candidate) in candidates.into_iter().enumerate() {
+            log::info!(
+                "SysfsBackend: Found Tenstorrent device: {} at {:?} (bus {}) → index {}",
+                candidate.name,
+                candidate.path,
+                candidate.bus_id.as_deref().unwrap_or("unknown"),
+                device_idx
+            );
 
-        let mut device_idx = 0;
-        for entry in entries.flatten() {
-            let path = entry.path();
+            let mut device = Device {
+                index: device_idx,
+                board_type: candidate.name,
+                // Fall back to the hwmon directory name rather than the device
+                // index: it's stable across boots and doesn't imply a PCI address.
+                bus_id: candidate.bus_id.unwrap_or(candidate.dir_name),
+                coords: String::new(),
+                architecture: candidate.architecture,
+                firmwares: None,
+                limits: None,
+                pcie_speed: None,
+                pcie_width: None,
+                grid_override: None,
+                channels_override: None,
+            };
+            // Real firmware limits from hwmon *_max files (kmd ≥ 2.9.0).
+            // HybridBackend later overwrites with the richer JSON limits
+            // block when tt-smi is available; this covers sysfs-only mode.
+            device.limits = Self::read_hwmon_limits(&candidate.path);
 
-            // Check if this is a Tenstorrent device by reading name
-            let name_path = path.join("name");
-            if let Ok(name) = fs::read_to_string(&name_path) {
-                let name = name.trim();
-
-                // Look for Tenstorrent-related hwmon names
-                // Common patterns: "tenstorrent", "tt_*", "grayskull", "wormhole", "blackhole"
-                if name.contains("tenstorrent")
-                    || name.starts_with("tt_")
-                    || name.contains("grayskull")
-                    || name.contains("wormhole")
-                    || name.contains("blackhole")
-                {
-                    log::info!(
-                        "SysfsBackend: Found Tenstorrent device: {} at {:?}",
-                        name,
-                        path
-                    );
-
-                    // Try to determine architecture from name
-                    let architecture = if name.contains("grayskull") {
-                        Architecture::Grayskull
-                    } else if name.contains("wormhole") {
-                        Architecture::Wormhole
-                    } else if name.contains("blackhole") {
-                        Architecture::Blackhole
-                    } else {
-                        Architecture::Unknown
-                    };
-
-                    // Try to extract PCI address from device path
-                    let bus_id = self
-                        .extract_pci_address(&path)
-                        .unwrap_or_else(|| format!("hwmon{}", device_idx));
-
-                    let mut device = Device {
-                        index: device_idx,
-                        board_type: name.to_string(),
-                        bus_id: bus_id.clone(),
-                        coords: String::new(),
-                        architecture,
-                        firmwares: None,
-                        limits: None,
-                        pcie_speed: None,
-                        pcie_width: None,
-                        grid_override: None,
-                        channels_override: None,
-                    };
-                    // Real firmware limits from hwmon *_max files (kmd ≥ 2.9.0).
-                    // HybridBackend later overwrites with the richer JSON limits
-                    // block when tt-smi is available; this covers sysfs-only mode.
-                    device.limits = Self::read_hwmon_limits(&path);
-
-                    self.devices.push(device);
-                    self.hwmon_paths.insert(device_idx, path);
-                    device_idx += 1;
-                }
-            }
+            self.devices.push(device);
+            self.hwmon_paths.insert(device_idx, candidate.path);
         }
 
         if self.devices.is_empty() {
@@ -243,25 +334,32 @@ impl SysfsBackend {
         log::info!("SysfsBackend: enriched board types from tt-smi");
     }
 
-    /// Extract PCI address from hwmon device path
-    /// Example: /sys/class/hwmon/hwmon3 -> /sys/devices/pci0000:00/0000:00:01.0/...
-    fn extract_pci_address(&self, hwmon_path: &Path) -> Option<String> {
+    /// Extract the device's PCI address from its hwmon `device` symlink.
+    ///
+    /// On tt-kmd the link is a single relative hop, e.g.
+    /// `/sys/class/hwmon/hwmon6/device -> ../../../0000:04:00.0`.
+    ///
+    /// The **last** PCI-looking path component is taken, not the first: a longer
+    /// link such as `…/pci0000:00/0000:00:01.5/0000:04:00.0/hwmon/hwmon6` walks
+    /// down through the upstream bridge (`0000:00:01.5`) before reaching the card
+    /// (`0000:04:00.0`), and it's the leaf that identifies the device. Getting
+    /// this wrong would also collapse several cards onto the same bus id and so
+    /// break the bus-id ordering that `collect_hwmon_candidates` depends on.
+    fn extract_pci_address(hwmon_path: &Path) -> Option<String> {
         // Read the device link to find real device path
         let device_link = hwmon_path.join("device");
-        if let Ok(real_path) = fs::read_link(&device_link) {
-            let path_str = real_path.to_string_lossy();
+        let real_path = fs::read_link(&device_link).ok()?;
+        let path_str = real_path.to_string_lossy();
 
-            // Look for PCI address pattern: 0000:00:00.0
-            for component in path_str.split('/') {
-                if component.len() >= 12
+        // Look for PCI address pattern: 0000:00:00.0
+        path_str
+            .split('/')
+            .rfind(|component| {
+                component.len() >= 12
                     && component.chars().nth(4) == Some(':')
                     && component.chars().nth(7) == Some(':')
-                {
-                    return Some(component.to_string());
-                }
-            }
-        }
-        None
+            })
+            .map(|c| c.to_string())
     }
 
     /// Pick the input file for one sensor class: prefer the candidate whose
@@ -450,6 +548,14 @@ impl SysfsBackend {
     #[cfg(test)]
     pub(crate) fn insert_telemetry_for_test(&mut self, device_idx: usize, telem: Telemetry) {
         self.telemetry_cache.insert(device_idx, telem);
+    }
+
+    /// Insert a synthesized SMBUS entry directly into the cache — test helper
+    /// only. Lets `HybridBackend` tests exercise the no-tt-smi fallback path
+    /// without a real hwmon tree.
+    #[cfg(test)]
+    pub(crate) fn insert_smbus_for_test(&mut self, device_idx: usize, smbus: SmbusTelemetry) {
+        self.smbus_cache.insert(device_idx, smbus);
     }
 }
 
@@ -872,5 +978,116 @@ mod tests {
     fn synthesize_smbus_no_sources_is_all_none() {
         let smbus = SysfsBackend::synthesize_smbus(None, None);
         assert!(smbus.aiclk.is_none() && smbus.fan_speed.is_none());
+    }
+
+    /// Create a fake hwmon dir whose `device` symlink resolves to `bus_id`,
+    /// mimicking the real tt-kmd layout
+    /// (`/sys/class/hwmon/hwmon6/device -> ../../../0000:04:00.0`).
+    /// The target need not exist — `extract_pci_address` only reads the link.
+    fn fake_hwmon_with_bus(base: &Path, dir_name: &str, bus_id: Option<&str>) {
+        let hwmon = base.join(dir_name);
+        stdfs::create_dir_all(&hwmon).unwrap();
+        stdfs::write(hwmon.join("name"), "blackhole\n").unwrap();
+        if let Some(bus) = bus_id {
+            std::os::unix::fs::symlink(format!("../../../{}", bus), hwmon.join("device")).unwrap();
+        }
+    }
+
+    /// A longer link that walks through the upstream bridge must still yield the
+    /// leaf card address, not the bridge's.
+    #[test]
+    fn extract_pci_address_prefers_leaf_over_bridge() {
+        let td = tempfile::tempdir().unwrap();
+        let hwmon = td.path().join("hwmon6");
+        stdfs::create_dir_all(&hwmon).unwrap();
+        std::os::unix::fs::symlink(
+            "../../devices/pci0000:00/0000:00:01.5/0000:04:00.0/hwmon/hwmon6",
+            hwmon.join("device"),
+        )
+        .unwrap();
+        assert_eq!(
+            SysfsBackend::extract_pci_address(&hwmon).as_deref(),
+            Some("0000:04:00.0")
+        );
+    }
+
+    /// Device indices must follow ascending PCI bus id, NOT `read_dir` order.
+    ///
+    /// `HybridBackend` joins tt-smi metadata/SMBUS onto sysfs devices by index,
+    /// and `tt-smi -s` orders `device_info[]` by bus id; readdir order on a real
+    /// 4× Blackhole box was 04, 03, 01, 02, so index-order joins mismatched every
+    /// card. The fake dirs below are named so that hwmon-number order (2,3,5,7),
+    /// readdir order, and bus-id order all disagree.
+    #[test]
+    fn detect_devices_sorted_by_bus_id_not_readdir_order() {
+        let td = tempfile::tempdir().unwrap();
+        fake_hwmon_with_bus(td.path(), "hwmon5", Some("0000:04:00.0"));
+        fake_hwmon_with_bus(td.path(), "hwmon2", Some("0000:03:00.0"));
+        fake_hwmon_with_bus(td.path(), "hwmon7", Some("0000:01:00.0"));
+        fake_hwmon_with_bus(td.path(), "hwmon3", Some("0000:02:00.0"));
+        // A non-Tenstorrent hwmon node must be ignored entirely.
+        let other = td.path().join("hwmon0");
+        stdfs::create_dir_all(&other).unwrap();
+        stdfs::write(other.join("name"), "coretemp\n").unwrap();
+
+        let mut backend = SysfsBackend::new();
+        backend.detect_devices_in(td.path()).unwrap();
+
+        let buses: Vec<&str> = backend.devices.iter().map(|d| d.bus_id.as_str()).collect();
+        assert_eq!(
+            buses,
+            vec![
+                "0000:01:00.0",
+                "0000:02:00.0",
+                "0000:03:00.0",
+                "0000:04:00.0"
+            ],
+            "devices must be ordered ascending by PCI bus id"
+        );
+        // Indices must match position, and hwmon_paths must agree with them.
+        for (pos, device) in backend.devices.iter().enumerate() {
+            assert_eq!(device.index, pos, "index must match ordering position");
+            let path = backend
+                .hwmon_paths
+                .get(&pos)
+                .expect("hwmon_paths must have an entry per index");
+            assert_eq!(
+                SysfsBackend::extract_pci_address(path).as_deref(),
+                Some(device.bus_id.as_str()),
+                "hwmon_paths[{}] must point at the same card as devices[{}]",
+                pos,
+                pos
+            );
+        }
+    }
+
+    /// Candidates without a resolvable bus id sort last, in hwmon-number order,
+    /// and fall back to the hwmon directory name as their `bus_id`.
+    #[test]
+    fn detect_devices_unresolved_bus_ids_sort_last_deterministically() {
+        let td = tempfile::tempdir().unwrap();
+        fake_hwmon_with_bus(td.path(), "hwmon10", None);
+        fake_hwmon_with_bus(td.path(), "hwmon4", Some("0000:05:00.0"));
+        fake_hwmon_with_bus(td.path(), "hwmon2", None);
+
+        let mut backend = SysfsBackend::new();
+        backend.detect_devices_in(td.path()).unwrap();
+
+        let buses: Vec<&str> = backend.devices.iter().map(|d| d.bus_id.as_str()).collect();
+        assert_eq!(
+            buses,
+            // Numeric (not lexicographic) hwmon ordering: hwmon2 before hwmon10.
+            vec!["0000:05:00.0", "hwmon2", "hwmon10"],
+        );
+    }
+
+    #[test]
+    fn detect_devices_errors_when_no_tt_hwmon_present() {
+        let td = tempfile::tempdir().unwrap();
+        let other = td.path().join("hwmon0");
+        stdfs::create_dir_all(&other).unwrap();
+        stdfs::write(other.join("name"), "nvme\n").unwrap();
+        let mut backend = SysfsBackend::new();
+        assert!(backend.detect_devices_in(td.path()).is_err());
     }
 }

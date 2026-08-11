@@ -753,6 +753,21 @@ impl TelemetryBackend for JSONBackend {
     }
 }
 
+/// Choose between tt-smi's two fan fields, preferring the first that carries a
+/// real (non-sentinel) RPM.
+///
+/// Returns the winning field's **original string** so downstream parsing and
+/// EMA smoothing behave exactly as they do for any other SMBUS string field.
+/// Returns `None` when neither field holds a real reading (fanless card), so
+/// `SmbusTelemetry::fan_rpm()` reports "no fan" rather than a sentinel.
+fn pick_fan_field(fan_speed: Option<&str>, fan_rpm: Option<&str>) -> Option<String> {
+    [fan_speed, fan_rpm]
+        .into_iter()
+        .flatten()
+        .find(|s| crate::models::telemetry::real_fan_rpm(s).is_some())
+        .map(|s| s.to_string())
+}
+
 /// Build a `SmbusTelemetry` from the parsed JSON fields struct.
 fn smbus_from_json_fields(smbus_json: SmbusTelemetryJSON) -> SmbusTelemetry {
     // Combine the two 32-bit board-id halves into one string ("0xHHHH-0xLLLLLLLL").
@@ -786,9 +801,16 @@ fn smbus_from_json_fields(smbus_json: SmbusTelemetryJSON) -> SmbusTelemetry {
         m3_bl_fw_version: smbus_json.dm_bl_fw_version,
         tt_flash_version: smbus_json.tt_flash_version,
         // FAN_SPEED is the legacy percentage-or-RPM field; tt-smi ≥ 5.3.0
-        // reports RPM in FAN_RPM. Prefer FAN_SPEED when present (back-compat),
-        // fall back to FAN_RPM so RPM-only sources still drive the fan row.
-        fan_speed: smbus_json.fan_speed.or(smbus_json.fan_rpm),
+        // reports RPM in FAN_RPM. Both keys are normally *present*, so an
+        // `Option::or` chain never falls through — and on Blackhole FAN_SPEED
+        // is the `0x0` sentinel while FAN_RPM carries the real reading, which
+        // is exactly the case that left the Fan row blank. Pick whichever field
+        // yields a non-sentinel RPM, FAN_SPEED first for back-compat; when
+        // neither does, stay None rather than storing a sentinel.
+        fan_speed: pick_fan_field(
+            smbus_json.fan_speed.as_deref(),
+            smbus_json.fan_rpm.as_deref(),
+        ),
         pcie_status: smbus_json.pcie_usage,
         board_power_limit: smbus_json.board_power_limit,
         therm_trip_count: smbus_json.therm_trip_count,
@@ -1441,6 +1463,53 @@ mod tests {
         let parsed = parse_tt_smi_snapshot(json).unwrap();
         let smbus = parsed.smbus.get(&0).unwrap();
         assert_eq!(smbus.fan_rpm(), Some(3000)); // 0xbb8
+    }
+
+    /// Regression: the committed real-world fixture has `FAN_SPEED = "0x0"`
+    /// alongside `FAN_RPM = "0x75a"` (1882 RPM) — the shape a live Blackhole
+    /// card actually emits. An `Option::or` chain kept the present-but-sentinel
+    /// FAN_SPEED and left the Fan row blank; the field must be chosen by whether
+    /// it holds a *real* reading.
+    #[test]
+    fn fan_rpm_wins_when_fan_speed_is_sentinel_zero() {
+        let result = parse_smbus_from_json(REAL_TTSMI_JSON);
+        let smbus = result.get(&0).expect("device 0 missing");
+        assert_eq!(
+            smbus.fan_rpm(),
+            Some(1882),
+            "FAN_RPM=0x75a must win over the FAN_SPEED=0x0 sentinel"
+        );
+    }
+
+    /// FAN_SPEED keeps priority when it holds a real reading (older tt-smi,
+    /// where FAN_SPEED is the only fan field).
+    #[test]
+    fn fan_speed_wins_when_real_and_fan_rpm_absent() {
+        let json = r#"{
+            "device_info": [{
+                "board_info": {"bus_id": "0000:01:00.0", "board_type": "n300"},
+                "smbus_telem": {"FAN_SPEED": "0x9c4"}
+            }]
+        }"#;
+        let parsed = parse_tt_smi_snapshot(json).unwrap();
+        let smbus = parsed.smbus.get(&0).unwrap();
+        assert_eq!(smbus.fan_rpm(), Some(2500)); // 0x9c4
+    }
+
+    /// Both fields sentinel (fanless p150-class card) → no fan reading at all,
+    /// and no sentinel string stored to be mis-rendered later.
+    #[test]
+    fn both_fan_fields_sentinel_yields_none() {
+        let json = r#"{
+            "device_info": [{
+                "board_info": {"bus_id": "0000:01:00.0", "board_type": "p150a"},
+                "smbus_telem": {"FAN_SPEED": "0x0", "FAN_RPM": "0xffffffff"}
+            }]
+        }"#;
+        let parsed = parse_tt_smi_snapshot(json).unwrap();
+        let smbus = parsed.smbus.get(&0).unwrap();
+        assert_eq!(smbus.fan_speed, None, "sentinels must not be stored");
+        assert_eq!(smbus.fan_rpm(), None);
     }
 
     #[test]

@@ -375,6 +375,53 @@ pub(crate) fn parse_hex_or_dec(s: &str) -> Option<u32> {
     }
 }
 
+/// Parse a raw fan field and return it only if it looks like a *real* RPM.
+///
+/// The single source of truth for "is this a fan reading or a sentinel", shared
+/// by [`SmbusTelemetry::fan_rpm`] (the render-side accessor) and the tt-smi JSON
+/// parser, which has to choose between two competing fields (`FAN_SPEED` and
+/// `FAN_RPM`) and needs the same notion of "real". `0`, `0xFFFF` and
+/// `0xFFFFFFFF` are all firmware "no reading" sentinels — see
+/// [`SmbusTelemetry::fan_rpm`] for where each comes from.
+pub(crate) fn real_fan_rpm(s: &str) -> Option<u32> {
+    let rpm = parse_hex_or_dec(s)?;
+    if rpm == 0 || rpm == 0xFFFF || rpm == 0xFFFF_FFFF {
+        None
+    } else {
+        Some(rpm)
+    }
+}
+
+/// Decode a raw SMBUS `THM_LIMITS` register into the thermal **shutdown** trip
+/// point in °C, so every backend puts the same units in
+/// [`SmbusTelemetry::thm_limits`] (the starfield thermal-headroom cue reads it
+/// as a plain °C number).
+///
+/// * **Wormhole** packs two 16-bit limits into the register: the low half is the
+///   shutdown limit, the high half the throttle (therm-trip L1) limit. This
+///   matches tt-smi's own `get_chip_limits()`, which computes
+///   `thm_limit = THM_LIMITS & 0xFFFF` and
+///   `therm_trip_l1_limit = THM_LIMITS >> 16`.
+/// * **Blackhole**'s `ThmLimits` telemetry tag already carries a plain °C value —
+///   tt-smi's `get_bh_chip_limits()` uses it verbatim when `THM_LIMIT_SHUTDOWN`
+///   is absent, and exposes the throttle limit through the separate
+///   `THM_LIMIT_THROTTLE` tag. Nothing is unpacked here.
+///
+/// Unknown architectures are treated as packed (the conservative choice: it
+/// masks off a high half that would otherwise render as millions of °C).
+///
+/// Only the luwen backend needs this: it reads the raw register. The tt-smi JSON
+/// path gets the already-decoded `THM_LIMIT_SHUTDOWN` field straight from tt-smi
+/// (which applies this same decode internally), and sysfs gets a decoded °C
+/// value from hwmon `temp*_max`, so there is no third caller to share it with.
+#[cfg(any(feature = "luwen-backend", test))]
+pub(crate) fn thm_limit_shutdown_c(raw: u32, arch: super::device::Architecture) -> u32 {
+    match arch {
+        super::device::Architecture::Blackhole => raw,
+        _ => raw & 0xFFFF,
+    }
+}
+
 /// Same as `parse_hex_or_dec` but for u64 (DDR_STATUS is 32+ bits wide).
 pub(crate) fn parse_hex_or_dec_64(s: &str) -> Option<u64> {
     let s = s.trim();
@@ -489,12 +536,7 @@ impl SmbusTelemetry {
     /// them to `None` instead of rendering a nonsensical "65535 RPM". Accepts
     /// both decimal and hex ("0xffffffff") strings.
     pub fn fan_rpm(&self) -> Option<u32> {
-        let rpm = parse_hex_or_dec(self.fan_speed.as_deref()?)?;
-        if rpm == 0 || rpm == 0xFFFF || rpm == 0xFFFF_FFFF {
-            None
-        } else {
-            Some(rpm)
-        }
+        real_fan_rpm(self.fan_speed.as_deref()?)
     }
 
     /// Firmware-reported measured power in Watts from the SMBUS TDP register.
@@ -607,6 +649,26 @@ mod tests {
         assert_eq!(telem.current_a(), 25.5);
         assert_eq!(telem.aiclk_mhz(), 1000);
         assert!(telem.arc_healthy());
+    }
+
+    /// The raw `THM_LIMITS` register must decode to the same plain-°C shutdown
+    /// limit every other backend writes, so starfield's thermal-headroom cue
+    /// compares like with like instead of against a ~6.8M "temperature".
+    #[test]
+    fn thm_limits_decode_matches_tt_smi_semantics() {
+        use crate::models::Architecture;
+        // A real packed Wormhole register: throttle 100 °C in the high half,
+        // shutdown 110 °C in the low half.
+        let packed = (100u32 << 16) | 110;
+        assert_eq!(thm_limit_shutdown_c(packed, Architecture::Wormhole), 110);
+        assert_eq!(thm_limit_shutdown_c(packed, Architecture::Grayskull), 110);
+        // Unknown arch is treated as packed rather than trusting the raw value.
+        assert_eq!(thm_limit_shutdown_c(packed, Architecture::Unknown), 110);
+        // Blackhole's ThmLimits tag is already plain °C — do not unpack it.
+        assert_eq!(thm_limit_shutdown_c(110, Architecture::Blackhole), 110);
+        // Regression guard: the undecoded packed value is nowhere near a
+        // plausible trip point (this is the bug being fixed).
+        assert!(packed > 6_000_000);
     }
 
     #[test]

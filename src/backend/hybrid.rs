@@ -398,8 +398,23 @@ impl TelemetryBackend for HybridBackend {
         self.sysfs.telemetry(device_idx)
     }
 
+    /// SMBUS telemetry for a device, preferring the tt-smi-derived blend.
+    ///
+    /// Falls back to the inner sysfs backend's synthesized block for any device
+    /// the blend doesn't cover. That is the whole story on a modern-kmd box
+    /// *without* tt-smi installed — auto-detect still resolves to Hybrid on
+    /// Linux, so returning only `smbus_blended` there meant this method reported
+    /// `None` for every device and the tt-kmd-sourced fan/clock/therm-trip/
+    /// serial/heartbeat rows were reachable only via an explicit
+    /// `--backend sysfs`.
+    ///
+    /// The blend wins wherever it exists because tt-smi's data is strictly
+    /// richer (DDR status, GDDR temps/ECC, firmware versions, enabled masks)
+    /// than what the driver exposes through sysfs.
     fn smbus_telemetry(&self, device_idx: usize) -> Option<&SmbusTelemetry> {
-        self.smbus_blended.get(&device_idx)
+        self.smbus_blended
+            .get(&device_idx)
+            .or_else(|| self.sysfs.smbus_telemetry(device_idx))
     }
 
     fn backend_info(&self) -> String {
@@ -526,6 +541,63 @@ mod tests {
             Some(raw.to_string()),
             "snapshot_json must relay the exact raw tt-smi output"
         );
+    }
+
+    /// On a modern-kmd box with no tt-smi installed, `smbus_telemetry()` must
+    /// still surface the sysfs-synthesized block — auto-detect lands on Hybrid,
+    /// so returning only the (empty) tt-smi blend hid the tt-kmd fan/clock/
+    /// therm-trip/serial rows behind an explicit `--backend sysfs`.
+    #[test]
+    fn test_smbus_falls_back_to_sysfs_without_tt_smi() {
+        let mut backend = HybridBackend::new("tt-smi");
+
+        backend.sysfs.insert_smbus_for_test(
+            0,
+            SmbusTelemetry {
+                aiclk: Some("800".to_string()),
+                fan_speed: Some("2100".to_string()),
+                arc0_health: Some("43874".to_string()), // tt_heartbeat
+                ..SmbusTelemetry::default()
+            },
+        );
+
+        // No tt-smi record ever arrived, so the blend is empty.
+        assert!(backend.smbus_blended.is_empty());
+
+        let smbus = backend
+            .smbus_telemetry(0)
+            .expect("sysfs-synthesized SMBUS must be visible through Hybrid");
+        assert_eq!(smbus.aiclk.as_deref(), Some("800"));
+        assert_eq!(smbus.fan_rpm(), Some(2100));
+        assert_eq!(smbus.arc0_health.as_deref(), Some("43874"));
+
+        // Unknown device index is still None on both paths.
+        assert!(backend.smbus_telemetry(9).is_none());
+    }
+
+    /// When tt-smi data *is* present it must win — it is strictly richer than
+    /// the sysfs synthesis.
+    #[test]
+    fn test_json_blend_wins_over_sysfs_smbus() {
+        let mut backend = HybridBackend::new("tt-smi");
+        backend.sysfs.insert_smbus_for_test(
+            0,
+            SmbusTelemetry {
+                aiclk: Some("111".to_string()),
+                ..SmbusTelemetry::default()
+            },
+        );
+        backend.smbus_blended.insert(
+            0,
+            SmbusTelemetry {
+                aiclk: Some("800".to_string()),
+                ddr_status: Some("0x55555555".to_string()),
+                ..SmbusTelemetry::default()
+            },
+        );
+        let smbus = backend.smbus_telemetry(0).unwrap();
+        assert_eq!(smbus.aiclk.as_deref(), Some("800"));
+        assert_eq!(smbus.ddr_status.as_deref(), Some("0x55555555"));
     }
 
     /// HybridBackend must overlay SMBUS TDP/TDC onto sysfs telemetry.

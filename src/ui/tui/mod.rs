@@ -5838,7 +5838,9 @@ fn render_device_panels(
         }
 
         // Board power row (full mode only): whole-card input power (tt-smi ≥ 6,
-        // dual-asic p300 boards) — only shown when it differs from asic power.
+        // dual-asic p300 boards). Shown whenever the backend reports it —
+        // knowing total board draw is useful even when it sits close to the
+        // asic figure above, and on p300 the two are meaningfully different.
         if !compact {
             if let Some(bw) = telemetry.and_then(|t| t.board_power) {
                 stat_lines.push(Line::from(vec![
@@ -5892,10 +5894,28 @@ fn render_device_panels(
 
         // GDDR ECC row (full mode only): shown only when any error counter is
         // non-zero — uncorrectable errors are the headline diagnostic and go red.
+        //
+        // Accumulation is saturating and drops the all-ones sentinel: an
+        // unimplemented/unpowered GDDR ECC register reads 0xFFFFFFFF (the same
+        // "no reading" convention the fan register uses), and four of those
+        // summed with `Iterator::sum` panics on overflow in a debug build.
+        // Unlike the fan filter, 0 and 0xFFFF are NOT filtered here — zero is
+        // the normal healthy count, and 65535 correctable errors is a plausible
+        // real reading on a degrading module.
         if !compact {
             if let Some(s) = smbus {
-                let corr: u32 = s.gddr_corr_errs.iter().flatten().sum();
-                let uncorr = s.gddr_uncorr_errs.unwrap_or(0);
+                const ECC_NO_READING: u32 = u32::MAX;
+                let corr: u32 = s
+                    .gddr_corr_errs
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .filter(|&v| v != ECC_NO_READING)
+                    .fold(0u32, u32::saturating_add);
+                let uncorr = s
+                    .gddr_uncorr_errs
+                    .filter(|&v| v != ECC_NO_READING)
+                    .unwrap_or(0);
                 if corr > 0 || uncorr > 0 {
                     let color = if uncorr > 0 {
                         Color::Rgb(255, 80, 80) // uncorrectable — data corruption risk
