@@ -27,6 +27,22 @@
 //! - Direct memory-mapped I/O for telemetry reads
 //! - Supports all Tenstorrent architectures (Grayskull, Wormhole, Blackhole)
 //!
+//! # Known differences from the sysfs / hybrid backends
+//!
+//! * **No PCIe link row.** The Insights sidebar's `PCIe Gen4 ×16` line is
+//!   absent on this backend by design. luwen exposes no `pcie_bandwidth()`
+//!   equivalent and carries no link *speed* or *width* source at all — the one
+//!   PCIe register it does surface is `PCIE_USAGE` (a lane count, published via
+//!   [`crate::models::SmbusTelemetry::pcie_status`]). sysfs reads link geometry
+//!   from `/sys/bus/pci/devices/*/current_link_{speed,width}` and tt-smi reports
+//!   it in `board_info`; neither path exists here, and inventing a plausible
+//!   "Gen4 ×16" would be a fabricated reading. If this is ever needed, the honest
+//!   fix is to read the PCI config space / sysfs link attributes for the chip's
+//!   own bus id — i.e. borrow the sysfs backend's reader — not to guess from
+//!   luwen telemetry.
+//! * **Limits are Blackhole-only.** `Device::limits` comes from BH telemetry
+//!   tags that Wormhole never assigns; see [`map_limits`].
+//!
 //! # Verification status
 //!
 //! The 0.8.5 migration is **compile-verified and reasoned from crate source
@@ -251,6 +267,72 @@ fn map_smbus(luwen_telem: &luwen_api::chip::Telemetry) -> SmbusTelemetry {
     }
 }
 
+/// Map a luwen `Telemetry` reading onto [`DeviceLimits`] — the per-board
+/// firmware ceilings the Insights sidebar annotates its Power/Temp/Current rows
+/// with.
+///
+/// Without this the sidebar falls back to the UI's generic constants (300 W /
+/// 105 °C) and drops the Current row's `(lim …A)` text altogether, so a luwen
+/// build disagreed with the safe backends side by side on the same card.
+///
+/// # Why this is Blackhole-only
+///
+/// The four registers below are Blackhole telemetry *tags*
+/// (`TdpLimitMax`/`TdcLimitMax`/`AiclkLimitMax`/`ThmLimitThrottle`). Wormhole
+/// reads a fixed-offset struct that never assigns them, so on WH they come from
+/// `Default` and read 0 — and `Some(0.0)` renders as "(lim 0W)", which is worse
+/// than no annotation at all. WH's *throttle* point is derivable from the high
+/// half of its packed `thm_limits` register (that's what tt-smi's
+/// `get_chip_limits()` does), but there is no WH source for the TDP/TDC/fmax
+/// ceilings, so the block would still be mostly fabricated — it stays absent
+/// until it can be verified against Wormhole hardware.
+///
+/// # Why `thm_limit_throttle`, not `thm_limits`
+///
+/// `DeviceLimits::thm_limit` is what the UI prints next to Temp, and it must
+/// mean the same thing on every backend: the throttle trip point (90 °C on a
+/// p300c), which is also hwmon's `temp1_max`. `thm_limits` carries the harder
+/// *shutdown* trip (110 °C) and is published separately in
+/// [`SmbusTelemetry::thm_limits`] for the starfield thermal-headroom cue.
+#[cfg(feature = "luwen-backend")]
+fn map_limits(luwen_telem: &luwen_api::chip::Telemetry) -> Option<crate::models::DeviceLimits> {
+    if !matches!(map_arch(luwen_telem.arch), Architecture::Blackhole) {
+        return None;
+    }
+    Some(crate::models::DeviceLimits {
+        tdp_limit: Some(luwen_telem.tdp_limit_max as f32),
+        tdc_limit: Some(luwen_telem.tdc_limit_max as f32),
+        asic_fmax: Some(luwen_telem.aiclk_limit_max),
+        thm_limit: Some(luwen_telem.thm_limit_throttle as f32),
+    })
+}
+
+/// Map a luwen `Telemetry` reading onto [`FirmwaresInfo`] so the Insights FW row
+/// renders a version instead of "—".
+///
+/// Unlike the limits above this is **not** arch-gated: Wormhole populates
+/// `fw_bundle_version` too (from telemetry offset 49, whenever ARC firmware is
+/// at least 2.25.0.0 — otherwise luwen leaves it 0). A zero register therefore
+/// means "not reported" on either arch, and reporting it as "0.0.0.0" would be a
+/// fake version, so the whole block is omitted in that case.
+///
+/// Only `fw_bundle_version` is filled: the component versions tt-smi shows
+/// (`eth_fw`, `cm_fw`, `gddr_fw`) are rendered from the raw ARC/ETH registers
+/// this backend already publishes through [`SmbusTelemetry`], and duplicating
+/// them here with a different decode would risk two backends disagreeing.
+#[cfg(feature = "luwen-backend")]
+fn map_firmwares(luwen_telem: &luwen_api::chip::Telemetry) -> Option<crate::models::FirmwaresInfo> {
+    if luwen_telem.fw_bundle_version == 0 {
+        return None;
+    }
+    Some(crate::models::FirmwaresInfo {
+        fw_bundle_version: Some(crate::models::fw_bundle_version_string(
+            luwen_telem.fw_bundle_version,
+        )),
+        ..Default::default()
+    })
+}
+
 /// Luwen backend implementation for direct hardware access
 pub struct LuwenBackend {
     /// Backend configuration
@@ -366,11 +448,15 @@ impl LuwenBackend {
                 format!("pci:{}", idx)
             };
 
-            // Try to get telemetry to determine board type
-            let board_type = if let Ok(telem) = chip.get_telemetry() {
-                telem.board_type().to_string()
-            } else {
-                format!("{:?}", arch)
+            // One telemetry read serves three purposes: the board type, the
+            // firmware-limit ceilings, and the firmware bundle version. All
+            // three are static device metadata, so they are read once here at
+            // detect time rather than on every `update()` tick — and reading
+            // once keeps the touch on a possibly-busy card minimal.
+            let detect_telem = chip.get_telemetry().ok();
+            let board_type = match &detect_telem {
+                Some(telem) => telem.board_type().to_string(),
+                None => format!("{:?}", arch),
             };
 
             // Create device
@@ -380,8 +466,13 @@ impl LuwenBackend {
                 bus_id,
                 coords: String::new(), // Coordinates not provided by luwen-if
                 architecture,
-                firmwares: None,
-                limits: None,
+                firmwares: detect_telem.as_ref().and_then(map_firmwares),
+                limits: detect_telem.as_ref().and_then(map_limits),
+                // No PCIe link geometry on this backend: luwen exposes no
+                // `pcie_bandwidth()` and has no source for link speed/width
+                // (only PCIE_USAGE, a lane count, which is published through
+                // SmbusTelemetry::pcie_status). See the module header — the
+                // PCIe row is legitimately absent here rather than faked.
                 pcie_speed: None,
                 pcie_width: None,
                 grid_override: None,
@@ -550,6 +641,13 @@ mod tests {
                 gddr_uncorr_errs: 7,
                 max_gddr_temp: 71,
                 tensix_enabled_col: 0x3FFF,
+                // Limit tags + packed bundle version, ground truth from a live
+                // p300c (tt-smi 5.3.0 / tt-kmd 2.9.0).
+                tdp_limit_max: 0x7d,            // 125 W
+                tdc_limit_max: 0x1f4,           // 500 A
+                aiclk_limit_max: 0x546,         // 1350 MHz
+                thm_limit_throttle: 0x5a,       // 90 °C
+                fw_bundle_version: 0x130b_0000, // "19.11.0.0"
                 ..Default::default()
             }
         }
@@ -684,6 +782,56 @@ mod tests {
             assert_eq!(wh.therm_trip_count, None);
             assert!(wh.gddr_temps.iter().all(|t| t.is_none()));
             assert!(wh.gddr_corr_errs.iter().all(|e| e.is_none()));
+        }
+
+        /// Blackhole's limit tags must reach `Device::limits`, or the Insights
+        /// sidebar silently falls back to the UI's generic ceilings (300 W /
+        /// 105 °C) and drops the Current row's `(lim …A)` annotation entirely.
+        /// Values are ground truth from a live p300c (tt-smi 5.3.0):
+        /// TDP_LIMIT_MAX=0x7d, TDC_LIMIT_MAX=0x1f4, AICLK_LIMIT_MAX=0x546,
+        /// THM_LIMIT_THROTTLE=0x5a.
+        #[test]
+        fn bh_limits_come_from_the_limit_max_tags() {
+            let lim = map_limits(&bh_telemetry()).expect("BH must report limits");
+            assert_eq!(lim.tdp_limit, Some(125.0));
+            assert_eq!(lim.tdc_limit, Some(500.0));
+            assert_eq!(lim.asic_fmax, Some(1350));
+            // The throttle trip point (90 °C), which is what hwmon reports as
+            // temp1_max and what the safe backends display — NOT the 110 °C
+            // shutdown trip in `thm_limits`.
+            assert_eq!(lim.thm_limit, Some(90.0));
+        }
+
+        /// Wormhole's fixed-offset telemetry struct never assigns the
+        /// `*_limit_max` / `thm_limit_throttle` fields, so they read 0 from
+        /// `Default`. `Some(0.0)` would render "(lim 0W)" — strictly worse than
+        /// no annotation — so the whole block stays absent on WH.
+        #[test]
+        fn wh_limits_are_absent_rather_than_zero() {
+            assert!(
+                map_limits(&wh_telemetry()).is_none(),
+                "WH must not publish fabricated zero limits"
+            );
+        }
+
+        /// The firmware bundle version is a packed register on this backend
+        /// (tt-smi's JSON carries it pre-rendered), so it must be decoded to the
+        /// same dotted string tt-smi shows — else the FW row renders "—".
+        #[test]
+        fn fw_bundle_version_is_decoded_for_the_fw_row() {
+            let fw = map_firmwares(&bh_telemetry()).expect("BH must report a bundle version");
+            assert_eq!(fw.fw_bundle_version.as_deref(), Some("19.11.0.0"));
+            // WH populates the same register (only for ARC fw >= 2.25.0.0), so
+            // it is not arch-gated — a real reading comes through.
+            let wh = map_firmwares(&LuwenTelemetry {
+                fw_bundle_version: 0x130b_0000,
+                ..wh_telemetry()
+            })
+            .expect("WH with a populated bundle register must report it");
+            assert_eq!(wh.fw_bundle_version.as_deref(), Some("19.11.0.0"));
+            // A zero register means "not reported" (WH below the ARC firmware
+            // threshold, or a BH tag table that omitted it) — not "0.0.0.0".
+            assert!(map_firmwares(&wh_telemetry()).is_none());
         }
 
         #[test]
