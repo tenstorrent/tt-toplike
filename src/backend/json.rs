@@ -486,6 +486,89 @@ impl JSONBackend {
     }
 }
 
+/// Best-effort decode of the top-level `processes[]` block into typed rows.
+///
+/// Decoding is **per row**: a row tt-smi wrote in an unexpected shape is
+/// skipped, the rest still land, and nothing here can ever affect the device
+/// list (the caller has already parsed that). Anything that isn't a JSON array
+/// — `null`, an object, a number — yields an empty list, matching what older
+/// tt-smi versions (which don't emit the key at all) produce.
+///
+/// `DeviceProcess`'s own fields use tolerant number-or-string deserializers, so
+/// `"pid": "4242"` decodes rather than being skipped.
+fn decode_processes(value: Option<serde_json::Value>) -> Vec<crate::models::DeviceProcess> {
+    let Some(serde_json::Value::Array(rows)) = value else {
+        return Vec::new();
+    };
+    let total = rows.len();
+    let decoded: Vec<crate::models::DeviceProcess> = rows
+        .into_iter()
+        .filter_map(|row| serde_json::from_value::<crate::models::DeviceProcess>(row).ok())
+        .collect();
+    if decoded.len() != total {
+        log::warn!(
+            "tt-smi processes[]: decoded {} of {} rows; the rest had unexpected value shapes",
+            decoded.len(),
+            total
+        );
+    }
+    decoded
+}
+
+/// Salvage a document that carries `device_info` but failed the strict
+/// modern-shape parse, by decoding each `device_info[]` entry independently.
+///
+/// Returns `None` when the document isn't the modern shape at all (no
+/// `device_info` array) — the caller then continues down the legacy branches.
+/// Returns `Some` (possibly with fewer devices than the array had) when it is:
+/// one card whose telemetry block tt-smi emitted in an unexpected shape then
+/// costs only that card, instead of the whole document falling through to the
+/// single-device branch and reporting 1 phantom device for the entire box.
+///
+/// Index attribution is preserved by *array position*, not by "position among
+/// the entries that decoded": a skipped entry leaves its index unused rather
+/// than shifting every later card's SMBUS/limits onto its neighbour.
+fn salvage_modern_snapshot(
+    json_str: &str,
+) -> Option<(Vec<TTSMIDeviceJSON>, Vec<crate::models::DeviceProcess>)> {
+    let mut doc: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let obj = doc.as_object_mut()?;
+    let processes = decode_processes(obj.remove("processes"));
+    let entries = match obj.remove("device_info") {
+        Some(serde_json::Value::Array(entries)) => entries,
+        _ => return None,
+    };
+
+    let devices = entries
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, entry)| {
+            let raw = match serde_json::from_value::<TTSMIDeviceRaw>(entry) {
+                Ok(raw) => raw,
+                Err(e) => {
+                    log::warn!("tt-smi device_info[{idx}] could not be decoded ({e}); skipping");
+                    return None;
+                }
+            };
+            let board_info = raw.board_info.as_ref();
+            Some(TTSMIDeviceJSON {
+                index: Some(idx),
+                board_type: board_info.and_then(|b| b.board_type.clone()),
+                bus_id: board_info.and_then(|b| b.bus_id.clone()),
+                coords: board_info.and_then(|b| b.coords.clone()),
+                telemetry: raw.telemetry,
+                smbus: raw.smbus_telem,
+                firmwares: raw.firmwares,
+                limits: raw.limits,
+                pcie_speed: board_info.and_then(|b| b.pcie_speed),
+                pcie_width: board_info.and_then(|b| b.pcie_width),
+            })
+        })
+        .collect();
+
+    Some((devices, processes))
+}
+
 /// Pure parse of tt-smi snapshot JSON into the intermediate device list, plus
 /// any top-level per-device process attribution (tt-smi ≥ 6.0.0 `processes[]`).
 ///
@@ -505,33 +588,67 @@ fn parse_json_devices(
     struct TTSMISnapshot {
         device_info: Option<Vec<TTSMIDeviceRaw>>,
         /// tt-smi ≥ 6.0.0: top-level per-device process attribution.
+        ///
+        /// **Deliberately a raw `Value`, not `Vec<DeviceProcess>`.** This struct
+        /// is the gate for the entire modern-snapshot branch: if *any* value in
+        /// the document fails to fit its declared type, `from_str` fails, this
+        /// branch is skipped, and the permissive single-device fallthrough at the
+        /// bottom of this function succeeds instead — silently collapsing an
+        /// N-device box to one phantom device with a fabricated bus id and no
+        /// telemetry. `processes[]` is the least load-bearing block in the
+        /// snapshot but was the only one typed strictly (`pid: i64`,
+        /// `device: usize`), and tt-smi has repeatedly flip-flopped between bare
+        /// numbers and quoted strings for numeric fields (hence the
+        /// `de_opt_*_str` helpers above). Keeping it opaque here makes that
+        /// impossible; it is decoded best-effort, per row, afterwards.
         #[serde(default)]
-        processes: Option<Vec<crate::models::DeviceProcess>>,
+        processes: Option<serde_json::Value>,
     }
 
-    if let Ok(snapshot) = serde_json::from_str::<TTSMISnapshot>(json_str) {
-        if let Some(raw_devices) = snapshot.device_info {
-            // Transform raw format to flattened format with indices
-            let devices: Vec<TTSMIDeviceJSON> = raw_devices
-                .into_iter()
-                .enumerate()
-                .map(|(idx, raw)| {
-                    let board_info = raw.board_info.as_ref();
-                    TTSMIDeviceJSON {
-                        index: Some(idx),
-                        board_type: board_info.and_then(|b| b.board_type.clone()),
-                        bus_id: board_info.and_then(|b| b.bus_id.clone()),
-                        coords: board_info.and_then(|b| b.coords.clone()),
-                        telemetry: raw.telemetry,
-                        smbus: raw.smbus_telem,
-                        firmwares: raw.firmwares,
-                        limits: raw.limits,
-                        pcie_speed: board_info.and_then(|b| b.pcie_speed),
-                        pcie_width: board_info.and_then(|b| b.pcie_width),
-                    }
-                })
-                .collect();
-            return Ok((devices, snapshot.processes.unwrap_or_default()));
+    match serde_json::from_str::<TTSMISnapshot>(json_str) {
+        Ok(snapshot) => {
+            if let Some(raw_devices) = snapshot.device_info {
+                // Transform raw format to flattened format with indices
+                let devices: Vec<TTSMIDeviceJSON> = raw_devices
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, raw)| {
+                        let board_info = raw.board_info.as_ref();
+                        TTSMIDeviceJSON {
+                            index: Some(idx),
+                            board_type: board_info.and_then(|b| b.board_type.clone()),
+                            bus_id: board_info.and_then(|b| b.bus_id.clone()),
+                            coords: board_info.and_then(|b| b.coords.clone()),
+                            telemetry: raw.telemetry,
+                            smbus: raw.smbus_telem,
+                            firmwares: raw.firmwares,
+                            limits: raw.limits,
+                            pcie_speed: board_info.and_then(|b| b.pcie_speed),
+                            pcie_width: board_info.and_then(|b| b.pcie_width),
+                        }
+                    })
+                    .collect();
+                return Ok((devices, decode_processes(snapshot.processes)));
+            }
+        }
+        Err(e) => {
+            // A document that *has* a `device_info` key must never slide quietly
+            // into the permissive single-device fallthrough at the bottom of this
+            // function: every `TTSMIDeviceJSON` field is `Option`, so `{...}`
+            // parses as "one device" no matter what it actually contains, and an
+            // N-device box would silently render as 1 phantom device with a
+            // fabricated bus id and no telemetry. Instead, salvage the modern
+            // shape element-by-element (see `salvage_modern_snapshot`) so one
+            // malformed card costs only that card, and say so at `warn` — the
+            // operator needs to know why a device went missing.
+            if let Some((devices, processes)) = salvage_modern_snapshot(json_str) {
+                log::warn!(
+                    "tt-smi snapshot did not fit the modern snapshot shape ({e}); \
+                     salvaged {} of its device_info[] entries element-wise",
+                    devices.len()
+                );
+                return Ok((devices, processes));
+            }
         }
     }
 
@@ -1572,5 +1689,93 @@ mod tests {
         let json = r#"{"device_info": [{"board_info": {"bus_id": "x", "board_type": "p150a"}}]}"#;
         let parsed = parse_tt_smi_snapshot(json).unwrap();
         assert!(parsed.processes.is_empty());
+    }
+
+    /// Two-device snapshot whose `processes[]` uses tt-smi's *other* habit for
+    /// numeric values — a quoted string `"pid": "4242"`.
+    ///
+    /// Regression: `processes` used to be typed `Option<Vec<DeviceProcess>>`
+    /// with `pid: Option<i64>`, so this document failed the modern-snapshot
+    /// parse outright, fell through to the permissive single-device branch (every
+    /// `TTSMIDeviceJSON` field is `Option`, so *any* object parses as one
+    /// device), and a 2-device box silently reported **1 phantom device** with a
+    /// fabricated bus id and no telemetry at all. The process list must never
+    /// cost the device list.
+    #[test]
+    fn string_typed_pid_in_processes_does_not_collapse_device_list() {
+        let json = r#"{
+            "device_info": [
+                {
+                    "board_info": {"bus_id": "0000:01:00.0", "board_type": "p150a"},
+                    "telemetry": {"power": " 16.0", "asic_temperature": " 41.5"}
+                },
+                {
+                    "board_info": {"bus_id": "0000:02:00.0", "board_type": "p150a"},
+                    "telemetry": {"power": " 22.0", "asic_temperature": " 44.0"}
+                }
+            ],
+            "processes": [
+                {"pid": "4242", "user": "ttuser", "device": "1", "cmdline": "python -m vllm serve"}
+            ]
+        }"#;
+        let parsed = parse_tt_smi_snapshot(json).expect("snapshot must parse");
+
+        assert_eq!(parsed.devices.len(), 2, "both devices must survive");
+        assert_eq!(parsed.devices[0].bus_id, "0000:01:00.0");
+        assert_eq!(parsed.devices[1].bus_id, "0000:02:00.0");
+        assert_eq!(parsed.telemetry.get(&0).and_then(|t| t.power), Some(16.0));
+        assert_eq!(parsed.telemetry.get(&1).and_then(|t| t.power), Some(22.0));
+
+        // The tolerant DeviceProcess deserializers also let the row itself
+        // through, so nothing is lost — but even an empty list would be fine
+        // here; what matters is that the devices are intact.
+        assert_eq!(parsed.processes.len(), 1);
+        assert_eq!(parsed.processes[0].pid, Some(4242));
+        assert_eq!(parsed.processes[0].device, Some(1));
+    }
+
+    /// Same guarantee for a `processes` block that isn't even an array (an object
+    /// keyed by pid, say): devices are untouched and the process list is empty.
+    #[test]
+    fn object_shaped_processes_block_does_not_harm_devices() {
+        let json = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"}, "telemetry": {"power": " 16.0"}},
+                {"board_info": {"bus_id": "0000:02:00.0"}, "telemetry": {"power": " 22.0"}}
+            ],
+            "processes": {"4242": {"device": 0}}
+        }"#;
+        let parsed = parse_tt_smi_snapshot(json).expect("snapshot must parse");
+        assert_eq!(parsed.devices.len(), 2);
+        assert_eq!(parsed.telemetry.get(&1).and_then(|t| t.power), Some(22.0));
+        assert!(
+            parsed.processes.is_empty(),
+            "a non-array processes block yields no rows"
+        );
+    }
+
+    /// A `device_info[]` entry tt-smi wrote in an unexpected shape costs only
+    /// that entry: the other card keeps its telemetry, and — crucially — the
+    /// document does NOT fall through to the single-device branch. Array
+    /// positions are preserved, so the survivor keeps index 1 rather than
+    /// sliding into the missing card's slot (that slide is exactly the
+    /// mis-attribution this release set out to fix).
+    #[test]
+    fn malformed_device_entry_is_skipped_not_collapsed() {
+        let json = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"}, "telemetry": true},
+                {"board_info": {"bus_id": "0000:02:00.0"}, "telemetry": {"power": " 22.0"}}
+            ]
+        }"#;
+        let parsed = parse_tt_smi_snapshot(json).expect("snapshot must salvage");
+        assert_eq!(parsed.devices.len(), 1, "only the bad entry is dropped");
+        assert_eq!(parsed.devices[0].index, 1, "array position is preserved");
+        assert_eq!(parsed.devices[0].bus_id, "0000:02:00.0");
+        assert_eq!(parsed.telemetry.get(&1).and_then(|t| t.power), Some(22.0));
+        assert!(
+            parsed.telemetry.get(&0).is_none(),
+            "no telemetry may be attributed to the dropped card's index"
+        );
     }
 }

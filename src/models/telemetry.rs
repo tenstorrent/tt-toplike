@@ -103,13 +103,54 @@ impl Default for Telemetry {
 /// One row of tt-smi ≥ 6.0.0's per-device process attribution
 /// (top-level `processes[]` in the snapshot). All fields optional —
 /// tt-smi serializes with exclude_none.
+///
+/// The two numeric fields accept a bare JSON number *or* a quoted string:
+/// tt-smi has flip-flopped between the two representations for numeric values
+/// across releases (`"pcie_width": "4"` vs `"pcie_speed": 4` in the same
+/// document today), and a strict type here used to be able to fail the whole
+/// snapshot parse — see `TTSMISnapshot::processes` in `backend::json` for what
+/// that cost. Unparseable values decode as `None` rather than erroring.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeviceProcess {
+    #[serde(default, deserialize_with = "de_opt_i64_str")]
     pub pid: Option<i64>,
     pub user: Option<String>,
     /// Index of the device this process has open.
+    #[serde(default, deserialize_with = "de_opt_usize_str")]
     pub device: Option<usize>,
     pub cmdline: Option<String>,
+}
+
+/// Deserialize an optional i64 from either a JSON number or a quoted string.
+fn de_opt_i64_str<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(i64),
+        Str(String),
+        Null,
+    }
+    Ok(match Option::<NumOrStr>::deserialize(d)? {
+        Some(NumOrStr::Num(v)) => Some(v),
+        Some(NumOrStr::Str(s)) => s.trim().parse::<i64>().ok(),
+        Some(NumOrStr::Null) | None => None,
+    })
+}
+
+/// Deserialize an optional usize from either a JSON number or a quoted string.
+fn de_opt_usize_str<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(usize),
+        Str(String),
+        Null,
+    }
+    Ok(match Option::<NumOrStr>::deserialize(d)? {
+        Some(NumOrStr::Num(v)) => Some(v),
+        Some(NumOrStr::Str(s)) => s.trim().parse::<usize>().ok(),
+        Some(NumOrStr::Null) | None => None,
+    })
 }
 
 /// SMBUS telemetry (low-level hardware status)
