@@ -1,26 +1,55 @@
-tt-toplike (0.7.40) noble; urgency=medium
+tt-toplike (0.8.0) noble; urgency=medium
 
-  * HivemindSweeper — a new opt-in, read-only activity sniffer mode (press
-    `~`). Correlates driver messages (`/dev/kmsg`), tt-metal compile-cache
-    churn, host/docker log tails, `/proc` device-fd activity, and the
-    Inspector log into one source × device/host decaying-heat board plus a
-    live filtered event feed underneath. Five collectors auto-spawn on
-    entry and are torn down whenever the mode is left (centralized at the
-    mode-transition choke point — `~`, Esc, `v`, jump keys, and `/mode <x>`
-    all tear down cleanly, never leaking the collector threads).
-    - In-mode controls: `hjkl`/arrow keys move the board cursor, `f` toggles
-      the unified feed (all cells vs. just the selected one), `s` cycles the
-      feed's severity floor (trace→info→notice→warn→error).
-    - `/hivemind` enters the mode and starts the engine from the command
-      bar (same as `~`); `/watch <path>` tails an arbitrary host log file,
-      `/watch pid <n>` attaches to a PID's device fds + best-effort open
-      logs, and `/wrap <cmd…>` spawns and captures a command's stdout/stderr
-      as an Emission lane — the one command with a real side effect, so it's
-      gated behind a confirmation (type the same `/wrap` a second time).
-    - Legend/Help/Explain overlays document the board's heat glyphs
-      (`░▒▓█`) and every new key/command.
+  * Telemetry expansion — the sysfs/hybrid path picks up most of what used
+    to require tt-smi or Luwen, four work items:
+    - Sysfs backend now reads label-aware hwmon sensors (matches `*_label`
+      instead of assuming a fixed `tempN`/`inN`/`currN` index), a fan
+      sensor, and real per-board `*_max` limit files (e.g. 125 W / 500 A /
+      90 °C on p300c) instead of hardcoded guesses. It also discovers
+      tt-kmd's class-attr directory
+      (`/sys/class/tenstorrent/tenstorrent!N/`) via the hwmon `device`
+      symlink and reads it two ways: once at startup for static enrichment
+      (`tt_card_type` → the real board SKU, `tt_fw_bundle_ver`) — which
+      *replaces* the old ~1.2 s tt-smi startup probe on modern kmd — and
+      once per tick for dynamic attributes (`tt_aiclk`, `tt_heartbeat`,
+      previously hardcoded to `None` in this backend) plus a synthesized
+      partial `SmbusTelemetry` (clocks, fan, thermal trips, serial), so
+      sysfs is no longer SMBUS-blind the way it was before.
+    - New `pcie_counters` module reads tt-kmd's twelve
+      `pcie_perf_counters/` data-word counters, folds them into in/out
+      directions, and derives live bandwidth (words × 4 bytes / dt) with
+      reset-clamping for counter wraparound. Exposed via a defaulted
+      `TelemetryBackend::pcie_bandwidth()` trait method implemented by the
+      sysfs and hybrid backends; Insights shows it as a two-row PCIe panel
+      with link geometry (GenN ×width) and live ▼/▲ rates.
+    - JSON backend parses tt-smi's full `board_info` (PCIe speed/width,
+      tolerant of tt-smi's number-vs-string drift across versions) and
+      falls back FAN_RPM → fan_speed for tt-smi 5.3.0's fan-semantics
+      change. It also picks up tt-smi 6.x's top-level `processes[]` array
+      (new `DeviceProcess` model + `device_processes()` trait method,
+      wired through both the JSON and WebSocket backends) and
+      `telemetry.board_power`.
+    - Insights sidebar gained Current (vs. TDC limit), Board power, PCIe
+      (link geometry + live bandwidth), GDDR ECC (uncorrectable counts
+      emphasized in red), and thermal-trip rows; the hybrid backend
+      propagates PCIe link geometry and board power via a new `DeviceMeta`
+      struct, and `format_bandwidth` is hardened with a provable ≤9-char
+      width bound so the panel never wraps.
+    - Both Prometheus scrapers (vLLM + media-server) now accept either
+      KV-cache metric name a given vLLM build emits
+      (`gpu_cache_usage_perc` or `kv_cache_usage_perc`) via a shared
+      `parse_kv_cache_line` helper — some deployments only expose one or
+      the other.
+  * luwen-backend migrated off the abandoned `all-smi-luwen-*` forks (13
+    months without a release) onto the official `luwen-api`/`luwen-def`
+    0.8.5 crates. Picks up Blackhole GDDR temperatures/ECC counters,
+    harvesting/enabled core masks, thermal trips, and input/board
+    power-limit fields the forked crates never exposed. Still launch-only
+    (never auto-detected, never touched by the live `b` backend-cycle key)
+    pending upstream arbitration between Luwen's BAR0 mapping and a
+    tt-kmd already serving an active workload.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 14 Jul 2026 00:00:00 +0000
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 10 Aug 2026 00:00:00 +0000
 
 tt-toplike (0.7.30) noble; urgency=medium
 

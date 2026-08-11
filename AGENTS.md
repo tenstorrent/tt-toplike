@@ -4082,3 +4082,113 @@ regenerate `Cargo.lock` **before** committing — otherwise the lockfile lags
 ---
 
 *Phase 24 status: **COMPLETE** — shipped as v0.7.40 on ppa.tenstorrent.com*
+
+---
+
+## Phase 25 — Telemetry expansion (August 2026, v0.8.0)
+
+**Origin**: with HivemindSweeper landed, the next gap was the telemetry
+backends themselves — the sysfs path (the safe, non-invasive default) was
+still missing fields that only tt-smi or Luwen could supply (AICLK, ARC
+heartbeat, real board limits, PCIe link state), and the Luwen path was
+sitting on a 13-months-stale third-party fork. Ten spec-driven tasks
+(`.superpowers/sdd/2026-08-10-telemetry-expansion/`) closed both gaps plus
+two smaller parsing debts (tt-smi 6.x's schema changes, a KV-cache metric
+name mismatch), landing as four work items.
+
+### 1. Sysfs backend: label-aware hwmon + the `/sys/class/tenstorrent` discovery (Tasks 1–3)
+
+The sysfs backend previously assumed a fixed sensor index (`temp1_input` =
+ASIC temp, `in0_input` = vcore, …), which is fragile across hwmon driver
+revisions. It now matches on the `*_label` sibling file instead, and reads
+real per-board limits from `*_max` attributes (125 W / 500 A / 90 °C on a
+p300c) rather than hardcoded constants.
+
+The bigger find: tt-kmd exposes a *second* sysfs surface beyond hwmon — a
+class-attribute directory at `/sys/class/tenstorrent/tenstorrent!N/` — that
+the hwmon node's `device` symlink resolves to. That directory carries two
+kinds of attribute:
+- **Static** (`tt_card_type`, `tt_fw_bundle_ver`): read once at startup.
+  `tt_card_type` gives the *real* board SKU — this **replaces** the old
+  ~1.2 s `tt-smi --version`/`tt-smi -s` startup probe from Phase (0.7.30)'s
+  fix, on any kmd new enough to expose it. No more shelling out just to
+  learn the board name.
+- **Dynamic** (`tt_aiclk`, `tt_heartbeat`): read every tick and fed into
+  the core `Telemetry` struct, which previously hardcoded these to `None`
+  in sysfs mode. A partial `SmbusTelemetry` is synthesized from the same
+  directory (clocks, fan, thermal-trip counters, serial) so sysfs is no
+  longer SMBUS-blind — it just has fewer fields than a full tt-smi/Luwen
+  read.
+
+### 2. Live PCIe bandwidth (Tasks 4–5)
+
+New `src/backend/pcie_counters.rs` reads tt-kmd's `pcie_perf_counters/`
+directory — twelve raw data-word counters — and folds them into inbound/
+outbound directions. Bandwidth is derived as `words × 4 bytes / dt` between
+ticks, with clamping so a counter reset (or wraparound) doesn't spike the
+reading to a nonsense value. This is exposed as a new, defaulted
+`TelemetryBackend::pcie_bandwidth(&self, device_idx) -> Option<PcieBandwidth>`
+trait method — every backend inherits `None` for free, and only sysfs/hybrid
+override it, since they're the only ones with kmd's raw counter files handy.
+
+### 3. tt-smi schema drift + Insights surfacing (Tasks 6–9)
+
+tt-smi's JSON output keeps changing shape underneath us:
+- `board_info` needed tolerant parsing (PCIe speed/width sometimes numbers,
+  sometimes strings across tt-smi releases).
+- tt-smi 5.3.0 changed fan telemetry semantics; JSON backend now falls back
+  FAN_RPM → fan_speed.
+- tt-smi 6.x introduced a top-level `processes[]` array (new `DeviceProcess`
+  model, `device_processes()` trait method, wired through JSON *and*
+  WebSocket backends) and `telemetry.board_power`.
+- Both Prometheus scrapers (vLLM + the media-server path from the July
+  media-inference work) were only recognizing one of the two KV-cache
+  metric names different vLLM builds emit; a shared `parse_kv_cache_line`
+  helper now accepts either `gpu_cache_usage_perc` or `kv_cache_usage_perc`.
+
+All of the above needed somewhere to show up: the Insights sidebar gained
+Current (against the TDC limit), Board power, a two-row PCIe panel (link
+geometry + live ▼/▲ bandwidth from item 2), GDDR ECC (uncorrectable counts
+emphasized in red), and thermal-trip rows. A new `DeviceMeta` struct carries
+PCIe geometry + board power through the hybrid backend's sysfs/JSON merge,
+and `format_bandwidth` ships with a unit-tested, provably-bounded ≤9-char
+output so the panel layout can't wrap under any input.
+
+### 4. Luwen: fork → official crates (Task 10)
+
+`all-smi-luwen-core`/`-if`/`-ref` — the third-party forks the Luwen backend
+was built on since Phase 6 — had gone 13 months without a release and were
+missing Blackhole telemetry tags entirely. Migrated to the crates.io
+`luwen-api`/`luwen-def` 0.8.5 crates published directly from
+`tenstorrent/luwen`. This is a straight upgrade in capability: Blackhole
+GDDR temperatures and ECC counters, harvesting/enabled core masks, thermal
+trips, and input/board power-limit fields the forks never surfaced.
+`detect_chips_silent` in the official crate returns already-initialized
+`Chip`s (no separate init-callback dance), which simplified
+`detect_devices()` along the way.
+
+**Why Luwen stays launch-only.** Beyond the long-standing "direct PCI BAR0
+access can disrupt a running workload" reasoning from Phase 14, task 10's
+research surfaced a sharper, driver-specific reason to never fold Luwen into
+auto-detect or the live `b` backend-cycle key: on tt-kmd ≥ 2.9/2.10, simply
+holding `/dev/tenstorrent/N` open participates in driver-managed power-state
+aggregation across all openers, and can block `O_EXCL` openers like
+`tt-flash`. An idle monitoring tool has no business being a silent
+participant in another tool's exclusive-access contract — Luwen remains
+`--backend luwen` only, by explicit user request, exactly as it's been since
+Phase 14.
+
+### Release hygiene
+
+Also folded into this release (deferred minors flagged in earlier task
+reviews, not new work): a `cargo fmt` pass (several tasks' code came from
+plan snippets that weren't rustfmt-shaped, and CI's `cargo fmt --check` gate
+is strict); a `cli.rs` test (`test_luwen_validation`) that only asserted the
+correct thing under one of the two `luwen-backend` feature states; a stale
+CI comment still naming the abandoned `all-smi-luwen-if` fork; and narrowing
+an `#[allow(deprecated)]` in `luwen.rs` from covering a whole `match arch`
+down to just the one arm (`Arch::Grayskull`) upstream actually deprecated.
+
+---
+
+*Phase 25 status: **COMPLETE** — shipped as v0.8.0*
