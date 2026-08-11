@@ -14,6 +14,46 @@ git tag                        # released versions
 
 ## Recent releases
 
+### 0.8.0
+- **Fix: per-device data was shuffled on multi-card boxes.** The sysfs backend
+  numbered devices in raw `readdir` order while `tt-smi` orders by PCI bus id, so
+  the default (hybrid) backend's index-keyed join attributed every card's SMBUS
+  data to the wrong card — DDR status, GDDR temps, ECC counters, thermal trips,
+  fan and clocks all landed on a neighbour. Discovery is now sorted by bus id.
+  If you ran the default backend on more than one card, what you saw was mixed up.
+- **The safe backend got a lot less telemetry-poor.** Alongside hwmon, the sysfs
+  path now reads tt-kmd's class-attribute directory
+  (`/sys/class/tenstorrent/tenstorrent!N/`): clock frequencies (AICLK/AXICLK/ARCCLK),
+  ARC firmware heartbeat, the real board SKU, firmware bundle version, board serial
+  and thermal-trip count. `tt_card_type` **replaces** the ~1.2 s `tt-smi -s` startup
+  probe on modern drivers. Needs tt-kmd ≥ 2.7; older drivers keep the old behavior.
+- **Live PCIe bandwidth.** tt-kmd's `pcie_perf_counters/` are folded into in/out
+  directions and differentiated per tick, so Insights shows a PCIe row with link
+  geometry (e.g. `Gen4 x4`) and live ▼/▲ rates. Sysfs and hybrid backends only.
+- **Better hwmon reads**: sensors are picked by their `*_label` (so the ASIC temp
+  sensor is used, not whichever has the lowest index), the fan sensor is read, and
+  `*_max` gives real per-board limits (125 W / 500 A / 90 °C on a p300c) instead of
+  hardcoded 300 W / 105 °C. Limits need tt-kmd ≥ 2.9.
+- **New Insights sidebar rows**: Current (with TDC limit), Board power (tt-smi 6.x),
+  PCIe, GDDR ECC (only when non-zero — uncorrectable errors in red; they were parsed
+  but never shown anywhere before), and thermal trips (only when non-zero).
+- **tt-smi upkeep**: full `board_info` parsing (PCIe generation/width, tolerant of
+  tt-smi's number-vs-string drift); the Fan row no longer stays blank on cards with a
+  spinning fan (live tt-smi emits `FAN_SPEED: "0x0"` next to a real `FAN_RPM`, so
+  whichever holds a non-sentinel reading now wins); tt-smi ≥ 6.0.0's top-level
+  `processes[]` (per-device pid/user/cmdline attribution) and `telemetry.board_power`
+  are parsed.
+- Both Prometheus scrapers accept either vLLM KV-cache metric name
+  (`vllm:gpu_cache_usage_perc` or `vllm:kv_cache_usage_perc`) — vLLM renamed it and
+  builds in the field ship one or the other.
+- **luwen backend migrated** off the abandoned `all-smi-luwen-*` forks onto the
+  official `luwen-api`/`luwen-pci`/`luwen-def` 0.8.5 crates, gaining Blackhole GDDR
+  temps/ECC counters, harvesting and enabled masks, and thermal-trip count.
+  ⚠️ **Compile-verified and unit-tested only — this release never ran it against
+  hardware.** It stays explicit-only (`--backend luwen`, never auto-detected): on
+  tt-kmd ≥ 2.9/2.10, merely holding the device open participates in driver power-state
+  aggregation and can block `O_EXCL` openers like `tt-flash`.
+
 ### 0.7.33
 - **[i] media/diffusion monitoring** — SkyReels / SDXL / z-image servers
   (tt-media-inference-server) now show live telemetry instead of a blank panel.

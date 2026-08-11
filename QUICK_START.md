@@ -67,6 +67,7 @@ tt-toplike               # default
 tt-toplike --mode normal # alias — "normal" now maps to Insights
 ```
 - Split-panel view: a **chip portrait** per processor (CPU/GPU/ANE/TT as a device card) with live power, temperature, DDR/training status, and an accuracy/activity trend
+- The per-chip sidebar also shows **current** (against the board's TDC limit), **board power** (tt-smi ≥ 6.0.0), **PCIe** link geometry with live ▼/▲ bandwidth, and — only when they're non-zero, because zero is the healthy answer — **GDDR ECC** errors (uncorrectable in red) and the lifetime **thermal-trip** count. Power and temperature are compared against the board's *real* firmware limits, not generic reference values
 - A **TT-process panel** lists processes by resource use and tags any that match a known inference runtime (ollama, vLLM, llama.cpp, MLX, ComfyUI, …); on TT hardware it also attributes per-process device usage and serving metrics
 - `↑`/`↓` navigate the process list; `k` silences the selected process's alerts, `K` kills it (Linux)
 - `Enter` zooms into the selected chip portrait; `Esc` zooms back out
@@ -102,8 +103,19 @@ Tries: **Hybrid (sysfs + background JSON) → JSON → Mock** on Linux (Luwen is
 ```bash
 tt-toplike --backend sysfs
 ```
-- Reads Linux hwmon (`/sys/class/hwmon/`)
-- Zero interference with running workloads — safe during LLM inference
+- Reads the **two** sysfs surfaces the Tenstorrent driver exposes, both world-readable ordinary files:
+  - Linux hwmon (`/sys/class/hwmon/`) — temperature, voltage, power, current, fan, and the board's real
+    `*_max` limits (a p300c reports 125 W / 500 A / 90 °C). Sensors are picked by their `*_label`, so
+    the ASIC temp sensor is used rather than whichever happens to be `temp1`
+  - tt-kmd class attributes (`/sys/class/tenstorrent/tenstorrent!N/`) — AICLK/AXICLK/ARCCLK, ARC
+    firmware heartbeat, board SKU, firmware bundle version, serial, thermal-trip count, and the
+    `pcie_perf_counters/` that give **live PCIe bandwidth**
+- Zero interference with running workloads — safe during LLM inference; no subprocess, no device open
+- Needs **tt-kmd ≥ 2.7** for the class attributes and **≥ 2.9** for the `*_max` limits on Blackhole.
+  Older drivers just expose less; nothing breaks
+- Still needs `tt-smi` (i.e. the JSON or hybrid backend) for the deeper SMBUS block: DDR training
+  status, GDDR temperatures and ECC counters, per-component firmware versions, and the PCIe link's
+  generation/width
 
 ### JSON (tt-smi)
 ```bash
@@ -111,6 +123,15 @@ tt-toplike --backend json
 ```
 - Runs `tt-smi -s` as a subprocess
 - Requires `tt-smi` installed
+- Adds the full SMBUS block, plus (on tt-smi ≥ 6.0.0) per-device process attribution and board power.
+  No PCIe bandwidth — that comes from the driver counters, which only sysfs/hybrid read
+
+### Hybrid (the default on Linux)
+```bash
+tt-toplike --backend hybrid
+```
+- Sysfs on the fast path plus a background `tt-smi` stream for enrichment — the union of the two above
+- Runs sysfs-only when `tt-smi` isn't installed
 
 ### Host (CPU/RAM — any machine, no TT hardware)
 ```bash
