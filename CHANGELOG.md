@@ -17,10 +17,13 @@ git tag                        # released versions
 ### 0.8.0
 - **Fix: per-device data was shuffled on multi-card boxes.** The sysfs backend
   numbered devices in raw `readdir` order while `tt-smi` orders by PCI bus id, so
-  the default (hybrid) backend's index-keyed join attributed every card's SMBUS
-  data to the wrong card — DDR status, GDDR temps, ECC counters, thermal trips,
-  fan and clocks all landed on a neighbour. Discovery is now sorted by bus id.
-  If you ran the default backend on more than one card, what you saw was mixed up.
+  the default (hybrid) backend's join attributed every card's SMBUS data to the
+  wrong card — DDR status, GDDR temps, ECC counters, thermal trips, fan and clocks
+  all landed on a neighbour. Discovery is now sorted by bus id, **and the join
+  itself keys on the PCI bus id** rather than on list position, so attribution
+  also holds when `tt-smi` enumerates fewer cards than hwmon does (a busy card, a
+  card that failed to enumerate, `--devices` filtering, hotplug). If you ran the
+  default backend on more than one card, what you saw was mixed up.
 - **The safe backend got a lot less telemetry-poor.** Alongside hwmon, the sysfs
   path now reads tt-kmd's class-attribute directory
   (`/sys/class/tenstorrent/tenstorrent!N/`): clock frequencies (AICLK/AXICLK/ARCCLK),
@@ -28,12 +31,16 @@ git tag                        # released versions
   and thermal-trip count. `tt_card_type` **replaces** the ~1.2 s `tt-smi -s` startup
   probe on modern drivers. Needs tt-kmd ≥ 2.7; older drivers keep the old behavior.
 - **Live PCIe bandwidth.** tt-kmd's `pcie_perf_counters/` are folded into in/out
-  directions and differentiated per tick, so Insights shows a PCIe row with link
-  geometry (e.g. `Gen4 x4`) and live ▼/▲ rates. Sysfs and hybrid backends only.
+  directions and differentiated between ~1 Hz samples, so Insights shows a PCIe row
+  with link geometry (e.g. `Gen4 x4`) and live ▼/▲ rates. A counter set that can't
+  be read at all reports nothing rather than a confident 0 B/s. Sysfs and hybrid
+  backends only.
 - **Better hwmon reads**: sensors are picked by their `*_label` (so the ASIC temp
   sensor is used, not whichever has the lowest index), the fan sensor is read, and
-  `*_max` gives real per-board limits (125 W / 500 A / 90 °C on a p300c) instead of
-  hardcoded 300 W / 105 °C. Limits need tt-kmd ≥ 2.9.
+  each sensor's own `*_max` gives real per-board limits (125 W / 500 A / 90 °C on a
+  p300c) instead of hardcoded 300 W / 105 °C — a limit always comes from the same
+  sensor as its reading. Limits need tt-kmd ≥ 2.9. The heavier reads (class attrs,
+  PCIe counters) are sampled at ~1 Hz instead of on every render frame.
 - **New Insights sidebar rows**: Current (with TDC limit), Board power (tt-smi 6.x),
   PCIe, GDDR ECC (only when non-zero — uncorrectable errors in red; they were parsed
   but never shown anywhere before), and thermal trips (only when non-zero).

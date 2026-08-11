@@ -114,14 +114,21 @@ JSON (`tt-smi`) or hybrid backend if you need them:
 
 Step 4 matters more than it looks. `readdir` returns hwmon entries in filesystem order, which is
 neither hwmon-number nor bus-id order and isn't stable across boots (measured on a 4× Blackhole box:
-04:00.0, 03:00.0, 01:00.0, 02:00.0). The hybrid backend joins `tt-smi` metadata and SMBUS telemetry
-onto these devices **by index**, and `tt-smi -s` emits `device_info[]` ascending by bus id — so
-assigning indices in readdir order made every card display another card's data. Candidates whose bus
-id can't be resolved sort last, by hwmon number, so they still get a stable index.
+04:00.0, 03:00.0, 01:00.0, 02:00.0), so assigning indices in readdir order made every card display
+another card's data. Candidates whose bus id can't be resolved sort last, by hwmon number, so they
+still get a stable index — and, having no PCI address, they don't take part in the join below.
+
+Ordering alone isn't enough, though: the hybrid backend joins `tt-smi` metadata and SMBUS telemetry
+onto these devices **by normalized PCI bus id**, not by list position. Bus-id ordering makes the two
+lists *agree* when both enumerate the same cards; the bus-id join is what keeps attribution correct
+when they don't (a card busy or failed to enumerate, `--devices` filtering, hotplug). A `tt-smi`
+entry with no bus id falls back to its array position; one whose bus id matches no hwmon device is
+dropped rather than landed on a neighbour.
 
 ### Sensor Reading
 
-For each hwmon device, sensors are discovered **once** at init and then read directly each tick.
+For each hwmon device, sensors are discovered **once** at init and then read directly each tick (the
+four hwmon inputs; the rest of the read set is decimated — see [Read cadence](#read-cadence)).
 Discovery prefers the input file whose `*_label` sibling matches the expected sensor, and falls back
 to the lowest-numbered existing input for older/unlabeled drivers:
 
@@ -276,7 +283,7 @@ cat /sys/class/tenstorrent/tenstorrent\!0/tt_card_type      # p300c
 cat /sys/class/tenstorrent/tenstorrent\!0/tt_serial         # 0000046131924062
 cat /sys/class/tenstorrent/tenstorrent\!0/tt_fw_bundle_ver  # 19.11.0.0
 
-# Clocks, ARC heartbeat and thermal trips (change every tick)
+# Clocks, ARC heartbeat and thermal trips (dynamic; sampled on the ~1 Hz slow lane)
 cat /sys/class/tenstorrent/tenstorrent\!0/tt_aiclk            # 800
 cat /sys/class/tenstorrent/tenstorrent\!0/tt_axiclk           # 960
 cat /sys/class/tenstorrent/tenstorrent\!0/tt_arcclk           # 800
@@ -474,8 +481,8 @@ backend when you need those.
 
 ### Multi-Device Support
 - **Device ordering**: hwmon indices don't match PCI bus order, so the backend sorts by bus id before
-  assigning device indices — this is what keeps the hybrid backend's index-keyed join against
-  `tt-smi -s` pointing at the right card
+  assigning device indices; the hybrid backend then joins `tt-smi -s` records onto those devices by
+  normalized bus id, so attribution survives tt-smi listing a different set of cards than hwmon does
 - **Dynamic hotplug**: devices appearing after init are not picked up until the backend re-initializes
 - **No coordination**: Hwmon doesn't guarantee consistent multi-device reads
 
