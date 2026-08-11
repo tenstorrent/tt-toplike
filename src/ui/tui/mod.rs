@@ -2774,6 +2774,45 @@ fn render_command_bar(f: &mut Frame, cmd_buf: &str, msg: Option<(&str, bool)>) {
     );
 }
 
+/// Display columns available to a full-mode stats-sidebar row's content
+/// (`stats_w` 31 minus the 1-column `║` border — see `panel_layout`).
+const STATS_CONTENT_W: usize = 30;
+
+/// Columns the sidebar's fixed label column occupies (`format!("{:<8}", …)`).
+const STATS_LABEL_W: usize = 8;
+
+/// How many ETH port dots fit, and the `+N` overflow suffix for the rest.
+///
+/// The sidebar clips instead of wrapping, so the dot map has to yield to the
+/// count text rather than assume a fixed cap: `label(8) + dots + suffix +
+/// count` must stay inside [`STATS_CONTENT_W`]. When the ports don't all fit we
+/// spend up to a few columns on a `+N` suffix, choosing the largest dot count
+/// whose suffix still fits — so the row degrades by dropping dots, never by
+/// truncating the live/total numbers, which are the part an operator reads.
+///
+/// `total` is `None` when firmware reports no ENABLED_ETH mask; there is
+/// nothing to size against, so no dots are drawn.
+fn eth_dot_budget(total: Option<u32>, count_cols: usize) -> (u32, String) {
+    let Some(total) = total else {
+        return (0, String::new());
+    };
+    let budget = STATS_CONTENT_W
+        .saturating_sub(STATS_LABEL_W)
+        .saturating_sub(count_cols);
+    // Everything fits: draw one dot per port, no suffix.
+    if (total as usize) <= budget {
+        return (total, String::new());
+    }
+    // Otherwise trade dots for a "+N" suffix, keeping as many dots as possible.
+    for dots in (0..=budget).rev() {
+        let suffix = format!("+{}", total as usize - dots);
+        if dots + suffix.chars().count() <= budget {
+            return (dots as u32, suffix);
+        }
+    }
+    (0, String::new())
+}
+
 /// Display width (terminal columns) of a fully-styled line: the sum of every
 /// span's unicode display width, so box-drawing, arrows and emoji count as the
 /// columns they actually occupy rather than as byte or `char` counts.
@@ -5469,8 +5508,16 @@ fn build_stats_sidebar_rows(
             ),
         ]));
     } else {
-        const ETH_DOT_CAP: u32 = 16;
-        let dots_shown = eth_total.unwrap_or(ETH_DOT_CAP).min(ETH_DOT_CAP);
+        // The row is label + dots(+overflow suffix) + count text, and the
+        // sidebar clips rather than wraps — so size the dot map to whatever
+        // the count text leaves free instead of a fixed cap. A fixed cap of 16
+        // overflowed: 8 (label) + 12 dots + " 12/12 live" (11) = 31 columns in
+        // a 30-column interior, which cost the "e" of "live".
+        let eth_count_txt = format!(" {}/{} live", eth_live_count, eth_total_display);
+        let (dots_shown, eth_suffix) = eth_dot_budget(
+            eth_total,
+            unicode_width::UnicodeWidthStr::width(eth_count_txt.as_str()),
+        );
         // Dot map: iterate enabled bits when available, else live bits.
         let enabled_bits: Vec<u32> = if eth_enabled_mask > 0 {
             (0..32)
@@ -5490,10 +5537,6 @@ fn build_stats_sidebar_rows(
                 }
             })
             .collect();
-        let eth_suffix = match eth_total {
-            Some(t) if t > ETH_DOT_CAP => format!("+{}", t - ETH_DOT_CAP),
-            _ => String::new(),
-        };
         stat_lines.push(Line::from(vec![
             Span::styled(
                 format!("{:<8}", "ETH"),
@@ -7545,7 +7588,9 @@ pub fn run_render_bench(
 /// dropping the Firmware line. These tests fail instead.
 #[cfg(test)]
 mod stats_sidebar_tests {
-    use super::{build_stats_sidebar_rows, DEVICE_PANEL_H};
+    use super::{
+        build_stats_sidebar_rows, eth_dot_budget, line_cols, DEVICE_PANEL_H, STATS_CONTENT_W,
+    };
     use crate::backend::pcie_counters::PcieBandwidth;
     use crate::models::telemetry::{DeviceLimits, FirmwaresInfo, GddrTempPair};
     use crate::models::{Device, SmbusTelemetry, Telemetry};
@@ -7635,6 +7680,55 @@ mod stats_sidebar_tests {
             rows.len(),
             INTERIOR_H
         );
+    }
+
+    /// Every worst-case row must also fit the sidebar *horizontally*. The panel
+    /// clips instead of wrapping, so an over-wide row silently loses its tail —
+    /// which is exactly what the ETH row did before `eth_dot_budget` existed:
+    /// 8 (label) + 12 dots + " 12/12 live" (11) = 31 columns in a 30-column
+    /// interior, rendering "12/12 liv" on real hardware.
+    #[test]
+    fn stats_sidebar_rows_fit_content_width() {
+        let (device, telem, smbus, bw) = worst_case();
+        for row in build_stats_sidebar_rows(&device, Some(&telem), Some(&smbus), bw, false) {
+            let cols = line_cols(&row);
+            let text: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                cols <= STATS_CONTENT_W,
+                "row {:?} is {} columns; the sidebar interior is {} and clips silently",
+                text,
+                cols,
+                STATS_CONTENT_W
+            );
+        }
+    }
+
+    /// The dot map yields columns to the count text, never the other way round.
+    #[test]
+    fn eth_dot_budget_keeps_the_row_inside_the_interior() {
+        // p300c: 12 enabled ports, all live → " 12/12 live" is 11 columns, so
+        // 30 - 8 - 11 = 11 columns are left. All 12 ports can't fit, so one dot
+        // is traded for the "+1" suffix (10 dots + "+2" also fits 11, and the
+        // loop keeps the most dots whose suffix still fits).
+        let (dots, suffix) = eth_dot_budget(Some(12), " 12/12 live".len());
+        assert!(
+            dots as usize + suffix.chars().count() <= 11,
+            "dots {} + suffix {:?} must fit the 11 free columns",
+            dots,
+            suffix
+        );
+        assert!(dots < 12, "12 dots cannot fit — some must be traded away");
+
+        // A narrow port count leaves room for every dot and needs no suffix.
+        let (dots, suffix) = eth_dot_budget(Some(4), " 4/4 live".len());
+        assert_eq!((dots, suffix.as_str()), (4, ""));
+
+        // Wormhole's 20 ports: still fits, still never overflows.
+        let (dots, suffix) = eth_dot_budget(Some(20), " 20/20 live".len());
+        assert!(dots as usize + suffix.chars().count() <= 30 - 8 - " 20/20 live".len());
+
+        // No ENABLED_ETH mask → nothing to size against, so no dots.
+        assert_eq!(eth_dot_budget(None, " 0/? live".len()), (0, String::new()));
     }
 
     /// Compact mode drops the secondary rows and must stay well inside budget.
