@@ -118,18 +118,66 @@ impl PcieRateTracker {
     }
 }
 
-/// Human-readable rate with SI decimal units, ≤ 3 significant digits.
+/// Human-readable rate with SI decimal units, capped at 9 characters total
+/// (mantissa + space + unit). The Insights sidebar's PCIe row renders this
+/// output for both directions on one line (e.g. "▼12.3 kB/s ▲1.23 GB/s"), so
+/// an unbounded mantissa here directly overflows that row's fixed width —
+/// see `pcie_row_parts` in `ui::tui`, which relies on this 9-char cap to
+/// keep its two-row layout within the sidebar's 30-column budget.
+///
+/// Picks the largest unit (B/s → kB/s → MB/s → GB/s → TB/s) whose mantissa
+/// is < 1000, then formats that mantissa at the highest decimal precision
+/// (2, then 1, then 0) that still fits a 4-character budget *after
+/// rounding* — checked against the actual formatted string length, not
+/// predicted from the pre-rounding magnitude. That distinction matters: a
+/// mantissa like 99.95 formatted to 1 decimal rounds UP to "100.0" (5
+/// chars — one over budget) even though 99.95 itself looks like it should
+/// fit a naive "< 100 → 1 decimal" rule. Falling back to 0 decimals here
+/// yields "100" instead: cosmetically coarser right at that boundary, but
+/// never wider than budget. Concretely, `999_990.0` B/s (999.99 kB/s) lands
+/// on this fallback and renders as "1000 kB/s" (9 chars) rather than the
+/// unbounded-precision "1000.0 kB/s" (11 chars, over budget) a fixed
+/// `{:.1}` would have produced.
+///
+/// TB/s exists purely as a safety net: nothing on a real PCIe link
+/// approaches even 100 GB/s (Gen5 x16 tops out around 63 GB/s), but without
+/// an upper unit the GB/s mantissa would grow without bound for
+/// pathological inputs (the width-regression test below sweeps up to
+/// ~1e14 bytes/sec specifically to exercise this) — capping the mantissa at
+/// < 1000 by continuing to scale down keeps the guarantee unconditional
+/// instead of "true for realistic PCIe speeds."
 pub fn format_bandwidth(bytes_per_sec: f64) -> String {
-    let b = bytes_per_sec.max(0.0);
-    if b < 1000.0 {
-        format!("{:.0} B/s", b)
-    } else if b < 1_000_000.0 {
-        format!("{:.1} kB/s", b / 1000.0)
-    } else if b < 1_000_000_000.0 {
-        format!("{:.0} MB/s", b / 1_000_000.0)
-    } else {
-        format!("{:.2} GB/s", b / 1_000_000_000.0)
+    const UNITS: [&str; 5] = ["B/s", "kB/s", "MB/s", "GB/s", "TB/s"];
+    let mut mantissa = bytes_per_sec.max(0.0);
+    let mut unit_idx = 0;
+    while mantissa >= 1000.0 && unit_idx < UNITS.len() - 1 {
+        mantissa /= 1000.0;
+        unit_idx += 1;
     }
+    let unit = UNITS[unit_idx];
+
+    if unit_idx == 0 {
+        // Whole bytes/sec: never needs a decimal point, and the unit-
+        // selection loop above guarantees mantissa < 1000 going in (though
+        // rounding at {:.0} can still tip e.g. 999.6 up to "1000" — still
+        // only 4 digits, well inside budget for the 3-char "B/s" suffix).
+        return format!("{:.0} {}", mantissa, unit);
+    }
+
+    // Every unit past B/s shares a 4-character suffix ("kB/s".."TB/s"), so
+    // "<mantissa> <unit>" totals 9 chars only if the mantissa itself is
+    // <= 4 chars (a leading space separates it from the unit).
+    const MANTISSA_BUDGET: usize = 4;
+    for &decimals in &[2usize, 1, 0] {
+        let s = format!("{:.*}", decimals, mantissa);
+        if s.len() <= MANTISSA_BUDGET {
+            return format!("{} {}", s, unit);
+        }
+    }
+    // Unreachable for any input the unit-selection loop can produce (it
+    // always leaves mantissa < 1000, so 0 decimals is always <= 4 chars) —
+    // kept as a safety net instead of a panic or unwrap.
+    format!("{:.0} {}", mantissa, unit)
 }
 
 #[cfg(test)]
@@ -183,12 +231,21 @@ mod tests {
         let t0 = Instant::now();
         // First sample only primes the tracker.
         assert!(tracker
-            .sample(PcieCounterSnapshot { words_in: 1000, words_out: 500 }, t0)
+            .sample(
+                PcieCounterSnapshot {
+                    words_in: 1000,
+                    words_out: 500
+                },
+                t0
+            )
             .is_none());
         // 2 s later: +2000 words in, +1000 words out → ×4 bytes / 2 s.
         let bw = tracker
             .sample(
-                PcieCounterSnapshot { words_in: 3000, words_out: 1500 },
+                PcieCounterSnapshot {
+                    words_in: 3000,
+                    words_out: 1500,
+                },
                 t0 + Duration::from_secs(2),
             )
             .unwrap();
@@ -200,11 +257,20 @@ mod tests {
     fn rate_tracker_counter_reset_yields_zero_not_negative() {
         let mut tracker = PcieRateTracker::new();
         let t0 = Instant::now();
-        tracker.sample(PcieCounterSnapshot { words_in: 5000, words_out: 5000 }, t0);
+        tracker.sample(
+            PcieCounterSnapshot {
+                words_in: 5000,
+                words_out: 5000,
+            },
+            t0,
+        );
         // Counters went backwards (device reset) → clamp to 0, don't underflow.
         let bw = tracker
             .sample(
-                PcieCounterSnapshot { words_in: 10, words_out: 10 },
+                PcieCounterSnapshot {
+                    words_in: 10,
+                    words_out: 10,
+                },
                 t0 + Duration::from_secs(1),
             )
             .unwrap();
@@ -219,5 +285,55 @@ mod tests {
         assert_eq!(format_bandwidth(12_300.0), "12.3 kB/s");
         assert_eq!(format_bandwidth(340_000_000.0), "340 MB/s");
         assert_eq!(format_bandwidth(1_230_000_000.0), "1.23 GB/s");
+    }
+
+    /// Pins the two rounding-boundary regressions the review flagged: a
+    /// fixed `{:.1}`/`{:.2}` per unit (the pre-fix implementation) blew the
+    /// 9-char budget exactly at these two magnitudes. Exact strings reflect
+    /// what this implementation's fallback-decimals tiering actually
+    /// produces (see `format_bandwidth`'s doc comment for why).
+    #[test]
+    fn format_bandwidth_new_tier_boundary_pins() {
+        // >= 10 GB/s per direction is realistic on Gen4 x16 (theoretical
+        // max ~31.5 GB/s) — the old fixed-{:.2} GB/s formatting grew to
+        // "31.50 GB/s" (10 chars) as soon as the integer part hit 2 digits.
+        assert_eq!(format_bandwidth(31_500_000_000.0), "31.5 GB/s");
+        // kB/s→MB/s rounding boundary: the old fixed-{:.1} kB/s formatting
+        // produced "1000.0 kB/s" (11 chars) here because 999.99 rounds UP
+        // to 1000 at one decimal place, gaining a 4th mantissa digit.
+        assert_eq!(format_bandwidth(999_990.0), "1000 kB/s");
+    }
+
+    /// Width-regression test: no magnitude may ever push `format_bandwidth`
+    /// past the 9-character budget the Insights sidebar's PCIe row depends
+    /// on (see `pcie_row_parts` / `pcie_row_parts_worst_case_fits_budget`
+    /// in `ui::tui`). Sweeps every unit-tier boundary (exponents 0..=11,
+    /// i.e. up to ~1e14 B/s — far beyond any real PCIe link, deliberately,
+    /// to prove the cap is unconditional) crossed with mantissas chosen to
+    /// land right at rounding cliffs (X.94 stays put, X.95 rounds up and
+    /// risks gaining a digit) plus X.99 (the closest-to-rollover case).
+    #[test]
+    fn format_bandwidth_output_never_exceeds_9_chars() {
+        for exp in 0..=11 {
+            for &m in &[1.0, 9.94, 9.95, 99.94, 99.95, 999.94, 999.95, 999.99] {
+                let value = m * 10f64.powi(exp);
+                let s = format_bandwidth(value);
+                assert!(
+                    s.chars().count() <= 9,
+                    "format_bandwidth({value}) = {s:?} is {} chars, over the 9-char budget",
+                    s.chars().count()
+                );
+                // The output is pure ASCII (digits, '.', space, unit
+                // letters) — char count and unicode display width must
+                // agree. If they ever diverge, a non-ASCII character crept
+                // into a unit string and the sidebar's column math (which
+                // uses unicode_width, not byte/char length) would be wrong.
+                assert_eq!(
+                    s.chars().count(),
+                    unicode_width::UnicodeWidthStr::width(s.as_str()),
+                    "format_bandwidth output must be pure ASCII: {s:?}"
+                );
+            }
+        }
     }
 }

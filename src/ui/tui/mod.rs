@@ -5282,20 +5282,25 @@ fn render_fleet_heatmap_panel(
 ///
 /// The full-mode sidebar's content width is 30 cols; the label column is 8
 /// (`format!("{:<8}", "PCIe")`), leaving 22 for content on a labeled row.
-/// Link geometry alone (worst realistic case "Gen5 x16", 8 cols) and
-/// bandwidth alone (worst realistic case "▼999 MB/s ▲999 MB/s", ~20 cols)
-/// each fit that 22-col budget solo — but concatenated on one row they don't
-/// (e.g. "Gen4 x16 ▼1.23 GB/s ▲1.23 GB/s" is 30 cols of content alone,
-/// 38 total with the label — a hard overflow that used to truncate mid-number).
+/// Link geometry alone (worst realistic case "Gen5 x16", 8 cols) fits that
+/// budget easily solo. Bandwidth alone is bounded by `format_bandwidth`'s
+/// own 9-char-per-direction cap (see its doc comment) to at most
+/// `1 + 9 + 1 + 1 + 9 = 21` cols for "▼<=9 chars> ▲<=9 chars>" — also under
+/// 22 solo. But concatenated on one row, link + bandwidth can still overflow
+/// (e.g. "Gen4 x16 ▼99.5 GB/s ▲99.5 GB/s" is 8 + 1 + 21 = 30 cols of content
+/// alone, 38 total with the label — a hard overflow that used to truncate
+/// mid-number before `format_bandwidth` was capped and this split existed).
 ///
 /// So: when both are present, they're split across two lines — link on the
 /// labeled row, bandwidth on an unlabeled continuation row indented to the
 /// label-column width (8 spaces) instead of repeating "PCIe". That gives the
 /// continuation row the *full* 30-col budget instead of sharing 22 with the
-/// link text; worst case "▼1.23 GB/s ▲1.23 GB/s" content is well under it
-/// (see `pcie_row_parts_worst_case_fits_budget` below). When only one piece
-/// of data is present, it stays alone on the single labeled row exactly as
-/// before — no continuation line is emitted.
+/// link text; worst case bandwidth content is <= 21 cols (proven by
+/// `format_bandwidth`'s cap, exercised in
+/// `pcie_row_parts_worst_case_fits_budget` below with 99.5 GB/s both ways),
+/// so `8 (indent) + 21 = 29 <= 30` — one column of margin. When only one
+/// piece of data is present, it stays alone on the single labeled row
+/// exactly as before — no continuation line is emitted.
 ///
 /// Returns one entry per row to render, as `(is_continuation, content,
 /// is_bandwidth)`:
@@ -6626,7 +6631,12 @@ mod pcie_row_parts_tests {
         let (continuation, content, is_bandwidth) = &rows[0];
         assert!(!continuation);
         assert!(is_bandwidth);
-        assert_eq!(content, " ▼590 B/s ▲1.4 kB/s");
+        // "1.40 kB/s" (2 decimals), not "1.4 kB/s" — the fix-round-2
+        // `format_bandwidth` tries the highest precision that still fits
+        // its 4-char mantissa budget, and "1.40" (4 chars) fits, so it's
+        // preferred over the coarser "1.4". Still well under this row's
+        // budget either way.
+        assert_eq!(content, " ▼590 B/s ▲1.40 kB/s");
     }
 
     #[test]
@@ -6649,16 +6659,20 @@ mod pcie_row_parts_tests {
     }
 
     /// The regression this whole fix is about: at Task 8's original single-row
-    /// width, "Gen4 x16 ▼1.23 GB/s ▲1.23 GB/s" silently overflowed the 30-col
-    /// sidebar and got clipped mid-number. Verify the two-row split actually
-    /// fits — every row's rendered width (label/indent + content) must be
-    /// <= the 30-col content budget, using worst-case realistic inputs
-    /// (max lane width "Gen4 x16" + the fixture bandwidth in both directions).
+    /// width, link geometry + bandwidth silently overflowed the 30-col
+    /// sidebar and got clipped mid-number. This uses a *true* worst case —
+    /// 99.5 GB/s in both directions — rather than the earlier round's
+    /// 1.23 GB/s fixture, which happened to format to the same length as a
+    /// small value and so never exercised the >= 10 GB/s / 2-integer-digit
+    /// growth that `format_bandwidth`'s rounding-boundary fix (see
+    /// `pcie_counters::format_bandwidth_new_tier_boundary_pins`) targets.
+    /// Verify the two-row split actually fits — every row's rendered width
+    /// (label/indent + content) must be <= the 30-col content budget.
     #[test]
     fn pcie_row_parts_worst_case_fits_budget() {
         let bw = PcieBandwidth {
-            rx_bytes_per_sec: 1_230_000_000.0,
-            tx_bytes_per_sec: 1_230_000_000.0,
+            rx_bytes_per_sec: 99_500_000_000.0,
+            tx_bytes_per_sec: 99_500_000_000.0,
         };
         let rows = pcie_row_parts(Some("Gen4 x16".to_string()), Some(bw));
         assert_eq!(rows.len(), 2, "worst case must produce the two-row split");
@@ -6673,13 +6687,16 @@ mod pcie_row_parts_tests {
                 content
             );
         }
-        // The continuation row specifically must fit within 22 cols of
-        // content on top of the 8-col indent, per the width math in
-        // `pcie_row_parts`'s doc comment.
+        // The continuation row's content is "▼<=9 chars> ▲<=9 chars>" —
+        // format_bandwidth guarantees each mantissa+unit is <= 9 chars (see
+        // its doc comment), so the combined worst case is
+        // 1 + 9 + 1 + 1 + 9 = 21 cols, not the 22 an earlier draft of this
+        // comment estimated. 8 (indent) + 21 = 29 <= 30: one column of
+        // margin, not an exact fit.
         let (_, bw_content, _) = &rows[1];
         assert!(
-            UnicodeWidthStr::width(bw_content.as_str()) <= 22,
-            "bandwidth continuation content {:?} exceeds the 22-col budget",
+            UnicodeWidthStr::width(bw_content.as_str()) <= 21,
+            "bandwidth continuation content {:?} exceeds the proven 21-col budget",
             bw_content
         );
     }
