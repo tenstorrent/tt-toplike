@@ -489,6 +489,26 @@ fn decode_processes(value: Option<serde_json::Value>) -> Vec<crate::models::Devi
     decoded
 }
 
+/// Result of an element-wise salvage of a modern-shaped snapshot.
+///
+/// `entries_seen` is the raw length of the `device_info[]` array *before* any
+/// entry was dropped, which is what lets the caller tell two very different
+/// documents apart:
+///
+/// * `entries_seen == 0` — a box with no cards (`"device_info": []`). Zero
+///   devices is the truth here, and reporting success is correct.
+/// * `entries_seen > 0` but `devices.is_empty()` — every per-device block was
+///   in a shape this build can't decode (e.g. a tt-smi upgrade reshaped
+///   `telemetry`). Zero devices is *not* the truth; it's total parse failure,
+///   and the caller must surface it as an error rather than as an empty
+///   success. See `parse_json_devices` for why that distinction is
+///   safety-critical.
+struct SalvagedSnapshot {
+    devices: Vec<TTSMIDeviceJSON>,
+    processes: Vec<crate::models::DeviceProcess>,
+    entries_seen: usize,
+}
+
 /// Salvage a document that carries `device_info` but failed the strict
 /// modern-shape parse, by decoding each `device_info[]` entry independently.
 ///
@@ -502,9 +522,7 @@ fn decode_processes(value: Option<serde_json::Value>) -> Vec<crate::models::Devi
 /// Index attribution is preserved by *array position*, not by "position among
 /// the entries that decoded": a skipped entry leaves its index unused rather
 /// than shifting every later card's SMBUS/limits onto its neighbour.
-fn salvage_modern_snapshot(
-    json_str: &str,
-) -> Option<(Vec<TTSMIDeviceJSON>, Vec<crate::models::DeviceProcess>)> {
+fn salvage_modern_snapshot(json_str: &str) -> Option<SalvagedSnapshot> {
     let mut doc: serde_json::Value = serde_json::from_str(json_str).ok()?;
     let obj = doc.as_object_mut()?;
     let processes = decode_processes(obj.remove("processes"));
@@ -512,6 +530,7 @@ fn salvage_modern_snapshot(
         Some(serde_json::Value::Array(entries)) => entries,
         _ => return None,
     };
+    let entries_seen = entries.len();
 
     let devices = entries
         .into_iter()
@@ -540,7 +559,11 @@ fn salvage_modern_snapshot(
         })
         .collect();
 
-    Some((devices, processes))
+    Some(SalvagedSnapshot {
+        devices,
+        processes,
+        entries_seen,
+    })
 }
 
 /// Pure parse of tt-smi snapshot JSON into the intermediate device list, plus
@@ -615,13 +638,43 @@ fn parse_json_devices(
             // shape element-by-element (see `salvage_modern_snapshot`) so one
             // malformed card costs only that card, and say so at `warn` — the
             // operator needs to know why a device went missing.
-            if let Some((devices, processes)) = salvage_modern_snapshot(json_str) {
+            if let Some(salvaged) = salvage_modern_snapshot(json_str) {
+                // A salvage that rescued *nothing* from a non-empty
+                // `device_info[]` is not a snapshot — it's a total parse
+                // failure, and it must be reported as one. Returning
+                // `Ok((vec![], _))` here looked harmless (the caller merges an
+                // empty list) but was the worst outcome available: the device
+                // list and telemetry maps are merged append-only / per-index,
+                // so nothing is removed, `apply_raw_snapshot` takes its success
+                // arm (bumps `last_update`, resets `error_count`), and the TUI
+                // keeps rendering the *last good* power/temp/clocks as if they
+                // were live — indefinitely, with `max_consecutive_errors` never
+                // firing. That's the failure mode of a tt-smi upgrade that
+                // reshapes a per-device block: frozen numbers presented as
+                // current readings on hardware that may in fact be throttling
+                // or on fire. An `Err` instead feeds the existing error path
+                // (error_count, exponential backoff, `max_consecutive_errors`),
+                // which is what this document produced before the salvage
+                // existed.
+                //
+                // `entries_seen == 0` is the opposite case and stays a success:
+                // `"device_info": []` on a host with no Tenstorrent cards
+                // honestly *has* zero devices.
+                if salvaged.devices.is_empty() && salvaged.entries_seen > 0 {
+                    return Err(BackendError::ParseError(format!(
+                        "tt-smi snapshot did not fit the modern snapshot shape ({e}); \
+                         none of its {} device_info[] entries could be decoded \
+                         element-wise either",
+                        salvaged.entries_seen
+                    )));
+                }
                 log::warn!(
                     "tt-smi snapshot did not fit the modern snapshot shape ({e}); \
-                     salvaged {} of its device_info[] entries element-wise",
-                    devices.len()
+                     salvaged {} of {} device_info[] entries element-wise",
+                    salvaged.devices.len(),
+                    salvaged.entries_seen
                 );
-                return Ok((devices, processes));
+                return Ok((salvaged.devices, salvaged.processes));
             }
         }
     }
@@ -1953,5 +2006,75 @@ mod tests {
             parsed.telemetry.get(&0).is_none(),
             "no telemetry may be attributed to the dropped card's index"
         );
+    }
+
+    /// When *every* `device_info[]` entry is in a shape this build can't decode,
+    /// the snapshot is a total parse failure and must surface as `Err`.
+    ///
+    /// Regression: the element-wise salvage happily returned `Ok((vec![], _))`
+    /// here. Because `merge_parsed` never removes a device and never clears a
+    /// telemetry key, that "success" left the previous snapshot's device list,
+    /// power, temperature and clocks in place while resetting `error_count` and
+    /// bumping `last_update` — so a tt-smi upgrade that reshapes a per-device
+    /// block turned the TUI into a screenshot of the last good poll, presented
+    /// as live telemetry, with `max_consecutive_errors` never firing.
+    #[test]
+    fn snapshot_where_every_device_entry_is_undecodable_is_an_error() {
+        let json = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"}, "telemetry": true},
+                {"board_info": {"bus_id": "0000:02:00.0"}, "telemetry": 7}
+            ]
+        }"#;
+        let err = parse_tt_smi_snapshot(json)
+            .err()
+            .expect("a wholly-undecodable device_info[] must not parse as success");
+        assert!(
+            matches!(err, BackendError::ParseError(_)),
+            "expected a ParseError, got {err:?}"
+        );
+
+        // And drive the real update path: the failure must feed the error
+        // counter (which gates backoff and `max_consecutive_errors`) rather
+        // than resetting it as a successful poll would.
+        let mut backend = JSONBackend::new("tt-smi");
+        backend
+            .apply_raw_snapshot_pub(REAL_TTSMI_JSON)
+            .expect("a good snapshot first, so error_count starts at 0");
+        assert_eq!(backend.error_count, 0);
+
+        assert!(
+            backend.apply_raw_snapshot_pub(json).is_err(),
+            "the undecodable snapshot must be reported to the caller"
+        );
+        assert_eq!(
+            backend.error_count, 1,
+            "a wholly-undecodable snapshot must increment error_count, not reset it"
+        );
+        // The last known-good raw snapshot is deliberately retained (that's
+        // `test_snapshot_json_unchanged_on_parse_error`), but the *error* is now
+        // visible, which is the whole point.
+        assert_eq!(backend.snapshot_json(), Some(REAL_TTSMI_JSON.to_string()));
+    }
+
+    /// The genuinely-empty case is NOT an error: a host with no Tenstorrent
+    /// cards makes tt-smi emit `"device_info": []`, and zero devices is the
+    /// truth. Distinguishing "the array was empty" from "the array had entries
+    /// and we salvaged none" is what keeps the fix above from breaking bring-up
+    /// on a card-less box.
+    #[test]
+    fn empty_device_info_array_is_a_successful_zero_device_snapshot() {
+        let parsed = parse_tt_smi_snapshot(r#"{"device_info": []}"#)
+            .expect("an empty device list is a valid snapshot");
+        assert!(parsed.devices.is_empty());
+        assert!(parsed.telemetry.is_empty());
+
+        // Same through the salvage path itself (a document that also carries a
+        // block the strict parse rejects), so the distinction is enforced where
+        // it is actually made rather than only on the strict-parse happy path.
+        let salvaged = salvage_modern_snapshot(r#"{"device_info": [], "processes": 5}"#)
+            .expect("device_info present ⇒ modern shape");
+        assert_eq!(salvaged.entries_seen, 0);
+        assert!(salvaged.devices.is_empty());
     }
 }
