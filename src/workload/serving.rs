@@ -477,13 +477,7 @@ fn probe_metrics(
             m.requests_decoding = Some(val as u32);
         } else if let Some(val) = parse_metric_line(line, "tt_num_active_sessions") {
             m.active_sessions = Some(val as u32);
-        } else if let Some(val) = parse_metric_line(line, "vllm:gpu_cache_usage_perc")
-            .or_else(|| parse_metric_line(line, "vllm:kv_cache_usage_perc"))
-        {
-            // vLLM renamed gpu_cache_usage_perc → kv_cache_usage_perc; TT
-            // builds in the field have shipped both. The old name keeps
-            // priority (it's what most deployed builds still emit); the new
-            // name is the fallback for builds that have picked up the rename.
+        } else if let Some(val) = parse_kv_cache_line(line) {
             m.kv_cache_utilization = Some(val);
         } else if let Some(val) = parse_metric_line(line, "tt_prefix_cache_hit_rate") {
             m.prefix_cache_hit_rate = Some(val);
@@ -537,6 +531,16 @@ fn parse_metric_line(line: &str, name: &str) -> Option<f32> {
         return None;
     }
     val_part.parse::<f32>().ok()
+}
+
+/// KV-cache utilization from either vLLM metric name. vLLM renamed
+/// gpu_cache_usage_perc → kv_cache_usage_perc; TT builds in the field ship
+/// both, so accept either, old name first for back-compat (it's what most
+/// deployed builds still emit; the new name is the fallback for builds that
+/// have picked up the rename).
+fn parse_kv_cache_line(line: &str) -> Option<f32> {
+    parse_metric_line(line, "vllm:gpu_cache_usage_perc")
+        .or_else(|| parse_metric_line(line, "vllm:kv_cache_usage_perc"))
 }
 
 /// Extract the numeric value from a Prometheus summary/histogram line.
@@ -599,17 +603,19 @@ mod tests {
     }
 
     #[test]
-    fn kv_cache_accepts_new_metric_name() {
+    fn kv_cache_accepts_both_metric_names() {
         // vLLM renamed gpu_cache_usage_perc → kv_cache_usage_perc; TT builds
-        // in the field have shipped both. probe_metrics() tries the old name
-        // first, falling back to the new one via `.or_else()` (a private,
-        // HTTP-driven fn not unit-testable without mocking the probe) — this
-        // proves the underlying line parser recognizes the new metric name's
-        // exposition-format line, which is what the fallback branch depends on.
-        let line = "vllm:kv_cache_usage_perc{engine=\"0\"} 0.37";
-        assert_eq!(
-            parse_metric_line(line, "vllm:kv_cache_usage_perc"),
-            Some(0.37)
-        );
+        // in the field have shipped both. Exercise the exact composed
+        // fallback `probe_metrics` calls (parse_kv_cache_line), not just the
+        // generic parse_metric_line, so a dropped/reordered/typo'd
+        // `.or_else()` would actually fail this test.
+        let old_name = "vllm:gpu_cache_usage_perc{engine=\"0\"} 0.42";
+        assert_eq!(parse_kv_cache_line(old_name), Some(0.42));
+
+        let new_name = "vllm:kv_cache_usage_perc{engine=\"0\"} 0.37";
+        assert_eq!(parse_kv_cache_line(new_name), Some(0.37));
+
+        let unrelated = "tt_num_active_sessions 3";
+        assert_eq!(parse_kv_cache_line(unrelated), None);
     }
 }
