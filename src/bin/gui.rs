@@ -188,8 +188,19 @@ impl TTTopGUI {
                         starfield.update_from_telemetry(&self.backend);
                     }
 
-                    for (i, dashboard) in self.dashboards.iter_mut().enumerate() {
-                        let hist = self.history.get(i);
+                    // `dashboards[i]` belongs to `devices[i]`, but the history is
+                    // keyed by the device's own `index` (see the `push` above),
+                    // and those differ whenever the index set is sparse — a
+                    // salvaged tt-smi snapshot that dropped a malformed
+                    // `device_info[]` entry, or a chip whose ARC never answered
+                    // and was skipped by the Luwen backend. Looking the history
+                    // up positionally then feeds one card's dashboard from
+                    // another card's samples (or from an empty hole).
+                    for (pos, dashboard) in self.dashboards.iter_mut().enumerate() {
+                        let hist = self
+                            .devices
+                            .get(pos)
+                            .and_then(|device| self.history.get(device.index));
                         dashboard.update(hist);
                     }
                 }
@@ -452,7 +463,14 @@ impl TTTopGUI {
 
     /// Charts view showing historical data
     fn view_charts(&self) -> Element<'_, Message> {
-        if let Some(history) = self.history.get(self.selected_device) {
+        // `selected_device` is a position in `self.devices`; the history is keyed
+        // by the device's own `index`. Resolve position → index before the lookup
+        // — on a sparse index set (salvaged snapshot, ARC-dead chip skipped by
+        // the Luwen backend) they differ, and charting by position plots a
+        // different card's power and temperature than the one named in the title.
+        let selected = self.devices.get(self.selected_device);
+        let selected_index = selected.map(|d| d.index).unwrap_or(self.selected_device);
+        if let Some(history) = self.history.get(selected_index) {
             if history.is_empty() {
                 return container(text("Collecting data... please wait").size(18))
                     .center_x(Length::Fill)
@@ -490,9 +508,13 @@ impl TTTopGUI {
 
             let charts_col = column![
                 container(
+                    // Name the physical card (its own index), not its slot in
+                    // the list — those differ on a sparse index set, and the
+                    // title has to agree with the plotted data.
                     text(format!(
                         "Device {}: {} - Historical Data",
-                        self.selected_device, self.devices[self.selected_device].board_type
+                        selected_index,
+                        selected.map(|d| d.board_type.as_str()).unwrap_or("?")
                     ))
                     .size(20)
                 )

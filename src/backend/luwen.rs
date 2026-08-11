@@ -109,6 +109,123 @@ fn map_arch(arch: Arch) -> Architecture {
     }
 }
 
+/// Outcome of triaging one detection sweep by ARC liveness.
+///
+/// See [`triage_chips`] for what "ARC liveness" means to an operator and why the
+/// positions in here are load-bearing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChipTriage {
+    /// Detection-order positions of the chips whose ARC answered — i.e. the
+    /// [`Device::index`] each survivor must be published under.
+    ///
+    /// Deliberately the *original* positions, not `0..live.len()`: this is the
+    /// only handle the operator has on which physical card a panel refers to.
+    live: Vec<usize>,
+
+    /// How many chips the PCI scan turned up in total, live or not.
+    detected: usize,
+}
+
+impl ChipTriage {
+    /// Chips that were detected on the bus but had to be dropped.
+    fn skipped(&self) -> usize {
+        self.detected.saturating_sub(self.live.len())
+    }
+}
+
+/// Triage a detection sweep: which chips can be monitored, under which indices.
+///
+/// Takes the per-chip `arc_alive()` answers in **detection order** (so
+/// `arc_alive[2]` is the third chip the PCI scan turned up) and returns the
+/// positions that survived, plus the total, so the caller can say how many it
+/// dropped.
+///
+/// # What "ARC not responding" means for the operator
+///
+/// The ARC is the small management core on each Tenstorrent ASIC that owns the
+/// telemetry mailbox — every power, current, temperature, clock and ETH reading
+/// this backend serves is read *through* it. A chip whose ARC doesn't answer a
+/// scratch-register read is not necessarily broken silicon; the usual causes are
+/// a wedged or mid-reset ARC firmware, a card that needs `tt-smi -r`, or a stale
+/// tt-kmd after a driver reload. But it does mean the card has **no telemetry
+/// surface at all** for as long as it stays that way, so there is nothing this
+/// backend can render for it beyond "it exists and it is silent".
+///
+/// # Why the positions must be preserved
+///
+/// Dropping a dead chip and renumbering the survivors (`enumerate()` over the
+/// survivors) is the mis-attribution bug this release exists to eliminate. On a
+/// 4-card box whose card 0 has a wedged ARC, renumbering publishes three devices
+/// labelled 0/1/2 that are physically cards 1/2/3 — so every per-index
+/// reference (panel order, the Insights device selection, a saved layout, a
+/// `--devices 0` filter) silently points one card off, and the operator who
+/// power-cycles "card 0" on a thermal alarm pulls the wrong card. Keeping the
+/// true positions makes the index set *sparse* instead of wrong, which is the
+/// honest shape: consumers look telemetry up by [`Device::index`] (see the
+/// `memory_castle`/`starfield` fixes on this branch), and the gap in the numbers
+/// is itself the signal that a card is missing.
+///
+/// # Errors
+///
+/// * no chips detected at all — nothing is attached, or the PCI scan found
+///   nothing this build can talk to;
+/// * chips detected but **every** ARC silent — the caller must fail rather than
+///   hand back an empty device list, or the TUI comes up looking like a healthy
+///   box with no hardware in it.
+fn triage_chips(arc_alive: &[bool]) -> BackendResult<ChipTriage> {
+    if arc_alive.is_empty() {
+        return Err(BackendError::Initialization("No devices found".to_string()));
+    }
+
+    let live: Vec<usize> = arc_alive
+        .iter()
+        .enumerate()
+        .filter_map(|(pos, alive)| if *alive { Some(pos) } else { None })
+        .collect();
+
+    if live.is_empty() {
+        return Err(BackendError::Initialization(format!(
+            "Found {} chip(s) but none had a live ARC — no telemetry available. \
+             The ARC firmware may be wedged or mid-reset; try `tt-smi -r` (or a \
+             host reboot), and check `dmesg` for tt-kmd errors.",
+            arc_alive.len()
+        )));
+    }
+
+    Ok(ChipTriage {
+        live,
+        detected: arc_alive.len(),
+    })
+}
+
+/// Render the footer's backend label, naming any chip this backend had to skip.
+///
+/// A skipped chip is otherwise invisible outside the log — the panel grid just
+/// has one fewer card in it, which on a fleet you don't have memorised looks
+/// exactly like a correctly-monitored smaller fleet. The label is the cheapest
+/// place that is *already rendered* (the TUI footer shows `backend_info()`), so
+/// the count travels with the screen the operator is looking at.
+///
+/// The fuller fix the review asks for is a **degraded device entry**: keep the
+/// dead chip in `devices()` with its true index and let the panel grid draw it
+/// greyed-out and labelled "ARC unresponsive", so the gap is visible in the
+/// place the operator actually reads and the index set stays dense. That is a
+/// new rendering concept (every consumer would need a "has no telemetry" state)
+/// and so is deliberately out of scope for a bugfix release — but it is the
+/// right end state, and this label is the honest interim.
+fn backend_label(detected: usize, live: usize) -> String {
+    let skipped = detected.saturating_sub(live);
+    if skipped == 0 {
+        // Includes the pre-`init()` state (0 detected, 0 live).
+        "Luwen (Direct Hardware)".to_string()
+    } else {
+        format!(
+            "Luwen (Direct Hardware; {} of {} chips — {} ARC-unresponsive)",
+            live, detected, skipped
+        )
+    }
+}
+
 /// Map a luwen `Telemetry` reading onto our core [`Telemetry`] model.
 ///
 /// Split out of `update()` so the mapping decisions are unit-testable from a
@@ -375,9 +492,22 @@ pub struct LuwenBackend {
     /// Cached SMBUS telemetry (per device index)
     smbus_cache: HashMap<usize, SmbusTelemetry>,
 
-    /// Luwen chip handles
+    /// Luwen chip handles, each paired with the **physical** detection-order
+    /// position it was found at — which is also the [`Device::index`] it is
+    /// published under and the key its telemetry is cached by.
+    ///
+    /// The pairing is the whole point: this vector is dense (a chip with a dead
+    /// ARC has no handle to store) while the index space is sparse, so the
+    /// handle's position in here must never be used as a device index. See
+    /// [`triage_chips`].
     #[cfg(feature = "luwen-backend")]
-    chips: Vec<Chip>,
+    chips: Vec<(usize, Chip)>,
+
+    /// How many chips the last detection sweep found on the bus, including any
+    /// whose ARC was silent and were therefore not registered as devices.
+    /// Compared against `devices.len()` by [`backend_label`] so the skip is
+    /// visible in the footer rather than only in the log.
+    detected_chips: usize,
 
     /// Consecutive `update()` calls in which *no* chip's telemetry could be
     /// read. Compared against `config.max_consecutive_errors` so a card that has
@@ -401,6 +531,7 @@ impl LuwenBackend {
             smbus_cache: HashMap::new(),
             #[cfg(feature = "luwen-backend")]
             chips: Vec::new(),
+            detected_chips: 0,
             consecutive_errors: 0,
         }
     }
@@ -433,10 +564,6 @@ impl LuwenBackend {
         let detected = luwen_pci::detect_chips_silent(options)
             .map_err(|e| BackendError::Initialization(format!("Device detection failed: {}", e)))?;
 
-        if detected.is_empty() {
-            return Err(BackendError::Initialization("No devices found".to_string()));
-        }
-
         log::info!("LuwenBackend: Found {} candidate chips", detected.len());
 
         // Detection yields `UninitChip`s. We deliberately do NOT call `init()`
@@ -444,26 +571,51 @@ impl LuwenBackend {
         // have no business driving on a card that is busy serving) — telemetry
         // lives behind the ARC, so `arc_alive()` is the whole precondition, and
         // `upgrade()` just unwraps the already-open chip handle.
-        let mut chips: Vec<Chip> = Vec::with_capacity(detected.len());
-        for (idx, uninit) in detected.into_iter().enumerate() {
-            if !uninit.arc_alive() {
+        //
+        // `arc_alive()` is a scratch-register read, so ask each chip exactly
+        // once and carry the answers: the triage decision, the log lines and the
+        // footer's skip count all work off this one sweep.
+        let arc_alive: Vec<bool> = detected.iter().map(|uninit| uninit.arc_alive()).collect();
+
+        // Errors when nothing was detected, or when every ARC was silent — in
+        // the latter case a card *is* present and we must say so rather than
+        // hand back an empty device list that reads as "no hardware installed".
+        let triage = triage_chips(&arc_alive)?;
+        self.detected_chips = triage.detected;
+
+        if triage.skipped() > 0 {
+            log::warn!(
+                "LuwenBackend: {} of {} chips have no live ARC and cannot be monitored; \
+                 the surviving chips keep their true indices, so the device list is sparse",
+                triage.skipped(),
+                triage.detected
+            );
+        }
+
+        // Pair every surviving handle with its **physical** detection-order
+        // position. Zipping the liveness answers back over the chips keeps that
+        // position attached; collapsing to `enumerate()` over the survivors is
+        // exactly the renumbering bug this pairing exists to prevent.
+        let mut chips: Vec<(usize, Chip)> = Vec::with_capacity(triage.live.len());
+        for (pos, (uninit, alive)) in detected.into_iter().zip(&arc_alive).enumerate() {
+            if !*alive {
                 log::warn!(
-                    "LuwenBackend: skipping chip {} — ARC not responding, no telemetry available",
-                    idx
+                    "LuwenBackend: skipping chip {pos} — ARC not responding, no telemetry \
+                     available. Index {pos} stays reserved for it; the remaining chips keep \
+                     their own indices and are NOT renumbered."
                 );
                 continue;
             }
-            chips.push(uninit.upgrade());
+            chips.push((pos, uninit.upgrade()));
         }
+        debug_assert_eq!(
+            chips.iter().map(|(pos, _)| *pos).collect::<Vec<_>>(),
+            triage.live,
+            "triage and the kept handles must agree on the surviving positions"
+        );
 
-        if chips.is_empty() {
-            return Err(BackendError::Initialization(
-                "Devices found but none had a live ARC (no telemetry available)".to_string(),
-            ));
-        }
-
-        // Register each chip whose ARC answered
-        for (idx, chip) in chips.into_iter().enumerate() {
+        // Register each chip whose ARC answered, under its physical index.
+        for (idx, chip) in chips {
             // Get architecture
             let arch = chip.get_arch();
             let architecture = map_arch(arch);
@@ -487,7 +639,13 @@ impl LuwenBackend {
                 None => format!("{:?}", arch),
             };
 
-            // Create device
+            // Create device.
+            //
+            // `index` is the chip's physical detection-order position, so a
+            // skipped ARC-dead chip leaves a *gap* in the index set rather than
+            // shifting its healthy neighbours down by one. Consumers address
+            // telemetry by this value (never by list position) — see the
+            // memory_castle/starfield/arcade fixes on this branch.
             let device = Device {
                 index: idx,
                 board_type,
@@ -509,8 +667,10 @@ impl LuwenBackend {
 
             self.devices.push(device);
 
-            // Store chip handle for telemetry reads
-            self.chips.push(chip);
+            // Store chip handle for telemetry reads, still paired with its
+            // physical index — `update()` keys the caches by that, not by the
+            // handle's position in this vector.
+            self.chips.push((idx, chip));
         }
 
         log::info!(
@@ -547,8 +707,15 @@ impl TelemetryBackend for LuwenBackend {
 
             let mut any_ok = false;
 
-            // Read telemetry from each chip
-            for (idx, chip) in self.chips.iter().enumerate() {
+            // Read telemetry from each chip.
+            //
+            // `idx` comes off the stored pair — the chip's physical index —
+            // never from the handle's position in `self.chips`. That vector is
+            // dense while the index space can be sparse (an ARC-dead chip has no
+            // handle), so enumerating it would cache card 1's watts under key 0
+            // and every panel would read one card off.
+            for (idx, chip) in self.chips.iter() {
+                let idx = *idx;
                 match chip.get_telemetry() {
                     Ok(luwen_telem) => {
                         any_ok = true;
@@ -614,8 +781,11 @@ impl TelemetryBackend for LuwenBackend {
         self.smbus_cache.get(&device_idx)
     }
 
+    /// Backend label for the footer — carries the ARC-unresponsive skip count so
+    /// a missing card is visible on screen and not only in the log. See
+    /// [`backend_label`].
     fn backend_info(&self) -> String {
-        "Luwen (Direct Hardware)".to_string()
+        backend_label(self.detected_chips, self.devices.len())
     }
 }
 
@@ -635,6 +805,108 @@ mod tests {
         let config = BackendConfig::default().with_interval(50);
         let backend = LuwenBackend::with_config(config);
         assert_eq!(backend.config.update_interval_ms, 50);
+    }
+
+    /// Index-assignment triage over a detection sweep.
+    ///
+    /// `detect_devices()` itself can't run here (it scans PCI and pokes each
+    /// chip's ARC; the development box serves live inference, which is why this
+    /// backend is explicit-only), so the index arithmetic and the skip
+    /// accounting are factored into [`triage_chips`] / [`backend_label`] and
+    /// pinned here — the same pattern as the `map_telemetry` / `map_smbus`
+    /// mapping tests below.
+    mod triage {
+        use super::*;
+
+        /// The regression: a wedged ARC on card 0 must NOT renumber cards 1–3
+        /// down to 0–2.
+        ///
+        /// Before the fix the survivors were re-enumerated, so a 4-card box with
+        /// a dead card 0 came up showing three devices labelled 0/1/2 that were
+        /// physically cards 1/2/3 — every per-index reference (panel order,
+        /// device selection, saved layouts, `--devices N`) off by one, and an
+        /// operator acting on a thermal alarm for "card 0" pulls the wrong card.
+        #[test]
+        fn dead_first_chip_keeps_the_survivors_true_indices() {
+            let triage = triage_chips(&[false, true, true, true])
+                .expect("three live ARCs is a monitorable box");
+
+            assert_eq!(
+                triage.live,
+                vec![1, 2, 3],
+                "survivors keep their physical detection-order positions"
+            );
+            assert_eq!(triage.detected, 4);
+            assert_eq!(triage.skipped(), 1);
+        }
+
+        /// A gap in the middle behaves the same way — the index set is sparse,
+        /// never compacted.
+        #[test]
+        fn dead_middle_chip_leaves_a_gap_rather_than_shifting() {
+            let triage = triage_chips(&[true, false, true, true]).expect("three live ARCs");
+            assert_eq!(triage.live, vec![0, 2, 3]);
+            assert_eq!(triage.skipped(), 1);
+        }
+
+        /// The healthy box is untouched: dense 0..n, nothing skipped.
+        #[test]
+        fn all_live_chips_are_numbered_densely() {
+            let triage = triage_chips(&[true, true, true, true]).expect("a healthy box");
+            assert_eq!(triage.live, vec![0, 1, 2, 3]);
+            assert_eq!(triage.detected, 4);
+            assert_eq!(triage.skipped(), 0);
+        }
+
+        /// Cards present but every ARC silent must be an error, not an empty
+        /// device list — otherwise the TUI comes up looking like a working box
+        /// with no hardware installed, which reads as "tt-toplike is fine, the
+        /// machine has no cards" instead of "your cards need a reset".
+        #[test]
+        fn all_arcs_dead_is_an_error_not_an_empty_fleet() {
+            let err = triage_chips(&[false, false, false, false])
+                .expect_err("a fleet with no telemetry surface must fail loudly");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("4 chip(s)") && msg.contains("live ARC"),
+                "the error must say how many chips were found and why they're unusable: {msg}"
+            );
+            assert!(
+                msg.contains("tt-smi -r"),
+                "and point at the recovery an operator can actually perform: {msg}"
+            );
+        }
+
+        /// Nothing detected at all keeps the pre-existing "No devices found"
+        /// wording — a distinct condition from "found, but all wedged".
+        #[test]
+        fn no_chips_detected_is_a_distinct_error() {
+            let err = triage_chips(&[]).expect_err("an empty sweep is an error");
+            assert!(err.to_string().contains("No devices found"), "{err}");
+        }
+
+        /// The skip has to be visible somewhere the operator is already looking.
+        /// `backend_info()` renders in the TUI footer, so the count rides along
+        /// with it; a `log::warn!` alone is invisible inside a full-screen TUI.
+        #[test]
+        fn backend_label_names_the_skipped_chips() {
+            assert_eq!(
+                backend_label(4, 3),
+                "Luwen (Direct Hardware; 3 of 4 chips — 1 ARC-unresponsive)"
+            );
+            assert_eq!(
+                backend_label(4, 1),
+                "Luwen (Direct Hardware; 1 of 4 chips — 3 ARC-unresponsive)"
+            );
+        }
+
+        /// A healthy fleet (and the pre-`init()` state) keeps the plain label —
+        /// no scary counts on a box where nothing is wrong.
+        #[test]
+        fn backend_label_stays_plain_when_nothing_was_skipped() {
+            assert_eq!(backend_label(4, 4), "Luwen (Direct Hardware)");
+            assert_eq!(backend_label(0, 0), "Luwen (Direct Hardware)");
+        }
     }
 
     /// Mapping tests over a hand-built luwen `Telemetry`.
