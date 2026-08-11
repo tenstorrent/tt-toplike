@@ -8,11 +8,12 @@
 //! with both luwen (direct hardware) and JSON (subprocess) backends.
 
 pub mod device;
+pub(crate) mod serde_num;
 pub mod telemetry;
 
 // Re-export commonly used types
 pub use device::{Architecture, Device};
 pub use telemetry::{
-    tensix_col_harvested, unpack_gddr_temps, DeviceLimits, DeviceProcess, FirmwaresInfo,
-    GddrTempPair, SmbusTelemetry, Telemetry, BH_TENSIX_COL_COUNT,
+    fw_bundle_version_string, tensix_col_harvested, unpack_gddr_temps, DeviceLimits, DeviceProcess,
+    FirmwaresInfo, GddrTempPair, SmbusTelemetry, Telemetry, BH_TENSIX_COL_COUNT,
 };

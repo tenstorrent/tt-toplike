@@ -34,44 +34,18 @@ use crate::backend::{BackendConfig, TelemetryBackend};
 use crate::error::{BackendError, BackendResult};
 use crate::models::{Device, SmbusTelemetry, Telemetry};
 use chrono::Utc;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
 // tt-smi encodes numeric telemetry values as quoted JSON strings, possibly with
-// leading whitespace (e.g. `"power": " 16.0"`).  These helpers accept either a
-// JSON number or a JSON string (trimmed) and return None for null / unparseable.
-
-fn de_opt_f32_str<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f32>, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum NumOrStr {
-        Num(f32),
-        Str(String),
-        Null,
-    }
-    Ok(match Option::<NumOrStr>::deserialize(d)? {
-        Some(NumOrStr::Num(v)) => Some(v),
-        Some(NumOrStr::Str(s)) => s.trim().parse::<f32>().ok(),
-        Some(NumOrStr::Null) | None => None,
-    })
-}
-
-fn de_opt_u32_str<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum NumOrStr {
-        Num(u32),
-        Str(String),
-        Null,
-    }
-    Ok(match Option::<NumOrStr>::deserialize(d)? {
-        Some(NumOrStr::Num(v)) => Some(v),
-        Some(NumOrStr::Str(s)) => s.trim().parse::<u32>().ok(),
-        Some(NumOrStr::Null) | None => None,
-    })
-}
+// leading whitespace (e.g. `"power": " 16.0"`). These helpers accept either a
+// JSON number or a JSON string (trimmed) and return None for null /
+// unparseable. They live in `models::serde_num` because `DeviceLimits` — a
+// model, which must not depend on this backend — needs exactly the same
+// tolerance for tt-smi's string-valued `limits` block.
+use crate::models::serde_num::{de_opt_f32_str, de_opt_u32_str};
 
 /// Actual tt-smi JSON format (from -s/--snapshot)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1492,6 +1466,90 @@ mod tests {
         );
         assert_eq!(meta.pcie_width, Some(4));
         assert_eq!(meta.board_power, Some(42.0));
+    }
+
+    /// A `limits` block exactly as tt-smi 5.3.0 emits it on a live p300c:
+    /// numeric values as **quoted strings**, except `bus_peak_limit` /
+    /// `fan_rpm_limit` which are bare numbers.
+    ///
+    /// Regression for the finding that `--backend json` never got real limits:
+    /// `Option<f32>` fields rejected the string form, serde failed the whole
+    /// block, and `Device::limits` stayed `None` — so the Insights rows fell
+    /// back to the UI's generic 300 W / 105 °C. The hybrid path masked this
+    /// because hwmon `*_max` supplies its limits instead.
+    const TTSMI_53_STRING_LIMITS_JSON: &str = r#"{
+        "device_info": [{
+            "board_info": {
+                "board_type": "p300c",
+                "bus_id": "0000:01:00.0",
+                "coords": "(0,0)"
+            },
+            "telemetry": {"power": " 16.0", "asic_temperature": "38.4"},
+            "firmwares": {
+                "fw_bundle_version": "19.11.0.0",
+                "tt_flash_version": "N/A",
+                "cm_fw": "0.33.0.0",
+                "cm_fw_date": "2020-00-33",
+                "eth_fw": "1.11.0",
+                "dm_bl_fw": "0.0.0.0",
+                "dm_app_fw": "0.27.0.0",
+                "gddr_fw": "2.16"
+            },
+            "limits": {
+                "vdd_min": "0.70",
+                "vdd_max": "0.90",
+                "tdp_limit": "125",
+                "tdc_limit": "500",
+                "asic_fmax": "1350",
+                "therm_trip_l1_limit": "90",
+                "thm_limit": "110",
+                "bus_peak_limit": 0,
+                "fan_rpm_limit": 0
+            }
+        }]
+    }"#;
+
+    /// End-to-end through the pure-JSON parser: the string-valued limits must
+    /// land on `Device::limits`, with `thm_limit` carrying the 90 °C throttle
+    /// point (not tt-smi's 110 °C shutdown value) so the number printed next to
+    /// Temp means the same thing here as it does on sysfs/hybrid/luwen.
+    #[test]
+    fn json_path_parses_tt_smi_53_string_limits() {
+        let parsed =
+            parse_tt_smi_snapshot(TTSMI_53_STRING_LIMITS_JSON).expect("live snapshot must parse");
+        let dev = &parsed.devices[0];
+        let lim = dev
+            .limits
+            .as_ref()
+            .expect("string-valued limits block must reach Device::limits");
+        assert_eq!(lim.tdp_limit, Some(125.0));
+        assert_eq!(lim.tdc_limit, Some(500.0));
+        assert_eq!(lim.asic_fmax, Some(1350));
+        assert_eq!(lim.thm_limit, Some(90.0));
+        // The firmwares block (all-string on real hardware) must survive too.
+        assert_eq!(
+            dev.firmwares
+                .as_ref()
+                .and_then(|f| f.fw_bundle_version.as_deref()),
+            Some("19.11.0.0")
+        );
+    }
+
+    /// The hybrid backend's reader takes the `parse_snapshot` path instead, so
+    /// pin the same expectation there — a fix in only one of the two parse
+    /// sites would leave the other silently dropping limits.
+    #[test]
+    fn parse_snapshot_meta_parses_tt_smi_53_string_limits() {
+        let snap = parse_snapshot(TTSMI_53_STRING_LIMITS_JSON);
+        let meta = snap.meta.get(&0).expect("meta for device 0 missing");
+        let lim = meta
+            .limits
+            .as_ref()
+            .expect("string-valued limits block must reach DeviceMeta::limits");
+        assert_eq!(lim.tdp_limit, Some(125.0));
+        assert_eq!(lim.tdc_limit, Some(500.0));
+        assert_eq!(lim.asic_fmax, Some(1350));
+        assert_eq!(lim.thm_limit, Some(90.0));
     }
 
     /// The shared pure parser must yield the full device triad — the exact
