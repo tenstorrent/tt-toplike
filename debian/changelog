@@ -24,8 +24,12 @@ tt-toplike (0.8.0) noble; urgency=medium
       with link geometry (GenN ×width) and live ▼/▲ rates.
     - JSON backend parses tt-smi's full `board_info` (PCIe speed/width,
       tolerant of tt-smi's number-vs-string drift across versions) and
-      falls back FAN_RPM → fan_speed for tt-smi 5.3.0's fan-semantics
-      change. It also picks up tt-smi 6.x's top-level `processes[]` array
+      handles tt-smi 5.3.0's fan-semantics change by choosing whichever of
+      FAN_SPEED / FAN_RPM holds a real (non-sentinel) RPM — live tt-smi
+      emits *both* keys, and on Blackhole FAN_SPEED is the `0x0` sentinel
+      while FAN_RPM carries the reading, so a present-but-absent fallback
+      chain would still have left the Fan row blank. It also picks up
+      tt-smi 6.x's top-level `processes[]` array
       (new `DeviceProcess` model + `device_processes()` trait method,
       wired through both the JSON and WebSocket backends) and
       `telemetry.board_power`.
@@ -40,14 +44,29 @@ tt-toplike (0.8.0) noble; urgency=medium
       (`gpu_cache_usage_perc` or `kv_cache_usage_perc`) via a shared
       `parse_kv_cache_line` helper — some deployments only expose one or
       the other.
+  * Device ordering fix (affects every multi-card box): the sysfs backend
+    assigned device indices in raw `readdir` order, which is neither hwmon
+    number nor PCI bus-id order and is not stable across boots. The hybrid
+    backend joins tt-smi metadata and SMBUS telemetry by *index*, and
+    `tt-smi -s` orders devices ascending by bus id — so on a 4-card box
+    every device displayed another card's DDR/ARC/GDDR/ECC/fan/clock data
+    plus this release's new PCIe geometry and board power. Discovery is now
+    sorted by bus id before indices are assigned.
   * luwen-backend migrated off the abandoned `all-smi-luwen-*` forks (13
-    months without a release) onto the official `luwen-api`/`luwen-def`
-    0.8.5 crates. Picks up Blackhole GDDR temperatures/ECC counters,
-    harvesting/enabled core masks, thermal trips, and input/board
-    power-limit fields the forked crates never exposed. Still launch-only
-    (never auto-detected, never touched by the live `b` backend-cycle key)
-    pending upstream arbitration between Luwen's BAR0 mapping and a
-    tt-kmd already serving an active workload.
+    months without a release) onto the official
+    `luwen-api`/`luwen-pci`/`luwen-def` 0.8.5 crates. Picks up Blackhole
+    GDDR temperatures/ECC counters, harvesting/enabled core masks, thermal
+    trips, and input/board power-limit fields the forked crates never
+    exposed. `luwen-pci` is required, not optional: `luwen-api` carries no
+    hardware transport, so an early cut of this migration could not detect
+    a device at all — enumeration now goes through
+    `luwen_pci::detect_chips_silent`, which does its own PCI scan.
+    **This migration is compile-verified and reasoned from the official
+    crate sources only; hardware verification is still pending.** The
+    backend remains launch-only (never auto-detected, never touched by the
+    live `b` backend-cycle key) pending upstream arbitration between
+    Luwen's BAR0 mapping and a tt-kmd already serving an active workload —
+    which is also why no box was available to run it on.
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 10 Aug 2026 00:00:00 +0000
 

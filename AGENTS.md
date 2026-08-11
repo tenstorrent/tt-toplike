@@ -4136,8 +4136,15 @@ override it, since they're the only ones with kmd's raw counter files handy.
 tt-smi's JSON output keeps changing shape underneath us:
 - `board_info` needed tolerant parsing (PCIe speed/width sometimes numbers,
   sometimes strings across tt-smi releases).
-- tt-smi 5.3.0 changed fan telemetry semantics; JSON backend now falls back
-  FAN_RPM → fan_speed.
+- tt-smi 5.3.0 changed fan telemetry semantics; the JSON backend now picks
+  whichever of `FAN_SPEED` / `FAN_RPM` holds a real (non-sentinel) RPM,
+  preferring `FAN_SPEED` for back-compat. **Not** an `Option::or` fallback:
+  live tt-smi emits *both* keys, so `or` never falls through, and on
+  Blackhole `FAN_SPEED` is the `0x0` sentinel while `FAN_RPM` carries the
+  reading (the committed fixture: `FAN_SPEED="0x0"`, `FAN_RPM="0x75a"` =
+  1882 RPM). One sentinel predicate — `real_fan_rpm` in
+  `models/telemetry.rs`, filtering `0`/`0xFFFF`/`0xFFFFFFFF` — is now shared
+  by the accessor, the JSON parser, and the luwen mapping.
 - tt-smi 6.x introduced a top-level `processes[]` array (new `DeviceProcess`
   model, `device_processes()` trait method, wired through JSON *and*
   WebSocket backends) and `telemetry.board_power`.
@@ -4159,13 +4166,87 @@ output so the panel layout can't wrap under any input.
 `all-smi-luwen-core`/`-if`/`-ref` — the third-party forks the Luwen backend
 was built on since Phase 6 — had gone 13 months without a release and were
 missing Blackhole telemetry tags entirely. Migrated to the crates.io
-`luwen-api`/`luwen-def` 0.8.5 crates published directly from
+`luwen-api`/`luwen-pci`/`luwen-def` 0.8.5 crates published directly from
 `tenstorrent/luwen`. This is a straight upgrade in capability: Blackhole
 GDDR temperatures and ECC counters, harvesting/enabled core masks, thermal
 trips, and input/board power-limit fields the forks never surfaced.
-`detect_chips_silent` in the official crate returns already-initialized
-`Chip`s (no separate init-callback dance), which simplified
-`detect_devices()` along the way.
+
+> ⚠️ **Verification status: compile-verified + reasoned from crate source
+> only. Never run against hardware.** The whole reason Luwen is launch-only
+> (below) is also the reason there was no box to test it on — this machine
+> serves live inference on 4× Blackhole. Treat the whole luwen path as
+> unvalidated until someone runs it on an idle card.
+
+**Which crate does what** (this cost a bug — see below):
+- **`luwen-pci`** owns the PCIe transport *and* local enumeration:
+  `PciDevice::scan()` → `ExtendedPciDevice::open()` → `Chip::open()`, wrapped
+  as `luwen_pci::detect_chips_silent(options)`. This is the path upstream's
+  own `detect_chips`/`detect_local_chips` helpers and `examples/demo.rs`
+  take.
+- **`luwen-api`** owns only the protocol/arch layer (`Chip`,
+  `ChipImpl::get_telemetry`, the per-arch telemetry decode). It has **no
+  hardware transport** — no PCI/ttkmd crate anywhere in its dependency set.
+  Its same-named `detect_chips_silent(root_chips, options)` takes the root
+  chips as its *first argument* and enumerates outward from them, so calling
+  it with `Vec::new()` returns `Ok(vec![])`. The first cut of this migration
+  did exactly that and could therefore never detect a device: init always
+  failed "No devices found". Fixed by adding `luwen-pci` to the
+  `luwen-backend` feature and enumerating through it.
+- `luwen-kmd` comes in transitively (via `luwen-pci`) and isn't referenced
+  directly. The umbrella `luwen` crate is just re-exports of all four.
+
+Detection yields `UninitChip`s. We deliberately do **not** call
+`UninitChip::init()` — that re-runs `wait_for_init` and drives DRAM/ETH
+bring-up, which a read-only monitor has no business doing to a card that may
+be busy. Telemetry lives behind the ARC, so `arc_alive()` is the whole
+precondition and `upgrade()` just unwraps the already-open handle.
+
+**Blackhole vs Wormhole is load-bearing in the mapping.** BH assembles its
+`Telemetry` from a *tag table* and finishes with `..Default::default()`; WH
+reads a *fixed-offset* struct and likewise defaults the BH-only fields. So a
+field the other arch doesn't emit reads `0`, indistinguishable from a real
+zero — and the first cut published all of them unconditionally as `Some(0)`.
+Four consequences, all fixed and unit-tested against hand-built
+`luwen_api::chip::Telemetry` values (the only verification possible without
+hardware — see `map_smbus`/`map_telemetry`, extracted from `update()` for
+exactly this reason):
+- **`arc0..3_health` are never assigned on BH** (only `timer_heartbeat` is).
+  A permanent `Some(0)` fed `InferenceEngine`, whose stall signal *is* an
+  unchanging observed counter → every device classified `Stalled` with
+  `Confidence::High` after ~30 frames. `arc0_health` now comes from
+  `telemetry_heartbeat()` (the accessor that papers over the gap), matching
+  where both safe backends put it (json: `TIMER_HEARTBEAT`, sysfs:
+  `tt_heartbeat`); `arc1..3` stay `None` on BH so the detector reads them as
+  "not observed" rather than "frozen".
+- **`thm_limits` was a raw register** while every other backend writes
+  decoded °C — and `starfield.rs` uses it directly as a trip point, so it
+  evaluated to ~6.8M and the thermal-headroom cue could never fire. New
+  shared `thm_limit_shutdown_c` helper: WH packs throttle (high half) and
+  shutdown (low half) into one word, BH's `ThmLimits` tag is already plain
+  °C — matching tt-smi's own `get_chip_limits`/`get_bh_chip_limits`.
+- **ETH read "0/12 live" on a healthy card**: `enabled_eth` (denominator)
+  was populated but `eth_live_status` (numerator) left `None` — worse than
+  the honest `0/?` it replaced. On BH the numerator *is* there:
+  `blackhole.rs` maps `TelemetryTags::EthLiveStatus` into the `eth_status0`
+  field. Both are now published on BH; on WH, where neither mask exists,
+  both stay `None`.
+- **`pcie_status` and `fan_speed` came out blank/zero.** Downstream
+  `pcie_status` means PCIE_USAGE, a *lane count* (json.rs maps tt-smi's
+  `PCIE_USAGE` there; `defrag.rs` parses it as 4/8/16); BH publishes that as
+  the `PcieUsage` tag → `enabled_pcie`, and never assigns `pcie_status`.
+  Fan: BH leaves `FanSpeed` at the `0` sentinel and carries RPM in `FanRpm`
+  — the same split tt-smi shows, so it reuses the shared sentinel predicate.
+
+**Device-index ordering (found in the same review, affects the safe path).**
+`SysfsBackend::detect_devices` assigned indices in raw `fs::read_dir` order,
+which is neither hwmon-number nor bus-id order and isn't stable across boots
+(measured here: 04:00.0, 03:00.0, 01:00.0, 02:00.0). `HybridBackend` joins
+tt-smi metadata and SMBUS telemetry **by index**, and `tt-smi -s` orders
+`device_info[]` ascending by bus id — so every card displayed another card's
+DDR/ARC/GDDR/ECC/trips/fan/clocks plus this release's new PCIe geometry and
+board power. Discovery is now collect → sort by bus id → assign indices.
+**If you add another per-index map to that backend, populate it from the
+sorted sequence.**
 
 **Why Luwen stays launch-only.** Beyond the long-standing "direct PCI BAR0
 access can disrupt a running workload" reasoning from Phase 14, task 10's
@@ -4189,6 +4270,28 @@ CI comment still naming the abandoned `all-smi-luwen-if` fork; and narrowing
 an `#[allow(deprecated)]` in `luwen.rs` from covering a whole `match arch`
 down to just the one arm (`Arch::Grayskull`) upstream actually deprecated.
 
+### Two more traps the final review caught (both safe-path)
+
+* **`smbus_smooth::apply_ema` enumerates fields by hand**, and it carried none
+  of the ten *non-string* `SmbusTelemetry` fields (GDDR temps, ECC counters,
+  `max_gddr_temp`, the `enabled_*`/`eth_live_status`/`harvesting_state`
+  bitmasks). Since `HybridBackend` only clones the whole struct on the
+  **first** insert for a device, those froze at the first snapshot — so the
+  new GDDR ECC row was permanently inert (counters read 0 on a healthy boot,
+  and anything accruing later never showed). They're copied straight through
+  now; **none of them wants EMA** — counters are monotonic, `max_gddr_temp`
+  is a maximum (smoothing a max understates the peak), and an interpolated
+  bitmask is meaningless. **Adding a field to `SmbusTelemetry` means adding a
+  line here too** — the compiler will not tell you.
+* **`HybridBackend::smbus_telemetry()` returned only the tt-smi blend.** On a
+  modern-kmd box with no tt-smi installed, auto-detect still lands on Hybrid,
+  so it reported `None` for every device and item 1's whole sysfs synthesis
+  (fan, clocks, therm trips, serial, heartbeat) was reachable only via an
+  explicit `--backend sysfs`. It now falls back to the inner sysfs cache per
+  device index, with the richer tt-smi blend still winning where present.
+
 ---
 
-*Phase 25 status: **COMPLETE** — shipped as v0.8.0*
+*Phase 25 status: **COMPLETE** — shipped as v0.8.0. Safe (sysfs/hybrid/json)
+path verified on 4× Blackhole; luwen path compile-verified only, hardware
+verification pending.*
