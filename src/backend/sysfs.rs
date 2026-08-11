@@ -661,6 +661,15 @@ impl SysfsBackend {
     pub(crate) fn insert_smbus_for_test(&mut self, device_idx: usize, smbus: SmbusTelemetry) {
         self.smbus_cache.insert(device_idx, smbus);
     }
+
+    /// Append a device to the list without touching the filesystem — test helper
+    /// only. Lets `HybridBackend` tests build a multi-card device list (with real
+    /// bus ids, which its tt-smi join keys on) without a fake hwmon tree.
+    /// `update()` on such a device is a no-op: it has no cached sensor paths.
+    #[cfg(test)]
+    pub(crate) fn push_device_for_test(&mut self, device: Device) {
+        self.devices.push(device);
+    }
 }
 
 impl TelemetryBackend for SysfsBackend {

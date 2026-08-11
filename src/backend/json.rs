@@ -1050,6 +1050,25 @@ pub(crate) struct DeviceMeta {
 pub(crate) struct SnapshotParts {
     pub smbus: HashMap<usize, SmbusTelemetry>,
     pub meta: HashMap<usize, DeviceMeta>,
+    /// tt-smi **array position** → that entry's normalized PCI bus id, for the
+    /// entries that carry one.
+    ///
+    /// `smbus`/`meta` above are keyed by array position, which is only a valid
+    /// join key against another list if both lists enumerate exactly the same
+    /// cards in the same order. `HybridBackend` gets its device list from sysfs,
+    /// which can legitimately see cards tt-smi doesn't (a card busy/failed to
+    /// enumerate, `--devices` filtering upstream, hotplug), so it re-keys these
+    /// maps onto its own device indices by bus id — the one identifier both
+    /// sides carry. See `hybrid::rekey_snapshot_by_bus_id`.
+    pub bus_ids: HashMap<usize, String>,
+}
+
+/// Canonical form of a PCI bus id for use as a join key: trimmed and lowercased
+/// (tt-smi has emitted uppercase hex, e.g. `0000:0A:00.0`, where sysfs uses
+/// lowercase). Every producer and consumer of a bus-id join key must go through
+/// this so the two sides can't disagree on case or padding.
+pub(crate) fn normalize_bus_id(bus_id: &str) -> String {
+    bus_id.trim().to_lowercase()
 }
 
 /// Parse a tt-smi JSON snapshot once and extract both SMBUS telemetry and
@@ -1063,13 +1082,23 @@ pub(crate) fn parse_snapshot(json_str: &str) -> SnapshotParts {
             return SnapshotParts {
                 smbus: HashMap::new(),
                 meta: HashMap::new(),
+                bus_ids: HashMap::new(),
             };
         }
     };
     let mut smbus_map = HashMap::new();
     let mut meta_map = HashMap::new();
+    let mut bus_ids = HashMap::new();
     for dev in devices {
         let idx = dev.index.unwrap_or(0);
+        // Recorded before the per-block extraction below so a device that
+        // carries only a bus id (no smbus/meta) still contributes its join key.
+        if let Some(bus) = dev.bus_id.as_deref() {
+            let norm = normalize_bus_id(bus);
+            if !norm.is_empty() {
+                bus_ids.insert(idx, norm);
+            }
+        }
         if let Some(smbus_json) = dev.smbus {
             smbus_map.insert(idx, smbus_from_json_fields(smbus_json));
         }
@@ -1109,6 +1138,7 @@ pub(crate) fn parse_snapshot(json_str: &str) -> SnapshotParts {
     SnapshotParts {
         smbus: smbus_map,
         meta: meta_map,
+        bus_ids,
     }
 }
 
