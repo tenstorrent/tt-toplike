@@ -119,18 +119,38 @@ impl PcieRateTracker {
 }
 
 /// Human-readable rate with SI decimal units, capped at 9 characters total
-/// (mantissa + space + unit). The Insights sidebar's PCIe row renders this
-/// output for both directions on one line (e.g. "▼12.3 kB/s ▲1.23 GB/s"), so
-/// an unbounded mantissa here directly overflows that row's fixed width —
-/// see `pcie_row_parts` in `ui::tui`, which relies on this 9-char cap to
-/// keep its two-row layout within the sidebar's 30-column budget.
+/// (mantissa + space + unit) **unconditionally** — for every finite input,
+/// not just realistic PCIe magnitudes. The Insights sidebar's PCIe row
+/// renders this output for both directions on one line (e.g. "▼12.3 kB/s
+/// ▲1.23 GB/s"), so an unbounded mantissa here directly overflows that
+/// row's fixed width — see `pcie_row_parts` in `ui::tui`, which relies on
+/// this 9-char cap to keep its two-row layout within the sidebar's
+/// 30-column budget.
 ///
-/// Picks the largest unit (B/s → kB/s → MB/s → GB/s → TB/s) whose mantissa
-/// is < 1000, then formats that mantissa at the highest decimal precision
-/// (2, then 1, then 0) that still fits a 4-character budget *after
-/// rounding* — checked against the actual formatted string length, not
-/// predicted from the pre-rounding magnitude. That distinction matters: a
-/// mantissa like 99.95 formatted to 1 decimal rounds UP to "100.0" (5
+/// **Input clamp.** `bytes_per_sec` is first clamped to `[0.0, 999.5e12]`
+/// (≈999.5 TB/s) — chosen as the largest value whose TB/s mantissa still
+/// rounds to `< 1000` (so the loop/fallback logic below is genuinely
+/// bounded, not just bounded "in practice"). Non-finite input (`NaN`,
+/// `+inf`, `-inf`) is treated as `0.0` instead of being clamped: `f64::clamp`
+/// propagates `NaN` unchanged rather than pulling it into range, so a NaN
+/// counter read would otherwise flow straight through to `format!` and
+/// render literally as `"NaN B/s"` — technically within the 9-char budget,
+/// but numerically nonsensical. This can happen on a corrupted tt-kmd
+/// counter read (bit-flipped word count, a subtraction over/underflow
+/// upstream), which is not reachable from a healthy PCIe link but *is*
+/// reachable from bad hardware/driver state — exactly the case where the
+/// row must render *something* sane rather than something wide, garbled,
+/// or `NaN`. Post-clamp, values that would have been enormous (or
+/// non-finite) render identically to a saturated real link: `"999 TB/s"` or
+/// `"1000 TB/s"` (whichever the rounding tier below picks — both fit).
+///
+/// **Unit + precision selection**, unchanged in spirit from before the
+/// clamp: picks the largest unit (B/s → kB/s → MB/s → GB/s → TB/s) whose
+/// mantissa is < 1000, then formats that mantissa at the highest decimal
+/// precision (2, then 1, then 0) that still fits a 4-character budget
+/// *after rounding* — checked against the actual formatted string length,
+/// not predicted from the pre-rounding magnitude. That distinction matters:
+/// a mantissa like 99.95 formatted to 1 decimal rounds UP to "100.0" (5
 /// chars — one over budget) even though 99.95 itself looks like it should
 /// fit a naive "< 100 → 1 decimal" rule. Falling back to 0 decimals here
 /// yields "100" instead: cosmetically coarser right at that boundary, but
@@ -139,16 +159,23 @@ impl PcieRateTracker {
 /// unbounded-precision "1000.0 kB/s" (11 chars, over budget) a fixed
 /// `{:.1}` would have produced.
 ///
-/// TB/s exists purely as a safety net: nothing on a real PCIe link
-/// approaches even 100 GB/s (Gen5 x16 tops out around 63 GB/s), but without
-/// an upper unit the GB/s mantissa would grow without bound for
-/// pathological inputs (the width-regression test below sweeps up to
-/// ~1e14 bytes/sec specifically to exercise this) — capping the mantissa at
-/// < 1000 by continuing to scale down keeps the guarantee unconditional
-/// instead of "true for realistic PCIe speeds."
+/// TB/s exists so the unit-selection loop has somewhere to land for large
+/// inputs instead of leaving the GB/s mantissa to grow without bound —
+/// combined with the input clamp above, this is what makes the "mantissa
+/// < 1000 whenever a non-B/s unit is chosen" invariant hold for *every*
+/// finite input, not merely realistic PCIe speeds (nothing on a real link
+/// approaches even 100 GB/s; Gen5 x16 tops out around 63 GB/s).
 pub fn format_bandwidth(bytes_per_sec: f64) -> String {
+    // Non-finite inputs (NaN, ±inf) bypass the clamp entirely — see the
+    // "Input clamp" section above for why `.clamp()` alone isn't safe here.
+    let b = if bytes_per_sec.is_finite() {
+        bytes_per_sec.clamp(0.0, 999.5e12)
+    } else {
+        0.0
+    };
+
     const UNITS: [&str; 5] = ["B/s", "kB/s", "MB/s", "GB/s", "TB/s"];
-    let mut mantissa = bytes_per_sec.max(0.0);
+    let mut mantissa = b;
     let mut unit_idx = 0;
     while mantissa >= 1000.0 && unit_idx < UNITS.len() - 1 {
         mantissa /= 1000.0;
@@ -174,9 +201,15 @@ pub fn format_bandwidth(bytes_per_sec: f64) -> String {
             return format!("{} {}", s, unit);
         }
     }
-    // Unreachable for any input the unit-selection loop can produce (it
-    // always leaves mantissa < 1000, so 0 decimals is always <= 4 chars) —
-    // kept as a safety net instead of a panic or unwrap.
+    // Genuinely unreachable now: the input clamp caps `b` at 999.5e12, so
+    // the unit-selection loop can only ever hand this branch a `mantissa`
+    // strictly less than 1000 (at TB/s, the top and final tier) — 0
+    // decimals of a value < 1000 is always <= 4 chars. Before the clamp
+    // was added, this branch WAS reachable (e.g. `format_bandwidth(1e30)`
+    // fell through to here with a many-digit mantissa and produced a
+    // multi-hundred-character string) — kept as a safety net rather than
+    // an `unreachable!()`, since "defensively correct but slightly verbose"
+    // beats "provably correct but panics if the proof is ever wrong."
     format!("{:.0} {}", mantissa, unit)
 }
 
@@ -312,6 +345,13 @@ mod tests {
     /// to prove the cap is unconditional) crossed with mantissas chosen to
     /// land right at rounding cliffs (X.94 stays put, X.95 rounds up and
     /// risks gaining a digit) plus X.99 (the closest-to-rollover case).
+    ///
+    /// This sweep alone does NOT prove the 9-char cap is unconditional —
+    /// exponents only up to 11 (~1e14) stay inside a range the pre-clamp
+    /// implementation already handled correctly by landing on the TB/s
+    /// tier with a sub-1000 mantissa. `format_bandwidth_saturates_extreme_and_non_finite_input`
+    /// below is what actually exercises the clamp (values the unit-loop
+    /// alone can't bound: 1e16, 1e30, `f64::MAX`) and the NaN/±inf guard.
     #[test]
     fn format_bandwidth_output_never_exceeds_9_chars() {
         for exp in 0..=11 {
@@ -334,6 +374,69 @@ mod tests {
                     "format_bandwidth output must be pure ASCII: {s:?}"
                 );
             }
+        }
+    }
+
+    /// The residual the second re-review caught: before the input clamp was
+    /// added, the unit-selection loop stopped at TB/s and left the mantissa
+    /// unbounded for anything above ~1e15 B/s — `format_bandwidth(1e30)`
+    /// fell through the decimal-fallback loop and hit its "unreachable"
+    /// last-resort branch with a mantissa still in the hundreds of
+    /// sextillions, producing a many-hundred-character string
+    /// ("1000000000000000000000000000 TB/s"-shaped) that would have blown
+    /// the sidebar row wide open. Unreachable from a healthy PCIe link, but
+    /// reachable from a corrupted tt-kmd counter read (bit-flip, subtraction
+    /// underflow upstream) — exactly the moment the UI must not misrender.
+    ///
+    /// Covers every non-realistic input class the review named: two
+    /// astronomically large finite values (1e16, 1e30), the largest finite
+    /// f64 (`f64::MAX`), both infinities, `NaN`, and a negative value (the
+    /// pre-existing `.max(0.0)` behavior, still exercised now that it's
+    /// folded into the finite branch of the clamp guard).
+    #[test]
+    fn format_bandwidth_saturates_extreme_and_non_finite_input() {
+        // Every huge-but-finite input saturates at the same clamped
+        // ceiling (999.5e12) and therefore renders identically — pinned
+        // against the actual output rather than assumed, per the
+        // coordinator's instruction ("pin what it actually produces").
+        for &huge in &[1e16, 1e30, f64::MAX] {
+            let s = format_bandwidth(huge);
+            assert_eq!(
+                s, "1000 TB/s",
+                "format_bandwidth({huge:e}) should saturate to the clamped ceiling"
+            );
+        }
+        // Non-finite and negative input must not panic and must render
+        // deterministically rather than propagating NaN/inf into the
+        // displayed string (`f64::clamp` alone would let NaN through
+        // unchanged — see the doc comment on `format_bandwidth` for why the
+        // `is_finite()` guard exists).
+        for &bad in &[f64::INFINITY, f64::NEG_INFINITY, f64::NAN, -5.0_f64] {
+            assert_eq!(
+                format_bandwidth(bad),
+                "0 B/s",
+                "non-finite/negative input {bad:?} must render as a sane zero, not propagate"
+            );
+        }
+        // Every case above must also respect the general width budget —
+        // redundant with the exact pins, but keeps this test self-contained
+        // as a width-regression guard even if the exact strings above ever
+        // legitimately change.
+        for &v in &[
+            1e16,
+            1e30,
+            f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            -5.0,
+        ] {
+            let s = format_bandwidth(v);
+            assert!(
+                s.chars().count() <= 9,
+                "format_bandwidth({v:?}) = {s:?} is {} chars, over the 9-char budget",
+                s.chars().count()
+            );
         }
     }
 }
