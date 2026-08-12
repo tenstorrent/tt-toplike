@@ -88,8 +88,20 @@ pub struct HybridBackend {
     /// the reader thread. `None` until the first successful poll.
     ///
     /// Only the *live measurement* in the meta payload is age-sensitive: see
-    /// [`BOARD_POWER_MAX_AGE`] and the overlay at the end of `update()`.
+    /// [`LIVE_MEASUREMENT_MAX_AGE`] and the overlay at the end of `update()`.
     device_meta_stamp: Arc<ArcSwapOption<std::time::Instant>>,
+
+    /// When [`smbus_shared`](Self::smbus_shared) was last replaced by the reader
+    /// thread. `None` until the first successful poll that carried an
+    /// `smbus_telem` block.
+    ///
+    /// Deliberately a *separate* stamp from `device_meta_stamp` even though both
+    /// come from the same document: `publish_snapshot` gates the two payloads
+    /// independently (a snapshot can carry meta and no SMBUS, or the reverse),
+    /// so one shared stamp would let a meta-only poll vouch for the freshness of
+    /// an SMBUS map nobody had refreshed. Each stamp is written under exactly
+    /// the same condition as the payload it describes.
+    smbus_stamp: Arc<ArcSwapOption<std::time::Instant>>,
 
     /// The render thread's private view of the latest background snapshot.
     /// Updated via `Arc::clone()` — one atomic ref-count increment, zero
@@ -304,18 +316,25 @@ fn rekey_map<V>(map: HashMap<usize, V>, mapping: &HashMap<usize, usize>) -> Hash
         .collect()
 }
 
-/// How long a `board_power` reading from the tt-smi reader thread may keep being
-/// overlaid onto freshly-read sysfs telemetry before it's treated as stale and
+/// How long a *live measurement* from the tt-smi reader thread may keep being
+/// served after the poll that produced it, before it's treated as stale and
 /// dropped.
 ///
-/// Why an expiry is needed at all: `device_meta_shared` is a latch — the reader
-/// thread only ever *stores* into it, so if its `tt-smi` subprocess dies or starts
-/// failing mid-run (ARC busy under load, tt-smi upgraded/removed, permissions
-/// change), `update()` would go on stamping the last successful poll's wattage
-/// onto live telemetry indefinitely. The Insights sidebar would show a frozen
-/// `Board <N>W total` row immediately beneath a Power row that *is* still
-/// updating, with nothing to tell the two apart. Expiring makes the row drop out
-/// instead — absent beats wrong.
+/// One age for both of this backend's tt-smi-sourced measurement payloads — the
+/// `board_power` overlay and the blended SMBUS map — because they come from the
+/// same subprocess on the same ~1.5 s cadence and go stale for the same reasons.
+/// Two thresholds would mean two different answers to "is tt-smi still alive",
+/// visible on screen as one row expiring while its neighbour kept lying.
+///
+/// Why an expiry is needed at all: `device_meta_shared` and `smbus_shared` are
+/// latches — the reader thread only ever *stores* into them, so if its `tt-smi`
+/// subprocess dies or starts failing mid-run (ARC busy under load, tt-smi
+/// upgraded/removed, permissions change), `update()` would go on stamping the
+/// last successful poll's wattage onto live telemetry, and serving that poll's
+/// ARC health / ETH live map / GDDR temps / ECC counters, indefinitely. The
+/// Insights sidebar would show a frozen `Board <N>W total` row immediately
+/// beneath a Power row that *is* still updating, with nothing to tell the two
+/// apart. Expiring makes those rows drop out instead — absent beats wrong.
 ///
 /// Why 10 s: the reader polls tt-smi about every 1.5 s (`poll_start.elapsed()` in
 /// the loop in `init()`), plus tt-smi's own runtime (~1–2 s while it walks the
@@ -327,19 +346,27 @@ fn rekey_map<V>(map: HashMap<usize, V>, mapping: &HashMap<usize, usize>) -> Hash
 /// within a couple of seconds, so 10 s is already the outer edge of "this could
 /// still plausibly be true"; anything longer is just a nicer-looking lie.
 ///
-/// This applies **only** to the live measurement. The static members of
+/// This applies **only** to live measurements. The static members of
 /// `DeviceMeta` (firmware versions, board limits, `pcie_speed`/`pcie_width`) are
 /// deliberately retained across a degraded snapshot — firmware doesn't change
 /// under a running card and a link doesn't renegotiate because tt-smi stopped
-/// answering, so expiring those would blank correct rows for no gain.
-const BOARD_POWER_MAX_AGE: Duration = Duration::from_secs(10);
+/// answering, so expiring those would blank correct rows for no gain. They live
+/// on the `Device`, not in the SMBUS block, so expiring the latter leaves them
+/// standing; what the operator loses when tt-smi goes away is the *measured*
+/// state, and the sysfs-synthesized SMBUS block (kmd ≥ 2.7: serial, clocks, fan,
+/// therm-trip) steps in underneath it, still live.
+const LIVE_MEASUREMENT_MAX_AGE: Duration = Duration::from_secs(10);
 
-/// Is a `board_power` reading stamped at `stamp` still fresh as of `now`?
+/// Is a measurement stamped at `stamp` still fresh as of `now`?
 ///
 /// Pure and timestamp-injectable (same shape as `sysfs::slow_lane_due`) so the
 /// expiry can be unit-tested without sleeping. `None` — no snapshot has ever
 /// been published — is not fresh: there is no measurement to trust.
-fn board_power_is_fresh(
+///
+/// Shared by both expiring payloads (`board_power` overlay, blended SMBUS map);
+/// each passes its own payload's stamp, so the answer always judges the payload
+/// it belongs to.
+fn measurement_is_fresh(
     stamp: Option<std::time::Instant>,
     now: std::time::Instant,
     max_age: Duration,
@@ -378,6 +405,7 @@ fn publish_snapshot(
     smbus_shared: &ArcSwap<HashMap<usize, SmbusTelemetry>>,
     device_meta_shared: &ArcSwap<HashMap<usize, json::DeviceMeta>>,
     device_meta_stamp: &ArcSwapOption<std::time::Instant>,
+    smbus_stamp: &ArcSwapOption<std::time::Instant>,
     smbus_generation: &AtomicU64,
 ) {
     let snapshot = rekey_snapshot_by_bus_id(json::parse_snapshot(json_str), bus_to_index);
@@ -390,13 +418,20 @@ fn publish_snapshot(
         // Stamp *when* this meta was measured. The static fields don't care, but
         // `board_power` is a live wattage and must expire rather than be
         // re-applied forever if this is the last poll that ever succeeds — see
-        // `BOARD_POWER_MAX_AGE`. The stamp is stored under exactly the same
+        // `LIVE_MEASUREMENT_MAX_AGE`. The stamp is stored under exactly the same
         // condition as the meta itself, so the freshness check can never see a
         // stamp that belongs to a different payload than the one it's judging.
         device_meta_stamp.store(Some(Arc::new(std::time::Instant::now())));
     }
     if !snapshot.smbus.is_empty() {
         smbus_shared.store(Arc::new(snapshot.smbus));
+        // Same reasoning as the meta stamp above, for the other latch. Almost
+        // everything in an SMBUS block is a live reading — ARC heartbeats, the
+        // ETH live-link map, GDDR temperatures, ECC counters — so the blend that
+        // is built from it in `update()` has to be able to stop being served.
+        // Stored under the same condition as the payload, so the two can never
+        // disagree about which poll produced what.
+        smbus_stamp.store(Some(Arc::new(std::time::Instant::now())));
     }
     // Bumped whenever *either* payload was stored, not just the SMBUS one: the
     // counter is what tells `update()` a new snapshot landed, and the sysfs
@@ -445,6 +480,7 @@ impl HybridBackend {
             device_meta_shared: Arc::new(ArcSwap::from(Arc::clone(&empty_meta))),
             // No snapshot yet ⇒ no board-power measurement to overlay.
             device_meta_stamp: Arc::new(ArcSwapOption::empty()),
+            smbus_stamp: Arc::new(ArcSwapOption::empty()),
             smbus_latest: Arc::clone(&empty),
             smbus_generation: Arc::new(AtomicU64::new(0)),
             smbus_snapshot_gen: 0,
@@ -510,6 +546,7 @@ impl TelemetryBackend for HybridBackend {
         let smbus_shared = Arc::clone(&self.smbus_shared);
         let device_meta_shared = Arc::clone(&self.device_meta_shared);
         let device_meta_stamp = Arc::clone(&self.device_meta_stamp);
+        let smbus_stamp = Arc::clone(&self.smbus_stamp);
         let smbus_generation = Arc::clone(&self.smbus_generation);
         let stop_flag = Arc::clone(&self.stop_flag);
         let last_raw = Arc::clone(&self.last_raw);
@@ -564,6 +601,7 @@ impl TelemetryBackend for HybridBackend {
                                 &smbus_shared,
                                 &device_meta_shared,
                                 &device_meta_stamp,
+                                &smbus_stamp,
                                 &smbus_generation,
                             );
                         }
@@ -665,12 +703,51 @@ impl TelemetryBackend for HybridBackend {
         // Without this loop, `smbus_blended` would be frozen between record
         // arrivals and the display would jump on each new generation instead of
         // converging smoothly — producing the rhythmic stutter.
-        for (idx, target) in self.smbus_latest.iter() {
-            let existing = self
-                .smbus_blended
-                .entry(*idx)
-                .or_insert_with(|| target.clone());
-            smbus_smooth::apply_ema(&mut self.smbus_ema, *idx, target, existing);
+        //
+        // ── …but only while the snapshot behind it is still fresh ─────────────
+        //
+        // `smbus_shared` is a latch, exactly like `device_meta_shared`: the
+        // reader thread only ever stores into it, and `update()` only shrinks
+        // `smbus_blended` when a *new* non-empty map arrives without some key.
+        // So if the reader's tt-smi dies (ARC wedged under load, tt-smi removed
+        // by an upgrade, permissions changed), the last successful poll would go
+        // on being blended and served forever — ARC health, the ETH live-link
+        // map, GDDR temperatures and ECC counters all rendering as current
+        // readings of an arbitrarily old moment, with nothing on screen dating
+        // them. Every one of those is a live measurement; none is static
+        // metadata (see `LIVE_MEASUREMENT_MAX_AGE` for where the static fields
+        // live and why they deliberately survive instead).
+        //
+        // When it expires, drop the blend and the EMA accumulators outright:
+        // `smbus_telemetry()` then falls through to the sysfs-synthesized block,
+        // which is still being read live from tt-kmd every tick, and
+        // `backend_info()` reverts to "no tt-smi" — both of which are true.
+        // `smbus_latest` is deliberately left alone so that a reader which
+        // recovers resumes from a warm target on the next generation bump; it is
+        // this freshness gate, not the map's contents, that decides whether it
+        // may be served.
+        let now = std::time::Instant::now();
+        let smbus_fresh = measurement_is_fresh(
+            self.smbus_stamp.load_full().as_deref().copied(),
+            now,
+            LIVE_MEASUREMENT_MAX_AGE,
+        );
+        if smbus_fresh {
+            for (idx, target) in self.smbus_latest.iter() {
+                let existing = self
+                    .smbus_blended
+                    .entry(*idx)
+                    .or_insert_with(|| target.clone());
+                smbus_smooth::apply_ema(&mut self.smbus_ema, *idx, target, existing);
+            }
+        } else if !self.smbus_blended.is_empty() {
+            log::warn!(
+                "HybridBackend: no tt-smi snapshot in {}s — dropping stale SMBUS blend \
+                 (falling back to tt-kmd sysfs attributes)",
+                LIVE_MEASUREMENT_MAX_AGE.as_secs()
+            );
+            self.smbus_blended.clear();
+            self.smbus_ema.clear();
         }
 
         // ── Overlay SMBUS TDP/TDC + whole-card board power onto sysfs telemetry ──
@@ -702,28 +779,37 @@ impl TelemetryBackend for HybridBackend {
         // ever writes to, it also has to be able to *stop* being applied: if the
         // reader's tt-smi stops producing snapshots, the last measured wattage
         // would otherwise be stamped onto live sysfs telemetry forever. Hence the
-        // age check — see `BOARD_POWER_MAX_AGE` for the threshold and for why the
-        // static meta fields above deliberately do NOT expire.
+        // age check — see `LIVE_MEASUREMENT_MAX_AGE` for the threshold and for
+        // why the static meta fields above deliberately do NOT expire.
         //
-        // Note the `else` branch clears rather than leaves the field alone:
+        // Note the assignment clears rather than leaves the field alone:
         // `SysfsBackend::update` rebuilds each `Telemetry` with
         // `board_power: None` every tick, but a device whose sensor paths are
         // missing keeps its previous cache entry, so an expired value has to be
         // erased explicitly to actually drop the row.
+        //
+        // The sweep is driven by the **telemetry cache**, not by the meta map.
+        // Driving it from the meta map cleared only the devices that map still
+        // mentions, which leaves a hole: a card that drops out of a later
+        // snapshot while its neighbours stay (a per-device parse failure, or a
+        // card that stopped answering) is no longer iterated, so if its sysfs
+        // sensor paths are also missing — the one case where `SysfsBackend`
+        // `continue`s past a device and keeps the old cache entry — its last
+        // board wattage stays pinned to a `Telemetry` that is never rewritten.
+        // Every cached device is visited here instead, and any that the newest
+        // meta doesn't vouch for gets `None`.
         let meta_for_power = self.device_meta_shared.load_full();
-        let fresh = board_power_is_fresh(
+        let board_power_fresh = measurement_is_fresh(
             self.device_meta_stamp.load_full().as_deref().copied(),
-            std::time::Instant::now(),
-            BOARD_POWER_MAX_AGE,
+            now,
+            LIVE_MEASUREMENT_MAX_AGE,
         );
-        for (idx, dm) in meta_for_power.iter() {
-            if let Some(telem) = self.sysfs.telemetry_cache_mut(*idx) {
-                telem.board_power = match dm.board_power {
-                    Some(bp) if fresh => Some(bp),
-                    _ => None,
-                };
-            }
-        }
+        self.sysfs.for_each_cached_telemetry(|idx, telem| {
+            telem.board_power = match meta_for_power.get(&idx).and_then(|dm| dm.board_power) {
+                Some(bp) if board_power_fresh => Some(bp),
+                _ => None,
+            };
+        });
 
         Ok(())
     }
@@ -1015,6 +1101,7 @@ mod tests {
             &backend.smbus_shared,
             &backend.device_meta_shared,
             &backend.device_meta_stamp,
+            &backend.smbus_stamp,
             &backend.smbus_generation,
         );
         backend.update().expect("update should not fail");
@@ -1066,23 +1153,23 @@ mod tests {
         let max_age = Duration::from_secs(10);
 
         // Never published ⇒ never fresh: there is no measurement to trust.
-        assert!(!board_power_is_fresh(None, t0, max_age));
+        assert!(!measurement_is_fresh(None, t0, max_age));
         // Inside the window (the common case: a poll every ~3 s).
-        assert!(board_power_is_fresh(Some(t0), t0, max_age));
-        assert!(board_power_is_fresh(
+        assert!(measurement_is_fresh(Some(t0), t0, max_age));
+        assert!(measurement_is_fresh(
             Some(t0),
             t0 + Duration::from_millis(9_999),
             max_age
         ));
         // At and past the ceiling ⇒ stale, so the Board row drops out.
-        assert!(!board_power_is_fresh(Some(t0), t0 + max_age, max_age));
-        assert!(!board_power_is_fresh(
+        assert!(!measurement_is_fresh(Some(t0), t0 + max_age, max_age));
+        assert!(!measurement_is_fresh(
             Some(t0),
             t0 + Duration::from_secs(120),
             max_age
         ));
         // A `now` that predates the stamp is treated as fresh, not a panic.
-        assert!(board_power_is_fresh(
+        assert!(measurement_is_fresh(
             Some(t0 + Duration::from_secs(5)),
             t0,
             max_age
@@ -1149,6 +1236,7 @@ mod tests {
                 &b.smbus_shared,
                 &b.device_meta_shared,
                 &b.device_meta_stamp,
+                &b.smbus_stamp,
                 &b.smbus_generation,
             );
         };
@@ -1168,7 +1256,7 @@ mod tests {
         // fails. Nothing new is published; only the clock moves on. Backdating
         // the stamp is exactly equivalent and needs no sleep.
         let stale = std::time::Instant::now()
-            .checked_sub(BOARD_POWER_MAX_AGE + Duration::from_secs(1))
+            .checked_sub(LIVE_MEASUREMENT_MAX_AGE + Duration::from_secs(1))
             .expect("monotonic clock has at least 11 s of history");
         backend.device_meta_stamp.store(Some(Arc::new(stale)));
 
@@ -1200,6 +1288,193 @@ mod tests {
             backend.telemetry(0).and_then(|t| t.board_power),
             Some(96.0),
             "a fresh snapshot restores the Board row"
+        );
+    }
+
+    /// The blended SMBUS map must expire on the same terms `board_power` does.
+    ///
+    /// Regression: `smbus_shared` is a latch too, and `smbus_blended` only ever
+    /// shrank when a *new* non-empty map arrived without some key. So when the
+    /// reader's tt-smi stopped answering, every live SMBUS measurement —
+    /// ARC health, the ETH live-link map, GDDR temperatures, ECC counters —
+    /// went on being blended and served from an arbitrarily old snapshot, with
+    /// no timestamp anywhere on screen. `board_power` (one field of one map) was
+    /// fixed in isolation; this is the rest of the same latch.
+    ///
+    /// What must survive is the *static* metadata, which lives on the `Device`
+    /// rather than in the SMBUS block, plus the sysfs-synthesized SMBUS block
+    /// that `smbus_telemetry()` falls back to — that one is re-read from tt-kmd
+    /// every tick and is still live when tt-smi is not.
+    #[test]
+    fn stale_smbus_blend_expires_instead_of_being_served() {
+        use crate::models::Device;
+
+        let mut backend = HybridBackend::new("tt-smi");
+        backend.sysfs.push_device_for_test(Device::new(
+            0,
+            "p300c".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        ));
+        backend.bus_to_index = backend.sysfs_bus_index();
+
+        let json = r#"{
+            "device_info": [
+                {
+                    "board_info": {"bus_id": "0000:01:00.0", "board_type": "p300c"},
+                    "telemetry": {"power": " 21.0"},
+                    "smbus_telem": {"BOARD_ID_LOW": "0xCARD01", "ARC0_HEALTH": "1234",
+                                    "AICLK": "800"},
+                    "firmwares": {"fw_bundle_version": "19.11.0.0"}
+                }
+            ]
+        }"#;
+        let publish = |b: &HybridBackend| {
+            publish_snapshot(
+                json,
+                &b.bus_to_index,
+                &b.smbus_shared,
+                &b.device_meta_shared,
+                &b.device_meta_stamp,
+                &b.smbus_stamp,
+                &b.smbus_generation,
+            );
+        };
+
+        publish(&backend);
+        backend.update().expect("update should not fail");
+        assert_eq!(
+            backend
+                .smbus_telemetry(0)
+                .and_then(|s| s.board_id.as_deref()),
+            Some("0xCARD01"),
+            "a fresh snapshot is served"
+        );
+
+        // The reader goes quiet. Backdating the SMBUS stamp is exactly
+        // equivalent to the clock moving on, and needs no sleep.
+        let stale = std::time::Instant::now()
+            .checked_sub(LIVE_MEASUREMENT_MAX_AGE + Duration::from_secs(1))
+            .expect("monotonic clock has at least 11 s of history");
+        backend.smbus_stamp.store(Some(Arc::new(stale)));
+
+        backend.update().expect("update should not fail");
+        assert!(
+            backend.smbus_blended.is_empty(),
+            "an expired blend must be dropped, not smoothed forever"
+        );
+        assert!(
+            backend.smbus_ema.is_empty(),
+            "and its EMA accumulators with it, so a recovery starts clean"
+        );
+        assert!(
+            backend.smbus_telemetry(0).is_none(),
+            "with no sysfs-synthesized block to fall back to (no hwmon paths in \
+             this test), a device with no fresh SMBUS reports none at all"
+        );
+        assert!(
+            backend.devices()[0].firmwares.is_some(),
+            "static metadata lives on the Device and must NOT expire with the blend"
+        );
+
+        // tt-smi recovers: the next poll re-stamps and the blend comes back.
+        publish(&backend);
+        backend.update().expect("update should not fail");
+        assert_eq!(
+            backend
+                .smbus_telemetry(0)
+                .and_then(|s| s.board_id.as_deref()),
+            Some("0xCARD01"),
+            "a fresh snapshot restores the blend"
+        );
+    }
+
+    /// `board_power` must be cleared for **every** cached device, not just the
+    /// ones the newest tt-smi snapshot still mentions.
+    ///
+    /// Regression: the clearing sweep iterated the *meta map*, so a card that
+    /// dropped out of a later snapshot while its neighbours stayed was no longer
+    /// visited at all. That is normally harmless because `SysfsBackend::update`
+    /// rebuilds each `Telemetry` from scratch every tick — except for a device
+    /// whose hwmon sensor paths are missing, where it `continue`s and keeps the
+    /// previous cache entry. Those two gaps line up into a card whose Board row
+    /// is pinned at its last-ever wattage with nothing rewriting it.
+    #[test]
+    fn board_power_is_cleared_for_a_device_that_leaves_the_snapshot() {
+        use crate::models::{Device, Telemetry};
+
+        let mut backend = HybridBackend::new("tt-smi");
+        for (idx, bus) in [(0, "0000:01:00.0"), (1, "0000:02:00.0")] {
+            backend.sysfs.push_device_for_test(Device::new(
+                idx,
+                "p300c".to_string(),
+                bus.to_string(),
+                String::new(),
+            ));
+            backend.sysfs.insert_telemetry_for_test(
+                idx,
+                Telemetry {
+                    power: Some(21.0),
+                    current: None,
+                    voltage: Some(0.72),
+                    asic_temperature: Some(40.0),
+                    aiclk: None,
+                    heartbeat: None,
+                    timestamp: chrono::Utc::now(),
+                    board_power: None,
+                },
+            );
+        }
+        backend.bus_to_index = backend.sysfs_bus_index();
+
+        // Both cards report; both get a Board row.
+        let both = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"},
+                 "telemetry": {"power": " 21.0", "board_power": " 96.0"}},
+                {"board_info": {"bus_id": "0000:02:00.0"},
+                 "telemetry": {"power": " 22.0", "board_power": " 98.0"}}
+            ]
+        }"#;
+        // Card 1 stops being reported — its entry no longer decodes, so the
+        // salvage drops it while card 0 keeps polling normally. Note the
+        // surviving card is still stamped fresh, so this isolates "absent from
+        // the snapshot" from "the whole reader died".
+        let only_card_0 = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"},
+                 "telemetry": {"power": " 21.0", "board_power": " 97.0"}},
+                {"board_info": {"bus_id": "0000:02:00.0"}, "telemetry": true}
+            ]
+        }"#;
+        let publish = |b: &HybridBackend, json: &str| {
+            publish_snapshot(
+                json,
+                &b.bus_to_index,
+                &b.smbus_shared,
+                &b.device_meta_shared,
+                &b.device_meta_stamp,
+                &b.smbus_stamp,
+                &b.smbus_generation,
+            );
+        };
+
+        publish(&backend, both);
+        backend.update().expect("update should not fail");
+        assert_eq!(backend.telemetry(0).and_then(|t| t.board_power), Some(96.0));
+        assert_eq!(backend.telemetry(1).and_then(|t| t.board_power), Some(98.0));
+
+        publish(&backend, only_card_0);
+        backend.update().expect("update should not fail");
+        assert_eq!(
+            backend.telemetry(0).and_then(|t| t.board_power),
+            Some(97.0),
+            "the card that is still reported keeps a live Board row"
+        );
+        assert!(
+            backend.telemetry(1).and_then(|t| t.board_power).is_none(),
+            "the card that left the snapshot must lose its Board row — 98 W is \
+             now an unbounded-age reading with nothing to refresh it"
         );
     }
 
@@ -1371,6 +1646,7 @@ mod tests {
             &backend.smbus_shared,
             &backend.device_meta_shared,
             &backend.device_meta_stamp,
+            &backend.smbus_stamp,
             &backend.smbus_generation,
         );
         backend.update().expect("update should not fail");
@@ -1453,6 +1729,14 @@ mod tests {
                 ..SmbusTelemetry::default()
             },
         );
+        // Seeding the blend directly skips `publish_snapshot`, which is what
+        // normally stamps it — so stamp it here too. In production a blend
+        // without a stamp cannot exist, and `update()` now (correctly) treats
+        // one as an expired snapshot and drops it; see
+        // `stale_smbus_blend_expires_instead_of_being_served`.
+        backend
+            .smbus_stamp
+            .store(Some(Arc::new(std::time::Instant::now())));
 
         // Exercise the real update() path.  sysfs.update() is a no-op when
         // `devices` is empty, so the cache entry seeded above is preserved and
