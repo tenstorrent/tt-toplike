@@ -664,6 +664,22 @@ impl SysfsBackend {
         self.telemetry_cache.get_mut(&device_idx)
     }
 
+    /// Visit **every** cached telemetry entry mutably, keyed by device index.
+    ///
+    /// The counterpart to [`Self::telemetry_cache_mut`] for the overlays that
+    /// must also be able to *un*-apply themselves: reaching only the devices
+    /// some external map still mentions leaves any other cached entry pinned at
+    /// whatever was last written to it, which for a device whose sensor paths
+    /// are missing (the `continue` in `update_at`, which keeps the previous
+    /// entry rather than rebuilding it) is indefinitely. HybridBackend's
+    /// `board_power` sweep uses this so a card that drops out of the tt-smi
+    /// snapshot gets its stale wattage cleared like everyone else's.
+    pub(crate) fn for_each_cached_telemetry(&mut self, mut f: impl FnMut(usize, &mut Telemetry)) {
+        for (idx, telem) in self.telemetry_cache.iter_mut() {
+            f(*idx, telem);
+        }
+    }
+
     /// Insert a telemetry entry directly into the cache — test helper only.
     #[cfg(test)]
     pub(crate) fn insert_telemetry_for_test(&mut self, device_idx: usize, telem: Telemetry) {
