@@ -213,16 +213,33 @@ fn triage_chips(arc_alive: &[bool]) -> BackendResult<ChipTriage> {
 /// new rendering concept (every consumer would need a "has no telemetry" state)
 /// and so is deliberately out of scope for a bugfix release — but it is the
 /// right end state, and this label is the honest interim.
+///
+/// ## Why it is terse
+///
+/// Every consumer of `backend_info()` interpolates it into a **single header
+/// line** with no width budget and no wrapping: the main header
+/// (`ui::tui::render_header`) follows it with `│ {n} devices`, and the
+/// starfield / memory-castle / memory-flow headers do the same. A prose label
+/// ("Luwen (Direct Hardware; 3 of 4 chips — 1 ARC-unresponsive)", 58 columns)
+/// pushed that line past 90 columns and the trailing device count fell off the
+/// right edge of an 80-column terminal — clipping exactly the field the
+/// operator would use to notice a card was missing, and violating the project's
+/// "size to content, never clip" rule.
+///
+/// `Luwen (3/4 chips)` keeps the *fact* — live count, detected count, and the
+/// mismatch between them — inside a bound that leaves room for the rest of the
+/// line; `skipped_label_fits_the_header` pins that bound for a 64-chip fleet.
+/// The reason for the skip is still spelled out in full by the `log::warn!` in
+/// [`triage_chips`] and by the error text when *every* chip is wedged.
 fn backend_label(detected: usize, live: usize) -> String {
     let skipped = detected.saturating_sub(live);
     if skipped == 0 {
-        // Includes the pre-`init()` state (0 detected, 0 live).
+        // Includes the pre-`init()` state (0 detected, 0 live). Byte-identical
+        // to the label this backend has always rendered on a healthy fleet —
+        // nothing new appears on a box where nothing is wrong.
         "Luwen (Direct Hardware)".to_string()
     } else {
-        format!(
-            "Luwen (Direct Hardware; {} of {} chips — {} ARC-unresponsive)",
-            live, detected, skipped
-        )
+        format!("Luwen ({}/{} chips)", live, detected)
     }
 }
 
@@ -904,14 +921,33 @@ mod tests {
         /// with it; a `log::warn!` alone is invisible inside a full-screen TUI.
         #[test]
         fn backend_label_names_the_skipped_chips() {
-            assert_eq!(
-                backend_label(4, 3),
-                "Luwen (Direct Hardware; 3 of 4 chips — 1 ARC-unresponsive)"
-            );
-            assert_eq!(
-                backend_label(4, 1),
-                "Luwen (Direct Hardware; 1 of 4 chips — 3 ARC-unresponsive)"
-            );
+            assert_eq!(backend_label(4, 3), "Luwen (3/4 chips)");
+            assert_eq!(backend_label(4, 1), "Luwen (1/4 chips)");
+        }
+
+        /// Upper bound in terminal columns on the skipped-chip label — see
+        /// `backend_label`'s "why it is terse" section. 18 columns is the widest
+        /// realistic rendering (`Luwen (1/64 chips)`); 24 leaves headroom for a
+        /// three-digit fleet while staying far inside what an 80-column header
+        /// can spare alongside the title, separators and device count.
+        const MAX_SKIPPED_LABEL_COLS: usize = 24;
+
+        /// The label is interpolated into single-line headers that have no width
+        /// budget and do not wrap, so its own width is the only thing keeping the
+        /// trailing `N devices` segment on screen at 80 columns. Pin it for a
+        /// worst-case fleet: 64 chips detected with all but one skipped.
+        #[test]
+        fn skipped_label_fits_the_header() {
+            use unicode_width::UnicodeWidthStr;
+            for (detected, live) in [(64, 1), (64, 63), (32, 0), (4, 3), (999, 1)] {
+                let label = backend_label(detected, live);
+                let cols = UnicodeWidthStr::width(label.as_str());
+                assert!(
+                    cols <= MAX_SKIPPED_LABEL_COLS,
+                    "backend_label({detected}, {live}) = {label:?} is {cols} columns, \
+                     over the {MAX_SKIPPED_LABEL_COLS}-column header budget"
+                );
+            }
         }
 
         /// A healthy fleet (and the pre-`init()` state) keeps the plain label —
