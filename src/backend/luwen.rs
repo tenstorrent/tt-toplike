@@ -373,11 +373,25 @@ fn map_smbus(luwen_telem: &luwen_api::chip::Telemetry) -> SmbusTelemetry {
         board_power_limit: is_bh.then(|| luwen_telem.board_power_limit.to_string()),
         therm_trip_count: is_bh.then(|| luwen_telem.therm_trip_count.to_string()),
         // ── GDDR temps / ECC / harvesting — new in official 0.8.x ──
+        // `.flatten()`: two independent reasons to have no reading, both of
+        // which mean the same thing to the renderer. The outer `is_bh` gate
+        // drops the whole tag on WH (where it's a `Default` 0, not a
+        // measurement); the inner `None` from `unpack_gddr_temps_u32` drops a
+        // BH register the firmware left at all-ones, which would otherwise
+        // render as 255 °C — see that function's doc comment.
         gddr_temps: [
-            is_bh.then(|| unpack_gddr_temps_u32(luwen_telem.gddr01_temp)),
-            is_bh.then(|| unpack_gddr_temps_u32(luwen_telem.gddr23_temp)),
-            is_bh.then(|| unpack_gddr_temps_u32(luwen_telem.gddr45_temp)),
-            is_bh.then(|| unpack_gddr_temps_u32(luwen_telem.gddr67_temp)),
+            is_bh
+                .then(|| unpack_gddr_temps_u32(luwen_telem.gddr01_temp))
+                .flatten(),
+            is_bh
+                .then(|| unpack_gddr_temps_u32(luwen_telem.gddr23_temp))
+                .flatten(),
+            is_bh
+                .then(|| unpack_gddr_temps_u32(luwen_telem.gddr45_temp))
+                .flatten(),
+            is_bh
+                .then(|| unpack_gddr_temps_u32(luwen_telem.gddr67_temp))
+                .flatten(),
         ],
         max_gddr_temp: is_bh.then_some(luwen_telem.max_gddr_temp as f32),
         gddr_corr_errs: [
