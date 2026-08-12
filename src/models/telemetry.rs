@@ -351,18 +351,37 @@ pub struct GddrTempPair(pub [f32; 4]);
 
 /// Unpack a raw GDDR_X_Y_TEMP register (4 packed temperature bytes) into °C.
 /// Bytes are extracted little-endian: byte0=LSB is temps[0].
-pub fn unpack_gddr_temps_u32(v: u32) -> GddrTempPair {
-    GddrTempPair([
+///
+/// Returns `None` for the all-ones register ([`REGISTER_NO_READING`]): a card
+/// whose firmware doesn't implement this telemetry tag (or whose GDDR isn't
+/// powered) leaves the register at `0xFFFFFFFF`, which unpacks to a nonsensical
+/// `[255, 255, 255, 255] °C` — rendered red in the sidebar as `GDDR T 255°→255°C`
+/// and fed into [`SmbusTelemetry::max_gddr_temp_computed`] and the starfield's
+/// thermal-headroom cue as if the memory were 175 °C past its shutdown trip.
+/// This is the same "no reading" convention the fan and ECC registers use.
+///
+/// Only the *whole-register* all-ones pattern is rejected. A single byte of
+/// `0xFF` is left alone deliberately: 255 °C is not a plausible GDDR reading
+/// either, but per-byte filtering would also have to guess what to put in its
+/// place, and a partially-populated register has never been observed. Rejecting
+/// only the pattern firmware actually uses for "nothing here" keeps a real —
+/// even alarmingly hot — reading intact.
+pub fn unpack_gddr_temps_u32(v: u32) -> Option<GddrTempPair> {
+    if v == REGISTER_NO_READING {
+        return None;
+    }
+    Some(GddrTempPair([
         (v & 0xFF) as f32,
         ((v >> 8) & 0xFF) as f32,
         ((v >> 16) & 0xFF) as f32,
         ((v >> 24) & 0xFF) as f32,
-    ])
+    ]))
 }
 
 /// Unpack a GDDR_X_Y_TEMP hex string (e.g. "0x262a2c2c") into four °C values.
 /// Bytes are extracted little-endian: byte0=LSB is temps[0].
-/// Returns None if the string is empty, `"N/A"`, or not a valid hex value.
+/// Returns None if the string is empty, `"N/A"`, not a valid hex value, or the
+/// all-ones "no reading" register — see [`unpack_gddr_temps_u32`].
 pub fn unpack_gddr_temps(s: &str) -> Option<GddrTempPair> {
     let s = s.trim();
     if s.is_empty() || s == "N/A" {
@@ -370,7 +389,7 @@ pub fn unpack_gddr_temps(s: &str) -> Option<GddrTempPair> {
     }
     let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
     let v = u32::from_str_radix(hex, 16).ok()?;
-    Some(unpack_gddr_temps_u32(v))
+    unpack_gddr_temps_u32(v)
 }
 
 /// Number of Tensix columns in the Blackhole chip grid that can be harvested.
@@ -518,9 +537,32 @@ pub(crate) fn real_fan_rpm(s: &str) -> Option<u32> {
 /// `true` when a raw fan register value is a firmware "no reading" sentinel
 /// rather than an RPM. Shared by [`real_fan_rpm`] (string sources: tt-smi JSON,
 /// sysfs) and the luwen backend (which reads the registers as `u32` directly).
+///
+/// The fan register has *two* extra sentinels beyond the generic
+/// [`REGISTER_NO_READING`]: `0` (a fanless card, or a fan the firmware knows
+/// about but cannot tach) and `0xFFFF` — tt-smi truncates the 32-bit all-ones
+/// register to 16 bits when it renders `fan_speed` as a decimal, so the same
+/// "no fan here" fact reaches us as `65535` through the JSON path and as
+/// `4294967295` through sysfs.
 pub(crate) fn is_fan_sentinel(rpm: u32) -> bool {
-    rpm == 0 || rpm == 0xFFFF || rpm == 0xFFFF_FFFF
+    rpm == 0 || rpm == 0xFFFF || rpm == REGISTER_NO_READING
 }
+
+/// The all-ones value a `u32` telemetry register carries when the firmware has
+/// **no reading** for it — an unimplemented tag, an unpowered domain, or a
+/// counter the board simply doesn't have.
+///
+/// One constant for the whole crate, because every register that can be absent
+/// signals it the same way and every consumer has to filter it the same way. It
+/// is not a plausible measurement for any of them: 4294967295 correctable ECC
+/// errors, 4294967295 lifetime thermal trips and 255 °C GDDR are each rendered
+/// in *red* as a hardware emergency, so failing to filter one turns a card that
+/// merely lacks a register into a card that appears to be dying.
+///
+/// Users: the GDDR ECC and thermal-trip rows in the device sidebar
+/// (`ui::tui`), [`unpack_gddr_temps_u32`], and [`is_fan_sentinel`] (which adds
+/// the fan register's own two extra sentinels on top).
+pub(crate) const REGISTER_NO_READING: u32 = u32::MAX;
 
 /// Decode a raw SMBUS `THM_LIMITS` register into the thermal **shutdown** trip
 /// point in °C, so every backend puts the same units in
@@ -894,8 +936,41 @@ mod tests {
     #[test]
     fn test_gddr_temp_unpack_u32() {
         // Same packing as the hex-string form: byte0 (LSB) = temps[0].
-        let pair = unpack_gddr_temps_u32(0x262a2c2c);
+        let pair = unpack_gddr_temps_u32(0x262a2c2c).expect("a real reading unpacks");
         assert_eq!(pair.0, [44.0_f32, 44.0, 42.0, 38.0]);
+    }
+
+    /// A card whose firmware doesn't implement the GDDR temperature tags leaves
+    /// the register at all-ones. Unpacked naively that is `[255; 4] °C` — a
+    /// red `GDDR T 255°→255°C` row in the sidebar, a bogus
+    /// `max_gddr_temp_computed()`, and a starfield thermal-headroom cue pegged
+    /// at "175 °C past shutdown" on hardware that is perfectly healthy.
+    ///
+    /// Both entry points must reject it: the hex-string form (tt-smi JSON,
+    /// sysfs) and the raw-`u32` form (the luwen backend reads the registers
+    /// directly).
+    #[test]
+    fn gddr_temp_all_ones_register_is_no_reading() {
+        assert!(
+            unpack_gddr_temps_u32(0xFFFF_FFFF).is_none(),
+            "the all-ones register is firmware's 'no reading', not 255 °C"
+        );
+        assert!(unpack_gddr_temps("0xffffffff").is_none());
+        assert!(unpack_gddr_temps("0xFFFFFFFF").is_none());
+    }
+
+    /// …but only that exact pattern. A hot card must still report as hot: the
+    /// filter must not become "drop anything alarming". 0x5a = 90 °C is a real,
+    /// throttling-hot GDDR reading, and a register with a *single* 0xFF byte is
+    /// still passed through — nothing has ever been observed to populate one
+    /// byte and not the others, and guessing would mean inventing a temperature.
+    #[test]
+    fn gddr_temp_hot_but_real_readings_survive() {
+        let hot = unpack_gddr_temps_u32(0x5a5a_5a5a).expect("90 °C is a real reading");
+        assert_eq!(hot.0, [90.0_f32, 90.0, 90.0, 90.0]);
+
+        let partial = unpack_gddr_temps_u32(0x2626_26FF).expect("only all-ones is a sentinel");
+        assert_eq!(partial.0, [255.0_f32, 38.0, 38.0, 38.0]);
     }
 
     // ── tensix_col_harvested ──────────────────────────────────────────────────

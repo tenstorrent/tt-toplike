@@ -5888,9 +5888,9 @@ fn build_stats_sidebar_rows(
     // non-zero — uncorrectable errors are the headline diagnostic and go red.
     //
     // Accumulation is saturating and drops the all-ones sentinel: an
-    // unimplemented/unpowered GDDR ECC register reads 0xFFFFFFFF (the same
-    // "no reading" convention the fan register uses), and four of those
-    // summed with `Iterator::sum` panics on overflow in a debug build.
+    // unimplemented/unpowered GDDR ECC register reads `REGISTER_NO_READING`
+    // (the crate-wide "no reading" convention — see its doc comment), and four
+    // of those summed with `Iterator::sum` panics on overflow in a debug build.
     // Unlike the fan filter, 0 and 0xFFFF are NOT filtered here — zero is
     // the normal healthy count, and 65535 correctable errors is a plausible
     // real reading on a degrading module.
@@ -5900,17 +5900,17 @@ fn build_stats_sidebar_rows(
     // truncating a corruption warning mid-number. See its doc comment.
     if !compact {
         if let Some(s) = smbus {
-            const ECC_NO_READING: u32 = u32::MAX;
+            use crate::models::telemetry::REGISTER_NO_READING;
             let corr: u32 = s
                 .gddr_corr_errs
                 .iter()
                 .flatten()
                 .copied()
-                .filter(|&v| v != ECC_NO_READING)
+                .filter(|&v| v != REGISTER_NO_READING)
                 .fold(0u32, u32::saturating_add);
             let uncorr = s
                 .gddr_uncorr_errs
-                .filter(|&v| v != ECC_NO_READING)
+                .filter(|&v| v != REGISTER_NO_READING)
                 .unwrap_or(0);
             if corr > 0 || uncorr > 0 {
                 let color = if uncorr > 0 {
@@ -5932,10 +5932,17 @@ fn build_stats_sidebar_rows(
     // Thermal-trip row (full mode only): lifetime trip counter — any
     // non-zero value means the card hit hardware thermal shutdown at least
     // once and deserves attention.
+    //
+    // `REGISTER_NO_READING` is filtered for the same reason as in the ECC row
+    // above, and it matters more here: a card whose firmware doesn't implement
+    // THERM_TRIP_COUNT leaves it at all-ones, which this row would otherwise
+    // render as `Trips 4294967295 thermal` in alarm red — a fabricated
+    // "this card has thermally shut down" on hardware that is perfectly fine.
     if !compact {
         if let Some(trips) = smbus
             .and_then(|s| s.therm_trip_count.as_deref())
             .and_then(crate::models::telemetry::parse_hex_or_dec)
+            .filter(|&v| v != crate::models::telemetry::REGISTER_NO_READING)
         {
             if trips > 0 {
                 stat_lines.push(Line::from(vec![
@@ -8115,6 +8122,57 @@ mod stats_sidebar_tests {
                 STATS_CONTENT_W
             );
         }
+    }
+
+    /// The thermal-trip row must apply the same "no reading" filter its
+    /// neighbours do.
+    ///
+    /// A card whose firmware doesn't implement THERM_TRIP_COUNT leaves the
+    /// register at all-ones, and this row renders any non-zero count in alarm
+    /// red — so without the filter a perfectly healthy p150/p300 shows
+    /// `Trips 4294967295 thermal`, i.e. a fabricated report that the card has
+    /// thermally shut down. That is worse than a missing row by a wide margin:
+    /// it is the single most alarming thing the sidebar can say.
+    ///
+    /// Both spellings the sources use are covered: sysfs hands us the raw
+    /// decimal, tt-smi's JSON hands us the hex.
+    #[test]
+    fn trips_row_is_absent_for_the_no_reading_sentinel() {
+        let (device, telem, smbus, bw) = worst_case();
+
+        let trips_rows = |s: &SmbusTelemetry| -> Vec<String> {
+            build_stats_sidebar_rows(&device, Some(&telem), Some(s), bw, false)
+                .iter()
+                .filter(|r| {
+                    r.spans
+                        .first()
+                        .is_some_and(|sp| sp.content.starts_with("Trips"))
+                })
+                .map(|r| r.spans.iter().map(|sp| sp.content.as_ref()).collect())
+                .collect()
+        };
+
+        for sentinel in ["4294967295", "0xFFFFFFFF", "0xffffffff"] {
+            let mut s = smbus.clone();
+            s.therm_trip_count = Some(sentinel.to_string());
+            assert!(
+                trips_rows(&s).is_empty(),
+                "{sentinel} is 'no reading', not 4.3 billion thermal shutdowns; \
+                 got rows {:?}",
+                trips_rows(&s)
+            );
+        }
+
+        // …and a real trip count must still raise the alarm. `worst_case()`
+        // carries 2 trips; without this half the test would pass by deleting
+        // the row entirely.
+        let real = trips_rows(&smbus);
+        assert_eq!(real.len(), 1, "a real trip count must still render");
+        assert!(
+            real[0].contains('2'),
+            "the count itself must survive: {:?}",
+            real[0]
+        );
     }
 
     /// Compact mode drops the secondary rows and must stay well inside budget.
