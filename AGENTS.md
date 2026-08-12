@@ -4360,3 +4360,78 @@ the four backends:
 *Phase 25 status: **COMPLETE** — shipped as v0.8.0. Safe (sysfs/hybrid/json)
 and luwen paths all verified on 4× Blackhole p300c; luwen remains explicit-only
 (never auto-detected) and unverified on Wormhole/Grayskull and under load.*
+
+---
+
+## Phase 26 — v0.8.1: the two bug families 0.8.0 created (August 11, 2026)
+
+Josh Zheng reviewed the merged #23 and left ten inline findings. Almost all of
+them are the *second-order* cost of Phase 25's own fixes, which is the durable
+lesson here: each 0.8.0 fix was locally correct and introduced a new coupling
+that the fix's own author couldn't see.
+
+**Family 1 — a cached reading that never expires.** Four findings. The pattern:
+0.8.0 taught a parse layer to say "no reading" for an invalid value, but the
+layer *above* it reads absent as "keep what you had".
+* `pick_fan_field` returning `None` on a sentinel + `smbus_smooth::blend`
+  preserving on `None` = a stopped fan reports its last healthy RPM forever.
+  Fixed by keeping the sentinel verbatim at the parse boundary (pre-0.8.0
+  shape) so `fan_rpm()` stays the single arbiter, plus a `blend_fan` that
+  copies a sentinel through — necessary because the generic EMA *smooths* a
+  numeric sentinel into a plausible 447 RPM. Measured, not theorised.
+* `read_counters` returning `None` while the caller only *skipped* = a PCIe
+  rate that outlives its counters. Evicting the tracker too matters: otherwise
+  recovery computes a rate spanning the outage.
+* `board_power` (and then the whole blended SMBUS surface) overlaid from a
+  stamp that was never reset = frozen ARC health / ETH / GDDR next to a live
+  Power row. Now expires at 10 s; static meta (firmware, limits) deliberately
+  doesn't, because those don't change under a card.
+* `merge_parsed` being append-only = a device dropped from a snapshot keeps
+  serving old telemetry. Chose mark-stale over drop: dropping churns
+  `device_count()` and index identity, which is the *other* bug family.
+
+**Family 2 — a presence check where a validity check was needed.** The 0.8.0
+gate meant to stop an empty SMBUS block from publishing used
+`fan_speed.is_some()`, but the fanless sentinel *is* `Some` — so the gate let
+through exactly the block it existed to stop, and downstream code that branches
+on block presence painted a red "ARC dead" dot on a healthy card. Same class:
+`THERM_TRIP_COUNT` all-ones rendering `Trips 4294967295 thermal` in red (a fake
+shutdown alarm), and an unimplemented GDDR register unpacking to 255 °C. The
+fix everywhere is to route through one sentinel predicate rather than adding a
+second copy.
+
+**Family 3 — position used as identity.** The luwen backend skipped an
+ARC-dead chip and renumbered survivors (panels labelled 0/1/2 that are
+physically 1/2/3); a malformed tt-smi entry left an index gap that Memory
+Castle's single-device path, its baseline loop, the starfield's star/planet
+keys and the `Dev{n}` labels all resolved *positionally*. Kept the honest index
+everywhere and fixed the consumers — renumbering is what caused the
+mis-attribution class Phase 25 existed to fix. The hybrid join's positional
+fallback could also claim an index a bus-id match already owned, with the
+`HashMap` collect dropping a card nondeterministically; resolution is now two
+ordered passes, bus id first.
+
+### Process notes
+
+* **A fresh reviewer found what six fix-agents could not.** Every 0.8.0 fix had
+  a red-before-green test; the bugs were all in the *seam* between a fix and
+  the layer above it. Per-task review can't see seams — only a whole-branch
+  pass can.
+* **Comparing two backends side by side is the cheapest correctness oracle we
+  have.** Diffing a luwen build against hybrid on the same box is what exposed
+  `Device::limits`/`firmwares` being unpopulated (`lim 105°C` vs `lim 90°C`) —
+  and that in turn exposed `--backend json` never parsing tt-smi's `limits`
+  block at all, because tt-smi emits those numbers as *quoted strings*.
+* **A test fixture with unrealistic values hides the bug it was written to
+  catch.** `stats_sidebar_rows_fit_content_width` passed throughout because
+  `worst_case()` used single-digit ECC counters; the real worst case overflows
+  by a column. Fixtures need to be as ugly as the field.
+* `scripts/bump-version.sh` rewrites the version *token* of the top stanza — it
+  does not open a new one. For a release you must restore the previous stanza's
+  header and prepend a new one by hand.
+
+---
+
+*Phase 26 status: **COMPLETE** — shipped as v0.8.1. All ten review findings
+fixed with regression tests, plus six same-class instances found by the
+whole-branch verification pass.*

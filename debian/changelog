@@ -1,3 +1,81 @@
+tt-toplike (0.8.1) noble; urgency=medium
+
+  * Bugfix release. Addresses review findings against 0.8.0, all in two
+    families: a cached reading that is never invalidated (so stale data
+    keeps rendering as live) and a presence check standing in for a
+    validity check (so a firmware "no reading" sentinel is treated as
+    data). Both families are what 0.8.0's own new rows made reachable.
+  * Stale readings now expire instead of lying:
+    - A stopped fan reported its last healthy RPM forever. 0.8.0 taught
+      the parser to return "no reading" for a sentinel, but the EMA blend
+      treats absent as "keep the previous value", so the Fan row latched
+      at e.g. 1882 RPM while an operator watched for a fan failure. The
+      parse layer now keeps the sentinel verbatim (pre-0.8.0 shape, with
+      fan_rpm() the single arbiter of validity) and the blend copies a
+      sentinel through instead of smoothing it — measured, the generic
+      EMA turned a sentinel into a plausible-looking 447 RPM.
+    - A PCIe rate outlived its counters. read_counters() deliberately
+      returns nothing for an unreadable set, but the caller only skipped
+      the update, so a tt-kmd reload or permission change left the last
+      rate rendering as live. The cached rate and its tracker are now
+      evicted, so a later recovery re-primes rather than computing a rate
+      spanning the outage.
+    - The whole tt-smi measurement surface now expires, not just board
+      power. If the reader's tt-smi subprocess dies, ARC health, the ETH
+      live map, GDDR temps and ECC counters were all served from an
+      arbitrarily old snapshot. Live measurements now age out after 10 s
+      (~3 s nominal poll cycle, ~6.5 s worst healthy, so two-to-three
+      missed polls without flapping); firmware versions and board limits
+      deliberately survive, since those don't change under a card.
+    - A device dropped from a snapshot kept serving its old telemetry.
+      Per-device measurements are now replaced per snapshot: an absent
+      card keeps its entry and index but reports no current reading,
+      rather than a stale number indistinguishable from a live one.
+  * Firmware "no reading" sentinels no longer read as data:
+    - A fanless card (0xFFFFFFFF fan) with an older driver published an
+      otherwise-empty SMBUS block, which downstream code read as
+      presence — painting a red "ARC dead" dot on a healthy card and
+      collapsing the ETH row's architectural-max fallback.
+    - THERM_TRIP_COUNT = 0xFFFFFFFF rendered "Trips 4294967295 thermal"
+      in red: a fake thermal-shutdown alarm on a card whose firmware
+      simply doesn't implement the register.
+    - An unimplemented GDDR temperature register unpacked to 255 °C and
+      fed both the sidebar and the starfield thermal cue.
+  * Device identity is no longer inferred from list position:
+    - The luwen backend skipped an ARC-unresponsive chip and renumbered
+      the survivors, so on a 4-card box with card 0 wedged, panels
+      labelled 0/1/2 were physically cards 1/2/3 and the missing card was
+      invisible outside the log. Detection-order indices are now
+      preserved, an all-dead sweep is an error rather than an empty
+      screen, and the footer reports "3/4 chips".
+    - A malformed entry in tt-smi's device_info[] left an index gap, and
+      several consumers addressed telemetry by list position — Memory
+      Castle's single-device path, its baseline loop, the starfield's
+      star/planet device keys, and the Dev{n} column labels all read the
+      wrong card (or none). They now resolve by device index; the
+      starfield's fleet position is split from its device identity.
+    - The hybrid join's positional fallback could claim an index already
+      taken by a bus-id match, and the resulting HashMap collect dropped
+      one card nondeterministically. Resolution is now two ordered passes
+      — bus id first, position only into free slots.
+  * A wholly-undecodable snapshot is an error again. 0.8.0's salvage path
+    returned success with zero devices when every device_info[] entry
+    failed to decode, so a tt-smi upgrade that reshaped the per-device
+    block would freeze the display on the last good snapshot while
+    max_consecutive_errors never fired. A genuinely empty device_info[]
+    (a box with no cards) is still a success.
+  * The ECC row can no longer truncate. "1 uncorr · 1234567 corr" is 31
+    columns in a 30-column sidebar, so a degrading GDDR module's error
+    count was clipped mid-number on precisely the row that signals data
+    corruption. Counts above 999 are now abbreviated through a formatter
+    with a proven <=4-column bound for every u32, and the worst-case test
+    fixture was raised so this can't silently regress.
+  * Snapshots without an smbus_telem block no longer lose their PCIe link
+    geometry and board power — those parse independently and are now
+    gated separately rather than behind SMBUS being non-empty.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 11 Aug 2026 00:00:00 +0000
+
 tt-toplike (0.8.0) noble; urgency=medium
 
   * Telemetry expansion — the sysfs/hybrid path picks up most of what used

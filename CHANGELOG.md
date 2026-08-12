@@ -14,6 +14,44 @@ git tag                        # released versions
 
 ## Recent releases
 
+### 0.8.1
+
+Bugfix release addressing review findings against 0.8.0. Almost everything
+here is one of two families — a cached reading that never expires, so stale
+data keeps rendering as live; and a presence check where a validity check was
+needed, so a firmware "no reading" sentinel gets treated as a measurement.
+Both were made reachable by 0.8.0's own new rows.
+
+- **Stale readings now expire instead of lying.** A stopped fan reported its
+  last healthy RPM indefinitely (the parser said "no reading", but the EMA
+  blend reads absent as "keep the old value"). A PCIe rate outlived its
+  counters after a driver reload. The whole tt-smi measurement surface —
+  ARC health, ETH live map, GDDR temps, ECC counters — kept rendering from an
+  arbitrarily old snapshot if the reader subprocess died; live measurements
+  now age out after 10 s while firmware versions and board limits deliberately
+  survive. A device dropped from a snapshot no longer serves its old telemetry.
+- **Sentinels no longer read as data.** A fanless card on an older driver
+  published an otherwise-empty SMBUS block, which downstream code took as
+  presence — a red "ARC dead" dot on a healthy card. `THERM_TRIP_COUNT`
+  all-ones rendered `Trips 4294967295 thermal` in red, a fake thermal-shutdown
+  alarm. An unimplemented GDDR register unpacked to 255 °C.
+- **Device identity no longer inferred from list position.** The luwen backend
+  skipped an ARC-unresponsive chip and renumbered the survivors, so panels
+  labelled 0/1/2 were physically cards 1/2/3 with the missing card invisible
+  outside the log; indices are preserved and the footer now reports `3/4
+  chips`. A malformed tt-smi entry left an index gap that several
+  consumers — Memory Castle's single-device path and baseline loop, the
+  starfield's device keys, the `Dev{n}` labels — resolved by position, showing
+  the wrong card or none. The hybrid join's positional fallback could steal an
+  index already claimed by a bus-id match and drop a card nondeterministically.
+- **A wholly-undecodable snapshot is an error again**, instead of succeeding
+  with zero devices and freezing the display on the last good data while the
+  error counter reset every poll. An empty `device_info[]` is still success.
+- **The ECC row can no longer truncate** — `1 uncorr · 1234567 corr` overflowed
+  the sidebar and clipped mid-number on the row that signals data corruption.
+- Snapshots without an `smbus_telem` block keep their PCIe geometry and board
+  power, which parse independently.
+
 ### 0.8.0
 - **Fix: per-device data was shuffled on multi-card boxes.** The sysfs backend
   numbered devices in raw `readdir` order while `tt-smi` orders by PCI bus id, so
