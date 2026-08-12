@@ -173,8 +173,19 @@ impl WsBackend {
     /// Merge a parsed snapshot into cached state.
     ///
     /// Append-only device list keyed by index (devices never disappear across
-    /// updates); telemetry and SMBUS maps replaced per-index. Identical semantics
-    /// to `JSONBackend`, so every visualization consumes this backend unchanged.
+    /// updates); the telemetry and SMBUS maps are *replaced*, so a device the
+    /// newest frame doesn't report has no current reading rather than an
+    /// indefinitely-served stale one. Identical semantics to
+    /// `JSONBackend::merge_parsed` — see there for the full rationale, including
+    /// why the device stays and only its numbers go — so every visualization
+    /// consumes either backend unchanged.
+    ///
+    /// The remote path needs the replacement at least as much as the local one:
+    /// the far end of this socket is a long-lived `--serve` publisher, so a card
+    /// that stops appearing in its snapshots (removed from the fleet, or an
+    /// entry that stopped parsing after a tt-smi upgrade over there) would
+    /// otherwise render its last-known wattage on this screen for as long as the
+    /// session stayed open, with no local signal that anything had changed.
     fn merge_parsed(&mut self, parsed: ParsedSnapshot) {
         // The WS stream is unauthenticated (trusted-LAN only), so a malformed or
         // hostile frame must not grow our state without bound. Real hardware tops
@@ -188,18 +199,22 @@ impl WsBackend {
                 self.devices.push(device);
             }
         }
-        for (idx, telem) in parsed.telemetry {
-            if self.telemetry.len() >= MAX_REMOTE_DEVICES && !self.telemetry.contains_key(&idx) {
-                continue;
-            }
-            self.telemetry.insert(idx, telem);
-        }
-        for (idx, smbus) in parsed.smbus {
-            if self.smbus.len() >= MAX_REMOTE_DEVICES && !self.smbus.contains_key(&idx) {
-                continue;
-            }
-            self.smbus.insert(idx, smbus);
-        }
+        // Replace, filtered to devices we actually admitted above. The filter is
+        // what keeps the OOM guard intact now that these maps are rebuilt from
+        // the frame rather than grown: `devices` is capped at
+        // MAX_REMOTE_DEVICES, so keying the measurement maps off it bounds them
+        // by construction — a hostile frame carrying a million telemetry entries
+        // for indices we never accepted as devices allocates nothing here.
+        self.telemetry = parsed
+            .telemetry
+            .into_iter()
+            .filter(|(idx, _)| self.devices.iter().any(|d| d.index == *idx))
+            .collect();
+        self.smbus = parsed
+            .smbus
+            .into_iter()
+            .filter(|(idx, _)| self.devices.iter().any(|d| d.index == *idx))
+            .collect();
         // Whole-system snapshot, not per-device keyed state — replace wholesale
         // each frame, same as `JSONBackend::merge_parsed`. Already bounded by
         // the frame size cap (this backend's messages are size-capped at the
@@ -648,6 +663,59 @@ mod tests {
 
         let smbus = b.smbus_telemetry(0).expect("smbus missing after frame");
         assert_eq!(smbus.enabled_tensix_col, Some(0x3FFF));
+    }
+
+    /// A device that stops appearing in the remote's frames must stop serving
+    /// its last reading — the remote counterpart of
+    /// `json::tests::device_absent_from_a_later_snapshot_stops_serving_its_old_telemetry`.
+    ///
+    /// The card stays in `devices()` (it is presumably still installed over
+    /// there, and dropping it would renumber every panel on a flap), but its
+    /// telemetry and SMBUS go to `None` rather than being served for the
+    /// remainder of a session that could last days.
+    #[test]
+    fn device_absent_from_a_later_frame_stops_serving_its_old_telemetry() {
+        // Two cards, then a frame in which the first card's entry no longer
+        // decodes (the publisher's tt-smi was upgraded mid-session). The
+        // element-wise salvage drops that entry; the frame still applies.
+        const TWO_CARDS: &str = r#"{
+            "device_info": [
+                {"board_info": {"board_type": "p150a", "bus_id": "0000:01:00.0"},
+                 "telemetry": {"power": "145.0"},
+                 "smbus_telem": {"DDR_STATUS": "0x55555555"}},
+                {"board_info": {"board_type": "p150a", "bus_id": "0000:02:00.0"},
+                 "telemetry": {"power": "30.0"}}
+            ]
+        }"#;
+        const FIRST_CARD_UNDECODABLE: &str = r#"{
+            "device_info": [
+                {"board_info": {"board_type": "p150a", "bus_id": "0000:01:00.0"},
+                 "telemetry": true},
+                {"board_info": {"board_type": "p150a", "bus_id": "0000:02:00.0"},
+                 "telemetry": {"power": "31.0"}}
+            ]
+        }"#;
+
+        let mut b = WsBackend::new_for_test();
+        b.test_inject(TWO_CARDS);
+        assert!(b.update().is_ok());
+        assert_eq!(b.telemetry(0).and_then(|t| t.power), Some(145.0));
+        assert!(b.smbus_telemetry(0).is_some());
+
+        b.test_inject(FIRST_CARD_UNDECODABLE);
+        assert!(b.update().is_ok(), "a salvaged frame still applies");
+
+        assert!(
+            b.telemetry(0).is_none(),
+            "device 0 is not in the newest frame — 145 W is no longer a reading"
+        );
+        assert!(b.smbus_telemetry(0).is_none());
+        assert_eq!(b.devices().len(), 2, "the card itself is not forgotten");
+        assert_eq!(
+            b.telemetry(1).and_then(|t| t.power),
+            Some(31.0),
+            "the card that is still reported keeps updating"
+        );
     }
 
     /// A second `update()` with no new frame is a cheap no-op (generation guard).

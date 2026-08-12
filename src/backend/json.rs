@@ -396,8 +396,8 @@ impl JSONBackend {
     }
 
     /// Test-only: build a `ParsedSnapshot` from an already-parsed device list and
-    /// merge it into this backend, preserving the historical append-only device
-    /// semantics that `init()`/`update()` rely on.
+    /// merge it into this backend through the same [`Self::merge_parsed`]
+    /// `init()`/`update()` use — append-only devices, replaced measurement maps.
     #[cfg(test)]
     fn update_from_json(&mut self, json_devices: Vec<TTSMIDeviceJSON>) -> BackendResult<()> {
         self.merge_parsed(parsed_from_json_devices(json_devices));
@@ -406,22 +406,38 @@ impl JSONBackend {
 
     /// Merge a parsed snapshot into the backend's cached state.
     ///
-    /// Device list is append-only and keyed by index (devices never disappear
-    /// across updates); telemetry and SMBUS maps are replaced per-index. This
-    /// reproduces the exact behaviour of the previous `update_from_json`, so the
-    /// subprocess path is unchanged by the refactor to a shared parser.
+    /// The **device list is append-only** and keyed by index: a card that drops
+    /// out of one snapshot keeps its panel, its index and its identity, so a
+    /// single flaky poll doesn't renumber the fleet or make panels appear and
+    /// disappear underneath the operator.
+    ///
+    /// The **measurement maps are replaced, not merged**. Each successful
+    /// `tt-smi -s` is a complete picture of the moment it was taken, so a device
+    /// it does not report has no current reading — and "no reading" is a state
+    /// the UI already renders (every consumer goes through `telemetry()` /
+    /// `smbus_telemetry()` and handles `None`), whereas a stale reading is
+    /// indistinguishable from a live one on screen.
+    ///
+    /// Merging per-index instead — the historical behaviour — meant a card whose
+    /// `device_info[]` entry stopped parsing (a shape change after a tt-smi
+    /// upgrade, say, which `parse_json_devices` skips rather than failing the
+    /// whole snapshot) kept serving its last-good power, temperature and clocks
+    /// as live *forever*, while `error_count` reset on every poll because the
+    /// snapshot as a whole kept succeeding. Nothing ever removed it.
+    ///
+    /// Dropping the device outright was the other candidate and is worse: it
+    /// changes `device_count()`, so panels would appear and vanish on a flap and
+    /// every index-keyed visualization would have to re-derive its layout
+    /// mid-animation. Keeping the card and blanking its numbers says exactly
+    /// what is true — the card is still there, we just don't know its state.
     fn merge_parsed(&mut self, parsed: ParsedSnapshot) {
         for device in parsed.devices {
             if !self.devices.iter().any(|d| d.index == device.index) {
                 self.devices.push(device);
             }
         }
-        for (idx, telem) in parsed.telemetry {
-            self.telemetry.insert(idx, telem);
-        }
-        for (idx, smbus) in parsed.smbus {
-            self.smbus_telemetry.insert(idx, smbus);
-        }
+        self.telemetry = parsed.telemetry;
+        self.smbus_telemetry = parsed.smbus;
         // Unlike telemetry/smbus (keyed maps merged per-device), `processes[]`
         // is a whole-system snapshot each tick — replace wholesale rather than
         // accumulate, so an exited process doesn't linger forever. A snapshot
@@ -2302,6 +2318,74 @@ mod tests {
         // `test_snapshot_json_unchanged_on_parse_error`), but the *error* is now
         // visible, which is the whole point.
         assert_eq!(backend.snapshot_json(), Some(REAL_TTSMI_JSON.to_string()));
+    }
+
+    /// The *partial* case of the same bug: one card's entry stops parsing while
+    /// the others keep working, so the snapshot as a whole still succeeds.
+    ///
+    /// `snapshot_where_every_device_entry_is_undecodable_is_an_error` closed the
+    /// all-or-nothing case. This is the one that survived it, and it is worse in
+    /// practice because nothing signals it at all: the poll succeeds, so
+    /// `error_count` resets every tick and `max_consecutive_errors` never fires,
+    /// while the dropped card's panel goes on rendering its last-good power,
+    /// temperature and clocks as live telemetry for as long as the process runs.
+    /// One card silently frozen next to three live ones is exactly the failure
+    /// this release is about.
+    ///
+    /// The device itself stays — the card hasn't gone anywhere, and dropping it
+    /// would renumber panels on every flap. Only its numbers go.
+    #[test]
+    fn device_absent_from_a_later_snapshot_stops_serving_its_old_telemetry() {
+        let good = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"},
+                 "telemetry": {"power": "77.0", "asic_temperature": "61.0"},
+                 "smbus_telem": {"BOARD_ID_LOW": "0xaaa"}},
+                {"board_info": {"bus_id": "0000:02:00.0"},
+                 "telemetry": {"power": "22.0"}}
+            ]
+        }"#;
+        // Same fleet, but card 0's entry is now in a shape this build can't
+        // decode (a tt-smi upgrade reshaping a per-device block). The salvage
+        // drops that entry and the snapshot still succeeds.
+        let degraded = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"}, "telemetry": true},
+                {"board_info": {"bus_id": "0000:02:00.0"},
+                 "telemetry": {"power": "23.0"}}
+            ]
+        }"#;
+
+        let mut backend = JSONBackend::new("tt-smi");
+        backend
+            .apply_raw_snapshot_pub(good)
+            .expect("the healthy snapshot parses");
+        assert_eq!(backend.telemetry(0).and_then(|t| t.power), Some(77.0));
+        assert!(backend.smbus_telemetry(0).is_some());
+
+        backend
+            .apply_raw_snapshot_pub(degraded)
+            .expect("a partially-salvaged snapshot is still a successful poll");
+
+        assert!(
+            backend.telemetry(0).is_none(),
+            "device 0 was not in this snapshot, so it has no current reading — \
+             serving 77.0 W here is a frozen number presented as live"
+        );
+        assert!(
+            backend.smbus_telemetry(0).is_none(),
+            "same for its SMBUS block: ARC health and DDR status are measurements"
+        );
+        assert_eq!(
+            backend.device_count(),
+            2,
+            "the card is still installed; only its numbers are unknown"
+        );
+        assert_eq!(
+            backend.telemetry(1).and_then(|t| t.power),
+            Some(23.0),
+            "the healthy card keeps updating"
+        );
     }
 
     /// The genuinely-empty case is NOT an error: a host with no Tenstorrent
