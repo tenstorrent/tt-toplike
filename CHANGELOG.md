@@ -34,6 +34,9 @@ Review follow-ups to 0.8.0 (PR #23), all in the paths that release touched:
 - **Luwen: an unresponsive chip no longer renumbers its siblings** — survivors
   keep their physical index, and the skipped card is reported in the backend
   info line instead of only the log.
+- **`webbrowser` 1.2.0 → 1.2.4** (RUSTSEC-2026-0257). Lockfile only, and
+  transitive through `egui-winit` → `eframe`, so it affects the optional egui
+  GUI and not the shipped TUI binary.
 - **Sidebar fixes.** The GDDR ECC row is width-bounded and abbreviates large
   counts (`1 uncorr · 1.2M corr`) instead of clipping mid-number; a hwmon fan
   sentinel no longer publishes an otherwise-empty SMBUS block (which read

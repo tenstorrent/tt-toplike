@@ -42,6 +42,12 @@ tt-toplike (0.8.1) noble; urgency=medium
       counts (`1 uncorr · 1.2M corr`). A degrading module reporting 1,234,567
       correctable errors overflowed the 30-column sidebar and rendered a
       truncated number on the one row that signals data corruption.
+    - Lockfile: `webbrowser` 1.2.0 -> 1.2.4 (RUSTSEC-2026-0257, argument
+      injection through the Unix `BROWSER` template). Transitive, via
+      `egui-winit` -> `eframe`, so it is reachable only from the optional
+      egui GUI and absent from the shipped `tt-toplike` TUI binary — but
+      it was the one real advisory in the tree, and 1.2.4 is in range of
+      egui-winit's own `1.0.5` requirement, so no code change was needed.
     - Visualizations: telemetry is looked up by `Device::index` everywhere,
       never by list position. Two backends can now serve a gapped device list
       (a salvaged `device_info[]`, a skipped chip), and Memory Castle, the
