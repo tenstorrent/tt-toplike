@@ -26,6 +26,16 @@ Binaries: `tt-toplike` (dispatcher), `tt-toplike-tui`, `tt-toplike-app`/`tt-topl
   via `cargo install` but not the `tt-toplike` dispatcher — copy that by hand.
 * `all-smi-luwen-*` crates are **optional**, gated behind the `luwen-backend`
   feature — default builds don't need them.
+* **`cargo update -p <crate>` rewrites more of `Cargo.lock` than it says.** Even
+  with `--precise`, re-resolving re-points every crate whose requirement is a
+  *range* (`>=0.52, <0.62`) at whichever matching entry the lock already holds —
+  in practice downgrading `windows-sys` pointers from 0.61.2 to 0.48/0.52/0.59
+  across `errno`, `rustix`, `tempfile`, `dirs-sys`, `uds_windows`,
+  `winapi-util`. That churn is unrelated to the crate you meant to bump and only
+  shows up on Windows builds. To bump one crate cleanly: run the update, lift the
+  regenerated `[[package]]` block for *that crate only* onto the committed
+  lockfile, then prove it with `cargo check --locked` (it fails if the hand-edit
+  left the graph inconsistent).
 * Adding a field to `ServiceState` / `TickSample` / `RemoteInference` is a
   compile error at **every** struct literal, including test-only ones — update
   all enumerated sites (the test build is where a missing field bites).

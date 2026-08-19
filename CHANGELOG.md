@@ -51,6 +51,9 @@ Both were made reachable by 0.8.0's own new rows.
   the sidebar and clipped mid-number on the row that signals data corruption.
 - Snapshots without an `smbus_telem` block keep their PCIe geometry and board
   power, which parse independently.
+- **`webbrowser` 1.2.0 → 1.2.4** (RUSTSEC-2026-0257). Lockfile only, and
+  transitive through `egui-winit` → `eframe`, so it affects the optional egui
+  GUI and not the shipped TUI binary.
 
 ### 0.8.0
 - **Fix: per-device data was shuffled on multi-card boxes.** The sysfs backend
