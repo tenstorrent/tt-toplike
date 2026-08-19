@@ -50,3 +50,7 @@ Thumbs.db
 
 # Superpowers scratch (SDD ledgers, brainstorm sessions, review diffs) — local only
 .superpowers/
+
+# Local Claude Code state (worktrees, session scratch) — never committed
+.claude/
+.cargo/config.toml.bak

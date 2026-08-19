@@ -1,3 +1,55 @@
+tt-toplike (0.8.1) noble; urgency=medium
+
+  * Review follow-ups to the 0.8.0 telemetry expansion (#23) — ten findings
+    from code review, all in the paths that release touched:
+    - Hybrid: a tt-smi entry with no `board_info.bus_id` no longer falls back
+      onto a device index a bus-id match already claimed. The unconditional
+      positional fallback could point two snapshot entries at one index, and
+      the re-key's HashMap collect then kept whichever the iterator emitted
+      last — nondeterministic mis-attribution of exactly the kind 0.8.0's
+      bus-id join was written to end. The contested entry is dropped now.
+    - Hybrid: `board_power` expires after 10 s. The overlay re-applied the
+      last published payload on every tick, so a tt-smi reader that died
+      mid-run pinned a frozen "Board NW total" row under a Power row that was
+      still live.
+    - Hybrid: a snapshot with no `smbus_telem` block (permission-restricted
+      run, ARC that didn't answer) no longer loses its PCIe link geometry,
+      board power and FW/limits enrichment — each payload is gated on its own
+      emptiness, and the device-metadata overlay runs off its own stamp
+      instead of the SMBUS generation.
+    - JSON: a snapshot whose `device_info[]` entries *all* fail to decode is
+      a parse error again, not `Ok(vec![])`. As a success it reset the error
+      counter and left the previous snapshot's devices and readings on
+      screen — frozen power/temp/clocks presented as live, with
+      `max_consecutive_errors` never firing.
+    - JSON/hybrid: a fan that stops clears the Fan row. `pick_fan_field`
+      correctly reports "no real RPM", but the EMA blend read that as "no new
+      data" and preserved the last healthy reading forever; fan RPM is now
+      copied straight through (an EMA between a real RPM and a stopped fan
+      also manufactured readings that were never measured).
+    - Sysfs: a hwmon `fan1_input` holding the firmware all-ones sentinel no
+      longer counts as SMBUS data. It published an otherwise all-`None`
+      block, which reads downstream as "SMBUS present, ARC dead" — a red ARC
+      dot on a healthy card and `0/? live` in place of the ETH fallback.
+    - Sysfs: the cached PCIe bandwidth is dropped when the counter directory
+      stops being readable (driver reload, device reset, permissions change),
+      instead of rendering the last rate on as if the link were still sampled.
+    - Luwen: a chip whose ARC doesn't answer no longer renumbers its
+      siblings. Survivors keep their physical detection index, so cards stay
+      labelled as the hardware numbers them, and the skip is surfaced through
+      the backend info line rather than only in the log.
+    - Insights: the GDDR ECC row is width-bounded and abbreviates large
+      counts (`1 uncorr · 1.2M corr`). A degrading module reporting 1,234,567
+      correctable errors overflowed the 30-column sidebar and rendered a
+      truncated number on the one row that signals data corruption.
+    - Visualizations: telemetry is looked up by `Device::index` everywhere,
+      never by list position. Two backends can now serve a gapped device list
+      (a salvaged `device_info[]`, a skipped chip), and Memory Castle, the
+      starfield and the arcade topology diagram all assumed position ==
+      index — showing 0 W / 0 °C for a card whose telemetry parsed fine.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 18 Aug 2026 00:00:00 +0000
+
 tt-toplike (0.8.0) noble; urgency=medium
 
   * Telemetry expansion — the sysfs/hybrid path picks up most of what used

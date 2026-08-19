@@ -276,7 +276,10 @@ impl ArcadeVisualization {
             spans.push(Span::styled("[", Style::default().fg(board_color)));
 
             for (c_idx, &chip_idx) in board.chips.iter().enumerate() {
-                let device = devices.get(chip_idx);
+                // `board.chips` holds hardware indices (`Device::index`), which
+                // are not slice positions once a backend serves a gapped device
+                // list — look the card up by identity, not by offset.
+                let device = devices.iter().find(|d| d.index == chip_idx);
                 let telem = backend.telemetry(chip_idx);
                 let temp = telem.map(|t| t.temp_c()).unwrap_or(25.0);
 

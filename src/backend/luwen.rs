@@ -372,9 +372,19 @@ pub struct LuwenBackend {
     /// Cached SMBUS telemetry (per device index)
     smbus_cache: HashMap<usize, SmbusTelemetry>,
 
-    /// Luwen chip handles
+    /// Luwen chip handles, each paired with its **physical detection index** —
+    /// the position the chip occupied in `detect_chips_silent`'s list, which is
+    /// also its `Device::index`. Pairing rather than relying on `Vec` position
+    /// is what keeps a card's identity stable when a sibling chip is skipped;
+    /// see `detect_devices`.
     #[cfg(feature = "luwen-backend")]
-    chips: Vec<Chip>,
+    chips: Vec<(usize, Chip)>,
+
+    /// Physical indices of chips detected but skipped because their ARC didn't
+    /// answer. Surfaced through [`TelemetryBackend::backend_info`] so the
+    /// missing card is visible in the UI, not only in the log.
+    #[cfg(feature = "luwen-backend")]
+    skipped_chips: Vec<usize>,
 
     /// Consecutive `update()` calls in which *no* chip's telemetry could be
     /// read. Compared against `config.max_consecutive_errors` so a card that has
@@ -398,6 +408,8 @@ impl LuwenBackend {
             smbus_cache: HashMap::new(),
             #[cfg(feature = "luwen-backend")]
             chips: Vec::new(),
+            #[cfg(feature = "luwen-backend")]
+            skipped_chips: Vec::new(),
             consecutive_errors: 0,
         }
     }
@@ -441,16 +453,28 @@ impl LuwenBackend {
         // have no business driving on a card that is busy serving) — telemetry
         // lives behind the ARC, so `arc_alive()` is the whole precondition, and
         // `upgrade()` just unwraps the already-open chip handle.
-        let mut chips: Vec<Chip> = Vec::with_capacity(detected.len());
+        //
+        // A chip whose ARC is wedged is skipped, but its **index is not reused**:
+        // each surviving chip keeps the position it was detected at, so on a
+        // 4-card box where card 0 is unresponsive the remaining cards stay
+        // labelled 1/2/3 (matching the physical cards, `tt-smi -s` and the sysfs
+        // enumeration) instead of being renumbered 0/1/2 — which silently
+        // pointed every per-index reference at the wrong card. The skip is
+        // reported through `backend_info()` as well as the log, so the missing
+        // card is visible in the UI.
+        let mut chips: Vec<(usize, Chip)> = Vec::with_capacity(detected.len());
+        self.skipped_chips.clear();
         for (idx, uninit) in detected.into_iter().enumerate() {
             if !uninit.arc_alive() {
-                log::warn!(
-                    "LuwenBackend: skipping chip {} — ARC not responding, no telemetry available",
+                log::error!(
+                    "LuwenBackend: chip {} skipped — ARC not responding, no telemetry \
+                     available for that card (its device index stays unused)",
                     idx
                 );
+                self.skipped_chips.push(idx);
                 continue;
             }
-            chips.push(uninit.upgrade());
+            chips.push((idx, uninit.upgrade()));
         }
 
         if chips.is_empty() {
@@ -459,8 +483,8 @@ impl LuwenBackend {
             ));
         }
 
-        // Register each chip whose ARC answered
-        for (idx, chip) in chips.into_iter().enumerate() {
+        // Register each chip whose ARC answered, under its physical index.
+        for (idx, chip) in chips.into_iter() {
             // Get architecture
             let arch = chip.get_arch();
             let architecture = map_arch(arch);
@@ -506,8 +530,8 @@ impl LuwenBackend {
 
             self.devices.push(device);
 
-            // Store chip handle for telemetry reads
-            self.chips.push(chip);
+            // Store chip handle for telemetry reads, keyed by physical index.
+            self.chips.push((idx, chip));
         }
 
         log::info!(
@@ -545,7 +569,11 @@ impl TelemetryBackend for LuwenBackend {
             let mut any_ok = false;
 
             // Read telemetry from each chip
-            for (idx, chip) in self.chips.iter().enumerate() {
+            // `idx` is the chip's physical index (see the `chips` field), which
+            // is what every cache and `Device::index` is keyed on — not its
+            // position in this Vec, which differs whenever a chip was skipped.
+            for (idx, chip) in self.chips.iter() {
+                let idx = *idx;
                 match chip.get_telemetry() {
                     Ok(luwen_telem) => {
                         any_ok = true;
@@ -612,6 +640,23 @@ impl TelemetryBackend for LuwenBackend {
     }
 
     fn backend_info(&self) -> String {
+        // Chips that were detected but couldn't be read are named here so the
+        // footer shows them: their device indices are deliberately left unused,
+        // which would otherwise be visible only as a gap nobody can explain.
+        #[cfg(feature = "luwen-backend")]
+        if !self.skipped_chips.is_empty() {
+            let list = self
+                .skipped_chips
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            return format!(
+                "Luwen (Direct Hardware, {} unavailable — chip {} ARC not responding)",
+                self.devices.len(),
+                list
+            );
+        }
         "Luwen (Direct Hardware)".to_string()
     }
 }

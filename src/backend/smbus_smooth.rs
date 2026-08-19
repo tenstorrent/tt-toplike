@@ -218,11 +218,27 @@ pub fn apply_ema(
     blend(&mut state.vcore, &incoming.vcore, &mut existing.vcore);
     blend(&mut state.tdp, &incoming.tdp, &mut existing.tdp);
     blend(&mut state.tdc, &incoming.tdc, &mut existing.tdc);
-    blend(
-        &mut state.fan_speed,
-        &incoming.fan_speed,
-        &mut existing.fan_speed,
-    );
+    // Fan RPM is deliberately NOT blended, and — unlike every other field
+    // here — an incoming `None` *clears* it rather than preserving what we had.
+    //
+    // Two reasons, both about the sentinel:
+    //
+    // * The JSON parser (`pick_fan_field`) resolves tt-smi's two fan registers
+    //   and yields `None` when neither holds a real RPM — a fanless card, or a
+    //   fan that has stopped. Under the normal "absent keeps the old value"
+    //   rule that reads as "no new data", so a card whose fan dies keeps
+    //   rendering its last healthy RPM forever: exactly the reading an operator
+    //   is watching for, frozen at "healthy". For this field, absent means
+    //   "firmware reported no real RPM", not "not reported".
+    // * EMA across that boundary would be worse than either endpoint: smoothing
+    //   1882 RPM toward a stopped fan manufactures intermediate values (1411,
+    //   1058, …) that were never measured and read as a slowing fan.
+    //
+    // A straight copy makes the row disappear on the first snapshot without a
+    // real reading, which is what it did before 0.8.0 (when the sentinel was
+    // stored verbatim and `fan_rpm()` filtered it at render time).
+    state.fan_speed = None;
+    existing.fan_speed = incoming.fan_speed.clone();
     blend(
         &mut state.input_power,
         &incoming.input_power,
@@ -350,6 +366,39 @@ mod tests {
         // Both fields absent in incoming — existing must be preserved
         assert_eq!(existing.arc0_health.as_deref(), Some("77"));
         assert_eq!(existing.board_id.as_deref(), Some("keep-me"));
+    }
+
+    /// A fan that stops must clear the row, not keep its last healthy RPM.
+    ///
+    /// The JSON parser yields `fan_speed = None` when neither tt-smi fan
+    /// register holds a real (non-sentinel) RPM. Under the general
+    /// "absent keeps existing" rule that froze the Insights `Fan` row at the
+    /// last good reading indefinitely — a fan failure rendering as healthy.
+    #[test]
+    fn fan_speed_clears_when_no_real_reading_arrives() {
+        let mut ema: SmbusEmaState = HashMap::new();
+        let mut existing = SmbusTelemetry {
+            fan_speed: Some("1882".to_owned()),
+            ..SmbusTelemetry::default()
+        };
+
+        // A live reading blends through unchanged (no smoothing on this field).
+        let spinning = SmbusTelemetry {
+            fan_speed: Some("1900".to_owned()),
+            ..SmbusTelemetry::default()
+        };
+        apply_ema(&mut ema, 0, &spinning, &mut existing);
+        assert_eq!(existing.fan_rpm(), Some(1900));
+
+        // Fan stops: tt-smi's registers go to sentinels, the parser reports
+        // None, and the row must go away rather than keep showing 1900.
+        let stopped = SmbusTelemetry::default();
+        apply_ema(&mut ema, 0, &stopped, &mut existing);
+        assert_eq!(
+            existing.fan_rpm(),
+            None,
+            "a snapshot with no real fan reading must clear the stale RPM"
+        );
     }
 
     #[test]

@@ -342,9 +342,11 @@ impl MemoryCastle {
     pub fn update(&mut self, backend: &dyn TelemetryBackend) {
         self.frame = self.frame.wrapping_add(1);
 
-        // Update baseline for each device
-        for (idx, device) in backend.devices().iter().enumerate() {
-            if let Some(telem) = backend.telemetry(idx) {
+        // Update baseline for each device. Keyed on `device.index` (which the
+        // baseline itself is keyed on), not the array position — see the note
+        // in `render` about backends that serve gapped device indices.
+        for device in backend.devices().iter() {
+            if let Some(telem) = backend.telemetry(device.index) {
                 self.baseline.update(
                     device.index,
                     telem.power_w(),
@@ -417,9 +419,17 @@ impl MemoryCastle {
         }
 
         // Single device mode: use full width (original behavior)
+        //
+        // Look the telemetry up by `device.index`, never by the array position:
+        // a backend may serve a device list whose indices have gaps (the JSON
+        // backend preserves a card's true `device_info[]` position when a
+        // sibling entry fails to decode; the luwen backend preserves the
+        // physical chip index when a chip's ARC is unresponsive). Asking for
+        // index 0 there returns `None` and renders 0 W / 0 °C / 0 A for a card
+        // whose telemetry parsed perfectly well.
         let device = &devices[0];
-        let telem = backend.telemetry(0);
-        let smbus = backend.smbus_telemetry(0);
+        let telem = backend.telemetry(device.index);
+        let smbus = backend.smbus_telemetry(device.index);
 
         // Get metrics
         let power = telem.map(|t| t.power_w()).unwrap_or(0.0);
@@ -580,8 +590,15 @@ impl MemoryCastle {
             if topo.has_multi_chip_boards() {
                 let mut board_label_spans = vec![Span::raw("  ")];
                 for board in topo.boards.iter() {
-                    let board_chips_in_view =
-                        board.chips.iter().filter(|&&c| c < num_devices).count();
+                    // `board.chips` holds hardware indices, so "is this chip on
+                    // screen?" is a membership test against the rendered device
+                    // list — not `< num_devices`, which drops a valid card whose
+                    // index exceeds the count (gapped device lists).
+                    let board_chips_in_view = board
+                        .chips
+                        .iter()
+                        .filter(|&&c| devices.iter().any(|d| d.index == c))
+                        .count();
                     if board_chips_in_view == 0 {
                         continue;
                     }
@@ -893,8 +910,15 @@ impl MemoryCastle {
             if topo.has_multi_chip_boards() {
                 let mut board_label_spans = vec![Span::raw("  ")];
                 for board in topo.boards.iter() {
-                    let board_chips_in_view =
-                        board.chips.iter().filter(|&&c| c < num_devices).count();
+                    // `board.chips` holds hardware indices, so "is this chip on
+                    // screen?" is a membership test against the rendered device
+                    // list — not `< num_devices`, which drops a valid card whose
+                    // index exceeds the count (gapped device lists).
+                    let board_chips_in_view = board
+                        .chips
+                        .iter()
+                        .filter(|&&c| devices.iter().any(|d| d.index == c))
+                        .count();
                     if board_chips_in_view == 0 {
                         continue;
                     }
@@ -1653,6 +1677,80 @@ mod tests {
     use crate::backend::host::HostBackend;
     use crate::backend::mock::MockBackend;
     use crate::backend::TelemetryBackend;
+
+    /// A backend serving a single device whose `index` is **not** 0 — what the
+    /// JSON backend produces when `device_info[0]` fails to decode and
+    /// `device_info[1]` parses fine, and what the luwen backend produces when
+    /// chip 0's ARC is unresponsive. Both keep the card's true identity, so the
+    /// device list is `[Device { index: 1, .. }]` with telemetry keyed at 1.
+    struct GappedBackend {
+        devices: Vec<crate::models::Device>,
+        telem: std::collections::HashMap<usize, crate::models::Telemetry>,
+    }
+
+    impl crate::backend::TelemetryBackend for GappedBackend {
+        fn init(&mut self) -> crate::error::BackendResult<()> {
+            Ok(())
+        }
+        fn update(&mut self) -> crate::error::BackendResult<()> {
+            Ok(())
+        }
+        fn devices(&self) -> &[crate::models::Device] {
+            &self.devices
+        }
+        fn telemetry(&self, idx: usize) -> Option<&crate::models::Telemetry> {
+            self.telem.get(&idx)
+        }
+        fn smbus_telemetry(&self, _idx: usize) -> Option<&crate::models::SmbusTelemetry> {
+            None
+        }
+        fn backend_info(&self) -> String {
+            "Gapped (test)".to_string()
+        }
+    }
+
+    /// The single-device header must read the card's telemetry by
+    /// `device.index`, not by array position — position 0 holds no telemetry
+    /// here, and rendering it as 0.0 W / 0.0 °C for a card that reported 96 W is
+    /// worse than showing nothing.
+    #[test]
+    fn single_device_header_reads_telemetry_by_device_index_not_position() {
+        let mut telem = std::collections::HashMap::new();
+        telem.insert(
+            1,
+            crate::models::Telemetry {
+                voltage: Some(0.72),
+                current: Some(88.0),
+                power: Some(96.0),
+                asic_temperature: Some(63.5),
+                aiclk: Some(1000),
+                heartbeat: Some(1),
+                timestamp: chrono::Utc::now(),
+                board_power: None,
+            },
+        );
+        let backend = GappedBackend {
+            devices: vec![crate::models::Device::new(
+                1,
+                "p300c".to_string(),
+                "0000:02:00.0".to_string(),
+                String::new(),
+            )],
+            telem,
+        };
+
+        let castle = MemoryCastle::new(120, 30);
+        let rendered: String = castle
+            .render(&backend)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+
+        assert!(
+            rendered.contains("96"),
+            "the card's real power must appear in the header; got: {rendered}"
+        );
+    }
 
     #[test]
     fn tier_dispatch_thresholds() {

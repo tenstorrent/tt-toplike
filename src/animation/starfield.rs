@@ -324,9 +324,19 @@ impl HardwareStarfield {
         // Calculate device spacing across screen width
         let device_spacing = self.width / num_devices.max(1);
 
-        for (device_idx, device) in devices.iter().enumerate() {
-            // Calculate center position for this device (horizontal only)
-            let device_center_x = (device_idx * device_spacing) + (device_spacing / 2);
+        for (slot, device) in devices.iter().enumerate() {
+            // Calculate center position for this device (horizontal only).
+            // `slot` is a *layout* position — where this card's column sits on
+            // screen — and is the only thing it may be used for.
+            let device_center_x = (slot * device_spacing) + (device_spacing / 2);
+            // Everything a star or planet carries downstream (telemetry lookups,
+            // the adaptive baseline, board topology) is keyed on the *hardware*
+            // index, which is not the same number: a backend serves a gapped
+            // device list whenever it couldn't read a card (a `device_info[]`
+            // entry that failed to decode, a chip whose ARC is unresponsive), and
+            // then slot 0 is device 1. Asking the backend for the slot returns
+            // another card's telemetry, or none at all.
+            let device_idx = device.index;
 
             // Get Tensix grid dimensions for this architecture
             let (grid_rows, grid_cols) = device.tensix_grid();
@@ -468,16 +478,21 @@ impl HardwareStarfield {
         // Initialize data streams between devices (if multiple devices)
         if num_devices > 1 {
             let device_spacing = self.width / num_devices;
-            for from_idx in 0..num_devices {
-                for to_idx in (from_idx + 1)..num_devices {
-                    let from_x = (from_idx * device_spacing) + (device_spacing / 2);
-                    let to_x = (to_idx * device_spacing) + (device_spacing / 2);
+            // Same split as above: `from_slot`/`to_slot` place the stream on
+            // screen, `from_dev`/`to_dev` are the hardware indices the topology
+            // and the per-device activity map are keyed on.
+            for from_slot in 0..num_devices {
+                for to_slot in (from_slot + 1)..num_devices {
+                    let from_x = (from_slot * device_spacing) + (device_spacing / 2);
+                    let to_x = (to_slot * device_spacing) + (device_spacing / 2);
+                    let from_dev = devices[from_slot].index;
+                    let to_dev = devices[to_slot].index;
 
                     // Determine topology relationship for this stream pair.
                     let intra = self
                         .board_topology
                         .as_ref()
-                        .map(|t| t.same_board(from_idx, to_idx))
+                        .map(|t| t.same_board(from_dev, to_dev))
                         .unwrap_or(false);
 
                     // Create stream segments along the horizontal path.
@@ -490,8 +505,8 @@ impl HardwareStarfield {
                             self.streams.push(DataStream {
                                 x,
                                 y,
-                                from_device: from_idx,
-                                to_device: to_idx,
+                                from_device: from_dev,
+                                to_device: to_dev,
                                 intensity: 0.0,
                                 offset: step as f32 / num_steps as f32,
                                 intra_board: intra,

@@ -14,6 +14,31 @@ git tag                        # released versions
 
 ## Recent releases
 
+### 0.8.1
+Review follow-ups to 0.8.0 (PR #23), all in the paths that release touched:
+
+- **Stale readings no longer render as live.** `board_power` expires when the
+  tt-smi reader stops producing (it used to pin the last poll's wattage under a
+  Power row that kept moving); PCIe bandwidth is dropped when the counter files
+  stop being readable; and a fan that stops clears the Fan row instead of
+  keeping its last healthy RPM forever.
+- **A wholly-unparseable `tt-smi -s` snapshot is an error again**, not an empty
+  success — as a success it reset the error counter and left the previous
+  snapshot's devices and telemetry on screen indefinitely.
+- **Attribution hardening.** A tt-smi entry with no bus id can no longer collide
+  onto an index a bus-id match already claimed (the collision was resolved by
+  HashMap iteration order, so the mis-attribution varied run to run). A snapshot
+  with no `smbus_telem` block keeps its PCIe link row and board power. Every
+  visualization looks telemetry up by `Device::index` rather than list position,
+  which matters now that a backend can serve a gapped device list.
+- **Luwen: an unresponsive chip no longer renumbers its siblings** — survivors
+  keep their physical index, and the skipped card is reported in the backend
+  info line instead of only the log.
+- **Sidebar fixes.** The GDDR ECC row is width-bounded and abbreviates large
+  counts (`1 uncorr · 1.2M corr`) instead of clipping mid-number; a hwmon fan
+  sentinel no longer publishes an otherwise-empty SMBUS block (which read
+  downstream as "ARC dead" on a healthy card).
+
 ### 0.8.0
 - **Fix: per-device data was shuffled on multi-card boxes.** The sysfs backend
   numbered devices in raw `readdir` order while `tt-smi` orders by PCI bus id, so

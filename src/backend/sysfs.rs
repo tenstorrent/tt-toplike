@@ -625,7 +625,15 @@ impl SysfsBackend {
             || s.therm_trip_count.is_some()
             || s.board_id.is_some()
             || s.m3_app_fw_version.is_some()
-            || s.fan_speed.is_some()
+            // `fan_rpm()`, not `fan_speed.is_some()`: hwmon exposes `fan1_input`
+            // on cards that have no readable fan, where it reads the firmware
+            // all-ones sentinel (0xFFFFFFFF — the value this file's own
+            // `fake_hwmon` fixture uses as the realistic p300c reading). A raw
+            // presence check counts that as data and publishes a block whose
+            // only populated field is a non-reading, which is exactly the
+            // all-`None`-block failure described above. The shared
+            // `real_fan_rpm` predicate (models::telemetry) filters it.
+            || s.fan_rpm().is_some()
     }
 }
 
@@ -813,13 +821,27 @@ impl TelemetryBackend for SysfsBackend {
             // the tracker computes its own dt, and a 1 s window smooths the
             // quantization noise a 100 ms window shows on a bursty link.
             if slow_lane {
-                if let Some(tt_dir) = self.tt_class_dirs.get(&device_idx) {
-                    let counter_dir = tt_dir.join("pcie_perf_counters");
-                    if let Some(snap) = crate::backend::pcie_counters::read_counters(&counter_dir) {
+                let snap = self.tt_class_dirs.get(&device_idx).and_then(|tt_dir| {
+                    crate::backend::pcie_counters::read_counters(&tt_dir.join("pcie_perf_counters"))
+                });
+                match snap {
+                    Some(snap) => {
                         let tracker = self.pcie_trackers.entry(device_idx).or_default();
                         if let Some(bw) = tracker.sample(snap, now) {
                             self.pcie_bandwidth.insert(device_idx, bw);
                         }
+                    }
+                    // Counter set no longer readable — the driver was reloaded,
+                    // the device was reset or surprise-removed, or the attribute
+                    // group's permissions changed. Drop the cached rate rather
+                    // than letting it render on as if it were live; that is the
+                    // same "confident number for an unsampled link" failure
+                    // `read_counters` returns `None` to avoid, just one layer up.
+                    // The tracker goes too, so a link that comes back re-baselines
+                    // instead of differencing across the outage.
+                    None => {
+                        self.pcie_bandwidth.remove(&device_idx);
+                        self.pcie_trackers.remove(&device_idx);
                     }
                 }
             }
@@ -949,6 +971,67 @@ mod tests {
     fn pcie_bandwidth_none_without_counter_dir() {
         let backend = SysfsBackend::new();
         assert!(backend.pcie_bandwidth(0).is_none());
+    }
+
+    /// The cached rate must be dropped when the counter set stops being
+    /// readable — a driver reload, a device reset/surprise-removal, or a
+    /// permissions change on the attribute group.
+    ///
+    /// `read_counters` deliberately returns `None` there rather than a
+    /// zero-valued snapshot, precisely so the UI never shows a confident
+    /// `▼0 B/s ▲0 B/s` for a link nobody sampled. Keeping the *last* rate in
+    /// the cache is the same lie one layer up: the sidebar keeps rendering a
+    /// live-looking rate for a link that is no longer being measured.
+    #[test]
+    fn pcie_bandwidth_is_cleared_when_the_counter_dir_disappears() {
+        let td = tempfile::tempdir().unwrap();
+        let hwmon = td.path().join("hwmon2");
+        stdfs::create_dir_all(&hwmon).unwrap();
+        fake_hwmon(&hwmon);
+        let tt_dir = fake_tt_class(&hwmon);
+        let counters = tt_dir.join("pcie_perf_counters");
+        stdfs::create_dir_all(&counters).unwrap();
+
+        let write_counters = |base: u64| {
+            for f in [
+                "mst_nonposted_wr_data_word_sent0",
+                "mst_posted_wr_data_word_sent0",
+                "mst_rd_data_word_received0",
+                "slv_nonposted_wr_data_word_received0",
+                "slv_posted_wr_data_word_received0",
+                "slv_rd_data_word_sent0",
+            ] {
+                stdfs::write(counters.join(f), base.to_string()).unwrap();
+            }
+        };
+
+        let mut backend = SysfsBackend::new();
+        backend.detect_devices_in(td.path()).unwrap();
+        // detect_devices_in doesn't resolve class dirs (init() does), so do it
+        // the way init() would — without the tt-smi enrichment subprocess.
+        backend
+            .tt_class_dirs
+            .insert(0, SysfsBackend::find_tt_class_dir(&hwmon).unwrap());
+
+        // Two slow-lane passes over a moving counter set → a real rate.
+        write_counters(1_000);
+        backend.update().unwrap();
+        write_counters(2_000);
+        backend.last_slow_refresh = None; // force the slow lane again
+        backend.update().unwrap();
+        assert!(
+            backend.pcie_bandwidth(0).is_some(),
+            "two samples of a readable counter set must yield a rate"
+        );
+
+        // The attribute group goes away (driver reload / device reset).
+        stdfs::remove_dir_all(&counters).unwrap();
+        backend.last_slow_refresh = None;
+        backend.update().unwrap();
+        assert!(
+            backend.pcie_bandwidth(0).is_none(),
+            "an unreadable counter set must clear the cached rate, not preserve it"
+        );
     }
 
     // Note: Actual device detection tests require real hardware or mocked filesystem
@@ -1228,6 +1311,67 @@ mod tests {
             backend.smbus_telemetry(0).is_none(),
             "no class dir and no fan → no SMBUS block at all"
         );
+    }
+
+    /// Same gate, but with a fan file whose value is the firmware "no reading"
+    /// sentinel — the realistic p300c case, where hwmon exposes `fan1_input`
+    /// and the fanless card reports all-ones.
+    ///
+    /// A raw `fan_speed.is_some()` presence check treats that sentinel as data
+    /// and publishes an otherwise all-`None` SMBUS block, which is precisely
+    /// what the gate exists to prevent (red "ARC dead" dot, `0/? live` ETH).
+    #[test]
+    fn smbus_telemetry_is_none_when_only_fan_is_a_sentinel() {
+        let td = tempfile::tempdir().unwrap();
+        let hwmon = td.path().join("hwmon2");
+        stdfs::create_dir_all(&hwmon).unwrap();
+        // hwmon sensors only (no `device` symlink → no tt class dir), plus a
+        // fan sensor reporting the all-ones sentinel.
+        for (f, v) in [
+            ("name", "blackhole"),
+            ("temp1_input", "38036"),
+            ("temp1_label", "asic_temp"),
+            ("in0_input", "718"),
+            ("power1_input", "16000000"),
+            ("curr1_input", "23000"),
+            ("fan1_input", "4294967295"),
+        ] {
+            stdfs::write(hwmon.join(f), v).unwrap();
+        }
+
+        let mut backend = SysfsBackend::new();
+        backend.detect_devices_in(td.path()).unwrap();
+        backend.update().unwrap();
+
+        assert!(
+            backend.smbus_telemetry(0).is_none(),
+            "a sentinel fan reading is not data — the block must stay absent"
+        );
+    }
+
+    /// A *real* fan reading, on the other hand, is enough on its own.
+    #[test]
+    fn smbus_telemetry_is_some_for_a_real_fan_reading() {
+        let td = tempfile::tempdir().unwrap();
+        let hwmon = td.path().join("hwmon2");
+        stdfs::create_dir_all(&hwmon).unwrap();
+        for (f, v) in [
+            ("name", "blackhole"),
+            ("temp1_input", "38036"),
+            ("temp1_label", "asic_temp"),
+            ("fan1_input", "1882"),
+        ] {
+            stdfs::write(hwmon.join(f), v).unwrap();
+        }
+
+        let mut backend = SysfsBackend::new();
+        backend.detect_devices_in(td.path()).unwrap();
+        backend.update().unwrap();
+
+        let smbus = backend
+            .smbus_telemetry(0)
+            .expect("a real fan RPM is real SMBUS data");
+        assert_eq!(smbus.fan_rpm(), Some(1882));
     }
 
     /// With the tt-kmd class dir present, the synthesized block *is* served.

@@ -502,9 +502,17 @@ fn decode_processes(value: Option<serde_json::Value>) -> Vec<crate::models::Devi
 /// Index attribution is preserved by *array position*, not by "position among
 /// the entries that decoded": a skipped entry leaves its index unused rather
 /// than shifting every later card's SMBUS/limits onto its neighbour.
+///
+/// The first tuple element is how many entries the `device_info` array actually
+/// held, so the caller can tell "salvaged some of N" from "salvaged none of N".
+/// The latter is a failed parse, not an empty box — see [`parse_json_devices`].
 fn salvage_modern_snapshot(
     json_str: &str,
-) -> Option<(Vec<TTSMIDeviceJSON>, Vec<crate::models::DeviceProcess>)> {
+) -> Option<(
+    usize,
+    Vec<TTSMIDeviceJSON>,
+    Vec<crate::models::DeviceProcess>,
+)> {
     let mut doc: serde_json::Value = serde_json::from_str(json_str).ok()?;
     let obj = doc.as_object_mut()?;
     let processes = decode_processes(obj.remove("processes"));
@@ -512,6 +520,7 @@ fn salvage_modern_snapshot(
         Some(serde_json::Value::Array(entries)) => entries,
         _ => return None,
     };
+    let entry_count = entries.len();
 
     let devices = entries
         .into_iter()
@@ -540,7 +549,7 @@ fn salvage_modern_snapshot(
         })
         .collect();
 
-    Some((devices, processes))
+    Some((entry_count, devices, processes))
 }
 
 /// Pure parse of tt-smi snapshot JSON into the intermediate device list, plus
@@ -615,10 +624,26 @@ fn parse_json_devices(
             // shape element-by-element (see `salvage_modern_snapshot`) so one
             // malformed card costs only that card, and say so at `warn` — the
             // operator needs to know why a device went missing.
-            if let Some((devices, processes)) = salvage_modern_snapshot(json_str) {
+            if let Some((entry_count, devices, processes)) = salvage_modern_snapshot(json_str) {
+                // Salvaging *nothing* out of a non-empty device_info[] is a
+                // failed parse, not an empty box. Reported as `Ok(vec![])` it
+                // takes the success arm in `apply_raw_snapshot`: the error
+                // counter resets, `max_consecutive_errors` never fires, and —
+                // because the merge is append-only for devices and per-index
+                // for telemetry — the previous snapshot's device list and
+                // readings keep rendering as if they were live. A tt-smi
+                // upgrade that changes every per-device block shape would show
+                // frozen power/temp/clocks with nothing surfaced to the user.
+                if devices.is_empty() && entry_count > 0 {
+                    return Err(BackendError::ParseError(format!(
+                        "tt-smi snapshot has {entry_count} device_info[] entries but none \
+                         could be decoded ({e}): {}",
+                        json_str.chars().take(100).collect::<String>()
+                    )));
+                }
                 log::warn!(
                     "tt-smi snapshot did not fit the modern snapshot shape ({e}); \
-                     salvaged {} of its device_info[] entries element-wise",
+                     salvaged {} of its {entry_count} device_info[] entries element-wise",
                     devices.len()
                 );
                 return Ok((devices, processes));
@@ -1848,6 +1873,36 @@ mod tests {
     /// positions are preserved, so the survivor keeps index 1 rather than
     /// sliding into the missing card's slot (that slide is exactly the
     /// mis-attribution this release set out to fix).
+    #[test]
+    fn every_device_entry_malformed_is_an_error_not_an_empty_success() {
+        // A tt-smi upgrade that changes the per-device block shape makes *every*
+        // entry fail to decode. Salvaging zero devices out of a non-empty
+        // device_info[] is not a successful update: reported as `Ok(vec![])` it
+        // resets the backend's error counter and leaves the previous snapshot's
+        // device list and telemetry on screen — frozen power/temp/clocks
+        // presented as live, with nothing surfaced to the user.
+        let json = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"}, "telemetry": true},
+                {"board_info": {"bus_id": "0000:02:00.0"}, "telemetry": 7}
+            ]
+        }"#;
+        let err = parse_json_devices(json).expect_err("must not report success");
+        assert!(
+            matches!(err, BackendError::ParseError(_)),
+            "expected a ParseError, got {err:?}"
+        );
+    }
+
+    /// An *empty* `device_info: []` is a legitimate "no cards" answer, not a
+    /// parse failure — it must still succeed with zero devices.
+    #[test]
+    fn empty_device_info_array_is_a_successful_zero_device_snapshot() {
+        let (devices, _) = parse_json_devices(r#"{"device_info": []}"#)
+            .expect("an empty device list is a valid snapshot");
+        assert!(devices.is_empty());
+    }
+
     #[test]
     fn malformed_device_entry_is_skipped_not_collapsed() {
         let json = r#"{

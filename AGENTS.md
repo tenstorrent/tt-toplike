@@ -4085,6 +4085,112 @@ regenerate `Cargo.lock` **before** committing — otherwise the lockfile lags
 
 ---
 
+## Phase 26 — PR #23 review follow-ups (August 18, 2026, v0.8.1)
+
+Ten review comments on the merged telemetry-expansion PR (#23), all verified
+against the code before touching anything. Every one was real. Grouped by what
+they're actually about:
+
+### "Stale data rendered as live" — three variants of one mistake
+
+The release added several caches whose *absence* semantics were never defined,
+so each one preserved its last value forever instead of expiring:
+
+* **`board_power`** (`hybrid.rs`). The overlay re-applied
+  `device_meta_shared`'s payload on every tick and nothing ever reset it, so a
+  tt-smi reader whose subprocess died mid-run stamped a frozen "Board NW total"
+  row onto freshly-read sysfs telemetry — directly beneath a Power row that
+  *was* still updating, with nothing to distinguish them. The payload is now a
+  `MetaSnapshot { at: Option<Instant>, meta }` and `board_power` is applied only
+  while `at.elapsed() <= BOARD_POWER_MAX_AGE` (10 s — two failed 5 s backoff
+  polls). The *static* half of the payload (firmwares/limits/PCIe geometry)
+  keeps its "never expires" treatment on purpose: a firmware version read five
+  minutes ago is still true. Skipping the overlay is all it takes to drop the
+  row, because sysfs rebuilds each `Telemetry` with `board_power: None` per tick.
+* **PCIe bandwidth** (`sysfs.rs`). `read_counters` deliberately returns `None`
+  for an unreadable counter set — precisely so the UI never shows a confident
+  `▼0 B/s ▲0 B/s` for a link nobody sampled — but the caller only *skipped* the
+  update, leaving the last rate in `pcie_bandwidth` forever. Same lie, one layer
+  up. Now clears both the rate and the tracker (so a link that comes back
+  re-baselines rather than differencing across the outage).
+* **Fan RPM** (`smbus_smooth.rs`). `pick_fan_field` returns `None` when neither
+  tt-smi fan register holds a real RPM, but `blend`'s general rule is "absent
+  keeps existing" — so a fan that *stops* kept reporting its last healthy RPM
+  indefinitely, the one reading an operator watches for. Fan is now copied
+  straight through (incoming `None` clears), and is deliberately no longer
+  EMA'd: smoothing 1882 RPM toward a stopped fan manufactures intermediate
+  values that were never measured. **The `blend` "absent = keep" rule is right
+  for every other field; fan is the exception because its parser has already
+  filtered a sentinel, so absent means "firmware reported no real RPM".**
+
+### "Empty success" — the parse that reported OK with nothing
+
+`salvage_modern_snapshot` returned `Some((devices, _))` even when *every*
+`device_info[]` entry failed to decode, so `parse_json_devices` returned
+`Ok(vec![])`. `apply_raw_snapshot` took the success arm: error counter reset,
+`max_consecutive_errors` never fires, and — since the merge is append-only for
+devices and per-index for telemetry — the previous snapshot's device list and
+readings kept rendering as live. A tt-smi upgrade that changed the per-device
+block shape would show frozen power/temp/clocks forever. Salvage now also
+returns the entry count, and zero-of-N is a `ParseError`; zero-of-zero (an
+empty `device_info: []`) is still a legitimate success.
+
+### Attribution — two more ways indices could lie
+
+* **Positional fallback collision** (`hybrid.rs`). `mapping.insert(pos, pos)`
+  for a bus-id-less entry was unconditional, so it could land on an index a
+  bus-id match had already claimed; `rekey_map`'s `HashMap` collect then kept
+  whichever pair the iterator emitted last. Nondeterministic — the same class
+  of mis-attribution the bus-id join was written to end. Now two passes: bus-id
+  matches claim first, positional fallback fills only unclaimed indices, and a
+  contested entry is *dropped* (the same honest choice the unmatched-bus-id
+  branch already made). The test loops 32× because a single pass could pass by
+  luck under a hash order.
+* **Gapped device lists, and everything that assumed there were none.** The
+  JSON salvage path preserves a card's true `device_info[]` position when a
+  sibling fails to decode; the luwen backend now preserves a chip's physical
+  index when its ARC is unresponsive (it previously renumbered the survivors,
+  so on a 4-card box with card 0 wedged you got three devices labelled 0/1/2
+  that were physically 1/2/3 — and the skip appeared only in the log; it's now
+  in `backend_info()`, which the footer renders). Both mean `devices[0].index`
+  can be non-zero — and `memory_castle::render`'s single-device path,
+  `starfield`'s `Star`/`MemoryPlanet`/`DataStream` device fields, the arcade
+  topology diagram's `devices.get(chip_idx)`, and two `c < num_devices` board
+  filters all assumed position == index. **Rule for this codebase: a loop
+  position over `backend.devices()` is a layout slot and may only be used for
+  layout; anything handed back to the backend, the adaptive baseline, or
+  `BoardTopology` must be `device.index`.** (`board.chips` holds hardware
+  indices, so it is never a slice offset either.)
+
+### Sidebar width
+
+The GDDR ECC row had no width budget while its neighbours (`eth_dot_budget`,
+`pcie_row_parts`/`format_bandwidth`) do. `corr` is a saturating sum of four
+`u32` channel counters, so 1 uncorr / 1,234,567 corr is 31 columns in a
+30-column interior and clipped to `ECC     1 uncorr · 1234567 cor` — a
+truncated number on the row that signals data corruption. New
+`ecc_row_content`/`abbrev_count` (integer math: `{:.0}` of 999_999/1000 rounds
+to `1000k` and blows the bound) keep it ≤22 columns for *every* `u32` pair, and
+the `worst_case()` fixture now carries degrading-module counts so the existing
+budget test actually measures the case.
+
+### Also
+
+`synthesized_smbus_has_data` gated on `fan_speed.is_some()` rather than the
+shared `real_fan_rpm` predicate, so a hwmon `fan1_input` holding the all-ones
+sentinel (what a fanless p300c reports — the repo's own fixture value)
+published an otherwise all-`None` SMBUS block: the exact "SMBUS present, ARC
+dead" state the gate exists to prevent (red ARC dot on a healthy card,
+`0/? live` instead of the architectural-max ETH fallback).
+
+Verification: 623 lib tests (`--features tui`), 540 on the minimal feature set,
+637 with `luwen-backend`; clippy clean on all three; `cargo fmt --check`. Each
+fix landed with a test proven red first. **Not hardware-verified** — no card
+was touched for this round; the luwen change in particular is compile- and
+reasoning-checked only, consistent with that backend's launch-only status.
+
+---
+
 ## Phase 25 — Telemetry expansion (August 2026, v0.8.0)
 
 **Origin**: with HivemindSweeper landed, the next gap was the telemetry

@@ -2813,6 +2813,55 @@ fn eth_dot_budget(total: Option<u32>, count_cols: usize) -> (u32, String) {
     (0, String::new())
 }
 
+/// Abbreviate an error counter to at most 4 columns: `999`, `9.9k`, `123M`,
+/// `4.2G`.
+///
+/// Integer math throughout, deliberately: a `{:.0}` format of 999_999/1_000
+/// rounds to `1000k` and blows the width bound the caller depends on. Truncating
+/// instead keeps every tier ≤ 4 columns (`999k`, `9.9k`), and an ECC count is a
+/// magnitude an operator reacts to, not a number they reconcile — the exact
+/// value belongs in `tt-smi -s` output, not in a 30-column sidebar.
+fn abbrev_count(n: u32) -> String {
+    let scaled = |div: u32, suffix: char| -> String {
+        let whole = n / div;
+        if whole < 10 {
+            // One truncated decimal: 9_999 → "9.9k" (never "10.0k").
+            format!("{}.{}{}", whole, (n % div) * 10 / div, suffix)
+        } else {
+            format!("{}{}", whole, suffix)
+        }
+    };
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=999_999 => scaled(1_000, 'k'),
+        1_000_000..=999_999_999 => scaled(1_000_000, 'M'),
+        _ => scaled(1_000_000_000, 'G'),
+    }
+}
+
+/// Content (label column excluded) for the GDDR ECC row, bounded to fit.
+///
+/// The sidebar clips rather than wraps, so an unbounded count truncates the row
+/// mid-number — on the one row that signals data corruption. `1 uncorr ·
+/// 1234567 corr` after an 8-column label is 31 columns in a 30-column interior
+/// and rendered as `ECC     1 uncorr · 1234567 cor`.
+///
+/// Counts are abbreviated to ≤ 4 columns each, and the spelled-out form is used
+/// whenever it fits (`1 uncorr · 1.2M corr`, 20 columns). Only when both counts
+/// are wide does it fall back to the terse `unc` label, which bounds the row at
+/// 20 columns for *every* pair of `u32`s — see
+/// `ecc_row_content_fits_for_any_counter_pair`.
+fn ecc_row_content(uncorr: u32, corr: u32) -> String {
+    let budget = STATS_CONTENT_W.saturating_sub(STATS_LABEL_W);
+    let (u, c) = (abbrev_count(uncorr), abbrev_count(corr));
+    let full = format!("{} uncorr · {} corr", u, c);
+    if full.chars().count() <= budget {
+        full
+    } else {
+        format!("{} unc · {} corr", u, c)
+    }
+}
+
 /// Display width (terminal columns) of a fully-styled line: the sum of every
 /// span's unicode display width, so box-drawing, arrows and emoji count as the
 /// columns they actually occupy rather than as byte or `char` counts.
@@ -5805,10 +5854,9 @@ fn build_stats_sidebar_rows(
                         format!("{:<8}", "ECC"),
                         Style::default().fg(Color::DarkGray),
                     ),
-                    Span::styled(
-                        format!("{} uncorr · {} corr", uncorr, corr),
-                        Style::default().fg(color),
-                    ),
+                    // Width-bounded: a degrading module's counts are exactly
+                    // when this row must stay readable — see `ecc_row_content`.
+                    Span::styled(ecc_row_content(uncorr, corr), Style::default().fg(color)),
                 ]));
             }
         }
@@ -7649,7 +7697,8 @@ pub fn run_render_bench(
 #[cfg(test)]
 mod stats_sidebar_tests {
     use super::{
-        build_stats_sidebar_rows, eth_dot_budget, line_cols, DEVICE_PANEL_H, STATS_CONTENT_W,
+        abbrev_count, build_stats_sidebar_rows, ecc_row_content, eth_dot_budget, line_cols,
+        DEVICE_PANEL_H, STATS_CONTENT_W, STATS_LABEL_W,
     };
     use crate::backend::pcie_counters::PcieBandwidth;
     use crate::models::telemetry::{DeviceLimits, FirmwaresInfo, GddrTempPair};
@@ -7700,7 +7749,11 @@ mod stats_sidebar_tests {
         smbus.gddr_temps[0] = Some(GddrTempPair([54.0, 56.0, 55.0, 57.0]));
         smbus.gddr_temps[1] = Some(GddrTempPair([58.0, 59.0, 60.0, 61.0]));
         smbus.max_gddr_temp = Some(61.0);
-        smbus.gddr_corr_errs = [Some(3), Some(0), Some(1), Some(0)];
+        // A degrading module, not a single-digit blip: the width budget only
+        // means something if the fixture exercises counts wide enough to
+        // overflow the row (1 uncorr / 1,234,567 corr was 31 columns before
+        // `ecc_row_content` existed).
+        smbus.gddr_corr_errs = [Some(1_234_000), Some(500), Some(67), Some(0)];
         smbus.gddr_uncorr_errs = Some(1);
         smbus.fan_speed = Some("2400".to_string());
         smbus.therm_trip_count = Some("2".to_string());
@@ -7761,6 +7814,46 @@ mod stats_sidebar_tests {
                 STATS_CONTENT_W
             );
         }
+    }
+
+    /// The ECC row must fit for *any* pair of counters, not just the plausible
+    /// ones — `corr` is a saturating sum of four `u32` channel registers, so
+    /// `u32::MAX` is reachable from a bad read, and this is the row an operator
+    /// reads when data corruption is on the line.
+    #[test]
+    fn ecc_row_content_fits_for_any_counter_pair() {
+        let budget = STATS_CONTENT_W - STATS_LABEL_W;
+        let interesting = [
+            0u32,
+            1,
+            999,
+            1_000,
+            9_999,
+            999_999,
+            1_000_000,
+            1_234_567,
+            999_999_999,
+            1_000_000_000,
+            u32::MAX,
+        ];
+        for &u in &interesting {
+            for &c in &interesting {
+                let content = ecc_row_content(u, c);
+                assert!(
+                    content.chars().count() <= budget,
+                    "ECC content {content:?} for ({u}, {c}) is {} columns; budget is {budget}",
+                    content.chars().count()
+                );
+            }
+        }
+
+        // The readable form is kept for realistic counts…
+        assert_eq!(ecc_row_content(1, 1_234_567), "1 uncorr · 1.2M corr");
+        // …and abbreviation never rounds up into an extra column.
+        assert_eq!(abbrev_count(999_999), "999k");
+        assert_eq!(abbrev_count(9_999), "9.9k");
+        assert_eq!(abbrev_count(u32::MAX), "4.2G");
+        assert_eq!(abbrev_count(0), "0");
     }
 
     /// The dot map yields columns to the count text, never the other way round.

@@ -79,10 +79,17 @@ pub struct HybridBackend {
     smbus_shared: Arc<ArcSwap<HashMap<usize, SmbusTelemetry>>>,
 
     /// Per-device metadata (firmwares, limits, PCIe link, board power) from
-    /// the same JSON snapshot. Populated by the reader thread; `update()`
-    /// copies the static fields into sysfs devices and overlays the
-    /// measurement field (`board_power`) onto telemetry every tick.
-    device_meta_shared: Arc<ArcSwap<HashMap<usize, json::DeviceMeta>>>,
+    /// the same JSON snapshot, stamped with the moment it was published.
+    /// Populated by the reader thread; `update()` copies the static fields into
+    /// sysfs devices when a new payload arrives, and overlays the *measurement*
+    /// field (`board_power`) onto telemetry every tick — but only while the
+    /// stamp is fresh, see [`BOARD_POWER_MAX_AGE`].
+    device_meta_shared: Arc<ArcSwap<MetaSnapshot>>,
+
+    /// The `MetaSnapshot::at` stamp whose static fields are already copied into
+    /// the sysfs device list, so that copy runs once per payload rather than
+    /// every frame. `None` until the first payload arrives.
+    meta_applied_at: Option<std::time::Instant>,
 
     /// The render thread's private view of the latest background snapshot.
     /// Updated via `Arc::clone()` — one atomic ref-count increment, zero
@@ -127,6 +134,29 @@ pub struct HybridBackend {
     /// [`rekey_snapshot_by_bus_id`] for why the join can't be positional.
     bus_to_index: HashMap<String, usize>,
 }
+
+/// A published `DeviceMeta` payload and the instant it was published.
+///
+/// The stamp exists for `board_power`, the one *measurement* in the payload.
+/// The rest (firmware versions, limits, PCIe link geometry) is static metadata
+/// that doesn't go stale — a value read five minutes ago is still true. Board
+/// power is a live wattage, and re-applying the last one on every tick made a
+/// dead `tt-smi` reader (subprocess killed, ARC busy under load, tt-smi removed
+/// or upgraded mid-run) render a frozen "Board  NW total" row directly beneath
+/// a Power row that *was* still updating, with nothing to tell them apart.
+#[derive(Default)]
+struct MetaSnapshot {
+    /// `None` for the empty payload every backend starts with — nothing to age.
+    at: Option<std::time::Instant>,
+    meta: HashMap<usize, json::DeviceMeta>,
+}
+
+/// How long a published `board_power` reading stays eligible for display.
+///
+/// The reader polls tt-smi every ~1.5 s and backs off to 5 s after a failure,
+/// so this tolerates a failed poll or two without flickering the row, while a
+/// genuinely stopped reader drops it within a few seconds instead of never.
+const BOARD_POWER_MAX_AGE: Duration = Duration::from_secs(10);
 
 /// Re-key a tt-smi snapshot from tt-smi's **array positions** onto this
 /// backend's **sysfs device indices**, joining on normalized PCI bus id.
@@ -183,12 +213,22 @@ fn rekey_snapshot_by_bus_id(
         .copied()
         .collect();
 
+    // Two passes, because the bus-id join is authoritative and the positional
+    // fallback must never step on it: with a snapshot that mixes entries (one
+    // without a `board_info.bus_id`, one whose bus id resolves to that same
+    // index) an unconditional `mapping.insert(pos, pos)` produced two positions
+    // pointing at one device index, and `rekey_map`'s `HashMap` collect then
+    // kept whichever pair the iterator emitted last — nondeterministic
+    // mis-attribution of exactly the kind the bus-id join exists to prevent.
     let mut mapping: HashMap<usize, usize> = HashMap::new();
+    let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut no_bus_id: Vec<usize> = Vec::new();
     for pos in positions {
         match bus_ids.get(&pos) {
             Some(bus) => match bus_to_index.get(bus) {
                 Some(&device_idx) => {
                     mapping.insert(pos, device_idx);
+                    claimed.insert(device_idx);
                 }
                 None => {
                     log::debug!(
@@ -198,13 +238,26 @@ fn rekey_snapshot_by_bus_id(
                     );
                 }
             },
-            None => {
-                log::warn!(
-                    "HybridBackend: tt-smi device_info[{pos}] carries no bus_id — \
-                     falling back to a positional join for this entry"
-                );
-                mapping.insert(pos, pos);
-            }
+            None => no_bus_id.push(pos),
+        }
+    }
+    // Second pass: positional fallback, only onto indices the bus-id pass left
+    // free. A contested index means we'd be guessing between two cards, and the
+    // guess that loses gets someone else's telemetry — dropping is the honest
+    // outcome (the same choice the unmatched-bus-id branch above makes).
+    for pos in no_bus_id {
+        if claimed.insert(pos) {
+            log::warn!(
+                "HybridBackend: tt-smi device_info[{pos}] carries no bus_id — \
+                 falling back to a positional join for this entry"
+            );
+            mapping.insert(pos, pos);
+        } else {
+            log::warn!(
+                "HybridBackend: tt-smi device_info[{pos}] carries no bus_id and device \
+                 index {pos} is already claimed by a bus-id match — dropping its \
+                 SMBUS/meta rather than overwriting that card's data"
+            );
         }
     }
 
@@ -229,28 +282,38 @@ fn rekey_map<V>(map: HashMap<usize, V>, mapping: &HashMap<usize, usize>) -> Hash
 ///
 /// Factored out of the reader-thread closure so the join is exercised by tests
 /// through the same code the thread runs, rather than a re-implementation of it.
-/// A snapshot whose SMBUS map comes out empty (unparseable output, or every
-/// entry dropped for want of a matching sysfs device) is *not* published: the
-/// previously deposited snapshot stays, so a single bad poll doesn't blank the
-/// SMBUS rows.
+/// Each payload is gated on its *own* emptiness. A snapshot whose SMBUS map
+/// comes out empty (unparseable output, or every entry dropped for want of a
+/// matching sysfs device) doesn't replace the previously deposited SMBUS map,
+/// so a single bad poll doesn't blank those rows — but it also doesn't suppress
+/// the `DeviceMeta` payload, which is parsed from `board_info`/`telemetry` and
+/// is independent of `smbus_telem`. Gating meta on SMBUS meant a snapshot with
+/// no SMBUS block at all (permission-restricted run, or a card whose ARC didn't
+/// answer the SMBUS read) dropped the PCIe link row and the Board power row
+/// too, even though both parsed fine.
 fn publish_snapshot(
     json_str: &str,
     bus_to_index: &HashMap<String, usize>,
     smbus_shared: &ArcSwap<HashMap<usize, SmbusTelemetry>>,
-    device_meta_shared: &ArcSwap<HashMap<usize, json::DeviceMeta>>,
+    device_meta_shared: &ArcSwap<MetaSnapshot>,
     smbus_generation: &AtomicU64,
 ) {
     let snapshot = rekey_snapshot_by_bus_id(json::parse_snapshot(json_str), bus_to_index);
-    if snapshot.smbus.is_empty() {
+    if snapshot.smbus.is_empty() && snapshot.meta.is_empty() {
         log::debug!("HybridBackend: tt-smi returned empty/unparseable JSON");
         return;
     }
     if !snapshot.meta.is_empty() {
-        device_meta_shared.store(Arc::new(snapshot.meta));
+        device_meta_shared.store(Arc::new(MetaSnapshot {
+            at: Some(std::time::Instant::now()),
+            meta: snapshot.meta,
+        }));
     }
-    smbus_shared.store(Arc::new(snapshot.smbus));
-    smbus_generation.fetch_add(1, Ordering::Release);
-    log::debug!("HybridBackend: SMBUS snapshot updated");
+    if !snapshot.smbus.is_empty() {
+        smbus_shared.store(Arc::new(snapshot.smbus));
+        smbus_generation.fetch_add(1, Ordering::Release);
+        log::debug!("HybridBackend: SMBUS snapshot updated");
+    }
 }
 
 impl HybridBackend {
@@ -280,12 +343,13 @@ impl HybridBackend {
     /// Create a new Hybrid backend with explicit configuration.
     pub fn with_config(tt_smi_path: impl Into<String>, _config: BackendConfig) -> Self {
         let empty: Arc<HashMap<usize, SmbusTelemetry>> = Arc::new(HashMap::new());
-        let empty_meta: Arc<HashMap<usize, json::DeviceMeta>> = Arc::new(HashMap::new());
+        let empty_meta: Arc<MetaSnapshot> = Arc::new(MetaSnapshot::default());
         Self {
             sysfs: SysfsBackend::new(),
             tt_smi_path: tt_smi_path.into(),
             smbus_shared: Arc::new(ArcSwap::from(Arc::clone(&empty))),
             device_meta_shared: Arc::new(ArcSwap::from(Arc::clone(&empty_meta))),
+            meta_applied_at: None,
             smbus_latest: Arc::clone(&empty),
             smbus_generation: Arc::new(AtomicU64::new(0)),
             smbus_snapshot_gen: 0,
@@ -460,25 +524,31 @@ impl TelemetryBackend for HybridBackend {
                 .retain(|k, _| self.smbus_latest.contains_key(k));
             self.smbus_ema
                 .retain(|k, _| self.smbus_latest.contains_key(k));
+        }
 
-            // Enrich sysfs device list with firmwares/limits/PCIe link from the
-            // JSON snapshot. Always overwrite (not just when None) so a firmware
-            // upgrade or hot-plugged link renegotiation applied while the tool
-            // is running is reflected without restarting.
-            //
-            // Note: device_meta_shared is only stored when the snapshot contains
-            // non-empty meta (reader thread, line above). If a degraded snapshot
-            // omits a field, the previously stored value is retained rather than
-            // reverting to None — intentional, since firmware versions and PCIe
-            // link geometry don't regress and a momentary ARC issue shouldn't
-            // blank these rows.
-            //
-            // `board_power` is deliberately NOT copied here — it's a live
-            // measurement, not static metadata, and is overlaid onto telemetry
-            // every tick below instead (see the TDP/TDC overlay).
-            let meta = self.device_meta_shared.load_full();
+        // ── Adopt new device metadata (firmwares / limits / PCIe link) ────────
+        //
+        // Keyed off the meta payload's own stamp, NOT the SMBUS generation: the
+        // two are published independently, and a snapshot with no `smbus_telem`
+        // block (permission-restricted run, ARC that didn't answer the SMBUS
+        // read) still carries perfectly good `board_info` — gating this on SMBUS
+        // dropped the PCIe link row and the FW/limits enrichment along with it.
+        //
+        // Always overwrite (not just when None) so a firmware upgrade or a
+        // hot-plugged link renegotiation applied while the tool is running is
+        // reflected without restarting. A degraded snapshot that omits a field
+        // retains the previous value rather than reverting to None —
+        // intentional: firmware versions and PCIe link geometry don't regress,
+        // and a momentary ARC issue shouldn't blank these rows.
+        //
+        // `board_power` is deliberately NOT copied here — it's a live
+        // measurement, not static metadata, and is overlaid onto telemetry
+        // every tick below (with a freshness check).
+        let meta_snapshot = self.device_meta_shared.load_full();
+        if meta_snapshot.at.is_some() && meta_snapshot.at != self.meta_applied_at {
+            self.meta_applied_at = meta_snapshot.at;
             for device in self.sysfs.devices_mut() {
-                if let Some(dm) = meta.get(&device.index) {
+                if let Some(dm) = meta_snapshot.meta.get(&device.index) {
                     if dm.firmwares.is_some() {
                         device.firmwares = dm.firmwares.clone();
                     }
@@ -532,15 +602,23 @@ impl TelemetryBackend for HybridBackend {
         }
         // board_power comes from tt-smi's `telemetry` block (not SMBUS), and
         // — unlike firmwares/limits/pcie link above — is a per-tick
-        // measurement rather than static metadata, so it's applied here,
-        // every tick, in lockstep with the TDP/TDC overlay, instead of only
-        // when the SMBUS generation advances. A cheap lock-free ArcSwap load;
-        // safe to repeat every frame.
-        let meta_for_power = self.device_meta_shared.load_full();
-        for (idx, dm) in meta_for_power.iter() {
-            if let Some(bp) = dm.board_power {
-                if let Some(telem) = self.sysfs.telemetry_cache_mut(*idx) {
-                    telem.board_power = Some(bp);
+        // measurement rather than static metadata, so it's applied here, every
+        // tick, in lockstep with the TDP/TDC overlay.
+        //
+        // Gated on the payload's age. sysfs rebuilds each `Telemetry` from
+        // scratch every tick with `board_power: None`, so skipping the overlay
+        // is what drops the row: once the reader stops producing snapshots the
+        // Board row disappears within `BOARD_POWER_MAX_AGE` instead of pinning
+        // the last poll's wattage under a Power row that keeps moving.
+        let board_power_fresh = meta_snapshot
+            .at
+            .is_some_and(|at| at.elapsed() <= BOARD_POWER_MAX_AGE);
+        if board_power_fresh {
+            for (idx, dm) in meta_snapshot.meta.iter() {
+                if let Some(bp) = dm.board_power {
+                    if let Some(telem) = self.sysfs.telemetry_cache_mut(*idx) {
+                        telem.board_power = Some(bp);
+                    }
                 }
             }
         }
@@ -947,6 +1025,192 @@ mod tests {
             parts.smbus.is_empty(),
             "an unmatched card must not be attributed to device 0"
         );
+    }
+
+    /// A snapshot carrying `board_info`/`telemetry` but no `smbus_telem` block
+    /// must still publish its PCIe link geometry and board power.
+    ///
+    /// Gating the whole payload on a non-empty SMBUS map meant a
+    /// permission-restricted `tt-smi` run — or a card whose ARC didn't answer
+    /// the SMBUS read — silently cost the PCIe row and the Board power row,
+    /// neither of which comes from SMBUS.
+    #[test]
+    fn meta_is_published_even_when_the_snapshot_has_no_smbus_block() {
+        use crate::models::{Device, Telemetry};
+
+        let mut backend = HybridBackend::new("tt-smi");
+        backend.sysfs.push_device_for_test(Device::new(
+            0,
+            "p300c".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        ));
+        backend.sysfs.insert_telemetry_for_test(
+            0,
+            Telemetry {
+                power: Some(17.0),
+                current: None,
+                voltage: Some(0.72),
+                asic_temperature: Some(39.0),
+                aiclk: None,
+                heartbeat: None,
+                timestamp: chrono::Utc::now(),
+                board_power: None,
+            },
+        );
+        backend.bus_to_index = backend.sysfs_bus_index();
+
+        let json = r#"{
+            "device_info": [
+                {
+                    "board_info": {"bus_id": "0000:01:00.0", "board_type": "p300c",
+                                   "pcie_speed": 4, "pcie_width": "4"},
+                    "telemetry": {"power": " 17.0", "board_power": " 42.0"}
+                }
+            ]
+        }"#;
+        publish_snapshot(
+            json,
+            &backend.bus_to_index,
+            &backend.smbus_shared,
+            &backend.device_meta_shared,
+            &backend.smbus_generation,
+        );
+        backend.update().expect("update should not fail");
+
+        assert_eq!(
+            backend.telemetry(0).and_then(|t| t.board_power),
+            Some(42.0),
+            "board power is parsed from `telemetry`, not SMBUS — it must survive"
+        );
+        let dev = &backend.devices()[0];
+        assert_eq!(dev.pcie_speed.as_deref(), Some("Gen4"));
+        assert_eq!(dev.pcie_width, Some(4));
+    }
+
+    /// `board_power` must expire when the tt-smi reader stops producing.
+    ///
+    /// The overlay re-applied the last stored payload on every tick, and nothing
+    /// ever reset it — so a reader whose subprocess died mid-run kept stamping a
+    /// frozen "Board NW total" row onto freshly-read sysfs telemetry, directly
+    /// beneath a Power row that *was* still live, with nothing to distinguish
+    /// the two.
+    #[test]
+    fn board_power_expires_when_the_meta_payload_goes_stale() {
+        use crate::models::{Device, Telemetry};
+
+        let mut backend = HybridBackend::new("tt-smi");
+        backend.sysfs.push_device_for_test(Device::new(
+            0,
+            "p300c".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        ));
+        let seed_telemetry = |b: &mut HybridBackend| {
+            b.sysfs.insert_telemetry_for_test(
+                0,
+                Telemetry {
+                    power: Some(17.0),
+                    current: None,
+                    voltage: Some(0.72),
+                    asic_temperature: Some(39.0),
+                    aiclk: None,
+                    heartbeat: None,
+                    timestamp: chrono::Utc::now(),
+                    // sysfs rebuilds this as None every tick; only the overlay
+                    // ever sets it.
+                    board_power: None,
+                },
+            );
+        };
+        seed_telemetry(&mut backend);
+        backend.bus_to_index = backend.sysfs_bus_index();
+
+        let json = r#"{
+            "device_info": [
+                {
+                    "board_info": {"bus_id": "0000:01:00.0", "board_type": "p300c"},
+                    "telemetry": {"power": " 17.0", "board_power": " 42.0"}
+                }
+            ]
+        }"#;
+        publish_snapshot(
+            json,
+            &backend.bus_to_index,
+            &backend.smbus_shared,
+            &backend.device_meta_shared,
+            &backend.smbus_generation,
+        );
+        backend.update().expect("update should not fail");
+        assert_eq!(
+            backend.telemetry(0).and_then(|t| t.board_power),
+            Some(42.0),
+            "a fresh payload must be applied"
+        );
+
+        // Age the published payload past the freshness window — what a reader
+        // thread that stopped polling looks like from the render thread.
+        let stale = backend.device_meta_shared.load_full();
+        let aged = std::time::Instant::now()
+            .checked_sub(BOARD_POWER_MAX_AGE + Duration::from_secs(1))
+            .expect("monotonic clock far enough from its origin");
+        backend.device_meta_shared.store(Arc::new(MetaSnapshot {
+            at: Some(aged),
+            meta: stale.meta.clone(),
+        }));
+
+        seed_telemetry(&mut backend); // next sysfs tick: board_power back to None
+        backend.update().expect("update should not fail");
+        assert_eq!(
+            backend.telemetry(0).and_then(|t| t.board_power),
+            None,
+            "a stale payload must drop the Board row, not keep stamping it"
+        );
+        assert_eq!(
+            backend.telemetry(0).and_then(|t| t.power),
+            Some(17.0),
+            "the live sysfs Power reading is unaffected"
+        );
+    }
+
+    /// A bus-id-less entry must never land on an index a bus-id match already
+    /// claimed — the unconditional `mapping.insert(pos, pos)` fallback let two
+    /// snapshot entries resolve to the same device index, and the `HashMap`
+    /// collect in `rekey_map` then kept whichever pair the iterator happened to
+    /// emit last. One card's SMBUS/meta on the wrong index, the other card with
+    /// none at all, and the outcome varying run to run.
+    #[test]
+    fn positional_fallback_never_overwrites_a_bus_id_match() {
+        let mut bus_to_index = HashMap::new();
+        bus_to_index.insert("0000:01:00.0".to_string(), 0);
+        bus_to_index.insert("0000:02:00.0".to_string(), 1);
+
+        // Entry 0 carries no bus id (→ position 0 by fallback); entry 1 resolves
+        // by bus id to device 0 as well.
+        let json = r#"{
+            "device_info": [
+                {"board_info": {"board_type": "p300c"},
+                 "smbus_telem": {"BOARD_ID_LOW": "0xNOBUS"}},
+                {"board_info": {"bus_id": "0000:01:00.0"},
+                 "smbus_telem": {"BOARD_ID_LOW": "0xREAL"}}
+            ]
+        }"#;
+
+        // Run it repeatedly: the old collision was decided by HashMap iteration
+        // order, so a single pass could pass by luck.
+        for _ in 0..32 {
+            let parts = rekey_snapshot_by_bus_id(json::parse_snapshot(json), &bus_to_index);
+            assert_eq!(
+                parts.smbus.len(),
+                1,
+                "the bus-id-less entry must be dropped, not collide onto index 0"
+            );
+            assert_eq!(
+                parts.smbus.get(&0).and_then(|s| s.board_id.as_deref()),
+                Some("0xREAL"),
+                "the bus-id match owns index 0"
+            );
+        }
     }
 
     /// HybridBackend must overlay SMBUS TDP/TDC onto sysfs telemetry.
