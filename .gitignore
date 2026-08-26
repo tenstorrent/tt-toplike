@@ -37,6 +37,7 @@ debian/tt-toplike-egui/
 /vendor/
 # .cargo/config.toml is written fresh each build to point at vendor/
 .cargo/config.toml
+.cargo/config.toml.deb-build.bak
 
 # Debug and log files
 *.log
