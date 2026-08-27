@@ -99,6 +99,41 @@ pub fn top_process(ps_output: &str) -> Option<(String, f32, u64)> {
     Some((comm, cpu, rss_kib.saturating_mul(1024)))
 }
 
+/// Parse one `/proc/<pid>/task/<pid>/children` file's contents
+/// (whitespace-separated child pids) into a `Vec<i32>`. Pure — a malformed
+/// or non-numeric token is silently skipped rather than failing the whole
+/// parse, matching every other parser in this module.
+fn parse_children(text: &str) -> Vec<i32> {
+    text.split_whitespace().filter_map(|t| t.parse().ok()).collect()
+}
+
+/// All pids in the process tree rooted at `root` (inclusive), found by
+/// recursively reading `/proc/<pid>/task/<pid>/children`. Docker gets this
+/// scoping for free from the container's own PID namespace (`docker
+/// exec`/`docker stats` only ever see the container's own processes); a bare
+/// host-launched vLLM has no such boundary, and it does fork real children
+/// (a `g++` compile child during kernel compilation, TT device worker
+/// subprocess(es)) whose CPU/RSS must count toward the same service's
+/// signals. Best-effort: a pid whose `children` file is already gone (it
+/// exited between reads) simply isn't descended further — same
+/// degrade-gracefully contract as every other probe helper.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn process_tree_pids(root: i32) -> Vec<i32> {
+    let mut out = vec![root];
+    let mut frontier = vec![root];
+    while let Some(pid) = frontier.pop() {
+        let path = format!("/proc/{pid}/task/{pid}/children");
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            for child in parse_children(&text) {
+                out.push(child);
+                frontier.push(child);
+            }
+        }
+    }
+    out
+}
+
 // ── Container access abstraction ────────────────────────────────────────────
 //
 // The monitor's tick loop needs raw text from a running container (env dump,
@@ -320,5 +355,14 @@ mod tests {
         let (name, _cpu, rss) = top_process(out).unwrap();
         assert_eq!(name, "python3");
         assert_eq!(rss, u64::MAX); // saturated, no overflow panic
+    }
+    #[test]
+    fn parse_children_splits_whitespace_separated_pids() {
+        assert_eq!(parse_children("123 456 789\n"), vec![123, 456, 789]);
+        assert_eq!(parse_children(""), Vec::<i32>::new());
+        assert_eq!(parse_children("  42  "), vec![42]);
+        // A non-numeric token (shouldn't happen in a real /proc file, but the
+        // parser must degrade rather than panic) is silently skipped.
+        assert_eq!(parse_children("1 abc 3"), vec![1, 3]);
     }
 }
