@@ -4,12 +4,30 @@
 //! Recognize a TT inference server from a process name + cmdline and extract a
 //! structured record. Pure and cross-platform-compilable; only invoked on Linux.
 
-/// Where the server runs. v1 handles Docker; the `Host` trail (non-container
-/// installs) slots in behind this enum without changing consumers.
+/// Where the server runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
     Docker { container: String },
-    // Trail: Host { unit_or_pid: String },
+    /// A bare (non-Docker) process, e.g. a direct `vllm serve`/
+    /// `server_example_tt.py` launch — see `parse_direct_vllm`.
+    Host { pid: i32 },
+}
+
+/// Prefix of the identity key `service_key` derives for a `Source::Host` —
+/// also used by `probe::SystemProbe` to recognize a host-keyed call.
+pub(crate) const HOST_KEY_PREFIX: &str = "host-vllm-";
+
+/// Stable identity key for a detected server, used for prev-state lookup,
+/// dedup, and the monitor's change-signature. Docker keys by container name
+/// (survives the monitor's own restarts, stable across ticks); a bare host
+/// process has no such name, so it keys by pid — a restart gets a fresh key
+/// and starts from `fresh_state`, which is correct: the old process's
+/// kernel/RSS history is not the new process's history.
+pub fn service_key(source: &Source) -> String {
+    match source {
+        Source::Docker { container } => container.clone(),
+        Source::Host { pid } => format!("{HOST_KEY_PREFIX}{pid}"),
+    }
 }
 
 /// Identity of a detected inference server, parsed from its launch cmdline.
@@ -350,5 +368,16 @@ mod tests {
         assert!(parse_inspect("not json").is_none());
         assert!(parse_inspect("[]").is_none());
         assert!(parse_inspect("{}").is_none());
+    }
+
+    #[test]
+    fn service_key_docker_uses_container_name_host_uses_pid() {
+        let docker = Source::Docker {
+            container: "tt-inference-server-abc123".into(),
+        };
+        assert_eq!(service_key(&docker), "tt-inference-server-abc123");
+
+        let host = Source::Host { pid: 4242 };
+        assert_eq!(service_key(&host), "host-vllm-4242");
     }
 }

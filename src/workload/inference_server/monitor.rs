@@ -22,7 +22,7 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::workload::inference_server::detect::{InferenceServer, Source};
+use crate::workload::inference_server::detect::{service_key, InferenceServer, Source};
 use crate::workload::inference_server::logs::last_non_health_line;
 use crate::workload::inference_server::probe::{
     contains_python, count_lines, parse_docker_stats, parse_env_var, parse_liveness, top_process,
@@ -266,7 +266,7 @@ pub(crate) fn rebuild_snapshot(
 ) -> Vec<ServiceState> {
     let mut next_states = Vec::with_capacity(detected.len());
     for server in detected {
-        let Source::Docker { container } = &server.source;
+        let container = service_key(&server.source);
         // Resolve to a curated SERVERS entry when the model matches (nicer label
         // + known port/health path); otherwise track the container generically
         // so ANY detected tt-inference-server appears — LLM/vLLM deployments run
@@ -298,7 +298,7 @@ pub(crate) fn rebuild_snapshot(
                     )
                 }
             };
-        let sample = build_sample(probe, container, port, health_path);
+        let sample = build_sample(probe, &container, port, health_path);
         let prev_state = prev
             .iter()
             .find(|s| s.key == key)
@@ -323,10 +323,7 @@ fn merge_detections(
     submitted: &[InferenceServer],
     enumerated: Vec<InferenceServer>,
 ) -> Vec<InferenceServer> {
-    let container_of = |s: &InferenceServer| -> String {
-        let Source::Docker { container } = &s.source;
-        container.clone()
-    };
+    let container_of = |s: &InferenceServer| -> String { service_key(&s.source) };
     let mut out = submitted.to_vec();
     let mut seen: std::collections::HashSet<String> = out.iter().map(&container_of).collect();
     // When a container is seen by BOTH paths, the host-process scan (`submitted`)
@@ -802,15 +799,12 @@ mod tests {
             2,
             "dup container collapses, detached one added"
         );
-        let containers: Vec<&str> = merged
+        let containers: Vec<String> = merged
             .iter()
-            .map(|s| {
-                let Source::Docker { container } = &s.source;
-                container.as_str()
-            })
+            .map(|s| service_key(&s.source))
             .collect();
-        assert!(containers.contains(&"fg-container"));
-        assert!(containers.contains(&"detached-vllm"));
+        assert!(containers.iter().any(|c| c == "fg-container"));
+        assert!(containers.iter().any(|c| c == "detached-vllm"));
     }
 
     #[test]

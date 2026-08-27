@@ -147,7 +147,7 @@ impl HostProcessMonitor {
     /// background thread probes each container's readiness/health.
     #[cfg(target_os = "linux")]
     pub fn detected_inference_servers(&self) -> Vec<crate::workload::InferenceServer> {
-        use crate::workload::inference_server::{parse_inference_server, Source};
+        use crate::workload::inference_server::{parse_inference_server, service_key};
 
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
@@ -160,8 +160,7 @@ impl HostProcessMonitor {
                 .collect::<Vec<_>>()
                 .join(" ");
             if let Some(server) = parse_inference_server(&name, &cmdline) {
-                let Source::Docker { container } = &server.source;
-                if seen.insert(container.clone()) {
+                if seen.insert(service_key(&server.source)) {
                     out.push(server);
                 }
             }
