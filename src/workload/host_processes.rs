@@ -85,6 +85,24 @@ fn runtime_active(
     }
 }
 
+/// Testable core of the per-process decision `detected_inference_servers`
+/// makes: given one process's (name, cmdline, environ, pid), which
+/// `InferenceServer` (if any) it contributes. Docker detection is tried
+/// first — a TT inference-server container's foreground `docker run`
+/// process would also, in principle, cmdline-match nothing
+/// vLLM-direct-shaped, so the ordering is defensive rather than
+/// load-bearing today.
+#[cfg(target_os = "linux")]
+fn classify_one(
+    name: &str,
+    cmdline: &str,
+    environ: &str,
+    pid: i32,
+) -> Option<crate::workload::InferenceServer> {
+    use crate::workload::inference_server::{parse_direct_vllm, parse_inference_server};
+    parse_inference_server(name, cmdline).or_else(|| parse_direct_vllm(name, cmdline, environ, pid))
+}
+
 /// Owns a `sysinfo::System` refreshed for process listing.
 pub struct HostProcessMonitor {
     sys: System,
@@ -140,18 +158,19 @@ impl HostProcessMonitor {
         out
     }
 
-    /// The TT inference-server containers detected in the current snapshot
-    /// (deduped by container name), as structured [`crate::workload::InferenceServer`]
-    /// records — no docker or network I/O here. Feed these to a
-    /// [`crate::workload::InferenceServerMonitor`] each refresh; the monitor's
-    /// background thread probes each container's readiness/health.
+    /// The TT inference-server containers *and* direct (non-Docker) vLLM-on-TT
+    /// processes detected in the current snapshot (deduped by identity key),
+    /// as structured [`crate::workload::InferenceServer`] records — no
+    /// docker/proc I/O beyond what `sysinfo` already collected this refresh.
+    /// Feed these to a [`crate::workload::InferenceServerMonitor`] each
+    /// refresh.
     #[cfg(target_os = "linux")]
     pub fn detected_inference_servers(&self) -> Vec<crate::workload::InferenceServer> {
-        use crate::workload::inference_server::{parse_inference_server, service_key};
+        use crate::workload::inference_server::service_key;
 
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
-        for p in self.sys.processes().values() {
+        for (pid, p) in self.sys.processes() {
             let name = p.name().to_string_lossy().to_string();
             let cmdline = p
                 .cmd()
@@ -159,7 +178,14 @@ impl HostProcessMonitor {
                 .map(|s| s.to_string_lossy())
                 .collect::<Vec<_>>()
                 .join(" ");
-            if let Some(server) = parse_inference_server(&name, &cmdline) {
+            let environ = p
+                .environ()
+                .iter()
+                .map(|s| s.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let pid_i32 = i32::try_from(pid.as_u32()).unwrap_or(i32::MAX);
+            if let Some(server) = classify_one(&name, &cmdline, &environ, pid_i32) {
                 if seen.insert(service_key(&server.source)) {
                     out.push(server);
                 }
@@ -417,5 +443,31 @@ mod tests {
         let servers = mon.detected_inference_servers();
         // No assertion on contents — just confirm the call is safe and typed.
         let _: Vec<crate::workload::InferenceServer> = servers;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn classify_one_prefers_docker_then_falls_back_to_direct_vllm() {
+        let docker_cmd = "docker run --rm --name tt-inference-server-x \
+            --device /dev/tenstorrent:/dev/tenstorrent --publish 0.0.0.0:8002:8002 \
+            ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release:0.14.0 --model M";
+        assert!(matches!(
+            classify_one("docker", docker_cmd, "", 1).unwrap().source,
+            crate::workload::Source::Docker { .. }
+        ));
+
+        let direct = classify_one(
+            "vllm",
+            "vllm serve episod/tt-tnt-1024 --port 8000",
+            "MESH_DEVICE=P300x2\n",
+            4242,
+        )
+        .unwrap();
+        assert!(matches!(
+            direct.source,
+            crate::workload::Source::Host { pid: 4242 }
+        ));
+
+        assert!(classify_one("bash", "bash -c ls", "", 1).is_none());
     }
 }
