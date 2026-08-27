@@ -122,12 +122,20 @@ fn parse_children(text: &str) -> Vec<i32> {
 fn process_tree_pids(root: i32) -> Vec<i32> {
     let mut out = vec![root];
     let mut frontier = vec![root];
+    // Guards against re-visiting a pid: a real /proc tree can't cycle back to
+    // an ancestor, but a malformed children file (or a future test double)
+    // could report the same pid as a descendant more than once, so `seen`
+    // ensures every pid is pushed onto `out`/`frontier` at most once.
+    let mut seen: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    seen.insert(root);
     while let Some(pid) = frontier.pop() {
         let path = format!("/proc/{pid}/task/{pid}/children");
         if let Ok(text) = std::fs::read_to_string(&path) {
             for child in parse_children(&text) {
-                out.push(child);
-                frontier.push(child);
+                if seen.insert(child) {
+                    out.push(child);
+                    frontier.push(child);
+                }
             }
         }
     }
