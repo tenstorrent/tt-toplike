@@ -5617,12 +5617,26 @@ fn build_stats_sidebar_rows(
     if !compact {
         if let Some(s) = smbus {
             let temps: Vec<f32> = s
-                .gddr_temps
-                .iter()
-                .filter_map(|p| p.as_ref())
-                .flat_map(|p| p.0.iter().copied())
-                .filter(|&t| t > 0.0)
-                .collect();
+                .gddr_telemetry
+                .as_ref()
+                .filter(|g| !g.channels.is_empty())
+                .map(|g| {
+                    g.channels
+                        .iter()
+                        .filter(|c| !c.harvested)
+                        .flat_map(|c| [c.temp_top, c.temp_bottom])
+                        .flatten()
+                        .filter(|&t| t > 0.0)
+                        .collect::<Vec<f32>>()
+                })
+                .unwrap_or_else(|| {
+                    s.gddr_temps
+                        .iter()
+                        .filter_map(|p| p.as_ref())
+                        .flat_map(|p| p.0.iter().copied())
+                        .filter(|&t| t > 0.0)
+                        .collect()
+                });
             if !temps.is_empty() {
                 let t_min = temps.iter().copied().fold(f32::INFINITY, f32::min);
                 let t_max = temps.iter().copied().fold(f32::NEG_INFINITY, f32::max);
@@ -5641,6 +5655,41 @@ fn build_stats_sidebar_rows(
                     Span::styled(
                         format!("{:.0}°→{:.0}°C", t_min, t_max),
                         Style::default().fg(max_color),
+                    ),
+                ]));
+            }
+
+            if let Some(g) = s.gddr_telemetry.as_ref().filter(|g| !g.channels.is_empty()) {
+                let total = g.channels.len();
+                let harvested = g.channels.iter().filter(|c| c.harvested).count();
+                let trained = g
+                    .channels
+                    .iter()
+                    .filter(|c| !c.harvested && c.training_pass)
+                    .count();
+                let bist_failed = g
+                    .channels
+                    .iter()
+                    .filter(|c| !c.harvested && !c.bist_pass)
+                    .count();
+                let color = if bist_failed > 0 {
+                    Color::Rgb(255, 80, 80)
+                } else if harvested > 0 {
+                    Color::Rgb(244, 196, 113)
+                } else {
+                    Color::Rgb(79, 209, 197)
+                };
+                stat_lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{:<8}", "GDDR"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!(
+                            "{}/{} trained · {} harvested · {} BIST-fail",
+                            trained, total, harvested, bist_failed
+                        ),
+                        Style::default().fg(color),
                     ),
                 ]));
             }
@@ -7652,7 +7701,9 @@ mod stats_sidebar_tests {
         build_stats_sidebar_rows, eth_dot_budget, line_cols, DEVICE_PANEL_H, STATS_CONTENT_W,
     };
     use crate::backend::pcie_counters::PcieBandwidth;
-    use crate::models::telemetry::{DeviceLimits, FirmwaresInfo, GddrTempPair};
+    use crate::models::telemetry::{
+        DeviceLimits, FirmwaresInfo, GddrChannel, GddrTelemetry, GddrTempPair,
+    };
     use crate::models::{Device, SmbusTelemetry, Telemetry};
 
     /// Rows available between the header rule and the footer hairline.
@@ -7863,6 +7914,110 @@ mod stats_sidebar_tests {
         assert!(
             eth.contains("0/? live"),
             "SMBUS present but no enabled mask → unknown total; got {eth:?}"
+        );
+    }
+
+    /// The new GDDR summary row must report real per-channel trained/harvested/
+    /// BIST-fail counts when `gddr_telemetry` is present — not just render
+    /// *some* row, and not fall back to the old packed-pair-only behavior.
+    #[test]
+    fn gddr_summary_row_shows_trained_harvested_bist_fail_counts_when_present() {
+        let device = Device::new(
+            0,
+            "p150a".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        );
+
+        let mut smbus = SmbusTelemetry::new();
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            channels: vec![
+                // Healthy, trained channel.
+                GddrChannel {
+                    channel: 0,
+                    harvested: false,
+                    enabled: true,
+                    training_pass: true,
+                    bist_pass: true,
+                    temp_top: Some(50.0),
+                    temp_bottom: Some(52.0),
+                    ..Default::default()
+                },
+                // Harvested channel — excluded from trained/BIST-fail counts.
+                GddrChannel {
+                    channel: 1,
+                    harvested: true,
+                    enabled: false,
+                    training_pass: false,
+                    bist_pass: false,
+                    ..Default::default()
+                },
+                // BIST-failed, non-harvested channel.
+                GddrChannel {
+                    channel: 2,
+                    harvested: false,
+                    enabled: true,
+                    training_pass: true,
+                    bist_pass: false,
+                    temp_top: Some(55.0),
+                    temp_bottom: Some(57.0),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+
+        let rows = build_stats_sidebar_rows(&device, None, Some(&smbus), None, false);
+        let gddr_row = rows
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .find(|text| text.contains("harvested") && text.contains("BIST"));
+
+        let text = gddr_row.expect(
+            "expected a GDDR summary row mentioning harvested/BIST counts when \
+             gddr_telemetry is present",
+        );
+        assert!(
+            text.contains("2/3 trained"),
+            "expected 2 of 3 non-harvested channels to have training_pass set \
+             (BIST failure is independent of training); got {text:?}"
+        );
+        assert!(
+            text.contains("1 harvested"),
+            "expected exactly 1 harvested channel; got {text:?}"
+        );
+        assert!(
+            text.contains("1 BIST-fail"),
+            "expected exactly 1 BIST-failed channel; got {text:?}"
+        );
+    }
+
+    /// With no `gddr_telemetry` at all (older tt-smi / sysfs / luwen), the
+    /// summary row must not appear — distinguishing "real per-channel counts
+    /// shown" from "generic/absent behavior" is the whole point of this row.
+    #[test]
+    fn gddr_summary_row_absent_when_gddr_telemetry_missing() {
+        let device = Device::new(
+            0,
+            "p150a".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        );
+        let smbus = SmbusTelemetry::new();
+
+        let rows = build_stats_sidebar_rows(&device, None, Some(&smbus), None, false);
+        let has_gddr_summary = rows.iter().any(|l| {
+            let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            text.contains("trained") && text.contains("harvested") && text.contains("BIST")
+        });
+        assert!(
+            !has_gddr_summary,
+            "no gddr_telemetry present → summary row must not render"
         );
     }
 }
