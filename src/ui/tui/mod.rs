@@ -4337,13 +4337,15 @@ const PANEL_INTER_COL_GAP: u16 = 1;
 ///
 /// The interior (`DEVICE_PANEL_H - 2`) has to hold **both** the 12-row chip
 /// portrait and the tallest possible stats sidebar. The sidebar is the binding
-/// constraint: its worst realistic case on a Blackhole with tt-smi ≥ 6 is 12
-/// rows (Power, ETH, GDDR T, Temp, Fan, Current, Board, PCIe link, PCIe
-/// bandwidth, ECC, Trips, FW), and `Paragraph` clips silently — at the previous
-/// height of 14 (interior 12) a 13th row would have dropped the Firmware row
-/// with no other symptom. 15 keeps a row of headroom;
-/// `stats_sidebar_worst_case_fits_panel_interior` fails if a future row eats it.
-const DEVICE_PANEL_H: u16 = 15;
+/// constraint: its worst realistic case on a Blackhole with tt-smi ≥ 6.3 is 13
+/// rows (Power, ETH, GDDR T, GDDR, Temp, Fan, Current, Board, PCIe link, PCIe
+/// bandwidth, ECC, Trips, FW), and `Paragraph` clips silently — at the height
+/// of 14 (interior 12) a 13th row would have dropped the Firmware row with no
+/// other symptom, and 15 (interior 13) was consumed exactly by the GDDR
+/// per-channel summary row tt-smi 6.3.0 made possible. 16 restores a row of
+/// headroom; `stats_sidebar_worst_case_fits_panel_interior` fails if a future
+/// row eats it.
+const DEVICE_PANEL_H: u16 = 16;
 
 /// Fleet compact mode activates at this device count (matching the starfield galaxy mode).
 /// At 32+ devices the full-portrait grid almost always overflows a standard terminal.
@@ -5684,9 +5686,18 @@ fn build_stats_sidebar_rows(
                         format!("{:<8}", "GDDR"),
                         Style::default().fg(Color::DarkGray),
                     ),
+                    // Abbreviated deliberately: the sidebar interior is
+                    // `STATS_CONTENT_W` (30) columns and the 8-column label
+                    // leaves only 22 for the value, with `Paragraph` clipping
+                    // (not wrapping) the tail. The spelled-out
+                    // "…trained · … harvested · … BIST-fail" measured 47
+                    // columns on real hardware, silently dropping the
+                    // BIST-fault count — the row's whole reason to exist.
+                    // trn = trained, hv = harvested, flt = BIST fault; worst
+                    // realistic case ("10/12 trn·2 hv·10 flt") is 21 columns.
                     Span::styled(
                         format!(
-                            "{}/{} trained · {} harvested · {} BIST-fail",
+                            "{}/{} trn·{} hv·{} flt",
                             trained, total, harvested, bist_failed
                         ),
                         Style::default().fg(color),
@@ -7755,6 +7766,53 @@ mod stats_sidebar_tests {
         smbus.gddr_uncorr_errs = Some(1);
         smbus.fan_speed = Some("2400".to_string());
         smbus.therm_trip_count = Some("2".to_string());
+        // tt-smi ≥ 6.3.0's per-channel GDDR block. Present on exactly the
+        // hardware this worst case models, and it drives *two* rows: the
+        // GDDR T temp row takes its real per-channel path (not the packed-pair
+        // fallback above) and the GDDR summary row renders at all. Same
+        // three-channel shape as
+        // `gddr_summary_row_shows_trained_harvested_bist_fail_counts_when_present`
+        // — one healthy+trained, one harvested, one BIST-failed — plus non-zero
+        // per-channel ECC counters so the ECC row keeps rendering off the
+        // per-channel sums.
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            channels: vec![
+                GddrChannel {
+                    channel: 0,
+                    harvested: false,
+                    enabled: true,
+                    training_pass: true,
+                    bist_pass: true,
+                    temp_top: Some(54.0),
+                    temp_bottom: Some(56.0),
+                    corr_rd: 2,
+                    corr_wr: 1,
+                    ..Default::default()
+                },
+                GddrChannel {
+                    channel: 1,
+                    harvested: true,
+                    enabled: false,
+                    training_pass: false,
+                    bist_pass: false,
+                    ..Default::default()
+                },
+                GddrChannel {
+                    channel: 2,
+                    harvested: false,
+                    enabled: true,
+                    training_pass: true,
+                    bist_pass: false,
+                    temp_top: Some(60.0),
+                    temp_bottom: Some(61.0),
+                    corr_rd: 0,
+                    corr_wr: 3,
+                    uncorr_rd: 1,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
 
         let bw = Some(PcieBandwidth {
             rx_bytes_per_sec: 1.23e9,
@@ -7771,18 +7829,20 @@ mod stats_sidebar_tests {
         let rows = build_stats_sidebar_rows(&device, Some(&telem), Some(&smbus), bw, false);
 
         // Sanity-check that the fixture really is the worst case, so this test
-        // can't quietly stop measuring anything: 12 rows = Power, ETH, GDDR T,
-        // Temp, Fan, Current, Board, PCIe link, PCIe bandwidth, ECC, Trips, FW.
+        // can't quietly stop measuring anything: 13 rows = Power, ETH, GDDR T,
+        // GDDR, Temp, Fan, Current, Board, PCIe link, PCIe bandwidth, ECC,
+        // Trips, FW.
         assert_eq!(
             rows.len(),
-            12,
+            13,
             "fixture must exercise every optional row; got {} rows",
             rows.len()
         );
         // Strictly less, not `<=`: the worst case must leave headroom. Before
-        // this fix the interior was exactly 12 rows for exactly 12 worst-case
-        // rows, so the very next row added anywhere in the sidebar would have
-        // been clipped away silently. Requiring a spare row is what turns that
+        // the v0.8.0 fix the interior was exactly 12 rows for exactly 12
+        // worst-case rows, so the very next row added anywhere in the sidebar
+        // would have been clipped away silently — which is precisely what the
+        // GDDR summary row then did. Requiring a spare row is what turns that
         // into a test failure instead.
         assert!(
             rows.len() < INTERIOR_H,
@@ -7976,23 +8036,23 @@ mod stats_sidebar_tests {
                     .map(|s| s.content.as_ref())
                     .collect::<String>()
             })
-            .find(|text| text.contains("harvested") && text.contains("BIST"));
+            .find(|text| text.contains(" hv·") && text.contains(" flt"));
 
         let text = gddr_row.expect(
             "expected a GDDR summary row mentioning harvested/BIST counts when \
              gddr_telemetry is present",
         );
         assert!(
-            text.contains("2/3 trained"),
+            text.contains("2/3 trn"),
             "expected 2 of 3 non-harvested channels to have training_pass set \
              (BIST failure is independent of training); got {text:?}"
         );
         assert!(
-            text.contains("1 harvested"),
+            text.contains("1 hv"),
             "expected exactly 1 harvested channel; got {text:?}"
         );
         assert!(
-            text.contains("1 BIST-fail"),
+            text.contains("1 flt"),
             "expected exactly 1 BIST-failed channel; got {text:?}"
         );
     }
@@ -8013,7 +8073,7 @@ mod stats_sidebar_tests {
         let rows = build_stats_sidebar_rows(&device, None, Some(&smbus), None, false);
         let has_gddr_summary = rows.iter().any(|l| {
             let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-            text.contains("trained") && text.contains("harvested") && text.contains("BIST")
+            text.contains(" trn·") && text.contains(" hv·") && text.contains(" flt")
         });
         assert!(
             !has_gddr_summary,
