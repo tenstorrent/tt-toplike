@@ -1,3 +1,28 @@
+tt-toplike (0.10.1) noble; urgency=medium
+
+  * Defrag view now also drives per-channel training/enabled/temperature
+    and errors from real `gddr_telemetry` (tt-smi >= 6.3.0) when present,
+    falling back to the existing packed pair-resolution registers when
+    absent. Two new states: a channel that fails BIST renders as a static
+    dim-red "bad sector" row (distinct from the harvested hatch and from a
+    transient error flash — a harvested channel is never also flagged
+    BIST-fail, since there's nothing to BIST), and uncorrectable errors
+    flash brighter and longer than a correctable flash, mirroring the
+    Insights sidebar ECC row's severity convention.
+  * Fix: a pre-existing EVICT false-positive, found while testing the
+    above — Defrag's model-unload detection could trigger on idle hardware
+    that never loaded anything. The Idle/Init -> Running transition
+    captured its power baseline from a single raw, unsmoothed sample
+    instead of the smoothed EMA used at the other two capture sites; since
+    Blackhole's aiclk is almost always >=200, this transition fires on
+    nearly every tick, so one noisy low sample could set an artificially
+    low baseline that ordinary idle jitter then satisfied on its own.
+    Confirmed via an A/B test against a binary built from the commit
+    before the gddr_telemetry change above, isolating this as unrelated
+    and pre-existing.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 28 Aug 2026 00:00:00 +0000
+
 tt-toplike (0.10.0) noble; urgency=medium
 
   * Per-GDDR-channel telemetry (tt-smi >= 6.3.0's `gddr_telemetry` block —
@@ -48,31 +73,6 @@ tt-toplike (0.10.0) noble; urgency=medium
     ever emits all-zero per-channel counters as placeholders while the
     packed aggregate carries genuine counts, the row would hide errors it
     used to show. Both are on the manual-verification checklist.
-
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 28 Aug 2026 00:00:00 +0000
-
-tt-toplike (0.10.1) noble; urgency=medium
-
-  * Defrag view now also drives per-channel training/enabled/temperature
-    and errors from real `gddr_telemetry` (tt-smi >= 6.3.0) when present,
-    falling back to the existing packed pair-resolution registers when
-    absent. Two new states: a channel that fails BIST renders as a static
-    dim-red "bad sector" row (distinct from the harvested hatch and from a
-    transient error flash — a harvested channel is never also flagged
-    BIST-fail, since there's nothing to BIST), and uncorrectable errors
-    flash brighter and longer than a correctable flash, mirroring the
-    Insights sidebar ECC row's severity convention.
-  * Fix: a pre-existing EVICT false-positive, found while testing the
-    above — Defrag's model-unload detection could trigger on idle hardware
-    that never loaded anything. The Idle/Init -> Running transition
-    captured its power baseline from a single raw, unsmoothed sample
-    instead of the smoothed EMA used at the other two capture sites; since
-    Blackhole's aiclk is almost always >=200, this transition fires on
-    nearly every tick, so one noisy low sample could set an artificially
-    low baseline that ordinary idle jitter then satisfied on its own.
-    Confirmed via an A/B test against a binary built from the commit
-    before the gddr_telemetry change above, isolating this as unrelated
-    and pre-existing.
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 28 Aug 2026 00:00:00 +0000
 
