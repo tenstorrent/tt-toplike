@@ -14,6 +14,22 @@ git tag                        # released versions
 
 ## Recent releases
 
+### 0.10.0
+- **Per-GDDR-channel telemetry** (tt-smi ≥ 6.3.0's `gddr_telemetry`: training/
+  BIST pass, harvested/enabled, dual-location temperature, directional
+  correctable/uncorrectable ECC) now flows into chip portrait, Memory Flow,
+  Memory Castle, Starfield, and the Insights sidebar — replacing coarser
+  packed-register decodes with real per-channel state wherever it's
+  available, and falling back to today's exact behavior everywhere else
+  (older tt-smi, sysfs, luwen, Wormhole/Grayskull). A whole-branch review
+  caught what no single file's review could: the new Insights summary row
+  was 47 columns in a 30-column budget and silently clipped its own
+  headline BIST-fail count on real hardware — fixed alongside the sidebar's
+  headroom invariant, a starfield DDR-planet rendering inconsistency on
+  Blackhole (8 real channels vs. 12 physical), and the ECC row's per-channel
+  sourcing. See `docs/superpowers/specs/2026-08-28-gddr-telemetry-design.md`.
+  Not yet hardware-verified against a real tt-smi ≥ 6.3.0 box.
+
 ### 0.9.0
 - **Direct (non-Docker) vLLM-on-TT detection for the `[i]` Inference Server
   panel.** Previously the panel only saw a `docker run`-launched

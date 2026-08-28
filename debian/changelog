@@ -1,3 +1,56 @@
+tt-toplike (0.10.0) noble; urgency=medium
+
+  * Per-GDDR-channel telemetry (tt-smi >= 6.3.0's `gddr_telemetry` block —
+    training/BIST pass, harvested/enabled, dual-location temperature,
+    directional correctable/uncorrectable ECC counts) now threads into
+    every memory-sensitive visualization, replacing coarser packed-register
+    decodes with real per-channel truth wherever it's available. Falls back
+    to today's exact behavior on older tt-smi, sysfs, luwen, or Wormhole/
+    Grayskull hardware (no version-string gating anywhere — purely
+    data-presence-driven).
+    - Chip portrait and Memory Flow's DDR wall: a harvested channel renders
+      dim gray instead of a heatmap tile, a BIST-failed channel shows a bold
+      red `✗` instead of being indistinguishable from a healthy one.
+    - Memory Castle's compact-tier DDR gate row: one glyph per real
+      channel (harvested -> dim gray, BIST-fail -> alarm red, healthy ->
+      the existing hue-cycling glyph) instead of one glyph per channel pair.
+    - Starfield's DDR planets: real per-channel temperature drives
+      brightness/activity instead of a generic board-wide power/current
+      proxy; a harvested or BIST-failed channel renders inert/flickering
+      rather than mixing real and synthetic signals side by side — this
+      matters specifically on Blackhole, where `gddr_telemetry` reports 8
+      channels but `memory_channels()` is 12, so channels beyond the
+      reported set are now rendered uniformly instead of falling back to
+      the old formula next to real-data-driven neighbors.
+    - Insights sidebar: the GDDR temp row prefers real per-channel
+      temperatures (skipping harvested channels) over the packed-pair
+      decode; a new summary row shows trained/harvested/BIST-fail counts;
+      the GDDR ECC row sums real per-channel directional counters instead
+      of the packed aggregate when available.
+    - `smbus_smooth`'s field-completeness guard (`SmbusTelemetry` now
+      derives `PartialEq`) was extended to cover the new field, closing the
+      same silent-field-freeze gap this codebase has hit twice before.
+    - A whole-branch review (after all nine tasks individually passed their
+      own scoped review) caught what no single file's review could: the new
+      Insights summary row measured 47 columns in the sidebar's 30-column
+      budget and silently clipped its own headline BIST-fail count on real
+      hardware, the width guard's own test fixture never having been
+      extended to exercise it. Fixed alongside three related findings
+      (the sidebar's one-row headroom invariant, the starfield planet
+      inconsistency above, and the ECC row's per-channel sourcing) in one
+      fix wave, independently re-verified.
+    Design: docs/superpowers/specs/2026-08-28-gddr-telemetry-design.md.
+    Not hardware-verified against a real tt-smi >= 6.3.0 box as of this
+    release — no such build was available. In particular: the sidebar
+    row's column math is computed from the format string, not observed on
+    a real p300c, and the ECC row now prefers the per-channel source
+    unconditionally whenever present and non-empty — if a real 6.3.0 build
+    ever emits all-zero per-channel counters as placeholders while the
+    packed aggregate carries genuine counts, the row would hide errors it
+    used to show. Both are on the manual-verification checklist.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 28 Aug 2026 00:00:00 +0000
+
 tt-toplike (0.9.0) noble; urgency=medium
 
   * Direct (non-Docker) vLLM-on-TT detection for the [i] Inference Server

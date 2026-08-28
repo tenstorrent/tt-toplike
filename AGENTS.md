@@ -4474,3 +4474,136 @@ pipeline: design doc at
 v0.9.0. All automated review gates (7 task reviews + 1 final whole-branch
 review + its one fix wave) passed; no manual verification against real TT
 hardware performed.*
+
+---
+
+## Phase 28 — Per-GDDR-channel telemetry across every memory visualization (August 28, 2026, v0.10.0)
+
+**Origin**: tt-smi ≥ 6.3.0 introduced a new `gddr_telemetry` block per device:
+per-channel training-pass, BIST-pass, harvested/enabled, dual-location
+temperature (top/bottom), and directional correctable/uncorrectable ECC
+counters. Previously the only GDDR signal any backend exposed was the
+packed, whole-board aggregates (`gddr_temps`, `gddr_corr_errs`,
+`gddr_uncorr_errs`) and a 4-bit-per-channel `DDR_STATUS` register — coarser
+than what the hardware can now report. User: *"let's add it in to this
+branch [feat/direct-vllm-detection] please. specialize in making the data
+flow into all of our memory-sensitive visualizations... you should expect
+to see some new magic in everything as a result of collecting this data
+when tt-smi v6.3.0 and above is present. pizzaz!"* Built via
+brainstorming → writing-plans → subagent-driven-development (9 tasks, spec
+at `docs/superpowers/specs/2026-08-28-gddr-telemetry-design.md`, plan at
+`docs/superpowers/plans/2026-08-28-gddr-telemetry.md`), on the same branch
+as Phase 27 (already carrying an open PR).
+
+### What changed
+
+- **Model + parsing (Tasks 1-2)**: `GddrChannel`/`GddrTelemetry` added to
+  `models/telemetry.rs`; `SmbusTelemetry.gddr_telemetry: Option<GddrTelemetry>`.
+  tt-smi's JSON quotes every numeric leaf except `channel` (bare number) and
+  `harvested`/`enabled` (bare bool) — `training`/`bist` are `"pass"`/other
+  strings, not booleans. A malformed channel entry is dropped, never
+  fabricated as zeroed, matching this codebase's existing
+  one-malformed-entry-costs-only-that-entry convention.
+- **Blend guard (Task 3)**: `smbus_smooth::apply_ema` copies the new field
+  through unsmoothed (counters are monotonic, `max_gddr_temp`-style
+  smoothing would understate peaks, bitmasks can't be interpolated).
+  `SmbusTelemetry` gained `#[derive(PartialEq)]` so the existing
+  field-completeness guard test collapsed to one `assert_eq!` — this
+  codebase has silently frozen an unlisted field in this exact blend
+  function twice before (Phase 25), so the guard was worth strengthening,
+  not just satisfying.
+- **Mock fabrication (Task 4)**: `MockScenario::QuadGalaxy` harvests channel
+  3 and BIST-fails channel 5 (device_idx % 17 == 0), so both new visual
+  states are reachable in a demo/test run.
+- **Five consumers (Tasks 5-9)**: chip portrait (DRAM cells: harvested → dim
+  `·`, BIST-fail → red `✗`), Memory Flow's DDR wall (real per-channel
+  training/BIST instead of decoding the packed register), Memory Castle's
+  compact-tier gate row (one glyph per real channel instead of per pair),
+  Starfield's DDR planets (real temperature drives brightness instead of a
+  generic board-wide power/current proxy), and the Insights sidebar (GDDR
+  temp row prefers real per-channel readings; new trained/harvested/
+  BIST-fail summary row; ECC row sums real per-channel directional counters).
+  Every site falls back to today's exact behavior when `gddr_telemetry` is
+  absent or its channel list is empty — no version-string gating anywhere,
+  purely `Option`/`Vec::is_empty()`-driven.
+
+### Position-vs-identity, again
+
+This codebase's own documented bug class (Phase 25/26: a Vec position
+treated as a stable identity) recurred and was caught mid-plan: Task 5's
+first cut used `channels.get(idx)`; the reviewer required
+`channels.iter().find(|c| c.channel == idx)` instead, since a dropped
+malformed channel would otherwise silently misattribute a neighbor's state.
+Tasks 6 and 8 applied the same fix proactively without being told, having
+read the file first per dispatch instructions — the fix propagated cleanly
+across all five consumers with, per the final whole-branch review's
+explicit grep sweep, zero survivors of the positional form anywhere in the
+tree.
+
+### What the whole-branch review caught that no task-scoped review could
+
+Each of the 9 tasks passed its own scoped review (three needed one fix
+round each: Task 3 for the `PartialEq` derive above, Task 5 for the
+identity-lookup fix plus a missing BIST-fail test, Task 7 for test-coverage
+gaps and a stale doc comment on `memory_castle.rs`'s DDR gate row — the
+fallback path itself was independently mutation-tested clean at every
+stage). The final whole-branch review then found four things invisible to
+any single file's diff:
+
+- **The new Insights "GDDR" summary row measured 47 columns in the
+  sidebar's 30-column budget** and silently clipped its own headline
+  BIST-fail count on real hardware — `Paragraph` clips instead of wrapping,
+  exactly the failure mode `eth_dot_budget` was built to prevent for the
+  ETH row (Phase 25), and the width guard's own `worst_case()` test fixture
+  had simply never been extended to set `gddr_telemetry`, so it measured
+  everything except the row that broke.
+- Same stale fixture meant the sidebar's one-row headroom invariant
+  (`rows.len() < INTERIOR_H`) was fully consumed once the new row was
+  accounted for, with every guard still green — the next row added
+  anywhere would have clipped silently.
+- **Starfield's DDR planets were inconsistent on Blackhole**: `gddr_telemetry`
+  reports 8 real channels but `device.memory_channels()` is 12, so 8 planets
+  rendered real per-channel state while the other 4 fell back to the old
+  generic power/current formula right next to them — a direct violation of
+  the spec's own bolded constraint never to derive this loop bound from
+  `memory_channels()`, and a visual regression on the exact hardware this
+  feature targets (pre-branch, all 12 were uniform).
+- **A spec requirement was dropped at plan-writing time**: the spec required
+  the GDDR ECC row to source its sums from per-channel directional data when
+  present; the plan instead said "the ECC row is untouched by this task,"
+  and the task-scoped reviewer verified that as a *positive*. Net result
+  before the fix: `corr_rd`/`corr_wr`/`uncorr_rd`/`uncorr_wr` were parsed,
+  modelled, mocked, and blended — and read by nothing.
+
+All four were fixed in the one allowed fix wave (5 commits — row-width +
+fixture/height fix, starfield fallback restructuring, ECC per-channel
+sourcing, a Memory Castle legend addition, a doc-comment correction) and
+independently re-verified, including a mutation test on the starfield fix's
+discriminating assertion (revert the fix, confirm the new test fails with
+the exact predicted values, restore). Two Minor findings were deferred as
+genuinely benign: `memory_flow.rs`'s DDR-wall channel-status function has
+the same `memory_channels()` loop-bound pattern as the starfield finding,
+but degrades safely (`map_or(0, _)`) rather than rendering inconsistently;
+and `defrag.rs` — a sixth, pre-existing per-GDDR-channel consumer that
+neither the spec nor the plan ever named — still runs entirely on the old
+packed/pair-resolution data and was left alone as out of scope.
+
+> ⚠️ **Not hardware-verified.** No box running tt-smi ≥ 6.3.0 was available
+> during this session. Two items specifically need a real box per the
+> re-review: the Insights row's column math is computed from the format
+> string, not observed on a real p300c: and the ECC row now prefers the
+> per-channel source unconditionally whenever `gddr_telemetry` is present
+> and non-empty — if a real 6.3.0 build ever emits all-zero per-channel
+> counters as placeholders while the packed aggregate carries genuine
+> counts, the row would hide errors it used to show. Both are on the
+> spec's manual-verification checklist alongside the general "does this
+> look right on a live box" pass.
+
+---
+
+*Phase 28 status: **COMPLETE, pending hardware verification** — shipped as
+v0.10.0. All 9 tasks passed scoped review (3 with one fix round each); the
+final whole-branch review found 1 Critical + 3 Important findings, all
+fixed in the one allowed fix wave and independently re-verified (including
+a mutation test); no manual verification against real TT hardware
+performed.*
