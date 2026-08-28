@@ -5833,27 +5833,50 @@ fn build_stats_sidebar_rows(
     // GDDR ECC row (full mode only): shown only when any error counter is
     // non-zero — uncorrectable errors are the headline diagnostic and go red.
     //
-    // Accumulation is saturating and drops the all-ones sentinel: an
-    // unimplemented/unpowered GDDR ECC register reads 0xFFFFFFFF (the same
-    // "no reading" convention the fan register uses), and four of those
-    // summed with `Iterator::sum` panics on overflow in a debug build.
-    // Unlike the fan filter, 0 and 0xFFFF are NOT filtered here — zero is
-    // the normal healthy count, and 65535 correctable errors is a plausible
-    // real reading on a degrading module.
+    // Source preference mirrors the GDDR T row: tt-smi >= 6.3.0's per-channel
+    // `gddr_telemetry` carries directional read/write counters per channel,
+    // which is strictly better than the packed aggregate registers, so it wins
+    // when present. Harvested channels are skipped — an unpowered module's
+    // error counters aren't a measurement of anything.
+    //
+    // The packed-aggregate fallback is unchanged: accumulation is saturating
+    // and drops the all-ones sentinel, because an unimplemented/unpowered GDDR
+    // ECC register reads 0xFFFFFFFF (the same "no reading" convention the fan
+    // register uses) and four of those summed with `Iterator::sum` panics on
+    // overflow in a debug build. Unlike the fan filter, 0 and 0xFFFF are NOT
+    // filtered here — zero is the normal healthy count, and 65535 correctable
+    // errors is a plausible real reading on a degrading module.
     if !compact {
         if let Some(s) = smbus {
             const ECC_NO_READING: u32 = u32::MAX;
-            let corr: u32 = s
-                .gddr_corr_errs
-                .iter()
-                .flatten()
-                .copied()
-                .filter(|&v| v != ECC_NO_READING)
-                .fold(0u32, u32::saturating_add);
-            let uncorr = s
-                .gddr_uncorr_errs
-                .filter(|&v| v != ECC_NO_READING)
-                .unwrap_or(0);
+            let (corr, uncorr): (u64, u64) =
+                match s.gddr_telemetry.as_ref().filter(|g| !g.channels.is_empty()) {
+                    Some(g) => g.channels.iter().filter(|c| !c.harvested).fold(
+                        (0u64, 0u64),
+                        |(corr, uncorr), c| {
+                            (
+                                corr.saturating_add(c.corr_rd).saturating_add(c.corr_wr),
+                                uncorr
+                                    .saturating_add(c.uncorr_rd)
+                                    .saturating_add(c.uncorr_wr),
+                            )
+                        },
+                    ),
+                    None => {
+                        let corr: u32 = s
+                            .gddr_corr_errs
+                            .iter()
+                            .flatten()
+                            .copied()
+                            .filter(|&v| v != ECC_NO_READING)
+                            .fold(0u32, u32::saturating_add);
+                        let uncorr = s
+                            .gddr_uncorr_errs
+                            .filter(|&v| v != ECC_NO_READING)
+                            .unwrap_or(0);
+                        (corr as u64, uncorr as u64)
+                    }
+                };
             if corr > 0 || uncorr > 0 {
                 let color = if uncorr > 0 {
                     Color::Rgb(255, 80, 80) // uncorrectable — data corruption risk
@@ -8078,6 +8101,119 @@ mod stats_sidebar_tests {
         assert!(
             !has_gddr_summary,
             "no gddr_telemetry present → summary row must not render"
+        );
+    }
+
+    /// Pull the ECC row's rendered text out of a sidebar, if it rendered.
+    fn ecc_row_text(rows: &[ratatui::text::Line<'static>]) -> Option<String> {
+        rows.iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .find(|t| t.contains("uncorr"))
+    }
+
+    /// The ECC row must sum tt-smi ≥ 6.3.0's **per-channel directional**
+    /// counters when `gddr_telemetry` is present, not the packed aggregate
+    /// registers.
+    ///
+    /// The two sources deliberately disagree in this fixture (packed = 0/0,
+    /// per-channel = 12 corr / 5 uncorr) — otherwise the test could not tell
+    /// which path produced the numbers. Harvested channels carry non-zero
+    /// counters that must NOT be counted: an unpowered module's counters
+    /// aren't a measurement.
+    #[test]
+    fn ecc_row_sums_per_channel_counters_when_gddr_telemetry_present() {
+        let device = Device::new(
+            0,
+            "p150a".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        );
+
+        let mut smbus = SmbusTelemetry::new();
+        // Packed aggregates say "no errors" — if the row reads these, it will
+        // not render at all and the assertions below fail.
+        smbus.gddr_corr_errs = [Some(0), Some(0), Some(0), Some(0)];
+        smbus.gddr_uncorr_errs = Some(0);
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            channels: vec![
+                GddrChannel {
+                    channel: 0,
+                    harvested: false,
+                    enabled: true,
+                    training_pass: true,
+                    bist_pass: true,
+                    corr_rd: 4,
+                    corr_wr: 3,
+                    uncorr_rd: 2,
+                    uncorr_wr: 1,
+                    ..Default::default()
+                },
+                GddrChannel {
+                    channel: 1,
+                    harvested: false,
+                    enabled: true,
+                    training_pass: true,
+                    bist_pass: true,
+                    corr_rd: 5,
+                    corr_wr: 0,
+                    uncorr_rd: 0,
+                    uncorr_wr: 2,
+                    ..Default::default()
+                },
+                // Harvested: counters present but must be excluded.
+                GddrChannel {
+                    channel: 2,
+                    harvested: true,
+                    enabled: false,
+                    corr_rd: 900,
+                    corr_wr: 900,
+                    uncorr_rd: 900,
+                    uncorr_wr: 900,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+
+        let rows = build_stats_sidebar_rows(&device, None, Some(&smbus), None, false);
+        let text = ecc_row_text(&rows).expect(
+            "ECC row must render off the per-channel sums even though the packed \
+             aggregate registers read zero",
+        );
+        // 4+3+5+0 = 12 correctable, 2+1+0+2 = 5 uncorrectable; the harvested
+        // channel's 1800 correctable and 1800 uncorrectable are excluded.
+        assert!(
+            text.contains("5 uncorr") && text.contains("12 corr"),
+            "expected the per-channel sums (5 uncorr · 12 corr); got {text:?}"
+        );
+    }
+
+    /// …and with no `gddr_telemetry`, the packed-aggregate path is unchanged.
+    #[test]
+    fn ecc_row_falls_back_to_packed_aggregate_when_gddr_telemetry_missing() {
+        let device = Device::new(
+            0,
+            "p150a".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        );
+
+        let mut smbus = SmbusTelemetry::new();
+        smbus.gddr_corr_errs = [Some(3), Some(0), Some(1), Some(u32::MAX)];
+        smbus.gddr_uncorr_errs = Some(1);
+        assert!(smbus.gddr_telemetry.is_none());
+
+        let rows = build_stats_sidebar_rows(&device, None, Some(&smbus), None, false);
+        let text = ecc_row_text(&rows).expect("packed-aggregate ECC row must still render");
+        assert!(
+            text.contains("1 uncorr") && text.contains("4 corr"),
+            "expected the packed sums with the 0xFFFFFFFF sentinel dropped \
+             (1 uncorr · 4 corr); got {text:?}"
         );
     }
 }
