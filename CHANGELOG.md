@@ -32,6 +32,9 @@ git tag                        # released versions
   into a root-run monitor's spawned shell. See
   `docs/superpowers/specs/2026-08-27-direct-vllm-detection-design.md`.
   Not yet hardware-verified against a real `tt-model serve` launch.
+- **`webbrowser` 1.2.0 → 1.2.4** (RUSTSEC-2026-0257). Lockfile only, and
+  transitive through `egui-winit` → `eframe`, so it affects the optional egui
+  GUI and not the shipped TUI binary.
 
 ### 0.8.0
 - **Fix: per-device data was shuffled on multi-card boxes.** The sysfs backend

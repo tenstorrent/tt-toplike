@@ -45,6 +45,11 @@ tt-toplike (0.9.0) noble; urgency=medium
     Not hardware-verified against a real `tt-model serve` launch as of this
     release — see that spec's manual-verification checklist.
 
+  * Lockfile: `webbrowser` 1.2.0 -> 1.2.4 (RUSTSEC-2026-0257, argument
+    injection through the Unix `BROWSER` template). Transitive, via
+    `egui-winit` -> `eframe`, so it is reachable only from the optional
+    egui GUI and absent from the shipped `tt-toplike` TUI binary.
+
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 27 Aug 2026 00:00:00 +0000
 
 tt-toplike (0.8.0) noble; urgency=medium
