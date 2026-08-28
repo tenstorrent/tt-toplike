@@ -57,6 +57,10 @@ struct TTSMIDeviceRaw {
     pub firmwares: Option<serde_json::Value>,
     /// Thermal/power limits (tt-smi 5.2.0+).
     pub limits: Option<serde_json::Value>,
+    /// Per-channel GDDR training/BIST/harvest/temp/ECC state (tt-smi 6.3.0+),
+    /// raw passthrough — decoded by `parse_gddr_telemetry` at the consuming
+    /// site, same pattern as `firmwares`/`limits` above.
+    pub gddr_telemetry: Option<serde_json::Value>,
 }
 
 /// Board info from tt-smi
@@ -101,6 +105,10 @@ struct TTSMIDeviceJSON {
     pub firmwares: Option<serde_json::Value>,
     /// Thermal/power limits (tt-smi 5.2.0+).
     pub limits: Option<serde_json::Value>,
+    /// Per-channel GDDR training/BIST/harvest/temp/ECC state (tt-smi 6.3.0+),
+    /// raw passthrough — decoded by `parse_gddr_telemetry` at the consuming
+    /// site, same pattern as `firmwares`/`limits` above.
+    pub gddr_telemetry: Option<serde_json::Value>,
     /// PCIe generation from board_info (tt-smi 5.x).
     #[serde(default)]
     pub pcie_speed: Option<u32>,
@@ -534,6 +542,7 @@ fn salvage_modern_snapshot(
                 smbus: raw.smbus_telem,
                 firmwares: raw.firmwares,
                 limits: raw.limits,
+                gddr_telemetry: raw.gddr_telemetry,
                 pcie_speed: board_info.and_then(|b| b.pcie_speed),
                 pcie_width: board_info.and_then(|b| b.pcie_width),
             })
@@ -597,6 +606,7 @@ fn parse_json_devices(
                             smbus: raw.smbus_telem,
                             firmwares: raw.firmwares,
                             limits: raw.limits,
+                            gddr_telemetry: raw.gddr_telemetry,
                             pcie_speed: board_info.and_then(|b| b.pcie_speed),
                             pcie_width: board_info.and_then(|b| b.pcie_width),
                         }
@@ -655,6 +665,60 @@ fn parse_json_devices(
         "Failed to parse JSON output: {}",
         json_str.chars().take(100).collect::<String>()
     )))
+}
+
+/// Parse tt-smi ≥ 6.3.0's `gddr_telemetry` block. Every numeric leaf is a
+/// quoted string in the real JSON except `channel` (already a number) —
+/// tolerant of both via `parse_hex_or_dec` and direct `str::parse`. A
+/// channel entry that fails to parse a required field is skipped (not
+/// fabricated as a zeroed channel), matching `salvage_modern_snapshot`'s
+/// "one malformed entry costs only that entry" convention.
+fn parse_gddr_telemetry(v: &serde_json::Value) -> Option<crate::models::telemetry::GddrTelemetry> {
+    let obj = v.as_object()?;
+    let speed = obj.get("speed").and_then(|s| s.as_str()).map(String::from);
+    let max_temp = obj
+        .get("max_temp")
+        .and_then(|s| s.as_str())
+        .and_then(|s| s.parse::<f32>().ok());
+    let enabled_mask = obj
+        .get("enabled_mask")
+        .and_then(|s| s.as_str())
+        .and_then(crate::models::telemetry::parse_hex_or_dec);
+    let channels = obj
+        .get("channels")
+        .and_then(|c| c.as_array())
+        .map(|arr| arr.iter().filter_map(parse_gddr_channel).collect())
+        .unwrap_or_default();
+    Some(crate::models::telemetry::GddrTelemetry {
+        speed,
+        max_temp,
+        enabled_mask,
+        channels,
+    })
+}
+
+/// Parse one `gddr_telemetry.channels[]` entry. `None` if `channel`,
+/// `harvested`, or `enabled` (the three fields with no sane default) are
+/// missing or the wrong JSON type — every other field degrades to a default
+/// (`false`/`None`/`0`) rather than dropping the whole channel.
+fn parse_gddr_channel(v: &serde_json::Value) -> Option<crate::models::telemetry::GddrChannel> {
+    let obj = v.as_object()?;
+    let str_f32 = |k: &str| obj.get(k)?.as_str()?.parse::<f32>().ok();
+    let str_u64 = |k: &str| obj.get(k)?.as_str()?.parse::<u64>().ok();
+    let str_bool_pass = |k: &str| obj.get(k).and_then(|v| v.as_str()).map(|s| s == "pass");
+    Some(crate::models::telemetry::GddrChannel {
+        channel: obj.get("channel")?.as_u64()? as usize,
+        harvested: obj.get("harvested")?.as_bool()?,
+        enabled: obj.get("enabled")?.as_bool()?,
+        training_pass: str_bool_pass("training").unwrap_or(false),
+        bist_pass: str_bool_pass("bist").unwrap_or(false),
+        temp_top: str_f32("temp_top"),
+        temp_bottom: str_f32("temp_bottom"),
+        corr_rd: str_u64("corr_rd").unwrap_or(0),
+        corr_wr: str_u64("corr_wr").unwrap_or(0),
+        uncorr_rd: str_u64("uncorr_rd").unwrap_or(0),
+        uncorr_wr: str_u64("uncorr_wr").unwrap_or(0),
+    })
 }
 
 /// Build a `Device` from a single parsed JSON entry, applying the same
@@ -742,8 +806,30 @@ fn parsed_from_json_devices(json_devices: Vec<TTSMIDeviceJSON>) -> ParsedSnapsho
         if let Some(telem_json) = json_dev.telemetry {
             telemetry.insert(idx, telemetry_from_json(&telem_json));
         }
-        if let Some(smbus_json) = json_dev.smbus {
-            smbus.insert(idx, smbus_from_json_fields(smbus_json));
+        let gddr_telemetry = json_dev
+            .gddr_telemetry
+            .as_ref()
+            .and_then(parse_gddr_telemetry);
+        match json_dev.smbus {
+            Some(smbus_json) => {
+                let mut s = smbus_from_json_fields(smbus_json);
+                s.gddr_telemetry = gddr_telemetry;
+                smbus.insert(idx, s);
+            }
+            None if gddr_telemetry.is_some() => {
+                // Phase 26 precedent: a payload that parses independently of
+                // smbus_telem's presence must not be dropped just because
+                // that sibling block is missing (permission-restricted run,
+                // ARC that didn't answer).
+                smbus.insert(
+                    idx,
+                    crate::models::telemetry::SmbusTelemetry {
+                        gddr_telemetry,
+                        ..Default::default()
+                    },
+                );
+            }
+            None => {}
         }
     }
 
@@ -1073,8 +1159,26 @@ pub(crate) fn parse_snapshot(json_str: &str) -> SnapshotParts {
                 bus_ids.insert(idx, norm);
             }
         }
-        if let Some(smbus_json) = dev.smbus {
-            smbus_map.insert(idx, smbus_from_json_fields(smbus_json));
+        let gddr_telemetry = dev.gddr_telemetry.as_ref().and_then(parse_gddr_telemetry);
+        match dev.smbus {
+            Some(smbus_json) => {
+                let mut s = smbus_from_json_fields(smbus_json);
+                s.gddr_telemetry = gddr_telemetry;
+                smbus_map.insert(idx, s);
+            }
+            None if gddr_telemetry.is_some() => {
+                // Same precedent as `parsed_from_json_devices`: a payload that
+                // parses independently of smbus_telem's presence must not be
+                // dropped just because that sibling block is missing.
+                smbus_map.insert(
+                    idx,
+                    crate::models::telemetry::SmbusTelemetry {
+                        gddr_telemetry,
+                        ..Default::default()
+                    },
+                );
+            }
+            None => {}
         }
         let firmwares = dev.firmwares.as_ref().and_then(|v| {
             serde_json::from_value::<crate::models::telemetry::FirmwaresInfo>(v.clone()).ok()
@@ -1124,6 +1228,103 @@ pub(crate) fn parse_smbus_from_json(json_str: &str) -> HashMap<usize, SmbusTelem
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Trimmed from a real tt-smi 6.3.0 `-s` snapshot (verified live against 4x
+    // Blackhole p300c, 2026-08-27). Every numeric leaf except `channel` is a
+    // quoted string — that inconsistency is exactly what parse_gddr_channel
+    // works around.
+    const GDDR_TELEMETRY_JSON: &str = r#"{
+        "speed": "16G",
+        "max_temp": "50",
+        "enabled_mask": "0xff",
+        "channels": [
+            {
+                "channel": 0,
+                "harvested": false,
+                "enabled": true,
+                "training": "pass",
+                "bist": "pass",
+                "temp_top": "46",
+                "temp_bottom": "50",
+                "corr_rd": "0",
+                "corr_wr": "0",
+                "uncorr_rd": "0",
+                "uncorr_wr": "0"
+            },
+            {
+                "channel": 1,
+                "harvested": true,
+                "enabled": false,
+                "training": "fail",
+                "bist": "fail",
+                "temp_top": "0",
+                "temp_bottom": "0",
+                "corr_rd": "0",
+                "corr_wr": "0",
+                "uncorr_rd": "0",
+                "uncorr_wr": "0"
+            }
+        ]
+    }"#;
+
+    #[test]
+    fn parses_real_gddr_telemetry_shape() {
+        let v: serde_json::Value = serde_json::from_str(GDDR_TELEMETRY_JSON).unwrap();
+        let g = parse_gddr_telemetry(&v).expect("should parse");
+        assert_eq!(g.speed.as_deref(), Some("16G"));
+        assert_eq!(g.max_temp, Some(50.0));
+        assert_eq!(g.enabled_mask, Some(0xff));
+        assert_eq!(g.channels.len(), 2);
+
+        let ch0 = &g.channels[0];
+        assert_eq!(ch0.channel, 0);
+        assert!(!ch0.harvested);
+        assert!(ch0.enabled);
+        assert!(ch0.training_pass);
+        assert!(ch0.bist_pass);
+        assert_eq!(ch0.temp_top, Some(46.0));
+        assert_eq!(ch0.temp_bottom, Some(50.0));
+
+        let ch1 = &g.channels[1];
+        assert!(ch1.harvested);
+        assert!(!ch1.enabled);
+        assert!(!ch1.training_pass);
+        assert!(!ch1.bist_pass);
+    }
+
+    #[test]
+    fn absent_gddr_telemetry_key_parses_to_none() {
+        // Older tt-smi (< 6.3.0) simply doesn't have this key at all.
+        let device_json = r#"{"board_info": {"bus_id": "0000:01:00.0"}}"#;
+        let v: serde_json::Value = serde_json::from_str(device_json).unwrap();
+        assert!(v.get("gddr_telemetry").is_none());
+    }
+
+    #[test]
+    fn malformed_channel_entry_is_skipped_not_fabricated() {
+        let json = r#"{
+            "speed": "16G",
+            "channels": [
+                {"channel": 0, "harvested": false, "enabled": true, "training": "pass", "bist": "pass"},
+                {"channel": "not-a-number", "harvested": false, "enabled": true}
+            ]
+        }"#;
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        let g = parse_gddr_telemetry(&v).expect("should still parse the block");
+        assert_eq!(
+            g.channels.len(),
+            1,
+            "the malformed second entry is dropped, not zeroed"
+        );
+        assert_eq!(g.channels[0].channel, 0);
+    }
+
+    #[test]
+    fn empty_channels_array_parses_to_empty_vec() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"channels": []}"#).unwrap();
+        let g = parse_gddr_telemetry(&v).expect("should parse");
+        assert!(g.channels.is_empty());
+    }
 
     // Compact real-world tt-smi snapshot (single device, all key types represented).
     const REAL_TTSMI_JSON: &str = r#"{
