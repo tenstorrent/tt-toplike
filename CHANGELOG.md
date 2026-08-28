@@ -14,6 +14,25 @@ git tag                        # released versions
 
 ## Recent releases
 
+### 0.9.0
+- **Direct (non-Docker) vLLM-on-TT detection for the `[i]` Inference Server
+  panel.** Previously the panel only saw a `docker run`-launched
+  tt-inference-server container; a bare `vllm serve <model> ...` /
+  `server_example_tt.py --model <model> ...` process (as `tt-model serve`
+  launches directly) was invisible to it. A new `Source::Host { pid }` variant
+  and `SystemProbe` (wrapping the existing `DockerProbe`) let both deployment
+  shapes be monitored simultaneously — the host path reads `/proc` and runs
+  local `ps`/`sh` scoped to the launched pid's whole process tree rather than
+  a Docker container. Requires `MESH_DEVICE`/`TT_METAL_HOME` present in the
+  process's own environment to confirm it's TT-backed. Host-keyed liveness
+  doesn't rely on matching a process name (a pip console-script's `comm`
+  isn't `python3`) — any row in the tree-scoped `ps` output counts as alive.
+  `host_exec` allowlists only the env vars the probe's own shell commands
+  need, rather than copying a locally-launched process's full environment
+  into a root-run monitor's spawned shell. See
+  `docs/superpowers/specs/2026-08-27-direct-vllm-detection-design.md`.
+  Not yet hardware-verified against a real `tt-model serve` launch.
+
 ### 0.8.0
 - **Fix: per-device data was shuffled on multi-card boxes.** The sysfs backend
   numbered devices in raw `readdir` order while `tt-smi` orders by PCI bus id, so

@@ -1,3 +1,52 @@
+tt-toplike (0.9.0) noble; urgency=medium
+
+  * Direct (non-Docker) vLLM-on-TT detection for the [i] Inference Server
+    panel. Previously the panel only saw a `docker run`-launched
+    tt-inference-server container; a bare `vllm serve <model> ...` or
+    `server_example_tt.py --model <model> ...` process (as `tt-model serve`
+    from tt-tnt launches directly) was invisible to it, surfacing only as a
+    generic "vllm" process in the plain process table.
+    - New `Source::Host { pid }` alongside the existing `Source::Docker`,
+      keyed by `service_key()` — `"host-vllm-<pid>"` for a bare process, the
+      container name for Docker — used everywhere identity/dedup/prev-state
+      lookup happens.
+    - `parse_direct_vllm` recognizes both launch shapes and requires
+      `MESH_DEVICE` or `TT_METAL_HOME` present in the process's own
+      environment before treating it as TT-backed, so a plain upstream vLLM
+      process (e.g. against a GPU, for comparison) is never misclassified.
+      Recognizes `--port`/`--port=N` and both `vllm serve <model>` and
+      `vllm serve --model <model>` forms.
+    - New `SystemProbe` wraps the existing `DockerProbe` and dispatches every
+      probe call by the identity key's shape: a host key reads `/proc`
+      directly and runs local `ps`/`sh` scoped to the launched pid's whole
+      process tree (a new `process_tree_pids` walker, since a bare process
+      has no cgroup/PID-namespace boundary the way a Docker container does)
+      instead of shelling into a container; anything else forwards unchanged
+      to the wrapped `DockerProbe`, so the Docker path's behavior is
+      untouched byte-for-byte.
+    - Host-keyed liveness doesn't rely on matching a process name in `ps`'s
+      `comm` column (a pip console-script's `comm` is the script's own name,
+      not `python3`, so the existing Docker-calibrated heuristic would have
+      read a compiling/loading `vllm serve` as `Down` for the entire
+      90-minute silent window this feature exists to illuminate) — a
+      host-keyed sample is "alive" whenever its tree-scoped `ps` returns any
+      row at all, since that invocation is already scoped to exactly the
+      right pids.
+    - `host_exec` (the shell used for the kernel/weight-shard `find` probes)
+      allowlists only `TT_METAL_HOME`/`CACHE_ROOT`/`HOME`/`PATH` from the
+      target process's environment rather than copying it wholesale — this
+      box is shared between users, and copying an arbitrary local process's
+      full environment into a root-run monitor's spawned shell (e.g. via
+      `LD_PRELOAD`) would have been a real privilege-escalation surface.
+    - Everything downstream (phase detection, progress estimation, vLLM
+      `/metrics` parsing, panel rendering) needed no changes — it already
+      operated on the backend-agnostic `ServiceState`/`TickSample` shapes.
+    Design: docs/superpowers/specs/2026-08-27-direct-vllm-detection-design.md.
+    Not hardware-verified against a real `tt-model serve` launch as of this
+    release — see that spec's manual-verification checklist.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 27 Aug 2026 00:00:00 +0000
+
 tt-toplike (0.8.0) noble; urgency=medium
 
   * Telemetry expansion — the sysfs/hybrid path picks up most of what used

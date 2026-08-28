@@ -4360,3 +4360,117 @@ the four backends:
 *Phase 25 status: **COMPLETE** — shipped as v0.8.0. Safe (sysfs/hybrid/json)
 and luwen paths all verified on 4× Blackhole p300c; luwen remains explicit-only
 (never auto-detected) and unverified on Wormhole/Grayskull and under load.*
+
+---
+
+## Phase 27 — Direct (non-Docker) vLLM-on-TT detection (August 27, 2026, v0.9.0)
+
+**Origin**: the `[i]` Inference Server panel (Phase 22/25's monitoring
+pipeline) only ever detected TT inference servers launched via `docker run`
+— keyed by container name, probed with `docker exec`/`docker stats`. A
+direct vLLM launch (`tt-model serve` from `tt-tnt`, which execs either
+`vllm serve <model> ...` or `python3 server_example_tt.py --model <model>
+...` directly, no Docker involved) was invisible to it — the generic
+`inference_match()` classifier tagged it `"vllm"` for the plain process
+table, but it never reached the rich phase/progress/metrics panel. The code
+had already anticipated this gap: `Source` carried a commented-out `Host {
+unit_or_pid: String }` trail variant, and `ContainerProbe`'s doc comment
+said "a host/systemd impl for non-Docker installs would implement this same
+trait." Built via the full brainstorming → spec → plan → subagent-driven-TDD
+pipeline: design doc at
+`docs/superpowers/specs/2026-08-27-direct-vllm-detection-design.md`, plan at
+`docs/superpowers/plans/2026-08-27-direct-vllm-detection.md`.
+
+### What changed
+
+- **`Source::Host { pid }`** joins the existing `Source::Docker { container
+  }`. A new `service_key()` helper derives a stable identity/dedup key for
+  either variant — `container.clone()` for Docker, `"host-vllm-<pid>"` for a
+  bare process — and replaced every place that used to irrefutably
+  destructure `Source::Docker` (adding the variant turned those into compile
+  errors, which is exactly what caught every call site that needed updating).
+- **`parse_direct_vllm`** (pure, in `detect.rs`) recognizes both real launch
+  shapes found in `tt-tnt`'s `docs/serving-with-tt-kernel.md`/`AUTOFIX.md`:
+  `vllm serve <model> ...` (matched by `ends_with("vllm")` on the binary
+  token, not exact-match — a venv console-script's argv[0] is commonly a
+  full path) and `server_example_tt.py --model <model> ...`. Requires
+  `MESH_DEVICE` or `TT_METAL_HOME` present in the process's own environment
+  before treating it as TT-backed — the equivalent of `parse_inference_server`'s
+  `uses_tt_device` check, which has no `/dev/tenstorrent` cmdline analogue for
+  a bare host process. Recognizes `--port <N>` and `--port=<N>`, and falls
+  back to `--model <X>`/`--model=X` when there's no positional model token.
+- **`SystemProbe`** wraps the existing `DockerProbe` and dispatches every
+  `ContainerProbe` call by the identity key's shape: a `"host-vllm-<pid>"`
+  key reads `/proc` directly and runs local `ps`/`sh`, scoped to the launched
+  pid's *whole process tree* (a new `process_tree_pids` walker, cycle-guarded
+  with a `HashSet`) — a bare process has no cgroup/PID-namespace boundary the
+  way a Docker container does, so a `g++` compile child or a TT device
+  worker subprocess would otherwise be invisible to CPU/RSS aggregation.
+  Anything else forwards unchanged to the wrapped `DockerProbe`, so the
+  Docker path is untouched byte-for-byte (confirmed in the final review: no
+  surviving `Source::Docker`-only assumption anywhere in the crate).
+- **Host-keyed liveness doesn't guess a process name.** The Docker path's
+  `contains_python` heuristic (checks `ps`'s `comm` column for `"python"`)
+  was calibrated for a `python3` entrypoint and would have misread a
+  compiling/loading `vllm serve` as `Down` for the entire silent window this
+  feature exists to illuminate — a pip console-script's `comm` is the
+  script's own name (`vllm`), not `python3`. Fixed during final review: for a
+  host key, "the tree-scoped `ps` returned at least one data row" is
+  sufficient liveness evidence, since that invocation is already scoped to
+  exactly the right pids.
+- **`host_exec` allowlists env vars instead of copying the target's
+  environment wholesale.** Also caught in final review: on a shared,
+  root-run box, blindly forwarding a locally-launched process's full
+  environment into the monitor's own spawned shell (to run the
+  `KERNEL_FIND_CMD`/`LOADED_FIND_CMD` probes) would have let a local user
+  plant `LD_PRELOAD` and have it honored by a root process. Now forwards
+  only `TT_METAL_HOME`/`CACHE_ROOT`/`HOME` (exactly what those two shell
+  strings expand) plus a `PATH` fallback.
+- Everything downstream — `fold_tick`, `Phase::derive`, `is_alarm`,
+  `estimate_progress`, `parse_vllm_metrics`, `service_for` — needed zero
+  changes, since it already operated on the backend-agnostic
+  `ServiceState`/`TickSample` shapes with no knowledge of `Source`.
+
+### Process notes
+
+- Built with `subagent-driven-development`: 7 tasks, each with its own
+  fresh-implementer + task-reviewer pass, plus a final whole-branch review
+  on the most capable available model.
+- **A plan defect surfaced mid-execution, not during brainstorming**: the
+  plan's own Global Constraints section reasoned that `process_tree_pids`
+  needed no extra `#[cfg]` gating beyond `detected_inference_servers()`'s
+  existing one, because `SystemProbe`'s host branch is "only ever reached at
+  runtime" via a `Source::Host` value — true, but irrelevant to Rust, where
+  an unconditionally-*called* `#[cfg(target_os = "linux")]` function fails
+  to compile on other targets regardless of whether it's ever invoked. Broke
+  the crate on the macOS/Windows CI jobs; caught by the Task 6 reviewer
+  running an actual cross-target `cargo check`, not by inference.
+- **The final whole-branch review earned its keep twice over**: beyond the
+  cross-target compile break (already fixed at the task level by the time
+  final review ran), it independently found the `contains_python` liveness
+  mismatch and the `host_exec` environment-inheritance security gap — both
+  invisible to any single task's review, since each task's diff looked
+  correct in isolation and the problem only exists in how the pieces compose
+  across the whole feature.
+- **Per-task review also caught a CI-invocation-specific bug no test run
+  would show**: Task 1 imported `Source` at module level in `monitor.rs`,
+  but every actual use was inside `#[cfg(test)] mod tests` — genuinely
+  unused under CI's exact `cargo clippy --lib --features tui -- -D
+  warnings` (no `--tests`), invisible under `cargo test --lib` (which
+  compiles `cfg(test)` code). Silently CI-red-eligible from Task 1 through
+  Task 6; caught only because the controller independently ran the literal
+  CI command before signing off on the "final" task.
+
+> ⚠️ **Not hardware-verified.** No box with TT hardware and a real
+> `tt-model serve` launch was available during this development session.
+> See the spec's manual-verification checklist before relying on this in
+> production — in particular the host-liveness heuristic and the
+> `CACHE_ROOT`/weight-shard-loading signal, both of which the reasoning
+> above is confident about but only real hardware can confirm.
+
+---
+
+*Phase 27 status: **COMPLETE, pending hardware verification** — shipped as
+v0.9.0. All automated review gates (7 task reviews + 1 final whole-branch
+review + its one fix wave) passed; no manual verification against real TT
+hardware performed.*
