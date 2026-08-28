@@ -14,6 +14,24 @@ git tag                        # released versions
 
 ## Recent releases
 
+### 0.10.3
+- **Security fix**: a direct-vLLM host process's own `PATH` was forwarded
+  onto the `sh` the monitor spawns to probe it — a bare `Command::new("sh")`
+  lookup resolves via whatever `PATH` ends up on the builder, so an
+  attacker-controlled process (gated only by `MESH_DEVICE`/`TT_METAL_HOME`,
+  which the process itself controls) could have redirected the root-run
+  monitor into executing a planted binary. Fixed by invoking the interpreter
+  via an absolute path and never forwarding the target's own `PATH`.
+- **Fix**: four GDDR-telemetry correctness gaps — a stale 8-channel cap
+  dropping real fault data for Blackhole's channels 8–11, Starfield's DDR
+  planets missing an `enabled` check present in every other memory
+  visualization, the Insights GDDR temp/ECC rows silently disappearing
+  instead of falling back on partially-usable real data, and a missing ECC
+  counter parsing as a genuine zero instead of "not reported".
+- **Perf**: a host-keyed service's per-tick probe redundantly re-read
+  `/proc/<pid>/environ` up to four times and re-walked its process tree
+  twice; now cached for the duration of one tick.
+
 ### 0.10.2
 - **Fix**: the `[i]` Inference Server roster showed dozens of duplicate
   entries for a single real vLLM-on-TT launch — a real launch forks several

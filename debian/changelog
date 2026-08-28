@@ -1,3 +1,28 @@
+tt-toplike (0.10.3) noble; urgency=medium
+
+  * Security fix: a direct-vLLM host process's own PATH (self-reported via
+    /proc/<pid>/environ, gated only by MESH_DEVICE/TT_METAL_HOME which the
+    process itself controls) was forwarded onto the `sh` the monitor spawns
+    to probe it -- a bare `Command::new("sh")` lookup resolves via whatever
+    PATH ends up on the builder, so an attacker-controlled process could
+    have redirected the root-run monitor into executing a planted binary.
+    Fixed by invoking the interpreter via an absolute path and never
+    forwarding the target's own PATH. Found and TDD'd with a real
+    spawned-process regression test, not a mock.
+  * Fix: four GDDR-telemetry correctness gaps found alongside the above --
+    a stale 8-channel cap in the chip portrait that dropped real fault data
+    for Blackhole's channels 8-11, Starfield's DDR planets missing an
+    `enabled` check present in every other memory visualization, the
+    Insights GDDR temp/ECC rows silently disappearing instead of falling
+    back when real per-channel data was present but unusable, and a
+    missing/malformed ECC counter parsing as a genuine zero instead of
+    "not reported".
+  * Perf: a host-keyed service's per-tick probe redundantly re-read
+    /proc/<pid>/environ up to four times and re-walked its process tree
+    twice; now cached for the duration of one tick.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 28 Aug 2026 00:00:00 +0000
+
 tt-toplike (0.10.2) noble; urgency=medium
 
   * Fix: the `[i]` Inference Server roster showed dozens of duplicate

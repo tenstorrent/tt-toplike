@@ -4747,3 +4747,117 @@ failed as expected, confirming they're real guards, not tautologies).
 *Phase 30 status: **COMPLETE, fix not re-observed live** — shipped as
 v0.10.2. Bounded bug fix (no SDD ledger); `is_match_root` mutation-tested;
 full suite green.*
+
+---
+
+## Phase 31 — `/code-review` findings: PATH injection, GDDR gaps, redundant I/O (August 28, 2026, v0.10.3)
+
+**Origin**: ran `/code-review medium --fix --comment` against the whole
+branch. The review agent's fix/comment steps stalled (two verification
+sub-agents' results were lost across a session gap), so it returned six raw
+findings — four independently confirmed, two flagged plausible-but-
+unverified — instead of applying fixes. Worked through all six by hand:
+verified each, fixed what was real, and explicitly deferred/discussed scope
+for the two that weren't simple bug fixes.
+
+### 1. PATH injection in `host_exec` (Critical — confirmed real)
+
+`host_exec` (`src/workload/inference_server/probe.rs`) forwarded the
+*target process's own* `PATH` — read from `/proc/<pid>/environ`, of a
+process whose only gate to reach this code path
+(`MESH_DEVICE`/`TT_METAL_HOME` present in its own environment) is entirely
+self-reported — onto the `sh` it spawned via `Command::new("sh")`, a
+bare-name lookup. The review flagged this as merely "plausible," needing a
+check against actual `std::process::Command` semantics. Verified
+empirically before touching any code: wrote a throwaway Rust program that
+placed a fake `sh` on a `PATH` set only via `.env()` on the builder (never
+the process's own OS-level `PATH`) and confirmed the fake binary executes.
+So `Command::new("sh")` resolves via whatever `PATH` ends up on the
+*builder*, not the calling process's real environment — the vulnerability
+is real, and structurally identical to the exact `LD_PRELOAD`-style attack
+this same function's `HOST_EXEC_FORWARDED_VARS` allowlist was built to
+prevent (Phase 27) — `PATH` had simply slipped through unguarded.
+
+Fixed by invoking the interpreter via an absolute path (`/bin/sh`, never a
+bare-name lookup) and dropping the target-PATH-forwarding branch entirely —
+always a fixed, conservative `PATH` (`/usr/bin:/bin:/usr/local/bin`,
+sufficient for the only two commands the shell probes ever run, `find` and
+`wc`). TDD'd with a real spawned process, not a mock: a first draft of the
+regression test planted a fake `find` instead of a fake `sh` and passed
+vacuously against the *pre-fix* code too — with no fake `sh` present, the
+buggy `Command::new("sh")` failed to resolve at all under the attacker's
+narrow `PATH`, so the exploit path was never actually exercised. Rewritten
+to fake `sh` itself; confirmed red against the vulnerable code (the fake
+`sh`'s marker string came back in the output), green after the fix.
+
+### 2. Four GDDR-telemetry correctness gaps (Important — all confirmed)
+
+All in the same family as Phase 28/29's own fallback bugs — real data
+present but degrading incorrectly instead of falling back cleanly:
+
+- **`chip_portrait.rs`**: the DRAM column→channel index mapping capped at
+  `idx >= 8`, a leftover from the packed 8-channel `DDR_STATUS`-bitmask era,
+  copied onto the new `gddr_telemetry` lookup even though real channels are
+  found by `.channel` id via `.find()` (which already handles absence
+  correctly). The cap only discarded real fault/temperature data for
+  Blackhole's channels 8–11. Removed at both the glyph and color sites.
+- **`starfield.rs`**: DDR planet activity/color checked `harvested` but not
+  `enabled`, unlike `memory_flow.rs`/`memory_castle.rs`'s established
+  `c.harvested || !c.enabled` convention (Phase 28) — an
+  administratively-disabled-but-not-harvested channel rendered as a live,
+  glowing planet instead of inert, an inconsistency across visualizations
+  for identical hardware state.
+- **`ui/tui/mod.rs`**: the GDDR temp and ECC rows only fell back to the
+  packed-aggregate reading when `gddr_telemetry` was `None`/empty — not when
+  present but yielding nothing usable (every channel's temp fields `None`,
+  or every non-harvested channel's ECC counters reading zero). `Some(vec![])`
+  / `Some((0,0))` isn't the same as "no real data"; both rows now fall back
+  whenever the real-data result didn't actually produce anything.
+- **`models/telemetry.rs`/`backend/json.rs`**: `GddrChannel`'s four ECC
+  counters were plain `u64`, parsed via `str_u64(...).unwrap_or(0)` —
+  conflating a missing/malformed field with a genuine zero reading. The
+  review flagged this as plausible but noted the code's own doc comment
+  documented it as an intentional simplification, and a proper fix meant
+  widening the type to `Option<u64>` across ~5 consumer files — bigger scope
+  than the other three. Asked explicitly before doing it; user chose to do
+  the full refactor. `temp_top`/`temp_bottom` already used this pattern, so
+  every consumer just added its own `.unwrap_or(0)` at the point of use.
+
+Every fix has a dedicated regression test confirmed red against the
+pre-fix behavior and green after (temporarily reverting the fix in place,
+running the test, restoring — never trusting a test's color without seeing
+both).
+
+### 3. Redundant per-tick probe I/O (Minor — confirmed, fixed after asking)
+
+`build_sample`'s sequence for one host-keyed service independently re-read
+`/proc/<pid>/environ` up to four times and re-walked `process_tree_pids`
+twice per tick, spawning two separate `ps` subprocesses along the way —
+flagged as a background-thread perf nitpick, not correctness/security.
+Asked whether it was worth the risk of touching the same file right after
+the security fix; user said fix it too. Added `HostProbeCache`, a
+short-TTL (500ms — long enough to cover one tick's calls, short enough to
+be stale well before the next) per-pid memoization inside `SystemProbe`
+(plain `RefCell`, not `Mutex` — the probe runs on one dedicated background
+thread, confirmed by reading `spawn_with_probe`, never called
+concurrently). `host_exec`/`host_stats_text`/`host_top_proc_cmd` now take
+pre-fetched environ text / pid lists as parameters instead of re-deriving
+them from a bare pid. Mutation-tested: temporarily dropped the cache's
+pid-key comparison (so any cached entry would satisfy any pid), and the new
+regression test (two real spawned processes with distinct environments,
+interleaved reads) failed exactly as expected.
+
+Both cross-compile targets (`x86_64-pc-windows-gnu`,
+`x86_64-apple-darwin`) checked clean after all of the above — the
+non-Linux `process_tree_pids` fallback and the cache/`SystemProbe`
+structure are unaffected by the `#[cfg(target_os = "linux")]` gating that
+already existed.
+
+---
+
+*Phase 31 status: **COMPLETE** — shipped as v0.10.3. All 6 code-review
+findings resolved: 1 security fix (empirically verified vulnerable-then-
+fixed), 4 correctness fixes (each red/green tested), 1 perf fix
+(mutation-tested). Two findings (#3's refactor scope, #6's fix-or-defer)
+explicitly discussed with the user before acting rather than silently
+decided. Full suite + fmt + clippy + both cross-compile targets green.*
