@@ -26,7 +26,7 @@ use crate::workload::inference_server::detect::{service_key, InferenceServer, So
 use crate::workload::inference_server::logs::last_non_health_line;
 use crate::workload::inference_server::probe::{
     contains_python, count_lines, parse_docker_stats, parse_env_var, parse_liveness, top_process,
-    ContainerProbe, DockerProbe, Readiness, TickSample,
+    ContainerProbe, DockerProbe, Readiness, SystemProbe, TickSample,
 };
 use crate::workload::inference_server::services::{model_basename, service_for};
 use crate::workload::inference_server::state::{
@@ -68,8 +68,6 @@ const KERNEL_FIND_CMD: &str =
 /// climbs during the weight-load phase, after (and alongside) the compile
 /// phase. Gated on `$CACHE_ROOT` being set (see `build_sample`).
 const LOADED_FIND_CMD: &str = "find \"$CACHE_ROOT\" -name '*.tensorbin' 2>/dev/null";
-/// `ps` invocation whose first data row is the container's top CPU consumer.
-const TOP_PROC_CMD: &str = "ps -eo pcpu,rss,comm --sort=-pcpu";
 
 /// A never-yet-probed baseline for a newly discovered service, so the first
 /// real tick's deltas are computed against a known-empty prior tick rather
@@ -214,7 +212,7 @@ fn build_sample(
     // liveness check. `python_alive` scans ALL rows, not just the top: a
     // loading server is often IO-bound and not the CPU leader, so keying
     // liveness off the top row alone flapped a loading service to Down.
-    let ps_output = probe.exec(container, TOP_PROC_CMD);
+    let ps_output = probe.exec(container, &probe.top_proc_cmd(container));
     let top = top_process(&ps_output);
     let top_proc = top.map(|(comm, _cpu, _rss)| comm);
     let python_alive = contains_python(&ps_output);
@@ -385,7 +383,7 @@ impl InferenceServerMonitor {
     /// recognized service's container and folds the result into its running
     /// state. All docker/HTTP I/O happens here, never on the render path.
     pub fn spawn() -> Self {
-        Self::spawn_with_probe(Box::new(DockerProbe))
+        Self::spawn_with_probe(Box::new(SystemProbe::new(DockerProbe)))
     }
 
     /// Same as [`Self::spawn`], but with the [`ContainerProbe`] injected —
@@ -732,6 +730,32 @@ mod tests {
         assert_eq!(snap[0].key, "tt-inference-server-2269d4f6");
         assert!(
             snap[0].label.contains("Qwen3-32B"),
+            "label derived from model basename, got {:?}",
+            snap[0].label
+        );
+    }
+
+    /// A direct (non-Docker) vLLM launch is tracked by its pid-derived key,
+    /// exactly like a Docker-sourced service — `rebuild_snapshot` doesn't care
+    /// which `Source` variant produced the `InferenceServer`, since `Task 1`
+    /// made `service_key` source-agnostic.
+    #[test]
+    fn rebuild_snapshot_tracks_a_host_source_by_its_pid_key() {
+        let srv = InferenceServer {
+            source: Source::Host { pid: 4242 },
+            image: "vllm-direct".into(),
+            model: Some("episod/tt-tnt-1024".into()),
+            mesh: Some("P300x2".into()),
+            arch: None,
+            device: None,
+            port: Some(8000),
+            uses_tt_device: true,
+        };
+        let snap = rebuild_snapshot(std::slice::from_ref(&srv), &[], &FakeProbe, 5);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].key, "host-vllm-4242");
+        assert!(
+            snap[0].label.contains("tt-tnt-1024"),
             "label derived from model basename, got {:?}",
             snap[0].label
         );
