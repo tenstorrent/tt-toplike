@@ -22,7 +22,7 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::workload::inference_server::detect::{service_key, InferenceServer, Source};
+use crate::workload::inference_server::detect::{service_key, InferenceServer};
 use crate::workload::inference_server::logs::last_non_health_line;
 use crate::workload::inference_server::probe::{
     contains_python, count_lines, parse_docker_stats, parse_env_var, parse_liveness, top_process,
@@ -467,6 +467,7 @@ impl InferenceServerMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workload::inference_server::detect::Source;
     use crate::workload::inference_server::probe::Readiness;
 
     /// A never-yet-probed baseline, for driving `fold_tick`'s very first
