@@ -306,9 +306,10 @@ fn format_host_stats(cpu_pct: f32, rss_bytes: u64) -> String {
 /// `"{cpu}%|{rss_bytes}B / 0B"` — matches [`parse_docker_stats`]'s expected
 /// shape (it only reads the "used" side of the `/`, so the "0B" denominator
 /// is a placeholder, not a real memory limit; documented so it isn't
-/// mistaken for one). CPU% and RSS are summed over `process_tree_pids(pid)`
-/// via a single tree-scoped `ps` call — a bare host process has no cgroup to
-/// aggregate by the way `docker stats` does for a container.
+/// mistaken for one). CPU% and RSS are summed over the caller-supplied pid
+/// list (see [`HostProbeCache::tree_pids`]) via a single tree-scoped `ps`
+/// call — a bare host process has no cgroup to aggregate by the way `docker
+/// stats` does for a container.
 ///
 /// Known limitation: `ps`'s `%CPU` column is a lifetime average
 /// (cputime/elapsed since the process started), not an instantaneous
@@ -316,8 +317,7 @@ fn format_host_stats(cpu_pct: f32, rss_bytes: u64) -> String {
 /// compiled kernels for 90 minutes and then went idle may keep reporting a
 /// stale-high CPU% long after an equivalent container's `docker stats`
 /// would show it drop.
-fn host_stats_text(pid: i32) -> String {
-    let pids = process_tree_pids(pid);
+fn host_stats_text(pids: &[i32]) -> String {
     let pid_list = pids
         .iter()
         .map(|p| p.to_string())
@@ -338,10 +338,9 @@ fn host_stats_text(pid: i32) -> String {
 
 /// The tree-scoped `ps` command a host-keyed [`ContainerProbe::top_proc_cmd`]
 /// returns — same 3-column, header-then-rows shape [`TOP_PROC_CMD`] produces
-/// (so [`top_process`]/[`contains_python`] parse it unchanged), scoped to
-/// `process_tree_pids(pid)` instead of relying on a container PID namespace.
-fn host_top_proc_cmd(pid: i32) -> String {
-    let pids = process_tree_pids(pid);
+/// (so [`top_process`]/[`contains_python`] parse it unchanged), scoped to the
+/// caller-supplied pid list instead of relying on a container PID namespace.
+fn host_top_proc_cmd(pids: &[i32]) -> String {
     let pid_list = pids
         .iter()
         .map(|p| p.to_string())
@@ -352,39 +351,110 @@ fn host_top_proc_cmd(pid: i32) -> String {
 
 /// Environment variables `host_exec` forwards from the target process's own
 /// `environ` — exactly what `KERNEL_FIND_CMD`/`LOADED_FIND_CMD` reference
-/// (`$TT_METAL_HOME`, `$CACHE_ROOT`, `$HOME`), plus `PATH` (handled
-/// separately below). Deliberately an allowlist, not a copy of the whole
-/// environ: only root can read another user's `/proc/<pid>/environ`, so a
-/// local user could otherwise plant a process whose environ carries
-/// `LD_PRELOAD` (or similar) alongside the `MESH_DEVICE`/`TT_METAL_HOME`
-/// gate `parse_direct_vllm` checks, and have the root-run monitor's next
-/// probe tick spawn `sh -c '<find …>'` with that variable set — `sh` isn't
-/// setuid, so the dynamic linker honors it. Forwarding only the handful of
-/// names the two shell commands actually need closes that off.
+/// (`$TT_METAL_HOME`, `$CACHE_ROOT`, `$HOME`). Deliberately an allowlist, not
+/// a copy of the whole environ: only root can read another user's
+/// `/proc/<pid>/environ`, so a local user could otherwise plant a process
+/// whose environ carries `LD_PRELOAD` (or similar) alongside the
+/// `MESH_DEVICE`/`TT_METAL_HOME` gate `parse_direct_vllm` checks, and have
+/// the root-run monitor's next probe tick spawn `sh -c '<find …>'` with that
+/// variable set — `sh` isn't setuid, so the dynamic linker honors it.
+/// Forwarding only the handful of names the two shell commands actually need
+/// closes that off. `PATH` is deliberately **not** in this list — see
+/// [`host_exec`].
 const HOST_EXEC_FORWARDED_VARS: &[&str] = &["TT_METAL_HOME", "CACHE_ROOT", "HOME"];
+
+/// The fixed `PATH` given to every `host_exec` shell — never the target
+/// process's own. Sufficient for the only commands `KERNEL_FIND_CMD`/
+/// `LOADED_FIND_CMD` invoke by bare name (`find`, `wc`), both standard-issue
+/// on any Linux box this runs on.
+const HOST_EXEC_PATH: &str = "/usr/bin:/bin:/usr/local/bin";
 
 /// Run `sh -c <sh>` locally, with an environment built from scratch (not
 /// inherited) so a locally-spawned shell doesn't pick up tt-toplike's own
 /// process environment the way a docker-exec'd shell would automatically be
-/// scoped to the container's env. Only [`HOST_EXEC_FORWARDED_VARS`] plus
-/// `PATH` are copied from the target pid's own `environ`; `PATH` falls back
-/// to a conservative default when the target's environ didn't carry one, so
-/// `sh` itself can still be resolved via `execvp`.
-fn host_exec(pid: i32, sh: &str) -> String {
-    let env_text = host_environ_text(pid);
-    let mut cmd = Command::new("sh");
+/// scoped to the container's env. Only [`HOST_EXEC_FORWARDED_VARS`] are
+/// copied from the target pid's own `environ` — **`PATH` is never one of
+/// them**, and the interpreter itself is invoked by an absolute path, not a
+/// bare name. `Command::new("sh")` resolves that bare name using whatever
+/// `PATH` ends up set on the builder (confirmed empirically: a fake `sh`
+/// placed on a PATH forwarded via `.env()` executes over the real `/bin/sh`)
+/// — so forwarding the target's own `PATH` here would have let any process
+/// satisfying `parse_direct_vllm`'s gate (which the process's own,
+/// self-reported environment controls) redirect the root-run monitor into
+/// executing an attacker-planted binary as its next probe tick. `find`/`wc`
+/// inside the script body are likewise resolved via this fixed `PATH`, not
+/// the target's.
+///
+/// Takes the target's `environ` text as a parameter rather than reading
+/// `/proc/<pid>/environ` itself — the caller (`SystemProbe`, via
+/// [`HostProbeCache`]) already has it cached for this probe tick, and a
+/// bare-`pid` signature would invite re-reading it here on every call.
+fn host_exec(sh: &str, env_text: &str) -> String {
+    let mut cmd = Command::new("/bin/sh");
     cmd.arg("-c").arg(sh);
     cmd.env_clear();
     for key in HOST_EXEC_FORWARDED_VARS {
-        if let Some(v) = parse_env_var(&env_text, key) {
+        if let Some(v) = parse_env_var(env_text, key) {
             cmd.env(key, v);
         }
     }
-    match parse_env_var(&env_text, "PATH") {
-        Some(v) => cmd.env("PATH", v),
-        None => cmd.env("PATH", "/usr/bin:/bin:/usr/local/bin"),
-    };
+    cmd.env("PATH", HOST_EXEC_PATH);
     run_bounded(cmd)
+}
+
+/// How long a per-pid `environ` read / process-tree walk may be reused
+/// before being considered stale — long enough to cover every call
+/// `build_sample` makes for one service within one probe tick (all
+/// synchronous, occurring within milliseconds of each other: `env`, two
+/// `exec`s for the kernel/weight-shard `find` probes, `stats`, and
+/// `top_proc_cmd` + its own `exec`, all keyed by the same pid), short
+/// enough to be naturally stale well before the next tick (services are
+/// probed on a several-second cadence, see `TICK_INTERVAL` in `monitor.rs`).
+/// Never serves stale *data* across ticks — CPU/RSS genuinely change every
+/// tick — only the pid list and environ text, which don't.
+const HOST_PROBE_CACHE_TTL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Per-pid memoization for `SystemProbe`'s host-keyed path. Without this,
+/// one `build_sample` call for a single host-keyed service independently
+/// re-read `/proc/<pid>/environ` up to four times and re-walked
+/// `process_tree_pids` twice — pure repeated I/O for data that cannot have
+/// changed between those calls. Single-threaded only (the monitor's probe
+/// runs on one dedicated background thread — see `spawn_with_probe` — so
+/// plain `RefCell`, not `Mutex`, is sufficient and cheaper).
+struct HostProbeCache {
+    environ: std::cell::RefCell<Option<(i32, std::time::Instant, String)>>,
+    tree: std::cell::RefCell<Option<(i32, std::time::Instant, Vec<i32>)>>,
+}
+
+impl HostProbeCache {
+    fn new() -> Self {
+        Self {
+            environ: std::cell::RefCell::new(None),
+            tree: std::cell::RefCell::new(None),
+        }
+    }
+
+    fn environ_text(&self, pid: i32) -> String {
+        if let Some((cached_pid, at, text)) = self.environ.borrow().as_ref() {
+            if *cached_pid == pid && at.elapsed() < HOST_PROBE_CACHE_TTL {
+                return text.clone();
+            }
+        }
+        let text = host_environ_text(pid);
+        *self.environ.borrow_mut() = Some((pid, std::time::Instant::now(), text.clone()));
+        text
+    }
+
+    fn tree_pids(&self, pid: i32) -> Vec<i32> {
+        if let Some((cached_pid, at, pids)) = self.tree.borrow().as_ref() {
+            if *cached_pid == pid && at.elapsed() < HOST_PROBE_CACHE_TTL {
+                return pids.clone();
+            }
+        }
+        let pids = process_tree_pids(pid);
+        *self.tree.borrow_mut() = Some((pid, std::time::Instant::now(), pids.clone()));
+        pids
+    }
 }
 
 /// Wraps a [`DockerProbe`] and dispatches each `ContainerProbe` call by the
@@ -396,30 +466,34 @@ fn host_exec(pid: i32, sh: &str) -> String {
 /// constructs, so both deployment shapes are monitored simultaneously.
 pub(crate) struct SystemProbe {
     docker: DockerProbe,
+    cache: HostProbeCache,
 }
 
 impl SystemProbe {
     pub(crate) fn new(docker: DockerProbe) -> Self {
-        Self { docker }
+        Self {
+            docker,
+            cache: HostProbeCache::new(),
+        }
     }
 }
 
 impl ContainerProbe for SystemProbe {
     fn env(&self, key: &str) -> String {
         match pid_from_key(key) {
-            Some(pid) => host_environ_text(pid),
+            Some(pid) => self.cache.environ_text(pid),
             None => self.docker.env(key),
         }
     }
     fn stats(&self, key: &str) -> String {
         match pid_from_key(key) {
-            Some(pid) => host_stats_text(pid),
+            Some(pid) => host_stats_text(&self.cache.tree_pids(pid)),
             None => self.docker.stats(key),
         }
     }
     fn exec(&self, key: &str, sh: &str) -> String {
         match pid_from_key(key) {
-            Some(pid) => host_exec(pid, sh),
+            Some(pid) => host_exec(sh, &self.cache.environ_text(pid)),
             None => self.docker.exec(key, sh),
         }
     }
@@ -429,7 +503,7 @@ impl ContainerProbe for SystemProbe {
     }
     fn top_proc_cmd(&self, key: &str) -> String {
         match pid_from_key(key) {
-            Some(pid) => host_top_proc_cmd(pid),
+            Some(pid) => host_top_proc_cmd(&self.cache.tree_pids(pid)),
             None => self.docker.top_proc_cmd(key),
         }
     }
@@ -518,6 +592,110 @@ fn run_local(args: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `HostProbeCache` memoizes per-pid, keyed by pid — the most likely way
+    /// a hand-rolled cache like this goes wrong is serving pid A's data for
+    /// pid B. Spawns two real distinct processes with genuinely different
+    /// environments and confirms each pid's cached environ matches only its
+    /// own process, never the other's.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn host_probe_cache_keys_environ_by_pid_not_a_single_shared_slot() {
+        let mut child_a = Command::new("/bin/sleep")
+            .arg("5")
+            .env_clear()
+            .env("MARKER", "PROCESS_A")
+            .spawn()
+            .expect("failed to spawn child A");
+        let mut child_b = Command::new("/bin/sleep")
+            .arg("5")
+            .env_clear()
+            .env("MARKER", "PROCESS_B")
+            .spawn()
+            .expect("failed to spawn child B");
+        let pid_a = child_a.id() as i32;
+        let pid_b = child_b.id() as i32;
+
+        let cache = HostProbeCache::new();
+        // Interleaved on purpose: A, then B, then A again — a single-slot
+        // cache bug would have B's read clobber A's, so re-reading A must
+        // still show A's marker, not B's.
+        let a1 = cache.environ_text(pid_a);
+        let b1 = cache.environ_text(pid_b);
+        let a2 = cache.environ_text(pid_a);
+
+        child_a.kill().ok();
+        child_b.kill().ok();
+        child_a.wait().ok();
+        child_b.wait().ok();
+
+        assert!(a1.contains("MARKER=PROCESS_A"));
+        assert!(b1.contains("MARKER=PROCESS_B"));
+        assert!(
+            a2.contains("MARKER=PROCESS_A"),
+            "re-reading pid_a after caching pid_b must still return pid_a's \
+             own environ, not pid_b's; got: {a2:?}"
+        );
+    }
+
+    /// Regression test for a PATH-injection bug: `host_exec` used to forward
+    /// the *target process's own* `PATH` (read from `/proc/<pid>/environ`)
+    /// onto the `sh` it spawned via `Command::new("sh")` — a bare-name
+    /// lookup that resolves using whatever `PATH` ends up on the builder, so
+    /// an attacker-controlled process (one that merely satisfies
+    /// `parse_direct_vllm`'s detection gate, which is itself controlled by
+    /// that process's own self-reported environment) could redirect the
+    /// root-run monitor into executing a planted `sh` — arbitrary code
+    /// execution, not just a hijacked sub-command.
+    ///
+    /// Spawns a real child process whose environment sets `PATH` to a
+    /// directory containing a fake `sh` that would betray itself if
+    /// resolved and executed in its place, then runs `host_exec` against
+    /// that real pid. The fake binary must never run (note: it must fake
+    /// `sh` itself, not merely a command the script body invokes — an
+    /// earlier draft of this test faked `find` instead, and passed
+    /// vacuously against the pre-fix code too, because with no fake `sh`
+    /// present, `Command::new("sh")`'s bare-name lookup failed outright
+    /// before ever reaching the script body).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn host_exec_never_resolves_the_shell_via_the_targets_own_path() {
+        let tmp = std::env::temp_dir().join(format!(
+            "host_exec_path_injection_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let fake_sh = tmp.join("sh");
+        std::fs::write(&fake_sh, "#!/bin/sh\necho HIJACKED-BY-TARGET-PATH\n").unwrap();
+        let mut perms = std::fs::metadata(&fake_sh).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&fake_sh, perms).unwrap();
+
+        // A real process whose *own* environ carries the malicious PATH —
+        // exactly what a locally-planted attacker process would look like
+        // from the root-run monitor's point of view.
+        let mut child = Command::new("/bin/sleep")
+            .arg("5")
+            .env_clear()
+            .env("PATH", tmp.to_str().unwrap())
+            .spawn()
+            .expect("failed to spawn test child");
+        let pid = child.id() as i32;
+        let env_text = host_environ_text(pid);
+
+        let output = host_exec("echo real-sh-ran", &env_text);
+
+        child.kill().ok();
+        child.wait().ok();
+        std::fs::remove_dir_all(&tmp).ok();
+
+        assert!(
+            !output.contains("HIJACKED-BY-TARGET-PATH"),
+            "host_exec must never resolve the `sh` interpreter itself via \
+             the target process's own PATH; got: {output:?}"
+        );
+    }
+
     #[test]
     fn contains_python_scans_all_rows_not_just_top() {
         // A loading server: some other process tops CPU, python idles lower down.
