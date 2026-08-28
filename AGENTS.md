@@ -4607,3 +4607,90 @@ final whole-branch review found 1 Critical + 3 Important findings, all
 fixed in the one allowed fix wave and independently re-verified (including
 a mutation test); no manual verification against real TT hardware
 performed.*
+
+---
+
+## Phase 29 — Defrag: real per-channel GDDR data + an idle-EVICT bug it surfaced (August 28, 2026, v0.10.1)
+
+**Origin**: after Phase 28 landed, tt-smi ≥ 6.3.0 was actually installed and
+verified live on this box's 4× p300c (all four emit a real `gddr_telemetry`
+block matching the shape Phase 28 was built against). User: *"Did anything
+change with the DEFRAG view these signals can be used for? (And if not,
+being a memory focused module... what can we do?)"* — Phase 28's own final
+review had flagged Defrag as a sixth, untouched consumer of this data
+(deferred as out of scope). Brainstormed as a **bounded** task (existing
+file, existing flow) and implemented directly — no SDD ledger, no spec file.
+
+### What changed
+
+`src/animation/defrag.rs`'s `Channel` struct now sources `trained`/
+`enabled`/`temp_ema`/error counts from real per-channel `gddr_telemetry`
+when present, falling back to the exact pre-existing packed-pair-resolution
+decode (`DDR_STATUS` nibble, `GDDR_x_y_TEMP`, `gddr_corr_errs`) otherwise —
+same `Option`-presence-gated pattern as every other Phase 25/28 consumer,
+no version-string check. Two genuinely new visual states, since real data
+can express things the packed registers never could:
+
+- **`bist_fail`**: a channel that fails BIST renders as a static, permanent
+  dim-red "bad sector" row — distinct from both the harvested hatch and a
+  transient error flash. A harvested channel is never also flagged
+  `bist_fail` (there's nothing to BIST on a channel that doesn't exist).
+- **`uncorr_flash`**: uncorrectable errors (no packed-register equivalent at
+  all before this) flash brighter and longer than a correctable flash,
+  mirroring the Insights sidebar ECC row's red/amber severity convention
+  from Phase 28.
+
+Legend and module doc comment updated to describe both. Regression tests
+(a `FakeBackend` test fixture, since none of this file's existing tests
+drove `update()` through a real backend before) cover: real data overriding
+the packed pair decode at true per-channel resolution (not just per-pair),
+real temp overriding the packed pair-temp, the bad-sector state rendering
+distinctly and never co-occurring with harvested, uncorrectable flash
+severity/duration, and the fallback path being byte-identical when
+`gddr_telemetry` is absent.
+
+### The idle-EVICT bug this surfaced
+
+User, after installing and testing: *"it looks like we're evicting more
+often than before, even on idle."* Investigated per
+`superpowers:systematic-debugging` rather than guessing: the diff for the
+change above touches zero EVICT-relevant state (`power_ema`, `idle_power`,
+`saw_load`, `running_since`, `evict_eligible()` itself all untouched — only
+per-channel `trained`/`enabled`/`temp`/error *sourcing* changed), and
+`DefragVis` persists across frames/mode-switches within one run (only
+resets on process restart). Rather than trust that analysis blind, built a
+binary from the commit immediately before the Defrag change (`git worktree
+add --detach` at the parent commit, built in isolation, installed alongside
+the current binary under a different name) and had the user A/B-test both
+on the same idle hardware — **both evicted repeatedly**, isolating the bug
+as pre-existing and entirely unrelated to the `gddr_telemetry` work.
+
+Root cause: `idle_power` (the EVICT heuristic's baseline) is captured at
+three different phase-transition sites, and two of them use the smoothed
+`power_ema` — but the Idle/Init → Running transition captured it from a
+single raw, unsmoothed `power` sample instead. Since Blackhole's `aiclk` is
+almost always ≥ 200, that transition fires on nearly every tick where power
+clears the idle floor, so any one noisy low sample could set an
+artificially-low baseline; ordinary idle jitter afterward could then both
+arm `saw_load` (exceed `idle_power × 1.5`) and satisfy the evict condition
+(fall back within `idle_power × 1.20`) — evicting a device that never
+loaded anything. Fixed by using `power_ema` at that site too, matching the
+other two. Regression test constructs a device with a stable ~15 W
+`power_ema` and a single noisy 9 W raw sample at the transition tick;
+confirmed red against the old raw-sample capture (`idle_power` landed at
+9), green after the fix (`idle_power` tracks the ~14.5 W smoothed value).
+
+> ⚠️ **Not hardware-verified against a real BIST-fail or harvested channel**
+> — this box's 4× p300c all report healthy channels, so the two new visual
+> states were verified only via the `FakeBackend` unit tests, not observed
+> live. The `gddr_telemetry`-sourced trained/enabled/temp path *is*
+> hardware-verified (confirmed against the same live tt-smi 6.3.0 dump used
+> to verify Phase 28), and the idle-EVICT fix is hardware-verified via the
+> A/B comparison above.
+
+---
+
+*Phase 29 status: **COMPLETE** — shipped as v0.10.1. Bounded task (no SDD
+ledger); real-data sourcing hardware-verified live, bad-sector/uncorrectable
+states unit-tested only (no failing hardware to hand), idle-EVICT fix
+hardware-verified via A/B comparison.*

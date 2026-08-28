@@ -14,6 +14,18 @@ git tag                        # released versions
 
 ## Recent releases
 
+### 0.10.1
+- **Defrag view** now also drives per-channel training/enabled/temperature and
+  errors from real `gddr_telemetry` when present, falling back to the
+  existing packed pair-resolution registers otherwise. New states: a static
+  "bad sector" row for a BIST-failed channel, and a brighter/longer flash for
+  uncorrectable vs. correctable errors.
+- **Fix**: a pre-existing EVICT false-positive that could trigger on idle
+  hardware — the Idle/Init → Running transition captured its power baseline
+  from a single raw sample instead of the smoothed EMA used elsewhere.
+  Confirmed pre-existing (unrelated to the Defrag change above) via an A/B
+  test against the prior commit.
+
 ### 0.10.0
 - **Per-GDDR-channel telemetry** (tt-smi ≥ 6.3.0's `gddr_telemetry`: training/
   BIST pass, harvested/enabled, dual-location temperature, directional
