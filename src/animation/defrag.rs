@@ -523,8 +523,19 @@ impl DefragVis {
                     // Idle/Init → Running (Blackhole: aiclk is always ≥200, so it
                     // never dwells in Idle). Arriving via Dma instead, idle_power
                     // was already captured at Dma-start, so leave it.
+                    //
+                    // Use the smoothed `power_ema`, not the raw instantaneous
+                    // `power` sample, matching the other two capture sites
+                    // (Dma-entry, Idle-entry) below. A single noisy low
+                    // sample here previously set an artificially-low
+                    // baseline — since this transition fires on nearly every
+                    // tick on Blackhole (aiclk almost always ≥200), ordinary
+                    // idle jitter could then both arm `saw_load` (exceed
+                    // idle_power×1.5) and satisfy the evict condition (fall
+                    // back within idle_power×1.20), evicting a device that
+                    // never actually loaded anything.
                     if matches!(p, Phase::Idle | Phase::Init) {
-                        ds.idle_power = power;
+                        ds.idle_power = ds.power_ema;
                     }
                     for ch in ds.channels.iter_mut() {
                         if ch.enabled && ch.trained {
@@ -2002,6 +2013,50 @@ mod tests {
         assert_eq!(
             ch.err_flash, 0,
             "a purely uncorrectable bump must not also trigger the correctable flash"
+        );
+    }
+
+    // ── Pre-existing EVICT false-positive (found while testing the change
+    // above, not caused by it — see the FakeBackend fixture rather than a
+    // gddr_telemetry-specific one, since this bug lives entirely in the
+    // Idle/Init → Running transition's idle_power capture) ────────────────
+
+    #[test]
+    fn idle_power_baseline_uses_smoothed_ema_not_a_single_raw_sample() {
+        // Regression test for a false-EVICT bug: on the Idle/Init -> Running
+        // transition, `idle_power` was captured from one raw, unsmoothed
+        // power sample instead of the already-smoothed `power_ema` used by
+        // the other two capture sites (Dma-entry, Idle-entry). Since
+        // Blackhole's aiclk is (almost) always >=200, this transition fires
+        // on nearly every tick where power exceeds the idle floor — so any
+        // single noisy low sample sets an artificially-low baseline, and
+        // ordinary idle jitter afterward can both arm `saw_load` (exceed
+        // idle_power*1.5) and satisfy the evict condition (fall back within
+        // idle_power*1.20), evicting a device that never actually loaded.
+        //
+        // This device has a stable ~15W power_ema (settled over many prior
+        // ticks) but this tick's single raw reading is a noisy 9W dip.
+        let backend = FakeBackend::one_device(9.0, SmbusTelemetry::new());
+
+        let mut dv = DefragVis::new(120, 40);
+        let mut ds = DeviceState::new(0);
+        ds.phase = Phase::Idle;
+        ds.power_ema = 15.0;
+        dv.devices.insert(0, ds);
+
+        dv.update(&backend);
+
+        let ds = &dv.devices[&0];
+        assert_eq!(
+            ds.phase,
+            Phase::Running,
+            "aiclk>=200 and power(9W) > POWER_IDLE_W(8W) must enter Running"
+        );
+        assert!(
+            ds.idle_power > 12.0,
+            "idle_power={} must track the smoothed ~14.5W baseline (power_ema \
+             after blending in the 9W sample), not the raw single 9W reading",
+            ds.idle_power
         );
     }
 
