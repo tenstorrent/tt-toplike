@@ -148,6 +148,14 @@ fn process_tree_pids(root: i32) -> Vec<i32> {
     out
 }
 
+/// Non-Linux: no `/proc` children interface, so the tree is just the root.
+/// The host path is Linux-only in practice (`parse_direct_vllm` is fed from
+/// `/proc`), but this keeps `probe.rs` compiling on the macOS/Windows CI jobs.
+#[cfg(not(target_os = "linux"))]
+fn process_tree_pids(root: i32) -> Vec<i32> {
+    vec![root]
+}
+
 // ── Container access abstraction ────────────────────────────────────────────
 //
 // The monitor's tick loop needs raw text from a running container (env dump,
@@ -265,7 +273,9 @@ impl ContainerProbe for DockerProbe {
 /// container name). `SystemProbe` uses this to decide, per call, which
 /// backing implementation handles a given identity key.
 fn pid_from_key(key: &str) -> Option<i32> {
-    key.strip_prefix(super::detect::HOST_KEY_PREFIX)?.parse().ok()
+    key.strip_prefix(super::detect::HOST_KEY_PREFIX)?
+        .parse()
+        .ok()
 }
 
 /// Read `/proc/<pid>/environ` (NUL-separated `KEY=VALUE` records) and
@@ -284,15 +294,33 @@ fn host_environ_text(pid: i32) -> String {
     }
 }
 
+/// Build the `"{cpu}%|{rss_bytes}B / 0B"` text `host_stats_text` returns —
+/// factored out so tests can pin the exact format contract without spawning
+/// a real `ps`.
+fn format_host_stats(cpu_pct: f32, rss_bytes: u64) -> String {
+    format!("{cpu_pct:.2}%|{rss_bytes}B / 0B")
+}
+
 /// `"{cpu}%|{rss_bytes}B / 0B"` — matches [`parse_docker_stats`]'s expected
 /// shape (it only reads the "used" side of the `/`, so the "0B" denominator
 /// is a placeholder, not a real memory limit; documented so it isn't
 /// mistaken for one). CPU% and RSS are summed over `process_tree_pids(pid)`
 /// via a single tree-scoped `ps` call — a bare host process has no cgroup to
 /// aggregate by the way `docker stats` does for a container.
+///
+/// Known limitation: `ps`'s `%CPU` column is a lifetime average
+/// (cputime/elapsed since the process started), not an instantaneous
+/// snapshot like `docker stats` reports. A host-probed service that
+/// compiled kernels for 90 minutes and then went idle may keep reporting a
+/// stale-high CPU% long after an equivalent container's `docker stats`
+/// would show it drop.
 fn host_stats_text(pid: i32) -> String {
     let pids = process_tree_pids(pid);
-    let pid_list = pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
+    let pid_list = pids
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     let out = run_local(&["ps", "-o", "pcpu=,rss=", "-p", &pid_list]);
     let (mut cpu_sum, mut rss_kib_sum) = (0.0f32, 0u64);
     for line in out.lines() {
@@ -303,7 +331,7 @@ fn host_stats_text(pid: i32) -> String {
         rss_kib_sum = rss_kib_sum.saturating_add(rss);
     }
     let rss_bytes = rss_kib_sum.saturating_mul(1024);
-    format!("{cpu_sum:.2}%|{rss_bytes}B / 0B")
+    format_host_stats(cpu_sum, rss_bytes)
 }
 
 /// The tree-scoped `ps` command a host-keyed [`ContainerProbe::top_proc_cmd`]
@@ -312,23 +340,44 @@ fn host_stats_text(pid: i32) -> String {
 /// `process_tree_pids(pid)` instead of relying on a container PID namespace.
 fn host_top_proc_cmd(pid: i32) -> String {
     let pids = process_tree_pids(pid);
-    let pid_list = pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
+    let pid_list = pids
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     format!("ps -o pcpu,rss,comm --sort=-pcpu -p {pid_list}")
 }
 
-/// Run `sh -c <sh>` locally with the target pid's own environment variables
-/// (read via [`host_environ_text`]) injected explicitly — a docker-exec'd
-/// shell inherits the container's env for free; a locally-spawned one does
-/// not, and the `KERNEL_FIND_CMD`/`LOADED_FIND_CMD` shell text (in
-/// `monitor.rs`) depends on `$TT_METAL_HOME`/`$CACHE_ROOT` being set.
+/// Run `sh -c <sh>` locally with **only** the target pid's own environment
+/// variables (read via [`host_environ_text`]) — a docker-exec'd shell
+/// inherits just the container's env for free; a locally-spawned one
+/// inherits tt-toplike's own process environment instead, and `cmd.env(k,
+/// v)` alone only overrides specific keys, it doesn't clear the rest first.
+/// Without `env_clear()`, a variable already set on the monitor's own
+/// process (e.g. an operator's `TT_METAL_HOME` from the dev shell they
+/// launched tt-toplike from) would leak into the probed child for any key
+/// the *target's* environ doesn't itself set — silently pointing
+/// `KERNEL_FIND_CMD`/`LOADED_FIND_CMD` (both gated on
+/// `TT_METAL_HOME`/`CACHE_ROOT`) at the wrong directory. `PATH` gets a
+/// conservative fallback when the target's environ didn't carry one, purely
+/// so `sh` itself can still be resolved via `execvp` — full isolation with no
+/// `PATH` at all risks failing to spawn `sh` in the first place.
 fn host_exec(pid: i32, sh: &str) -> String {
     let env_text = host_environ_text(pid);
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(sh);
+    cmd.env_clear();
+    let mut saw_path = false;
     for line in env_text.lines() {
         if let Some((k, v)) = line.split_once('=') {
+            if k == "PATH" {
+                saw_path = true;
+            }
             cmd.env(k, v);
         }
+    }
+    if !saw_path {
+        cmd.env("PATH", "/usr/bin:/bin:/usr/local/bin");
     }
     run_bounded(cmd)
 }
@@ -553,20 +602,30 @@ mod tests {
     }
     #[test]
     fn system_probe_dispatches_docker_keys_to_the_inner_docker_probe() {
-        // A docker-shaped key (no "host-vllm-" prefix) must behave exactly like
-        // the wrapped DockerProbe — we can't run a real docker daemon in tests,
-        // so this asserts the *dispatch*, not DockerProbe's own I/O (already
-        // covered by DockerProbe's existing tests).
+        // Exercise the real dispatch in SystemProbe::top_proc_cmd: DockerProbe
+        // doesn't override ContainerProbe::top_proc_cmd, so it inherits the
+        // pure, no-subprocess default (TOP_PROC_CMD) — meaning we can assert
+        // on both the docker and host arms without touching a real docker
+        // daemon or /proc.
+        let p = SystemProbe::new(DockerProbe);
+        assert_eq!(p.top_proc_cmd("tt-inference-server-abc"), TOP_PROC_CMD); // docker arm
+        assert!(p
+            .top_proc_cmd("host-vllm-1")
+            .starts_with("ps -o pcpu,rss,comm --sort=-pcpu -p ")); // host arm
+        assert_ne!(p.top_proc_cmd("host-vllm-1"), TOP_PROC_CMD);
+
+        // pid_from_key itself, still worth pinning directly.
         assert!(pid_from_key("tt-inference-server-abc123").is_none());
         assert_eq!(pid_from_key("host-vllm-4242"), Some(4242));
         assert!(pid_from_key("host-vllm-not-a-pid").is_none());
     }
     #[test]
     fn host_stats_text_matches_parse_docker_stats_shape() {
-        // Doesn't spawn a real ps — exercises the formatting contract directly:
-        // whatever host_stats_text produces must round-trip through
-        // parse_docker_stats the same way a real docker stats line does.
-        let formatted = format!("{:.2}%|{}B / 0B", 12.5_f32, 1024_u64 * 1024);
+        // Calls the actual formatting helper host_stats_text uses internally
+        // (not a re-typed literal), so a change to its format string would be
+        // caught here, then round-trips the result through parse_docker_stats
+        // the same way a real docker stats line is consumed.
+        let formatted = format_host_stats(12.5, 1024 * 1024);
         let (cpu, rss) = parse_docker_stats(&formatted).expect("must parse");
         assert!((cpu - 12.5).abs() < 0.01);
         assert_eq!(rss, 1024 * 1024);
