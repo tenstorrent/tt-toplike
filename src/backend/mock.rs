@@ -314,6 +314,38 @@ impl MockBackend {
             Some(0_u32)
         };
 
+        // Per-channel GDDR telemetry (tt-smi 6.3.0+ shape). Reuses t_base/t_var
+        // so temps stay consistent with the legacy gddr_temps fabrication
+        // above; QuadGalaxy additionally harvests channel 3 and fails BIST on
+        // channel 5 (on the same device that harvests a Tensix column) so
+        // both new visual states are reachable in a demo/test run.
+        let gddr_channels: Vec<crate::models::telemetry::GddrChannel> = (0..8)
+            .map(|ch| {
+                let temp = t_base + t_var + ch as f32 * 0.5;
+                let is_harvested_channel = is_harvested && ch == 3;
+                let is_bist_failed_channel = is_harvested && ch == 5;
+                crate::models::telemetry::GddrChannel {
+                    channel: ch,
+                    harvested: is_harvested_channel,
+                    enabled: !is_harvested_channel,
+                    training_pass: !is_harvested_channel,
+                    bist_pass: !is_bist_failed_channel,
+                    temp_top: Some(temp),
+                    temp_bottom: Some(temp + 2.0),
+                    corr_rd: 0,
+                    corr_wr: 0,
+                    uncorr_rd: 0,
+                    uncorr_wr: 0,
+                }
+            })
+            .collect();
+        let gddr_telemetry = Some(crate::models::telemetry::GddrTelemetry {
+            speed: Some("16G".to_string()),
+            max_temp: Some(t_base + t_var + 6.0),
+            enabled_mask: Some(0xff),
+            channels: gddr_channels,
+        });
+
         SmbusTelemetry {
             board_id: Some(format!("BOARD_{:04}", device_idx)),
             enum_version: Some("1.0".to_string()),
@@ -415,7 +447,7 @@ impl MockBackend {
             enabled_gddr: None,
             enabled_l2cpu: None,
             enabled_tensix_col,
-            gddr_telemetry: None,
+            gddr_telemetry,
         }
     }
 
@@ -679,5 +711,24 @@ mod tests {
             any_harvested,
             "QuadGalaxy mock should have some harvested columns"
         );
+    }
+
+    #[test]
+    fn quad_galaxy_scenario_produces_harvested_and_bist_failed_gddr_channels() {
+        let mut b = MockBackend::with_scenario(MockScenario::QuadGalaxy);
+        b.init().unwrap();
+
+        let any_gddr_harvested = b.devices().iter().any(|d| {
+            b.smbus_telemetry(d.index)
+                .and_then(|s| s.gddr_telemetry.as_ref())
+                .is_some_and(|g| g.channels.iter().any(|c| c.harvested))
+        });
+        let any_bist_failed = b.devices().iter().any(|d| {
+            b.smbus_telemetry(d.index)
+                .and_then(|s| s.gddr_telemetry.as_ref())
+                .is_some_and(|g| g.channels.iter().any(|c| !c.bist_pass))
+        });
+        assert!(any_gddr_harvested, "QuadGalaxy mock should harvest a GDDR channel");
+        assert!(any_bist_failed, "QuadGalaxy mock should fail BIST on a GDDR channel");
     }
 }
