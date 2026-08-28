@@ -156,6 +156,11 @@ pub fn apply_ema(
         &incoming.enabled_tensix_col,
         &mut existing.enabled_tensix_col,
     );
+    // Per-channel GDDR training/BIST/harvest/temp/ECC rollup (tt-smi ≥ 6.3.0).
+    // Same "copy, don't smooth" reasoning as the rest of this block: channel
+    // temps are point-in-time and the ECC counters inside it are monotonic,
+    // so blending it toward a prior snapshot would be meaningless.
+    copy_opt(&incoming.gddr_telemetry, &mut existing.gddr_telemetry);
     for (src, dst) in incoming
         .gddr_corr_errs
         .iter()
@@ -500,5 +505,293 @@ mod tests {
         apply_ema(&mut ema, 0, &incoming, &mut existing);
         // Hex string — must be copied verbatim, not mangled
         assert_eq!(existing.ddr_status.as_deref(), Some("0x55555555"));
+    }
+
+    /// Regression: `gddr_telemetry` must be copied through exactly as it
+    /// arrives on every `apply_ema` call — never averaged/smoothed. Channel
+    /// temps are point-in-time and ECC counters are monotonic; neither is
+    /// meaningful blended toward a prior snapshot, matching how every other
+    /// GDDR field in this module is already handled ("copy, don't smooth").
+    #[test]
+    fn blend_copies_gddr_telemetry_through_unsmoothed() {
+        use crate::models::telemetry::{GddrChannel, GddrTelemetry};
+
+        let ch_prev = GddrChannel {
+            channel: 0,
+            harvested: false,
+            enabled: true,
+            training_pass: true,
+            bist_pass: true,
+            temp_top: Some(40.0),
+            temp_bottom: Some(42.0),
+            corr_rd: 0,
+            corr_wr: 0,
+            uncorr_rd: 0,
+            uncorr_wr: 0,
+        };
+        let mut existing = SmbusTelemetry {
+            gddr_telemetry: Some(GddrTelemetry {
+                speed: Some("16G".into()),
+                max_temp: Some(42.0),
+                enabled_mask: Some(0xff),
+                channels: vec![ch_prev],
+            }),
+            ..SmbusTelemetry::default()
+        };
+
+        let ch_now = GddrChannel {
+            temp_top: Some(60.0),
+            temp_bottom: Some(62.0),
+            corr_rd: 5,
+            ..ch_prev
+        };
+        let incoming = SmbusTelemetry {
+            gddr_telemetry: Some(GddrTelemetry {
+                speed: Some("16G".into()),
+                max_temp: Some(62.0),
+                enabled_mask: Some(0xff),
+                channels: vec![ch_now],
+            }),
+            ..SmbusTelemetry::default()
+        };
+
+        let mut ema: SmbusEmaState = HashMap::new();
+        apply_ema(&mut ema, 0, &incoming, &mut existing);
+
+        // The whole tick's incoming value wins verbatim — not an average with
+        // `existing`'s prior 40/42 readings. Temps are point-in-time, ECC
+        // counters are monotonic; neither is meaningful smoothed.
+        assert_eq!(existing.gddr_telemetry, incoming.gddr_telemetry);
+        assert_eq!(
+            existing.gddr_telemetry.unwrap().channels[0].temp_top,
+            Some(60.0),
+            "must be this tick's reading, not an EMA toward the previous 40.0"
+        );
+    }
+
+    /// Regression guard for the exact bug class Phase 25/26 already hit
+    /// twice: a field added to `SmbusTelemetry` that `apply_ema()` forgets to
+    /// touch. Constructing this literal with NO `..SmbusTelemetry::default()`
+    /// forces every field to be named — if a future field is added to
+    /// `SmbusTelemetry` but not handled here, THIS TEST STOPS COMPILING until
+    /// it's added, turning a silent runtime bug into a compile error.
+    ///
+    /// Every field below is then asserted individually (rather than via a
+    /// whole-struct `assert_eq!`, since `SmbusTelemetry` doesn't derive
+    /// `PartialEq` and adding that derive is outside this task's scope) —
+    /// naming each field also gives a precise failure message pointing at
+    /// exactly which field `apply_ema()` dropped.
+    #[test]
+    fn blend_touches_every_smbus_telemetry_field() {
+        use crate::models::telemetry::GddrTelemetry;
+
+        let incoming = SmbusTelemetry {
+            board_id: Some("b".into()),
+            enum_version: Some("1".into()),
+            device_id: Some("d".into()),
+            ddr_speed: Some("16G".into()),
+            ddr_status: Some("0x2".into()),
+            arc0_health: Some("healthy".into()),
+            arc1_health: Some("healthy".into()),
+            arc2_health: Some("healthy".into()),
+            arc3_health: Some("healthy".into()),
+            arc0_fw_version: Some("1.0".into()),
+            arc1_fw_version: Some("1.0".into()),
+            arc2_fw_version: Some("1.0".into()),
+            arc3_fw_version: Some("1.0".into()),
+            eth_fw_version: Some("1.0".into()),
+            m3_bl_fw_version: Some("1.0".into()),
+            m3_app_fw_version: Some("1.0".into()),
+            spibootrom_fw_version: Some("1.0".into()),
+            tt_flash_version: Some("1.0".into()),
+            aiclk: Some("1000MHz".into()),
+            axiclk: Some("1000MHz".into()),
+            arcclk: Some("1000MHz".into()),
+            asic_temperature: Some("50C".into()),
+            vreg_temperature: Some("50C".into()),
+            board_temperature: Some("40C".into()),
+            vcore: Some("0.8V".into()),
+            tdp: Some("100W".into()),
+            tdc: Some("100A".into()),
+            throttler: Some("0".into()),
+            vdd_limits: Some("0.7-0.9".into()),
+            thm_limits: Some("90".into()),
+            fan_speed: Some("1000rpm".into()),
+            faults: Some("0".into()),
+            pcie_status: Some("Gen4 x16".into()),
+            eth_status0: Some("0".into()),
+            eth_status1: Some("0".into()),
+            input_power: Some("100W".into()),
+            board_power_limit: Some("300W".into()),
+            therm_trip_count: Some("zero".into()),
+            boot_date: Some("2026-01-01".into()),
+            rt_seconds: Some("100s".into()),
+            wh_fw_date: Some("2026-01-01".into()),
+            asic_tmon0: Some("50".into()),
+            asic_tmon1: Some("50".into()),
+            mvddq_power: Some("5W".into()),
+            gddr_train_temp0: Some("40".into()),
+            gddr_train_temp1: Some("40".into()),
+            aux_status: Some("0".into()),
+            eth_debug_status0: Some("0".into()),
+            eth_debug_status1: Some("0".into()),
+            gddr_temps: [None, None, None, None],
+            max_gddr_temp: Some(50.0),
+            gddr_corr_errs: [None, None, None, None],
+            gddr_uncorr_errs: Some(0),
+            harvesting_state: Some(0),
+            eth_live_status: Some(0),
+            enabled_eth: Some(0),
+            enabled_gddr: Some(0xff),
+            enabled_l2cpu: Some(0),
+            enabled_tensix_col: Some(0x3fff),
+            gddr_telemetry: Some(GddrTelemetry::default()),
+        };
+        let mut existing = SmbusTelemetry::default();
+        let mut ema: SmbusEmaState = HashMap::new();
+        apply_ema(&mut ema, 0, &incoming, &mut existing);
+
+        // Every field named above must have made it through apply_ema
+        // unchanged (all values here are non-numeric strings or fresh
+        // typed values, so no EMA-numeric reformatting applies — see the
+        // other tests in this module for that behaviour).
+        assert_eq!(existing.board_id, incoming.board_id, "board_id");
+        assert_eq!(existing.enum_version, incoming.enum_version, "enum_version");
+        assert_eq!(existing.device_id, incoming.device_id, "device_id");
+        assert_eq!(existing.ddr_speed, incoming.ddr_speed, "ddr_speed");
+        assert_eq!(existing.ddr_status, incoming.ddr_status, "ddr_status");
+        assert_eq!(existing.arc0_health, incoming.arc0_health, "arc0_health");
+        assert_eq!(existing.arc1_health, incoming.arc1_health, "arc1_health");
+        assert_eq!(existing.arc2_health, incoming.arc2_health, "arc2_health");
+        assert_eq!(existing.arc3_health, incoming.arc3_health, "arc3_health");
+        assert_eq!(
+            existing.arc0_fw_version, incoming.arc0_fw_version,
+            "arc0_fw_version"
+        );
+        assert_eq!(
+            existing.arc1_fw_version, incoming.arc1_fw_version,
+            "arc1_fw_version"
+        );
+        assert_eq!(
+            existing.arc2_fw_version, incoming.arc2_fw_version,
+            "arc2_fw_version"
+        );
+        assert_eq!(
+            existing.arc3_fw_version, incoming.arc3_fw_version,
+            "arc3_fw_version"
+        );
+        assert_eq!(
+            existing.eth_fw_version, incoming.eth_fw_version,
+            "eth_fw_version"
+        );
+        assert_eq!(
+            existing.m3_bl_fw_version, incoming.m3_bl_fw_version,
+            "m3_bl_fw_version"
+        );
+        assert_eq!(
+            existing.m3_app_fw_version, incoming.m3_app_fw_version,
+            "m3_app_fw_version"
+        );
+        assert_eq!(
+            existing.spibootrom_fw_version, incoming.spibootrom_fw_version,
+            "spibootrom_fw_version"
+        );
+        assert_eq!(
+            existing.tt_flash_version, incoming.tt_flash_version,
+            "tt_flash_version"
+        );
+        assert_eq!(existing.aiclk, incoming.aiclk, "aiclk");
+        assert_eq!(existing.axiclk, incoming.axiclk, "axiclk");
+        assert_eq!(existing.arcclk, incoming.arcclk, "arcclk");
+        assert_eq!(
+            existing.asic_temperature, incoming.asic_temperature,
+            "asic_temperature"
+        );
+        assert_eq!(
+            existing.vreg_temperature, incoming.vreg_temperature,
+            "vreg_temperature"
+        );
+        assert_eq!(
+            existing.board_temperature, incoming.board_temperature,
+            "board_temperature"
+        );
+        assert_eq!(existing.vcore, incoming.vcore, "vcore");
+        assert_eq!(existing.tdp, incoming.tdp, "tdp");
+        assert_eq!(existing.tdc, incoming.tdc, "tdc");
+        assert_eq!(existing.throttler, incoming.throttler, "throttler");
+        assert_eq!(existing.vdd_limits, incoming.vdd_limits, "vdd_limits");
+        assert_eq!(existing.thm_limits, incoming.thm_limits, "thm_limits");
+        assert_eq!(existing.fan_speed, incoming.fan_speed, "fan_speed");
+        assert_eq!(existing.faults, incoming.faults, "faults");
+        assert_eq!(existing.pcie_status, incoming.pcie_status, "pcie_status");
+        assert_eq!(existing.eth_status0, incoming.eth_status0, "eth_status0");
+        assert_eq!(existing.eth_status1, incoming.eth_status1, "eth_status1");
+        assert_eq!(existing.input_power, incoming.input_power, "input_power");
+        assert_eq!(
+            existing.board_power_limit, incoming.board_power_limit,
+            "board_power_limit"
+        );
+        assert_eq!(
+            existing.therm_trip_count, incoming.therm_trip_count,
+            "therm_trip_count"
+        );
+        assert_eq!(existing.boot_date, incoming.boot_date, "boot_date");
+        assert_eq!(existing.rt_seconds, incoming.rt_seconds, "rt_seconds");
+        assert_eq!(existing.wh_fw_date, incoming.wh_fw_date, "wh_fw_date");
+        assert_eq!(existing.asic_tmon0, incoming.asic_tmon0, "asic_tmon0");
+        assert_eq!(existing.asic_tmon1, incoming.asic_tmon1, "asic_tmon1");
+        assert_eq!(existing.mvddq_power, incoming.mvddq_power, "mvddq_power");
+        assert_eq!(
+            existing.gddr_train_temp0, incoming.gddr_train_temp0,
+            "gddr_train_temp0"
+        );
+        assert_eq!(
+            existing.gddr_train_temp1, incoming.gddr_train_temp1,
+            "gddr_train_temp1"
+        );
+        assert_eq!(existing.aux_status, incoming.aux_status, "aux_status");
+        assert_eq!(
+            existing.eth_debug_status0, incoming.eth_debug_status0,
+            "eth_debug_status0"
+        );
+        assert_eq!(
+            existing.eth_debug_status1, incoming.eth_debug_status1,
+            "eth_debug_status1"
+        );
+        assert_eq!(existing.gddr_temps, incoming.gddr_temps, "gddr_temps");
+        assert_eq!(
+            existing.max_gddr_temp, incoming.max_gddr_temp,
+            "max_gddr_temp"
+        );
+        assert_eq!(
+            existing.gddr_corr_errs, incoming.gddr_corr_errs,
+            "gddr_corr_errs"
+        );
+        assert_eq!(
+            existing.gddr_uncorr_errs, incoming.gddr_uncorr_errs,
+            "gddr_uncorr_errs"
+        );
+        assert_eq!(
+            existing.harvesting_state, incoming.harvesting_state,
+            "harvesting_state"
+        );
+        assert_eq!(
+            existing.eth_live_status, incoming.eth_live_status,
+            "eth_live_status"
+        );
+        assert_eq!(existing.enabled_eth, incoming.enabled_eth, "enabled_eth");
+        assert_eq!(existing.enabled_gddr, incoming.enabled_gddr, "enabled_gddr");
+        assert_eq!(
+            existing.enabled_l2cpu, incoming.enabled_l2cpu,
+            "enabled_l2cpu"
+        );
+        assert_eq!(
+            existing.enabled_tensix_col, incoming.enabled_tensix_col,
+            "enabled_tensix_col"
+        );
+        assert_eq!(
+            existing.gddr_telemetry, incoming.gddr_telemetry,
+            "gddr_telemetry"
+        );
     }
 }
