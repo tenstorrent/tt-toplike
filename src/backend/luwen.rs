@@ -285,6 +285,9 @@ fn map_smbus(luwen_telem: &luwen_api::chip::Telemetry) -> SmbusTelemetry {
         enabled_gddr: is_bh.then_some(luwen_telem.enabled_gddr),
         enabled_l2cpu: is_bh.then_some(luwen_telem.enabled_l2cpu),
         enabled_tensix_col: is_bh.then_some(luwen_telem.tensix_enabled_col),
+        // luwen's Telemetry has no gddr_telemetry-equivalent tag today —
+        // absent on both BH and WH until upstream adds one.
+        gddr_telemetry: None,
         // No `..Default::default()`: every SmbusTelemetry
         // field is now mapped explicitly, so adding one
         // upstream fails the build here instead of silently

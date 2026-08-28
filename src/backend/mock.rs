@@ -415,6 +415,7 @@ impl MockBackend {
             enabled_gddr: None,
             enabled_l2cpu: None,
             enabled_tensix_col,
+            gddr_telemetry: None,
         }
     }
 

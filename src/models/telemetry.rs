@@ -342,6 +342,11 @@ pub struct SmbusTelemetry {
     /// ENABLED_TENSIX_COL: 14-bit mask, one bit per Tensix column (Blackhole).
     /// Bit N clear → Tensix column N is harvested.
     pub enabled_tensix_col: Option<u32>,
+
+    /// Per-channel GDDR training/BIST/harvest/temp/ECC state (tt-smi ≥ 6.3.0).
+    /// `None` on older tt-smi or a backend that never produces it. See
+    /// `GddrTelemetry`'s doc comment for why this isn't on `Device`.
+    pub gddr_telemetry: Option<GddrTelemetry>,
 }
 
 /// Four temperature readings packed into one GDDR_X_Y_TEMP hex register.
@@ -386,6 +391,41 @@ pub fn tensix_col_harvested(enabled_tensix_col: u32, col: usize) -> bool {
         return false;
     }
     (enabled_tensix_col >> col) & 1 == 0
+}
+
+/// One GDDR channel's state, from tt-smi ≥ 6.3.0's `gddr_telemetry.channels[]`.
+/// Every numeric field arrives as a quoted string in the real JSON (the same
+/// inconsistency `DeviceLimitsRaw` already works around) — parsed tolerantly
+/// in `backend/json.rs`, never via a derived `Deserialize` on this struct.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct GddrChannel {
+    pub channel: usize,
+    pub harvested: bool,
+    pub enabled: bool,
+    pub training_pass: bool,
+    pub bist_pass: bool,
+    pub temp_top: Option<f32>,
+    pub temp_bottom: Option<f32>,
+    pub corr_rd: u64,
+    pub corr_wr: u64,
+    pub uncorr_rd: u64,
+    pub uncorr_wr: u64,
+}
+
+/// Device-level GDDR telemetry rollup, from tt-smi ≥ 6.3.0's `gddr_telemetry`
+/// block. `None` on older tt-smi (JSON simply lacks the key) or a backend
+/// that doesn't produce it (sysfs/hybrid without a live tt-smi reader, luwen).
+/// Lives on `SmbusTelemetry`, not `Device`: unlike `firmwares`/`limits` (static
+/// device identity, parsed once, never expires), these fields are
+/// measurements — temps drift, ECC counters accrue — so this rides the
+/// hybrid backend's existing whole-SMBUS-surface staleness expiry instead of
+/// living forever.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GddrTelemetry {
+    pub speed: Option<String>,
+    pub max_temp: Option<f32>,
+    pub enabled_mask: Option<u32>,
+    pub channels: Vec<GddrChannel>,
 }
 
 /// Firmware bundle + component firmware versions (from tt-smi 5.2.0 `firmwares` block).
@@ -625,6 +665,7 @@ impl SmbusTelemetry {
             enabled_gddr: None,
             enabled_l2cpu: None,
             enabled_tensix_col: None,
+            gddr_telemetry: None,
         }
     }
 
@@ -1035,5 +1076,37 @@ mod tests {
         assert_eq!(back.tdc_limit, Some(500.0));
         assert_eq!(back.asic_fmax, Some(1350));
         assert_eq!(back.thm_limit, Some(90.0));
+    }
+
+    #[test]
+    fn gddr_telemetry_defaults_to_none_on_smbus_telemetry() {
+        let s = SmbusTelemetry::default();
+        assert!(s.gddr_telemetry.is_none());
+    }
+
+    #[test]
+    fn gddr_channel_and_telemetry_construct_and_compare() {
+        let ch = GddrChannel {
+            channel: 0,
+            harvested: false,
+            enabled: true,
+            training_pass: true,
+            bist_pass: true,
+            temp_top: Some(46.0),
+            temp_bottom: Some(50.0),
+            corr_rd: 0,
+            corr_wr: 0,
+            uncorr_rd: 0,
+            uncorr_wr: 0,
+        };
+        let g = GddrTelemetry {
+            speed: Some("16G".to_string()),
+            max_temp: Some(50.0),
+            enabled_mask: Some(0xff),
+            channels: vec![ch],
+        };
+        assert_eq!(g.channels.len(), 1);
+        assert_eq!(g.channels[0].channel, 0);
+        assert_eq!(g, g.clone());
     }
 }
