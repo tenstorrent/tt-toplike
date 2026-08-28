@@ -9,10 +9,14 @@ use crate::workload::inference_server::probe::parse_env_var;
 /// Where the server runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
-    Docker { container: String },
+    Docker {
+        container: String,
+    },
     /// A bare (non-Docker) process, e.g. a direct `vllm serve`/
     /// `server_example_tt.py` launch — see `parse_direct_vllm`.
-    Host { pid: i32 },
+    Host {
+        pid: i32,
+    },
 }
 
 /// Prefix of the identity key `service_key` derives for a `Source::Host` —
@@ -265,13 +269,21 @@ pub fn parse_direct_vllm(
     // Match by `ends_with("vllm")`, not `== "vllm"`: a venv console-script's
     // argv[0] is commonly a full path (e.g.
     // `/home/ttuser/venv-vllm-standalone/bin/vllm`), not the bare token.
+    // `vllm serve <model> ...`: positional model argument. If that shape
+    // isn't present (e.g. `vllm serve --model X` — flag form instead of
+    // positional), fall back to `model_arg`, the same `--model`/`--model=X`
+    // helper the `server_example_tt.py` shape below uses — otherwise a
+    // flag-form `vllm serve` launch goes entirely undetected.
     let model = toks
         .iter()
         .position(|t| t.ends_with("vllm"))
         .filter(|&i| toks.get(i + 1) == Some(&"serve"))
-        .and_then(|i| toks.get(i + 2))
-        .filter(|t| !t.starts_with('-'))
-        .map(|s| s.to_string())
+        .and_then(|i| {
+            toks.get(i + 2)
+                .filter(|t| !t.starts_with('-'))
+                .map(|s| s.to_string())
+                .or_else(|| model_arg(&toks))
+        })
         .or_else(|| {
             cmdline
                 .contains("server_example_tt.py")
@@ -285,11 +297,17 @@ pub fn parse_direct_vllm(
         return None;
     }
 
+    // vLLM uses argparse, so both `--port <N>` and `--port=<N>` are valid.
     let port = toks
         .iter()
         .position(|t| *t == "--port")
         .and_then(|i| toks.get(i + 1))
         .and_then(|p| p.parse::<u16>().ok())
+        .or_else(|| {
+            toks.iter()
+                .find_map(|t| t.strip_prefix("--port="))
+                .and_then(|p| p.parse::<u16>().ok())
+        })
         .unwrap_or(8000);
 
     Some(InferenceServer {
@@ -474,8 +492,13 @@ mod tests {
 
     #[test]
     fn parses_example_script_shape() {
-        let s = parse_direct_vllm("python3", CMDLINE_EXAMPLE_SCRIPT, ENVIRON_EXAMPLE_SCRIPT, 99)
-            .expect("should detect server_example_tt.py shape");
+        let s = parse_direct_vllm(
+            "python3",
+            CMDLINE_EXAMPLE_SCRIPT,
+            ENVIRON_EXAMPLE_SCRIPT,
+            99,
+        )
+        .expect("should detect server_example_tt.py shape");
         assert_eq!(s.source, Source::Host { pid: 99 });
         assert_eq!(s.model.as_deref(), Some("episod/tt-tnt"));
         assert_eq!(s.mesh.as_deref(), Some("P150"));
@@ -502,6 +525,25 @@ mod tests {
         let cmd = "vllm serve some/model --port 9001";
         let s = parse_direct_vllm("vllm", cmd, ENVIRON_VLLM_SERVE, 1).unwrap();
         assert_eq!(s.port, Some(9001));
+    }
+
+    #[test]
+    fn parses_port_equals_form() {
+        // argparse accepts `--port=<N>` as well as `--port <N>`.
+        let cmd = "vllm serve some/model --port=9001";
+        let s = parse_direct_vllm("vllm", cmd, ENVIRON_VLLM_SERVE, 1).unwrap();
+        assert_eq!(s.port, Some(9001));
+    }
+
+    #[test]
+    fn parses_vllm_serve_with_flag_form_model_arg() {
+        // `vllm serve --model X` (flag form) instead of `vllm serve X`
+        // (positional) must still be recognized.
+        let cmd = "vllm serve --model episod/tt-tnt-1024 --port 8000";
+        let s = parse_direct_vllm("vllm", cmd, ENVIRON_VLLM_SERVE, 1)
+            .expect("flag-form --model must still be detected");
+        assert_eq!(s.model.as_deref(), Some("episod/tt-tnt-1024"));
+        assert_eq!(s.port, Some(8000));
     }
 
     #[test]

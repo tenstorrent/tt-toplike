@@ -111,7 +111,9 @@ pub fn top_process(ps_output: &str) -> Option<(String, f32, u64)> {
 /// or non-numeric token is silently skipped rather than failing the whole
 /// parse, matching every other parser in this module.
 fn parse_children(text: &str) -> Vec<i32> {
-    text.split_whitespace().filter_map(|t| t.parse().ok()).collect()
+    text.split_whitespace()
+        .filter_map(|t| t.parse().ok())
+        .collect()
 }
 
 /// All pids in the process tree rooted at `root` (inclusive), found by
@@ -348,37 +350,40 @@ fn host_top_proc_cmd(pid: i32) -> String {
     format!("ps -o pcpu,rss,comm --sort=-pcpu -p {pid_list}")
 }
 
-/// Run `sh -c <sh>` locally with **only** the target pid's own environment
-/// variables (read via [`host_environ_text`]) — a docker-exec'd shell
-/// inherits just the container's env for free; a locally-spawned one
-/// inherits tt-toplike's own process environment instead, and `cmd.env(k,
-/// v)` alone only overrides specific keys, it doesn't clear the rest first.
-/// Without `env_clear()`, a variable already set on the monitor's own
-/// process (e.g. an operator's `TT_METAL_HOME` from the dev shell they
-/// launched tt-toplike from) would leak into the probed child for any key
-/// the *target's* environ doesn't itself set — silently pointing
-/// `KERNEL_FIND_CMD`/`LOADED_FIND_CMD` (both gated on
-/// `TT_METAL_HOME`/`CACHE_ROOT`) at the wrong directory. `PATH` gets a
-/// conservative fallback when the target's environ didn't carry one, purely
-/// so `sh` itself can still be resolved via `execvp` — full isolation with no
-/// `PATH` at all risks failing to spawn `sh` in the first place.
+/// Environment variables `host_exec` forwards from the target process's own
+/// `environ` — exactly what `KERNEL_FIND_CMD`/`LOADED_FIND_CMD` reference
+/// (`$TT_METAL_HOME`, `$CACHE_ROOT`, `$HOME`), plus `PATH` (handled
+/// separately below). Deliberately an allowlist, not a copy of the whole
+/// environ: only root can read another user's `/proc/<pid>/environ`, so a
+/// local user could otherwise plant a process whose environ carries
+/// `LD_PRELOAD` (or similar) alongside the `MESH_DEVICE`/`TT_METAL_HOME`
+/// gate `parse_direct_vllm` checks, and have the root-run monitor's next
+/// probe tick spawn `sh -c '<find …>'` with that variable set — `sh` isn't
+/// setuid, so the dynamic linker honors it. Forwarding only the handful of
+/// names the two shell commands actually need closes that off.
+const HOST_EXEC_FORWARDED_VARS: &[&str] = &["TT_METAL_HOME", "CACHE_ROOT", "HOME"];
+
+/// Run `sh -c <sh>` locally, with an environment built from scratch (not
+/// inherited) so a locally-spawned shell doesn't pick up tt-toplike's own
+/// process environment the way a docker-exec'd shell would automatically be
+/// scoped to the container's env. Only [`HOST_EXEC_FORWARDED_VARS`] plus
+/// `PATH` are copied from the target pid's own `environ`; `PATH` falls back
+/// to a conservative default when the target's environ didn't carry one, so
+/// `sh` itself can still be resolved via `execvp`.
 fn host_exec(pid: i32, sh: &str) -> String {
     let env_text = host_environ_text(pid);
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(sh);
     cmd.env_clear();
-    let mut saw_path = false;
-    for line in env_text.lines() {
-        if let Some((k, v)) = line.split_once('=') {
-            if k == "PATH" {
-                saw_path = true;
-            }
-            cmd.env(k, v);
+    for key in HOST_EXEC_FORWARDED_VARS {
+        if let Some(v) = parse_env_var(&env_text, key) {
+            cmd.env(key, v);
         }
     }
-    if !saw_path {
-        cmd.env("PATH", "/usr/bin:/bin:/usr/local/bin");
-    }
+    match parse_env_var(&env_text, "PATH") {
+        Some(v) => cmd.env("PATH", v),
+        None => cmd.env("PATH", "/usr/bin:/bin:/usr/local/bin"),
+    };
     run_bounded(cmd)
 }
 

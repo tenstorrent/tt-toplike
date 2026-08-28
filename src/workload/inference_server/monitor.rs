@@ -22,7 +22,7 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::workload::inference_server::detect::{service_key, InferenceServer};
+use crate::workload::inference_server::detect::{service_key, InferenceServer, HOST_KEY_PREFIX};
 use crate::workload::inference_server::logs::last_non_health_line;
 use crate::workload::inference_server::probe::{
     contains_python, count_lines, parse_docker_stats, parse_env_var, parse_liveness, top_process,
@@ -215,7 +215,25 @@ fn build_sample(
     let ps_output = probe.exec(container, &probe.top_proc_cmd(container));
     let top = top_process(&ps_output);
     let top_proc = top.map(|(comm, _cpu, _rss)| comm);
-    let python_alive = contains_python(&ps_output);
+    // For a host-keyed service, `top_proc_cmd` already scopes the `ps` call to
+    // exactly the launched pid's process tree (`host_top_proc_cmd` via
+    // `process_tree_pids`) — nothing else can appear in its output. So "the ps
+    // output has at least one data row beyond the header" is sufficient proof
+    // the tree is alive; there's no need to guess a process name. That matters
+    // because a `vllm serve <model>` launch's `comm` is commonly `vllm` (a pip
+    // console-script's shebang execs the interpreter directly, and the kernel
+    // sets `comm` to the script's own basename, not `python3`) — matching on
+    // `contains_python` here would misreport the whole compile/load window
+    // (readiness `Down`, `comm` never containing "python") as the process
+    // being dead, exactly the silence this feature exists to illuminate. A
+    // Docker key keeps using `contains_python` unchanged: `docker exec ps` is
+    // a global process listing (not tree-scoped), so row-count alone isn't
+    // evidence of *this* service's liveness.
+    let python_alive = if container.starts_with(HOST_KEY_PREFIX) {
+        ps_output.lines().count() > 1
+    } else {
+        contains_python(&ps_output)
+    };
 
     let (status, body) = probe.http(port, health_path);
     let readiness = parse_liveness(status, &body);
@@ -824,10 +842,7 @@ mod tests {
             2,
             "dup container collapses, detached one added"
         );
-        let containers: Vec<String> = merged
-            .iter()
-            .map(|s| service_key(&s.source))
-            .collect();
+        let containers: Vec<String> = merged.iter().map(|s| service_key(&s.source)).collect();
         assert!(containers.iter().any(|c| c == "fg-container"));
         assert!(containers.iter().any(|c| c == "detached-vllm"));
     }
@@ -848,5 +863,68 @@ mod tests {
             crate::workload::inference_server::state::Phase::Alarm
         );
         assert_eq!(state.flat_ticks, 60);
+    }
+
+    /// A fake whose `ps` output reports the canonical `vllm serve` shape's
+    /// `comm` column — `vllm`, never `python3` — to prove `build_sample`
+    /// doesn't rely on `contains_python` for a host-keyed service. Readiness
+    /// is `Down` (nothing listening yet, matching the real compile/load
+    /// window), so `Phase::derive` would report `Down` if `python_alive` came
+    /// out false here too — exactly the false negative this fix closes.
+    struct FakeHostProbe;
+    impl ContainerProbe for FakeHostProbe {
+        fn env(&self, _key: &str) -> String {
+            "TT_METAL_HOME=/x/tt-metal\n".into()
+        }
+        fn stats(&self, _key: &str) -> String {
+            "50.0%|9GiB / 249GiB".into()
+        }
+        fn exec(&self, _key: &str, _sh: &str) -> String {
+            "PCPU RSS COMMAND\n12.0 900000 vllm\n".into()
+        }
+        fn http(&self, _port: u16, _path: &str) -> (u16, String) {
+            (0, String::new()) // Down: nothing listening yet during compile/load
+        }
+        fn top_proc_cmd(&self, _key: &str) -> String {
+            "ps -o pcpu,rss,comm --sort=-pcpu -p 1".into()
+        }
+    }
+
+    #[test]
+    fn build_sample_host_liveness_does_not_require_python_in_comm() {
+        let sample = build_sample(&FakeHostProbe, "host-vllm-4242", 8000, "/tt-liveness");
+        assert!(
+            sample.python_alive,
+            "a host-keyed tree-scoped ps with any data row is alive, \
+             regardless of the comm column (vllm serve's comm is `vllm`, not `python3`)"
+        );
+        assert!(matches!(sample.readiness, Readiness::Down));
+    }
+
+    #[test]
+    fn build_sample_docker_liveness_still_requires_python_in_comm() {
+        // Same shape (a non-python comm, no data beyond header check), but a
+        // Docker-style key — must NOT get the row-count shortcut, since
+        // `docker exec ps` is a global listing, not tree-scoped.
+        struct FakeDockerLikeProbe;
+        impl ContainerProbe for FakeDockerLikeProbe {
+            fn env(&self, _key: &str) -> String {
+                "TT_METAL_HOME=/x/tt-metal\n".into()
+            }
+            fn stats(&self, _key: &str) -> String {
+                "50.0%|9GiB / 249GiB".into()
+            }
+            fn exec(&self, _key: &str, _sh: &str) -> String {
+                "PCPU RSS COMMAND\n12.0 900000 some-other-proc\n".into()
+            }
+            fn http(&self, _port: u16, _path: &str) -> (u16, String) {
+                (0, String::new())
+            }
+        }
+        let sample = build_sample(&FakeDockerLikeProbe, "tt-inference-server-abc", 8000, "/h");
+        assert!(
+            !sample.python_alive,
+            "docker-keyed path must keep using contains_python, not row-count"
+        );
     }
 }
