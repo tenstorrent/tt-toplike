@@ -3592,6 +3592,23 @@ fn castle_legend_lines(
             Span::styled("•", Style::default().fg(colors::rgb(255, 100, 150))),
             Span::styled(" = cache miss", Style::default().fg(dim))
         ]),
+        // The four lines above describe the *particle overlay*. The DDR gate
+        // row is a different rendering context (the static per-device row at
+        // the castle's base, driven by tt-smi ≥ 6.3.0 per-channel
+        // gddr_telemetry) and deliberately reuses `·` for a harvested channel
+        // — dim gray there, orange for "write access" above. Same glyph,
+        // different colour, different meaning: spelled out here rather than
+        // left for the reader to infer. Colours match `memory_castle.rs`'s
+        // gate row; the healthy gate's `▪` actually hue-cycles, so the blue
+        // below stands in for the whole cycle.
+        ln!(vec![
+            Span::styled("▪", Style::default().fg(colors::rgb(120, 200, 255))),
+            Span::styled(" = DDR gate ok  ", Style::default().fg(dim)),
+            Span::styled("·", Style::default().fg(ratatui::style::Color::DarkGray)),
+            Span::styled(" harvested  ", Style::default().fg(dim)),
+            Span::styled("✗", Style::default().fg(colors::rgb(255, 90, 90))),
+            Span::styled(" BIST-fail", Style::default().fg(dim)),
+        ]),
         ln!(vec![
             Span::styled(
                 "layers    ",
@@ -7387,6 +7404,9 @@ mod host_default_screen_tests {
             (OverlayPanel::Help, DisplayMode::Insights),
             (OverlayPanel::Legend, DisplayMode::Insights),
             (OverlayPanel::Legend, DisplayMode::InferenceMonitor),
+            // Multi-glyph line (DDR gate states) makes this legend's widest
+            // line noticeably wider than its per-particle lines.
+            (OverlayPanel::Legend, DisplayMode::MemoryCastle),
             (OverlayPanel::Explain, DisplayMode::Insights),
         ];
         for (kind, mode) in cases {
