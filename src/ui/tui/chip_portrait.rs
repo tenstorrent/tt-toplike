@@ -435,21 +435,29 @@ pub fn build_portrait_rows(
                 CoreType::Dram => {
                     let dram_channel_idx = if device.architecture == Architecture::Blackhole {
                         // Same "count earlier DRAM columns" mapping trained_random_col
-                        // already uses — extract it to a shared helper if convenient,
-                        // but do not change trained_random_col's own behavior.
+                        // already uses.
                         let is_dram_col = |c: usize| c != 8 && core_type_bh(c, 0) == CoreType::Dram;
                         if is_dram_col(col) {
-                            Some((0..col).filter(|&cc| is_dram_col(cc)).count())
+                            let idx = (0..col).filter(|&cc| is_dram_col(cc)).count();
+                            if idx >= 8 {
+                                None
+                            } else {
+                                Some(idx)
+                            }
                         } else {
                             None
                         }
                     } else {
                         None
                     };
+                    // Look up by the real `channel` field, not by position — the JSON
+                    // parser (`parse_gddr_channel`) silently drops a malformed channel
+                    // entry, which would shift every subsequent channel's position out
+                    // from under a positional `channels.get(idx)` lookup.
                     let real_channel = dram_channel_idx.and_then(|idx| {
                         smbus
                             .and_then(|s| s.gddr_telemetry.as_ref())
-                            .and_then(|g| g.channels.get(idx))
+                            .and_then(|g| g.channels.iter().find(|c| c.channel == idx))
                     });
                     match real_channel {
                         Some(c) if c.harvested => '·',
@@ -534,14 +542,18 @@ pub fn build_portrait_lines<'a>(
             let is_dram_col = |c: usize| c != 8 && core_type_bh(c, 0) == CoreType::Dram;
             if is_dram_col(col) {
                 let idx = (0..col).filter(|&cc| is_dram_col(cc)).count();
-                smbus
-                    .and_then(|s| s.gddr_telemetry.as_ref())
-                    .and_then(|g| g.channels.get(idx))
-                    .and_then(|c| match (c.temp_top, c.temp_bottom) {
-                        (Some(t), Some(b)) => Some(t.max(b)),
-                        (Some(t), None) | (None, Some(t)) => Some(t),
-                        (None, None) => None,
-                    })
+                if idx >= 8 {
+                    None
+                } else {
+                    smbus
+                        .and_then(|s| s.gddr_telemetry.as_ref())
+                        .and_then(|g| g.channels.iter().find(|c| c.channel == idx))
+                        .and_then(|c| match (c.temp_top, c.temp_bottom) {
+                            (Some(t), Some(b)) => Some(t.max(b)),
+                            (Some(t), None) | (None, Some(t)) => Some(t),
+                            (None, None) => None,
+                        })
+                }
             } else {
                 None
             }
@@ -1001,6 +1013,40 @@ mod tests {
         assert_eq!(
             chars[1], '·',
             "harvested GDDR channel should show '·', got '{}'",
+            chars[1]
+        );
+    }
+
+    #[test]
+    fn dram_col_shows_alarm_when_bist_fails() {
+        use crate::models::telemetry::{GddrChannel, GddrTelemetry};
+        let device = make_device(Architecture::Blackhole);
+        let mut smbus = make_smbus(Architecture::Blackhole);
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            speed: None,
+            max_temp: None,
+            enabled_mask: None,
+            channels: vec![GddrChannel {
+                channel: 0,
+                harvested: false,
+                enabled: true,
+                training_pass: false,
+                bist_pass: false,
+                temp_top: None,
+                temp_bottom: None,
+                corr_rd: 0,
+                corr_wr: 0,
+                uncorr_rd: 0,
+                uncorr_wr: 0,
+            }],
+        });
+        let telem = make_telemetry();
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
+        // BH row=0 col=1 is the first (non-ETH, non-PCIe) DRAM cell → channel 0.
+        let chars: Vec<char> = rows[0].chars().collect();
+        assert_eq!(
+            chars[1], '✗',
+            "BIST-failed GDDR channel should show '✗', got '{}'",
             chars[1]
         );
     }
