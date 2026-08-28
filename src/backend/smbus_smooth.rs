@@ -576,11 +576,12 @@ mod tests {
     /// `SmbusTelemetry` but not handled here, THIS TEST STOPS COMPILING until
     /// it's added, turning a silent runtime bug into a compile error.
     ///
-    /// Every field below is then asserted individually (rather than via a
-    /// whole-struct `assert_eq!`, since `SmbusTelemetry` doesn't derive
-    /// `PartialEq` and adding that derive is outside this task's scope) —
-    /// naming each field also gives a precise failure message pointing at
-    /// exactly which field `apply_ema()` dropped.
+    /// The whole-struct `assert_eq!` below is equally load-bearing: it forces
+    /// every named field to actually be *checked* too, not just named in the
+    /// literal — a developer who adds a field, hits the compile error above,
+    /// and adds it to the literal has done nothing to prove `apply_ema()`
+    /// copies it. Only a struct-wide comparison closes that gap, which is why
+    /// `SmbusTelemetry` now derives `PartialEq` (all field types already did).
     #[test]
     fn blend_touches_every_smbus_telemetry_field() {
         use crate::models::telemetry::GddrTelemetry;
@@ -654,144 +655,12 @@ mod tests {
         // Every field named above must have made it through apply_ema
         // unchanged (all values here are non-numeric strings or fresh
         // typed values, so no EMA-numeric reformatting applies — see the
-        // other tests in this module for that behaviour).
-        assert_eq!(existing.board_id, incoming.board_id, "board_id");
-        assert_eq!(existing.enum_version, incoming.enum_version, "enum_version");
-        assert_eq!(existing.device_id, incoming.device_id, "device_id");
-        assert_eq!(existing.ddr_speed, incoming.ddr_speed, "ddr_speed");
-        assert_eq!(existing.ddr_status, incoming.ddr_status, "ddr_status");
-        assert_eq!(existing.arc0_health, incoming.arc0_health, "arc0_health");
-        assert_eq!(existing.arc1_health, incoming.arc1_health, "arc1_health");
-        assert_eq!(existing.arc2_health, incoming.arc2_health, "arc2_health");
-        assert_eq!(existing.arc3_health, incoming.arc3_health, "arc3_health");
+        // other tests in this module for that behaviour). A whole-struct
+        // comparison is what actually enforces this: it fails the moment
+        // apply_ema() drops any field, named or not.
         assert_eq!(
-            existing.arc0_fw_version, incoming.arc0_fw_version,
-            "arc0_fw_version"
-        );
-        assert_eq!(
-            existing.arc1_fw_version, incoming.arc1_fw_version,
-            "arc1_fw_version"
-        );
-        assert_eq!(
-            existing.arc2_fw_version, incoming.arc2_fw_version,
-            "arc2_fw_version"
-        );
-        assert_eq!(
-            existing.arc3_fw_version, incoming.arc3_fw_version,
-            "arc3_fw_version"
-        );
-        assert_eq!(
-            existing.eth_fw_version, incoming.eth_fw_version,
-            "eth_fw_version"
-        );
-        assert_eq!(
-            existing.m3_bl_fw_version, incoming.m3_bl_fw_version,
-            "m3_bl_fw_version"
-        );
-        assert_eq!(
-            existing.m3_app_fw_version, incoming.m3_app_fw_version,
-            "m3_app_fw_version"
-        );
-        assert_eq!(
-            existing.spibootrom_fw_version, incoming.spibootrom_fw_version,
-            "spibootrom_fw_version"
-        );
-        assert_eq!(
-            existing.tt_flash_version, incoming.tt_flash_version,
-            "tt_flash_version"
-        );
-        assert_eq!(existing.aiclk, incoming.aiclk, "aiclk");
-        assert_eq!(existing.axiclk, incoming.axiclk, "axiclk");
-        assert_eq!(existing.arcclk, incoming.arcclk, "arcclk");
-        assert_eq!(
-            existing.asic_temperature, incoming.asic_temperature,
-            "asic_temperature"
-        );
-        assert_eq!(
-            existing.vreg_temperature, incoming.vreg_temperature,
-            "vreg_temperature"
-        );
-        assert_eq!(
-            existing.board_temperature, incoming.board_temperature,
-            "board_temperature"
-        );
-        assert_eq!(existing.vcore, incoming.vcore, "vcore");
-        assert_eq!(existing.tdp, incoming.tdp, "tdp");
-        assert_eq!(existing.tdc, incoming.tdc, "tdc");
-        assert_eq!(existing.throttler, incoming.throttler, "throttler");
-        assert_eq!(existing.vdd_limits, incoming.vdd_limits, "vdd_limits");
-        assert_eq!(existing.thm_limits, incoming.thm_limits, "thm_limits");
-        assert_eq!(existing.fan_speed, incoming.fan_speed, "fan_speed");
-        assert_eq!(existing.faults, incoming.faults, "faults");
-        assert_eq!(existing.pcie_status, incoming.pcie_status, "pcie_status");
-        assert_eq!(existing.eth_status0, incoming.eth_status0, "eth_status0");
-        assert_eq!(existing.eth_status1, incoming.eth_status1, "eth_status1");
-        assert_eq!(existing.input_power, incoming.input_power, "input_power");
-        assert_eq!(
-            existing.board_power_limit, incoming.board_power_limit,
-            "board_power_limit"
-        );
-        assert_eq!(
-            existing.therm_trip_count, incoming.therm_trip_count,
-            "therm_trip_count"
-        );
-        assert_eq!(existing.boot_date, incoming.boot_date, "boot_date");
-        assert_eq!(existing.rt_seconds, incoming.rt_seconds, "rt_seconds");
-        assert_eq!(existing.wh_fw_date, incoming.wh_fw_date, "wh_fw_date");
-        assert_eq!(existing.asic_tmon0, incoming.asic_tmon0, "asic_tmon0");
-        assert_eq!(existing.asic_tmon1, incoming.asic_tmon1, "asic_tmon1");
-        assert_eq!(existing.mvddq_power, incoming.mvddq_power, "mvddq_power");
-        assert_eq!(
-            existing.gddr_train_temp0, incoming.gddr_train_temp0,
-            "gddr_train_temp0"
-        );
-        assert_eq!(
-            existing.gddr_train_temp1, incoming.gddr_train_temp1,
-            "gddr_train_temp1"
-        );
-        assert_eq!(existing.aux_status, incoming.aux_status, "aux_status");
-        assert_eq!(
-            existing.eth_debug_status0, incoming.eth_debug_status0,
-            "eth_debug_status0"
-        );
-        assert_eq!(
-            existing.eth_debug_status1, incoming.eth_debug_status1,
-            "eth_debug_status1"
-        );
-        assert_eq!(existing.gddr_temps, incoming.gddr_temps, "gddr_temps");
-        assert_eq!(
-            existing.max_gddr_temp, incoming.max_gddr_temp,
-            "max_gddr_temp"
-        );
-        assert_eq!(
-            existing.gddr_corr_errs, incoming.gddr_corr_errs,
-            "gddr_corr_errs"
-        );
-        assert_eq!(
-            existing.gddr_uncorr_errs, incoming.gddr_uncorr_errs,
-            "gddr_uncorr_errs"
-        );
-        assert_eq!(
-            existing.harvesting_state, incoming.harvesting_state,
-            "harvesting_state"
-        );
-        assert_eq!(
-            existing.eth_live_status, incoming.eth_live_status,
-            "eth_live_status"
-        );
-        assert_eq!(existing.enabled_eth, incoming.enabled_eth, "enabled_eth");
-        assert_eq!(existing.enabled_gddr, incoming.enabled_gddr, "enabled_gddr");
-        assert_eq!(
-            existing.enabled_l2cpu, incoming.enabled_l2cpu,
-            "enabled_l2cpu"
-        );
-        assert_eq!(
-            existing.enabled_tensix_col, incoming.enabled_tensix_col,
-            "enabled_tensix_col"
-        );
-        assert_eq!(
-            existing.gddr_telemetry, incoming.gddr_telemetry,
-            "gddr_telemetry"
+            existing, incoming,
+            "apply_ema() must copy or correctly merge every field — if this assertion fails after adding a new SmbusTelemetry field, apply_ema() is silently dropping it"
         );
     }
 }

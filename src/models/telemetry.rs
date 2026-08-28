@@ -157,7 +157,7 @@ fn de_opt_usize_str<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<usi
 ///
 /// Contains detailed hardware status information from the System Management Bus.
 /// This includes DDR status, firmware versions, health indicators, and more.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SmbusTelemetry {
     /// Board ID
     pub board_id: Option<String>,
