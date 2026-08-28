@@ -432,7 +432,31 @@ pub fn build_portrait_rows(
                     }
                 }
 
-                CoreType::Dram => '▪',
+                CoreType::Dram => {
+                    let dram_channel_idx = if device.architecture == Architecture::Blackhole {
+                        // Same "count earlier DRAM columns" mapping trained_random_col
+                        // already uses — extract it to a shared helper if convenient,
+                        // but do not change trained_random_col's own behavior.
+                        let is_dram_col = |c: usize| c != 8 && core_type_bh(c, 0) == CoreType::Dram;
+                        if is_dram_col(col) {
+                            Some((0..col).filter(|&cc| is_dram_col(cc)).count())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    let real_channel = dram_channel_idx.and_then(|idx| {
+                        smbus
+                            .and_then(|s| s.gddr_telemetry.as_ref())
+                            .and_then(|g| g.channels.get(idx))
+                    });
+                    match real_channel {
+                        Some(c) if c.harvested => '·',
+                        Some(c) if !c.bist_pass => '✗',
+                        _ => '▪',
+                    }
+                }
 
                 CoreType::Tensix => {
                     // BH only: check harvesting mask via tensix column index
@@ -506,11 +530,31 @@ pub fn build_portrait_lines<'a>(
 
     // Per-column DRAM temperature color via GDDR temp interpolation
     let dram_color_for_col = |col: usize| -> Color {
-        let pair_idx = (col / 4).min(3);
-        let temp = smbus
-            .and_then(|s| s.gddr_temps.get(pair_idx).and_then(|p| p.as_ref()))
-            .map(|p| p.0.iter().copied().fold(f32::NEG_INFINITY, f32::max))
-            .unwrap_or(0.0);
+        let real_channel_temp = if device.architecture == Architecture::Blackhole {
+            let is_dram_col = |c: usize| c != 8 && core_type_bh(c, 0) == CoreType::Dram;
+            if is_dram_col(col) {
+                let idx = (0..col).filter(|&cc| is_dram_col(cc)).count();
+                smbus
+                    .and_then(|s| s.gddr_telemetry.as_ref())
+                    .and_then(|g| g.channels.get(idx))
+                    .and_then(|c| match (c.temp_top, c.temp_bottom) {
+                        (Some(t), Some(b)) => Some(t.max(b)),
+                        (Some(t), None) | (None, Some(t)) => Some(t),
+                        (None, None) => None,
+                    })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let temp = real_channel_temp.unwrap_or_else(|| {
+            let pair_idx = (col / 4).min(3);
+            smbus
+                .and_then(|s| s.gddr_temps.get(pair_idx).and_then(|p| p.as_ref()))
+                .map(|p| p.0.iter().copied().fold(f32::NEG_INFINITY, f32::max))
+                .unwrap_or(0.0)
+        });
         let [r, g, b] = dram_temp_rgb(temp);
         Color::Rgb(r, g, b)
     };
@@ -535,6 +579,16 @@ pub fn build_portrait_lines<'a>(
                     // ETH: cyan when live, dim gray when down
                     (CoreType::Eth, '●') => Style::default().fg(Color::Rgb(79, 209, 197)),
                     (CoreType::Eth, _) => Style::default().fg(Color::DarkGray),
+                    // DRAM harvested ('·'): dim gray, no heatmap — mirrors
+                    // the existing Tensix-harvested treatment.
+                    (CoreType::Dram, '·') => Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
+                    // DRAM BIST-fail ('✗'): alarm red — a real fault, not a
+                    // temperature reading.
+                    (CoreType::Dram, '✗') => Style::default()
+                        .fg(Color::Rgb(255, 90, 90))
+                        .add_modifier(Modifier::BOLD),
                     // DRAM: blue→amber→red by per-column GDDR temperature
                     (CoreType::Dram, _) => Style::default().fg(dram_color_for_col(col)),
                     // Tensix harvested ('·'): dim gray, no heatmap
@@ -913,6 +967,56 @@ mod tests {
         assert_eq!(
             chars[1], '·',
             "harvested col should show '·', got '{}'",
+            chars[1]
+        );
+    }
+
+    #[test]
+    fn dram_col_uses_real_gddr_telemetry_harvested_state_when_present() {
+        use crate::models::telemetry::{GddrChannel, GddrTelemetry};
+        let device = make_device(Architecture::Blackhole);
+        let mut smbus = make_smbus(Architecture::Blackhole);
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            speed: None,
+            max_temp: None,
+            enabled_mask: None,
+            channels: vec![GddrChannel {
+                channel: 0,
+                harvested: true,
+                enabled: false,
+                training_pass: false,
+                bist_pass: true,
+                temp_top: None,
+                temp_bottom: None,
+                corr_rd: 0,
+                corr_wr: 0,
+                uncorr_rd: 0,
+                uncorr_wr: 0,
+            }],
+        });
+        let telem = make_telemetry();
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
+        // BH row=0 col=1 is the first (non-ETH, non-PCIe) DRAM cell → channel 0.
+        let chars: Vec<char> = rows[0].chars().collect();
+        assert_eq!(
+            chars[1], '·',
+            "harvested GDDR channel should show '·', got '{}'",
+            chars[1]
+        );
+    }
+
+    #[test]
+    fn dram_col_falls_back_to_packed_bitmask_when_gddr_telemetry_absent() {
+        let device = make_device(Architecture::Blackhole);
+        let smbus = make_smbus(Architecture::Blackhole); // gddr_telemetry: None
+        let telem = make_telemetry();
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
+        // Regression guard: with no gddr_telemetry present, the DRAM cell must
+        // render exactly as the pre-existing packed-register path did — '▪'.
+        let chars: Vec<char> = rows[0].chars().collect();
+        assert_eq!(
+            chars[1], '▪',
+            "DRAM cell without gddr_telemetry should fall back to '▪', got '{}'",
             chars[1]
         );
     }
