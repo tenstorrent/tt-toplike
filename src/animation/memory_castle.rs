@@ -970,36 +970,72 @@ impl MemoryCastle {
             ),
         ]));
 
-        // DDR gate row: one glyph per two memory channels — a compact,
-        // at-a-glance channel-count signal that doesn't need the numeric
-        // width the full path's header has room for.
+        // DDR gate row: one glyph per real memory channel when
+        // `gddr_telemetry` is present (tt-smi >= 6.3.0), colored per-channel
+        // (harvested → dim gray, BIST-fail → alarm red, else the existing
+        // hue-cycling glow); falls back to one glyph per two memory channels
+        // — a compact, at-a-glance channel-count signal that doesn't need
+        // the numeric width the full path's header has room for — when
+        // real per-channel data isn't available.
         let gate_spans: Vec<Span> = devices
             .iter()
             .take(num_devices)
             .enumerate()
-            .map(|(idx, device)| {
+            .flat_map(|(idx, device)| {
                 let telem = backend.telemetry(device.index);
                 let current = telem.map(|t| t.current_a()).unwrap_or(0.0);
                 let current_change = self.baseline.current_change(device.index, current);
 
-                let channels = device.memory_channels().max(1);
-                let gates = ((channels + 1) / 2).min(col_width);
-                let hue = (210.0 + self.frame as f32 * 0.9 + idx as f32 * 12.0) % 360.0;
-                let glow = (0.45 + current_change.clamp(0.0, 1.0) * 0.45).min(1.0);
-                let color = hsv_to_rgb(hue, 0.85, glow);
+                let smbus = backend.smbus_telemetry(device.index);
+                let real_channels = smbus
+                    .and_then(|s| s.gddr_telemetry.as_ref())
+                    .filter(|g| !g.channels.is_empty());
 
-                let glyphs: String = "▪".repeat(gates);
-                let padding_needed = col_width.saturating_sub(glyphs.chars().count());
+                let glyph_spans: Vec<Span> = if let Some(g) = real_channels {
+                    let n = g.channels.len().min(col_width).max(1);
+                    g.channels
+                        .iter()
+                        .take(n)
+                        .map(|c| {
+                            let (ch, color) = if c.harvested {
+                                ('·', Color::DarkGray)
+                            } else if !c.bist_pass {
+                                ('✗', Color::Rgb(255, 90, 90))
+                            } else {
+                                let hue =
+                                    (210.0 + self.frame as f32 * 0.9 + idx as f32 * 12.0) % 360.0;
+                                let glow = (0.45 + current_change.clamp(0.0, 1.0) * 0.45).min(1.0);
+                                ('▪', hsv_to_rgb(hue, 0.85, glow))
+                            };
+                            Span::styled(
+                                ch.to_string(),
+                                Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                            )
+                        })
+                        .collect()
+                } else {
+                    let channels = device.memory_channels().max(1);
+                    let gates = ((channels + 1) / 2).min(col_width);
+                    let hue = (210.0 + self.frame as f32 * 0.9 + idx as f32 * 12.0) % 360.0;
+                    let glow = (0.45 + current_change.clamp(0.0, 1.0) * 0.45).min(1.0);
+                    let color = hsv_to_rgb(hue, 0.85, glow);
+                    vec![Span::styled(
+                        "▪".repeat(gates),
+                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                    )]
+                };
+
+                let glyph_count: usize =
+                    glyph_spans.iter().map(|s| s.content.chars().count()).sum();
+                let padding_needed = col_width.saturating_sub(glyph_count);
                 let left_pad = " ".repeat(padding_needed / 2);
                 let right_pad = " ".repeat(padding_needed - padding_needed / 2);
 
-                vec![
-                    Span::styled(left_pad, Style::default()),
-                    Span::styled(glyphs, Style::default().bg(colors::rgb(0, 0, 0)).fg(color)),
-                    Span::styled(right_pad, Style::default()),
-                ]
+                let mut spans = vec![Span::styled(left_pad, Style::default())];
+                spans.extend(glyph_spans);
+                spans.push(Span::styled(right_pad, Style::default()));
+                spans
             })
-            .flatten()
             .collect();
         let mut gate_line_spans = vec![Span::raw("  ")];
         gate_line_spans.extend(gate_spans);
@@ -1704,6 +1740,39 @@ mod tests {
         );
         let lines = castle.render(&backend);
         assert!(!lines.is_empty(), "compact render with particles must work");
+    }
+
+    /// The DDR gate row (compact tier only) must show one glyph per real
+    /// GDDR channel when `gddr_telemetry` is present, not the generic
+    /// per-pair count derived from `device.memory_channels()`. MockBackend
+    /// always synthesizes 8 real GDDR channels regardless of architecture,
+    /// while device 0 (Grayskull, e150, 4 memory channels) would only get
+    /// (4+1)/2 = 2 glyphs under the old generic-pair fallback — a
+    /// distinctive mismatch that proves the real data is driving the row.
+    #[test]
+    fn ddr_gate_row_uses_real_channel_count_and_state_when_present() {
+        let mut backend = MockBackend::new(10);
+        backend.init().expect("mock backend init");
+
+        let castle = MemoryCastle::new(122, 40);
+        assert_eq!(castle_tier(122, 10), CastleTier::Compact);
+
+        let lines = castle.render(&backend);
+        // Row order with no board topology set: 0 top separator, 1 header,
+        // 2 separator, 3 DDR gate row.
+        let gate_line = &lines[3];
+        let text: String = gate_line.spans.iter().map(|s| s.content.as_ref()).collect();
+
+        let col_width = (122usize.saturating_sub(2)) / backend.devices().len();
+        // Device 0's column starts right after the row's leading "  " prefix.
+        let device0_col: String = text.chars().skip(2).take(col_width).collect();
+        let glyph_count = device0_col.chars().filter(|&c| c != ' ').count();
+
+        assert_eq!(
+            glyph_count, 8,
+            "DDR gate row for device 0 should show 8 real GDDR channels, not the generic 2-gate pair count; got column {:?}",
+            device0_col
+        );
     }
 
     /// 4 devices at a narrow 30-col terminal (usable=28, per=7: below the
