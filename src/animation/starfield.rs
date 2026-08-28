@@ -628,6 +628,15 @@ impl HardwareStarfield {
                 let current = telem.current_a();
                 let current_change = self.baseline.current_change(planet.device_idx, current);
 
+                // Real per-channel GDDR block for this device, if the backend
+                // has one (tt-smi >= 6.3.0). Fetched once and shared by both
+                // the activity and the colour assignment below, so the two can
+                // never disagree about which signal source a DDR planet is on.
+                let gddr = backend
+                    .smbus_telemetry(planet.device_idx)
+                    .and_then(|s| s.gddr_telemetry.as_ref())
+                    .filter(|g| !g.channels.is_empty());
+
                 // Different memory levels respond to different metrics
                 planet.activity = match planet.level {
                     0 => {
@@ -648,30 +657,44 @@ impl HardwareStarfield {
                         // a number derived from unrelated power draw), and a
                         // healthy channel's real temperature is a much better
                         // activity signal than "how busy is the whole board".
-                        // Falls back to the generic formula only when no real
-                        // per-channel data exists for this exact channel id.
-                        let real_channel = backend
-                            .smbus_telemetry(planet.device_idx)
-                            .and_then(|s| s.gddr_telemetry.as_ref())
-                            .and_then(|g| {
-                                g.channels.iter().find(|c| c.channel == planet.channel_idx)
-                            });
-                        match real_channel {
-                            Some(c) if c.harvested => 0.0,
-                            Some(c) if !c.bist_pass => 1.0, // max activity: flag the fault
-                            Some(c) => {
-                                let avg_temp = match (c.temp_top, c.temp_bottom) {
-                                    (Some(t), Some(b)) => (t + b) / 2.0,
-                                    (Some(t), None) | (None, Some(t)) => t,
-                                    (None, None) => 0.0,
-                                };
-                                (avg_temp / 90.0).clamp(0.0, 1.0)
-                            }
+                        // Falls back to the generic formula only when the device
+                        // has no per-channel data *at all*.
+                        //
+                        // The fallback is deliberately per-device, not
+                        // per-channel: planets are spawned from
+                        // `device.memory_channels()` (12 on Blackhole) while
+                        // tt-smi only reports the 8 real channels, so a
+                        // per-channel fallback left 8 planets driven by real
+                        // telemetry sitting next to 4 driven by an unrelated
+                        // power/current proxy — two incommensurable signals in
+                        // one ring, on exactly the hardware this feature
+                        // targets. A channel with no real counterpart is now
+                        // rendered inert (like a harvested one) instead, so
+                        // every DDR planet on a device with real GDDR data is
+                        // either genuinely real-data-driven or uniformly
+                        // marked "not tracked".
+                        match gddr {
                             None => {
                                 let power = telem.power_w();
                                 let power_change =
                                     self.baseline.power_change(planet.device_idx, power);
                                 ((power_change + current_change) / 2.0).max(0.0).min(1.0)
+                            }
+                            Some(g) => {
+                                match g.channels.iter().find(|c| c.channel == planet.channel_idx) {
+                                    Some(c) if c.harvested => 0.0,
+                                    Some(c) if !c.bist_pass => 1.0, // max activity: flag the fault
+                                    Some(c) => {
+                                        let avg_temp = match (c.temp_top, c.temp_bottom) {
+                                            (Some(t), Some(b)) => (t + b) / 2.0,
+                                            (Some(t), None) | (None, Some(t)) => t,
+                                            (None, None) => 0.0,
+                                        };
+                                        (avg_temp / 90.0).clamp(0.0, 1.0)
+                                    }
+                                    // Beyond the set tt-smi reports: inert.
+                                    None => 0.0,
+                                }
                             }
                         }
                     }
@@ -682,36 +705,36 @@ impl HardwareStarfield {
                 // per-channel offset spreads the colours so they aren't all in sync.
                 use crate::animation::hsv_to_rgb as _hsv;
                 // DDR planets prefer real per-channel gddr_telemetry state for
-                // their color too: harvested channels go dim gray (nothing to
-                // show), BIST-failed channels flicker bright/dark red as a
-                // fault beacon, and everything else (L1/L2 planets, and DDR
-                // planets with no real per-channel data) keeps the existing
-                // hue-cycling look untouched.
-                let real_ddr_channel = (planet.level == 2)
-                    .then(|| {
-                        backend
-                            .smbus_telemetry(planet.device_idx)
-                            .and_then(|s| s.gddr_telemetry.as_ref())
-                            .and_then(|g| {
-                                g.channels.iter().find(|c| c.channel == planet.channel_idx)
-                            })
-                    })
-                    .flatten();
-                if let Some(c) = real_ddr_channel {
-                    if c.harvested {
-                        planet.color = Color::Rgb(60, 60, 60);
-                    } else if !c.bist_pass {
-                        let flicker = (self.frame / 3) % 2 == 0;
-                        planet.color = if flicker {
-                            Color::Rgb(255, 60, 60)
-                        } else {
-                            Color::Rgb(90, 20, 20)
-                        };
-                    } else {
-                        let planet_hue =
-                            (self.frame as f32 * 2.5 + planet.channel_idx as f32 * 30.0) % 360.0;
-                        let planet_value = 0.6 + planet.activity * 0.4;
-                        planet.color = _hsv(planet_hue, 1.0, planet_value);
+                // their color too: harvested channels — and, for the same
+                // reason as the activity above, channels tt-smi doesn't report
+                // at all — go dim gray (nothing to show), BIST-failed channels
+                // flicker bright/dark red as a fault beacon, and everything
+                // else (L1/L2 planets, and every DDR planet on a device with
+                // no per-channel block at all) keeps the existing hue-cycling
+                // look untouched.
+                let ddr_gddr = if planet.level == 2 { gddr } else { None };
+                if let Some(g) = ddr_gddr {
+                    match g.channels.iter().find(|c| c.channel == planet.channel_idx) {
+                        Some(c) if c.harvested => planet.color = Color::Rgb(60, 60, 60),
+                        Some(c) if !c.bist_pass => {
+                            let flicker = (self.frame / 3) % 2 == 0;
+                            planet.color = if flicker {
+                                Color::Rgb(255, 60, 60)
+                            } else {
+                                Color::Rgb(90, 20, 20)
+                            };
+                        }
+                        Some(_) => {
+                            let planet_hue = (self.frame as f32 * 2.5
+                                + planet.channel_idx as f32 * 30.0)
+                                % 360.0;
+                            let planet_value = 0.6 + planet.activity * 0.4;
+                            planet.color = _hsv(planet_hue, 1.0, planet_value);
+                        }
+                        // Beyond the set tt-smi reports: same inert dim gray a
+                        // harvested channel gets, never the hue-cycling look —
+                        // that would read as live data it isn't.
+                        None => planet.color = Color::Rgb(60, 60, 60),
                     }
                 } else {
                     let planet_hue = match planet.level {
@@ -1287,6 +1310,136 @@ mod tests {
         assert_eq!(
             channel1_activity, 0.0,
             "channel 1 is harvested and must show zero activity regardless of power/current"
+        );
+    }
+
+    /// Backend wrapper reporting a **sparse** `gddr_telemetry` block for
+    /// device 2 (a Blackhole `p150` in the mock's Mixed scenario, so
+    /// `memory_channels()` == 12): only channels 0 and 1 are described, both
+    /// healthy. This is the real tt-smi shape — it reports 8 channels on
+    /// hardware whose architecture declares 12 — reduced to the smallest
+    /// fixture that exhibits it.
+    struct SparseGddrBackend(crate::backend::mock::MockBackend);
+
+    impl TelemetryBackend for SparseGddrBackend {
+        fn init(&mut self) -> crate::error::BackendResult<()> {
+            self.0.init()
+        }
+        fn update(&mut self) -> crate::error::BackendResult<()> {
+            self.0.update()
+        }
+        fn devices(&self) -> &[crate::models::Device] {
+            self.0.devices()
+        }
+        fn telemetry(&self, device_idx: usize) -> Option<&crate::models::Telemetry> {
+            self.0.telemetry(device_idx)
+        }
+        fn smbus_telemetry(
+            &self,
+            device_idx: usize,
+        ) -> Option<&crate::models::telemetry::SmbusTelemetry> {
+            if device_idx == 2 {
+                use std::sync::OnceLock;
+                static SMBUS: OnceLock<crate::models::telemetry::SmbusTelemetry> = OnceLock::new();
+                Some(SMBUS.get_or_init(|| {
+                    use crate::models::telemetry::{GddrChannel, GddrTelemetry, SmbusTelemetry};
+                    let healthy = |channel: usize| GddrChannel {
+                        channel,
+                        harvested: false,
+                        enabled: true,
+                        training_pass: true,
+                        bist_pass: true,
+                        temp_top: Some(70.0),
+                        temp_bottom: Some(70.0),
+                        ..Default::default()
+                    };
+                    SmbusTelemetry {
+                        gddr_telemetry: Some(GddrTelemetry {
+                            speed: Some("16G".to_string()),
+                            max_temp: Some(70.0),
+                            enabled_mask: Some(0b11),
+                            channels: vec![healthy(0), healthy(1)],
+                        }),
+                        ..Default::default()
+                    }
+                }))
+            } else {
+                self.0.smbus_telemetry(device_idx)
+            }
+        }
+        fn backend_info(&self) -> String {
+            self.0.backend_info()
+        }
+    }
+
+    /// A DDR planet whose channel id is beyond what tt-smi reports must NOT
+    /// fall back to the generic power/current formula while its neighbours run
+    /// on real per-channel telemetry — that mixes two incommensurable signals
+    /// in one ring. It renders inert instead, exactly like a harvested channel.
+    ///
+    /// Colour is the discriminating assertion: the generic fallback's
+    /// hue-cycling branch is `hsv(h, 1.0, >= 0.6)`, which is fully saturated
+    /// and can never be the neutral gray used for "not tracked", whereas an
+    /// activity of `0.0` alone would be ambiguous (the generic formula can
+    /// legitimately produce 0.0 on an idle device).
+    #[test]
+    fn ddr_planet_beyond_reported_channels_is_inert_not_generic() {
+        let mut inner = crate::backend::mock::MockBackend::new(3);
+        inner.init().expect("mock backend init");
+        let backend = SparseGddrBackend(inner);
+        assert_eq!(
+            backend.devices()[2].architecture,
+            crate::models::Architecture::Blackhole,
+            "test setup: device 2 must be a Blackhole so memory_channels() (12) \
+             exceeds the 2 channels the fixture reports"
+        );
+        assert!(
+            backend.devices()[2].memory_channels() > 2,
+            "test setup: the architecture must declare more channels than the fixture reports"
+        );
+
+        let mut starfield = HardwareStarfield::new(120, 40);
+        starfield.initialize_from_devices(backend.devices());
+        // Several ticks so the adaptive baseline is past its learning phase and
+        // the generic power/current formula would have something real to say.
+        for _ in 0..25 {
+            starfield.update_from_telemetry(&backend);
+        }
+
+        let planet = |channel_idx: usize| {
+            starfield
+                .planets
+                .iter()
+                .find(|p| p.device_idx == 2 && p.level == 2 && p.channel_idx == channel_idx)
+                .unwrap_or_else(|| {
+                    panic!("device 2 must have a DDR planet for channel {channel_idx}")
+                })
+        };
+
+        // Channel 10: no tt-smi counterpart → inert, and unmistakably so.
+        let untracked = planet(10);
+        assert_eq!(
+            untracked.activity, 0.0,
+            "an unreported channel must not borrow the generic power/current activity"
+        );
+        assert_eq!(
+            untracked.color,
+            Color::Rgb(60, 60, 60),
+            "an unreported channel must use the same neutral gray a harvested \
+             channel gets, never the generic hue-cycling look"
+        );
+
+        // Channel 0 is really reported: the real-data path is untouched.
+        let tracked = planet(0);
+        assert!(
+            tracked.activity > 0.7,
+            "channel 0 at 70°C real temp should read as high activity (70/90); got {}",
+            tracked.activity
+        );
+        assert_ne!(
+            tracked.color,
+            Color::Rgb(60, 60, 60),
+            "a real, healthy channel must not render as 'not tracked'"
         );
     }
 
