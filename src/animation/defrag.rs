@@ -12,13 +12,14 @@
 //! | Signal           | Meaning in view                                  |
 //! |------------------|--------------------------------------------------|
 //! | aiclk            | Phase: 0 = DMA loading, high = executing         |
-//! | DDR_STATUS nibble| Per-channel init state (trained / untrained)     |
-//! | GDDR_x_y_TEMP    | Per-channel heat → color saturation & shimmer    |
+//! | DDR_STATUS nibble| Per-channel init state (trained / untrained) — used only when `gddr_telemetry` (tt-smi >= 6.3.0) is absent |
+//! | gddr_telemetry   | Real per-channel training/BIST/harvested/temp/directional ECC (tt-smi >= 6.3.0) — preferred over every packed signal below when present |
+//! | GDDR_x_y_TEMP    | Per-channel heat → color saturation & shimmer (packed-pair fallback) |
 //! | PCIe usage       | DMA bandwidth → write-head sweep speed           |
 //! | ETH_LIVE_STATUS  | Inter-chip links → link-pulse animation          |
-//! | ENABLED_GDDR     | Which channels exist on this chip                |
+//! | ENABLED_GDDR     | Which channels exist on this chip (packed-pair fallback) |
 //! | heartbeat        | ARC alive → periodic global pulse                |
-//! | corr_errs        | GDDR correctable errors → glitch flash           |
+//! | corr_errs        | GDDR correctable errors → glitch flash (packed-pair fallback; real per-channel corr/uncorr sums preferred) |
 //! | power (TDP)      | Overall load → brightness                        |
 //!
 //! ## Block states
@@ -30,6 +31,9 @@
 //! █  resident / written                   (full, colored by temp)
 //! ·  seek ahead of frontier               (faint dot)
 //! ✗  correctable error flash              (brief red, then heals)
+//! ✗  uncorrectable error flash            (brighter, longer-lived red — real per-channel data only)
+//! ✗  bad sector (BIST-fail)               (static dim red, whole row — permanent, real per-channel data only)
+//! ╌  disabled / harvested channel         (static dim gray, whole row)
 //! ```
 //!
 //! ## Phases
@@ -109,19 +113,34 @@ enum Phase {
 #[derive(Debug, Clone)]
 struct Channel {
     /// DDR training status nibble for this channel-pair (0=untrained, 5=trained).
+    /// With real per-channel data (tt-smi >= 6.3.0) this is exact per channel
+    /// instead of shared across a pair.
     trained: bool,
     /// Fill fraction [0, 1] — how much of the channel's GDDR capacity is loaded.
     fill: f32,
     /// Smoothed temperature (EMA).
     temp_ema: f32,
-    /// Correctable error count (last seen).
-    last_corr_errs: u32,
-    /// Frames remaining to show an error flash.
+    /// Correctable error count (last seen) — real per-channel `corr_rd+corr_wr`
+    /// when available, else the packed pair counter widened to u64.
+    last_corr_errs: u64,
+    /// Frames remaining to show a correctable-error flash.
     err_flash: u8,
     /// Whether this channel is physically enabled on this chip.
     enabled: bool,
     /// Write-head position (0..=1) during DMA — trails behind `fill`.
     head_pos: f32,
+    /// Permanent (non-transient) bad-sector state: this channel failed BIST.
+    /// Real per-channel data only (tt-smi >= 6.3.0) — always `false` without
+    /// it, since the packed registers carry no BIST-pass signal at all.
+    bist_fail: bool,
+    /// Uncorrectable error count (last seen). Real per-channel data only —
+    /// the packed registers have no directional/uncorrectable breakdown, so
+    /// this stays at 0 (never flashes) without `gddr_telemetry`.
+    last_uncorr_errs: u64,
+    /// Frames remaining to show an uncorrectable-error flash — harsher and
+    /// longer than `err_flash`, since uncorrectable errors are the more
+    /// severe signal (data corruption risk, not just a corrected bit).
+    uncorr_flash: u8,
 }
 
 impl Channel {
@@ -134,6 +153,9 @@ impl Channel {
             err_flash: 0,
             enabled: true,
             head_pos: 0.0,
+            bist_fail: false,
+            last_uncorr_errs: 0,
+            uncorr_flash: 0,
         }
     }
 }
@@ -292,7 +314,18 @@ impl DefragVis {
                 ds.heartbeat_pulse -= 1;
             }
 
-            // Per-channel temps from SMBUS
+            // Real per-channel GDDR telemetry (tt-smi >= 6.3.0), when this
+            // device reports it. Falls back to the packed pair-resolution
+            // registers below when absent or empty — no version-string
+            // gating anywhere, purely data-presence-driven, matching every
+            // other consumer of this field.
+            let gddr = smbus
+                .and_then(|s| s.gddr_telemetry.as_ref())
+                .filter(|g| !g.channels.is_empty());
+
+            // Per-channel temps from SMBUS (packed-pair fallback only — real
+            // per-channel temp_top/temp_bottom is read directly from `gddr`
+            // per channel below).
             let ch_temps: [f32; GDDR_CHANNELS] = if let Some(s) = smbus {
                 [
                     s.gddr_temps[0].map(|p| p.0[0]).unwrap_or(25.0),
@@ -308,12 +341,14 @@ impl DefragVis {
                 [25.0; GDDR_CHANNELS]
             };
 
-            // Per-channel DDR training status (nibble per channel-pair from DDR_STATUS)
+            // Per-channel DDR training status (nibble per channel-pair from
+            // DDR_STATUS) — packed-pair fallback only; real per-channel
+            // `training_pass` is read from `gddr` per channel below.
             let ddr_mask: u64 = smbus
                 .and_then(|s| s.ddr_status_bitmask())
                 .unwrap_or(0xffff_ffff_ffff_ffff); // assume trained if no smbus
 
-            // ENABLED_GDDR bitmask — one bit per channel
+            // ENABLED_GDDR bitmask — one bit per channel (packed-pair fallback only).
             let enabled_mask: u8 = smbus
                 .and_then(|s| s.enabled_gddr)
                 .map(|v| v as u8)
@@ -331,7 +366,9 @@ impl DefragVis {
                 .map(|v| v.count_ones())
                 .unwrap_or(0);
 
-            // Per-channel correctable errors (one counter per pair)
+            // Per-channel correctable errors (one counter per pair) —
+            // packed-pair fallback only; real per-channel `corr_rd`/`corr_wr`/
+            // `uncorr_rd`/`uncorr_wr` are read from `gddr` per channel below.
             let corr: [u32; 4] = if let Some(s) = smbus {
                 [
                     s.gddr_corr_errs[0].unwrap_or(0),
@@ -345,23 +382,74 @@ impl DefragVis {
 
             // Update per-channel static properties
             for (ch_idx, ch) in ds.channels.iter_mut().enumerate() {
-                ch.enabled = (enabled_mask >> ch_idx) & 1 == 1;
-                ch.temp_ema = ch.temp_ema * 0.92 + ch_temps[ch_idx] * 0.08;
+                // Real per-channel data takes priority when this device
+                // reports it. A channel id absent from the real set (e.g. a
+                // dropped malformed entry, or an architectural channel tt-smi
+                // doesn't address) is treated as inert/absent rather than
+                // falling back to the packed-pair registers for just that
+                // channel — mixing a real-data device's channels between two
+                // unrelated sources would misrepresent both.
+                let real_channel =
+                    gddr.and_then(|g| g.channels.iter().find(|c| c.channel == ch_idx));
 
-                // DDR_STATUS: 4 bits per channel-pair; nibble 0 = channels 0-1, etc.
-                // Bit pattern 0x5 = trained for a pair.
-                let nibble_idx = ch_idx / 2;
-                let nibble = ((ddr_mask >> (nibble_idx * 4)) & 0xf) as u8;
-                ch.trained = nibble >= 4; // 4=init, 5=trained
+                match real_channel {
+                    Some(rc) => {
+                        ch.enabled = rc.enabled;
+                        ch.trained = rc.training_pass;
+                        // A harvested channel has nothing to BIST — don't mark
+                        // it as a fault on top of already being absent.
+                        ch.bist_fail = !rc.harvested && !rc.bist_pass;
 
-                // Error flash detection
-                let pair_errs = corr[ch_idx / 2];
-                if pair_errs > ch.last_corr_errs {
-                    ch.err_flash = 12; // flash for ~12 frames
+                        let real_temp = match (rc.temp_top, rc.temp_bottom) {
+                            (Some(t), Some(b)) => (t + b) / 2.0,
+                            (Some(t), None) | (None, Some(t)) => t,
+                            (None, None) => ch.temp_ema, // no reading this tick — hold steady
+                        };
+                        ch.temp_ema = ch.temp_ema * 0.92 + real_temp * 0.08;
+
+                        let corr_sum = rc.corr_rd.saturating_add(rc.corr_wr);
+                        if corr_sum > ch.last_corr_errs {
+                            ch.err_flash = 12; // flash for ~12 frames
+                        }
+                        ch.last_corr_errs = corr_sum;
+
+                        let uncorr_sum = rc.uncorr_rd.saturating_add(rc.uncorr_wr);
+                        if uncorr_sum > ch.last_uncorr_errs {
+                            ch.uncorr_flash = 20; // longer than a correctable flash
+                        }
+                        ch.last_uncorr_errs = uncorr_sum;
+                    }
+                    None if gddr.is_some() => {
+                        ch.enabled = false;
+                        ch.trained = false;
+                        ch.bist_fail = false;
+                    }
+                    None => {
+                        // No real per-channel data for this device at all —
+                        // exact pre-feature behavior, byte-for-byte.
+                        ch.enabled = (enabled_mask >> ch_idx) & 1 == 1;
+                        ch.temp_ema = ch.temp_ema * 0.92 + ch_temps[ch_idx] * 0.08;
+
+                        // DDR_STATUS: 4 bits per channel-pair; nibble 0 = channels 0-1, etc.
+                        // Bit pattern 0x5 = trained for a pair.
+                        let nibble_idx = ch_idx / 2;
+                        let nibble = ((ddr_mask >> (nibble_idx * 4)) & 0xf) as u8;
+                        ch.trained = nibble >= 4; // 4=init, 5=trained
+                        ch.bist_fail = false;
+
+                        let pair_errs = corr[ch_idx / 2] as u64;
+                        if pair_errs > ch.last_corr_errs {
+                            ch.err_flash = 12; // flash for ~12 frames
+                        }
+                        ch.last_corr_errs = pair_errs;
+                    }
                 }
-                ch.last_corr_errs = pair_errs;
+
                 if ch.err_flash > 0 {
                     ch.err_flash -= 1;
+                }
+                if ch.uncorr_flash > 0 {
+                    ch.uncorr_flash -= 1;
                 }
             }
 
@@ -895,13 +983,29 @@ impl DefragVis {
         let fill = ch.map(|c| c.fill).unwrap_or(0.0);
         let ch_temp = ch.map(|c| c.temp_ema).unwrap_or(asic_temp);
         let err_flash = ch.map(|c| c.err_flash).unwrap_or(0);
+        let uncorr_flash = ch.map(|c| c.uncorr_flash).unwrap_or(0);
+        let bist_fail = ch.map(|c| c.bist_fail).unwrap_or(false);
 
         if !enabled {
-            // Disabled channel: hatched
+            // Disabled/harvested channel: hatched
             let s: String = (0..grid_w).map(|_| '╌').collect();
             spans.push(Span::styled(
                 s,
                 Style::default().fg(colors::rgb(30, 30, 40)),
+            ));
+            return;
+        }
+
+        if bist_fail {
+            // Bad sector: this channel exists but failed BIST — a permanent
+            // fault (real per-channel data only), not a transient error.
+            // Static (no animation, no fill/drain/frontier) so it reads as
+            // distinct from both the harvested hatch above and the brief
+            // bright flash used for a live correctable/uncorrectable error.
+            let s: String = (0..grid_w).map(|_| '✗').collect();
+            spans.push(Span::styled(
+                s,
+                Style::default().fg(colors::rgb(120, 25, 25)),
             ));
             return;
         }
@@ -1013,6 +1117,14 @@ impl DefragVis {
         };
 
         // --- Error flash cell (if active) ---
+        // Uncorrectable takes precedence when both are active — it's the
+        // more severe signal (real per-channel data only; without it,
+        // uncorr_flash is always 0 and this branch never lights up).
+        let uncorr_flash_col = if uncorr_flash > 0 {
+            Some(resident_cells.saturating_sub(1))
+        } else {
+            None
+        };
         let flash_col = if err_flash > 0 {
             Some(resident_cells.saturating_sub(1))
         } else {
@@ -1049,8 +1161,15 @@ impl DefragVis {
 
         // --- Resident region (col 0..resident_cells) ---
         for col in 0..resident_cells.min(cells) {
-            let (glyph, style) = if flash_col == Some(col) {
-                // Error flash: dark red ✗ — not white, uses block glyph intensity
+            let (glyph, style) = if uncorr_flash_col == Some(col) {
+                // Uncorrectable error flash: brighter and longer-lived than a
+                // correctable flash (no 0.55 cap) — data corruption risk,
+                // not just a corrected bit.
+                let intensity = (uncorr_flash as f32 / 20.0).max(0.35);
+                let ec = hsv_to_rgb(0.0, 1.0, intensity);
+                ('✗', Style::default().fg(ec).add_modifier(Modifier::BOLD))
+            } else if flash_col == Some(col) {
+                // Correctable error flash: dark red ✗ — not white, uses block glyph intensity
                 let intensity = err_flash as f32 / 12.0 * 0.55; // cap at 0.55
                 let ec = hsv_to_rgb(0.0, 1.0, intensity);
                 ('✗', Style::default().fg(ec).add_modifier(Modifier::BOLD))
@@ -1638,5 +1757,287 @@ mod tests {
         assert!(!evict_eligible(50, Some(0), 15.0, 15.0, true));
         // Never entered Running → not eligible.
         assert!(!evict_eligible(200, None, 15.0, 15.0, true));
+    }
+
+    // ── Real per-channel gddr_telemetry (tt-smi >= 6.3.0) ──────────────────
+
+    use crate::models::telemetry::{GddrChannel, GddrTelemetry};
+    use crate::models::{Device, SmbusTelemetry, Telemetry};
+
+    /// A minimal backend fixture with full control over one device's
+    /// telemetry/SMBUS state — used to exercise `update()`'s real-vs-packed
+    /// data sourcing precisely, which none of this file's other tests
+    /// (which manipulate `Channel`/`DeviceState` fields directly) touch.
+    struct FakeBackend {
+        devices: Vec<Device>,
+        telemetry: Vec<Telemetry>,
+        smbus: Vec<SmbusTelemetry>,
+    }
+
+    impl FakeBackend {
+        fn one_device(power: f32, smbus: SmbusTelemetry) -> Self {
+            let device = Device::new(
+                0,
+                "p300c".to_string(),
+                "0000:01:00.0".to_string(),
+                String::new(),
+            );
+            let telemetry = Telemetry {
+                voltage: Some(0.72),
+                current: Some(20.0),
+                power: Some(power),
+                asic_temperature: Some(40.0),
+                aiclk: Some(200),
+                heartbeat: Some(1),
+                timestamp: chrono::Utc::now(),
+                board_power: None,
+            };
+            Self {
+                devices: vec![device],
+                telemetry: vec![telemetry],
+                smbus: vec![smbus],
+            }
+        }
+    }
+
+    impl TelemetryBackend for FakeBackend {
+        fn init(&mut self) -> crate::error::BackendResult<()> {
+            Ok(())
+        }
+        fn update(&mut self) -> crate::error::BackendResult<()> {
+            Ok(())
+        }
+        fn devices(&self) -> &[Device] {
+            &self.devices
+        }
+        fn telemetry(&self, device_idx: usize) -> Option<&Telemetry> {
+            self.telemetry.get(device_idx)
+        }
+        fn smbus_telemetry(&self, device_idx: usize) -> Option<&SmbusTelemetry> {
+            self.smbus.get(device_idx)
+        }
+        fn backend_info(&self) -> String {
+            "fake".to_string()
+        }
+    }
+
+    fn healthy_channel(channel: usize) -> GddrChannel {
+        GddrChannel {
+            channel,
+            harvested: false,
+            enabled: true,
+            training_pass: true,
+            bist_pass: true,
+            temp_top: Some(40.0),
+            temp_bottom: Some(42.0),
+            corr_rd: 0,
+            corr_wr: 0,
+            uncorr_rd: 0,
+            uncorr_wr: 0,
+        }
+    }
+
+    #[test]
+    fn real_per_channel_data_overrides_packed_pair_decode_at_true_resolution() {
+        // Packed DDR_STATUS would decode BOTH channels 0 and 1 (same nibble,
+        // pair index 0) as untrained: nibble 0x0. If real data weren't
+        // consulted, both would show `trained = false`. Real gddr_telemetry
+        // says channel 0 is trained and channel 1 is harvested — a
+        // distinction the packed pair-nibble simply cannot express.
+        let mut smbus = SmbusTelemetry::new();
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            speed: Some("16G".to_string()),
+            max_temp: Some(42.0),
+            enabled_mask: Some(0xff),
+            channels: vec![
+                healthy_channel(0),
+                GddrChannel {
+                    harvested: true,
+                    enabled: false,
+                    training_pass: false,
+                    bist_pass: false,
+                    ..healthy_channel(1)
+                },
+            ],
+        });
+        // ddr_status_bitmask() decodes to 0x0 for the pair (untrained) — the
+        // opposite of what real data says for channel 0.
+        smbus.ddr_status = Some("0x0".to_string());
+
+        let backend = FakeBackend::one_device(20.0, smbus);
+        let mut dv = DefragVis::new(120, 40);
+        dv.update(&backend);
+
+        let ds = &dv.devices[&0];
+        assert!(
+            ds.channels[0].trained,
+            "channel 0's real training_pass=true must win over the packed pair decode"
+        );
+        assert!(
+            !ds.channels[1].enabled,
+            "channel 1's real harvested=true must win over the packed pair decode"
+        );
+    }
+
+    #[test]
+    fn real_per_channel_temp_overrides_packed_pair_temp() {
+        use crate::models::telemetry::GddrTempPair;
+
+        let mut smbus = SmbusTelemetry::new();
+        // Packed pair temp for channel 0 (pair 0, slot 0) says 25°C.
+        smbus.gddr_temps[0] = Some(GddrTempPair([25.0, 25.0, 25.0, 25.0]));
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            speed: Some("16G".to_string()),
+            max_temp: Some(80.0),
+            enabled_mask: Some(0xff),
+            channels: vec![GddrChannel {
+                temp_top: Some(80.0),
+                temp_bottom: Some(80.0),
+                ..healthy_channel(0)
+            }],
+        });
+
+        let backend = FakeBackend::one_device(20.0, smbus);
+        let mut dv = DefragVis::new(120, 40);
+        for _ in 0..50 {
+            dv.update(&backend);
+        }
+
+        let ds = &dv.devices[&0];
+        assert!(
+            ds.channels[0].temp_ema > 60.0,
+            "temp_ema={} should have converged toward the real 80°C reading, \
+             not the packed pair's 25°C",
+            ds.channels[0].temp_ema
+        );
+    }
+
+    #[test]
+    fn bist_fail_channel_renders_a_static_bad_sector_distinct_from_harvested_and_flash() {
+        let mut smbus = SmbusTelemetry::new();
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            speed: Some("16G".to_string()),
+            max_temp: Some(40.0),
+            enabled_mask: Some(0xff),
+            channels: vec![GddrChannel {
+                bist_pass: false,
+                ..healthy_channel(0)
+            }],
+        });
+
+        let backend = FakeBackend::one_device(20.0, smbus);
+        let mut dv = DefragVis::new(120, 40);
+        dv.update(&backend);
+
+        assert!(
+            dv.devices[&0].channels[0].bist_fail,
+            "bist_pass=false, harvested=false must set bist_fail"
+        );
+
+        let lines = dv.render(&backend);
+        let bad_sector_style = Style::default().fg(colors::rgb(120, 25, 25));
+        let has_bad_sector_row = lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content.contains('✗') && s.style == bad_sector_style)
+        });
+        assert!(
+            has_bad_sector_row,
+            "expected a static bad-sector '✗' span styled distinctly from the harvested hatch and the bright error flash"
+        );
+    }
+
+    #[test]
+    fn harvested_channel_does_not_also_render_as_bist_fail() {
+        // A harvested channel has nothing to BIST — it must take the
+        // existing "disabled" hatch, never the new bad-sector state, even
+        // if its bist_pass happens to read false.
+        let mut smbus = SmbusTelemetry::new();
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            speed: Some("16G".to_string()),
+            max_temp: Some(40.0),
+            enabled_mask: Some(0xff),
+            channels: vec![GddrChannel {
+                harvested: true,
+                enabled: false,
+                bist_pass: false,
+                ..healthy_channel(0)
+            }],
+        });
+
+        let backend = FakeBackend::one_device(20.0, smbus);
+        let mut dv = DefragVis::new(120, 40);
+        dv.update(&backend);
+
+        assert!(
+            !dv.devices[&0].channels[0].bist_fail,
+            "a harvested channel must never be flagged bist_fail"
+        );
+    }
+
+    #[test]
+    fn uncorrectable_error_flash_is_brighter_and_longer_than_correctable() {
+        let mut smbus = SmbusTelemetry::new();
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            speed: Some("16G".to_string()),
+            max_temp: Some(40.0),
+            enabled_mask: Some(0xff),
+            channels: vec![healthy_channel(0)],
+        });
+        let backend = FakeBackend::one_device(20.0, smbus.clone());
+        let mut dv = DefragVis::new(120, 40);
+        dv.update(&backend); // establish baseline (0 errors seen)
+
+        // Bump only the uncorrectable counter — correctable stays at 0.
+        let mut smbus2 = smbus;
+        smbus2.gddr_telemetry.as_mut().unwrap().channels[0].uncorr_rd = 3;
+        let backend2 = FakeBackend::one_device(20.0, smbus2);
+        dv.update(&backend2);
+
+        let ch = &dv.devices[&0].channels[0];
+        assert_eq!(
+            ch.uncorr_flash, 19,
+            "uncorr_flash set to 20, then one decrement this frame"
+        );
+        assert_eq!(
+            ch.err_flash, 0,
+            "a purely uncorrectable bump must not also trigger the correctable flash"
+        );
+    }
+
+    #[test]
+    fn no_gddr_telemetry_falls_back_to_byte_identical_packed_pair_behavior() {
+        // Exact pre-feature fixture: packed registers only, gddr_telemetry
+        // absent. Every field must land exactly where the old pair-decode
+        // logic would have put it.
+        let mut smbus = SmbusTelemetry::new();
+        smbus.ddr_status = Some("0x55".to_string()); // both nibbles = 5 (trained)
+        smbus.enabled_gddr = Some(0x03); // channels 0,1 enabled; rest disabled
+        smbus.gddr_corr_errs = [Some(4), None, None, None];
+
+        let backend = FakeBackend::one_device(20.0, smbus);
+        let mut dv = DefragVis::new(120, 40);
+        dv.update(&backend);
+
+        let ds = &dv.devices[&0];
+        assert!(ds.channels[0].trained, "nibble 5 decodes to trained");
+        assert!(ds.channels[0].enabled, "bit 0 set → channel 0 enabled");
+        assert!(!ds.channels[2].enabled, "bit 2 clear → channel 2 disabled");
+        assert!(
+            !ds.channels[0].bist_fail,
+            "bist_fail is always false on the fallback path"
+        );
+        assert_eq!(
+            ds.channels[0].last_corr_errs, 4,
+            "packed pair-0 corr count for channel 0"
+        );
+        assert_eq!(
+            ds.channels[0].err_flash, 11,
+            "flash set to 12, then decremented once this same frame"
+        );
+        assert_eq!(
+            ds.channels[0].last_uncorr_errs, 0,
+            "no uncorrectable signal exists in the packed registers"
+        );
     }
 }

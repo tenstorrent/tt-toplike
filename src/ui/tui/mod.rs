@@ -3658,6 +3658,15 @@ fn defrag_legend_lines(
             Span::styled(" peak activity", Style::default().fg(dim))
         ]),
         ln!(vec![
+            Span::styled("✗", Style::default().fg(colors::rgb(120, 25, 25))),
+            Span::styled(
+                " bad sector (BIST-fail, static)  ",
+                Style::default().fg(dim)
+            ),
+            Span::styled("✗", Style::default().fg(colors::rgb(255, 60, 60))),
+            Span::styled(" uncorr flash", Style::default().fg(dim))
+        ]),
+        ln!(vec![
             Span::styled("EVICT     ", Style::default().fg(colors::rgb(255, 100, 80))),
             Span::styled("= model unload surge", Style::default().fg(dim))
         ]),
