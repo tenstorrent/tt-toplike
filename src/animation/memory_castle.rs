@@ -860,9 +860,14 @@ impl MemoryCastle {
     /// differences are: an abbreviated header (`D{idx} {power}W`, no numeric
     /// temperature — temperature is still legible via the shared
     /// `render_background`/particle coloring, which is unchanged), a
-    /// dedicated one-row DDR "gate" indicator (one glyph per two memory
-    /// channels, since a narrow column can't reliably show the full-mode
-    /// modulo-spaced wall pattern), and a halved (but never-zero) per-device
+    /// dedicated one-row DDR "gate" indicator — one glyph per **real** GDDR
+    /// channel, colored per-channel (harvested → dim gray, BIST-fail →
+    /// alarm red, else the existing hue-cycling glow), when
+    /// `SmbusTelemetry.gddr_telemetry` is present (tt-smi >= 6.3.0); falls
+    /// back to the old one-glyph-per-two-memory-channels generic indicator
+    /// (uniformly colored, no per-channel state) when it isn't, since a
+    /// narrow column can't reliably show the full-mode modulo-spaced wall
+    /// pattern either way — and a halved (but never-zero) per-device
     /// live-particle budget so narrow columns don't look like static.
     fn render_compact(&self, backend: &dyn TelemetryBackend) -> Vec<Line<'static>> {
         let devices = backend.devices();
@@ -1750,7 +1755,7 @@ mod tests {
     /// (4+1)/2 = 2 glyphs under the old generic-pair fallback — a
     /// distinctive mismatch that proves the real data is driving the row.
     #[test]
-    fn ddr_gate_row_uses_real_channel_count_and_state_when_present() {
+    fn ddr_gate_row_uses_real_channel_count_when_present() {
         let mut backend = MockBackend::new(10);
         backend.init().expect("mock backend init");
 
@@ -1771,6 +1776,137 @@ mod tests {
         assert_eq!(
             glyph_count, 8,
             "DDR gate row for device 0 should show 8 real GDDR channels, not the generic 2-gate pair count; got column {:?}",
+            device0_col
+        );
+    }
+
+    /// The DDR gate row must reflect real per-channel *state*, not just real
+    /// per-channel *count* — a harvested channel renders `'·'` and a
+    /// BIST-failed channel renders `'✗'`, distinct from a healthy channel's
+    /// `'▪'`. `MockScenario::QuadGalaxy` harvests channel 3 and BIST-fails
+    /// channel 5 specifically on devices where `device_idx % 17 == 0`
+    /// (device 0 qualifies). A 1100-col terminal with QuadGalaxy's 128
+    /// devices lands in the Compact tier: usable = 1098, per-device
+    /// `col_width` = 1098/128 = 8, which exactly fits all 8 real channels
+    /// with zero padding, so device 0's column is precisely its 8 channel
+    /// glyphs in order.
+    #[test]
+    fn ddr_gate_row_reflects_harvested_and_bist_fail_channel_state() {
+        use crate::backend::mock::MockScenario;
+
+        let mut backend = MockBackend::with_scenario(MockScenario::QuadGalaxy);
+        backend.init().expect("mock backend init");
+
+        let castle = MemoryCastle::new(1100, 40);
+        assert_eq!(castle_tier(1100, 128), CastleTier::Compact);
+
+        let lines = castle.render(&backend);
+        let gate_line = &lines[3];
+        let text: String = gate_line.spans.iter().map(|s| s.content.as_ref()).collect();
+
+        let col_width = (1100usize.saturating_sub(2)) / backend.devices().len();
+        assert_eq!(
+            col_width, 8,
+            "test assumption: col_width must exactly fit 8 real channels with no padding"
+        );
+        let device0_col: String = text.chars().skip(2).take(col_width).collect();
+
+        assert_eq!(
+            device0_col.chars().filter(|&c| c == '·').count(),
+            1,
+            "harvested channel 3 should render as a single '·'; got column {:?}",
+            device0_col
+        );
+        assert_eq!(
+            device0_col.chars().filter(|&c| c == '✗').count(),
+            1,
+            "BIST-failed channel 5 should render as a single '✗'; got column {:?}",
+            device0_col
+        );
+        assert_eq!(
+            device0_col.chars().filter(|&c| c == '▪').count(),
+            6,
+            "the remaining 6 healthy channels should render as '▪'; got column {:?}",
+            device0_col
+        );
+    }
+
+    /// Backend wrapper that delegates every `TelemetryBackend`-required
+    /// method to an inner `MockBackend`, but always reports `None` for
+    /// `smbus_telemetry` — simulating a backend with no GDDR telemetry at
+    /// all (e.g. a stock JSON/sysfs read against an older tt-smi). Used to
+    /// drive `render_compact`'s DDR gate row down its fallback branch, since
+    /// `MockBackend` itself always populates `gddr_telemetry` (Task 4) and
+    /// so can never reach that branch on its own.
+    struct NoSmbusBackend(MockBackend);
+
+    impl TelemetryBackend for NoSmbusBackend {
+        fn init(&mut self) -> crate::error::BackendResult<()> {
+            self.0.init()
+        }
+        fn update(&mut self) -> crate::error::BackendResult<()> {
+            self.0.update()
+        }
+        fn devices(&self) -> &[crate::models::Device] {
+            self.0.devices()
+        }
+        fn telemetry(&self, device_idx: usize) -> Option<&crate::models::Telemetry> {
+            self.0.telemetry(device_idx)
+        }
+        fn smbus_telemetry(
+            &self,
+            _device_idx: usize,
+        ) -> Option<&crate::models::telemetry::SmbusTelemetry> {
+            None
+        }
+        fn backend_info(&self) -> String {
+            self.0.backend_info()
+        }
+    }
+
+    /// Regression guard for the fallback branch: with no `gddr_telemetry`
+    /// available at all, the DDR gate row must render exactly the old
+    /// generic per-pair pattern — `((channels + 1) / 2)` uniform `'▪'`
+    /// glyphs — not the new real-channel path (which must not be reachable
+    /// without smbus data) and not a blank/empty row.
+    #[test]
+    fn ddr_gate_row_falls_back_to_generic_pair_count_without_gddr_telemetry() {
+        let mut inner = MockBackend::new(10);
+        inner.init().expect("mock backend init");
+        let backend = NoSmbusBackend(inner);
+        assert!(
+            backend.smbus_telemetry(0).is_none(),
+            "test setup: wrapper must report no smbus telemetry"
+        );
+
+        let castle = MemoryCastle::new(122, 40);
+        assert_eq!(castle_tier(122, 10), CastleTier::Compact);
+
+        let lines = castle.render(&backend);
+        let gate_line = &lines[3];
+        let text: String = gate_line.spans.iter().map(|s| s.content.as_ref()).collect();
+
+        let col_width = (122usize.saturating_sub(2)) / backend.devices().len();
+        let device0_col: String = text.chars().skip(2).take(col_width).collect();
+
+        // Device 0 is Grayskull (e150, 4 memory channels) → generic fallback
+        // gates = (4+1)/2 = 2, always '▪' (no harvested/BIST-fail state
+        // exists in the fallback path).
+        let glyph_count = device0_col.chars().filter(|&c| c != ' ').count();
+        assert_eq!(
+            glyph_count, 2,
+            "fallback DDR gate row for device 0 should show the generic 2-gate pair count; got column {:?}",
+            device0_col
+        );
+        assert_eq!(
+            device0_col.chars().filter(|&c| c == '▪').count(),
+            2,
+            "fallback glyphs must be the uniform '▪' gate character; got column {:?}",
+            device0_col
+        );
+        assert!(
+            !device0_col.contains('·') && !device0_col.contains('✗'),
+            "fallback path has no per-channel state, so harvested/BIST-fail glyphs must not appear; got column {:?}",
             device0_col
         );
     }
