@@ -652,7 +652,8 @@ impl HardwareStarfield {
                     2 => {
                         // DDR: prefer real per-channel gddr_telemetry state
                         // (tt-smi >= 6.3.0) over the generic power/current
-                        // proxy — a harvested channel is definitionally idle,
+                        // proxy — a harvested or administratively-disabled
+                        // channel is definitionally idle,
                         // a BIST-failed channel is a fault (max activity, not
                         // a number derived from unrelated power draw), and a
                         // healthy channel's real temperature is a much better
@@ -682,7 +683,7 @@ impl HardwareStarfield {
                             }
                             Some(g) => {
                                 match g.channels.iter().find(|c| c.channel == planet.channel_idx) {
-                                    Some(c) if c.harvested => 0.0,
+                                    Some(c) if c.harvested || !c.enabled => 0.0,
                                     Some(c) if !c.bist_pass => 1.0, // max activity: flag the fault
                                     Some(c) => {
                                         let avg_temp = match (c.temp_top, c.temp_bottom) {
@@ -705,9 +706,10 @@ impl HardwareStarfield {
                 // per-channel offset spreads the colours so they aren't all in sync.
                 use crate::animation::hsv_to_rgb as _hsv;
                 // DDR planets prefer real per-channel gddr_telemetry state for
-                // their color too: harvested channels — and, for the same
-                // reason as the activity above, channels tt-smi doesn't report
-                // at all — go dim gray (nothing to show), BIST-failed channels
+                // their color too: harvested or administratively-disabled
+                // channels — and, for the same reason as the activity above,
+                // channels tt-smi doesn't report at all — go dim gray (nothing
+                // to show), BIST-failed channels
                 // flicker bright/dark red as a fault beacon, and everything
                 // else (L1/L2 planets, and every DDR planet on a device with
                 // no per-channel block at all) keeps the existing hue-cycling
@@ -715,7 +717,9 @@ impl HardwareStarfield {
                 let ddr_gddr = if planet.level == 2 { gddr } else { None };
                 if let Some(g) = ddr_gddr {
                     match g.channels.iter().find(|c| c.channel == planet.channel_idx) {
-                        Some(c) if c.harvested => planet.color = Color::Rgb(60, 60, 60),
+                        Some(c) if c.harvested || !c.enabled => {
+                            planet.color = Color::Rgb(60, 60, 60)
+                        }
                         Some(c) if !c.bist_pass => {
                             let flicker = (self.frame / 3) % 2 == 0;
                             planet.color = if flicker {
@@ -1234,10 +1238,10 @@ mod tests {
                             bist_pass: true,
                             temp_top: Some(80.0),
                             temp_bottom: Some(80.0),
-                            corr_rd: 0,
-                            corr_wr: 0,
-                            uncorr_rd: 0,
-                            uncorr_wr: 0,
+                            corr_rd: Some(0),
+                            corr_wr: Some(0),
+                            uncorr_rd: Some(0),
+                            uncorr_wr: Some(0),
                         },
                         GddrChannel {
                             channel: 1,
@@ -1247,10 +1251,10 @@ mod tests {
                             bist_pass: true,
                             temp_top: None,
                             temp_bottom: None,
-                            corr_rd: 0,
-                            corr_wr: 0,
-                            uncorr_rd: 0,
-                            uncorr_wr: 0,
+                            corr_rd: Some(0),
+                            corr_wr: Some(0),
+                            uncorr_rd: Some(0),
+                            uncorr_wr: Some(0),
                         },
                     ];
                     SmbusTelemetry {
@@ -1440,6 +1444,97 @@ mod tests {
             tracked.color,
             Color::Rgb(60, 60, 60),
             "a real, healthy channel must not render as 'not tracked'"
+        );
+    }
+
+    /// Regression test: a channel that is `enabled: false` but NOT
+    /// `harvested` (administratively disabled, not fused off — distinct
+    /// states in `gddr_telemetry`) must render inert like a harvested
+    /// channel, matching memory_flow.rs's `c.harvested || !c.enabled`
+    /// convention. Starfield previously checked only `harvested`, so this
+    /// state fell through to the healthy arm and rendered a live, glowing,
+    /// temperature-tracking planet — inconsistent with Memory Flow showing
+    /// the same hardware state as dark/inactive on the same telemetry tick.
+    #[test]
+    fn ddr_planet_inert_when_disabled_but_not_harvested() {
+        struct DisabledNotHarvestedBackend(crate::backend::mock::MockBackend);
+        impl crate::backend::TelemetryBackend for DisabledNotHarvestedBackend {
+            fn init(&mut self) -> crate::error::BackendResult<()> {
+                self.0.init()
+            }
+            fn update(&mut self) -> crate::error::BackendResult<()> {
+                self.0.update()
+            }
+            fn devices(&self) -> &[crate::models::Device] {
+                self.0.devices()
+            }
+            fn telemetry(&self, device_idx: usize) -> Option<&crate::models::Telemetry> {
+                self.0.telemetry(device_idx)
+            }
+            fn smbus_telemetry(
+                &self,
+                device_idx: usize,
+            ) -> Option<&crate::models::telemetry::SmbusTelemetry> {
+                if device_idx == 0 {
+                    use std::sync::OnceLock;
+                    static SMBUS: OnceLock<crate::models::telemetry::SmbusTelemetry> =
+                        OnceLock::new();
+                    Some(SMBUS.get_or_init(|| {
+                        use crate::models::telemetry::{
+                            GddrChannel, GddrTelemetry, SmbusTelemetry,
+                        };
+                        SmbusTelemetry {
+                            gddr_telemetry: Some(GddrTelemetry {
+                                speed: Some("16G".to_string()),
+                                max_temp: Some(90.0),
+                                enabled_mask: Some(0b1),
+                                channels: vec![GddrChannel {
+                                    channel: 0,
+                                    harvested: false, // NOT harvested
+                                    enabled: false,   // administratively disabled
+                                    training_pass: false,
+                                    bist_pass: true,
+                                    temp_top: Some(90.0), // would read as max activity if not caught
+                                    temp_bottom: Some(90.0),
+                                    ..Default::default()
+                                }],
+                            }),
+                            ..Default::default()
+                        }
+                    }))
+                } else {
+                    self.0.smbus_telemetry(device_idx)
+                }
+            }
+            fn backend_info(&self) -> String {
+                self.0.backend_info()
+            }
+        }
+
+        let mut inner = crate::backend::mock::MockBackend::new(1);
+        inner.init().expect("mock backend init");
+        let backend = DisabledNotHarvestedBackend(inner);
+
+        let mut starfield = HardwareStarfield::new(120, 40);
+        starfield.initialize_from_devices(backend.devices());
+        for _ in 0..25 {
+            starfield.update_from_telemetry(&backend);
+        }
+
+        let planet = starfield
+            .planets
+            .iter()
+            .find(|p| p.device_idx == 0 && p.level == 2 && p.channel_idx == 0)
+            .expect("device 0 must have a level==2/channel_idx==0 DDR planet");
+
+        assert_eq!(
+            planet.activity, 0.0,
+            "a disabled-but-not-harvested channel must render inert, not driven by its (irrelevant) 90°C reading"
+        );
+        assert_eq!(
+            planet.color,
+            Color::Rgb(60, 60, 60),
+            "a disabled-but-not-harvested channel must use the same neutral gray as a harvested one"
         );
     }
 

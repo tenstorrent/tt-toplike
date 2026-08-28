@@ -524,10 +524,10 @@ mod tests {
             bist_pass: true,
             temp_top: Some(40.0),
             temp_bottom: Some(42.0),
-            corr_rd: 0,
-            corr_wr: 0,
-            uncorr_rd: 0,
-            uncorr_wr: 0,
+            corr_rd: Some(0),
+            corr_wr: Some(0),
+            uncorr_rd: Some(0),
+            uncorr_wr: Some(0),
         };
         let mut existing = SmbusTelemetry {
             gddr_telemetry: Some(GddrTelemetry {
@@ -542,7 +542,7 @@ mod tests {
         let ch_now = GddrChannel {
             temp_top: Some(60.0),
             temp_bottom: Some(62.0),
-            corr_rd: 5,
+            corr_rd: Some(5),
             ..ch_prev
         };
         let incoming = SmbusTelemetry {

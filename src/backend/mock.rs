@@ -332,10 +332,10 @@ impl MockBackend {
                     bist_pass: !is_bist_failed_channel,
                     temp_top: Some(temp),
                     temp_bottom: Some(temp + 2.0),
-                    corr_rd: 0,
-                    corr_wr: 0,
-                    uncorr_rd: 0,
-                    uncorr_wr: 0,
+                    corr_rd: Some(0),
+                    corr_wr: Some(0),
+                    uncorr_rd: Some(0),
+                    uncorr_wr: Some(0),
                 }
             })
             .collect();

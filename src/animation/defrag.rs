@@ -407,13 +407,24 @@ impl DefragVis {
                         };
                         ch.temp_ema = ch.temp_ema * 0.92 + real_temp * 0.08;
 
-                        let corr_sum = rc.corr_rd.saturating_add(rc.corr_wr);
+                        // A missing/malformed counter (None) contributes 0 to
+                        // the sum here -- distinguishing "not reported" from
+                        // "genuinely zero" only matters where a whole-row
+                        // fallback decision is made (json.rs's GddrChannel
+                        // doc comment), not for this per-tick delta.
+                        let corr_sum = rc
+                            .corr_rd
+                            .unwrap_or(0)
+                            .saturating_add(rc.corr_wr.unwrap_or(0));
                         if corr_sum > ch.last_corr_errs {
                             ch.err_flash = 12; // flash for ~12 frames
                         }
                         ch.last_corr_errs = corr_sum;
 
-                        let uncorr_sum = rc.uncorr_rd.saturating_add(rc.uncorr_wr);
+                        let uncorr_sum = rc
+                            .uncorr_rd
+                            .unwrap_or(0)
+                            .saturating_add(rc.uncorr_wr.unwrap_or(0));
                         if uncorr_sum > ch.last_uncorr_errs {
                             ch.uncorr_flash = 20; // longer than a correctable flash
                         }
@@ -1841,10 +1852,10 @@ mod tests {
             bist_pass: true,
             temp_top: Some(40.0),
             temp_bottom: Some(42.0),
-            corr_rd: 0,
-            corr_wr: 0,
-            uncorr_rd: 0,
-            uncorr_wr: 0,
+            corr_rd: Some(0),
+            corr_wr: Some(0),
+            uncorr_rd: Some(0),
+            uncorr_wr: Some(0),
         }
     }
 
@@ -2001,7 +2012,7 @@ mod tests {
 
         // Bump only the uncorrectable counter — correctable stays at 0.
         let mut smbus2 = smbus;
-        smbus2.gddr_telemetry.as_mut().unwrap().channels[0].uncorr_rd = 3;
+        smbus2.gddr_telemetry.as_mut().unwrap().channels[0].uncorr_rd = Some(3);
         let backend2 = FakeBackend::one_device(20.0, smbus2);
         dv.update(&backend2);
 

@@ -711,8 +711,9 @@ fn parse_gddr_telemetry(v: &serde_json::Value) -> Option<crate::models::telemetr
 
 /// Parse one `gddr_telemetry.channels[]` entry. `None` if `channel`,
 /// `harvested`, or `enabled` (the three fields with no sane default) are
-/// missing or the wrong JSON type — every other field degrades to a default
-/// (`false`/`None`/`0`) rather than dropping the whole channel.
+/// missing or the wrong JSON type — every other field degrades to `false`/
+/// `None` (never a numeric `0`, which would be indistinguishable from a
+/// genuine zero reading) rather than dropping the whole channel.
 fn parse_gddr_channel(v: &serde_json::Value) -> Option<crate::models::telemetry::GddrChannel> {
     let obj = v.as_object()?;
     let str_f32 = |k: &str| obj.get(k)?.as_str()?.parse::<f32>().ok();
@@ -726,10 +727,10 @@ fn parse_gddr_channel(v: &serde_json::Value) -> Option<crate::models::telemetry:
         bist_pass: str_bool_pass("bist").unwrap_or(false),
         temp_top: str_f32("temp_top"),
         temp_bottom: str_f32("temp_bottom"),
-        corr_rd: str_u64("corr_rd").unwrap_or(0),
-        corr_wr: str_u64("corr_wr").unwrap_or(0),
-        uncorr_rd: str_u64("uncorr_rd").unwrap_or(0),
-        uncorr_wr: str_u64("uncorr_wr").unwrap_or(0),
+        corr_rd: str_u64("corr_rd"),
+        corr_wr: str_u64("corr_wr"),
+        uncorr_rd: str_u64("uncorr_rd"),
+        uncorr_wr: str_u64("uncorr_wr"),
     })
 }
 
@@ -1329,6 +1330,39 @@ mod tests {
             "the malformed second entry is dropped, not zeroed"
         );
         assert_eq!(g.channels[0].channel, 0);
+    }
+
+    /// Regression test: a channel entry that omits an ECC counter entirely
+    /// must parse to `None`, not a numeric `0` — a genuinely-zero reading
+    /// and a missing/unreported field must stay distinguishable all the way
+    /// through, otherwise a real nonzero count that failed to parse for some
+    /// other reason would be indistinguishable from a clean channel.
+    #[test]
+    fn missing_ecc_counter_parses_to_none_not_zero() {
+        let json = r#"{
+            "channels": [
+                {
+                    "channel": 0,
+                    "harvested": false,
+                    "enabled": true,
+                    "training": "pass",
+                    "bist": "pass",
+                    "corr_rd": "0",
+                    "corr_wr": "0",
+                    "uncorr_rd": "0"
+                }
+            ]
+        }"#;
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        let g = parse_gddr_telemetry(&v).expect("should parse");
+        let ch = &g.channels[0];
+        assert_eq!(ch.corr_rd, Some(0), "present and genuinely zero");
+        assert_eq!(ch.corr_wr, Some(0), "present and genuinely zero");
+        assert_eq!(ch.uncorr_rd, Some(0), "present and genuinely zero");
+        assert_eq!(
+            ch.uncorr_wr, None,
+            "uncorr_wr was never in the JSON -- must be None, not Some(0)"
+        );
     }
 
     #[test]

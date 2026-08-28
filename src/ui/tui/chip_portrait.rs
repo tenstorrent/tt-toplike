@@ -438,12 +438,14 @@ pub fn build_portrait_rows(
                         // already uses.
                         let is_dram_col = |c: usize| c != 8 && core_type_bh(c, 0) == CoreType::Dram;
                         if is_dram_col(col) {
-                            let idx = (0..col).filter(|&cc| is_dram_col(cc)).count();
-                            if idx >= 8 {
-                                None
-                            } else {
-                                Some(idx)
-                            }
+                            // No upper bound here: gddr_telemetry.channels is
+                            // looked up by real `.channel` id just below, not
+                            // by position, so a channel id beyond a stale
+                            // 8-channel assumption (Blackhole has up to 12
+                            // DRAM columns) still resolves correctly — or
+                            // simply misses via `.find`, same as any other
+                            // absent id.
+                            Some((0..col).filter(|&cc| is_dram_col(cc)).count())
                         } else {
                             None
                         }
@@ -541,19 +543,19 @@ pub fn build_portrait_lines<'a>(
         let real_channel_temp = if device.architecture == Architecture::Blackhole {
             let is_dram_col = |c: usize| c != 8 && core_type_bh(c, 0) == CoreType::Dram;
             if is_dram_col(col) {
+                // No upper bound: see the matching comment in build_portrait_rows
+                // above — `.find(|c| c.channel == idx)` already handles an
+                // absent id, so an artificial cap here only discards real
+                // data for channels 8-11 on a 12-channel Blackhole board.
                 let idx = (0..col).filter(|&cc| is_dram_col(cc)).count();
-                if idx >= 8 {
-                    None
-                } else {
-                    smbus
-                        .and_then(|s| s.gddr_telemetry.as_ref())
-                        .and_then(|g| g.channels.iter().find(|c| c.channel == idx))
-                        .and_then(|c| match (c.temp_top, c.temp_bottom) {
-                            (Some(t), Some(b)) => Some(t.max(b)),
-                            (Some(t), None) | (None, Some(t)) => Some(t),
-                            (None, None) => None,
-                        })
-                }
+                smbus
+                    .and_then(|s| s.gddr_telemetry.as_ref())
+                    .and_then(|g| g.channels.iter().find(|c| c.channel == idx))
+                    .and_then(|c| match (c.temp_top, c.temp_bottom) {
+                        (Some(t), Some(b)) => Some(t.max(b)),
+                        (Some(t), None) | (None, Some(t)) => Some(t),
+                        (None, None) => None,
+                    })
             } else {
                 None
             }
@@ -1000,10 +1002,10 @@ mod tests {
                 bist_pass: true,
                 temp_top: None,
                 temp_bottom: None,
-                corr_rd: 0,
-                corr_wr: 0,
-                uncorr_rd: 0,
-                uncorr_wr: 0,
+                corr_rd: Some(0),
+                corr_wr: Some(0),
+                uncorr_rd: Some(0),
+                uncorr_wr: Some(0),
             }],
         });
         let telem = make_telemetry();
@@ -1034,10 +1036,10 @@ mod tests {
                 bist_pass: false,
                 temp_top: None,
                 temp_bottom: None,
-                corr_rd: 0,
-                corr_wr: 0,
-                uncorr_rd: 0,
-                uncorr_wr: 0,
+                corr_rd: Some(0),
+                corr_wr: Some(0),
+                uncorr_rd: Some(0),
+                uncorr_wr: Some(0),
             }],
         });
         let telem = make_telemetry();
@@ -1048,6 +1050,53 @@ mod tests {
             chars[1], '✗',
             "BIST-failed GDDR channel should show '✗', got '{}'",
             chars[1]
+        );
+    }
+
+    #[test]
+    fn dram_col_shows_real_channel_state_past_the_stale_eight_channel_cap() {
+        // Regression test: the column->channel mapping used to cap at
+        // idx>=8, a leftover from the packed 8-channel DDR_STATUS bitmask
+        // era. gddr_telemetry.channels is looked up by real `.channel` id
+        // (not position), so Blackhole's channels 8-11 must resolve too.
+        use crate::models::telemetry::{GddrChannel, GddrTelemetry};
+        let device = make_device(Architecture::Blackhole);
+        let mut smbus = make_smbus(Architecture::Blackhole);
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            speed: None,
+            max_temp: None,
+            enabled_mask: None,
+            channels: vec![GddrChannel {
+                channel: 9,
+                harvested: false,
+                enabled: true,
+                training_pass: true,
+                bist_pass: false, // faulted -> must show '✗'
+                temp_top: None,
+                temp_bottom: None,
+                corr_rd: Some(0),
+                corr_wr: Some(0),
+                uncorr_rd: Some(0),
+                uncorr_wr: Some(0),
+            }],
+        });
+        let telem = make_telemetry();
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
+
+        // Find the grid column that is the 10th DRAM column (0-indexed
+        // channel 9) using the same is_dram_col rule production uses.
+        let (cols, _) = portrait_dims(Architecture::Blackhole);
+        let is_dram_col = |c: usize| c != 8 && core_type_bh(c, 0) == CoreType::Dram;
+        let target_col = (0..cols)
+            .filter(|&c| is_dram_col(c))
+            .nth(9)
+            .expect("Blackhole must have at least 10 DRAM columns for this test to be meaningful");
+
+        let chars: Vec<char> = rows[0].chars().collect();
+        assert_eq!(
+            chars[target_col], '✗',
+            "channel 9's BIST-fail must render even though it's past the old 8-channel cap; got '{}'",
+            chars[target_col]
         );
     }
 

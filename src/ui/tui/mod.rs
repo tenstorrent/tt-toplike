@@ -5657,6 +5657,13 @@ fn build_stats_sidebar_rows(
                         .filter(|&t| t > 0.0)
                         .collect::<Vec<f32>>()
                 })
+                // A non-empty channel list whose temps all end up filtered
+                // out (harvested/missing/non-positive) must still fall back
+                // to the packed reading below -- Some(vec![]) is not the
+                // same as "no real data", and dropping the row entirely
+                // would be a regression versus the pre-gddr_telemetry
+                // behavior for a partially-populated report.
+                .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| {
                     s.gddr_temps
                         .iter()
@@ -5875,34 +5882,52 @@ fn build_stats_sidebar_rows(
     if !compact {
         if let Some(s) = smbus {
             const ECC_NO_READING: u32 = u32::MAX;
-            let (corr, uncorr): (u64, u64) =
-                match s.gddr_telemetry.as_ref().filter(|g| !g.channels.is_empty()) {
-                    Some(g) => g.channels.iter().filter(|c| !c.harvested).fold(
+            // Prefer the real per-channel sum, but only when it actually
+            // found something: a non-empty channel list where every
+            // non-harvested channel's counters happen to be zero (missing/
+            // malformed fields default to 0 in the JSON parser, the same
+            // gap the temp row above guards against) must still fall back
+            // to the packed registers rather than silently reporting "no
+            // errors" when the packed side may hold real, nonzero counts.
+            // A genuinely healthy device reads (0, 0) on both sides, so
+            // falling back changes nothing observable for that common case.
+            let real_ecc: Option<(u64, u64)> = s
+                .gddr_telemetry
+                .as_ref()
+                .filter(|g| !g.channels.is_empty())
+                .map(|g| {
+                    // A missing/malformed counter (None) contributes 0 to this
+                    // sum -- the row-level fallback below (triggered when the
+                    // *whole* real-data result is all-zero) is what actually
+                    // guards against a parsing gap hiding real packed counts.
+                    g.channels.iter().filter(|c| !c.harvested).fold(
                         (0u64, 0u64),
                         |(corr, uncorr), c| {
                             (
-                                corr.saturating_add(c.corr_rd).saturating_add(c.corr_wr),
+                                corr.saturating_add(c.corr_rd.unwrap_or(0))
+                                    .saturating_add(c.corr_wr.unwrap_or(0)),
                                 uncorr
-                                    .saturating_add(c.uncorr_rd)
-                                    .saturating_add(c.uncorr_wr),
+                                    .saturating_add(c.uncorr_rd.unwrap_or(0))
+                                    .saturating_add(c.uncorr_wr.unwrap_or(0)),
                             )
                         },
-                    ),
-                    None => {
-                        let corr: u32 = s
-                            .gddr_corr_errs
-                            .iter()
-                            .flatten()
-                            .copied()
-                            .filter(|&v| v != ECC_NO_READING)
-                            .fold(0u32, u32::saturating_add);
-                        let uncorr = s
-                            .gddr_uncorr_errs
-                            .filter(|&v| v != ECC_NO_READING)
-                            .unwrap_or(0);
-                        (corr as u64, uncorr as u64)
-                    }
-                };
+                    )
+                })
+                .filter(|&(c, u)| c > 0 || u > 0);
+            let (corr, uncorr): (u64, u64) = real_ecc.unwrap_or_else(|| {
+                let corr: u32 = s
+                    .gddr_corr_errs
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .filter(|&v| v != ECC_NO_READING)
+                    .fold(0u32, u32::saturating_add);
+                let uncorr = s
+                    .gddr_uncorr_errs
+                    .filter(|&v| v != ECC_NO_READING)
+                    .unwrap_or(0);
+                (corr as u64, uncorr as u64)
+            });
             if corr > 0 || uncorr > 0 {
                 let color = if uncorr > 0 {
                     Color::Rgb(255, 80, 80) // uncorrectable — data corruption risk
@@ -7837,8 +7862,8 @@ mod stats_sidebar_tests {
                     bist_pass: true,
                     temp_top: Some(54.0),
                     temp_bottom: Some(56.0),
-                    corr_rd: 2,
-                    corr_wr: 1,
+                    corr_rd: Some(2),
+                    corr_wr: Some(1),
                     ..Default::default()
                 },
                 GddrChannel {
@@ -7857,9 +7882,9 @@ mod stats_sidebar_tests {
                     bist_pass: false,
                     temp_top: Some(60.0),
                     temp_bottom: Some(61.0),
-                    corr_rd: 0,
-                    corr_wr: 3,
-                    uncorr_rd: 1,
+                    corr_rd: Some(0),
+                    corr_wr: Some(3),
+                    uncorr_rd: Some(1),
                     ..Default::default()
                 },
             ],
@@ -8176,10 +8201,10 @@ mod stats_sidebar_tests {
                     enabled: true,
                     training_pass: true,
                     bist_pass: true,
-                    corr_rd: 4,
-                    corr_wr: 3,
-                    uncorr_rd: 2,
-                    uncorr_wr: 1,
+                    corr_rd: Some(4),
+                    corr_wr: Some(3),
+                    uncorr_rd: Some(2),
+                    uncorr_wr: Some(1),
                     ..Default::default()
                 },
                 GddrChannel {
@@ -8188,10 +8213,10 @@ mod stats_sidebar_tests {
                     enabled: true,
                     training_pass: true,
                     bist_pass: true,
-                    corr_rd: 5,
-                    corr_wr: 0,
-                    uncorr_rd: 0,
-                    uncorr_wr: 2,
+                    corr_rd: Some(5),
+                    corr_wr: Some(0),
+                    uncorr_rd: Some(0),
+                    uncorr_wr: Some(2),
                     ..Default::default()
                 },
                 // Harvested: counters present but must be excluded.
@@ -8199,10 +8224,10 @@ mod stats_sidebar_tests {
                     channel: 2,
                     harvested: true,
                     enabled: false,
-                    corr_rd: 900,
-                    corr_wr: 900,
-                    uncorr_rd: 900,
-                    uncorr_wr: 900,
+                    corr_rd: Some(900),
+                    corr_wr: Some(900),
+                    uncorr_rd: Some(900),
+                    uncorr_wr: Some(900),
                     ..Default::default()
                 },
             ],
@@ -8243,6 +8268,117 @@ mod stats_sidebar_tests {
             text.contains("1 uncorr") && text.contains("4 corr"),
             "expected the packed sums with the 0xFFFFFFFF sentinel dropped \
              (1 uncorr · 4 corr); got {text:?}"
+        );
+    }
+
+    /// Pull the "GDDR T" temp row's rendered text out of a sidebar, if it rendered.
+    fn gddr_temp_row_text(rows: &[ratatui::text::Line<'static>]) -> Option<String> {
+        rows.iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .find(|t| t.starts_with("GDDR T"))
+    }
+
+    /// Regression test: a non-empty `gddr_telemetry.channels` whose every
+    /// non-harvested channel's temp fields are `None` (missing/malformed
+    /// field — the same gap `json.rs`'s `str_u64(...).unwrap_or(0)` leaves
+    /// for ECC counters) must still fall back to the packed `gddr_temps`
+    /// reading, not silently drop the row. `Some(vec![])` is not the same
+    /// as "no real data present".
+    #[test]
+    fn gddr_temp_row_falls_back_to_packed_when_real_channels_have_no_temps() {
+        use crate::models::telemetry::{GddrChannel, GddrTelemetry, GddrTempPair};
+
+        let device = Device::new(
+            0,
+            "p150a".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        );
+
+        let mut smbus = SmbusTelemetry::new();
+        // Packed pair temps: real, nonzero readings.
+        smbus.gddr_temps[0] = Some(GddrTempPair([54.0, 56.0, 55.0, 57.0]));
+        // Real gddr_telemetry present and non-empty, but every channel's
+        // temp fields are None -- exactly what a malformed/missing field
+        // looks like after json.rs's tolerant parsing.
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            speed: Some("16G".to_string()),
+            max_temp: None,
+            enabled_mask: Some(0xff),
+            channels: vec![GddrChannel {
+                channel: 0,
+                harvested: false,
+                enabled: true,
+                training_pass: true,
+                bist_pass: true,
+                temp_top: None,
+                temp_bottom: None,
+                ..Default::default()
+            }],
+        });
+
+        let rows = build_stats_sidebar_rows(&device, None, Some(&smbus), None, false);
+        let text = gddr_temp_row_text(&rows).expect(
+            "GDDR T row must fall back to the packed reading when the real \
+             channel list yields no usable temps, not disappear entirely",
+        );
+        assert!(
+            text.contains("54") && text.contains("57"),
+            "expected the packed pair reading (54°→57°C); got {text:?}"
+        );
+    }
+
+    /// Same gap, ECC row: a non-empty `gddr_telemetry.channels` whose every
+    /// non-harvested channel's counters happen to be zero (a missing field
+    /// defaults to 0 in the parser, indistinguishable from a real zero
+    /// reading) must still fall back to the packed aggregate when it holds
+    /// real, nonzero counts — not silently report "no errors".
+    #[test]
+    fn ecc_row_falls_back_to_packed_when_real_channels_read_all_zero() {
+        use crate::models::telemetry::{GddrChannel, GddrTelemetry};
+
+        let device = Device::new(
+            0,
+            "p150a".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        );
+
+        let mut smbus = SmbusTelemetry::new();
+        smbus.gddr_corr_errs = [Some(3), Some(0), Some(1), Some(0)];
+        smbus.gddr_uncorr_errs = Some(1);
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            speed: Some("16G".to_string()),
+            max_temp: None,
+            enabled_mask: Some(0xff),
+            channels: vec![GddrChannel {
+                channel: 0,
+                harvested: false,
+                enabled: true,
+                training_pass: true,
+                bist_pass: true,
+                corr_rd: Some(0),
+                corr_wr: Some(0),
+                uncorr_rd: Some(0),
+                uncorr_wr: Some(0),
+                ..Default::default()
+            }],
+        });
+
+        let rows = build_stats_sidebar_rows(&device, None, Some(&smbus), None, false);
+        let text = ecc_row_text(&rows).expect(
+            "ECC row must fall back to the packed aggregate when the real \
+             channel list reads all-zero but the packed registers hold real \
+             counts, not silently report no errors",
+        );
+        assert!(
+            text.contains("1 uncorr") && text.contains("4 corr"),
+            "expected the packed sums (1 uncorr · 4 corr); got {text:?}"
         );
     }
 }

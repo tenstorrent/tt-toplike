@@ -397,6 +397,14 @@ pub fn tensix_col_harvested(enabled_tensix_col: u32, col: usize) -> bool {
 /// Every numeric field arrives as a quoted string in the real JSON (the same
 /// inconsistency `DeviceLimitsRaw` already works around) — parsed tolerantly
 /// in `backend/json.rs`, never via a derived `Deserialize` on this struct.
+///
+/// The four ECC counters are `Option<u64>`, not `u64`: a missing or
+/// malformed field must not be indistinguishable from a genuine zero
+/// reading — a channel with real, nonzero errors whose field failed to
+/// parse would otherwise silently report "clean". Consumers that need a
+/// definite number for arithmetic (e.g. summing across channels) decide
+/// their own `unwrap_or(0)` at the point of use, same as `temp_top`/
+/// `temp_bottom` already do.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct GddrChannel {
     pub channel: usize,
@@ -406,10 +414,10 @@ pub struct GddrChannel {
     pub bist_pass: bool,
     pub temp_top: Option<f32>,
     pub temp_bottom: Option<f32>,
-    pub corr_rd: u64,
-    pub corr_wr: u64,
-    pub uncorr_rd: u64,
-    pub uncorr_wr: u64,
+    pub corr_rd: Option<u64>,
+    pub corr_wr: Option<u64>,
+    pub uncorr_rd: Option<u64>,
+    pub uncorr_wr: Option<u64>,
 }
 
 /// Device-level GDDR telemetry rollup, from tt-smi ≥ 6.3.0's `gddr_telemetry`
@@ -1094,10 +1102,10 @@ mod tests {
             bist_pass: true,
             temp_top: Some(46.0),
             temp_bottom: Some(50.0),
-            corr_rd: 0,
-            corr_wr: 0,
-            uncorr_rd: 0,
-            uncorr_wr: 0,
+            corr_rd: Some(0),
+            corr_wr: Some(0),
+            uncorr_rd: Some(0),
+            uncorr_wr: Some(0),
         };
         let g = GddrTelemetry {
             speed: Some("16G".to_string()),
