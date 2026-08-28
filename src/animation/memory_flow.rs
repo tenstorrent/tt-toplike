@@ -491,18 +491,15 @@ impl MemoryFlowVis {
     ) -> Vec<u8> {
         (0..num_channels)
             .map(|i| {
-                g.channels
-                    .iter()
-                    .find(|c| c.channel == i)
-                    .map_or(0, |c| {
-                        if c.harvested || !c.enabled {
-                            0
-                        } else if !c.training_pass || !c.bist_pass {
-                            3
-                        } else {
-                            2
-                        }
-                    })
+                g.channels.iter().find(|c| c.channel == i).map_or(0, |c| {
+                    if c.harvested || !c.enabled {
+                        0
+                    } else if !c.training_pass || !c.bist_pass {
+                        3
+                    } else {
+                        2
+                    }
+                })
             })
             .collect()
     }
@@ -846,16 +843,40 @@ mod tests {
                 max_temp: None,
                 enabled_mask: None,
                 channels: vec![
-                    GddrChannel { channel: 0, harvested: true, enabled: false, training_pass: false, bist_pass: true, ..Default::default() },
-                    GddrChannel { channel: 1, harvested: false, enabled: true, training_pass: true, bist_pass: false, ..Default::default() },
-                    GddrChannel { channel: 2, harvested: false, enabled: true, training_pass: true, bist_pass: true, ..Default::default() },
+                    GddrChannel {
+                        channel: 0,
+                        harvested: true,
+                        enabled: false,
+                        training_pass: false,
+                        bist_pass: true,
+                        ..Default::default()
+                    },
+                    GddrChannel {
+                        channel: 1,
+                        harvested: false,
+                        enabled: true,
+                        training_pass: true,
+                        bist_pass: false,
+                        ..Default::default()
+                    },
+                    GddrChannel {
+                        channel: 2,
+                        harvested: false,
+                        enabled: true,
+                        training_pass: true,
+                        bist_pass: true,
+                        ..Default::default()
+                    },
                 ],
             }),
             ..Default::default()
         };
         let status = MemoryFlowVis::channel_status(Some(&smbus), 3);
         assert_eq!(status[0], 0, "harvested channel reads as idle, not trained");
-        assert_eq!(status[1], 3, "BIST failure is a distinct error code, not the generic bitmask error");
+        assert_eq!(
+            status[1], 3,
+            "BIST failure is a distinct error code, not the generic bitmask error"
+        );
         assert_eq!(status[2], 2, "healthy enabled channel reads as trained");
     }
 

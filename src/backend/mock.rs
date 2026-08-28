@@ -728,7 +728,13 @@ mod tests {
                 .and_then(|s| s.gddr_telemetry.as_ref())
                 .is_some_and(|g| g.channels.iter().any(|c| !c.bist_pass))
         });
-        assert!(any_gddr_harvested, "QuadGalaxy mock should harvest a GDDR channel");
-        assert!(any_bist_failed, "QuadGalaxy mock should fail BIST on a GDDR channel");
+        assert!(
+            any_gddr_harvested,
+            "QuadGalaxy mock should harvest a GDDR channel"
+        );
+        assert!(
+            any_bist_failed,
+            "QuadGalaxy mock should fail BIST on a GDDR channel"
+        );
     }
 }
