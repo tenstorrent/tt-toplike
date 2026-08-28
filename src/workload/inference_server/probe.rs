@@ -10,6 +10,13 @@
 //! (raw docker/HTTP/process output), since a malformed line should degrade
 //! to `None`/a conservative `Readiness` rather than crash the monitor.
 
+/// `ps` invocation whose first data row is the service's top-CPU consumer.
+/// Correct as a *global* `ps` when run via `docker exec` (the container's own
+/// PID namespace already scopes it to that container's processes);
+/// `SystemProbe` overrides `ContainerProbe::top_proc_cmd` for a host-keyed
+/// service to scope this the same way `process_tree_pids` does.
+pub(crate) const TOP_PROC_CMD: &str = "ps -eo pcpu,rss,comm --sort=-pcpu";
+
 /// Readiness ladder from a liveness probe.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Readiness {
@@ -186,6 +193,17 @@ pub trait ContainerProbe: Send {
     /// status `0` means unreachable (down or timed out).
     fn http(&self, port: u16, path: &str) -> (u16, String);
 
+    /// The `ps`-style command whose first data row is the service's
+    /// top-CPU process (see [`top_process`]/[`contains_python`]'s expected
+    /// 3-column, header-then-rows shape). Default: [`TOP_PROC_CMD`] — correct
+    /// for `DockerProbe`, since `docker exec` already scopes to the
+    /// container's own PID namespace. `key` is the same identity string
+    /// passed to `env`/`stats`/`exec`.
+    fn top_proc_cmd(&self, key: &str) -> String {
+        let _ = key;
+        TOP_PROC_CMD.to_string()
+    }
+
     /// Enumerate running TT inference-server containers directly (via `docker
     /// ps` + `docker inspect`), independent of any foreground `docker run` host
     /// process — this is how **detached** (`-d`), `docker compose`, and
@@ -258,28 +276,21 @@ const DOCKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 /// a legitimate many-thousand-line listing.
 const MAX_DOCKER_OUTPUT: u64 = 8 * 1024 * 1024;
 
-/// Run `docker <args>`, returning stdout as a lossy UTF-8 string. Any spawn or
-/// exec failure (docker not installed, container gone) yields `""`. Bounded two
-/// ways: the reader caps stdout at [`MAX_DOCKER_OUTPUT`], and the whole call is
-/// bounded by [`DOCKER_TIMEOUT`] — on timeout we **kill the child**, which both
-/// frees the process and closes the pipe so the reader thread hits EOF and
-/// exits (no orphaned thread or unbounded allocation from a wedged docker).
-pub(crate) fn docker(args: &[&str]) -> String {
+/// Run a pre-built `Command`, bounded by [`DOCKER_TIMEOUT`] (renamed in
+/// spirit only — the bound applies to any local subprocess this module
+/// spawns, not just `docker`) and [`MAX_DOCKER_OUTPUT`]. Any spawn/exec
+/// failure, or exceeding the timeout, yields `""` rather than panicking or
+/// blocking the monitor thread indefinitely; on timeout the child is killed
+/// so the reader thread's pipe hits EOF and the thread exits (no orphan).
+fn run_bounded(mut cmd: Command) -> String {
     use std::io::Read;
     use std::process::Stdio;
 
-    let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    let mut child = match Command::new("docker")
-        .args(&owned)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(_) => return String::new(),
     };
-    // Only the pipe moves into the reader thread; `child` stays here so a
-    // timeout can kill it.
     let stdout = child.stdout.take();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -300,6 +311,28 @@ pub(crate) fn docker(args: &[&str]) -> String {
             String::new()
         }
     }
+}
+
+/// Run `docker <args>`, returning stdout as a lossy UTF-8 string — see
+/// [`run_bounded`] for the timeout/output-cap contract.
+pub(crate) fn docker(args: &[&str]) -> String {
+    let mut cmd = Command::new("docker");
+    cmd.args(args);
+    run_bounded(cmd)
+}
+
+/// Run `args[0] args[1..]` locally (no `docker` wrapper) — used by
+/// `SystemProbe`'s host-process probing (`ps`, `sh -c <find/ps command>`)
+/// where `docker exec`'s namespace scoping doesn't apply. Same bounds as
+/// [`docker`]. Empty `args` yields `""` without spawning anything.
+#[allow(dead_code)] // consumed starting Task 6
+fn run_local(args: &[&str]) -> String {
+    let Some((program, rest)) = args.split_first() else {
+        return String::new();
+    };
+    let mut cmd = Command::new(program);
+    cmd.args(rest);
+    run_bounded(cmd)
 }
 
 #[cfg(test)]
@@ -372,5 +405,24 @@ mod tests {
         // A non-numeric token (shouldn't happen in a real /proc file, but the
         // parser must degrade rather than panic) is silently skipped.
         assert_eq!(parse_children("1 abc 3"), vec![1, 3]);
+    }
+    #[test]
+    fn default_top_proc_cmd_is_the_docker_global_ps() {
+        struct Dummy;
+        impl ContainerProbe for Dummy {
+            fn env(&self, _c: &str) -> String {
+                String::new()
+            }
+            fn stats(&self, _c: &str) -> String {
+                String::new()
+            }
+            fn exec(&self, _c: &str, _sh: &str) -> String {
+                String::new()
+            }
+            fn http(&self, _port: u16, _path: &str) -> (u16, String) {
+                (0, String::new())
+            }
+        }
+        assert_eq!(Dummy.top_proc_cmd("anything"), TOP_PROC_CMD);
     }
 }
