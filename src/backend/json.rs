@@ -667,10 +667,22 @@ fn parse_json_devices(
     )))
 }
 
-/// Parse tt-smi ≥ 6.3.0's `gddr_telemetry` block. Every numeric leaf is a
-/// quoted string in the real JSON except `channel` (already a number) —
-/// tolerant of both via `parse_hex_or_dec` and direct `str::parse`. A
-/// channel entry that fails to parse a required field is skipped (not
+/// Parse tt-smi ≥ 6.3.0's `gddr_telemetry` block.
+///
+/// Leaf encodings in the real JSON, each read exactly as tt-smi emits it (no
+/// leaf is parsed more than one way):
+/// * `enabled_mask` — hex-or-decimal **string**, via `parse_hex_or_dec`. This
+///   is the only hex-tolerant leaf in either function.
+/// * `speed` — plain string, kept verbatim.
+/// * `max_temp`, and in `parse_gddr_channel` `temp_top` / `temp_bottom` /
+///   `corr_rd` / `corr_wr` / `uncorr_rd` / `uncorr_wr` — quoted **decimal**
+///   strings, parsed with plain `str::parse` (no hex tolerance).
+/// * `channels[].channel` — a bare JSON **number** (`as_u64`), not a string.
+/// * `channels[].harvested` / `.enabled` — bare JSON **booleans** (`as_bool`).
+/// * `channels[].training` / `.bist` — strings compared against `"pass"`;
+///   anything else (including a missing key) reads as a failure.
+///
+/// A channel entry that fails to parse a required field is skipped (not
 /// fabricated as a zeroed channel), matching `salvage_modern_snapshot`'s
 /// "one malformed entry costs only that entry" convention.
 fn parse_gddr_telemetry(v: &serde_json::Value) -> Option<crate::models::telemetry::GddrTelemetry> {
