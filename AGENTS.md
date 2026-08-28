@@ -4694,3 +4694,56 @@ confirmed red against the old raw-sample capture (`idle_power` landed at
 ledger); real-data sourcing hardware-verified live, bad-sector/uncorrectable
 states unit-tested only (no failing hardware to hand), idle-EVICT fix
 hardware-verified via A/B comparison.*
+
+---
+
+## Phase 30 — Inference roster: dedup multiprocessing-worker duplicates (August 28, 2026, v0.10.2)
+
+**Origin**: user shared a screenshot (`~/Pictures/tt-toplike-inference.png`) of
+a real `tt-model serve` launch (`tt-tnt`'s wrapper around a direct vLLM-on-TT
+serve, across all 4 chips of a Blackhole box) — the `[i]` Inference Server
+roster showed *"inference services (26, +18 more)"*, with ~8 visible rows all
+reading `down tt-tnt-1024` and only one correctly reading `compiling 0:15`.
+This is the Phase 27 direct-vLLM-detection feature's first real hardware
+exposure, and the "not yet hardware-verified" caveat from that phase turned
+out to be hiding a real bug.
+
+**Root cause**: `detected_inference_servers()` (`src/workload/host_processes.rs`)
+scans every process in the snapshot and builds one `InferenceServer` per
+matching process, deduped only by `service_key()` — `"host-vllm-<pid>"` for a
+host launch, unique per pid. A real vLLM-on-TT launch across multiple chips
+forks several worker/engine-core processes (one per tensor-parallel rank,
+etc.); `fork()` preserves the parent's full cmdline *and* environment in
+`/proc/<pid>/cmdline`, so each worker independently matches
+`parse_direct_vllm`'s heuristic (the same `MESH_DEVICE`/`TT_METAL_HOME`-gated
+`vllm serve <model>` shape) too. Per-pid keying meant every worker counted as
+its own distinct "service" — confirmed these weren't stale zombies either
+(`remove_dead: true` is already set on the sysinfo refresh), just genuine
+live siblings of one real launch.
+
+**Fix**: `detected_inference_servers()` now builds a pid→parent map from
+`sysinfo::Process::parent()` alongside the existing classification pass, and
+a new pure helper `is_match_root(pid, parent_of, matched)` walks a matching
+pid's ancestry — if any ancestor also matches, the descendant is dropped,
+keeping only the root of each match family. `is_match_root` is generic over
+any `Eq + Hash + Copy` id (not tied to `sysinfo::Pid`), so it's directly
+unit-tested with synthetic parent/match maps rather than needing real forked
+processes: root-with-matching-children, root-with-non-matching-parent,
+matching-grandparent-through-a-non-matching-intermediate-hop, and a
+cycle-defense bound (32 hops — a real process tree is never anywhere near
+this deep). All four tests were mutation-checked (temporarily hard-coded
+`is_match_root` to always return `true`; the two descendant-rejecting tests
+failed as expected, confirming they're real guards, not tautologies).
+
+> Hardware-verified indirectly: the bug was found from a live screenshot, and
+> the root-cause mechanism (fork-preserved cmdline/environ, confirmed
+> non-stale via `remove_dead`) is confirmed against real process semantics —
+> but the fix itself (rebuilt binary against this exact live multi-worker
+> launch) was not re-observed before this release. Worth a follow-up look
+> next time a `tt-model serve` launch is live on hardware.
+
+---
+
+*Phase 30 status: **COMPLETE, fix not re-observed live** — shipped as
+v0.10.2. Bounded bug fix (no SDD ledger); `is_match_root` mutation-tested;
+full suite green.*

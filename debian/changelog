@@ -1,3 +1,18 @@
+tt-toplike (0.10.2) noble; urgency=medium
+
+  * Fix: the `[i]` Inference Server roster showed dozens of duplicate
+    entries for a single real launch. A direct-vLLM launch commonly forks
+    several worker/engine-core processes (one per tensor-parallel rank,
+    etc.); `fork()` preserves the parent's cmdline and environment in
+    `/proc/<pid>/cmdline`, so each worker independently matched the
+    direct-vLLM detection heuristic too — and since the existing dedup
+    keys on a per-pid identity, every worker showed up as its own distinct
+    "service". Observed live: one real launch across 4 chips produced 26
+    roster entries, almost all stuck on "down". Detection now walks each
+    match's process ancestry and keeps only the root of each match family.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 28 Aug 2026 00:00:00 +0000
+
 tt-toplike (0.10.1) noble; urgency=medium
 
   * Defrag view now also drives per-channel training/enabled/temperature

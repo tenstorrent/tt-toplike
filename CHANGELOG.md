@@ -14,6 +14,15 @@ git tag                        # released versions
 
 ## Recent releases
 
+### 0.10.2
+- **Fix**: the `[i]` Inference Server roster showed dozens of duplicate
+  entries for a single real vLLM-on-TT launch — a real launch forks several
+  worker/engine-core processes that each independently matched the
+  direct-vLLM detection heuristic (each keyed by its own pid). Detection now
+  walks each match's process ancestry and keeps only the root of each match
+  family. Observed live: one real launch across 4 chips produced 26 roster
+  entries, almost all stuck on "down".
+
 ### 0.10.1
 - **Defrag view** now also drives per-channel training/enabled/temperature and
   errors from real `gddr_telemetry` when present, falling back to the
