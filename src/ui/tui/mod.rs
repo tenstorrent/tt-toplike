@@ -599,6 +599,11 @@ fn run_app(
                 // The heat board decays every tick and the feed pane streams
                 // live events — same "must redraw at anim cadence" reasoning.
                 | DisplayMode::HivemindSweeper
+                // Continuously animated: forward/backward sweeps travel the
+                // network, the aurora drifts, stars twinkle, and a checkpoint
+                // comet crosses the sky. At the 10 FPS data rate all of that
+                // reads as stepping rather than moving.
+                | DisplayMode::Training
         ) || (display_mode == DisplayMode::Defrag && defrag_is_animated);
         let render_interval = if is_anim_mode {
             throttle_state.effective_anim_interval(ui_poll_rate_anim)

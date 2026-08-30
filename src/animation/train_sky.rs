@@ -34,11 +34,22 @@ pub fn star_hash(x: usize, y: usize) -> f32 {
     (h as f32) / (u32::MAX as f32)
 }
 
+/// Frames per second the Training view animates at, used to convert a frame
+/// counter into seconds so motion is expressed in wall-clock terms.
+///
+/// The view redraws on the shared ~16 ms animation tick. Every rate below is
+/// *per second*, so re-tuning the tick rate changes only how smooth the
+/// motion is, never how fast it appears — the drift and twinkle speeds here
+/// were chosen when the view ran at 10 FPS and must look identical at 60.
+pub const ANIM_FPS: f32 = 60.0;
+
 /// Aurora intensity and hue at a cell. `rel_y` is 0.0 at the top of the sky
 /// band and 1.0 at the mountain line.
 fn aurora(x: usize, rel_y: f32, frame: u64) -> (f32, f32) {
     let fx = x as f32;
-    let ff = frame as f32;
+    // Seconds-since-start, scaled so the constants below stay in the units
+    // they were tuned in (one "old frame" = 1/10 s).
+    let ff = (frame as f32 / ANIM_FPS) * 10.0;
     let mut best = 0.0f32;
     let mut hue = 0.0f32;
     for band in 0..2u32 {
@@ -66,7 +77,9 @@ pub fn sky_cell(x: usize, y: usize, rel_y: f32, frame: u64) -> Option<SkyCell> {
     if sv > STAR_THRESHOLD {
         let phase = star_hash(x + 31, y + 17) * std::f32::consts::TAU;
         let speed = 0.035 + star_hash(x + 7, y + 3) * 0.075;
-        let tw = 0.5 + 0.5 * (frame as f32 * speed + phase).sin();
+        // Same scaling as the aurora: keep the per-star twinkle rate in its
+        // original units so higher frame rates only add smoothness.
+        let tw = 0.5 + 0.5 * ((frame as f32 / ANIM_FPS) * 10.0 * speed + phase).sin();
         // A minority of stars are vividly colored; the rest are cool white.
         let vivid = star_hash(x + 91, y + 53) > 0.82;
         let (h, s) = if vivid {

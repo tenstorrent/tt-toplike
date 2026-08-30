@@ -42,6 +42,71 @@ pub fn loss_hue(loss: f32) -> f32 {
 const FWD_HUE: f32 = 42.0;
 const BWD_HUE: f32 = 268.0;
 
+/// Sub-columns the forward/backward pass advances per second. Expressed in
+/// wall-clock terms so the pulse travels at the same visible speed whatever
+/// the redraw rate — a higher frame rate buys smoothness, not speed.
+const SWEEP_SUBCOLS_PER_SEC: f32 = 26.0;
+
+/// How far behind the sweep head a cell still glows, in sub-columns. The
+/// falloff over this distance is what turns a hard lit block into a tail.
+const SWEEP_TAIL: f32 = 6.0;
+
+/// How far *ahead* of the head a cell starts brightening. Without this the
+/// pulse pops from dark to near-full in a single frame as the head crosses a
+/// cell (measured: a 0.95 jump), which reads as a blink rather than an
+/// arrival. A short lead-in makes the front edge glide in.
+const SWEEP_LEAD: f32 = 3.0;
+
+/// Smoothstep on `t ∈ [0,1]`. Used for both edges of the pulse because its
+/// derivative is zero at both ends: a plain `t²` ramp is steepest exactly at
+/// the peak, so the frame the head crosses a cell produces the largest jump
+/// of the whole pass — the one place it most needs to be smooth.
+fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Current sweep-head position, wrapped into `period`. Fractional, so the
+/// head moves smoothly between cells rather than snapping to one per tick.
+fn sweep_head(frame: u64, period: f32) -> f32 {
+    if period <= 0.0 {
+        return 0.0;
+    }
+    let secs = frame as f32 / crate::animation::train_sky::ANIM_FPS;
+    (secs * SWEEP_SUBCOLS_PER_SEC) % period
+}
+
+/// Glow at sub-column `at` given the head position: brightest under the head,
+/// ramping up over [`SWEEP_LEAD`] ahead of it and fading over [`SWEEP_TAIL`]
+/// behind, wrapping around `period` so the pulse survives the wrap instead of
+/// blinking out. Asymmetric on purpose — a longer tail than lead-in is what
+/// makes the motion read directionally.
+fn sweep_at(head: f32, at: f32, period: f32) -> f32 {
+    if period <= 0.0 {
+        return 0.0;
+    }
+    // Signed distance, wrapped into [-period/2, period/2): positive means the
+    // head has already passed this cell, negative means it's approaching.
+    let half = period / 2.0;
+    let mut d = head - at;
+    while d < -half {
+        d += period;
+    }
+    while d >= half {
+        d -= period;
+    }
+    // Smoothstepped falloff on both sides: a bright head with thinning edges
+    // reads as motion better than a linear ramp (which looks like a smear),
+    // and the flat top means crossing the peak doesn't jolt.
+    if (0.0..SWEEP_TAIL).contains(&d) {
+        smoothstep(1.0 - d / SWEEP_TAIL)
+    } else if (-SWEEP_LEAD..0.0).contains(&d) {
+        smoothstep(1.0 - (-d) / SWEEP_LEAD)
+    } else {
+        0.0
+    }
+}
+
 /// Muted violet-blue used for the frame border everywhere it appears.
 const BORDER: Color = Color::Rgb(90, 90, 130);
 
@@ -608,12 +673,16 @@ impl TrainView {
                 if x >= x0 + w {
                     break;
                 }
-                // Forward pass sweeps left→right, backward right→left, both
-                // paced by `self.frame` — a lit node briefly outshines the
-                // resting loss-hue coloring.
-                let period = cols + 4;
-                let fwd_on = (self.frame as usize / 2 + c) % period < 2;
-                let bwd_on = (self.frame as usize / 2 + (cols - 1 - c)) % period < 2;
+                // Sweep intensity is continuous, not a binary on/off: the head
+                // advances in fractional columns and each cell's brightness
+                // falls off behind it, so at animation cadence the pulse
+                // *flows* through the network instead of stepping between
+                // discrete lit blocks. Measured in sub-column units so the
+                // connector cells between nodes light in sequence too.
+                let sub = stride.max(1) as f32;
+                let head = sweep_head(self.frame, (cols + 4) as f32 * sub);
+                let fwd = sweep_at(head, c as f32 * sub, (cols + 4) as f32 * sub);
+                let bwd = sweep_at(head, (cols - 1 - c) as f32 * sub, (cols + 4) as f32 * sub);
 
                 // Connectors run from this node toward the next block. They
                 // light with whichever sweep is passing, so the pulse reads as
@@ -635,10 +704,22 @@ impl TrainView {
                         } else {
                             '─'
                         };
-                        let (col, bold) = if fwd_on {
-                            (hsv_to_rgb(FWD_HUE, 0.75, 0.7), true)
-                        } else if bwd_on {
-                            (hsv_to_rgb(BWD_HUE, 0.6, 0.65), true)
+                        // Each connector cell sits a fraction of a block
+                        // further along, so the sweep crosses the gap smoothly
+                        // rather than jumping node-to-node.
+                        let at = c as f32 * sub + k as f32;
+                        let period = (cols + 4) as f32 * sub;
+                        let f = sweep_at(head, at, period);
+                        let b = sweep_at(head, (cols - 1 - c) as f32 * sub - k as f32, period);
+                        let lit = f.max(b);
+                        let (col, bold) = if lit > 0.04 {
+                            let hue = if f >= b { FWD_HUE } else { BWD_HUE };
+                            // Blend from the resting wire colour up to the
+                            // sweep's own hue as the pulse passes.
+                            (
+                                hsv_to_rgb(hue, 0.35 + lit * 0.4, 0.30 + lit * 0.45),
+                                lit > 0.55,
+                            )
                         } else {
                             (Color::Rgb(80, 90, 115), false)
                         };
@@ -646,17 +727,23 @@ impl TrainView {
                     }
                 }
 
-                let glyph = node_glyphs[(r + c + (self.frame as usize / 6)) % node_glyphs.len()];
-                let color = if fwd_on {
-                    hsv_to_rgb(FWD_HUE, 0.85, 0.95)
-                } else if bwd_on {
-                    hsv_to_rgb(BWD_HUE, 0.7, 0.9)
+                // Node glyph tracks the sweep's local intensity: a passing
+                // pulse swells it ●, and it rests at ·. Previously this cycled
+                // on a frame counter, which read as random flicker unrelated
+                // to the pass travelling through.
+                let lit = fwd.max(bwd);
+                let glyph = node_glyphs[((1.0 - lit) * (node_glyphs.len() - 1) as f32).round()
+                    as usize
+                    % node_glyphs.len()];
+                let color = if lit > 0.04 {
+                    let hue = if fwd >= bwd { FWD_HUE } else { BWD_HUE };
+                    hsv_to_rgb(hue, 0.55 + lit * 0.3, 0.5 + lit * 0.45)
                 } else if let Some(loss) = st.loss {
                     hsv_to_rgb(loss_hue(loss), 0.55, 0.6)
                 } else {
                     Color::Rgb(90, 100, 130)
                 };
-                self.put(buf, x, y, glyph, color, fwd_on || bwd_on);
+                self.put(buf, x, y, glyph, color, lit > 0.55);
             }
         }
     }
@@ -1347,6 +1434,68 @@ mod tests {
                 assert!(cols <= w, "line is {cols} cols at width {w}: {s:?}");
             }
         }
+    }
+
+    /// Fluidity guard. The sweep used to be a binary `% period < 2` on/off,
+    /// which at any frame rate reads as blocks blinking rather than a pulse
+    /// travelling. Now it's a continuous head with a lead-in and a trailing
+    /// falloff, so a cell's brightness changes by small increments between
+    /// consecutive frames. Asserts that directly: a regression to on/off
+    /// would produce a 1.0 jump, and dropping the lead-in ramp measured 0.95.
+    #[test]
+    fn sweep_intensity_changes_smoothly_between_consecutive_frames() {
+        let period = 50.0; // (cols+4) * stride for a typical 6-block grid
+        let mut worst: f32 = 0.0;
+        // Sample several cells so the wrap-around boundary is covered too.
+        for at in [0.0f32, 7.5, 15.0, 33.0, 49.0] {
+            let mut prev = sweep_at(sweep_head(0, period), at, period);
+            for f in 1..240u64 {
+                let cur = sweep_at(sweep_head(f, period), at, period);
+                worst = worst.max((cur - prev).abs());
+                prev = cur;
+            }
+        }
+        assert!(
+            worst < 0.25,
+            "sweep steps by {worst:.3} between frames — motion should be \
+             continuous, not a blink"
+        );
+
+        // And it must actually reach full brightness, or "smooth" would be
+        // satisfied by a flat line that never lights up at all.
+        let peak = (0..240u64)
+            .map(|f| sweep_at(sweep_head(f, period), 15.0, period))
+            .fold(0.0f32, f32::max);
+        assert!(
+            peak > 0.85,
+            "sweep never reaches full brightness: {peak:.3}"
+        );
+    }
+
+    /// The pulse must travel in a consistent direction, not shimmer in place:
+    /// as the head advances, the lit cell index should advance with it.
+    #[test]
+    fn sweep_head_advances_monotonically_within_a_cycle() {
+        let period = 50.0;
+        let mut last = sweep_head(0, period);
+        let mut wraps = 0;
+        for f in 1..200u64 {
+            let h = sweep_head(f, period);
+            if h < last {
+                wraps += 1; // a wrap is expected, a jitter is not
+            } else {
+                assert!(
+                    h - last < 1.0,
+                    "head jumped {:.2} sub-columns in one frame at f={f}",
+                    h - last
+                );
+            }
+            last = h;
+        }
+        assert!(
+            (1..=3).contains(&wraps),
+            "expected the sweep to wrap a couple of times over 200 frames, got {wraps}"
+        );
     }
 
     /// The grid should breathe on a normal terminal: blocks spaced several
