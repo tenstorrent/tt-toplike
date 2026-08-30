@@ -4,27 +4,37 @@ theme: tt-brand
 defaults:
   cols: 160
   rows: 44
-  # The Training view reads a trainer's stdout via /proc and the mock backend
-  # for chip telemetry — it never opens /dev/tenstorrent, so this demo needs
-  # no hardware lease and cannot perturb anything running on the ASICs.
-  backend: "--mock --mock-devices 4"
+  # Real hardware, safe backend: hybrid reads the driver's sysfs surfaces and
+  # tt-smi. It never opens /dev/tenstorrent, so it cannot perturb the training
+  # run these scenes are recorded against.
+  backend: "--backend hybrid"
   outputs: [cast, gif, mp4]
   render:
-    # An animated TUI at agg defaults lands at 15-25 MB; these knobs keep a
-    # 30s scene small enough to sit in a README and on the site.
+    # An animated TUI at agg defaults lands at 15-25 MB; these knobs keep the
+    # artifacts small enough for a README and the project site.
     fps_cap: 10
     font_size: 12
 
 scenes:
   - id: training-view
-    title: "Training view: watching a live tt-train run"
+    title: "Training view: a live tt-train run"
     layout: single
     right:
-      run: "tt-toplike-tui {backend}"
-      keys: ["t"]
+      run: "tt-toplike-tui {backend} --mode training"
     duration: 30s
     caption: >-
-      The Training view auto-attaches to a running tt-train process, tails the
-      log its stdout already points at, and renders the run: loss mountains
+      The Training view auto-attaches to a running trainer, tails the log its
+      stdout already points at, and renders the run: the loss mountain range
       descending as the model converges, forward and backward sweeps travelling
-      the network grid, and a checkpoint comet on every save.
+      the network, and the chips actually doing the work heating up beneath it.
+
+  - id: rotate
+    title: "Rotate: every view, unattended"
+    layout: single
+    right:
+      run: "tt-toplike-tui {backend} --rotate"
+    duration: 180s
+    caption: >-
+      `--rotate` cycles every view — including the three normally reachable only
+      by their own key — dwelling 30s on each, 45s on arcade, and only 10s on a
+      workload view with nothing to show.
