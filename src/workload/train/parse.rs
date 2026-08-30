@@ -53,6 +53,31 @@ pub enum TrainEvent {
     GradAccum(u32),
     Scheduler(String),
     ParamCount(u64),
+    /// Sequence length the run is actually using. Worth its own event
+    /// because a harness may *narrow* it below what the model YAML declares
+    /// (tt-tnt does), and the run's value is the one tokens/sec must use.
+    SeqLen(u32),
+    /// A model-topology YAML named in the log rather than on the cmdline.
+    /// The monitor resolves it; the parser only reports the name.
+    ModelConfigFile(String),
+    /// A Python harness's one-line run summary, carrying several fields at
+    /// once. Expanded by the state into the individual events.
+    HarnessSummary {
+        max_steps: u64,
+        batch_size: u32,
+        seq_len: u32,
+    },
+}
+
+/// The integer immediately following `key` in a `key=value` line.
+fn kv_num(s: &str, key: &str) -> Option<u64> {
+    let i = s.find(key)?;
+    let digits: String = s[i + key.len()..]
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
 }
 
 /// Value after `prefix`, trimmed. `None` when the line doesn't start with it.
@@ -118,6 +143,53 @@ pub fn parse_train_line(line: &str) -> Option<TrainEvent> {
             },
             _ => TrainEvent::Step { step, loss },
         });
+    }
+
+    // A Python harness's own run summary. tt-tnt prints, on one line:
+    //   "tt-tnt training — steps=4000 batch=8 seq_len=512 arch=blackhole"
+    // This is the only place a ttml-driven run states its step budget, so
+    // without it there is no ETA and no tokens/sec for such a run.
+    // Checked before the per-step `step=` shape below, which it cannot be
+    // confused with (that one requires `train_loss=`).
+    if line.contains("steps=") && line.contains("batch=") {
+        if let (Some(max_steps), Some(batch_size)) =
+            (kv_num(line, "steps="), kv_num(line, "batch="))
+        {
+            // seq_len is on the same line for tt-tnt; a harness that omits
+            // it still yields the step budget, which is the valuable part.
+            let seq_len = kv_num(line, "seq_len=").unwrap_or(0) as u32;
+            return Some(TrainEvent::HarnessSummary {
+                max_steps,
+                batch_size: batch_size as u32,
+                seq_len,
+            });
+        }
+    }
+
+    // "  seq_len: 512 (NARROWED from the size's declared ... 2048; ...)"
+    // Three variants of the parenthetical exist; only the number matters.
+    // Must be read as the run's own value — the model YAML's declared
+    // length can be larger, and using that would overstate tokens/sec.
+    if let Some(v) = after(line, "seq_len:") {
+        let digits: String = v.chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(n) = digits.parse::<u32>() {
+            return Some(TrainEvent::SeqLen(n));
+        }
+    }
+
+    // "  model size: 384 (tt-tnt-384.yaml)" — the topology YAML is named in
+    // the log rather than passed on the cmdline, because the harness builds
+    // its config in Python.
+    if let Some(v) = after(line, "model size:") {
+        if let Some(open) = v.find('(') {
+            let inner = &v[open + 1..];
+            if let Some(close) = inner.find(')') {
+                let name = inner[..close].trim();
+                if name.ends_with(".yaml") || name.ends_with(".yml") {
+                    return Some(TrainEvent::ModelConfigFile(name.to_string()));
+                }
+            }
+        }
     }
 
     // Python harnesses that drive ttml print their own shape rather than
@@ -244,6 +316,83 @@ mod tests {
         );
         // A line mentioning steps but carrying no train_loss is not a step.
         assert_eq!(parse_train_line("  step=   12 val_loss=3.1"), None);
+    }
+
+    /// Every string here is copied verbatim from the log of the real tt-tnt
+    /// run recorded on 4× Blackhole — not retyped from the source, which is
+    /// how the per-step shapes came to be wrong in the first place.
+    #[test]
+    fn parses_a_python_harnesss_run_summary_and_topology_lines() {
+        assert_eq!(
+            parse_train_line("tt-tnt training — steps=4000 batch=8 seq_len=512 arch=blackhole"),
+            Some(TrainEvent::HarnessSummary {
+                max_steps: 4000,
+                batch_size: 8,
+                seq_len: 512,
+            }),
+            "the run summary is the only place a ttml run states its step budget"
+        );
+
+        // The narrowing variant: the run uses 512 even though the model YAML
+        // declares 2048. Reading the YAML's number would overstate tokens/sec
+        // fourfold, so the run's own value has to win.
+        assert_eq!(
+            parse_train_line(
+                "  seq_len: 512 (NARROWED from the size's declared max_sequence_length 2048; \
+                 RoPE cache is read as a prefix)"
+            ),
+            Some(TrainEvent::SeqLen(512)),
+        );
+        assert_eq!(
+            parse_train_line("  seq_len: 2048 (size's max_sequence_length)"),
+            Some(TrainEvent::SeqLen(2048)),
+        );
+
+        assert_eq!(
+            parse_train_line("  model size: 384 (tt-tnt-384.yaml)"),
+            Some(TrainEvent::ModelConfigFile("tt-tnt-384.yaml".to_string())),
+        );
+        // A parenthetical that isn't a config file must not be taken as one.
+        assert_eq!(parse_train_line("  model size: 384 (the big one)"), None);
+    }
+
+    /// The summary must not be mistaken for a per-step line, or a run's step
+    /// budget would be read as its current step.
+    #[test]
+    fn the_run_summary_is_not_confused_with_a_step_line() {
+        let ev =
+            parse_train_line("tt-tnt training — steps=4000 batch=8 seq_len=512 arch=blackhole");
+        assert!(
+            !matches!(ev, Some(TrainEvent::Step { .. })),
+            "`steps=` must not be read as the per-step `step=` shape"
+        );
+    }
+
+    /// The summary expands into the same fields the tt-train startup lines
+    /// set, so ETA and tokens/sec work identically for either kind of run.
+    #[test]
+    fn a_run_summary_yields_eta_and_tokens_per_sec() {
+        let mut st = crate::workload::train::monitor::TrainState::new();
+        st.apply_event(
+            parse_train_line("tt-tnt training — steps=4000 batch=8 seq_len=512 arch=blackhole")
+                .unwrap(),
+        );
+        assert_eq!(st.max_steps, 4000);
+        assert_eq!(st.batch_size, 8);
+        assert_eq!(st.config.max_sequence_length, Some(512));
+
+        // With a step time known, both derived figures become available.
+        st.apply_event(TrainEvent::Step {
+            step: 100,
+            loss: 3.0,
+        });
+        st.step_ms = 500.0;
+        assert!(st.eta_secs().is_some(), "ETA needs the step budget");
+        assert_eq!(
+            st.tokens_per_sec(),
+            Some(8.0 * 512.0 * 2.0),
+            "batch × seq_len × 1/step_ms, with grad_accum defaulting to 1"
+        );
     }
 
     /// A combined line must feed step time and cache entries through, or the

@@ -81,6 +81,27 @@ impl TrainState {
                 self.apply_event(TrainEvent::Step { step, loss });
                 self.apply_event(TrainEvent::StepTime { ms, cache_entries });
             }
+            // The run's own sequence length, which may be narrower than the
+            // model YAML's declared maximum. Whichever the log states last
+            // wins, and the harness prints its summary after naming the
+            // YAML, so a narrowed run is not overstated.
+            TrainEvent::SeqLen(v) => {
+                if v > 0 {
+                    self.config.max_sequence_length = Some(v);
+                }
+            }
+            // Resolved by the monitor, which has the pid needed to find the
+            // file; nothing to record in the state itself.
+            TrainEvent::ModelConfigFile(_) => {}
+            TrainEvent::HarnessSummary {
+                max_steps,
+                batch_size,
+                seq_len,
+            } => {
+                self.apply_event(TrainEvent::MaxSteps(max_steps));
+                self.apply_event(TrainEvent::BatchSize(batch_size));
+                self.apply_event(TrainEvent::SeqLen(seq_len));
+            }
             TrainEvent::MaxSteps(v) => self.max_steps = v,
             TrainEvent::BatchSize(v) => self.batch_size = v,
             TrainEvent::GradAccum(v) => self.grad_accum = v,
@@ -225,6 +246,13 @@ pub struct TrainMonitor {
     tailer: Option<Tailer>,
     ckpt: Option<CheckpointWatch>,
     last_scan: Option<Instant>,
+    /// True once the log has stated a step time itself (tt-train does, on
+    /// its combined per-step line). While false, step time is derived from
+    /// how fast step lines arrive — see `note_step_progress`.
+    saw_reported_step_time: bool,
+    /// `(step number, when we saw it)` for the last poll that advanced the
+    /// step. The gap to the next one is what the derivation measures.
+    last_step_seen: Option<(u64, Instant)>,
 }
 
 impl Default for TrainMonitor {
@@ -240,7 +268,93 @@ impl TrainMonitor {
             tailer: None,
             ckpt: None,
             last_scan: None,
+            saw_reported_step_time: false,
+            last_step_seen: None,
         }
+    }
+
+    /// Derive a per-step wall time from how fast step lines arrive.
+    ///
+    /// A harness that drives `ttml` from Python prints no step time at all,
+    /// so without this its run shows no step/s, no tokens/sec and no ETA.
+    /// The measurement divides by the *step delta*, not by one, so a harness
+    /// that logs every Nth step still yields a per-step figure.
+    ///
+    /// Only used when the log never states a step time itself — a reported
+    /// number is the trainer's own measurement of compute and always beats
+    /// our measurement of its logging. Deliberately skipped for the first
+    /// observation (nothing to measure against) and for implausible gaps, so
+    /// the burst of backlog read at attach can't be mistaken for one step.
+    fn note_step_progress(&mut self, now: Instant) {
+        if self.saw_reported_step_time {
+            return;
+        }
+        let step = self.state.step;
+        if let Some((prev_step, prev_at)) = self.last_step_seen {
+            if step > prev_step {
+                let dt_ms = now.duration_since(prev_at).as_secs_f32() * 1000.0;
+                let dsteps = (step - prev_step) as f32;
+                let per_step = dt_ms / dsteps;
+                // Under 1 ms is backlog being replayed, not training; over
+                // two minutes a step means the run stalled or we were
+                // descheduled, and either way it is not a rate worth showing.
+                if (1.0..=120_000.0).contains(&per_step) {
+                    // Smoothed: a single slow step (a checkpoint save, a
+                    // scheduler hiccup) shouldn't visibly jerk the readout.
+                    self.state.step_ms = if self.state.step_ms > 0.0 {
+                        self.state.step_ms * 0.7 + per_step * 0.3
+                    } else {
+                        per_step
+                    };
+                }
+            }
+        }
+        if self.last_step_seen.map(|(s, _)| step > s).unwrap_or(true) {
+            self.last_step_seen = Some((step, now));
+        }
+    }
+
+    /// Find a model-topology YAML the log named but the cmdline didn't pass.
+    ///
+    /// A harness that assembles its config in Python has no config file to
+    /// point at, but it does print which topology it chose. Searched beneath
+    /// the trainer's own working directory and depth-bounded, so this stays
+    /// a quick look near the run rather than a filesystem crawl.
+    #[cfg(target_os = "linux")]
+    fn find_named_config(pid: i32, name: &str) -> Option<PathBuf> {
+        const MAX_DEPTH: usize = 4;
+        let root = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
+        let mut queue = vec![(root, 0usize)];
+        while let Some((dir, depth)) = queue.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.file_name().is_some_and(|f| f == name) {
+                    return Some(path);
+                }
+                if depth < MAX_DEPTH && e.file_type().is_ok_and(|t| t.is_dir()) {
+                    // Skip the usual large, uninteresting trees rather than
+                    // descending into a venv or a build directory.
+                    let skip = path.file_name().is_some_and(|f| {
+                        matches!(
+                            f.to_string_lossy().as_ref(),
+                            ".git" | "target" | "build" | "node_modules" | "__pycache__" | ".venv"
+                        )
+                    });
+                    if !skip {
+                        queue.push((path, depth + 1));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn find_named_config(_pid: i32, _name: &str) -> Option<PathBuf> {
+        None
     }
 
     pub fn state(&self) -> &TrainState {
@@ -428,12 +542,55 @@ impl TrainMonitor {
 
         // Drain newly-appended log lines.
         if let Some(t) = self.tailer.as_mut() {
-            for line in t.read_new() {
-                if let Some(ev) = parse_train_line(&line) {
-                    self.state.apply_event(ev);
+            let lines = t.read_new();
+            let pid = self.state.proc.as_ref().map(|p| p.pid);
+            for line in lines {
+                let Some(ev) = parse_train_line(&line) else {
+                    continue;
+                };
+                match ev {
+                    // The trainer stated its own step time, so stop deriving
+                    // one from log cadence.
+                    TrainEvent::StepTime { .. } | TrainEvent::StepAndTime { .. } => {
+                        self.saw_reported_step_time = true;
+                        self.state.apply_event(ev);
+                    }
+                    // A topology YAML named in the log: locate it near the
+                    // run and merge it, the same as a `--config`-supplied
+                    // one. Any `SeqLen` later in the log still wins, since
+                    // the harness prints its summary after this line.
+                    TrainEvent::ModelConfigFile(ref name) => {
+                        if let Some(pid) = pid {
+                            if let Some(path) = Self::find_named_config(pid, name) {
+                                if let Ok(text) = std::fs::read_to_string(&path) {
+                                    // The YAML states the topology's *declared*
+                                    // maximum sequence length; a run may narrow
+                                    // it (tt-tnt runs 512 against a declared
+                                    // 2048). Taking the YAML's number would
+                                    // overstate tokens/sec fourfold, so a
+                                    // length the run already told us survives
+                                    // the merge. In practice the log names the
+                                    // YAML before stating its length, so this
+                                    // guards the other ordering — but tokens
+                                    // /sec being wrong by a factor of four is
+                                    // not something to leave resting on the
+                                    // order two lines happen to be printed in.
+                                    let run_seq = self.state.config.max_sequence_length;
+                                    merge_model_yaml(&mut self.state.config, &text);
+                                    if run_seq.is_some() {
+                                        self.state.config.max_sequence_length = run_seq;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => self.state.apply_event(ev),
                 }
             }
         }
+        // Measure the step cadence after the batch, so a poll that read many
+        // lines counts as one observation rather than many.
+        self.note_step_progress(Instant::now());
 
         // Checkpoint pulse.
         if self.state.checkpoint_pulse > 0 {
@@ -507,6 +664,157 @@ mod tests {
             cfg.model_save_path.as_deref(),
             Some("transformer.msgpack"),
             "the training yaml itself must have been read"
+        );
+    }
+
+    /// The run's own sequence length must beat the topology YAML's declared
+    /// maximum, whichever order they arrive in. tt-tnt runs 512 against a
+    /// declared 2048; taking the YAML's number overstates tokens/sec 4×.
+    #[test]
+    fn a_narrowed_run_sequence_length_survives_the_topology_merge() {
+        // The real tt-tnt-384.yaml's relevant lines.
+        let yaml = "transformer_config:\n  num_heads: 6\n  embedding_dim: 384\n  \
+                    num_blocks: 6\n  vocab_size: 32000\n  max_sequence_length: 2048\n";
+
+        // Order as the log actually prints it: YAML named first, run's own
+        // length stated after.
+        let mut cfg = TrainConfig::default();
+        merge_model_yaml(&mut cfg, yaml);
+        let mut st = TrainState::new();
+        st.config = cfg;
+        st.apply_event(TrainEvent::SeqLen(512));
+        assert_eq!(st.config.max_sequence_length, Some(512));
+
+        // The other order — the guard in the merge arm, expressed directly.
+        let mut cfg2 = TrainConfig {
+            max_sequence_length: Some(512),
+            ..TrainConfig::default()
+        };
+        let run_seq = cfg2.max_sequence_length;
+        merge_model_yaml(&mut cfg2, yaml);
+        if run_seq.is_some() {
+            cfg2.max_sequence_length = run_seq;
+        }
+        assert_eq!(
+            cfg2.max_sequence_length,
+            Some(512),
+            "the topology's declared maximum must not overwrite the run's own length"
+        );
+        // The rest of the topology must still come through.
+        assert_eq!(cfg2.num_blocks, Some(6));
+        assert_eq!(cfg2.embedding_dim, Some(384));
+    }
+
+    /// A harness that builds its config in Python has no config file to
+    /// pass on the cmdline, but it does print which topology YAML it chose.
+    /// Finding it is what turns `topology unknown` into a real model card.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_config_named_in_the_log_is_found_beneath_the_trainers_cwd() {
+        let dir = std::env::temp_dir().join(format!("ttfindcfg_{}", std::process::id()));
+        let nested = dir.join("train").join("configs").join("model");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("tt-tnt-384.yaml"), "transformer_config:\n").unwrap();
+        // A tree that must be skipped rather than descended into.
+        let skipped = dir.join(".venv").join("deep");
+        std::fs::create_dir_all(&skipped).unwrap();
+        std::fs::write(skipped.join("decoy.yaml"), "x").unwrap();
+
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .current_dir(&dir)
+            .spawn()
+            .expect("spawn test child");
+        let pid = child.id() as i32;
+
+        let found = TrainMonitor::find_named_config(pid, "tt-tnt-384.yaml");
+        let decoy = TrainMonitor::find_named_config(pid, "decoy.yaml");
+        let absent = TrainMonitor::find_named_config(pid, "nothing-here.yaml");
+
+        child.kill().ok();
+        child.wait().ok();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(
+            found.as_deref(),
+            Some(nested.join("tt-tnt-384.yaml").as_path()),
+            "a config nested under the trainer's cwd must be found"
+        );
+        assert!(
+            decoy.is_none(),
+            "trees like .venv must be skipped, not crawled"
+        );
+        assert!(absent.is_none(), "a name that isn't there must not match");
+    }
+
+    /// A ttml-driven harness prints no step time, so without deriving one
+    /// from log cadence its run shows no step/s, no tokens/sec and no ETA.
+    #[test]
+    fn step_time_is_derived_from_log_cadence_when_the_log_never_states_one() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+
+        // First observation only establishes a baseline — there is nothing
+        // to measure a gap against yet.
+        m.state.step = 10;
+        m.note_step_progress(t0);
+        assert_eq!(m.state.step_ms, 0.0, "one observation cannot be a rate");
+
+        // 400 ms later, 2 steps on: 200 ms per step.
+        m.state.step = 12;
+        m.note_step_progress(t0 + Duration::from_millis(400));
+        assert!(
+            (m.state.step_ms - 200.0).abs() < 1.0,
+            "expected ~200ms/step from a 400ms gap over 2 steps, got {}",
+            m.state.step_ms
+        );
+        assert!(m.state.steps_per_sec() > 0.0);
+    }
+
+    /// The trainer's own measurement of its compute always beats our
+    /// measurement of how fast it writes to a file.
+    #[test]
+    fn a_reported_step_time_is_never_overwritten_by_the_derived_one() {
+        let mut m = TrainMonitor::new();
+        m.saw_reported_step_time = true;
+        m.state.step_ms = 1124.5;
+
+        let t0 = Instant::now();
+        m.state.step = 1;
+        m.note_step_progress(t0);
+        m.state.step = 2;
+        m.note_step_progress(t0 + Duration::from_millis(50));
+
+        assert_eq!(
+            m.state.step_ms, 1124.5,
+            "a log that states its own step time must not be second-guessed"
+        );
+    }
+
+    /// At attach the tailer replays the whole existing log at once, which
+    /// would otherwise look like thousands of steps in a single instant.
+    #[test]
+    fn replayed_backlog_does_not_produce_an_absurd_step_rate() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+
+        // One poll jumps from nothing to step 4000 — the backlog.
+        m.state.step = 4000;
+        m.note_step_progress(t0);
+        // The very next poll, microseconds later, advances one step.
+        m.state.step = 4001;
+        m.note_step_progress(t0 + Duration::from_micros(200));
+        assert_eq!(
+            m.state.step_ms, 0.0,
+            "a sub-millisecond gap is replay, not a training step"
+        );
+
+        // A genuine gap afterwards is still measured.
+        m.state.step = 4002;
+        m.note_step_progress(t0 + Duration::from_millis(300));
+        assert!(
+            m.state.step_ms > 0.0,
+            "real cadence must still be picked up"
         );
     }
 
