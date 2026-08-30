@@ -70,6 +70,17 @@ impl TrainState {
                 self.step_ms = ms;
                 self.cache_entries = cache_entries;
             }
+            // Current tt-train packs all four fields onto one line; expand it
+            // so both halves take exactly the paths the split shape does.
+            TrainEvent::StepAndTime {
+                step,
+                loss,
+                ms,
+                cache_entries,
+            } => {
+                self.apply_event(TrainEvent::Step { step, loss });
+                self.apply_event(TrainEvent::StepTime { ms, cache_entries });
+            }
             TrainEvent::MaxSteps(v) => self.max_steps = v,
             TrainEvent::BatchSize(v) => self.batch_size = v,
             TrainEvent::GradAccum(v) => self.grad_accum = v,

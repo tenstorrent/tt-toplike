@@ -7,14 +7,22 @@
 //! emits per-run (verbatim from `sources/examples/nano_gpt/main.cpp`):
 //!
 //! ```text
-//! Step: {global_step}, Loss: {average_loss}
-//! Full step time {duration} ms, cache entries: {n}
+//! Step: {step}, Loss: {loss}, Time: {ms} ms, cache entries: {n}   (nano_gpt)
+//! Step: {step} Loss: {loss}                          (linear_regression)
+//! Step: {step} | Average Loss: {loss}                       (mnist_mlp)
 //! Max steps {N}
 //! Batch size {N}
 //! Gradient accumulation steps {N}
 //! Scheduler type {name}
-//! Number of parameters: {N}
 //! ```
+//!
+//! Verified against tt-metal v0.77.0. The three example binaries each spell
+//! the per-step line differently, so the step parser matches on the pieces
+//! rather than one exact layout. Two shapes an earlier revision of this
+//! parser expected — a separate `Full step time …` line, and
+//! `Number of parameters: {N}` — are emitted by **no** current binary; they
+//! are still accepted (harmless, and other builds may print them) but
+//! nothing may depend on them arriving.
 //!
 //! Anything else (framework logger output, blank lines, a partially-flushed
 //! line) yields `None` and is skipped rather than failing the tail.
@@ -22,8 +30,24 @@
 /// One recognized line of tt-train output.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrainEvent {
-    Step { step: u64, loss: f32 },
-    StepTime { ms: f32, cache_entries: u32 },
+    Step {
+        step: u64,
+        loss: f32,
+    },
+    StepTime {
+        ms: f32,
+        cache_entries: u32,
+    },
+    /// The combined per-step line current tt-train emits, carrying the step,
+    /// loss, wall time and program-cache count together. Kept distinct from
+    /// `Step` + `StepTime` so the parser stays one-event-per-line; the state
+    /// expands it into both.
+    StepAndTime {
+        step: u64,
+        loss: f32,
+        ms: f32,
+        cache_entries: u32,
+    },
     MaxSteps(u64),
     BatchSize(u32),
     GradAccum(u32),
@@ -39,12 +63,60 @@ fn after<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
 pub fn parse_train_line(line: &str) -> Option<TrainEvent> {
     let line = line.trim();
 
-    // "Step: 2431, Loss: 1.8342" — both halves required.
+    // The per-step line. Each example binary spells it differently, so match
+    // on the pieces rather than on one exact layout:
+    //
+    //   nano_gpt           Step: 2431, Loss: 1.8342, Time: 1124.5 ms, cache entries: 21
+    //   linear_regression  Step: 7 Loss: 0.4213
+    //   mnist_mlp          Step:    42 | Average Loss: 0.1337
+    //
+    // Everything after the loss is optional; when the time/cache fields are
+    // present (nano_gpt) they arrive on this same line, where older builds
+    // put them on a separate "Full step time" line.
     if let Some(rest) = after(line, "Step:") {
-        let (step_s, loss_s) = rest.split_once(", Loss:")?;
-        return Some(TrainEvent::Step {
-            step: step_s.trim().parse().ok()?,
-            loss: loss_s.trim().parse().ok()?,
+        // "Average Loss:" contains "Loss:", so one search covers both.
+        let loss_at = rest.find("Loss:")?;
+        // The step number is always the leading token, so read it directly
+        // rather than trying to unwind whatever separator and "Average "
+        // qualifier follow it — those differ per binary and compose in
+        // orders that are easy to get subtly wrong.
+        let step_s: String = rest
+            .trim_start()
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        let after_loss = &rest[loss_at + "Loss:".len()..];
+        // The loss runs to the next comma, or to end of line.
+        let (loss_s, tail) = match after_loss.split_once(',') {
+            Some((l, t)) => (l, t),
+            None => (after_loss, ""),
+        };
+        let step = step_s.parse().ok()?;
+        let loss = loss_s.trim().parse().ok()?;
+
+        // Optional trailing "Time: {} ms" and "cache entries: {}".
+        let ms = tail
+            .find("Time:")
+            .and_then(|i| tail[i + "Time:".len()..].split_once("ms"))
+            .and_then(|(v, _)| v.trim().parse::<f32>().ok());
+        let cache = tail
+            .find("cache entries:")
+            .and_then(|i| {
+                tail[i + "cache entries:".len()..]
+                    .split(',')
+                    .next()
+                    .map(str::trim)
+            })
+            .and_then(|v| v.parse::<u32>().ok());
+
+        return Some(match (ms, cache) {
+            (Some(ms), Some(cache_entries)) => TrainEvent::StepAndTime {
+                step,
+                loss,
+                ms,
+                cache_entries,
+            },
+            _ => TrainEvent::Step { step, loss },
         });
     }
 
@@ -82,6 +154,63 @@ pub fn parse_train_line(line: &str) -> Option<TrainEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three per-step shapes tt-train actually emits, copied from the
+    /// `fmt::print` format strings in tt-metal v0.77.0. Each example binary
+    /// spells the line differently, and none of them match the two-line
+    /// `Step:` + `Full step time` shape this parser was first written
+    /// against — a run against any real binary produced an attached view
+    /// with a permanently empty loss curve.
+    #[test]
+    fn parses_the_real_per_step_lines_from_every_example_binary() {
+        // nano_gpt — one combined line carrying time and cache entries.
+        // main.cpp: "Step: {}, Loss: {}, Time: {} ms, cache entries: {}\n"
+        assert_eq!(
+            parse_train_line("Step: 2431, Loss: 1.8342, Time: 1124.5 ms, cache entries: 21"),
+            Some(TrainEvent::StepAndTime {
+                step: 2431,
+                loss: 1.8342,
+                ms: 1124.5,
+                cache_entries: 21,
+            }),
+        );
+
+        // linear_regression — no comma at all between the two fields.
+        // main.cpp: "Step: {} Loss: {}\n"
+        assert_eq!(
+            parse_train_line("Step: 7 Loss: 0.4213"),
+            Some(TrainEvent::Step {
+                step: 7,
+                loss: 0.4213
+            }),
+        );
+
+        // mnist_mlp — pipe separator, and "Average Loss" rather than "Loss".
+        // main.cpp: "Step: {:5d} | Average Loss: {:.4f}\n"
+        assert_eq!(
+            parse_train_line("Step:    42 | Average Loss: 0.1337"),
+            Some(TrainEvent::Step {
+                step: 42,
+                loss: 0.1337
+            }),
+        );
+    }
+
+    /// A combined line must feed step time and cache entries through, or the
+    /// derived tokens/sec, step/s, ETA and the kernel-cache shimmer all stay
+    /// dead on exactly the binary the view is most likely pointed at.
+    #[test]
+    fn a_combined_step_line_populates_step_time_and_cache_entries() {
+        let mut st = crate::workload::train::monitor::TrainState::new();
+        let ev = parse_train_line("Step: 10, Loss: 2.5, Time: 800 ms, cache entries: 34")
+            .expect("the real nano_gpt line must parse");
+        st.apply_event(ev);
+        assert_eq!(st.step, 10);
+        assert_eq!(st.loss, Some(2.5));
+        assert_eq!(st.step_ms, 800.0, "step time must reach the state");
+        assert_eq!(st.cache_entries, 34, "cache entries must reach the state");
+        assert!(st.steps_per_sec() > 0.0, "step/s must be derivable");
+    }
 
     // Every string below is the verbatim shape tt-train's fmt::print emits
     // (sources/examples/nano_gpt/main.cpp) — do not "tidy" them.
