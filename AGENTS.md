@@ -4984,3 +4984,100 @@ defects (an inaccurate explain claim, mismatched legend swatches, a wrong
 fixed during task review, not discovered later. Full test suite, `cargo fmt
 --check`, and `cargo clippy -D warnings` all green; no real tt-train run
 available to verify against.*
+
+---
+
+## Phase 33 — Recording the Training view, and the bug the recording found (August 30, 2026, v0.11.1)
+
+**Origin**: "record a tt-demo-maker video of the new mode while the demo load
+is running please. but first, can we get the movement a little more fluid."
+
+### Fluidity (v0.11.0 follow-up)
+
+Three causes, the first dominant: `DisplayMode::Training` was missing from
+`is_anim_mode`, so the view redrew at the **10 FPS data rate** rather than the
+~60 FPS animation rate — every moving element was stepping six times slower
+than designed. The forward/backward sweep was also a binary `% period < 2`
+on/off, so cells blinked rather than flowed; it now advances in fractional
+sub-columns with a smoothstepped falloff, a short lead-in ahead of the head
+and a longer tail behind (the asymmetry is what makes direction readable),
+and node glyphs track local sweep intensity instead of a raw frame counter.
+
+Measured while iterating rather than eyeballed: a naive `t²` falloff still
+jumped **0.95** in one frame, because a squared ramp is steepest exactly at
+its peak. Smoothstep has zero derivative at both ends — precisely where the
+pulse most needs to be smooth — bringing the worst-case frame-to-frame change
+under 0.25. Animation rates in `train_sky` are now expressed against
+`ANIM_FPS`, so the 6× frame-rate change bought smoothness without altering
+apparent speed, and re-tuning the tick rate later can't silently speed the
+sky up.
+
+### The bug the demo found
+
+`tt-demo verify` renders a contact sheet so the footage can be checked against
+what its caption claims. Two claims failed, in order:
+
+1. **The first take showed the Insights screen for all 30s.** The manifest's
+   `keys: ["t"]` is parsed *only* to select the asciinema engine — nothing in
+   `tt-demo` ever sends it. Its `raw_script` escape hatch doesn't record either
+   (a documented v1 limitation: `record.rs` prints "run vhs/asciinema
+   manually"). Recorded by driving `lib/tmux_capture.sh` directly with a pane
+   that sends keys to its own `$TMUX_PANE`.
+
+2. **The caption promised "a checkpoint comet on every save" and the comet
+   never fired.** Grepping the cast for the comet's unique mint
+   `RGB(150,235,205)` returned **zero** frames while the checkpoint file's
+   mtime was demonstrably advancing every ten seconds — so this was the
+   product, not the demo. Root cause:
+
+   ```rust
+   self.ckpt = Some(CheckpointWatch::new(PathBuf::from(mp)));
+   ```
+
+   `model_path` is a bare filename in tt-train's own configs
+   (`transformer.msgpack`), written through a plain relative open — so it
+   lands in *the trainer's* cwd. Built verbatim it pointed at whatever
+   directory tt-toplike was launched from, and since `poll()` returns `false`
+   whenever the path can't be stat'd, the pulse stayed silent for the entire
+   run. **The identical wrong-cwd bug had already been fixed for the config
+   path** — `resolve_for_pid` existed and simply wasn't called here.
+
+   Construction moved into `checkpoint_watch_for` so the *wiring* has a seam
+   to test: asserting `resolve_for_pid`'s arithmetic would have passed the
+   whole time, since the defect was that the caller never invoked it. The
+   test spawns a real process with its own cwd and requires a pulse; mutating
+   the resolution back reddens it with exactly the predicted message. After
+   the fix the recording carries 114 comet frames in three bursts matching
+   the ~10.5s save cadence, and the LIVE panel shows `ckpt @ 120` / `ckpt @
+   150` where it previously showed nothing.
+
+**The lesson is the one this repo keeps relearning**: a relative path is
+meaningless without the cwd it was written against, and a watcher on a
+nonexistent path fails *silently and permanently* rather than loudly. It took
+a demo whose caption made a falsifiable claim to notice.
+
+### Recording notes
+
+- `demo/demos.yaml` is committed (the reproducible recipe); `demo/assets/` is
+  gitignored, with published copies in `assets/` and `site/assets/`.
+- `tt-demo render --mp4` hangs past 5 minutes; the mp4 is built directly
+  (`agg --fps-cap 24` → `ffmpeg -r 24 -crf 20`, 1.5 MB) so the fluidity work
+  survives, while the README GIF stays at `--fps-cap 10` (2.7 MB).
+- The demo trainer is a shell stand-in emitting tt-train's verbatim stdout
+  line shapes on a compressed timeline. Its `max_steps` and decay horizon are
+  tuned so the loss is *visibly descending* during the take — an earlier run
+  had flattened at its asymptote and produced a boring plateau.
+- Site gained a `t · training` mode-row (it previously had only a feature
+  card); README gained the GIF in its Training section.
+
+> ⚠️ **Still not hardware-verified.** The recording is a mock backend plus a
+> stand-in trainer. The checkpoint fix is verified against a real process with
+> a real cwd and a real mtime, but attach-to-a-genuine-tt-train-run remains
+> unconfirmed, per Phase 32's caveat.
+
+---
+
+*Phase 33 status: **COMPLETE** — v0.11.1. Fluidity work committed with two
+regression tests (one mutation-tested); one real bug found by verifying demo
+footage against its caption and fixed with a wiring-layer test; 728 tests,
+fmt, clippy, and both cross-targets green.*

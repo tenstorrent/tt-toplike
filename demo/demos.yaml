@@ -1,0 +1,30 @@
+project: tt-toplike
+theme: tt-brand
+
+defaults:
+  cols: 160
+  rows: 44
+  # The Training view reads a trainer's stdout via /proc and the mock backend
+  # for chip telemetry — it never opens /dev/tenstorrent, so this demo needs
+  # no hardware lease and cannot perturb anything running on the ASICs.
+  backend: "--mock --mock-devices 4"
+  outputs: [cast, gif, mp4]
+  render:
+    # An animated TUI at agg defaults lands at 15-25 MB; these knobs keep a
+    # 30s scene small enough to sit in a README and on the site.
+    fps_cap: 10
+    font_size: 12
+
+scenes:
+  - id: training-view
+    title: "Training view: watching a live tt-train run"
+    layout: single
+    right:
+      run: "tt-toplike-tui {backend}"
+      keys: ["t"]
+    duration: 30s
+    caption: >-
+      The Training view auto-attaches to a running tt-train process, tails the
+      log its stdout already points at, and renders the run: loss mountains
+      descending as the model converges, forward and backward sweeps travelling
+      the network grid, and a checkpoint comet on every save.

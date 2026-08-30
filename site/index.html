@@ -767,7 +767,7 @@
 ·∘○◉         ●◉○∘·∘○◉●
 ◉●∘·  ·∘○◉●◉○∘·  ·∘○◉</div>
 
-      <p class="hero-eyebrow">Tenstorrent Hardware Monitor · v0.11.0 · Rust</p>
+      <p class="hero-eyebrow">Tenstorrent Hardware Monitor · v0.11.1 · Rust</p>
 
       <h1 class="hero-title">
         Watch<br>
@@ -1229,6 +1229,43 @@
       </div>
       <img class="mode-gif" src="assets/tt-toplike-hivemindsweeper.gif"
            alt="HivemindSweeper demo — vLLM serving throughput, device-holder heartbeats, and tt-metal kernel compiles coalesced into one source × device feed on 4× Blackhole"
+           loading="lazy">
+    </div>
+
+    <hr class="mode-divider">
+
+    <!-- Training -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">t · training</span>
+        <p class="mode-title">Training</p>
+        <p class="mode-desc">
+          Watch a model learn. No flags, no config, no target to name — it finds a
+          live <a href="https://github.com/tenstorrent/tt-metal/tree/main/tt-train">tt-train</a>
+          run, resolves <code>/proc/&lt;pid&gt;/fd/1</code> to the log that process is
+          already writing, and starts tailing it. The model is drawn as the network
+          it is — one column per transformer block, one node per attention head —
+          with amber sweeps for the forward pass and violet for backward. Below,
+          a loss <em>mountain range</em> descends as the run converges, each column
+          keeping its own loss's hue so the range doubles as a run-history timeline,
+          under an aurora-and-starfield sky that widens as the loss drops. A comet
+          crosses that sky on every checkpoint save.
+        </p>
+        <p class="mode-desc">
+          Deliberately honest about its limits: tt-train streams only step, loss,
+          step time, and cache-entry count, so gradient norms and MFU — which exist
+          only in a run-end summary — are simply not drawn. If the trainer's stdout
+          went to a pipe or a tty rather than a file, the per-step stream is
+          genuinely unrecoverable, and the view says so instead of inventing a curve.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>t</kbd> from any view</span>
+          <span class="mode-hint"><kbd>Esc</kbd> back</span>
+          <span class="mode-hint"><kbd>l</kbd> legend</span>
+        </div>
+      </div>
+      <img class="mode-gif" src="assets/tt-toplike-training.gif"
+           alt="Training view — a live nano_gpt run with the loss mountain range descending magenta through violet, forward and backward sweeps travelling the transformer block grid, and an aurora-and-starfield sky widening above as the model converges"
            loading="lazy">
     </div>
 

@@ -1,3 +1,27 @@
+tt-toplike (0.11.1) noble; urgency=medium
+
+  * Fix: the Training view's checkpoint pulse never fired. The watcher was
+    built from the config's `model_path` verbatim, but tt-train's own
+    configs name a bare file (`transformer.msgpack`) that the trainer
+    writes into *its* working directory — so the watcher pointed at
+    whatever directory tt-toplike was launched from, found nothing, and
+    silently reported "no save" for the entire run. It now resolves the
+    path against the trainer's cwd, as the config path already did, so the
+    checkpoint comet and the `ckpt @` readout work.
+  * Fix: the Training view animated at the 10 FPS telemetry rate instead of
+    the ~60 FPS animation rate, making the sweeps, aurora drift, star
+    twinkle, and checkpoint comet visibly step rather than move.
+  * Improve: the forward/backward sweep now travels the network in
+    fractional sub-columns with a smoothstepped falloff and a lead-in ahead
+    of its head, so the pass flows through the connectors instead of
+    blinking node to node, and its direction is readable from the
+    asymmetry. Animation rates are expressed per second, so the frame-rate
+    change alters smoothness only, never apparent speed.
+  * Docs: recorded a Training view demo (README + project site), and added
+    a `t · training` mode row to the site.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 30 Aug 2026 00:00:00 +0000
+
 tt-toplike (0.11.0) noble; urgency=medium
 
   * Add: Training view (`t`) — a full-screen visualization of a live

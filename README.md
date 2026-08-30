@@ -420,6 +420,10 @@ The screenshot above (4× Blackhole, live) shows all three at once: a **vLLM** e
 
 ### Training — watch a model learn (`t`)
 
+<img src="assets/tt-toplike-training.gif" alt="Training view — a live nano_gpt run: the loss mountain range descending magenta through violet as the model converges, forward/backward sweeps travelling the transformer block grid, and an aurora-and-starfield sky widening above" width="100%" />
+
+*A live `nano_gpt` run, attached automatically. Loss falls 2.88 → 2.24 over the clip; the mountain range recolors as it descends, the sky opens up behind it, and `ckpt @` advances as each checkpoint save lands.*
+
 Press `t` for the **Training view** — no flags, no config, no target to name. It scans running processes for a live [tt-train](https://github.com/tenstorrent/tt-metal/tree/main/tt-train) example (`nano_gpt`, `mnist_mlp`, `linear_regression`), resolves `/proc/<pid>/fd/1` to find that process's own log file, and starts tailing it — attaching within a couple of seconds if a run is already in progress.
 
 The model is drawn as the network it is — one column per transformer block, one node per attention head — fed by token particles, with amber sweeps for the forward pass and violet sweeps for backward/gradients. Beneath it, a loss "mountain range" descends as the model converges, colored magenta (high loss) through teal (low loss), with each column keeping its own loss's hue so the range doubles as a run-history timeline. The mountains sit under a twinkling aurora-and-starfield nightscape that opens up on the right as the loss drops — the negative space is itself a progress signal — and a comet streaks across the sky on every checkpoint save.
