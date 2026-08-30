@@ -593,6 +593,38 @@ fn run_local(args: &[&str]) -> String {
 mod tests {
     use super::*;
 
+    /// Poll `/proc/<pid>/environ` (bypassing any cache) until it contains
+    /// `marker`, or panic after a generous bounded wait.
+    ///
+    /// `Command::spawn()` returns as soon as `fork()` succeeds — it makes no
+    /// promise that the child has reached `exec()` yet. Until it has,
+    /// `/proc/<pid>/environ` still reflects the *pre-exec* image (typically
+    /// the test harness's own environment, inherited across the fork), not
+    /// `/bin/sleep`'s post-exec one carrying our injected `MARKER`. Under
+    /// load (e.g. the full suite running many tests in parallel) that
+    /// fork-to-exec gap can outlast an immediate read, so a test that reads
+    /// `environ` right after `spawn()` races the child's own startup. This
+    /// helper removes the race by waiting for the observable post-exec state
+    /// instead of assuming a fixed delay is long enough.
+    #[cfg(target_os = "linux")]
+    fn wait_for_environ_marker(pid: i32, marker: &str) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let text = host_environ_text(pid);
+            if text.contains(marker) {
+                return text;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "timed out after 5s waiting for pid {pid}'s /proc/{pid}/environ \
+                     to contain {marker:?} (child never appeared to exec); last \
+                     read: {text:?}"
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     /// `HostProbeCache` memoizes per-pid, keyed by pid — the most likely way
     /// a hand-rolled cache like this goes wrong is serving pid A's data for
     /// pid B. Spawns two real distinct processes with genuinely different
@@ -615,6 +647,13 @@ mod tests {
             .expect("failed to spawn child B");
         let pid_a = child_a.id() as i32;
         let pid_b = child_b.id() as i32;
+
+        // Wait for each child to actually reach exec() before touching the
+        // cache under test — see `wait_for_environ_marker`'s doc comment.
+        // These reads go straight through `host_environ_text`, not the
+        // cache, so they can't influence what the cache under test observes.
+        wait_for_environ_marker(pid_a, "MARKER=PROCESS_A");
+        wait_for_environ_marker(pid_b, "MARKER=PROCESS_B");
 
         let cache = HostProbeCache::new();
         // Interleaved on purpose: A, then B, then A again — a single-slot
