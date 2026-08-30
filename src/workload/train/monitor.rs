@@ -306,6 +306,20 @@ impl TrainMonitor {
         PathBuf::from(path)
     }
 
+    /// Build the checkpoint watcher for a detected run.
+    ///
+    /// `model_path` in tt-train's own sample configs is a bare filename
+    /// (`transformer.msgpack`), and the trainer writes it through a plain
+    /// relative `fopen` — so it lands in *the trainer's* working directory,
+    /// which has nothing to do with ours. Resolving it against our own cwd
+    /// yields a path that simply never exists, and since `poll()` reports
+    /// `false` whenever the file can't be stat'd, the checkpoint pulse would
+    /// stay silent for the entire run instead of failing loudly.
+    fn checkpoint_watch_for(p: &TrainProcess, cfg: &TrainConfig) -> Option<CheckpointWatch> {
+        let mp = cfg.model_save_path.as_ref()?;
+        Some(CheckpointWatch::new(Self::resolve_for_pid(p.pid, mp)))
+    }
+
     fn load_config(p: &TrainProcess) -> TrainConfig {
         let Some(cfg_path) = p.config_path.as_ref() else {
             return TrainConfig::default();
@@ -366,9 +380,7 @@ impl TrainMonitor {
                 if let LogSource::File(ref path) = log {
                     self.tailer = Some(Tailer::new(path.clone()));
                 }
-                if let Some(ref mp) = cfg.model_save_path {
-                    self.ckpt = Some(CheckpointWatch::new(PathBuf::from(mp)));
-                }
+                self.ckpt = Self::checkpoint_watch_for(&p, &cfg);
                 self.state = TrainState::new();
                 self.state.first_seen = Some(Instant::now());
                 self.state.config = cfg;
@@ -459,6 +471,68 @@ mod tests {
             cfg.model_save_path.as_deref(),
             Some("transformer.msgpack"),
             "the training yaml itself must have been read"
+        );
+    }
+
+    /// The checkpoint watcher must observe the file the *trainer* writes.
+    ///
+    /// `model_path` is a bare filename in tt-train's own configs, so building
+    /// the watcher from it verbatim points at our cwd, where nothing exists —
+    /// and a watcher on a nonexistent path reports "no save" forever, so the
+    /// checkpoint pulse never fires for the whole run.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_checkpoint_watcher_follows_the_trainers_cwd_not_ours() {
+        // Distinct from the other checkpoint tests' directories: they all run
+        // in one process, so a shared `ttckpt_<pid>` name would have each
+        // test's cleanup deleting a sibling's files mid-run.
+        let dir = std::env::temp_dir().join(format!("ttckptcwd_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ckpt = dir.join("transformer.msgpack");
+        std::fs::write(&ckpt, b"v1").unwrap();
+
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .current_dir(&dir)
+            .spawn()
+            .expect("spawn test child");
+        let pid = child.id() as i32;
+
+        let p = TrainProcess {
+            pid,
+            binary: "nano_gpt".into(),
+            config_path: Some("train.yaml".into()),
+        };
+        let cfg = TrainConfig {
+            // Relative, exactly as tt-train's sample configs ship it.
+            model_save_path: Some("transformer.msgpack".into()),
+            ..TrainConfig::default()
+        };
+
+        let mut w = TrainMonitor::checkpoint_watch_for(&p, &cfg)
+            .expect("a config naming model_path must yield a watcher");
+
+        // The checkpoint already existed at attach, so the first poll only
+        // establishes the baseline.
+        let baseline = w.poll();
+        // A later save bumps the mtime; SystemTime comparison needs the write
+        // to land strictly after the baseline reading.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&ckpt, b"v2").unwrap();
+        let after_save = w.poll();
+
+        child.kill().ok();
+        child.wait().ok();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            !baseline,
+            "a checkpoint left over from a previous run must not pulse on attach"
+        );
+        assert!(
+            after_save,
+            "a save in the trainer's own cwd must pulse — a watcher built \
+             from the raw relative path watches our cwd and stays silent forever"
         );
     }
 
