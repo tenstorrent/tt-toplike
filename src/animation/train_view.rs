@@ -1,0 +1,966 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+//! Training view — a live tt-train run drawn as a character-grid network
+//! being fed tokens, with loss "mountains" against an aurora nightscape.
+//!
+//! ## The colour language
+//!
+//! Each channel carries a different real signal — nothing is decorative:
+//!
+//! | Channel | Encodes |
+//! |---|---|
+//! | node/mountain hue magenta→teal | loss magnitude |
+//! | amber sweep left→right | forward pass |
+//! | violet sweep right→left | backward pass / gradients |
+//! | per-column river hue | the run's history (each column keeps its own loss's hue) |
+//! | mint ▼ / coral ▲ | loss delta direction |
+//! | cyan→green→amber→red | chip temperature (the app's existing ramp) |
+//! | bar density █▓▒░· | chip power draw |
+//! | violet shimmer → dim | kernel cache compiling → steady |
+//! | mint burst + comet | checkpoint saved |
+//!
+//! Everything here is driven by what tt-train actually prints plus
+//! tt-toplike's own chip telemetry; no metric is invented.
+
+use crate::animation::common::hsv_to_rgb;
+use crate::animation::inference_load::{fmt_elapsed, group_thousands};
+use crate::animation::train_sky::sky_cell;
+use crate::backend::TelemetryBackend;
+use crate::ui::colors;
+use crate::workload::train::{LogSource, TrainState};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+
+/// Loss → hue: 158° (teal, converged) … 325° (magenta, chaotic).
+pub fn loss_hue(loss: f32) -> f32 {
+    let t = ((loss - 0.30) / 4.3).clamp(0.0, 1.0);
+    158.0 + t * 167.0
+}
+
+const FWD_HUE: f32 = 42.0;
+const BWD_HUE: f32 = 268.0;
+
+/// Muted violet-blue used for the frame border everywhere it appears.
+const BORDER: Color = Color::Rgb(90, 90, 130);
+
+/// Compact magnitude suffix: `11.2M`, `1.20B`, `640K`. Distinct from
+/// `fmt_bytes` (binary/KiB units) — this is a plain decimal parameter count.
+fn format_count(n: u64) -> String {
+    let f = n as f64;
+    if n >= 1_000_000_000 {
+        format!("{:.2}B", f / 1e9)
+    } else if n >= 1_000_000 {
+        format!("{:.1}M", f / 1e6)
+    } else if n >= 1_000 {
+        format!("{:.1}K", f / 1e3)
+    } else {
+        n.to_string()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Cell {
+    ch: char,
+    fg: Color,
+    bold: bool,
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Self {
+            ch: ' ',
+            fg: Color::Rgb(22, 29, 38),
+            bold: false,
+        }
+    }
+}
+
+/// Row boundaries for the content bands between the title bar and the
+/// bottom border. Computed fresh from `(width, height)` on every render
+/// call — cheap, and keeps every `draw_*` method agreeing on where things
+/// go without threading a dozen extra parameters through `render()`.
+#[derive(Clone, Copy)]
+struct Layout {
+    /// First row of the model-card / network / live-stats band.
+    network_top: usize,
+    /// Height, in rows, of that band (including its own header row).
+    network_h: usize,
+    /// First row of the loss river (below the network band).
+    river_top: usize,
+    /// One past the last row of the river (the row the "low/high" labels
+    /// and the blank spacer before CHIPS occupy).
+    river_bottom: usize,
+    /// Row the CHIPS line is drawn on.
+    chips_row: usize,
+    /// Row the legend is drawn on, directly above the bottom border.
+    legend_row: usize,
+}
+
+pub struct TrainView {
+    width: usize,
+    height: usize,
+    frame: u64,
+}
+
+impl TrainView {
+    pub fn new(width: usize, height: usize) -> Self {
+        Self {
+            width: width.max(20),
+            height: height.max(10),
+            frame: 0,
+        }
+    }
+
+    pub fn update(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
+    }
+
+    pub fn render(&self, st: &TrainState, backend: &dyn TelemetryBackend) -> Vec<Line<'static>> {
+        let mut buf = vec![vec![Cell::default(); self.width]; self.height];
+        self.draw_frame(&mut buf);
+
+        match st.proc.as_ref() {
+            None => self.draw_scanning(&mut buf),
+            Some(_) => {
+                self.draw_header(&mut buf, st);
+                match st.log.as_ref() {
+                    Some(LogSource::File(_)) => {
+                        self.draw_model_card(&mut buf, st);
+                        self.draw_network(&mut buf, st);
+                        self.draw_live_stats(&mut buf, st);
+                        self.draw_river(&mut buf, st);
+                    }
+                    _ => self.draw_no_log_notice(&mut buf, st),
+                }
+                self.draw_chips(&mut buf, backend);
+                self.draw_legend(&mut buf, st);
+            }
+        }
+        self.to_lines(buf)
+    }
+
+    // ── the pieces (see defrag.rs for the same buffer→Line shape) ──
+    // NOTE TO IMPLEMENTER: each `draw_*` writes into `buf`; keep every write
+    // bounds-checked via `put`, and never emit ╗ or ╝ (left+bottom borders
+    // only). The reference mockup for exact glyphs and layout is
+    // docs/superpowers/specs/2026-08-29-training-view-design.md.
+
+    fn put(&self, buf: &mut [Vec<Cell>], x: usize, y: usize, ch: char, fg: Color, bold: bool) {
+        if y < self.height && x < self.width {
+            buf[y][x] = Cell { ch, fg, bold };
+        }
+    }
+
+    fn text(&self, buf: &mut [Vec<Cell>], x: usize, y: usize, s: &str, fg: Color, bold: bool) {
+        for (i, ch) in s.chars().enumerate() {
+            self.put(buf, x + i, y, ch, fg, bold);
+        }
+    }
+
+    /// Truncate `s` to at most `w` characters — used everywhere a panel
+    /// column has a fixed width, so a long value never bleeds into its
+    /// neighbour (writes past the screen edge are already safe via `put`,
+    /// but this keeps adjacent *panels* from overlapping each other).
+    fn clip(s: &str, w: usize) -> String {
+        s.chars().take(w).collect()
+    }
+
+    /// Column width of the left-hand MODEL/BATCH card.
+    fn left_w(&self) -> usize {
+        (self.width / 5).clamp(14, 26)
+    }
+
+    /// Column width of the right-hand LIVE stats panel.
+    fn right_w(&self) -> usize {
+        (self.width / 4).clamp(18, 30)
+    }
+
+    /// `(x0, w)` of the network grid — the space between the model card and
+    /// the live-stats panel.
+    fn network_bounds(&self) -> (usize, usize) {
+        let x0 = 2 + self.left_w() + 1;
+        let w = self.width.saturating_sub(x0 + self.right_w() + 1).max(4);
+        (x0, w)
+    }
+
+    fn layout(&self) -> Layout {
+        // Row 0/1 are the title + subtitle bars, row `height-1` is the
+        // bottom border — everything else is shared out between the
+        // network band, the river (which gets whatever's left over, since
+        // it's the visual centerpiece), CHIPS, and the legend.
+        let legend_row = self.height.saturating_sub(2);
+        let chips_row = legend_row.saturating_sub(2);
+        let network_top = 3;
+        let network_h = 9usize.min(chips_row.saturating_sub(network_top + 3)).max(2);
+        let river_top = network_top + network_h + 1;
+        let river_bottom = chips_row.saturating_sub(1).max(river_top + 1);
+        Layout {
+            network_top,
+            network_h,
+            river_top,
+            river_bottom,
+            chips_row,
+            legend_row,
+        }
+    }
+
+    fn draw_frame(&self, buf: &mut [Vec<Cell>]) {
+        // Left border down every content row except the title bar (row 0
+        // draws its own `╔`) and the bottom border row (drawn below).
+        for y in 1..self.height.saturating_sub(1) {
+            self.put(buf, 0, y, '║', BORDER, false);
+        }
+        let last = self.height - 1; // height >= 10, guaranteed by `new`.
+        self.put(buf, 0, last, '╚', BORDER, false);
+        for x in 1..self.width {
+            self.put(buf, x, last, '═', BORDER, false);
+        }
+    }
+
+    fn draw_scanning(&self, buf: &mut [Vec<Cell>]) {
+        let dim = Color::Rgb(150, 155, 175);
+
+        self.put(buf, 0, 0, '╔', BORDER, false);
+        self.text(buf, 1, 0, "═[ TRAINING ]", BORDER, true);
+        for x in 14..self.width {
+            self.put(buf, x, 0, '═', BORDER, false);
+        }
+
+        // Idle nightscape behind the scanning message — even with nothing
+        // to monitor yet, the negative space stays alive.
+        let top = 1;
+        let bottom = self.height.saturating_sub(1);
+        let span = bottom.saturating_sub(top).max(1);
+        for y in top..bottom {
+            let rel_y = (y - top) as f32 / span as f32;
+            for x in 1..self.width {
+                if let Some(sc) = sky_cell(x, y, rel_y, self.frame) {
+                    self.put(buf, x, y, sc.ch, sc.color, false);
+                }
+            }
+        }
+
+        let title = "SCANNING FOR TRAINING";
+        let tx = self.width.saturating_sub(title.chars().count()) / 2;
+        let mid = self.height / 2;
+        self.text(
+            buf,
+            tx.max(2),
+            mid.saturating_sub(2),
+            title,
+            Color::Rgb(220, 200, 255),
+            true,
+        );
+
+        let checklist = [
+            "· device-fd holders",
+            "· tt-train binaries (nano_gpt, mnist_mlp, linear_regression)",
+            "· /proc/<pid>/fd/1 → regular file?",
+            "· log tail",
+        ];
+        for (i, line) in checklist.iter().enumerate() {
+            let y = mid + i;
+            if y >= bottom {
+                break;
+            }
+            self.text(
+                buf,
+                3,
+                y,
+                &Self::clip(line, self.width.saturating_sub(4)),
+                dim,
+                false,
+            );
+        }
+    }
+
+    fn draw_header(&self, buf: &mut [Vec<Cell>], st: &TrainState) {
+        let bright = Color::Rgb(230, 230, 255);
+        let binary = st
+            .proc
+            .as_ref()
+            .map(|p| p.binary.as_str())
+            .unwrap_or("training");
+        let pid = st.proc.as_ref().map(|p| p.pid).unwrap_or(0);
+
+        self.put(buf, 0, 0, '╔', BORDER, false);
+        let left = format!("═[ TRAINING ]  {binary} · pid {pid} ");
+        self.text(
+            buf,
+            1,
+            0,
+            &Self::clip(&left, self.width.saturating_sub(1)),
+            BORDER,
+            true,
+        );
+        let mut x = 1 + left.chars().count();
+        while x < self.width {
+            self.put(buf, x, 0, '═', BORDER, false);
+            x += 1;
+        }
+
+        // Right-aligned loss + delta — drawn after the dash fill so it wins.
+        if let Some(loss) = st.loss {
+            let color = hsv_to_rgb(loss_hue(loss), 0.75, 0.85);
+            let loss_part = format!("LOSS {loss:.4}  ");
+            let (delta_str, delta_color) = match st.prev_loss {
+                Some(prev) => {
+                    let d = loss - prev;
+                    if d <= 0.0 {
+                        (format!("▼{:.4}", -d), Color::Rgb(120, 230, 190))
+                    } else {
+                        (format!("▲{d:.4}"), Color::Rgb(255, 140, 120))
+                    }
+                }
+                None => (String::new(), Color::Reset),
+            };
+            let total = loss_part.chars().count() + delta_str.chars().count();
+            let rx = self.width.saturating_sub(total + 1);
+            self.text(buf, rx, 0, &loss_part, color, true);
+            self.text(
+                buf,
+                rx + loss_part.chars().count(),
+                0,
+                &delta_str,
+                delta_color,
+                true,
+            );
+        }
+
+        // Second header row: how we attached, plus the step counter.
+        let attach_desc = match st.log.as_ref() {
+            Some(LogSource::File(p)) => format!(" auto-attached  {}", p.display()),
+            Some(LogSource::NotRedirected) => " auto-attached  stdout not redirected".to_string(),
+            None => " scanning for log".to_string(),
+        };
+        let right_w = if st.max_steps > 0 { 26 } else { 0 };
+        let left_room = self.width.saturating_sub(right_w + 2);
+        self.text(
+            buf,
+            1,
+            1,
+            &Self::clip(&attach_desc, left_room),
+            Color::Rgb(150, 160, 190),
+            false,
+        );
+
+        if st.max_steps > 0 {
+            let pct = (st.step as f64 / st.max_steps as f64 * 100.0).clamp(0.0, 100.0);
+            let step_str = format!(
+                "step {} / {}  {pct:.1}%",
+                group_thousands(st.step as usize),
+                group_thousands(st.max_steps as usize),
+            );
+            let sx = self.width.saturating_sub(step_str.chars().count() + 1);
+            self.text(buf, sx, 1, &step_str, bright, false);
+        }
+    }
+
+    fn draw_no_log_notice(&self, buf: &mut [Vec<Cell>], st: &TrainState) {
+        let dim = Color::Rgb(160, 165, 185);
+        let warn = Color::Rgb(255, 190, 120);
+        let binary = st
+            .proc
+            .as_ref()
+            .map(|p| p.binary.as_str())
+            .unwrap_or("The training run");
+        let row = 4;
+        let w = self.width.saturating_sub(4);
+        self.text(
+            buf,
+            2,
+            row,
+            &Self::clip(
+                &format!("{binary} is running, but its output isn't visible here."),
+                w,
+            ),
+            dim,
+            false,
+        );
+        self.text(
+            buf,
+            2,
+            row + 2,
+            &Self::clip(
+                "stdout is not redirected to a file — relaunch with '> train.log' for per-step metrics",
+                w,
+            ),
+            warn,
+            true,
+        );
+        self.text(
+            buf,
+            2,
+            row + 4,
+            &Self::clip(
+                "process, chip telemetry, and checkpoint mtime are still tracked below.",
+                w,
+            ),
+            dim,
+            false,
+        );
+    }
+
+    // The macro's final `y += 1` in each of these two methods is never read
+    // afterward — harmless (it's only ever the last line drawn), but the
+    // compiler can't see that across an early-return-free macro expansion.
+    #[allow(unused_assignments)]
+    fn draw_model_card(&self, buf: &mut [Vec<Cell>], st: &TrainState) {
+        let Layout {
+            network_top,
+            network_h,
+            ..
+        } = self.layout();
+        let max_y = network_top + network_h;
+        let card_w = self.left_w().saturating_sub(1);
+        let label = Color::Rgb(140, 200, 255);
+        let val = Color::Rgb(210, 210, 230);
+        let mut y = network_top;
+
+        macro_rules! line {
+            ($text:expr, $color:expr, $bold:expr) => {
+                if y < max_y {
+                    let s = Self::clip(&$text, card_w);
+                    self.text(buf, 2, y, &s, $color, $bold);
+                    y += 1;
+                }
+            };
+        }
+
+        line!("MODEL", label, true);
+        if st.param_count > 0 {
+            line!(
+                format!("params {}", format_count(st.param_count)),
+                val,
+                false
+            );
+        }
+        if let Some(n) = st.config.num_blocks {
+            line!(format!("blocks {n}"), val, false);
+        }
+        if let Some(n) = st.config.num_heads {
+            line!(format!("heads {n}"), val, false);
+        }
+        if let Some(n) = st.config.embedding_dim {
+            line!(format!("d_model {n}"), val, false);
+        }
+        if let Some(n) = st.config.vocab_size {
+            line!(format!("vocab {n}"), val, false);
+        }
+        if let Some(n) = st.config.max_sequence_length {
+            line!(format!("seq {n}"), val, false);
+        }
+        if st.batch_size > 0 || st.config.learning_rate.is_some() {
+            line!("BATCH", label, true);
+            if st.batch_size > 0 {
+                let accum = if st.grad_accum > 1 {
+                    format!(" x{}", st.grad_accum)
+                } else {
+                    String::new()
+                };
+                line!(format!("size {}{accum}", st.batch_size), val, false);
+            }
+            if let Some(lr) = st.config.learning_rate {
+                line!(format!("lr {lr:.1e}"), val, false);
+            }
+        }
+    }
+
+    fn draw_network(&self, buf: &mut [Vec<Cell>], st: &TrainState) {
+        let (x0, w) = self.network_bounds();
+        let Layout {
+            network_top,
+            network_h,
+            ..
+        } = self.layout();
+        let label = Color::Rgb(150, 200, 255);
+        let blocks = st.config.num_blocks.unwrap_or(6).max(1) as usize;
+        let heads = st.config.num_heads.unwrap_or(6).max(1) as usize;
+
+        self.text(
+            buf,
+            x0,
+            network_top,
+            &Self::clip(
+                &format!("tokens →   [ {blocks} blocks × {heads} heads ]   ∇ gradients"),
+                w,
+            ),
+            label,
+            false,
+        );
+
+        let max_rows = network_h.saturating_sub(1).max(1);
+        let rows = heads.min(max_rows).max(1);
+        let cols = blocks.min(w.saturating_sub(1) / 3).max(1);
+        let node_glyphs = ['●', '◉', '○', '◇', '·'];
+        let synapses = ['─', '╱', '╲'];
+
+        for r in 0..rows {
+            let y = network_top + 1 + r;
+            let mut x = x0;
+            for c in 0..cols {
+                if x >= x0 + w {
+                    break;
+                }
+                // Forward pass sweeps left→right, backward right→left, both
+                // paced by `self.frame` — a lit node briefly outshines the
+                // resting loss-hue coloring.
+                let period = cols + 4;
+                let fwd_on = (self.frame as usize / 2 + c) % period < 2;
+                let bwd_on = (self.frame as usize / 2 + (cols - 1 - c)) % period < 2;
+
+                let glyph = node_glyphs[(r + c + (self.frame as usize / 6)) % node_glyphs.len()];
+                let color = if fwd_on {
+                    hsv_to_rgb(FWD_HUE, 0.85, 0.95)
+                } else if bwd_on {
+                    hsv_to_rgb(BWD_HUE, 0.7, 0.9)
+                } else if let Some(loss) = st.loss {
+                    hsv_to_rgb(loss_hue(loss), 0.55, 0.6)
+                } else {
+                    Color::Rgb(90, 100, 130)
+                };
+                self.put(buf, x, y, glyph, color, fwd_on || bwd_on);
+                x += 1;
+                if c + 1 < cols && x < x0 + w {
+                    self.put(
+                        buf,
+                        x,
+                        y,
+                        synapses[(r + c) % synapses.len()],
+                        Color::Rgb(80, 90, 115),
+                        false,
+                    );
+                    x += 1;
+                }
+            }
+        }
+    }
+
+    #[allow(unused_assignments)]
+    fn draw_live_stats(&self, buf: &mut [Vec<Cell>], st: &TrainState) {
+        let Layout {
+            network_top,
+            network_h,
+            ..
+        } = self.layout();
+        let max_y = network_top + network_h;
+        let rw = self.right_w();
+        let rx = self.width.saturating_sub(rw + 1);
+        let val = Color::Rgb(210, 230, 220);
+        let label = Color::Rgb(150, 220, 200);
+        let mut y = network_top;
+
+        macro_rules! line {
+            ($text:expr, $color:expr, $bold:expr) => {
+                if y < max_y {
+                    let s = Self::clip(&$text, rw);
+                    self.text(buf, rx, y, &s, $color, $bold);
+                    y += 1;
+                }
+            };
+        }
+
+        line!("LIVE", label, true);
+        if let Some(tps) = st.tokens_per_sec() {
+            line!(
+                format!("tok/s   {}", group_thousands(tps.round().max(0.0) as usize)),
+                val,
+                false
+            );
+        }
+        let sps = st.steps_per_sec();
+        if sps > 0.0 {
+            line!(format!("step/s  {sps:.2}"), val, false);
+        }
+        if st.step > 0 {
+            // No frame-to-frame comparison is available here — `render` is
+            // `&self` and this view keeps no history of `cache_entries` — so
+            // "still climbing" is approximated with an early-run window
+            // rather than a real delta. See task-7 report for the trade-off.
+            let climbing = st.cache_entries > 0 && st.step <= 50;
+            let (txt, color) = if climbing {
+                (
+                    format!("cache   {} climbing", st.cache_entries),
+                    Color::Rgb(180, 140, 230),
+                )
+            } else {
+                (
+                    format!("cache   {} steady", st.cache_entries),
+                    Color::Rgb(120, 120, 140),
+                )
+            };
+            line!(txt, color, false);
+        }
+        if let Some(first_seen) = st.first_seen {
+            let elapsed = fmt_elapsed(first_seen.elapsed().as_secs());
+            let eta = st
+                .eta_secs()
+                .map(|e| fmt_elapsed(e.max(0.0) as u64))
+                .unwrap_or_else(|| "—".to_string());
+            line!(format!("elapsed {elapsed}  eta {eta}"), val, false);
+        }
+        if st.checkpoint_step > 0 || st.checkpoint_pulse > 0 {
+            let color = if st.checkpoint_pulse > 0 {
+                Color::Rgb(120, 230, 190)
+            } else {
+                Color::Rgb(150, 150, 170)
+            };
+            line!(
+                format!("ckpt @ {}", group_thousands(st.checkpoint_step as usize)),
+                color,
+                true
+            );
+        }
+    }
+
+    fn draw_river(&self, buf: &mut [Vec<Cell>], st: &TrainState) {
+        let Layout {
+            river_top,
+            river_bottom,
+            ..
+        } = self.layout();
+        if river_bottom <= river_top + 1 {
+            return;
+        }
+        let label_row = river_top.saturating_sub(1);
+        self.text(
+            buf,
+            2,
+            label_row,
+            &Self::clip(
+                "LOSS  · mountains colored by their own value",
+                self.width.saturating_sub(3),
+            ),
+            Color::Rgb(160, 170, 200),
+            false,
+        );
+
+        let sky_rows = river_bottom - river_top;
+
+        if st.loss_history.is_empty() {
+            // Nothing to plot yet — keep the region alive with the same
+            // nightscape rather than an empty void.
+            for y in river_top..river_bottom {
+                let rel_y = (y - river_top) as f32 / sky_rows.max(1) as f32;
+                for x in 1..self.width {
+                    if let Some(sc) = sky_cell(x, y, rel_y, self.frame) {
+                        self.put(buf, x, y, sc.ch, sc.color, false);
+                    }
+                }
+            }
+            return;
+        }
+
+        let hist = &st.loss_history;
+        let (min_loss, max_loss) = hist
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(mn, mx), &l| (mn.min(l), mx.max(l)));
+        let range = (max_loss - min_loss).max(0.001);
+        let total_eighths = sky_rows * 8;
+        let bars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        let usable_w = self.width.saturating_sub(3).max(1);
+
+        for x in 2..self.width {
+            let rel = (x - 2) as f32 / usable_w as f32;
+            let idx = ((rel * (hist.len() - 1) as f32).round() as usize).min(hist.len() - 1);
+            let loss = hist[idx];
+            let norm = ((loss - min_loss) / range).clamp(0.0, 1.0);
+            let eighths = (norm * total_eighths as f32).round() as usize;
+            let color = hsv_to_rgb(loss_hue(loss), 0.8, 0.75);
+            let full_bars = eighths / 8;
+            let partial = eighths % 8;
+
+            for row_from_bottom in 0..sky_rows {
+                let y = river_bottom - 1 - row_from_bottom;
+                if row_from_bottom < full_bars {
+                    self.put(buf, x, y, '█', color, false);
+                } else if row_from_bottom == full_bars && partial > 0 {
+                    self.put(buf, x, y, bars[partial - 1], color, false);
+                } else {
+                    // Sky above the mountain line — `rel_y` runs 0 at the
+                    // top of the band, 1 at the mountain line, so it's the
+                    // inverse of `row_from_bottom`.
+                    let rel_y = 1.0 - (row_from_bottom as f32 / sky_rows.max(1) as f32);
+                    if let Some(sc) = sky_cell(x, y, rel_y, self.frame) {
+                        self.put(buf, x, y, sc.ch, sc.color, false);
+                    }
+                }
+            }
+        }
+
+        if river_bottom < self.height.saturating_sub(1) {
+            self.text(
+                buf,
+                2,
+                river_bottom,
+                &format!("{min_loss:.2} low"),
+                Color::Rgb(140, 220, 190),
+                false,
+            );
+            let high = format!("high {max_loss:.2}");
+            let hx = self.width.saturating_sub(high.chars().count() + 1);
+            self.text(
+                buf,
+                hx,
+                river_bottom,
+                &high,
+                Color::Rgb(255, 150, 130),
+                false,
+            );
+        }
+    }
+
+    fn draw_chips(&self, buf: &mut [Vec<Cell>], backend: &dyn TelemetryBackend) {
+        let y = self.layout().chips_row;
+        let label = Color::Rgb(180, 200, 255);
+        self.text(buf, 2, y, "CHIPS", label, true);
+        let mut x = 8;
+        for device in backend.devices() {
+            if x + 6 >= self.width {
+                break;
+            }
+            let idx = device.index;
+            let temp = backend.telemetry(idx).map(|t| t.temp_c()).unwrap_or(0.0);
+            let power = backend.telemetry(idx).map(|t| t.power_w()).unwrap_or(0.0);
+            let tcolor = colors::temp_color(temp);
+            let tag = format!("dev{idx} {temp:.1}°C {power:.0}W ");
+            let tag = Self::clip(&tag, self.width.saturating_sub(x + 1));
+            self.text(buf, x, y, &tag, tcolor, false);
+            x += tag.chars().count();
+
+            let bar_w = 10usize.min(self.width.saturating_sub(x + 2));
+            // Density bar: fraction of a rough 200W per-chip ceiling, with a
+            // partial-fill glyph at the fading edge so the bar reads
+            // smoothly instead of a hard step.
+            let frac = (power / 200.0).clamp(0.0, 1.0);
+            for i in 0..bar_w {
+                let level = frac * bar_w as f32 - i as f32;
+                let ch = if level >= 1.0 {
+                    '█'
+                } else if level >= 0.75 {
+                    '▓'
+                } else if level >= 0.5 {
+                    '▒'
+                } else if level >= 0.25 {
+                    '░'
+                } else {
+                    '·'
+                };
+                self.put(buf, x + i, y, ch, tcolor, false);
+            }
+            x += bar_w + 2;
+        }
+    }
+
+    fn draw_legend(&self, buf: &mut [Vec<Cell>], st: &TrainState) {
+        let y = self.layout().legend_row;
+        let loss_color = st
+            .loss
+            .map(|l| hsv_to_rgb(loss_hue(l), 0.75, 0.85))
+            .unwrap_or(Color::Rgb(200, 150, 220));
+        let entries: [(char, &str, Color); 9] = [
+            ('●', "loss", loss_color),
+            ('─', "forward", hsv_to_rgb(FWD_HUE, 0.85, 0.9)),
+            ('∙', "gradients", hsv_to_rgb(BWD_HUE, 0.7, 0.85)),
+            ('▼', "loss ↓", Color::Rgb(120, 230, 190)),
+            ('▲', "loss ↑", Color::Rgb(255, 140, 120)),
+            ('█', "chip temp", colors::temp_color(70.0)),
+            ('▓', "chip power", Color::Rgb(200, 200, 120)),
+            ('✦', "checkpoint", Color::Rgb(120, 230, 190)),
+            ('░', "aurora", Color::Rgb(120, 180, 150)),
+        ];
+        let mut x = 2;
+        for (glyph, label, color) in entries {
+            if x + 3 >= self.width.saturating_sub(1) {
+                break;
+            }
+            self.put(buf, x, y, glyph, color, false);
+            x += 2;
+            let remaining = self.width.saturating_sub(x + 2);
+            let text = Self::clip(label, remaining);
+            let n = text.chars().count();
+            self.text(buf, x, y, &text, Color::Rgb(170, 170, 190), false);
+            x += n + 2;
+        }
+    }
+
+    fn to_lines(&self, buf: Vec<Vec<Cell>>) -> Vec<Line<'static>> {
+        buf.into_iter()
+            .map(|row| {
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                let mut run = String::new();
+                let mut cur: Option<(Color, bool)> = None;
+                for c in row {
+                    let key = (c.fg, c.bold);
+                    if Some(key) != cur {
+                        if !run.is_empty() {
+                            let (fg, b) = cur.unwrap();
+                            let mut st = Style::default().fg(fg);
+                            if b {
+                                st = st.add_modifier(Modifier::BOLD);
+                            }
+                            spans.push(Span::styled(std::mem::take(&mut run), st));
+                        }
+                        cur = Some(key);
+                    }
+                    run.push(c.ch);
+                }
+                if !run.is_empty() {
+                    let (fg, b) = cur.unwrap_or((Color::Reset, false));
+                    let mut st = Style::default().fg(fg);
+                    if b {
+                        st = st.add_modifier(Modifier::BOLD);
+                    }
+                    spans.push(Span::styled(run, st));
+                }
+                Line::from(spans)
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::mock::MockBackend;
+    use crate::backend::TelemetryBackend;
+    use crate::workload::train::TrainState;
+
+    fn text_of(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn loss_hue_runs_magenta_when_high_to_teal_when_converged() {
+        let hot = loss_hue(4.5);
+        let cool = loss_hue(0.35);
+        assert!(hot > 300.0, "high loss should be magenta-ish, got {hot}");
+        assert!(
+            (150.0..180.0).contains(&cool),
+            "converged loss should be teal-ish, got {cool}"
+        );
+        // Clamped outside the observed range rather than wrapping around.
+        assert!((loss_hue(99.0) - loss_hue(4.6)).abs() < 1.0);
+        assert!((loss_hue(-1.0) - loss_hue(0.30)).abs() < 1.0);
+    }
+
+    #[test]
+    fn with_no_process_it_says_it_is_scanning_and_draws_no_metrics() {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let v = TrainView::new(120, 40);
+        let out = text_of(&v.render(&TrainState::new(), &b));
+        assert!(
+            out.contains("SCANNING"),
+            "expected a scanning state:\n{out}"
+        );
+        assert!(
+            !out.contains("LOSS  "),
+            "must not draw a loss panel with no data:\n{out}"
+        );
+    }
+
+    #[test]
+    fn an_unredirected_stdout_explains_itself_instead_of_faking_a_curve() {
+        use crate::workload::train::{LogSource, TrainProcess};
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = TrainState::new();
+        st.proc = Some(TrainProcess {
+            pid: 4242,
+            binary: "nano_gpt".into(),
+            config_path: None,
+        });
+        st.log = Some(LogSource::NotRedirected);
+
+        let v = TrainView::new(120, 40);
+        let out = text_of(&v.render(&st, &b));
+        assert!(
+            out.contains("nano_gpt"),
+            "should still name the run:\n{out}"
+        );
+        assert!(
+            out.to_lowercase().contains("redirect"),
+            "must explain why per-step metrics are missing:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_live_run_draws_its_numbers() {
+        use crate::workload::train::{LogSource, TrainEvent, TrainProcess};
+        let mut b = MockBackend::new(4);
+        b.init().unwrap();
+        let mut st = TrainState::new();
+        st.proc = Some(TrainProcess {
+            pid: 48213,
+            binary: "nano_gpt".into(),
+            config_path: Some("t.yaml".into()),
+        });
+        st.log = Some(LogSource::File("/tmp/x.log".into()));
+        st.apply_event(TrainEvent::MaxSteps(50000));
+        st.apply_event(TrainEvent::BatchSize(64));
+        for i in 1..=60u64 {
+            st.apply_event(TrainEvent::Step {
+                step: i,
+                loss: 4.5 - (i as f32) * 0.05,
+            });
+        }
+        st.apply_event(TrainEvent::StepTime {
+            ms: 1000.0,
+            cache_entries: 21,
+        });
+
+        let v = TrainView::new(134, 40);
+        let out = text_of(&v.render(&st, &b));
+        assert!(out.contains("nano_gpt"));
+        assert!(out.contains("48213"), "pid should be shown:\n{out}");
+        assert!(out.contains("50,000"), "max steps should be shown:\n{out}");
+        assert!(out.contains("LOSS"), "loss panel should be present:\n{out}");
+    }
+
+    #[test]
+    fn never_emits_a_right_side_border_and_fits_the_width() {
+        use crate::workload::train::{LogSource, TrainEvent, TrainProcess};
+        let mut b = MockBackend::new(4);
+        b.init().unwrap();
+        let mut st = TrainState::new();
+        st.proc = Some(TrainProcess {
+            pid: 1,
+            binary: "nano_gpt".into(),
+            config_path: None,
+        });
+        st.log = Some(LogSource::File("/tmp/x.log".into()));
+        for i in 1..=200u64 {
+            st.apply_event(TrainEvent::Step { step: i, loss: 2.0 });
+        }
+
+        // Narrow terminals are where wrapping bugs show up.
+        for w in [60usize, 80, 100, 134] {
+            let v = TrainView::new(w, 30);
+            for line in v.render(&st, &b) {
+                let s: String = line.spans.iter().map(|sp| sp.content.as_ref()).collect();
+                // No right-side border glyphs anywhere, and any `║` that
+                // does appear must be the left border at column 0.
+                assert!(
+                    !s.contains('╗') && !s.contains('╝'),
+                    "right-side corner characters are forbidden (w={w}): {s:?}"
+                );
+                if let Some(pos) = s.find('║') {
+                    assert_eq!(pos, 0, "`║` must only appear at column 0 (w={w}): {s:?}");
+                }
+                let cols = unicode_width::UnicodeWidthStr::width(s.as_str());
+                assert!(cols <= w, "line is {cols} cols at width {w}: {s:?}");
+            }
+        }
+    }
+}
