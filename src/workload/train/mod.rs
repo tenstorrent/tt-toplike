@@ -7,5 +7,7 @@
 //! all I/O confined to `monitor`.
 
 pub mod detect;
+pub mod parse;
 
 pub use detect::{parse_train_process, TrainProcess, TRAIN_BINARIES};
+pub use parse::{parse_train_line, TrainEvent};
