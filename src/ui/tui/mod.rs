@@ -3489,9 +3489,9 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
                     "the range is the whole run's history —",
                     "magenta chaos resolving to teal calm.",
                     "",
-                    "The view attaches by itself: it finds a",
-                    "process holding /dev/tenstorrent whose",
-                    "binary is a tt-train example, then reads",
+                    "The view attaches by itself: it scans /proc",
+                    "for a process whose binary is a tt-train",
+                    "example (nano_gpt, mnist_mlp, …), then reads",
                     "/proc/<pid>/fd/1 to locate its log.",
                     "",
                     "tt-train prints step, loss, step time and",
@@ -3955,11 +3955,15 @@ fn train_legend_lines(
             Span::styled(" regressing", Style::default().fg(dim)),
         ]),
         ln!(vec![
-            Span::styled("█", Style::default().fg(colors::rgb(246, 188, 66))),
-            Span::styled(" chip temp + power draw", Style::default().fg(dim)),
+            Span::styled("█", Style::default().fg(colors::temp_color(70.0))),
+            Span::styled(" chip temp (varies with heat)", Style::default().fg(dim)),
         ]),
         ln!(vec![
-            Span::styled("░▒", Style::default().fg(colors::rgb(96, 70, 130))),
+            Span::styled("▓", Style::default().fg(colors::rgb(200, 200, 120))),
+            Span::styled(" chip power draw", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("░▒", Style::default().fg(colors::rgb(120, 180, 150))),
             Span::styled(
                 " aurora + stars — sky opens as loss falls",
                 Style::default().fg(dim)
@@ -7767,37 +7771,92 @@ mod host_default_screen_tests {
             colors::rgb(0, 0, 0),
             colors::rgb(120, 120, 120),
         );
-        let text: String = lines
+        // Per-line text, lowercased, so a dropped line is caught even when its
+        // one distinguishing word ("loss") also appears on another line — a
+        // single pooled-and-joined blob (the previous version of this test)
+        // can't tell "the loss river line is gone" from "the loss line moved".
+        let line_texts: Vec<String> = lines
             .iter()
-            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase();
-        for needle in [
-            "loss",
-            "forward",
-            "gradient",
-            "temp",
-            "checkpoint",
-            "aurora",
-            "cache",
-        ] {
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect::<String>()
+                    .to_lowercase()
+            })
+            .collect();
+        let all = line_texts.join("\n");
+
+        // Every one of the nine colour channels must have its own line with
+        // its own distinguishing text.
+        let expected_per_line: [&str; 10] = [
+            "loss: magenta chaos", // loss
+            "forward pass",        // forward
+            "gradients",           // gradients (backward)
+            "loss river",          // loss history (river)
+            "improving",           // delta direction (▼/▲ on one line)
+            "chip temp",           // chip temp
+            "chip power draw",     // chip power
+            "aurora",              // aurora + stars
+            "cache compiling",     // kernel cache
+            "checkpoint saved",    // checkpoint
+        ];
+        for needle in expected_per_line {
             assert!(
-                text.contains(needle),
-                "legend is missing {needle:?}: {text}"
+                line_texts.iter().any(|t| t.contains(needle)),
+                "legend is missing a line containing {needle:?}; got:\n{all}"
             );
         }
+        assert_eq!(
+            lines.len(),
+            expected_per_line.len(),
+            "expected exactly one line per channel entry, got:\n{all}"
+        );
     }
 
     #[test]
-    fn training_overlays_render_without_truncating() {
-        use super::{overlay_lines, DisplayMode, OverlayPanel};
+    fn training_overlays_do_not_truncate_wide_content() {
+        use super::{line_cols, overlay_lines, render_overlay_panel, DisplayMode, OverlayPanel};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
 
-        // The overlay panel sizes to its widest line; this guards the new mode's
-        // entries the same way the existing overlay test does.
-        for panel in [OverlayPanel::Legend, OverlayPanel::Explain] {
-            let lines = overlay_lines(panel, DisplayMode::Training);
-            assert!(!lines.is_empty(), "{panel:?} must render for Training");
+        // Mirrors `overlay_panel_does_not_truncate_wide_content` but scoped to
+        // the new Training mode: assert the panel sizes to its widest line
+        // rather than merely asserting the content list is non-empty.
+        let (w, h) = (140u16, 44u16);
+        for kind in [OverlayPanel::Legend, OverlayPanel::Explain] {
+            let mode = DisplayMode::Training;
+            let lines = overlay_lines(kind, mode);
+            assert!(!lines.is_empty(), "{kind:?} must render for Training");
+
+            let widest: String = lines
+                .iter()
+                .max_by_key(|l| line_cols(l))
+                .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+                .unwrap_or_default();
+            let needle: String = widest.trim_start_matches('║').trim().to_string();
+
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
+            terminal
+                .draw(|f| render_overlay_panel(f, kind, mode))
+                .expect("draw");
+
+            let buf = terminal.backend().buffer().clone();
+            let mut rows: Vec<String> = Vec::new();
+            for y in 0..buf.area.height {
+                let mut row = String::new();
+                for x in 0..buf.area.width {
+                    row.push_str(buf[(x, y)].symbol());
+                }
+                rows.push(row);
+            }
+            let painted = rows.join("\n");
+
+            assert!(
+                painted.contains(&needle),
+                "{kind:?}/{mode:?}: widest Training line was truncated.\n\
+                 expected to find: {needle:?}\nrendered:\n{painted}"
+            );
         }
     }
 
