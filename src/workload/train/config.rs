@@ -28,6 +28,9 @@ pub struct TrainConfig {
 /// Value for `key` in a flat `key: value` line, quotes and inline `#`
 /// comments stripped. Only matches a line whose trimmed form starts with
 /// `key:`, so `model_path` never matches `transformer_model_path`.
+///
+/// Quotes are processed before comment stripping: a `#` inside quotes is part
+/// of the value, not a comment marker.
 fn scalar<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     for line in text.lines() {
         let t = line.trim();
@@ -38,10 +41,28 @@ fn scalar<'a>(text: &'a str, key: &str) -> Option<&'a str> {
             continue;
         };
         let mut v = rest.trim();
-        if let Some(hash) = v.find('#') {
-            v = v[..hash].trim();
+
+        // If the value starts with a quote, extract everything up to the
+        // matching closing quote (ignoring any # inside the quotes).
+        if v.starts_with('"') {
+            if let Some(close_quote) = v[1..].find('"') {
+                v = &v[1..1 + close_quote];
+            } else {
+                return None; // Unclosed quote
+            }
+        } else if v.starts_with('\'') {
+            if let Some(close_quote) = v[1..].find('\'') {
+                v = &v[1..1 + close_quote];
+            } else {
+                return None; // Unclosed quote
+            }
+        } else {
+            // Unquoted value: strip inline comment at first #
+            if let Some(hash) = v.find('#') {
+                v = v[..hash].trim();
+            }
         }
-        v = v.trim_matches('"').trim_matches('\'').trim();
+
         if v.is_empty() {
             return None;
         }
@@ -143,5 +164,34 @@ transformer_config:
     fn strips_quotes_and_inline_comments() {
         let c = parse_train_yaml("  model_path: 'ckpt.msgpack'  # rolling save\n");
         assert_eq!(c.model_save_path.as_deref(), Some("ckpt.msgpack"));
+    }
+
+    #[test]
+    fn preserves_hash_inside_quoted_values() {
+        // Hash inside quotes is part of the value, not a comment
+        let c = parse_train_yaml("model_path: \"a#b.msgpack\"");
+        assert_eq!(c.model_save_path.as_deref(), Some("a#b.msgpack"));
+    }
+
+    #[test]
+    fn strips_comment_outside_quotes() {
+        // Comment outside quotes is still stripped
+        let c = parse_train_yaml("model_path: \"x.msgpack\"  # rolling save");
+        assert_eq!(c.model_save_path.as_deref(), Some("x.msgpack"));
+    }
+
+    #[test]
+    fn handles_unquoted_with_comment() {
+        // Unquoted value with comment (existing behavior)
+        let c = parse_train_yaml("model_path: plain.msgpack  # note");
+        assert_eq!(c.model_save_path.as_deref(), Some("plain.msgpack"));
+    }
+
+    #[test]
+    fn merge_ignores_garbage_numeric_values() {
+        // Non-numeric value for a numeric field is left None, not panicked
+        let mut c = TrainConfig::default();
+        merge_model_yaml(&mut c, "num_blocks: nope");
+        assert_eq!(c.num_blocks, None);
     }
 }
