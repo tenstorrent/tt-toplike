@@ -1,3 +1,34 @@
+tt-toplike (0.11.0) noble; urgency=medium
+
+  * Add: Training view (`t`) — a full-screen visualization of a live
+    tt-train run, drawn as the network it is: a character grid of
+    transformer blocks and attention heads fed by token particles, a loss
+    "mountain range" under a twinkling aurora nightscape that opens up as
+    the model converges, plus chip telemetry alongside it.
+  * Auto-attaches with no command: scans running processes for a tt-train
+    example binary (`nano_gpt`, `mnist_mlp`, `linear_regression`), then
+    resolves `/proc/<pid>/fd/1` to find and tail that process's log.
+    Checkpoint saves are detected by mtime on the run's rolling checkpoint
+    file.
+  * Honest limitation, shown in the view itself: tt-train's per-step
+    stream can only be tailed if its stdout was redirected to a real file
+    at launch (`> train.log`). If fd 1 is a pipe or tty, retroactively
+    reading it is an OS-level impossibility, not a gap in this tool — the
+    view says so and falls back to what it can still see (process
+    liveness, RSS/CPU, device fds, chip telemetry, checkpoint mtime)
+    rather than drawing a fake loss curve. Gradient norms, MFU, and
+    throughput counters are never available live either — tt-train only
+    writes those to a run-end JSON summary — so the view derives
+    tokens/sec and ETA from the step/loss lines it can actually read
+    instead of showing numbers it can't source.
+  * Nine independent color channels carry the loss magnitude, run-history
+    timeline, loss-delta direction, forward/backward sweep cadence, kernel
+    cache compile/steady state, checkpoint-save bursts, and the existing
+    chip temperature/power ramps — documented in the new legend and
+    explain overlays.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sat, 29 Aug 2026 00:00:00 +0000
+
 tt-toplike (0.10.3) noble; urgency=medium
 
   * Security fix: a direct-vLLM host process's own PATH (self-reported via

@@ -1,6 +1,6 @@
 # tt-toplike Quick Start
 
-**Version**: 0.10.3
+**Version**: 0.11.0
 **Last Updated**: July 15, 2026
 
 ---
@@ -92,6 +92,17 @@ tt-toplike --mode hivemind    # or press ~ in any mode
 - The red **KITT scanner** along the bottom slows, focuses, and brightens as total activity climbs
 - Safe: collectors spawn only while the mode is active and stop on exit; never sets a debug env var or reads a device buffer
 
+### Training (`t`)
+```bash
+# from any view, just press:  t
+```
+- Auto-attaches to a live [tt-train](https://github.com/tenstorrent/tt-metal/tree/main/tt-train) run — no flags, no target to name. Scans for a `nano_gpt`/`mnist_mlp`/`linear_regression` process, resolves `/proc/<pid>/fd/1` to its log, and starts tailing it
+- The model as a character-grid network (columns = transformer blocks, nodes = attention heads) fed by token particles, amber forward sweeps, violet backward/gradient sweeps
+- A loss "mountain range" descends as the model converges (magenta = high loss → teal = low loss, each column keeping its own loss's hue as a run-history timeline), under an aurora/starfield nightscape that opens up as loss drops; a comet crosses the sky on each checkpoint save
+- **Requires stdout redirected to a file** (`> train.log`) at launch — if fd 1 is a pipe or tty the per-step stream can't be tailed after the fact (an OS property, not a gap), and the view says so instead of drawing a fake curve
+- Shows only what tt-train actually emits live (step, loss, step time, cache entries) — no gradient norms/MFU/throughput, since those only exist in a run-end JSON summary. `l` for the legend, `/explain` for the mapping overlay
+- `Esc` backs out to where you came from. Deliberately excluded from the `v` cycle, like `i`
+
 ---
 
 ## Backend Options
@@ -179,6 +190,7 @@ tt-toplike --host --mode arcade             # your real CPU/RAM in arcade mode (
 |-----|--------|
 | `v` | Cycle visualization modes: Insights → Flow → Starfield → Castle → Arcade → Defrag → Inference → Insights |
 | `i` | Open the Inference Server Monitor from any view; `i` while in it jumps to Insights, `Esc` backs out to where you came from. Also at the tail of the `v` cycle |
+| `t` | Open the Training view from any view — auto-attaches to a running tt-train process with no further input; `Esc` backs out. Excluded from the `v` cycle, like `i` |
 | `l` | Toggle legend overlay for the current view |
 | `b` | Cycle backend live: Hybrid → Sysfs → JSON → Mock → Host → Hybrid. Luwen and Remote are launch-only — the cycle never steps onto them |
 | `r` | Force refresh |
