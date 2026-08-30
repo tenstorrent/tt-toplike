@@ -125,6 +125,57 @@ fn next_display_mode(m: DisplayMode) -> DisplayMode {
     }
 }
 
+/// How long `--rotate`/`R` dwells on a view before advancing.
+const ROTATE_LINGER: Duration = Duration::from_secs(30);
+/// Arcade packs three visualizations into one screen, so it gets longer.
+const ROTATE_LINGER_ARCADE: Duration = Duration::from_secs(45);
+/// Training and the Inference Monitor are *about* a workload. With no run
+/// and no server to show, they are near-empty screens, so the rotation
+/// glances at them and moves on rather than parking on nothing.
+const ROTATE_LINGER_IDLE: Duration = Duration::from_secs(10);
+
+/// The unattended rotation (`--rotate`, or `R` in-app).
+///
+/// Unlike the `v` cycle this deliberately includes the entry-key-only views
+/// (`i`, `~`, `t`) — the whole point is to surface everything, including the
+/// screens a passer-by would never know to press a key for.
+const ROTATION: &[DisplayMode] = &[
+    DisplayMode::Insights,
+    DisplayMode::Grid,
+    DisplayMode::MemoryFlow,
+    DisplayMode::Starfield,
+    DisplayMode::MemoryCastle,
+    DisplayMode::Arcade,
+    DisplayMode::Defrag,
+    DisplayMode::InferenceMonitor,
+    DisplayMode::HivemindSweeper,
+    DisplayMode::Training,
+];
+
+/// The next view in the unattended rotation.
+///
+/// A mode that somehow isn't in `ROTATION` restarts it rather than getting
+/// stuck, so the rotation can never wedge on an unlisted view.
+fn next_rotation_mode(m: DisplayMode) -> DisplayMode {
+    match ROTATION.iter().position(|&x| x == m) {
+        Some(i) => ROTATION[(i + 1) % ROTATION.len()],
+        None => ROTATION[0],
+    }
+}
+
+/// How long to dwell on `mode`.
+///
+/// `active` is only consulted for the two workload views; every other screen
+/// draws live hardware telemetry and is never "empty", so it always gets the
+/// full dwell.
+fn linger_for(mode: DisplayMode, active: bool) -> Duration {
+    match mode {
+        DisplayMode::Arcade => ROTATE_LINGER_ARCADE,
+        DisplayMode::Training | DisplayMode::InferenceMonitor if !active => ROTATE_LINGER_IDLE,
+        _ => ROTATE_LINGER,
+    }
+}
+
 /// The view `--mode <name>` launches into.
 ///
 /// Split out of `run_tui` so the pairing is testable: an omitted arm is a
@@ -389,6 +440,18 @@ fn run_app(
         .mode
         .map(display_mode_for)
         .unwrap_or(DisplayMode::Insights); // default is now Insights
+                                           // ── Unattended rotation (`--rotate`, `R`) ───────────────────────────────
+                                           // `rotate_since` is the moment the current view became visible; each tick
+                                           // compares its age against `linger_for(display_mode, …)`. Any explicit
+                                           // mode change resets it (see the mode-transition choke point) so a view
+                                           // you just navigated to gets its whole dwell rather than a leftover
+                                           // sliver. The two activity flags below are refreshed by the Training and
+                                           // InferenceMonitor update arms while those views are on screen — which is
+                                           // exactly when the rotation needs them, so nothing is probed off-view.
+    let mut rotate_enabled = cli.rotate;
+    let mut rotate_since = Instant::now();
+    let mut train_active = false;
+    let mut inference_active = false;
     let mut starfield: Option<HardwareStarfield> = None;
     let mut memory_castle: Option<MemoryCastle> = None;
     let mut memory_flow: Option<MemoryFlowVis> = None;
@@ -896,6 +959,10 @@ fn run_app(
                         );
                     }
                     let roster_h = inference_roster.len();
+                    // Drives the rotation's dwell (see `train_active`): with
+                    // no service detected the snake is just roaming an empty
+                    // catalog, so `--rotate` gives it the short glance.
+                    inference_active = !rows.is_empty();
                     // Education band: describe the featured *loading* service.
                     band_rotation = band_rotation.wrapping_add(1);
                     inference_band = {
@@ -959,10 +1026,35 @@ fn run_app(
                     }
                     if let Some(ref mut tm) = train_monitor {
                         tm.poll();
+                        // Drives the rotation's dwell: with no run attached
+                        // this screen is an empty-state card, so `--rotate`
+                        // glances and moves on. Re-read every tick, so a run
+                        // that the (≤2s) rescan only just found extends the
+                        // dwell instead of being cut short.
+                        train_active = tm.state().proc.is_some();
                     }
                     if let Some(ref mut tv) = train_view {
                         tv.update();
                     }
+                }
+            }
+
+            // Unattended rotation: advance once this view has had its dwell.
+            // Placed after the per-mode update so the activity flags reflect
+            // the tick just processed, and inside `should_tick` so the
+            // decision is made at the data rate rather than the (much faster)
+            // animation rate.
+            if rotate_enabled {
+                let active = match display_mode {
+                    DisplayMode::Training => train_active,
+                    DisplayMode::InferenceMonitor => inference_active,
+                    // Every other view draws live telemetry and is never
+                    // "empty", so the activity question doesn't apply.
+                    _ => true,
+                };
+                if rotate_since.elapsed() >= linger_for(display_mode, active) {
+                    display_mode = next_rotation_mode(display_mode);
+                    force_redraw = true;
                 }
             }
         } // end if should_tick
@@ -986,6 +1078,29 @@ fn run_app(
                     h.stop();
                 }
             }
+            // Matching choke point for *entering* the sweeper. `~` and the
+            // `/hivemind` command start the engine in their own handlers, but
+            // the unattended rotation also lands here with no keypress
+            // involved, and a sweeper with no collectors running draws a
+            // permanently empty board. `start()` early-returns when already
+            // running, so double-starting is harmless and the handlers above
+            // stay as they are.
+            if display_mode == DisplayMode::HivemindSweeper
+                && prev_display_mode != DisplayMode::HivemindSweeper
+            {
+                hivemind
+                    .get_or_insert_with(crate::workload::hivemind::Hivemind::new)
+                    .start();
+            }
+            // Any arrival at a new view — rotated to or navigated to — starts
+            // its dwell fresh, so pressing a mode key never lands you on a
+            // view that's about to rotate away.
+            rotate_since = Instant::now();
+            // The incoming view's activity is unknown until its update arm
+            // runs; assume active so a view is never cut to the short glance
+            // on a stale flag left by the previous one.
+            train_active = true;
+            inference_active = true;
             terminal.clear().ok();
             prev_display_mode = display_mode;
         }
@@ -1684,6 +1799,26 @@ fn run_app(
                                     prev_mode = display_mode;
                                     display_mode = DisplayMode::Training;
                                 }
+                                force_redraw = true;
+                            }
+                            KeyCode::Char('R') => {
+                                // Toggle the unattended rotation. Capital `R`
+                                // because lowercase `r` is force-refresh; the
+                                // two are unrelated, but `R` is the only free
+                                // key with the right mnemonic.
+                                rotate_enabled = !rotate_enabled;
+                                // Starting the rotation gives the current view
+                                // a full dwell rather than advancing on
+                                // whatever time had already elapsed.
+                                rotate_since = Instant::now();
+                                cmd_message = Some((
+                                    if rotate_enabled {
+                                        "rotation on — cycling all views (R to stop)".to_string()
+                                    } else {
+                                        "rotation off".to_string()
+                                    },
+                                    false,
+                                ));
                                 force_redraw = true;
                             }
                             KeyCode::Char('/') => {
@@ -7239,7 +7374,7 @@ mod tests {
 /// the `v`-cycle rotation.
 #[cfg(test)]
 mod display_mode_tests {
-    use super::{display_mode_for, next_display_mode, DisplayMode};
+    use super::{display_mode_for, linger_for, next_display_mode, next_rotation_mode, DisplayMode};
 
     #[test]
     fn t_key_enters_training_mode_and_esc_leaves_it() {
@@ -7262,6 +7397,110 @@ mod display_mode_tests {
             m = next_display_mode(m);
             assert_ne!(m, DisplayMode::Training, "`v` must not cycle into Training");
         }
+    }
+
+    /// The whole point of `--rotate` is that it surfaces the views a
+    /// passer-by would never press a key for, so "every view appears" is the
+    /// requirement — not just the ones `v` already cycles.
+    #[test]
+    fn rotation_visits_every_view_including_the_hidden_ones() {
+        let all = [
+            DisplayMode::Insights,
+            DisplayMode::Grid,
+            DisplayMode::Starfield,
+            DisplayMode::MemoryCastle,
+            DisplayMode::MemoryFlow,
+            DisplayMode::Arcade,
+            DisplayMode::Defrag,
+            DisplayMode::InferenceMonitor,
+            DisplayMode::HivemindSweeper,
+            DisplayMode::Training,
+        ];
+        let mut m = DisplayMode::Insights;
+        let mut seen = Vec::new();
+        // Exactly one lap: `all.len()` advances must visit every view and
+        // land back on the starting one, which is what proves it wraps
+        // rather than stalling or running long.
+        for _ in 0..all.len() {
+            if !seen.contains(&m) {
+                seen.push(m);
+            }
+            m = next_rotation_mode(m);
+        }
+        assert_eq!(
+            seen.len(),
+            all.len(),
+            "a lap must visit each view exactly once, saw {seen:?}"
+        );
+        for want in all {
+            assert!(
+                seen.contains(&want),
+                "{want:?} is never reached by the rotation"
+            );
+        }
+        assert_eq!(m, DisplayMode::Insights, "the rotation must wrap around");
+    }
+
+    /// A view missing from `ROTATION` must restart the cycle, never wedge.
+    #[test]
+    fn rotation_never_gets_stuck_on_an_unlisted_view() {
+        for m in [DisplayMode::Insights, DisplayMode::Training] {
+            let next = next_rotation_mode(m);
+            assert_ne!(next, m, "{m:?} must advance, not repeat");
+        }
+    }
+
+    #[test]
+    fn linger_is_longer_for_arcade_and_shorter_for_idle_workload_views() {
+        use super::{ROTATE_LINGER, ROTATE_LINGER_ARCADE, ROTATE_LINGER_IDLE};
+
+        // Arcade stacks three visualizations, so it earns the long dwell —
+        // and does so whether or not any workload is running.
+        for active in [true, false] {
+            assert_eq!(
+                linger_for(DisplayMode::Arcade, active),
+                ROTATE_LINGER_ARCADE
+            );
+        }
+
+        // The two workload views are the only ones that can be empty.
+        for m in [DisplayMode::Training, DisplayMode::InferenceMonitor] {
+            assert_eq!(
+                linger_for(m, false),
+                ROTATE_LINGER_IDLE,
+                "{m:?} with nothing to show must get the short glance"
+            );
+            assert_eq!(
+                linger_for(m, true),
+                ROTATE_LINGER,
+                "{m:?} with live activity must get the full dwell"
+            );
+        }
+
+        // Everything else draws live telemetry and is never empty, so the
+        // activity flag must not shorten it.
+        for m in [
+            DisplayMode::Insights,
+            DisplayMode::Grid,
+            DisplayMode::Starfield,
+            DisplayMode::MemoryCastle,
+            DisplayMode::MemoryFlow,
+            DisplayMode::Defrag,
+            DisplayMode::HivemindSweeper,
+        ] {
+            for active in [true, false] {
+                assert_eq!(
+                    linger_for(m, active),
+                    ROTATE_LINGER,
+                    "{m:?} must always get the full dwell"
+                );
+            }
+        }
+
+        // The ordering is the actual requirement; pin it so retuning the
+        // constants can't silently invert them.
+        assert!(ROTATE_LINGER_IDLE < ROTATE_LINGER);
+        assert!(ROTATE_LINGER < ROTATE_LINGER_ARCADE);
     }
 
     /// Every `--mode` value must launch the view it names. A missing arm is a

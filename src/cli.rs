@@ -178,6 +178,16 @@ pub struct Cli {
     #[arg(short = 'm', long, value_enum)]
     pub mode: Option<VisualizationMode>,
 
+    /// Rotate through every view unattended (kiosk / wall-display mode)
+    ///
+    /// Cycles all views — including the ones normally reachable only by their
+    /// own key (`i`, `~`, `t`) — dwelling 30s on each, 45s on arcade, and
+    /// only 10s on training or the inference monitor when there is no run or
+    /// server for them to show. Toggle in-app with `R`. Combines with
+    /// `--mode` to choose where the rotation starts.
+    #[arg(long)]
+    pub rotate: bool,
+
     /// Animation sensitivity preset
     ///
     /// Controls how responsive visualizations are to hardware activity.
@@ -525,6 +535,7 @@ impl Cli {
             print: false,
             bench: true,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             throttle: false,
             idle_on_blur: false,
@@ -594,6 +605,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -629,6 +641,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -659,6 +672,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -689,6 +703,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -723,6 +738,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -750,6 +766,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -780,6 +797,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -819,6 +837,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -846,6 +865,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -875,6 +895,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,

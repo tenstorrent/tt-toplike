@@ -1,6 +1,6 @@
 # tt-toplike Quick Start
 
-**Version**: 0.11.2
+**Version**: 0.12.0
 **Last Updated**: August 30, 2026
 
 ---
@@ -103,6 +103,17 @@ tt-toplike --mode training    # or press t in any mode (aliases: train, tt-train
 - Shows only what tt-train actually emits live (step, loss, step time, cache entries) — no gradient norms or MFU live, but derives its own tokens/sec and ETA from what it can read. `l` for the legend, `/explain` for the mapping overlay
 - `Esc` backs out to where you came from. Deliberately excluded from the `v` cycle, like `i`
 - `--mode training` launches straight into it, for scripts, kiosks and systemd units — it takes no target either way, since the view finds the run itself
+
+### Rotate every view (`--rotate` / `R`)
+```bash
+tt-toplike --rotate                     # start rotating immediately
+tt-toplike --rotate --mode arcade       # ...starting from a particular view
+# or press R in any mode
+```
+- Unattended kiosk/wall-display cycle through **all** views — including the ones normally reachable only by their own key (`i`, `~`, `t`), which the `v` cycle deliberately skips
+- Dwell: **30s** per view, **45s** on arcade (it's three visualizations at once), and only **10s** on Training or the Inference Monitor when there's no run or server for them to show — so it glances at an empty screen instead of parking on it
+- A run or server appearing mid-dwell extends it to the full 30s; the check is re-evaluated every tick, not decided on arrival
+- Any explicit mode key resets the dwell, so a view you navigate to gets its full time. `R` stops the rotation where you are
 
 ---
 

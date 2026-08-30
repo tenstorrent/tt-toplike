@@ -1,3 +1,22 @@
+tt-toplike (0.12.0) noble; urgency=medium
+
+  * Add: `--rotate` and the `R` hotkey — an unattended rotation for kiosk
+    and wall-display use. Unlike the `v` cycle it visits EVERY view,
+    including the ones normally reachable only by their own key (`i`, `~`,
+    `t`), which is the point: it surfaces screens a passer-by would never
+    know to press a key for.
+  * Dwell is 30s per view, 45s on arcade (three visualizations at once),
+    and 10s on Training or the Inference Monitor when there is no run or
+    server for them to show — a glance at an empty screen rather than
+    parking on it. Activity is re-checked every tick, so a run appearing
+    mid-dwell extends it to the full 30s instead of being cut short.
+  * Rotating into HivemindSweeper now starts its collectors. They were
+    previously started only by the `~` key handler, so any keyless arrival
+    would have drawn a permanently empty board; entry is now a choke point
+    mirroring the existing exit one.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 30 Aug 2026 00:00:00 +0000
+
 tt-toplike (0.11.2) noble; urgency=medium
 
   * Add: `--mode training` (aliases `train`, `tt-train`) launches straight
