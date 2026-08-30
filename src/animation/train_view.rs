@@ -31,6 +31,7 @@ use crate::ui::colors;
 use crate::workload::train::{LogSource, TrainState};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use std::cell::Cell as StdCell;
 
 /// Loss → hue: 158° (teal, converged) … 325° (magenta, chaotic).
 pub fn loss_hue(loss: f32) -> f32 {
@@ -43,6 +44,17 @@ const BWD_HUE: f32 = 268.0;
 
 /// Muted violet-blue used for the frame border everywhere it appears.
 const BORDER: Color = Color::Rgb(90, 90, 130);
+
+/// Consecutive `render()` calls with no growth in `cache_entries` before the
+/// cache indicator settles from "climbing" to "steady". A single stalled
+/// tick doesn't mean compilation is done — a few in a row does.
+const CACHE_STEADY_TICKS: u32 = 4;
+
+/// The monitor's checkpoint-pulse window (`CKPT_PULSE_TICKS` in
+/// `workload::train::monitor`, not re-exported — it's an animation-speed
+/// constant, not part of the state contract). Mirrored here so the comet's
+/// progress (`1 - pulse/window`) tracks one full pulse release.
+const CKPT_PULSE_WINDOW: f32 = 40.0;
 
 /// Compact magnitude suffix: `11.2M`, `1.20B`, `640K`. Distinct from
 /// `fmt_bytes` (binary/KiB units) — this is a plain decimal parameter count.
@@ -101,6 +113,15 @@ pub struct TrainView {
     width: usize,
     height: usize,
     frame: u64,
+    /// Last-observed `cache_entries`, tracked across render calls so the
+    /// LIVE panel can report the real climbing→steady derivative instead of
+    /// guessing from the step count. `render(&self, …)` can't hold a plain
+    /// field for this — `Cell` is the standard escape hatch for
+    /// "mutate a little state from an otherwise-immutable render pass"
+    /// without changing any prescribed method signature.
+    cache_last: StdCell<u32>,
+    /// Consecutive render calls since `cache_entries` last grew.
+    cache_steady_ticks: StdCell<u32>,
 }
 
 impl TrainView {
@@ -109,6 +130,8 @@ impl TrainView {
             width: width.max(20),
             height: height.max(10),
             frame: 0,
+            cache_last: StdCell::new(0),
+            cache_steady_ticks: StdCell::new(0),
         }
     }
 
@@ -126,9 +149,20 @@ impl TrainView {
                 self.draw_header(&mut buf, st);
                 match st.log.as_ref() {
                     Some(LogSource::File(_)) => {
-                        self.draw_model_card(&mut buf, st);
+                        // Side panels degrade gracefully rather than
+                        // overlapping at narrow widths: the model card and
+                        // live-stats panel are dropped, in that priority
+                        // order, whenever there isn't room for all three
+                        // columns — the network grid and the river (the
+                        // visual centerpiece) always get drawn.
+                        let (show_model, show_live) = self.panel_fit();
+                        if show_model {
+                            self.draw_model_card(&mut buf, st);
+                        }
                         self.draw_network(&mut buf, st);
-                        self.draw_live_stats(&mut buf, st);
+                        if show_live {
+                            self.draw_live_stats(&mut buf, st);
+                        }
                         self.draw_river(&mut buf, st);
                     }
                     _ => self.draw_no_log_notice(&mut buf, st),
@@ -176,11 +210,30 @@ impl TrainView {
         (self.width / 4).clamp(18, 30)
     }
 
-    /// `(x0, w)` of the network grid — the space between the model card and
-    /// the live-stats panel.
+    /// Which of the two side panels fit at the current width, in priority
+    /// order (model card first, live-stats second) — checked *before* any
+    /// panel is drawn, rather than drawn-then-clipped, since an overlapping
+    /// draw would corrupt whichever panel is drawn first.
+    ///
+    /// `show_model` requires room for: a 2-col left margin, the model
+    /// card, a 1-col gap, a minimum 4-col network, another 1-col gap, the
+    /// live panel, and a trailing 1-col margin. `show_live` alone (with the
+    /// model card dropped) needs the same minus the card's width.
+    fn panel_fit(&self) -> (bool, bool) {
+        let left = self.left_w();
+        let right = self.right_w();
+        let show_model = self.width > 2 + left + 1 + 4 + 1 + right;
+        let show_live = show_model || self.width > 2 + 4 + 1 + right;
+        (show_model, show_live)
+    }
+
+    /// `(x0, w)` of the network grid — the space between whichever side
+    /// panels are actually being drawn (see `panel_fit`).
     fn network_bounds(&self) -> (usize, usize) {
-        let x0 = 2 + self.left_w() + 1;
-        let w = self.width.saturating_sub(x0 + self.right_w() + 1).max(4);
+        let (show_model, show_live) = self.panel_fit();
+        let x0 = if show_model { 2 + self.left_w() + 1 } else { 2 };
+        let right_reserved = if show_live { self.right_w() } else { 0 };
+        let w = self.width.saturating_sub(x0 + right_reserved + 1).max(4);
         (x0, w)
     }
 
@@ -286,6 +339,7 @@ impl TrainView {
 
         self.put(buf, 0, 0, '╔', BORDER, false);
         let left = format!("═[ TRAINING ]  {binary} · pid {pid} ");
+        let left_cols = left.chars().count();
         self.text(
             buf,
             1,
@@ -294,13 +348,19 @@ impl TrainView {
             BORDER,
             true,
         );
-        let mut x = 1 + left.chars().count();
+        let mut x = 1 + left_cols;
         while x < self.width {
             self.put(buf, x, 0, '═', BORDER, false);
             x += 1;
         }
 
-        // Right-aligned loss + delta — drawn after the dash fill so it wins.
+        // Right-aligned loss + delta — drawn after the dash fill so it wins,
+        // but never allowed to start before the run's name/pid ends. Without
+        // this floor, a long binary name (`linear_regression` is a real
+        // tt-train example) plus a multi-digit pid can run right up against
+        // — or past — where the loss readout wants to start, and the loss
+        // text (drawn last) would overwrite the very thing the header exists
+        // to identify.
         if let Some(loss) = st.loss {
             let color = hsv_to_rgb(loss_hue(loss), 0.75, 0.85);
             let loss_part = format!("LOSS {loss:.4}  ");
@@ -316,7 +376,10 @@ impl TrainView {
                 None => (String::new(), Color::Reset),
             };
             let total = loss_part.chars().count() + delta_str.chars().count();
-            let rx = self.width.saturating_sub(total + 1);
+            // Leave at least a 1-col gap after the run's name before the
+            // loss readout is allowed to start.
+            let min_rx = 1 + left_cols + 1;
+            let rx = self.width.saturating_sub(total + 1).max(min_rx);
             self.text(buf, rx, 0, &loss_part, color, true);
             self.text(
                 buf,
@@ -574,11 +637,22 @@ impl TrainView {
             line!(format!("step/s  {sps:.2}"), val, false);
         }
         if st.step > 0 {
-            // No frame-to-frame comparison is available here — `render` is
-            // `&self` and this view keeps no history of `cache_entries` — so
-            // "still climbing" is approximated with an early-run window
-            // rather than a real delta. See task-7 report for the trade-off.
-            let climbing = st.cache_entries > 0 && st.step <= 50;
+            // The real derivative, not a step-count guess: compare this
+            // tick's `cache_entries` against the last render's (tracked in
+            // `self.cache_last`/`self.cache_steady_ticks`, both `Cell`s —
+            // see the field docs on `TrainView`). Climbing while it keeps
+            // growing; steady only once it's held flat for
+            // `CACHE_STEADY_TICKS` renders in a row, so one stalled tick
+            // (e.g. between two log lines) doesn't flip it prematurely.
+            let prev = self.cache_last.replace(st.cache_entries);
+            if st.cache_entries > prev {
+                self.cache_steady_ticks.set(0);
+            } else {
+                self.cache_steady_ticks
+                    .set(self.cache_steady_ticks.get().saturating_add(1));
+            }
+            let climbing =
+                st.cache_entries > 0 && self.cache_steady_ticks.get() < CACHE_STEADY_TICKS;
             let (txt, color) = if climbing {
                 (
                     format!("cache   {} climbing", st.cache_entries),
@@ -614,6 +688,43 @@ impl TrainView {
         }
     }
 
+    /// The comet released across the sky while a checkpoint pulse is
+    /// active (`st.checkpoint_pulse > 0`) — `Some((glyph, color))` for a
+    /// head or trail cell at this column, `None` otherwise, including when
+    /// the mountain at this column would be tall enough to hide it (clipped
+    /// against the skyline, per the design doc).
+    fn comet_glyph_at(
+        &self,
+        x: usize,
+        sky_rows: usize,
+        mountain_full_bars: usize,
+        pulse: u8,
+    ) -> Option<(char, Color)> {
+        if pulse == 0 {
+            return None;
+        }
+        let usable_w = self.width.saturating_sub(3).max(1);
+        let progress = (1.0 - pulse as f32 / CKPT_PULSE_WINDOW).clamp(0.0, 1.0);
+        let head_x = 2 + (progress * usable_w as f32) as usize;
+        let glyph = if x == head_x {
+            '✦'
+        } else if x + 2 == head_x {
+            '∙'
+        } else if x + 4 == head_x {
+            '·'
+        } else {
+            return None;
+        };
+        // The comet flies near the top of the sky band; if the mountain at
+        // this column is tall enough to reach that row, it's hidden rather
+        // than drawn on top of the peak.
+        let comet_row_from_bottom = sky_rows.saturating_sub(2);
+        if comet_row_from_bottom < mountain_full_bars {
+            return None;
+        }
+        Some((glyph, Color::Rgb(150, 235, 205)))
+    }
+
     fn draw_river(&self, buf: &mut [Vec<Cell>], st: &TrainState) {
         let Layout {
             river_top,
@@ -640,13 +751,21 @@ impl TrainView {
 
         if st.loss_history.is_empty() {
             // Nothing to plot yet — keep the region alive with the same
-            // nightscape rather than an empty void.
-            for y in river_top..river_bottom {
-                let rel_y = (y - river_top) as f32 / sky_rows.max(1) as f32;
-                for x in 1..self.width {
+            // nightscape rather than an empty void. No mountains exist yet,
+            // so a checkpoint comet (if one is in flight) is never clipped.
+            for x in 1..self.width {
+                for y in river_top..river_bottom {
+                    let rel_y = (y - river_top) as f32 / sky_rows.max(1) as f32;
                     if let Some(sc) = sky_cell(x, y, rel_y, self.frame) {
                         self.put(buf, x, y, sc.ch, sc.color, false);
                     }
+                }
+                if let Some((glyph, color)) =
+                    self.comet_glyph_at(x, sky_rows, 0, st.checkpoint_pulse)
+                {
+                    let row_from_bottom = sky_rows.saturating_sub(2);
+                    let y = river_bottom.saturating_sub(1 + row_from_bottom);
+                    self.put(buf, x, y, glyph, color, true);
                 }
             }
             return;
@@ -686,6 +805,17 @@ impl TrainView {
                         self.put(buf, x, y, sc.ch, sc.color, false);
                     }
                 }
+            }
+
+            // Checkpoint comet: drawn after the mountain/sky for this column
+            // so it wins over the aurora, but clipped against this column's
+            // own mountain height.
+            if let Some((glyph, color)) =
+                self.comet_glyph_at(x, sky_rows, full_bars, st.checkpoint_pulse)
+            {
+                let row_from_bottom = sky_rows.saturating_sub(2);
+                let y = river_bottom - 1 - row_from_bottom;
+                self.put(buf, x, y, glyph, color, true);
             }
         }
 
@@ -855,6 +985,15 @@ mod tests {
     }
 
     #[test]
+    fn format_count_thresholds() {
+        assert_eq!(format_count(640), "640");
+        assert_eq!(format_count(999), "999");
+        assert_eq!(format_count(1_000), "1.0K");
+        assert_eq!(format_count(11_200_000), "11.2M");
+        assert_eq!(format_count(1_200_000_000), "1.20B");
+    }
+
+    #[test]
     fn with_no_process_it_says_it_is_scanning_and_draws_no_metrics() {
         let mut b = MockBackend::new(1);
         b.init().unwrap();
@@ -893,6 +1032,16 @@ mod tests {
             out.to_lowercase().contains("redirect"),
             "must explain why per-step metrics are missing:\n{out}"
         );
+        // A regression that drew the notice *and* a fake/empty curve would
+        // still pass the two assertions above — this is the discriminator.
+        assert!(
+            !out.contains("LOSS  "),
+            "must not draw a loss panel when the log isn't redirected:\n{out}"
+        );
+        assert!(
+            !out.contains("mountains colored"),
+            "must not draw the river label when there's no data to plot:\n{out}"
+        );
     }
 
     #[test]
@@ -926,6 +1075,181 @@ mod tests {
         assert!(out.contains("48213"), "pid should be shown:\n{out}");
         assert!(out.contains("50,000"), "max steps should be shown:\n{out}");
         assert!(out.contains("LOSS"), "loss panel should be present:\n{out}");
+    }
+
+    #[test]
+    fn header_loss_readout_never_overwrites_the_run_name() {
+        use crate::workload::train::{LogSource, TrainEvent, TrainProcess};
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = TrainState::new();
+        // `linear_regression` is a real tt-train example binary (it's in
+        // this file's own scanning checklist) and a 5-digit pid is
+        // realistic — this combination is what pushes the run's name past
+        // where the loss readout wants to start at a narrow width.
+        st.proc = Some(TrainProcess {
+            pid: 48213,
+            binary: "linear_regression".into(),
+            config_path: None,
+        });
+        st.log = Some(LogSource::File("/tmp/x.log".into()));
+        st.apply_event(TrainEvent::Step {
+            step: 1,
+            loss: 4.55,
+        });
+        st.apply_event(TrainEvent::Step {
+            step: 2,
+            loss: 4.50,
+        });
+
+        let v = TrainView::new(60, 40);
+        let out = text_of(&v.render(&st, &b));
+        assert!(
+            out.contains("linear_regression · pid 48213"),
+            "long binary name + pid must survive intact in the header, not be \
+             overwritten by the right-aligned loss readout:\n{out}"
+        );
+    }
+
+    #[test]
+    fn side_panels_never_invert_at_any_width() {
+        // Direct check of the layout invariant itself (not text-scraping):
+        // whichever side panels `panel_fit` says are shown, the network
+        // grid's own bounds must never reach into them.
+        for w in 20..=140usize {
+            let v = TrainView::new(w, 40);
+            let (show_model, show_live) = v.panel_fit();
+            let (x0, netw) = v.network_bounds();
+            let net_end = x0 + netw;
+            if show_live {
+                let rx = w.saturating_sub(v.right_w() + 1);
+                assert!(
+                    net_end <= rx,
+                    "network overruns the LIVE panel at w={w}: x0={x0} netw={netw} rx={rx}"
+                );
+            } else {
+                assert!(
+                    net_end <= w,
+                    "network overruns the screen at w={w}: x0={x0} netw={netw}"
+                );
+            }
+            if show_model {
+                assert!(x0 >= 3, "model card column missing room at w={w}");
+            } else {
+                assert_eq!(x0, 2, "network should start at the left margin at w={w}");
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_widths_drop_side_panels_instead_of_garbling_them() {
+        use crate::workload::train::{LogSource, TrainEvent, TrainProcess};
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = TrainState::new();
+        st.proc = Some(TrainProcess {
+            pid: 1,
+            binary: "nano_gpt".into(),
+            config_path: Some("t.yaml".into()),
+        });
+        st.log = Some(LogSource::File("/tmp/x.log".into()));
+        st.apply_event(TrainEvent::MaxSteps(1000));
+        for i in 1..=10u64 {
+            st.apply_event(TrainEvent::Step { step: i, loss: 3.0 });
+        }
+
+        for w in [20usize, 30] {
+            let v = TrainView::new(w, 40);
+            let (show_model, show_live) = v.panel_fit();
+            assert!(
+                !show_model,
+                "model card should be dropped, not squeezed, at w={w}"
+            );
+            let out = text_of(&v.render(&st, &b));
+            assert!(
+                !out.contains("MODEL"),
+                "dropped model card must not appear at w={w}:\n{out}"
+            );
+            if !show_live {
+                assert!(
+                    !out.contains("LIVE"),
+                    "dropped live panel must not appear at w={w}:\n{out}"
+                );
+            }
+            for line in v.render(&st, &b) {
+                let s: String = line.spans.iter().map(|sp| sp.content.as_ref()).collect();
+                assert!(!s.contains('╗') && !s.contains('╝'), "w={w}: {s:?}");
+                let cols = unicode_width::UnicodeWidthStr::width(s.as_str());
+                assert!(cols <= w, "line is {cols} cols at width {w}: {s:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn cache_reads_climbing_then_steady_from_the_real_derivative_not_a_step_count() {
+        use crate::workload::train::{LogSource, TrainEvent, TrainProcess};
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = TrainState::new();
+        st.proc = Some(TrainProcess {
+            pid: 1,
+            binary: "nano_gpt".into(),
+            config_path: None,
+        });
+        st.log = Some(LogSource::File("/tmp/x.log".into()));
+        st.apply_event(TrainEvent::Step { step: 1, loss: 4.0 });
+        st.apply_event(TrainEvent::StepTime {
+            ms: 10.0,
+            cache_entries: 5,
+        });
+
+        let v = TrainView::new(134, 40);
+        let out1 = text_of(&v.render(&st, &b));
+        assert!(
+            out1.contains("climbing"),
+            "a freshly-growing cache should read climbing:\n{out1}"
+        );
+
+        // The cache stops growing for several renders in a row — this must
+        // settle to steady from the real observed plateau, not from any
+        // fixed step-count threshold (the old, replaced heuristic).
+        let mut out_last = out1;
+        for _ in 0..(CACHE_STEADY_TICKS + 2) {
+            out_last = text_of(&v.render(&st, &b));
+        }
+        assert!(
+            out_last.contains("steady"),
+            "a plateaued cache must read steady, not stay climbing forever:\n{out_last}"
+        );
+    }
+
+    #[test]
+    fn a_checkpoint_pulse_releases_a_comet_across_the_sky() {
+        use crate::workload::train::{LogSource, TrainEvent, TrainProcess};
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = TrainState::new();
+        st.proc = Some(TrainProcess {
+            pid: 1,
+            binary: "nano_gpt".into(),
+            config_path: None,
+        });
+        st.log = Some(LogSource::File("/tmp/x.log".into()));
+        for i in 1..=20u64 {
+            st.apply_event(TrainEvent::Step {
+                step: i,
+                loss: 3.0 - i as f32 * 0.05,
+            });
+        }
+        st.checkpoint_pulse = 20;
+        st.checkpoint_step = 20;
+
+        let v = TrainView::new(134, 40);
+        let out = text_of(&v.render(&st, &b));
+        assert!(
+            out.contains('✦') || out.contains('∙'),
+            "a checkpoint pulse should release a visible comet:\n{out}"
+        );
     }
 
     #[test]
