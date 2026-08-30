@@ -10,7 +10,7 @@
 //! keep drawing.
 
 use super::config::{merge_model_yaml, parse_train_yaml, TrainConfig};
-use super::detect::{parse_train_process, TrainProcess};
+use super::detect::{parse_python_trainer, parse_train_process, TrainProcess};
 use super::logsrc::{discover_log, LogSource};
 use super::parse::{parse_train_line, TrainEvent};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -275,8 +275,33 @@ impl TrainMonitor {
             if let Some(p) = parse_train_process(&comm, &cmdline, pid) {
                 return Some(p);
             }
+            // A compiled example is the cheap case; a Python harness driving
+            // ttml costs a `maps` read, so only reach for it when the first
+            // match failed. The gate is that tt-train's own extension module
+            // is actually mapped — see `parse_python_trainer`.
+            if let Some(p) = parse_python_trainer(&cmdline, pid, Self::maps_ttml(pid)) {
+                return Some(p);
+            }
         }
         None
+    }
+
+    /// Whether tt-train's `ttml` extension module is mapped into `pid`.
+    ///
+    /// Reading `/proc/<pid>/maps` needs no more privilege than reading the
+    /// cmdline for our own processes, and fails closed (`false`) for
+    /// anything we can't read, so a foreign process is never claimed.
+    #[cfg(target_os = "linux")]
+    fn maps_ttml(pid: i32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/maps"))
+            .map(|m| {
+                m.lines().any(|l| {
+                    // The compiled binding (`_ttml*.so`) or the package
+                    // directory tt-train installs it under.
+                    l.contains("_ttml") || l.contains("/ttml/")
+                })
+            })
+            .unwrap_or(false)
     }
 
     #[cfg(not(target_os = "linux"))]

@@ -120,6 +120,30 @@ pub fn parse_train_line(line: &str) -> Option<TrainEvent> {
         });
     }
 
+    // Python harnesses that drive ttml print their own shape rather than
+    // tt-train's, because ttml's trainer prints nothing per step. tt-tnt:
+    //   "  step=   1234 train_loss=3.3125 val_loss=3.4012 lr=3.000e-04"
+    // Only `step=` and `train_loss=` are required; val_loss and lr are
+    // optional and the view has nowhere to put them today.
+    if let Some(i) = line.find("step=") {
+        let rest = &line[i + "step=".len()..];
+        let step_s: String = rest
+            .trim_start()
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        if let Some(j) = rest.find("train_loss=") {
+            let loss_s: String = rest[j + "train_loss=".len()..]
+                .trim_start()
+                .chars()
+                .take_while(|c| !c.is_whitespace())
+                .collect();
+            if let (Ok(step), Ok(loss)) = (step_s.parse::<u64>(), loss_s.parse::<f32>()) {
+                return Some(TrainEvent::Step { step, loss });
+            }
+        }
+    }
+
     // "Full step time 1124.5 ms, cache entries: 21"
     if let Some(rest) = after(line, "Full step time") {
         let (ms_s, cache_s) = rest.split_once("ms, cache entries:")?;
@@ -194,6 +218,32 @@ mod tests {
                 loss: 0.1337
             }),
         );
+    }
+
+    /// tt-tnt's shape. `ttml`'s trainer prints nothing per step, so a Python
+    /// harness's own logging is the only per-step signal that exists for a
+    /// run driven that way.
+    #[test]
+    fn parses_a_python_harness_step_line() {
+        // Verbatim from tt-tnt train/run.py's f-string, including the
+        // leading indent and the `:>7` right-alignment of the step.
+        assert_eq!(
+            parse_train_line("  step=   1234 train_loss=3.3125 val_loss=3.4012 lr=3.000e-04"),
+            Some(TrainEvent::Step {
+                step: 1234,
+                loss: 3.3125
+            }),
+        );
+        // lr is optional (only present for non-constant schedules).
+        assert_eq!(
+            parse_train_line("  step=      1 train_loss=4.8210 val_loss=4.9001"),
+            Some(TrainEvent::Step {
+                step: 1,
+                loss: 4.8210
+            }),
+        );
+        // A line mentioning steps but carrying no train_loss is not a step.
+        assert_eq!(parse_train_line("  step=   12 val_loss=3.1"), None);
     }
 
     /// A combined line must feed step time and cache entries through, or the

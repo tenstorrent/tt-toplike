@@ -55,9 +55,111 @@ pub fn parse_train_process(name: &str, cmdline: &str, pid: i32) -> Option<TrainP
     })
 }
 
+/// True when `name`/argv[0] is a Python interpreter (`python`, `python3`,
+/// `python3.12`, or a venv path ending in one of those).
+fn is_python(base: &str) -> bool {
+    base == "python"
+        || base
+            .strip_prefix("python")
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_digit()))
+}
+
+/// `Some(TrainProcess)` for a Python harness that drives tt-train through
+/// `ttml` — tt-metal's own `tt-train/sources/ttml` Python bindings.
+///
+/// tt-train ships three C++ examples, but real projects here (tt-tnt, for
+/// one) train by importing `ttml` from Python instead, so matching only the
+/// example binary names misses the runs people actually launch.
+///
+/// `ttml_loaded` is the gate and must come from the caller's inspection of
+/// the process's mapped libraries — a cmdline alone can't distinguish a
+/// training harness from any other script called `run.py`, and this view
+/// attaching to the wrong process is worse than not attaching. It mirrors
+/// how HivemindSweeper classifies interpreter-hosted workloads.
+pub fn parse_python_trainer(cmdline: &str, pid: i32, ttml_loaded: bool) -> Option<TrainProcess> {
+    if !ttml_loaded {
+        return None;
+    }
+    let toks: Vec<&str> = cmdline.split_whitespace().collect();
+    let argv0_base = toks.first().and_then(|t| t.rsplit('/').next())?;
+    if !is_python(argv0_base) {
+        return None;
+    }
+    // Name the run after its script, so the header reads `run.py` rather
+    // than a bare `python3` that says nothing about which run this is.
+    // A bare REPL (no script argument) is not a training run.
+    let script = toks
+        .iter()
+        .skip(1)
+        .find(|t| t.ends_with(".py"))
+        .and_then(|t| t.rsplit('/').next())?;
+
+    Some(TrainProcess {
+        pid,
+        binary: script.to_string(),
+        config_path: config_arg(&toks),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// tt-tnt's real launch shape. The `ttml`-loaded gate is what makes this
+    /// safe: without it, every `run.py` on the box would look like training.
+    #[test]
+    fn recognizes_a_python_harness_that_drives_ttml() {
+        let cmd = "python3 train/run.py --size 384 --steps 200 --val-every 1";
+        let p = parse_python_trainer(cmd, 9001, true).expect("must detect a ttml python trainer");
+        assert_eq!(p.pid, 9001);
+        assert_eq!(p.binary, "run.py", "the run is named after its script");
+
+        assert!(
+            parse_python_trainer(cmd, 9001, false).is_none(),
+            "without ttml mapped this is just some script called run.py"
+        );
+    }
+
+    #[test]
+    fn python_trainer_detection_needs_an_actual_script() {
+        // A bare interpreter — or a shell that merely mentions one — is not
+        // a training run, however its libraries are mapped.
+        assert!(parse_python_trainer("python3", 1, true).is_none());
+        assert!(parse_python_trainer("python3 -i", 2, true).is_none());
+        assert!(parse_python_trainer("bash run.py", 3, true).is_none());
+    }
+
+    #[test]
+    fn python_trainer_accepts_versioned_and_venv_interpreters() {
+        for argv0 in [
+            "python",
+            "python3",
+            "python3.12",
+            "/home/u/.venv/bin/python3",
+        ] {
+            let cmd = format!("{argv0} train/run.py");
+            assert!(
+                parse_python_trainer(&cmd, 4, true).is_some(),
+                "{argv0} must be recognized as an interpreter"
+            );
+        }
+        // Something merely *starting* with "python" isn't an interpreter.
+        assert!(parse_python_trainer("pythonish train/run.py", 5, true).is_none());
+    }
+
+    #[test]
+    fn python_trainer_picks_up_a_config_flag() {
+        let p = parse_python_trainer(
+            "python3 train/run.py --config train/configs/nanollama3_bpe_v2.yaml",
+            6,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            p.config_path.as_deref(),
+            Some("train/configs/nanollama3_bpe_v2.yaml")
+        );
+    }
 
     #[test]
     fn recognizes_nano_gpt_by_binary_name_not_flags() {
