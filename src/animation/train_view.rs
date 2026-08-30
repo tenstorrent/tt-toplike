@@ -245,7 +245,12 @@ impl TrainView {
         let legend_row = self.height.saturating_sub(2);
         let chips_row = legend_row.saturating_sub(2);
         let network_top = 3;
-        let network_h = 9usize.min(chips_row.saturating_sub(network_top + 3)).max(2);
+        // Tall terminals give the network enough rows to space its heads out
+        // (see `draw_network`'s `row_stride`); short ones fall back. Capped at
+        // half the content band either way so the river — the centerpiece —
+        // always keeps the larger share.
+        let content_h = chips_row.saturating_sub(network_top + 3);
+        let network_h = 13usize.min(content_h / 2).max(2).min(content_h.max(2));
         let river_top = network_top + network_h + 1;
         let river_bottom = chips_row.saturating_sub(1).max(river_top + 1);
         Layout {
@@ -560,16 +565,46 @@ impl TrainView {
             false,
         );
 
+        // ── Grid sizing ──────────────────────────────────────────────
+        // The band has spare width at typical terminal sizes, so the grid
+        // breathes: pick the widest per-block stride that still fits, and
+        // put a blank row between head rows when the band is tall enough.
+        // Both back off to the old tight packing on small terminals — the
+        // river below is the centerpiece and never gives up height for this.
         let max_rows = network_h.saturating_sub(1).max(1);
-        let rows = heads.min(max_rows).max(1);
-        let cols = blocks.min(w.saturating_sub(1) / 3).max(1);
+        let usable_w = w.saturating_sub(1);
+
+        // stride = columns consumed per block (1 node + stride-1 connectors).
+        // `(cols-1)*stride + 1` must fit `usable_w`.
+        let cols_at = |stride: usize| -> usize {
+            if usable_w == 0 {
+                return 1;
+            }
+            (usable_w.saturating_sub(1) / stride + 1).max(1)
+        };
+        let stride = [5usize, 4, 3]
+            .into_iter()
+            .find(|&s| cols_at(s) >= blocks)
+            .unwrap_or(2);
+        let cols = blocks.min(cols_at(stride)).max(1);
+
+        // Row stride 2 (a blank row between heads) only when every head still
+        // fits; otherwise stay at 1 rather than truncating the network.
+        let row_stride = if heads > 0 && (heads - 1) * 2 < max_rows {
+            2
+        } else {
+            1
+        };
+        let rows = heads
+            .min((max_rows.saturating_sub(1)) / row_stride + 1)
+            .max(1);
+
         let node_glyphs = ['●', '◉', '○', '◇', '·'];
-        let synapses = ['─', '╱', '╲'];
 
         for r in 0..rows {
-            let y = network_top + 1 + r;
-            let mut x = x0;
+            let y = network_top + 1 + r * row_stride;
             for c in 0..cols {
+                let x = x0 + c * stride;
                 if x >= x0 + w {
                     break;
                 }
@@ -579,6 +614,37 @@ impl TrainView {
                 let period = cols + 4;
                 let fwd_on = (self.frame as usize / 2 + c) % period < 2;
                 let bwd_on = (self.frame as usize / 2 + (cols - 1 - c)) % period < 2;
+
+                // Connectors run from this node toward the next block. They
+                // light with whichever sweep is passing, so the pulse reads as
+                // travelling *through* the network rather than hopping nodes.
+                if c + 1 < cols {
+                    for k in 1..stride {
+                        let cx = x + k;
+                        if cx >= x0 + w {
+                            break;
+                        }
+                        // Fan the middle of a wide gap into ╱/╲ so adjacent
+                        // heads look wired together, not just railed straight.
+                        let ch = if stride >= 4 && k == stride / 2 {
+                            if (r + c) % 2 == 0 {
+                                '╲'
+                            } else {
+                                '╱'
+                            }
+                        } else {
+                            '─'
+                        };
+                        let (col, bold) = if fwd_on {
+                            (hsv_to_rgb(FWD_HUE, 0.75, 0.7), true)
+                        } else if bwd_on {
+                            (hsv_to_rgb(BWD_HUE, 0.6, 0.65), true)
+                        } else {
+                            (Color::Rgb(80, 90, 115), false)
+                        };
+                        self.put(buf, cx, y, ch, col, bold);
+                    }
+                }
 
                 let glyph = node_glyphs[(r + c + (self.frame as usize / 6)) % node_glyphs.len()];
                 let color = if fwd_on {
@@ -591,18 +657,6 @@ impl TrainView {
                     Color::Rgb(90, 100, 130)
                 };
                 self.put(buf, x, y, glyph, color, fwd_on || bwd_on);
-                x += 1;
-                if c + 1 < cols && x < x0 + w {
-                    self.put(
-                        buf,
-                        x,
-                        y,
-                        synapses[(r + c) % synapses.len()],
-                        Color::Rgb(80, 90, 115),
-                        false,
-                    );
-                    x += 1;
-                }
             }
         }
     }
@@ -1293,6 +1347,73 @@ mod tests {
                 assert!(cols <= w, "line is {cols} cols at width {w}: {s:?}");
             }
         }
+    }
+
+    /// The grid should breathe on a normal terminal: blocks spaced several
+    /// columns apart with visible connectors between them, and — when the
+    /// band is tall enough — a blank row between head rows. A regression to
+    /// the old tight `node,connector,node` packing (2 columns per block,
+    /// rows touching) would make the network read as a solid clump, so this
+    /// asserts the spacing directly rather than eyeballing it.
+    #[test]
+    fn network_grid_is_spaced_out_on_a_roomy_terminal() {
+        use crate::workload::train::{LogSource, TrainProcess};
+        let mut b = MockBackend::new(4);
+        b.init().unwrap();
+        let mut st = TrainState::new();
+        st.proc = Some(TrainProcess {
+            pid: 1,
+            binary: "nano_gpt".into(),
+            config_path: None,
+        });
+        st.log = Some(LogSource::File("/tmp/x.log".into()));
+        st.config.num_blocks = Some(6);
+        st.config.num_heads = Some(6);
+        st.loss = Some(2.0);
+
+        let v = TrainView::new(134, 40);
+        let lines = v.render(&st, &b);
+        let rows: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+
+        // Scope to the network band: everything above the river's "LOSS"
+        // label. The legend row also mixes node glyphs with `─`, so an
+        // unscoped scan would count it as a seventh head row.
+        let river_label = rows
+            .iter()
+            .position(|r| r.contains("LOSS  ·"))
+            .expect("river label row should render");
+        let node_rows: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .take(river_label)
+            .filter(|(_, r)| r.contains('─') && r.chars().any(|c| "●◉○◇·".contains(c)))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            node_rows.len(),
+            6,
+            "all six head rows should render; got {node_rows:?}"
+        );
+
+        // Vertical: consecutive head rows are two apart (a blank row between).
+        for pair in node_rows.windows(2) {
+            assert_eq!(
+                pair[1] - pair[0],
+                2,
+                "head rows should be spaced on a 40-row terminal; got {node_rows:?}"
+            );
+        }
+
+        // Horizontal: at least two connector chars between adjacent nodes.
+        // The old packing put exactly one, so `──` never appeared.
+        let first = &rows[node_rows[0]];
+        assert!(
+            first.contains("──"),
+            "expected multi-column connectors between blocks, got {first:?}"
+        );
     }
 
     #[test]
