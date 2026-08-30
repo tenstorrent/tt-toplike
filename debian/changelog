@@ -1,3 +1,13 @@
+tt-toplike (0.11.2) noble; urgency=medium
+
+  * Add: `--mode training` (aliases `train`, `tt-train`) launches straight
+    into the Training view, matching `--mode hivemind`. The view takes no
+    target either way — it finds the running tt-train process itself — so
+    this is purely a scriptable entry point for launchers, kiosks and
+    systemd units that previously needed an interactive `t`.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 30 Aug 2026 00:00:00 +0000
+
 tt-toplike (0.11.1) noble; urgency=medium
 
   * Fix: the Training view's checkpoint pulse never fired. The watcher was

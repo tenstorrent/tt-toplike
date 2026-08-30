@@ -1,7 +1,7 @@
 # tt-toplike Quick Start
 
-**Version**: 0.11.1
-**Last Updated**: August 29, 2026
+**Version**: 0.11.2
+**Last Updated**: August 30, 2026
 
 ---
 
@@ -94,7 +94,7 @@ tt-toplike --mode hivemind    # or press ~ in any mode
 
 ### Training (`t`)
 ```bash
-# from any view, just press:  t
+tt-toplike --mode training    # or press t in any mode (aliases: train, tt-train)
 ```
 - Auto-attaches to a live [tt-train](https://github.com/tenstorrent/tt-metal/tree/main/tt-train) run — no flags, no target to name. Scans for a `nano_gpt`/`mnist_mlp`/`linear_regression` process, resolves `/proc/<pid>/fd/1` to its log, and starts tailing it
 - The model as a character-grid network (columns = transformer blocks, nodes = attention heads) fed by token particles, amber forward sweeps, violet backward/gradient sweeps
@@ -102,6 +102,7 @@ tt-toplike --mode hivemind    # or press ~ in any mode
 - **Requires stdout redirected to a file** (`> train.log`) at launch — if fd 1 is a pipe or tty the per-step stream can't be tailed after the fact (an OS property, not a gap), and the view says so instead of drawing a fake curve
 - Shows only what tt-train actually emits live (step, loss, step time, cache entries) — no gradient norms or MFU live, but derives its own tokens/sec and ETA from what it can read. `l` for the legend, `/explain` for the mapping overlay
 - `Esc` backs out to where you came from. Deliberately excluded from the `v` cycle, like `i`
+- `--mode training` launches straight into it, for scripts, kiosks and systemd units — it takes no target either way, since the view finds the run itself
 
 ---
 

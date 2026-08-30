@@ -125,6 +125,24 @@ fn next_display_mode(m: DisplayMode) -> DisplayMode {
     }
 }
 
+/// The view `--mode <name>` launches into.
+///
+/// Split out of `run_tui` so the pairing is testable: an omitted arm is a
+/// compile error, but a *wrong* one — pointing a mode at its neighbour —
+/// compiles happily and only shows up as launching the wrong screen.
+fn display_mode_for(mode: crate::cli::VisualizationMode) -> DisplayMode {
+    use crate::cli::VisualizationMode as V;
+    match mode {
+        V::Normal => DisplayMode::Insights,
+        V::Starfield => DisplayMode::Starfield,
+        V::Castle => DisplayMode::MemoryCastle,
+        V::Flow => DisplayMode::MemoryFlow,
+        V::Arcade => DisplayMode::Arcade,
+        V::Hivemind => DisplayMode::HivemindSweeper,
+        V::Training => DisplayMode::Training,
+    }
+}
+
 /// Floating overlay panel type — toggled by hotkeys, auto-dismissed on any other keypress.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum OverlayPanel {
@@ -367,18 +385,10 @@ fn run_app(
     };
 
     // UI state - initialize from CLI --mode option if provided
-    let mut display_mode = if let Some(mode) = cli.mode {
-        match mode {
-            crate::cli::VisualizationMode::Normal => DisplayMode::Insights,
-            crate::cli::VisualizationMode::Starfield => DisplayMode::Starfield,
-            crate::cli::VisualizationMode::Castle => DisplayMode::MemoryCastle,
-            crate::cli::VisualizationMode::Flow => DisplayMode::MemoryFlow,
-            crate::cli::VisualizationMode::Arcade => DisplayMode::Arcade,
-            crate::cli::VisualizationMode::Hivemind => DisplayMode::HivemindSweeper,
-        }
-    } else {
-        DisplayMode::Insights // default is now Insights
-    };
+    let mut display_mode = cli
+        .mode
+        .map(display_mode_for)
+        .unwrap_or(DisplayMode::Insights); // default is now Insights
     let mut starfield: Option<HardwareStarfield> = None;
     let mut memory_castle: Option<MemoryCastle> = None;
     let mut memory_flow: Option<MemoryFlowVis> = None;
@@ -7229,7 +7239,7 @@ mod tests {
 /// the `v`-cycle rotation.
 #[cfg(test)]
 mod display_mode_tests {
-    use super::{next_display_mode, DisplayMode};
+    use super::{display_mode_for, next_display_mode, DisplayMode};
 
     #[test]
     fn t_key_enters_training_mode_and_esc_leaves_it() {
@@ -7251,6 +7261,44 @@ mod display_mode_tests {
         for _ in 0..12 {
             m = next_display_mode(m);
             assert_ne!(m, DisplayMode::Training, "`v` must not cycle into Training");
+        }
+    }
+
+    /// Every `--mode` value must launch the view it names. A missing arm is a
+    /// compile error, but a wrong one — pointing Training at Arcade, say —
+    /// compiles fine and only surfaces as the wrong screen at launch.
+    #[test]
+    fn every_cli_mode_launches_its_own_view() {
+        use crate::cli::VisualizationMode as V;
+        let pairs = [
+            (V::Normal, DisplayMode::Insights),
+            (V::Starfield, DisplayMode::Starfield),
+            (V::Castle, DisplayMode::MemoryCastle),
+            (V::Flow, DisplayMode::MemoryFlow),
+            (V::Arcade, DisplayMode::Arcade),
+            (V::Hivemind, DisplayMode::HivemindSweeper),
+            (V::Training, DisplayMode::Training),
+        ];
+        for (cli_mode, want) in pairs {
+            assert_eq!(
+                display_mode_for(cli_mode),
+                want,
+                "--mode {cli_mode:?} launched the wrong view"
+            );
+        }
+        // Distinct inputs must stay distinct outputs, so a copy-paste slip
+        // that maps two modes to one view can't pass the pairs above.
+        // Compared pairwise rather than via a set: `DisplayMode` is
+        // deliberately only `PartialEq`, and widening a production derive to
+        // suit a test is the wrong trade.
+        for (i, (a, _)) in pairs.iter().enumerate() {
+            for (b, _) in pairs.iter().skip(i + 1) {
+                assert_ne!(
+                    display_mode_for(*a),
+                    display_mode_for(*b),
+                    "--mode {a:?} and --mode {b:?} launch the same view"
+                );
+            }
         }
     }
 }
