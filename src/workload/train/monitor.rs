@@ -169,16 +169,29 @@ impl Tailer {
 pub struct CheckpointWatch {
     path: PathBuf,
     last: Option<SystemTime>,
+    /// Whether the checkpoint already existed when we attached. A file that
+    /// did NOT exist yet has its first appearance treated as a real save —
+    /// otherwise the first checkpoint of a fresh run is swallowed as the
+    /// baseline. A file that DID exist is a leftover from a previous run and
+    /// must not announce itself as fresh, which is what the baseline is for.
+    existed_at_start: bool,
 }
 
 impl CheckpointWatch {
     pub fn new(path: PathBuf) -> Self {
-        Self { path, last: None }
+        let existed_at_start = std::fs::metadata(&path).is_ok();
+        Self {
+            path,
+            last: None,
+            existed_at_start,
+        }
     }
 
-    /// `true` exactly once per observed save. The first call only establishes
-    /// a baseline — an already-existing checkpoint from a previous run must
-    /// not announce itself as a fresh save.
+    /// `true` exactly once per observed save. If the checkpoint already
+    /// existed when we attached, the first call only establishes a baseline
+    /// — a leftover from a previous run must not announce itself as fresh.
+    /// If it did NOT exist yet, its first successful read means the file was
+    /// just created, which is itself a genuine save and pulses immediately.
     pub fn poll(&mut self) -> bool {
         let Ok(m) = std::fs::metadata(&self.path).and_then(|m| m.modified()) else {
             return false;
@@ -186,7 +199,7 @@ impl CheckpointWatch {
         match self.last {
             None => {
                 self.last = Some(m);
-                false
+                !self.existed_at_start
             }
             Some(prev) => {
                 if m > prev {
@@ -496,6 +509,47 @@ mod tests {
         std::fs::write(&path, b"bb").unwrap();
         assert!(w.poll(), "an mtime bump pulses once");
         assert!(!w.poll(), "and only once");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn checkpoint_created_after_attach_pulses_on_its_first_appearance() {
+        let dir = std::env::temp_dir().join(format!("ttckpt_new_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("m.msgpack");
+        // Deliberately do NOT create the file before attaching — this is the
+        // fresh-run case where the checkpoint doesn't exist yet.
+        assert!(!path.exists());
+
+        let mut w = CheckpointWatch::new(path.clone());
+        assert!(!w.poll(), "no file yet — nothing to pulse");
+
+        std::fs::write(&path, b"a").unwrap();
+        assert!(
+            w.poll(),
+            "the checkpoint's first appearance after attach is a genuine save, not a baseline"
+        );
+        assert!(!w.poll(), "and only once");
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(&path, b"bb").unwrap();
+        assert!(w.poll(), "a later real mtime bump still pulses");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn checkpoint_that_never_appears_never_pulses() {
+        let dir = std::env::temp_dir().join(format!("ttckpt_absent_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("never.msgpack");
+        assert!(!path.exists());
+
+        let mut w = CheckpointWatch::new(path.clone());
+        for _ in 0..5 {
+            assert!(!w.poll(), "an absent checkpoint never pulses, never panics");
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }
