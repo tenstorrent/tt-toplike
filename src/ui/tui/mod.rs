@@ -3027,7 +3027,7 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
         return;
     }
 
-    let lines = overlay_panel_lines(kind, mode);
+    let lines = overlay_lines(kind, mode);
 
     // Title + accent per panel kind (used for the header and to size the panel).
     let (title, border_color) = match kind {
@@ -3100,7 +3100,7 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
 ///
 /// Lines must fit within PANEL_W - 2 visible columns (no right border means content
 /// needs to respect the panel width itself).  Each line is prefixed with `║ ` (2 cols).
-fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
+fn overlay_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
     let bg = colors::rgb(8, 14, 22);
     let bar = colors::rgb(40, 55, 70);
     let dim = colors::rgb(90, 100, 120);
@@ -3220,14 +3220,7 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 DisplayMode::Insights => insights_legend_lines(bar, bg, dim),
                 DisplayMode::Grid => grid_legend_lines(bar, bg, dim),
                 DisplayMode::HivemindSweeper => hivemind_view::legend_lines(bar, bg, dim),
-                // Placeholder — Task 9 replaces this with `train_legend_lines`,
-                // which documents the view's colour channels in full.
-                DisplayMode::Training => {
-                    vec![Line::from(Span::styled(
-                        "Training view",
-                        Style::default().fg(dim),
-                    ))]
-                }
+                DisplayMode::Training => train_legend_lines(bar, bg, dim),
                 DisplayMode::Arcade => {
                     // All four combined.
                     let mut v = Vec::new();
@@ -3477,11 +3470,43 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
             DisplayMode::HivemindSweeper => {
                 explain_lines(bar, bg, dim, lbl, hivemind_view::EXPLAIN_TEXT)
             }
-            // Placeholder — Task 9 replaces this with the full "Training —
-            // Robot Brain Food" copy.
-            DisplayMode::Training => {
-                explain_lines(bar, bg, dim, lbl, &["Training view", "", "TBD (Task 9)."])
-            }
+            DisplayMode::Training => explain_lines(
+                bar,
+                bg,
+                dim,
+                lbl,
+                &[
+                    "Training — Robot Brain Food",
+                    "",
+                    "A live tt-train run, drawn as the model",
+                    "itself: one column per transformer block,",
+                    "one node per attention head.",
+                    "",
+                    "Each step feeds tokens in from the left",
+                    "(amber), then gradients flow back out to",
+                    "the right (violet). The loss mountains",
+                    "below are coloured by their own value, so",
+                    "the range is the whole run's history —",
+                    "magenta chaos resolving to teal calm.",
+                    "",
+                    "The view attaches by itself: it finds a",
+                    "process holding /dev/tenstorrent whose",
+                    "binary is a tt-train example, then reads",
+                    "/proc/<pid>/fd/1 to locate its log.",
+                    "",
+                    "tt-train prints step, loss, step time and",
+                    "kernel-cache size; tokens/sec and ETA are",
+                    "derived from those plus the run's YAML.",
+                    "Nothing here is invented — gradient norms",
+                    "and MFU aren't emitted live, so they",
+                    "aren't shown.",
+                    "",
+                    "If stdout wasn't redirected to a file, the",
+                    "per-step stream can't be read after the",
+                    "fact — relaunch with '> train.log' and the",
+                    "view picks it up automatically.",
+                ],
+            ),
         },
     }
 }
@@ -3879,6 +3904,74 @@ fn defrag_legend_lines(
                 Style::default().fg(colors::rgb(200, 230, 255))
             ),
             Span::styled("= channel temperature", Style::default().fg(dim))
+        ]),
+    ]
+}
+
+/// Legend for the Training view: the nine colour channels, each of which
+/// carries a different live signal.
+fn train_legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    macro_rules! ln {
+        ($spans:expr) => {{
+            let mut v: Vec<Span<'static>> =
+                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            v.extend($spans);
+            Line::from(v)
+        }};
+    }
+    vec![
+        ln!(vec![
+            Span::styled("●", Style::default().fg(colors::rgb(214, 92, 208))),
+            Span::styled(" → ", Style::default().fg(dim)),
+            Span::styled("●", Style::default().fg(colors::rgb(79, 209, 197))),
+            Span::styled(
+                "  loss: magenta chaos → teal converged",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("─", Style::default().fg(colors::rgb(242, 180, 62))),
+            Span::styled(" forward pass (left→right)", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("∙", Style::default().fg(colors::rgb(150, 120, 240))),
+            Span::styled(" gradients (right→left)", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("▁▄█", Style::default().fg(colors::rgb(180, 120, 200))),
+            Span::styled(
+                " loss river — each column keeps its own value's hue",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("▼", Style::default().fg(colors::rgb(124, 242, 156))),
+            Span::styled(" improving   ", Style::default().fg(dim)),
+            Span::styled("▲", Style::default().fg(colors::rgb(255, 138, 107))),
+            Span::styled(" regressing", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("█", Style::default().fg(colors::rgb(246, 188, 66))),
+            Span::styled(" chip temp + power draw", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("░▒", Style::default().fg(colors::rgb(96, 70, 130))),
+            Span::styled(
+                " aurora + stars — sky opens as loss falls",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("◆", Style::default().fg(colors::rgb(170, 120, 245))),
+            Span::styled(" kernel cache compiling → steady", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("✦", Style::default().fg(colors::rgb(124, 242, 156))),
+            Span::styled(" checkpoint saved", Style::default().fg(dim)),
         ]),
     ]
 }
@@ -7661,6 +7754,53 @@ mod host_default_screen_tests {
         );
     }
 
+    /// The Training legend must document every one of the view's nine colour
+    /// channels (loss, forward, gradients, river history, delta direction,
+    /// chip temp/power, aurora, cache, checkpoint) — not just render *some*
+    /// lines.
+    #[test]
+    fn train_legend_documents_every_colour_channel() {
+        use super::{colors, train_legend_lines};
+
+        let lines = train_legend_lines(
+            colors::rgb(80, 80, 80),
+            colors::rgb(0, 0, 0),
+            colors::rgb(120, 120, 120),
+        );
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        for needle in [
+            "loss",
+            "forward",
+            "gradient",
+            "temp",
+            "checkpoint",
+            "aurora",
+            "cache",
+        ] {
+            assert!(
+                text.contains(needle),
+                "legend is missing {needle:?}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn training_overlays_render_without_truncating() {
+        use super::{overlay_lines, DisplayMode, OverlayPanel};
+
+        // The overlay panel sizes to its widest line; this guards the new mode's
+        // entries the same way the existing overlay test does.
+        for panel in [OverlayPanel::Legend, OverlayPanel::Explain] {
+            let lines = overlay_lines(panel, DisplayMode::Training);
+            assert!(!lines.is_empty(), "{panel:?} must render for Training");
+        }
+    }
+
     /// Regression: the legend/help/explain overlay panel was a fixed 42 columns
     /// wide while its content lines are 50–66 display columns, so `Paragraph`
     /// (which clips, not wraps) silently truncated the tail of every long line
@@ -7669,9 +7809,7 @@ mod host_default_screen_tests {
     /// roomy terminal and assert the full text of the widest line survives.
     #[test]
     fn overlay_panel_does_not_truncate_wide_content() {
-        use super::{
-            line_cols, overlay_panel_lines, render_overlay_panel, DisplayMode, OverlayPanel,
-        };
+        use super::{line_cols, overlay_lines, render_overlay_panel, DisplayMode, OverlayPanel};
 
         // Terminal wide enough that the panel is never terminal-clamped.
         let (w, h) = (140u16, 44u16);
@@ -7686,7 +7824,7 @@ mod host_default_screen_tests {
         ];
         for (kind, mode) in cases {
             // The widest content line for this panel, as plain text.
-            let widest: String = overlay_panel_lines(kind, mode)
+            let widest: String = overlay_lines(kind, mode)
                 .into_iter()
                 .max_by_key(|l| line_cols(l))
                 .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
