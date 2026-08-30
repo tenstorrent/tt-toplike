@@ -27,6 +27,23 @@ pub enum LogSource {
 
 /// Classify a resolved `/proc/<pid>/fd/1` target. Pure, so the pipe/tty
 /// shapes are testable without spawning anything.
+///
+/// The prefix checks below are an optimization for the common cases, not the
+/// whole contract: the real gate is `target.is_file()`. That single call is
+/// also what rejects two shapes with no dedicated prefix rule:
+/// - A **rotated/unlinked log**: the kernel appends a literal ` (deleted)`
+///   suffix to the readlink target when the process still holds an fd open
+///   to a file that's been removed (e.g. by `logrotate`). No prefix matches
+///   that path, so it falls through to `is_file()`, which is `false` for a
+///   path that no longer exists on disk — correctly `NotRedirected` rather
+///   than handing back a path nothing can open.
+/// - A **FIFO or on-disk socket**: these have ordinary-looking paths (no
+///   `pipe:`/`socket:` prefix — that form is only for *anonymous* fds), so
+///   they're rejected purely because `is_file()` checks the file-type bits
+///   and `S_IFIFO`/`S_IFSOCK` aren't `S_IFREG`.
+///
+/// Do not remove or short-circuit the `is_file()` call on the assumption
+/// that the prefix list already covers everything — it doesn't.
 pub fn classify_fd_target(target: &Path) -> LogSource {
     let s = target.to_string_lossy();
     // Anonymous fds render as `pipe:[N]` / `socket:[N]`; a tty is under /dev.
@@ -126,5 +143,42 @@ mod tests {
     #[test]
     fn a_dead_pid_is_not_redirected_rather_than_an_error() {
         assert_eq!(discover_log(999_999_998), LogSource::NotRedirected);
+    }
+
+    /// A rotated/unlinked log: the kernel appends ` (deleted)` to the
+    /// readlink target when the process still holds the fd open to a file
+    /// that's been removed from the directory (e.g. by logrotate). No
+    /// prefix rule matches this, and the path no longer exists on disk, so
+    /// it must fall through to `NotRedirected` — handing back `File(path)`
+    /// here would give a caller a path that can't be opened.
+    #[test]
+    fn classifies_a_deleted_log_path_as_not_redirected() {
+        assert_eq!(
+            classify_fd_target(std::path::Path::new("/tmp/train.log (deleted)")),
+            LogSource::NotRedirected
+        );
+    }
+
+    /// A FIFO has an ordinary-looking path — no `pipe:`/`socket:` prefix,
+    /// since that form is only for anonymous fds — so it's rejected purely
+    /// by the `is_file()` file-type check. This proves that reliance is
+    /// real, not incidental: if someone later "optimizes" by trusting the
+    /// prefix list alone, this test goes red.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn classifies_a_named_pipe_as_not_redirected() {
+        let dir = std::env::temp_dir().join(format!("ttlog_fifo_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("train.fifo");
+
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo must succeed to run this test");
+
+        assert_eq!(classify_fd_target(&fifo), LogSource::NotRedirected);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
