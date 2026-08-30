@@ -53,11 +53,6 @@ impl TrainState {
         Self::default()
     }
 
-    /// True when a run is attached and its per-step stream is readable.
-    pub fn has_metrics(&self) -> bool {
-        matches!(self.log, Some(LogSource::File(_))) && self.step > 0
-    }
-
     pub fn apply_event(&mut self, ev: TrainEvent) {
         match ev {
             TrainEvent::Step { step, loss } => {

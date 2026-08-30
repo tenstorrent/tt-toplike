@@ -15,12 +15,11 @@ tt-toplike (0.11.0) noble; urgency=medium
     at launch (`> train.log`). If fd 1 is a pipe or tty, retroactively
     reading it is an OS-level impossibility, not a gap in this tool — the
     view says so and falls back to what it can still see (process
-    liveness, RSS/CPU, device fds, chip telemetry, checkpoint mtime)
-    rather than drawing a fake loss curve. Gradient norms, MFU, and
-    throughput counters are never available live either — tt-train only
-    writes those to a run-end JSON summary — so the view derives
-    tokens/sec and ETA from the step/loss lines it can actually read
-    instead of showing numbers it can't source.
+    liveness, chip telemetry, and checkpoint mtime) rather than drawing a
+    fake loss curve. Gradient norms, MFU, and throughput counters aren't
+    emitted live — so the view derives tokens/sec and ETA from the
+    step/loss lines it can actually read instead of showing numbers it
+    can't source.
   * Nine independent color channels carry the loss magnitude, run-history
     timeline, loss-delta direction, forward/backward sweep cadence, kernel
     cache compile/steady state, checkpoint-save bursts, and the existing

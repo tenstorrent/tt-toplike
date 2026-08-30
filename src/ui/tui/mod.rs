@@ -3153,6 +3153,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
                 row!(" g", "jump to Grid", key),
                 row!(" i  I", "Inference Servers monitor", key),
                 row!(" ~", "HivemindSweeper activity sniffer", key),
+                row!(" t", "Training view (live tt-train run)", key),
                 row!(" b", "cycle backend", key),
                 ln!(vec![Span::styled(
                     "──────────────────────────────────────",

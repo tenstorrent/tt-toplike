@@ -28,10 +28,10 @@ git tag                        # released versions
   stdout was redirected to a real file at launch (`> train.log`). If fd 1 is
   a pipe or tty, retroactively reading it is an OS-level impossibility, not a
   gap in this tool — the view says so and falls back to what it can still
-  see (process liveness, RSS/CPU, device fds, chip telemetry, checkpoint
-  mtime) rather than drawing a fake loss curve. Gradient norms, MFU, and
-  throughput counters are never available live either, so the view derives
-  tokens/sec and ETA only from what it can actually read.
+  see (process liveness, chip telemetry, and checkpoint mtime) rather than
+  drawing a fake loss curve. Gradient norms, MFU, and throughput counters
+  aren't emitted live either, so the view derives tokens/sec and ETA only
+  from what it can actually read.
 - Nine independent color channels (loss magnitude, run-history timeline,
   loss-delta direction, forward/backward sweep cadence, cache compile/steady
   state, checkpoint bursts, plus chip temp/power) — see the new legend and

@@ -307,7 +307,7 @@ impl TrainView {
         );
 
         let checklist = [
-            "· device-fd holders",
+            "· /proc scan for tt-train binaries",
             "· tt-train binaries (nano_gpt, mnist_mlp, linear_regression)",
             "· /proc/<pid>/fd/1 → regular file?",
             "· log tail",
@@ -538,17 +538,24 @@ impl TrainView {
             ..
         } = self.layout();
         let label = Color::Rgb(150, 200, 255);
+        // The grid's row/column counts are decorative shape only — when the
+        // real config is unknown we still need *some* shape to animate, so
+        // default to nanollama3's 6x6. But the header text is a claim about
+        // the actual model, so it must never assert those defaulted numbers
+        // as fact: only print counts when both are genuinely known.
         let blocks = st.config.num_blocks.unwrap_or(6).max(1) as usize;
         let heads = st.config.num_heads.unwrap_or(6).max(1) as usize;
+
+        let topology_label = match (st.config.num_blocks, st.config.num_heads) {
+            (Some(b), Some(h)) => format!("{b} blocks × {h} heads"),
+            _ => "topology unknown".to_string(),
+        };
 
         self.text(
             buf,
             x0,
             network_top,
-            &Self::clip(
-                &format!("tokens →   [ {blocks} blocks × {heads} heads ]   ∇ gradients"),
-                w,
-            ),
+            &Self::clip(&format!("tokens →   [ {topology_label} ]   ∇ gradients"), w),
             label,
             false,
         );
@@ -672,7 +679,7 @@ impl TrainView {
                 .eta_secs()
                 .map(|e| fmt_elapsed(e.max(0.0) as u64))
                 .unwrap_or_else(|| "—".to_string());
-            line!(format!("elapsed {elapsed}  eta {eta}"), val, false);
+            line!(format!("watching {elapsed}  eta {eta}"), val, false);
         }
         if st.checkpoint_step > 0 || st.checkpoint_pulse > 0 {
             let color = if st.checkpoint_pulse > 0 {
@@ -1279,12 +1286,69 @@ mod tests {
                     !s.contains('╗') && !s.contains('╝'),
                     "right-side corner characters are forbidden (w={w}): {s:?}"
                 );
-                if let Some(pos) = s.find('║') {
+                for (pos, _) in s.match_indices('║') {
                     assert_eq!(pos, 0, "`║` must only appear at column 0 (w={w}): {s:?}");
                 }
                 let cols = unicode_width::UnicodeWidthStr::width(s.as_str());
                 assert!(cols <= w, "line is {cols} cols at width {w}: {s:?}");
             }
         }
+    }
+
+    #[test]
+    fn network_header_never_fabricates_topology_it_cannot_source() {
+        use crate::workload::train::{LogSource, TrainEvent, TrainProcess};
+        let mut b = MockBackend::new(4);
+        b.init().unwrap();
+        let v = TrainView::new(100, 30);
+
+        // Unknown config (no readable YAML): the header must not assert a
+        // specific block/head count, fabricated or otherwise.
+        let mut st = TrainState::new();
+        st.proc = Some(TrainProcess {
+            pid: 1,
+            binary: "nano_gpt".into(),
+            config_path: None,
+        });
+        st.log = Some(LogSource::File("/tmp/x.log".into()));
+        st.apply_event(TrainEvent::Step { step: 1, loss: 2.0 });
+        assert_eq!(st.config.num_blocks, None);
+        assert_eq!(st.config.num_heads, None);
+        let out: String = v
+            .render(&st, &b)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|sp| sp.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !out.contains("6 blocks"),
+            "must not assert a fabricated block/head count when config is unknown:\n{out}"
+        );
+        assert!(
+            out.contains("topology unknown"),
+            "should say the topology is unknown rather than guess:\n{out}"
+        );
+
+        // Known config: the header should state the real numbers.
+        let mut st2 = TrainState::new();
+        st2.proc = Some(TrainProcess {
+            pid: 1,
+            binary: "nano_gpt".into(),
+            config_path: None,
+        });
+        st2.log = Some(LogSource::File("/tmp/x.log".into()));
+        st2.apply_event(TrainEvent::Step { step: 1, loss: 2.0 });
+        st2.config.num_blocks = Some(12);
+        st2.config.num_heads = Some(8);
+        let out2: String = v
+            .render(&st2, &b)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|sp| sp.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            out2.contains("12 blocks × 8 heads"),
+            "known topology should be stated exactly:\n{out2}"
+        );
     }
 }

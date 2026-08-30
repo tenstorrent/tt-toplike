@@ -4911,7 +4911,7 @@ lookup by pid. If fd 1 is a **pipe or a tty**, the per-step stream is
 genuinely unrecoverable after the fact; the view says so in plain language
 (training runs, but the visualization can't source per-step numbers, so it
 doesn't draw a fake curve) and falls back to what it can still see —
-process liveness, RSS/CPU, device fds, chip telemetry, checkpoint mtime.
+process liveness, chip telemetry, and checkpoint mtime.
 Relaunching with stdout redirected to a file fixes it. Checkpoint saves are
 detected the same way HivemindSweeper's `cache_watch` detects compile-cache
 churn: poll the configured checkpoint path's mtime, pulse on change.

@@ -1,7 +1,7 @@
 # tt-toplike Quick Start
 
 **Version**: 0.11.0
-**Last Updated**: July 15, 2026
+**Last Updated**: August 29, 2026
 
 ---
 
@@ -100,7 +100,7 @@ tt-toplike --mode hivemind    # or press ~ in any mode
 - The model as a character-grid network (columns = transformer blocks, nodes = attention heads) fed by token particles, amber forward sweeps, violet backward/gradient sweeps
 - A loss "mountain range" descends as the model converges (magenta = high loss → teal = low loss, each column keeping its own loss's hue as a run-history timeline), under an aurora/starfield nightscape that opens up as loss drops; a comet crosses the sky on each checkpoint save
 - **Requires stdout redirected to a file** (`> train.log`) at launch — if fd 1 is a pipe or tty the per-step stream can't be tailed after the fact (an OS property, not a gap), and the view says so instead of drawing a fake curve
-- Shows only what tt-train actually emits live (step, loss, step time, cache entries) — no gradient norms/MFU/throughput, since those only exist in a run-end JSON summary. `l` for the legend, `/explain` for the mapping overlay
+- Shows only what tt-train actually emits live (step, loss, step time, cache entries) — no gradient norms or MFU live, but derives its own tokens/sec and ETA from what it can read. `l` for the legend, `/explain` for the mapping overlay
 - `Esc` backs out to where you came from. Deliberately excluded from the `v` cycle, like `i`
 
 ---
