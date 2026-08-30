@@ -21,12 +21,13 @@ mod hivemind_view;
 pub(crate) mod inference_panel;
 
 use crate::animation::{
-    ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis,
+    ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis, TrainView,
 };
 use crate::backend::{factory, BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
 use crate::error::TTTopError;
 use crate::ui::colors;
+use crate::workload::train::TrainMonitor;
 use crate::workload::{HostProcessMonitor, ProcRow};
 // InferenceEngine + the /proc-based probes are only used on the Linux/TT path,
 // so gate the import to match (keeps non-Linux builds warning-clean under -D warnings).
@@ -92,6 +93,36 @@ enum DisplayMode {
     /// back out again, Esc also backs out to `prev_mode`. Both exit paths
     /// stop the engine's collector threads — see the `~` and Esc handlers.
     HivemindSweeper,
+    /// Training view — a live tt-train run. Entered via `t` only
+    /// (deliberately excluded from the `v`-cycle rotation, like
+    /// `InferenceMonitor` and `HivemindSweeper`); `t` toggles back out to
+    /// `prev_mode`, as does Esc.
+    Training,
+}
+
+/// The `v` rotation. `InferenceMonitor`, `HivemindSweeper` and `Training`
+/// are entry-key-only modes and are never cycled into; a `v` pressed while
+/// one of them is active leaves to `Insights`.
+fn next_display_mode(m: DisplayMode) -> DisplayMode {
+    match m {
+        DisplayMode::Insights | DisplayMode::Grid => DisplayMode::MemoryFlow,
+        DisplayMode::MemoryFlow => DisplayMode::Starfield,
+        DisplayMode::Starfield => DisplayMode::MemoryCastle,
+        DisplayMode::MemoryCastle => DisplayMode::Arcade,
+        DisplayMode::Arcade => DisplayMode::Defrag,
+        // Defrag and the Inference Server Monitor round out the rotation
+        // just before it wraps back to Insights, so both are reachable by
+        // cycling with `v` (the monitor is also still a direct toggle via
+        // `i`).
+        DisplayMode::Defrag => DisplayMode::InferenceMonitor,
+        DisplayMode::InferenceMonitor => DisplayMode::Insights,
+        // HivemindSweeper and Training are deliberately excluded from the
+        // `v`-cycle rotation (only reachable via `~`/`t`), but `v` is a
+        // global hotkey, so pressing it while either happens to be active
+        // still needs to leave cleanly.
+        DisplayMode::HivemindSweeper => DisplayMode::Insights,
+        DisplayMode::Training => DisplayMode::Insights,
+    }
 }
 
 /// Floating overlay panel type — toggled by hotkeys, auto-dismissed on any other keypress.
@@ -353,6 +384,8 @@ fn run_app(
     let mut memory_flow: Option<MemoryFlowVis> = None;
     let mut arcade: Option<ArcadeVisualization> = None;
     let mut defrag: Option<DefragVis> = None;
+    let mut train_view: Option<TrainView> = None;
+    let mut train_monitor: Option<TrainMonitor> = None;
     let mut prev_display_mode = display_mode;
     // The mode to return to when `i`/`I`/`Esc` exits the dedicated
     // `DisplayMode::InferenceMonitor` view — captured at entry so `i` (or
@@ -901,6 +934,21 @@ fn run_app(
                         h.poll();
                     }
                 }
+                DisplayMode::Training => {
+                    if train_view.is_none() {
+                        train_view =
+                            Some(TrainView::new(size.width as usize, size.height as usize));
+                    }
+                    if train_monitor.is_none() {
+                        train_monitor = Some(TrainMonitor::new());
+                    }
+                    if let Some(ref mut tm) = train_monitor {
+                        tm.poll();
+                    }
+                    if let Some(ref mut tv) = train_view {
+                        tv.update();
+                    }
+                }
             }
         } // end if should_tick
 
@@ -1089,6 +1137,11 @@ fn run_app(
                                 );
                             }
                         }
+                        DisplayMode::Training => {
+                            if let (Some(ref tv), Some(ref tm)) = (&train_view, &train_monitor) {
+                                ui_train(f, tv, tm.state(), backend);
+                            }
+                        }
                     }
 
                     // ── Global status bar (all modes) ─────────────────────────
@@ -1137,6 +1190,7 @@ fn run_app(
                     memory_flow = None;
                     arcade = None;
                     defrag = None;
+                    train_view = None;
                     terminal.clear().ok();
                 }
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -1602,6 +1656,21 @@ fn run_app(
                                 }
                                 force_redraw = true;
                             }
+                            KeyCode::Char('t') => {
+                                // Toggle the Training view — mirrors the `~` handler
+                                // above: entering remembers `prev_mode`, leaving (via
+                                // `t` again, or Esc) hands back to it. Training owns no
+                                // threads (`TrainMonitor` is polled inline each tick),
+                                // so unlike HivemindSweeper there is nothing for the
+                                // mode-transition choke point to tear down.
+                                if display_mode == DisplayMode::Training {
+                                    display_mode = prev_mode;
+                                } else {
+                                    prev_mode = display_mode;
+                                    display_mode = DisplayMode::Training;
+                                }
+                                force_redraw = true;
+                            }
                             KeyCode::Char('/') => {
                                 // Open command bar — clears any previous result message
                                 cmd_mode = true;
@@ -1643,6 +1712,10 @@ fn run_app(
                                     // view to wherever the user came from (see the
                                     // `i`/`I` handler above) rather than quitting.
                                     display_mode = prev_mode;
+                                } else if display_mode == DisplayMode::Training {
+                                    // Back out of the Training view to wherever the
+                                    // user came from (see the `t` handler above).
+                                    display_mode = prev_mode;
                                 } else {
                                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_some() {
@@ -1664,37 +1737,27 @@ fn run_app(
                                 }
                             }
                             KeyCode::Char('v') => {
-                                // Cycle through visualization modes.
-                                // Grid mode is intentionally excluded — the Insights screen
-                                // already is the chip-portrait grid.
-                                display_mode = match display_mode {
-                                    DisplayMode::Insights | DisplayMode::Grid => {
-                                        DisplayMode::MemoryFlow
-                                    }
-                                    DisplayMode::MemoryFlow => DisplayMode::Starfield,
+                                // Cycle through visualization modes (see `next_display_mode`
+                                // for the rotation itself). Grid mode is intentionally
+                                // excluded — the Insights screen already is the
+                                // chip-portrait grid.
+                                //
+                                // A couple of transitions reset the *next* mode's
+                                // visualization state so it reinitializes fresh rather
+                                // than resuming stale particles/state from a previous
+                                // visit; these resets are tied to the mode being left,
+                                // so they stay here rather than in the pure rotation
+                                // function.
+                                match display_mode {
                                     DisplayMode::Starfield => {
                                         memory_castle = None;
-                                        DisplayMode::MemoryCastle
                                     }
                                     DisplayMode::MemoryCastle => {
                                         arcade = None;
-                                        DisplayMode::Arcade
                                     }
-                                    DisplayMode::Arcade => DisplayMode::Defrag,
-                                    // Defrag and the Inference Server Monitor round out the
-                                    // rotation just before it wraps back to Insights, so both
-                                    // are reachable by cycling with `v` (the monitor is also
-                                    // still a direct toggle via `i`).
-                                    DisplayMode::Defrag => DisplayMode::InferenceMonitor,
-                                    DisplayMode::InferenceMonitor => DisplayMode::Insights,
-                                    // HivemindSweeper is deliberately excluded from the
-                                    // `v`-cycle rotation (only reachable via `~`), but `v`
-                                    // is a global hotkey, so pressing it while the sweeper
-                                    // happens to be active still needs to leave cleanly;
-                                    // the mode-transition choke point above stops its
-                                    // collector threads.
-                                    DisplayMode::HivemindSweeper => DisplayMode::Insights,
-                                };
+                                    _ => {}
+                                }
+                                display_mode = next_display_mode(display_mode);
                                 log::info!("Switched to {:?} mode", display_mode);
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
@@ -2438,6 +2501,19 @@ fn ui_defrag(f: &mut Frame, dv: &DefragVis, backend: &dyn TelemetryBackend) {
     f.render_widget(widget, f.area());
 }
 
+/// Render the Training view — full-screen character grid, same shape as
+/// `ui_defrag`.
+fn ui_train(
+    f: &mut Frame,
+    tv: &TrainView,
+    st: &crate::workload::train::TrainState,
+    backend: &dyn TelemetryBackend,
+) {
+    let lines = tv.render(st, backend);
+    let widget = Paragraph::new(lines).style(Style::default().bg(colors::rgb(0, 0, 0)));
+    f.render_widget(widget, f.area());
+}
+
 /// Render Arcade mode — uses the composite canvas so the hero `@` and trail
 /// actually appear.  The previous ratatui-Layout approach called sub-viz methods
 /// directly into separate Rects, bypassing ArcadeVisualization::render() and
@@ -3144,6 +3220,14 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 DisplayMode::Insights => insights_legend_lines(bar, bg, dim),
                 DisplayMode::Grid => grid_legend_lines(bar, bg, dim),
                 DisplayMode::HivemindSweeper => hivemind_view::legend_lines(bar, bg, dim),
+                // Placeholder — Task 9 replaces this with `train_legend_lines`,
+                // which documents the view's colour channels in full.
+                DisplayMode::Training => {
+                    vec![Line::from(Span::styled(
+                        "Training view",
+                        Style::default().fg(dim),
+                    ))]
+                }
                 DisplayMode::Arcade => {
                     // All four combined.
                     let mut v = Vec::new();
@@ -3392,6 +3476,11 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
             ),
             DisplayMode::HivemindSweeper => {
                 explain_lines(bar, bg, dim, lbl, hivemind_view::EXPLAIN_TEXT)
+            }
+            // Placeholder — Task 9 replaces this with the full "Training —
+            // Robot Brain Food" copy.
+            DisplayMode::Training => {
+                explain_lines(bar, bg, dim, lbl, &["Training view", "", "TBD (Task 9)."])
             }
         },
     }
@@ -7030,6 +7119,36 @@ mod tests {
         let (stats_w, _, cols_per_row) = panel_layout(9, BH_PORTRAIT_W, 160);
         assert_eq!(stats_w, 31);
         assert_eq!(cols_per_row, 3, "9 chips → 3×3 grid");
+    }
+}
+
+/// Tests for the Training view's `t`-key entry/exit and its exclusion from
+/// the `v`-cycle rotation.
+#[cfg(test)]
+mod display_mode_tests {
+    use super::{next_display_mode, DisplayMode};
+
+    #[test]
+    fn t_key_enters_training_mode_and_esc_leaves_it() {
+        // Mirrors the existing mode-transition tests: `t` is a dedicated entry
+        // key like `~`/`i`, not part of the `v` cycle.
+        let mut mode = DisplayMode::Insights;
+        let prev = mode;
+        mode = DisplayMode::Training;
+        assert_eq!(mode, DisplayMode::Training);
+        mode = prev;
+        assert_eq!(mode, DisplayMode::Insights);
+    }
+
+    #[test]
+    fn training_is_excluded_from_the_v_cycle() {
+        // Walk the whole `v` rotation; Training must never appear (it is
+        // entered with `t` only, like InferenceMonitor and HivemindSweeper).
+        let mut m = DisplayMode::Insights;
+        for _ in 0..12 {
+            m = next_display_mode(m);
+            assert_ne!(m, DisplayMode::Training, "`v` must not cycle into Training");
+        }
     }
 }
 
