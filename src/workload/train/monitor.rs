@@ -275,23 +275,58 @@ impl TrainMonitor {
 
     /// Load the run's YAML config, following `transformer_config` to the
     /// model topology. Silently leaves fields unset when unreadable.
+    /// Resolve a possibly-relative path the way the *training process* would.
+    ///
+    /// tt-train is normally launched from inside its own run directory
+    /// (`./nano_gpt -c train.yaml`), so its config path is relative to that
+    /// cwd — not to wherever the user happened to start tt-toplike. Reading
+    /// it directly therefore fails and the whole model card silently goes
+    /// unknown. `/proc/<pid>/cwd` is a symlink to the process's working
+    /// directory, which lets us resolve it exactly as the trainer would.
+    ///
+    /// Absolute paths pass through untouched. A pid that has exited (no
+    /// `/proc/<pid>/cwd`) yields the original relative path, which then
+    /// simply fails to open — the caller degrades to an empty config, never
+    /// an error.
+    #[cfg(target_os = "linux")]
+    fn resolve_for_pid(pid: i32, path: &str) -> PathBuf {
+        let p = PathBuf::from(path);
+        if p.is_absolute() {
+            return p;
+        }
+        match std::fs::read_link(format!("/proc/{pid}/cwd")) {
+            Ok(cwd) => cwd.join(p),
+            Err(_) => p,
+        }
+    }
+
+    /// Non-Linux: no `/proc`, so a relative path can only be taken as-is.
+    #[cfg(not(target_os = "linux"))]
+    fn resolve_for_pid(_pid: i32, path: &str) -> PathBuf {
+        PathBuf::from(path)
+    }
+
     fn load_config(p: &TrainProcess) -> TrainConfig {
         let Some(cfg_path) = p.config_path.as_ref() else {
             return TrainConfig::default();
         };
-        let Ok(text) = std::fs::read_to_string(cfg_path) else {
+        // Resolve against the trainer's cwd, since `-c train.yaml` is the
+        // usual invocation and our cwd is unrelated to the run's.
+        let cfg_path = Self::resolve_for_pid(p.pid, cfg_path);
+        let Ok(text) = std::fs::read_to_string(&cfg_path) else {
             return TrainConfig::default();
         };
         let mut cfg = parse_train_yaml(&text);
         if let Some(mp) = cfg.model_config_path.clone() {
-            // The model path may be relative to the training config's dir.
-            let direct = std::fs::read_to_string(&mp);
-            let text2 = direct.or_else(|_| {
-                let base = std::path::Path::new(cfg_path)
-                    .parent()
-                    .unwrap_or(std::path::Path::new("."));
-                std::fs::read_to_string(base.join(&mp))
-            });
+            // `transformer_config` is itself usually relative — try it
+            // beside the training config first (the shape tt-train's own
+            // sample configs use), then as the trainer's cwd would see it.
+            let base = cfg_path
+                .parent()
+                .map(|b| b.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."));
+            let text2 = std::fs::read_to_string(base.join(&mp))
+                .or_else(|_| std::fs::read_to_string(Self::resolve_for_pid(p.pid, &mp)));
             if let Ok(t) = text2 {
                 merge_model_yaml(&mut cfg, &t);
             }
@@ -369,6 +404,107 @@ impl TrainMonitor {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// A relative `-c config.yaml` is the common way tt-train is launched
+    /// (from inside the run's own directory), but tt-toplike's cwd is
+    /// wherever the *user* started it — so resolving the path directly
+    /// silently fails and the whole model card goes unknown. It has to be
+    /// resolved against the training process's cwd, which `/proc/<pid>/cwd`
+    /// exposes. Uses a real spawned process because that symlink is the
+    /// mechanism under test; a mock would prove nothing.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_relative_config_path_resolves_against_the_process_cwd() {
+        let dir = std::env::temp_dir().join(format!("ttrelcfg_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("train.yaml"),
+            "training_config:\n  model_path: \"transformer.msgpack\"\n  transformer_config: \"model.yaml\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("model.yaml"),
+            "transformer_config:\n  num_blocks: 12\n  num_heads: 8\n  embedding_dim: 512\n",
+        )
+        .unwrap();
+
+        // A real process whose cwd is `dir`, exactly like a trainer launched
+        // from its own run directory.
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .current_dir(&dir)
+            .spawn()
+            .expect("spawn test child");
+        let pid = child.id() as i32;
+
+        let p = TrainProcess {
+            pid,
+            binary: "nano_gpt".into(),
+            // Relative, as the real CLI is almost always invoked.
+            config_path: Some("train.yaml".into()),
+        };
+        let cfg = TrainMonitor::load_config(&p);
+
+        child.kill().ok();
+        child.wait().ok();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(
+            cfg.num_blocks,
+            Some(12),
+            "a relative config path must resolve against the trainer's cwd"
+        );
+        assert_eq!(cfg.num_heads, Some(8));
+        assert_eq!(
+            cfg.model_save_path.as_deref(),
+            Some("transformer.msgpack"),
+            "the training yaml itself must have been read"
+        );
+    }
+
+    /// An absolute path must keep working untouched, and a dead pid (no
+    /// `/proc/<pid>/cwd` to resolve against) must degrade to an empty config
+    /// rather than panicking.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn absolute_config_paths_still_work_and_a_dead_pid_degrades() {
+        let dir = std::env::temp_dir().join(format!("ttabscfg_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("train.yaml");
+        std::fs::write(
+            &cfg_path,
+            "training_config:\n  model_path: \"ckpt.msgpack\"\n  transformer_config: \"model.yaml\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("model.yaml"),
+            "transformer_config:\n  num_blocks: 4\n  num_heads: 2\n",
+        )
+        .unwrap();
+
+        // Absolute path + a pid that does not exist: resolution must fall
+        // through to the literal path and still succeed.
+        let p = TrainProcess {
+            pid: 999_999_998,
+            binary: "nano_gpt".into(),
+            config_path: Some(cfg_path.to_string_lossy().into_owned()),
+        };
+        let cfg = TrainMonitor::load_config(&p);
+        assert_eq!(cfg.num_blocks, Some(4), "absolute paths must be unaffected");
+        assert_eq!(cfg.num_heads, Some(2));
+
+        // Relative path + dead pid: nothing to resolve against, so empty.
+        let p2 = TrainProcess {
+            pid: 999_999_998,
+            binary: "nano_gpt".into(),
+            config_path: Some("train.yaml".into()),
+        };
+        let cfg2 = TrainMonitor::load_config(&p2);
+        assert_eq!(cfg2.num_blocks, None);
+        assert_eq!(cfg2.model_save_path, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn events_fold_into_state() {
