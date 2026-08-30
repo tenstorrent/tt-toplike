@@ -14,6 +14,7 @@ pub mod model_catalog;
 pub mod process_monitor;
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 pub mod serving;
+pub mod train;
 
 pub use host_processes::{HostProcessMonitor, ProcRow, TtProcInfo};
 pub use inference::{
