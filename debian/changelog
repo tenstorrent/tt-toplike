@@ -1,3 +1,29 @@
+tt-toplike (0.13.0) noble; urgency=medium
+
+  * Add: `--mock` now drives the Training and Inference Server views too.
+    Both probed the real world (a /proc scan for a trainer, Docker for
+    containers), so on a mock backend they showed only their empty state
+    and the app could not be demoed end to end without hardware and a
+    live workload. Synthetic sources walk the real lifecycles instead.
+    Both are labelled — `TRAINING · mock` and a `(mock)` suffix per
+    service — because synthetic data indistinguishable from real data
+    would break the one guarantee this tool makes about its display.
+  * Add: HivemindSweeper gained a FOCUS pane that tracks the busiest
+    cell automatically and describes it (heat, events, rate, worst
+    severity, age, top coalesced rows). The board previously showed only
+    *that* something was active; learning *what* required driving a
+    cursor there first. Arrows still pin the focus, Enter hands it back.
+  * Add: `/rotate [on|off]` command, plus help entries for it and the
+    `R` key — the rotation worked but appeared in no footer or help
+    panel, which is indistinguishable from not existing.
+  * Fix: the rotation no longer stops on Grid, which is an alternate
+    layout of the same chip portraits Insights already draws — it opened
+    by showing the same data twice running.
+  * Fix: `/mode training` is recognized; it was reachable only as
+    `--mode training`.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 30 Aug 2026 00:00:00 +0000
+
 tt-toplike (0.12.0) noble; urgency=medium
 
   * Add: `--rotate` and the `R` hotkey — an unattended rotation for kiosk
