@@ -54,6 +54,24 @@ const MOUNTAIN_HUE_WOBBLE: f32 = 14.0;
 /// sits deep and dark, the crest lifts toward the warm end.
 const MOUNTAIN_HUE_LIFT: f32 = 26.0;
 
+/// HSV for one mountain cell: `depth` is 0 at the column's base and 1 at its
+/// crest, `x` its screen column, `t` elapsed seconds.
+///
+/// Split out of the renderer so the gradient can be asserted directly. The
+/// obvious alternative — reading colours back off rendered spans — silently
+/// depends on the terminal: `colors::rgb` returns `Color::Indexed` rather
+/// than `Color::Rgb` when the environment reports no true-colour support, so
+/// such a test passes on a developer's terminal and fails in CI.
+fn mountain_hsv(base_hue: f32, depth: f32, x: usize, t: f32) -> (f32, f32, f32) {
+    let wob = (x as f32 * 0.055 + t * 0.4 + depth * 1.9).sin();
+    let hue = (base_hue + depth * MOUNTAIN_HUE_LIFT + wob * MOUNTAIN_HUE_WOBBLE).rem_euclid(360.0);
+    // Deep and near-fully saturated at the base, easing off as it rises so
+    // the crest glows rather than turning to poster ink.
+    let sat = (0.95 - depth * 0.28).clamp(0.35, 1.0);
+    let val = (0.26 + depth * 0.58 + wob * 0.05).clamp(0.08, 1.0);
+    (hue, sat, val)
+}
+
 const FWD_HUE: f32 = 42.0;
 const BWD_HUE: f32 = 268.0;
 
@@ -996,14 +1014,8 @@ impl TrainView {
                 } else {
                     row_from_bottom as f32 / height as f32
                 };
-                let wob = (x as f32 * 0.055 + t * 0.4 + depth * 1.9).sin();
-                let hue = (base_hue + depth * MOUNTAIN_HUE_LIFT + wob * MOUNTAIN_HUE_WOBBLE)
-                    .rem_euclid(360.0);
-                // Deep and near-fully saturated at the base, easing off as it
-                // rises so the crest glows rather than turning to poster ink.
-                let sat = (0.95 - depth * 0.28).clamp(0.35, 1.0);
-                let val = (0.26 + depth * 0.58 + wob * 0.05).clamp(0.08, 1.0);
-                hsv_to_rgb(hue, sat, val)
+                let (h, s, v) = mountain_hsv(base_hue, depth, x, t);
+                hsv_to_rgb(h, s, v)
             };
 
             for row_from_bottom in 0..sky_rows {
@@ -1454,84 +1466,73 @@ mod tests {
 
     #[test]
     /// The river should read as a gradient — deep, dark bases lifting to
-    /// brighter crests, across a wide hue arc — rather than columns of flat
-    /// colour. Asserted on the rendered cells, since the interesting part is
-    /// what a column looks like top to bottom, not what `loss_hue` returns.
+    /// brighter crests across a wide hue arc — rather than columns of flat
+    /// colour.
+    ///
+    /// Asserted on `mountain_hsv` rather than on rendered spans, because
+    /// reading colours back off the render depends on the *terminal*:
+    /// `colors::rgb` yields `Color::Indexed` when the environment reports no
+    /// true-colour support, so a span-reading version of this test passed on
+    /// a developer machine (COLORTERM=truecolor) and failed in CI on all
+    /// three platforms, which is exactly how it was found.
     #[test]
     fn mountains_render_as_a_gradient_not_flat_columns() {
-        use crate::workload::train::{LogSource, TrainEvent, TrainProcess};
-        let mut b = MockBackend::new(1);
-        b.init().unwrap();
-        let mut st = TrainState::new();
-        st.proc = Some(TrainProcess {
-            pid: 1,
-            binary: "nano_gpt".into(),
-            config_path: None,
-        });
-        st.log = Some(LogSource::File("/tmp/x.log".into()));
-        // A real descent, so the window spans a wide loss range.
-        for i in 0..200u64 {
-            st.apply_event(TrainEvent::Step {
-                step: i + 1,
-                loss: 4.6 - i as f32 * 0.02,
-            });
-        }
+        let hue = loss_hue(2.5);
+        let t = 0.0;
 
-        let v = TrainView::new(120, 40);
-        let lines = v.render(&st, &b);
-        let texts: Vec<String> = lines
-            .iter()
-            .map(|l| l.spans.iter().map(|sp| sp.content.to_string()).collect())
-            .collect();
-        let top = texts.iter().position(|t| t.contains("LOSS  ·")).unwrap();
-        let bot = texts
-            .iter()
-            .position(|t| t.contains(" low") && t.contains("high "))
-            .unwrap_or(texts.len());
+        // Brightness must rise from base to crest — the gradient itself.
+        let base = mountain_hsv(hue, 0.0, 10, t);
+        let crest = mountain_hsv(hue, 1.0, 10, t);
+        assert!(
+            crest.2 > base.2 + 0.25,
+            "crest must be materially brighter than base: {} vs {}",
+            crest.2,
+            base.2
+        );
+        // ...and saturation ease off, so the crest glows instead of going
+        // to poster ink.
+        assert!(
+            crest.1 < base.1,
+            "saturation must ease off toward the crest: {} vs {}",
+            crest.1,
+            base.1
+        );
 
-        // Collect (row, colour) for every mountain glyph.
-        let mut cells: Vec<(usize, (u8, u8, u8))> = Vec::new();
-        for (ri, line) in lines[top + 1..bot].iter().enumerate() {
-            for sp in &line.spans {
-                if sp.content.chars().any(|c| "▁▂▃▄▅▆▇█".contains(c)) {
-                    if let ratatui::style::Color::Rgb(r, g, bb) = sp.style.fg.unwrap() {
-                        cells.push((ri, (r, g, bb)));
-                    }
+        // Every value stays in range at any depth, column, or moment.
+        for d in 0..=10 {
+            for x in [0usize, 7, 113] {
+                for tt in [0.0f32, 1.7, 40.0] {
+                    let (h, sa, v) = mountain_hsv(hue, d as f32 / 10.0, x, tt);
+                    assert!((0.0..360.0).contains(&h), "hue out of range: {h}");
+                    assert!((0.0..=1.0).contains(&sa), "sat out of range: {sa}");
+                    assert!((0.0..=1.0).contains(&v), "val out of range: {v}");
                 }
             }
         }
-        assert!(!cells.is_empty(), "the river must draw mountains");
 
-        let distinct: std::collections::HashSet<_> = cells.iter().map(|(_, c)| *c).collect();
+        // The wobble must stay small enough that the colour still reads as
+        // its loss value rather than drifting into a neighbouring band.
+        let mut lo = f32::MAX;
+        let mut hi = f32::MIN;
+        for x in 0..200usize {
+            for tt in 0..40 {
+                let (h, _, _) = mountain_hsv(hue, 0.0, x, tt as f32 * 0.25);
+                lo = lo.min(h);
+                hi = hi.max(h);
+            }
+        }
         assert!(
-            distinct.len() >= 12,
-            "a gradient needs many colours, got {}",
-            distinct.len()
+            hi - lo <= MOUNTAIN_HUE_WOBBLE * 2.0 + 1.0,
+            "hue wobble must stay bounded, spanned {:.1} deg",
+            hi - lo
         );
 
-        // Brightness must rise with height: compare the mean luminance of
-        // the top third of the band against the bottom third.
-        let rows: Vec<usize> = cells.iter().map(|(r, _)| *r).collect();
-        let (lo, hi) = (*rows.iter().min().unwrap(), *rows.iter().max().unwrap());
-        let split = lo + (hi - lo) / 3;
-        // HSV *value* (max channel), not weighted luminance: luminance
-        // varies with hue, so a flat-brightness column whose hue drifts
-        // still shows a luminance difference and the assertion passes
-        // against a gradient that isn't there. Checked by mutation.
-        let lum = |c: (u8, u8, u8)| c.0.max(c.1).max(c.2) as f32;
-        let mean = |f: &dyn Fn(usize) -> bool| {
-            let v: Vec<f32> = cells
-                .iter()
-                .filter(|(r, _)| f(*r))
-                .map(|(_, c)| lum(*c))
-                .collect();
-            v.iter().sum::<f32>() / v.len().max(1) as f32
-        };
-        let high = mean(&|r| r <= split);
-        let low = mean(&|r| r > hi - (hi - lo) / 3);
+        // The undulation has to actually move, or "undulating" is a lie.
+        let a = mountain_hsv(hue, 0.5, 20, 0.0);
+        let b = mountain_hsv(hue, 0.5, 20, 3.0);
         assert!(
-            high > low + 12.0,
-            "crests must be materially brighter than bases: crest {high:.1} vs base {low:.1}"
+            (a.0 - b.0).abs() > 0.5 || (a.2 - b.2).abs() > 0.005,
+            "the gradient must drift over time"
         );
     }
 
