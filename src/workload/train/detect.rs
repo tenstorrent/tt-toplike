@@ -77,9 +77,6 @@ fn is_python(base: &str) -> bool {
 /// attaching to the wrong process is worse than not attaching. It mirrors
 /// how HivemindSweeper classifies interpreter-hosted workloads.
 pub fn parse_python_trainer(cmdline: &str, pid: i32, ttml_loaded: bool) -> Option<TrainProcess> {
-    if !ttml_loaded {
-        return None;
-    }
     let toks: Vec<&str> = cmdline.split_whitespace().collect();
     let argv0_base = toks.first().and_then(|t| t.rsplit('/').next())?;
     if !is_python(argv0_base) {
@@ -94,11 +91,40 @@ pub fn parse_python_trainer(cmdline: &str, pid: i32, ttml_loaded: bool) -> Optio
         .find(|t| t.ends_with(".py"))
         .and_then(|t| t.rsplit('/').next())?;
 
+    // Two ways to qualify, because a run is not always device-backed:
+    //
+    //   * `ttml` mapped — unambiguous, and how a device-backed run is
+    //     recognised whatever its script is called.
+    //   * a training-shaped script name — for a run that is CPU-bound, or
+    //     has not opened the device yet. Tokenisation, the data pipeline
+    //     and a warm start all happen before `ttml` appears in `maps`, and
+    //     some runs never touch a device at all.
+    //
+    // The name rule is deliberately narrow: `train_*.py`, `*_train.py`, or
+    // anything under a `train/` directory. It is the same
+    // match-on-the-name principle as `TRAIN_BINARIES`, and it keeps the
+    // neighbouring `eval_*.py` scripts — which look identical in every
+    // other respect, and burn just as much CPU — out of a *training* view.
+    if !ttml_loaded && !is_training_script(script, &toks) {
+        return None;
+    }
+
     Some(TrainProcess {
         pid,
         binary: script.to_string(),
         config_path: config_arg(&toks),
     })
+}
+
+/// Whether a script's name marks it as a training entry point.
+fn is_training_script(script: &str, toks: &[&str]) -> bool {
+    let stem = script.strip_suffix(".py").unwrap_or(script);
+    if stem == "train" || stem.starts_with("train_") || stem.ends_with("_train") {
+        return true;
+    }
+    // A script living under a `train/` directory (tt-tnt's `train/run.py`).
+    toks.iter()
+        .any(|t| t.ends_with(".py") && t.contains("train/"))
 }
 
 #[cfg(test)]
@@ -114,10 +140,55 @@ mod tests {
         assert_eq!(p.pid, 9001);
         assert_eq!(p.binary, "run.py", "the run is named after its script");
 
+        // Without ttml this one still qualifies — it lives under `train/`,
+        // which is the CPU-bound / not-yet-opened-the-device case.
+        assert!(parse_python_trainer(cmd, 9001, false).is_some());
+
+        // But an arbitrarily-named script with no ttml does not.
         assert!(
-            parse_python_trainer(cmd, 9001, false).is_none(),
-            "without ttml mapped this is just some script called run.py"
+            parse_python_trainer("python3 scripts/serve.py", 9002, false).is_none(),
+            "a script that is neither ttml-backed nor training-named must not match"
         );
+    }
+
+    /// A run can be entirely CPU-bound, or simply not have opened the
+    /// device yet — tokenisation, the data pipeline and a warm start all
+    /// happen before `ttml` shows up in `maps`. Measured on this box: a
+    /// tt-tnt script at 647% CPU with no ttml mapped at all.
+    #[test]
+    fn recognizes_a_cpu_bound_training_script_without_ttml() {
+        for cmd in [
+            "python scripts/train_tool_calling.py --lora --out-root artifacts/ckpt",
+            "python3 train/run.py --size 384",
+            "python3 tools/sft_train.py",
+        ] {
+            assert!(
+                parse_python_trainer(cmd, 7, false).is_some(),
+                "{cmd:?} should register as training even with no device open"
+            );
+        }
+    }
+
+    /// The neighbouring eval scripts look identical in every other respect
+    /// and burn just as much CPU — they must stay out of a *training* view,
+    /// or the header will claim a training run that isn't happening.
+    #[test]
+    fn does_not_mistake_eval_or_serving_scripts_for_training() {
+        for cmd in [
+            // Real, from this box, running at 647% CPU alongside a trainer.
+            "python scripts/eval_tool_calling.py --model /tmp/ckpt",
+            "python3 scripts/serve_model.py",
+            "python3 scripts/tokenize_corpus.py",
+            "python3 scripts/retrain_notes.py",
+        ] {
+            assert!(
+                parse_python_trainer(cmd, 8, false).is_none(),
+                "{cmd:?} must not be taken for a training run"
+            );
+        }
+        // ...but if it genuinely loads ttml, it is device-backed work and
+        // the name rule is not what decides.
+        assert!(parse_python_trainer("python3 scripts/eval_tool_calling.py", 8, true).is_some());
     }
 
     #[test]

@@ -46,6 +46,19 @@ pub struct TrainState {
     pub checkpoint_step: u64,
     pub checkpoint_pulse: u8,
     pub first_seen: Option<Instant>,
+    /// The trainer process's own host-side cost: CPU percent (100 = one
+    /// core saturated) and resident set size.
+    ///
+    /// Training is not only a device workload — tokenisation, the data
+    /// pipeline, kernel compilation and any CPU-resident model all burn host
+    /// cycles, and a run can be entirely CPU-bound with the accelerators
+    /// idle. Without this the view showed cold chips and offered no clue
+    /// that the machine was flat out.
+    pub host_cpu_pct: Option<f32>,
+    pub host_rss_bytes: Option<u64>,
+    /// Whether tt-train's own extension module is mapped into the process,
+    /// i.e. this run is device-backed rather than pure host compute.
+    pub device_backed: bool,
     /// This run is fabricated by `--mock`, not read from a real trainer.
     /// Surfaced in the header: this tool's premise is that every pixel maps
     /// to a real signal, so synthetic data has to say so.
@@ -302,6 +315,10 @@ pub struct TrainMonitor {
     /// `(step number, when we saw it)` for the last poll that advanced the
     /// step. The gap to the next one is what the derivation measures.
     last_step_seen: Option<(u64, Instant)>,
+    /// `(cumulative CPU ticks, when read)` for the trainer, so CPU percent
+    /// is a rate between polls rather than the process's lifetime average —
+    /// the latter would understate a run that has only just got busy.
+    last_cpu: Option<(u64, Instant)>,
 }
 
 impl Default for TrainMonitor {
@@ -319,8 +336,69 @@ impl TrainMonitor {
             last_scan: None,
             saw_reported_step_time: false,
             last_step_seen: None,
+            last_cpu: None,
         }
     }
+
+    /// Sample the trainer's CPU percent and RSS from `/proc/<pid>`.
+    ///
+    /// CPU is a rate between polls: `utime + stime` are cumulative counters,
+    /// so reporting them against process age would show a long run that has
+    /// only just become busy as almost idle. 100.0 means one core saturated,
+    /// matching `top`, so a value above 100 is normal on a threaded loader.
+    ///
+    /// This is the process's own CPU, threads included but child processes
+    /// not. That matches the common case — a Python trainer parallelises
+    /// with threads — but a harness that forks worker processes will read
+    /// low here, and its workers are separate pids we do not attribute.
+    #[cfg(target_os = "linux")]
+    fn sample_host_cost(&mut self, pid: i32, now: Instant) {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return;
+        };
+        // Fields after the comm field, which may itself contain spaces and
+        // is parenthesised — split there rather than on whitespace.
+        let Some(rest) = stat.rsplit_once(')') else {
+            return;
+        };
+        let f: Vec<&str> = rest.1.split_whitespace().collect();
+        // utime and stime are fields 14 and 15 (1-based) of the whole line;
+        // after the comm split they are index 11 and 12.
+        let (Some(ut), Some(st)) = (
+            f.get(11).and_then(|v| v.parse::<u64>().ok()),
+            f.get(12).and_then(|v| v.parse::<u64>().ok()),
+        ) else {
+            return;
+        };
+        let ticks = ut + st;
+        let hz = 100.0; // USER_HZ is 100 on every Linux target we support.
+        if let Some((prev_ticks, prev_at)) = self.last_cpu {
+            let dt = now.duration_since(prev_at).as_secs_f32();
+            if dt > 0.05 && ticks >= prev_ticks {
+                let pct = (ticks - prev_ticks) as f32 / hz / dt * 100.0;
+                self.state.host_cpu_pct = Some(pct);
+            }
+        }
+        self.last_cpu = Some((ticks, now));
+
+        if let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
+            for line in status.lines() {
+                if let Some(v) = line.strip_prefix("VmRSS:") {
+                    if let Some(kb) = v
+                        .split_whitespace()
+                        .next()
+                        .and_then(|k| k.parse::<u64>().ok())
+                    {
+                        self.state.host_rss_bytes = Some(kb * 1024);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn sample_host_cost(&mut self, _pid: i32, _now: Instant) {}
 
     /// Derive a per-step wall time from how fast step lines arrive.
     ///
@@ -684,7 +762,14 @@ impl TrainMonitor {
         }
         // Measure the step cadence after the batch, so a poll that read many
         // lines counts as one observation rather than many.
-        self.note_step_progress(Instant::now());
+        let now = Instant::now();
+        self.note_step_progress(now);
+        // Host-side cost of the run, sampled every poll — this is the only
+        // signal a CPU-bound run produces, and it stays useful for a
+        // device-backed one (the data pipeline and compiler live here too).
+        if let Some(pid) = self.state.proc.as_ref().map(|p| p.pid) {
+            self.sample_host_cost(pid, now);
+        }
 
         // Checkpoint pulse.
         if self.state.checkpoint_pulse > 0 {
@@ -759,6 +844,61 @@ mod tests {
             Some("transformer.msgpack"),
             "the training yaml itself must have been read"
         );
+    }
+
+    /// Host cost is the only signal a CPU-bound run produces, so it has to
+    /// come off a real process rather than a fixture — and CPU has to be a
+    /// *rate*, not the lifetime average, or a long run that has just become
+    /// busy reads as idle.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn host_cpu_and_rss_are_sampled_from_a_real_process() {
+        // A child that burns CPU *in its own process*: shell builtins only,
+        // no forks. A loop calling `date` spends its cycles in short-lived
+        // children instead, which `utime`/`stime` rightly exclude — the
+        // first version of this test did that and measured 13%.
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("i=0; while [ $i -lt 100000000 ]; do i=$((i+1)); done")
+            .spawn()
+            .expect("spawn busy child");
+        let pid = child.id() as i32;
+
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        // First sample only establishes the baseline counter.
+        m.sample_host_cost(pid, t0);
+        assert_eq!(m.state.host_cpu_pct, None, "one reading cannot be a rate");
+
+        std::thread::sleep(Duration::from_millis(600));
+        m.sample_host_cost(pid, Instant::now());
+
+        child.kill().ok();
+        child.wait().ok();
+
+        let cpu = m
+            .state
+            .host_cpu_pct
+            .expect("a busy process must report CPU");
+        assert!(
+            cpu > 20.0,
+            "a spin loop should show substantial CPU, got {cpu:.1}%"
+        );
+        assert!(
+            m.state.host_rss_bytes.is_some_and(|r| r > 0),
+            "RSS must be read"
+        );
+    }
+
+    /// A pid that has exited must degrade quietly — a monitoring view keeps
+    /// drawing rather than propagating an error.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn host_cost_of_a_dead_pid_is_simply_absent() {
+        let mut m = TrainMonitor::new();
+        m.sample_host_cost(999_999, Instant::now());
+        assert_eq!(m.state.host_cpu_pct, None);
+        assert_eq!(m.state.host_rss_bytes, None);
     }
 
     /// A progress bar redraws with carriage returns, so many bar frames

@@ -24,7 +24,7 @@
 //! tt-toplike's own chip telemetry; no metric is invented.
 
 use crate::animation::common::hsv_to_rgb;
-use crate::animation::inference_load::{fmt_elapsed, group_thousands};
+use crate::animation::inference_load::{fmt_bytes, fmt_elapsed, group_thousands};
 use crate::animation::train_sky::sky_cell;
 use crate::backend::TelemetryBackend;
 use crate::ui::colors;
@@ -828,6 +828,16 @@ impl TrainView {
         let sps = st.steps_per_sec();
         if sps > 0.0 {
             line!(format!("step/s  {sps:.2}"), val, false);
+        }
+        // Host-side cost. Training is not only a device workload — the data
+        // pipeline, tokenisation and kernel compilation all burn host cycles,
+        // and a run can be entirely CPU-bound with the chips idle. 100% is
+        // one core, so >100 is normal and worth seeing rather than clamping.
+        if let Some(cpu) = st.host_cpu_pct {
+            line!(format!("cpu     {cpu:.0}%"), val, false);
+        }
+        if let Some(rss) = st.host_rss_bytes {
+            line!(format!("rss     {}", fmt_bytes(rss)), val, false);
         }
         if st.step > 0 {
             // The real derivative, not a step-count guess: compare this
