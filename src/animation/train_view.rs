@@ -922,7 +922,7 @@ impl TrainView {
                 .eta_secs()
                 .map(|e| fmt_elapsed(e.max(0.0) as u64))
                 .unwrap_or_else(|| "—".to_string());
-            line!(format!("watching {elapsed}  eta {eta}"), val, false);
+            line!(Self::watching_line(&elapsed, &eta), val, false);
         }
         if st.checkpoint_step > 0 || st.checkpoint_pulse > 0 {
             let color = if st.checkpoint_pulse > 0 {
@@ -1127,6 +1127,32 @@ impl TrainView {
                 false,
             );
         }
+    }
+
+    /// Columns reserved for an elapsed / eta reading.
+    ///
+    /// `fmt_elapsed` renders `M:SS` with UNPADDED minutes, so the field grows a
+    /// column at ten minutes and again at a hundred. Six covers `999:59`,
+    /// about sixteen hours — beyond that the line widens once more rather than
+    /// continuously, which is the graceful direction to fail.
+    const TIME_FIELD_W: usize = 6;
+
+    /// The elapsed/eta line, with both readings right-aligned into a fixed
+    /// field.
+    ///
+    /// Same defect as the CHIPS strip, one line up: these two values share a
+    /// row, so when `watching` crosses 9:59 → 10:00 it pushes `eta` and its
+    /// label a column to the right. Unlike the CHIPS strip nothing downstream
+    /// moves — the other LIVE rows are separate lines — so this is a smaller
+    /// twitch, but it is the same artefact of digit count rather than of the
+    /// measurement, and it happens once in every run longer than ten minutes.
+    ///
+    /// Padded here rather than inside `fmt_elapsed`, which is shared with the
+    /// inference views: widening a helper for one caller's layout is how the
+    /// other callers acquire a bug they never asked for.
+    fn watching_line(elapsed: &str, eta: &str) -> String {
+        let w = Self::TIME_FIELD_W;
+        format!("watching {elapsed:>w$}  eta {eta:>w$}")
     }
 
     /// One chip's label, at a FIXED width so the strip cannot jitter.
@@ -1353,6 +1379,36 @@ mod tests {
         let legacy = |l: f32| loss_hue(l, LEGACY_LOSS_CEILING);
         assert!((legacy(10.37) - legacy(6.8)).abs() < 1.0);
         assert!((legacy(6.8) - legacy(4.6)).abs() < 1.0);
+    }
+
+    /// `watching` and `eta` share a row, so a run crossing ten minutes pushes
+    /// the `eta` label right by a column. Every run longer than ten minutes
+    /// does this exactly once, which is enough to be noticed and encodes
+    /// nothing.
+    #[test]
+    fn the_watching_line_keeps_its_width_across_the_ten_minute_boundary() {
+        let widths: Vec<usize> = [
+            ("0:38", "4:11"),
+            ("9:59", "0:01"),
+            ("10:00", "0:00"),
+            ("100:00", "999:59"),
+            ("5:34", "—"),          // eta unknown renders as a dash
+        ]
+        .iter()
+        .map(|(e, t)| TrainView::watching_line(e, t).chars().count())
+        .collect();
+        let first = widths[0];
+        assert!(
+            widths.iter().all(|w| *w == first),
+            "the row must not change width, got {widths:?}"
+        );
+    }
+
+    #[test]
+    fn the_watching_line_still_states_both_readings() {
+        let l = TrainView::watching_line("5:34", "0:27");
+        assert!(l.contains("5:34") && l.contains("0:27"), "{l}");
+        assert!(l.starts_with("watching"), "{l}");
     }
 
     /// The CHIPS strip advances its x cursor by each tag's length, so a tag
