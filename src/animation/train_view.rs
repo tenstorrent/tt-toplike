@@ -33,14 +33,55 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::cell::Cell as StdCell;
 
-/// Loss → hue: 186° (deep cyan, converged) … 356° (red, chaotic).
+/// The loss a model that has learned nothing would report — the top of the
+/// hue ramp, derived from the job rather than fixed.
 ///
-/// The ramp runs cyan → blue → violet → magenta → pink → red, so the range
-/// spans a wider arc than the original teal→magenta and a converged run
-/// settles into deep cyan rather than a mid teal. Still monotonic in loss —
-/// the colour remains readable as a value, not decoration.
-pub fn loss_hue(loss: f32) -> f32 {
-    let t = ((loss - 0.30) / 4.3).clamp(0.0, 1.0);
+/// For a language model that is `ln(vocab_size)`: cross-entropy against a
+/// uniform distribution over the vocabulary. A 32,000-token vocabulary gives
+/// 10.373, and no run over that vocabulary can score worse for long. It is the
+/// one ceiling that is a property of the *task* rather than of a guess about
+/// what losses look like.
+///
+/// Without a vocabulary — the tt-train regression examples, `linear_regression`
+/// and `mnist_mlp`, whose losses live around 0.1–0.5 — there is no such
+/// derivation, so the historical fixed anchor stands. That anchor was always
+/// right for those runs; it was only ever wrong when applied to a vocabulary.
+pub fn loss_ceiling(vocab_size: Option<u32>) -> f32 {
+    match vocab_size {
+        Some(v) if v > 1 => (v as f32).ln(),
+        _ => LEGACY_LOSS_CEILING,
+    }
+}
+
+/// The pre-2026-08-31 fixed ceiling, kept for runs with no vocabulary.
+const LEGACY_LOSS_CEILING: f32 = 4.6;
+
+/// Loss → hue: 186° (deep cyan) … 356° (red), scaled to `ceiling`.
+///
+/// The ramp runs cyan → blue → violet → magenta → pink → red and stays
+/// monotonic in loss, so the colour remains readable as a value rather than
+/// decoration.
+///
+/// WHY THE CEILING IS A PARAMETER. It used to be the constants `0.30` and
+/// `4.3`, which put "converged" at a loss of 0.30 and saturated at 4.60. For a
+/// language model over a 32k vocabulary both ends are wrong, and measurably so:
+/// 0.30 is unreachable — it would need near-certainty on every token, and the
+/// best result tt-tnt has ever recorded is 1.73 — while 4.60 is *below* the
+/// loss of an untrained model (10.37), so the entire early phase of a run,
+/// where the loss falls fastest, rendered as one flat red. The visualisation
+/// was blind exactly where the run was most dynamic.
+///
+/// One fixed ramp cannot serve both a regression example whose loss is 0.2 and
+/// a language model whose loss starts above 10. Scaling to the job's own
+/// ceiling is what lets a single ramp do both: the run enters at red and walks
+/// the spectrum down as it learns, whatever it is training.
+pub fn loss_hue(loss: f32, ceiling: f32) -> f32 {
+    let ceiling = if ceiling > 0.0 {
+        ceiling
+    } else {
+        LEGACY_LOSS_CEILING
+    };
+    let t = (loss / ceiling).clamp(0.0, 1.0);
     186.0 + t * 170.0
 }
 
@@ -437,6 +478,11 @@ impl TrainView {
     }
 
     fn draw_header(&self, buf: &mut [Vec<Cell>], st: &TrainState) {
+        // The hue ramp is scaled to this job's own worst-case loss -- ln(vocab)
+        // for a language model -- so a run enters at red and walks the spectrum
+        // down as it learns, instead of saturating at a fixed anchor that a
+        // 32k-vocab model is above for its entire early phase.
+        let ceiling = loss_ceiling(st.config.vocab_size);
         let bright = Color::Rgb(230, 230, 255);
         let binary = st
             .proc
@@ -477,7 +523,7 @@ impl TrainView {
         // text (drawn last) would overwrite the very thing the header exists
         // to identify.
         if let Some(loss) = st.loss {
-            let color = hsv_to_rgb(loss_hue(loss), 0.75, 0.85);
+            let color = hsv_to_rgb(loss_hue(loss, ceiling), 0.75, 0.85);
             let loss_part = format!("LOSS {loss:.4}  ");
             let (delta_str, delta_color) = match st.prev_loss {
                 Some(prev) => {
@@ -646,6 +692,7 @@ impl TrainView {
     }
 
     fn draw_network(&self, buf: &mut [Vec<Cell>], st: &TrainState) {
+        let ceiling = loss_ceiling(st.config.vocab_size);
         let (x0, w) = self.network_bounds();
         let Layout {
             network_top,
@@ -784,7 +831,7 @@ impl TrainView {
                     let hue = if fwd >= bwd { FWD_HUE } else { BWD_HUE };
                     hsv_to_rgb(hue, 0.55 + lit * 0.3, 0.5 + lit * 0.45)
                 } else if let Some(loss) = st.loss {
-                    hsv_to_rgb(loss_hue(loss), 0.55, 0.6)
+                    hsv_to_rgb(loss_hue(loss, ceiling), 0.55, 0.6)
                 } else {
                     Color::Rgb(90, 100, 130)
                 };
@@ -929,6 +976,7 @@ impl TrainView {
     }
 
     fn draw_river(&self, buf: &mut [Vec<Cell>], st: &TrainState) {
+        let ceiling = loss_ceiling(st.config.vocab_size);
         let Layout {
             river_top,
             river_bottom,
@@ -1007,7 +1055,7 @@ impl TrainView {
             let norm = ((loss - min_loss) / range).clamp(0.0, 1.0);
             let norm = MOUNTAIN_FLOOR + norm * (1.0 - MOUNTAIN_FLOOR);
             let eighths = (norm * total_eighths as f32).round() as usize;
-            let base_hue = loss_hue(loss);
+            let base_hue = loss_hue(loss, ceiling);
             let full_bars = eighths / 8;
             let partial = eighths % 8;
             // Slow drift, in wall-clock seconds so the undulation reads the
@@ -1124,10 +1172,11 @@ impl TrainView {
     }
 
     fn draw_legend(&self, buf: &mut [Vec<Cell>], st: &TrainState) {
+        let ceiling = loss_ceiling(st.config.vocab_size);
         let y = self.layout().legend_row;
         let loss_color = st
             .loss
-            .map(|l| hsv_to_rgb(loss_hue(l), 0.75, 0.85))
+            .map(|l| hsv_to_rgb(loss_hue(l, ceiling), 0.75, 0.85))
             .unwrap_or(Color::Rgb(200, 150, 220));
         let entries: [(char, &str, Color); 9] = [
             ('●', "loss", loss_color),
@@ -1212,8 +1261,9 @@ mod tests {
 
     #[test]
     fn loss_hue_runs_red_when_high_to_deep_cyan_when_converged() {
-        let hot = loss_hue(4.5);
-        let cool = loss_hue(0.35);
+        let c = LEGACY_LOSS_CEILING;
+        let hot = loss_hue(4.5, c);
+        let cool = loss_hue(0.1, c);
         assert!(
             (330.0..=360.0).contains(&hot),
             "high loss should be red/pink, got {hot}"
@@ -1224,15 +1274,60 @@ mod tests {
         );
         // Monotonic in loss, so the colour still reads as a value rather
         // than decoration — the whole ramp is meaningless otherwise.
-        let mut prev = loss_hue(0.0);
+        let mut prev = loss_hue(0.0, c);
         for i in 1..=40 {
-            let h = loss_hue(i as f32 * 0.12);
+            let h = loss_hue(i as f32 * 0.12, c);
             assert!(h >= prev, "hue must not go backwards as loss rises");
             prev = h;
         }
         // Clamped outside the observed range rather than wrapping around.
-        assert!((loss_hue(99.0) - loss_hue(4.6)).abs() < 1.0);
-        assert!((loss_hue(-1.0) - loss_hue(0.30)).abs() < 1.0);
+        assert!((loss_hue(99.0, c) - loss_hue(c, c)).abs() < 1.0);
+        assert!((loss_hue(-1.0, c) - loss_hue(0.0, c)).abs() < 1.0);
+    }
+
+    /// The ceiling is a property of the task. For a language model it is the
+    /// loss of a uniform distribution over the vocabulary — what a model that
+    /// has learned nothing reports — so the ramp spans the run's own range.
+    #[test]
+    fn the_loss_ceiling_is_ln_vocab_for_a_language_model() {
+        let c = loss_ceiling(Some(32_000));
+        assert!((c - 10.373).abs() < 0.01, "ln(32000) expected, got {c}");
+        // A bigger vocabulary is a harder task and a higher ceiling.
+        assert!(loss_ceiling(Some(128_000)) > c);
+        // No vocabulary — a regression example — keeps the historical anchor,
+        // which was always right for losses that live around 0.1–0.5.
+        assert_eq!(loss_ceiling(None), LEGACY_LOSS_CEILING);
+        assert_eq!(loss_ceiling(Some(1)), LEGACY_LOSS_CEILING);
+    }
+
+    /// The regression this replaces. Under the old fixed ramp every loss at or
+    /// above 4.6 was the same red, so a 32k-vocab run rendered flat through the
+    /// whole early phase — from an untrained 10.37 down to 4.6 — which is
+    /// exactly where the loss moves fastest. Scaled to ln(vocab) those are
+    /// distinguishable, and the run walks the spectrum as it learns.
+    #[test]
+    fn early_training_is_not_one_flat_red_for_a_vocabulary_sized_loss() {
+        let c = loss_ceiling(Some(32_000));
+        let untrained = loss_hue(10.37, c);
+        let early = loss_hue(6.8, c);
+        let mid = loss_hue(3.9, c);
+        let best = loss_hue(1.73, c);
+
+        // Each phase is a visibly different hue, not the same saturated red.
+        for (a, b, what) in [
+            (untrained, early, "untrained vs early"),
+            (early, mid, "early vs mid"),
+            (mid, best, "mid vs best"),
+        ] {
+            assert!(a - b > 15.0, "{what} must be distinguishable: {a} vs {b}");
+        }
+        // And the best loss this project has recorded reads as cool, not red.
+        assert!(best < 240.0, "a converged LM should be cyan-blue, got {best}");
+
+        // The old ramp could not tell any of the top three apart.
+        let legacy = |l: f32| loss_hue(l, LEGACY_LOSS_CEILING);
+        assert!((legacy(10.37) - legacy(6.8)).abs() < 1.0);
+        assert!((legacy(6.8) - legacy(4.6)).abs() < 1.0);
     }
 
     #[test]
@@ -1487,7 +1582,7 @@ mod tests {
     /// three platforms, which is exactly how it was found.
     #[test]
     fn mountains_render_as_a_gradient_not_flat_columns() {
-        let hue = loss_hue(2.5);
+        let hue = loss_hue(2.5, LEGACY_LOSS_CEILING);
         let t = 0.0;
 
         // Brightness must rise from base to crest — the gradient itself.
