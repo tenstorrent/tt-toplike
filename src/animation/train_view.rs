@@ -115,6 +115,11 @@ const BORDER: Color = Color::Rgb(90, 90, 130);
 /// tick doesn't mean compilation is done — a few in a row does.
 const CACHE_STEADY_TICKS: u32 = 4;
 
+/// Fraction of the river's height the lowest column still occupies. Without
+/// it the window minimum renders as bare ground, and a converged run — where
+/// every column *is* the minimum — shows no mountains at all.
+const MOUNTAIN_FLOOR: f32 = 0.12;
+
 /// The monitor's checkpoint-pulse window (`CKPT_PULSE_TICKS` in
 /// `workload::train::monitor`, not re-exported — it's an animation-speed
 /// constant, not part of the state contract). Mirrored here so the comet's
@@ -930,7 +935,21 @@ impl TrainView {
         let (min_loss, max_loss) = hist
             .iter()
             .fold((f32::MAX, f32::MIN), |(mn, mx), &l| (mn.min(l), mx.max(l)));
-        let range = (max_loss - min_loss).max(0.001);
+        // Span the window's losses are normalised against. Two floors, for
+        // two different failure modes:
+        //
+        // The absolute floor stops a *converged* run — every loss within a
+        // hair of the others — normalising to zero everywhere and rendering
+        // as bare ground under the aurora. A model that has converged is a
+        // run at its best, not an absence of data, and it should still show
+        // a range.
+        //
+        // The relative floor stops the opposite: dividing a 0.0002-wide
+        // window by a 0.001 constant amplifies pure step-to-step noise into
+        // a full-height sawtooth, drawing a dramatic landscape out of a loss
+        // that is not really moving. Scaling the floor with the loss's own
+        // magnitude keeps small wobble looking small.
+        let range = (max_loss - min_loss).max(min_loss.abs() * 0.05).max(0.02);
         let total_eighths = sky_rows * 8;
         let bars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
         let usable_w = self.width.saturating_sub(3).max(1);
@@ -939,7 +958,11 @@ impl TrainView {
             let rel = (x - 2) as f32 / usable_w as f32;
             let idx = ((rel * (hist.len() - 1) as f32).round() as usize).min(hist.len() - 1);
             let loss = hist[idx];
+            // Lift the whole band off the floor so the window's lowest
+            // column still reads as a mountain rather than as empty sky —
+            // the low point of a descending run is a data point, not a gap.
             let norm = ((loss - min_loss) / range).clamp(0.0, 1.0);
+            let norm = MOUNTAIN_FLOOR + norm * (1.0 - MOUNTAIN_FLOOR);
             let eighths = (norm * total_eighths as f32).round() as usize;
             let color = hsv_to_rgb(loss_hue(loss), 0.8, 0.75);
             let full_bars = eighths / 8;
@@ -1375,6 +1398,93 @@ mod tests {
         assert!(
             out_last.contains("steady"),
             "a plateaued cache must read steady, not stay climbing forever:\n{out_last}"
+        );
+    }
+
+    #[test]
+    /// Mountain height is the loss's position within the window's own
+    /// min..max, so a window whose losses are all close together normalises
+    /// to zero everywhere and the range vanishes entirely — leaving aurora
+    /// and stars over bare ground. That is exactly what a converged run
+    /// looks like, and what a run with one sample so far looks like.
+    #[test]
+    fn mountains_are_drawn_even_when_the_loss_window_is_flat() {
+        use crate::workload::train::{LogSource, TrainEvent, TrainProcess};
+        // Count mountain glyphs ONLY between the "LOSS" header and the
+        // low/high scale line. The CHIPS row and the legend both draw power
+        // with the same block characters, so counting the whole frame
+        // reports success no matter what the river does — the first version
+        // of this test did exactly that and passed against the bug.
+        let mountain = |st: &TrainState| -> usize {
+            let mut b = MockBackend::new(1);
+            b.init().unwrap();
+            let v = TrainView::new(120, 40);
+            let lines: Vec<String> = v
+                .render(st, &b)
+                .iter()
+                .map(|l| l.spans.iter().map(|sp| sp.content.to_string()).collect())
+                .collect();
+            let top = lines
+                .iter()
+                .position(|t| t.contains("LOSS  ·"))
+                .expect("the river has a header");
+            let bottom = lines
+                .iter()
+                .position(|t| t.contains(" low") && t.contains("high "))
+                .unwrap_or(lines.len());
+            lines[top + 1..bottom]
+                .iter()
+                .flat_map(|t| t.chars())
+                .filter(|c| "▁▂▃▄▅▆▇█".contains(*c))
+                .count()
+        };
+        let base = |losses: &[f32]| {
+            let mut st = TrainState::new();
+            st.proc = Some(TrainProcess {
+                pid: 1,
+                binary: "nano_gpt".into(),
+                config_path: None,
+            });
+            st.log = Some(LogSource::File("/tmp/x.log".into()));
+            for (i, l) in losses.iter().enumerate() {
+                st.apply_event(TrainEvent::Step {
+                    step: i as u64 + 1,
+                    loss: *l,
+                });
+            }
+            st
+        };
+
+        // A descending run has always drawn mountains — the control.
+        let descending: Vec<f32> = (0..60).map(|i| 3.0 - i as f32 * 0.03).collect();
+        assert!(
+            mountain(&base(&descending)) > 0,
+            "a descending run must draw mountains"
+        );
+
+        // A converged run: every loss within a hair of every other.
+        let flat: Vec<f32> = vec![0.42; 60];
+        assert!(
+            mountain(&base(&flat)) > 0,
+            "a converged run must still show a range, not bare ground"
+        );
+
+        // A run that has only reported once.
+        assert!(
+            mountain(&base(&[2.5])) > 0,
+            "a single sample must still draw a ridge"
+        );
+
+        // The opposite failure: a window that is nearly-but-not-quite flat
+        // must not be amplified into a dramatic landscape. Dividing a
+        // 0.0002-wide window by a small constant would turn pure step noise
+        // into a full-height sawtooth, which reads as a model doing
+        // something when it is not.
+        let noisy: Vec<f32> = (0..60).map(|i| 2.0 + (i % 5) as f32 * 0.0001).collect();
+        let real: Vec<f32> = (0..60).map(|i| 3.0 - i as f32 * 0.03).collect();
+        assert!(
+            mountain(&base(&noisy)) < mountain(&base(&real)),
+            "step noise must not draw as much mountain as a real descent"
         );
     }
 

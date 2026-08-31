@@ -3276,7 +3276,12 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
         return;
     }
 
-    let lines = overlay_lines(kind, mode);
+    // Wrap budget for prose panels: the panel clamps to `area.width - 2`, and
+    // each content line spends 2 columns on the "║ " border plus one trailing
+    // padding column. Capped so the text keeps a readable measure on a very
+    // wide terminal instead of stretching into one long line.
+    let wrap_cols = (area.width as usize).saturating_sub(5).clamp(16, 56);
+    let lines = overlay_lines(kind, mode, wrap_cols);
 
     // Title + accent per panel kind (used for the header and to size the panel).
     let (title, border_color) = match kind {
@@ -3349,7 +3354,7 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
 ///
 /// Lines must fit within PANEL_W - 2 visible columns (no right border means content
 /// needs to respect the panel width itself).  Each line is prefixed with `║ ` (2 cols).
-fn overlay_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
+fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line<'static>> {
     let bg = colors::rgb(8, 14, 22);
     let bar = colors::rgb(40, 55, 70);
     let dim = colors::rgb(90, 100, 120);
@@ -3532,6 +3537,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
                     "memory hierarchy — orbit radius tracks",
                     "memory bandwidth utilization.",
                 ],
+                cols,
             ),
             DisplayMode::MemoryCastle => explain_lines(
                 bar,
@@ -3555,6 +3561,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
                     "Particle color encodes the memory tier.",
                     "Density reflects current bandwidth.",
                 ],
+                cols,
             ),
             DisplayMode::Defrag => explain_lines(
                 bar,
@@ -3579,6 +3586,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
                     "relative activity within each cell.",
                     "Color encodes channel temperature.",
                 ],
+                cols,
             ),
             DisplayMode::MemoryFlow => explain_lines(
                 bar,
@@ -3602,6 +3610,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
                     "",
                     "Heat-map center encodes die temperature.",
                 ],
+                cols,
             ),
             DisplayMode::Arcade => explain_lines(
                 bar,
@@ -3629,6 +3638,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
                     "  @  healthy   !  throttled/faulted",
                     "  ?  ARC stall  %  undervolt",
                 ],
+                cols,
             ),
             DisplayMode::Insights => explain_lines(
                 bar,
@@ -3674,6 +3684,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
                     "At 32+ devices a compact fleet heatmap",
                     "is shown — Enter to zoom in.",
                 ],
+                cols,
             ),
             DisplayMode::Grid => explain_lines(
                 bar,
@@ -3691,6 +3702,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
                     "",
                     "Press v to continue cycling modes.",
                 ],
+                cols,
             ),
             DisplayMode::InferenceMonitor => explain_lines(
                 bar,
@@ -3718,9 +3730,10 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
                     "",
                     "Press l for the symbol legend · i to return.",
                 ],
+                cols,
             ),
             DisplayMode::HivemindSweeper => {
-                explain_lines(bar, bg, dim, lbl, hivemind_view::EXPLAIN_TEXT)
+                explain_lines(bar, bg, dim, lbl, hivemind_view::EXPLAIN_TEXT, cols)
             }
             DisplayMode::Training => explain_lines(
                 bar,
@@ -3758,6 +3771,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
                     "fact — relaunch with '> train.log' and the",
                     "view picks it up automatically.",
                 ],
+                cols,
             ),
         },
     }
@@ -4363,23 +4377,99 @@ fn hero_legend_lines(
 }
 
 /// Build explain lines from a static slice of text strings.
+/// Re-flow overlay prose to `cols` display columns.
+///
+/// The explain panels are authored as blank-line-separated paragraphs. They
+/// used to be hand-broken to a width someone chose by eye, which meant the
+/// panel's width was really set by whichever literal happened to be longest —
+/// so a single edit that ran long pushed a line past the panel, and
+/// `Paragraph` clips rather than wraps, silently cutting the tail off.
+/// Wrapping here makes the authored text plain prose and the layout the
+/// renderer's job.
+///
+/// Structure that carries meaning is preserved rather than flattened:
+/// blank lines separate paragraphs and are never joined across, and a run of
+/// lines sharing a leading indent re-flows as its own paragraph at that
+/// indent — the indented sub-blocks in several panels (`  x-axis = …`) are
+/// list items, and `explain_lines` also colours a line by whether it starts
+/// with a space, so the indent has to survive.
+fn wrap_overlay_text(text: &[&str], cols: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthStr;
+    let cols = cols.max(8);
+    let mut out: Vec<String> = Vec::new();
+
+    // Group into paragraphs: a blank line, or a change of indentation, ends
+    // the current one.
+    let mut para: Vec<&str> = Vec::new();
+    let mut para_indent = 0usize;
+
+    // Flush the pending paragraph, wrapping it on word boundaries.
+    let flush = |para: &mut Vec<&str>, indent: usize, out: &mut Vec<String>| {
+        if para.is_empty() {
+            return;
+        }
+        let body = para.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
+        para.clear();
+        let pad = " ".repeat(indent);
+        let budget = cols.saturating_sub(indent).max(4);
+        let mut line = String::new();
+        for word in body.split_whitespace() {
+            let w = UnicodeWidthStr::width(word);
+            let cur = UnicodeWidthStr::width(line.as_str());
+            if line.is_empty() {
+                line.push_str(word);
+            } else if cur + 1 + w <= budget {
+                line.push(' ');
+                line.push_str(word);
+            } else {
+                out.push(format!("{pad}{line}"));
+                line = word.to_string();
+            }
+        }
+        if !line.is_empty() {
+            out.push(format!("{pad}{line}"));
+        }
+    };
+
+    for raw in text {
+        if raw.trim().is_empty() {
+            flush(&mut para, para_indent, &mut out);
+            out.push(String::new());
+            continue;
+        }
+        let indent = raw.len() - raw.trim_start().len();
+        if !para.is_empty() && indent != para_indent {
+            flush(&mut para, para_indent, &mut out);
+        }
+        if para.is_empty() {
+            para_indent = indent;
+        }
+        para.push(raw);
+    }
+    flush(&mut para, para_indent, &mut out);
+    out
+}
+
 fn explain_lines(
     bar: ratatui::style::Color,
     bg: ratatui::style::Color,
     dim: ratatui::style::Color,
     lbl: ratatui::style::Color,
     text: &[&'static str],
+    cols: usize,
 ) -> Vec<Line<'static>> {
-    text.iter()
+    wrap_overlay_text(text, cols)
+        .into_iter()
         .map(|s| {
             let mut v: Vec<Span<'static>> =
                 vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
             if s.is_empty() {
                 // blank separator line
             } else {
+                let indented = s.starts_with(' ');
                 v.push(Span::styled(
-                    s.to_string(),
-                    Style::default().fg(if s.starts_with(' ') { dim } else { lbl }),
+                    s,
+                    Style::default().fg(if indented { dim } else { lbl }),
                 ));
             }
             Line::from(v)
@@ -8246,6 +8336,79 @@ mod host_default_screen_tests {
         );
     }
 
+    /// The explain panels are prose. They used to be hand-broken to a width
+    /// chosen by eye, so the panel's size was really set by whichever
+    /// literal happened to be longest — and one edit that ran long pushed a
+    /// line past the panel, where `Paragraph` clips instead of wrapping and
+    /// silently ate the tail. This pins the property for every mode at
+    /// several widths, so the next long sentence cannot reintroduce it.
+    #[test]
+    fn explain_text_never_exceeds_its_wrap_budget() {
+        use super::{line_cols, overlay_lines, wrap_overlay_text, DisplayMode, OverlayPanel};
+        for mode in [
+            DisplayMode::Insights,
+            DisplayMode::Grid,
+            DisplayMode::Starfield,
+            DisplayMode::MemoryCastle,
+            DisplayMode::MemoryFlow,
+            DisplayMode::Arcade,
+            DisplayMode::Defrag,
+            DisplayMode::InferenceMonitor,
+            DisplayMode::HivemindSweeper,
+            DisplayMode::Training,
+        ] {
+            for cols in [24usize, 40, 56] {
+                for line in overlay_lines(OverlayPanel::Explain, mode, cols) {
+                    // +2 for the "║ " border prefix each line carries.
+                    let w = line_cols(&line);
+                    assert!(
+                        w <= cols + 2,
+                        "{mode:?} explain line is {w} cols at a {cols}-col budget"
+                    );
+                }
+            }
+        }
+
+        // Wrapping must break on word boundaries, not mid-word.
+        let wrapped = wrap_overlay_text(&["alpha bravo charlie delta echo foxtrot"], 16);
+        for l in &wrapped {
+            assert!(l.len() <= 16, "{l:?} exceeds the budget");
+        }
+        assert_eq!(
+            wrapped.join(" ").split_whitespace().collect::<Vec<_>>(),
+            vec!["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"],
+            "no word may be split or lost"
+        );
+    }
+
+    /// Structure that carries meaning has to survive the re-flow: blank
+    /// lines separate paragraphs, and an indented run is a list item that
+    /// keeps its indent (which `explain_lines` also uses to pick its colour).
+    #[test]
+    fn wrapping_preserves_blank_lines_and_indentation() {
+        use super::wrap_overlay_text;
+        let out = wrap_overlay_text(
+            &[
+                "Heading",
+                "",
+                "  x-axis = current draw and some more words to force a wrap",
+                "trailing prose",
+            ],
+            30,
+        );
+        assert_eq!(out[0], "Heading");
+        assert_eq!(out[1], "", "the blank separator must survive");
+        let indented: Vec<&String> = out.iter().filter(|l| l.starts_with("  ")).collect();
+        assert!(
+            indented.len() >= 2,
+            "an indented paragraph must wrap at its own indent, got {out:?}"
+        );
+        assert!(
+            out.iter().any(|l| l == "trailing prose"),
+            "a following unindented paragraph must not be folded into it"
+        );
+    }
+
     #[test]
     fn training_overlays_do_not_truncate_wide_content() {
         use super::{line_cols, overlay_lines, render_overlay_panel, DisplayMode, OverlayPanel};
@@ -8258,7 +8421,7 @@ mod host_default_screen_tests {
         let (w, h) = (140u16, 44u16);
         for kind in [OverlayPanel::Legend, OverlayPanel::Explain] {
             let mode = DisplayMode::Training;
-            let lines = overlay_lines(kind, mode);
+            let lines = overlay_lines(kind, mode, 56);
             assert!(!lines.is_empty(), "{kind:?} must render for Training");
 
             let widest: String = lines
@@ -8315,7 +8478,7 @@ mod host_default_screen_tests {
         ];
         for (kind, mode) in cases {
             // The widest content line for this panel, as plain text.
-            let widest: String = overlay_lines(kind, mode)
+            let widest: String = overlay_lines(kind, mode, 56)
                 .into_iter()
                 .max_by_key(|l| line_cols(l))
                 .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
