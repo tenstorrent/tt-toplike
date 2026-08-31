@@ -1,3 +1,23 @@
+tt-toplike (0.13.1) noble; urgency=medium
+
+  * Fix: the Training view's loss mountains vanished on a converged run.
+    Height was the loss's position within the window's own min..max, so a
+    window whose losses sit close together normalised to zero everywhere
+    and drew bare ground under the aurora. The range now has an absolute
+    floor (a converged model is a run at its best, not missing data) and
+    one proportional to the loss magnitude, so step noise in a nearly
+    flat window isn't amplified into a full-height sawtooth either.
+  * Improve: the mountain gradient runs deep cyan → red through blue,
+    violet, magenta and pink, and each column is shaded per cell — a
+    deep, dark base lifting to a brighter crest, undulating slowly.
+  * Fix: explain-overlay prose is wrapped at render time instead of
+    hand-broken in the source. A single long sentence previously pushed a
+    line past the panel, where it was silently clipped rather than
+    wrapped. Blank-line paragraph breaks and indented list items survive
+    the re-flow.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 30 Aug 2026 00:00:00 +0000
+
 tt-toplike (0.13.0) noble; urgency=medium
 
   * Add: `--mock` now drives the Training and Inference Server views too.
