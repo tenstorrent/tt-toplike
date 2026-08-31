@@ -219,8 +219,33 @@ impl CheckpointWatch {
     /// — a leftover from a previous run must not announce itself as fresh.
     /// If it did NOT exist yet, its first successful read means the file was
     /// just created, which is itself a genuine save and pulses immediately.
+    /// When the checkpoint was last written.
+    ///
+    /// tt-train's rolling checkpoint is a *directory* of per-tensor
+    /// `.tensorbin` files, rewritten in place on every save. A directory's
+    /// own mtime only moves when entries are added or removed, so it stays
+    /// frozen for the whole run — measured on a live run, the directory sat
+    /// at one timestamp while the files inside advanced every ten seconds.
+    /// Taking the directory's own mtime therefore means the pulse never
+    /// fires on a real run; the newest entry is the real save time.
+    fn last_written(path: &std::path::Path) -> Option<SystemTime> {
+        let md = std::fs::metadata(path).ok()?;
+        if !md.is_dir() {
+            return md.modified().ok();
+        }
+        let mut newest: Option<SystemTime> = None;
+        for entry in std::fs::read_dir(path).ok()?.flatten() {
+            if let Ok(m) = entry.metadata().and_then(|m| m.modified()) {
+                newest = Some(newest.map_or(m, |n| n.max(m)));
+            }
+        }
+        // An empty checkpoint directory falls back to its own mtime rather
+        // than reporting "unreadable", which would look like no checkpoint.
+        newest.or_else(|| md.modified().ok())
+    }
+
     pub fn poll(&mut self) -> bool {
-        let Ok(m) = std::fs::metadata(&self.path).and_then(|m| m.modified()) else {
+        let Some(m) = Self::last_written(&self.path) else {
             return false;
         };
         match self.last {
@@ -482,20 +507,65 @@ impl TrainMonitor {
         };
         let mut cfg = parse_train_yaml(&text);
         if let Some(mp) = cfg.model_config_path.clone() {
-            // `transformer_config` is itself usually relative — try it
-            // beside the training config first (the shape tt-train's own
-            // sample configs use), then as the trainer's cwd would see it.
-            let base = cfg_path
+            // tt-train's own configs write this path with a `${...}` prefix
+            // and resolve it two directories above the training config
+            // (`configs/training_configs/x.yaml` -> the tt-train root), so
+            // reproduce that rule first and keep the looser guesses as
+            // fallbacks for hand-written layouts.
+            let mp = Self::expand_env_for_pid(p.pid, &mp);
+            let dir = cfg_path
                 .parent()
                 .map(|b| b.to_path_buf())
                 .unwrap_or_else(|| PathBuf::from("."));
-            let text2 = std::fs::read_to_string(base.join(&mp))
-                .or_else(|_| std::fs::read_to_string(Self::resolve_for_pid(p.pid, &mp)));
-            if let Ok(t) = text2 {
-                merge_model_yaml(&mut cfg, &t);
+            let tt_train_root = dir.parent().and_then(|d| d.parent());
+            let candidates = [
+                tt_train_root.map(|r| r.join(&mp)),
+                Some(dir.join(&mp)),
+                Some(Self::resolve_for_pid(p.pid, &mp)),
+            ];
+            for cand in candidates.into_iter().flatten() {
+                if let Ok(t) = std::fs::read_to_string(&cand) {
+                    merge_model_yaml(&mut cfg, &t);
+                    break;
+                }
             }
         }
         cfg
+    }
+
+    /// Expand `${VAR}` using the *trainer's* environment.
+    ///
+    /// tt-train's sample configs point at their model YAML through
+    /// `${TT_METAL_RUNTIME_ROOT}`, which is set for the training process and
+    /// says nothing about ours. An unset or unreadable variable expands to
+    /// nothing, leaving a relative path the fallbacks below can still find.
+    #[cfg(target_os = "linux")]
+    fn expand_env_for_pid(pid: i32, path: &str) -> String {
+        if !path.contains("${") {
+            return path.to_string();
+        }
+        let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+        let text = String::from_utf8_lossy(&environ);
+        let mut out = path.to_string();
+        for entry in text.split('\0') {
+            if let Some((k, v)) = entry.split_once('=') {
+                out = out.replace(&format!("${{{k}}}"), v);
+            }
+        }
+        // Anything still unexpanded would only produce a path that cannot
+        // exist; drop the marker so the relative remainder stays usable.
+        while let Some(start) = out.find("${") {
+            match out[start..].find('}') {
+                Some(end) => out.replace_range(start..start + end + 1, ""),
+                None => break,
+            }
+        }
+        out.trim_start_matches('/').to_string()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn expand_env_for_pid(_pid: i32, path: &str) -> String {
+        path.to_string()
     }
 
     /// True while the attached process is still alive.
@@ -664,6 +734,43 @@ mod tests {
             cfg.model_save_path.as_deref(),
             Some("transformer.msgpack"),
             "the training yaml itself must have been read"
+        );
+    }
+
+    /// tt-train's rolling checkpoint is a directory of per-tensor files that
+    /// it rewrites in place. Watching the directory's own mtime sees nothing
+    /// — on a live run it stayed frozen while the files inside advanced
+    /// every ten seconds — so the pulse never fires and the comet never
+    /// crosses the sky.
+    #[test]
+    fn a_checkpoint_directory_pulses_when_its_contents_are_rewritten() {
+        let dir = std::env::temp_dir().join(format!("ttckptdir_{}", std::process::id()));
+        let ckpt = dir.join("transformer.msgpack");
+        std::fs::create_dir_all(&ckpt).unwrap();
+        std::fs::write(ckpt.join("block_0.tensorbin"), b"v1").unwrap();
+
+        let dir_mtime_before = std::fs::metadata(&ckpt).unwrap().modified().unwrap();
+
+        let mut w = CheckpointWatch::new(ckpt.clone());
+        assert!(!w.poll(), "first observation establishes a baseline");
+
+        // Rewrite an existing entry, exactly as a save does — no entry is
+        // added or removed, so the directory's own mtime does not move.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(ckpt.join("block_0.tensorbin"), b"v2").unwrap();
+        let pulsed = w.poll();
+        let dir_mtime_after = std::fs::metadata(&ckpt).unwrap().modified().unwrap();
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(
+            dir_mtime_before, dir_mtime_after,
+            "precondition: rewriting an entry must not move the directory's \
+             own mtime, or this test proves nothing"
+        );
+        assert!(
+            pulsed,
+            "a save that rewrites files in place must still pulse"
         );
     }
 
