@@ -466,6 +466,9 @@ fn run_app(
     let mut train_monitor: Option<TrainMonitor> = None;
     // `--mock` substitutes a synthetic run for the /proc scan; see the
     // Training arm of the per-mode update below.
+    // Shared clock for both synthetic sources, so a mock session's training
+    // run and inference roster advance on the same timeline.
+    let mock_started = Instant::now();
     let mut mock_train: Option<MockTrainRun> = None;
     let mut mock_train_state: Option<crate::workload::train::TrainState> = None;
     let mut prev_display_mode = display_mode;
@@ -883,8 +886,19 @@ fn run_app(
                     // loading→ready burst internally. The live service rows only
                     // exist on Linux (the design is Docker/TT-only); off Linux we
                     // hand it an empty slice, so it simply roams the catalog.
+                    // Under `--mock` there are no containers to probe, so
+                    // this view could only ever show its cold "no server"
+                    // state. Substitute a synthetic roster that walks the
+                    // real lifecycle; every label carries a `(mock)` suffix
+                    // so its serving numbers can't read as real ones.
                     #[cfg(target_os = "linux")]
-                    let local_rows = inference_monitor.snapshot();
+                    let local_rows = if backend_type == BackendType::Mock {
+                        crate::workload::inference_server::mock::mock_services(
+                            mock_started.elapsed().as_secs_f32(),
+                        )
+                    } else {
+                        inference_monitor.snapshot()
+                    };
                     #[cfg(not(target_os = "linux"))]
                     let local_rows: Vec<
                         crate::workload::inference_server::ServiceState,
