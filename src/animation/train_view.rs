@@ -1129,6 +1129,31 @@ impl TrainView {
         }
     }
 
+    /// One chip's label, at a FIXED width so the strip cannot jitter.
+    ///
+    /// Temperature and power are right-aligned into their widest plausible
+    /// form — five columns for `100.0`, three for `235` — because the caller
+    /// advances its x cursor by this string's length. Unpadded, a chip
+    /// crossing 9W → 10W or 99.9°C → 100.0°C lengthens its own tag by a
+    /// column, which shifts its density bar *and* every device to its right.
+    /// With four chips sampled ten times a second that reads as the whole
+    /// strip twitching, and the movement encodes nothing: it is an artefact of
+    /// how many digits the number happens to have, not of the number.
+    ///
+    /// ASCII spaces, deliberately. The typographic answer to digits changing
+    /// width is U+2007 FIGURE SPACE, which matches a digit's advance in a
+    /// PROPORTIONAL font. This is a cell buffer — one character per column,
+    /// see `put` — so a plain space is already exactly one digit wide, and
+    /// U+2007 would add a font-substitution risk for no gain.
+    ///
+    /// The widths are ceilings, not guesses: per-chip power is bounded by the
+    /// 200W-ish ceiling the density bar below already assumes (a p300c peaks
+    /// around 235W under load), and a temperature needing four integer digits
+    /// is not a reading, it is a broken sensor.
+    fn chip_tag(idx: usize, temp: f32, power: f32) -> String {
+        format!("dev{idx} {temp:>5.1}°C {power:>3.0}W ")
+    }
+
     fn draw_chips(&self, buf: &mut [Vec<Cell>], backend: &dyn TelemetryBackend) {
         let y = self.layout().chips_row;
         let label = Color::Rgb(180, 200, 255);
@@ -1142,7 +1167,7 @@ impl TrainView {
             let temp = backend.telemetry(idx).map(|t| t.temp_c()).unwrap_or(0.0);
             let power = backend.telemetry(idx).map(|t| t.power_w()).unwrap_or(0.0);
             let tcolor = colors::temp_color(temp);
-            let tag = format!("dev{idx} {temp:.1}°C {power:.0}W ");
+            let tag = Self::chip_tag(idx, temp, power);
             let tag = Self::clip(&tag, self.width.saturating_sub(x + 1));
             self.text(buf, x, y, &tag, tcolor, false);
             x += tag.chars().count();
@@ -1328,6 +1353,46 @@ mod tests {
         let legacy = |l: f32| loss_hue(l, LEGACY_LOSS_CEILING);
         assert!((legacy(10.37) - legacy(6.8)).abs() < 1.0);
         assert!((legacy(6.8) - legacy(4.6)).abs() < 1.0);
+    }
+
+    /// The CHIPS strip advances its x cursor by each tag's length, so a tag
+    /// that changes width moves everything to its right. Crossing a digit
+    /// boundary is the common case — a chip idling at 9W and loaded at 115W
+    /// crosses two — and the resulting movement encodes nothing about the
+    /// hardware.
+    #[test]
+    fn a_chip_tag_keeps_its_width_across_every_digit_boundary() {
+        let cases = [
+            (0usize, 9.0f32, 9.0f32),      // single digit both
+            (0, 45.0, 18.0),               // the idle shape
+            (0, 62.7, 115.0),              // loaded
+            (0, 99.9, 99.0),               // just below both boundaries
+            (0, 100.0, 100.0),             // just above both
+            (0, 8.4, 235.0),               // p300c peak power, low temp
+            (0, 0.0, 0.0),                 // telemetry unavailable
+        ];
+        let widths: Vec<usize> = cases
+            .iter()
+            .map(|(i, t, p)| TrainView::chip_tag(*i, *t, *p).chars().count())
+            .collect();
+        let first = widths[0];
+        assert!(
+            widths.iter().all(|w| *w == first),
+            "every tag must be the same width, got {widths:?} for {cases:?}"
+        );
+    }
+
+    /// Padding must not cost the values themselves — a stable strip showing
+    /// the wrong number is worse than a twitching one showing the right one.
+    #[test]
+    fn a_chip_tag_still_states_its_readings() {
+        let tag = TrainView::chip_tag(2, 62.7, 115.0);
+        assert!(tag.starts_with("dev2 "), "{tag}");
+        assert!(tag.contains("62.7°C"), "{tag}");
+        assert!(tag.contains("115W"), "{tag}");
+        // Right-aligned, so a narrow reading gains leading blanks rather than
+        // shifting what follows it.
+        assert!(TrainView::chip_tag(0, 9.0, 9.0).contains("  9.0°C   9W"));
     }
 
     #[test]
