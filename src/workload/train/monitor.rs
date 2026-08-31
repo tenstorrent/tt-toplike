@@ -217,6 +217,33 @@ impl Tailer {
                                 out.push(seg.to_string());
                             }
                         }
+                    } else if let Some(last_cr) = line.rfind('\r') {
+                        // No newline — but a carriage return ENDS a progress
+                        // frame just as definitively as a newline ends a
+                        // line, so everything before the final '\r' is
+                        // settled and can be emitted now.
+                        //
+                        // Without this the newline requirement above defeats
+                        // the '\r' handling below it. A trainer that reports
+                        // loss only as bar postfix emits no newline at all
+                        // between its startup banner and its final summary:
+                        // measured against ttml's SFTTrainer, ~300 seconds
+                        // and 3000 steps of one unterminated line. The whole
+                        // run buffered here and arrived in a single burst at
+                        // the end, so the loss mountains stayed empty, the
+                        // model/topology fields never resolved, and the LIVE
+                        // block froze a few seconds after attach.
+                        //
+                        // Consume up to and including that '\r'; the tail
+                        // after it is the bar's in-flight frame, which is
+                        // re-read whole on the next poll.
+                        consumed += (last_cr + 1) as u64;
+                        for seg in line[..last_cr].split('\r') {
+                            if !seg.trim().is_empty() {
+                                out.push(seg.to_string());
+                            }
+                        }
+                        break;
                     } else {
                         break;
                     }
@@ -922,6 +949,47 @@ mod tests {
 
         assert_eq!(got.len(), 3, "each bar frame is its own line, got {got:?}");
         assert!(got[2].contains("loss=1.8"), "the newest frame must survive");
+    }
+
+    /// A tqdm-only trainer emits NO newline between its banner and its final
+    /// summary — ttml's SFTTrainer reports loss solely as bar postfix, so a
+    /// 3000-step run is one unterminated line for ~300 seconds. Requiring a
+    /// newline buffers the entire run and delivers it in one burst at the end,
+    /// which is exactly the failure the '\r' splitting exists to prevent.
+    #[test]
+    fn carriage_return_frames_are_emitted_without_a_trailing_newline() {
+        let dir = std::env::temp_dir().join(format!("ttcrnl_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("train.log");
+
+        // No trailing newline anywhere — the shape tqdm actually writes.
+        std::fs::write(
+            &path,
+            "SFTTrainer: 1/9 [00:01, 1.0it/s, loss=2.0]\rSFTTrainer: 2/9 [00:02, 1.0it/s, loss=1.9]\rSFTTrainer: 3/9 [00:03, 1.0it/s, loss=1.8]",
+        )
+        .unwrap();
+
+        let mut t = Tailer::new(path.clone());
+        let got = t.read_new();
+        assert_eq!(
+            got.len(),
+            2,
+            "the two completed frames must land; the third is still in flight, got {got:?}"
+        );
+        assert!(got[1].contains("loss=1.9"), "newest COMPLETE frame, got {got:?}");
+
+        // The in-flight frame is not consumed, so it arrives once terminated.
+        std::fs::write(
+            &path,
+            "SFTTrainer: 1/9 [00:01, 1.0it/s, loss=2.0]\rSFTTrainer: 2/9 [00:02, 1.0it/s, loss=1.9]\rSFTTrainer: 3/9 [00:03, 1.0it/s, loss=1.8]\rSFTTrainer: 4/9 [00:04, 1.0it/s, loss=1.7]",
+        )
+        .unwrap();
+        let got2 = t.read_new();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            got2.iter().any(|l| l.contains("loss=1.8")),
+            "the previously-partial frame must not be lost, got {got2:?}"
+        );
     }
 
     /// tt-train's rolling checkpoint is a directory of per-tensor files that
