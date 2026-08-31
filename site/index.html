@@ -1252,11 +1252,21 @@
           crosses that sky on every checkpoint save.
         </p>
         <p class="mode-desc">
-          Deliberately honest about its limits: tt-train streams only step, loss,
-          step time, and cache-entry count, so gradient norms and MFU — which exist
-          only in a run-end summary — are simply not drawn. If the trainer's stdout
-          went to a pipe or a tty rather than a file, the per-step stream is
-          genuinely unrecoverable, and the view says so instead of inventing a curve.
+          Deliberately honest about its limits: it draws only what a run actually
+          emits, so gradient norms and MFU — which exist only in a run-end summary —
+          are simply not drawn. If the trainer's stdout went to a pipe or a tty
+          rather than a file, the per-step stream is genuinely unrecoverable, and the
+          view says so instead of inventing a curve.
+        </p>
+        <p class="mode-desc">
+          The clip above is one unedited take: a real LoRA fine-tune of a 123.3M-parameter
+          model on 2× p300c Blackhole, 3,000 steps, with the trainer on the left and
+          <code>tt-toplike --mode training</code> on the right. The view resolved the run's
+          shape from its log alone — 8 blocks × 16 heads, d_model 1024, vocab 32000,
+          seq 512, batch 8 — and derives <strong>42,279 tok/s</strong> from it. The hue ramp
+          is scaled to <code>ln(vocab_size)</code>, the cross-entropy of a uniform
+          distribution and so the worst score a run can post; against a fixed anchor the
+          entire early phase, where loss falls fastest, collapsed into one flat red.
         </p>
         <div class="mode-hints">
           <span class="mode-hint"><kbd>t</kbd> from any view</span>
@@ -1265,9 +1275,10 @@
           <span class="mode-hint"><kbd>l</kbd> legend</span>
         </div>
       </div>
-      <img class="mode-gif" src="assets/tt-toplike-training.gif"
-           alt="Training view — a real nano_gpt run on 4× Blackhole, showing the loss mountain range, forward and backward sweeps across the transformer block grid, checkpoint comets, and live per-chip telemetry"
-           loading="lazy">
+      <video class="mode-gif" src="assets/tt-toplike-training-lora.mp4"
+             poster="assets/tt-toplike-training-lora.png"
+             autoplay loop muted playsinline
+             aria-label="Training view beside a live LoRA fine-tune on Blackhole: the trainer streams on the left while the right pane shows the resolved model card, live tokens per second, and a loss mountain range shaded pink through violet to deep blue"></video>
     </div>
 
     <hr class="mode-divider">

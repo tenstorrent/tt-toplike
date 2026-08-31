@@ -422,9 +422,19 @@ The screenshot above (4× Blackhole, live) shows all three at once: a **vLLM** e
 
 ### Training — watch a model learn (`t`)
 
-<img src="assets/tt-toplike-training.gif" alt="Training view — a real nano_gpt run on 4× Blackhole: the loss mountain range descending as the model converges, forward and backward sweeps travelling the transformer block grid, checkpoint comets crossing an aurora-and-starfield sky, and live per-chip telemetry beneath" width="100%" />
+<img src="assets/tt-toplike-training-lora.png" alt="Training view beside a live LoRA fine-tune on Blackhole: the left pane streams the trainer's tqdm progress, the right pane shows the resolved model card, live tok/s and step/s, and a loss mountain range shaded pink through violet to deep blue" width="100%" />
 
-*A real `nano_gpt` run on 4× Blackhole — char-level NanoLlama3 on Shakespeare, attached automatically with no flags. Loss falls 1.20 → 1.03 across the clip as the mountain range recolours, `ckpt @` advances on each checkpoint save, and the chips doing the work heat to 115 W beneath it.*
+*A real LoRA fine-tune of `tt-tnt-1024` (123.3M parameters, 48 of 114 trainable) on 2× p300c Blackhole — 3,000 steps, recorded end to end. Left pane is the trainer; right pane is `tt-toplike --mode training`, attached with no flags. It resolved the run's shape from the log alone (8 blocks × 16 heads, d_model 1024, vocab 32000, seq 512, batch 8) and derives **42,279 tok/s** from it. The mountains span pink through violet to deep blue because the hue ramp is scaled to `ln(vocab_size)` — 10.373 nats for a 32k vocabulary, what a model that has learned nothing reports — rather than a fixed anchor.*
+
+<img src="assets/tt-toplike-training-lora-early.png" alt="The same run five steps in: five loss samples drawn as broad blocks near the top of the range, while the left pane still narrates warm start and kernel compilation" width="100%" />
+
+*The same run at step 5 of 3,000. Five samples are drawn as broad blocks rather than a fabricated curve, and the loss sits at 6.97 — close to the 10.373 an untrained model over this vocabulary would report, which is why the early phase reads pink rather than saturating at the top of the scale. The left pane is still narrating warm start and kernel compilation; the board is busy before a single step is taken.*
+
+<img src="assets/tt-toplike-training.gif" alt="An earlier nano_gpt run on 4x Blackhole, showing checkpoint comets crossing the sky as each save lands" width="100%" />
+
+*A different run — char-level NanoLlama3 under tt-train's own `nano_gpt` — kept because it shows something the LoRA take above does not: a mint comet crossing the sky on every checkpoint save, with `ckpt @` advancing beneath it.*
+
+<sub>The LoRA footage was recorded on a QuietBox with 2× p300c from `tt-tnt`'s own `demo/demos.yaml`, one take, one seed. Chips 2 and 3 stay near idle throughout because `gozer` leased a single board — the contrast is deliberate, and it is what makes the causation visible rather than asserted.</sub>
 
 Press `t` for the **Training view** — no flags, no config, no target to name. It scans running processes for a live [tt-train](https://github.com/tenstorrent/tt-metal/tree/main/tt-train) example (`nano_gpt`, `mnist_mlp`, `linear_regression`), resolves `/proc/<pid>/fd/1` to find that process's own log file, and starts tailing it — attaching within a couple of seconds if a run is already in progress.
 
