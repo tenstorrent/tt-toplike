@@ -468,6 +468,12 @@ fn run_app(
     // Training arm of the per-mode update below.
     // Shared clock for both synthetic sources, so a mock session's training
     // run and inference roster advance on the same timeline.
+    //
+    // Linux-gated because its only consumer — the synthetic inference roster
+    // — is: the real roster comes from a Docker probe that exists on Linux
+    // alone. Left ungated it is an unused binding everywhere else, which is
+    // a hard error under CI's `-D warnings`.
+    #[cfg(target_os = "linux")]
     let mock_started = Instant::now();
     let mut mock_train: Option<MockTrainRun> = None;
     let mut mock_train_state: Option<crate::workload::train::TrainState> = None;

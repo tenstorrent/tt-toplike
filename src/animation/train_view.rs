@@ -1373,7 +1373,10 @@ mod tests {
             assert!(a - b > 15.0, "{what} must be distinguishable: {a} vs {b}");
         }
         // And the best loss this project has recorded reads as cool, not red.
-        assert!(best < 240.0, "a converged LM should be cyan-blue, got {best}");
+        assert!(
+            best < 240.0,
+            "a converged LM should be cyan-blue, got {best}"
+        );
 
         // The old ramp could not tell any of the top three apart.
         let legacy = |l: f32| loss_hue(l, LEGACY_LOSS_CEILING);
@@ -1392,7 +1395,7 @@ mod tests {
             ("9:59", "0:01"),
             ("10:00", "0:00"),
             ("100:00", "999:59"),
-            ("5:34", "—"),          // eta unknown renders as a dash
+            ("5:34", "—"), // eta unknown renders as a dash
         ]
         .iter()
         .map(|(e, t)| TrainView::watching_line(e, t).chars().count())
@@ -1419,13 +1422,13 @@ mod tests {
     #[test]
     fn a_chip_tag_keeps_its_width_across_every_digit_boundary() {
         let cases = [
-            (0usize, 9.0f32, 9.0f32),      // single digit both
-            (0, 45.0, 18.0),               // the idle shape
-            (0, 62.7, 115.0),              // loaded
-            (0, 99.9, 99.0),               // just below both boundaries
-            (0, 100.0, 100.0),             // just above both
-            (0, 8.4, 235.0),               // p300c peak power, low temp
-            (0, 0.0, 0.0),                 // telemetry unavailable
+            (0usize, 9.0f32, 9.0f32), // single digit both
+            (0, 45.0, 18.0),          // the idle shape
+            (0, 62.7, 115.0),         // loaded
+            (0, 99.9, 99.0),          // just below both boundaries
+            (0, 100.0, 100.0),        // just above both
+            (0, 8.4, 235.0),          // p300c peak power, low temp
+            (0, 0.0, 0.0),            // telemetry unavailable
         ];
         let widths: Vec<usize> = cases
             .iter()

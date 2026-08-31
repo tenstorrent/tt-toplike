@@ -976,7 +976,10 @@ mod tests {
             2,
             "the two completed frames must land; the third is still in flight, got {got:?}"
         );
-        assert!(got[1].contains("loss=1.9"), "newest COMPLETE frame, got {got:?}");
+        assert!(
+            got[1].contains("loss=1.9"),
+            "newest COMPLETE frame, got {got:?}"
+        );
 
         // The in-flight frame is not consumed, so it arrives once terminated.
         std::fs::write(
