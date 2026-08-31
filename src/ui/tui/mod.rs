@@ -139,9 +139,14 @@ const ROTATE_LINGER_IDLE: Duration = Duration::from_secs(10);
 /// Unlike the `v` cycle this deliberately includes the entry-key-only views
 /// (`i`, `~`, `t`) — the whole point is to surface everything, including the
 /// screens a passer-by would never know to press a key for.
+///
+/// `Grid` is the one deliberate omission. It is not a distinct view but an
+/// alternate layout of the *same* chip portraits Insights already draws, so
+/// rotating through both shows the same data twice in a row. `next_display_mode`
+/// takes the same position — it treats `Insights | Grid` as one stop and never
+/// cycles into Grid either; `g` is how you ask for that layout.
 const ROTATION: &[DisplayMode] = &[
     DisplayMode::Insights,
-    DisplayMode::Grid,
     DisplayMode::MemoryFlow,
     DisplayMode::Starfield,
     DisplayMode::MemoryCastle,
@@ -1486,6 +1491,50 @@ fn run_app(
                                             true,
                                         ));
                                     }
+                                } else if verb == "rotate" {
+                                    // Handled here rather than in
+                                    // `execute_command` because the rotation
+                                    // lives in the loop's own state, which
+                                    // that function cannot reach — the same
+                                    // reason `/hivemind` is intercepted below.
+                                    // `/rotate` toggles; `/rotate on|off` is
+                                    // explicit, so a script or a kiosk unit
+                                    // can set a known state rather than
+                                    // flipping whatever it happens to find.
+                                    let arg = cmd_buf
+                                        .trim()
+                                        .trim_start_matches('/')
+                                        .split_once(char::is_whitespace)
+                                        .map(|(_, rest)| rest.trim().to_ascii_lowercase())
+                                        .unwrap_or_default();
+                                    let want = match arg.as_str() {
+                                        "" => Some(!rotate_enabled),
+                                        "on" | "start" => Some(true),
+                                        "off" | "stop" => Some(false),
+                                        _ => None,
+                                    };
+                                    match want {
+                                        Some(v) => {
+                                            rotate_enabled = v;
+                                            rotate_since = Instant::now();
+                                            cmd_message = Some((
+                                                if v {
+                                                    "rotation on — cycling all views (R to stop)"
+                                                        .to_string()
+                                                } else {
+                                                    "rotation off".to_string()
+                                                },
+                                                false,
+                                            ));
+                                        }
+                                        None => {
+                                            cmd_message = Some((
+                                                format!("rotate: expected on|off, got '{arg}'"),
+                                                true,
+                                            ));
+                                        }
+                                    }
+                                    force_redraw = true;
                                 } else if verb == "hivemind"
                                     || (verb == "mode"
                                         && cmd_buf
@@ -3304,6 +3353,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
                 row!(" i  I", "Inference Servers monitor", key),
                 row!(" ~", "HivemindSweeper activity sniffer", key),
                 row!(" t", "Training view (live tt-train run)", key),
+                row!(" R", "rotate every view unattended (kiosk)", key),
                 row!(" b", "cycle backend", key),
                 ln!(vec![Span::styled(
                     "──────────────────────────────────────",
@@ -3313,6 +3363,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
                 row!(" /mode <name>", "insights grid castle flow…", lbl),
                 row!(" /fps <n>", "animation FPS  1–120", lbl),
                 row!(" /datafps <n>", "data refresh FPS  1–30", lbl),
+                row!(" /rotate", "rotate all views; on|off to force", lbl),
                 row!(" /legend", "toggle legend panel", lbl),
                 row!(" /explain", "toggle explain panel", lbl),
                 row!(" /help", "toggle this panel", lbl),
@@ -4385,8 +4436,16 @@ fn execute_command(
                     false,
                 )
             }
+            // Training owns no threads (its monitor is polled inline), so
+            // unlike hivemind there is nothing to start — setting the mode
+            // is the whole job and this arm needs no loop-level counterpart.
+            "training" | "train" => {
+                *display_mode = DisplayMode::Training;
+                ("→ training".to_string(), false, false)
+            }
             _ => (
-                "mode: insights|grid|starfield|castle|flow|arcade|defrag|hivemind".to_string(),
+                "mode: insights|grid|starfield|castle|flow|arcade|defrag|hivemind|training"
+                    .to_string(),
                 true,
                 false,
             ),
@@ -7374,7 +7433,9 @@ mod tests {
 /// the `v`-cycle rotation.
 #[cfg(test)]
 mod display_mode_tests {
-    use super::{display_mode_for, linger_for, next_display_mode, next_rotation_mode, DisplayMode};
+    use super::{
+        display_mode_for, linger_for, next_display_mode, next_rotation_mode, DisplayMode, ROTATION,
+    };
 
     #[test]
     fn t_key_enters_training_mode_and_esc_leaves_it() {
@@ -7404,9 +7465,11 @@ mod display_mode_tests {
     /// requirement — not just the ones `v` already cycles.
     #[test]
     fn rotation_visits_every_view_including_the_hidden_ones() {
+        // Grid is deliberately absent: it draws the same chip portraits as
+        // Insights in a different layout, so rotating through both shows the
+        // same data twice running. See `rotation_skips_grid`.
         let all = [
             DisplayMode::Insights,
-            DisplayMode::Grid,
             DisplayMode::Starfield,
             DisplayMode::MemoryCastle,
             DisplayMode::MemoryFlow,
@@ -7448,6 +7511,32 @@ mod display_mode_tests {
             let next = next_rotation_mode(m);
             assert_ne!(next, m, "{m:?} must advance, not repeat");
         }
+    }
+
+    /// Grid is an alternate layout of the chip portraits Insights already
+    /// draws, not a view of its own — rotating through both would show the
+    /// same data twice running. `next_display_mode` takes the same position,
+    /// treating `Insights | Grid` as a single stop in the `v` cycle.
+    #[test]
+    fn rotation_skips_grid() {
+        let mut m = DisplayMode::Insights;
+        for _ in 0..ROTATION.len() * 2 {
+            m = next_rotation_mode(m);
+            assert_ne!(
+                m,
+                DisplayMode::Grid,
+                "Grid re-shows Insights' data and must stay out of the rotation"
+            );
+        }
+
+        // Someone who pressed `g` and then started the rotation must still
+        // move on rather than wedging on an unlisted view.
+        let next = next_rotation_mode(DisplayMode::Grid);
+        assert_ne!(next, DisplayMode::Grid, "a rotation from Grid must advance");
+        assert!(
+            ROTATION.contains(&next),
+            "leaving Grid must land inside the rotation, got {next:?}"
+        );
     }
 
     #[test]
