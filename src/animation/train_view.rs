@@ -408,7 +408,14 @@ impl TrainView {
         let pid = st.proc.as_ref().map(|p| p.pid).unwrap_or(0);
 
         self.put(buf, 0, 0, '╔', BORDER, false);
-        let left = format!("═[ TRAINING ]  {binary} · pid {pid} ");
+        // A fabricated run says so, right in the title. This tool's premise
+        // is that every pixel maps to a real signal; synthetic data that
+        // looked identical to a real run would quietly break that promise.
+        let left = if st.is_mock {
+            format!("═[ TRAINING · mock ]  {binary} ")
+        } else {
+            format!("═[ TRAINING ]  {binary} · pid {pid} ")
+        };
         let left_cols = left.chars().count();
         self.text(
             buf,

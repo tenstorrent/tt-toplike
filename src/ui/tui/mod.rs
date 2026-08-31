@@ -27,7 +27,7 @@ use crate::backend::{factory, BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
 use crate::error::TTTopError;
 use crate::ui::colors;
-use crate::workload::train::TrainMonitor;
+use crate::workload::train::{MockTrainRun, TrainMonitor};
 use crate::workload::{HostProcessMonitor, ProcRow};
 // InferenceEngine + the /proc-based probes are only used on the Linux/TT path,
 // so gate the import to match (keeps non-Linux builds warning-clean under -D warnings).
@@ -464,6 +464,10 @@ fn run_app(
     let mut defrag: Option<DefragVis> = None;
     let mut train_view: Option<TrainView> = None;
     let mut train_monitor: Option<TrainMonitor> = None;
+    // `--mock` substitutes a synthetic run for the /proc scan; see the
+    // Training arm of the per-mode update below.
+    let mut mock_train: Option<MockTrainRun> = None;
+    let mut mock_train_state: Option<crate::workload::train::TrainState> = None;
     let mut prev_display_mode = display_mode;
     // The mode to return to when `i`/`I`/`Esc` exits the dedicated
     // `DisplayMode::InferenceMonitor` view — captured at entry so `i` (or
@@ -1026,7 +1030,15 @@ fn run_app(
                         train_view =
                             Some(TrainView::new(size.width as usize, size.height as usize));
                     }
-                    if train_monitor.is_none() {
+                    // Under `--mock` there is no trainer to find, so scanning
+                    // /proc would leave this view permanently empty — the one
+                    // screen a mock backend couldn't demo. Drive it from a
+                    // synthetic run instead; the header marks it as mock.
+                    if backend_type == BackendType::Mock {
+                        let run = mock_train.get_or_insert_with(MockTrainRun::new);
+                        mock_train_state = Some(run.state());
+                        train_active = true;
+                    } else if train_monitor.is_none() {
                         train_monitor = Some(TrainMonitor::new());
                     }
                     if let Some(ref mut tm) = train_monitor {
@@ -1273,8 +1285,16 @@ fn run_app(
                             }
                         }
                         DisplayMode::Training => {
-                            if let (Some(ref tv), Some(ref tm)) = (&train_view, &train_monitor) {
-                                ui_train(f, tv, tm.state(), backend);
+                            // Under `--mock` the state comes from the
+                            // synthetic run rather than a /proc scan; the
+                            // header marks it so it can't be mistaken for a
+                            // real one.
+                            if let Some(ref tv) = train_view {
+                                if let Some(ref st) = mock_train_state {
+                                    ui_train(f, tv, st, backend);
+                                } else if let Some(ref tm) = train_monitor {
+                                    ui_train(f, tv, tm.state(), backend);
+                                }
                             }
                         }
                     }

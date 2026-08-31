@@ -46,6 +46,10 @@ pub struct TrainState {
     pub checkpoint_step: u64,
     pub checkpoint_pulse: u8,
     pub first_seen: Option<Instant>,
+    /// This run is fabricated by `--mock`, not read from a real trainer.
+    /// Surfaced in the header: this tool's premise is that every pixel maps
+    /// to a real signal, so synthetic data has to say so.
+    pub is_mock: bool,
 }
 
 impl TrainState {
