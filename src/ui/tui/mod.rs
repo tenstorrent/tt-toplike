@@ -494,6 +494,10 @@ fn run_app(
     // in-mode keys" block in the non-cmd_mode match.
     let mut hivemind: Option<crate::workload::hivemind::Hivemind> = None;
     let mut hm_cursor = (0usize, 0usize);
+    // The focus follows the busiest cell until a cursor key is pressed, so
+    // the sweeper says something useful without being driven. Enter hands
+    // it back.
+    let mut hm_auto = true;
     let mut hm_unified = false;
     let mut hm_sev = crate::workload::hivemind::Severity::Trace;
     // Launched directly into HivemindSweeper via `--mode hivemind`? Start the
@@ -1292,6 +1296,7 @@ fn run_app(
                                     f.area(),
                                     h,
                                     hm_cursor,
+                                    hm_auto,
                                     hm_unified,
                                     hm_sev,
                                     &kitt,
@@ -1760,10 +1765,18 @@ fn run_app(
                             // toggle below, so it opens the legend here exactly as it
                             // does in every other mode (vim `h`/`j`/`k` still move the
                             // cursor, and Right covers rightward movement).
+                            // Hand the focus back to the sweeper. Guarded to
+                            // the mode so Insights' own Enter (portrait zoom)
+                            // is untouched.
+                            KeyCode::Enter if display_mode == DisplayMode::HivemindSweeper => {
+                                hm_auto = true;
+                                force_redraw = true;
+                            }
                             KeyCode::Char('h') | KeyCode::Left
                                 if display_mode == DisplayMode::HivemindSweeper =>
                             {
                                 hm_cursor.1 = hm_cursor.1.saturating_sub(1);
+                                hm_auto = false;
                             }
                             KeyCode::Right if display_mode == DisplayMode::HivemindSweeper => {
                                 if let Some(h) = hivemind.as_ref() {
@@ -1772,6 +1785,7 @@ fn run_app(
                                         rows.first().map(|r| r.cells.len().saturating_sub(1))
                                     {
                                         hm_cursor.1 = (hm_cursor.1 + 1).min(max_col);
+                                        hm_auto = false;
                                     }
                                 }
                             }
@@ -1779,6 +1793,7 @@ fn run_app(
                                 if display_mode == DisplayMode::HivemindSweeper =>
                             {
                                 hm_cursor.0 = hm_cursor.0.saturating_sub(1);
+                                hm_auto = false;
                             }
                             KeyCode::Char('j') | KeyCode::Down
                                 if display_mode == DisplayMode::HivemindSweeper =>
@@ -1787,6 +1802,7 @@ fn run_app(
                                     let rows = hivemind_view::board_rows(h, Instant::now());
                                     let max_row = rows.len().saturating_sub(1);
                                     hm_cursor.0 = (hm_cursor.0 + 1).min(max_row);
+                                    hm_auto = false;
                                 }
                             }
                             KeyCode::Char('f') if display_mode == DisplayMode::HivemindSweeper => {

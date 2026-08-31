@@ -333,11 +333,144 @@ pub fn beam_cells(width: usize, pos: f32, activity: f32) -> Vec<(char, Color)> {
 /// sparkline reuses column width that was already reserved (every column is
 /// padded to fit the "Host" label, 4 columns, even though a glyph alone is
 /// only 1) — so adding it never widens the board past what it already drew.
+/// Minimum content width before the detail pane appears. Below this the
+/// board and feed need every column they can get, so the pane is dropped
+/// rather than squeezing both into illegibility.
+const DETAIL_MIN_CONTENT_W: usize = 96;
+
+/// Width of the detail pane, including its separator column.
+const DETAIL_W: usize = 38;
+
+/// The busiest cell on the board — the one the sweeper focuses on its own.
+///
+/// This mode exists to answer "what is touching my hardware right now", and
+/// making that answer require cursor keys means the screen says nothing to
+/// anyone who merely glances at it. Returns `None` for an empty or entirely
+/// cold board: there is no activity to focus on, and the caller should leave
+/// the cursor wherever the user put it rather than inventing a target.
+pub fn hottest_cell(hive: &Hivemind, rows: &[BoardRow]) -> Option<(usize, usize)> {
+    let grid = hive.grid();
+    let mut best: Option<(f32, usize, usize)> = None;
+    for (ri, row) in rows.iter().enumerate() {
+        for (ci, cell) in row.cells.iter().enumerate() {
+            let heat = grid.heat(row.source, cell.col);
+            if heat <= 0.0 {
+                continue;
+            }
+            // Strictly greater keeps the earliest cell on a tie, so a board
+            // whose top cells are equally warm doesn't flicker between them
+            // frame to frame — which would be worse than no auto-focus.
+            if best.is_none_or(|(h, _, _)| heat > h) {
+                best = Some((heat, ri, ci));
+            }
+        }
+    }
+    best.map(|(_, ri, ci)| (ri, ci))
+}
+
+/// The FOCUS pane: what is actually behind the focused cell.
+///
+/// Every value here already exists in the engine — decayed heat and its
+/// spark, and the coalesced feed's count/rate/severity/age for this exact
+/// source+device. Nothing is synthesised, and a cell with no rows says so
+/// rather than padding itself out.
+#[allow(clippy::too_many_arguments)]
+fn detail_lines(
+    hive: &Hivemind,
+    sel: Option<(Source, Column)>,
+    now: Instant,
+    w: usize,
+    head: Color,
+    dim: Color,
+    accent: Color,
+) -> Vec<Line<'static>> {
+    let mut out: Vec<Line> = Vec::new();
+    let Some((src, col)) = sel else {
+        out.push(Line::from(Span::styled(
+            "FOCUS",
+            Style::default().fg(head).add_modifier(Modifier::BOLD),
+        )));
+        out.push(Line::from(Span::styled(
+            "no activity yet",
+            Style::default().fg(dim),
+        )));
+        return out;
+    };
+
+    out.push(Line::from(Span::styled(
+        format!("FOCUS  {} · {}", src.label(), col_label(col)),
+        Style::default().fg(head).add_modifier(Modifier::BOLD),
+    )));
+
+    let heat = hive.grid().heat(src, col);
+    let spark: String = hive
+        .grid()
+        .spark(src, col)
+        .iter()
+        .map(|&v| spark_char(v))
+        .collect();
+    out.push(Line::from(vec![
+        Span::styled("heat   ".to_string(), Style::default().fg(dim)),
+        Span::styled(
+            format!("{}{}", grid::heat_char(heat), spark),
+            Style::default().fg(accent),
+        ),
+    ]));
+
+    // The same filter the feed pane uses, so the two can never disagree
+    // about what this cell is doing.
+    let device = column_to_device(col);
+    let rows = hive.feed().rows(Some((src, device)), Severity::Trace);
+    let total: u64 = rows.iter().map(|r| r.count).sum();
+    let rate: f32 = rows.iter().map(|r| r.rate).sum();
+    let worst = rows.iter().map(|r| r.max_severity).max();
+
+    out.push(Line::from(vec![
+        Span::styled("events ".to_string(), Style::default().fg(dim)),
+        Span::styled(format!("{total}"), Style::default().fg(accent)),
+        Span::styled("  rate ".to_string(), Style::default().fg(dim)),
+        Span::styled(format!("{rate:.1}/s"), Style::default().fg(accent)),
+    ]));
+    if let Some(sev) = worst {
+        out.push(Line::from(vec![
+            Span::styled("worst  ".to_string(), Style::default().fg(dim)),
+            Span::styled(severity_label(sev).to_string(), severity_style(sev)),
+        ]));
+    }
+    if let Some(newest) = rows.first() {
+        let age = now.saturating_duration_since(newest.last).as_secs();
+        out.push(Line::from(vec![
+            Span::styled("last   ".to_string(), Style::default().fg(dim)),
+            Span::styled(format!("{age}s ago"), Style::default().fg(accent)),
+        ]));
+    }
+
+    out.push(Line::from(Span::styled(
+        "─".repeat(w),
+        Style::default().fg(dim),
+    )));
+
+    if rows.is_empty() {
+        out.push(Line::from(Span::styled(
+            "no events for this cell",
+            Style::default().fg(dim),
+        )));
+    }
+    for row in rows.iter().take(10) {
+        out.push(Line::from(vec![
+            Span::styled(format!("x{:<5}", row.count), Style::default().fg(dim)),
+            Span::raw(truncate_to_width(&row.display, w.saturating_sub(6))),
+        ]));
+    }
+    out
+}
+
 pub fn render_hivemind(
     f: &mut Frame,
     area: Rect,
     hive: &Hivemind,
     cursor: (usize, usize),
+    auto_focus: bool,
     unified: bool,
     sev_floor: Severity,
     kitt: &KittScanner,
@@ -355,10 +488,23 @@ pub fn render_hivemind(
                                                                  // board or feed rendering below. If there's truly no room (shouldn't
                                                                  // happen given the `area.height < 6` guard above, which always leaves
                                                                  // >= 4 content rows), skip the beam gracefully rather than clip or panic.
+                                                                 // The FOCUS pane takes a fixed right-hand column when there is room;
+                                                                 // below the threshold the board and feed need every column they have.
+    let show_detail = content_w >= DETAIL_MIN_CONTENT_W;
+    let detail_w = if show_detail { DETAIL_W } else { 0 };
+    let left_w = content_w.saturating_sub(detail_w);
     let beam_reserved = content_rows > 0;
     let body_rows_avail = content_rows.saturating_sub(if beam_reserved { 1 } else { 0 });
 
     let rows = board_rows(hive, now);
+    // Until someone moves the cursor, the focus follows the busiest cell by
+    // itself — otherwise this screen only answers its question for a person
+    // already driving it with the arrow keys.
+    let cursor = if auto_focus {
+        hottest_cell(hive, &rows).unwrap_or(cursor)
+    } else {
+        cursor
+    };
     let selected = selected_cell(&rows, cursor);
 
     // Column label width sized to the widest label actually in use ("Host" is
@@ -439,7 +585,7 @@ pub fn render_hivemind(
     header_body.push(Line::from(collector_spans));
 
     // ── Rule ─────────────────────────────────────────────────────────────
-    header_body.push(rule_line(content_w, dim));
+    header_body.push(rule_line(left_w, dim));
 
     // ── Column header + board rows ──────────────────────────────────────
     if rows.is_empty() {
@@ -498,7 +644,7 @@ pub fn render_hivemind(
     }
 
     // ── Rule ─────────────────────────────────────────────────────────────
-    header_body.push(rule_line(content_w, dim));
+    header_body.push(rule_line(left_w, dim));
 
     // ── Feed header ──────────────────────────────────────────────────────
     let feed_title = if unified {
@@ -547,9 +693,7 @@ pub fn render_hivemind(
         let trailing_w = unicode_width::UnicodeWidthStr::width(trailing.as_str());
 
         let prefix_w = 7 /* severity */ + 1 + label_w + 1 + 4 /* dev field */ + 1;
-        let text_w = content_w
-            .saturating_sub(prefix_w)
-            .saturating_sub(trailing_w);
+        let text_w = left_w.saturating_sub(prefix_w).saturating_sub(trailing_w);
         feed_lines.push(Line::from(vec![
             Span::styled(
                 format!("{:<7}", severity_label(row.max_severity)),
@@ -578,9 +722,42 @@ pub fn render_hivemind(
         format!("╔{}", "═".repeat(width.saturating_sub(1))),
         border_style,
     )));
-    for line in body.into_iter().take(body_rows_avail) {
+    // Build the FOCUS pane, then lay the two columns out side by side.
+    // Composing into the one Paragraph (rather than rendering a second
+    // widget) keeps the left/bottom-only border intact — this project never
+    // draws a right-hand border, because a variable-width box glyph wraps
+    // the moment the terminal is a column narrower than expected.
+    let detail = if show_detail {
+        detail_lines(
+            hive,
+            selected,
+            now,
+            DETAIL_W.saturating_sub(2),
+            head,
+            dim,
+            accent,
+        )
+    } else {
+        Vec::new()
+    };
+
+    for (i, line) in body.into_iter().take(body_rows_avail).enumerate() {
         let mut spans = vec![Span::styled("║ ", border_style)];
+        let used: usize = line
+            .spans
+            .iter()
+            .map(|sp| unicode_width::UnicodeWidthStr::width(sp.content.as_ref()))
+            .sum();
         spans.extend(line.spans);
+        if show_detail {
+            // Pad the left column to its full width so the divider lands on
+            // the same screen column on every row, whatever the content.
+            spans.push(Span::raw(" ".repeat(left_w.saturating_sub(used))));
+            spans.push(Span::styled("│ ", Style::default().fg(dim)));
+            if let Some(dl) = detail.get(i) {
+                spans.extend(dl.spans.clone());
+            }
+        }
         display_lines.push(Line::from(spans));
     }
     // ── KITT scanner bar: one dedicated row, just above the bottom border ──
@@ -650,10 +827,30 @@ pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'stati
         ]),
         ln!(vec![
             Span::styled(
+                "FOCUS      ",
+                Style::default().fg(colors::rgb(200, 230, 255))
+            ),
+            Span::styled(
+                "= busiest cell, tracked automatically",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled(
                 "←↑↓→ / hjk ",
                 Style::default().fg(colors::rgb(200, 230, 255))
             ),
-            Span::styled("= move the board cursor", Style::default().fg(dim)),
+            Span::styled(
+                "= pin the focus to a cell yourself",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled(
+                "Enter      ",
+                Style::default().fg(colors::rgb(200, 230, 255))
+            ),
+            Span::styled("= hand the focus back to auto", Style::default().fg(dim)),
         ]),
         ln!(vec![
             Span::styled(
@@ -724,7 +921,8 @@ pub(crate) const EXPLAIN_TEXT: &[&str] = &[
     "row with a running count and events/sec rate, for",
     "whichever cell is selected (or every row, unified).",
     "",
-    "Controls: arrows (or vim h/j/k) move the cursor, f",
+    "The FOCUS pane tracks the busiest cell on its own; arrows (or vim h/j/k) pin \
+     it to a cell of your choosing and Enter hands it back. f",
     "toggles the unified feed, s raises the severity floor,",
     "l opens this legend.",
     "",
@@ -744,6 +942,45 @@ pub(crate) const EXPLAIN_TEXT: &[&str] = &[
 mod tests {
     use super::*;
     use crate::workload::hivemind::{event::*, grid::Column, Hivemind};
+
+    /// The sweeper's job is answering "what is touching my hardware right
+    /// now". If that answer needs arrow keys, the screen says nothing to
+    /// anyone who just glances at it.
+    #[test]
+    fn the_focus_follows_the_busiest_cell_without_any_input() {
+        let mut h = Hivemind::new();
+        h.bump_grid_for_test(Source::Ttnn, None);
+        for _ in 0..12 {
+            h.bump_grid_for_test(Source::TtMetal, Some(0));
+        }
+        let rows = board_rows(&h, Instant::now());
+        let (ri, ci) = hottest_cell(&h, &rows).expect("an active board has a hottest cell");
+        assert_eq!(rows[ri].source, Source::TtMetal);
+        assert_eq!(rows[ri].cells[ci].col, Column::Device(0));
+    }
+
+    /// A cold board has nothing to focus on; inventing a focus would aim the
+    /// FOCUS pane at a cell with no activity behind it.
+    #[test]
+    fn a_cold_board_has_no_hottest_cell() {
+        let h = Hivemind::new();
+        let rows = board_rows(&h, Instant::now());
+        assert_eq!(hottest_cell(&h, &rows), None);
+    }
+
+    /// Equal heat must not make the focus flicker between two cells frame to
+    /// frame, which would be worse than no auto-focus at all.
+    #[test]
+    fn a_tie_resolves_to_the_same_cell_every_time() {
+        let mut h = Hivemind::new();
+        h.bump_grid_for_test(Source::TtMetal, Some(0));
+        h.bump_grid_for_test(Source::Ttnn, Some(0));
+        let rows = board_rows(&h, Instant::now());
+        let first = hottest_cell(&h, &rows);
+        for _ in 0..20 {
+            assert_eq!(hottest_cell(&h, &rows), first, "focus must be stable");
+        }
+    }
 
     #[test]
     fn board_lists_active_sources_with_host_and_device_columns() {
@@ -921,21 +1158,27 @@ mod tests {
         for (w, h) in [(120u16, 40u16), (60, 20), (20, 8), (12, 6), (5, 4)] {
             let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
             for hive in [&empty, &active] {
+                // Both focus modes at every size — the FOCUS pane only
+                // appears above a width threshold, so the narrow cases are
+                // what prove dropping it neither panics nor misaligns.
                 for unified in [false, true] {
-                    terminal
-                        .draw(|f| {
-                            let area = f.area();
-                            render_hivemind(
-                                f,
-                                area,
-                                hive,
-                                (0, 0),
-                                unified,
-                                Severity::Trace,
-                                &KittScanner::new(),
-                            );
-                        })
-                        .expect("draw must not panic");
+                    for auto_focus in [false, true] {
+                        terminal
+                            .draw(|f| {
+                                let area = f.area();
+                                render_hivemind(
+                                    f,
+                                    area,
+                                    hive,
+                                    (0, 0),
+                                    auto_focus,
+                                    unified,
+                                    Severity::Trace,
+                                    &KittScanner::new(),
+                                );
+                            })
+                            .expect("draw must not panic");
+                    }
                 }
             }
         }
