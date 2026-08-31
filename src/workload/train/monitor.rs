@@ -97,6 +97,15 @@ impl TrainState {
             // Resolved by the monitor, which has the pid needed to find the
             // file; nothing to record in the state itself.
             TrainEvent::ModelConfigFile(_) => {}
+            // A bar carries the step, its budget and the loss together.
+            TrainEvent::BarProgress {
+                step,
+                max_steps,
+                loss,
+            } => {
+                self.apply_event(TrainEvent::MaxSteps(max_steps));
+                self.apply_event(TrainEvent::Step { step, loss });
+            }
             TrainEvent::HarnessSummary {
                 max_steps,
                 batch_size,
@@ -183,7 +192,18 @@ impl Tailer {
                     // left for the next poll rather than mis-parsed.
                     if line.ends_with('\n') {
                         consumed += n as u64;
-                        out.push(line.trim_end().to_string());
+                        // A progress bar redraws itself with carriage
+                        // returns rather than newlines, so a "line" here can
+                        // hold many bar frames. Split them out and keep the
+                        // last, which is the bar's current state — otherwise
+                        // a tqdm-only trainer (ttml's SFTTrainer reports
+                        // loss *solely* as bar postfix) yields nothing until
+                        // the run ends.
+                        for seg in line.trim_end().split('\r') {
+                            if !seg.trim().is_empty() {
+                                out.push(seg.to_string());
+                            }
+                        }
                     } else {
                         break;
                     }
@@ -739,6 +759,29 @@ mod tests {
             Some("transformer.msgpack"),
             "the training yaml itself must have been read"
         );
+    }
+
+    /// A progress bar redraws with carriage returns, so many bar frames
+    /// arrive inside one newline-terminated chunk. Handing that chunk over
+    /// whole means the parser sees a single mangled line and the run's only
+    /// source of loss — `ttml`'s SFTTrainer reports it solely as bar postfix
+    /// — never lands.
+    #[test]
+    fn the_tailer_splits_carriage_return_progress_frames() {
+        let dir = std::env::temp_dir().join(format!("ttcr_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("train.log");
+        std::fs::write(
+            &path,
+            "SFTTrainer: 1/9 [00:01<00:09, 1.0it/s, loss=2.0]\r             SFTTrainer: 2/9 [00:02<00:08, 1.0it/s, loss=1.9]\r             SFTTrainer: 3/9 [00:03<00:07, 1.0it/s, loss=1.8]\n",
+        )
+        .unwrap();
+
+        let got = Tailer::new(path.clone()).read_new();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(got.len(), 3, "each bar frame is its own line, got {got:?}");
+        assert!(got[2].contains("loss=1.8"), "the newest frame must survive");
     }
 
     /// tt-train's rolling checkpoint is a directory of per-tensor files that

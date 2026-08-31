@@ -60,6 +60,15 @@ pub enum TrainEvent {
     /// A model-topology YAML named in the log rather than on the cmdline.
     /// The monitor resolves it; the parser only reports the name.
     ModelConfigFile(String),
+    /// A tqdm progress bar's current state. Several trainers report progress
+    /// *only* through a bar — `ttml`'s `SFTTrainer` sets `loss`/`lr` as
+    /// postfix and prints no per-step line at all — so without this a run
+    /// like that shows an attached process and an empty loss curve.
+    BarProgress {
+        step: u64,
+        max_steps: u64,
+        loss: f32,
+    },
     /// A Python harness's one-line run summary, carrying several fields at
     /// once. Expanded by the state into the individual events.
     HarnessSummary {
@@ -143,6 +152,52 @@ pub fn parse_train_line(line: &str) -> Option<TrainEvent> {
             },
             _ => TrainEvent::Step { step, loss },
         });
+    }
+
+    // A tqdm progress bar, e.g. from ttml's SFTTrainer:
+    //   "SFTTrainer:  12%|#1  | 30/250 [00:45<05:30, 1.50s/it, loss=1.2345, lr=3.00e-04]"
+    // The step and budget live in the bar's own "done/total" counter rather
+    // than in any printed field, and the loss arrives as a postfix.
+    if line.contains("it]") || line.contains("it/s") || line.contains("s/it") {
+        // "30/250 [" — anchored on the bracket so a ratio inside the
+        // postfix (or a percentage) can't be mistaken for it.
+        let counter = line.find(" [").and_then(|br| {
+            let head = &line[..br];
+            let slash = head.rfind('/')?;
+            let done: String = head[..slash]
+                .chars()
+                .rev()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            let total: String = head[slash + 1..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            Some((
+                done.chars().rev().collect::<String>().parse::<u64>().ok()?,
+                total.parse::<u64>().ok()?,
+            ))
+        });
+        // `loss=`, but not the tail of `train_loss=` / `val_loss=`, which
+        // are different quantities reported by other harnesses.
+        let loss = line.match_indices("loss=").find_map(|(i, _)| {
+            let prev = line[..i].chars().next_back();
+            if matches!(prev, Some(c) if c == '_') {
+                return None;
+            }
+            let v: String = line[i + "loss=".len()..]
+                .chars()
+                .take_while(|c| !c.is_whitespace() && *c != ',' && *c != ']')
+                .collect();
+            v.parse::<f32>().ok()
+        });
+        if let (Some((step, max_steps)), Some(loss)) = (counter, loss) {
+            return Some(TrainEvent::BarProgress {
+                step,
+                max_steps,
+                loss,
+            });
+        }
     }
 
     // A Python harness's own run summary. tt-tnt prints, on one line:
@@ -290,6 +345,86 @@ mod tests {
                 loss: 0.1337
             }),
         );
+    }
+
+    /// `ttml`'s `SFTTrainer` reports progress *only* through a tqdm bar —
+    /// `set_postfix({"loss", "lr"})`, no per-step print at all — so a real
+    /// run (tt-tnt's `scripts/train_tool_calling.py`) showed an attached
+    /// process and a permanently empty loss curve.
+    #[test]
+    fn parses_a_tqdm_progress_bar() {
+        // Shape built from sft_trainer.py: desc="SFTTrainer", postfix
+        // {"loss": "{:.4f}", "lr": "{:.2e}"}.
+        assert_eq!(
+            parse_train_line(
+                "SFTTrainer:  12%|#1        | 30/250 [00:45<05:30,  1.50s/it, loss=1.2345, lr=3.00e-04]"
+            ),
+            Some(TrainEvent::BarProgress {
+                step: 30,
+                max_steps: 250,
+                loss: 1.2345,
+            }),
+        );
+
+        // The eval variant adds val_loss; `loss` must still be the one read,
+        // not the tail of `val_loss=`.
+        assert_eq!(
+            parse_train_line(
+                "SFTTrainer:  40%|####      | 100/250 [02:30<03:45, 1.5s/it, loss=0.8000, val_loss=0.9500, lr=3.00e-04]"
+            ),
+            Some(TrainEvent::BarProgress {
+                step: 100,
+                max_steps: 250,
+                loss: 0.8,
+            }),
+        );
+
+        // Verbatim from a real tt-tnt LoRA run's log (SFTTrainer over 3000
+        // steps), block glyphs and all — reconstructing a format by hand is
+        // exactly how the per-step shapes came to be wrong.
+        assert_eq!(
+            parse_train_line(
+                "SFTTrainer: 100%|\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2589}| 2998/3000 [04:57<00:00, 10.63it/s, loss=1.5859, lr=2.00e-04]"
+            ),
+            Some(TrainEvent::BarProgress {
+                step: 2998,
+                max_steps: 3000,
+                loss: 1.5859,
+            }),
+        );
+        assert_eq!(
+            parse_train_line(
+                "SFTTrainer: 100%|\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}| 3000/3000 [04:58<00:00,  4.73it/s, loss=3.3750, val_loss=1.7712, lr=2.00e-04]"
+            ),
+            Some(TrainEvent::BarProgress {
+                step: 3000,
+                max_steps: 3000,
+                loss: 3.375,
+            }),
+        );
+
+        // A bar with no loss postfix yet carries no step data worth showing.
+        assert_eq!(
+            parse_train_line("SFTTrainer:   0%|          | 0/250 [00:00<?, ?it/s]"),
+            None
+        );
+    }
+
+    /// A bar's step, budget and loss must all reach the state, or the run
+    /// has no curve, no progress and no ETA.
+    #[test]
+    fn a_bar_populates_step_budget_and_loss() {
+        let mut st = crate::workload::train::monitor::TrainState::new();
+        st.apply_event(
+            parse_train_line(
+                "SFTTrainer:  12%|#1        | 30/250 [00:45<05:30,  1.50s/it, loss=1.2345, lr=3.00e-04]",
+            )
+            .expect("the bar must parse"),
+        );
+        assert_eq!(st.step, 30);
+        assert_eq!(st.max_steps, 250);
+        assert_eq!(st.loss, Some(1.2345));
+        assert_eq!(st.loss_history.len(), 1, "the curve must get a sample");
     }
 
     /// tt-tnt's shape. `ttml`'s trainer prints nothing per step, so a Python
