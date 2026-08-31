@@ -416,6 +416,7 @@ The screenshot above (4× Blackhole, live) shows all three at once: a **vLLM** e
 - **Classification that sees through interpreters.** A model run as `python -m pytest …` with no framework name in its argv is still identified — by cmdline, by its loaded TT libraries (`/proc/<pid>/maps`), or, failing that, as a generic `workload` holding the device (never a bare "unknown").
 - **Point it at a target.** `/watch <path>` tails a log file; `/watch pid <n>` attaches to a process; `/wrap <cmd…>` runs and captures a command (e.g. `/wrap ttl export mykernel.py` to watch emitted C++).
 - **Controls.** `f` toggles the unified feed (all sources) vs. the selected cell · `s` raises the severity floor · arrows / `hjk` move the cursor · `l` legend · `!` explain.
+- **It explains itself.** A FOCUS pane on the right tracks the busiest cell automatically and describes what's behind it — heat, event count and rate, worst severity, age, and the top coalesced rows for that source and device. Arrows pin it to a cell you choose; `Enter` hands it back to auto.
 - **Zero idle cost, safe by default.** Collectors spawn only while the mode is active and stop on exit; everything is read-only — it never sets a debug env var or touches a device buffer, so it's safe to point at a box mid-training.
 - The red **KITT scanner** along the bottom idles dim and diffuse, then slows, focuses, and brightens as total activity climbs — a peripheral pulse for "is anything happening?"
 

@@ -88,7 +88,8 @@ tt-toplike --mode hivemind    # or press ~ in any mode
 - Built for **finding signs of life** when the interesting work isn't logging where you're watching — silent kernel compiles, a model holding the device, or serving throughput buried in docker DEBUG logs
 - Correlates five passive sources — `/dev/kmsg` driver messages, tt-metal compile-cache churn, `/proc` process + device-fd activity, log tails (incl. `docker logs`), and the tt-metal Inspector — into a **source × device** heat board + a **coalesced feed**: repeats fold into one row with a live count · rate · sparkline (e.g. `metal · ncrisc.elf ×136`, `vLLM · holding /dev/tenstorrent/#`, `vLLM · Avg generation throughput …`)
 - Identifies interpreter-hosted workloads by cmdline **and loaded TT libraries** (`/proc/<pid>/maps`), so a `python -m pytest …` shows as `metal`/`ttnn`, never a bare "unknown"
-- Point it at a target: `/watch <path>`, `/watch pid <n>`, `/wrap <cmd…>`. `f` unified feed · `s` severity floor · arrows/`hjk` cursor · `l` legend
+- A **FOCUS pane** on the right names the busiest cell and describes it — heat, event count, rate, worst severity, age, and its top coalesced rows. It tracks the hottest cell **automatically**, so the screen explains itself without being driven; arrows/`hjk` pin it to a cell of your choosing and `Enter` hands it back (pane hidden below ~96 columns)
+- Point it at a target: `/watch <path>`, `/watch pid <n>`, `/wrap <cmd…>`. `f` unified feed · `s` severity floor · `l` legend
 - The red **KITT scanner** along the bottom slows, focuses, and brightens as total activity climbs
 - Safe: collectors spawn only while the mode is active and stop on exit; never sets a debug env var or reads a device buffer
 
