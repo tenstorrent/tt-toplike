@@ -10,7 +10,7 @@
 //!
 //! | Channel | Encodes |
 //! |---|---|
-//! | node/mountain hue magenta→teal | loss magnitude |
+//! | node/mountain hue red→cyan | loss magnitude (per-cell gradient in the river) |
 //! | amber sweep left→right | forward pass |
 //! | violet sweep right→left | backward pass / gradients |
 //! | per-column river hue | the run's history (each column keeps its own loss's hue) |
@@ -33,11 +33,26 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::cell::Cell as StdCell;
 
-/// Loss → hue: 158° (teal, converged) … 325° (magenta, chaotic).
+/// Loss → hue: 186° (deep cyan, converged) … 356° (red, chaotic).
+///
+/// The ramp runs cyan → blue → violet → magenta → pink → red, so the range
+/// spans a wider arc than the original teal→magenta and a converged run
+/// settles into deep cyan rather than a mid teal. Still monotonic in loss —
+/// the colour remains readable as a value, not decoration.
 pub fn loss_hue(loss: f32) -> f32 {
     let t = ((loss - 0.30) / 4.3).clamp(0.0, 1.0);
-    158.0 + t * 167.0
+    186.0 + t * 170.0
 }
+
+/// How far a mountain's hue drifts as it undulates, in degrees. Small
+/// enough that the colour still reads as its loss value — the wobble is
+/// meant to make the range feel alive, not to blur what it encodes.
+const MOUNTAIN_HUE_WOBBLE: f32 = 14.0;
+
+/// Extra hue the crest of a column carries over its base, in degrees. This
+/// is what makes each column a gradient rather than a flat block: the base
+/// sits deep and dark, the crest lifts toward the warm end.
+const MOUNTAIN_HUE_LIFT: f32 = 26.0;
 
 const FWD_HUE: f32 = 42.0;
 const BWD_HUE: f32 = 268.0;
@@ -964,16 +979,41 @@ impl TrainView {
             let norm = ((loss - min_loss) / range).clamp(0.0, 1.0);
             let norm = MOUNTAIN_FLOOR + norm * (1.0 - MOUNTAIN_FLOOR);
             let eighths = (norm * total_eighths as f32).round() as usize;
-            let color = hsv_to_rgb(loss_hue(loss), 0.8, 0.75);
+            let base_hue = loss_hue(loss);
             let full_bars = eighths / 8;
             let partial = eighths % 8;
+            // Slow drift, in wall-clock seconds so the undulation reads the
+            // same at any redraw rate.
+            let t = self.frame as f32 / crate::animation::train_sky::ANIM_FPS;
+
+            // Colour for a cell at `row_from_bottom` within this column: the
+            // base is deep and saturated, the crest brighter and slightly
+            // warmer, with a slow wobble across x and height so the whole
+            // range undulates instead of standing still.
+            let cell_color = |row_from_bottom: usize, height: usize| {
+                let depth = if height == 0 {
+                    0.0
+                } else {
+                    row_from_bottom as f32 / height as f32
+                };
+                let wob = (x as f32 * 0.055 + t * 0.4 + depth * 1.9).sin();
+                let hue = (base_hue + depth * MOUNTAIN_HUE_LIFT + wob * MOUNTAIN_HUE_WOBBLE)
+                    .rem_euclid(360.0);
+                // Deep and near-fully saturated at the base, easing off as it
+                // rises so the crest glows rather than turning to poster ink.
+                let sat = (0.95 - depth * 0.28).clamp(0.35, 1.0);
+                let val = (0.26 + depth * 0.58 + wob * 0.05).clamp(0.08, 1.0);
+                hsv_to_rgb(hue, sat, val)
+            };
 
             for row_from_bottom in 0..sky_rows {
                 let y = river_bottom - 1 - row_from_bottom;
                 if row_from_bottom < full_bars {
-                    self.put(buf, x, y, '█', color, false);
+                    let c = cell_color(row_from_bottom, full_bars);
+                    self.put(buf, x, y, '█', c, false);
                 } else if row_from_bottom == full_bars && partial > 0 {
-                    self.put(buf, x, y, bars[partial - 1], color, false);
+                    let c = cell_color(row_from_bottom, full_bars.max(1));
+                    self.put(buf, x, y, bars[partial - 1], c, false);
                 } else {
                     // Sky above the mountain line — `rel_y` runs 0 at the
                     // top of the band, 1 at the mountain line, so it's the
@@ -1149,14 +1189,25 @@ mod tests {
     }
 
     #[test]
-    fn loss_hue_runs_magenta_when_high_to_teal_when_converged() {
+    fn loss_hue_runs_red_when_high_to_deep_cyan_when_converged() {
         let hot = loss_hue(4.5);
         let cool = loss_hue(0.35);
-        assert!(hot > 300.0, "high loss should be magenta-ish, got {hot}");
         assert!(
-            (150.0..180.0).contains(&cool),
-            "converged loss should be teal-ish, got {cool}"
+            (330.0..=360.0).contains(&hot),
+            "high loss should be red/pink, got {hot}"
         );
+        assert!(
+            (180.0..200.0).contains(&cool),
+            "converged loss should be deep cyan, got {cool}"
+        );
+        // Monotonic in loss, so the colour still reads as a value rather
+        // than decoration — the whole ramp is meaningless otherwise.
+        let mut prev = loss_hue(0.0);
+        for i in 1..=40 {
+            let h = loss_hue(i as f32 * 0.12);
+            assert!(h >= prev, "hue must not go backwards as loss rises");
+            prev = h;
+        }
         // Clamped outside the observed range rather than wrapping around.
         assert!((loss_hue(99.0) - loss_hue(4.6)).abs() < 1.0);
         assert!((loss_hue(-1.0) - loss_hue(0.30)).abs() < 1.0);
@@ -1402,6 +1453,88 @@ mod tests {
     }
 
     #[test]
+    /// The river should read as a gradient — deep, dark bases lifting to
+    /// brighter crests, across a wide hue arc — rather than columns of flat
+    /// colour. Asserted on the rendered cells, since the interesting part is
+    /// what a column looks like top to bottom, not what `loss_hue` returns.
+    #[test]
+    fn mountains_render_as_a_gradient_not_flat_columns() {
+        use crate::workload::train::{LogSource, TrainEvent, TrainProcess};
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = TrainState::new();
+        st.proc = Some(TrainProcess {
+            pid: 1,
+            binary: "nano_gpt".into(),
+            config_path: None,
+        });
+        st.log = Some(LogSource::File("/tmp/x.log".into()));
+        // A real descent, so the window spans a wide loss range.
+        for i in 0..200u64 {
+            st.apply_event(TrainEvent::Step {
+                step: i + 1,
+                loss: 4.6 - i as f32 * 0.02,
+            });
+        }
+
+        let v = TrainView::new(120, 40);
+        let lines = v.render(&st, &b);
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|sp| sp.content.to_string()).collect())
+            .collect();
+        let top = texts.iter().position(|t| t.contains("LOSS  ·")).unwrap();
+        let bot = texts
+            .iter()
+            .position(|t| t.contains(" low") && t.contains("high "))
+            .unwrap_or(texts.len());
+
+        // Collect (row, colour) for every mountain glyph.
+        let mut cells: Vec<(usize, (u8, u8, u8))> = Vec::new();
+        for (ri, line) in lines[top + 1..bot].iter().enumerate() {
+            for sp in &line.spans {
+                if sp.content.chars().any(|c| "▁▂▃▄▅▆▇█".contains(c)) {
+                    if let ratatui::style::Color::Rgb(r, g, bb) = sp.style.fg.unwrap() {
+                        cells.push((ri, (r, g, bb)));
+                    }
+                }
+            }
+        }
+        assert!(!cells.is_empty(), "the river must draw mountains");
+
+        let distinct: std::collections::HashSet<_> = cells.iter().map(|(_, c)| *c).collect();
+        assert!(
+            distinct.len() >= 12,
+            "a gradient needs many colours, got {}",
+            distinct.len()
+        );
+
+        // Brightness must rise with height: compare the mean luminance of
+        // the top third of the band against the bottom third.
+        let rows: Vec<usize> = cells.iter().map(|(r, _)| *r).collect();
+        let (lo, hi) = (*rows.iter().min().unwrap(), *rows.iter().max().unwrap());
+        let split = lo + (hi - lo) / 3;
+        // HSV *value* (max channel), not weighted luminance: luminance
+        // varies with hue, so a flat-brightness column whose hue drifts
+        // still shows a luminance difference and the assertion passes
+        // against a gradient that isn't there. Checked by mutation.
+        let lum = |c: (u8, u8, u8)| c.0.max(c.1).max(c.2) as f32;
+        let mean = |f: &dyn Fn(usize) -> bool| {
+            let v: Vec<f32> = cells
+                .iter()
+                .filter(|(r, _)| f(*r))
+                .map(|(_, c)| lum(*c))
+                .collect();
+            v.iter().sum::<f32>() / v.len().max(1) as f32
+        };
+        let high = mean(&|r| r <= split);
+        let low = mean(&|r| r > hi - (hi - lo) / 3);
+        assert!(
+            high > low + 12.0,
+            "crests must be materially brighter than bases: crest {high:.1} vs base {low:.1}"
+        );
+    }
+
     /// Mountain height is the loss's position within the window's own
     /// min..max, so a window whose losses are all close together normalises
     /// to zero everywhere and the range vanishes entirely — leaving aurora
