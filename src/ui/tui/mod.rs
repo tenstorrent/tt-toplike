@@ -6209,15 +6209,25 @@ fn build_stats_sidebar_rows(
     //   1. SMBUS present + ENABLED_ETH > 0  → use enabled count (accurate)
     //   2. SMBUS present + ENABLED_ETH = 0  → show live/? (transient or no ports)
     //   3. SMBUS absent entirely             → fall back to arch max (no data yet)
-    let eth_live_mask = smbus.and_then(|s| s.eth_live_status).unwrap_or(0);
+    // `None` here means the liveness mask was never reported — which is NOT
+    // the same fact as "no links are live", and must not render as one. A
+    // tt-smi/firmware build that omits ETH_LIVE_STATUS while still reporting
+    // ENABLED_ETH used to produce a confident `0/12 live` under twelve dark
+    // dots on a card whose links were all up. The denominator has always
+    // drawn this distinction (`0/?` when ENABLED_ETH is missing); the
+    // numerator now draws it too.
+    let eth_live = smbus.and_then(|s| s.eth_live_status);
+    let eth_live_mask = eth_live.unwrap_or(0);
     let eth_enabled_mask = smbus.and_then(|s| s.enabled_eth).unwrap_or(0);
     // Count only ports that are both enabled and live to prevent impossible
     // displays like "15/14 live" if ETH_LIVE_STATUS has bits outside ENABLED_ETH.
-    let eth_live_count = if eth_enabled_mask > 0 {
-        (eth_live_mask & eth_enabled_mask as u64).count_ones()
-    } else {
-        eth_live_mask.count_ones()
-    };
+    let eth_live_count: Option<u32> = eth_live.map(|live| {
+        if eth_enabled_mask > 0 {
+            (live & eth_enabled_mask as u64).count_ones()
+        } else {
+            live.count_ones()
+        }
+    });
     let eth_total: Option<u32> = if eth_enabled_mask > 0 {
         Some(eth_enabled_mask.count_ones())
     } else if smbus.is_some() {
@@ -6233,16 +6243,21 @@ fn build_stats_sidebar_rows(
     let eth_total_display = eth_total
         .map(|t| t.to_string())
         .unwrap_or_else(|| "?".to_string());
-    let eth_color = match eth_total {
-        Some(t) if eth_live_count == t && t > 0 => Color::Rgb(79, 209, 197), // teal — all live
-        _ if eth_live_count > 0 => Color::Rgb(244, 196, 113),                // yellow — partial
-        _ => Color::Rgb(96, 125, 139), // muted gray — none live
+    let eth_live_display = eth_live_count
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let eth_color = match (eth_live_count, eth_total) {
+        (Some(c), Some(t)) if c == t && t > 0 => Color::Rgb(79, 209, 197), // teal — all live
+        (Some(c), _) if c > 0 => Color::Rgb(244, 196, 113),                // yellow — partial
+        // Muted gray covers both "measured zero" and "not measured" — an
+        // unknown reading must never be louder than a real one.
+        _ => Color::Rgb(96, 125, 139),
     };
     if compact {
         stat_lines.push(Line::from(vec![
             Span::styled("E ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                format!("{}/{}", eth_live_count, eth_total_display),
+                format!("{}/{}", eth_live_display, eth_total_display),
                 Style::default().fg(eth_color),
             ),
         ]));
@@ -6252,11 +6267,18 @@ fn build_stats_sidebar_rows(
         // the count text leaves free instead of a fixed cap. A fixed cap of 16
         // overflowed: 8 (label) + 12 dots + " 12/12 live" (11) = 31 columns in
         // a 30-column interior, which cost the "e" of "live".
-        let eth_count_txt = format!(" {}/{} live", eth_live_count, eth_total_display);
-        let (dots_shown, eth_suffix) = eth_dot_budget(
-            eth_total,
-            unicode_width::UnicodeWidthStr::width(eth_count_txt.as_str()),
-        );
+        let eth_count_txt = format!(" {}/{} live", eth_live_display, eth_total_display);
+        // A dot's entire meaning is live-or-not, so with no liveness mask there
+        // is nothing to draw them from: drawing the enabled ports as dark dots
+        // would state "these are down" on no evidence.
+        let (dots_shown, eth_suffix) = if eth_live_count.is_none() {
+            (0, String::new())
+        } else {
+            eth_dot_budget(
+                eth_total,
+                unicode_width::UnicodeWidthStr::width(eth_count_txt.as_str()),
+            )
+        };
         // Dot map: iterate enabled bits when available, else live bits.
         let enabled_bits: Vec<u32> = if eth_enabled_mask > 0 {
             (0..32)
@@ -6286,7 +6308,7 @@ fn build_stats_sidebar_rows(
                 Style::default().fg(eth_color),
             ),
             Span::styled(
-                format!(" {}/{} live", eth_live_count, eth_total_display),
+                format!(" {}/{} live", eth_live_display, eth_total_display),
                 Style::default().fg(Color::White),
             ),
         ]));
@@ -9415,6 +9437,12 @@ mod stats_sidebar_tests {
         assert!(rows.len() <= INTERIOR_H);
     }
 
+    /// The numerators here read `?`, not `0`: with no SMBUS block (or none
+    /// carrying ETH_LIVE_STATUS) the liveness of those ports is simply not
+    /// measured, and this row must not report a measurement it never made —
+    /// see `eth_row_says_unknown_not_zero_when_liveness_is_not_reported`. What
+    /// this test is actually about, the *denominator's* fallback, is unchanged.
+    ///
     /// The ETH row's "SMBUS absent entirely → architectural maximum" fallback
     /// must be reachable.
     ///
@@ -9444,7 +9472,7 @@ mod stats_sidebar_tests {
             .map(|s| s.content.as_ref())
             .collect::<String>();
         assert!(
-            eth.contains("0/24 live"),
+            eth.contains("?/24 live"),
             "no SMBUS → architectural max denominator; got {eth:?}"
         );
 
@@ -9458,8 +9486,64 @@ mod stats_sidebar_tests {
             .map(|s| s.content.as_ref())
             .collect::<String>();
         assert!(
-            eth.contains("0/? live"),
+            eth.contains("?/? live"),
             "SMBUS present but no enabled mask → unknown total; got {eth:?}"
+        );
+    }
+
+    /// An unreported liveness mask must read as unknown, not as "all links
+    /// down". The denominator already distinguishes these (`0/?` when
+    /// ENABLED_ETH is missing); the numerator did not, so a firmware or tt-smi
+    /// build that omits ETH_LIVE_STATUS while still reporting ENABLED_ETH
+    /// rendered a confident `0/12 live` under twelve dark dots — on a card
+    /// whose links were all up.
+    ///
+    /// Reproduced end-to-end before this test existed: a real `tt-smi -s`
+    /// snapshot off this box with only ETH_LIVE_STATUS deleted, served back
+    /// through `--tt-smi-path`, printed exactly `ETH ············ 0/12 live`.
+    #[test]
+    fn eth_row_says_unknown_not_zero_when_liveness_is_not_reported() {
+        let device = Device::new(0, "p300c".into(), "0000:01:00.0".into(), "N/A".into());
+
+        let mut unknown = SmbusTelemetry::new();
+        unknown.enabled_eth = Some(0x3edf); // 12 ports provisioned
+        unknown.eth_live_status = None; // ...but liveness not reported
+        let row = |s: &SmbusTelemetry| {
+            build_stats_sidebar_rows(&device, None, Some(s), None, false)[1]
+                .spans
+                .iter()
+                .map(|sp| sp.content.as_ref())
+                .collect::<String>()
+        };
+
+        let eth = row(&unknown);
+        assert!(
+            eth.contains("?/12 live"),
+            "unreported liveness must read as unknown against a known total; got {eth:?}"
+        );
+        assert!(
+            !eth.contains("0/12"),
+            "must not claim a measurement of zero it never made; got {eth:?}"
+        );
+        assert!(
+            !eth.contains('\u{00b7}') && !eth.contains('\u{25cf}'),
+            "a dot means live-or-not; with no liveness data there is nothing \
+             to draw dots from, so none may be drawn; got {eth:?}"
+        );
+
+        // The discriminating half: a real measurement of zero is a genuine
+        // all-links-down alarm and must stay exactly as loud as it was.
+        let mut all_down = SmbusTelemetry::new();
+        all_down.enabled_eth = Some(0x3edf);
+        all_down.eth_live_status = Some(0);
+        let eth = row(&all_down);
+        assert!(
+            eth.contains("0/12 live"),
+            "a measured zero is a real fault and must still read 0/12; got {eth:?}"
+        );
+        assert!(
+            eth.contains('\u{00b7}'),
+            "measured-down ports still draw their dark dots; got {eth:?}"
         );
     }
 
