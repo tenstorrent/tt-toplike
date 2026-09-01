@@ -31,6 +31,8 @@ pub mod serving_panels;
 pub mod snake;
 pub mod starfield;
 pub mod topology;
+pub mod train_sky;
+pub mod train_view;
 
 pub use arcade::ArcadeVisualization;
 pub use baseline::AdaptiveBaseline;
@@ -46,3 +48,5 @@ pub use serving_panels::{exhaust_count, format_chip, lane_segments, sparkline, C
 pub use snake::{Behavior, Snake, SnakeWorld};
 pub use starfield::{DataStream, HardwareStarfield, MemoryPlanet, Star};
 pub use topology::{sync_score, BoardTopology};
+pub use train_sky::{sky_cell, star_hash, SkyCell, STAR_THRESHOLD};
+pub use train_view::TrainView;

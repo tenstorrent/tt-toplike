@@ -767,7 +767,7 @@
 ·∘○◉         ●◉○∘·∘○◉●
 ◉●∘·  ·∘○◉●◉○∘·  ·∘○◉</div>
 
-      <p class="hero-eyebrow">Tenstorrent Hardware Monitor · v0.10.3 · Rust</p>
+      <p class="hero-eyebrow">Tenstorrent Hardware Monitor · v0.13.2 · Rust</p>
 
       <h1 class="hero-title">
         Watch<br>
@@ -937,6 +937,16 @@
         power (vertical) and current (horizontal). Its color is temperature.
         It leaves a trail of recent positions. It's your avatar inside the chip —
         moving through DDR, L2, L1, and Tensix as the workload climbs.
+      </p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">△</div>
+      <p class="feature-title">Training</p>
+      <p class="feature-desc">
+        Watch a model learn. tt-toplike finds a running tt-train job on its
+        own and draws it as the network it is: tokens streaming in, gradients
+        washing back, and a range of loss mountains under an aurora that
+        widens as the model converges.
       </p>
     </div>
   </div>
@@ -1220,6 +1230,55 @@
       <img class="mode-gif" src="assets/tt-toplike-hivemindsweeper.gif"
            alt="HivemindSweeper demo — vLLM serving throughput, device-holder heartbeats, and tt-metal kernel compiles coalesced into one source × device feed on 4× Blackhole"
            loading="lazy">
+    </div>
+
+    <hr class="mode-divider">
+
+    <!-- Training -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">t · training</span>
+        <p class="mode-title">Training</p>
+        <p class="mode-desc">
+          Watch a model learn. No flags, no config, no target to name — it finds a
+          live <a href="https://github.com/tenstorrent/tt-metal/tree/main/tt-train">tt-train</a>
+          run, resolves <code>/proc/&lt;pid&gt;/fd/1</code> to the log that process is
+          already writing, and starts tailing it. The model is drawn as the network
+          it is — one column per transformer block, one node per attention head —
+          with amber sweeps for the forward pass and violet for backward. Below,
+          a loss <em>mountain range</em> descends as the run converges, each column
+          keeping its own loss's hue so the range doubles as a run-history timeline,
+          under an aurora-and-starfield sky that widens as the loss drops. A comet
+          crosses that sky on every checkpoint save.
+        </p>
+        <p class="mode-desc">
+          Deliberately honest about its limits: it draws only what a run actually
+          emits, so gradient norms and MFU — which exist only in a run-end summary —
+          are simply not drawn. If the trainer's stdout went to a pipe or a tty
+          rather than a file, the per-step stream is genuinely unrecoverable, and the
+          view says so instead of inventing a curve.
+        </p>
+        <p class="mode-desc">
+          The clip above is one unedited take: a real LoRA fine-tune of a 123.3M-parameter
+          model on 2× p300c Blackhole, 3,000 steps, with the trainer on the left and
+          <code>tt-toplike --mode training</code> on the right. The view resolved the run's
+          shape from its log alone — 8 blocks × 16 heads, d_model 1024, vocab 32000,
+          seq 512, batch 8 — and derives <strong>42,279 tok/s</strong> from it. The hue ramp
+          is scaled to <code>ln(vocab_size)</code>, the cross-entropy of a uniform
+          distribution and so the worst score a run can post; against a fixed anchor the
+          entire early phase, where loss falls fastest, collapsed into one flat red.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>t</kbd> from any view</span>
+          <span class="mode-hint"><code>--mode training</code> to launch into it</span>
+          <span class="mode-hint"><kbd>Esc</kbd> back</span>
+          <span class="mode-hint"><kbd>l</kbd> legend</span>
+        </div>
+      </div>
+      <video class="mode-gif" src="assets/tt-toplike-training-lora.mp4"
+             poster="assets/tt-toplike-training-lora.png"
+             autoplay loop muted playsinline
+             aria-label="Training view beside a live LoRA fine-tune on Blackhole: the trainer streams on the left while the right pane shows the resolved model card, live tokens per second, and a loss mountain range shaded pink through violet to deep blue"></video>
     </div>
 
     <hr class="mode-divider">

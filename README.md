@@ -356,6 +356,8 @@ tt-toplike --devices 0,2
 | `d` | Jump directly to Defrag |
 | `g` | Jump directly to Grid (Insights table) |
 | `i` | Open the Inference Server Monitor from **any** view; `i` while in it jumps to Insights (a quick back-and-forth), `Esc` backs out to where you came from. Also sits at the tail of the `v` cycle. |
+| `t` | Open the Training view from **any** view — auto-attaches to a running tt-train process with no further input; `Esc` backs out to where you came from. Deliberately excluded from the `v` cycle, like `i`. Scriptable as `--mode training`. |
+| `R` | Toggle the unattended rotation — cycles **every** view, including the key-only ones (`i`, `~`, `t`) that `v` skips. 30s each, 45s on arcade, and 10s on training / the inference monitor when there's no run or server to show. Also `--rotate` at launch. |
 | `b` | Cycle backend (live switching): Hybrid → Sysfs → JSON → Mock → Host → Hybrid. Luwen and Remote are launch-only — the cycle never steps onto them. |
 | `/` | Command bar — type `/mode defrag`, `/fps 30`, `/theme grayskull`, `/quit`, etc. |
 | `l` | Toggle legend overlay (what each signal means in the current mode) |
@@ -414,8 +416,31 @@ The screenshot above (4× Blackhole, live) shows all three at once: a **vLLM** e
 - **Classification that sees through interpreters.** A model run as `python -m pytest …` with no framework name in its argv is still identified — by cmdline, by its loaded TT libraries (`/proc/<pid>/maps`), or, failing that, as a generic `workload` holding the device (never a bare "unknown").
 - **Point it at a target.** `/watch <path>` tails a log file; `/watch pid <n>` attaches to a process; `/wrap <cmd…>` runs and captures a command (e.g. `/wrap ttl export mykernel.py` to watch emitted C++).
 - **Controls.** `f` toggles the unified feed (all sources) vs. the selected cell · `s` raises the severity floor · arrows / `hjk` move the cursor · `l` legend · `!` explain.
+- **It explains itself.** A FOCUS pane on the right tracks the busiest cell automatically and describes what's behind it — heat, event count and rate, worst severity, age, and the top coalesced rows for that source and device. Arrows pin it to a cell you choose; `Enter` hands it back to auto.
 - **Zero idle cost, safe by default.** Collectors spawn only while the mode is active and stop on exit; everything is read-only — it never sets a debug env var or touches a device buffer, so it's safe to point at a box mid-training.
 - The red **KITT scanner** along the bottom idles dim and diffuse, then slows, focuses, and brightens as total activity climbs — a peripheral pulse for "is anything happening?"
+
+### Training — watch a model learn (`t`)
+
+<img src="assets/tt-toplike-training-lora.png" alt="Training view beside a live LoRA fine-tune on Blackhole: the left pane streams the trainer's tqdm progress, the right pane shows the resolved model card, live tok/s and step/s, and a loss mountain range shaded pink through violet to deep blue" width="100%" />
+
+*A real LoRA fine-tune of `tt-tnt-1024` (123.3M parameters, 48 of 114 trainable) on 2× p300c Blackhole — 3,000 steps, recorded end to end. Left pane is the trainer; right pane is `tt-toplike --mode training`, attached with no flags. It resolved the run's shape from the log alone (8 blocks × 16 heads, d_model 1024, vocab 32000, seq 512, batch 8) and derives **42,279 tok/s** from it. The mountains span pink through violet to deep blue because the hue ramp is scaled to `ln(vocab_size)` — 10.373 nats for a 32k vocabulary, what a model that has learned nothing reports — rather than a fixed anchor.*
+
+<img src="assets/tt-toplike-training-lora-early.png" alt="The same run five steps in: five loss samples drawn as broad blocks near the top of the range, while the left pane still narrates warm start and kernel compilation" width="100%" />
+
+*The same run at step 5 of 3,000. Five samples are drawn as broad blocks rather than a fabricated curve, and the loss sits at 6.97 — close to the 10.373 an untrained model over this vocabulary would report, which is why the early phase reads pink rather than saturating at the top of the scale. The left pane is still narrating warm start and kernel compilation; the board is busy before a single step is taken.*
+
+<img src="assets/tt-toplike-training.gif" alt="An earlier nano_gpt run on 4x Blackhole, showing checkpoint comets crossing the sky as each save lands" width="100%" />
+
+*A different run — char-level NanoLlama3 under tt-train's own `nano_gpt` — kept because it shows something the LoRA take above does not: a mint comet crossing the sky on every checkpoint save, with `ckpt @` advancing beneath it.*
+
+<sub>The LoRA footage was recorded on a QuietBox with 2× p300c from `tt-tnt`'s own `demo/demos.yaml`, one take, one seed. Chips 2 and 3 stay near idle throughout because `gozer` leased a single board — the contrast is deliberate, and it is what makes the causation visible rather than asserted.</sub>
+
+Press `t` for the **Training view** — no flags, no config, no target to name. It scans running processes for a live [tt-train](https://github.com/tenstorrent/tt-metal/tree/main/tt-train) example (`nano_gpt`, `mnist_mlp`, `linear_regression`), resolves `/proc/<pid>/fd/1` to find that process's own log file, and starts tailing it — attaching within a couple of seconds if a run is already in progress.
+
+The model is drawn as the network it is — one column per transformer block, one node per attention head — fed by token particles, with amber sweeps for the forward pass and violet sweeps for backward/gradients. Beneath it, a loss "mountain range" descends as the model converges, colored magenta (high loss) through teal (low loss), with each column keeping its own loss's hue so the range doubles as a run-history timeline. The mountains sit under a twinkling aurora-and-starfield nightscape that opens up on the right as the loss drops — the negative space is itself a progress signal — and a comet streaks across the sky on every checkpoint save.
+
+**Honest about what it can't see.** tt-train only prints step number, loss, step time, and cache-entry count to stdout — no gradient norms, no MFU, no throughput counter live (those exist only in a run-end JSON summary). The view derives tokens/sec and ETA from what it can actually read, and shows nothing it can't source. If the trainer's stdout wasn't redirected to a file at launch (i.e. it's a pipe or a tty), the per-step stream is genuinely unreadable after the fact — that's an OS property, not a gap — and the view says so plainly instead of drawing a fake curve; relaunching with `> train.log` fixes it. Checkpoint saves are detected by mtime on the run's rolling checkpoint file, not by parsing a save-confirmation line (tt-train doesn't print one).
 
 ### Gallery — recorded sessions
 
@@ -466,11 +491,31 @@ Particle density reflects real power differentials (e.g. 12W vs 18W across 4 Bla
 
 | Dependency | Purpose | How to get |
 |-----------|---------|-----------|
-| `tt-smi` | Required for JSON backend | `apt install tt-smi` (same repo) |
+| `tt-smi` | Required for JSON backend; **≥ 6.3.0** for per-GDDR-channel detail | `apt install tt-smi` (same repo) |
 | `tenstorrent-dkms` | Required for sysfs hwmon driver | `apt install tenstorrent-dkms` (same repo) |
 | `tt-toplike-app` | Optional native window app | `apt install tt-toplike-app` (same repo) |
 
 The package declares `tt-smi` and `tenstorrent-dkms` as `Recommends`, so an `apt install tt-toplike` pulls them in by default (apt installs `Recommends` unless configured otherwise). With the standalone `.deb`, install them separately.
+
+### tt-smi version floor for per-channel GDDR
+
+Per-channel GDDR detail — the `✗` on a BIST-failed channel, dimmed harvested
+channels, per-channel temperatures and directional ECC counters — comes from a
+`gddr_telemetry` block that **tt-smi only emits from 6.3.0 onward**. On an older
+tt-smi that block is absent, and every consumer falls back to the coarser packed
+registers it used before (whole-board temperature aggregates, one training
+nibble per channel *pair*).
+
+Worth stating explicitly because the fallback is deliberately silent: nothing
+warns, no row disappears, and the display looks entirely healthy — it is simply
+answering at pair resolution. If channel-level states never appear on hardware
+you expect them on, check `tt-smi --version` before looking anywhere else.
+
+    tt-smi --version    # 6.3.0 or newer for per-channel GDDR
+    tt-smi -s | grep -q gddr_telemetry && echo present || echo absent
+
+`gddr_telemetry` sits beside `smbus_telem` under each `device_info[]` entry, not
+inside it.
 
 ## Building .deb Packages
 

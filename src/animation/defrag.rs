@@ -67,6 +67,41 @@ const POWER_IDLE_W: f32 = 8.0;
 /// still sits in the Running phase because aiclk is always ≥200).
 const LOAD_SURGE_FACTOR: f32 = 1.5;
 
+/// Fraction of the board's own firmware-reported TDP limit above which a device
+/// counts as working even with no observed rest to compare against. On a p300c
+/// (125 W) this is ~37 W, against a measured 13–16 W idle — comfortably clear of
+/// rest, and far below the ~60–77 W of real inference.
+const RUN_TDP_FRACTION: f32 = 0.30;
+
+/// Whether a device's power says it is doing work, rather than merely powered on.
+///
+/// The gate this joins used to be `aiclk >= 200 && power > POWER_IDLE_W`, which
+/// silently assumed an architecture whose idle clock is ~0. Blackhole idles at
+/// ~800 MHz and 13–16 W, so both halves were permanently true and every chip on
+/// a fully idle box reported `RUN` — reported in review, reproducible on `main`.
+/// The surrounding code already knew this (see `LOAD_SURGE_FACTOR` and
+/// `running_since`, both of which exist to stop the resulting phantom-Running
+/// state from cascading into an EVICT loop); those were treatments of the
+/// symptom, and this is the cause.
+///
+/// Two independent pieces of evidence, because neither covers the other's case:
+///
+///  * **Against the chip's own observed rest** — the codebase's standing answer
+///    to absolute thresholds (`AdaptiveBaseline`, Phase 5): a 10% rise means the
+///    same thing on a 15 W board and a 300 W one. Needs rest to have been seen.
+///  * **Against the board's firmware-reported TDP limit** — for a monitor
+///    started *during* a workload, where there is no observed rest and the
+///    learned baseline would be the loaded power itself. This is a real number
+///    off the hardware (`limits.tdp_limit`), not a per-arch constant to drift.
+///
+/// `idle_power == 0.0` means "no rest observed yet", never "rest is 0 W".
+fn shows_load(power_ema: f32, idle_power: f32, tdp_limit: Option<f32>) -> bool {
+    if idle_power > 0.0 && power_ema > idle_power * LOAD_SURGE_FACTOR {
+        return true;
+    }
+    tdp_limit.is_some_and(|tdp| tdp > 0.0 && power_ema > tdp * RUN_TDP_FRACTION)
+}
+
 // EVICT is triggered by real hardware events, not a frame timer.
 // See Phase transition logic in update().
 
@@ -298,10 +333,24 @@ impl DefragVis {
                 .unwrap_or(0);
             let sysfs_aiclk = telem.and_then(|t| t.aiclk).unwrap_or(0);
             let aiclk = smbus_aiclk.max(sysfs_aiclk);
+            // The board's own reported power ceiling, used by `shows_load` as
+            // the fallback when no rest has been observed. `None` on backends
+            // that don't report limits, which just leaves the learned baseline.
+            let tdp_limit = device.limits.as_ref().and_then(|l| l.tdp_limit);
             let hb = telem.and_then(|t| t.heartbeat).unwrap_or(0);
 
             // Fast EMA (noise filter for phase transitions).
-            ds.power_ema = ds.power_ema * 0.92 + power * 0.08;
+            //
+            // Seeded from the first real sample rather than climbing out of
+            // zero: an EMA starting at 0 spends ~40 frames below the truth, and
+            // the idle baseline learned underneath it (below) would latch onto
+            // a value from that ramp — a "rest" reading of ~1 W that no board
+            // has, which then makes every later reading look like a load.
+            if ds.power_ema == 0.0 {
+                ds.power_ema = power;
+            } else {
+                ds.power_ema = ds.power_ema * 0.92 + power * 0.08;
+            }
             // Slow EMA (long-term baseline; surge = fast >> slow).
             ds.power_ema_slow = ds.power_ema_slow * 0.992 + power * 0.008;
 
@@ -510,7 +559,10 @@ impl DefragVis {
             {
                 // Power dropped back to idle — model unloaded → EVICT.
                 Phase::Deconstructing
-            } else if (aiclk >= 200 || all_full) && power > POWER_IDLE_W {
+            } else if (aiclk >= 200 || all_full)
+                && power > POWER_IDLE_W
+                && shows_load(ds.power_ema, ds.idle_power, tdp_limit)
+            {
                 Phase::Running
             } else if aiclk < 200 && power > POWER_IDLE_W {
                 Phase::Dma
@@ -545,7 +597,17 @@ impl DefragVis {
                     // idle_power×1.5) and satisfy the evict condition (fall
                     // back within idle_power×1.20), evicting a device that
                     // never actually loaded anything.
-                    if matches!(p, Phase::Idle | Phase::Init) {
+                    //
+                    // Only when no rest has ever been observed. This capture
+                    // exists because Blackhole "never dwells in Idle" — which
+                    // was true only while the phase gate called an idle chip
+                    // Running. Now that it does dwell, overwriting a learned
+                    // baseline with the *loaded* reading raises the bar by
+                    // 1.5x of a loaded value and immediately drops the device
+                    // back out of Running: measured on a 14W-rest chip pulling
+                    // 25W, which entered Running, rewrote its baseline to
+                    // 21.3W, and fell straight back to Idle.
+                    if matches!(p, Phase::Idle | Phase::Init) && ds.idle_power == 0.0 {
                         ds.idle_power = ds.power_ema;
                     }
                     for ch in ds.channels.iter_mut() {
@@ -567,7 +629,19 @@ impl DefragVis {
                     ds.saw_load = false;
                 }
                 (_, Phase::Idle) => {
-                    ds.idle_power = ds.power_ema;
+                    // A running *minimum*, not a re-capture. This arm has no
+                    // guard, so it fires on every frame the device is idle —
+                    // assigning `power_ema` outright pinned the baseline to the
+                    // live reading, making `power_ema > idle_power × 1.5`
+                    // unsatisfiable (p > 1.5p) and leaving the learned half of
+                    // `shows_load` permanently dead. A minimum converges on the
+                    // chip's true rest and then holds still, which is what a
+                    // baseline is for.
+                    ds.idle_power = if ds.idle_power > 0.0 {
+                        ds.idle_power.min(ds.power_ema)
+                    } else {
+                        ds.power_ema
+                    };
                     // Drop any in-flight bursts — they belong to the Running phase and
                     // should not bleed into Idle's static rendering.
                     ds.scatter_bursts.clear();
@@ -1901,6 +1975,141 @@ mod tests {
         );
     }
 
+    /// Blackhole idles at ~800 MHz and 13-16 W, so the old gate
+    /// (`aiclk >= 200 && power > 8 W`) was permanently true and all four chips
+    /// on a fully idle box read `RUN` — reported in review, and reproducible on
+    /// `main`. The numbers below are this box's real idle telemetry
+    /// (`tt-smi -s`: 13-16 W at 800 MHz, TDP limit 125 W).
+    ///
+    /// The gate now asks the question the phase actually means — is this chip
+    /// doing more than it does at rest — rather than comparing against an
+    /// absolute floor calibrated for an architecture whose idle clock is 0.
+    #[test]
+    fn an_idle_blackhole_does_not_read_as_running() {
+        let idle = |power: f32| {
+            let mut smbus = SmbusTelemetry::new();
+            smbus.gddr_telemetry = Some(GddrTelemetry {
+                speed: Some("16G".to_string()),
+                max_temp: Some(42.0),
+                enabled_mask: Some(0xff),
+                channels: vec![healthy_channel(0), healthy_channel(1)],
+            });
+            let mut b = FakeBackend::one_device(power, smbus);
+            b.telemetry[0].aiclk = Some(800); // BH idles here — never 0
+            b.devices[0].limits = Some(crate::models::telemetry::DeviceLimits {
+                tdp_limit: Some(125.0),
+                ..Default::default()
+            });
+            b
+        };
+
+        let mut dv = DefragVis::new(80, 24);
+        let backend = idle(14.0);
+        for _ in 0..200 {
+            dv.update(&backend);
+        }
+        assert_ne!(
+            dv.devices[&0].phase,
+            Phase::Running,
+            "13-16 W at 800 MHz is this board at rest, not executing a model"
+        );
+
+        // The discriminating half: a chip actually under load must still read
+        // RUN, or the fix has simply traded one wrong answer for another.
+        let mut dv = DefragVis::new(80, 24);
+        let loaded = idle(95.0);
+        for _ in 0..200 {
+            dv.update(&loaded);
+        }
+        assert_eq!(
+            dv.devices[&0].phase,
+            Phase::Running,
+            "95 W of a 125 W board is unambiguously executing"
+        );
+    }
+
+    /// The learned-baseline half of `shows_load`, on its own: a load that is
+    /// real for this chip but well *below* the TDP backstop, so only the
+    /// comparison against observed rest can catch it. Without this, both other
+    /// phase tests pass on the backstop alone and the baseline path is dead
+    /// code — which is exactly what happened when the idle arm re-captured
+    /// `idle_power = power_ema` every frame, pinning the threshold to the live
+    /// reading and making `p > 1.5p` unsatisfiable.
+    #[test]
+    fn a_modest_load_below_the_tdp_backstop_still_reads_as_running() {
+        let at = |power: f32| {
+            let mut smbus = SmbusTelemetry::new();
+            smbus.gddr_telemetry = Some(GddrTelemetry {
+                speed: Some("16G".to_string()),
+                max_temp: Some(42.0),
+                enabled_mask: Some(0xff),
+                channels: vec![healthy_channel(0), healthy_channel(1)],
+            });
+            let mut b = FakeBackend::one_device(power, smbus);
+            b.telemetry[0].aiclk = Some(800);
+            b.devices[0].limits = Some(crate::models::telemetry::DeviceLimits {
+                tdp_limit: Some(125.0),
+                ..Default::default()
+            });
+            b
+        };
+
+        let mut dv = DefragVis::new(80, 24);
+        // Settle at rest so the baseline is learned.
+        let resting = at(14.0);
+        for _ in 0..200 {
+            dv.update(&resting);
+        }
+        assert_eq!(dv.devices[&0].phase, Phase::Idle, "precondition: at rest");
+        assert!(
+            dv.devices[&0].idle_power > 12.0 && dv.devices[&0].idle_power < 16.0,
+            "baseline must settle on the observed rest, got {}",
+            dv.devices[&0].idle_power
+        );
+
+        // 25 W: comfortably above 14 x 1.5, and comfortably below 125 x 0.30.
+        let working = at(25.0);
+        for _ in 0..100 {
+            dv.update(&working);
+        }
+        assert_eq!(
+            dv.devices[&0].phase,
+            Phase::Running,
+            "25W against a learned 14W rest is real work, even though it never \
+             reaches the 37.5W TDP backstop"
+        );
+    }
+
+    /// Started *during* a workload there is no observed rest to compare
+    /// against, so the learned baseline is useless and the board's own
+    /// firmware-reported TDP limit is what separates work from rest.
+    #[test]
+    fn a_monitor_started_mid_workload_still_reports_running() {
+        let mut smbus = SmbusTelemetry::new();
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            speed: Some("16G".to_string()),
+            max_temp: Some(70.0),
+            enabled_mask: Some(0xff),
+            channels: vec![healthy_channel(0), healthy_channel(1)],
+        });
+        let mut backend = FakeBackend::one_device(100.0, smbus);
+        backend.telemetry[0].aiclk = Some(1000);
+        backend.devices[0].limits = Some(crate::models::telemetry::DeviceLimits {
+            tdp_limit: Some(125.0),
+            ..Default::default()
+        });
+
+        let mut dv = DefragVis::new(80, 24);
+        for _ in 0..200 {
+            dv.update(&backend);
+        }
+        assert_eq!(
+            dv.devices[&0].phase,
+            Phase::Running,
+            "first sample already loaded — the TDP-relative backstop must carry it"
+        );
+    }
+
     #[test]
     fn real_per_channel_temp_overrides_packed_pair_temp() {
         use crate::models::telemetry::GddrTempPair;
@@ -2058,15 +2267,69 @@ mod tests {
         dv.update(&backend);
 
         let ds = &dv.devices[&0];
+        // This assertion used to read `Phase::Running`, on the reasoning quoted
+        // in its own message: "aiclk>=200 and power(9W) > POWER_IDLE_W(8W) must
+        // enter Running". That was scaffolding for the baseline check below,
+        // and it encoded the very defect a later review reported — a chip
+        // drawing 9 W is at rest, and calling that "executing a model" is what
+        // made all four chips on an idle box read RUN. See
+        // `an_idle_blackhole_does_not_read_as_running`.
         assert_eq!(
             ds.phase,
-            Phase::Running,
-            "aiclk>=200 and power(9W) > POWER_IDLE_W(8W) must enter Running"
+            Phase::Idle,
+            "9W is this board at rest, whatever its idle clock reads"
         );
+        // The substance of this test, unchanged and still the thing that
+        // matters: the baseline follows the *smoothed* series, so one noisy
+        // low sample cannot pin it low and arm a false EVICT.
         assert!(
             ds.idle_power > 12.0,
             "idle_power={} must track the smoothed ~14.5W baseline (power_ema \
              after blending in the 9W sample), not the raw single 9W reading",
+            ds.idle_power
+        );
+    }
+
+    /// Companion to the test above, and the one that actually reaches the
+    /// Idle/Init → Running capture site.
+    ///
+    /// Gating Running on real load evidence moved the original test onto the
+    /// Idle path, which left that site — a hardware-verified fix — with no
+    /// coverage at all: reverting `ds.idle_power = ds.power_ema` back to the
+    /// raw `power` sample passed the entire suite. This drives a device that
+    /// genuinely enters Running while the raw reading for that tick is a noisy
+    /// low outlier, so the smoothed-vs-raw distinction is under test again.
+    #[test]
+    fn the_running_transition_baseline_also_uses_the_smoothed_ema() {
+        // Raw sample this tick is a noisy 9 W against a settled 60 W EMA, on a
+        // device with no observed rest yet (`idle_power == 0`) — the only case
+        // that still captures, and the one the original fix was written for.
+        // It enters Running on the TDP backstop.
+        let mut backend = FakeBackend::one_device(9.0, SmbusTelemetry::new());
+        backend.devices[0].limits = Some(crate::models::telemetry::DeviceLimits {
+            tdp_limit: Some(125.0),
+            ..Default::default()
+        });
+
+        let mut dv = DefragVis::new(120, 40);
+        let mut ds = DeviceState::new(0);
+        ds.phase = Phase::Idle;
+        ds.power_ema = 60.0;
+        ds.idle_power = 0.0;
+        dv.devices.insert(0, ds);
+
+        dv.update(&backend);
+
+        let ds = &dv.devices[&0];
+        assert_eq!(
+            ds.phase,
+            Phase::Running,
+            "60W of a 125W board is a real load even with no rest observed"
+        );
+        assert!(
+            ds.idle_power > 12.0,
+            "idle_power={} must come from the smoothed series, not the raw 9W \
+             outlier — a baseline pinned that low arms a false EVICT",
             ds.idle_power
         );
     }

@@ -1,7 +1,7 @@
 # tt-toplike Quick Start
 
-**Version**: 0.10.3
-**Last Updated**: July 15, 2026
+**Version**: 0.13.2
+**Last Updated**: August 30, 2026
 
 ---
 
@@ -88,9 +88,33 @@ tt-toplike --mode hivemind    # or press ~ in any mode
 - Built for **finding signs of life** when the interesting work isn't logging where you're watching — silent kernel compiles, a model holding the device, or serving throughput buried in docker DEBUG logs
 - Correlates five passive sources — `/dev/kmsg` driver messages, tt-metal compile-cache churn, `/proc` process + device-fd activity, log tails (incl. `docker logs`), and the tt-metal Inspector — into a **source × device** heat board + a **coalesced feed**: repeats fold into one row with a live count · rate · sparkline (e.g. `metal · ncrisc.elf ×136`, `vLLM · holding /dev/tenstorrent/#`, `vLLM · Avg generation throughput …`)
 - Identifies interpreter-hosted workloads by cmdline **and loaded TT libraries** (`/proc/<pid>/maps`), so a `python -m pytest …` shows as `metal`/`ttnn`, never a bare "unknown"
-- Point it at a target: `/watch <path>`, `/watch pid <n>`, `/wrap <cmd…>`. `f` unified feed · `s` severity floor · arrows/`hjk` cursor · `l` legend
+- A **FOCUS pane** on the right names the busiest cell and describes it — heat, event count, rate, worst severity, age, and its top coalesced rows. It tracks the hottest cell **automatically**, so the screen explains itself without being driven; arrows/`hjk` pin it to a cell of your choosing and `Enter` hands it back (pane hidden below ~96 columns)
+- Point it at a target: `/watch <path>`, `/watch pid <n>`, `/wrap <cmd…>`. `f` unified feed · `s` severity floor · `l` legend
 - The red **KITT scanner** along the bottom slows, focuses, and brightens as total activity climbs
 - Safe: collectors spawn only while the mode is active and stop on exit; never sets a debug env var or reads a device buffer
+
+### Training (`t`)
+```bash
+tt-toplike --mode training    # or press t in any mode (aliases: train, tt-train)
+```
+- Auto-attaches to a live [tt-train](https://github.com/tenstorrent/tt-metal/tree/main/tt-train) run — no flags, no target to name. Scans for a `nano_gpt`/`mnist_mlp`/`linear_regression` process, resolves `/proc/<pid>/fd/1` to its log, and starts tailing it
+- The model as a character-grid network (columns = transformer blocks, nodes = attention heads) fed by token particles, amber forward sweeps, violet backward/gradient sweeps
+- A loss "mountain range" descends as the model converges (magenta = high loss → teal = low loss, each column keeping its own loss's hue as a run-history timeline), under an aurora/starfield nightscape that opens up as loss drops; a comet crosses the sky on each checkpoint save
+- **Requires stdout redirected to a file** (`> train.log`) at launch — if fd 1 is a pipe or tty the per-step stream can't be tailed after the fact (an OS property, not a gap), and the view says so instead of drawing a fake curve
+- Shows only what tt-train actually emits live (step, loss, step time, cache entries) — no gradient norms or MFU live, but derives its own tokens/sec and ETA from what it can read. `l` for the legend, `/explain` for the mapping overlay
+- `Esc` backs out to where you came from. Deliberately excluded from the `v` cycle, like `i`
+- `--mode training` launches straight into it, for scripts, kiosks and systemd units — it takes no target either way, since the view finds the run itself
+
+### Rotate every view (`--rotate` / `R`)
+```bash
+tt-toplike --rotate                     # start rotating immediately
+tt-toplike --rotate --mode arcade       # ...starting from a particular view
+# or press R in any mode
+```
+- Unattended kiosk/wall-display cycle through **all** views — including the ones normally reachable only by their own key (`i`, `~`, `t`), which the `v` cycle deliberately skips
+- Dwell: **30s** per view, **45s** on arcade (it's three visualizations at once), and only **10s** on Training or the Inference Monitor when there's no run or server for them to show — so it glances at an empty screen instead of parking on it
+- A run or server appearing mid-dwell extends it to the full 30s; the check is re-evaluated every tick, not decided on arrival
+- Any explicit mode key resets the dwell, so a view you navigate to gets its full time. `R` stops the rotation where you are
 
 ---
 
@@ -179,6 +203,7 @@ tt-toplike --host --mode arcade             # your real CPU/RAM in arcade mode (
 |-----|--------|
 | `v` | Cycle visualization modes: Insights → Flow → Starfield → Castle → Arcade → Defrag → Inference → Insights |
 | `i` | Open the Inference Server Monitor from any view; `i` while in it jumps to Insights, `Esc` backs out to where you came from. Also at the tail of the `v` cycle |
+| `t` | Open the Training view from any view — auto-attaches to a running tt-train process with no further input; `Esc` backs out. Excluded from the `v` cycle, like `i` |
 | `l` | Toggle legend overlay for the current view |
 | `b` | Cycle backend live: Hybrid → Sysfs → JSON → Mock → Host → Hybrid. Luwen and Remote are launch-only — the cycle never steps onto them |
 | `r` | Force refresh |

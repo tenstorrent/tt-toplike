@@ -4697,6 +4697,118 @@ hardware-verified via A/B comparison.*
 
 ---
 
+## Phase 34 — Review findings: launch-shape coverage, and two instruments reporting measurements they never made (September 1, 2026)
+
+Three findings from an independent hardware review of PR #26 (4× p300c), all
+non-blocking, all fixed.
+
+**1. `parse_direct_vllm` saw one launch shape in four.** It matched a token
+ending in `vllm` followed by `serve`, so `python -m vllm.entrypoints.openai.
+api_server` fell out entirely — eight real processes invisible in the
+reviewer's run. Rather than add the reported shape, swept the TT tooling
+checked out here for what actually gets launched: `vllm serve` (229
+occurrences), `run_vllm_api_server.py` (64), `python -m vllm.entrypoints…`
+(45), `server_example_tt.py` (20). Two beyond the reported one, neither a
+guess — the module form has a non-`openai` sibling in use, and
+`run_vllm_api_server.py` is reachable on the *host* (not only as a container
+entrypoint) via tt-inference-server's `workflows/run_local_server.py`. That
+wrapper also spells its port `--service-port` and remaps it onto vLLM's
+`--port`, so reading only `--port` reported the 8000 default for every
+non-default launch — the port the liveness probe then polls.
+
+Widening the match made a documented contract load-bearing:
+`parse_direct_vllm` is by contract the *non-Docker* path, and
+`run_vllm_api_server.py` is the ENTRYPOINT of tt-inference-server's own image.
+Containers are enumerated separately (`docker ps`) and merged by container
+name — a key that can never collide with `host-vllm-<pid>` — so a
+containerized match becomes a second roster row for one server: the Phase 30
+duplicate, reintroduced from the other side. Cross-uid `/proc/<pid>/environ`
+is unreadable (measured), which saves an unprivileged run, but that is a
+permission accident and stops holding under root. The host path now drops
+containerized pids, matched per cgroup path *segment* — the docker daemon
+itself lives at `/system.slice/docker.service`, and a substring test would
+exclude host processes on the strength of the daemon's unit name.
+
+**2 & 3 are the same mistake in different clothes**: a reading printed with
+full confidence where the signal was absent, or incapable of distinguishing
+the two states it was asked about.
+
+* **ETH `0/12 live` on a card whose links are all up.** The denominator always
+  distinguished "not reported" (`0/?`); the numerator was
+  `eth_live_status.unwrap_or(0)`, so a build omitting `ETH_LIVE_STATUS` while
+  still emitting `ENABLED_ETH` rendered a confident zero under twelve dark
+  dots. Reproduced end-to-end: a real `tt-smi -s` snapshot with only that key
+  deleted, served back through `--tt-smi-path`, printed exactly
+  `ETH ············ 0/12 live`. Now `?/12` with no dots — a dot's meaning is
+  live-or-not, so with no liveness data there is nothing to draw them from. A
+  *measured* zero stays a loud all-links-down alarm.
+
+* **Defrag `4×RUN` on a fully idle box.** The gate was `aiclk >= 200 && power >
+  8 W`; Blackhole idles at ~800 MHz and 13–16 W, so both halves were
+  permanently true. The surrounding code already knew — `LOAD_SURGE_FACTOR`
+  and `running_since` exist *because* of the phantom-Running state, and say so
+  in their comments. Those treated the EVICT loop it caused; the phase itself
+  stayed wrong. `shows_load()` now asks what the phase means, on two
+  independent signals: the chip's own observed rest (this codebase's standing
+  answer to absolute thresholds — `AdaptiveBaseline`, Phase 5), and the
+  board's firmware-reported TDP limit for a monitor started *during* a
+  workload, where no rest was ever observed.
+
+  **Two adjacent defects had to be fixed for that baseline to mean anything,
+  and neither was visible from the change that motivated it** — both surfaced
+  only because a mutation survived:
+  - The idle arm has **no guard**, so it fires every frame while idle.
+    Assigning `idle_power = power_ema` pinned the threshold to the live
+    reading, making `p > 1.5p` unsatisfiable and leaving the learned half of
+    the gate permanently dead. It is a running minimum now.
+  - The Running transition **clobbered a learned baseline** with the loaded
+    reading. Measured: a 14 W-rest chip pulling 25 W entered Running, rewrote
+    its baseline to 21.3 W, and fell straight back to Idle. It now captures
+    only when no rest was ever observed — the case the Phase 29 fix was
+    actually written for. That capture justified itself with "Blackhole never
+    dwells in Idle", which was true only while this bug existed.
+
+  `power_ema` is also seeded from the first sample rather than climbing out of
+  zero, since the minimum learned underneath a ramping EMA latched onto a ~1 W
+  "rest" no board has.
+
+### A test that encoded the bug it was scaffolding for
+
+`idle_power_baseline_uses_smoothed_ema_not_a_single_raw_sample` asserted
+`Phase::Running` for a **9 W** device, reasoning in its own message that
+"aiclk>=200 and power(9W) > POWER_IDLE_W(8W) must enter Running" — precisely
+the defect under repair, asserted as setup for a different subject. Correcting
+it to `Idle` moved the test off the capture site it was protecting, and
+reverting that hardware-verified Phase 29 fix then passed all 824 tests.
+Coverage restored by a companion test that drives a device genuinely entering
+Running. **Changing a phase gate can silently orphan a regression guard that
+reached its subject only through that phase** — worth a mutation check on the
+*old* fix whenever a state machine's transitions move.
+
+### Verification
+
+Every guard mutation-tested (eleven mutations across the three fixes; each
+reddens only the test covering it). ETH and Defrag both confirmed on the real
+4× p300c: Defrag's header reads `0×DMA  0×RUN  4×idle` at 13–16 W where it
+read `4×RUN`, and the ETH row reads `12/12 live` on the live box and `?/12`
+against the doctored snapshot. Also documented tt-smi's **≥ 6.3.0** floor for
+per-channel GDDR in the README — the fallback to packed registers is
+deliberately silent, so an older tt-smi looks entirely healthy while answering
+at pair resolution.
+
+> ⚠️ A check written into that README section was wrong on first draft
+> (`grep -c gddr_telemetry`, which counts *lines*, and the block is a sibling
+> of `smbus_telem` rather than inside it). It read plausibly and returned `4`
+> on this box — matching the device count by coincidence of pretty-printing.
+> Caught by running it against a snapshot with the block actually removed.
+
+---
+
+*Phase 34 status: **COMPLETE** — v0.13.2. Three review findings fixed;
+findings 2 and 3 were pre-existing on `main`.*
+
+---
+
 ## Phase 30 — Inference roster: dedup multiprocessing-worker duplicates (August 28, 2026, v0.10.2)
 
 **Origin**: user shared a screenshot (`~/Pictures/tt-toplike-inference.png`) of
@@ -4861,3 +4973,223 @@ fixed), 4 correctness fixes (each red/green tested), 1 perf fix
 (mutation-tested). Two findings (#3's refactor scope, #6's fix-or-defer)
 explicitly discussed with the user before acting rather than silently
 decided. Full suite + fmt + clippy + both cross-compile targets green.*
+
+---
+
+## Phase 32 — Training view: watch a live tt-train run (August 29, 2026, v0.11.0)
+
+**Origin**: every other view watches inference or generic hardware activity;
+none watched the other half of what actually runs on this silicon —
+training. tt-train (`tt-metal/tt-train`, a compiled C++ binary, not a Python
+script) has no dashboard of its own: no Prometheus endpoint, no TensorBoard,
+just plain lines to stdout. Built via `.superpowers/sdd/2026-08-29-training-view/`
+(design doc → 10-task plan → subagent-driven TDD, one task per component,
+each with its own reviewer pass).
+
+### What tt-train actually emits (research against the real source)
+
+Read from `tt-train/sources/examples/nano_gpt/main.cpp`. Per step, on stdout:
+
+```
+Step: {global_step}, Loss: {average_loss}
+Full step time {duration} ms, cache entries: {num_program_cache_entries}
+```
+
+At startup: `Max steps {N}`, `Batch size {N}`, `Gradient accumulation steps
+{N}`, `Scheduler type {name}`, `Number of parameters: {N}`. Checkpoints write
+to a single rolling path from the run's YAML config (e.g.
+`transformer.msgpack`), overwritten in place every `model_save_interval`
+steps — no save-confirmation line is ever printed, so a save is only visible
+as an mtime bump.
+
+**Deliberately not shown, because it is never emitted live**: gradient
+norms, MFU, and a tokens/sec counter. `tt_train_metrics.py` writes a rich
+JSON summary with exactly those fields, but only once, at run end. The view
+derives its own tokens/sec and ETA from the step/loss/step-time lines above
+instead of inventing numbers tt-train never streams.
+
+### Auto-attach — the `/proc/<pid>/fd/1` technique
+
+The view takes no arguments and needs no command. `TrainMonitor::scan_for_process`
+(`src/workload/train/monitor.rs`) walks `/proc`, matching each process's
+`comm`/`cmdline` against `TRAIN_BINARIES = ["nano_gpt", "mnist_mlp",
+"linear_regression"]` (`src/workload/train/detect.rs`) — binary name only,
+never flags, since the flag sets have already drifted across tt-metal
+checkouts. Once a match is found, `readlink /proc/<pid>/fd/1` resolves what
+the process's own stdout points at: if it's a **regular file** (the process
+was launched as `... > train.log`), that file is opened and tailed from the
+current offset — no cooperation from the trainer required, just an OS-level
+lookup by pid. If fd 1 is a **pipe or a tty**, the per-step stream is
+genuinely unrecoverable after the fact; the view says so in plain language
+(training runs, but the visualization can't source per-step numbers, so it
+doesn't draw a fake curve) and falls back to what it can still see —
+process liveness, chip telemetry, and checkpoint mtime.
+Relaunching with stdout redirected to a file fixes it. Checkpoint saves are
+detected the same way HivemindSweeper's `cache_watch` detects compile-cache
+churn: poll the configured checkpoint path's mtime, pulse on change.
+
+### The nine-channel color language
+
+No single hue carries everything — nine independent channels, each a real
+signal: node/mountain hue (magenta 325° → teal 158°, loss magnitude, from
+stdout), amber sweep left→right (forward pass, by step cadence), violet
+sweep right→left (backward pass/gradients, by step cadence), per-column hue
+across the loss range (the whole run's history — a magenta→teal timeline),
+mint▼/coral▲ (loss delta direction, distinct from magnitude), the existing
+cyan→green→amber→red ramp (chip temperature), block density `█▓▒░·` (chip
+power draw), violet shimmer→dim (kernel cache compiling→steady, from the
+cache-entries count), and mint burst + comet (checkpoint saved, from mtime).
+Documented in full in `train_legend_lines` (legend, `l`) and the explain
+overlay (`!`).
+
+### Defects task reviews caught in this feature's own plan
+
+Same pattern this dev log has recorded before (Phase 27's cross-target
+compile break, Phase 31's vacuous security test): the plan and design doc
+were themselves wrong in four places, each caught by a task's review rather
+than by the implementer transcribing correctly:
+
+- **A false auto-attach claim.** The explain overlay's copy (lifted from the
+  design doc) said the view "finds a process holding `/dev/tenstorrent`" —
+  but `scan_for_process` never checks device fds at all, only `comm`/
+  `cmdline` against the three known binary names. Rewritten to describe what
+  the code actually does.
+- **Legend swatches that didn't match the renderer.** The overlay legend's
+  chip-temp/power and aurora color literals were written independently of
+  `train_view.rs`'s own in-app legend (`draw_legend`) and didn't match it —
+  caught by reading the renderer's `entries` array as ground truth and
+  diffing every literal against it. Also split one merged "temp + power"
+  legend line into two, since they're independently-driven signals in the
+  renderer.
+- **A wrong sketch of the existing `v`-cycle.** Task 8's brief gave a
+  simplified `next_display_mode` body that dropped several pre-existing
+  side effects the real cycle handler performs at each transition (e.g.
+  resetting `memory_castle`/`starfield` state) — a plan defect, not a
+  transcription slip, caught by comparing against the actual match arms
+  before refactoring them into the free function.
+- **`CheckpointWatch` swallowed the first save of a fresh run.** The brief's
+  "first poll only establishes a baseline" rule was unconditional, so a
+  checkpoint file that didn't exist yet at attach time — the common case for
+  a fresh launch — had its first real appearance treated as the baseline and
+  silently missed, exactly the save a user watching a new run most wants to
+  see. Fixed with an `existed_at_start` flag captured at construction; a
+  file absent at attach time now pulses on its first successful read, while
+  a pre-existing file keeps the original no-false-pulse-on-attach behavior.
+  TDD'd: the regression test was confirmed to fail (panic) against the
+  pre-fix code before the fix landed.
+
+> ⚠️ **Not hardware-verified.** No box with a real tt-train run was available
+> during development. All parsers are tested against verbatim line shapes
+> from the real `tt-train` source, and the `/proc/<pid>/fd/1` resolution is
+> tested against a real spawned process (not a mock) — but end-to-end
+> attach-to-a-live-run behavior, the honest-degradation path against a
+> genuinely un-redirected trainer, and the checkpoint-comet/aurora-widening
+> visuals under real loss data all remain to be confirmed live, matching how
+> Phase 27's direct-vLLM detection shipped with the same caveat.
+
+---
+
+*Phase 32 status: **COMPLETE, pending hardware verification** — shipped as
+v0.11.0. All 10 plan tasks landed with per-task TDD and review; four plan
+defects (an inaccurate explain claim, mismatched legend swatches, a wrong
+`v`-cycle sketch, and a checkpoint-swallowing edge case) were caught and
+fixed during task review, not discovered later. Full test suite, `cargo fmt
+--check`, and `cargo clippy -D warnings` all green; no real tt-train run
+available to verify against.*
+
+---
+
+## Phase 33 — Recording the Training view, and the bug the recording found (August 30, 2026, v0.11.1)
+
+**Origin**: "record a tt-demo-maker video of the new mode while the demo load
+is running please. but first, can we get the movement a little more fluid."
+
+### Fluidity (v0.11.0 follow-up)
+
+Three causes, the first dominant: `DisplayMode::Training` was missing from
+`is_anim_mode`, so the view redrew at the **10 FPS data rate** rather than the
+~60 FPS animation rate — every moving element was stepping six times slower
+than designed. The forward/backward sweep was also a binary `% period < 2`
+on/off, so cells blinked rather than flowed; it now advances in fractional
+sub-columns with a smoothstepped falloff, a short lead-in ahead of the head
+and a longer tail behind (the asymmetry is what makes direction readable),
+and node glyphs track local sweep intensity instead of a raw frame counter.
+
+Measured while iterating rather than eyeballed: a naive `t²` falloff still
+jumped **0.95** in one frame, because a squared ramp is steepest exactly at
+its peak. Smoothstep has zero derivative at both ends — precisely where the
+pulse most needs to be smooth — bringing the worst-case frame-to-frame change
+under 0.25. Animation rates in `train_sky` are now expressed against
+`ANIM_FPS`, so the 6× frame-rate change bought smoothness without altering
+apparent speed, and re-tuning the tick rate later can't silently speed the
+sky up.
+
+### The bug the demo found
+
+`tt-demo verify` renders a contact sheet so the footage can be checked against
+what its caption claims. Two claims failed, in order:
+
+1. **The first take showed the Insights screen for all 30s.** The manifest's
+   `keys: ["t"]` is parsed *only* to select the asciinema engine — nothing in
+   `tt-demo` ever sends it. Its `raw_script` escape hatch doesn't record either
+   (a documented v1 limitation: `record.rs` prints "run vhs/asciinema
+   manually"). Recorded by driving `lib/tmux_capture.sh` directly with a pane
+   that sends keys to its own `$TMUX_PANE`.
+
+2. **The caption promised "a checkpoint comet on every save" and the comet
+   never fired.** Grepping the cast for the comet's unique mint
+   `RGB(150,235,205)` returned **zero** frames while the checkpoint file's
+   mtime was demonstrably advancing every ten seconds — so this was the
+   product, not the demo. Root cause:
+
+   ```rust
+   self.ckpt = Some(CheckpointWatch::new(PathBuf::from(mp)));
+   ```
+
+   `model_path` is a bare filename in tt-train's own configs
+   (`transformer.msgpack`), written through a plain relative open — so it
+   lands in *the trainer's* cwd. Built verbatim it pointed at whatever
+   directory tt-toplike was launched from, and since `poll()` returns `false`
+   whenever the path can't be stat'd, the pulse stayed silent for the entire
+   run. **The identical wrong-cwd bug had already been fixed for the config
+   path** — `resolve_for_pid` existed and simply wasn't called here.
+
+   Construction moved into `checkpoint_watch_for` so the *wiring* has a seam
+   to test: asserting `resolve_for_pid`'s arithmetic would have passed the
+   whole time, since the defect was that the caller never invoked it. The
+   test spawns a real process with its own cwd and requires a pulse; mutating
+   the resolution back reddens it with exactly the predicted message. After
+   the fix the recording carries 114 comet frames in three bursts matching
+   the ~10.5s save cadence, and the LIVE panel shows `ckpt @ 120` / `ckpt @
+   150` where it previously showed nothing.
+
+**The lesson is the one this repo keeps relearning**: a relative path is
+meaningless without the cwd it was written against, and a watcher on a
+nonexistent path fails *silently and permanently* rather than loudly. It took
+a demo whose caption made a falsifiable claim to notice.
+
+### Recording notes
+
+- `demo/demos.yaml` is committed (the reproducible recipe); `demo/assets/` is
+  gitignored, with published copies in `assets/` and `site/assets/`.
+- `tt-demo render --mp4` hangs past 5 minutes; the mp4 is built directly
+  (`agg --fps-cap 24` → `ffmpeg -r 24 -crf 20`, 1.5 MB) so the fluidity work
+  survives, while the README GIF stays at `--fps-cap 10` (2.7 MB).
+- The demo trainer is a shell stand-in emitting tt-train's verbatim stdout
+  line shapes on a compressed timeline. Its `max_steps` and decay horizon are
+  tuned so the loss is *visibly descending* during the take — an earlier run
+  had flattened at its asymptote and produced a boring plateau.
+- Site gained a `t · training` mode-row (it previously had only a feature
+  card); README gained the GIF in its Training section.
+
+> ⚠️ **Still not hardware-verified.** The recording is a mock backend plus a
+> stand-in trainer. The checkpoint fix is verified against a real process with
+> a real cwd and a real mtime, but attach-to-a-genuine-tt-train-run remains
+> unconfirmed, per Phase 32's caveat.
+
+---
+
+*Phase 33 status: **COMPLETE** — v0.11.1. Fluidity work committed with two
+regression tests (one mutation-tested); one real bug found by verifying demo
+footage against its caption and fixed with a wiring-layer test; 728 tests,
+fmt, clippy, and both cross-targets green.*

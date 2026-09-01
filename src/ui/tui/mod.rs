@@ -21,12 +21,13 @@ mod hivemind_view;
 pub(crate) mod inference_panel;
 
 use crate::animation::{
-    ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis,
+    ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis, TrainView,
 };
 use crate::backend::{factory, BackendConfig, TelemetryBackend};
 use crate::cli::{BackendType, Cli};
 use crate::error::TTTopError;
 use crate::ui::colors;
+use crate::workload::train::{MockTrainRun, TrainMonitor};
 use crate::workload::{HostProcessMonitor, ProcRow};
 // InferenceEngine + the /proc-based probes are only used on the Linux/TT path,
 // so gate the import to match (keeps non-Linux builds warning-clean under -D warnings).
@@ -92,6 +93,110 @@ enum DisplayMode {
     /// back out again, Esc also backs out to `prev_mode`. Both exit paths
     /// stop the engine's collector threads — see the `~` and Esc handlers.
     HivemindSweeper,
+    /// Training view — a live tt-train run. Entered via `t` only
+    /// (deliberately excluded from the `v`-cycle rotation, like
+    /// `InferenceMonitor` and `HivemindSweeper`); `t` toggles back out to
+    /// `prev_mode`, as does Esc.
+    Training,
+}
+
+/// The `v` rotation. `InferenceMonitor`, `HivemindSweeper` and `Training`
+/// are entry-key-only modes and are never cycled into; a `v` pressed while
+/// one of them is active leaves to `Insights`.
+fn next_display_mode(m: DisplayMode) -> DisplayMode {
+    match m {
+        DisplayMode::Insights | DisplayMode::Grid => DisplayMode::MemoryFlow,
+        DisplayMode::MemoryFlow => DisplayMode::Starfield,
+        DisplayMode::Starfield => DisplayMode::MemoryCastle,
+        DisplayMode::MemoryCastle => DisplayMode::Arcade,
+        DisplayMode::Arcade => DisplayMode::Defrag,
+        // Defrag and the Inference Server Monitor round out the rotation
+        // just before it wraps back to Insights, so both are reachable by
+        // cycling with `v` (the monitor is also still a direct toggle via
+        // `i`).
+        DisplayMode::Defrag => DisplayMode::InferenceMonitor,
+        DisplayMode::InferenceMonitor => DisplayMode::Insights,
+        // HivemindSweeper and Training are deliberately excluded from the
+        // `v`-cycle rotation (only reachable via `~`/`t`), but `v` is a
+        // global hotkey, so pressing it while either happens to be active
+        // still needs to leave cleanly.
+        DisplayMode::HivemindSweeper => DisplayMode::Insights,
+        DisplayMode::Training => DisplayMode::Insights,
+    }
+}
+
+/// How long `--rotate`/`R` dwells on a view before advancing.
+const ROTATE_LINGER: Duration = Duration::from_secs(30);
+/// Arcade packs three visualizations into one screen, so it gets longer.
+const ROTATE_LINGER_ARCADE: Duration = Duration::from_secs(45);
+/// Training and the Inference Monitor are *about* a workload. With no run
+/// and no server to show, they are near-empty screens, so the rotation
+/// glances at them and moves on rather than parking on nothing.
+const ROTATE_LINGER_IDLE: Duration = Duration::from_secs(10);
+
+/// The unattended rotation (`--rotate`, or `R` in-app).
+///
+/// Unlike the `v` cycle this deliberately includes the entry-key-only views
+/// (`i`, `~`, `t`) — the whole point is to surface everything, including the
+/// screens a passer-by would never know to press a key for.
+///
+/// `Grid` is the one deliberate omission. It is not a distinct view but an
+/// alternate layout of the *same* chip portraits Insights already draws, so
+/// rotating through both shows the same data twice in a row. `next_display_mode`
+/// takes the same position — it treats `Insights | Grid` as one stop and never
+/// cycles into Grid either; `g` is how you ask for that layout.
+const ROTATION: &[DisplayMode] = &[
+    DisplayMode::Insights,
+    DisplayMode::MemoryFlow,
+    DisplayMode::Starfield,
+    DisplayMode::MemoryCastle,
+    DisplayMode::Arcade,
+    DisplayMode::Defrag,
+    DisplayMode::InferenceMonitor,
+    DisplayMode::HivemindSweeper,
+    DisplayMode::Training,
+];
+
+/// The next view in the unattended rotation.
+///
+/// A mode that somehow isn't in `ROTATION` restarts it rather than getting
+/// stuck, so the rotation can never wedge on an unlisted view.
+fn next_rotation_mode(m: DisplayMode) -> DisplayMode {
+    match ROTATION.iter().position(|&x| x == m) {
+        Some(i) => ROTATION[(i + 1) % ROTATION.len()],
+        None => ROTATION[0],
+    }
+}
+
+/// How long to dwell on `mode`.
+///
+/// `active` is only consulted for the two workload views; every other screen
+/// draws live hardware telemetry and is never "empty", so it always gets the
+/// full dwell.
+fn linger_for(mode: DisplayMode, active: bool) -> Duration {
+    match mode {
+        DisplayMode::Arcade => ROTATE_LINGER_ARCADE,
+        DisplayMode::Training | DisplayMode::InferenceMonitor if !active => ROTATE_LINGER_IDLE,
+        _ => ROTATE_LINGER,
+    }
+}
+
+/// The view `--mode <name>` launches into.
+///
+/// Split out of `run_tui` so the pairing is testable: an omitted arm is a
+/// compile error, but a *wrong* one — pointing a mode at its neighbour —
+/// compiles happily and only shows up as launching the wrong screen.
+fn display_mode_for(mode: crate::cli::VisualizationMode) -> DisplayMode {
+    use crate::cli::VisualizationMode as V;
+    match mode {
+        V::Normal => DisplayMode::Insights,
+        V::Starfield => DisplayMode::Starfield,
+        V::Castle => DisplayMode::MemoryCastle,
+        V::Flow => DisplayMode::MemoryFlow,
+        V::Arcade => DisplayMode::Arcade,
+        V::Hivemind => DisplayMode::HivemindSweeper,
+        V::Training => DisplayMode::Training,
+    }
 }
 
 /// Floating overlay panel type — toggled by hotkeys, auto-dismissed on any other keypress.
@@ -336,23 +441,42 @@ fn run_app(
     };
 
     // UI state - initialize from CLI --mode option if provided
-    let mut display_mode = if let Some(mode) = cli.mode {
-        match mode {
-            crate::cli::VisualizationMode::Normal => DisplayMode::Insights,
-            crate::cli::VisualizationMode::Starfield => DisplayMode::Starfield,
-            crate::cli::VisualizationMode::Castle => DisplayMode::MemoryCastle,
-            crate::cli::VisualizationMode::Flow => DisplayMode::MemoryFlow,
-            crate::cli::VisualizationMode::Arcade => DisplayMode::Arcade,
-            crate::cli::VisualizationMode::Hivemind => DisplayMode::HivemindSweeper,
-        }
-    } else {
-        DisplayMode::Insights // default is now Insights
-    };
+    let mut display_mode = cli
+        .mode
+        .map(display_mode_for)
+        .unwrap_or(DisplayMode::Insights); // default is now Insights
+                                           // ── Unattended rotation (`--rotate`, `R`) ───────────────────────────────
+                                           // `rotate_since` is the moment the current view became visible; each tick
+                                           // compares its age against `linger_for(display_mode, …)`. Any explicit
+                                           // mode change resets it (see the mode-transition choke point) so a view
+                                           // you just navigated to gets its whole dwell rather than a leftover
+                                           // sliver. The two activity flags below are refreshed by the Training and
+                                           // InferenceMonitor update arms while those views are on screen — which is
+                                           // exactly when the rotation needs them, so nothing is probed off-view.
+    let mut rotate_enabled = cli.rotate;
+    let mut rotate_since = Instant::now();
+    let mut train_active = false;
+    let mut inference_active = false;
     let mut starfield: Option<HardwareStarfield> = None;
     let mut memory_castle: Option<MemoryCastle> = None;
     let mut memory_flow: Option<MemoryFlowVis> = None;
     let mut arcade: Option<ArcadeVisualization> = None;
     let mut defrag: Option<DefragVis> = None;
+    let mut train_view: Option<TrainView> = None;
+    let mut train_monitor: Option<TrainMonitor> = None;
+    // `--mock` substitutes a synthetic run for the /proc scan; see the
+    // Training arm of the per-mode update below.
+    // Shared clock for both synthetic sources, so a mock session's training
+    // run and inference roster advance on the same timeline.
+    //
+    // Linux-gated because its only consumer — the synthetic inference roster
+    // — is: the real roster comes from a Docker probe that exists on Linux
+    // alone. Left ungated it is an unused binding everywhere else, which is
+    // a hard error under CI's `-D warnings`.
+    #[cfg(target_os = "linux")]
+    let mock_started = Instant::now();
+    let mut mock_train: Option<MockTrainRun> = None;
+    let mut mock_train_state: Option<crate::workload::train::TrainState> = None;
     let mut prev_display_mode = display_mode;
     // The mode to return to when `i`/`I`/`Esc` exits the dedicated
     // `DisplayMode::InferenceMonitor` view — captured at entry so `i` (or
@@ -376,6 +500,10 @@ fn run_app(
     // in-mode keys" block in the non-cmd_mode match.
     let mut hivemind: Option<crate::workload::hivemind::Hivemind> = None;
     let mut hm_cursor = (0usize, 0usize);
+    // The focus follows the busiest cell until a cursor key is pressed, so
+    // the sweeper says something useful without being driven. Enter hands
+    // it back.
+    let mut hm_auto = true;
     let mut hm_unified = false;
     let mut hm_sev = crate::workload::hivemind::Severity::Trace;
     // Launched directly into HivemindSweeper via `--mode hivemind`? Start the
@@ -566,6 +694,11 @@ fn run_app(
                 // The heat board decays every tick and the feed pane streams
                 // live events — same "must redraw at anim cadence" reasoning.
                 | DisplayMode::HivemindSweeper
+                // Continuously animated: forward/backward sweeps travel the
+                // network, the aurora drifts, stars twinkle, and a checkpoint
+                // comet crosses the sky. At the 10 FPS data rate all of that
+                // reads as stepping rather than moving.
+                | DisplayMode::Training
         ) || (display_mode == DisplayMode::Defrag && defrag_is_animated);
         let render_interval = if is_anim_mode {
             throttle_state.effective_anim_interval(ui_poll_rate_anim)
@@ -763,8 +896,19 @@ fn run_app(
                     // loading→ready burst internally. The live service rows only
                     // exist on Linux (the design is Docker/TT-only); off Linux we
                     // hand it an empty slice, so it simply roams the catalog.
+                    // Under `--mock` there are no containers to probe, so
+                    // this view could only ever show its cold "no server"
+                    // state. Substitute a synthetic roster that walks the
+                    // real lifecycle; every label carries a `(mock)` suffix
+                    // so its serving numbers can't read as real ones.
                     #[cfg(target_os = "linux")]
-                    let local_rows = inference_monitor.snapshot();
+                    let local_rows = if backend_type == BackendType::Mock {
+                        crate::workload::inference_server::mock::mock_services(
+                            mock_started.elapsed().as_secs_f32(),
+                        )
+                    } else {
+                        inference_monitor.snapshot()
+                    };
                     #[cfg(not(target_os = "linux"))]
                     let local_rows: Vec<
                         crate::workload::inference_server::ServiceState,
@@ -848,6 +992,10 @@ fn run_app(
                         );
                     }
                     let roster_h = inference_roster.len();
+                    // Drives the rotation's dwell (see `train_active`): with
+                    // no service detected the snake is just roaming an empty
+                    // catalog, so `--rotate` gives it the short glance.
+                    inference_active = !rows.is_empty();
                     // Education band: describe the featured *loading* service.
                     band_rotation = band_rotation.wrapping_add(1);
                     inference_band = {
@@ -901,6 +1049,54 @@ fn run_app(
                         h.poll();
                     }
                 }
+                DisplayMode::Training => {
+                    if train_view.is_none() {
+                        train_view =
+                            Some(TrainView::new(size.width as usize, size.height as usize));
+                    }
+                    // Under `--mock` there is no trainer to find, so scanning
+                    // /proc would leave this view permanently empty — the one
+                    // screen a mock backend couldn't demo. Drive it from a
+                    // synthetic run instead; the header marks it as mock.
+                    if backend_type == BackendType::Mock {
+                        let run = mock_train.get_or_insert_with(MockTrainRun::new);
+                        mock_train_state = Some(run.state());
+                        train_active = true;
+                    } else if train_monitor.is_none() {
+                        train_monitor = Some(TrainMonitor::new());
+                    }
+                    if let Some(ref mut tm) = train_monitor {
+                        tm.poll();
+                        // Drives the rotation's dwell: with no run attached
+                        // this screen is an empty-state card, so `--rotate`
+                        // glances and moves on. Re-read every tick, so a run
+                        // that the (≤2s) rescan only just found extends the
+                        // dwell instead of being cut short.
+                        train_active = tm.state().proc.is_some();
+                    }
+                    if let Some(ref mut tv) = train_view {
+                        tv.update();
+                    }
+                }
+            }
+
+            // Unattended rotation: advance once this view has had its dwell.
+            // Placed after the per-mode update so the activity flags reflect
+            // the tick just processed, and inside `should_tick` so the
+            // decision is made at the data rate rather than the (much faster)
+            // animation rate.
+            if rotate_enabled {
+                let active = match display_mode {
+                    DisplayMode::Training => train_active,
+                    DisplayMode::InferenceMonitor => inference_active,
+                    // Every other view draws live telemetry and is never
+                    // "empty", so the activity question doesn't apply.
+                    _ => true,
+                };
+                if rotate_since.elapsed() >= linger_for(display_mode, active) {
+                    display_mode = next_rotation_mode(display_mode);
+                    force_redraw = true;
+                }
             }
         } // end if should_tick
 
@@ -923,6 +1119,29 @@ fn run_app(
                     h.stop();
                 }
             }
+            // Matching choke point for *entering* the sweeper. `~` and the
+            // `/hivemind` command start the engine in their own handlers, but
+            // the unattended rotation also lands here with no keypress
+            // involved, and a sweeper with no collectors running draws a
+            // permanently empty board. `start()` early-returns when already
+            // running, so double-starting is harmless and the handlers above
+            // stay as they are.
+            if display_mode == DisplayMode::HivemindSweeper
+                && prev_display_mode != DisplayMode::HivemindSweeper
+            {
+                hivemind
+                    .get_or_insert_with(crate::workload::hivemind::Hivemind::new)
+                    .start();
+            }
+            // Any arrival at a new view — rotated to or navigated to — starts
+            // its dwell fresh, so pressing a mode key never lands you on a
+            // view that's about to rotate away.
+            rotate_since = Instant::now();
+            // The incoming view's activity is unknown until its update arm
+            // runs; assume active so a view is never cut to the short glance
+            // on a stale flag left by the previous one.
+            train_active = true;
+            inference_active = true;
             terminal.clear().ok();
             prev_display_mode = display_mode;
         }
@@ -1083,10 +1302,24 @@ fn run_app(
                                     f.area(),
                                     h,
                                     hm_cursor,
+                                    hm_auto,
                                     hm_unified,
                                     hm_sev,
                                     &kitt,
                                 );
+                            }
+                        }
+                        DisplayMode::Training => {
+                            // Under `--mock` the state comes from the
+                            // synthetic run rather than a /proc scan; the
+                            // header marks it so it can't be mistaken for a
+                            // real one.
+                            if let Some(ref tv) = train_view {
+                                if let Some(ref st) = mock_train_state {
+                                    ui_train(f, tv, st, backend);
+                                } else if let Some(ref tm) = train_monitor {
+                                    ui_train(f, tv, tm.state(), backend);
+                                }
                             }
                         }
                     }
@@ -1137,6 +1370,7 @@ fn run_app(
                     memory_flow = None;
                     arcade = None;
                     defrag = None;
+                    train_view = None;
                     terminal.clear().ok();
                 }
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -1302,6 +1536,50 @@ fn run_app(
                                             true,
                                         ));
                                     }
+                                } else if verb == "rotate" {
+                                    // Handled here rather than in
+                                    // `execute_command` because the rotation
+                                    // lives in the loop's own state, which
+                                    // that function cannot reach — the same
+                                    // reason `/hivemind` is intercepted below.
+                                    // `/rotate` toggles; `/rotate on|off` is
+                                    // explicit, so a script or a kiosk unit
+                                    // can set a known state rather than
+                                    // flipping whatever it happens to find.
+                                    let arg = cmd_buf
+                                        .trim()
+                                        .trim_start_matches('/')
+                                        .split_once(char::is_whitespace)
+                                        .map(|(_, rest)| rest.trim().to_ascii_lowercase())
+                                        .unwrap_or_default();
+                                    let want = match arg.as_str() {
+                                        "" => Some(!rotate_enabled),
+                                        "on" | "start" => Some(true),
+                                        "off" | "stop" => Some(false),
+                                        _ => None,
+                                    };
+                                    match want {
+                                        Some(v) => {
+                                            rotate_enabled = v;
+                                            rotate_since = Instant::now();
+                                            cmd_message = Some((
+                                                if v {
+                                                    "rotation on — cycling all views (R to stop)"
+                                                        .to_string()
+                                                } else {
+                                                    "rotation off".to_string()
+                                                },
+                                                false,
+                                            ));
+                                        }
+                                        None => {
+                                            cmd_message = Some((
+                                                format!("rotate: expected on|off, got '{arg}'"),
+                                                true,
+                                            ));
+                                        }
+                                    }
+                                    force_redraw = true;
                                 } else if verb == "hivemind"
                                     || (verb == "mode"
                                         && cmd_buf
@@ -1493,10 +1771,18 @@ fn run_app(
                             // toggle below, so it opens the legend here exactly as it
                             // does in every other mode (vim `h`/`j`/`k` still move the
                             // cursor, and Right covers rightward movement).
+                            // Hand the focus back to the sweeper. Guarded to
+                            // the mode so Insights' own Enter (portrait zoom)
+                            // is untouched.
+                            KeyCode::Enter if display_mode == DisplayMode::HivemindSweeper => {
+                                hm_auto = true;
+                                force_redraw = true;
+                            }
                             KeyCode::Char('h') | KeyCode::Left
                                 if display_mode == DisplayMode::HivemindSweeper =>
                             {
                                 hm_cursor.1 = hm_cursor.1.saturating_sub(1);
+                                hm_auto = false;
                             }
                             KeyCode::Right if display_mode == DisplayMode::HivemindSweeper => {
                                 if let Some(h) = hivemind.as_ref() {
@@ -1505,6 +1791,7 @@ fn run_app(
                                         rows.first().map(|r| r.cells.len().saturating_sub(1))
                                     {
                                         hm_cursor.1 = (hm_cursor.1 + 1).min(max_col);
+                                        hm_auto = false;
                                     }
                                 }
                             }
@@ -1512,6 +1799,7 @@ fn run_app(
                                 if display_mode == DisplayMode::HivemindSweeper =>
                             {
                                 hm_cursor.0 = hm_cursor.0.saturating_sub(1);
+                                hm_auto = false;
                             }
                             KeyCode::Char('j') | KeyCode::Down
                                 if display_mode == DisplayMode::HivemindSweeper =>
@@ -1520,6 +1808,7 @@ fn run_app(
                                     let rows = hivemind_view::board_rows(h, Instant::now());
                                     let max_row = rows.len().saturating_sub(1);
                                     hm_cursor.0 = (hm_cursor.0 + 1).min(max_row);
+                                    hm_auto = false;
                                 }
                             }
                             KeyCode::Char('f') if display_mode == DisplayMode::HivemindSweeper => {
@@ -1602,6 +1891,41 @@ fn run_app(
                                 }
                                 force_redraw = true;
                             }
+                            KeyCode::Char('t') => {
+                                // Toggle the Training view — mirrors the `~` handler
+                                // above: entering remembers `prev_mode`, leaving (via
+                                // `t` again, or Esc) hands back to it. Training owns no
+                                // threads (`TrainMonitor` is polled inline each tick),
+                                // so unlike HivemindSweeper there is nothing for the
+                                // mode-transition choke point to tear down.
+                                if display_mode == DisplayMode::Training {
+                                    display_mode = prev_mode;
+                                } else {
+                                    prev_mode = display_mode;
+                                    display_mode = DisplayMode::Training;
+                                }
+                                force_redraw = true;
+                            }
+                            KeyCode::Char('R') => {
+                                // Toggle the unattended rotation. Capital `R`
+                                // because lowercase `r` is force-refresh; the
+                                // two are unrelated, but `R` is the only free
+                                // key with the right mnemonic.
+                                rotate_enabled = !rotate_enabled;
+                                // Starting the rotation gives the current view
+                                // a full dwell rather than advancing on
+                                // whatever time had already elapsed.
+                                rotate_since = Instant::now();
+                                cmd_message = Some((
+                                    if rotate_enabled {
+                                        "rotation on — cycling all views (R to stop)".to_string()
+                                    } else {
+                                        "rotation off".to_string()
+                                    },
+                                    false,
+                                ));
+                                force_redraw = true;
+                            }
                             KeyCode::Char('/') => {
                                 // Open command bar — clears any previous result message
                                 cmd_mode = true;
@@ -1643,6 +1967,10 @@ fn run_app(
                                     // view to wherever the user came from (see the
                                     // `i`/`I` handler above) rather than quitting.
                                     display_mode = prev_mode;
+                                } else if display_mode == DisplayMode::Training {
+                                    // Back out of the Training view to wherever the
+                                    // user came from (see the `t` handler above).
+                                    display_mode = prev_mode;
                                 } else {
                                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_some() {
@@ -1664,37 +1992,27 @@ fn run_app(
                                 }
                             }
                             KeyCode::Char('v') => {
-                                // Cycle through visualization modes.
-                                // Grid mode is intentionally excluded — the Insights screen
-                                // already is the chip-portrait grid.
-                                display_mode = match display_mode {
-                                    DisplayMode::Insights | DisplayMode::Grid => {
-                                        DisplayMode::MemoryFlow
-                                    }
-                                    DisplayMode::MemoryFlow => DisplayMode::Starfield,
+                                // Cycle through visualization modes (see `next_display_mode`
+                                // for the rotation itself). Grid mode is intentionally
+                                // excluded — the Insights screen already is the
+                                // chip-portrait grid.
+                                //
+                                // A couple of transitions reset the *next* mode's
+                                // visualization state so it reinitializes fresh rather
+                                // than resuming stale particles/state from a previous
+                                // visit; these resets are tied to the mode being left,
+                                // so they stay here rather than in the pure rotation
+                                // function.
+                                match display_mode {
                                     DisplayMode::Starfield => {
                                         memory_castle = None;
-                                        DisplayMode::MemoryCastle
                                     }
                                     DisplayMode::MemoryCastle => {
                                         arcade = None;
-                                        DisplayMode::Arcade
                                     }
-                                    DisplayMode::Arcade => DisplayMode::Defrag,
-                                    // Defrag and the Inference Server Monitor round out the
-                                    // rotation just before it wraps back to Insights, so both
-                                    // are reachable by cycling with `v` (the monitor is also
-                                    // still a direct toggle via `i`).
-                                    DisplayMode::Defrag => DisplayMode::InferenceMonitor,
-                                    DisplayMode::InferenceMonitor => DisplayMode::Insights,
-                                    // HivemindSweeper is deliberately excluded from the
-                                    // `v`-cycle rotation (only reachable via `~`), but `v`
-                                    // is a global hotkey, so pressing it while the sweeper
-                                    // happens to be active still needs to leave cleanly;
-                                    // the mode-transition choke point above stops its
-                                    // collector threads.
-                                    DisplayMode::HivemindSweeper => DisplayMode::Insights,
-                                };
+                                    _ => {}
+                                }
+                                display_mode = next_display_mode(display_mode);
                                 log::info!("Switched to {:?} mode", display_mode);
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
@@ -2438,6 +2756,19 @@ fn ui_defrag(f: &mut Frame, dv: &DefragVis, backend: &dyn TelemetryBackend) {
     f.render_widget(widget, f.area());
 }
 
+/// Render the Training view — full-screen character grid, same shape as
+/// `ui_defrag`.
+fn ui_train(
+    f: &mut Frame,
+    tv: &TrainView,
+    st: &crate::workload::train::TrainState,
+    backend: &dyn TelemetryBackend,
+) {
+    let lines = tv.render(st, backend);
+    let widget = Paragraph::new(lines).style(Style::default().bg(colors::rgb(0, 0, 0)));
+    f.render_widget(widget, f.area());
+}
+
 /// Render Arcade mode — uses the composite canvas so the hero `@` and trail
 /// actually appear.  The previous ratatui-Layout approach called sub-viz methods
 /// directly into separate Rects, bypassing ArcadeVisualization::render() and
@@ -2951,7 +3282,12 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
         return;
     }
 
-    let lines = overlay_panel_lines(kind, mode);
+    // Wrap budget for prose panels: the panel clamps to `area.width - 2`, and
+    // each content line spends 2 columns on the "║ " border plus one trailing
+    // padding column. Capped so the text keeps a readable measure on a very
+    // wide terminal instead of stretching into one long line.
+    let wrap_cols = (area.width as usize).saturating_sub(5).clamp(16, 56);
+    let lines = overlay_lines(kind, mode, wrap_cols);
 
     // Title + accent per panel kind (used for the header and to size the panel).
     let (title, border_color) = match kind {
@@ -2982,7 +3318,16 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
         height: panel_h,
     };
 
-    // Clear background behind the panel.
+    // Reset the cells behind the panel, then paint its background.
+    //
+    // A `Block` with a background style only recolours each cell — it does
+    // not replace the symbol already there, so whatever the view drew
+    // underneath kept showing through wherever a content line was shorter
+    // than the panel. Harmless-looking on the sparse views this started on;
+    // on the Training view, whose loss river is a solid wall of `█`, the
+    // panel was unreadable. `Clear` is the widget that actually blanks the
+    // cells.
+    f.render_widget(ratatui::widgets::Clear, panel_rect);
     f.render_widget(
         Block::default().style(Style::default().bg(colors::rgb(8, 14, 22))),
         panel_rect,
@@ -3024,7 +3369,7 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
 ///
 /// Lines must fit within PANEL_W - 2 visible columns (no right border means content
 /// needs to respect the panel width itself).  Each line is prefixed with `║ ` (2 cols).
-fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'static>> {
+fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line<'static>> {
     let bg = colors::rgb(8, 14, 22);
     let bar = colors::rgb(40, 55, 70);
     let dim = colors::rgb(90, 100, 120);
@@ -3077,6 +3422,8 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 row!(" g", "jump to Grid", key),
                 row!(" i  I", "Inference Servers monitor", key),
                 row!(" ~", "HivemindSweeper activity sniffer", key),
+                row!(" t", "Training view (live tt-train run)", key),
+                row!(" R", "rotate every view unattended (kiosk)", key),
                 row!(" b", "cycle backend", key),
                 ln!(vec![Span::styled(
                     "──────────────────────────────────────",
@@ -3086,6 +3433,7 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 row!(" /mode <name>", "insights grid castle flow…", lbl),
                 row!(" /fps <n>", "animation FPS  1–120", lbl),
                 row!(" /datafps <n>", "data refresh FPS  1–30", lbl),
+                row!(" /rotate", "rotate all views; on|off to force", lbl),
                 row!(" /legend", "toggle legend panel", lbl),
                 row!(" /explain", "toggle explain panel", lbl),
                 row!(" /help", "toggle this panel", lbl),
@@ -3144,6 +3492,7 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                 DisplayMode::Insights => insights_legend_lines(bar, bg, dim),
                 DisplayMode::Grid => grid_legend_lines(bar, bg, dim),
                 DisplayMode::HivemindSweeper => hivemind_view::legend_lines(bar, bg, dim),
+                DisplayMode::Training => train_legend_lines(bar, bg, dim),
                 DisplayMode::Arcade => {
                     // All four combined.
                     let mut v = Vec::new();
@@ -3203,6 +3552,7 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "memory hierarchy — orbit radius tracks",
                     "memory bandwidth utilization.",
                 ],
+                cols,
             ),
             DisplayMode::MemoryCastle => explain_lines(
                 bar,
@@ -3226,6 +3576,7 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "Particle color encodes the memory tier.",
                     "Density reflects current bandwidth.",
                 ],
+                cols,
             ),
             DisplayMode::Defrag => explain_lines(
                 bar,
@@ -3250,6 +3601,7 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "relative activity within each cell.",
                     "Color encodes channel temperature.",
                 ],
+                cols,
             ),
             DisplayMode::MemoryFlow => explain_lines(
                 bar,
@@ -3273,6 +3625,7 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "",
                     "Heat-map center encodes die temperature.",
                 ],
+                cols,
             ),
             DisplayMode::Arcade => explain_lines(
                 bar,
@@ -3300,6 +3653,7 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "  @  healthy   !  throttled/faulted",
                     "  ?  ARC stall  %  undervolt",
                 ],
+                cols,
             ),
             DisplayMode::Insights => explain_lines(
                 bar,
@@ -3345,6 +3699,7 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "At 32+ devices a compact fleet heatmap",
                     "is shown — Enter to zoom in.",
                 ],
+                cols,
             ),
             DisplayMode::Grid => explain_lines(
                 bar,
@@ -3362,6 +3717,7 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "",
                     "Press v to continue cycling modes.",
                 ],
+                cols,
             ),
             DisplayMode::InferenceMonitor => explain_lines(
                 bar,
@@ -3389,10 +3745,49 @@ fn overlay_panel_lines(kind: OverlayPanel, mode: DisplayMode) -> Vec<Line<'stati
                     "",
                     "Press l for the symbol legend · i to return.",
                 ],
+                cols,
             ),
             DisplayMode::HivemindSweeper => {
-                explain_lines(bar, bg, dim, lbl, hivemind_view::EXPLAIN_TEXT)
+                explain_lines(bar, bg, dim, lbl, hivemind_view::EXPLAIN_TEXT, cols)
             }
+            DisplayMode::Training => explain_lines(
+                bar,
+                bg,
+                dim,
+                lbl,
+                &[
+                    "Training — Robot Brain Food",
+                    "",
+                    "A live tt-train run, drawn as the model",
+                    "itself: one column per transformer block,",
+                    "one node per attention head.",
+                    "",
+                    "Each step feeds tokens in from the left",
+                    "(amber), then gradients flow back out to",
+                    "the right (violet). The loss mountains",
+                    "below are coloured by their own value, so",
+                    "the range is the whole run's history —",
+                    "magenta chaos resolving to teal calm.",
+                    "",
+                    "The view attaches by itself: it scans /proc",
+                    "for a process whose binary is a tt-train",
+                    "example (nano_gpt, mnist_mlp, …), then reads",
+                    "/proc/<pid>/fd/1 to locate its log.",
+                    "",
+                    "tt-train prints step, loss, step time and",
+                    "kernel-cache size; tokens/sec and ETA are",
+                    "derived from those plus the run's YAML.",
+                    "Nothing here is invented — gradient norms",
+                    "and MFU aren't emitted live, so they",
+                    "aren't shown.",
+                    "",
+                    "If stdout wasn't redirected to a file, the",
+                    "per-step stream can't be read after the",
+                    "fact — relaunch with '> train.log' and the",
+                    "view picks it up automatically.",
+                ],
+                cols,
+            ),
         },
     }
 }
@@ -3794,6 +4189,78 @@ fn defrag_legend_lines(
     ]
 }
 
+/// Legend for the Training view: the nine colour channels, each of which
+/// carries a different live signal.
+fn train_legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    macro_rules! ln {
+        ($spans:expr) => {{
+            let mut v: Vec<Span<'static>> =
+                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            v.extend($spans);
+            Line::from(v)
+        }};
+    }
+    vec![
+        ln!(vec![
+            Span::styled("●", Style::default().fg(colors::rgb(214, 92, 208))),
+            Span::styled(" → ", Style::default().fg(dim)),
+            Span::styled("●", Style::default().fg(colors::rgb(79, 209, 197))),
+            Span::styled(
+                "  loss: magenta chaos → teal converged",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("─", Style::default().fg(colors::rgb(242, 180, 62))),
+            Span::styled(" forward pass (left→right)", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("∙", Style::default().fg(colors::rgb(150, 120, 240))),
+            Span::styled(" gradients (right→left)", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("▁▄█", Style::default().fg(colors::rgb(180, 120, 200))),
+            Span::styled(
+                " loss river — each column keeps its own value's hue",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("▼", Style::default().fg(colors::rgb(124, 242, 156))),
+            Span::styled(" improving   ", Style::default().fg(dim)),
+            Span::styled("▲", Style::default().fg(colors::rgb(255, 138, 107))),
+            Span::styled(" regressing", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("█", Style::default().fg(colors::temp_color(70.0))),
+            Span::styled(" chip temp (varies with heat)", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("▓", Style::default().fg(colors::rgb(200, 200, 120))),
+            Span::styled(" chip power draw", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("░▒", Style::default().fg(colors::rgb(120, 180, 150))),
+            Span::styled(
+                " aurora + stars — sky opens as loss falls",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("◆", Style::default().fg(colors::rgb(170, 120, 245))),
+            Span::styled(" kernel cache compiling → steady", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("✦", Style::default().fg(colors::rgb(124, 242, 156))),
+            Span::styled(" checkpoint saved", Style::default().fg(dim)),
+        ]),
+    ]
+}
+
 fn flow_legend_lines(
     bar: ratatui::style::Color,
     bg: ratatui::style::Color,
@@ -3925,23 +4392,85 @@ fn hero_legend_lines(
 }
 
 /// Build explain lines from a static slice of text strings.
+/// Wrap overlay text to `cols` display columns, splitting long lines and
+/// never joining short ones.
+///
+/// The panels were hand-broken to a width someone chose by eye, which made
+/// the panel's size a function of whichever literal happened to be longest —
+/// one sentence that ran long pushed a line past the panel, and `Paragraph`
+/// clips instead of wrapping, silently eating the tail.
+///
+/// An earlier version of this fixed that by re-flowing whole paragraphs, and
+/// that was wrong: these panels are mostly *lists*, and joining consecutive
+/// items ran them together — in the worst case separating a glyph from its
+/// own definition across a line break (`◇` / `diamond — cache hit`). Author
+/// line breaks carry meaning here, including deliberate column alignment that
+/// `split_whitespace` would collapse.
+///
+/// So the rule is one-directional: a line that fits is emitted untouched, and
+/// only a line that would overflow is broken, with its continuations keeping
+/// the original indent. That still fixes the overflow this exists for, while
+/// leaving every authored line exactly where its author put it.
+fn wrap_overlay_text(text: &[&str], cols: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthStr;
+    let cols = cols.max(8);
+    let mut out: Vec<String> = Vec::new();
+
+    for raw in text {
+        if raw.trim().is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        if UnicodeWidthStr::width(*raw) <= cols {
+            out.push((*raw).to_string());
+            continue;
+        }
+        // Too wide: break on word boundaries, hanging continuations at the
+        // line's own indent so a wrapped list item stays visually an item.
+        let indent = raw.len() - raw.trim_start().len();
+        let pad = " ".repeat(indent);
+        let budget = cols.saturating_sub(indent).max(4);
+        let mut line = String::new();
+        for word in raw.split_whitespace() {
+            let w = UnicodeWidthStr::width(word);
+            let cur = UnicodeWidthStr::width(line.as_str());
+            if line.is_empty() {
+                line.push_str(word);
+            } else if cur + 1 + w <= budget {
+                line.push(' ');
+                line.push_str(word);
+            } else {
+                out.push(format!("{pad}{line}"));
+                line = word.to_string();
+            }
+        }
+        if !line.is_empty() {
+            out.push(format!("{pad}{line}"));
+        }
+    }
+    out
+}
+
 fn explain_lines(
     bar: ratatui::style::Color,
     bg: ratatui::style::Color,
     dim: ratatui::style::Color,
     lbl: ratatui::style::Color,
     text: &[&'static str],
+    cols: usize,
 ) -> Vec<Line<'static>> {
-    text.iter()
+    wrap_overlay_text(text, cols)
+        .into_iter()
         .map(|s| {
             let mut v: Vec<Span<'static>> =
                 vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
             if s.is_empty() {
                 // blank separator line
             } else {
+                let indented = s.starts_with(' ');
                 v.push(Span::styled(
-                    s.to_string(),
-                    Style::default().fg(if s.starts_with(' ') { dim } else { lbl }),
+                    s,
+                    Style::default().fg(if indented { dim } else { lbl }),
                 ));
             }
             Line::from(v)
@@ -4048,8 +4577,16 @@ fn execute_command(
                     false,
                 )
             }
+            // Training owns no threads (its monitor is polled inline), so
+            // unlike hivemind there is nothing to start — setting the mode
+            // is the whole job and this arm needs no loop-level counterpart.
+            "training" | "train" => {
+                *display_mode = DisplayMode::Training;
+                ("→ training".to_string(), false, false)
+            }
             _ => (
-                "mode: insights|grid|starfield|castle|flow|arcade|defrag|hivemind".to_string(),
+                "mode: insights|grid|starfield|castle|flow|arcade|defrag|hivemind|training"
+                    .to_string(),
                 true,
                 false,
             ),
@@ -5672,15 +6209,25 @@ fn build_stats_sidebar_rows(
     //   1. SMBUS present + ENABLED_ETH > 0  → use enabled count (accurate)
     //   2. SMBUS present + ENABLED_ETH = 0  → show live/? (transient or no ports)
     //   3. SMBUS absent entirely             → fall back to arch max (no data yet)
-    let eth_live_mask = smbus.and_then(|s| s.eth_live_status).unwrap_or(0);
+    // `None` here means the liveness mask was never reported — which is NOT
+    // the same fact as "no links are live", and must not render as one. A
+    // tt-smi/firmware build that omits ETH_LIVE_STATUS while still reporting
+    // ENABLED_ETH used to produce a confident `0/12 live` under twelve dark
+    // dots on a card whose links were all up. The denominator has always
+    // drawn this distinction (`0/?` when ENABLED_ETH is missing); the
+    // numerator now draws it too.
+    let eth_live = smbus.and_then(|s| s.eth_live_status);
+    let eth_live_mask = eth_live.unwrap_or(0);
     let eth_enabled_mask = smbus.and_then(|s| s.enabled_eth).unwrap_or(0);
     // Count only ports that are both enabled and live to prevent impossible
     // displays like "15/14 live" if ETH_LIVE_STATUS has bits outside ENABLED_ETH.
-    let eth_live_count = if eth_enabled_mask > 0 {
-        (eth_live_mask & eth_enabled_mask as u64).count_ones()
-    } else {
-        eth_live_mask.count_ones()
-    };
+    let eth_live_count: Option<u32> = eth_live.map(|live| {
+        if eth_enabled_mask > 0 {
+            (live & eth_enabled_mask as u64).count_ones()
+        } else {
+            live.count_ones()
+        }
+    });
     let eth_total: Option<u32> = if eth_enabled_mask > 0 {
         Some(eth_enabled_mask.count_ones())
     } else if smbus.is_some() {
@@ -5696,16 +6243,21 @@ fn build_stats_sidebar_rows(
     let eth_total_display = eth_total
         .map(|t| t.to_string())
         .unwrap_or_else(|| "?".to_string());
-    let eth_color = match eth_total {
-        Some(t) if eth_live_count == t && t > 0 => Color::Rgb(79, 209, 197), // teal — all live
-        _ if eth_live_count > 0 => Color::Rgb(244, 196, 113),                // yellow — partial
-        _ => Color::Rgb(96, 125, 139), // muted gray — none live
+    let eth_live_display = eth_live_count
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let eth_color = match (eth_live_count, eth_total) {
+        (Some(c), Some(t)) if c == t && t > 0 => Color::Rgb(79, 209, 197), // teal — all live
+        (Some(c), _) if c > 0 => Color::Rgb(244, 196, 113),                // yellow — partial
+        // Muted gray covers both "measured zero" and "not measured" — an
+        // unknown reading must never be louder than a real one.
+        _ => Color::Rgb(96, 125, 139),
     };
     if compact {
         stat_lines.push(Line::from(vec![
             Span::styled("E ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                format!("{}/{}", eth_live_count, eth_total_display),
+                format!("{}/{}", eth_live_display, eth_total_display),
                 Style::default().fg(eth_color),
             ),
         ]));
@@ -5715,11 +6267,18 @@ fn build_stats_sidebar_rows(
         // the count text leaves free instead of a fixed cap. A fixed cap of 16
         // overflowed: 8 (label) + 12 dots + " 12/12 live" (11) = 31 columns in
         // a 30-column interior, which cost the "e" of "live".
-        let eth_count_txt = format!(" {}/{} live", eth_live_count, eth_total_display);
-        let (dots_shown, eth_suffix) = eth_dot_budget(
-            eth_total,
-            unicode_width::UnicodeWidthStr::width(eth_count_txt.as_str()),
-        );
+        let eth_count_txt = format!(" {}/{} live", eth_live_display, eth_total_display);
+        // A dot's entire meaning is live-or-not, so with no liveness mask there
+        // is nothing to draw them from: drawing the enabled ports as dark dots
+        // would state "these are down" on no evidence.
+        let (dots_shown, eth_suffix) = if eth_live_count.is_none() {
+            (0, String::new())
+        } else {
+            eth_dot_budget(
+                eth_total,
+                unicode_width::UnicodeWidthStr::width(eth_count_txt.as_str()),
+            )
+        };
         // Dot map: iterate enabled bits when available, else live bits.
         let enabled_bits: Vec<u32> = if eth_enabled_mask > 0 {
             (0..32)
@@ -5749,7 +6308,7 @@ fn build_stats_sidebar_rows(
                 Style::default().fg(eth_color),
             ),
             Span::styled(
-                format!(" {}/{} live", eth_live_count, eth_total_display),
+                format!(" {}/{} live", eth_live_display, eth_total_display),
                 Style::default().fg(Color::White),
             ),
         ]));
@@ -7033,6 +7592,208 @@ mod tests {
     }
 }
 
+/// Tests for the Training view's `t`-key entry/exit and its exclusion from
+/// the `v`-cycle rotation.
+#[cfg(test)]
+mod display_mode_tests {
+    use super::{
+        display_mode_for, linger_for, next_display_mode, next_rotation_mode, DisplayMode, ROTATION,
+    };
+
+    #[test]
+    fn t_key_enters_training_mode_and_esc_leaves_it() {
+        // Mirrors the existing mode-transition tests: `t` is a dedicated entry
+        // key like `~`/`i`, not part of the `v` cycle.
+        let mut mode = DisplayMode::Insights;
+        let prev = mode;
+        mode = DisplayMode::Training;
+        assert_eq!(mode, DisplayMode::Training);
+        mode = prev;
+        assert_eq!(mode, DisplayMode::Insights);
+    }
+
+    #[test]
+    fn training_is_excluded_from_the_v_cycle() {
+        // Walk the whole `v` rotation; Training must never appear (it is
+        // entered with `t` only, like InferenceMonitor and HivemindSweeper).
+        let mut m = DisplayMode::Insights;
+        for _ in 0..12 {
+            m = next_display_mode(m);
+            assert_ne!(m, DisplayMode::Training, "`v` must not cycle into Training");
+        }
+    }
+
+    /// The whole point of `--rotate` is that it surfaces the views a
+    /// passer-by would never press a key for, so "every view appears" is the
+    /// requirement — not just the ones `v` already cycles.
+    #[test]
+    fn rotation_visits_every_view_including_the_hidden_ones() {
+        // Grid is deliberately absent: it draws the same chip portraits as
+        // Insights in a different layout, so rotating through both shows the
+        // same data twice running. See `rotation_skips_grid`.
+        let all = [
+            DisplayMode::Insights,
+            DisplayMode::Starfield,
+            DisplayMode::MemoryCastle,
+            DisplayMode::MemoryFlow,
+            DisplayMode::Arcade,
+            DisplayMode::Defrag,
+            DisplayMode::InferenceMonitor,
+            DisplayMode::HivemindSweeper,
+            DisplayMode::Training,
+        ];
+        let mut m = DisplayMode::Insights;
+        let mut seen = Vec::new();
+        // Exactly one lap: `all.len()` advances must visit every view and
+        // land back on the starting one, which is what proves it wraps
+        // rather than stalling or running long.
+        for _ in 0..all.len() {
+            if !seen.contains(&m) {
+                seen.push(m);
+            }
+            m = next_rotation_mode(m);
+        }
+        assert_eq!(
+            seen.len(),
+            all.len(),
+            "a lap must visit each view exactly once, saw {seen:?}"
+        );
+        for want in all {
+            assert!(
+                seen.contains(&want),
+                "{want:?} is never reached by the rotation"
+            );
+        }
+        assert_eq!(m, DisplayMode::Insights, "the rotation must wrap around");
+    }
+
+    /// A view missing from `ROTATION` must restart the cycle, never wedge.
+    #[test]
+    fn rotation_never_gets_stuck_on_an_unlisted_view() {
+        for m in [DisplayMode::Insights, DisplayMode::Training] {
+            let next = next_rotation_mode(m);
+            assert_ne!(next, m, "{m:?} must advance, not repeat");
+        }
+    }
+
+    /// Grid is an alternate layout of the chip portraits Insights already
+    /// draws, not a view of its own — rotating through both would show the
+    /// same data twice running. `next_display_mode` takes the same position,
+    /// treating `Insights | Grid` as a single stop in the `v` cycle.
+    #[test]
+    fn rotation_skips_grid() {
+        let mut m = DisplayMode::Insights;
+        for _ in 0..ROTATION.len() * 2 {
+            m = next_rotation_mode(m);
+            assert_ne!(
+                m,
+                DisplayMode::Grid,
+                "Grid re-shows Insights' data and must stay out of the rotation"
+            );
+        }
+
+        // Someone who pressed `g` and then started the rotation must still
+        // move on rather than wedging on an unlisted view.
+        let next = next_rotation_mode(DisplayMode::Grid);
+        assert_ne!(next, DisplayMode::Grid, "a rotation from Grid must advance");
+        assert!(
+            ROTATION.contains(&next),
+            "leaving Grid must land inside the rotation, got {next:?}"
+        );
+    }
+
+    #[test]
+    fn linger_is_longer_for_arcade_and_shorter_for_idle_workload_views() {
+        use super::{ROTATE_LINGER, ROTATE_LINGER_ARCADE, ROTATE_LINGER_IDLE};
+
+        // Arcade stacks three visualizations, so it earns the long dwell —
+        // and does so whether or not any workload is running.
+        for active in [true, false] {
+            assert_eq!(
+                linger_for(DisplayMode::Arcade, active),
+                ROTATE_LINGER_ARCADE
+            );
+        }
+
+        // The two workload views are the only ones that can be empty.
+        for m in [DisplayMode::Training, DisplayMode::InferenceMonitor] {
+            assert_eq!(
+                linger_for(m, false),
+                ROTATE_LINGER_IDLE,
+                "{m:?} with nothing to show must get the short glance"
+            );
+            assert_eq!(
+                linger_for(m, true),
+                ROTATE_LINGER,
+                "{m:?} with live activity must get the full dwell"
+            );
+        }
+
+        // Everything else draws live telemetry and is never empty, so the
+        // activity flag must not shorten it.
+        for m in [
+            DisplayMode::Insights,
+            DisplayMode::Grid,
+            DisplayMode::Starfield,
+            DisplayMode::MemoryCastle,
+            DisplayMode::MemoryFlow,
+            DisplayMode::Defrag,
+            DisplayMode::HivemindSweeper,
+        ] {
+            for active in [true, false] {
+                assert_eq!(
+                    linger_for(m, active),
+                    ROTATE_LINGER,
+                    "{m:?} must always get the full dwell"
+                );
+            }
+        }
+
+        // The ordering is the actual requirement; pin it so retuning the
+        // constants can't silently invert them.
+        assert!(ROTATE_LINGER_IDLE < ROTATE_LINGER);
+        assert!(ROTATE_LINGER < ROTATE_LINGER_ARCADE);
+    }
+
+    /// Every `--mode` value must launch the view it names. A missing arm is a
+    /// compile error, but a wrong one — pointing Training at Arcade, say —
+    /// compiles fine and only surfaces as the wrong screen at launch.
+    #[test]
+    fn every_cli_mode_launches_its_own_view() {
+        use crate::cli::VisualizationMode as V;
+        let pairs = [
+            (V::Normal, DisplayMode::Insights),
+            (V::Starfield, DisplayMode::Starfield),
+            (V::Castle, DisplayMode::MemoryCastle),
+            (V::Flow, DisplayMode::MemoryFlow),
+            (V::Arcade, DisplayMode::Arcade),
+            (V::Hivemind, DisplayMode::HivemindSweeper),
+            (V::Training, DisplayMode::Training),
+        ];
+        for (cli_mode, want) in pairs {
+            assert_eq!(
+                display_mode_for(cli_mode),
+                want,
+                "--mode {cli_mode:?} launched the wrong view"
+            );
+        }
+        // Distinct inputs must stay distinct outputs, so a copy-paste slip
+        // that maps two modes to one view can't pass the pairs above.
+        // Compared pairwise rather than via a set: `DisplayMode` is
+        // deliberately only `PartialEq`, and widening a production derive to
+        // suit a test is the wrong trade.
+        for (i, (a, _)) in pairs.iter().enumerate() {
+            for (b, _) in pairs.iter().skip(i + 1) {
+                assert_ne!(
+                    display_mode_for(*a),
+                    display_mode_for(*b),
+                    "--mode {a:?} and --mode {b:?} launch the same view"
+                );
+            }
+        }
+    }
+}
+
 /// Tests for `pcie_row_parts` — the pure width-budget decision behind the
 /// Insights sidebar's PCIe row(s). Fixes a real overflow: the previous
 /// single-row layout truncated mid-number once both link geometry and live
@@ -7542,6 +8303,283 @@ mod host_default_screen_tests {
         );
     }
 
+    /// The Training legend must document every one of the view's nine colour
+    /// channels (loss, forward, gradients, river history, delta direction,
+    /// chip temp/power, aurora, cache, checkpoint) — not just render *some*
+    /// lines.
+    #[test]
+    fn train_legend_documents_every_colour_channel() {
+        use super::{colors, train_legend_lines};
+
+        let lines = train_legend_lines(
+            colors::rgb(80, 80, 80),
+            colors::rgb(0, 0, 0),
+            colors::rgb(120, 120, 120),
+        );
+        // Per-line text, lowercased, so a dropped line is caught even when its
+        // one distinguishing word ("loss") also appears on another line — a
+        // single pooled-and-joined blob (the previous version of this test)
+        // can't tell "the loss river line is gone" from "the loss line moved".
+        let line_texts: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect::<String>()
+                    .to_lowercase()
+            })
+            .collect();
+        let all = line_texts.join("\n");
+
+        // Every one of the nine colour channels must have its own line with
+        // its own distinguishing text.
+        let expected_per_line: [&str; 10] = [
+            "loss: magenta chaos", // loss
+            "forward pass",        // forward
+            "gradients",           // gradients (backward)
+            "loss river",          // loss history (river)
+            "improving",           // delta direction (▼/▲ on one line)
+            "chip temp",           // chip temp
+            "chip power draw",     // chip power
+            "aurora",              // aurora + stars
+            "cache compiling",     // kernel cache
+            "checkpoint saved",    // checkpoint
+        ];
+        for needle in expected_per_line {
+            assert!(
+                line_texts.iter().any(|t| t.contains(needle)),
+                "legend is missing a line containing {needle:?}; got:\n{all}"
+            );
+        }
+        assert_eq!(
+            lines.len(),
+            expected_per_line.len(),
+            "expected exactly one line per channel entry, got:\n{all}"
+        );
+    }
+
+    /// The explain panels are prose. They used to be hand-broken to a width
+    /// chosen by eye, so the panel's size was really set by whichever
+    /// literal happened to be longest — and one edit that ran long pushed a
+    /// line past the panel, where `Paragraph` clips instead of wrapping and
+    /// silently ate the tail. This pins the property for every mode at
+    /// several widths, so the next long sentence cannot reintroduce it.
+    #[test]
+    fn explain_text_never_exceeds_its_wrap_budget() {
+        use super::{line_cols, overlay_lines, wrap_overlay_text, DisplayMode, OverlayPanel};
+        for mode in [
+            DisplayMode::Insights,
+            DisplayMode::Grid,
+            DisplayMode::Starfield,
+            DisplayMode::MemoryCastle,
+            DisplayMode::MemoryFlow,
+            DisplayMode::Arcade,
+            DisplayMode::Defrag,
+            DisplayMode::InferenceMonitor,
+            DisplayMode::HivemindSweeper,
+            DisplayMode::Training,
+        ] {
+            for cols in [24usize, 40, 56] {
+                for line in overlay_lines(OverlayPanel::Explain, mode, cols) {
+                    // +2 for the "║ " border prefix each line carries.
+                    let w = line_cols(&line);
+                    assert!(
+                        w <= cols + 2,
+                        "{mode:?} explain line is {w} cols at a {cols}-col budget"
+                    );
+                }
+            }
+        }
+
+        // Wrapping must break on word boundaries, not mid-word.
+        let wrapped = wrap_overlay_text(&["alpha bravo charlie delta echo foxtrot"], 16);
+        for l in &wrapped {
+            assert!(l.len() <= 16, "{l:?} exceeds the budget");
+        }
+        assert_eq!(
+            wrapped.join(" ").split_whitespace().collect::<Vec<_>>(),
+            vec!["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"],
+            "no word may be split or lost"
+        );
+    }
+
+    /// A `Block` with a background style recolours cells but leaves their
+    /// symbols, so whatever the view drew underneath showed through every
+    /// short overlay line. Cosmetic on sparse views; on the Training view,
+    /// whose loss river is a solid wall of block glyphs, the panel was
+    /// unreadable. Caught in review.
+    #[test]
+    fn an_overlay_blanks_whatever_it_covers() {
+        use super::{render_overlay_panel, DisplayMode, OverlayPanel};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+        terminal
+            .draw(|f| {
+                // Fill the whole screen the way a dense view does...
+                let area = f.area();
+                let wall: Vec<ratatui::text::Line> = (0..area.height)
+                    .map(|_| ratatui::text::Line::from("█".repeat(area.width as usize)))
+                    .collect();
+                f.render_widget(ratatui::widgets::Paragraph::new(wall), area);
+                // ...then drop an overlay on top of it.
+                render_overlay_panel(f, OverlayPanel::Explain, DisplayMode::Training);
+            })
+            .expect("draw");
+
+        // Locate the panel by its own top-left corner glyph rather than by
+        // heuristic: the first version of this test guessed at the rect,
+        // never matched a cell, and passed with `Clear` removed.
+        let buf = terminal.backend().buffer();
+        let mut corner = None;
+        for y in 0..40u16 {
+            for x in 0..120u16 {
+                if buf[(x, y)].symbol() == "╔" {
+                    corner = Some((x, y));
+                }
+            }
+        }
+        let (px, py) = corner.expect("the overlay draws a top-left corner");
+
+        // Bound the scan by the panel's own bottom border: the panel is
+        // anchored one row above the command bar, so scanning to the screen
+        // edge counts that uncovered row and reports a false 47.
+        let bottom = (py..40u16)
+            .find(|&y| buf[(px, y)].symbol() == "╚")
+            .expect("the overlay draws a bottom-left corner");
+        let mut bled = 0;
+        for y in py..=bottom {
+            for x in px..120u16 {
+                if buf[(x, y)].symbol() == "█" {
+                    bled += 1;
+                }
+            }
+        }
+        assert_eq!(bled, 0, "{bled} cells of the view bled through the overlay");
+    }
+
+    /// Author line breaks carry meaning in these panels — they are mostly
+    /// lists, and several align their columns deliberately. An earlier
+    /// re-flowing wrapper joined consecutive items into run-on prose across
+    /// four panels, in the worst case separating a glyph from its own
+    /// definition (`◇` / `diamond — cache hit`). Caught in review.
+    #[test]
+    fn wrapping_never_joins_authored_lines() {
+        use super::wrap_overlay_text;
+
+        // The Memory Castle symbol key, verbatim.
+        let castle = [
+            "◦ open circle  — read access",
+            "· dot          — write access",
+            "◇ diamond      — cache hit",
+            "• filled dot   — cache miss",
+        ];
+        let got = wrap_overlay_text(&castle, 56);
+        assert_eq!(got.len(), 4, "each legend item keeps its own line: {got:?}");
+        assert_eq!(got[0], castle[0], "a line that fits is emitted untouched");
+
+        // Deliberate column alignment must survive — `split_whitespace`
+        // would collapse the double spaces that line these up.
+        let hero = [
+            "@  healthy   !  throttled/faulted",
+            "?  ARC stall  %  undervolt",
+        ];
+        let got = wrap_overlay_text(&hero, 56);
+        assert_eq!(got, vec![hero[0].to_string(), hero[1].to_string()]);
+
+        // An unindented list whose items are ordinary prose must not merge
+        // either — the rule is "never join", not "never join glyphs".
+        let bands = [
+            "Top band: Starfield — Tensix cores",
+            "Middle-left: Memory Castle — hierarchy",
+            "Bottom band: Memory Flow — NoC traffic",
+        ];
+        assert_eq!(wrap_overlay_text(&bands, 56).len(), 3);
+    }
+
+    /// Splitting still has to happen — that is the overflow this wrapper
+    /// exists for — and a blank separator must survive it.
+    #[test]
+    fn wrapping_still_splits_an_overlong_line_and_keeps_blanks() {
+        use super::wrap_overlay_text;
+        let long = "The FOCUS pane names the busiest cell and describes it, tracking that \
+                    cell on its own so the screen explains itself without being driven.";
+        let out = wrap_overlay_text(
+            &[
+                "Heading",
+                "",
+                long,
+                "  indented item that is quite long and will not fit in the budget",
+            ],
+            40,
+        );
+        assert_eq!(out[0], "Heading");
+        assert_eq!(out[1], "", "the blank separator survives");
+        assert!(
+            out.len() > 4,
+            "the long lines must have been split: {out:?}"
+        );
+        for l in &out {
+            assert!(
+                unicode_width::UnicodeWidthStr::width(l.as_str()) <= 40,
+                "{l:?} exceeds the budget"
+            );
+        }
+        // A wrapped indented line hangs at its own indent.
+        let cont: Vec<&String> = out.iter().filter(|l| l.starts_with("  ")).collect();
+        assert!(
+            cont.len() >= 2,
+            "indent preserved on continuations: {out:?}"
+        );
+    }
+
+    #[test]
+    fn training_overlays_do_not_truncate_wide_content() {
+        use super::{line_cols, overlay_lines, render_overlay_panel, DisplayMode, OverlayPanel};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        // Mirrors `overlay_panel_does_not_truncate_wide_content` but scoped to
+        // the new Training mode: assert the panel sizes to its widest line
+        // rather than merely asserting the content list is non-empty.
+        let (w, h) = (140u16, 44u16);
+        for kind in [OverlayPanel::Legend, OverlayPanel::Explain] {
+            let mode = DisplayMode::Training;
+            let lines = overlay_lines(kind, mode, 56);
+            assert!(!lines.is_empty(), "{kind:?} must render for Training");
+
+            let widest: String = lines
+                .iter()
+                .max_by_key(|l| line_cols(l))
+                .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+                .unwrap_or_default();
+            let needle: String = widest.trim_start_matches('║').trim().to_string();
+
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
+            terminal
+                .draw(|f| render_overlay_panel(f, kind, mode))
+                .expect("draw");
+
+            let buf = terminal.backend().buffer().clone();
+            let mut rows: Vec<String> = Vec::new();
+            for y in 0..buf.area.height {
+                let mut row = String::new();
+                for x in 0..buf.area.width {
+                    row.push_str(buf[(x, y)].symbol());
+                }
+                rows.push(row);
+            }
+            let painted = rows.join("\n");
+
+            assert!(
+                painted.contains(&needle),
+                "{kind:?}/{mode:?}: widest Training line was truncated.\n\
+                 expected to find: {needle:?}\nrendered:\n{painted}"
+            );
+        }
+    }
+
     /// Regression: the legend/help/explain overlay panel was a fixed 42 columns
     /// wide while its content lines are 50–66 display columns, so `Paragraph`
     /// (which clips, not wraps) silently truncated the tail of every long line
@@ -7550,9 +8588,7 @@ mod host_default_screen_tests {
     /// roomy terminal and assert the full text of the widest line survives.
     #[test]
     fn overlay_panel_does_not_truncate_wide_content() {
-        use super::{
-            line_cols, overlay_panel_lines, render_overlay_panel, DisplayMode, OverlayPanel,
-        };
+        use super::{line_cols, overlay_lines, render_overlay_panel, DisplayMode, OverlayPanel};
 
         // Terminal wide enough that the panel is never terminal-clamped.
         let (w, h) = (140u16, 44u16);
@@ -7567,7 +8603,7 @@ mod host_default_screen_tests {
         ];
         for (kind, mode) in cases {
             // The widest content line for this panel, as plain text.
-            let widest: String = overlay_panel_lines(kind, mode)
+            let widest: String = overlay_lines(kind, mode, 56)
                 .into_iter()
                 .max_by_key(|l| line_cols(l))
                 .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
@@ -8401,6 +9437,12 @@ mod stats_sidebar_tests {
         assert!(rows.len() <= INTERIOR_H);
     }
 
+    /// The numerators here read `?`, not `0`: with no SMBUS block (or none
+    /// carrying ETH_LIVE_STATUS) the liveness of those ports is simply not
+    /// measured, and this row must not report a measurement it never made —
+    /// see `eth_row_says_unknown_not_zero_when_liveness_is_not_reported`. What
+    /// this test is actually about, the *denominator's* fallback, is unchanged.
+    ///
     /// The ETH row's "SMBUS absent entirely → architectural maximum" fallback
     /// must be reachable.
     ///
@@ -8430,7 +9472,7 @@ mod stats_sidebar_tests {
             .map(|s| s.content.as_ref())
             .collect::<String>();
         assert!(
-            eth.contains("0/24 live"),
+            eth.contains("?/24 live"),
             "no SMBUS → architectural max denominator; got {eth:?}"
         );
 
@@ -8444,8 +9486,64 @@ mod stats_sidebar_tests {
             .map(|s| s.content.as_ref())
             .collect::<String>();
         assert!(
-            eth.contains("0/? live"),
+            eth.contains("?/? live"),
             "SMBUS present but no enabled mask → unknown total; got {eth:?}"
+        );
+    }
+
+    /// An unreported liveness mask must read as unknown, not as "all links
+    /// down". The denominator already distinguishes these (`0/?` when
+    /// ENABLED_ETH is missing); the numerator did not, so a firmware or tt-smi
+    /// build that omits ETH_LIVE_STATUS while still reporting ENABLED_ETH
+    /// rendered a confident `0/12 live` under twelve dark dots — on a card
+    /// whose links were all up.
+    ///
+    /// Reproduced end-to-end before this test existed: a real `tt-smi -s`
+    /// snapshot off this box with only ETH_LIVE_STATUS deleted, served back
+    /// through `--tt-smi-path`, printed exactly `ETH ············ 0/12 live`.
+    #[test]
+    fn eth_row_says_unknown_not_zero_when_liveness_is_not_reported() {
+        let device = Device::new(0, "p300c".into(), "0000:01:00.0".into(), "N/A".into());
+
+        let mut unknown = SmbusTelemetry::new();
+        unknown.enabled_eth = Some(0x3edf); // 12 ports provisioned
+        unknown.eth_live_status = None; // ...but liveness not reported
+        let row = |s: &SmbusTelemetry| {
+            build_stats_sidebar_rows(&device, None, Some(s), None, false)[1]
+                .spans
+                .iter()
+                .map(|sp| sp.content.as_ref())
+                .collect::<String>()
+        };
+
+        let eth = row(&unknown);
+        assert!(
+            eth.contains("?/12 live"),
+            "unreported liveness must read as unknown against a known total; got {eth:?}"
+        );
+        assert!(
+            !eth.contains("0/12"),
+            "must not claim a measurement of zero it never made; got {eth:?}"
+        );
+        assert!(
+            !eth.contains('\u{00b7}') && !eth.contains('\u{25cf}'),
+            "a dot means live-or-not; with no liveness data there is nothing \
+             to draw dots from, so none may be drawn; got {eth:?}"
+        );
+
+        // The discriminating half: a real measurement of zero is a genuine
+        // all-links-down alarm and must stay exactly as loud as it was.
+        let mut all_down = SmbusTelemetry::new();
+        all_down.enabled_eth = Some(0x3edf);
+        all_down.eth_live_status = Some(0);
+        let eth = row(&all_down);
+        assert!(
+            eth.contains("0/12 live"),
+            "a measured zero is a real fault and must still read 0/12; got {eth:?}"
+        );
+        assert!(
+            eth.contains('\u{00b7}'),
+            "measured-down ports still draw their dark dots; got {eth:?}"
         );
     }
 

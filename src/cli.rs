@@ -174,9 +174,19 @@ pub struct Cli {
     /// Launch directly into specific visualization mode
     ///
     /// Skip the normal table view and start in a specific mode.
-    /// Available modes: normal, starfield, castle, flow, arcade, hivemind
+    /// Available modes: normal, starfield, castle, flow, arcade, hivemind, training
     #[arg(short = 'm', long, value_enum)]
     pub mode: Option<VisualizationMode>,
+
+    /// Rotate through every view unattended (kiosk / wall-display mode)
+    ///
+    /// Cycles all views — including the ones normally reachable only by their
+    /// own key (`i`, `~`, `t`) — dwelling 30s on each, 45s on arcade, and
+    /// only 10s on training or the inference monitor when there is no run or
+    /// server for them to show. Toggle in-app with `R`. Combines with
+    /// `--mode` to choose where the rotation starts.
+    #[arg(long)]
+    pub rotate: bool,
 
     /// Animation sensitivity preset
     ///
@@ -374,6 +384,14 @@ pub enum VisualizationMode {
     /// board + coalesced event feed). Also reachable in-app with `~`.
     #[value(alias = "hive", alias = "sniff", alias = "hivemindsweeper")]
     Hivemind,
+
+    /// Training — attaches to a live tt-train run (loss mountains, network
+    /// sweeps, checkpoint comets). Also reachable in-app with `t`.
+    ///
+    /// Takes no target: the view finds the run itself, so this is purely a
+    /// "start here" alias for scripted/kiosk launches.
+    #[value(alias = "train", alias = "tt-train")]
+    Training,
 }
 
 impl Cli {
@@ -517,6 +535,7 @@ impl Cli {
             print: false,
             bench: true,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             throttle: false,
             idle_on_blur: false,
@@ -586,6 +605,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -621,6 +641,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -651,6 +672,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -681,6 +703,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -715,6 +738,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -742,6 +766,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -772,6 +797,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -811,6 +837,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -838,6 +865,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -867,6 +895,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             throttle: false,
@@ -951,5 +980,40 @@ mod tests {
     #[test]
     fn parse_serve_bind_default_port_constant() {
         assert_eq!(DEFAULT_SERVE_PORT, 8770);
+    }
+
+    /// `--mode training` and its aliases are the scriptable entry point to a
+    /// view that otherwise needs an interactive `t`, so the accepted spellings
+    /// are load-bearing: a launcher, kiosk unit, or CI script hard-codes one.
+    #[test]
+    fn mode_training_and_its_aliases_parse() {
+        for spelling in ["training", "train", "tt-train"] {
+            let cli = Cli::try_parse_from(["tt-toplike", "--mode", spelling])
+                .unwrap_or_else(|e| panic!("`--mode {spelling}` must parse: {e}"));
+            assert_eq!(
+                cli.mode,
+                Some(VisualizationMode::Training),
+                "`--mode {spelling}` must select the Training view"
+            );
+        }
+    }
+
+    /// The neighbouring modes must keep their own spellings — an alias list is
+    /// easy to widen by accident until two modes answer to the same word.
+    #[test]
+    fn mode_training_does_not_swallow_neighbouring_spellings() {
+        let cases = [
+            ("hivemind", VisualizationMode::Hivemind),
+            ("arcade", VisualizationMode::Arcade),
+            ("normal", VisualizationMode::Normal),
+        ];
+        for (spelling, want) in cases {
+            let cli = Cli::try_parse_from(["tt-toplike", "--mode", spelling]).unwrap();
+            assert_eq!(cli.mode, Some(want), "`--mode {spelling}` regressed");
+        }
+        assert!(
+            Cli::try_parse_from(["tt-toplike", "--mode", "trainingg"]).is_err(),
+            "an unknown mode must be rejected, not silently defaulted"
+        );
     }
 }

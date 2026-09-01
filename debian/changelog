@@ -1,3 +1,148 @@
+tt-toplike (0.13.2) noble; urgency=medium
+
+  * Fix: the Training view drew no loss curve for trainers that report
+    progress only through a tqdm bar. `ttml`'s SFTTrainer — which
+    tt-tnt's LoRA and tool-calling scripts use — sets loss and lr as bar
+    postfix and prints no per-step line at all, so the view attached to
+    the run and then had nothing to plot. The bar's own done/total
+    counter and its loss postfix are now read.
+  * Fix: the log tailer only yielded newline-terminated lines, but a
+    progress bar redraws itself with carriage returns, so many frames
+    arrive inside one chunk. Frames are now split out, which is what
+    makes a bar-only trainer visible while it is still running rather
+    than after it exits.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 31 Aug 2026 00:00:00 +0000
+
+tt-toplike (0.13.1) noble; urgency=medium
+
+  * Fix: the Training view's loss mountains vanished on a converged run.
+    Height was the loss's position within the window's own min..max, so a
+    window whose losses sit close together normalised to zero everywhere
+    and drew bare ground under the aurora. The range now has an absolute
+    floor (a converged model is a run at its best, not missing data) and
+    one proportional to the loss magnitude, so step noise in a nearly
+    flat window isn't amplified into a full-height sawtooth either.
+  * Improve: the mountain gradient runs deep cyan → red through blue,
+    violet, magenta and pink, and each column is shaded per cell — a
+    deep, dark base lifting to a brighter crest, undulating slowly.
+  * Fix: explain-overlay prose is wrapped at render time instead of
+    hand-broken in the source. A single long sentence previously pushed a
+    line past the panel, where it was silently clipped rather than
+    wrapped. Blank-line paragraph breaks and indented list items survive
+    the re-flow.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 30 Aug 2026 00:00:00 +0000
+
+tt-toplike (0.13.0) noble; urgency=medium
+
+  * Add: `--mock` now drives the Training and Inference Server views too.
+    Both probed the real world (a /proc scan for a trainer, Docker for
+    containers), so on a mock backend they showed only their empty state
+    and the app could not be demoed end to end without hardware and a
+    live workload. Synthetic sources walk the real lifecycles instead.
+    Both are labelled — `TRAINING · mock` and a `(mock)` suffix per
+    service — because synthetic data indistinguishable from real data
+    would break the one guarantee this tool makes about its display.
+  * Add: HivemindSweeper gained a FOCUS pane that tracks the busiest
+    cell automatically and describes it (heat, events, rate, worst
+    severity, age, top coalesced rows). The board previously showed only
+    *that* something was active; learning *what* required driving a
+    cursor there first. Arrows still pin the focus, Enter hands it back.
+  * Add: `/rotate [on|off]` command, plus help entries for it and the
+    `R` key — the rotation worked but appeared in no footer or help
+    panel, which is indistinguishable from not existing.
+  * Fix: the rotation no longer stops on Grid, which is an alternate
+    layout of the same chip portraits Insights already draws — it opened
+    by showing the same data twice running.
+  * Fix: `/mode training` is recognized; it was reachable only as
+    `--mode training`.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 30 Aug 2026 00:00:00 +0000
+
+tt-toplike (0.12.0) noble; urgency=medium
+
+  * Add: `--rotate` and the `R` hotkey — an unattended rotation for kiosk
+    and wall-display use. Unlike the `v` cycle it visits EVERY view,
+    including the ones normally reachable only by their own key (`i`, `~`,
+    `t`), which is the point: it surfaces screens a passer-by would never
+    know to press a key for.
+  * Dwell is 30s per view, 45s on arcade (three visualizations at once),
+    and 10s on Training or the Inference Monitor when there is no run or
+    server for them to show — a glance at an empty screen rather than
+    parking on it. Activity is re-checked every tick, so a run appearing
+    mid-dwell extends it to the full 30s instead of being cut short.
+  * Rotating into HivemindSweeper now starts its collectors. They were
+    previously started only by the `~` key handler, so any keyless arrival
+    would have drawn a permanently empty board; entry is now a choke point
+    mirroring the existing exit one.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 30 Aug 2026 00:00:00 +0000
+
+tt-toplike (0.11.2) noble; urgency=medium
+
+  * Add: `--mode training` (aliases `train`, `tt-train`) launches straight
+    into the Training view, matching `--mode hivemind`. The view takes no
+    target either way — it finds the running tt-train process itself — so
+    this is purely a scriptable entry point for launchers, kiosks and
+    systemd units that previously needed an interactive `t`.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 30 Aug 2026 00:00:00 +0000
+
+tt-toplike (0.11.1) noble; urgency=medium
+
+  * Fix: the Training view's checkpoint pulse never fired. The watcher was
+    built from the config's `model_path` verbatim, but tt-train's own
+    configs name a bare file (`transformer.msgpack`) that the trainer
+    writes into *its* working directory — so the watcher pointed at
+    whatever directory tt-toplike was launched from, found nothing, and
+    silently reported "no save" for the entire run. It now resolves the
+    path against the trainer's cwd, as the config path already did, so the
+    checkpoint comet and the `ckpt @` readout work.
+  * Fix: the Training view animated at the 10 FPS telemetry rate instead of
+    the ~60 FPS animation rate, making the sweeps, aurora drift, star
+    twinkle, and checkpoint comet visibly step rather than move.
+  * Improve: the forward/backward sweep now travels the network in
+    fractional sub-columns with a smoothstepped falloff and a lead-in ahead
+    of its head, so the pass flows through the connectors instead of
+    blinking node to node, and its direction is readable from the
+    asymmetry. Animation rates are expressed per second, so the frame-rate
+    change alters smoothness only, never apparent speed.
+  * Docs: recorded a Training view demo (README + project site), and added
+    a `t · training` mode row to the site.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 30 Aug 2026 00:00:00 +0000
+
+tt-toplike (0.11.0) noble; urgency=medium
+
+  * Add: Training view (`t`) — a full-screen visualization of a live
+    tt-train run, drawn as the network it is: a character grid of
+    transformer blocks and attention heads fed by token particles, a loss
+    "mountain range" under a twinkling aurora nightscape that opens up as
+    the model converges, plus chip telemetry alongside it.
+  * Auto-attaches with no command: scans running processes for a tt-train
+    example binary (`nano_gpt`, `mnist_mlp`, `linear_regression`), then
+    resolves `/proc/<pid>/fd/1` to find and tail that process's log.
+    Checkpoint saves are detected by mtime on the run's rolling checkpoint
+    file.
+  * Honest limitation, shown in the view itself: tt-train's per-step
+    stream can only be tailed if its stdout was redirected to a real file
+    at launch (`> train.log`). If fd 1 is a pipe or tty, retroactively
+    reading it is an OS-level impossibility, not a gap in this tool — the
+    view says so and falls back to what it can still see (process
+    liveness, chip telemetry, and checkpoint mtime) rather than drawing a
+    fake loss curve. Gradient norms, MFU, and throughput counters aren't
+    emitted live — so the view derives tokens/sec and ETA from the
+    step/loss lines it can actually read instead of showing numbers it
+    can't source.
+  * Nine independent color channels carry the loss magnitude, run-history
+    timeline, loss-delta direction, forward/backward sweep cadence, kernel
+    cache compile/steady state, checkpoint-save bursts, and the existing
+    chip temperature/power ramps — documented in the new legend and
+    explain overlays.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sat, 29 Aug 2026 00:00:00 +0000
+
 tt-toplike (0.10.3) noble; urgency=medium
 
   * Security fix: a direct-vLLM host process's own PATH (self-reported via

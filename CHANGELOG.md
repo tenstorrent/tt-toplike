@@ -14,6 +14,29 @@ git tag                        # released versions
 
 ## Recent releases
 
+### 0.11.0
+- **Add**: Training view (`t`) — a full-screen visualization of a live
+  tt-train run, drawn as the network it is: a character grid of transformer
+  blocks and attention heads fed by token particles, a loss "mountain range"
+  under a twinkling aurora nightscape that opens up as the model converges,
+  plus chip telemetry alongside it.
+- **Auto-attaches with no command**: scans running processes for a tt-train
+  example binary (`nano_gpt`, `mnist_mlp`, `linear_regression`), then resolves
+  `/proc/<pid>/fd/1` to find and tail that process's log. Checkpoint saves
+  are detected by mtime on the run's rolling checkpoint file.
+- **Honest limitation**: tt-train's per-step stream can only be tailed if its
+  stdout was redirected to a real file at launch (`> train.log`). If fd 1 is
+  a pipe or tty, retroactively reading it is an OS-level impossibility, not a
+  gap in this tool — the view says so and falls back to what it can still
+  see (process liveness, chip telemetry, and checkpoint mtime) rather than
+  drawing a fake loss curve. Gradient norms, MFU, and throughput counters
+  aren't emitted live either, so the view derives tokens/sec and ETA only
+  from what it can actually read.
+- Nine independent color channels (loss magnitude, run-history timeline,
+  loss-delta direction, forward/backward sweep cadence, cache compile/steady
+  state, checkpoint bursts, plus chip temp/power) — see the new legend and
+  explain overlays.
+
 ### 0.10.3
 - **Security fix**: a direct-vLLM host process's own `PATH` was forwarded
   onto the `sh` the monitor spawns to probe it — a bare `Command::new("sh")`

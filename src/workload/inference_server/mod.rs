@@ -13,6 +13,7 @@ pub(crate) mod detect;
 pub mod education;
 mod logs;
 pub mod metrics;
+pub mod mock;
 mod monitor;
 pub(crate) mod probe;
 mod services;

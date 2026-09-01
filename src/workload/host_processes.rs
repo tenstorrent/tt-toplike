@@ -103,6 +103,44 @@ fn classify_one(
     parse_inference_server(name, cmdline).or_else(|| parse_direct_vllm(name, cmdline, environ, pid))
 }
 
+/// True when a `/proc/<pid>/cgroup` body places the process inside a container.
+///
+/// [`parse_direct_vllm`] is by contract the *non-Docker* path, and containers
+/// are enumerated separately (`docker ps`) then merged by container name — a
+/// key that can never collide with `host-vllm-<pid>`. So a containerized
+/// process matching the host path becomes a second roster row for one server:
+/// exactly the duplicate Phase 30 removed, reintroduced from the other side.
+///
+/// This matters because tt-inference-server's image ENTRYPOINT is
+/// `python run_vllm_api_server.py`, which the host matcher now recognizes.
+/// Cross-uid `/proc/<pid>/environ` is unreadable, so an unprivileged run never
+/// gets far enough to classify one — but that is a permission accident, not a
+/// rule, and it stops protecting us the moment tt-toplike runs as root.
+///
+/// Matched per path *segment* rather than by substring: the docker daemon
+/// itself lives at `/system.slice/docker.service` on the host, and a substring
+/// test would exclude host processes on the strength of the daemon's unit name.
+/// Read from the host, where the full path is visible — a process reading its
+/// own cgroup from inside a cgroup namespace would just see `0::/`.
+#[cfg(target_os = "linux")]
+fn cgroup_is_containerized(text: &str) -> bool {
+    text.lines().any(|line| {
+        // v1 lines are `hier:controllers:/path`; v2 is `0::/path`. The path is
+        // whatever follows the last colon in either case.
+        let path = line.rsplit(':').next().unwrap_or(line);
+        path.split('/').any(|seg| {
+            let seg = seg.trim();
+            seg == "docker"
+                || seg.starts_with("docker-")
+                || seg.starts_with("containerd-")
+                || seg.starts_with("cri-containerd-")
+                || seg.starts_with("crio-")
+                || seg.starts_with("libpod-")
+                || seg.starts_with("kubepods")
+        })
+    })
+}
+
 /// True when `pid` is the *root* of its inference-server match family: no
 /// ancestor (walking `parent_of`, which maps a pid to its parent pid) is
 /// itself in `matched`. Kept independent of `sysinfo` types (generic over any
@@ -229,6 +267,17 @@ impl HostProcessMonitor {
                 .join("\n");
             let pid_i32 = i32::try_from(pid.as_u32()).unwrap_or(i32::MAX);
             if let Some(server) = classify_one(&name, &cmdline, &environ, pid_i32) {
+                // Only the host path needs the container check: a `Source::Docker`
+                // match came from a `docker run` cmdline, which is the client on
+                // the host by construction. Reading cgroup here rather than in
+                // `classify_one` keeps that function pure and costs one small
+                // read per *matched* process, not per process on the box.
+                if matches!(server.source, crate::workload::Source::Host { .. })
+                    && std::fs::read_to_string(format!("/proc/{pid_i32}/cgroup"))
+                        .is_ok_and(|c| cgroup_is_containerized(&c))
+                {
+                    continue;
+                }
                 classified.insert(*pid, server);
             }
         }
@@ -495,6 +544,52 @@ mod tests {
         let servers = mon.detected_inference_servers();
         // No assertion on contents — just confirm the call is safe and typed.
         let _: Vec<crate::workload::InferenceServer> = servers;
+    }
+
+    /// `parse_direct_vllm` is by contract the *non-Docker* path, and widening
+    /// it to `run_vllm_api_server.py` made that contract load-bearing: that
+    /// script is the ENTRYPOINT of tt-inference-server's own image, so the
+    /// process inside a running container matches it exactly.
+    ///
+    /// Containers are enumerated separately (`docker ps`) and merged by
+    /// container name, which can never collide with a `host-vllm-<pid>` key —
+    /// so a containerized match would show up as a second roster row for one
+    /// server. An unprivileged reader is saved by `/proc/<pid>/environ` being
+    /// unreadable across uids, but that is a permission accident, not a rule;
+    /// run tt-toplike as root and it would double-count.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn containerized_processes_are_excluded_from_the_host_path() {
+        // Verbatim from this box — a plain user process must not be excluded.
+        assert!(!cgroup_is_containerized(
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/\
+             app-org.kde.konsole-cff422f472f04f79b3ba30f6e259e313.scope"
+        ));
+
+        // The docker *daemon* runs on the host under a unit whose name
+        // contains "docker" — the case a naive `contains("docker")` gets
+        // wrong, excluding host processes it should keep.
+        assert!(!cgroup_is_containerized("0::/system.slice/docker.service"));
+        assert!(!cgroup_is_containerized("0::/"));
+
+        for inside in [
+            // cgroup v2, systemd driver (what modern Docker writes).
+            "0::/system.slice/docker-3f1c9a2b4d5e6f708192a3b4c5d6e7f8.scope",
+            // cgroup v2, cgroupfs driver.
+            "0::/docker/3f1c9a2b4d5e6f708192a3b4c5d6e7f8",
+            // cgroup v1, multiple controller lines.
+            "12:cpuset:/docker/3f1c9a2b4d5e6f708192a3b4c5d6e7f8\n\
+             11:memory:/docker/3f1c9a2b4d5e6f708192a3b4c5d6e7f8",
+            // Kubernetes, podman, cri-o.
+            "0::/kubepods.slice/kubepods-besteffort.slice/cri-containerd-abc.scope",
+            "0::/machine.slice/libpod-3f1c9a2b4d5e.scope",
+            "0::/machine.slice/crio-3f1c9a2b4d5e.scope",
+        ] {
+            assert!(
+                cgroup_is_containerized(inside),
+                "{inside:?} is a containerized cgroup path"
+            );
+        }
     }
 
     #[test]
