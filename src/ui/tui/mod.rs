@@ -3318,7 +3318,16 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
         height: panel_h,
     };
 
-    // Clear background behind the panel.
+    // Reset the cells behind the panel, then paint its background.
+    //
+    // A `Block` with a background style only recolours each cell — it does
+    // not replace the symbol already there, so whatever the view drew
+    // underneath kept showing through wherever a content line was shorter
+    // than the panel. Harmless-looking on the sparse views this started on;
+    // on the Training view, whose loss river is a solid wall of `█`, the
+    // panel was unreadable. `Clear` is the widget that actually blanks the
+    // cells.
+    f.render_widget(ratatui::widgets::Clear, panel_rect);
     f.render_widget(
         Block::default().style(Style::default().bg(colors::rgb(8, 14, 22))),
         panel_rect,
@@ -4383,43 +4392,46 @@ fn hero_legend_lines(
 }
 
 /// Build explain lines from a static slice of text strings.
-/// Re-flow overlay prose to `cols` display columns.
+/// Wrap overlay text to `cols` display columns, splitting long lines and
+/// never joining short ones.
 ///
-/// The explain panels are authored as blank-line-separated paragraphs. They
-/// used to be hand-broken to a width someone chose by eye, which meant the
-/// panel's width was really set by whichever literal happened to be longest —
-/// so a single edit that ran long pushed a line past the panel, and
-/// `Paragraph` clips rather than wraps, silently cutting the tail off.
-/// Wrapping here makes the authored text plain prose and the layout the
-/// renderer's job.
+/// The panels were hand-broken to a width someone chose by eye, which made
+/// the panel's size a function of whichever literal happened to be longest —
+/// one sentence that ran long pushed a line past the panel, and `Paragraph`
+/// clips instead of wrapping, silently eating the tail.
 ///
-/// Structure that carries meaning is preserved rather than flattened:
-/// blank lines separate paragraphs and are never joined across, and a run of
-/// lines sharing a leading indent re-flows as its own paragraph at that
-/// indent — the indented sub-blocks in several panels (`  x-axis = …`) are
-/// list items, and `explain_lines` also colours a line by whether it starts
-/// with a space, so the indent has to survive.
+/// An earlier version of this fixed that by re-flowing whole paragraphs, and
+/// that was wrong: these panels are mostly *lists*, and joining consecutive
+/// items ran them together — in the worst case separating a glyph from its
+/// own definition across a line break (`◇` / `diamond — cache hit`). Author
+/// line breaks carry meaning here, including deliberate column alignment that
+/// `split_whitespace` would collapse.
+///
+/// So the rule is one-directional: a line that fits is emitted untouched, and
+/// only a line that would overflow is broken, with its continuations keeping
+/// the original indent. That still fixes the overflow this exists for, while
+/// leaving every authored line exactly where its author put it.
 fn wrap_overlay_text(text: &[&str], cols: usize) -> Vec<String> {
     use unicode_width::UnicodeWidthStr;
     let cols = cols.max(8);
     let mut out: Vec<String> = Vec::new();
 
-    // Group into paragraphs: a blank line, or a change of indentation, ends
-    // the current one.
-    let mut para: Vec<&str> = Vec::new();
-    let mut para_indent = 0usize;
-
-    // Flush the pending paragraph, wrapping it on word boundaries.
-    let flush = |para: &mut Vec<&str>, indent: usize, out: &mut Vec<String>| {
-        if para.is_empty() {
-            return;
+    for raw in text {
+        if raw.trim().is_empty() {
+            out.push(String::new());
+            continue;
         }
-        let body = para.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
-        para.clear();
+        if UnicodeWidthStr::width(*raw) <= cols {
+            out.push((*raw).to_string());
+            continue;
+        }
+        // Too wide: break on word boundaries, hanging continuations at the
+        // line's own indent so a wrapped list item stays visually an item.
+        let indent = raw.len() - raw.trim_start().len();
         let pad = " ".repeat(indent);
         let budget = cols.saturating_sub(indent).max(4);
         let mut line = String::new();
-        for word in body.split_whitespace() {
+        for word in raw.split_whitespace() {
             let w = UnicodeWidthStr::width(word);
             let cur = UnicodeWidthStr::width(line.as_str());
             if line.is_empty() {
@@ -4435,24 +4447,7 @@ fn wrap_overlay_text(text: &[&str], cols: usize) -> Vec<String> {
         if !line.is_empty() {
             out.push(format!("{pad}{line}"));
         }
-    };
-
-    for raw in text {
-        if raw.trim().is_empty() {
-            flush(&mut para, para_indent, &mut out);
-            out.push(String::new());
-            continue;
-        }
-        let indent = raw.len() - raw.trim_start().len();
-        if !para.is_empty() && indent != para_indent {
-            flush(&mut para, para_indent, &mut out);
-        }
-        if para.is_empty() {
-            para_indent = indent;
-        }
-        para.push(raw);
     }
-    flush(&mut para, para_indent, &mut out);
     out
 }
 
@@ -8387,31 +8382,133 @@ mod host_default_screen_tests {
         );
     }
 
-    /// Structure that carries meaning has to survive the re-flow: blank
-    /// lines separate paragraphs, and an indented run is a list item that
-    /// keeps its indent (which `explain_lines` also uses to pick its colour).
+    /// A `Block` with a background style recolours cells but leaves their
+    /// symbols, so whatever the view drew underneath showed through every
+    /// short overlay line. Cosmetic on sparse views; on the Training view,
+    /// whose loss river is a solid wall of block glyphs, the panel was
+    /// unreadable. Caught in review.
     #[test]
-    fn wrapping_preserves_blank_lines_and_indentation() {
+    fn an_overlay_blanks_whatever_it_covers() {
+        use super::{render_overlay_panel, DisplayMode, OverlayPanel};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+        terminal
+            .draw(|f| {
+                // Fill the whole screen the way a dense view does...
+                let area = f.area();
+                let wall: Vec<ratatui::text::Line> = (0..area.height)
+                    .map(|_| ratatui::text::Line::from("█".repeat(area.width as usize)))
+                    .collect();
+                f.render_widget(ratatui::widgets::Paragraph::new(wall), area);
+                // ...then drop an overlay on top of it.
+                render_overlay_panel(f, OverlayPanel::Explain, DisplayMode::Training);
+            })
+            .expect("draw");
+
+        // Locate the panel by its own top-left corner glyph rather than by
+        // heuristic: the first version of this test guessed at the rect,
+        // never matched a cell, and passed with `Clear` removed.
+        let buf = terminal.backend().buffer();
+        let mut corner = None;
+        for y in 0..40u16 {
+            for x in 0..120u16 {
+                if buf[(x, y)].symbol() == "╔" {
+                    corner = Some((x, y));
+                }
+            }
+        }
+        let (px, py) = corner.expect("the overlay draws a top-left corner");
+
+        // Bound the scan by the panel's own bottom border: the panel is
+        // anchored one row above the command bar, so scanning to the screen
+        // edge counts that uncovered row and reports a false 47.
+        let bottom = (py..40u16)
+            .find(|&y| buf[(px, y)].symbol() == "╚")
+            .expect("the overlay draws a bottom-left corner");
+        let mut bled = 0;
+        for y in py..=bottom {
+            for x in px..120u16 {
+                if buf[(x, y)].symbol() == "█" {
+                    bled += 1;
+                }
+            }
+        }
+        assert_eq!(bled, 0, "{bled} cells of the view bled through the overlay");
+    }
+
+    /// Author line breaks carry meaning in these panels — they are mostly
+    /// lists, and several align their columns deliberately. An earlier
+    /// re-flowing wrapper joined consecutive items into run-on prose across
+    /// four panels, in the worst case separating a glyph from its own
+    /// definition (`◇` / `diamond — cache hit`). Caught in review.
+    #[test]
+    fn wrapping_never_joins_authored_lines() {
         use super::wrap_overlay_text;
+
+        // The Memory Castle symbol key, verbatim.
+        let castle = [
+            "◦ open circle  — read access",
+            "· dot          — write access",
+            "◇ diamond      — cache hit",
+            "• filled dot   — cache miss",
+        ];
+        let got = wrap_overlay_text(&castle, 56);
+        assert_eq!(got.len(), 4, "each legend item keeps its own line: {got:?}");
+        assert_eq!(got[0], castle[0], "a line that fits is emitted untouched");
+
+        // Deliberate column alignment must survive — `split_whitespace`
+        // would collapse the double spaces that line these up.
+        let hero = [
+            "@  healthy   !  throttled/faulted",
+            "?  ARC stall  %  undervolt",
+        ];
+        let got = wrap_overlay_text(&hero, 56);
+        assert_eq!(got, vec![hero[0].to_string(), hero[1].to_string()]);
+
+        // An unindented list whose items are ordinary prose must not merge
+        // either — the rule is "never join", not "never join glyphs".
+        let bands = [
+            "Top band: Starfield — Tensix cores",
+            "Middle-left: Memory Castle — hierarchy",
+            "Bottom band: Memory Flow — NoC traffic",
+        ];
+        assert_eq!(wrap_overlay_text(&bands, 56).len(), 3);
+    }
+
+    /// Splitting still has to happen — that is the overflow this wrapper
+    /// exists for — and a blank separator must survive it.
+    #[test]
+    fn wrapping_still_splits_an_overlong_line_and_keeps_blanks() {
+        use super::wrap_overlay_text;
+        let long = "The FOCUS pane names the busiest cell and describes it, tracking that \
+                    cell on its own so the screen explains itself without being driven.";
         let out = wrap_overlay_text(
             &[
                 "Heading",
                 "",
-                "  x-axis = current draw and some more words to force a wrap",
-                "trailing prose",
+                long,
+                "  indented item that is quite long and will not fit in the budget",
             ],
-            30,
+            40,
         );
         assert_eq!(out[0], "Heading");
-        assert_eq!(out[1], "", "the blank separator must survive");
-        let indented: Vec<&String> = out.iter().filter(|l| l.starts_with("  ")).collect();
+        assert_eq!(out[1], "", "the blank separator survives");
         assert!(
-            indented.len() >= 2,
-            "an indented paragraph must wrap at its own indent, got {out:?}"
+            out.len() > 4,
+            "the long lines must have been split: {out:?}"
         );
+        for l in &out {
+            assert!(
+                unicode_width::UnicodeWidthStr::width(l.as_str()) <= 40,
+                "{l:?} exceeds the budget"
+            );
+        }
+        // A wrapped indented line hangs at its own indent.
+        let cont: Vec<&String> = out.iter().filter(|l| l.starts_with("  ")).collect();
         assert!(
-            out.iter().any(|l| l == "trailing prose"),
-            "a following unindented paragraph must not be folded into it"
+            cont.len() >= 2,
+            "indent preserved on continuations: {out:?}"
         );
     }
 

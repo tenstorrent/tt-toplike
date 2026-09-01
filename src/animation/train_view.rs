@@ -1229,7 +1229,13 @@ impl TrainView {
             .loss
             .map(|l| hsv_to_rgb(loss_hue(l, ceiling), 0.75, 0.85))
             .unwrap_or(Color::Rgb(200, 150, 220));
-        let entries: [(char, &str, Color); 9] = [
+        // A run whose stdout can't be read draws no loss curve, no sweeps and
+        // no comet — so advertising their symbols in the legend describes a
+        // screen the viewer is not looking at. Only the channels that survive
+        // that state are listed. `log` is `None` while still scanning, which
+        // is also a state with no curve.
+        let has_stream = matches!(st.log, Some(LogSource::File(_)));
+        let all: [(char, &str, Color); 9] = [
             ('●', "loss", loss_color),
             ('─', "forward", hsv_to_rgb(FWD_HUE, 0.85, 0.9)),
             ('∙', "gradients", hsv_to_rgb(BWD_HUE, 0.7, 0.85)),
@@ -1240,6 +1246,14 @@ impl TrainView {
             ('✦', "checkpoint", Color::Rgb(120, 230, 190)),
             ('░', "aurora", Color::Rgb(120, 180, 150)),
         ];
+        // Without a stream, `draw_no_log_notice` replaces both the network
+        // band and the river — and the comet is drawn *inside* the river, so
+        // the aurora and the checkpoint pulse are unreachable too. Only the
+        // chip strip is still drawn.
+        let entries: Vec<(char, &str, Color)> = all
+            .into_iter()
+            .filter(|(_, label, _)| has_stream || matches!(*label, "chip temp" | "chip power"))
+            .collect();
         let mut x = 2;
         for (glyph, label, color) in entries {
             if x + 3 >= self.width.saturating_sub(1) {
@@ -1694,6 +1708,57 @@ mod tests {
     }
 
     #[test]
+    /// A run whose stdout is unreadable draws no loss curve, no sweeps and
+    /// no comet, so listing their symbols describes a screen that isn't
+    /// there. Raised in review.
+    #[test]
+    fn the_legend_only_lists_symbols_that_can_appear() {
+        use crate::workload::train::{LogSource, TrainProcess};
+        let render = |log: Option<LogSource>| -> String {
+            let mut b = MockBackend::new(1);
+            b.init().unwrap();
+            let mut st = TrainState::new();
+            st.proc = Some(TrainProcess {
+                pid: 1,
+                binary: "nano_gpt".into(),
+                config_path: None,
+            });
+            st.log = log;
+            let lines: Vec<String> = TrainView::new(120, 40)
+                .render(&st, &b)
+                .iter()
+                .map(|l| l.spans.iter().map(|sp| sp.content.to_string()).collect())
+                .collect();
+            // The legend row only — matching the whole frame also hits the
+            // no-log notice, whose copy legitimately says "checkpoint mtime".
+            lines
+                .iter()
+                .find(|l| l.contains("chip temp"))
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        // Unreadable stdout: no per-step stream exists.
+        let out = render(Some(LogSource::NotRedirected));
+        for absent in ["loss", "forward", "gradients", "checkpoint", "aurora"] {
+            assert!(
+                !out.contains(absent),
+                "legend advertises {absent:?} on a screen that cannot draw it"
+            );
+        }
+        // What is still genuinely drawn stays listed.
+        assert!(out.contains("chip temp"), "chip telemetry still flows");
+
+        // A readable log gets the full legend back.
+        let out = render(Some(LogSource::File("/tmp/x.log".into())));
+        for present in ["loss ↓", "checkpoint", "gradients"] {
+            assert!(
+                out.contains(present),
+                "legend lost {present:?} on a live run"
+            );
+        }
+    }
+
     /// The river should read as a gradient — deep, dark bases lifting to
     /// brighter crests across a wide hue arc — rather than columns of flat
     /// colour.

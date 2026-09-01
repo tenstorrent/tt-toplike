@@ -91,7 +91,18 @@ pub fn parse_train_yaml(text: &str) -> TrainConfig {
         model_config_path: scalar(text, "model_config")
             .or_else(|| scalar(text, "transformer_config"))
             .map(|s| s.to_string()),
-        learning_rate: scalar(text, "learning_rate").and_then(|s| s.parse().ok()),
+        // Real configs write `lr` under `optimizer:` — both tt-metal's own
+        // training configs and tt-tnt's do, including this module's fixture.
+        // `learning_rate` is accepted first because a hand-written config may
+        // use it, but reading only that key meant the row populated in the
+        // mock (which hard-codes it) and never on hardware: the one field
+        // that behaved better in the demo than on a real run.
+        //
+        // `scalar` anchors on `key:`, so `lr` cannot match `lr_schedule:` —
+        // stripping `lr` leaves `_schedule:`, which is not a `:`.
+        learning_rate: scalar(text, "learning_rate")
+            .or_else(|| scalar(text, "lr"))
+            .and_then(|s| s.parse().ok()),
         ..Default::default()
     }
 }
@@ -174,6 +185,30 @@ transformer_config:
 
     /// `transformer_config` is still accepted as the path key so a
     /// hand-written config using it keeps working.
+    /// The fixture is a verbatim tt-metal training config, and it writes
+    /// `lr` — as does tt-tnt's. Reading only `learning_rate` meant this row
+    /// showed in the mock and never on a real run.
+    #[test]
+    fn reads_the_learning_rate_key_real_configs_actually_write() {
+        let c = parse_train_yaml(TRAINING_YAML);
+        assert_eq!(
+            c.learning_rate,
+            Some(0.0003),
+            "real configs write `lr:` under `optimizer:`"
+        );
+
+        // A hand-written config using the long spelling still works...
+        let c2 = parse_train_yaml("  learning_rate: 0.001\n");
+        assert_eq!(c2.learning_rate, Some(0.001));
+
+        // ...and `lr` must not be matched out of a longer key.
+        let c3 = parse_train_yaml("  lr_schedule: constant\n  lr_min: 0.00001\n");
+        assert_eq!(
+            c3.learning_rate, None,
+            "`lr_schedule`/`lr_min` are not the learning rate"
+        );
+    }
+
     #[test]
     fn the_older_path_key_still_resolves() {
         let c = parse_train_yaml("  transformer_config: \"configs/model_configs/x.yaml\"\n");
