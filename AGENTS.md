@@ -4697,6 +4697,118 @@ hardware-verified via A/B comparison.*
 
 ---
 
+## Phase 34 — Review findings: launch-shape coverage, and two instruments reporting measurements they never made (September 1, 2026)
+
+Three findings from an independent hardware review of PR #26 (4× p300c), all
+non-blocking, all fixed.
+
+**1. `parse_direct_vllm` saw one launch shape in four.** It matched a token
+ending in `vllm` followed by `serve`, so `python -m vllm.entrypoints.openai.
+api_server` fell out entirely — eight real processes invisible in the
+reviewer's run. Rather than add the reported shape, swept the TT tooling
+checked out here for what actually gets launched: `vllm serve` (229
+occurrences), `run_vllm_api_server.py` (64), `python -m vllm.entrypoints…`
+(45), `server_example_tt.py` (20). Two beyond the reported one, neither a
+guess — the module form has a non-`openai` sibling in use, and
+`run_vllm_api_server.py` is reachable on the *host* (not only as a container
+entrypoint) via tt-inference-server's `workflows/run_local_server.py`. That
+wrapper also spells its port `--service-port` and remaps it onto vLLM's
+`--port`, so reading only `--port` reported the 8000 default for every
+non-default launch — the port the liveness probe then polls.
+
+Widening the match made a documented contract load-bearing:
+`parse_direct_vllm` is by contract the *non-Docker* path, and
+`run_vllm_api_server.py` is the ENTRYPOINT of tt-inference-server's own image.
+Containers are enumerated separately (`docker ps`) and merged by container
+name — a key that can never collide with `host-vllm-<pid>` — so a
+containerized match becomes a second roster row for one server: the Phase 30
+duplicate, reintroduced from the other side. Cross-uid `/proc/<pid>/environ`
+is unreadable (measured), which saves an unprivileged run, but that is a
+permission accident and stops holding under root. The host path now drops
+containerized pids, matched per cgroup path *segment* — the docker daemon
+itself lives at `/system.slice/docker.service`, and a substring test would
+exclude host processes on the strength of the daemon's unit name.
+
+**2 & 3 are the same mistake in different clothes**: a reading printed with
+full confidence where the signal was absent, or incapable of distinguishing
+the two states it was asked about.
+
+* **ETH `0/12 live` on a card whose links are all up.** The denominator always
+  distinguished "not reported" (`0/?`); the numerator was
+  `eth_live_status.unwrap_or(0)`, so a build omitting `ETH_LIVE_STATUS` while
+  still emitting `ENABLED_ETH` rendered a confident zero under twelve dark
+  dots. Reproduced end-to-end: a real `tt-smi -s` snapshot with only that key
+  deleted, served back through `--tt-smi-path`, printed exactly
+  `ETH ············ 0/12 live`. Now `?/12` with no dots — a dot's meaning is
+  live-or-not, so with no liveness data there is nothing to draw them from. A
+  *measured* zero stays a loud all-links-down alarm.
+
+* **Defrag `4×RUN` on a fully idle box.** The gate was `aiclk >= 200 && power >
+  8 W`; Blackhole idles at ~800 MHz and 13–16 W, so both halves were
+  permanently true. The surrounding code already knew — `LOAD_SURGE_FACTOR`
+  and `running_since` exist *because* of the phantom-Running state, and say so
+  in their comments. Those treated the EVICT loop it caused; the phase itself
+  stayed wrong. `shows_load()` now asks what the phase means, on two
+  independent signals: the chip's own observed rest (this codebase's standing
+  answer to absolute thresholds — `AdaptiveBaseline`, Phase 5), and the
+  board's firmware-reported TDP limit for a monitor started *during* a
+  workload, where no rest was ever observed.
+
+  **Two adjacent defects had to be fixed for that baseline to mean anything,
+  and neither was visible from the change that motivated it** — both surfaced
+  only because a mutation survived:
+  - The idle arm has **no guard**, so it fires every frame while idle.
+    Assigning `idle_power = power_ema` pinned the threshold to the live
+    reading, making `p > 1.5p` unsatisfiable and leaving the learned half of
+    the gate permanently dead. It is a running minimum now.
+  - The Running transition **clobbered a learned baseline** with the loaded
+    reading. Measured: a 14 W-rest chip pulling 25 W entered Running, rewrote
+    its baseline to 21.3 W, and fell straight back to Idle. It now captures
+    only when no rest was ever observed — the case the Phase 29 fix was
+    actually written for. That capture justified itself with "Blackhole never
+    dwells in Idle", which was true only while this bug existed.
+
+  `power_ema` is also seeded from the first sample rather than climbing out of
+  zero, since the minimum learned underneath a ramping EMA latched onto a ~1 W
+  "rest" no board has.
+
+### A test that encoded the bug it was scaffolding for
+
+`idle_power_baseline_uses_smoothed_ema_not_a_single_raw_sample` asserted
+`Phase::Running` for a **9 W** device, reasoning in its own message that
+"aiclk>=200 and power(9W) > POWER_IDLE_W(8W) must enter Running" — precisely
+the defect under repair, asserted as setup for a different subject. Correcting
+it to `Idle` moved the test off the capture site it was protecting, and
+reverting that hardware-verified Phase 29 fix then passed all 824 tests.
+Coverage restored by a companion test that drives a device genuinely entering
+Running. **Changing a phase gate can silently orphan a regression guard that
+reached its subject only through that phase** — worth a mutation check on the
+*old* fix whenever a state machine's transitions move.
+
+### Verification
+
+Every guard mutation-tested (eleven mutations across the three fixes; each
+reddens only the test covering it). ETH and Defrag both confirmed on the real
+4× p300c: Defrag's header reads `0×DMA  0×RUN  4×idle` at 13–16 W where it
+read `4×RUN`, and the ETH row reads `12/12 live` on the live box and `?/12`
+against the doctored snapshot. Also documented tt-smi's **≥ 6.3.0** floor for
+per-channel GDDR in the README — the fallback to packed registers is
+deliberately silent, so an older tt-smi looks entirely healthy while answering
+at pair resolution.
+
+> ⚠️ A check written into that README section was wrong on first draft
+> (`grep -c gddr_telemetry`, which counts *lines*, and the block is a sibling
+> of `smbus_telem` rather than inside it). It read plausibly and returned `4`
+> on this box — matching the device count by coincidence of pretty-printing.
+> Caught by running it against a snapshot with the block actually removed.
+
+---
+
+*Phase 34 status: **COMPLETE** — v0.13.2. Three review findings fixed;
+findings 2 and 3 were pre-existing on `main`.*
+
+---
+
 ## Phase 30 — Inference roster: dedup multiprocessing-worker duplicates (August 28, 2026, v0.10.2)
 
 **Origin**: user shared a screenshot (`~/Pictures/tt-toplike-inference.png`) of

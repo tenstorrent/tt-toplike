@@ -491,11 +491,31 @@ Particle density reflects real power differentials (e.g. 12W vs 18W across 4 Bla
 
 | Dependency | Purpose | How to get |
 |-----------|---------|-----------|
-| `tt-smi` | Required for JSON backend | `apt install tt-smi` (same repo) |
+| `tt-smi` | Required for JSON backend; **≥ 6.3.0** for per-GDDR-channel detail | `apt install tt-smi` (same repo) |
 | `tenstorrent-dkms` | Required for sysfs hwmon driver | `apt install tenstorrent-dkms` (same repo) |
 | `tt-toplike-app` | Optional native window app | `apt install tt-toplike-app` (same repo) |
 
 The package declares `tt-smi` and `tenstorrent-dkms` as `Recommends`, so an `apt install tt-toplike` pulls them in by default (apt installs `Recommends` unless configured otherwise). With the standalone `.deb`, install them separately.
+
+### tt-smi version floor for per-channel GDDR
+
+Per-channel GDDR detail — the `✗` on a BIST-failed channel, dimmed harvested
+channels, per-channel temperatures and directional ECC counters — comes from a
+`gddr_telemetry` block that **tt-smi only emits from 6.3.0 onward**. On an older
+tt-smi that block is absent, and every consumer falls back to the coarser packed
+registers it used before (whole-board temperature aggregates, one training
+nibble per channel *pair*).
+
+Worth stating explicitly because the fallback is deliberately silent: nothing
+warns, no row disappears, and the display looks entirely healthy — it is simply
+answering at pair resolution. If channel-level states never appear on hardware
+you expect them on, check `tt-smi --version` before looking anywhere else.
+
+    tt-smi --version    # 6.3.0 or newer for per-channel GDDR
+    tt-smi -s | grep -q gddr_telemetry && echo present || echo absent
+
+`gddr_telemetry` sits beside `smbus_telem` under each `device_info[]` entry, not
+inside it.
 
 ## Building .deb Packages
 
