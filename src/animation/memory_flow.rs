@@ -478,6 +478,47 @@ impl MemoryFlowVis {
             .collect()
     }
 
+    /// Map real per-channel `gddr_telemetry` state onto the same status
+    /// vocabulary `parse_ddr_status` produces from the packed bitmask
+    /// (0=idle/untrained, 1=training, 2=trained, >2=error), so the existing
+    /// render match in `render_ddr_channels_top_agg`/`bottom_agg` needs no
+    /// changes. `gddr_telemetry` has no "currently training" signal (only a
+    /// post-hoc pass/fail), so this source never emits `1` — that state
+    /// stays reachable only via the bitmask fallback.
+    fn channel_status_from_gddr_telemetry(
+        g: &crate::models::telemetry::GddrTelemetry,
+        num_channels: usize,
+    ) -> Vec<u8> {
+        (0..num_channels)
+            .map(|i| {
+                g.channels.iter().find(|c| c.channel == i).map_or(0, |c| {
+                    if c.harvested || !c.enabled {
+                        0
+                    } else if !c.training_pass || !c.bist_pass {
+                        3
+                    } else {
+                        2
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Real `gddr_telemetry` state when present (tt-smi ≥ 6.3.0), else the
+    /// packed `DDR_STATUS` bitmask decode (`parse_ddr_status`).
+    fn channel_status(
+        smbus: Option<&crate::models::SmbusTelemetry>,
+        num_channels: usize,
+    ) -> Vec<u8> {
+        match smbus
+            .and_then(|s| s.gddr_telemetry.as_ref())
+            .filter(|g| !g.channels.is_empty())
+        {
+            Some(g) => Self::channel_status_from_gddr_telemetry(g, num_channels),
+            None => Self::parse_ddr_status(smbus, num_channels),
+        }
+    }
+
     /// Render top DDR channels — fleet aggregate version.
     fn render_ddr_channels_top_agg(
         &self,
@@ -497,7 +538,7 @@ impl MemoryFlowVis {
         ));
 
         let channel_width = (self.width.saturating_sub(15)) / num_channels.max(1);
-        let channel_status = Self::parse_ddr_status(smbus, num_channels);
+        let channel_status = Self::channel_status(smbus, num_channels);
 
         for ch in 0..num_channels {
             let status = channel_status.get(ch).copied().unwrap_or(0);
@@ -657,7 +698,7 @@ impl MemoryFlowVis {
         ));
 
         let channel_width = (self.width.saturating_sub(15)) / num_channels.max(1);
-        let channel_status = Self::parse_ddr_status(smbus, num_channels);
+        let channel_status = Self::channel_status(smbus, num_channels);
 
         for ch in 0..num_channels {
             let status = channel_status.get(ch).copied().unwrap_or(0);
@@ -787,5 +828,68 @@ mod tests {
         for _ in 0..10 {
             flow.update(&backend);
         }
+    }
+
+    #[test]
+    fn channel_status_prefers_real_gddr_telemetry_over_bitmask() {
+        use crate::models::telemetry::{GddrChannel, GddrTelemetry, SmbusTelemetry};
+        let smbus = SmbusTelemetry {
+            // Bitmask says "all trained" (nibble 2 repeated) — if this were used,
+            // every channel would show status 2. gddr_telemetry disagrees, and
+            // must win.
+            ddr_status: Some("0x22222222".to_string()),
+            gddr_telemetry: Some(GddrTelemetry {
+                speed: None,
+                max_temp: None,
+                enabled_mask: None,
+                channels: vec![
+                    GddrChannel {
+                        channel: 0,
+                        harvested: true,
+                        enabled: false,
+                        training_pass: false,
+                        bist_pass: true,
+                        ..Default::default()
+                    },
+                    GddrChannel {
+                        channel: 1,
+                        harvested: false,
+                        enabled: true,
+                        training_pass: true,
+                        bist_pass: false,
+                        ..Default::default()
+                    },
+                    GddrChannel {
+                        channel: 2,
+                        harvested: false,
+                        enabled: true,
+                        training_pass: true,
+                        bist_pass: true,
+                        ..Default::default()
+                    },
+                ],
+            }),
+            ..Default::default()
+        };
+        let status = MemoryFlowVis::channel_status(Some(&smbus), 3);
+        assert_eq!(status[0], 0, "harvested channel reads as idle, not trained");
+        assert_eq!(
+            status[1], 3,
+            "BIST failure is a distinct error code, not the generic bitmask error"
+        );
+        assert_eq!(status[2], 2, "healthy enabled channel reads as trained");
+    }
+
+    #[test]
+    fn channel_status_falls_back_to_bitmask_when_gddr_telemetry_absent() {
+        use crate::models::telemetry::SmbusTelemetry;
+        let smbus = SmbusTelemetry {
+            ddr_status: Some("0x00000012".to_string()), // channel0=trained(2), channel1=idle(0), channel... etc per nibble
+            gddr_telemetry: None,
+            ..Default::default()
+        };
+        let status = MemoryFlowVis::channel_status(Some(&smbus), 2);
+        assert_eq!(status[0], 2);
+        assert_eq!(status[1], 1);
     }
 }

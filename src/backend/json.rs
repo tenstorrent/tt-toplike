@@ -57,6 +57,10 @@ struct TTSMIDeviceRaw {
     pub firmwares: Option<serde_json::Value>,
     /// Thermal/power limits (tt-smi 5.2.0+).
     pub limits: Option<serde_json::Value>,
+    /// Per-channel GDDR training/BIST/harvest/temp/ECC state (tt-smi 6.3.0+),
+    /// raw passthrough — decoded by `parse_gddr_telemetry` at the consuming
+    /// site, same pattern as `firmwares`/`limits` above.
+    pub gddr_telemetry: Option<serde_json::Value>,
 }
 
 /// Board info from tt-smi
@@ -101,6 +105,10 @@ struct TTSMIDeviceJSON {
     pub firmwares: Option<serde_json::Value>,
     /// Thermal/power limits (tt-smi 5.2.0+).
     pub limits: Option<serde_json::Value>,
+    /// Per-channel GDDR training/BIST/harvest/temp/ECC state (tt-smi 6.3.0+),
+    /// raw passthrough — decoded by `parse_gddr_telemetry` at the consuming
+    /// site, same pattern as `firmwares`/`limits` above.
+    pub gddr_telemetry: Option<serde_json::Value>,
     /// PCIe generation from board_info (tt-smi 5.x).
     #[serde(default)]
     pub pcie_speed: Option<u32>,
@@ -388,8 +396,8 @@ impl JSONBackend {
     }
 
     /// Test-only: build a `ParsedSnapshot` from an already-parsed device list and
-    /// merge it into this backend, preserving the historical append-only device
-    /// semantics that `init()`/`update()` rely on.
+    /// merge it into this backend through the same [`Self::merge_parsed`]
+    /// `init()`/`update()` use — append-only devices, replaced measurement maps.
     #[cfg(test)]
     fn update_from_json(&mut self, json_devices: Vec<TTSMIDeviceJSON>) -> BackendResult<()> {
         self.merge_parsed(parsed_from_json_devices(json_devices));
@@ -398,22 +406,38 @@ impl JSONBackend {
 
     /// Merge a parsed snapshot into the backend's cached state.
     ///
-    /// Device list is append-only and keyed by index (devices never disappear
-    /// across updates); telemetry and SMBUS maps are replaced per-index. This
-    /// reproduces the exact behaviour of the previous `update_from_json`, so the
-    /// subprocess path is unchanged by the refactor to a shared parser.
+    /// The **device list is append-only** and keyed by index: a card that drops
+    /// out of one snapshot keeps its panel, its index and its identity, so a
+    /// single flaky poll doesn't renumber the fleet or make panels appear and
+    /// disappear underneath the operator.
+    ///
+    /// The **measurement maps are replaced, not merged**. Each successful
+    /// `tt-smi -s` is a complete picture of the moment it was taken, so a device
+    /// it does not report has no current reading — and "no reading" is a state
+    /// the UI already renders (every consumer goes through `telemetry()` /
+    /// `smbus_telemetry()` and handles `None`), whereas a stale reading is
+    /// indistinguishable from a live one on screen.
+    ///
+    /// Merging per-index instead — the historical behaviour — meant a card whose
+    /// `device_info[]` entry stopped parsing (a shape change after a tt-smi
+    /// upgrade, say, which `parse_json_devices` skips rather than failing the
+    /// whole snapshot) kept serving its last-good power, temperature and clocks
+    /// as live *forever*, while `error_count` reset on every poll because the
+    /// snapshot as a whole kept succeeding. Nothing ever removed it.
+    ///
+    /// Dropping the device outright was the other candidate and is worse: it
+    /// changes `device_count()`, so panels would appear and vanish on a flap and
+    /// every index-keyed visualization would have to re-derive its layout
+    /// mid-animation. Keeping the card and blanking its numbers says exactly
+    /// what is true — the card is still there, we just don't know its state.
     fn merge_parsed(&mut self, parsed: ParsedSnapshot) {
         for device in parsed.devices {
             if !self.devices.iter().any(|d| d.index == device.index) {
                 self.devices.push(device);
             }
         }
-        for (idx, telem) in parsed.telemetry {
-            self.telemetry.insert(idx, telem);
-        }
-        for (idx, smbus) in parsed.smbus {
-            self.smbus_telemetry.insert(idx, smbus);
-        }
+        self.telemetry = parsed.telemetry;
+        self.smbus_telemetry = parsed.smbus;
         // Unlike telemetry/smbus (keyed maps merged per-device), `processes[]`
         // is a whole-system snapshot each tick — replace wholesale rather than
         // accumulate, so an exited process doesn't linger forever. A snapshot
@@ -489,6 +513,26 @@ fn decode_processes(value: Option<serde_json::Value>) -> Vec<crate::models::Devi
     decoded
 }
 
+/// Result of an element-wise salvage of a modern-shaped snapshot.
+///
+/// `entries_seen` is the raw length of the `device_info[]` array *before* any
+/// entry was dropped, which is what lets the caller tell two very different
+/// documents apart:
+///
+/// * `entries_seen == 0` — a box with no cards (`"device_info": []`). Zero
+///   devices is the truth here, and reporting success is correct.
+/// * `entries_seen > 0` but `devices.is_empty()` — every per-device block was
+///   in a shape this build can't decode (e.g. a tt-smi upgrade reshaped
+///   `telemetry`). Zero devices is *not* the truth; it's total parse failure,
+///   and the caller must surface it as an error rather than as an empty
+///   success. See `parse_json_devices` for why that distinction is
+///   safety-critical.
+struct SalvagedSnapshot {
+    devices: Vec<TTSMIDeviceJSON>,
+    processes: Vec<crate::models::DeviceProcess>,
+    entries_seen: usize,
+}
+
 /// Salvage a document that carries `device_info` but failed the strict
 /// modern-shape parse, by decoding each `device_info[]` entry independently.
 ///
@@ -502,9 +546,7 @@ fn decode_processes(value: Option<serde_json::Value>) -> Vec<crate::models::Devi
 /// Index attribution is preserved by *array position*, not by "position among
 /// the entries that decoded": a skipped entry leaves its index unused rather
 /// than shifting every later card's SMBUS/limits onto its neighbour.
-fn salvage_modern_snapshot(
-    json_str: &str,
-) -> Option<(Vec<TTSMIDeviceJSON>, Vec<crate::models::DeviceProcess>)> {
+fn salvage_modern_snapshot(json_str: &str) -> Option<SalvagedSnapshot> {
     let mut doc: serde_json::Value = serde_json::from_str(json_str).ok()?;
     let obj = doc.as_object_mut()?;
     let processes = decode_processes(obj.remove("processes"));
@@ -512,6 +554,7 @@ fn salvage_modern_snapshot(
         Some(serde_json::Value::Array(entries)) => entries,
         _ => return None,
     };
+    let entries_seen = entries.len();
 
     let devices = entries
         .into_iter()
@@ -534,13 +577,18 @@ fn salvage_modern_snapshot(
                 smbus: raw.smbus_telem,
                 firmwares: raw.firmwares,
                 limits: raw.limits,
+                gddr_telemetry: raw.gddr_telemetry,
                 pcie_speed: board_info.and_then(|b| b.pcie_speed),
                 pcie_width: board_info.and_then(|b| b.pcie_width),
             })
         })
         .collect();
 
-    Some((devices, processes))
+    Some(SalvagedSnapshot {
+        devices,
+        processes,
+        entries_seen,
+    })
 }
 
 /// Pure parse of tt-smi snapshot JSON into the intermediate device list, plus
@@ -597,6 +645,7 @@ fn parse_json_devices(
                             smbus: raw.smbus_telem,
                             firmwares: raw.firmwares,
                             limits: raw.limits,
+                            gddr_telemetry: raw.gddr_telemetry,
                             pcie_speed: board_info.and_then(|b| b.pcie_speed),
                             pcie_width: board_info.and_then(|b| b.pcie_width),
                         }
@@ -615,13 +664,43 @@ fn parse_json_devices(
             // shape element-by-element (see `salvage_modern_snapshot`) so one
             // malformed card costs only that card, and say so at `warn` — the
             // operator needs to know why a device went missing.
-            if let Some((devices, processes)) = salvage_modern_snapshot(json_str) {
+            if let Some(salvaged) = salvage_modern_snapshot(json_str) {
+                // A salvage that rescued *nothing* from a non-empty
+                // `device_info[]` is not a snapshot — it's a total parse
+                // failure, and it must be reported as one. Returning
+                // `Ok((vec![], _))` here looked harmless (the caller merges an
+                // empty list) but was the worst outcome available: the device
+                // list and telemetry maps are merged append-only / per-index,
+                // so nothing is removed, `apply_raw_snapshot` takes its success
+                // arm (bumps `last_update`, resets `error_count`), and the TUI
+                // keeps rendering the *last good* power/temp/clocks as if they
+                // were live — indefinitely, with `max_consecutive_errors` never
+                // firing. That's the failure mode of a tt-smi upgrade that
+                // reshapes a per-device block: frozen numbers presented as
+                // current readings on hardware that may in fact be throttling
+                // or on fire. An `Err` instead feeds the existing error path
+                // (error_count, exponential backoff, `max_consecutive_errors`),
+                // which is what this document produced before the salvage
+                // existed.
+                //
+                // `entries_seen == 0` is the opposite case and stays a success:
+                // `"device_info": []` on a host with no Tenstorrent cards
+                // honestly *has* zero devices.
+                if salvaged.devices.is_empty() && salvaged.entries_seen > 0 {
+                    return Err(BackendError::ParseError(format!(
+                        "tt-smi snapshot did not fit the modern snapshot shape ({e}); \
+                         none of its {} device_info[] entries could be decoded \
+                         element-wise either",
+                        salvaged.entries_seen
+                    )));
+                }
                 log::warn!(
                     "tt-smi snapshot did not fit the modern snapshot shape ({e}); \
-                     salvaged {} of its device_info[] entries element-wise",
-                    devices.len()
+                     salvaged {} of {} device_info[] entries element-wise",
+                    salvaged.devices.len(),
+                    salvaged.entries_seen
                 );
-                return Ok((devices, processes));
+                return Ok((salvaged.devices, salvaged.processes));
             }
         }
     }
@@ -655,6 +734,73 @@ fn parse_json_devices(
         "Failed to parse JSON output: {}",
         json_str.chars().take(100).collect::<String>()
     )))
+}
+
+/// Parse tt-smi ≥ 6.3.0's `gddr_telemetry` block.
+///
+/// Leaf encodings in the real JSON, each read exactly as tt-smi emits it (no
+/// leaf is parsed more than one way):
+/// * `enabled_mask` — hex-or-decimal **string**, via `parse_hex_or_dec`. This
+///   is the only hex-tolerant leaf in either function.
+/// * `speed` — plain string, kept verbatim.
+/// * `max_temp`, and in `parse_gddr_channel` `temp_top` / `temp_bottom` /
+///   `corr_rd` / `corr_wr` / `uncorr_rd` / `uncorr_wr` — quoted **decimal**
+///   strings, parsed with plain `str::parse` (no hex tolerance).
+/// * `channels[].channel` — a bare JSON **number** (`as_u64`), not a string.
+/// * `channels[].harvested` / `.enabled` — bare JSON **booleans** (`as_bool`).
+/// * `channels[].training` / `.bist` — strings compared against `"pass"`;
+///   anything else (including a missing key) reads as a failure.
+///
+/// A channel entry that fails to parse a required field is skipped (not
+/// fabricated as a zeroed channel), matching `salvage_modern_snapshot`'s
+/// "one malformed entry costs only that entry" convention.
+fn parse_gddr_telemetry(v: &serde_json::Value) -> Option<crate::models::telemetry::GddrTelemetry> {
+    let obj = v.as_object()?;
+    let speed = obj.get("speed").and_then(|s| s.as_str()).map(String::from);
+    let max_temp = obj
+        .get("max_temp")
+        .and_then(|s| s.as_str())
+        .and_then(|s| s.parse::<f32>().ok());
+    let enabled_mask = obj
+        .get("enabled_mask")
+        .and_then(|s| s.as_str())
+        .and_then(crate::models::telemetry::parse_hex_or_dec);
+    let channels = obj
+        .get("channels")
+        .and_then(|c| c.as_array())
+        .map(|arr| arr.iter().filter_map(parse_gddr_channel).collect())
+        .unwrap_or_default();
+    Some(crate::models::telemetry::GddrTelemetry {
+        speed,
+        max_temp,
+        enabled_mask,
+        channels,
+    })
+}
+
+/// Parse one `gddr_telemetry.channels[]` entry. `None` if `channel`,
+/// `harvested`, or `enabled` (the three fields with no sane default) are
+/// missing or the wrong JSON type — every other field degrades to `false`/
+/// `None` (never a numeric `0`, which would be indistinguishable from a
+/// genuine zero reading) rather than dropping the whole channel.
+fn parse_gddr_channel(v: &serde_json::Value) -> Option<crate::models::telemetry::GddrChannel> {
+    let obj = v.as_object()?;
+    let str_f32 = |k: &str| obj.get(k)?.as_str()?.parse::<f32>().ok();
+    let str_u64 = |k: &str| obj.get(k)?.as_str()?.parse::<u64>().ok();
+    let str_bool_pass = |k: &str| obj.get(k).and_then(|v| v.as_str()).map(|s| s == "pass");
+    Some(crate::models::telemetry::GddrChannel {
+        channel: obj.get("channel")?.as_u64()? as usize,
+        harvested: obj.get("harvested")?.as_bool()?,
+        enabled: obj.get("enabled")?.as_bool()?,
+        training_pass: str_bool_pass("training").unwrap_or(false),
+        bist_pass: str_bool_pass("bist").unwrap_or(false),
+        temp_top: str_f32("temp_top"),
+        temp_bottom: str_f32("temp_bottom"),
+        corr_rd: str_u64("corr_rd"),
+        corr_wr: str_u64("corr_wr"),
+        uncorr_rd: str_u64("uncorr_rd"),
+        uncorr_wr: str_u64("uncorr_wr"),
+    })
 }
 
 /// Build a `Device` from a single parsed JSON entry, applying the same
@@ -742,8 +888,30 @@ fn parsed_from_json_devices(json_devices: Vec<TTSMIDeviceJSON>) -> ParsedSnapsho
         if let Some(telem_json) = json_dev.telemetry {
             telemetry.insert(idx, telemetry_from_json(&telem_json));
         }
-        if let Some(smbus_json) = json_dev.smbus {
-            smbus.insert(idx, smbus_from_json_fields(smbus_json));
+        let gddr_telemetry = json_dev
+            .gddr_telemetry
+            .as_ref()
+            .and_then(parse_gddr_telemetry);
+        match json_dev.smbus {
+            Some(smbus_json) => {
+                let mut s = smbus_from_json_fields(smbus_json);
+                s.gddr_telemetry = gddr_telemetry;
+                smbus.insert(idx, s);
+            }
+            None if gddr_telemetry.is_some() => {
+                // Phase 26 precedent: a payload that parses independently of
+                // smbus_telem's presence must not be dropped just because
+                // that sibling block is missing (permission-restricted run,
+                // ARC that didn't answer).
+                smbus.insert(
+                    idx,
+                    crate::models::telemetry::SmbusTelemetry {
+                        gddr_telemetry,
+                        ..Default::default()
+                    },
+                );
+            }
+            None => {}
         }
     }
 
@@ -849,13 +1017,28 @@ impl TelemetryBackend for JSONBackend {
 ///
 /// Returns the winning field's **original string** so downstream parsing and
 /// EMA smoothing behave exactly as they do for any other SMBUS string field.
-/// Returns `None` when neither field holds a real reading (fanless card), so
-/// `SmbusTelemetry::fan_rpm()` reports "no fan" rather than a sentinel.
+///
+/// **When neither field holds a real reading**, this returns the first field
+/// that was *present* — the sentinel, verbatim — rather than `None`. That
+/// distinction matters one layer down: `SmbusTelemetry::fan_speed` is `None` for
+/// "tt-smi didn't report a fan field at all" and `Some(sentinel)` for "the
+/// firmware reported, and the reading is not an RPM". `smbus_smooth::blend`
+/// preserves the existing value on a `None` incoming (a field missing from one
+/// snapshot must not erase what we know), so collapsing a reported sentinel to
+/// `None` here made a fan that *stopped* keep rendering its last healthy RPM
+/// forever. The sentinel is filtered at the display boundary by
+/// `SmbusTelemetry::fan_rpm()`, which is the single place that decides what a
+/// real reading is — so a sentinel stored here still means "no Fan row", it just
+/// also means "clear whatever was there before".
+///
+/// `None` remains reserved for a snapshot that carries neither key.
 fn pick_fan_field(fan_speed: Option<&str>, fan_rpm: Option<&str>) -> Option<String> {
-    [fan_speed, fan_rpm]
+    let candidates = [fan_speed, fan_rpm];
+    candidates
         .into_iter()
         .flatten()
         .find(|s| crate::models::telemetry::real_fan_rpm(s).is_some())
+        .or_else(|| candidates.into_iter().flatten().next())
         .map(|s| s.to_string())
 }
 
@@ -1073,8 +1256,26 @@ pub(crate) fn parse_snapshot(json_str: &str) -> SnapshotParts {
                 bus_ids.insert(idx, norm);
             }
         }
-        if let Some(smbus_json) = dev.smbus {
-            smbus_map.insert(idx, smbus_from_json_fields(smbus_json));
+        let gddr_telemetry = dev.gddr_telemetry.as_ref().and_then(parse_gddr_telemetry);
+        match dev.smbus {
+            Some(smbus_json) => {
+                let mut s = smbus_from_json_fields(smbus_json);
+                s.gddr_telemetry = gddr_telemetry;
+                smbus_map.insert(idx, s);
+            }
+            None if gddr_telemetry.is_some() => {
+                // Same precedent as `parsed_from_json_devices`: a payload that
+                // parses independently of smbus_telem's presence must not be
+                // dropped just because that sibling block is missing.
+                smbus_map.insert(
+                    idx,
+                    crate::models::telemetry::SmbusTelemetry {
+                        gddr_telemetry,
+                        ..Default::default()
+                    },
+                );
+            }
+            None => {}
         }
         let firmwares = dev.firmwares.as_ref().and_then(|v| {
             serde_json::from_value::<crate::models::telemetry::FirmwaresInfo>(v.clone()).ok()
@@ -1124,6 +1325,136 @@ pub(crate) fn parse_smbus_from_json(json_str: &str) -> HashMap<usize, SmbusTelem
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Trimmed from a real tt-smi 6.3.0 `-s` snapshot (verified live against 4x
+    // Blackhole p300c, 2026-08-27). Every numeric leaf except `channel` is a
+    // quoted string — that inconsistency is exactly what parse_gddr_channel
+    // works around.
+    const GDDR_TELEMETRY_JSON: &str = r#"{
+        "speed": "16G",
+        "max_temp": "50",
+        "enabled_mask": "0xff",
+        "channels": [
+            {
+                "channel": 0,
+                "harvested": false,
+                "enabled": true,
+                "training": "pass",
+                "bist": "pass",
+                "temp_top": "46",
+                "temp_bottom": "50",
+                "corr_rd": "0",
+                "corr_wr": "0",
+                "uncorr_rd": "0",
+                "uncorr_wr": "0"
+            },
+            {
+                "channel": 1,
+                "harvested": true,
+                "enabled": false,
+                "training": "fail",
+                "bist": "fail",
+                "temp_top": "0",
+                "temp_bottom": "0",
+                "corr_rd": "0",
+                "corr_wr": "0",
+                "uncorr_rd": "0",
+                "uncorr_wr": "0"
+            }
+        ]
+    }"#;
+
+    #[test]
+    fn parses_real_gddr_telemetry_shape() {
+        let v: serde_json::Value = serde_json::from_str(GDDR_TELEMETRY_JSON).unwrap();
+        let g = parse_gddr_telemetry(&v).expect("should parse");
+        assert_eq!(g.speed.as_deref(), Some("16G"));
+        assert_eq!(g.max_temp, Some(50.0));
+        assert_eq!(g.enabled_mask, Some(0xff));
+        assert_eq!(g.channels.len(), 2);
+
+        let ch0 = &g.channels[0];
+        assert_eq!(ch0.channel, 0);
+        assert!(!ch0.harvested);
+        assert!(ch0.enabled);
+        assert!(ch0.training_pass);
+        assert!(ch0.bist_pass);
+        assert_eq!(ch0.temp_top, Some(46.0));
+        assert_eq!(ch0.temp_bottom, Some(50.0));
+
+        let ch1 = &g.channels[1];
+        assert!(ch1.harvested);
+        assert!(!ch1.enabled);
+        assert!(!ch1.training_pass);
+        assert!(!ch1.bist_pass);
+    }
+
+    #[test]
+    fn absent_gddr_telemetry_key_parses_to_none() {
+        // Older tt-smi (< 6.3.0) simply doesn't have this key at all.
+        let device_json = r#"{"board_info": {"bus_id": "0000:01:00.0"}}"#;
+        let v: serde_json::Value = serde_json::from_str(device_json).unwrap();
+        assert!(v.get("gddr_telemetry").is_none());
+    }
+
+    #[test]
+    fn malformed_channel_entry_is_skipped_not_fabricated() {
+        let json = r#"{
+            "speed": "16G",
+            "channels": [
+                {"channel": 0, "harvested": false, "enabled": true, "training": "pass", "bist": "pass"},
+                {"channel": "not-a-number", "harvested": false, "enabled": true}
+            ]
+        }"#;
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        let g = parse_gddr_telemetry(&v).expect("should still parse the block");
+        assert_eq!(
+            g.channels.len(),
+            1,
+            "the malformed second entry is dropped, not zeroed"
+        );
+        assert_eq!(g.channels[0].channel, 0);
+    }
+
+    /// Regression test: a channel entry that omits an ECC counter entirely
+    /// must parse to `None`, not a numeric `0` — a genuinely-zero reading
+    /// and a missing/unreported field must stay distinguishable all the way
+    /// through, otherwise a real nonzero count that failed to parse for some
+    /// other reason would be indistinguishable from a clean channel.
+    #[test]
+    fn missing_ecc_counter_parses_to_none_not_zero() {
+        let json = r#"{
+            "channels": [
+                {
+                    "channel": 0,
+                    "harvested": false,
+                    "enabled": true,
+                    "training": "pass",
+                    "bist": "pass",
+                    "corr_rd": "0",
+                    "corr_wr": "0",
+                    "uncorr_rd": "0"
+                }
+            ]
+        }"#;
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        let g = parse_gddr_telemetry(&v).expect("should parse");
+        let ch = &g.channels[0];
+        assert_eq!(ch.corr_rd, Some(0), "present and genuinely zero");
+        assert_eq!(ch.corr_wr, Some(0), "present and genuinely zero");
+        assert_eq!(ch.uncorr_rd, Some(0), "present and genuinely zero");
+        assert_eq!(
+            ch.uncorr_wr, None,
+            "uncorr_wr was never in the JSON -- must be None, not Some(0)"
+        );
+    }
+
+    #[test]
+    fn empty_channels_array_parses_to_empty_vec() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"channels": []}"#).unwrap();
+        let g = parse_gddr_telemetry(&v).expect("should parse");
+        assert!(g.channels.is_empty());
+    }
 
     // Compact real-world tt-smi snapshot (single device, all key types represented).
     const REAL_TTSMI_JSON: &str = r#"{
@@ -1701,8 +2032,13 @@ mod tests {
         assert_eq!(smbus.fan_rpm(), Some(2500)); // 0x9c4
     }
 
-    /// Both fields sentinel (fanless p150-class card) → no fan reading at all,
-    /// and no sentinel string stored to be mis-rendered later.
+    /// Both fields sentinel (fanless p150-class card) → no fan reading at all.
+    ///
+    /// The sentinel *is* kept verbatim in `fan_speed`: it is what the firmware
+    /// reported, `fan_rpm()` filters it out of the display, and keeping it is what
+    /// lets `smbus_smooth::blend_fan` tell "reported, not a reading" (clear the
+    /// row) apart from "not reported this snapshot" (keep what we know) — see
+    /// `fan_sentinel_clears_a_stale_healthy_rpm`.
     #[test]
     fn both_fan_fields_sentinel_yields_none() {
         let json = r#"{
@@ -1713,7 +2049,75 @@ mod tests {
         }"#;
         let parsed = parse_tt_smi_snapshot(json).unwrap();
         let smbus = parsed.smbus.get(&0).unwrap();
-        assert_eq!(smbus.fan_speed, None, "sentinels must not be stored");
+        assert_eq!(
+            smbus.fan_speed.as_deref(),
+            Some("0x0"),
+            "a reported sentinel stays representable"
+        );
+        assert_eq!(smbus.fan_rpm(), None, "…and is not a fan reading");
+    }
+
+    /// End-to-end (parse → EMA blend), the shape the hybrid backend runs: a card
+    /// reporting a real RPM whose fan then stops must lose its Fan row.
+    ///
+    /// Regression (v0.8.1): `pick_fan_field` collapsed the stopped-fan sentinel to
+    /// `None`, `smbus_smooth::blend` read `None` as "field absent, keep what we
+    /// know", and the Insights sidebar rendered `Fan  1882 RPM` for the rest of
+    /// the session.
+    #[test]
+    fn fan_row_disappears_when_a_real_fan_stops() {
+        let spinning = r#"{
+            "device_info": [{
+                "board_info": {"bus_id": "0000:01:00.0", "board_type": "p300c"},
+                "smbus_telem": {"FAN_SPEED": "0x0", "FAN_RPM": "0x75a"}
+            }]
+        }"#;
+        let stopped = r#"{
+            "device_info": [{
+                "board_info": {"bus_id": "0000:01:00.0", "board_type": "p300c"},
+                "smbus_telem": {"FAN_SPEED": "0x0", "FAN_RPM": "0xffffffff"}
+            }]
+        }"#;
+
+        let first = parse_tt_smi_snapshot(spinning).unwrap();
+        let first = first.smbus.get(&0).unwrap().clone();
+        let second = parse_tt_smi_snapshot(stopped).unwrap();
+        let second = second.smbus.get(&0).unwrap();
+
+        // Mirrors HybridBackend::update: clone on first sight, then blend.
+        let mut ema = crate::backend::smbus_smooth::SmbusEmaState::new();
+        let mut blended = first.clone();
+        crate::backend::smbus_smooth::apply_ema(&mut ema, 0, &first, &mut blended);
+        assert_eq!(
+            blended.fan_rpm(),
+            Some(1882),
+            "baseline: the fan is spinning"
+        );
+
+        for _ in 0..5 {
+            crate::backend::smbus_smooth::apply_ema(&mut ema, 0, second, &mut blended);
+        }
+        assert_eq!(
+            blended.fan_rpm(),
+            None,
+            "a stopped fan must drop the row, not keep reporting 1882 RPM"
+        );
+    }
+
+    /// No fan key at all in the snapshot → `None`, which is a *different* state
+    /// from "reported a sentinel" and is the only one `blend` may treat as
+    /// "leave the previous value alone".
+    #[test]
+    fn absent_fan_fields_stay_none() {
+        let json = r#"{
+            "device_info": [{
+                "board_info": {"bus_id": "0000:01:00.0", "board_type": "p150a"},
+                "smbus_telem": {"AICLK": "0x320"}
+            }]
+        }"#;
+        let parsed = parse_tt_smi_snapshot(json).unwrap();
+        let smbus = parsed.smbus.get(&0).unwrap();
+        assert_eq!(smbus.fan_speed, None);
         assert_eq!(smbus.fan_rpm(), None);
     }
 
@@ -1865,5 +2269,143 @@ mod tests {
             parsed.telemetry.get(&0).is_none(),
             "no telemetry may be attributed to the dropped card's index"
         );
+    }
+
+    /// When *every* `device_info[]` entry is in a shape this build can't decode,
+    /// the snapshot is a total parse failure and must surface as `Err`.
+    ///
+    /// Regression: the element-wise salvage happily returned `Ok((vec![], _))`
+    /// here. Because `merge_parsed` never removes a device and never clears a
+    /// telemetry key, that "success" left the previous snapshot's device list,
+    /// power, temperature and clocks in place while resetting `error_count` and
+    /// bumping `last_update` — so a tt-smi upgrade that reshapes a per-device
+    /// block turned the TUI into a screenshot of the last good poll, presented
+    /// as live telemetry, with `max_consecutive_errors` never firing.
+    #[test]
+    fn snapshot_where_every_device_entry_is_undecodable_is_an_error() {
+        let json = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"}, "telemetry": true},
+                {"board_info": {"bus_id": "0000:02:00.0"}, "telemetry": 7}
+            ]
+        }"#;
+        let err = parse_tt_smi_snapshot(json)
+            .err()
+            .expect("a wholly-undecodable device_info[] must not parse as success");
+        assert!(
+            matches!(err, BackendError::ParseError(_)),
+            "expected a ParseError, got {err:?}"
+        );
+
+        // And drive the real update path: the failure must feed the error
+        // counter (which gates backoff and `max_consecutive_errors`) rather
+        // than resetting it as a successful poll would.
+        let mut backend = JSONBackend::new("tt-smi");
+        backend
+            .apply_raw_snapshot_pub(REAL_TTSMI_JSON)
+            .expect("a good snapshot first, so error_count starts at 0");
+        assert_eq!(backend.error_count, 0);
+
+        assert!(
+            backend.apply_raw_snapshot_pub(json).is_err(),
+            "the undecodable snapshot must be reported to the caller"
+        );
+        assert_eq!(
+            backend.error_count, 1,
+            "a wholly-undecodable snapshot must increment error_count, not reset it"
+        );
+        // The last known-good raw snapshot is deliberately retained (that's
+        // `test_snapshot_json_unchanged_on_parse_error`), but the *error* is now
+        // visible, which is the whole point.
+        assert_eq!(backend.snapshot_json(), Some(REAL_TTSMI_JSON.to_string()));
+    }
+
+    /// The *partial* case of the same bug: one card's entry stops parsing while
+    /// the others keep working, so the snapshot as a whole still succeeds.
+    ///
+    /// `snapshot_where_every_device_entry_is_undecodable_is_an_error` closed the
+    /// all-or-nothing case. This is the one that survived it, and it is worse in
+    /// practice because nothing signals it at all: the poll succeeds, so
+    /// `error_count` resets every tick and `max_consecutive_errors` never fires,
+    /// while the dropped card's panel goes on rendering its last-good power,
+    /// temperature and clocks as live telemetry for as long as the process runs.
+    /// One card silently frozen next to three live ones is exactly the failure
+    /// this release is about.
+    ///
+    /// The device itself stays — the card hasn't gone anywhere, and dropping it
+    /// would renumber panels on every flap. Only its numbers go.
+    #[test]
+    fn device_absent_from_a_later_snapshot_stops_serving_its_old_telemetry() {
+        let good = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"},
+                 "telemetry": {"power": "77.0", "asic_temperature": "61.0"},
+                 "smbus_telem": {"BOARD_ID_LOW": "0xaaa"}},
+                {"board_info": {"bus_id": "0000:02:00.0"},
+                 "telemetry": {"power": "22.0"}}
+            ]
+        }"#;
+        // Same fleet, but card 0's entry is now in a shape this build can't
+        // decode (a tt-smi upgrade reshaping a per-device block). The salvage
+        // drops that entry and the snapshot still succeeds.
+        let degraded = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"}, "telemetry": true},
+                {"board_info": {"bus_id": "0000:02:00.0"},
+                 "telemetry": {"power": "23.0"}}
+            ]
+        }"#;
+
+        let mut backend = JSONBackend::new("tt-smi");
+        backend
+            .apply_raw_snapshot_pub(good)
+            .expect("the healthy snapshot parses");
+        assert_eq!(backend.telemetry(0).and_then(|t| t.power), Some(77.0));
+        assert!(backend.smbus_telemetry(0).is_some());
+
+        backend
+            .apply_raw_snapshot_pub(degraded)
+            .expect("a partially-salvaged snapshot is still a successful poll");
+
+        assert!(
+            backend.telemetry(0).is_none(),
+            "device 0 was not in this snapshot, so it has no current reading — \
+             serving 77.0 W here is a frozen number presented as live"
+        );
+        assert!(
+            backend.smbus_telemetry(0).is_none(),
+            "same for its SMBUS block: ARC health and DDR status are measurements"
+        );
+        assert_eq!(
+            backend.device_count(),
+            2,
+            "the card is still installed; only its numbers are unknown"
+        );
+        assert_eq!(
+            backend.telemetry(1).and_then(|t| t.power),
+            Some(23.0),
+            "the healthy card keeps updating"
+        );
+    }
+
+    /// The genuinely-empty case is NOT an error: a host with no Tenstorrent
+    /// cards makes tt-smi emit `"device_info": []`, and zero devices is the
+    /// truth. Distinguishing "the array was empty" from "the array had entries
+    /// and we salvaged none" is what keeps the fix above from breaking bring-up
+    /// on a card-less box.
+    #[test]
+    fn empty_device_info_array_is_a_successful_zero_device_snapshot() {
+        let parsed = parse_tt_smi_snapshot(r#"{"device_info": []}"#)
+            .expect("an empty device list is a valid snapshot");
+        assert!(parsed.devices.is_empty());
+        assert!(parsed.telemetry.is_empty());
+
+        // Same through the salvage path itself (a document that also carries a
+        // block the strict parse rejects), so the distinction is enforced where
+        // it is actually made rather than only on the strict-parse happy path.
+        let salvaged = salvage_modern_snapshot(r#"{"device_info": [], "processes": 5}"#)
+            .expect("device_info present ⇒ modern shape");
+        assert_eq!(salvaged.entries_seen, 0);
+        assert!(salvaged.devices.is_empty());
     }
 }

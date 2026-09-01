@@ -22,11 +22,11 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::workload::inference_server::detect::{InferenceServer, Source};
+use crate::workload::inference_server::detect::{service_key, InferenceServer, HOST_KEY_PREFIX};
 use crate::workload::inference_server::logs::last_non_health_line;
 use crate::workload::inference_server::probe::{
     contains_python, count_lines, parse_docker_stats, parse_env_var, parse_liveness, top_process,
-    ContainerProbe, DockerProbe, Readiness, TickSample,
+    ContainerProbe, DockerProbe, Readiness, SystemProbe, TickSample,
 };
 use crate::workload::inference_server::services::{model_basename, service_for};
 use crate::workload::inference_server::state::{
@@ -68,8 +68,6 @@ const KERNEL_FIND_CMD: &str =
 /// climbs during the weight-load phase, after (and alongside) the compile
 /// phase. Gated on `$CACHE_ROOT` being set (see `build_sample`).
 const LOADED_FIND_CMD: &str = "find \"$CACHE_ROOT\" -name '*.tensorbin' 2>/dev/null";
-/// `ps` invocation whose first data row is the container's top CPU consumer.
-const TOP_PROC_CMD: &str = "ps -eo pcpu,rss,comm --sort=-pcpu";
 
 /// A never-yet-probed baseline for a newly discovered service, so the first
 /// real tick's deltas are computed against a known-empty prior tick rather
@@ -214,10 +212,28 @@ fn build_sample(
     // liveness check. `python_alive` scans ALL rows, not just the top: a
     // loading server is often IO-bound and not the CPU leader, so keying
     // liveness off the top row alone flapped a loading service to Down.
-    let ps_output = probe.exec(container, TOP_PROC_CMD);
+    let ps_output = probe.exec(container, &probe.top_proc_cmd(container));
     let top = top_process(&ps_output);
     let top_proc = top.map(|(comm, _cpu, _rss)| comm);
-    let python_alive = contains_python(&ps_output);
+    // For a host-keyed service, `top_proc_cmd` already scopes the `ps` call to
+    // exactly the launched pid's process tree (`host_top_proc_cmd` via
+    // `process_tree_pids`) — nothing else can appear in its output. So "the ps
+    // output has at least one data row beyond the header" is sufficient proof
+    // the tree is alive; there's no need to guess a process name. That matters
+    // because a `vllm serve <model>` launch's `comm` is commonly `vllm` (a pip
+    // console-script's shebang execs the interpreter directly, and the kernel
+    // sets `comm` to the script's own basename, not `python3`) — matching on
+    // `contains_python` here would misreport the whole compile/load window
+    // (readiness `Down`, `comm` never containing "python") as the process
+    // being dead, exactly the silence this feature exists to illuminate. A
+    // Docker key keeps using `contains_python` unchanged: `docker exec ps` is
+    // a global process listing (not tree-scoped), so row-count alone isn't
+    // evidence of *this* service's liveness.
+    let python_alive = if container.starts_with(HOST_KEY_PREFIX) {
+        ps_output.lines().count() > 1
+    } else {
+        contains_python(&ps_output)
+    };
 
     let (status, body) = probe.http(port, health_path);
     let readiness = parse_liveness(status, &body);
@@ -266,7 +282,7 @@ pub(crate) fn rebuild_snapshot(
 ) -> Vec<ServiceState> {
     let mut next_states = Vec::with_capacity(detected.len());
     for server in detected {
-        let Source::Docker { container } = &server.source;
+        let container = service_key(&server.source);
         // Resolve to a curated SERVERS entry when the model matches (nicer label
         // + known port/health path); otherwise track the container generically
         // so ANY detected tt-inference-server appears — LLM/vLLM deployments run
@@ -298,7 +314,7 @@ pub(crate) fn rebuild_snapshot(
                     )
                 }
             };
-        let sample = build_sample(probe, container, port, health_path);
+        let sample = build_sample(probe, &container, port, health_path);
         let prev_state = prev
             .iter()
             .find(|s| s.key == key)
@@ -323,10 +339,7 @@ fn merge_detections(
     submitted: &[InferenceServer],
     enumerated: Vec<InferenceServer>,
 ) -> Vec<InferenceServer> {
-    let container_of = |s: &InferenceServer| -> String {
-        let Source::Docker { container } = &s.source;
-        container.clone()
-    };
+    let container_of = |s: &InferenceServer| -> String { service_key(&s.source) };
     let mut out = submitted.to_vec();
     let mut seen: std::collections::HashSet<String> = out.iter().map(&container_of).collect();
     // When a container is seen by BOTH paths, the host-process scan (`submitted`)
@@ -388,7 +401,7 @@ impl InferenceServerMonitor {
     /// recognized service's container and folds the result into its running
     /// state. All docker/HTTP I/O happens here, never on the render path.
     pub fn spawn() -> Self {
-        Self::spawn_with_probe(Box::new(DockerProbe))
+        Self::spawn_with_probe(Box::new(SystemProbe::new(DockerProbe)))
     }
 
     /// Same as [`Self::spawn`], but with the [`ContainerProbe`] injected —
@@ -472,6 +485,7 @@ impl InferenceServerMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workload::inference_server::detect::Source;
     use crate::workload::inference_server::probe::Readiness;
 
     /// A never-yet-probed baseline, for driving `fold_tick`'s very first
@@ -740,6 +754,32 @@ mod tests {
         );
     }
 
+    /// A direct (non-Docker) vLLM launch is tracked by its pid-derived key,
+    /// exactly like a Docker-sourced service — `rebuild_snapshot` doesn't care
+    /// which `Source` variant produced the `InferenceServer`, since `Task 1`
+    /// made `service_key` source-agnostic.
+    #[test]
+    fn rebuild_snapshot_tracks_a_host_source_by_its_pid_key() {
+        let srv = InferenceServer {
+            source: Source::Host { pid: 4242 },
+            image: "vllm-direct".into(),
+            model: Some("episod/tt-tnt-1024".into()),
+            mesh: Some("P300x2".into()),
+            arch: None,
+            device: None,
+            port: Some(8000),
+            uses_tt_device: true,
+        };
+        let snap = rebuild_snapshot(std::slice::from_ref(&srv), &[], &FakeProbe, 5);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].key, "host-vllm-4242");
+        assert!(
+            snap[0].label.contains("tt-tnt-1024"),
+            "label derived from model basename, got {:?}",
+            snap[0].label
+        );
+    }
+
     fn srv(container: &str, model: &str) -> InferenceServer {
         InferenceServer {
             source: Source::Docker {
@@ -802,15 +842,9 @@ mod tests {
             2,
             "dup container collapses, detached one added"
         );
-        let containers: Vec<&str> = merged
-            .iter()
-            .map(|s| {
-                let Source::Docker { container } = &s.source;
-                container.as_str()
-            })
-            .collect();
-        assert!(containers.contains(&"fg-container"));
-        assert!(containers.contains(&"detached-vllm"));
+        let containers: Vec<String> = merged.iter().map(|s| service_key(&s.source)).collect();
+        assert!(containers.iter().any(|c| c == "fg-container"));
+        assert!(containers.iter().any(|c| c == "detached-vllm"));
     }
 
     #[test]
@@ -829,5 +863,68 @@ mod tests {
             crate::workload::inference_server::state::Phase::Alarm
         );
         assert_eq!(state.flat_ticks, 60);
+    }
+
+    /// A fake whose `ps` output reports the canonical `vllm serve` shape's
+    /// `comm` column — `vllm`, never `python3` — to prove `build_sample`
+    /// doesn't rely on `contains_python` for a host-keyed service. Readiness
+    /// is `Down` (nothing listening yet, matching the real compile/load
+    /// window), so `Phase::derive` would report `Down` if `python_alive` came
+    /// out false here too — exactly the false negative this fix closes.
+    struct FakeHostProbe;
+    impl ContainerProbe for FakeHostProbe {
+        fn env(&self, _key: &str) -> String {
+            "TT_METAL_HOME=/x/tt-metal\n".into()
+        }
+        fn stats(&self, _key: &str) -> String {
+            "50.0%|9GiB / 249GiB".into()
+        }
+        fn exec(&self, _key: &str, _sh: &str) -> String {
+            "PCPU RSS COMMAND\n12.0 900000 vllm\n".into()
+        }
+        fn http(&self, _port: u16, _path: &str) -> (u16, String) {
+            (0, String::new()) // Down: nothing listening yet during compile/load
+        }
+        fn top_proc_cmd(&self, _key: &str) -> String {
+            "ps -o pcpu,rss,comm --sort=-pcpu -p 1".into()
+        }
+    }
+
+    #[test]
+    fn build_sample_host_liveness_does_not_require_python_in_comm() {
+        let sample = build_sample(&FakeHostProbe, "host-vllm-4242", 8000, "/tt-liveness");
+        assert!(
+            sample.python_alive,
+            "a host-keyed tree-scoped ps with any data row is alive, \
+             regardless of the comm column (vllm serve's comm is `vllm`, not `python3`)"
+        );
+        assert!(matches!(sample.readiness, Readiness::Down));
+    }
+
+    #[test]
+    fn build_sample_docker_liveness_still_requires_python_in_comm() {
+        // Same shape (a non-python comm, no data beyond header check), but a
+        // Docker-style key — must NOT get the row-count shortcut, since
+        // `docker exec ps` is a global listing, not tree-scoped.
+        struct FakeDockerLikeProbe;
+        impl ContainerProbe for FakeDockerLikeProbe {
+            fn env(&self, _key: &str) -> String {
+                "TT_METAL_HOME=/x/tt-metal\n".into()
+            }
+            fn stats(&self, _key: &str) -> String {
+                "50.0%|9GiB / 249GiB".into()
+            }
+            fn exec(&self, _key: &str, _sh: &str) -> String {
+                "PCPU RSS COMMAND\n12.0 900000 some-other-proc\n".into()
+            }
+            fn http(&self, _port: u16, _path: &str) -> (u16, String) {
+                (0, String::new())
+            }
+        }
+        let sample = build_sample(&FakeDockerLikeProbe, "tt-inference-server-abc", 8000, "/h");
+        assert!(
+            !sample.python_alive,
+            "docker-keyed path must keep using contains_python, not row-count"
+        );
     }
 }

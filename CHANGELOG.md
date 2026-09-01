@@ -14,6 +14,83 @@ git tag                        # released versions
 
 ## Recent releases
 
+### 0.10.3
+- **Security fix**: a direct-vLLM host process's own `PATH` was forwarded
+  onto the `sh` the monitor spawns to probe it — a bare `Command::new("sh")`
+  lookup resolves via whatever `PATH` ends up on the builder, so an
+  attacker-controlled process (gated only by `MESH_DEVICE`/`TT_METAL_HOME`,
+  which the process itself controls) could have redirected the root-run
+  monitor into executing a planted binary. Fixed by invoking the interpreter
+  via an absolute path and never forwarding the target's own `PATH`.
+- **Fix**: four GDDR-telemetry correctness gaps — a stale 8-channel cap
+  dropping real fault data for Blackhole's channels 8–11, Starfield's DDR
+  planets missing an `enabled` check present in every other memory
+  visualization, the Insights GDDR temp/ECC rows silently disappearing
+  instead of falling back on partially-usable real data, and a missing ECC
+  counter parsing as a genuine zero instead of "not reported".
+- **Perf**: a host-keyed service's per-tick probe redundantly re-read
+  `/proc/<pid>/environ` up to four times and re-walked its process tree
+  twice; now cached for the duration of one tick.
+
+### 0.10.2
+- **Fix**: the `[i]` Inference Server roster showed dozens of duplicate
+  entries for a single real vLLM-on-TT launch — a real launch forks several
+  worker/engine-core processes that each independently matched the
+  direct-vLLM detection heuristic (each keyed by its own pid). Detection now
+  walks each match's process ancestry and keeps only the root of each match
+  family. Observed live: one real launch across 4 chips produced 26 roster
+  entries, almost all stuck on "down".
+
+### 0.10.1
+- **Defrag view** now also drives per-channel training/enabled/temperature and
+  errors from real `gddr_telemetry` when present, falling back to the
+  existing packed pair-resolution registers otherwise. New states: a static
+  "bad sector" row for a BIST-failed channel, and a brighter/longer flash for
+  uncorrectable vs. correctable errors.
+- **Fix**: a pre-existing EVICT false-positive that could trigger on idle
+  hardware — the Idle/Init → Running transition captured its power baseline
+  from a single raw sample instead of the smoothed EMA used elsewhere.
+  Confirmed pre-existing (unrelated to the Defrag change above) via an A/B
+  test against the prior commit.
+
+### 0.10.0
+- **Per-GDDR-channel telemetry** (tt-smi ≥ 6.3.0's `gddr_telemetry`: training/
+  BIST pass, harvested/enabled, dual-location temperature, directional
+  correctable/uncorrectable ECC) now flows into chip portrait, Memory Flow,
+  Memory Castle, Starfield, and the Insights sidebar — replacing coarser
+  packed-register decodes with real per-channel state wherever it's
+  available, and falling back to today's exact behavior everywhere else
+  (older tt-smi, sysfs, luwen, Wormhole/Grayskull). A whole-branch review
+  caught what no single file's review could: the new Insights summary row
+  was 47 columns in a 30-column budget and silently clipped its own
+  headline BIST-fail count on real hardware — fixed alongside the sidebar's
+  headroom invariant, a starfield DDR-planet rendering inconsistency on
+  Blackhole (8 real channels vs. 12 physical), and the ECC row's per-channel
+  sourcing. See `docs/superpowers/specs/2026-08-28-gddr-telemetry-design.md`.
+  Not yet hardware-verified against a real tt-smi ≥ 6.3.0 box.
+
+### 0.9.0
+- **Direct (non-Docker) vLLM-on-TT detection for the `[i]` Inference Server
+  panel.** Previously the panel only saw a `docker run`-launched
+  tt-inference-server container; a bare `vllm serve <model> ...` /
+  `server_example_tt.py --model <model> ...` process (as `tt-model serve`
+  launches directly) was invisible to it. A new `Source::Host { pid }` variant
+  and `SystemProbe` (wrapping the existing `DockerProbe`) let both deployment
+  shapes be monitored simultaneously — the host path reads `/proc` and runs
+  local `ps`/`sh` scoped to the launched pid's whole process tree rather than
+  a Docker container. Requires `MESH_DEVICE`/`TT_METAL_HOME` present in the
+  process's own environment to confirm it's TT-backed. Host-keyed liveness
+  doesn't rely on matching a process name (a pip console-script's `comm`
+  isn't `python3`) — any row in the tree-scoped `ps` output counts as alive.
+  `host_exec` allowlists only the env vars the probe's own shell commands
+  need, rather than copying a locally-launched process's full environment
+  into a root-run monitor's spawned shell. See
+  `docs/superpowers/specs/2026-08-27-direct-vllm-detection-design.md`.
+  Not yet hardware-verified against a real `tt-model serve` launch.
+- **`webbrowser` 1.2.0 → 1.2.4** (RUSTSEC-2026-0257). Lockfile only, and
+  transitive through `egui-winit` → `eframe`, so it affects the optional egui
+  GUI and not the shipped TUI binary.
+
 ### 0.8.0
 - **Fix: per-device data was shuffled on multi-card boxes.** The sysfs backend
   numbered devices in raw `readdir` order while `tt-smi` orders by PCI bus id, so

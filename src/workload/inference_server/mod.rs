@@ -18,7 +18,7 @@ pub(crate) mod probe;
 mod services;
 mod state;
 
-pub use detect::{parse_inference_server, InferenceServer, Source};
+pub use detect::{parse_direct_vllm, parse_inference_server, service_key, InferenceServer, Source};
 pub use logs::last_non_health_line;
 pub use metrics::{
     parse_media_metrics, parse_vllm_metrics, MediaCounters, MediaStats, ServingStats, VllmCounters,

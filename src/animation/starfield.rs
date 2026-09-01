@@ -39,7 +39,15 @@ pub struct Star {
     /// Y position in terminal coordinates
     pub y: usize,
 
-    /// Device index this star belongs to
+    /// Device index this star belongs to.
+    ///
+    /// This is the device's **own** `Device::index` (the physical card
+    /// identity), not its position in `backend.devices()`. The two differ
+    /// whenever the index set is sparse — a salvaged tt-smi snapshot that
+    /// dropped a malformed `device_info[]` entry, or a chip whose ARC never
+    /// answered — and this field is used as a telemetry/baseline *key*, so it
+    /// must be the identity, never the position. Screen geometry uses the
+    /// position instead (see `fleet_pos` on `MemoryPlanet`).
     pub device_idx: usize,
 
     /// Core index within the device
@@ -93,8 +101,20 @@ pub struct MemoryPlanet {
     /// Y position in terminal coordinates
     pub y: usize,
 
-    /// Device index this planet belongs to
+    /// Device index this planet belongs to — the device's own `Device::index`,
+    /// used as the telemetry/baseline key. See `Star::device_idx`.
     pub device_idx: usize,
+
+    /// Position of the owning device within `backend.devices()`, i.e. which
+    /// screen column this planet orbits.
+    ///
+    /// Deliberately separate from `device_idx`: the orbital centre is recomputed
+    /// every tick from `width / devices.len()`, which is a *layout* quantity, so
+    /// it must track the device's slot in the row and not its physical index. On
+    /// a sparse index set (salvaged snapshot, ARC-dead chip) using the index
+    /// here would fling the planets off-screen or stack two devices' rings on
+    /// top of each other.
+    pub fleet_pos: usize,
 
     /// Memory level (0=L1, 1=L2, 2=DDR)
     pub level: usize,
@@ -324,9 +344,20 @@ impl HardwareStarfield {
         // Calculate device spacing across screen width
         let device_spacing = self.width / num_devices.max(1);
 
-        for (device_idx, device) in devices.iter().enumerate() {
+        // `fleet_pos` is the device's slot in the row (screen geometry);
+        // `device_idx` is its own `Device::index` (the telemetry/baseline key).
+        // These are equal on a healthy box and diverge the moment the index set
+        // goes sparse — a salvaged tt-smi snapshot that dropped a malformed
+        // `device_info[]` entry, or a chip whose ARC never answered. Conflating
+        // them used to leave every star of the surviving card looking up
+        // telemetry for a device that isn't in the list: `None`, so the whole
+        // starfield stayed at its dim initial brightness on a chip that was in
+        // fact running flat out.
+        for (fleet_pos, device) in devices.iter().enumerate() {
+            let device_idx = device.index;
+
             // Calculate center position for this device (horizontal only)
-            let device_center_x = (device_idx * device_spacing) + (device_spacing / 2);
+            let device_center_x = (fleet_pos * device_spacing) + (device_spacing / 2);
 
             // Get Tensix grid dimensions for this architecture
             let (grid_rows, grid_cols) = device.tensix_grid();
@@ -399,6 +430,7 @@ impl HardwareStarfield {
                         x: px as usize,
                         y: py as usize,
                         device_idx,
+                        fleet_pos,
                         level: 2, // DDR
                         channel_idx: i,
                         activity: 0.0,
@@ -426,6 +458,7 @@ impl HardwareStarfield {
                         x: px as usize,
                         y: py as usize,
                         device_idx,
+                        fleet_pos,
                         level: 1, // L2
                         channel_idx: i,
                         activity: 0.0,
@@ -453,6 +486,7 @@ impl HardwareStarfield {
                         x: px as usize,
                         y: py as usize,
                         device_idx,
+                        fleet_pos,
                         level: 0, // L1
                         channel_idx: i,
                         activity: 0.0,
@@ -465,13 +499,20 @@ impl HardwareStarfield {
             }
         }
 
-        // Initialize data streams between devices (if multiple devices)
+        // Initialize data streams between devices (if multiple devices).
+        //
+        // The loop walks *positions* (screen columns give the segment path), but
+        // `from_device`/`to_device` store the endpoints' own device indices —
+        // they're later used to key `device_activity` and to ask the topology
+        // which board a chip sits on, both of which are index-keyed.
         if num_devices > 1 {
             let device_spacing = self.width / num_devices;
-            for from_idx in 0..num_devices {
-                for to_idx in (from_idx + 1)..num_devices {
-                    let from_x = (from_idx * device_spacing) + (device_spacing / 2);
-                    let to_x = (to_idx * device_spacing) + (device_spacing / 2);
+            for from_pos in 0..num_devices {
+                for to_pos in (from_pos + 1)..num_devices {
+                    let from_x = (from_pos * device_spacing) + (device_spacing / 2);
+                    let to_x = (to_pos * device_spacing) + (device_spacing / 2);
+                    let from_idx = devices[from_pos].index;
+                    let to_idx = devices[to_pos].index;
 
                     // Determine topology relationship for this stream pair.
                     let intra = self
@@ -628,6 +669,15 @@ impl HardwareStarfield {
                 let current = telem.current_a();
                 let current_change = self.baseline.current_change(planet.device_idx, current);
 
+                // Real per-channel GDDR block for this device, if the backend
+                // has one (tt-smi >= 6.3.0). Fetched once and shared by both
+                // the activity and the colour assignment below, so the two can
+                // never disagree about which signal source a DDR planet is on.
+                let gddr = backend
+                    .smbus_telemetry(planet.device_idx)
+                    .and_then(|s| s.gddr_telemetry.as_ref())
+                    .filter(|g| !g.channels.is_empty());
+
                 // Different memory levels respond to different metrics
                 planet.activity = match planet.level {
                     0 => {
@@ -641,10 +691,54 @@ impl HardwareStarfield {
                         current_change.max(0.0).min(1.0)
                     }
                     2 => {
-                        // DDR: Responds to combined activity
-                        let power = telem.power_w();
-                        let power_change = self.baseline.power_change(planet.device_idx, power);
-                        ((power_change + current_change) / 2.0).max(0.0).min(1.0)
+                        // DDR: prefer real per-channel gddr_telemetry state
+                        // (tt-smi >= 6.3.0) over the generic power/current
+                        // proxy — a harvested or administratively-disabled
+                        // channel is definitionally idle,
+                        // a BIST-failed channel is a fault (max activity, not
+                        // a number derived from unrelated power draw), and a
+                        // healthy channel's real temperature is a much better
+                        // activity signal than "how busy is the whole board".
+                        // Falls back to the generic formula only when the device
+                        // has no per-channel data *at all*.
+                        //
+                        // The fallback is deliberately per-device, not
+                        // per-channel: planets are spawned from
+                        // `device.memory_channels()` (12 on Blackhole) while
+                        // tt-smi only reports the 8 real channels, so a
+                        // per-channel fallback left 8 planets driven by real
+                        // telemetry sitting next to 4 driven by an unrelated
+                        // power/current proxy — two incommensurable signals in
+                        // one ring, on exactly the hardware this feature
+                        // targets. A channel with no real counterpart is now
+                        // rendered inert (like a harvested one) instead, so
+                        // every DDR planet on a device with real GDDR data is
+                        // either genuinely real-data-driven or uniformly
+                        // marked "not tracked".
+                        match gddr {
+                            None => {
+                                let power = telem.power_w();
+                                let power_change =
+                                    self.baseline.power_change(planet.device_idx, power);
+                                ((power_change + current_change) / 2.0).max(0.0).min(1.0)
+                            }
+                            Some(g) => {
+                                match g.channels.iter().find(|c| c.channel == planet.channel_idx) {
+                                    Some(c) if c.harvested || !c.enabled => 0.0,
+                                    Some(c) if !c.bist_pass => 1.0, // max activity: flag the fault
+                                    Some(c) => {
+                                        let avg_temp = match (c.temp_top, c.temp_bottom) {
+                                            (Some(t), Some(b)) => (t + b) / 2.0,
+                                            (Some(t), None) | (None, Some(t)) => t,
+                                            (None, None) => 0.0,
+                                        };
+                                        (avg_temp / 90.0).clamp(0.0, 1.0)
+                                    }
+                                    // Beyond the set tt-smi reports: inert.
+                                    None => 0.0,
+                                }
+                            }
+                        }
                     }
                     _ => 0.0,
                 };
@@ -652,17 +746,56 @@ impl HardwareStarfield {
                 // Planets: each memory level cycles through its own hue range,
                 // per-channel offset spreads the colours so they aren't all in sync.
                 use crate::animation::hsv_to_rgb as _hsv;
-                let planet_hue = match planet.level {
-                    0 => {
-                        (240.0 + self.frame as f32 * 1.5 + planet.channel_idx as f32 * 90.0) % 360.0
+                // DDR planets prefer real per-channel gddr_telemetry state for
+                // their color too: harvested or administratively-disabled
+                // channels — and, for the same reason as the activity above,
+                // channels tt-smi doesn't report at all — go dim gray (nothing
+                // to show), BIST-failed channels
+                // flicker bright/dark red as a fault beacon, and everything
+                // else (L1/L2 planets, and every DDR planet on a device with
+                // no per-channel block at all) keeps the existing hue-cycling
+                // look untouched.
+                let ddr_gddr = if planet.level == 2 { gddr } else { None };
+                if let Some(g) = ddr_gddr {
+                    match g.channels.iter().find(|c| c.channel == planet.channel_idx) {
+                        Some(c) if c.harvested || !c.enabled => {
+                            planet.color = Color::Rgb(60, 60, 60)
+                        }
+                        Some(c) if !c.bist_pass => {
+                            let flicker = (self.frame / 3) % 2 == 0;
+                            planet.color = if flicker {
+                                Color::Rgb(255, 60, 60)
+                            } else {
+                                Color::Rgb(90, 20, 20)
+                            };
+                        }
+                        Some(_) => {
+                            let planet_hue = (self.frame as f32 * 2.5
+                                + planet.channel_idx as f32 * 30.0)
+                                % 360.0;
+                            let planet_value = 0.6 + planet.activity * 0.4;
+                            planet.color = _hsv(planet_hue, 1.0, planet_value);
+                        }
+                        // Beyond the set tt-smi reports: same inert dim gray a
+                        // harvested channel gets, never the hue-cycling look —
+                        // that would read as live data it isn't.
+                        None => planet.color = Color::Rgb(60, 60, 60),
                     }
-                    1 => {
-                        (120.0 + self.frame as f32 * 1.0 + planet.channel_idx as f32 * 45.0) % 360.0
-                    }
-                    _ => (self.frame as f32 * 2.5 + planet.channel_idx as f32 * 30.0) % 360.0,
-                };
-                let planet_value = 0.6 + planet.activity * 0.4;
-                planet.color = _hsv(planet_hue, 1.0, planet_value);
+                } else {
+                    let planet_hue = match planet.level {
+                        0 => {
+                            (240.0 + self.frame as f32 * 1.5 + planet.channel_idx as f32 * 90.0)
+                                % 360.0
+                        }
+                        1 => {
+                            (120.0 + self.frame as f32 * 1.0 + planet.channel_idx as f32 * 45.0)
+                                % 360.0
+                        }
+                        _ => (self.frame as f32 * 2.5 + planet.channel_idx as f32 * 30.0) % 360.0,
+                    };
+                    let planet_value = 0.6 + planet.activity * 0.4;
+                    planet.color = _hsv(planet_hue, 1.0, planet_value);
+                }
 
                 // Orbital motion - planets orbit around device center
                 // Different levels orbit at different speeds
@@ -677,8 +810,11 @@ impl HardwareStarfield {
                 planet.angle += orbit_speed * (1.0 + planet.activity * 0.5);
 
                 // Calculate new orbital position
+                // Layout, not identity: the orbital centre follows the device's
+                // slot in the row (`fleet_pos`), while the telemetry above was
+                // read with its own index. See `MemoryPlanet::fleet_pos`.
                 let device_spacing = self.width / backend.devices().len().max(1);
-                let device_center_x = (planet.device_idx * device_spacing) + (device_spacing / 2);
+                let device_center_x = (planet.fleet_pos * device_spacing) + (device_spacing / 2);
                 let device_center_y = self.height / 2;
 
                 let px = device_center_x as f32 + planet.angle.cos() * planet.radius;
@@ -1082,6 +1218,7 @@ mod tests {
             x: 0,
             y: 0,
             device_idx: 0,
+            fleet_pos: 0,
             level: 0,
             channel_idx: 0,
             activity: 0.5,
@@ -1096,6 +1233,7 @@ mod tests {
             x: 0,
             y: 0,
             device_idx: 0,
+            fleet_pos: 0,
             level: 1,
             channel_idx: 0,
             activity: 0.5,
@@ -1105,6 +1243,345 @@ mod tests {
             pulse: 0.0,
         };
         assert_eq!(l2_planet.get_char(), '◇'); // L2 outline diamond
+    }
+
+    /// Backend wrapper that delegates every `TelemetryBackend`-required
+    /// method to an inner `MockBackend`, but overrides `smbus_telemetry` for
+    /// device 0 with a hand-built `gddr_telemetry` block: channel 0 is a
+    /// healthy channel at a known high temperature (80°C top and bottom),
+    /// and channel 1 is harvested. Mirrors the `NoSmbusBackend` wrapper
+    /// pattern used in `memory_castle.rs`'s gddr_telemetry tests.
+    struct CustomGddrBackend(crate::backend::mock::MockBackend);
+
+    impl TelemetryBackend for CustomGddrBackend {
+        fn init(&mut self) -> crate::error::BackendResult<()> {
+            self.0.init()
+        }
+        fn update(&mut self) -> crate::error::BackendResult<()> {
+            self.0.update()
+        }
+        fn devices(&self) -> &[crate::models::Device] {
+            self.0.devices()
+        }
+        fn telemetry(&self, device_idx: usize) -> Option<&crate::models::Telemetry> {
+            self.0.telemetry(device_idx)
+        }
+        fn smbus_telemetry(
+            &self,
+            device_idx: usize,
+        ) -> Option<&crate::models::telemetry::SmbusTelemetry> {
+            if device_idx == 0 {
+                use std::sync::OnceLock;
+                static SMBUS: OnceLock<crate::models::telemetry::SmbusTelemetry> = OnceLock::new();
+                Some(SMBUS.get_or_init(|| {
+                    use crate::models::telemetry::{GddrChannel, GddrTelemetry, SmbusTelemetry};
+                    let channels = vec![
+                        GddrChannel {
+                            channel: 0,
+                            harvested: false,
+                            enabled: true,
+                            training_pass: true,
+                            bist_pass: true,
+                            temp_top: Some(80.0),
+                            temp_bottom: Some(80.0),
+                            corr_rd: Some(0),
+                            corr_wr: Some(0),
+                            uncorr_rd: Some(0),
+                            uncorr_wr: Some(0),
+                        },
+                        GddrChannel {
+                            channel: 1,
+                            harvested: true,
+                            enabled: false,
+                            training_pass: false,
+                            bist_pass: true,
+                            temp_top: None,
+                            temp_bottom: None,
+                            corr_rd: Some(0),
+                            corr_wr: Some(0),
+                            uncorr_rd: Some(0),
+                            uncorr_wr: Some(0),
+                        },
+                    ];
+                    SmbusTelemetry {
+                        gddr_telemetry: Some(GddrTelemetry {
+                            speed: Some("16G".to_string()),
+                            max_temp: Some(80.0),
+                            enabled_mask: Some(0b01),
+                            channels,
+                        }),
+                        ..Default::default()
+                    }
+                }))
+            } else {
+                self.0.smbus_telemetry(device_idx)
+            }
+        }
+        fn backend_info(&self) -> String {
+            self.0.backend_info()
+        }
+    }
+
+    #[test]
+    fn ddr_planet_activity_reflects_real_channel_temp_when_present() {
+        let mut inner = crate::backend::mock::MockBackend::new(1);
+        inner.init().expect("mock backend init");
+        let backend = CustomGddrBackend(inner);
+        assert!(
+            backend
+                .smbus_telemetry(0)
+                .and_then(|s| s.gddr_telemetry.as_ref())
+                .is_some(),
+            "test setup: wrapper must report real gddr_telemetry for device 0"
+        );
+
+        let mut starfield = HardwareStarfield::new(80, 24);
+        starfield.initialize_from_devices(backend.devices());
+        starfield.update_from_telemetry(&backend);
+
+        let channel0_activity = starfield
+            .planets
+            .iter()
+            .find(|p| p.device_idx == 0 && p.level == 2 && p.channel_idx == 0)
+            .map(|p| p.activity)
+            .expect("device 0 must have a level==2/channel_idx==0 DDR planet");
+        let channel1_activity = starfield
+            .planets
+            .iter()
+            .find(|p| p.device_idx == 0 && p.level == 2 && p.channel_idx == 1)
+            .map(|p| p.activity)
+            .expect("device 0 must have a level==2/channel_idx==1 DDR planet");
+
+        assert!(
+            channel0_activity > 0.85,
+            "channel 0 at 80°C real temp should read as high activity (80/90 clamped); got {}",
+            channel0_activity
+        );
+        assert_eq!(
+            channel1_activity, 0.0,
+            "channel 1 is harvested and must show zero activity regardless of power/current"
+        );
+    }
+
+    /// Backend wrapper reporting a **sparse** `gddr_telemetry` block for
+    /// device 2 (a Blackhole `p150` in the mock's Mixed scenario, so
+    /// `memory_channels()` == 12): only channels 0 and 1 are described, both
+    /// healthy. This is the real tt-smi shape — it reports 8 channels on
+    /// hardware whose architecture declares 12 — reduced to the smallest
+    /// fixture that exhibits it.
+    struct SparseGddrBackend(crate::backend::mock::MockBackend);
+
+    impl TelemetryBackend for SparseGddrBackend {
+        fn init(&mut self) -> crate::error::BackendResult<()> {
+            self.0.init()
+        }
+        fn update(&mut self) -> crate::error::BackendResult<()> {
+            self.0.update()
+        }
+        fn devices(&self) -> &[crate::models::Device] {
+            self.0.devices()
+        }
+        fn telemetry(&self, device_idx: usize) -> Option<&crate::models::Telemetry> {
+            self.0.telemetry(device_idx)
+        }
+        fn smbus_telemetry(
+            &self,
+            device_idx: usize,
+        ) -> Option<&crate::models::telemetry::SmbusTelemetry> {
+            if device_idx == 2 {
+                use std::sync::OnceLock;
+                static SMBUS: OnceLock<crate::models::telemetry::SmbusTelemetry> = OnceLock::new();
+                Some(SMBUS.get_or_init(|| {
+                    use crate::models::telemetry::{GddrChannel, GddrTelemetry, SmbusTelemetry};
+                    let healthy = |channel: usize| GddrChannel {
+                        channel,
+                        harvested: false,
+                        enabled: true,
+                        training_pass: true,
+                        bist_pass: true,
+                        temp_top: Some(70.0),
+                        temp_bottom: Some(70.0),
+                        ..Default::default()
+                    };
+                    SmbusTelemetry {
+                        gddr_telemetry: Some(GddrTelemetry {
+                            speed: Some("16G".to_string()),
+                            max_temp: Some(70.0),
+                            enabled_mask: Some(0b11),
+                            channels: vec![healthy(0), healthy(1)],
+                        }),
+                        ..Default::default()
+                    }
+                }))
+            } else {
+                self.0.smbus_telemetry(device_idx)
+            }
+        }
+        fn backend_info(&self) -> String {
+            self.0.backend_info()
+        }
+    }
+
+    /// A DDR planet whose channel id is beyond what tt-smi reports must NOT
+    /// fall back to the generic power/current formula while its neighbours run
+    /// on real per-channel telemetry — that mixes two incommensurable signals
+    /// in one ring. It renders inert instead, exactly like a harvested channel.
+    ///
+    /// Colour is the discriminating assertion: the generic fallback's
+    /// hue-cycling branch is `hsv(h, 1.0, >= 0.6)`, which is fully saturated
+    /// and can never be the neutral gray used for "not tracked", whereas an
+    /// activity of `0.0` alone would be ambiguous (the generic formula can
+    /// legitimately produce 0.0 on an idle device).
+    #[test]
+    fn ddr_planet_beyond_reported_channels_is_inert_not_generic() {
+        let mut inner = crate::backend::mock::MockBackend::new(3);
+        inner.init().expect("mock backend init");
+        let backend = SparseGddrBackend(inner);
+        assert_eq!(
+            backend.devices()[2].architecture,
+            crate::models::Architecture::Blackhole,
+            "test setup: device 2 must be a Blackhole so memory_channels() (12) \
+             exceeds the 2 channels the fixture reports"
+        );
+        assert!(
+            backend.devices()[2].memory_channels() > 2,
+            "test setup: the architecture must declare more channels than the fixture reports"
+        );
+
+        let mut starfield = HardwareStarfield::new(120, 40);
+        starfield.initialize_from_devices(backend.devices());
+        // Several ticks so the adaptive baseline is past its learning phase and
+        // the generic power/current formula would have something real to say.
+        for _ in 0..25 {
+            starfield.update_from_telemetry(&backend);
+        }
+
+        let planet = |channel_idx: usize| {
+            starfield
+                .planets
+                .iter()
+                .find(|p| p.device_idx == 2 && p.level == 2 && p.channel_idx == channel_idx)
+                .unwrap_or_else(|| {
+                    panic!("device 2 must have a DDR planet for channel {channel_idx}")
+                })
+        };
+
+        // Channel 10: no tt-smi counterpart → inert, and unmistakably so.
+        let untracked = planet(10);
+        assert_eq!(
+            untracked.activity, 0.0,
+            "an unreported channel must not borrow the generic power/current activity"
+        );
+        assert_eq!(
+            untracked.color,
+            Color::Rgb(60, 60, 60),
+            "an unreported channel must use the same neutral gray a harvested \
+             channel gets, never the generic hue-cycling look"
+        );
+
+        // Channel 0 is really reported: the real-data path is untouched.
+        let tracked = planet(0);
+        assert!(
+            tracked.activity > 0.7,
+            "channel 0 at 70°C real temp should read as high activity (70/90); got {}",
+            tracked.activity
+        );
+        assert_ne!(
+            tracked.color,
+            Color::Rgb(60, 60, 60),
+            "a real, healthy channel must not render as 'not tracked'"
+        );
+    }
+
+    /// Regression test: a channel that is `enabled: false` but NOT
+    /// `harvested` (administratively disabled, not fused off — distinct
+    /// states in `gddr_telemetry`) must render inert like a harvested
+    /// channel, matching memory_flow.rs's `c.harvested || !c.enabled`
+    /// convention. Starfield previously checked only `harvested`, so this
+    /// state fell through to the healthy arm and rendered a live, glowing,
+    /// temperature-tracking planet — inconsistent with Memory Flow showing
+    /// the same hardware state as dark/inactive on the same telemetry tick.
+    #[test]
+    fn ddr_planet_inert_when_disabled_but_not_harvested() {
+        struct DisabledNotHarvestedBackend(crate::backend::mock::MockBackend);
+        impl crate::backend::TelemetryBackend for DisabledNotHarvestedBackend {
+            fn init(&mut self) -> crate::error::BackendResult<()> {
+                self.0.init()
+            }
+            fn update(&mut self) -> crate::error::BackendResult<()> {
+                self.0.update()
+            }
+            fn devices(&self) -> &[crate::models::Device] {
+                self.0.devices()
+            }
+            fn telemetry(&self, device_idx: usize) -> Option<&crate::models::Telemetry> {
+                self.0.telemetry(device_idx)
+            }
+            fn smbus_telemetry(
+                &self,
+                device_idx: usize,
+            ) -> Option<&crate::models::telemetry::SmbusTelemetry> {
+                if device_idx == 0 {
+                    use std::sync::OnceLock;
+                    static SMBUS: OnceLock<crate::models::telemetry::SmbusTelemetry> =
+                        OnceLock::new();
+                    Some(SMBUS.get_or_init(|| {
+                        use crate::models::telemetry::{
+                            GddrChannel, GddrTelemetry, SmbusTelemetry,
+                        };
+                        SmbusTelemetry {
+                            gddr_telemetry: Some(GddrTelemetry {
+                                speed: Some("16G".to_string()),
+                                max_temp: Some(90.0),
+                                enabled_mask: Some(0b1),
+                                channels: vec![GddrChannel {
+                                    channel: 0,
+                                    harvested: false, // NOT harvested
+                                    enabled: false,   // administratively disabled
+                                    training_pass: false,
+                                    bist_pass: true,
+                                    temp_top: Some(90.0), // would read as max activity if not caught
+                                    temp_bottom: Some(90.0),
+                                    ..Default::default()
+                                }],
+                            }),
+                            ..Default::default()
+                        }
+                    }))
+                } else {
+                    self.0.smbus_telemetry(device_idx)
+                }
+            }
+            fn backend_info(&self) -> String {
+                self.0.backend_info()
+            }
+        }
+
+        let mut inner = crate::backend::mock::MockBackend::new(1);
+        inner.init().expect("mock backend init");
+        let backend = DisabledNotHarvestedBackend(inner);
+
+        let mut starfield = HardwareStarfield::new(120, 40);
+        starfield.initialize_from_devices(backend.devices());
+        for _ in 0..25 {
+            starfield.update_from_telemetry(&backend);
+        }
+
+        let planet = starfield
+            .planets
+            .iter()
+            .find(|p| p.device_idx == 0 && p.level == 2 && p.channel_idx == 0)
+            .expect("device 0 must have a level==2/channel_idx==0 DDR planet");
+
+        assert_eq!(
+            planet.activity, 0.0,
+            "a disabled-but-not-harvested channel must render inert, not driven by its (irrelevant) 90°C reading"
+        );
+        assert_eq!(
+            planet.color,
+            Color::Rgb(60, 60, 60),
+            "a disabled-but-not-harvested channel must use the same neutral gray as a harvested one"
+        );
     }
 
     #[test]
@@ -1130,5 +1607,67 @@ mod tests {
             intra_board: false,
         };
         assert_eq!(inter.get_char(), '═');
+    }
+
+    /// Stars and planets must key their telemetry by the device's **own** index,
+    /// not by its position in `backend.devices()`.
+    ///
+    /// The realistic producer of a sparse index set is a tt-smi snapshot whose
+    /// first `device_info[]` entry was undecodable: the element-wise salvage
+    /// keeps array positions on purpose, so the backend serves a one-element
+    /// device list carrying `index: 1` with telemetry keyed at 1. (An ARC-dead
+    /// chip skipped by the Luwen backend leaves the same hole.)
+    ///
+    /// Regression: `initialize_from_devices` stamped the *enumerate position*
+    /// into `Star::device_idx`, so every star of the surviving card looked up
+    /// `telemetry(0)` — `None` — and the entire telemetry branch was skipped: no
+    /// brightness, no temperature colour, a starfield frozen at its initial dim
+    /// state while the chip was in fact running flat out.
+    #[test]
+    fn sparse_device_index_still_drives_stars_and_planets() {
+        const SNAPSHOT: &str = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"}, "telemetry": true},
+                {
+                    "board_info": {"bus_id": "0000:02:00.0", "board_type": "p300c"},
+                    "telemetry": {"power": " 220.0", "asic_temperature": " 71.0",
+                                  "current": " 90.0", "aiclk": " 1350"}
+                }
+            ]
+        }"#;
+
+        let mut backend = crate::backend::json::JSONBackend::new("tt-smi");
+        backend
+            .apply_raw_snapshot_pub(SNAPSHOT)
+            .expect("the healthy sibling must still be salvaged");
+        assert_eq!(
+            backend.devices()[0].index,
+            1,
+            "salvage keeps array position"
+        );
+
+        let mut sf = HardwareStarfield::new(80, 24);
+        sf.initialize_from_devices(backend.devices());
+        assert!(!sf.stars.is_empty(), "stars must be created");
+        assert!(
+            sf.stars.iter().all(|s| s.device_idx == 1),
+            "stars carry the device's own index, not its list position"
+        );
+        assert!(
+            sf.planets
+                .iter()
+                .all(|p| p.device_idx == 1 && p.fleet_pos == 0),
+            "planets key telemetry by index but orbit by fleet position"
+        );
+
+        sf.update_from_telemetry(&backend);
+        assert!(
+            sf.stars.iter().any(|s| s.color != colors::primary()),
+            "the telemetry branch must run: stars leave their initial colour"
+        );
+        assert!(
+            sf.planets.iter().any(|p| p.pulse > 0.0),
+            "planets must be animated by the surviving card's telemetry"
+        );
     }
 }

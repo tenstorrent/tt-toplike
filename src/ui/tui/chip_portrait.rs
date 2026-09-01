@@ -432,7 +432,41 @@ pub fn build_portrait_rows(
                     }
                 }
 
-                CoreType::Dram => '▪',
+                CoreType::Dram => {
+                    let dram_channel_idx = if device.architecture == Architecture::Blackhole {
+                        // Same "count earlier DRAM columns" mapping trained_random_col
+                        // already uses.
+                        let is_dram_col = |c: usize| c != 8 && core_type_bh(c, 0) == CoreType::Dram;
+                        if is_dram_col(col) {
+                            // No upper bound here: gddr_telemetry.channels is
+                            // looked up by real `.channel` id just below, not
+                            // by position, so a channel id beyond a stale
+                            // 8-channel assumption (Blackhole has up to 12
+                            // DRAM columns) still resolves correctly — or
+                            // simply misses via `.find`, same as any other
+                            // absent id.
+                            Some((0..col).filter(|&cc| is_dram_col(cc)).count())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    // Look up by the real `channel` field, not by position — the JSON
+                    // parser (`parse_gddr_channel`) silently drops a malformed channel
+                    // entry, which would shift every subsequent channel's position out
+                    // from under a positional `channels.get(idx)` lookup.
+                    let real_channel = dram_channel_idx.and_then(|idx| {
+                        smbus
+                            .and_then(|s| s.gddr_telemetry.as_ref())
+                            .and_then(|g| g.channels.iter().find(|c| c.channel == idx))
+                    });
+                    match real_channel {
+                        Some(c) if c.harvested => '·',
+                        Some(c) if !c.bist_pass => '✗',
+                        _ => '▪',
+                    }
+                }
 
                 CoreType::Tensix => {
                     // BH only: check harvesting mask via tensix column index
@@ -506,11 +540,35 @@ pub fn build_portrait_lines<'a>(
 
     // Per-column DRAM temperature color via GDDR temp interpolation
     let dram_color_for_col = |col: usize| -> Color {
-        let pair_idx = (col / 4).min(3);
-        let temp = smbus
-            .and_then(|s| s.gddr_temps.get(pair_idx).and_then(|p| p.as_ref()))
-            .map(|p| p.0.iter().copied().fold(f32::NEG_INFINITY, f32::max))
-            .unwrap_or(0.0);
+        let real_channel_temp = if device.architecture == Architecture::Blackhole {
+            let is_dram_col = |c: usize| c != 8 && core_type_bh(c, 0) == CoreType::Dram;
+            if is_dram_col(col) {
+                // No upper bound: see the matching comment in build_portrait_rows
+                // above — `.find(|c| c.channel == idx)` already handles an
+                // absent id, so an artificial cap here only discards real
+                // data for channels 8-11 on a 12-channel Blackhole board.
+                let idx = (0..col).filter(|&cc| is_dram_col(cc)).count();
+                smbus
+                    .and_then(|s| s.gddr_telemetry.as_ref())
+                    .and_then(|g| g.channels.iter().find(|c| c.channel == idx))
+                    .and_then(|c| match (c.temp_top, c.temp_bottom) {
+                        (Some(t), Some(b)) => Some(t.max(b)),
+                        (Some(t), None) | (None, Some(t)) => Some(t),
+                        (None, None) => None,
+                    })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let temp = real_channel_temp.unwrap_or_else(|| {
+            let pair_idx = (col / 4).min(3);
+            smbus
+                .and_then(|s| s.gddr_temps.get(pair_idx).and_then(|p| p.as_ref()))
+                .map(|p| p.0.iter().copied().fold(f32::NEG_INFINITY, f32::max))
+                .unwrap_or(0.0)
+        });
         let [r, g, b] = dram_temp_rgb(temp);
         Color::Rgb(r, g, b)
     };
@@ -535,6 +593,16 @@ pub fn build_portrait_lines<'a>(
                     // ETH: cyan when live, dim gray when down
                     (CoreType::Eth, '●') => Style::default().fg(Color::Rgb(79, 209, 197)),
                     (CoreType::Eth, _) => Style::default().fg(Color::DarkGray),
+                    // DRAM harvested ('·'): dim gray, no heatmap — mirrors
+                    // the existing Tensix-harvested treatment.
+                    (CoreType::Dram, '·') => Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
+                    // DRAM BIST-fail ('✗'): alarm red — a real fault, not a
+                    // temperature reading.
+                    (CoreType::Dram, '✗') => Style::default()
+                        .fg(Color::Rgb(255, 90, 90))
+                        .add_modifier(Modifier::BOLD),
                     // DRAM: blue→amber→red by per-column GDDR temperature
                     (CoreType::Dram, _) => Style::default().fg(dram_color_for_col(col)),
                     // Tensix harvested ('·'): dim gray, no heatmap
@@ -913,6 +981,137 @@ mod tests {
         assert_eq!(
             chars[1], '·',
             "harvested col should show '·', got '{}'",
+            chars[1]
+        );
+    }
+
+    #[test]
+    fn dram_col_uses_real_gddr_telemetry_harvested_state_when_present() {
+        use crate::models::telemetry::{GddrChannel, GddrTelemetry};
+        let device = make_device(Architecture::Blackhole);
+        let mut smbus = make_smbus(Architecture::Blackhole);
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            speed: None,
+            max_temp: None,
+            enabled_mask: None,
+            channels: vec![GddrChannel {
+                channel: 0,
+                harvested: true,
+                enabled: false,
+                training_pass: false,
+                bist_pass: true,
+                temp_top: None,
+                temp_bottom: None,
+                corr_rd: Some(0),
+                corr_wr: Some(0),
+                uncorr_rd: Some(0),
+                uncorr_wr: Some(0),
+            }],
+        });
+        let telem = make_telemetry();
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
+        // BH row=0 col=1 is the first (non-ETH, non-PCIe) DRAM cell → channel 0.
+        let chars: Vec<char> = rows[0].chars().collect();
+        assert_eq!(
+            chars[1], '·',
+            "harvested GDDR channel should show '·', got '{}'",
+            chars[1]
+        );
+    }
+
+    #[test]
+    fn dram_col_shows_alarm_when_bist_fails() {
+        use crate::models::telemetry::{GddrChannel, GddrTelemetry};
+        let device = make_device(Architecture::Blackhole);
+        let mut smbus = make_smbus(Architecture::Blackhole);
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            speed: None,
+            max_temp: None,
+            enabled_mask: None,
+            channels: vec![GddrChannel {
+                channel: 0,
+                harvested: false,
+                enabled: true,
+                training_pass: false,
+                bist_pass: false,
+                temp_top: None,
+                temp_bottom: None,
+                corr_rd: Some(0),
+                corr_wr: Some(0),
+                uncorr_rd: Some(0),
+                uncorr_wr: Some(0),
+            }],
+        });
+        let telem = make_telemetry();
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
+        // BH row=0 col=1 is the first (non-ETH, non-PCIe) DRAM cell → channel 0.
+        let chars: Vec<char> = rows[0].chars().collect();
+        assert_eq!(
+            chars[1], '✗',
+            "BIST-failed GDDR channel should show '✗', got '{}'",
+            chars[1]
+        );
+    }
+
+    #[test]
+    fn dram_col_shows_real_channel_state_past_the_stale_eight_channel_cap() {
+        // Regression test: the column->channel mapping used to cap at
+        // idx>=8, a leftover from the packed 8-channel DDR_STATUS bitmask
+        // era. gddr_telemetry.channels is looked up by real `.channel` id
+        // (not position), so Blackhole's channels 8-11 must resolve too.
+        use crate::models::telemetry::{GddrChannel, GddrTelemetry};
+        let device = make_device(Architecture::Blackhole);
+        let mut smbus = make_smbus(Architecture::Blackhole);
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            speed: None,
+            max_temp: None,
+            enabled_mask: None,
+            channels: vec![GddrChannel {
+                channel: 9,
+                harvested: false,
+                enabled: true,
+                training_pass: true,
+                bist_pass: false, // faulted -> must show '✗'
+                temp_top: None,
+                temp_bottom: None,
+                corr_rd: Some(0),
+                corr_wr: Some(0),
+                uncorr_rd: Some(0),
+                uncorr_wr: Some(0),
+            }],
+        });
+        let telem = make_telemetry();
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
+
+        // Find the grid column that is the 10th DRAM column (0-indexed
+        // channel 9) using the same is_dram_col rule production uses.
+        let (cols, _) = portrait_dims(Architecture::Blackhole);
+        let is_dram_col = |c: usize| c != 8 && core_type_bh(c, 0) == CoreType::Dram;
+        let target_col = (0..cols)
+            .filter(|&c| is_dram_col(c))
+            .nth(9)
+            .expect("Blackhole must have at least 10 DRAM columns for this test to be meaningful");
+
+        let chars: Vec<char> = rows[0].chars().collect();
+        assert_eq!(
+            chars[target_col], '✗',
+            "channel 9's BIST-fail must render even though it's past the old 8-channel cap; got '{}'",
+            chars[target_col]
+        );
+    }
+
+    #[test]
+    fn dram_col_falls_back_to_packed_bitmask_when_gddr_telemetry_absent() {
+        let device = make_device(Architecture::Blackhole);
+        let smbus = make_smbus(Architecture::Blackhole); // gddr_telemetry: None
+        let telem = make_telemetry();
+        let rows = build_portrait_rows(&device, &telem, Some(&smbus), 0, 0.0);
+        // Regression guard: with no gddr_telemetry present, the DRAM cell must
+        // render exactly as the pre-existing packed-register path did — '▪'.
+        let chars: Vec<char> = rows[0].chars().collect();
+        assert_eq!(
+            chars[1], '▪',
+            "DRAM cell without gddr_telemetry should fall back to '▪', got '{}'",
             chars[1]
         );
     }

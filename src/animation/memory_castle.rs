@@ -342,9 +342,17 @@ impl MemoryCastle {
     pub fn update(&mut self, backend: &dyn TelemetryBackend) {
         self.frame = self.frame.wrapping_add(1);
 
-        // Update baseline for each device
-        for (idx, device) in backend.devices().iter().enumerate() {
-            if let Some(telem) = backend.telemetry(idx) {
+        // Update baseline for each device.
+        //
+        // Keyed by `device.index`, never by the device's position in the list:
+        // the backend's index set can be sparse (a salvaged tt-smi snapshot that
+        // dropped a malformed `device_info[]` entry, or a chip whose ARC never
+        // answered), so `devices()[0].index` is not always 0. Looking up by
+        // position there reads telemetry for a card that isn't in the list —
+        // usually `None`, which silently freezes the baseline at its idle guess
+        // and leaves the whole dungeon rendering as if the chip were asleep.
+        for device in backend.devices() {
+            if let Some(telem) = backend.telemetry(device.index) {
                 self.baseline.update(
                     device.index,
                     telem.power_w(),
@@ -356,7 +364,7 @@ impl MemoryCastle {
         }
 
         // Spawn new particles based on activity (spawn MANY more particles)
-        for (_idx, device) in backend.devices().iter().enumerate() {
+        for device in backend.devices() {
             if let Some(telem) = backend.telemetry(device.index) {
                 let power_change = self.baseline.power_change(device.index, telem.power_w());
                 let temp = telem.temp_c();
@@ -416,10 +424,21 @@ impl MemoryCastle {
             return self.render_multi_device(backend);
         }
 
-        // Single device mode: use full width (original behavior)
+        // Single device mode: use full width (original behavior).
+        //
+        // `devices[0]` is the first device *in the list*, whose own `index` is
+        // not necessarily 0. A tt-smi snapshot whose first `device_info[]` entry
+        // was unparseable is served as a one-element list carrying `index: 1`,
+        // with telemetry keyed at 1; a chip whose ARC never came up leaves the
+        // same hole. Looking the telemetry up positionally (`telemetry(0)`) then
+        // returns `None` for a card whose readings parsed perfectly, and the
+        // header rendered 0.0 W / 0.0 °C / 0.0 A with no ARC dot — a healthy
+        // card presented as dead silicon. Always address by the device's own
+        // index; that identity is the honest one, and renumbering to close the
+        // gap is exactly the mis-attribution this release exists to fix.
         let device = &devices[0];
-        let telem = backend.telemetry(0);
-        let smbus = backend.smbus_telemetry(0);
+        let telem = backend.telemetry(device.index);
+        let smbus = backend.smbus_telemetry(device.index);
 
         // Get metrics
         let power = telem.map(|t| t.power_w()).unwrap_or(0.0);
@@ -624,10 +643,17 @@ impl MemoryCastle {
                 // Standalone shows the per-device W/°C header; embedded
                 // (chrome off) keeps only the Dev{n} orientation label — the
                 // Arcade shared strip owns the telemetry readout.
+                //
+                // The label is `device.index`, not the column position: with a
+                // sparse index set (a salvaged snapshot, or a card whose ARC
+                // never answered) those differ, and a column labelled "Dev0"
+                // showing card 1's watts is precisely the mis-attribution this
+                // release is about. Matches the Compact/FleetGrid tiers, which
+                // already label by `device.index`.
                 let device_info = if self.chrome {
-                    format!(" Dev{:<2} {:>3.0}W {:>3.0}°C ", idx, power, temp)
+                    format!(" Dev{:<2} {:>3.0}W {:>3.0}°C ", device.index, power, temp)
                 } else {
-                    format!(" Dev{:<2} ", idx)
+                    format!(" Dev{:<2} ", device.index)
                 };
                 let padding_needed = col_width.saturating_sub(device_info.len());
                 let padding = " ".repeat(padding_needed / 2);
@@ -860,9 +886,14 @@ impl MemoryCastle {
     /// differences are: an abbreviated header (`D{idx} {power}W`, no numeric
     /// temperature — temperature is still legible via the shared
     /// `render_background`/particle coloring, which is unchanged), a
-    /// dedicated one-row DDR "gate" indicator (one glyph per two memory
-    /// channels, since a narrow column can't reliably show the full-mode
-    /// modulo-spaced wall pattern), and a halved (but never-zero) per-device
+    /// dedicated one-row DDR "gate" indicator — one glyph per **real** GDDR
+    /// channel, colored per-channel (harvested → dim gray, BIST-fail →
+    /// alarm red, else the existing hue-cycling glow), when
+    /// `SmbusTelemetry.gddr_telemetry` is present (tt-smi >= 6.3.0); falls
+    /// back to the old one-glyph-per-two-memory-channels generic indicator
+    /// (uniformly colored, no per-channel state) when it isn't, since a
+    /// narrow column can't reliably show the full-mode modulo-spaced wall
+    /// pattern either way — and a halved (but never-zero) per-device
     /// live-particle budget so narrow columns don't look like static.
     fn render_compact(&self, backend: &dyn TelemetryBackend) -> Vec<Line<'static>> {
         let devices = backend.devices();
@@ -970,36 +1001,72 @@ impl MemoryCastle {
             ),
         ]));
 
-        // DDR gate row: one glyph per two memory channels — a compact,
-        // at-a-glance channel-count signal that doesn't need the numeric
-        // width the full path's header has room for.
+        // DDR gate row: one glyph per real memory channel when
+        // `gddr_telemetry` is present (tt-smi >= 6.3.0), colored per-channel
+        // (harvested → dim gray, BIST-fail → alarm red, else the existing
+        // hue-cycling glow); falls back to one glyph per two memory channels
+        // — a compact, at-a-glance channel-count signal that doesn't need
+        // the numeric width the full path's header has room for — when
+        // real per-channel data isn't available.
         let gate_spans: Vec<Span> = devices
             .iter()
             .take(num_devices)
             .enumerate()
-            .map(|(idx, device)| {
+            .flat_map(|(idx, device)| {
                 let telem = backend.telemetry(device.index);
                 let current = telem.map(|t| t.current_a()).unwrap_or(0.0);
                 let current_change = self.baseline.current_change(device.index, current);
 
-                let channels = device.memory_channels().max(1);
-                let gates = ((channels + 1) / 2).min(col_width);
-                let hue = (210.0 + self.frame as f32 * 0.9 + idx as f32 * 12.0) % 360.0;
-                let glow = (0.45 + current_change.clamp(0.0, 1.0) * 0.45).min(1.0);
-                let color = hsv_to_rgb(hue, 0.85, glow);
+                let smbus = backend.smbus_telemetry(device.index);
+                let real_channels = smbus
+                    .and_then(|s| s.gddr_telemetry.as_ref())
+                    .filter(|g| !g.channels.is_empty());
 
-                let glyphs: String = "▪".repeat(gates);
-                let padding_needed = col_width.saturating_sub(glyphs.chars().count());
+                let glyph_spans: Vec<Span> = if let Some(g) = real_channels {
+                    let n = g.channels.len().min(col_width).max(1);
+                    g.channels
+                        .iter()
+                        .take(n)
+                        .map(|c| {
+                            let (ch, color) = if c.harvested {
+                                ('·', Color::DarkGray)
+                            } else if !c.bist_pass {
+                                ('✗', Color::Rgb(255, 90, 90))
+                            } else {
+                                let hue =
+                                    (210.0 + self.frame as f32 * 0.9 + idx as f32 * 12.0) % 360.0;
+                                let glow = (0.45 + current_change.clamp(0.0, 1.0) * 0.45).min(1.0);
+                                ('▪', hsv_to_rgb(hue, 0.85, glow))
+                            };
+                            Span::styled(
+                                ch.to_string(),
+                                Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                            )
+                        })
+                        .collect()
+                } else {
+                    let channels = device.memory_channels().max(1);
+                    let gates = ((channels + 1) / 2).min(col_width);
+                    let hue = (210.0 + self.frame as f32 * 0.9 + idx as f32 * 12.0) % 360.0;
+                    let glow = (0.45 + current_change.clamp(0.0, 1.0) * 0.45).min(1.0);
+                    let color = hsv_to_rgb(hue, 0.85, glow);
+                    vec![Span::styled(
+                        "▪".repeat(gates),
+                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                    )]
+                };
+
+                let glyph_count: usize =
+                    glyph_spans.iter().map(|s| s.content.chars().count()).sum();
+                let padding_needed = col_width.saturating_sub(glyph_count);
                 let left_pad = " ".repeat(padding_needed / 2);
                 let right_pad = " ".repeat(padding_needed - padding_needed / 2);
 
-                vec![
-                    Span::styled(left_pad, Style::default()),
-                    Span::styled(glyphs, Style::default().bg(colors::rgb(0, 0, 0)).fg(color)),
-                    Span::styled(right_pad, Style::default()),
-                ]
+                let mut spans = vec![Span::styled(left_pad, Style::default())];
+                spans.extend(glyph_spans);
+                spans.push(Span::styled(right_pad, Style::default()));
+                spans
             })
-            .flatten()
             .collect();
         let mut gate_line_spans = vec![Span::raw("  ")];
         gate_line_spans.extend(gate_spans);
@@ -1706,6 +1773,170 @@ mod tests {
         assert!(!lines.is_empty(), "compact render with particles must work");
     }
 
+    /// The DDR gate row (compact tier only) must show one glyph per real
+    /// GDDR channel when `gddr_telemetry` is present, not the generic
+    /// per-pair count derived from `device.memory_channels()`. MockBackend
+    /// always synthesizes 8 real GDDR channels regardless of architecture,
+    /// while device 0 (Grayskull, e150, 4 memory channels) would only get
+    /// (4+1)/2 = 2 glyphs under the old generic-pair fallback — a
+    /// distinctive mismatch that proves the real data is driving the row.
+    #[test]
+    fn ddr_gate_row_uses_real_channel_count_when_present() {
+        let mut backend = MockBackend::new(10);
+        backend.init().expect("mock backend init");
+
+        let castle = MemoryCastle::new(122, 40);
+        assert_eq!(castle_tier(122, 10), CastleTier::Compact);
+
+        let lines = castle.render(&backend);
+        // Row order with no board topology set: 0 top separator, 1 header,
+        // 2 separator, 3 DDR gate row.
+        let gate_line = &lines[3];
+        let text: String = gate_line.spans.iter().map(|s| s.content.as_ref()).collect();
+
+        let col_width = (122usize.saturating_sub(2)) / backend.devices().len();
+        // Device 0's column starts right after the row's leading "  " prefix.
+        let device0_col: String = text.chars().skip(2).take(col_width).collect();
+        let glyph_count = device0_col.chars().filter(|&c| c != ' ').count();
+
+        assert_eq!(
+            glyph_count, 8,
+            "DDR gate row for device 0 should show 8 real GDDR channels, not the generic 2-gate pair count; got column {:?}",
+            device0_col
+        );
+    }
+
+    /// The DDR gate row must reflect real per-channel *state*, not just real
+    /// per-channel *count* — a harvested channel renders `'·'` and a
+    /// BIST-failed channel renders `'✗'`, distinct from a healthy channel's
+    /// `'▪'`. `MockScenario::QuadGalaxy` harvests channel 3 and BIST-fails
+    /// channel 5 specifically on devices where `device_idx % 17 == 0`
+    /// (device 0 qualifies). A 1100-col terminal with QuadGalaxy's 128
+    /// devices lands in the Compact tier: usable = 1098, per-device
+    /// `col_width` = 1098/128 = 8, which exactly fits all 8 real channels
+    /// with zero padding, so device 0's column is precisely its 8 channel
+    /// glyphs in order.
+    #[test]
+    fn ddr_gate_row_reflects_harvested_and_bist_fail_channel_state() {
+        use crate::backend::mock::MockScenario;
+
+        let mut backend = MockBackend::with_scenario(MockScenario::QuadGalaxy);
+        backend.init().expect("mock backend init");
+
+        let castle = MemoryCastle::new(1100, 40);
+        assert_eq!(castle_tier(1100, 128), CastleTier::Compact);
+
+        let lines = castle.render(&backend);
+        let gate_line = &lines[3];
+        let text: String = gate_line.spans.iter().map(|s| s.content.as_ref()).collect();
+
+        let col_width = (1100usize.saturating_sub(2)) / backend.devices().len();
+        assert_eq!(
+            col_width, 8,
+            "test assumption: col_width must exactly fit 8 real channels with no padding"
+        );
+        let device0_col: String = text.chars().skip(2).take(col_width).collect();
+
+        assert_eq!(
+            device0_col.chars().filter(|&c| c == '·').count(),
+            1,
+            "harvested channel 3 should render as a single '·'; got column {:?}",
+            device0_col
+        );
+        assert_eq!(
+            device0_col.chars().filter(|&c| c == '✗').count(),
+            1,
+            "BIST-failed channel 5 should render as a single '✗'; got column {:?}",
+            device0_col
+        );
+        assert_eq!(
+            device0_col.chars().filter(|&c| c == '▪').count(),
+            6,
+            "the remaining 6 healthy channels should render as '▪'; got column {:?}",
+            device0_col
+        );
+    }
+
+    /// Backend wrapper that delegates every `TelemetryBackend`-required
+    /// method to an inner `MockBackend`, but always reports `None` for
+    /// `smbus_telemetry` — simulating a backend with no GDDR telemetry at
+    /// all (e.g. a stock JSON/sysfs read against an older tt-smi). Used to
+    /// drive `render_compact`'s DDR gate row down its fallback branch, since
+    /// `MockBackend` itself always populates `gddr_telemetry` (Task 4) and
+    /// so can never reach that branch on its own.
+    struct NoSmbusBackend(MockBackend);
+
+    impl TelemetryBackend for NoSmbusBackend {
+        fn init(&mut self) -> crate::error::BackendResult<()> {
+            self.0.init()
+        }
+        fn update(&mut self) -> crate::error::BackendResult<()> {
+            self.0.update()
+        }
+        fn devices(&self) -> &[crate::models::Device] {
+            self.0.devices()
+        }
+        fn telemetry(&self, device_idx: usize) -> Option<&crate::models::Telemetry> {
+            self.0.telemetry(device_idx)
+        }
+        fn smbus_telemetry(
+            &self,
+            _device_idx: usize,
+        ) -> Option<&crate::models::telemetry::SmbusTelemetry> {
+            None
+        }
+        fn backend_info(&self) -> String {
+            self.0.backend_info()
+        }
+    }
+
+    /// Regression guard for the fallback branch: with no `gddr_telemetry`
+    /// available at all, the DDR gate row must render exactly the old
+    /// generic per-pair pattern — `((channels + 1) / 2)` uniform `'▪'`
+    /// glyphs — not the new real-channel path (which must not be reachable
+    /// without smbus data) and not a blank/empty row.
+    #[test]
+    fn ddr_gate_row_falls_back_to_generic_pair_count_without_gddr_telemetry() {
+        let mut inner = MockBackend::new(10);
+        inner.init().expect("mock backend init");
+        let backend = NoSmbusBackend(inner);
+        assert!(
+            backend.smbus_telemetry(0).is_none(),
+            "test setup: wrapper must report no smbus telemetry"
+        );
+
+        let castle = MemoryCastle::new(122, 40);
+        assert_eq!(castle_tier(122, 10), CastleTier::Compact);
+
+        let lines = castle.render(&backend);
+        let gate_line = &lines[3];
+        let text: String = gate_line.spans.iter().map(|s| s.content.as_ref()).collect();
+
+        let col_width = (122usize.saturating_sub(2)) / backend.devices().len();
+        let device0_col: String = text.chars().skip(2).take(col_width).collect();
+
+        // Device 0 is Grayskull (e150, 4 memory channels) → generic fallback
+        // gates = (4+1)/2 = 2, always '▪' (no harvested/BIST-fail state
+        // exists in the fallback path).
+        let glyph_count = device0_col.chars().filter(|&c| c != ' ').count();
+        assert_eq!(
+            glyph_count, 2,
+            "fallback DDR gate row for device 0 should show the generic 2-gate pair count; got column {:?}",
+            device0_col
+        );
+        assert_eq!(
+            device0_col.chars().filter(|&c| c == '▪').count(),
+            2,
+            "fallback glyphs must be the uniform '▪' gate character; got column {:?}",
+            device0_col
+        );
+        assert!(
+            !device0_col.contains('·') && !device0_col.contains('✗'),
+            "fallback path has no per-channel state, so harvested/BIST-fail glyphs must not appear; got column {:?}",
+            device0_col
+        );
+    }
+
     /// 4 devices at a narrow 30-col terminal (usable=28, per=7: below the
     /// 8-col compact floor) must still fall back to the fleet grid, and that
     /// fallback must keep working after the tier ladder gained a middle rung.
@@ -1737,5 +1968,79 @@ mod tests {
         for _ in 0..10 {
             castle.update(&backend);
         }
+    }
+
+    /// A backend whose device index set is **sparse** must still get its
+    /// telemetry rendered.
+    ///
+    /// The realistic producer of a sparse set is a tt-smi snapshot whose first
+    /// `device_info[]` entry was in a shape this build can't decode: the
+    /// element-wise salvage keeps array positions (deliberately — renumbering is
+    /// the mis-attribution class this release exists to fix), so the backend
+    /// serves a one-element device list carrying `index: 1`, with telemetry and
+    /// SMBUS keyed at 1. An ARC-dead chip skipped by the Luwen backend leaves
+    /// the same hole.
+    ///
+    /// Regression: the single-device path read `backend.telemetry(0)` /
+    /// `smbus_telemetry(0)` positionally, both `None` here, so the header
+    /// printed 0.0 °C / 0.0 W / 0.0 A and dropped the ARC dot for a card whose
+    /// telemetry had parsed perfectly — a healthy chip rendered as dead silicon.
+    #[test]
+    fn single_device_header_uses_device_index_not_list_position() {
+        // device_info[0] is undecodable (`"telemetry": true`); device_info[1] is
+        // a healthy card at 22.0 W / 44.0 °C / 12.5 A with a live ARC heartbeat.
+        const SNAPSHOT: &str = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"}, "telemetry": true},
+                {
+                    "board_info": {"bus_id": "0000:02:00.0", "board_type": "p300c"},
+                    "telemetry": {"power": " 22.0", "asic_temperature": " 44.0",
+                                  "current": " 12.5", "aiclk": " 1000"},
+                    "smbus_telem": {"TIMER_HEARTBEAT": "0x1234"}
+                }
+            ]
+        }"#;
+
+        let mut backend = crate::backend::json::JSONBackend::new("tt-smi");
+        backend
+            .apply_raw_snapshot_pub(SNAPSHOT)
+            .expect("the healthy sibling must still be salvaged");
+
+        // Precondition: exactly one device, and its index is NOT its position.
+        assert_eq!(backend.devices().len(), 1);
+        assert_eq!(
+            backend.devices()[0].index,
+            1,
+            "salvage keeps array position"
+        );
+
+        let castle = MemoryCastle::new(120, 24);
+        let lines = castle.render(&backend);
+        let header: String = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+
+        assert!(
+            header.contains("22.0W"),
+            "header must show the surviving card's real power, got: {header}"
+        );
+        assert!(
+            header.contains("44.0°C"),
+            "header must show the surviving card's real temperature, got: {header}"
+        );
+        assert!(
+            header.contains("12.5A"),
+            "header must show the surviving card's real current, got: {header}"
+        );
+        assert!(
+            header.contains("ARC: ●"),
+            "SMBUS must be found too, so the ARC dot renders healthy, got: {header}"
+        );
+        assert!(
+            header.contains("Device 1"),
+            "the header names the physical card, got: {header}"
+        );
     }
 }

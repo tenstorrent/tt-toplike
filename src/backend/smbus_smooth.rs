@@ -32,6 +32,9 @@
 //!   copied verbatim — they carry no meaning as floats.
 //! - **When `incoming` is `None`**: the existing value and EMA state are left
 //!   unchanged (missing field in this snapshot doesn't mean the device lost it).
+//! - **`fan_speed`**: numeric, but a *reported* firmware sentinel (`0`,
+//!   `0xFFFF`, `0xFFFFFFFF`) means "no reading" and must replace rather than
+//!   blend — see [`blend_fan`].
 
 use crate::models::SmbusTelemetry;
 use std::collections::HashMap;
@@ -156,6 +159,11 @@ pub fn apply_ema(
         &incoming.enabled_tensix_col,
         &mut existing.enabled_tensix_col,
     );
+    // Per-channel GDDR training/BIST/harvest/temp/ECC rollup (tt-smi ≥ 6.3.0).
+    // Same "copy, don't smooth" reasoning as the rest of this block: channel
+    // temps are point-in-time and the ECC counters inside it are monotonic,
+    // so blending it toward a prior snapshot would be meaningless.
+    copy_opt(&incoming.gddr_telemetry, &mut existing.gddr_telemetry);
     for (src, dst) in incoming
         .gddr_corr_errs
         .iter()
@@ -218,7 +226,7 @@ pub fn apply_ema(
     blend(&mut state.vcore, &incoming.vcore, &mut existing.vcore);
     blend(&mut state.tdp, &incoming.tdp, &mut existing.tdp);
     blend(&mut state.tdc, &incoming.tdc, &mut existing.tdc);
-    blend(
+    blend_fan(
         &mut state.fan_speed,
         &incoming.fan_speed,
         &mut existing.fan_speed,
@@ -301,6 +309,38 @@ fn blend(state: &mut FieldEma, incoming: &Option<String>, existing: &mut Option<
             *existing = Some(raw_str.to_owned());
         }
     }
+}
+
+/// [`blend`] for the fan field, which has a value class the generic path can't
+/// handle: a *reported non-reading*.
+///
+/// The firmware signals "no fan reading" with a sentinel register value (`0`,
+/// `0xFFFF`, `0xFFFFFFFF` — see `models::telemetry::is_fan_sentinel`), and those
+/// are numeric, so the generic EMA path would happily blend one in: a card whose
+/// fan stops goes `1882 → 1412 → 1059 → …`, a decaying sequence of entirely
+/// plausible-looking RPMs that `fan_rpm()` cannot recognise as bogus. The
+/// operator watching for a fan failure sees a fan slowing down, then a fan
+/// running at some low speed, indefinitely.
+///
+/// So a sentinel is copied through verbatim and the EMA accumulator is reset:
+/// `existing` becomes the honest register value, `fan_rpm()` filters it to
+/// `None`, and the Insights Fan row disappears — which is the correct report for
+/// a fan that isn't turning. Resetting the accumulator also means the *next*
+/// real reading lands immediately instead of being dragged up from the stale
+/// value.
+///
+/// `None` incoming still means "field absent from this snapshot" and preserves
+/// `existing`, exactly as for every other field.
+#[inline]
+fn blend_fan(state: &mut FieldEma, incoming: &Option<String>, existing: &mut Option<String>) {
+    if let Some(raw) = incoming {
+        if crate::models::telemetry::real_fan_rpm(raw).is_none() {
+            *state = None;
+            *existing = Some(raw.clone());
+            return;
+        }
+    }
+    blend(state, incoming, existing);
 }
 
 #[cfg(test)]
@@ -488,6 +528,92 @@ mod tests {
         assert_eq!(existing.gddr_corr_errs[0], Some(3));
     }
 
+    /// Regression (v0.8.1): a fan that stops must drop its row, not freeze at the
+    /// last healthy RPM.
+    ///
+    /// The sequence is the live p300c one: tt-smi reports a real
+    /// `FAN_RPM = 0x75a` (1882), the fan later stops and the register returns a
+    /// sentinel. With the sentinel collapsed to `None` at the parse boundary,
+    /// `blend`'s "absent → keep existing" rule pinned `Fan  1882 RPM` on screen
+    /// forever; with it EMA-blended, the value decayed through plausible RPMs
+    /// instead. Either way the operator watching for a fan failure saw a fan.
+    #[test]
+    fn fan_sentinel_clears_a_stale_healthy_rpm() {
+        let mut ema: SmbusEmaState = HashMap::new();
+        let mut existing = SmbusTelemetry::default();
+
+        // Several ticks of a real reading — enough for the EMA to settle on it.
+        let healthy = SmbusTelemetry {
+            fan_speed: Some("0x75a".to_owned()),
+            ..SmbusTelemetry::default()
+        };
+        for _ in 0..10 {
+            apply_ema(&mut ema, 0, &healthy, &mut existing);
+        }
+        assert_eq!(existing.fan_rpm(), Some(1882), "baseline: fan row renders");
+
+        // The fan stops: the register now reads the no-reading sentinel.
+        let stopped = SmbusTelemetry {
+            fan_speed: Some("0xffffffff".to_owned()),
+            ..SmbusTelemetry::default()
+        };
+        apply_ema(&mut ema, 0, &stopped, &mut existing);
+        assert_eq!(
+            existing.fan_rpm(),
+            None,
+            "a reported sentinel must clear the stale RPM, not preserve or decay it"
+        );
+        // …and stay cleared on subsequent ticks (no EMA tail dragging it back).
+        for _ in 0..5 {
+            apply_ema(&mut ema, 0, &stopped, &mut existing);
+        }
+        assert_eq!(existing.fan_rpm(), None);
+
+        // A real reading afterwards lands immediately — the accumulator was reset,
+        // so the recovering fan isn't dragged up from the stale 1882.
+        apply_ema(&mut ema, 0, &healthy, &mut existing);
+        assert_eq!(existing.fan_rpm(), Some(1882));
+    }
+
+    /// The fan field keeps the ordinary "absent this snapshot → keep what we
+    /// know" contract; only a *reported* sentinel clears.
+    #[test]
+    fn fan_absent_in_incoming_preserves_existing() {
+        let mut ema: SmbusEmaState = HashMap::new();
+        let mut existing = SmbusTelemetry {
+            fan_speed: Some("1882".to_owned()),
+            ..SmbusTelemetry::default()
+        };
+        apply_ema(&mut ema, 0, &SmbusTelemetry::default(), &mut existing);
+        assert_eq!(existing.fan_rpm(), Some(1882));
+    }
+
+    /// Real fan readings are still EMA-smoothed like any other numeric field.
+    #[test]
+    fn fan_real_readings_still_smooth() {
+        let mut ema: SmbusEmaState = HashMap::new();
+        let mut existing = SmbusTelemetry {
+            fan_speed: Some("1000".to_owned()),
+            ..SmbusTelemetry::default()
+        };
+        // Seed the accumulator at 1000, then step to 2000.
+        let seed = SmbusTelemetry {
+            fan_speed: Some("1000".to_owned()),
+            ..SmbusTelemetry::default()
+        };
+        apply_ema(&mut ema, 0, &seed, &mut existing);
+        let step = SmbusTelemetry {
+            fan_speed: Some("2000".to_owned()),
+            ..SmbusTelemetry::default()
+        };
+        apply_ema(&mut ema, 0, &step, &mut existing);
+        let v = existing.fan_rpm().unwrap();
+        assert!(
+            (1100..1500).contains(&v),
+            "one EMA step should land ~25% of the way (got {v})"
+        );
+    }
+
     #[test]
     fn test_non_numeric_string_passes_through() {
         let mut ema: SmbusEmaState = HashMap::new();
@@ -500,5 +626,162 @@ mod tests {
         apply_ema(&mut ema, 0, &incoming, &mut existing);
         // Hex string — must be copied verbatim, not mangled
         assert_eq!(existing.ddr_status.as_deref(), Some("0x55555555"));
+    }
+
+    /// Regression: `gddr_telemetry` must be copied through exactly as it
+    /// arrives on every `apply_ema` call — never averaged/smoothed. Channel
+    /// temps are point-in-time and ECC counters are monotonic; neither is
+    /// meaningful blended toward a prior snapshot, matching how every other
+    /// GDDR field in this module is already handled ("copy, don't smooth").
+    #[test]
+    fn blend_copies_gddr_telemetry_through_unsmoothed() {
+        use crate::models::telemetry::{GddrChannel, GddrTelemetry};
+
+        let ch_prev = GddrChannel {
+            channel: 0,
+            harvested: false,
+            enabled: true,
+            training_pass: true,
+            bist_pass: true,
+            temp_top: Some(40.0),
+            temp_bottom: Some(42.0),
+            corr_rd: Some(0),
+            corr_wr: Some(0),
+            uncorr_rd: Some(0),
+            uncorr_wr: Some(0),
+        };
+        let mut existing = SmbusTelemetry {
+            gddr_telemetry: Some(GddrTelemetry {
+                speed: Some("16G".into()),
+                max_temp: Some(42.0),
+                enabled_mask: Some(0xff),
+                channels: vec![ch_prev],
+            }),
+            ..SmbusTelemetry::default()
+        };
+
+        let ch_now = GddrChannel {
+            temp_top: Some(60.0),
+            temp_bottom: Some(62.0),
+            corr_rd: Some(5),
+            ..ch_prev
+        };
+        let incoming = SmbusTelemetry {
+            gddr_telemetry: Some(GddrTelemetry {
+                speed: Some("16G".into()),
+                max_temp: Some(62.0),
+                enabled_mask: Some(0xff),
+                channels: vec![ch_now],
+            }),
+            ..SmbusTelemetry::default()
+        };
+
+        let mut ema: SmbusEmaState = HashMap::new();
+        apply_ema(&mut ema, 0, &incoming, &mut existing);
+
+        // The whole tick's incoming value wins verbatim — not an average with
+        // `existing`'s prior 40/42 readings. Temps are point-in-time, ECC
+        // counters are monotonic; neither is meaningful smoothed.
+        assert_eq!(existing.gddr_telemetry, incoming.gddr_telemetry);
+        assert_eq!(
+            existing.gddr_telemetry.unwrap().channels[0].temp_top,
+            Some(60.0),
+            "must be this tick's reading, not an EMA toward the previous 40.0"
+        );
+    }
+
+    /// Regression guard for the exact bug class Phase 25/26 already hit
+    /// twice: a field added to `SmbusTelemetry` that `apply_ema()` forgets to
+    /// touch. Constructing this literal with NO `..SmbusTelemetry::default()`
+    /// forces every field to be named — if a future field is added to
+    /// `SmbusTelemetry` but not handled here, THIS TEST STOPS COMPILING until
+    /// it's added, turning a silent runtime bug into a compile error.
+    ///
+    /// The whole-struct `assert_eq!` below is equally load-bearing: it forces
+    /// every named field to actually be *checked* too, not just named in the
+    /// literal — a developer who adds a field, hits the compile error above,
+    /// and adds it to the literal has done nothing to prove `apply_ema()`
+    /// copies it. Only a struct-wide comparison closes that gap, which is why
+    /// `SmbusTelemetry` now derives `PartialEq` (all field types already did).
+    #[test]
+    fn blend_touches_every_smbus_telemetry_field() {
+        use crate::models::telemetry::GddrTelemetry;
+
+        let incoming = SmbusTelemetry {
+            board_id: Some("b".into()),
+            enum_version: Some("1".into()),
+            device_id: Some("d".into()),
+            ddr_speed: Some("16G".into()),
+            ddr_status: Some("0x2".into()),
+            arc0_health: Some("healthy".into()),
+            arc1_health: Some("healthy".into()),
+            arc2_health: Some("healthy".into()),
+            arc3_health: Some("healthy".into()),
+            arc0_fw_version: Some("1.0".into()),
+            arc1_fw_version: Some("1.0".into()),
+            arc2_fw_version: Some("1.0".into()),
+            arc3_fw_version: Some("1.0".into()),
+            eth_fw_version: Some("1.0".into()),
+            m3_bl_fw_version: Some("1.0".into()),
+            m3_app_fw_version: Some("1.0".into()),
+            spibootrom_fw_version: Some("1.0".into()),
+            tt_flash_version: Some("1.0".into()),
+            aiclk: Some("1000MHz".into()),
+            axiclk: Some("1000MHz".into()),
+            arcclk: Some("1000MHz".into()),
+            asic_temperature: Some("50C".into()),
+            vreg_temperature: Some("50C".into()),
+            board_temperature: Some("40C".into()),
+            vcore: Some("0.8V".into()),
+            tdp: Some("100W".into()),
+            tdc: Some("100A".into()),
+            throttler: Some("0".into()),
+            vdd_limits: Some("0.7-0.9".into()),
+            thm_limits: Some("90".into()),
+            fan_speed: Some("1000rpm".into()),
+            faults: Some("0".into()),
+            pcie_status: Some("Gen4 x16".into()),
+            eth_status0: Some("0".into()),
+            eth_status1: Some("0".into()),
+            input_power: Some("100W".into()),
+            board_power_limit: Some("300W".into()),
+            therm_trip_count: Some("zero".into()),
+            boot_date: Some("2026-01-01".into()),
+            rt_seconds: Some("100s".into()),
+            wh_fw_date: Some("2026-01-01".into()),
+            asic_tmon0: Some("50".into()),
+            asic_tmon1: Some("50".into()),
+            mvddq_power: Some("5W".into()),
+            gddr_train_temp0: Some("40".into()),
+            gddr_train_temp1: Some("40".into()),
+            aux_status: Some("0".into()),
+            eth_debug_status0: Some("0".into()),
+            eth_debug_status1: Some("0".into()),
+            gddr_temps: [None, None, None, None],
+            max_gddr_temp: Some(50.0),
+            gddr_corr_errs: [None, None, None, None],
+            gddr_uncorr_errs: Some(0),
+            harvesting_state: Some(0),
+            eth_live_status: Some(0),
+            enabled_eth: Some(0),
+            enabled_gddr: Some(0xff),
+            enabled_l2cpu: Some(0),
+            enabled_tensix_col: Some(0x3fff),
+            gddr_telemetry: Some(GddrTelemetry::default()),
+        };
+        let mut existing = SmbusTelemetry::default();
+        let mut ema: SmbusEmaState = HashMap::new();
+        apply_ema(&mut ema, 0, &incoming, &mut existing);
+
+        // Every field named above must have made it through apply_ema
+        // unchanged (all values here are non-numeric strings or fresh
+        // typed values, so no EMA-numeric reformatting applies — see the
+        // other tests in this module for that behaviour). A whole-struct
+        // comparison is what actually enforces this: it fails the moment
+        // apply_ema() drops any field, named or not.
+        assert_eq!(
+            existing, incoming,
+            "apply_ema() must copy or correctly merge every field — if this assertion fails after adding a new SmbusTelemetry field, apply_ema() is silently dropping it"
+        );
     }
 }

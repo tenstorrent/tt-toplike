@@ -85,6 +85,53 @@ fn runtime_active(
     }
 }
 
+/// Testable core of the per-process decision `detected_inference_servers`
+/// makes: given one process's (name, cmdline, environ, pid), which
+/// `InferenceServer` (if any) it contributes. Docker detection is tried
+/// first — a TT inference-server container's foreground `docker run`
+/// process would also, in principle, cmdline-match nothing
+/// vLLM-direct-shaped, so the ordering is defensive rather than
+/// load-bearing today.
+#[cfg(target_os = "linux")]
+fn classify_one(
+    name: &str,
+    cmdline: &str,
+    environ: &str,
+    pid: i32,
+) -> Option<crate::workload::InferenceServer> {
+    use crate::workload::inference_server::{parse_direct_vllm, parse_inference_server};
+    parse_inference_server(name, cmdline).or_else(|| parse_direct_vllm(name, cmdline, environ, pid))
+}
+
+/// True when `pid` is the *root* of its inference-server match family: no
+/// ancestor (walking `parent_of`, which maps a pid to its parent pid) is
+/// itself in `matched`. Kept independent of `sysinfo` types (generic over any
+/// `Eq + Hash + Copy` id) so it's directly unit-testable with plain `u32`s —
+/// the real caller builds `parent_of`/`matched` from `sysinfo::Process`.
+///
+/// `hops` is capped at 32 purely as a defensive bound against a corrupt or
+/// cyclic parent map (a real process tree is never anywhere near this deep) —
+/// it does not reflect any expected multiprocessing fan-out depth.
+fn is_match_root<T: Eq + std::hash::Hash + Copy>(
+    pid: T,
+    parent_of: &HashMap<T, T>,
+    matched: &std::collections::HashSet<T>,
+) -> bool {
+    let mut ancestor = parent_of.get(&pid).copied();
+    let mut hops = 0;
+    while let Some(anc) = ancestor {
+        if hops >= 32 {
+            break;
+        }
+        if matched.contains(&anc) {
+            return false;
+        }
+        ancestor = parent_of.get(&anc).copied();
+        hops += 1;
+    }
+    true
+}
+
 /// Owns a `sysinfo::System` refreshed for process listing.
 pub struct HostProcessMonitor {
     sys: System,
@@ -140,18 +187,33 @@ impl HostProcessMonitor {
         out
     }
 
-    /// The TT inference-server containers detected in the current snapshot
-    /// (deduped by container name), as structured [`crate::workload::InferenceServer`]
-    /// records — no docker or network I/O here. Feed these to a
-    /// [`crate::workload::InferenceServerMonitor`] each refresh; the monitor's
-    /// background thread probes each container's readiness/health.
+    /// The TT inference-server containers *and* direct (non-Docker) vLLM-on-TT
+    /// processes detected in the current snapshot (deduped by identity key),
+    /// as structured [`crate::workload::InferenceServer`] records — no
+    /// docker/proc I/O beyond what `sysinfo` already collected this refresh.
+    /// Feed these to a [`crate::workload::InferenceServerMonitor`] each
+    /// refresh.
+    ///
+    /// A real direct-vLLM launch commonly forks several worker/engine-core
+    /// processes (one per tensor-parallel rank, etc.) — `fork` preserves the
+    /// parent's cmdline and environment in `/proc/<pid>/cmdline`, so each
+    /// worker independently matches [`classify_one`]'s heuristic too. Without
+    /// filtering these out, one real launch shows up as N duplicate roster
+    /// entries (each with its own `host-vllm-<pid>` key, so the existing
+    /// dedup-by-key never collapses them). [`is_match_root`] keeps only the
+    /// root of each match family — a matching process whose ancestors, if
+    /// any, don't also match.
     #[cfg(target_os = "linux")]
     pub fn detected_inference_servers(&self) -> Vec<crate::workload::InferenceServer> {
-        use crate::workload::inference_server::{parse_inference_server, Source};
+        use crate::workload::inference_server::service_key;
 
-        let mut seen = std::collections::HashSet::new();
-        let mut out = Vec::new();
-        for p in self.sys.processes().values() {
+        let mut classified: HashMap<sysinfo::Pid, crate::workload::InferenceServer> =
+            HashMap::new();
+        let mut parent_of: HashMap<sysinfo::Pid, sysinfo::Pid> = HashMap::new();
+        for (pid, p) in self.sys.processes() {
+            if let Some(parent) = p.parent() {
+                parent_of.insert(*pid, parent);
+            }
             let name = p.name().to_string_lossy().to_string();
             let cmdline = p
                 .cmd()
@@ -159,11 +221,26 @@ impl HostProcessMonitor {
                 .map(|s| s.to_string_lossy())
                 .collect::<Vec<_>>()
                 .join(" ");
-            if let Some(server) = parse_inference_server(&name, &cmdline) {
-                let Source::Docker { container } = &server.source;
-                if seen.insert(container.clone()) {
-                    out.push(server);
-                }
+            let environ = p
+                .environ()
+                .iter()
+                .map(|s| s.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let pid_i32 = i32::try_from(pid.as_u32()).unwrap_or(i32::MAX);
+            if let Some(server) = classify_one(&name, &cmdline, &environ, pid_i32) {
+                classified.insert(*pid, server);
+            }
+        }
+
+        let matched: std::collections::HashSet<sysinfo::Pid> = classified.keys().copied().collect();
+
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for (&pid, server) in &classified {
+            if is_match_root(pid, &parent_of, &matched) && seen.insert(service_key(&server.source))
+            {
+                out.push(server.clone());
             }
         }
         out
@@ -418,5 +495,96 @@ mod tests {
         let servers = mon.detected_inference_servers();
         // No assertion on contents — just confirm the call is safe and typed.
         let _: Vec<crate::workload::InferenceServer> = servers;
+    }
+
+    #[test]
+    fn is_match_root_keeps_the_root_and_rejects_matching_descendants() {
+        // A launcher (100) forks 3 worker ranks (101, 102, 103) that all
+        // inherit its cmdline/environment and independently match the same
+        // classification -- exactly the vLLM tensor-parallel-worker shape
+        // that flooded the roster with duplicates. Only 100 has no matching
+        // ancestor.
+        let parent_of: HashMap<u32, u32> =
+            [(101, 100), (102, 100), (103, 100)].into_iter().collect();
+        let matched: std::collections::HashSet<u32> = [100u32, 101, 102, 103].into_iter().collect();
+
+        assert!(
+            is_match_root(100, &parent_of, &matched),
+            "the launcher itself has no ancestor at all"
+        );
+        assert!(
+            !is_match_root(101, &parent_of, &matched),
+            "101's parent (100) also matches -- not a root"
+        );
+        assert!(
+            !is_match_root(102, &parent_of, &matched),
+            "102's parent (100) also matches -- not a root"
+        );
+        assert!(
+            !is_match_root(103, &parent_of, &matched),
+            "103's parent (100) also matches -- not a root"
+        );
+    }
+
+    #[test]
+    fn is_match_root_keeps_a_match_whose_parent_does_not_also_match() {
+        // 200's parent (199) is a plain shell that never matched
+        // classify_one -- 200 is a genuine standalone launch, not a
+        // multiprocessing worker, and must be counted.
+        let parent_of: HashMap<u32, u32> = [(200, 199)].into_iter().collect();
+        let matched: std::collections::HashSet<u32> = [200u32].into_iter().collect();
+
+        assert!(is_match_root(200, &parent_of, &matched));
+    }
+
+    #[test]
+    fn is_match_root_walks_past_a_non_matching_intermediate_ancestor() {
+        // grandchild (302) -> child (301, does NOT match) -> launcher (300,
+        // matches). A real vLLM launch can insert an intermediate shell/
+        // supervisor hop between the launcher and a worker, so the check
+        // must walk the whole chain, not just the immediate parent.
+        let parent_of: HashMap<u32, u32> = [(301, 300), (302, 301)].into_iter().collect();
+        let matched: std::collections::HashSet<u32> = [300u32, 302].into_iter().collect();
+
+        assert!(
+            !is_match_root(302, &parent_of, &matched),
+            "302's grandparent (300) matches, even though its immediate parent (301) doesn't"
+        );
+    }
+
+    #[test]
+    fn is_match_root_defends_against_a_parent_cycle() {
+        // A corrupt/racing parent map (pid reuse mid-scan) could in
+        // principle form a cycle; the hop cap must stop the walk rather than
+        // looping forever.
+        let parent_of: HashMap<u32, u32> = [(1, 2), (2, 1)].into_iter().collect();
+        let matched: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        assert!(is_match_root(1, &parent_of, &matched));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn classify_one_prefers_docker_then_falls_back_to_direct_vllm() {
+        let docker_cmd = "docker run --rm --name tt-inference-server-x \
+            --device /dev/tenstorrent:/dev/tenstorrent --publish 0.0.0.0:8002:8002 \
+            ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release:0.14.0 --model M";
+        assert!(matches!(
+            classify_one("docker", docker_cmd, "", 1).unwrap().source,
+            crate::workload::Source::Docker { .. }
+        ));
+
+        let direct = classify_one(
+            "vllm",
+            "vllm serve episod/tt-tnt-1024 --port 8000",
+            "MESH_DEVICE=P300x2\n",
+            4242,
+        )
+        .unwrap();
+        assert!(matches!(
+            direct.source,
+            crate::workload::Source::Host { pid: 4242 }
+        ));
+
+        assert!(classify_one("bash", "bash -c ls", "", 1).is_none());
     }
 }

@@ -103,6 +103,10 @@ pub struct SysfsBackend {
     pcie_trackers: HashMap<usize, crate::backend::pcie_counters::PcieRateTracker>,
 
     /// Last computed per-device PCIe bandwidth.
+    ///
+    /// Invalidated (entry removed, tracker dropped) as soon as the counter
+    /// directory stops being readable — see the PCIe block in [`Self::update_at`]
+    /// for why a stale rate must never outlive its sampling.
     pcie_bandwidth: HashMap<usize, crate::backend::pcie_counters::PcieBandwidth>,
 
     /// When the slow lane (tt-kmd class attrs, synthesized SMBUS, PCIe
@@ -617,6 +621,18 @@ impl SysfsBackend {
     /// 2.7) nor a fan sensor, this must stay `None` — exactly the pre-0.8.0
     /// semantics. Only the fields `synthesize_smbus` fills are checked; the
     /// remaining ~40 SMBUS fields are unreachable from sysfs by construction.
+    ///
+    /// **The fan needs the sentinel-aware predicate, not a presence check.**
+    /// `synthesize_smbus` stores `fan1_input` verbatim (the honest raw register),
+    /// and on a fanless card — every p300c/p150a in the fleet — that raw value is
+    /// the firmware "no reading" sentinel `0xFFFFFFFF`. A bare
+    /// `fan_speed.is_some()` therefore counted that sentinel as real data, so a
+    /// card with an hwmon fan node but no class dir (kmd < 2.7, or a
+    /// `canonicalize` failure on the `device` symlink) published a block whose
+    /// only populated field was a non-reading — the precise all-`None`-in-effect
+    /// case this gate exists to suppress. Going through
+    /// [`SmbusTelemetry::fan_rpm`] keeps `models::telemetry`'s `real_fan_rpm` /
+    /// `is_fan_sentinel` the single source of truth about what a fan reading is.
     fn synthesized_smbus_has_data(s: &SmbusTelemetry) -> bool {
         s.aiclk.is_some()
             || s.axiclk.is_some()
@@ -625,7 +641,7 @@ impl SysfsBackend {
             || s.therm_trip_count.is_some()
             || s.board_id.is_some()
             || s.m3_app_fw_version.is_some()
-            || s.fan_speed.is_some()
+            || s.fan_rpm().is_some()
     }
 }
 
@@ -646,6 +662,22 @@ impl SysfsBackend {
     /// overlay firmware-reported TDP/TDC values on top of the hwmon reading.
     pub(crate) fn telemetry_cache_mut(&mut self, device_idx: usize) -> Option<&mut Telemetry> {
         self.telemetry_cache.get_mut(&device_idx)
+    }
+
+    /// Visit **every** cached telemetry entry mutably, keyed by device index.
+    ///
+    /// The counterpart to [`Self::telemetry_cache_mut`] for the overlays that
+    /// must also be able to *un*-apply themselves: reaching only the devices
+    /// some external map still mentions leaves any other cached entry pinned at
+    /// whatever was last written to it, which for a device whose sensor paths
+    /// are missing (the `continue` in `update_at`, which keeps the previous
+    /// entry rather than rebuilding it) is indefinitely. HybridBackend's
+    /// `board_power` sweep uses this so a card that drops out of the tt-smi
+    /// snapshot gets its stale wattage cleared like everyone else's.
+    pub(crate) fn for_each_cached_telemetry(&mut self, mut f: impl FnMut(usize, &mut Telemetry)) {
+        for (idx, telem) in self.telemetry_cache.iter_mut() {
+            f(*idx, telem);
+        }
     }
 
     /// Insert a telemetry entry directly into the cache — test helper only.
@@ -723,9 +755,51 @@ impl TelemetryBackend for SysfsBackend {
     }
 
     fn update(&mut self) -> BackendResult<()> {
+        // Read the clock once here, at the trait boundary, and hand it to the
+        // real body — see [`SysfsBackend::update_at`] for why it's injectable.
+        self.update_at(std::time::Instant::now())
+    }
+
+    fn devices(&self) -> &[Device] {
+        &self.devices
+    }
+
+    fn device_count(&self) -> usize {
+        self.devices.len()
+    }
+
+    fn telemetry(&self, device_idx: usize) -> Option<&Telemetry> {
+        self.telemetry_cache.get(&device_idx)
+    }
+
+    fn smbus_telemetry(&self, device_idx: usize) -> Option<&SmbusTelemetry> {
+        // Partial SMBUS synthesized from tt-kmd sysfs attrs (kmd ≥ 2.7).
+        self.smbus_cache.get(&device_idx)
+    }
+
+    fn backend_info(&self) -> String {
+        "Sysfs (hwmon sensors)".to_string()
+    }
+
+    fn pcie_bandwidth(
+        &self,
+        device_idx: usize,
+    ) -> Option<crate::backend::pcie_counters::PcieBandwidth> {
+        self.pcie_bandwidth.get(&device_idx).copied()
+    }
+}
+
+impl SysfsBackend {
+    /// The body of [`TelemetryBackend::update`], with the tick's `now` passed in.
+    ///
+    /// Two consumers of `now` want it injectable rather than read inline: the
+    /// slow-lane cadence ([`slow_lane_due`]) and the PCIe rate tracker, whose
+    /// output is `Δcounters / Δt`. Threading the timestamp through lets the tests
+    /// drive several ticks a known interval apart — exact, reproducible byte
+    /// rates and exact cadence decisions — instead of sleeping.
+    fn update_at(&mut self, now: std::time::Instant) -> BackendResult<()> {
         // Decide once per tick whether the slow lane runs — see
         // `slow_lane_due` for the cadence rationale.
-        let now = std::time::Instant::now();
         let slow_lane = slow_lane_due(self.last_slow_refresh, now, SLOW_LANE_INTERVAL);
         if slow_lane {
             self.last_slow_refresh = Some(now);
@@ -813,47 +887,54 @@ impl TelemetryBackend for SysfsBackend {
             // the tracker computes its own dt, and a 1 s window smooths the
             // quantization noise a 100 ms window shows on a bursty link.
             if slow_lane {
-                if let Some(tt_dir) = self.tt_class_dirs.get(&device_idx) {
-                    let counter_dir = tt_dir.join("pcie_perf_counters");
-                    if let Some(snap) = crate::backend::pcie_counters::read_counters(&counter_dir) {
+                let counter_dir = self
+                    .tt_class_dirs
+                    .get(&device_idx)
+                    .map(|tt_dir| tt_dir.join("pcie_perf_counters"));
+                match counter_dir
+                    .as_deref()
+                    .and_then(crate::backend::pcie_counters::read_counters)
+                {
+                    Some(snap) => {
                         let tracker = self.pcie_trackers.entry(device_idx).or_default();
                         if let Some(bw) = tracker.sample(snap, now) {
                             self.pcie_bandwidth.insert(device_idx, bw);
                         }
+                    }
+                    // Counters unreadable this tick ⇒ the link is NOT being
+                    // sampled, so drop the cached rate instead of letting the
+                    // last computed one keep rendering as if it were live.
+                    //
+                    // `read_counters` returns `None` only for structural
+                    // failures — the `pcie_perf_counters/` directory is gone or
+                    // is no longer a directory (tt-kmd unloaded/reloaded, device
+                    // reset or surprise-removed, sysfs node torn down), or not
+                    // one of its twelve files could be read (the whole attribute
+                    // group's permissions changed). A transient per-file hiccup
+                    // still yields a partial sum and takes the `Some` arm above,
+                    // so there is nothing here worth a grace period: clearing on
+                    // the first failure cannot flap on read noise, and showing
+                    // ▼—/▲— for one second longer than strictly necessary is far
+                    // cheaper than presenting an unsampled rate as measured.
+                    //
+                    // The tracker is dropped as well as the rate. Keeping it
+                    // would leave a pre-outage `(snapshot, instant)` pair behind,
+                    // and the first successful read after recovery would divide
+                    // the counters' whole-outage delta by the whole-outage dt —
+                    // an average over a window the UI labels "now", and flatly
+                    // wrong if the counters were reset to 0 by the very event
+                    // that broke the reads. Dropping it means recovery re-primes
+                    // (one silent tick) and the next tick reports a genuine
+                    // short-window rate.
+                    None => {
+                        self.pcie_bandwidth.remove(&device_idx);
+                        self.pcie_trackers.remove(&device_idx);
                     }
                 }
             }
         }
 
         Ok(())
-    }
-
-    fn devices(&self) -> &[Device] {
-        &self.devices
-    }
-
-    fn device_count(&self) -> usize {
-        self.devices.len()
-    }
-
-    fn telemetry(&self, device_idx: usize) -> Option<&Telemetry> {
-        self.telemetry_cache.get(&device_idx)
-    }
-
-    fn smbus_telemetry(&self, device_idx: usize) -> Option<&SmbusTelemetry> {
-        // Partial SMBUS synthesized from tt-kmd sysfs attrs (kmd ≥ 2.7).
-        self.smbus_cache.get(&device_idx)
-    }
-
-    fn backend_info(&self) -> String {
-        "Sysfs (hwmon sensors)".to_string()
-    }
-
-    fn pcie_bandwidth(
-        &self,
-        device_idx: usize,
-    ) -> Option<crate::backend::pcie_counters::PcieBandwidth> {
-        self.pcie_bandwidth.get(&device_idx).copied()
     }
 }
 
@@ -1230,6 +1311,72 @@ mod tests {
         );
     }
 
+    /// A fan node that only reports the fanless **sentinel** is not data either.
+    ///
+    /// Regression (v0.8.1): the gate used a raw `fan_speed.is_some()` presence
+    /// check, so this fixture — `fan1_input = 4294967295` (the value a live p300c
+    /// actually reports, see `fake_hwmon`) with no `device` symlink and therefore
+    /// no tt-kmd class dir — published an SMBUS block whose only populated field
+    /// was a non-reading. Downstream that is indistinguishable from an all-`None`
+    /// block: `memory_castle` paints a red "ARC dead" dot on a healthy card
+    /// (`is_arc0_healthy()` = `arc0_health.unwrap_or(0) > 0`) and the Insights ETH
+    /// row loses its architectural-max fallback (`0/? live` instead of
+    /// `0/24 live` — pinned in `ui::tui`'s
+    /// `eth_row_falls_back_to_arch_max_when_smbus_absent`, which is only
+    /// reachable while this stays `None`).
+    ///
+    /// `smbus_telemetry_is_none_without_class_dir_or_fan` cannot catch this: its
+    /// fixture omits the fan file entirely, so it never reaches the sentinel path.
+    #[test]
+    fn smbus_telemetry_is_none_when_only_fan_is_the_sentinel() {
+        let td = tempfile::tempdir().unwrap();
+        let hwmon = td.path().join("hwmon2");
+        stdfs::create_dir_all(&hwmon).unwrap();
+        // Full hwmon attr set (fan1_input = the 0xFFFFFFFF no-fan sentinel), but
+        // no `device` symlink → no tt class dir.
+        fake_hwmon(&hwmon);
+
+        let mut backend = SysfsBackend::new();
+        backend.detect_devices_in(td.path()).unwrap();
+        backend.update().unwrap();
+
+        // The raw fan value *is* readable — this is the sentinel path, not a
+        // missing-file path.
+        let synthesized = SysfsBackend::synthesize_smbus(None, Some(&hwmon.join("fan1_input")));
+        assert_eq!(synthesized.fan_speed.as_deref(), Some("4294967295"));
+        assert_eq!(synthesized.fan_rpm(), None, "sentinel is not an RPM");
+
+        assert!(
+            backend.telemetry(0).is_some(),
+            "core hwmon telemetry must still be served"
+        );
+        assert!(
+            backend.smbus_telemetry(0).is_none(),
+            "a sentinel-only fan reading must not publish an SMBUS block"
+        );
+    }
+
+    /// …but a fan node reporting a *real* RPM is data, even with no class dir:
+    /// the gate filters sentinels, it does not stop trusting the fan sensor.
+    #[test]
+    fn smbus_telemetry_is_some_when_fan_reports_a_real_rpm() {
+        let td = tempfile::tempdir().unwrap();
+        let hwmon = td.path().join("hwmon2");
+        stdfs::create_dir_all(&hwmon).unwrap();
+        fake_hwmon(&hwmon);
+        // Same fixture, but this card has a fan that is actually spinning.
+        stdfs::write(hwmon.join("fan1_input"), "1882").unwrap();
+
+        let mut backend = SysfsBackend::new();
+        backend.detect_devices_in(td.path()).unwrap();
+        backend.update().unwrap();
+
+        let smbus = backend
+            .smbus_telemetry(0)
+            .expect("a real fan reading must be published");
+        assert_eq!(smbus.fan_rpm(), Some(1882));
+    }
+
     /// With the tt-kmd class dir present, the synthesized block *is* served.
     #[test]
     fn smbus_telemetry_is_some_with_class_dir() {
@@ -1331,6 +1478,103 @@ mod tests {
             Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
         backend.update().unwrap();
         assert_eq!(backend.telemetry(0).unwrap().aiclk, Some(1350));
+    }
+
+    /// Write the twelve `pcie_perf_counters/` files tt-kmd exposes, with all the
+    /// traffic parked on one counter per direction so the folded totals are
+    /// exactly `words_in` / `words_out` (see `pcie_counters::IN_COUNTERS`).
+    fn write_pcie_counters(dir: &Path, words_in: u64, words_out: u64) {
+        for (f, v) in [
+            ("slv_posted_wr_data_word_received0", words_in),
+            ("slv_posted_wr_data_word_received1", 0),
+            ("slv_nonposted_wr_data_word_received0", 0),
+            ("slv_nonposted_wr_data_word_received1", 0),
+            ("mst_rd_data_word_received0", 0),
+            ("mst_rd_data_word_received1", 0),
+            ("slv_rd_data_word_sent0", words_out),
+            ("slv_rd_data_word_sent1", 0),
+            ("mst_posted_wr_data_word_sent0", 0),
+            ("mst_posted_wr_data_word_sent1", 0),
+            ("mst_nonposted_wr_data_word_sent0", 0),
+            ("mst_nonposted_wr_data_word_sent1", 0),
+        ] {
+            stdfs::write(dir.join(f), format!("{}\n", v)).unwrap();
+        }
+    }
+
+    /// A cached PCIe rate must not outlive the sampling that produced it, and a
+    /// recovery must not report a rate measured across the outage.
+    ///
+    /// Regression: `read_counters` was made to return `None` for an unreadable
+    /// counter set (so a link nobody sampled can't render `▼0 B/s ▲0 B/s`), but
+    /// the caller only *skipped* the update on `None` — it never evicted the
+    /// `pcie_bandwidth` entry. After a tt-kmd reload, a device reset/surprise
+    /// removal, or a permissions change on the attribute group, the last rate
+    /// computed before the outage stayed in the map forever and the Insights
+    /// sidebar kept presenting it as live traffic.
+    ///
+    /// All ticks use injected timestamps, so the byte rates below are exact and
+    /// the test never sleeps.
+    #[test]
+    fn pcie_bandwidth_is_cleared_when_counters_become_unreadable() {
+        let sec = std::time::Duration::from_secs(1);
+        let t0 = std::time::Instant::now();
+
+        let td = tempfile::tempdir().unwrap();
+        let hwmon = td.path().join("hwmon2");
+        stdfs::create_dir_all(&hwmon).unwrap();
+        fake_hwmon(&hwmon);
+        let tt_dir = fake_tt_class(&hwmon);
+        let counters = tt_dir.join("pcie_perf_counters");
+        stdfs::create_dir_all(&counters).unwrap();
+        write_pcie_counters(&counters, 1_000, 2_000);
+
+        let mut backend = SysfsBackend::new();
+        backend.detect_devices_in(td.path()).unwrap();
+        backend.tt_class_dirs.insert(0, tt_dir.clone());
+
+        // Tick 1 primes the tracker — a single cumulative sample is not a rate.
+        backend.update_at(t0).unwrap();
+        assert!(
+            backend.pcie_bandwidth(0).is_none(),
+            "first sample primes only"
+        );
+
+        // Tick 2, exactly 1 s later: +250 words in, +500 words out. At 4 bytes
+        // per 32-bit data word that's 1000 B/s down and 2000 B/s up.
+        write_pcie_counters(&counters, 1_250, 2_500);
+        backend.update_at(t0 + sec).unwrap();
+        let bw = backend.pcie_bandwidth(0).expect("two samples ⇒ a rate");
+        assert_eq!(bw.rx_bytes_per_sec, 1000.0);
+        assert_eq!(bw.tx_bytes_per_sec, 2000.0);
+
+        // The counter directory disappears mid-run (tt-kmd unloaded, device
+        // reset, node torn down). The cached rate must go with it.
+        stdfs::remove_dir_all(&counters).unwrap();
+        backend.update_at(t0 + 2 * sec).unwrap();
+        assert!(
+            backend.pcie_bandwidth(0).is_none(),
+            "an unsampled link must report no rate, not the last one it had"
+        );
+
+        // The counters come back — with the traffic that crossed the link during
+        // the outage already accumulated (+100_000 words each way). The first
+        // read after recovery must re-prime, not divide that whole backlog by the
+        // whole outage and present the result as the current rate.
+        stdfs::create_dir_all(&counters).unwrap();
+        write_pcie_counters(&counters, 101_250, 202_500);
+        backend.update_at(t0 + 3 * sec).unwrap();
+        assert!(
+            backend.pcie_bandwidth(0).is_none(),
+            "recovery re-primes the tracker instead of spanning the outage"
+        );
+
+        // And the tick after that reports a genuine short-window rate.
+        write_pcie_counters(&counters, 101_500, 203_000);
+        backend.update_at(t0 + 4 * sec).unwrap();
+        let bw = backend.pcie_bandwidth(0).expect("post-recovery rate");
+        assert_eq!(bw.rx_bytes_per_sec, 1000.0, "+250 words over 1 s");
+        assert_eq!(bw.tx_bytes_per_sec, 2000.0, "+500 words over 1 s");
     }
 
     /// Create a fake hwmon dir whose `device` symlink resolves to `bus_id`,

@@ -2813,6 +2813,120 @@ fn eth_dot_budget(total: Option<u32>, count_cols: usize) -> (u32, String) {
     (0, String::new())
 }
 
+/// Compact rendering of a hardware error counter, bounded to **4 display
+/// columns for every possible `u32` input**.
+///
+/// The sidebar clips instead of wrapping, so the ECC row — the one row whose
+/// whole purpose is to announce data corruption — must not be able to lose its
+/// tail no matter how bad the memory gets. Counts below 1000 render *exactly*
+/// (`3` → `"3"`): low counts are the common real reading and their precision is
+/// the point. Above that the count is abbreviated with a `K`/`M`/`G` suffix
+/// (`1234567` → `"1.2M"`), trading digits for a guaranteed width.
+///
+/// # Width bound: 4 columns, unconditional
+///
+/// * `n < 1000` takes the exact path: 1–3 digits, so <= 3 columns.
+/// * Otherwise the unit loop divides by 1000 until the mantissa is below
+///   `999.5` (or the top `G` tier is reached), then the first of `{:.1}` /
+///   `{:.0}` whose mantissa fits 3 columns wins, plus 1 column for the unit
+///   letter. One of the two always fits:
+///   * `m < 9.95` → `{:.1}` renders at most `"9.9"` — 3 columns.
+///   * `9.95 <= m < 999.5` → `{:.1}` is 4–5 columns and loses, but `{:.0}`
+///     rounds to at most `999` — 3 columns.
+///   * At the `G` tier the loop cannot promote any further, but there `m` is at
+///     most `u32::MAX / 1e9` = `4.295`, i.e. the `m < 9.95` case above.
+/// * The loop's threshold is `999.5`, **not** `1000.0`, and that is what makes
+///   the middle case true: `999.5..1000.0` is exactly the window where `{:.0}`
+///   rounds *up* to the 4-column `"1000"` and would blow the budget, so such a
+///   value is promoted a tier (`999600` → `"1.0M"`) instead. That
+///   rounding-cliff class of bug bit `format_bandwidth` twice during v0.8.0;
+///   the boundaries are pinned in
+///   `format_err_count_is_never_wider_than_four_columns`.
+fn format_err_count(n: u64) -> String {
+    // Small counts are reported verbatim — "3 corr" must never become "0.0K".
+    if n < 1000 {
+        return n.to_string();
+    }
+
+    // Unit letters, applied after each division. Three tiers is enough: a u32
+    // tops out at 4.29e9, which is the first G-tier value.
+    const UNITS: [&str; 7] = ["", "K", "M", "G", "T", "P", "E"];
+    // 999.5 is the `{:.0}` rounding cliff (see the doc comment); dividing at
+    // that point rather than at 1000.0 is what keeps the mantissa <= 3 columns.
+    const PROMOTE_AT: f64 = 999.5;
+
+    let mut mantissa = n as f64;
+    let mut unit_idx = 0usize;
+    while mantissa >= PROMOTE_AT && unit_idx < UNITS.len() - 1 {
+        mantissa /= 1000.0;
+        unit_idx += 1;
+    }
+
+    // Mantissa budget: 4 total columns minus the 1-column unit letter. (This
+    // branch always has a unit letter — `n >= 1000` guarantees at least one
+    // division above.)
+    const MANTISSA_BUDGET: usize = 3;
+    for &decimals in &[1usize, 0] {
+        let s = format!("{:.*}", decimals, mantissa);
+        if s.len() <= MANTISSA_BUDGET {
+            return format!("{}{}", s, UNITS[unit_idx]);
+        }
+    }
+    // Unreachable given the bound proven in the doc comment, but kept as a
+    // safety net rather than an `unreachable!()`: on the ECC row, "slightly too
+    // wide" beats "panics in the middle of a corruption warning".
+    format!("{:.0}{}", mantissa, UNITS[unit_idx])
+}
+
+/// Content of the Insights sidebar's GDDR ECC row (everything right of the
+/// label column), bounded to the columns a labeled row actually has.
+///
+/// The sibling of [`eth_dot_budget`] and `pcie_row_parts`: `Paragraph` clips
+/// rather than wraps, so a row that outgrows [`STATS_CONTENT_W`] silently loses
+/// its tail. This row used to be a bare
+/// `format!("{} uncorr · {} corr", uncorr, corr)` with no budget at all, so a
+/// degrading module reporting 1 uncorrectable / 1,234,567 correctable rendered
+/// as `ECC     1 uncorr · 1234567 cor` — a truncated error count on precisely
+/// the row that signals corruption.
+///
+/// Three candidate forms are tried widest-first, so nothing is given up until
+/// it has to be:
+/// 1. **Exact counts, mid-dot separator** — the original form, kept whenever it
+///    fits. Covers every count an operator is realistically going to read
+///    precisely (`1 uncorr · 65535 corr` is 21 of the 22 columns).
+/// 2. **Abbreviated counts** ([`format_err_count`]), same wording.
+/// 3. **Abbreviated counts, plain-space separator** — drops the `·` for one
+///    more column of numbers.
+///
+/// Candidate 3 provably fits, so the function can never return an over-wide
+/// string: both counts are <= 4 columns and the wording is a fixed 13
+/// (`" uncorr"` + `" "` + `" corr"`), i.e. <= 21 columns against a budget of
+/// `STATS_CONTENT_W - STATS_LABEL_W` = 22. Pinned by
+/// `ecc_row_content_fits_the_row_budget`.
+///
+/// The uncorrectable count always comes first and keeps its own word, so the
+/// caller's red/amber styling plus reading order still distinguish 1
+/// uncorrectable from 1 correctable at a glance.
+fn ecc_row_content(uncorr: u64, corr: u64) -> String {
+    use unicode_width::UnicodeWidthStr;
+
+    let budget = STATS_CONTENT_W.saturating_sub(STATS_LABEL_W);
+    let (u_abbrev, c_abbrev) = (format_err_count(uncorr), format_err_count(corr));
+
+    // Widest form first; the loop falls through to the provably-fitting one.
+    let candidates = [
+        format!("{} uncorr · {} corr", uncorr, corr),
+        format!("{} uncorr · {} corr", u_abbrev, c_abbrev),
+    ];
+    for candidate in candidates {
+        // Real display columns, not bytes: the `·` is 2 bytes wide but 1 column.
+        if UnicodeWidthStr::width(candidate.as_str()) <= budget {
+            return candidate;
+        }
+    }
+    format!("{} uncorr {} corr", u_abbrev, c_abbrev)
+}
+
 /// Display width (terminal columns) of a fully-styled line: the sum of every
 /// span's unicode display width, so box-drawing, arrows and emoji count as the
 /// columns they actually occupy rather than as byte or `char` counts.
@@ -3592,6 +3706,23 @@ fn castle_legend_lines(
             Span::styled("•", Style::default().fg(colors::rgb(255, 100, 150))),
             Span::styled(" = cache miss", Style::default().fg(dim))
         ]),
+        // The four lines above describe the *particle overlay*. The DDR gate
+        // row is a different rendering context (the static per-device row at
+        // the castle's base, driven by tt-smi ≥ 6.3.0 per-channel
+        // gddr_telemetry) and deliberately reuses `·` for a harvested channel
+        // — dim gray there, orange for "write access" above. Same glyph,
+        // different colour, different meaning: spelled out here rather than
+        // left for the reader to infer. Colours match `memory_castle.rs`'s
+        // gate row; the healthy gate's `▪` actually hue-cycles, so the blue
+        // below stands in for the whole cycle.
+        ln!(vec![
+            Span::styled("▪", Style::default().fg(colors::rgb(120, 200, 255))),
+            Span::styled(" = DDR gate ok  ", Style::default().fg(dim)),
+            Span::styled("·", Style::default().fg(ratatui::style::Color::DarkGray)),
+            Span::styled(" harvested  ", Style::default().fg(dim)),
+            Span::styled("✗", Style::default().fg(colors::rgb(255, 90, 90))),
+            Span::styled(" BIST-fail", Style::default().fg(dim)),
+        ]),
         ln!(vec![
             Span::styled(
                 "layers    ",
@@ -3639,6 +3770,15 @@ fn defrag_legend_lines(
         ln!(vec![
             Span::styled("█", Style::default().fg(colors::rgb(220, 240, 255))),
             Span::styled(" peak activity", Style::default().fg(dim))
+        ]),
+        ln!(vec![
+            Span::styled("✗", Style::default().fg(colors::rgb(120, 25, 25))),
+            Span::styled(
+                " bad sector (BIST-fail, static)  ",
+                Style::default().fg(dim)
+            ),
+            Span::styled("✗", Style::default().fg(colors::rgb(255, 60, 60))),
+            Span::styled(" uncorr flash", Style::default().fg(dim))
         ]),
         ln!(vec![
             Span::styled("EVICT     ", Style::default().fg(colors::rgb(255, 100, 80))),
@@ -4337,13 +4477,15 @@ const PANEL_INTER_COL_GAP: u16 = 1;
 ///
 /// The interior (`DEVICE_PANEL_H - 2`) has to hold **both** the 12-row chip
 /// portrait and the tallest possible stats sidebar. The sidebar is the binding
-/// constraint: its worst realistic case on a Blackhole with tt-smi ≥ 6 is 12
-/// rows (Power, ETH, GDDR T, Temp, Fan, Current, Board, PCIe link, PCIe
-/// bandwidth, ECC, Trips, FW), and `Paragraph` clips silently — at the previous
-/// height of 14 (interior 12) a 13th row would have dropped the Firmware row
-/// with no other symptom. 15 keeps a row of headroom;
-/// `stats_sidebar_worst_case_fits_panel_interior` fails if a future row eats it.
-const DEVICE_PANEL_H: u16 = 15;
+/// constraint: its worst realistic case on a Blackhole with tt-smi ≥ 6.3 is 13
+/// rows (Power, ETH, GDDR T, GDDR, Temp, Fan, Current, Board, PCIe link, PCIe
+/// bandwidth, ECC, Trips, FW), and `Paragraph` clips silently — at the height
+/// of 14 (interior 12) a 13th row would have dropped the Firmware row with no
+/// other symptom, and 15 (interior 13) was consumed exactly by the GDDR
+/// per-channel summary row tt-smi 6.3.0 made possible. 16 restores a row of
+/// headroom; `stats_sidebar_worst_case_fits_panel_interior` fails if a future
+/// row eats it.
+const DEVICE_PANEL_H: u16 = 16;
 
 /// Fleet compact mode activates at this device count (matching the starfield galaxy mode).
 /// At 32+ devices the full-portrait grid almost always overflows a standard terminal.
@@ -5617,12 +5759,33 @@ fn build_stats_sidebar_rows(
     if !compact {
         if let Some(s) = smbus {
             let temps: Vec<f32> = s
-                .gddr_temps
-                .iter()
-                .filter_map(|p| p.as_ref())
-                .flat_map(|p| p.0.iter().copied())
-                .filter(|&t| t > 0.0)
-                .collect();
+                .gddr_telemetry
+                .as_ref()
+                .filter(|g| !g.channels.is_empty())
+                .map(|g| {
+                    g.channels
+                        .iter()
+                        .filter(|c| !c.harvested)
+                        .flat_map(|c| [c.temp_top, c.temp_bottom])
+                        .flatten()
+                        .filter(|&t| t > 0.0)
+                        .collect::<Vec<f32>>()
+                })
+                // A non-empty channel list whose temps all end up filtered
+                // out (harvested/missing/non-positive) must still fall back
+                // to the packed reading below -- Some(vec![]) is not the
+                // same as "no real data", and dropping the row entirely
+                // would be a regression versus the pre-gddr_telemetry
+                // behavior for a partially-populated report.
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| {
+                    s.gddr_temps
+                        .iter()
+                        .filter_map(|p| p.as_ref())
+                        .flat_map(|p| p.0.iter().copied())
+                        .filter(|&t| t > 0.0)
+                        .collect()
+                });
             if !temps.is_empty() {
                 let t_min = temps.iter().copied().fold(f32::INFINITY, f32::min);
                 let t_max = temps.iter().copied().fold(f32::NEG_INFINITY, f32::max);
@@ -5641,6 +5804,50 @@ fn build_stats_sidebar_rows(
                     Span::styled(
                         format!("{:.0}°→{:.0}°C", t_min, t_max),
                         Style::default().fg(max_color),
+                    ),
+                ]));
+            }
+
+            if let Some(g) = s.gddr_telemetry.as_ref().filter(|g| !g.channels.is_empty()) {
+                let total = g.channels.len();
+                let harvested = g.channels.iter().filter(|c| c.harvested).count();
+                let trained = g
+                    .channels
+                    .iter()
+                    .filter(|c| !c.harvested && c.training_pass)
+                    .count();
+                let bist_failed = g
+                    .channels
+                    .iter()
+                    .filter(|c| !c.harvested && !c.bist_pass)
+                    .count();
+                let color = if bist_failed > 0 {
+                    Color::Rgb(255, 80, 80)
+                } else if harvested > 0 {
+                    Color::Rgb(244, 196, 113)
+                } else {
+                    Color::Rgb(79, 209, 197)
+                };
+                stat_lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{:<8}", "GDDR"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    // Abbreviated deliberately: the sidebar interior is
+                    // `STATS_CONTENT_W` (30) columns and the 8-column label
+                    // leaves only 22 for the value, with `Paragraph` clipping
+                    // (not wrapping) the tail. The spelled-out
+                    // "…trained · … harvested · … BIST-fail" measured 47
+                    // columns on real hardware, silently dropping the
+                    // BIST-fault count — the row's whole reason to exist.
+                    // trn = trained, hv = harvested, flt = BIST fault; worst
+                    // realistic case ("10/12 trn·2 hv·10 flt") is 21 columns.
+                    Span::styled(
+                        format!(
+                            "{}/{} trn·{} hv·{} flt",
+                            trained, total, harvested, bist_failed
+                        ),
+                        Style::default().fg(color),
                     ),
                 ]));
             }
@@ -5773,27 +5980,72 @@ fn build_stats_sidebar_rows(
     // GDDR ECC row (full mode only): shown only when any error counter is
     // non-zero — uncorrectable errors are the headline diagnostic and go red.
     //
-    // Accumulation is saturating and drops the all-ones sentinel: an
-    // unimplemented/unpowered GDDR ECC register reads 0xFFFFFFFF (the same
-    // "no reading" convention the fan register uses), and four of those
-    // summed with `Iterator::sum` panics on overflow in a debug build.
-    // Unlike the fan filter, 0 and 0xFFFF are NOT filtered here — zero is
-    // the normal healthy count, and 65535 correctable errors is a plausible
-    // real reading on a degrading module.
+    // Source preference mirrors the GDDR T row: tt-smi >= 6.3.0's per-channel
+    // `gddr_telemetry` carries directional read/write counters per channel,
+    // which is strictly better than the packed aggregate registers, so it wins
+    // when present. Harvested channels are skipped — an unpowered module's
+    // error counters aren't a measurement of anything.
+    //
+    // The packed-aggregate fallback is unchanged: accumulation is saturating
+    // and drops the all-ones sentinel, because an unimplemented/unpowered GDDR
+    // ECC register reads `REGISTER_NO_READING` (the crate-wide "no reading"
+    // convention — see its doc comment) and four of those summed with `Iterator::sum` panics on
+    // overflow in a debug build. Unlike the fan filter, 0 and 0xFFFF are NOT
+    // filtered here — zero is the normal healthy count, and 65535 correctable
+    // errors is a plausible real reading on a degrading module.
+    //
+    // Row width is `ecc_row_content`'s job: a million-count reading overflows
+    // the 30-col sidebar in the naive `format!` form, and the sidebar clips —
+    // truncating a corruption warning mid-number. See its doc comment.
     if !compact {
         if let Some(s) = smbus {
-            const ECC_NO_READING: u32 = u32::MAX;
-            let corr: u32 = s
-                .gddr_corr_errs
-                .iter()
-                .flatten()
-                .copied()
-                .filter(|&v| v != ECC_NO_READING)
-                .fold(0u32, u32::saturating_add);
-            let uncorr = s
-                .gddr_uncorr_errs
-                .filter(|&v| v != ECC_NO_READING)
-                .unwrap_or(0);
+            use crate::models::telemetry::REGISTER_NO_READING;
+            // Prefer the real per-channel sum, but only when it actually
+            // found something: a non-empty channel list where every
+            // non-harvested channel's counters happen to be zero (missing/
+            // malformed fields default to 0 in the JSON parser, the same
+            // gap the temp row above guards against) must still fall back
+            // to the packed registers rather than silently reporting "no
+            // errors" when the packed side may hold real, nonzero counts.
+            // A genuinely healthy device reads (0, 0) on both sides, so
+            // falling back changes nothing observable for that common case.
+            let real_ecc: Option<(u64, u64)> = s
+                .gddr_telemetry
+                .as_ref()
+                .filter(|g| !g.channels.is_empty())
+                .map(|g| {
+                    // A missing/malformed counter (None) contributes 0 to this
+                    // sum -- the row-level fallback below (triggered when the
+                    // *whole* real-data result is all-zero) is what actually
+                    // guards against a parsing gap hiding real packed counts.
+                    g.channels.iter().filter(|c| !c.harvested).fold(
+                        (0u64, 0u64),
+                        |(corr, uncorr), c| {
+                            (
+                                corr.saturating_add(c.corr_rd.unwrap_or(0))
+                                    .saturating_add(c.corr_wr.unwrap_or(0)),
+                                uncorr
+                                    .saturating_add(c.uncorr_rd.unwrap_or(0))
+                                    .saturating_add(c.uncorr_wr.unwrap_or(0)),
+                            )
+                        },
+                    )
+                })
+                .filter(|&(c, u)| c > 0 || u > 0);
+            let (corr, uncorr): (u64, u64) = real_ecc.unwrap_or_else(|| {
+                let corr: u32 = s
+                    .gddr_corr_errs
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .filter(|&v| v != REGISTER_NO_READING)
+                    .fold(0u32, u32::saturating_add);
+                let uncorr = s
+                    .gddr_uncorr_errs
+                    .filter(|&v| v != REGISTER_NO_READING)
+                    .unwrap_or(0);
+                (corr as u64, uncorr as u64)
+            });
             if corr > 0 || uncorr > 0 {
                 let color = if uncorr > 0 {
                     Color::Rgb(255, 80, 80) // uncorrectable — data corruption risk
@@ -5805,10 +6057,7 @@ fn build_stats_sidebar_rows(
                         format!("{:<8}", "ECC"),
                         Style::default().fg(Color::DarkGray),
                     ),
-                    Span::styled(
-                        format!("{} uncorr · {} corr", uncorr, corr),
-                        Style::default().fg(color),
-                    ),
+                    Span::styled(ecc_row_content(uncorr, corr), Style::default().fg(color)),
                 ]));
             }
         }
@@ -5817,10 +6066,17 @@ fn build_stats_sidebar_rows(
     // Thermal-trip row (full mode only): lifetime trip counter — any
     // non-zero value means the card hit hardware thermal shutdown at least
     // once and deserves attention.
+    //
+    // `REGISTER_NO_READING` is filtered for the same reason as in the ECC row
+    // above, and it matters more here: a card whose firmware doesn't implement
+    // THERM_TRIP_COUNT leaves it at all-ones, which this row would otherwise
+    // render as `Trips 4294967295 thermal` in alarm red — a fabricated
+    // "this card has thermally shut down" on hardware that is perfectly fine.
     if !compact {
         if let Some(trips) = smbus
             .and_then(|s| s.therm_trip_count.as_deref())
             .and_then(crate::models::telemetry::parse_hex_or_dec)
+            .filter(|&v| v != crate::models::telemetry::REGISTER_NO_READING)
         {
             if trips > 0 {
                 stat_lines.push(Line::from(vec![
@@ -7304,6 +7560,9 @@ mod host_default_screen_tests {
             (OverlayPanel::Help, DisplayMode::Insights),
             (OverlayPanel::Legend, DisplayMode::Insights),
             (OverlayPanel::Legend, DisplayMode::InferenceMonitor),
+            // Multi-glyph line (DDR gate states) makes this legend's widest
+            // line noticeably wider than its per-particle lines.
+            (OverlayPanel::Legend, DisplayMode::MemoryCastle),
             (OverlayPanel::Explain, DisplayMode::Insights),
         ];
         for (kind, mode) in cases {
@@ -7649,10 +7908,13 @@ pub fn run_render_bench(
 #[cfg(test)]
 mod stats_sidebar_tests {
     use super::{
-        build_stats_sidebar_rows, eth_dot_budget, line_cols, DEVICE_PANEL_H, STATS_CONTENT_W,
+        build_stats_sidebar_rows, ecc_row_content, eth_dot_budget, format_err_count, line_cols,
+        DEVICE_PANEL_H, STATS_CONTENT_W, STATS_LABEL_W,
     };
     use crate::backend::pcie_counters::PcieBandwidth;
-    use crate::models::telemetry::{DeviceLimits, FirmwaresInfo, GddrTempPair};
+    use crate::models::telemetry::{
+        DeviceLimits, FirmwaresInfo, GddrChannel, GddrTelemetry, GddrTempPair,
+    };
     use crate::models::{Device, SmbusTelemetry, Telemetry};
 
     /// Rows available between the header rule and the footer hairline.
@@ -7663,6 +7925,15 @@ mod stats_sidebar_tests {
     /// ECC counters, a past thermal trip, board power from tt-smi ≥ 6, a current
     /// reading, firmware version and limits. All of this co-occurs on a real
     /// p300c under load — it is not a synthetic maximum.
+    ///
+    /// The ECC counters are deliberately a *degrading module's* reading
+    /// (1 uncorrectable, ~1.2M correctable across the channels) rather than the
+    /// single-digit counts this fixture originally carried. Those single digits
+    /// are why the ECC row's 31-column overflow shipped in v0.8.0:
+    /// `stats_sidebar_rows_fit_content_width` measured a row that happened to
+    /// fit and reported the whole sidebar sound. A realistic bad reading is now
+    /// part of the "worst case" the width test measures — see also
+    /// `ecc_row_fits_content_width_at_the_u32_maximum` for the absolute bound.
     fn worst_case() -> (Device, Telemetry, SmbusTelemetry, Option<PcieBandwidth>) {
         let mut device = Device::new(
             0,
@@ -7700,10 +7971,60 @@ mod stats_sidebar_tests {
         smbus.gddr_temps[0] = Some(GddrTempPair([54.0, 56.0, 55.0, 57.0]));
         smbus.gddr_temps[1] = Some(GddrTempPair([58.0, 59.0, 60.0, 61.0]));
         smbus.max_gddr_temp = Some(61.0);
-        smbus.gddr_corr_errs = [Some(3), Some(0), Some(1), Some(0)];
+        // Four channels summing to 1,234,567 correctable — the reviewer's
+        // real-world degrading-GDDR figure, which overflowed the row by exactly
+        // one column before `ecc_row_content` existed.
+        smbus.gddr_corr_errs = [Some(1_000_000), Some(200_000), Some(34_000), Some(567)];
         smbus.gddr_uncorr_errs = Some(1);
         smbus.fan_speed = Some("2400".to_string());
         smbus.therm_trip_count = Some("2".to_string());
+        // tt-smi ≥ 6.3.0's per-channel GDDR block. Present on exactly the
+        // hardware this worst case models, and it drives *two* rows: the
+        // GDDR T temp row takes its real per-channel path (not the packed-pair
+        // fallback above) and the GDDR summary row renders at all. Same
+        // three-channel shape as
+        // `gddr_summary_row_shows_trained_harvested_bist_fail_counts_when_present`
+        // — one healthy+trained, one harvested, one BIST-failed — plus non-zero
+        // per-channel ECC counters so the ECC row keeps rendering off the
+        // per-channel sums.
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            channels: vec![
+                GddrChannel {
+                    channel: 0,
+                    harvested: false,
+                    enabled: true,
+                    training_pass: true,
+                    bist_pass: true,
+                    temp_top: Some(54.0),
+                    temp_bottom: Some(56.0),
+                    corr_rd: Some(2),
+                    corr_wr: Some(1),
+                    ..Default::default()
+                },
+                GddrChannel {
+                    channel: 1,
+                    harvested: true,
+                    enabled: false,
+                    training_pass: false,
+                    bist_pass: false,
+                    ..Default::default()
+                },
+                GddrChannel {
+                    channel: 2,
+                    harvested: false,
+                    enabled: true,
+                    training_pass: true,
+                    bist_pass: false,
+                    temp_top: Some(60.0),
+                    temp_bottom: Some(61.0),
+                    corr_rd: Some(0),
+                    corr_wr: Some(3),
+                    uncorr_rd: Some(1),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
 
         let bw = Some(PcieBandwidth {
             rx_bytes_per_sec: 1.23e9,
@@ -7720,18 +8041,20 @@ mod stats_sidebar_tests {
         let rows = build_stats_sidebar_rows(&device, Some(&telem), Some(&smbus), bw, false);
 
         // Sanity-check that the fixture really is the worst case, so this test
-        // can't quietly stop measuring anything: 12 rows = Power, ETH, GDDR T,
-        // Temp, Fan, Current, Board, PCIe link, PCIe bandwidth, ECC, Trips, FW.
+        // can't quietly stop measuring anything: 13 rows = Power, ETH, GDDR T,
+        // GDDR, Temp, Fan, Current, Board, PCIe link, PCIe bandwidth, ECC,
+        // Trips, FW.
         assert_eq!(
             rows.len(),
-            12,
+            13,
             "fixture must exercise every optional row; got {} rows",
             rows.len()
         );
         // Strictly less, not `<=`: the worst case must leave headroom. Before
-        // this fix the interior was exactly 12 rows for exactly 12 worst-case
-        // rows, so the very next row added anywhere in the sidebar would have
-        // been clipped away silently. Requiring a spare row is what turns that
+        // the v0.8.0 fix the interior was exactly 12 rows for exactly 12
+        // worst-case rows, so the very next row added anywhere in the sidebar
+        // would have been clipped away silently — which is precisely what the
+        // GDDR summary row then did. Requiring a spare row is what turns that
         // into a test failure instead.
         assert!(
             rows.len() < INTERIOR_H,
@@ -7789,6 +8112,266 @@ mod stats_sidebar_tests {
 
         // No ENABLED_ETH mask → nothing to size against, so no dots.
         assert_eq!(eth_dot_budget(None, " 0/? live".len()), (0, String::new()));
+    }
+
+    /// Low counts — the common real reading — keep every digit, and only large
+    /// ones get abbreviated.
+    #[test]
+    fn format_err_count_renders_small_counts_exactly() {
+        // Exact below 1000: an operator distinguishing 1 error from 3 must not
+        // be shown a rounded figure.
+        assert_eq!(format_err_count(0), "0");
+        assert_eq!(format_err_count(1), "1");
+        assert_eq!(format_err_count(3), "3");
+        assert_eq!(format_err_count(42), "42");
+        assert_eq!(format_err_count(999), "999");
+        // First abbreviated value, and the reviewer's real-world figure.
+        assert_eq!(format_err_count(1_000), "1.0K");
+        assert_eq!(format_err_count(1_234_567), "1.2M");
+        // Two-digit mantissas drop the decimal to stay inside the budget.
+        assert_eq!(format_err_count(65_535), "66K");
+        assert_eq!(format_err_count(999_400), "999K");
+        // Rounding cliffs: `{:.0}` of 999.6 would be the 4-column "1000", so
+        // the value is promoted a tier instead of growing the string.
+        assert_eq!(format_err_count(999_600), "1.0M");
+        assert_eq!(format_err_count(999_950), "1.0M");
+        // Top of the type.
+        assert_eq!(format_err_count(u32::MAX as u64), "4.3G");
+    }
+
+    /// Width proof for [`format_err_count`]: **no** `u32` may render wider than
+    /// 4 display columns, because that width is what makes the ECC row's budget
+    /// provable rather than merely plausible.
+    ///
+    /// The sweep is deliberately shaped like `format_bandwidth`'s (which had two
+    /// separate rounding-boundary regressions during v0.8.0, both of the "a
+    /// value just under the tier boundary rounds *up* and gains a digit" kind):
+    ///
+    /// * every value in `0..=20_000` densely, covering the exact/abbreviated
+    ///   transition and the first `9.95` decimal cliff;
+    /// * a ±64 window around every decade and every rounding cliff of every unit
+    ///   tier (`1`, `9.95`, `10`, `99.95`, `100`, `999.5`, `999.95` × K/M/G);
+    /// * a multiplicative stride sweep across the *whole* `u32` range, so no
+    ///   magnitude is unvisited;
+    /// * the two largest `u32` values explicitly.
+    #[test]
+    fn format_err_count_is_never_wider_than_four_columns() {
+        use unicode_width::UnicodeWidthStr;
+
+        /// The bound stated in `format_err_count`'s doc comment.
+        const MAX_COLS: usize = 4;
+
+        let check = |n: u64| {
+            let s = format_err_count(n);
+            assert!(
+                UnicodeWidthStr::width(s.as_str()) <= MAX_COLS,
+                "format_err_count({}) = {:?} is {} columns; the bound is {}",
+                n,
+                s,
+                UnicodeWidthStr::width(s.as_str()),
+                MAX_COLS
+            );
+        };
+
+        // Dense low range.
+        for n in 0..=20_000u64 {
+            check(n);
+        }
+
+        // Tier boundaries and rounding cliffs, ±64 columns of slack each. The
+        // cliff multipliers are scaled by 100 to stay in integer arithmetic.
+        for base in [1_000u64, 1_000_000, 1_000_000_000, 1_000_000_000_000] {
+            for cliff_x100 in [100u64, 995, 1_000, 9_995, 10_000, 99_950, 99_995] {
+                let center = base * cliff_x100 / 100;
+                for n in center.saturating_sub(64)..=center + 64 {
+                    check(n);
+                }
+            }
+        }
+
+        // Multiplicative stride: ~1% steps visit every magnitude in the range
+        // in a couple of thousand iterations.
+        let mut n: u64 = 1;
+        while n <= u32::MAX as u64 {
+            check(n);
+            n += (n / 97).max(1);
+        }
+
+        check(u32::MAX as u64);
+        check(u32::MAX as u64 - 1);
+        // The counters are u64, so the bound has to hold at the top of that
+        // type as well, not just where the old u32 signature stopped.
+        check(u64::MAX);
+        check(u64::MAX - 1);
+    }
+
+    /// The ECC row content must fit its 22-column budget for **every** pair of
+    /// `u64` counts, and must keep the uncorrectable count first.
+    ///
+    /// Regression: this row was a bare `format!("{} uncorr · {} corr", ..)` with
+    /// no budget, so `1 uncorr / 1_234_567 corr` produced 23 columns of content
+    /// (31 with the label) in a 30-column sidebar that clips — the operator read
+    /// `1 uncorr · 1234567 cor`.
+    #[test]
+    fn ecc_row_content_fits_the_row_budget() {
+        use unicode_width::UnicodeWidthStr;
+
+        /// Columns a labeled sidebar row leaves for its content.
+        const BUDGET: usize = STATS_CONTENT_W - STATS_LABEL_W;
+
+        // Small counts keep the original, precise wording untouched — this is
+        // the reading on a healthy-but-not-perfect card.
+        assert_eq!(ecc_row_content(1, 3), "1 uncorr · 3 corr");
+        // Precise counts are kept for as long as they fit (21 of 22 columns).
+        assert_eq!(ecc_row_content(1, 65_535), "1 uncorr · 65535 corr");
+        // The overflow case: counts abbreviate rather than truncate.
+        assert_eq!(ecc_row_content(1, 1_234_567), "1 uncorr · 1.2M corr");
+        // Both counts wide: the `·` is spent on digits (candidate 3).
+        assert_eq!(
+            ecc_row_content(u32::MAX as u64, u32::MAX as u64),
+            "4.3G uncorr 4.3G corr"
+        );
+
+        let interesting: [u64; 19] = [
+            0u64,
+            1,
+            3,
+            9,
+            999,
+            1_000,
+            9_999,
+            65_535,
+            999_499,
+            999_500,
+            999_999,
+            1_234_567,
+            123_456_789,
+            u32::MAX as u64 - 1,
+            u32::MAX as u64,
+            // The type is u64 now, so the 4-column bound has to hold there
+            // too — a table stopping at "G" would render these as eleven.
+            1_000_000_000_000,
+            1_000_000_000_000_000,
+            u64::MAX / 2,
+            u64::MAX,
+        ];
+        for &uncorr in &interesting {
+            for &corr in &interesting {
+                let s = ecc_row_content(uncorr, corr);
+                assert!(
+                    UnicodeWidthStr::width(s.as_str()) <= BUDGET,
+                    "ecc_row_content({}, {}) = {:?} is {} columns; budget is {} \
+                     and the sidebar clips silently",
+                    uncorr,
+                    corr,
+                    s,
+                    UnicodeWidthStr::width(s.as_str()),
+                    BUDGET
+                );
+                // Meaning must survive the width squeeze: uncorrectable first,
+                // both counts still labeled.
+                assert!(
+                    s.find("uncorr").unwrap() < s.rfind("corr").unwrap(),
+                    "uncorrectable count must read first: {:?}",
+                    s
+                );
+                assert!(
+                    s.ends_with(" corr"),
+                    "correctable count must be labeled: {:?}",
+                    s
+                );
+            }
+        }
+    }
+
+    /// End-to-end companion to the two proofs above: the assembled ECC row fits
+    /// the sidebar even when the counters are pinned at the largest values the
+    /// hardware registers can report.
+    ///
+    /// `worst_case()` carries a *realistic* degrading-module reading, which is
+    /// what a regression would most likely look like; this pins the absolute
+    /// ceiling so no future wording change can be safe only for realistic
+    /// inputs. `u32::MAX` itself is the "no reading" sentinel the row filters,
+    /// so the largest reportable count is `u32::MAX - 1` per channel — which the
+    /// saturating fold turns into `u32::MAX` correctable.
+    #[test]
+    fn ecc_row_fits_content_width_at_the_u32_maximum() {
+        let (device, telem, mut smbus, bw) = worst_case();
+        smbus.gddr_corr_errs = [Some(u32::MAX - 1); 4];
+        smbus.gddr_uncorr_errs = Some(u32::MAX - 1);
+
+        let rows = build_stats_sidebar_rows(&device, Some(&telem), Some(&smbus), bw, false);
+        let ecc: Vec<_> = rows
+            .iter()
+            .filter(|r| {
+                r.spans
+                    .first()
+                    .is_some_and(|s| s.content.starts_with("ECC"))
+            })
+            .collect();
+        assert_eq!(ecc.len(), 1, "the ECC row must still render at max counts");
+        for row in &rows {
+            let cols = line_cols(row);
+            let text: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                cols <= STATS_CONTENT_W,
+                "row {:?} is {} columns; the sidebar interior is {} and clips silently",
+                text,
+                cols,
+                STATS_CONTENT_W
+            );
+        }
+    }
+
+    /// The thermal-trip row must apply the same "no reading" filter its
+    /// neighbours do.
+    ///
+    /// A card whose firmware doesn't implement THERM_TRIP_COUNT leaves the
+    /// register at all-ones, and this row renders any non-zero count in alarm
+    /// red — so without the filter a perfectly healthy p150/p300 shows
+    /// `Trips 4294967295 thermal`, i.e. a fabricated report that the card has
+    /// thermally shut down. That is worse than a missing row by a wide margin:
+    /// it is the single most alarming thing the sidebar can say.
+    ///
+    /// Both spellings the sources use are covered: sysfs hands us the raw
+    /// decimal, tt-smi's JSON hands us the hex.
+    #[test]
+    fn trips_row_is_absent_for_the_no_reading_sentinel() {
+        let (device, telem, smbus, bw) = worst_case();
+
+        let trips_rows = |s: &SmbusTelemetry| -> Vec<String> {
+            build_stats_sidebar_rows(&device, Some(&telem), Some(s), bw, false)
+                .iter()
+                .filter(|r| {
+                    r.spans
+                        .first()
+                        .is_some_and(|sp| sp.content.starts_with("Trips"))
+                })
+                .map(|r| r.spans.iter().map(|sp| sp.content.as_ref()).collect())
+                .collect()
+        };
+
+        for sentinel in ["4294967295", "0xFFFFFFFF", "0xffffffff"] {
+            let mut s = smbus.clone();
+            s.therm_trip_count = Some(sentinel.to_string());
+            assert!(
+                trips_rows(&s).is_empty(),
+                "{sentinel} is 'no reading', not 4.3 billion thermal shutdowns; \
+                 got rows {:?}",
+                trips_rows(&s)
+            );
+        }
+
+        // …and a real trip count must still raise the alarm. `worst_case()`
+        // carries 2 trips; without this half the test would pass by deleting
+        // the row entirely.
+        let real = trips_rows(&smbus);
+        assert_eq!(real.len(), 1, "a real trip count must still render");
+        assert!(
+            real[0].contains('2'),
+            "the count itself must survive: {:?}",
+            real[0]
+        );
     }
 
     /// Compact mode drops the secondary rows and must stay well inside budget.
@@ -7863,6 +8446,334 @@ mod stats_sidebar_tests {
         assert!(
             eth.contains("0/? live"),
             "SMBUS present but no enabled mask → unknown total; got {eth:?}"
+        );
+    }
+
+    /// The new GDDR summary row must report real per-channel trained/harvested/
+    /// BIST-fail counts when `gddr_telemetry` is present — not just render
+    /// *some* row, and not fall back to the old packed-pair-only behavior.
+    #[test]
+    fn gddr_summary_row_shows_trained_harvested_bist_fail_counts_when_present() {
+        let device = Device::new(
+            0,
+            "p150a".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        );
+
+        let mut smbus = SmbusTelemetry::new();
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            channels: vec![
+                // Healthy, trained channel.
+                GddrChannel {
+                    channel: 0,
+                    harvested: false,
+                    enabled: true,
+                    training_pass: true,
+                    bist_pass: true,
+                    temp_top: Some(50.0),
+                    temp_bottom: Some(52.0),
+                    ..Default::default()
+                },
+                // Harvested channel — excluded from trained/BIST-fail counts.
+                GddrChannel {
+                    channel: 1,
+                    harvested: true,
+                    enabled: false,
+                    training_pass: false,
+                    bist_pass: false,
+                    ..Default::default()
+                },
+                // BIST-failed, non-harvested channel.
+                GddrChannel {
+                    channel: 2,
+                    harvested: false,
+                    enabled: true,
+                    training_pass: true,
+                    bist_pass: false,
+                    temp_top: Some(55.0),
+                    temp_bottom: Some(57.0),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+
+        let rows = build_stats_sidebar_rows(&device, None, Some(&smbus), None, false);
+        let gddr_row = rows
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .find(|text| text.contains(" hv·") && text.contains(" flt"));
+
+        let text = gddr_row.expect(
+            "expected a GDDR summary row mentioning harvested/BIST counts when \
+             gddr_telemetry is present",
+        );
+        assert!(
+            text.contains("2/3 trn"),
+            "expected 2 of 3 non-harvested channels to have training_pass set \
+             (BIST failure is independent of training); got {text:?}"
+        );
+        assert!(
+            text.contains("1 hv"),
+            "expected exactly 1 harvested channel; got {text:?}"
+        );
+        assert!(
+            text.contains("1 flt"),
+            "expected exactly 1 BIST-failed channel; got {text:?}"
+        );
+    }
+
+    /// With no `gddr_telemetry` at all (older tt-smi / sysfs / luwen), the
+    /// summary row must not appear — distinguishing "real per-channel counts
+    /// shown" from "generic/absent behavior" is the whole point of this row.
+    #[test]
+    fn gddr_summary_row_absent_when_gddr_telemetry_missing() {
+        let device = Device::new(
+            0,
+            "p150a".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        );
+        let smbus = SmbusTelemetry::new();
+
+        let rows = build_stats_sidebar_rows(&device, None, Some(&smbus), None, false);
+        let has_gddr_summary = rows.iter().any(|l| {
+            let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            text.contains(" trn·") && text.contains(" hv·") && text.contains(" flt")
+        });
+        assert!(
+            !has_gddr_summary,
+            "no gddr_telemetry present → summary row must not render"
+        );
+    }
+
+    /// Pull the ECC row's rendered text out of a sidebar, if it rendered.
+    fn ecc_row_text(rows: &[ratatui::text::Line<'static>]) -> Option<String> {
+        rows.iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .find(|t| t.contains("uncorr"))
+    }
+
+    /// The ECC row must sum tt-smi ≥ 6.3.0's **per-channel directional**
+    /// counters when `gddr_telemetry` is present, not the packed aggregate
+    /// registers.
+    ///
+    /// The two sources deliberately disagree in this fixture (packed = 0/0,
+    /// per-channel = 12 corr / 5 uncorr) — otherwise the test could not tell
+    /// which path produced the numbers. Harvested channels carry non-zero
+    /// counters that must NOT be counted: an unpowered module's counters
+    /// aren't a measurement.
+    #[test]
+    fn ecc_row_sums_per_channel_counters_when_gddr_telemetry_present() {
+        let device = Device::new(
+            0,
+            "p150a".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        );
+
+        let mut smbus = SmbusTelemetry::new();
+        // Packed aggregates say "no errors" — if the row reads these, it will
+        // not render at all and the assertions below fail.
+        smbus.gddr_corr_errs = [Some(0), Some(0), Some(0), Some(0)];
+        smbus.gddr_uncorr_errs = Some(0);
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            channels: vec![
+                GddrChannel {
+                    channel: 0,
+                    harvested: false,
+                    enabled: true,
+                    training_pass: true,
+                    bist_pass: true,
+                    corr_rd: Some(4),
+                    corr_wr: Some(3),
+                    uncorr_rd: Some(2),
+                    uncorr_wr: Some(1),
+                    ..Default::default()
+                },
+                GddrChannel {
+                    channel: 1,
+                    harvested: false,
+                    enabled: true,
+                    training_pass: true,
+                    bist_pass: true,
+                    corr_rd: Some(5),
+                    corr_wr: Some(0),
+                    uncorr_rd: Some(0),
+                    uncorr_wr: Some(2),
+                    ..Default::default()
+                },
+                // Harvested: counters present but must be excluded.
+                GddrChannel {
+                    channel: 2,
+                    harvested: true,
+                    enabled: false,
+                    corr_rd: Some(900),
+                    corr_wr: Some(900),
+                    uncorr_rd: Some(900),
+                    uncorr_wr: Some(900),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+
+        let rows = build_stats_sidebar_rows(&device, None, Some(&smbus), None, false);
+        let text = ecc_row_text(&rows).expect(
+            "ECC row must render off the per-channel sums even though the packed \
+             aggregate registers read zero",
+        );
+        // 4+3+5+0 = 12 correctable, 2+1+0+2 = 5 uncorrectable; the harvested
+        // channel's 1800 correctable and 1800 uncorrectable are excluded.
+        assert!(
+            text.contains("5 uncorr") && text.contains("12 corr"),
+            "expected the per-channel sums (5 uncorr · 12 corr); got {text:?}"
+        );
+    }
+
+    /// …and with no `gddr_telemetry`, the packed-aggregate path is unchanged.
+    #[test]
+    fn ecc_row_falls_back_to_packed_aggregate_when_gddr_telemetry_missing() {
+        let device = Device::new(
+            0,
+            "p150a".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        );
+
+        let mut smbus = SmbusTelemetry::new();
+        smbus.gddr_corr_errs = [Some(3), Some(0), Some(1), Some(u32::MAX)];
+        smbus.gddr_uncorr_errs = Some(1);
+        assert!(smbus.gddr_telemetry.is_none());
+
+        let rows = build_stats_sidebar_rows(&device, None, Some(&smbus), None, false);
+        let text = ecc_row_text(&rows).expect("packed-aggregate ECC row must still render");
+        assert!(
+            text.contains("1 uncorr") && text.contains("4 corr"),
+            "expected the packed sums with the 0xFFFFFFFF sentinel dropped \
+             (1 uncorr · 4 corr); got {text:?}"
+        );
+    }
+
+    /// Pull the "GDDR T" temp row's rendered text out of a sidebar, if it rendered.
+    fn gddr_temp_row_text(rows: &[ratatui::text::Line<'static>]) -> Option<String> {
+        rows.iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .find(|t| t.starts_with("GDDR T"))
+    }
+
+    /// Regression test: a non-empty `gddr_telemetry.channels` whose every
+    /// non-harvested channel's temp fields are `None` (missing/malformed
+    /// field — the same gap `json.rs`'s `str_u64(...).unwrap_or(0)` leaves
+    /// for ECC counters) must still fall back to the packed `gddr_temps`
+    /// reading, not silently drop the row. `Some(vec![])` is not the same
+    /// as "no real data present".
+    #[test]
+    fn gddr_temp_row_falls_back_to_packed_when_real_channels_have_no_temps() {
+        use crate::models::telemetry::{GddrChannel, GddrTelemetry, GddrTempPair};
+
+        let device = Device::new(
+            0,
+            "p150a".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        );
+
+        let mut smbus = SmbusTelemetry::new();
+        // Packed pair temps: real, nonzero readings.
+        smbus.gddr_temps[0] = Some(GddrTempPair([54.0, 56.0, 55.0, 57.0]));
+        // Real gddr_telemetry present and non-empty, but every channel's
+        // temp fields are None -- exactly what a malformed/missing field
+        // looks like after json.rs's tolerant parsing.
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            speed: Some("16G".to_string()),
+            max_temp: None,
+            enabled_mask: Some(0xff),
+            channels: vec![GddrChannel {
+                channel: 0,
+                harvested: false,
+                enabled: true,
+                training_pass: true,
+                bist_pass: true,
+                temp_top: None,
+                temp_bottom: None,
+                ..Default::default()
+            }],
+        });
+
+        let rows = build_stats_sidebar_rows(&device, None, Some(&smbus), None, false);
+        let text = gddr_temp_row_text(&rows).expect(
+            "GDDR T row must fall back to the packed reading when the real \
+             channel list yields no usable temps, not disappear entirely",
+        );
+        assert!(
+            text.contains("54") && text.contains("57"),
+            "expected the packed pair reading (54°→57°C); got {text:?}"
+        );
+    }
+
+    /// Same gap, ECC row: a non-empty `gddr_telemetry.channels` whose every
+    /// non-harvested channel's counters happen to be zero (a missing field
+    /// defaults to 0 in the parser, indistinguishable from a real zero
+    /// reading) must still fall back to the packed aggregate when it holds
+    /// real, nonzero counts — not silently report "no errors".
+    #[test]
+    fn ecc_row_falls_back_to_packed_when_real_channels_read_all_zero() {
+        use crate::models::telemetry::{GddrChannel, GddrTelemetry};
+
+        let device = Device::new(
+            0,
+            "p150a".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        );
+
+        let mut smbus = SmbusTelemetry::new();
+        smbus.gddr_corr_errs = [Some(3), Some(0), Some(1), Some(0)];
+        smbus.gddr_uncorr_errs = Some(1);
+        smbus.gddr_telemetry = Some(GddrTelemetry {
+            speed: Some("16G".to_string()),
+            max_temp: None,
+            enabled_mask: Some(0xff),
+            channels: vec![GddrChannel {
+                channel: 0,
+                harvested: false,
+                enabled: true,
+                training_pass: true,
+                bist_pass: true,
+                corr_rd: Some(0),
+                corr_wr: Some(0),
+                uncorr_rd: Some(0),
+                uncorr_wr: Some(0),
+                ..Default::default()
+            }],
+        });
+
+        let rows = build_stats_sidebar_rows(&device, None, Some(&smbus), None, false);
+        let text = ecc_row_text(&rows).expect(
+            "ECC row must fall back to the packed aggregate when the real \
+             channel list reads all-zero but the packed registers hold real \
+             counts, not silently report no errors",
+        );
+        assert!(
+            text.contains("1 uncorr") && text.contains("4 corr"),
+            "expected the packed sums (1 uncorr · 4 corr); got {text:?}"
         );
     }
 }

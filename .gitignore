@@ -37,6 +37,11 @@ debian/tt-toplike-egui/
 /vendor/
 # .cargo/config.toml is written fresh each build to point at vendor/
 .cargo/config.toml
+.cargo/*.bak
+
+# Stray local git worktrees / build outputs left under .claude/ by prior
+# sessions — never repo content, easy to catch in a `git add -A`.
+.claude/worktrees/
 
 # Debug and log files
 *.log

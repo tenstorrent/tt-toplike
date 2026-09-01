@@ -4,12 +4,36 @@
 //! Recognize a TT inference server from a process name + cmdline and extract a
 //! structured record. Pure and cross-platform-compilable; only invoked on Linux.
 
-/// Where the server runs. v1 handles Docker; the `Host` trail (non-container
-/// installs) slots in behind this enum without changing consumers.
+use crate::workload::inference_server::probe::parse_env_var;
+
+/// Where the server runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
-    Docker { container: String },
-    // Trail: Host { unit_or_pid: String },
+    Docker {
+        container: String,
+    },
+    /// A bare (non-Docker) process, e.g. a direct `vllm serve`/
+    /// `server_example_tt.py` launch — see `parse_direct_vllm`.
+    Host {
+        pid: i32,
+    },
+}
+
+/// Prefix of the identity key `service_key` derives for a `Source::Host` —
+/// also used by `probe::SystemProbe` to recognize a host-keyed call.
+pub(crate) const HOST_KEY_PREFIX: &str = "host-vllm-";
+
+/// Stable identity key for a detected server, used for prev-state lookup,
+/// dedup, and the monitor's change-signature. Docker keys by container name
+/// (survives the monitor's own restarts, stable across ticks); a bare host
+/// process has no such name, so it keys by pid — a restart gets a fresh key
+/// and starts from `fresh_state`, which is correct: the old process's
+/// kernel/RSS history is not the new process's history.
+pub fn service_key(source: &Source) -> String {
+    match source {
+        Source::Docker { container } => container.clone(),
+        Source::Host { pid } => format!("{HOST_KEY_PREFIX}{pid}"),
+    }
 }
 
 /// Identity of a detected inference server, parsed from its launch cmdline.
@@ -220,6 +244,86 @@ pub fn parse_inspect(json: &str) -> Option<InferenceServer> {
     })
 }
 
+/// Recognize a direct (non-Docker) vLLM-on-TT launch from `name` + `cmdline`
+/// + the process's own `environ` (`KEY=VALUE`-per-line text — same shape
+/// `probe::parse_env_var` already expects), building a `Source::Host { pid }`
+/// record. Two real shapes (from `tt-tnt`'s `tt-model serve`, which execs one
+/// of these directly): `vllm serve <model> ...`, or a cmdline containing
+/// `server_example_tt.py` with a `--model <X>` arg.
+///
+/// Requires `MESH_DEVICE` or `TT_METAL_HOME` present in `environ` to confirm
+/// this is genuinely TT-backed — mirrors `parse_inference_server`'s
+/// `uses_tt_device` check, which has no `/dev/tenstorrent` cmdline
+/// equivalent to key off for a bare host process. Without this gate, plain
+/// upstream vLLM (e.g. running against a GPU on the same box for comparison)
+/// would be misclassified as a TT inference server.
+pub fn parse_direct_vllm(
+    name: &str,
+    cmdline: &str,
+    environ: &str,
+    pid: i32,
+) -> Option<InferenceServer> {
+    let _ = name; // recognized from cmdline shape alone; kept for API symmetry with parse_inference_server
+    let toks: Vec<&str> = cmdline.split_whitespace().collect();
+
+    // Match by `ends_with("vllm")`, not `== "vllm"`: a venv console-script's
+    // argv[0] is commonly a full path (e.g.
+    // `/home/ttuser/venv-vllm-standalone/bin/vllm`), not the bare token.
+    // `vllm serve <model> ...`: positional model argument. If that shape
+    // isn't present (e.g. `vllm serve --model X` — flag form instead of
+    // positional), fall back to `model_arg`, the same `--model`/`--model=X`
+    // helper the `server_example_tt.py` shape below uses — otherwise a
+    // flag-form `vllm serve` launch goes entirely undetected.
+    let model = toks
+        .iter()
+        .position(|t| t.ends_with("vllm"))
+        .filter(|&i| toks.get(i + 1) == Some(&"serve"))
+        .and_then(|i| {
+            toks.get(i + 2)
+                .filter(|t| !t.starts_with('-'))
+                .map(|s| s.to_string())
+                .or_else(|| model_arg(&toks))
+        })
+        .or_else(|| {
+            cmdline
+                .contains("server_example_tt.py")
+                .then(|| model_arg(&toks))
+                .flatten()
+        })?;
+
+    let mesh = parse_env_var(environ, "MESH_DEVICE");
+    let tt_metal_home = parse_env_var(environ, "TT_METAL_HOME");
+    if mesh.is_none() && tt_metal_home.is_none() {
+        return None;
+    }
+
+    // vLLM uses argparse, so both `--port <N>` and `--port=<N>` are valid.
+    let port = toks
+        .iter()
+        .position(|t| *t == "--port")
+        .and_then(|i| toks.get(i + 1))
+        .and_then(|p| p.parse::<u16>().ok())
+        .or_else(|| {
+            toks.iter()
+                .find_map(|t| t.strip_prefix("--port="))
+                .and_then(|p| p.parse::<u16>().ok())
+        })
+        .unwrap_or(8000);
+
+    Some(InferenceServer {
+        source: Source::Host { pid },
+        // No container image for a bare process; a stable label is enough —
+        // only used for the monitor's display/signature formatting.
+        image: "vllm-direct".to_string(),
+        model: Some(model),
+        mesh,
+        arch: None,
+        device: None,
+        port: Some(port),
+        uses_tt_device: true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,5 +454,107 @@ mod tests {
         assert!(parse_inspect("not json").is_none());
         assert!(parse_inspect("[]").is_none());
         assert!(parse_inspect("{}").is_none());
+    }
+
+    #[test]
+    fn service_key_docker_uses_container_name_host_uses_pid() {
+        let docker = Source::Docker {
+            container: "tt-inference-server-abc123".into(),
+        };
+        assert_eq!(service_key(&docker), "tt-inference-server-abc123");
+
+        let host = Source::Host { pid: 4242 };
+        assert_eq!(service_key(&host), "host-vllm-4242");
+    }
+
+    // Real shapes from tt-tnt's docs/serving-with-tt-kernel.md and AUTOFIX.md,
+    // trimmed to the parts parse_direct_vllm reads.
+    const CMDLINE_VLLM_SERVE: &str = "vllm serve episod/tt-tnt-1024 --max_model_len 512 \
+        --max_num_seqs 32 --port 8000 --additional-config {\"tt\":{\"fabric_config\":\"FABRIC_2D_TORUS_XY\"}}";
+    const ENVIRON_VLLM_SERVE: &str = "TT_METAL_HOME=/home/ttuser/tt-metal-src-vllm-home\n\
+        MESH_DEVICE=P300x2\nHF_MODEL=episod/tt-tnt-1024\nPATH=/usr/bin\n";
+
+    const CMDLINE_EXAMPLE_SCRIPT: &str =
+        "python3 server_example_tt.py --model episod/tt-tnt --max_model_len 2048 --max_num_seqs 8";
+    const ENVIRON_EXAMPLE_SCRIPT: &str =
+        "MESH_DEVICE=P150\nHF_MODEL=episod/tt-tnt\nVLLM_USE_V1=1\n";
+
+    #[test]
+    fn parses_vllm_serve_shape() {
+        let s = parse_direct_vllm("vllm", CMDLINE_VLLM_SERVE, ENVIRON_VLLM_SERVE, 4242)
+            .expect("should detect vllm serve shape");
+        assert_eq!(s.source, Source::Host { pid: 4242 });
+        assert_eq!(s.model.as_deref(), Some("episod/tt-tnt-1024"));
+        assert_eq!(s.mesh.as_deref(), Some("P300x2"));
+        assert_eq!(s.port, Some(8000));
+        assert!(s.uses_tt_device);
+    }
+
+    #[test]
+    fn parses_example_script_shape() {
+        let s = parse_direct_vllm(
+            "python3",
+            CMDLINE_EXAMPLE_SCRIPT,
+            ENVIRON_EXAMPLE_SCRIPT,
+            99,
+        )
+        .expect("should detect server_example_tt.py shape");
+        assert_eq!(s.source, Source::Host { pid: 99 });
+        assert_eq!(s.model.as_deref(), Some("episod/tt-tnt"));
+        assert_eq!(s.mesh.as_deref(), Some("P150"));
+        // no --port in this shape → default
+        assert_eq!(s.port, Some(8000));
+    }
+
+    #[test]
+    fn rejects_vllm_serve_without_tt_evidence() {
+        // Same cmdline, but neither MESH_DEVICE nor TT_METAL_HOME set — must not
+        // be misclassified as TT-backed (could be plain upstream vLLM on GPU).
+        let no_tt_env = "HOME=/root\nPATH=/usr/bin\n";
+        assert!(parse_direct_vllm("vllm", CMDLINE_VLLM_SERVE, no_tt_env, 1).is_none());
+    }
+
+    #[test]
+    fn rejects_unrelated_processes() {
+        assert!(parse_direct_vllm("bash", "bash -c ls", ENVIRON_VLLM_SERVE, 1).is_none());
+        assert!(parse_direct_vllm("python3", "python3 train.py", ENVIRON_VLLM_SERVE, 1).is_none());
+    }
+
+    #[test]
+    fn parses_explicit_port_override() {
+        let cmd = "vllm serve some/model --port 9001";
+        let s = parse_direct_vllm("vllm", cmd, ENVIRON_VLLM_SERVE, 1).unwrap();
+        assert_eq!(s.port, Some(9001));
+    }
+
+    #[test]
+    fn parses_port_equals_form() {
+        // argparse accepts `--port=<N>` as well as `--port <N>`.
+        let cmd = "vllm serve some/model --port=9001";
+        let s = parse_direct_vllm("vllm", cmd, ENVIRON_VLLM_SERVE, 1).unwrap();
+        assert_eq!(s.port, Some(9001));
+    }
+
+    #[test]
+    fn parses_vllm_serve_with_flag_form_model_arg() {
+        // `vllm serve --model X` (flag form) instead of `vllm serve X`
+        // (positional) must still be recognized.
+        let cmd = "vllm serve --model episod/tt-tnt-1024 --port 8000";
+        let s = parse_direct_vllm("vllm", cmd, ENVIRON_VLLM_SERVE, 1)
+            .expect("flag-form --model must still be detected");
+        assert_eq!(s.model.as_deref(), Some("episod/tt-tnt-1024"));
+        assert_eq!(s.port, Some(8000));
+    }
+
+    #[test]
+    fn recognizes_a_full_path_vllm_binary_not_just_the_bare_name() {
+        // A venv console-script's argv[0] is commonly a full path
+        // (e.g. `/home/ttuser/venv-vllm-standalone/bin/vllm serve ...`), not the
+        // bare token "vllm" — real deployments look like this, not like the
+        // other tests' bare-name fixtures.
+        let cmd = "/home/ttuser/venv-vllm-standalone/bin/vllm serve episod/tt-tnt-1024 --port 8000";
+        let s = parse_direct_vllm("vllm", cmd, ENVIRON_VLLM_SERVE, 1)
+            .expect("full-path vllm binary must still be recognized");
+        assert_eq!(s.model.as_deref(), Some("episod/tt-tnt-1024"));
     }
 }

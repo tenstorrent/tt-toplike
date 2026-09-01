@@ -386,7 +386,7 @@ Command bar verbs (type `/` then the verb): `/fps <1–120>`, `/datafps <1–30>
 
 ### Inference Server Monitor (`[i]`)
 
-Press `i` from any view to open the flagship **Inference Server Monitor** — one unified "snake" that reflects your whole fleet through three telemetry-true states. `i` while in it jumps to Insights (a quick back-and-forth); `Esc` backs out to wherever you came from; and it also sits at the tail of the `v` rotation. Press `l` for the legend, `/explain` for the mapping overlay.
+Press `i` from any view to open the flagship **Inference Server Monitor** — one unified "snake" that reflects your whole fleet through three telemetry-true states. It detects both a Docker-wrapped tt-inference-server container and a direct (non-Docker) `vllm serve`/`tt-model serve`-launched process, and monitors either the same way. `i` while in it jumps to Insights (a quick back-and-forth); `Esc` backs out to wherever you came from; and it also sits at the tail of the `v` rotation. Press `l` for the legend, `/explain` for the mapping overlay.
 
 - **Cold** (nothing loading or serving) — a hungry snake roams a drifting starfield of the **model catalog**. The catalog is a bundled compatibility snapshot (the offline floor) refreshed in the background from Tenstorrent's live copy, and the footer tallies `N of M models run on your <arch>` for the silicon you actually have.
 - **Loading** (a model is compiling/loading) — the snake coils into a boxed loading journey through `compile → load → ready` in a synthwave palette (cyan→violet→magenta→pink), capped by a hot-pink burst the instant the model reports Ready. A footer band explains what the current phase is actually doing (drawn from in-tree education copy) and shows live progress — **compiled** kernels and **loaded** weight shards side by side, so you can watch the compile count climb first and the load count follow.
@@ -399,7 +399,7 @@ loading ▓▒░ compile → load → ready ░▒▓  compiled 1,658 · loaded
 serving ▶───────  tok/s ▁▂▅▇█▅▂  ⚔ swimlanes · live vLLM /metrics
 ```
 
-The snapshot the snake reads is a local Docker/HTTP probe of *this* machine. Under `--remote`, if the publisher streams the `tt_toplike` extension the `[i]` view describes the **remote** box's inference; otherwise it falls back to this machine's probe with a `LOCAL` label.
+The snapshot the snake reads is a local probe of *this* machine — either a Docker/HTTP probe of a running tt-inference-server container, or a `/proc`+HTTP probe of a direct (non-Docker) `vllm serve`/`server_example_tt.py` process, whichever is detected. Under `--remote`, if the publisher streams the `tt_toplike` extension the `[i]` view describes the **remote** box's inference; otherwise it falls back to this machine's probe with a `LOCAL` label.
 
 ### HivemindSweeper — the signs-of-life sniffer (`~`)
 

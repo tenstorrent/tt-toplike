@@ -4360,3 +4360,504 @@ the four backends:
 *Phase 25 status: **COMPLETE** — shipped as v0.8.0. Safe (sysfs/hybrid/json)
 and luwen paths all verified on 4× Blackhole p300c; luwen remains explicit-only
 (never auto-detected) and unverified on Wormhole/Grayskull and under load.*
+
+---
+
+## Phase 27 — Direct (non-Docker) vLLM-on-TT detection (August 27, 2026, v0.9.0)
+
+**Origin**: the `[i]` Inference Server panel (Phase 22/25's monitoring
+pipeline) only ever detected TT inference servers launched via `docker run`
+— keyed by container name, probed with `docker exec`/`docker stats`. A
+direct vLLM launch (`tt-model serve` from `tt-tnt`, which execs either
+`vllm serve <model> ...` or `python3 server_example_tt.py --model <model>
+...` directly, no Docker involved) was invisible to it — the generic
+`inference_match()` classifier tagged it `"vllm"` for the plain process
+table, but it never reached the rich phase/progress/metrics panel. The code
+had already anticipated this gap: `Source` carried a commented-out `Host {
+unit_or_pid: String }` trail variant, and `ContainerProbe`'s doc comment
+said "a host/systemd impl for non-Docker installs would implement this same
+trait." Built via the full brainstorming → spec → plan → subagent-driven-TDD
+pipeline: design doc at
+`docs/superpowers/specs/2026-08-27-direct-vllm-detection-design.md`, plan at
+`docs/superpowers/plans/2026-08-27-direct-vllm-detection.md`.
+
+### What changed
+
+- **`Source::Host { pid }`** joins the existing `Source::Docker { container
+  }`. A new `service_key()` helper derives a stable identity/dedup key for
+  either variant — `container.clone()` for Docker, `"host-vllm-<pid>"` for a
+  bare process — and replaced every place that used to irrefutably
+  destructure `Source::Docker` (adding the variant turned those into compile
+  errors, which is exactly what caught every call site that needed updating).
+- **`parse_direct_vllm`** (pure, in `detect.rs`) recognizes both real launch
+  shapes found in `tt-tnt`'s `docs/serving-with-tt-kernel.md`/`AUTOFIX.md`:
+  `vllm serve <model> ...` (matched by `ends_with("vllm")` on the binary
+  token, not exact-match — a venv console-script's argv[0] is commonly a
+  full path) and `server_example_tt.py --model <model> ...`. Requires
+  `MESH_DEVICE` or `TT_METAL_HOME` present in the process's own environment
+  before treating it as TT-backed — the equivalent of `parse_inference_server`'s
+  `uses_tt_device` check, which has no `/dev/tenstorrent` cmdline analogue for
+  a bare host process. Recognizes `--port <N>` and `--port=<N>`, and falls
+  back to `--model <X>`/`--model=X` when there's no positional model token.
+- **`SystemProbe`** wraps the existing `DockerProbe` and dispatches every
+  `ContainerProbe` call by the identity key's shape: a `"host-vllm-<pid>"`
+  key reads `/proc` directly and runs local `ps`/`sh`, scoped to the launched
+  pid's *whole process tree* (a new `process_tree_pids` walker, cycle-guarded
+  with a `HashSet`) — a bare process has no cgroup/PID-namespace boundary the
+  way a Docker container does, so a `g++` compile child or a TT device
+  worker subprocess would otherwise be invisible to CPU/RSS aggregation.
+  Anything else forwards unchanged to the wrapped `DockerProbe`, so the
+  Docker path is untouched byte-for-byte (confirmed in the final review: no
+  surviving `Source::Docker`-only assumption anywhere in the crate).
+- **Host-keyed liveness doesn't guess a process name.** The Docker path's
+  `contains_python` heuristic (checks `ps`'s `comm` column for `"python"`)
+  was calibrated for a `python3` entrypoint and would have misread a
+  compiling/loading `vllm serve` as `Down` for the entire silent window this
+  feature exists to illuminate — a pip console-script's `comm` is the
+  script's own name (`vllm`), not `python3`. Fixed during final review: for a
+  host key, "the tree-scoped `ps` returned at least one data row" is
+  sufficient liveness evidence, since that invocation is already scoped to
+  exactly the right pids.
+- **`host_exec` allowlists env vars instead of copying the target's
+  environment wholesale.** Also caught in final review: on a shared,
+  root-run box, blindly forwarding a locally-launched process's full
+  environment into the monitor's own spawned shell (to run the
+  `KERNEL_FIND_CMD`/`LOADED_FIND_CMD` probes) would have let a local user
+  plant `LD_PRELOAD` and have it honored by a root process. Now forwards
+  only `TT_METAL_HOME`/`CACHE_ROOT`/`HOME` (exactly what those two shell
+  strings expand) plus a `PATH` fallback.
+- Everything downstream — `fold_tick`, `Phase::derive`, `is_alarm`,
+  `estimate_progress`, `parse_vllm_metrics`, `service_for` — needed zero
+  changes, since it already operated on the backend-agnostic
+  `ServiceState`/`TickSample` shapes with no knowledge of `Source`.
+
+### Process notes
+
+- Built with `subagent-driven-development`: 7 tasks, each with its own
+  fresh-implementer + task-reviewer pass, plus a final whole-branch review
+  on the most capable available model.
+- **A plan defect surfaced mid-execution, not during brainstorming**: the
+  plan's own Global Constraints section reasoned that `process_tree_pids`
+  needed no extra `#[cfg]` gating beyond `detected_inference_servers()`'s
+  existing one, because `SystemProbe`'s host branch is "only ever reached at
+  runtime" via a `Source::Host` value — true, but irrelevant to Rust, where
+  an unconditionally-*called* `#[cfg(target_os = "linux")]` function fails
+  to compile on other targets regardless of whether it's ever invoked. Broke
+  the crate on the macOS/Windows CI jobs; caught by the Task 6 reviewer
+  running an actual cross-target `cargo check`, not by inference.
+- **The final whole-branch review earned its keep twice over**: beyond the
+  cross-target compile break (already fixed at the task level by the time
+  final review ran), it independently found the `contains_python` liveness
+  mismatch and the `host_exec` environment-inheritance security gap — both
+  invisible to any single task's review, since each task's diff looked
+  correct in isolation and the problem only exists in how the pieces compose
+  across the whole feature.
+- **Per-task review also caught a CI-invocation-specific bug no test run
+  would show**: Task 1 imported `Source` at module level in `monitor.rs`,
+  but every actual use was inside `#[cfg(test)] mod tests` — genuinely
+  unused under CI's exact `cargo clippy --lib --features tui -- -D
+  warnings` (no `--tests`), invisible under `cargo test --lib` (which
+  compiles `cfg(test)` code). Silently CI-red-eligible from Task 1 through
+  Task 6; caught only because the controller independently ran the literal
+  CI command before signing off on the "final" task.
+
+> ⚠️ **Not hardware-verified.** No box with TT hardware and a real
+> `tt-model serve` launch was available during this development session.
+> See the spec's manual-verification checklist before relying on this in
+> production — in particular the host-liveness heuristic and the
+> `CACHE_ROOT`/weight-shard-loading signal, both of which the reasoning
+> above is confident about but only real hardware can confirm.
+
+---
+
+*Phase 27 status: **COMPLETE, pending hardware verification** — shipped as
+v0.9.0. All automated review gates (7 task reviews + 1 final whole-branch
+review + its one fix wave) passed; no manual verification against real TT
+hardware performed.*
+
+---
+
+## Phase 28 — Per-GDDR-channel telemetry across every memory visualization (August 28, 2026, v0.10.0)
+
+**Origin**: tt-smi ≥ 6.3.0 introduced a new `gddr_telemetry` block per device:
+per-channel training-pass, BIST-pass, harvested/enabled, dual-location
+temperature (top/bottom), and directional correctable/uncorrectable ECC
+counters. Previously the only GDDR signal any backend exposed was the
+packed, whole-board aggregates (`gddr_temps`, `gddr_corr_errs`,
+`gddr_uncorr_errs`) and a 4-bit-per-channel `DDR_STATUS` register — coarser
+than what the hardware can now report. User: *"let's add it in to this
+branch [feat/direct-vllm-detection] please. specialize in making the data
+flow into all of our memory-sensitive visualizations... you should expect
+to see some new magic in everything as a result of collecting this data
+when tt-smi v6.3.0 and above is present. pizzaz!"* Built via
+brainstorming → writing-plans → subagent-driven-development (9 tasks, spec
+at `docs/superpowers/specs/2026-08-28-gddr-telemetry-design.md`, plan at
+`docs/superpowers/plans/2026-08-28-gddr-telemetry.md`), on the same branch
+as Phase 27 (already carrying an open PR).
+
+### What changed
+
+- **Model + parsing (Tasks 1-2)**: `GddrChannel`/`GddrTelemetry` added to
+  `models/telemetry.rs`; `SmbusTelemetry.gddr_telemetry: Option<GddrTelemetry>`.
+  tt-smi's JSON quotes every numeric leaf except `channel` (bare number) and
+  `harvested`/`enabled` (bare bool) — `training`/`bist` are `"pass"`/other
+  strings, not booleans. A malformed channel entry is dropped, never
+  fabricated as zeroed, matching this codebase's existing
+  one-malformed-entry-costs-only-that-entry convention.
+- **Blend guard (Task 3)**: `smbus_smooth::apply_ema` copies the new field
+  through unsmoothed (counters are monotonic, `max_gddr_temp`-style
+  smoothing would understate peaks, bitmasks can't be interpolated).
+  `SmbusTelemetry` gained `#[derive(PartialEq)]` so the existing
+  field-completeness guard test collapsed to one `assert_eq!` — this
+  codebase has silently frozen an unlisted field in this exact blend
+  function twice before (Phase 25), so the guard was worth strengthening,
+  not just satisfying.
+- **Mock fabrication (Task 4)**: `MockScenario::QuadGalaxy` harvests channel
+  3 and BIST-fails channel 5 (device_idx % 17 == 0), so both new visual
+  states are reachable in a demo/test run.
+- **Five consumers (Tasks 5-9)**: chip portrait (DRAM cells: harvested → dim
+  `·`, BIST-fail → red `✗`), Memory Flow's DDR wall (real per-channel
+  training/BIST instead of decoding the packed register), Memory Castle's
+  compact-tier gate row (one glyph per real channel instead of per pair),
+  Starfield's DDR planets (real temperature drives brightness instead of a
+  generic board-wide power/current proxy), and the Insights sidebar (GDDR
+  temp row prefers real per-channel readings; new trained/harvested/
+  BIST-fail summary row; ECC row sums real per-channel directional counters).
+  Every site falls back to today's exact behavior when `gddr_telemetry` is
+  absent or its channel list is empty — no version-string gating anywhere,
+  purely `Option`/`Vec::is_empty()`-driven.
+
+### Position-vs-identity, again
+
+This codebase's own documented bug class (Phase 25/26: a Vec position
+treated as a stable identity) recurred and was caught mid-plan: Task 5's
+first cut used `channels.get(idx)`; the reviewer required
+`channels.iter().find(|c| c.channel == idx)` instead, since a dropped
+malformed channel would otherwise silently misattribute a neighbor's state.
+Tasks 6 and 8 applied the same fix proactively without being told, having
+read the file first per dispatch instructions — the fix propagated cleanly
+across all five consumers with, per the final whole-branch review's
+explicit grep sweep, zero survivors of the positional form anywhere in the
+tree.
+
+### What the whole-branch review caught that no task-scoped review could
+
+Each of the 9 tasks passed its own scoped review (three needed one fix
+round each: Task 3 for the `PartialEq` derive above, Task 5 for the
+identity-lookup fix plus a missing BIST-fail test, Task 7 for test-coverage
+gaps and a stale doc comment on `memory_castle.rs`'s DDR gate row — the
+fallback path itself was independently mutation-tested clean at every
+stage). The final whole-branch review then found four things invisible to
+any single file's diff:
+
+- **The new Insights "GDDR" summary row measured 47 columns in the
+  sidebar's 30-column budget** and silently clipped its own headline
+  BIST-fail count on real hardware — `Paragraph` clips instead of wrapping,
+  exactly the failure mode `eth_dot_budget` was built to prevent for the
+  ETH row (Phase 25), and the width guard's own `worst_case()` test fixture
+  had simply never been extended to set `gddr_telemetry`, so it measured
+  everything except the row that broke.
+- Same stale fixture meant the sidebar's one-row headroom invariant
+  (`rows.len() < INTERIOR_H`) was fully consumed once the new row was
+  accounted for, with every guard still green — the next row added
+  anywhere would have clipped silently.
+- **Starfield's DDR planets were inconsistent on Blackhole**: `gddr_telemetry`
+  reports 8 real channels but `device.memory_channels()` is 12, so 8 planets
+  rendered real per-channel state while the other 4 fell back to the old
+  generic power/current formula right next to them — a direct violation of
+  the spec's own bolded constraint never to derive this loop bound from
+  `memory_channels()`, and a visual regression on the exact hardware this
+  feature targets (pre-branch, all 12 were uniform).
+- **A spec requirement was dropped at plan-writing time**: the spec required
+  the GDDR ECC row to source its sums from per-channel directional data when
+  present; the plan instead said "the ECC row is untouched by this task,"
+  and the task-scoped reviewer verified that as a *positive*. Net result
+  before the fix: `corr_rd`/`corr_wr`/`uncorr_rd`/`uncorr_wr` were parsed,
+  modelled, mocked, and blended — and read by nothing.
+
+All four were fixed in the one allowed fix wave (5 commits — row-width +
+fixture/height fix, starfield fallback restructuring, ECC per-channel
+sourcing, a Memory Castle legend addition, a doc-comment correction) and
+independently re-verified, including a mutation test on the starfield fix's
+discriminating assertion (revert the fix, confirm the new test fails with
+the exact predicted values, restore). Two Minor findings were deferred as
+genuinely benign: `memory_flow.rs`'s DDR-wall channel-status function has
+the same `memory_channels()` loop-bound pattern as the starfield finding,
+but degrades safely (`map_or(0, _)`) rather than rendering inconsistently;
+and `defrag.rs` — a sixth, pre-existing per-GDDR-channel consumer that
+neither the spec nor the plan ever named — still runs entirely on the old
+packed/pair-resolution data and was left alone as out of scope.
+
+> ⚠️ **Not hardware-verified.** No box running tt-smi ≥ 6.3.0 was available
+> during this session. Two items specifically need a real box per the
+> re-review: the Insights row's column math is computed from the format
+> string, not observed on a real p300c: and the ECC row now prefers the
+> per-channel source unconditionally whenever `gddr_telemetry` is present
+> and non-empty — if a real 6.3.0 build ever emits all-zero per-channel
+> counters as placeholders while the packed aggregate carries genuine
+> counts, the row would hide errors it used to show. Both are on the
+> spec's manual-verification checklist alongside the general "does this
+> look right on a live box" pass.
+
+---
+
+*Phase 28 status: **COMPLETE, pending hardware verification** — shipped as
+v0.10.0. All 9 tasks passed scoped review (3 with one fix round each); the
+final whole-branch review found 1 Critical + 3 Important findings, all
+fixed in the one allowed fix wave and independently re-verified (including
+a mutation test); no manual verification against real TT hardware
+performed.*
+
+---
+
+## Phase 29 — Defrag: real per-channel GDDR data + an idle-EVICT bug it surfaced (August 28, 2026, v0.10.1)
+
+**Origin**: after Phase 28 landed, tt-smi ≥ 6.3.0 was actually installed and
+verified live on this box's 4× p300c (all four emit a real `gddr_telemetry`
+block matching the shape Phase 28 was built against). User: *"Did anything
+change with the DEFRAG view these signals can be used for? (And if not,
+being a memory focused module... what can we do?)"* — Phase 28's own final
+review had flagged Defrag as a sixth, untouched consumer of this data
+(deferred as out of scope). Brainstormed as a **bounded** task (existing
+file, existing flow) and implemented directly — no SDD ledger, no spec file.
+
+### What changed
+
+`src/animation/defrag.rs`'s `Channel` struct now sources `trained`/
+`enabled`/`temp_ema`/error counts from real per-channel `gddr_telemetry`
+when present, falling back to the exact pre-existing packed-pair-resolution
+decode (`DDR_STATUS` nibble, `GDDR_x_y_TEMP`, `gddr_corr_errs`) otherwise —
+same `Option`-presence-gated pattern as every other Phase 25/28 consumer,
+no version-string check. Two genuinely new visual states, since real data
+can express things the packed registers never could:
+
+- **`bist_fail`**: a channel that fails BIST renders as a static, permanent
+  dim-red "bad sector" row — distinct from both the harvested hatch and a
+  transient error flash. A harvested channel is never also flagged
+  `bist_fail` (there's nothing to BIST on a channel that doesn't exist).
+- **`uncorr_flash`**: uncorrectable errors (no packed-register equivalent at
+  all before this) flash brighter and longer than a correctable flash,
+  mirroring the Insights sidebar ECC row's red/amber severity convention
+  from Phase 28.
+
+Legend and module doc comment updated to describe both. Regression tests
+(a `FakeBackend` test fixture, since none of this file's existing tests
+drove `update()` through a real backend before) cover: real data overriding
+the packed pair decode at true per-channel resolution (not just per-pair),
+real temp overriding the packed pair-temp, the bad-sector state rendering
+distinctly and never co-occurring with harvested, uncorrectable flash
+severity/duration, and the fallback path being byte-identical when
+`gddr_telemetry` is absent.
+
+### The idle-EVICT bug this surfaced
+
+User, after installing and testing: *"it looks like we're evicting more
+often than before, even on idle."* Investigated per
+`superpowers:systematic-debugging` rather than guessing: the diff for the
+change above touches zero EVICT-relevant state (`power_ema`, `idle_power`,
+`saw_load`, `running_since`, `evict_eligible()` itself all untouched — only
+per-channel `trained`/`enabled`/`temp`/error *sourcing* changed), and
+`DefragVis` persists across frames/mode-switches within one run (only
+resets on process restart). Rather than trust that analysis blind, built a
+binary from the commit immediately before the Defrag change (`git worktree
+add --detach` at the parent commit, built in isolation, installed alongside
+the current binary under a different name) and had the user A/B-test both
+on the same idle hardware — **both evicted repeatedly**, isolating the bug
+as pre-existing and entirely unrelated to the `gddr_telemetry` work.
+
+Root cause: `idle_power` (the EVICT heuristic's baseline) is captured at
+three different phase-transition sites, and two of them use the smoothed
+`power_ema` — but the Idle/Init → Running transition captured it from a
+single raw, unsmoothed `power` sample instead. Since Blackhole's `aiclk` is
+almost always ≥ 200, that transition fires on nearly every tick where power
+clears the idle floor, so any one noisy low sample could set an
+artificially-low baseline; ordinary idle jitter afterward could then both
+arm `saw_load` (exceed `idle_power × 1.5`) and satisfy the evict condition
+(fall back within `idle_power × 1.20`) — evicting a device that never
+loaded anything. Fixed by using `power_ema` at that site too, matching the
+other two. Regression test constructs a device with a stable ~15 W
+`power_ema` and a single noisy 9 W raw sample at the transition tick;
+confirmed red against the old raw-sample capture (`idle_power` landed at
+9), green after the fix (`idle_power` tracks the ~14.5 W smoothed value).
+
+> ⚠️ **Not hardware-verified against a real BIST-fail or harvested channel**
+> — this box's 4× p300c all report healthy channels, so the two new visual
+> states were verified only via the `FakeBackend` unit tests, not observed
+> live. The `gddr_telemetry`-sourced trained/enabled/temp path *is*
+> hardware-verified (confirmed against the same live tt-smi 6.3.0 dump used
+> to verify Phase 28), and the idle-EVICT fix is hardware-verified via the
+> A/B comparison above.
+
+---
+
+*Phase 29 status: **COMPLETE** — shipped as v0.10.1. Bounded task (no SDD
+ledger); real-data sourcing hardware-verified live, bad-sector/uncorrectable
+states unit-tested only (no failing hardware to hand), idle-EVICT fix
+hardware-verified via A/B comparison.*
+
+---
+
+## Phase 30 — Inference roster: dedup multiprocessing-worker duplicates (August 28, 2026, v0.10.2)
+
+**Origin**: user shared a screenshot (`~/Pictures/tt-toplike-inference.png`) of
+a real `tt-model serve` launch (`tt-tnt`'s wrapper around a direct vLLM-on-TT
+serve, across all 4 chips of a Blackhole box) — the `[i]` Inference Server
+roster showed *"inference services (26, +18 more)"*, with ~8 visible rows all
+reading `down tt-tnt-1024` and only one correctly reading `compiling 0:15`.
+This is the Phase 27 direct-vLLM-detection feature's first real hardware
+exposure, and the "not yet hardware-verified" caveat from that phase turned
+out to be hiding a real bug.
+
+**Root cause**: `detected_inference_servers()` (`src/workload/host_processes.rs`)
+scans every process in the snapshot and builds one `InferenceServer` per
+matching process, deduped only by `service_key()` — `"host-vllm-<pid>"` for a
+host launch, unique per pid. A real vLLM-on-TT launch across multiple chips
+forks several worker/engine-core processes (one per tensor-parallel rank,
+etc.); `fork()` preserves the parent's full cmdline *and* environment in
+`/proc/<pid>/cmdline`, so each worker independently matches
+`parse_direct_vllm`'s heuristic (the same `MESH_DEVICE`/`TT_METAL_HOME`-gated
+`vllm serve <model>` shape) too. Per-pid keying meant every worker counted as
+its own distinct "service" — confirmed these weren't stale zombies either
+(`remove_dead: true` is already set on the sysinfo refresh), just genuine
+live siblings of one real launch.
+
+**Fix**: `detected_inference_servers()` now builds a pid→parent map from
+`sysinfo::Process::parent()` alongside the existing classification pass, and
+a new pure helper `is_match_root(pid, parent_of, matched)` walks a matching
+pid's ancestry — if any ancestor also matches, the descendant is dropped,
+keeping only the root of each match family. `is_match_root` is generic over
+any `Eq + Hash + Copy` id (not tied to `sysinfo::Pid`), so it's directly
+unit-tested with synthetic parent/match maps rather than needing real forked
+processes: root-with-matching-children, root-with-non-matching-parent,
+matching-grandparent-through-a-non-matching-intermediate-hop, and a
+cycle-defense bound (32 hops — a real process tree is never anywhere near
+this deep). All four tests were mutation-checked (temporarily hard-coded
+`is_match_root` to always return `true`; the two descendant-rejecting tests
+failed as expected, confirming they're real guards, not tautologies).
+
+> Hardware-verified indirectly: the bug was found from a live screenshot, and
+> the root-cause mechanism (fork-preserved cmdline/environ, confirmed
+> non-stale via `remove_dead`) is confirmed against real process semantics —
+> but the fix itself (rebuilt binary against this exact live multi-worker
+> launch) was not re-observed before this release. Worth a follow-up look
+> next time a `tt-model serve` launch is live on hardware.
+
+---
+
+*Phase 30 status: **COMPLETE, fix not re-observed live** — shipped as
+v0.10.2. Bounded bug fix (no SDD ledger); `is_match_root` mutation-tested;
+full suite green.*
+
+---
+
+## Phase 31 — `/code-review` findings: PATH injection, GDDR gaps, redundant I/O (August 28, 2026, v0.10.3)
+
+**Origin**: ran `/code-review medium --fix --comment` against the whole
+branch. The review agent's fix/comment steps stalled (two verification
+sub-agents' results were lost across a session gap), so it returned six raw
+findings — four independently confirmed, two flagged plausible-but-
+unverified — instead of applying fixes. Worked through all six by hand:
+verified each, fixed what was real, and explicitly deferred/discussed scope
+for the two that weren't simple bug fixes.
+
+### 1. PATH injection in `host_exec` (Critical — confirmed real)
+
+`host_exec` (`src/workload/inference_server/probe.rs`) forwarded the
+*target process's own* `PATH` — read from `/proc/<pid>/environ`, of a
+process whose only gate to reach this code path
+(`MESH_DEVICE`/`TT_METAL_HOME` present in its own environment) is entirely
+self-reported — onto the `sh` it spawned via `Command::new("sh")`, a
+bare-name lookup. The review flagged this as merely "plausible," needing a
+check against actual `std::process::Command` semantics. Verified
+empirically before touching any code: wrote a throwaway Rust program that
+placed a fake `sh` on a `PATH` set only via `.env()` on the builder (never
+the process's own OS-level `PATH`) and confirmed the fake binary executes.
+So `Command::new("sh")` resolves via whatever `PATH` ends up on the
+*builder*, not the calling process's real environment — the vulnerability
+is real, and structurally identical to the exact `LD_PRELOAD`-style attack
+this same function's `HOST_EXEC_FORWARDED_VARS` allowlist was built to
+prevent (Phase 27) — `PATH` had simply slipped through unguarded.
+
+Fixed by invoking the interpreter via an absolute path (`/bin/sh`, never a
+bare-name lookup) and dropping the target-PATH-forwarding branch entirely —
+always a fixed, conservative `PATH` (`/usr/bin:/bin:/usr/local/bin`,
+sufficient for the only two commands the shell probes ever run, `find` and
+`wc`). TDD'd with a real spawned process, not a mock: a first draft of the
+regression test planted a fake `find` instead of a fake `sh` and passed
+vacuously against the *pre-fix* code too — with no fake `sh` present, the
+buggy `Command::new("sh")` failed to resolve at all under the attacker's
+narrow `PATH`, so the exploit path was never actually exercised. Rewritten
+to fake `sh` itself; confirmed red against the vulnerable code (the fake
+`sh`'s marker string came back in the output), green after the fix.
+
+### 2. Four GDDR-telemetry correctness gaps (Important — all confirmed)
+
+All in the same family as Phase 28/29's own fallback bugs — real data
+present but degrading incorrectly instead of falling back cleanly:
+
+- **`chip_portrait.rs`**: the DRAM column→channel index mapping capped at
+  `idx >= 8`, a leftover from the packed 8-channel `DDR_STATUS`-bitmask era,
+  copied onto the new `gddr_telemetry` lookup even though real channels are
+  found by `.channel` id via `.find()` (which already handles absence
+  correctly). The cap only discarded real fault/temperature data for
+  Blackhole's channels 8–11. Removed at both the glyph and color sites.
+- **`starfield.rs`**: DDR planet activity/color checked `harvested` but not
+  `enabled`, unlike `memory_flow.rs`/`memory_castle.rs`'s established
+  `c.harvested || !c.enabled` convention (Phase 28) — an
+  administratively-disabled-but-not-harvested channel rendered as a live,
+  glowing planet instead of inert, an inconsistency across visualizations
+  for identical hardware state.
+- **`ui/tui/mod.rs`**: the GDDR temp and ECC rows only fell back to the
+  packed-aggregate reading when `gddr_telemetry` was `None`/empty — not when
+  present but yielding nothing usable (every channel's temp fields `None`,
+  or every non-harvested channel's ECC counters reading zero). `Some(vec![])`
+  / `Some((0,0))` isn't the same as "no real data"; both rows now fall back
+  whenever the real-data result didn't actually produce anything.
+- **`models/telemetry.rs`/`backend/json.rs`**: `GddrChannel`'s four ECC
+  counters were plain `u64`, parsed via `str_u64(...).unwrap_or(0)` —
+  conflating a missing/malformed field with a genuine zero reading. The
+  review flagged this as plausible but noted the code's own doc comment
+  documented it as an intentional simplification, and a proper fix meant
+  widening the type to `Option<u64>` across ~5 consumer files — bigger scope
+  than the other three. Asked explicitly before doing it; user chose to do
+  the full refactor. `temp_top`/`temp_bottom` already used this pattern, so
+  every consumer just added its own `.unwrap_or(0)` at the point of use.
+
+Every fix has a dedicated regression test confirmed red against the
+pre-fix behavior and green after (temporarily reverting the fix in place,
+running the test, restoring — never trusting a test's color without seeing
+both).
+
+### 3. Redundant per-tick probe I/O (Minor — confirmed, fixed after asking)
+
+`build_sample`'s sequence for one host-keyed service independently re-read
+`/proc/<pid>/environ` up to four times and re-walked `process_tree_pids`
+twice per tick, spawning two separate `ps` subprocesses along the way —
+flagged as a background-thread perf nitpick, not correctness/security.
+Asked whether it was worth the risk of touching the same file right after
+the security fix; user said fix it too. Added `HostProbeCache`, a
+short-TTL (500ms — long enough to cover one tick's calls, short enough to
+be stale well before the next) per-pid memoization inside `SystemProbe`
+(plain `RefCell`, not `Mutex` — the probe runs on one dedicated background
+thread, confirmed by reading `spawn_with_probe`, never called
+concurrently). `host_exec`/`host_stats_text`/`host_top_proc_cmd` now take
+pre-fetched environ text / pid lists as parameters instead of re-deriving
+them from a bare pid. Mutation-tested: temporarily dropped the cache's
+pid-key comparison (so any cached entry would satisfy any pid), and the new
+regression test (two real spawned processes with distinct environments,
+interleaved reads) failed exactly as expected.
+
+Both cross-compile targets (`x86_64-pc-windows-gnu`,
+`x86_64-apple-darwin`) checked clean after all of the above — the
+non-Linux `process_tree_pids` fallback and the cache/`SystemProbe`
+structure are unaffected by the `#[cfg(target_os = "linux")]` gating that
+already existed.
+
+---
+
+*Phase 31 status: **COMPLETE** — shipped as v0.10.3. All 6 code-review
+findings resolved: 1 security fix (empirically verified vulnerable-then-
+fixed), 4 correctness fixes (each red/green tested), 1 perf fix
+(mutation-tested). Two findings (#3's refactor scope, #6's fix-or-defer)
+explicitly discussed with the user before acting rather than silently
+decided. Full suite + fmt + clippy + both cross-compile targets green.*
