@@ -2842,7 +2842,7 @@ fn eth_dot_budget(total: Option<u32>, count_cols: usize) -> (u32, String) {
 ///   rounding-cliff class of bug bit `format_bandwidth` twice during v0.8.0;
 ///   the boundaries are pinned in
 ///   `format_err_count_is_never_wider_than_four_columns`.
-fn format_err_count(n: u32) -> String {
+fn format_err_count(n: u64) -> String {
     // Small counts are reported verbatim — "3 corr" must never become "0.0K".
     if n < 1000 {
         return n.to_string();
@@ -2850,7 +2850,7 @@ fn format_err_count(n: u32) -> String {
 
     // Unit letters, applied after each division. Three tiers is enough: a u32
     // tops out at 4.29e9, which is the first G-tier value.
-    const UNITS: [&str; 4] = ["", "K", "M", "G"];
+    const UNITS: [&str; 7] = ["", "K", "M", "G", "T", "P", "E"];
     // 999.5 is the `{:.0}` rounding cliff (see the doc comment); dividing at
     // that point rather than at 1000.0 is what keeps the mantissa <= 3 columns.
     const PROMOTE_AT: f64 = 999.5;
@@ -2907,7 +2907,7 @@ fn format_err_count(n: u32) -> String {
 /// The uncorrectable count always comes first and keeps its own word, so the
 /// caller's red/amber styling plus reading order still distinguish 1
 /// uncorrectable from 1 correctable at a glance.
-fn ecc_row_content(uncorr: u32, corr: u32) -> String {
+fn ecc_row_content(uncorr: u64, corr: u64) -> String {
     use unicode_width::UnicodeWidthStr;
 
     let budget = STATS_CONTENT_W.saturating_sub(STATS_LABEL_W);
@@ -8136,7 +8136,7 @@ mod stats_sidebar_tests {
         assert_eq!(format_err_count(999_600), "1.0M");
         assert_eq!(format_err_count(999_950), "1.0M");
         // Top of the type.
-        assert_eq!(format_err_count(u32::MAX), "4.3G");
+        assert_eq!(format_err_count(u32::MAX as u64), "4.3G");
     }
 
     /// Width proof for [`format_err_count`]: **no** `u32` may render wider than
@@ -8161,7 +8161,7 @@ mod stats_sidebar_tests {
         /// The bound stated in `format_err_count`'s doc comment.
         const MAX_COLS: usize = 4;
 
-        let check = |n: u32| {
+        let check = |n: u64| {
             let s = format_err_count(n);
             assert!(
                 UnicodeWidthStr::width(s.as_str()) <= MAX_COLS,
@@ -8174,19 +8174,17 @@ mod stats_sidebar_tests {
         };
 
         // Dense low range.
-        for n in 0..=20_000u32 {
+        for n in 0..=20_000u64 {
             check(n);
         }
 
         // Tier boundaries and rounding cliffs, ±64 columns of slack each. The
         // cliff multipliers are scaled by 100 to stay in integer arithmetic.
-        for base in [1_000u64, 1_000_000, 1_000_000_000] {
+        for base in [1_000u64, 1_000_000, 1_000_000_000, 1_000_000_000_000] {
             for cliff_x100 in [100u64, 995, 1_000, 9_995, 10_000, 99_950, 99_995] {
                 let center = base * cliff_x100 / 100;
                 for n in center.saturating_sub(64)..=center + 64 {
-                    if n <= u32::MAX as u64 {
-                        check(n as u32);
-                    }
+                    check(n);
                 }
             }
         }
@@ -8195,16 +8193,20 @@ mod stats_sidebar_tests {
         // in a couple of thousand iterations.
         let mut n: u64 = 1;
         while n <= u32::MAX as u64 {
-            check(n as u32);
+            check(n);
             n += (n / 97).max(1);
         }
 
-        check(u32::MAX);
-        check(u32::MAX - 1);
+        check(u32::MAX as u64);
+        check(u32::MAX as u64 - 1);
+        // The counters are u64, so the bound has to hold at the top of that
+        // type as well, not just where the old u32 signature stopped.
+        check(u64::MAX);
+        check(u64::MAX - 1);
     }
 
     /// The ECC row content must fit its 22-column budget for **every** pair of
-    /// `u32` counts, and must keep the uncorrectable count first.
+    /// `u64` counts, and must keep the uncorrectable count first.
     ///
     /// Regression: this row was a bare `format!("{} uncorr · {} corr", ..)` with
     /// no budget, so `1 uncorr / 1_234_567 corr` produced 23 columns of content
@@ -8225,10 +8227,13 @@ mod stats_sidebar_tests {
         // The overflow case: counts abbreviate rather than truncate.
         assert_eq!(ecc_row_content(1, 1_234_567), "1 uncorr · 1.2M corr");
         // Both counts wide: the `·` is spent on digits (candidate 3).
-        assert_eq!(ecc_row_content(u32::MAX, u32::MAX), "4.3G uncorr 4.3G corr");
+        assert_eq!(
+            ecc_row_content(u32::MAX as u64, u32::MAX as u64),
+            "4.3G uncorr 4.3G corr"
+        );
 
-        let interesting = [
-            0u32,
+        let interesting: [u64; 19] = [
+            0u64,
             1,
             3,
             9,
@@ -8241,8 +8246,14 @@ mod stats_sidebar_tests {
             999_999,
             1_234_567,
             123_456_789,
-            u32::MAX - 1,
-            u32::MAX,
+            u32::MAX as u64 - 1,
+            u32::MAX as u64,
+            // The type is u64 now, so the 4-column bound has to hold there
+            // too — a table stopping at "G" would render these as eleven.
+            1_000_000_000_000,
+            1_000_000_000_000_000,
+            u64::MAX / 2,
+            u64::MAX,
         ];
         for &uncorr in &interesting {
             for &corr in &interesting {
