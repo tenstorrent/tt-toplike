@@ -119,6 +119,20 @@ fn model_arg(toks: &[&str]) -> Option<String> {
     None
 }
 
+/// Value of a `--flag <N>` / `--flag=<N>` u16 port argument.
+///
+/// Both spellings are valid because every launcher in scope parses with
+/// argparse. The separated form is searched across the whole argv before the
+/// `=` form, preserving the precedence the two open-coded copies of this had.
+fn port_flag(toks: &[&str], flag: &str) -> Option<u16> {
+    let eq = format!("{flag}=");
+    toks.iter()
+        .position(|t| t == &flag)
+        .and_then(|i| value_after(toks, i))
+        .or_else(|| toks.iter().find_map(|t| t.strip_prefix(eq.as_str())))
+        .and_then(|p| p.parse().ok())
+}
+
 /// Recognize a TT inference server from `name` + full `cmdline`, or `None`.
 /// v1 only recognizes the `docker run` form.
 pub fn parse_inference_server(name: &str, cmdline: &str) -> Option<InferenceServer> {
@@ -247,9 +261,28 @@ pub fn parse_inspect(json: &str) -> Option<InferenceServer> {
 /// Recognize a direct (non-Docker) vLLM-on-TT launch from `name` + `cmdline`
 /// + the process's own `environ` (`KEY=VALUE`-per-line text — same shape
 /// `probe::parse_env_var` already expects), building a `Source::Host { pid }`
-/// record. Two real shapes (from `tt-tnt`'s `tt-model serve`, which execs one
-/// of these directly): `vllm serve <model> ...`, or a cmdline containing
-/// `server_example_tt.py` with a `--model <X>` arg.
+/// record.
+///
+/// Four real launch shapes, all present in the TT tooling checked out on this
+/// box. The ordering is by how common each actually is — occurrence counts
+/// from a sweep of tt-tnt + tt-inference-server + tt-vllm:
+///
+///   * `vllm serve <model> ...` — the console script, positional or
+///     `--model` flag form (229 occurrences; clearly dominant).
+///   * `python -m vllm.entrypoints...` — the module form (45). Matched on the
+///     `vllm.entrypoints` prefix rather than one full module path, because
+///     both `vllm.entrypoints.openai.api_server` and the older
+///     `vllm.entrypoints.api_server` are in use.
+///   * `python <path>/run_vllm_api_server.py ...` — tt-inference-server's
+///     wrapper (64), reached on the host via `workflows/run_local_server.py`.
+///     It ends in `runpy.run_module("vllm.entrypoints.openai.api_server")`,
+///     which runs in the *same* process; Python's `sys.argv` rewrite does not
+///     touch `/proc/<pid>/cmdline`, so the kernel keeps showing this argv for
+///     the life of the server.
+///   * `python server_example_tt.py --model <X>` — the plugin example (20).
+///
+/// The last three neither end in `vllm` nor carry a `serve` token, so each
+/// needs its own rule; all four then take the model from `--model`.
 ///
 /// Requires `MESH_DEVICE` or `TT_METAL_HOME` present in `environ` to confirm
 /// this is genuinely TT-backed — mirrors `parse_inference_server`'s
@@ -289,6 +322,25 @@ pub fn parse_direct_vllm(
                 .contains("server_example_tt.py")
                 .then(|| model_arg(&toks))
                 .flatten()
+        })
+        .or_else(|| {
+            // `python -m vllm.entrypoints.openai.api_server --model X`, and
+            // the older non-`openai` sibling. Matched per-token rather than
+            // over the whole cmdline, so the module name has to be an argv
+            // token and not a substring of some unrelated path.
+            toks.iter()
+                .any(|t| t.contains("vllm.entrypoints"))
+                .then(|| model_arg(&toks))
+                .flatten()
+        })
+        .or_else(|| {
+            // tt-inference-server's wrapper. `ends_with` on a token, so a path
+            // that merely mentions the script (a log file, say) does not
+            // qualify — it has to be the thing being run.
+            toks.iter()
+                .any(|t| t.ends_with("run_vllm_api_server.py"))
+                .then(|| model_arg(&toks))
+                .flatten()
         })?;
 
     let mesh = parse_env_var(environ, "MESH_DEVICE");
@@ -298,16 +350,15 @@ pub fn parse_direct_vllm(
     }
 
     // vLLM uses argparse, so both `--port <N>` and `--port=<N>` are valid.
-    let port = toks
-        .iter()
-        .position(|t| *t == "--port")
-        .and_then(|i| toks.get(i + 1))
-        .and_then(|p| p.parse::<u16>().ok())
-        .or_else(|| {
-            toks.iter()
-                .find_map(|t| t.strip_prefix("--port="))
-                .and_then(|p| p.parse::<u16>().ok())
-        })
+    //
+    // `--service-port` is the wrapper shape's own spelling: run_vllm_api_server.py
+    // remaps it onto vLLM's `--port` before handing off, so that is genuinely the
+    // port the server listens on — and so the port the liveness probe polls.
+    // Reading only `--port` reported the 8000 default for every non-default
+    // launch. The precedence is the wrapper's own: an explicit `--port` wins and
+    // `--service-port` is ignored (it logs exactly that).
+    let port = port_flag(&toks, "--port")
+        .or_else(|| port_flag(&toks, "--service-port"))
         .unwrap_or(8000);
 
     Some(InferenceServer {
@@ -544,6 +595,109 @@ mod tests {
             .expect("flag-form --model must still be detected");
         assert_eq!(s.model.as_deref(), Some("episod/tt-tnt-1024"));
         assert_eq!(s.port, Some(8000));
+    }
+
+    /// `python -m vllm.entrypoints.openai.api_server` — the third real launch
+    /// shape, and the one this box's own Gemma launcher uses. The module path
+    /// does not end in `vllm` and carries no `serve` token, so the two rules
+    /// above both miss it.
+    ///
+    /// Matched on the `vllm.entrypoints` prefix rather than the full module
+    /// path, because the non-`openai` variant (`vllm.entrypoints.api_server`)
+    /// is also in use — both appear in the vLLM checkouts on this box.
+    #[test]
+    fn parses_the_python_module_launch_shape() {
+        for cmd in [
+            // Verbatim shape of the working Gemma launcher.
+            "python -m vllm.entrypoints.openai.api_server \
+             --model google/gemma-4-26B-A4B-it --block_size 64 --port 8000",
+            // The non-openai entrypoint, same family.
+            "python3 -m vllm.entrypoints.api_server --model episod/tt-tnt-1024 --port 8000",
+        ] {
+            let s = parse_direct_vllm("python3", cmd, ENVIRON_VLLM_SERVE, 7)
+                .expect("the `-m vllm.entrypoints...` shape must be detected");
+            assert_eq!(s.port, Some(8000));
+            assert!(s.model.is_some(), "model comes from --model");
+        }
+    }
+
+    /// tt-inference-server's non-Docker path (`workflows/run_local_server.py`)
+    /// execs `<venv>/bin/python <abs>/run_vllm_api_server.py --model <repo>
+    /// --tt-device <dev>`, and that script `runpy`s vLLM *in the same process*
+    /// — Python's `sys.argv` rewrite does not touch `/proc/<pid>/cmdline`, so
+    /// the kernel keeps showing this argv for the whole life of the server.
+    #[test]
+    fn parses_the_run_vllm_api_server_wrapper_shape() {
+        let cmd = "/home/ttuser/tt-metal/python_env/bin/python \
+            /home/ttuser/code/tt-inference-server/vllm-tt-metal/src/run_vllm_api_server.py \
+            --model meta-llama/Llama-3.1-8B --tt-device n300 --no-auth";
+        let s = parse_direct_vllm("python", cmd, ENVIRON_VLLM_SERVE, 8)
+            .expect("the tt-inference-server local-server wrapper must be detected");
+        assert_eq!(s.model.as_deref(), Some("meta-llama/Llama-3.1-8B"));
+        assert_eq!(s.port, Some(8000), "no port flag at all → vLLM's default");
+    }
+
+    /// That same wrapper spells its port `--service-port`, and remaps it onto
+    /// vLLM's `--port` internally — so the server really does listen there.
+    /// Reading only `--port` reported 8000 for every non-default launch, which
+    /// is the port the liveness probe then polls.
+    ///
+    /// Precedence matches the wrapper's own: an explicit `--port` wins and
+    /// `--service-port` is ignored (run_vllm_api_server.py logs exactly that).
+    #[test]
+    fn service_port_is_read_but_an_explicit_port_still_wins() {
+        let base = "/venv/bin/python /srv/run_vllm_api_server.py --model m --tt-device n300";
+
+        let s = parse_direct_vllm(
+            "python",
+            &format!("{base} --service-port 8123"),
+            ENVIRON_VLLM_SERVE,
+            9,
+        )
+        .expect("wrapper shape detected");
+        assert_eq!(
+            s.port,
+            Some(8123),
+            "--service-port is the port it listens on"
+        );
+
+        let s = parse_direct_vllm(
+            "python",
+            &format!("{base} --service-port=8124"),
+            ENVIRON_VLLM_SERVE,
+            9,
+        )
+        .unwrap();
+        assert_eq!(s.port, Some(8124), "argparse also accepts --service-port=N");
+
+        let s = parse_direct_vllm(
+            "python",
+            &format!("{base} --service-port 8123 --port 9000"),
+            ENVIRON_VLLM_SERVE,
+            9,
+        )
+        .unwrap();
+        assert_eq!(
+            s.port,
+            Some(9000),
+            "an explicit --port wins; the wrapper ignores --service-port in that case"
+        );
+    }
+
+    /// The new shapes stay behind the same TT-backed gate as the old ones —
+    /// widening what we recognize must not widen what we *claim* is on TT.
+    #[test]
+    fn the_new_shapes_still_require_a_tt_backed_environment() {
+        let no_tt_env = "PATH=/usr/bin\nHOME=/home/ttuser\n";
+        for cmd in [
+            "python -m vllm.entrypoints.openai.api_server --model m --port 8000",
+            "/venv/bin/python /srv/run_vllm_api_server.py --model m --tt-device n300",
+        ] {
+            assert!(
+                parse_direct_vllm("python", cmd, no_tt_env, 1).is_none(),
+                "{cmd:?} must not be claimed as TT-backed without MESH_DEVICE/TT_METAL_HOME"
+            );
+        }
     }
 
     #[test]

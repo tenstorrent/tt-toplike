@@ -1762,7 +1762,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// A run whose stdout is unreadable draws no loss curve, no sweeps and
     /// no comet, so listing their symbols describes a screen that isn't
     /// there. Raised in review.
