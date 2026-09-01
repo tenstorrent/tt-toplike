@@ -309,7 +309,29 @@ impl TrainView {
                         }
                         self.draw_river(&mut buf, st);
                     }
-                    _ => self.draw_no_log_notice(&mut buf, st),
+                    // The log is unreadable, but the *config* isn't — the
+                    // model card and the network band come from it, and
+                    // `draw_river` already paints its nightscape when there
+                    // is no loss history. Only the mountains genuinely
+                    // depend on the stream. Replacing the whole body left
+                    // ~30 rows blank between the notice and the chip strip.
+                    _ => {
+                        let (show_model, show_live) = self.panel_fit();
+                        if show_model {
+                            self.draw_model_card(&mut buf, st);
+                        }
+                        self.draw_network(&mut buf, st);
+                        // `draw_live_stats` needs no special case: its rows
+                        // are emitted only for values that exist, so with no
+                        // stream it degrades by itself to cpu / rss /
+                        // watching and omits tok/s, step/s, cache and eta.
+                        if show_live {
+                            self.draw_live_stats(&mut buf, st);
+                        }
+                        self.draw_river(&mut buf, st);
+                        // Drawn last so it sits over the nightscape.
+                        self.draw_no_log_notice(&mut buf, st);
+                    }
                 }
                 self.draw_chips(&mut buf, backend);
                 self.draw_legend(&mut buf, st);
@@ -589,8 +611,28 @@ impl TrainView {
             .as_ref()
             .map(|p| p.binary.as_str())
             .unwrap_or("The training run");
-        let row = 4;
+        // Centred in the river band rather than at row 4: the model card and
+        // network band occupy the top of the screen now, and the river's
+        // nightscape is the space this message used to leave empty.
+        let Layout {
+            river_top,
+            river_bottom,
+            ..
+        } = self.layout();
+        let band = river_bottom.saturating_sub(river_top);
+        let row = river_top + band.saturating_sub(5) / 2;
         let w = self.width.saturating_sub(4);
+
+        // Blank the rows this message occupies before writing it. The
+        // nightscape is drawn underneath now, and aurora glyphs rendered
+        // through the text make it genuinely hard to read — the same failure
+        // the explain overlay had, for the same reason: writing a string
+        // leaves every cell it doesn't cover untouched.
+        for r in row.saturating_sub(1)..=(row + 5).min(river_bottom.saturating_sub(1)) {
+            for x in 1..self.width {
+                self.put(buf, x, r, ' ', Color::Rgb(22, 29, 38), false);
+            }
+        }
         self.text(
             buf,
             2,
@@ -985,18 +1027,25 @@ impl TrainView {
         if river_bottom <= river_top + 1 {
             return;
         }
-        let label_row = river_top.saturating_sub(1);
-        self.text(
-            buf,
-            2,
-            label_row,
-            &Self::clip(
-                "LOSS  · mountains colored by their own value",
-                self.width.saturating_sub(3),
-            ),
-            Color::Rgb(160, 170, 200),
-            false,
-        );
+        // Only label the band once there is something in it. The nightscape
+        // is drawn either way — it is the run's sky, not a placeholder — but
+        // heading an empty band "LOSS · mountains colored by their own value"
+        // promises a plot that isn't there, which is the one thing this view
+        // must not do.
+        if !st.loss_history.is_empty() {
+            let label_row = river_top.saturating_sub(1);
+            self.text(
+                buf,
+                2,
+                label_row,
+                &Self::clip(
+                    "LOSS  · mountains colored by their own value",
+                    self.width.saturating_sub(3),
+                ),
+                Color::Rgb(160, 170, 200),
+                false,
+            );
+        }
 
         let sky_rows = river_bottom - river_top;
 
@@ -1246,13 +1295,19 @@ impl TrainView {
             ('✦', "checkpoint", Color::Rgb(120, 230, 190)),
             ('░', "aurora", Color::Rgb(120, 180, 150)),
         ];
-        // Without a stream, `draw_no_log_notice` replaces both the network
-        // band and the river — and the comet is drawn *inside* the river, so
-        // the aurora and the checkpoint pulse are unreachable too. Only the
-        // chip strip is still drawn.
+        // Every channel is drawn without a stream *except* the ones that need
+        // a loss value: the network band and the river (nightscape, aurora,
+        // and the checkpoint comet drawn inside it) all still render from the
+        // config and from chip telemetry. Only the mountains and the header's
+        // delta arrows depend on a per-step loss.
+        //
+        // This tracks whether the river is drawn, not whether a stream
+        // exists — an earlier version keyed on the stream and dropped the
+        // aurora and comet, which was right only while the no-log state
+        // replaced the river wholesale.
         let entries: Vec<(char, &str, Color)> = all
             .into_iter()
-            .filter(|(_, label, _)| has_stream || matches!(*label, "chip temp" | "chip power"))
+            .filter(|(_, label, _)| has_stream || !matches!(*label, "loss" | "loss ↓" | "loss ↑"))
             .collect();
         let mut x = 2;
         for (glyph, label, color) in entries {
@@ -1740,15 +1795,26 @@ mod tests {
 
         // Unreadable stdout: no per-step stream exists.
         let out = render(Some(LogSource::NotRedirected));
-        for absent in ["loss", "forward", "gradients", "checkpoint", "aurora"] {
+        // The river and network still render from the config in this state,
+        // so only the loss-derived channels are unreachable.
+        for present in [
+            "chip temp",
+            "chip power",
+            "aurora",
+            "checkpoint",
+            "gradients",
+        ] {
+            assert!(
+                out.contains(present),
+                "legend dropped {present:?}, which this state still draws"
+            );
+        }
+        for absent in ["loss ↓", "loss ↑"] {
             assert!(
                 !out.contains(absent),
                 "legend advertises {absent:?} on a screen that cannot draw it"
             );
         }
-        // What is still genuinely drawn stays listed.
-        assert!(out.contains("chip temp"), "chip telemetry still flows");
-
         // A readable log gets the full legend back.
         let out = render(Some(LogSource::File("/tmp/x.log".into())));
         for present in ["loss ↓", "checkpoint", "gradients"] {
@@ -2063,7 +2129,11 @@ mod tests {
         st.log = Some(LogSource::File("/tmp/x.log".into()));
         st.config.num_blocks = Some(6);
         st.config.num_heads = Some(6);
-        st.loss = Some(2.0);
+        // Through `apply_event`, as a real run does: setting `loss` alone
+        // leaves `loss_history` empty, which no live run can be in — and the
+        // river label (this test's anchor) is drawn only when there is
+        // history to label.
+        st.apply_event(crate::workload::train::TrainEvent::Step { step: 1, loss: 2.0 });
 
         let v = TrainView::new(134, 40);
         let lines = v.render(&st, &b);
