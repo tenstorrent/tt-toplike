@@ -5193,3 +5193,146 @@ a demo whose caption made a falsifiable claim to notice.
 regression tests (one mutation-tested); one real bug found by verifying demo
 footage against its caption and fixed with a wiring-layer test; 728 tests,
 fmt, clippy, and both cross-targets green.*
+
+---
+
+## Phase 35 — Inference monitor missed a Docker container tagged by tt-model-manager (September 2, 2026, v0.13.3)
+
+**Origin**: user report — "This tool has the inference view mode. It can
+detect vllm and tt-inference-server. it's not detecting a vllm within a
+docker running right now from tt-model-manager." Investigated per
+`superpowers:systematic-debugging` rather than guessing.
+
+**Root cause**: `DockerProbe::list_servers()` (`probe.rs`) enumerates every
+running container via `docker ps`, then hard-gates on
+`detect::is_tt_inference_image(image)` — a substring match against
+`"inference-server"` / `"tt-media-inference"` /
+`"ghcr.io/tenstorrent/tt-*server*"` — **before `docker inspect` is ever
+called**. tt-model-manager tags its images `tt-model/<name>:<hash>` (verified
+live: `tt-model/qwen3-coder-30b-a3b:7c2773460298`), which matches none of
+those patterns, so the container was filtered out no matter what was running
+inside it. `docker inspect` on the real container confirmed a completely
+ordinary `vllm serve` launch — `Entrypoint: ["/usr/local/bin/entrypoint.sh"]`,
+`Cmd: ["vllm", "serve", "Qwen/Qwen3-Coder-30B-A3B-Instruct", ..., "--port",
+"8000"]`, `Devices: [{"PathOnHost": "/dev/tenstorrent", ...}]`, model also
+available as `-e HF_MODEL=...` (no plain `MODEL=` key at all) — the image
+name was simply the wrong signal to gate on.
+
+**Fix** (`detect.rs`, `probe.rs`): factored `parse_direct_vllm`'s (Phase 27)
+host-process launch-shape recognition into shared, token-slice-based helpers
+— `vllm_serve_model`/`is_vllm_launch`/`vllm_model_from_toks` — usable against
+either a split cmdline (host path, unchanged behavior) or a container's
+Entrypoint+Cmd array (`parse_inspect`, new). `parse_inspect` now accepts a
+container when **either** its image matches a known TT pattern (unchanged
+fast path) **or** its Entrypoint+Cmd is vLLM-shaped **and** `HostConfig`
+actually maps `/dev/tenstorrent` — the same TT-evidence discipline Phase 27
+applied to a bare host process (there via `MESH_DEVICE`/`TT_METAL_HOME` in
+`environ`, since a container has no such env-var gate need — its device
+mapping is authoritative and already computed for `uses_tt_device`).
+Model extraction gained an `HF_MODEL` env fallback alongside `MODEL`, since
+`vllm_model_from_toks` also covers the positional `vllm serve <model>` shape
+that a `-e MODEL=` env var was previously required to substitute for.
+`probe.rs`'s `list_servers` pre-filter (avoiding a `docker inspect` call for
+every unrelated container on the box) was widened to also admit a container
+whose plain `docker ps` Command already looks vLLM-shaped — the authoritative
+accept/reject decision still lives in `parse_inspect`.
+
+**Verification**: a new unit test (`parses_model_manager_style_container_by_
+command_shape_not_image`) built from the real `docker inspect` JSON above,
+mutation-tested by temporarily restoring the old image-only gate (confirmed
+red, restored, confirmed green) — plus a paired
+`rejects_vllm_shaped_command_without_a_tt_device_mapping` test (a vLLM-shaped
+container with no device mapping, e.g. plain GPU vLLM, must not be claimed).
+Beyond unit tests: added a temporary `#[ignore]`d smoke test calling
+`DockerProbe::list_servers()` directly against the real Docker daemon on this
+box, confirmed it now returns the tt-model-manager container with the
+correct model/mesh/port, then removed the test (kept only as commit-message
+evidence, not code). User separately confirmed via a manual pass in the live
+TUI. Full suite (828 lib tests), `cargo fmt --check`, `cargo clippy --lib
+--features tui -- -D warnings` all green.
+
+---
+
+*Phase 35 status: **COMPLETE, hardware-verified** — v0.13.3. Root cause
+confirmed live (real `docker inspect` output), fix mutation-tested, detection
+re-verified end-to-end against the real running container, and confirmed
+working by the user in the live TUI.*
+
+---
+
+## Phase 36 — Arcade legend leak + device-labeling consistency (September 2, 2026, v0.13.4)
+
+**Origin**: user report — "Arcade view still shows text and duplicative data
+found in other views on the screen at the same time. This text shouldn't be
+in arcade view: `Showing 4 devices side-by-side │ Particles color-coded by
+device`... Look for chances for consistency in addressing cards. BH0 and WH0
+are great. Dev0 Dev1 Dev2 less so." Classified bounded via
+`superpowers:brainstorming`; scope (full sweep vs. Arcade-only) confirmed
+with the user before touching code.
+
+**Bug**: `MemoryCastle::render()` and `render_compact()` (`memory_castle.rs`)
+each print a standalone-mode legend footer — the only one of that file's
+several duplicated elements never gated behind `self.chrome`, the flag every
+other embedded-vs-standalone distinction in the file already respects (the
+per-device W/°C readout, the single-device detail line, …). Arcade sets
+`chrome=false` specifically so its own strip/legend own that information; the
+ungated footer leaked through anyway. Fixed by wrapping both footers (text
++ their separator rule) in `if self.chrome`.
+
+**Consistency audit**: a survey across every animation/TUI view found six
+different device-labeling conventions in concurrent use: `BH0`/`WH0` (arch
+abbrev + index, no separator — Arcade's topology strip, the one the user
+liked), `Dev0`/`Dev N`, `D{n}`, `Device N: BH`, a bare numeral, and the full
+uppercase architecture name paired separately with `D{n}` (chip portrait).
+Several of these are visible on Arcade's own composited screen
+simultaneously, since it stacks Memory Castle + Starfield + Flow + its own
+strip in one view.
+
+Added `Device::short_label()` (`src/models/device.rs`, next to the existing
+`Device::name()`) returning the `"BH0"`/`"WH2"`/`"GS1"` form, and adopted it
+at every site with room for it:
+- `arcade.rs`'s `telemetry_strip` — the one place Arcade prints per-device
+  W/°C, so the single highest-value fix.
+- `memory_castle.rs`'s Full-tier and Compact-tier per-device column headers.
+- The 32+-chip fleet-grid row label — changed from a fixed `"Dev {:2} {} "`
+  (dev-index-then-arch, 10 cols) to a fixed-width `"{:<5}"` around
+  `short_label()` (arch-then-index, ≤5 cols) so the power bar that follows
+  still lines up down the column regardless of index digit count.
+- The standalone single-device title bar (`"Device 0: BH"` → `"BH0"`).
+
+**Bonus fix caught in passing**: while touching the Compact tier's header,
+found it was still labeling by loop position (`idx` from `.enumerate()`)
+rather than `device.index` — the exact sparse-index mis-attribution bug
+(a salvaged tt-smi snapshot that drops a malformed `device_info[]` entry, or
+an ARC-dead chip) the Full tier's own header comment already documents
+having been fixed for. Fixed the same way here, with a dedicated regression
+test built from a sparse two-device snapshot (indices 1 and 2) asserting the
+header names `BH1`/`BH2`, not a position-keyed `BH0`/`BH1`.
+
+**Deliberately left alone**, each with an inline comment explaining why
+rather than silently skipped:
+- `mod.rs`'s TRON/32+-chip fleet-grid bare numeral and `hivemind_view.rs`'s
+  `D{d}` sidebar columns — both tiers purpose-built to cram many chips/rows
+  into a minimal per-cell width budget; a 2-3 char label addition could
+  break that budget for the chip counts (32+) those tiers exist for.
+- The chip portrait header (`mod.rs`) — already prints the full uppercase
+  architecture name once per chip; adding `BH` too would be the repetition
+  this pass exists to remove, not a fix.
+- The kill-confirm dialog's `"Dev N"` (`mod.rs`) — a modal, never shown
+  alongside the other conventions at once, and getting architecture into it
+  needs a small signature change for low value.
+
+**Verification**: two new regression tests, both mutation-tested (reverted
+the fix, confirmed the test fails with the exact predicted wrong text,
+restored) — `embedded_chrome_off_suppresses_the_side_by_side_footer_text`
+(covers both Full and Compact tiers, plus a positive assertion that
+standalone/chrome-on still shows the footer) and
+`compact_tier_header_uses_device_index_not_list_position`. Full suite (831
+lib tests), `cargo fmt --check`, `cargo clippy --lib --features tui -- -D
+warnings` all green. Rebuilt and installed the release binaries; user
+confirmed the swap.
+
+---
+
+*Phase 36 status: **COMPLETE** — v0.13.4. Both fixes mutation-tested; full
+suite/fmt/clippy green; binaries rebuilt and installed on the live box.*

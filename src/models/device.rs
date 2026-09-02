@@ -167,6 +167,16 @@ impl Device {
         format!("{}-{}", self.architecture.name(), self.index)
     }
 
+    /// Terse device label: architecture abbreviation + index, no separator.
+    ///
+    /// Format: "BH0", "WH2", "GS1". The canonical short label used wherever a
+    /// device needs identifying in a tight space (per-device column headers,
+    /// telemetry strips) — distinct from [`Device::name`]'s longer
+    /// "Architecture-N" form, which reads better in prose.
+    pub fn short_label(&self) -> String {
+        format!("{}{}", self.architecture.abbrev(), self.index)
+    }
+
     /// Check if device is Grayskull architecture
     pub fn is_grayskull(&self) -> bool {
         self.architecture == Architecture::Grayskull
@@ -262,6 +272,23 @@ mod tests {
         assert_eq!(device.name(), "Wormhole-0");
         assert!(device.is_wormhole());
         assert!(!device.is_grayskull());
+    }
+
+    #[test]
+    fn short_label_is_arch_abbrev_plus_index_no_separator() {
+        let wh = Device::new(2, "n150".to_string(), "0000:01:00.0".to_string(), "".into());
+        assert_eq!(wh.short_label(), "WH2");
+
+        let bh = Device::new(
+            0,
+            "p150a".to_string(),
+            "0000:02:00.0".to_string(),
+            "".into(),
+        );
+        assert_eq!(bh.short_label(), "BH0");
+
+        let gs = Device::new(11, "e75".to_string(), "0000:03:00.0".to_string(), "".into());
+        assert_eq!(gs.short_label(), "GS11");
     }
 
     #[test]

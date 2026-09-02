@@ -676,7 +676,7 @@ impl ArcadeVisualization {
 
     /// Build the single shared per-device telemetry strip.
     ///
-    /// Format: `Dev0 92W 78°C 1.35GHz · Dev1 …`.  Fields a device does not
+    /// Format: `BH0 92W 78°C 1.35GHz · BH1 …`.  Fields a device does not
     /// report are skipped.  Character-safe: when the devices don't fit in
     /// `width` display columns the string is truncated on a character boundary
     /// and a trailing `…` appended.  Returns an empty string when there are no
@@ -687,14 +687,14 @@ impl ArcadeVisualization {
         let mut entries: Vec<String> = Vec::new();
         for device in backend.devices() {
             let telem = backend.telemetry(device.index);
-            // "Dev{n}" label always present for orientation; each numeric field
-            // is added only when the device actually reports it. The label is
-            // the device's own index, not its position in the strip: those
-            // differ whenever the index set is sparse (a salvaged tt-smi
-            // snapshot that dropped a malformed `device_info[]` entry, or a chip
-            // whose ARC never answered), and the label must name the card whose
-            // watts follow it.
-            let mut parts: Vec<String> = vec![format!("Dev{}", device.index)];
+            // `short_label()` ("BH0") always present for orientation; each
+            // numeric field is added only when the device actually reports
+            // it. The label is the device's own index, not its position in
+            // the strip: those differ whenever the index set is sparse (a
+            // salvaged tt-smi snapshot that dropped a malformed
+            // `device_info[]` entry, or a chip whose ARC never answered),
+            // and the label must name the card whose watts follow it.
+            let mut parts: Vec<String> = vec![device.short_label()];
             if let Some(t) = telem {
                 if let Some(p) = t.power {
                     parts.push(format!("{:.0}W", p));
