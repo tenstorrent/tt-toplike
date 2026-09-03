@@ -32,6 +32,22 @@ tt-toplike (0.13.4) noble; urgency=medium
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Wed, 02 Sep 2026 00:00:00 +0000
 
+tt-toplike (0.13.2) noble; urgency=medium
+
+  * Fix: the Training view drew no loss curve for trainers that report
+    progress only through a tqdm bar. `ttml`'s SFTTrainer — which
+    tt-tnt's LoRA and tool-calling scripts use — sets loss and lr as bar
+    postfix and prints no per-step line at all, so the view attached to
+    the run and then had nothing to plot. The bar's own done/total
+    counter and its loss postfix are now read.
+  * Fix: the log tailer only yielded newline-terminated lines, but a
+    progress bar redraws itself with carriage returns, so many frames
+    arrive inside one chunk. Frames are now split out, which is what
+    makes a bar-only trainer visible while it is still running rather
+    than after it exits.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 31 Aug 2026 00:00:00 +0000
+
 tt-toplike (0.13.1) noble; urgency=medium
 
   * Fix: the Training view's loss mountains vanished on a converged run.

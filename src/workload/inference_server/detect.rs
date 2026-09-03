@@ -114,6 +114,21 @@ fn vllm_model_from_toks(toks: &[&str]) -> Option<String> {
         })
 }
 
+/// Split any token containing whitespace into separate words. Handles
+/// Docker's shell-form CMD/ENTRYPOINT (e.g. a Dockerfile's `CMD vllm serve
+/// $MODEL --port 8000`), which `docker inspect` reports as
+/// `["/bin/sh", "-c", "vllm serve $MODEL --port 8000"]` — the whole
+/// invocation lands in one JSON array element instead of being pre-split the
+/// way exec-form (`CMD ["vllm", "serve", ...]`) is. Without this,
+/// `is_vllm_launch`/`vllm_model_from_toks`'s token-position matching never
+/// sees a `"vllm"` token to anchor on. A no-op for already-split exec-form
+/// argv, since none of its tokens contain whitespace.
+fn flatten_shell_tokens(toks: &[&str]) -> Vec<String> {
+    toks.iter()
+        .flat_map(|t| t.split_whitespace().map(str::to_string))
+        .collect()
+}
+
 /// Value following a flag token, e.g. `--name X` → `X`. Returns the next token.
 fn value_after<'a>(toks: &[&'a str], i: usize) -> Option<&'a str> {
     toks.get(i + 1).copied()
@@ -268,6 +283,10 @@ pub fn parse_inspect(json: &str) -> Option<InferenceServer> {
         .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
         .unwrap_or_default();
     let full_argv: Vec<&str> = entrypoint.iter().chain(cmd.iter()).copied().collect();
+    // Shell-form CMD/ENTRYPOINT packs the whole invocation into one array
+    // element (see `flatten_shell_tokens`) — split it before shape-matching.
+    let full_argv_flat: Vec<String> = flatten_shell_tokens(&full_argv);
+    let full_argv_flat: Vec<&str> = full_argv_flat.iter().map(String::as_str).collect();
 
     // uses_tt_device: any HostConfig.Devices entry mapping /dev/tenstorrent.
     let uses_tt_device = obj
@@ -292,7 +311,7 @@ pub fn parse_inspect(json: &str) -> Option<InferenceServer> {
     // TT-device evidence already computed above, mirroring the environ-based
     // TT gate `parse_direct_vllm` applies to a bare host process.
     let image_recognized = is_tt_inference_image(&image);
-    if !(image_recognized || (is_vllm_launch(&full_argv) && uses_tt_device)) {
+    if !(image_recognized || (is_vllm_launch(&full_argv_flat) && uses_tt_device)) {
         return None;
     }
 
@@ -328,8 +347,12 @@ pub fn parse_inspect(json: &str) -> Option<InferenceServer> {
         // then the container's bare `--model` arg.
         model: env_val("MODEL")
             .or_else(|| env_val("HF_MODEL"))
-            .or_else(|| vllm_model_from_toks(&full_argv))
-            .or_else(|| model_arg(&cmd)),
+            .or_else(|| vllm_model_from_toks(&full_argv_flat))
+            // Covers an image-recognized container whose Cmd is bare flags to
+            // a baked-in entrypoint (e.g. `["--model", "X", ...]`, no `vllm
+            // serve`/other recognized launch shape at all) — `vllm_model_from_toks`
+            // only looks for `--model` within a shape it already recognized.
+            .or_else(|| model_arg(&full_argv_flat)),
         mesh: env_val("MESH_DEVICE"),
         arch: env_val("ARCH_NAME"),
         device: env_val("DEVICE"),
@@ -602,6 +625,32 @@ mod tests {
             "HostConfig": {}
         }]"#;
         assert!(parse_inspect(no_device).is_none());
+    }
+
+    // A Dockerfile using shell-form CMD (`CMD vllm serve $MODEL --port 8000`)
+    // reports the whole invocation as one Cmd array element, verified against
+    // a real `docker inspect` of such a build — distinct from the model-manager
+    // fixture above, whose Cmd is already exec-form (pre-split array).
+    const INSPECT_SHELL_FORM_VLLM: &str = r#"[{
+        "Name": "/shell-form-vllm",
+        "Config": {
+            "Image": "tt-model/some-model:deadbeef",
+            "Cmd": ["/bin/sh", "-c", "vllm serve some/model --port 8000"]
+        },
+        "HostConfig": {
+            "Devices": [{"PathOnHost": "/dev/tenstorrent", "PathInContainer": "/dev/tenstorrent"}],
+            "PortBindings": {"8000/tcp": [{"HostIp": "", "HostPort": "8000"}]}
+        }
+    }]"#;
+
+    #[test]
+    fn parses_shell_form_cmd_by_splitting_the_packed_invocation() {
+        let s = parse_inspect(INSPECT_SHELL_FORM_VLLM).expect(
+            "a shell-form `vllm serve` Cmd (one packed token) with a TT device mapping must still be detected",
+        );
+        assert_eq!(s.model.as_deref(), Some("some/model"));
+        assert_eq!(s.port, Some(8000));
+        assert!(s.uses_tt_device);
     }
 
     #[test]
