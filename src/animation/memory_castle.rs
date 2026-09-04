@@ -641,19 +641,19 @@ impl MemoryCastle {
                 let color = hsv_to_rgb(hue, 0.8, 0.9);
 
                 // Standalone shows the per-device W/°C header; embedded
-                // (chrome off) keeps only the Dev{n} orientation label — the
-                // Arcade shared strip owns the telemetry readout.
+                // (chrome off) keeps only the short_label() orientation
+                // label — the Arcade shared strip owns the telemetry readout.
                 //
                 // The label is `device.index`, not the column position: with a
                 // sparse index set (a salvaged snapshot, or a card whose ARC
-                // never answered) those differ, and a column labelled "Dev0"
+                // never answered) those differ, and a column labelled "BH0"
                 // showing card 1's watts is precisely the mis-attribution this
                 // release is about. Matches the Compact/FleetGrid tiers, which
                 // already label by `device.index`.
                 let device_info = if self.chrome {
-                    format!(" Dev{:<2} {:>3.0}W {:>3.0}°C ", device.index, power, temp)
+                    format!(" {} {:>3.0}W {:>3.0}°C ", device.short_label(), power, temp)
                 } else {
-                    format!(" Dev{:<2} ", device.index)
+                    format!(" {} ", device.short_label())
                 };
                 let padding_needed = col_width.saturating_sub(device_info.len());
                 let padding = " ".repeat(padding_needed / 2);
@@ -853,28 +853,32 @@ impl MemoryCastle {
         }
 
         // === FOOTER ===
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                "─".repeat(self.width.saturating_sub(2)),
-                Style::default()
-                    .bg(colors::rgb(0, 0, 0))
-                    .fg(colors::rgb(100, 100, 120)),
-            ),
-        ]));
-        let footer_text = format!(
-            "Showing {} devices side-by-side │ Particles color-coded by device",
-            num_devices
-        );
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                footer_text,
-                Style::default()
-                    .bg(colors::rgb(0, 0, 0))
-                    .fg(colors::rgb(160, 160, 160)),
-            ),
-        ]));
+        // Standalone only: this legend text duplicates what Arcade's own
+        // shared strip/legend already say when this view is embedded there.
+        if self.chrome {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    "─".repeat(self.width.saturating_sub(2)),
+                    Style::default()
+                        .bg(colors::rgb(0, 0, 0))
+                        .fg(colors::rgb(100, 100, 120)),
+                ),
+            ]));
+            let footer_text = format!(
+                "Showing {} devices side-by-side │ Particles color-coded by device",
+                num_devices
+            );
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    footer_text,
+                    Style::default()
+                        .bg(colors::rgb(0, 0, 0))
+                        .fg(colors::rgb(160, 160, 160)),
+                ),
+            ]));
+        }
 
         lines
     }
@@ -963,13 +967,18 @@ impl MemoryCastle {
                     .unwrap_or((idx as f32 * 90.0) % 360.0);
                 let color = hsv_to_rgb(hue, 0.8, 0.9);
 
-                // Standalone shows the compact `D{n} {W}W` label; embedded
-                // (chrome off) drops the wattage but keeps the `D{n}` label for
-                // orientation — the Arcade shared strip owns the readout.
+                // Standalone shows the compact `short_label() {W}W` label;
+                // embedded (chrome off) drops the wattage but keeps the label
+                // for orientation — the Arcade shared strip owns the readout.
+                //
+                // Labeled by `device.index`, not `idx` (the loop position):
+                // those differ with a sparse index set, and this tier used to
+                // label by position — the same mis-attribution the full tier
+                // above already guards against.
                 let device_info = if self.chrome {
-                    format!("D{} {:>3.0}W", idx, power)
+                    format!("{} {:>3.0}W", device.short_label(), power)
                 } else {
-                    format!("D{}", idx)
+                    device.short_label()
                 };
                 let padding_needed = col_width.saturating_sub(device_info.len());
                 let left_pad = " ".repeat(padding_needed / 2);
@@ -1255,28 +1264,31 @@ impl MemoryCastle {
         }
 
         // === FOOTER ===
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                "─".repeat(self.width.saturating_sub(2)),
-                Style::default()
-                    .bg(colors::rgb(0, 0, 0))
-                    .fg(colors::rgb(100, 100, 120)),
-            ),
-        ]));
-        let footer_text = format!(
-            "Showing {} devices side-by-side (compact) │ Particles color-coded by device",
-            num_devices
-        );
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                footer_text,
-                Style::default()
-                    .bg(colors::rgb(0, 0, 0))
-                    .fg(colors::rgb(160, 160, 160)),
-            ),
-        ]));
+        // Standalone only — see the full-tier `render()`'s identical guard.
+        if self.chrome {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    "─".repeat(self.width.saturating_sub(2)),
+                    Style::default()
+                        .bg(colors::rgb(0, 0, 0))
+                        .fg(colors::rgb(100, 100, 120)),
+                ),
+            ]));
+            let footer_text = format!(
+                "Showing {} devices side-by-side (compact) │ Particles color-coded by device",
+                num_devices
+            );
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    footer_text,
+                    Style::default()
+                        .bg(colors::rgb(0, 0, 0))
+                        .fg(colors::rgb(160, 160, 160)),
+                ),
+            ]));
+        }
 
         lines
     }
@@ -1382,11 +1394,12 @@ impl MemoryCastle {
                 let hue = temp_to_hue(temp);
                 let bar_color = hsv_to_rgb(hue, 0.9, 0.85);
                 let idx_color = hsv_to_rgb((chip_idx as f32 * 40.0) % 360.0, 0.6, 0.75);
-                let arch_str = device.architecture.abbrev();
 
-                // "Dev  0 BH ████████░░░░ 16.1W 43.2°C"
+                // "BH0  ████████░░░░ 16.1W 43.2°C" — fixed-width so the bar
+                // that follows lines up down the column regardless of index
+                // digit count.
                 spans.push(Span::styled(
-                    format!("Dev {:2} {} ", device.index, arch_str),
+                    format!("{:<5}", device.short_label()),
                     Style::default().bg(colors::rgb(0, 0, 0)).fg(idx_color),
                 ));
                 spans.push(Span::styled(
@@ -1573,7 +1586,7 @@ impl MemoryCastle {
 
         // Device info
         spans.push(Span::styled(
-            format!("Device {}: {} ", device.index, device.architecture.abbrev()),
+            format!("{} ", device.short_label()),
             Style::default()
                 .bg(colors::rgb(0, 0, 0))
                 .fg(colors::rgb(180, 200, 255)),
@@ -1952,6 +1965,60 @@ mod tests {
         assert!(!lines.is_empty(), "fleet-grid render must produce output");
     }
 
+    /// Regression: Arcade embeds Memory Castle with chrome off (`set_chrome
+    /// (false)`) specifically so its own legend/strip aren't duplicated by
+    /// this view's — but the "Showing N devices side-by-side │ Particles
+    /// color-coded by device" footer wasn't gated on `chrome` at all, so it
+    /// leaked into Arcade's screen alongside Arcade's own equivalent text.
+    /// Covers both multi-device tiers (Full and Compact) that carry this
+    /// footer.
+    #[test]
+    fn embedded_chrome_off_suppresses_the_side_by_side_footer_text() {
+        let mut backend = MockBackend::new(4);
+        backend.init().expect("mock backend init");
+
+        // Full tier: wide terminal, 4 devices comfortably >= MIN_CHIP_COL_WIDTH.
+        let mut full = MemoryCastle::new(160, 30);
+        assert_eq!(castle_tier(160, 4), CastleTier::Full);
+        full.set_chrome(false);
+        let full_text: String = full
+            .render(&backend)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(
+            !full_text.contains("side-by-side"),
+            "Full-tier embedded render must not carry the standalone footer, got: {full_text}"
+        );
+
+        // Compact tier: narrower terminal, same 4 devices, still >= MIN_COMPACT_COL_WIDTH.
+        let mut compact = MemoryCastle::new(50, 30);
+        assert_eq!(castle_tier(50, 4), CastleTier::Compact);
+        compact.set_chrome(false);
+        let compact_text: String = compact
+            .render(&backend)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(
+            !compact_text.contains("side-by-side"),
+            "Compact-tier embedded render must not carry the standalone footer, got: {compact_text}"
+        );
+
+        // Standalone (chrome on, the default) must still show it — this is a
+        // suppression test, not a deletion, so pin the positive case too.
+        let standalone = MemoryCastle::new(160, 30);
+        let standalone_text: String = standalone
+            .render(&backend)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(
+            standalone_text.contains("side-by-side"),
+            "standalone render must still show the footer, got: {standalone_text}"
+        );
+    }
+
     /// Regression: the Host backend (`--host`) presents a CPU as an
     /// `Architecture::Unknown` device, which reports 0 memory channels. The
     /// particle-spawn path did `frame % num_channels`, panicking with
@@ -1968,6 +2035,56 @@ mod tests {
         for _ in 0..10 {
             castle.update(&backend);
         }
+    }
+
+    /// Regression: the Compact tier's per-device header used to label by
+    /// loop position (`idx` from `.enumerate()`) instead of `device.index` —
+    /// the exact sparse-index mis-attribution the Full tier's own header
+    /// already guards against (see
+    /// `single_device_header_uses_device_index_not_list_position` below).
+    /// With a sparse index set (device_info[0] undecodable, survivors at
+    /// indices 1 and 2), a position-keyed label would print "BH0 BH1" for
+    /// cards that are actually index 1 and 2.
+    #[test]
+    fn compact_tier_header_uses_device_index_not_list_position() {
+        const SNAPSHOT: &str = r#"{
+            "device_info": [
+                {"board_info": {"bus_id": "0000:01:00.0"}, "telemetry": true},
+                {
+                    "board_info": {"bus_id": "0000:02:00.0", "board_type": "p300c"},
+                    "telemetry": {"power": " 22.0", "asic_temperature": " 44.0"}
+                },
+                {
+                    "board_info": {"bus_id": "0000:03:00.0", "board_type": "p300c"},
+                    "telemetry": {"power": " 18.0", "asic_temperature": " 40.0"}
+                }
+            ]
+        }"#;
+        let mut backend = crate::backend::json::JSONBackend::new("tt-smi");
+        backend
+            .apply_raw_snapshot_pub(SNAPSHOT)
+            .expect("the two healthy siblings must still be salvaged");
+        assert_eq!(backend.devices().len(), 2);
+        assert_eq!(backend.devices()[0].index, 1);
+        assert_eq!(backend.devices()[1].index, 2);
+
+        // 2 devices at width 20 (usable 18, per 9) lands in Compact.
+        assert_eq!(castle_tier(20, 2), CastleTier::Compact);
+        let castle = MemoryCastle::new(20, 24);
+        let text: String = castle
+            .render(&backend)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+
+        assert!(
+            text.contains("BH1") && text.contains("BH2"),
+            "Compact header must name the physical cards (BH1, BH2), got: {text}"
+        );
+        assert!(
+            !text.contains("BH0"),
+            "must not fall back to position-based labels (BH0 would mean card 1 mislabeled), got: {text}"
+        );
     }
 
     /// A backend whose device index set is **sparse** must still get its
@@ -2039,7 +2156,7 @@ mod tests {
             "SMBUS must be found too, so the ARC dot renders healthy, got: {header}"
         );
         assert!(
-            header.contains("Device 1"),
+            header.contains("BH1"),
             "the header names the physical card, got: {header}"
         );
     }

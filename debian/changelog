@@ -1,3 +1,37 @@
+tt-toplike (0.13.4) noble; urgency=medium
+
+  * Fix: the Inference Server monitor never detected a vLLM-on-TT
+    container launched by tt-model-manager. Detached-container discovery
+    (`docker ps` → `docker inspect`) gated entirely on the image name
+    matching one of three known-TT substrings; tt-model-manager tags its
+    images `tt-model/<name>:<hash>`, which matches none of them, so the
+    container was filtered out before `docker inspect` was ever called —
+    regardless of the real `vllm serve ...` command running inside.
+    Detection now also recognizes a vLLM launch shape in the container's
+    own Entrypoint+Cmd (the same shapes already recognized for a bare
+    host process), gated on the container's HostConfig actually mapping
+    `/dev/tenstorrent` so a look-alike GPU vLLM container isn't
+    misclassified. Model extraction also gained an `HF_MODEL` env
+    fallback (no plain `MODEL` key set) and a positional `vllm serve
+    <model>` reader (that launcher passes the model positionally, not via
+    `--model`). Verified live against the real container on this box.
+  * Fix: Arcade mode leaked Memory Castle's standalone
+    "Showing N devices side-by-side │ Particles color-coded by device"
+    legend text onto its own composited screen — the one footer in that
+    view never gated on the `chrome` flag every other duplicated element
+    already respects when embedded.
+  * Improve: consolidated device labeling on one terse convention
+    ("BH0"/"WH2"/"GS1" — architecture abbreviation + index, no
+    separator) via a new `Device::short_label()`, replacing a mix of
+    "Dev0", "D{n}", and "Device N: BH" across Arcade's shared telemetry
+    strip, Memory Castle's full/compact/fleet-grid headers, and its
+    standalone title bar. Along the way, fixed the Compact tier
+    labeling devices by loop position instead of `device.index` — the
+    same sparse-index mis-attribution bug the Full tier already guarded
+    against.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Wed, 02 Sep 2026 00:00:00 +0000
+
 tt-toplike (0.13.2) noble; urgency=medium
 
   * Fix: the Training view drew no loss curve for trainers that report

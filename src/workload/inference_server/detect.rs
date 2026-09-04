@@ -58,6 +58,77 @@ pub(crate) fn is_tt_inference_image(token: &str) -> bool {
         || (t.contains("ghcr.io/tenstorrent/tt-") && t.contains("server"))
 }
 
+/// Model name from a `vllm serve <model>` argv shape, positional or
+/// `--model`/`--model=X` flag form. Shared by [`parse_direct_vllm`] (a host
+/// process's split cmdline) and [`parse_inspect`] (a container's
+/// Entrypoint+Cmd array) — both are already `&[&str]` token slices.
+///
+/// Match by `ends_with("vllm")`, not `== "vllm"`: a venv console-script's
+/// argv[0] is commonly a full path (e.g.
+/// `/home/ttuser/venv-vllm-standalone/bin/vllm`), not the bare token.
+fn vllm_serve_model(toks: &[&str]) -> Option<String> {
+    toks.iter()
+        .position(|t| t.ends_with("vllm"))
+        .filter(|&i| toks.get(i + 1) == Some(&"serve"))
+        .and_then(|i| {
+            toks.get(i + 2)
+                .filter(|t| !t.starts_with('-'))
+                .map(|s| s.to_string())
+                .or_else(|| model_arg(toks))
+        })
+}
+
+/// True if `toks` launches vLLM in one of the shapes this module recognizes:
+/// `vllm serve`, the `-m vllm.entrypoints...` module form, tt-inference-server's
+/// `run_vllm_api_server.py` wrapper, or the `server_example_tt.py` plugin
+/// example. Used both as a cheap pre-filter (over a `docker ps` Command
+/// string's tokens) and as the authoritative shape check in [`parse_inspect`]
+/// (over a container's Entrypoint+Cmd).
+pub(crate) fn is_vllm_launch(toks: &[&str]) -> bool {
+    vllm_serve_model(toks).is_some()
+        || toks.iter().any(|t| t.contains("vllm.entrypoints"))
+        || toks.iter().any(|t| t.contains("server_example_tt.py"))
+        || toks.iter().any(|t| t.ends_with("run_vllm_api_server.py"))
+}
+
+/// Model name from any of the shapes [`is_vllm_launch`] recognizes.
+fn vllm_model_from_toks(toks: &[&str]) -> Option<String> {
+    vllm_serve_model(toks)
+        .or_else(|| {
+            toks.iter()
+                .any(|t| t.contains("vllm.entrypoints"))
+                .then(|| model_arg(toks))
+                .flatten()
+        })
+        .or_else(|| {
+            toks.iter()
+                .any(|t| t.contains("server_example_tt.py"))
+                .then(|| model_arg(toks))
+                .flatten()
+        })
+        .or_else(|| {
+            toks.iter()
+                .any(|t| t.ends_with("run_vllm_api_server.py"))
+                .then(|| model_arg(toks))
+                .flatten()
+        })
+}
+
+/// Split any token containing whitespace into separate words. Handles
+/// Docker's shell-form CMD/ENTRYPOINT (e.g. a Dockerfile's `CMD vllm serve
+/// $MODEL --port 8000`), which `docker inspect` reports as
+/// `["/bin/sh", "-c", "vllm serve $MODEL --port 8000"]` — the whole
+/// invocation lands in one JSON array element instead of being pre-split the
+/// way exec-form (`CMD ["vllm", "serve", ...]`) is. Without this,
+/// `is_vllm_launch`/`vllm_model_from_toks`'s token-position matching never
+/// sees a `"vllm"` token to anchor on. A no-op for already-split exec-form
+/// argv, since none of its tokens contain whitespace.
+fn flatten_shell_tokens(toks: &[&str]) -> Vec<String> {
+    toks.iter()
+        .flat_map(|t| t.split_whitespace().map(str::to_string))
+        .collect()
+}
+
 /// Value following a flag token, e.g. `--name X` → `X`. Returns the next token.
 fn value_after<'a>(toks: &[&'a str], i: usize) -> Option<&'a str> {
     toks.get(i + 1).copied()
@@ -186,16 +257,10 @@ pub fn parse_inspect(json: &str) -> Option<InferenceServer> {
     let obj = v.as_array()?.first()?;
     let config = obj.get("Config")?;
     let image = config.get("Image")?.as_str()?.to_string();
-    if !is_tt_inference_image(&image) {
-        return None;
-    }
-    let container = obj
-        .get("Name")
-        .and_then(|n| n.as_str())
-        .map(|n| n.trim_start_matches('/').to_string())
-        .unwrap_or_else(|| "unknown".to_string());
 
-    // Config.Env is ["KEY=VALUE", …]; Config.Cmd is the container's argv.
+    // Config.Env is ["KEY=VALUE", …]; Config.Entrypoint/Cmd are the container's
+    // argv, split across the two fields (an entrypoint script like
+    // `entrypoint.sh` commonly execs the real command from Cmd).
     let env: Vec<&str> = config
         .get("Env")
         .and_then(|e| e.as_array())
@@ -207,11 +272,21 @@ pub fn parse_inspect(json: &str) -> Option<InferenceServer> {
             (k == key).then(|| val.to_string())
         })
     };
+    let entrypoint: Vec<&str> = config
+        .get("Entrypoint")
+        .and_then(|c| c.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+        .unwrap_or_default();
     let cmd: Vec<&str> = config
         .get("Cmd")
         .and_then(|c| c.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
         .unwrap_or_default();
+    let full_argv: Vec<&str> = entrypoint.iter().chain(cmd.iter()).copied().collect();
+    // Shell-form CMD/ENTRYPOINT packs the whole invocation into one array
+    // element (see `flatten_shell_tokens`) — split it before shape-matching.
+    let full_argv_flat: Vec<String> = flatten_shell_tokens(&full_argv);
+    let full_argv_flat: Vec<&str> = full_argv_flat.iter().map(String::as_str).collect();
 
     // uses_tt_device: any HostConfig.Devices entry mapping /dev/tenstorrent.
     let uses_tt_device = obj
@@ -226,6 +301,25 @@ pub fn parse_inspect(json: &str) -> Option<InferenceServer> {
             })
         })
         .unwrap_or(false);
+
+    // Two independent ways in: a known TT image (e.g.
+    // ghcr.io/tenstorrent/tt-inference-server/...), or — for a container built
+    // under some other name entirely (e.g. a local model-manager image tagged
+    // `tt-model/<model>:<hash>`) — a recognizable vLLM launch shape in the
+    // container's own argv. The latter alone isn't enough (plain upstream
+    // vLLM on a GPU box would match too), so it additionally requires the real
+    // TT-device evidence already computed above, mirroring the environ-based
+    // TT gate `parse_direct_vllm` applies to a bare host process.
+    let image_recognized = is_tt_inference_image(&image);
+    if !(image_recognized || (is_vllm_launch(&full_argv_flat) && uses_tt_device)) {
+        return None;
+    }
+
+    let container = obj
+        .get("Name")
+        .and_then(|n| n.as_str())
+        .map(|n| n.trim_start_matches('/').to_string())
+        .unwrap_or_else(|| "unknown".to_string());
 
     // Published port: HostConfig.PortBindings maps "8002/tcp" → [{HostPort:"8002"}].
     // We probe localhost, so the HostPort is what matters.
@@ -248,8 +342,17 @@ pub fn parse_inspect(json: &str) -> Option<InferenceServer> {
     Some(InferenceServer {
         source: Source::Docker { container },
         image,
-        // Prefer `-e MODEL=`; fall back to the container's `--model` arg (vLLM).
-        model: env_val("MODEL").or_else(|| model_arg(&cmd)),
+        // Prefer `-e MODEL=`; some launchers set `-e HF_MODEL=` instead (no
+        // `MODEL` key at all); fall back to the vLLM launch-shape parsers,
+        // then the container's bare `--model` arg.
+        model: env_val("MODEL")
+            .or_else(|| env_val("HF_MODEL"))
+            .or_else(|| vllm_model_from_toks(&full_argv_flat))
+            // Covers an image-recognized container whose Cmd is bare flags to
+            // a baked-in entrypoint (e.g. `["--model", "X", ...]`, no `vllm
+            // serve`/other recognized launch shape at all) — `vllm_model_from_toks`
+            // only looks for `--model` within a shape it already recognized.
+            .or_else(|| model_arg(&full_argv_flat)),
         mesh: env_val("MESH_DEVICE"),
         arch: env_val("ARCH_NAME"),
         device: env_val("DEVICE"),
@@ -299,49 +402,9 @@ pub fn parse_direct_vllm(
     let _ = name; // recognized from cmdline shape alone; kept for API symmetry with parse_inference_server
     let toks: Vec<&str> = cmdline.split_whitespace().collect();
 
-    // Match by `ends_with("vllm")`, not `== "vllm"`: a venv console-script's
-    // argv[0] is commonly a full path (e.g.
-    // `/home/ttuser/venv-vllm-standalone/bin/vllm`), not the bare token.
-    // `vllm serve <model> ...`: positional model argument. If that shape
-    // isn't present (e.g. `vllm serve --model X` — flag form instead of
-    // positional), fall back to `model_arg`, the same `--model`/`--model=X`
-    // helper the `server_example_tt.py` shape below uses — otherwise a
-    // flag-form `vllm serve` launch goes entirely undetected.
-    let model = toks
-        .iter()
-        .position(|t| t.ends_with("vllm"))
-        .filter(|&i| toks.get(i + 1) == Some(&"serve"))
-        .and_then(|i| {
-            toks.get(i + 2)
-                .filter(|t| !t.starts_with('-'))
-                .map(|s| s.to_string())
-                .or_else(|| model_arg(&toks))
-        })
-        .or_else(|| {
-            cmdline
-                .contains("server_example_tt.py")
-                .then(|| model_arg(&toks))
-                .flatten()
-        })
-        .or_else(|| {
-            // `python -m vllm.entrypoints.openai.api_server --model X`, and
-            // the older non-`openai` sibling. Matched per-token rather than
-            // over the whole cmdline, so the module name has to be an argv
-            // token and not a substring of some unrelated path.
-            toks.iter()
-                .any(|t| t.contains("vllm.entrypoints"))
-                .then(|| model_arg(&toks))
-                .flatten()
-        })
-        .or_else(|| {
-            // tt-inference-server's wrapper. `ends_with` on a token, so a path
-            // that merely mentions the script (a log file, say) does not
-            // qualify — it has to be the thing being run.
-            toks.iter()
-                .any(|t| t.ends_with("run_vllm_api_server.py"))
-                .then(|| model_arg(&toks))
-                .flatten()
-        })?;
+    // Shared with `parse_inspect`'s container-argv path — see
+    // `vllm_model_from_toks`'s doc comment for the shape-by-shape breakdown.
+    let model = vllm_model_from_toks(&toks)?;
 
     let mesh = parse_env_var(environ, "MESH_DEVICE");
     let tt_metal_home = parse_env_var(environ, "TT_METAL_HOME");
@@ -505,6 +568,89 @@ mod tests {
         assert!(parse_inspect("not json").is_none());
         assert!(parse_inspect("[]").is_none());
         assert!(parse_inspect("{}").is_none());
+    }
+
+    // Trimmed from a real `docker inspect` of a container launched by
+    // tt-model-manager (verified live on this box): the image is tagged
+    // `tt-model/<name>:<hash>`, matching none of `is_tt_inference_image`'s
+    // substring patterns, and the model comes from `-e HF_MODEL=` (no plain
+    // `MODEL` key) plus a positional `vllm serve <model>` in Cmd, behind an
+    // entrypoint script.
+    const INSPECT_MODEL_MANAGER_VLLM: &str = r#"[{
+        "Name": "/tt-model-qwen3-coder-30b-a3b-default",
+        "Config": {
+            "Image": "tt-model/qwen3-coder-30b-a3b:7c2773460298",
+            "Entrypoint": ["/usr/local/bin/entrypoint.sh"],
+            "Env": ["MESH_DEVICE=P300x2", "ARCH_NAME=blackhole",
+                     "HF_MODEL=Qwen/Qwen3-Coder-30B-A3B-Instruct"],
+            "Cmd": ["vllm", "serve", "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+                     "--max-model-len", "256000", "--port", "8000"]
+        },
+        "HostConfig": {
+            "Devices": [{"PathOnHost": "/dev/tenstorrent", "PathInContainer": "/dev/tenstorrent"}],
+            "PortBindings": {"8000/tcp": [{"HostIp": "", "HostPort": "8000"}]}
+        }
+    }]"#;
+
+    #[test]
+    fn parses_model_manager_style_container_by_command_shape_not_image() {
+        let s = parse_inspect(INSPECT_MODEL_MANAGER_VLLM)
+            .expect("a vllm-serve Cmd behind an unrecognized image, with a TT device mapping, must still be detected");
+        assert_eq!(
+            s.source,
+            Source::Docker {
+                container: "tt-model-qwen3-coder-30b-a3b-default".into()
+            }
+        );
+        assert_eq!(
+            s.model.as_deref(),
+            Some("Qwen/Qwen3-Coder-30B-A3B-Instruct")
+        );
+        assert_eq!(s.mesh.as_deref(), Some("P300x2"));
+        assert_eq!(s.port, Some(8000));
+        assert!(s.uses_tt_device);
+    }
+
+    #[test]
+    fn rejects_vllm_shaped_command_without_a_tt_device_mapping() {
+        // Same Cmd/image shape, but no HostConfig.Devices entry — could be
+        // plain upstream vLLM on a GPU box, so it must not be claimed as a TT
+        // inference server just because the command looks like vllm serve.
+        let no_device = r#"[{
+            "Name": "/some-gpu-vllm",
+            "Config": {
+                "Image": "vllm/vllm-openai:latest",
+                "Cmd": ["vllm", "serve", "some/model", "--port", "8000"]
+            },
+            "HostConfig": {}
+        }]"#;
+        assert!(parse_inspect(no_device).is_none());
+    }
+
+    // A Dockerfile using shell-form CMD (`CMD vllm serve $MODEL --port 8000`)
+    // reports the whole invocation as one Cmd array element, verified against
+    // a real `docker inspect` of such a build — distinct from the model-manager
+    // fixture above, whose Cmd is already exec-form (pre-split array).
+    const INSPECT_SHELL_FORM_VLLM: &str = r#"[{
+        "Name": "/shell-form-vllm",
+        "Config": {
+            "Image": "tt-model/some-model:deadbeef",
+            "Cmd": ["/bin/sh", "-c", "vllm serve some/model --port 8000"]
+        },
+        "HostConfig": {
+            "Devices": [{"PathOnHost": "/dev/tenstorrent", "PathInContainer": "/dev/tenstorrent"}],
+            "PortBindings": {"8000/tcp": [{"HostIp": "", "HostPort": "8000"}]}
+        }
+    }]"#;
+
+    #[test]
+    fn parses_shell_form_cmd_by_splitting_the_packed_invocation() {
+        let s = parse_inspect(INSPECT_SHELL_FORM_VLLM).expect(
+            "a shell-form `vllm serve` Cmd (one packed token) with a TT device mapping must still be detected",
+        );
+        assert_eq!(s.model.as_deref(), Some("some/model"));
+        assert_eq!(s.port, Some(8000));
+        assert!(s.uses_tt_device);
     }
 
     #[test]

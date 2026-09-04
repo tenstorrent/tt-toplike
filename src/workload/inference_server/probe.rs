@@ -250,16 +250,37 @@ impl ContainerProbe for DockerProbe {
     }
 
     fn list_servers(&self) -> Vec<super::InferenceServer> {
-        // List running containers (name + image), keep TT inference images, and
-        // inspect each match into a structured record. All docker I/O — only
-        // ever called on the monitor's background thread, never the render path.
-        let listing = docker(&["ps", "--no-trunc", "--format", "{{.Names}}\t{{.Image}}"]);
+        // List running containers (name + image + command), keep candidates,
+        // and inspect each match into a structured record. All docker I/O —
+        // only ever called on the monitor's background thread, never the
+        // render path.
+        //
+        // A candidate is either a known TT image (the common case) or a
+        // container whose displayed Command already looks like a vLLM launch
+        // (e.g. a locally-built image tagged by some other tool entirely,
+        // such as `tt-model/<model>:<hash>` — the image string alone gives no
+        // hint, but `docker ps`'s Command already shows `vllm serve ...`).
+        // This is only a cheap pre-filter to avoid inspecting every
+        // container on the box; `parse_inspect` does the authoritative
+        // shape + TT-device check on the full inspected argv.
+        let listing = docker(&[
+            "ps",
+            "--no-trunc",
+            "--format",
+            "{{.Names}}\t{{.Image}}\t{{.Command}}",
+        ]);
         let mut out = Vec::new();
         for line in listing.lines() {
-            let Some((name, image)) = line.split_once('\t') else {
+            let mut parts = line.splitn(3, '\t');
+            let (Some(name), Some(image), Some(command)) =
+                (parts.next(), parts.next(), parts.next())
+            else {
                 continue;
             };
-            if !super::detect::is_tt_inference_image(image) {
+            let command_toks: Vec<&str> = command.split_whitespace().collect();
+            if !super::detect::is_tt_inference_image(image)
+                && !super::detect::is_vllm_launch(&command_toks)
+            {
                 continue;
             }
             if let Some(s) = super::detect::parse_inspect(&docker(&["inspect", name.trim()])) {
