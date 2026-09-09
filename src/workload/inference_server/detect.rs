@@ -58,6 +58,18 @@ pub(crate) fn is_tt_inference_image(token: &str) -> bool {
         || (t.contains("ghcr.io/tenstorrent/tt-") && t.contains("server"))
 }
 
+/// True if `token` is tagged under tt-model-manager's own naming convention
+/// (`tt-model/<name>:<hash>`) for every container it launches, regardless of
+/// what's inside (vLLM, SkyReels, flux, …). Deliberately kept separate from
+/// [`is_tt_inference_image`]'s unconditionally-trusted patterns: those name
+/// specific, narrow TT tooling, while `tt-model/` is a broad, effectively
+/// user-controlled namespace (any model name tt-model-manager is pointed at)
+/// — so a match here still needs the caller's own `uses_tt_device` evidence,
+/// the same co-requirement [`is_vllm_launch`] carries, before being trusted.
+pub(crate) fn is_tt_model_manager_image(token: &str) -> bool {
+    token.to_lowercase().starts_with("tt-model/")
+}
+
 /// Model name from a `vllm serve <model>` argv shape, positional or
 /// `--model`/`--model=X` flag form. Shared by [`parse_direct_vllm`] (a host
 /// process's split cmdline) and [`parse_inspect`] (a container's
@@ -302,16 +314,18 @@ pub fn parse_inspect(json: &str) -> Option<InferenceServer> {
         })
         .unwrap_or(false);
 
-    // Two independent ways in: a known TT image (e.g.
-    // ghcr.io/tenstorrent/tt-inference-server/...), or — for a container built
-    // under some other name entirely (e.g. a local model-manager image tagged
-    // `tt-model/<model>:<hash>`) — a recognizable vLLM launch shape in the
-    // container's own argv. The latter alone isn't enough (plain upstream
-    // vLLM on a GPU box would match too), so it additionally requires the real
+    // Two independent ways in: a known, narrow TT image (e.g.
+    // ghcr.io/tenstorrent/tt-inference-server/...) is trusted outright; a
+    // broader signal — a `tt-model/<name>:<hash>` tag from tt-model-manager,
+    // or a recognizable vLLM launch shape in the container's own argv, for a
+    // container built under some other name entirely — isn't enough alone
+    // (a `tt-model/`-tagged one-shot setup container, or plain upstream vLLM
+    // on a GPU box, would match too), so both additionally require the real
     // TT-device evidence already computed above, mirroring the environ-based
     // TT gate `parse_direct_vllm` applies to a bare host process.
     let image_recognized = is_tt_inference_image(&image);
-    if !(image_recognized || (is_vllm_launch(&full_argv_flat) && uses_tt_device)) {
+    let broad_signal = is_tt_model_manager_image(&image) || is_vllm_launch(&full_argv_flat);
+    if !(image_recognized || (broad_signal && uses_tt_device)) {
         return None;
     }
 
@@ -611,6 +625,47 @@ mod tests {
         assert!(s.uses_tt_device);
     }
 
+    // Trimmed from a real `docker inspect` of a live tt-model-manager-launched
+    // SkyReels container (verified on this box): tt-model-manager can also
+    // launch non-vLLM (media/diffusion) servers, so gating on `is_vllm_launch`
+    // in addition to the image pattern misses this entirely — the Cmd is a
+    // plain uvicorn app, not a vLLM shape.
+    const INSPECT_MODEL_MANAGER_SKYREELS: &str = r#"[{
+        "Name": "/tt-model-tt-skyreels-default",
+        "Config": {
+            "Image": "tt-model/tt-skyreels:7c91967a658a",
+            "Entrypoint": ["/usr/local/bin/entrypoint.sh"],
+            "Env": ["MESH_DEVICE=QB2", "TT_MODEL_KIND=tt-dit-server",
+                     "HF_MODEL=Skywork/SkyReels-V2-DF-1.3B-540P-Diffusers"],
+            "Cmd": ["python", "-m", "uvicorn", "--host", "0.0.0.0", "--port",
+                     "20000", "--lifespan", "on", "skyreels_ttnn.server.app:app"]
+        },
+        "HostConfig": {
+            "Devices": [{"PathOnHost": "/dev/tenstorrent", "PathInContainer": "/dev/tenstorrent"}],
+            "PortBindings": {"20000/tcp": [{"HostIp": "", "HostPort": "20000"}]}
+        }
+    }]"#;
+
+    #[test]
+    fn parses_model_manager_style_container_by_image_prefix_when_not_vllm_shaped() {
+        let s = parse_inspect(INSPECT_MODEL_MANAGER_SKYREELS).expect(
+            "a tt-model/-tagged container must be detected even when its Cmd isn't vLLM-shaped",
+        );
+        assert_eq!(
+            s.source,
+            Source::Docker {
+                container: "tt-model-tt-skyreels-default".into()
+            }
+        );
+        assert_eq!(
+            s.model.as_deref(),
+            Some("Skywork/SkyReels-V2-DF-1.3B-540P-Diffusers")
+        );
+        assert_eq!(s.mesh.as_deref(), Some("QB2"));
+        assert_eq!(s.port, Some(20000));
+        assert!(s.uses_tt_device);
+    }
+
     #[test]
     fn rejects_vllm_shaped_command_without_a_tt_device_mapping() {
         // Same Cmd/image shape, but no HostConfig.Devices entry — could be
@@ -621,6 +676,23 @@ mod tests {
             "Config": {
                 "Image": "vllm/vllm-openai:latest",
                 "Cmd": ["vllm", "serve", "some/model", "--port", "8000"]
+            },
+            "HostConfig": {}
+        }]"#;
+        assert!(parse_inspect(no_device).is_none());
+    }
+
+    #[test]
+    fn rejects_tt_model_tagged_container_without_a_tt_device_mapping() {
+        // A `tt-model/`-tagged container could be a one-shot setup/build/
+        // download step, not a live server — the image prefix alone must not
+        // be trusted without the same TT-device evidence `is_vllm_launch`
+        // needs.
+        let no_device = r#"[{
+            "Name": "/tt-model-setup-job",
+            "Config": {
+                "Image": "tt-model/some-model:deadbeef",
+                "Cmd": ["python", "-m", "download_weights"]
             },
             "HostConfig": {}
         }]"#;

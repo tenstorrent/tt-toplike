@@ -1,3 +1,44 @@
+tt-toplike (0.13.5) noble; urgency=medium
+
+  * Fix: the Inference Server monitor still missed a tt-model-manager
+    container when the model behind it wasn't vLLM. v0.13.4 widened
+    detection to recognize a `vllm serve ...` shape under an unrecognized
+    image, but a live SkyReels (diffusion) launch runs a plain
+    `python -m uvicorn ... skyreels_ttnn.server.app:app` — not
+    vLLM-shaped at all — under the same `tt-model/<name>:<hash>` image
+    tag, so it matched neither the known-image substrings nor the vLLM
+    shape check and was invisible end to end. `tt-model/` is now
+    recognized as its own signal (tt-model-manager's naming convention,
+    independent of what's running inside), gated on the container's
+    HostConfig actually mapping `/dev/tenstorrent` — the same
+    device-mapping co-requirement the vLLM-shape fallback already
+    carries, so a one-shot `tt-model/`-tagged setup/download container
+    with no device mapping still isn't claimed as a live server.
+    Verified end to end against the real running SkyReels container on
+    this box.
+  * Fix: once detected, that same SkyReels container's Inference Server
+    panel still showed only CPU/RSS — no compile or weight-load signal.
+    The kernel-compile probe (`KERNEL_FIND_CMD`) only searched
+    `$TT_METAL_HOME/built` and `$HOME/.cache/tt-metal-cache`, but this
+    container (and current tt-metal generally) sets `$TT_METAL_CACHE`,
+    which tt-metal's own `rtoptions.cpp` makes authoritative — resolving
+    to `$TT_METAL_CACHE/tt-metal-cache`, the exact root `jit_build`'s
+    `out_root_` (`build.cpp`) writes every `.dephash` under — so the
+    probe found 0 kernels while the container's own logs showed live
+    `BuildKernels | compiled ...` lines. `$TT_METAL_CACHE/tt-metal-cache`
+    is now a third search root, gated on either `TT_METAL_HOME` or
+    `TT_METAL_CACHE` being set. Also widened `LOADED_FIND_CMD` (the
+    weight-shard probe) to search `$TT_DIT_CACHE_DIR` alongside
+    `$CACHE_ROOT`: diffusion/DiT launches (SkyReels, Flux, Motif, Wan2.2,
+    …) cache loaded `.tensorbin` shards there instead, per tt-metal's
+    `models/experimental/tt_dit/utils/cache.py` — so every non-vLLM model
+    family previously read a permanently frozen `loaded_count` of 0 even
+    while actively loading weights. Both new env vars were added to
+    `host_exec`'s forwarded-variable allowlist so the host (non-Docker)
+    launch path gets the same fix.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Wed, 09 Sep 2026 00:00:00 +0000
+
 tt-toplike (0.13.4) noble; urgency=medium
 
   * Fix: the Inference Server monitor never detected a vLLM-on-TT
