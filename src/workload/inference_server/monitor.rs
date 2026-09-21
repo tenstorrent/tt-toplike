@@ -52,22 +52,46 @@ pub const CADENCE_SECS: u32 = TICK_INTERVAL.as_secs() as u32;
 const NEVER_OBSERVED_KERNEL_COUNT: usize = i64::MAX as usize;
 
 /// The shell command run inside the container to count compiled-kernel
-/// artifacts (one `.dephash` per JIT-compiled kernel program). Both roots are
-/// searched because the location moved across tt-inference-server releases:
-/// older images cached under `$TT_METAL_HOME/built`, while 0.14.0+ uses the
-/// per-user JIT cache at `$HOME/.cache/tt-metal-cache` (the old `built/` is
-/// empty there, which silently zeroed this count before). `$TT_METAL_HOME`/
-/// `$HOME` are expanded by the container's own shell (via `sh -c`), not here —
-/// the host-side `env` dump only decides *whether* to run this (see `build_sample`).
-const KERNEL_FIND_CMD: &str =
+/// artifacts (one `.dephash` per JIT-compiled kernel program) when
+/// `$TT_METAL_CACHE` is authoritative. `RunTimeOptions::get_cache_dir()`
+/// (`tt_metal/llrt/rtoptions.cpp`) resolves to
+/// `$TT_METAL_CACHE/tt-metal-cache` (unconditionally appending that subdir),
+/// and `jit_build`'s `out_root_` (`tt_metal/jit_build/build.cpp`, feeding
+/// every `.dephash` write) uses exactly that path, ignoring the legacy roots.
+/// `$TT_METAL_CACHE` is expanded by the container's own shell (via `sh -c`),
+/// not here.
+const KERNEL_FIND_CMD_TT_METAL_CACHE: &str =
+    "find \"$TT_METAL_CACHE/tt-metal-cache\" -name '*.dephash' 2>/dev/null";
+
+/// The fallback shell command for older images that still cache under either
+/// `$TT_METAL_HOME/built` or `$HOME/.cache/tt-metal-cache`.
+const KERNEL_FIND_CMD_LEGACY: &str =
     "find \"$TT_METAL_HOME/built\" \"$HOME/.cache/tt-metal-cache\" -name '*.dephash' 2>/dev/null";
 
 /// The shell command that counts *loaded* weight shards — the device-format
-/// tensor binaries (`.tensorbin`) the runtime writes under `$CACHE_ROOT` as it
-/// converts and loads a model's weights. Distinct from compiled kernels: this
-/// climbs during the weight-load phase, after (and alongside) the compile
-/// phase. Gated on `$CACHE_ROOT` being set (see `build_sample`).
-const LOADED_FIND_CMD: &str = "find \"$CACHE_ROOT\" -name '*.tensorbin' 2>/dev/null";
+/// tensor binaries (`.tensorbin`) the runtime writes as it converts and loads
+/// a model's weights. Two independent roots, since the env var carrying this
+/// path differs by model family: `$CACHE_ROOT` is tt-inference-server's own
+/// convention (vLLM-on-TT launches); `$TT_DIT_CACHE_DIR` is tt-metal's
+/// `tt_dit` diffusion-transformer cache (SkyReels, Flux, Motif, Wan2.2, …,
+/// verified against `models/experimental/tt_dit/utils/cache.py`'s
+/// `to_cached_state_dict`, whose default `path_suffix` is the same
+/// `.tensorbin`) — a container sets one or the other, never both. Distinct
+/// from compiled kernels: this climbs during the weight-load phase, after
+/// (and alongside) the compile phase. Gated on at least one being set (see
+/// `build_sample`).
+const LOADED_FIND_CMD: &str =
+    "find \"$CACHE_ROOT\" \"$TT_DIT_CACHE_DIR\" -name '*.tensorbin' 2>/dev/null";
+
+fn kernel_find_cmd(env: &str) -> Option<&'static str> {
+    if parse_env_var(env, "TT_METAL_CACHE").is_some() {
+        Some(KERNEL_FIND_CMD_TT_METAL_CACHE)
+    } else if parse_env_var(env, "TT_METAL_HOME").is_some() {
+        Some(KERNEL_FIND_CMD_LEGACY)
+    } else {
+        None
+    }
+}
 
 /// A never-yet-probed baseline for a newly discovered service, so the first
 /// real tick's deltas are computed against a known-empty prior tick rather
@@ -190,17 +214,18 @@ fn build_sample(
     health_path: &str,
 ) -> TickSample {
     // Only run the (slower) exec'd `find` when the container actually has
-    // TT_METAL_HOME set — e.g. `prompt-server` doesn't, and would otherwise
-    // pay for a doomed `find` every tick.
+    // TT_METAL_HOME or TT_METAL_CACHE set — e.g. `prompt-server` has
+    // neither, and would otherwise pay for a doomed `find` every tick.
     let env = probe.env(container);
-    let kernel_count = if parse_env_var(&env, "TT_METAL_HOME").is_some() {
-        count_lines(&probe.exec(container, KERNEL_FIND_CMD))
-    } else {
-        0
-    };
-    // Loaded weight shards live under `$CACHE_ROOT`; only probe when that's set
-    // (e.g. `prompt-server` has no such cache and would pay for a doomed `find`).
-    let loaded_count = if parse_env_var(&env, "CACHE_ROOT").is_some() {
+    let kernel_count = kernel_find_cmd(&env)
+        .map(|cmd| count_lines(&probe.exec(container, cmd)))
+        .unwrap_or(0);
+    // Loaded weight shards live under `$CACHE_ROOT` (vLLM-on-TT) or
+    // `$TT_DIT_CACHE_DIR` (diffusion/DiT) — only probe when at least one is
+    // set (e.g. `prompt-server` has neither and would pay for a doomed `find`).
+    let loaded_count = if parse_env_var(&env, "CACHE_ROOT").is_some()
+        || parse_env_var(&env, "TT_DIT_CACHE_DIR").is_some()
+    {
         count_lines(&probe.exec(container, LOADED_FIND_CMD))
     } else {
         0
@@ -925,6 +950,134 @@ mod tests {
         assert!(
             !sample.python_alive,
             "docker-keyed path must keep using contains_python, not row-count"
+        );
+    }
+
+    /// A diffusion/DiT launch (SkyReels, Flux, Motif, Wan2.2, …) writes its
+    /// loaded weight shards under `$TT_DIT_CACHE_DIR` (tt-metal's
+    /// `models/experimental/tt_dit/utils/cache.py`, `to_cached_state_dict`'s
+    /// default `.tensorbin` suffix — the same file extension `LOADED_FIND_CMD`
+    /// already searches for), never `$CACHE_ROOT` (that's tt-inference-server's
+    /// own convention, for its non-DiT vLLM path). This probe reports
+    /// `TT_DIT_CACHE_DIR` set and `CACHE_ROOT` absent, with the `find` exec
+    /// returning shard paths only when invoked against a command that
+    /// actually names `TT_DIT_CACHE_DIR`.
+    struct FakeDitProbe;
+    impl ContainerProbe for FakeDitProbe {
+        fn env(&self, _key: &str) -> String {
+            "MESH_DEVICE=QB2\nTT_DIT_CACHE_DIR=/weight-cache\n".into()
+        }
+        fn stats(&self, _key: &str) -> String {
+            "50.0%|9GiB / 249GiB".into()
+        }
+        fn exec(&self, _key: &str, sh: &str) -> String {
+            if sh.contains("TT_DIT_CACHE_DIR") {
+                "/weight-cache/a.tensorbin\n/weight-cache/b.tensorbin\n".into()
+            } else {
+                String::new()
+            }
+        }
+        fn http(&self, _port: u16, _path: &str) -> (u16, String) {
+            (0, String::new())
+        }
+    }
+
+    #[test]
+    fn build_sample_counts_dit_weight_shards_under_tt_dit_cache_dir() {
+        let sample = build_sample(
+            &FakeDitProbe,
+            "tt-model-tt-skyreels-default",
+            20000,
+            "/health",
+        );
+        assert_eq!(
+            sample.loaded_count, 2,
+            "a DiT launch's loaded shards live under $TT_DIT_CACHE_DIR, not $CACHE_ROOT — \
+             the probe must search that root too, or every diffusion/media launch reads a \
+             permanently frozen `loaded_count` of 0 even while it's actively loading weights"
+        );
+    }
+
+    /// A live SkyReels container (verified on this box) sets `TT_METAL_CACHE`
+    /// (not just `TT_METAL_HOME`) — and tt-metal's own `rtoptions.cpp` makes
+    /// `$TT_METAL_CACHE` authoritative: when set, `get_cache_dir()` resolves
+    /// to `$TT_METAL_CACHE/tt-metal-cache` (unconditionally appending that
+    /// subdir — see `normalize_path`), and `jit_build`'s `out_root_` (feeding
+    /// every `.dephash` write) uses exactly that path whenever
+    /// `is_cache_dir_specified()`, ignoring `$TT_METAL_HOME/built` and
+    /// `$HOME/.cache/tt-metal-cache` entirely. Confirmed live: with
+    /// `TT_METAL_CACHE=/cache` set, `find "$TT_METAL_HOME/built"
+    /// "$HOME/.cache/tt-metal-cache"` found 0 `.dephash` files while the
+    /// container's own logs showed live `BuildKernels | compiled ...` lines.
+    struct FakeTtMetalCacheProbe;
+    impl ContainerProbe for FakeTtMetalCacheProbe {
+        fn env(&self, _key: &str) -> String {
+            "TT_METAL_HOME=/opt/tt-metal\nTT_METAL_CACHE=/cache\n".into()
+        }
+        fn stats(&self, _key: &str) -> String {
+            "50.0%|9GiB / 249GiB".into()
+        }
+        fn exec(&self, _key: &str, sh: &str) -> String {
+            if sh.contains("TT_METAL_CACHE") {
+                "/cache/tt-metal-cache/a.dephash\n/cache/tt-metal-cache/b.dephash\n\
+                 /cache/tt-metal-cache/c.dephash\n"
+                    .into()
+            } else {
+                String::new()
+            }
+        }
+        fn http(&self, _port: u16, _path: &str) -> (u16, String) {
+            (0, String::new())
+        }
+    }
+
+    #[test]
+    fn build_sample_counts_kernel_artifacts_under_tt_metal_cache() {
+        let sample = build_sample(
+            &FakeTtMetalCacheProbe,
+            "tt-model-tt-skyreels-default",
+            20000,
+            "/health",
+        );
+        assert_eq!(
+            sample.kernel_count, 3,
+            "when $TT_METAL_CACHE is set, tt-metal's real kernel-cache root is \
+             $TT_METAL_CACHE/tt-metal-cache — the probe must search that root too, or a \
+             container using it reads a permanently frozen `kernel_count` of 0 even while \
+             kernels are actively compiling"
+        );
+    }
+
+    #[test]
+    fn build_sample_ignores_legacy_kernel_roots_when_tt_metal_cache_is_set() {
+        struct FakeProbe;
+        impl ContainerProbe for FakeProbe {
+            fn env(&self, _key: &str) -> String {
+                "TT_METAL_HOME=/opt/tt-metal\nTT_METAL_CACHE=/cache\n".into()
+            }
+            fn stats(&self, _key: &str) -> String {
+                "50.0%|9GiB / 249GiB".into()
+            }
+            fn exec(&self, _key: &str, sh: &str) -> String {
+                if sh == KERNEL_FIND_CMD_TT_METAL_CACHE {
+                    "/cache/tt-metal-cache/live.dephash\n".into()
+                } else {
+                    "/opt/tt-metal/built/stale-a.dephash\n\
+                     /root/.cache/tt-metal-cache/stale-b.dephash\n\
+                     /cache/tt-metal-cache/live.dephash\n"
+                        .into()
+                }
+            }
+            fn http(&self, _port: u16, _path: &str) -> (u16, String) {
+                (0, String::new())
+            }
+        }
+
+        let sample = build_sample(&FakeProbe, "tt-model-tt-skyreels-default", 20000, "/health");
+        assert_eq!(
+            sample.kernel_count, 1,
+            "when $TT_METAL_CACHE is set, only $TT_METAL_CACHE/tt-metal-cache counts — \
+             stale legacy roots must be ignored"
         );
     }
 }

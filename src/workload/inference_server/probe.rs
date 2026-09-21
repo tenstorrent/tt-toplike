@@ -255,14 +255,14 @@ impl ContainerProbe for DockerProbe {
         // only ever called on the monitor's background thread, never the
         // render path.
         //
-        // A candidate is either a known TT image (the common case) or a
-        // container whose displayed Command already looks like a vLLM launch
-        // (e.g. a locally-built image tagged by some other tool entirely,
-        // such as `tt-model/<model>:<hash>` — the image string alone gives no
-        // hint, but `docker ps`'s Command already shows `vllm serve ...`).
-        // This is only a cheap pre-filter to avoid inspecting every
-        // container on the box; `parse_inspect` does the authoritative
-        // shape + TT-device check on the full inspected argv.
+        // A candidate is a known TT image (the common case), a `tt-model/`-
+        // tagged tt-model-manager container (any model kind — vLLM, SkyReels,
+        // …), or a container whose displayed Command already looks like a
+        // vLLM launch under some other image entirely. This is only a cheap
+        // pre-filter to avoid inspecting every container on the box;
+        // `parse_inspect` does the authoritative shape + TT-device check on
+        // the full inspected argv (rejecting the latter two without real
+        // TT-device evidence).
         let listing = docker(&[
             "ps",
             "--no-trunc",
@@ -279,6 +279,7 @@ impl ContainerProbe for DockerProbe {
             };
             let command_toks: Vec<&str> = command.split_whitespace().collect();
             if !super::detect::is_tt_inference_image(image)
+                && !super::detect::is_tt_model_manager_image(image)
                 && !super::detect::is_vllm_launch(&command_toks)
             {
                 continue;
@@ -372,17 +373,23 @@ fn host_top_proc_cmd(pids: &[i32]) -> String {
 
 /// Environment variables `host_exec` forwards from the target process's own
 /// `environ` — exactly what `KERNEL_FIND_CMD`/`LOADED_FIND_CMD` reference
-/// (`$TT_METAL_HOME`, `$CACHE_ROOT`, `$HOME`). Deliberately an allowlist, not
-/// a copy of the whole environ: only root can read another user's
-/// `/proc/<pid>/environ`, so a local user could otherwise plant a process
-/// whose environ carries `LD_PRELOAD` (or similar) alongside the
-/// `MESH_DEVICE`/`TT_METAL_HOME` gate `parse_direct_vllm` checks, and have
-/// the root-run monitor's next probe tick spawn `sh -c '<find …>'` with that
-/// variable set — `sh` isn't setuid, so the dynamic linker honors it.
-/// Forwarding only the handful of names the two shell commands actually need
-/// closes that off. `PATH` is deliberately **not** in this list — see
-/// [`host_exec`].
-const HOST_EXEC_FORWARDED_VARS: &[&str] = &["TT_METAL_HOME", "CACHE_ROOT", "HOME"];
+/// (`$TT_METAL_HOME`, `$TT_METAL_CACHE`, `$CACHE_ROOT`, `$TT_DIT_CACHE_DIR`,
+/// `$HOME`). Deliberately an allowlist, not a copy of the whole environ: only
+/// root can read another user's `/proc/<pid>/environ`, so a local user could
+/// otherwise plant a process whose environ carries `LD_PRELOAD` (or similar)
+/// alongside the `MESH_DEVICE`/`TT_METAL_HOME` gate `parse_direct_vllm`
+/// checks, and have the root-run monitor's next probe tick spawn
+/// `sh -c '<find …>'` with that variable set — `sh` isn't setuid, so the
+/// dynamic linker honors it. Forwarding only the handful of names the two
+/// shell commands actually need closes that off. `PATH` is deliberately
+/// **not** in this list — see [`host_exec`].
+const HOST_EXEC_FORWARDED_VARS: &[&str] = &[
+    "TT_METAL_HOME",
+    "TT_METAL_CACHE",
+    "CACHE_ROOT",
+    "TT_DIT_CACHE_DIR",
+    "HOME",
+];
 
 /// The fixed `PATH` given to every `host_exec` shell — never the target
 /// process's own. Sufficient for the only commands `KERNEL_FIND_CMD`/
