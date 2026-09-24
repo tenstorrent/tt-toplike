@@ -32,6 +32,7 @@ use crate::workload::train::{LogSource, TrainState};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::cell::Cell as StdCell;
+use std::time::Instant;
 
 /// The loss a model that has learned nothing would report — the top of the
 /// hue ramp, derived from the job rather than fixed.
@@ -116,11 +117,6 @@ fn mountain_hsv(base_hue: f32, depth: f32, x: usize, t: f32) -> (f32, f32, f32) 
 const FWD_HUE: f32 = 42.0;
 const BWD_HUE: f32 = 268.0;
 
-/// Sub-columns the forward/backward pass advances per second. Expressed in
-/// wall-clock terms so the pulse travels at the same visible speed whatever
-/// the redraw rate — a higher frame rate buys smoothness, not speed.
-const SWEEP_SUBCOLS_PER_SEC: f32 = 26.0;
-
 /// How far behind the sweep head a cell still glows, in sub-columns. The
 /// falloff over this distance is what turns a hard lit block into a tail.
 const SWEEP_TAIL: f32 = 6.0;
@@ -140,14 +136,27 @@ fn smoothstep(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Current sweep-head position, wrapped into `period`. Fractional, so the
-/// head moves smoothly between cells rather than snapping to one per tick.
-fn sweep_head(frame: u64, period: f32) -> f32 {
-    if period <= 0.0 {
+/// Fraction of a training step's real, measured duration that has elapsed
+/// since the step began — the pure arithmetic core of the sweep's motion.
+///
+/// Clamped to `0.0..=1.0`: it climbs from `0.0` (the instant `st.step`
+/// changed) to `1.0` (elapsed time reaches `step_ms`, the trainer's own
+/// measured cost of that step) and then *stays* at `1.0` rather than
+/// wrapping — a stalled trainer holds its last frame instead of looping.
+/// Returns `0.0` when `step_ms <= 0.0`: with no measured step cost there is
+/// no real cadence to derive a fraction from, and fabricating one (e.g.
+/// defaulting to some made-up duration) is exactly the synthetic-motion
+/// problem this function exists to avoid.
+///
+/// All the wall-clock/`Instant` bookkeeping needed to produce `elapsed_secs`
+/// lives in `draw_network`'s `Cell`s (impure, and not worth testing without
+/// a fake clock); this function is the arithmetic, isolated so it can be
+/// asserted directly — same split as `mountain_hsv`/`sweep_at` above.
+fn step_progress(elapsed_secs: f32, step_ms: f32) -> f32 {
+    if step_ms <= 0.0 {
         return 0.0;
     }
-    let secs = frame as f32 / crate::animation::train_sky::ANIM_FPS;
-    (secs * SWEEP_SUBCOLS_PER_SEC) % period
+    (elapsed_secs * 1000.0 / step_ms).clamp(0.0, 1.0)
 }
 
 /// Glow at sub-column `at` given the head position: brightest under the head,
@@ -266,6 +275,17 @@ pub struct TrainView {
     cache_last: StdCell<u32>,
     /// Consecutive render calls since `cache_entries` last grew.
     cache_steady_ticks: StdCell<u32>,
+    /// `st.step` as of the last `draw_network` call, so a real step
+    /// boundary (a genuine change, not just a redraw) can be detected from
+    /// an otherwise-`&self` render pass. See `step_started_at` and the
+    /// doc comment in `draw_network` for why this replaces frame-driven
+    /// sweep motion. Same `Cell` pattern as `cache_last` above, for the
+    /// same reason.
+    last_step: StdCell<u64>,
+    /// Wall-clock moment `last_step` last changed. The sweep's progress is
+    /// `(now - step_started_at) / st.step_ms`, i.e. real elapsed time
+    /// against the trainer's own measured step cost — not a fixed rate.
+    step_started_at: StdCell<Instant>,
 }
 
 impl TrainView {
@@ -276,6 +296,8 @@ impl TrainView {
             frame: 0,
             cache_last: StdCell::new(0),
             cache_steady_ticks: StdCell::new(0),
+            last_step: StdCell::new(0),
+            step_started_at: StdCell::new(Instant::now()),
         }
     }
 
@@ -800,6 +822,48 @@ impl TrainView {
 
         let node_glyphs = ['●', '◉', '○', '◇', '·'];
 
+        // ── Step-driven sweep state ──────────────────────────────────
+        // A step boundary is the only trustworthy sign of training progress
+        // this view has: `st.step` only changes when the monitor parsed a
+        // real `Step`/`StepAndTime` log line (`TrainState::apply_event`), so
+        // noticing it change here means real forward+backward work just
+        // completed — not merely that wall-clock time passed. Latch that
+        // moment so the sweep's *duration* can be pinned to `st.step_ms`,
+        // the trainer's own measured cost of the step, instead of the old
+        // made-up `SWEEP_SUBCOLS_PER_SEC` rate.
+        if st.step != self.last_step.get() {
+            self.last_step.set(st.step);
+            self.step_started_at.set(Instant::now());
+        }
+
+        // No step has ever landed, or its timing is unknown: there is no
+        // real cadence to animate, so the network sits at rest rather than
+        // fabricating one. `sweep_progress` is `None` in exactly that case;
+        // otherwise it's this step's elapsed fraction, `0.0..=1.0`, which
+        // *stops* advancing once it hits `1.0` rather than wrapping back to
+        // `0.0` — a stalled trainer (no new `st.step` arriving) finishes its
+        // one in-flight pass and then holds still, instead of the old
+        // perpetual loop that animated identically whether or not the run
+        // was actually making progress.
+        let sweep_progress = (st.step > 0 && st.step_ms > 0.0).then(|| {
+            step_progress(
+                self.step_started_at.get().elapsed().as_secs_f32(),
+                st.step_ms,
+            )
+        });
+
+        // One pass spans the grid width plus a small buffer so both the
+        // forward and backward tails have room to fully clear before the
+        // sweep comes to rest. `sweep_at`'s distance math is periodic, so it
+        // gets a period several times wider than one pass (`wrap_period`)
+        // purely to disable wraparound — a real wrap would otherwise light
+        // the far end of the grid as if the head had already looped back to
+        // it, which is exactly the perpetual-motion behaviour being removed.
+        let sub = stride.max(1) as f32;
+        let span = (cols + 4) as f32 * sub;
+        let wrap_period = span * 3.0;
+        let head = sweep_progress.map(|p| p * span);
+
         for r in 0..rows {
             let y = network_top + 1 + r * row_stride;
             for c in 0..cols {
@@ -813,10 +877,13 @@ impl TrainView {
                 // *flows* through the network instead of stepping between
                 // discrete lit blocks. Measured in sub-column units so the
                 // connector cells between nodes light in sequence too.
-                let sub = stride.max(1) as f32;
-                let head = sweep_head(self.frame, (cols + 4) as f32 * sub);
-                let fwd = sweep_at(head, c as f32 * sub, (cols + 4) as f32 * sub);
-                let bwd = sweep_at(head, (cols - 1 - c) as f32 * sub, (cols + 4) as f32 * sub);
+                let (fwd, bwd) = match head {
+                    Some(h) => (
+                        sweep_at(h, c as f32 * sub, wrap_period),
+                        sweep_at(h, (cols - 1 - c) as f32 * sub, wrap_period),
+                    ),
+                    None => (0.0, 0.0),
+                };
 
                 // Connectors run from this node toward the next block. They
                 // light with whichever sweep is passing, so the pulse reads as
@@ -840,11 +907,17 @@ impl TrainView {
                         };
                         // Each connector cell sits a fraction of a block
                         // further along, so the sweep crosses the gap smoothly
-                        // rather than jumping node-to-node.
+                        // rather than jumping node-to-node. Uses the same
+                        // `head`/`wrap_period` as the node above so nodes and
+                        // connectors always agree on where the pulse is.
                         let at = c as f32 * sub + k as f32;
-                        let period = (cols + 4) as f32 * sub;
-                        let f = sweep_at(head, at, period);
-                        let b = sweep_at(head, (cols - 1 - c) as f32 * sub - k as f32, period);
+                        let (f, b) = match head {
+                            Some(h) => (
+                                sweep_at(h, at, wrap_period),
+                                sweep_at(h, (cols - 1 - c) as f32 * sub - k as f32, wrap_period),
+                            ),
+                            None => (0.0, 0.0),
+                        };
                         let lit = f.max(b);
                         let (col, bold) = if lit > 0.04 {
                             let hue = if f >= b { FWD_HUE } else { BWD_HUE };
@@ -2049,18 +2122,24 @@ mod tests {
     /// Fluidity guard. The sweep used to be a binary `% period < 2` on/off,
     /// which at any frame rate reads as blocks blinking rather than a pulse
     /// travelling. Now it's a continuous head with a lead-in and a trailing
-    /// falloff, so a cell's brightness changes by small increments between
-    /// consecutive frames. Asserts that directly: a regression to on/off
-    /// would produce a 1.0 jump, and dropping the lead-in ramp measured 0.95.
+    /// falloff, so a cell's brightness changes by small increments as the
+    /// head advances in small steps. Asserts that directly: a regression to
+    /// on/off would produce a 1.0 jump, and dropping the lead-in ramp
+    /// measured 0.95. `head` is swept linearly here rather than via
+    /// `step_progress`/wall-clock — this test is about `sweep_at`'s glow
+    /// shape, which is unchanged rendering aesthetic, not about how `head`
+    /// itself is now derived from real step progress.
     #[test]
     fn sweep_intensity_changes_smoothly_between_consecutive_frames() {
         let period = 50.0; // (cols+4) * stride for a typical 6-block grid
+        let steps = 240;
         let mut worst: f32 = 0.0;
         // Sample several cells so the wrap-around boundary is covered too.
         for at in [0.0f32, 7.5, 15.0, 33.0, 49.0] {
-            let mut prev = sweep_at(sweep_head(0, period), at, period);
-            for f in 1..240u64 {
-                let cur = sweep_at(sweep_head(f, period), at, period);
+            let mut prev = sweep_at(0.0, at, period);
+            for f in 1..steps {
+                let head = (f as f32 / steps as f32) * period;
+                let cur = sweep_at(head, at, period);
                 worst = worst.max((cur - prev).abs());
                 prev = cur;
             }
@@ -2073,8 +2152,8 @@ mod tests {
 
         // And it must actually reach full brightness, or "smooth" would be
         // satisfied by a flat line that never lights up at all.
-        let peak = (0..240u64)
-            .map(|f| sweep_at(sweep_head(f, period), 15.0, period))
+        let peak = (0..steps)
+            .map(|f| sweep_at((f as f32 / steps as f32) * period, 15.0, period))
             .fold(0.0f32, f32::max);
         assert!(
             peak > 0.85,
@@ -2082,30 +2161,46 @@ mod tests {
         );
     }
 
-    /// The pulse must travel in a consistent direction, not shimmer in place:
-    /// as the head advances, the lit cell index should advance with it.
+    /// `step_progress` climbs linearly from `0.0` at the step boundary to
+    /// `1.0` once `elapsed_secs` reaches the step's measured cost, and never
+    /// exceeds `1.0` however much longer the trainer stalls — this is the
+    /// "finish the pass, then hold" behaviour that replaces the old
+    /// perpetual wall-clock loop.
     #[test]
-    fn sweep_head_advances_monotonically_within_a_cycle() {
-        let period = 50.0;
-        let mut last = sweep_head(0, period);
-        let mut wraps = 0;
-        for f in 1..200u64 {
-            let h = sweep_head(f, period);
-            if h < last {
-                wraps += 1; // a wrap is expected, a jitter is not
-            } else {
-                assert!(
-                    h - last < 1.0,
-                    "head jumped {:.2} sub-columns in one frame at f={f}",
-                    h - last
-                );
-            }
-            last = h;
-        }
-        assert!(
-            (1..=3).contains(&wraps),
-            "expected the sweep to wrap a couple of times over 200 frames, got {wraps}"
+    fn step_progress_climbs_then_clamps_at_one() {
+        assert_eq!(step_progress(0.0, 400.0), 0.0, "no time elapsed yet");
+        assert_eq!(
+            step_progress(0.4, 400.0),
+            1.0,
+            "elapsed == step_ms should reach exactly full progress"
         );
+        assert_eq!(
+            step_progress(4.0, 400.0),
+            1.0,
+            "elapsed far beyond step_ms must clamp at 1.0, not overshoot"
+        );
+        // Monotonic in between, so the sweep never visibly reverses.
+        let mut last = 0.0f32;
+        for ms in 0..=40 {
+            let p = step_progress(ms as f32 / 100.0, 400.0);
+            assert!(
+                p >= last,
+                "progress went backwards at {ms}0ms: {p} < {last}"
+            );
+            last = p;
+        }
+    }
+
+    /// With no measured step cost there is no real cadence to derive a
+    /// fraction from, so `step_progress` must report "no progress" rather
+    /// than picking an arbitrary one — this is what keeps the network at
+    /// rest before the first step (or step timing) is ever observed.
+    #[test]
+    fn step_progress_is_zero_without_a_measured_step_cost() {
+        for elapsed in [0.0f32, 0.1, 1.0, 100.0] {
+            assert_eq!(step_progress(elapsed, 0.0), 0.0);
+            assert_eq!(step_progress(elapsed, -5.0), 0.0);
+        }
     }
 
     /// The grid should breathe on a normal terminal: blocks spaced several

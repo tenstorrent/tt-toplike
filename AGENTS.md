@@ -481,3 +481,37 @@ CPU/RSS: the kernel/weight-load progress probes never searched
 tt-metal and every diffusion/DiT model family use — so they always reported
 zero hits. Both env vars added to `host_exec`'s forwarded-variable
 allowlist.
+
+## v0.13.6 (Sep 23, 2026)
+
+Defrag TUI's model-loading visualization went dark on p300c (dual-ASIC)
+under confirmed heavy load: every phase-transition gate requires `power >
+POWER_IDLE_W`, and per-ASIC `Telemetry::power` (TDP register) can read
+exactly 0.0 W independently of the rest of the board — live `tt-smi -s`
+showed `power`/`VCORE` zeroed while `board_power` (~288 W), current
+(50-64 A), aiclk (1350 MHz boosted) and ASIC temp (65-70°C) all said the
+device was running. Added `effective_power_w()`: falls back to
+`board_power` only when per-ASIC `power` is absent/near-zero and
+`board_power` itself clears `POWER_IDLE_W`; leaves single-ASIC/healthy
+boards untouched and doesn't fabricate load on a genuinely idle card.
+Render-path power readout (`render_power_bar`) untouched — this was
+specifically the animation-liveness gating going dark, not the numeric
+display.
+
+## v0.13.7 (Sep 23, 2026)
+
+Training view's network sweep (`src/animation/train_view.rs`) was purely
+decorative: it advanced on a fixed wall-clock rate
+(`SWEEP_SUBCOLS_PER_SEC`), so a stalled trainer animated identically to a
+healthy one — violating the tool's own every-pixel-is-real-signal premise.
+Replaced with a step-gated sweep: it starts when `TrainState.step` actually
+changes (a real log event) and traverses over that step's measured
+`step_ms`, then holds at rest — no perpetual loop — until the next real
+step lands; no lit pulse before a first step/timing is observed. Added pure
+`step_progress(elapsed_secs, step_ms)` (unit-tested) and `Cell`-based
+`last_step`/`step_started_at` on `TrainView` to detect the step boundary
+from `&self`. Removed the now-dead `sweep_head`/`SWEEP_SUBCOLS_PER_SEC`;
+`sweep_at`'s glow/falloff shape is unchanged, just fed a step-derived head
+instead of a wall-clock one. Mock runs (`MockTrainRun`) needed no special
+casing — they already derive `step`/`step_ms` at the same real cadence a
+live run would.

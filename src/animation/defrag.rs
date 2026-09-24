@@ -53,7 +53,7 @@
 
 use crate::animation::{hsv_to_rgb, lerp, temp_to_hue};
 use crate::backend::TelemetryBackend;
-use crate::models::telemetry::parse_hex_or_dec;
+use crate::models::telemetry::{parse_hex_or_dec, Telemetry};
 use crate::ui::colors;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -100,6 +100,52 @@ fn shows_load(power_ema: f32, idle_power: f32, tdp_limit: Option<f32>) -> bool {
         return true;
     }
     tdp_limit.is_some_and(|tdp| tdp > 0.0 && power_ema > tdp * RUN_TDP_FRACTION)
+}
+
+/// How close to zero a power reading has to be before it's treated as "not
+/// reporting" rather than a genuine near-zero measurement. The confirmed p300c
+/// failure mode zeros the per-ASIC TDP register bit-for-bit (`Telemetry::power
+/// == Some(0.0)`, alongside `VCORE` reading 0x0 in the raw SMBUS block), but a
+/// small tolerance also covers a firmware that reports a similarly meaningless
+/// sub-watt value instead of a hard zero.
+const POWER_ZERO_EPSILON_W: f32 = 0.5;
+
+/// Effective power reading for the phase-gating logic below, tolerating a
+/// known dual-ASIC failure mode.
+///
+/// Every phase-transition gate in this file (`Phase::Dma`, `Phase::Running`,
+/// `shows_load`, `evict_eligible`) requires `power > POWER_IDLE_W` (8 W). On
+/// p300c-class (dual-ASIC) boards, the per-ASIC TDP register that
+/// `Telemetry::power_w()` reads can independently read/report exactly 0.0 W
+/// while the card is genuinely under heavy load — confirmed live via
+/// `tt-smi -s`: `power` and `VCORE` both zero out while `board_power` (the
+/// whole-card aggregate, a separate register) reads ~285-291 W, current reads
+/// 50-64 A, aiclk reads 1350 MHz (boosted), and ASIC temp reads 65-70°C. Left
+/// alone, that zeroed per-ASIC reading closes every gate above and drains the
+/// visualization to `Phase::Idle` — animation goes dark — even though the
+/// device is demonstrably active.
+///
+/// Falls back to `board_power` only when the per-ASIC reading is absent or
+/// reads as (near) zero *and* `board_power` itself is above the idle floor.
+/// This deliberately does not split `board_power` across ASICs — it's a
+/// coarser signal (whole-card, not per-device), but it's honest about what it
+/// is, and per-ASIC apportionment would invent precision this bug doesn't
+/// need: the caller only wants a fallback that goes above/below
+/// `POWER_IDLE_W`, not an exact per-device wattage. When `board_power` is also
+/// absent or near-idle, this returns the (possibly zero) per-ASIC reading
+/// unchanged — never invents activity from a card that is genuinely idle.
+fn effective_power_w(telem: Option<&Telemetry>) -> f32 {
+    let Some(telem) = telem else {
+        return 0.0;
+    };
+    let power = telem.power_w();
+    if power > POWER_ZERO_EPSILON_W {
+        return power;
+    }
+    match telem.board_power {
+        Some(board_power) if board_power > POWER_IDLE_W => board_power,
+        _ => power,
+    }
 }
 
 // EVICT is triggered by real hardware events, not a frame timer.
@@ -323,7 +369,11 @@ impl DefragVis {
             let telem = backend.telemetry(idx);
             let smbus = backend.smbus_telemetry(idx);
 
-            let power = telem.map(|t| t.power_w()).unwrap_or(0.0);
+            // See `effective_power_w` doc comment: on p300c-class boards the
+            // per-ASIC TDP register this feeds the phase gates from can zero
+            // out while the card is genuinely under load, so this tolerates a
+            // `board_power` fallback rather than reading `power_w()` directly.
+            let power = effective_power_w(telem);
             // Prefer sysfs aiclk; fall back to SMBUS AICLK register (hex string).
             // Sysfs reads 0 during GDDR DMA even when Tensix is running, so SMBUS
             // is the authoritative source.
@@ -1853,6 +1903,71 @@ mod tests {
         assert!(!evict_eligible(50, Some(0), 15.0, 15.0, true));
         // Never entered Running → not eligible.
         assert!(!evict_eligible(200, None, 15.0, 15.0, true));
+    }
+
+    // ── effective_power_w (p300c per-ASIC-TDP-zeroes-out fallback) ─────────
+
+    /// The confirmed p300c failure mode: per-ASIC `power` reads exactly 0.0 W
+    /// (TDP register zeroed, alongside VCORE reading 0x0) while `board_power`
+    /// shows the card genuinely under heavy load. Must fall back to
+    /// `board_power` so the phase gates (which all require `power >
+    /// POWER_IDLE_W`) don't force the device to `Phase::Idle`.
+    #[test]
+    fn effective_power_w_falls_back_to_board_power_when_per_asic_zeroes_out() {
+        let telem = Telemetry {
+            power: Some(0.0),
+            board_power: Some(288.0),
+            ..Telemetry::new()
+        };
+        assert_eq!(effective_power_w(Some(&telem)), 288.0);
+    }
+
+    /// Same fallback, but `power` is `None` (never reported) rather than a
+    /// hard zero — the "absent" half of "None or reads as zero".
+    #[test]
+    fn effective_power_w_falls_back_to_board_power_when_per_asic_absent() {
+        let telem = Telemetry {
+            power: None,
+            board_power: Some(150.0),
+            ..Telemetry::new()
+        };
+        assert_eq!(effective_power_w(Some(&telem)), 150.0);
+    }
+
+    /// Boards where this bug isn't happening (single-ASIC, or a dual-ASIC
+    /// board whose per-ASIC register is behaving) must see no change in
+    /// behavior at all — `board_power` is ignored whenever `power` is a real,
+    /// non-zero reading, even if `board_power` also happens to be present.
+    #[test]
+    fn effective_power_w_prefers_real_per_asic_reading_when_present() {
+        let telem = Telemetry {
+            power: Some(45.0),
+            board_power: Some(288.0),
+            ..Telemetry::new()
+        };
+        assert_eq!(effective_power_w(Some(&telem)), 45.0);
+    }
+
+    /// A genuinely idle card (both readings absent or near-zero) must stay
+    /// idle — this fallback must not fabricate activity from nothing.
+    #[test]
+    fn effective_power_w_stays_zero_when_both_readings_absent_or_idle() {
+        // Both fields entirely absent.
+        let telem = Telemetry::new();
+        assert_eq!(effective_power_w(Some(&telem)), 0.0);
+
+        // Per-ASIC zero, board_power also at/below the idle floor — no
+        // fallback: a card that is actually resting must not be reported as
+        // running just because *some* number happened to be present.
+        let telem = Telemetry {
+            power: Some(0.0),
+            board_power: Some(POWER_IDLE_W), // exactly at the floor, not above it
+            ..Telemetry::new()
+        };
+        assert_eq!(effective_power_w(Some(&telem)), 0.0);
+
+        // No telemetry at all for this device.
+        assert_eq!(effective_power_w(None), 0.0);
     }
 
     // ── Real per-channel gddr_telemetry (tt-smi >= 6.3.0) ──────────────────

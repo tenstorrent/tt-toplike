@@ -14,6 +14,23 @@ git tag                        # released versions
 
 ## Recent releases
 
+### 0.13.7
+- **Fix**: the Training view's network sweep animated on a fixed wall-clock
+  rate with no tie to real training progress, so a stalled trainer pulsed
+  identically to a healthy one. The sweep now starts on a genuine
+  `TrainState.step` change and completes over that step's actual measured
+  `step_ms`, then holds at rest until the next real step lands — no more
+  perpetual loop, and no lit pulse before a first real step is observed.
+
+### 0.13.6
+- **Fix**: the Defrag TUI's model-loading visualization went dark on p300c
+  (dual-ASIC) boards under confirmed heavy load — every phase-transition
+  gate required `power > POWER_IDLE_W`, and the per-ASIC TDP register can
+  independently read 0.0 W while `board_power`, current, aiclk, and ASIC
+  temp all showed the card running. Added an `effective_power_w()` fallback
+  to `board_power` when the per-ASIC reading is absent/near-zero and
+  `board_power` itself is above the idle floor.
+
 ### 0.11.0
 - **Add**: Training view (`t`) — a full-screen visualization of a live
   tt-train run, drawn as the network it is: a character grid of transformer

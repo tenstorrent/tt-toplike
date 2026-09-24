@@ -1,3 +1,44 @@
+tt-toplike (0.13.7) noble; urgency=medium
+
+  * Fix: the Training view's network-topology sweep (`src/animation/
+    train_view.rs`) animated on a fixed wall-clock rate
+    (`SWEEP_SUBCOLS_PER_SEC`) with no tie to real training progress, so a
+    stalled or dead trainer pulsed exactly like a healthy one — a direct
+    violation of this tool's every-pixel-is-a-real-signal premise. The
+    sweep now starts only when `TrainState.step` genuinely advances (a
+    real `Step`/`StepAndTime` log event) and completes over the actual
+    measured `step_ms` for that step, then holds at rest until the next
+    real step lands, instead of looping forever. Before any step (or step
+    timing) has ever been observed, the network sits with no lit pulse
+    rather than fabricating a default speed. Added a pure `step_progress()`
+    helper (unit-tested) for the elapsed/step_ms fraction, and `Cell`-based
+    `last_step`/`step_started_at` state on `TrainView` to detect the step
+    boundary from an otherwise-`&self` render pass.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Wed, 23 Sep 2026 00:00:00 +0000
+
+tt-toplike (0.13.6) noble; urgency=medium
+
+  * Fix: the Defrag TUI (model-loading memory-block visualization) went
+    dark on p300c (dual-ASIC) boards under confirmed heavy load. Every
+    phase-transition gate (`Phase::Dma`, `Phase::Running`, `shows_load`,
+    `evict_eligible`) requires `power > POWER_IDLE_W`, and the per-ASIC
+    TDP register (`Telemetry::power`) can independently read exactly
+    0.0 W while the card is genuinely running — confirmed live via
+    `tt-smi -s`: `power` and `VCORE` both zeroed out while `board_power`
+    (the whole-card aggregate) read ~285-291 W, current read 50-64 A,
+    aiclk read 1350 MHz (boosted), and ASIC temp read 65-70°C. Added
+    `effective_power_w()` in `src/animation/defrag.rs`, which falls back
+    to `board_power` only when the per-ASIC reading is absent or near
+    zero *and* `board_power` itself clears `POWER_IDLE_W` — boards where
+    the per-ASIC register behaves normally see no change, and a
+    genuinely idle card (both readings near zero) is not reported as
+    running. The render-path numeric power readout was left untouched;
+    this was specifically the phase-gating logic going dark, not the
+    displayed wattage.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Wed, 23 Sep 2026 00:00:00 +0000
+
 tt-toplike (0.13.5) noble; urgency=medium
 
   * Fix: the Inference Server monitor still missed a tt-model-manager
