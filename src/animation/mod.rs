@@ -29,6 +29,7 @@ pub mod model_starfield;
 pub mod serving_creature;
 pub mod serving_panels;
 pub mod snake;
+pub mod takeover;
 pub mod starfield;
 pub mod topology;
 pub mod train_sky;
