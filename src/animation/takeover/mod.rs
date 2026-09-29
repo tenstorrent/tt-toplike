@@ -11,10 +11,11 @@
 //! finished AND its own short "done" resolution beat has played — never a
 //! fixed fake timer running independent of the real reset.
 
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use ratatui::Frame;
 use std::time::Duration;
 
@@ -88,10 +89,70 @@ pub use hatch_countdown::HatchCountdownTakeover;
 mod trek_reset;
 pub use trek_reset::TrekResetTakeover;
 
-/// Shared full-screen frame: clears the terminal cells, paints a bordered
-/// block (left/bottom borders only, per this project's no-right-border-glyph
-/// convention) with `title`, and renders `lines` as a centered paragraph.
-/// Every variant's `render` calls this so a takeover always reads as one
+/// How much a `TintOverlay` blends toward its tint color: 0.0 leaves cells
+/// untouched, 1.0 fully replaces them. Chosen so the real screen beneath a
+/// takeover stays clearly visible (a "color filter", per the design ask)
+/// without competing with the takeover's own text for attention.
+const TINT_ALPHA: f32 = 0.55;
+
+/// Extract an RGB triple from a `Color`, treating any non-`Rgb` variant as
+/// black — every takeover variant already builds its accent color via
+/// `colors::rgb(...)`, so this only falls back for a color this module
+/// didn't construct itself.
+fn as_rgb(color: Color) -> (u8, u8, u8) {
+    match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (0, 0, 0),
+    }
+}
+
+fn blend_channel(base: u8, tint: u8, alpha: f32) -> u8 {
+    (base as f32 * (1.0 - alpha) + tint as f32 * alpha)
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
+fn blend_color(base: Color, tint: (u8, u8, u8), alpha: f32) -> Color {
+    let (br, bg, bb) = as_rgb(base);
+    Color::Rgb(
+        blend_channel(br, tint.0, alpha),
+        blend_channel(bg, tint.1, alpha),
+        blend_channel(bb, tint.2, alpha),
+    )
+}
+
+/// A widget that blends every existing cell's fg and bg toward `tint` by
+/// `alpha`, in place — instead of clearing the area, this is how a takeover
+/// reveals the real screen beneath it through a color wash. Any cell a
+/// takeover's own `Block`/`Paragraph` draws into afterward still gets its
+/// own crisp, unblended color (both only patch the style fields they
+/// explicitly set), so the takeover's text stays legible over the tinted,
+/// still-recognizable backdrop.
+struct TintOverlay {
+    tint: (u8, u8, u8),
+    alpha: f32,
+}
+
+impl Widget for TintOverlay {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let area = area.intersection(buf.area);
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.fg = blend_color(cell.fg, self.tint, self.alpha);
+                    cell.bg = blend_color(cell.bg, self.tint, self.alpha);
+                }
+            }
+        }
+    }
+}
+
+/// Shared full-screen frame: tints the terminal cells toward `border_color`
+/// (see [`TintOverlay`] — the real screen shows through a color wash rather
+/// than being cleared to black), paints a bordered block (left/bottom
+/// borders only, per this project's no-right-border-glyph convention) with
+/// `title`, and renders `lines` as a centered paragraph on top. Every
+/// variant's `render` calls this so a takeover always reads as one
 /// consistent "something big just happened" moment. No-ops on a terminal too
 /// small to safely draw into (matches `render_overlay_panel`'s guard).
 pub(crate) fn render_takeover_frame(
@@ -104,7 +165,13 @@ pub(crate) fn render_takeover_frame(
     if area.width < 8 || area.height < 4 {
         return;
     }
-    f.render_widget(Clear, area);
+    f.render_widget(
+        TintOverlay {
+            tint: as_rgb(border_color),
+            alpha: TINT_ALPHA,
+        },
+        area,
+    );
     let block = Block::default()
         .borders(Borders::LEFT | Borders::BOTTOM)
         .title(format!(" {title} "))
@@ -293,6 +360,81 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    #[test]
+    fn blend_color_at_zero_alpha_leaves_the_original_color_untouched() {
+        let original = Color::Rgb(10, 20, 30);
+        assert_eq!(blend_color(original, (255, 0, 0), 0.0), original);
+    }
+
+    #[test]
+    fn blend_color_at_full_alpha_becomes_the_tint_exactly() {
+        let original = Color::Rgb(10, 20, 30);
+        assert_eq!(blend_color(original, (200, 100, 50), 1.0), Color::Rgb(200, 100, 50));
+    }
+
+    /// The whole point of `TintOverlay` replacing `Clear`: a cell the
+    /// takeover itself never draws into must still show the REAL underlying
+    /// color, blended toward the tint — not black, and not the raw
+    /// untouched original either. This proves the "reveal the screen
+    /// beneath, with a color filter" behavior end to end through
+    /// `render_takeover_frame`, not just the `blend_color` helper in
+    /// isolation.
+    ///
+    /// Both the "underlying view" and the takeover overlay are rendered
+    /// inside the SAME `terminal.draw()` closure, exactly matching how the
+    /// real main loop wires it (`src/ui/tui/mod.rs` renders whatever
+    /// `display_mode` picks, then calls the active takeover's `render` as
+    /// the last step of that same draw) — `ratatui::Terminal` hands each
+    /// separate `draw()` call a fresh buffer, so two separate `draw()` calls
+    /// would NOT exercise this at all.
+    #[test]
+    fn render_takeover_frame_tints_rather_than_clears_the_underlying_screen() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let underlying_bg = Color::Rgb(20, 80, 200);
+        let tint = (255, 0, 255); // an arbitrary, distinctive accent color
+        terminal
+            .draw(|f| {
+                // Stands in for "whatever real telemetry view already
+                // painted this frame" — the takeover overlay renders on top
+                // of it, in the same frame, just like the real main loop.
+                f.render_widget(
+                    Block::default().style(Style::default().bg(underlying_bg)),
+                    f.area(),
+                );
+                render_takeover_frame(
+                    f,
+                    f.area(),
+                    "TITLE",
+                    Color::Rgb(tint.0, tint.1, tint.2),
+                    vec![Line::raw("one line of content")],
+                );
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let corner = &buf[(0, 0)];
+        let expected = blend_color(underlying_bg, tint, TINT_ALPHA);
+        assert_eq!(
+            corner.bg, expected,
+            "an untouched corner cell should show the real underlying color blended toward the tint, not a hard clear"
+        );
+        assert_ne!(
+            corner.bg,
+            Color::Rgb(0, 0, 0),
+            "must not have been cleared to black"
+        );
+        assert_ne!(
+            corner.bg,
+            underlying_bg,
+            "must actually be tinted, not left 100% raw"
+        );
     }
 
     fn full_ev() -> ResetEvent {
