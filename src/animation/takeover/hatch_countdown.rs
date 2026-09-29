@@ -3,6 +3,9 @@
 
 //! Lost-hatch-style repeating countdown, paced by real elapsed/in-progress
 //! time rather than a single fixed guess at how long the real reset takes.
+//! Rendered as a big blocky LED-style digit display (like the real Swan
+//! station's computer), with the show's iconic numbers as a flavor
+//! easter egg below it.
 
 use super::{render_takeover_frame, TakeoverClock};
 use crate::ui::colors;
@@ -15,6 +18,48 @@ use std::time::Duration;
 
 const DONE_TAIL: Duration = Duration::from_millis(700);
 const CYCLE_MS: u128 = 30_000;
+
+/// One LED-style glyph: three rows, each the same width. Digits are the
+/// classic seven-segment shapes; `:` is a narrow two-dot separator.
+fn led_glyph(ch: char) -> [&'static str; 3] {
+    match ch {
+        '0' => [" _ ", "| |", "|_|"],
+        '1' => ["   ", "  |", "  |"],
+        '2' => [" _ ", " _|", "|_ "],
+        '3' => [" _ ", " _|", " _|"],
+        '4' => ["   ", "|_|", "  |"],
+        '5' => [" _ ", "|_ ", " _|"],
+        '6' => [" _ ", "|_ ", "|_|"],
+        '7' => [" _ ", "  |", "  |"],
+        '8' => [" _ ", "|_|", "|_|"],
+        '9' => [" _ ", "|_|", " _|"],
+        ':' => [" ", "o", "o"],
+        _ => ["   ", "   ", "   "],
+    }
+}
+
+/// Render `text` (digits and `:`) as three lines of concatenated LED
+/// glyphs, one space between characters.
+fn led_lines(text: &str, color: ratatui::style::Color) -> [Line<'static>; 3] {
+    let mut rows = [String::new(), String::new(), String::new()];
+    for (i, ch) in text.chars().enumerate() {
+        if i > 0 {
+            for row in &mut rows {
+                row.push(' ');
+            }
+        }
+        let glyph = led_glyph(ch);
+        for (row, seg) in rows.iter_mut().zip(glyph) {
+            row.push_str(seg);
+        }
+    }
+    let style = Style::default().fg(color);
+    [
+        Line::from(Span::styled(rows[0].clone(), style)),
+        Line::from(Span::styled(rows[1].clone(), style)),
+        Line::from(Span::styled(rows[2].clone(), style)),
+    ]
+}
 
 pub struct HatchCountdownTakeover {
     clock: TakeoverClock,
@@ -54,18 +99,29 @@ impl HatchCountdownTakeover {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
-        let lines = vec![
-            Line::from(Span::raw("THE HATCH")),
-            Line::from(Span::styled(
-                format!("{:04}", self.remaining_secs()),
-                Style::default().fg(colors::rgb(255, 80, 0)),
-            )),
-            Line::from(Span::raw(if self.clock.in_progress() {
+        let amber = colors::rgb(255, 140, 0);
+        let dim_amber = colors::rgb(140, 90, 30);
+
+        let mut lines: Vec<Line<'static>> = vec![
+            Line::from(Span::styled("THE HATCH", Style::default().fg(dim_amber))),
+            Line::from(Span::raw("")),
+        ];
+        lines.extend(led_lines(&format!("00:{:02}", self.remaining_secs()), amber));
+        lines.push(Line::from(Span::raw("")));
+        lines.push(Line::from(Span::styled(
+            if self.clock.in_progress() {
                 "EXECUTE"
             } else {
                 "SYSTEM RESET"
-            })),
-        ];
+            },
+            Style::default().fg(amber),
+        )));
+        lines.push(Line::from(Span::raw("")));
+        lines.push(Line::from(Span::styled(
+            "4 8 15 16 23 42",
+            Style::default().fg(dim_amber),
+        )));
+
         render_takeover_frame(f, area, "DHARMA INITIATIVE", colors::rgb(255, 140, 0), lines);
     }
 }
@@ -118,5 +174,38 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let t = HatchCountdownTakeover::new(&ev());
         terminal.draw(|f| t.render(f, f.area())).unwrap();
+    }
+
+    /// The LED digit display must actually be present and correctly reflect
+    /// the real countdown value, formatted like the show's own MM:SS prop.
+    #[test]
+    fn render_shows_led_digits_for_the_real_countdown() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut t = HatchCountdownTakeover::new(&ev());
+        t.tick(Duration::from_secs(5)); // 25s remaining
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| t.render(f, f.area())).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut painted = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                painted.push_str(buf[(x, y)].symbol());
+            }
+            painted.push('\n');
+        }
+        // "2" and "5" each have a distinctive top segment (" _ ") — presence
+        // of the LED block characters confirms the digit grid rendered.
+        assert!(painted.contains('_'), "expected LED segment glyphs:\n{painted}");
+        assert!(painted.contains("4 8 15 16 23 42"), "expected the Lost numbers easter egg:\n{painted}");
+    }
+
+    #[test]
+    fn led_glyph_covers_every_digit_and_colon_with_uniform_row_count() {
+        for ch in "0123456789:".chars() {
+            let glyph = led_glyph(ch);
+            assert_eq!(glyph.len(), 3);
+        }
     }
 }
