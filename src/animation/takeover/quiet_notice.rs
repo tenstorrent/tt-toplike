@@ -26,10 +26,34 @@ const DONE_TAIL: Duration = Duration::from_millis(600);
 const CYAN_HUE: f32 = 185.0;
 const PURPLE_HUE: f32 = 280.0;
 /// Slow and small — a gentle shimmer, not the livelier twinkle Blackhole
-/// Swarm uses; this is the quiet variant.
+/// Swarm uses; this is the quiet variant. The *motion* stays gentle; the
+/// *texture* (below) is where the dithered look comes from.
 const TWINKLE_RATE: f32 = 0.7;
 const TWINKLE_AMPLITUDE: f32 = 0.14;
-const BASE_VALUE: f32 = 0.4;
+const BASE_VALUE: f32 = 0.45;
+/// How strongly the ordered-dither offset perturbs each cell's brightness
+/// before it's mapped to a glyph. This is what actually produces the
+/// dithered look — real dithering is a structured per-cell offset, not a
+/// smooth gradient, so nearby cells land in visibly different glyph bands
+/// (sparse `·` right next to a bold `▓`) even though the underlying
+/// twinkle value barely moves.
+const DITHER_STRENGTH: f32 = 0.55;
+
+/// Classic 4x4 ordered (Bayer) dither matrix, values 0-15.
+const BAYER_4X4: [[u8; 4]; 4] = [
+    [0, 8, 2, 10],
+    [12, 4, 14, 6],
+    [3, 11, 1, 9],
+    [15, 7, 13, 5],
+];
+
+/// Per-cell dither offset in roughly `[-0.5, 0.47]`, tiled every 4 cells in
+/// each direction — a fixed, structured pattern (not random, not
+/// time-varying), the same way real ordered dithering works.
+fn dither_offset(row: usize, col: usize) -> f32 {
+    let v = BAYER_4X4[row % 4][col % 4] as f32 / 16.0;
+    v - 0.5
+}
 
 pub struct QuietNoticeTakeover {
     clock: TakeoverClock,
@@ -92,10 +116,12 @@ impl QuietNoticeTakeover {
         (BASE_VALUE + TWINKLE_AMPLITUDE * t.sin()).clamp(0.1, 0.8)
     }
 
-    fn background_cell(&self, seed: usize) -> (char, Color) {
-        let value = self.cell_value(seed);
-        let ch = value_to_char_intensity(value, &BLOCK_CHARS);
-        let color = hsv_to_grayskull(Self::cell_hue(seed), 0.6, value);
+    fn background_cell(&self, row: usize, col: usize, seed: usize) -> (char, Color) {
+        let twinkle_value = self.cell_value(seed);
+        let dithered_value =
+            (twinkle_value + dither_offset(row, col) * DITHER_STRENGTH).clamp(0.05, 0.95);
+        let ch = value_to_char_intensity(dithered_value, &BLOCK_CHARS);
+        let color = hsv_to_grayskull(Self::cell_hue(seed), 0.6, dithered_value);
         (ch, color)
     }
 
@@ -147,7 +173,7 @@ impl QuietNoticeTakeover {
                     }
                 }
                 let seed = row * cols + col;
-                let (ch, color) = self.background_cell(seed);
+                let (ch, color) = self.background_cell(row, col, seed);
                 spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
             }
             lines.push(Line::from(spans));
@@ -230,6 +256,26 @@ mod tests {
             t.cell_value(0),
             t.cell_value(1),
             "cells should be out of phase with each other"
+        );
+    }
+
+    /// The whole point of this pass: the ordered dither must actually
+    /// spread nearby cells across MULTIPLE glyph classes (a real dithered
+    /// look), not leave them all landing on the same one or two characters
+    /// near the middle of the ramp.
+    #[test]
+    fn dither_spreads_glyphs_across_the_full_ramp() {
+        let t = QuietNoticeTakeover::new(&ev(true, 4));
+        let mut seen = std::collections::HashSet::new();
+        for row in 0..4 {
+            for col in 0..8 {
+                let (ch, _) = t.background_cell(row, col, row * 8 + col);
+                seen.insert(ch);
+            }
+        }
+        assert!(
+            seen.len() >= 3,
+            "expected the dither to span at least 3 distinct glyph classes over a 4x8 patch, got {seen:?}"
         );
     }
 
