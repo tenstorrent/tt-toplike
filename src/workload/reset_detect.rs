@@ -135,6 +135,62 @@ fn resolve_target_indices(targets: &[String], devices: &[Device]) -> Vec<u8> {
     out
 }
 
+/// Tracks at most one active `tt-smi -r` invocation at a time. A second
+/// reset detected while one is already tracked is dropped (see design
+/// spec's "overlapping resets" non-goal) — call `clear()` once its visual
+/// consequence (a takeover animation, or a HivemindSweeper injection) is
+/// also done, not merely once the process itself exits.
+pub struct ResetDetector {
+    active: Option<ResetEvent>,
+}
+
+impl ResetDetector {
+    pub fn new() -> Self {
+        Self { active: None }
+    }
+
+    /// Scans `processes` — `(pid, name, cmdline)` triples for every process
+    /// currently visible, e.g. from
+    /// `HostProcessMonitor::processes_snapshot()` — for a new `tt-smi -r`
+    /// invocation. Returns `None` if one is already tracked or none is
+    /// found.
+    pub fn observe(
+        &mut self,
+        processes: &[(i32, String, String)],
+        devices: &[Device],
+    ) -> Option<&ResetEvent> {
+        if self.active.is_some() {
+            return None;
+        }
+        for (pid, name, cmdline) in processes {
+            if let Some(ev) = parse_reset_process(*pid, name, cmdline, devices) {
+                self.active = Some(ev);
+                return self.active.as_ref();
+            }
+        }
+        None
+    }
+
+    /// True once the tracked pid is no longer present in `processes`.
+    /// `false` if nothing is being tracked.
+    pub fn is_finished(&self, processes: &[(i32, String, String)]) -> bool {
+        match &self.active {
+            Some(ev) => !processes.iter().any(|(pid, _, _)| *pid == ev.pid),
+            None => false,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.active = None;
+    }
+}
+
+impl Default for ResetDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +329,71 @@ mod tests {
             vec![0, 0],
             "device_indices should preserve duplicates"
         );
+    }
+
+    fn procs(entries: &[(i32, &str, &str)]) -> Vec<(i32, String, String)> {
+        entries
+            .iter()
+            .map(|(pid, name, cmd)| (*pid, name.to_string(), cmd.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn detector_observes_a_new_reset() {
+        let devices = fixture_devices(4);
+        let mut det = ResetDetector::new();
+        let live = procs(&[(1, "bash", "bash"), (500, "tt-smi", "tt-smi -r 1")]);
+        let ev = det.observe(&live, &devices).expect("should detect reset");
+        assert_eq!(ev.pid, 500);
+        assert_eq!(ev.device_indices, vec![1]);
+    }
+
+    #[test]
+    fn detector_ignores_overlapping_second_reset() {
+        let devices = fixture_devices(4);
+        let mut det = ResetDetector::new();
+        let first = procs(&[(500, "tt-smi", "tt-smi -r 0")]);
+        assert!(det.observe(&first, &devices).is_some());
+
+        let second = procs(&[(500, "tt-smi", "tt-smi -r 0"), (600, "tt-smi", "tt-smi -r 1")]);
+        assert!(det.observe(&second, &devices).is_none());
+    }
+
+    #[test]
+    fn is_finished_false_while_pid_present() {
+        let devices = fixture_devices(4);
+        let mut det = ResetDetector::new();
+        let live = procs(&[(500, "tt-smi", "tt-smi -r 0")]);
+        det.observe(&live, &devices);
+        assert!(!det.is_finished(&live));
+    }
+
+    #[test]
+    fn is_finished_true_once_pid_gone() {
+        let devices = fixture_devices(4);
+        let mut det = ResetDetector::new();
+        let live = procs(&[(500, "tt-smi", "tt-smi -r 0")]);
+        det.observe(&live, &devices);
+        let gone = procs(&[(1, "bash", "bash")]);
+        assert!(det.is_finished(&gone));
+    }
+
+    #[test]
+    fn is_finished_false_with_nothing_tracked() {
+        let det = ResetDetector::new();
+        let any = procs(&[(1, "bash", "bash")]);
+        assert!(!det.is_finished(&any));
+    }
+
+    #[test]
+    fn clear_allows_a_later_reset_to_be_tracked() {
+        let devices = fixture_devices(4);
+        let mut det = ResetDetector::new();
+        let first = procs(&[(500, "tt-smi", "tt-smi -r 0")]);
+        det.observe(&first, &devices);
+        det.clear();
+        let second = procs(&[(600, "tt-smi", "tt-smi -r 1")]);
+        let ev = det.observe(&second, &devices).expect("should detect after clear");
+        assert_eq!(ev.pid, 600);
     }
 }
