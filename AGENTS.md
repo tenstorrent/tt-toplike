@@ -543,3 +543,45 @@ text when `/dev/kmsg` is readable) was deliberately not built — every
 variant uses only the honest generic-fallback pacing described as the
 spec's fallback path. Flagged explicitly rather than silently dropped; a
 candidate follow-up, not a gap.
+
+### Follow-up polish pass (Sep 29, 2026)
+
+Live feedback after using the feature: Missile Command's original blinking
+bracket-strip had no real motion and a flat red tint that read as harsh —
+rebuilt as a per-lane missile that actually descends over real elapsed
+time toward each targeted chip, blooms into a fading burst ring on impact,
+staggered per lane, over a deep steel-blue night-sky wash instead of red.
+Trek's single sensor-scan row became the real "Super Star Trek" (1971
+BASIC) screen: a status sidebar (STARDATE/CONDITION/KLINGONS REMAINING
+tied to real reset state) plus a fixed 8x8 sensor grid, so it reads as
+walking in on a game already in progress rather than a title card.
+Separately: takeovers now reveal the real screen beneath them through a
+55%-blend color filter (a `TintOverlay` widget replacing the old `Clear`)
+instead of blacking it out — Block/Paragraph only patch the style fields
+they explicitly set, so untouched cells keep showing (tinted) real content.
+
+BBS's rainbow hue-cycling turned out to be too much — toned down to a
+fixed classic-BBS palette, an ANSI box border, modem-connect flavor lines,
+and a real typewriter reveal per chip line, with the "psychedelic"
+treatment kept specific to BBS rather than spreading everywhere. Quiet
+Notice, Blackhole Swarm, and Hatch Countdown were brought up to the same
+bar: Quiet Notice got a shaded ANSI block backdrop (this app's own
+`BLOCK_CHARS`/`hsv_to_grayskull` vocabulary, plus a 4x4 Bayer ordered
+dither so nearby cells actually spread across the full glyph ramp instead
+of clustering on one shade) that shimmers gently; Blackhole Swarm — never
+read the clock at all before this — now has each glyph twinkling
+independently; Hatch Countdown gained a real seven-segment LED digit
+display and the show's own numbers as an easter egg.
+
+Added a 7th variant, Fail Whale: a flock of birds (count scales with the
+real chip count) carries the whale on ropes, hovering and wing-flapping
+while the real reset is still in progress — never faking a landing time —
+then gliding into a soft touchdown once it's actually finished, birds
+flying off happily. Caught during its own build: a sub-one-row bob
+amplitude computed a technically-changing position that rendered as a
+frozen scene, since terminal cells only have integer rows (fixed by
+widening the amplitude and testing the position calculation directly
+rather than a rendered snapshot); and a "landed" ground-row position
+computed from the bottom of the screen alone pushed the whale's own lower
+body and the ground line clean off the bottom of the terminal (fixed by
+reserving room for the scene's real height below that point).

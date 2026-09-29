@@ -89,6 +89,9 @@ pub use hatch_countdown::HatchCountdownTakeover;
 mod trek_reset;
 pub use trek_reset::TrekResetTakeover;
 
+mod fail_whale;
+pub use fail_whale::FailWhaleTakeover;
+
 /// How much a `TintOverlay` blends toward its tint color: 0.0 leaves cells
 /// untouched, 1.0 fully replaces them. Chosen so the real screen beneath a
 /// takeover stays clearly visible (a "color filter", per the design ask)
@@ -191,6 +194,7 @@ pub enum Takeover {
     HatchCountdown(HatchCountdownTakeover),
     MissileCommand(MissileCommandTakeover),
     TrekReset(TrekResetTakeover),
+    FailWhale(FailWhaleTakeover),
     QuietNotice(QuietNoticeTakeover),
 }
 
@@ -202,6 +206,7 @@ impl Takeover {
             Takeover::HatchCountdown(v) => v.tick(elapsed),
             Takeover::MissileCommand(v) => v.tick(elapsed),
             Takeover::TrekReset(v) => v.tick(elapsed),
+            Takeover::FailWhale(v) => v.tick(elapsed),
             Takeover::QuietNotice(v) => v.tick(elapsed),
         }
     }
@@ -213,6 +218,7 @@ impl Takeover {
             Takeover::HatchCountdown(v) => v.render(f, area),
             Takeover::MissileCommand(v) => v.render(f, area),
             Takeover::TrekReset(v) => v.render(f, area),
+            Takeover::FailWhale(v) => v.render(f, area),
             Takeover::QuietNotice(v) => v.render(f, area),
         }
     }
@@ -224,6 +230,7 @@ impl Takeover {
             Takeover::HatchCountdown(v) => v.is_done(),
             Takeover::MissileCommand(v) => v.is_done(),
             Takeover::TrekReset(v) => v.is_done(),
+            Takeover::FailWhale(v) => v.is_done(),
             Takeover::QuietNotice(v) => v.is_done(),
         }
     }
@@ -235,6 +242,7 @@ impl Takeover {
             Takeover::HatchCountdown(v) => v.note_reset_finished(),
             Takeover::MissileCommand(v) => v.note_reset_finished(),
             Takeover::TrekReset(v) => v.note_reset_finished(),
+            Takeover::FailWhale(v) => v.note_reset_finished(),
             Takeover::QuietNotice(v) => v.note_reset_finished(),
         }
     }
@@ -246,6 +254,7 @@ impl Takeover {
             Takeover::HatchCountdown(v) => v.skip(),
             Takeover::MissileCommand(v) => v.skip(),
             Takeover::TrekReset(v) => v.skip(),
+            Takeover::FailWhale(v) => v.skip(),
             Takeover::QuietNotice(v) => v.skip(),
         }
     }
@@ -253,7 +262,7 @@ impl Takeover {
 
 /// Weighted-random pick of a variant for a detected reset (real entropy —
 /// see `pick_takeover_from_roll` for the deterministic, testable core).
-/// `is_full` weights toward the four spectacle variants; a subset reset
+/// `is_full` weights toward the five spectacle variants; a subset reset
 /// weights toward `MissileCommand` (scoped to the real targets) and
 /// `QuietNotice`.
 pub fn pick_takeover(ev: &ResetEvent) -> Takeover {
@@ -263,26 +272,29 @@ pub fn pick_takeover(ev: &ResetEvent) -> Takeover {
 }
 
 /// Pure selection core: `roll` in `0..100` maps to a variant. Full-reset
-/// weights: Bbs 25, BlackholeSwarm 25, HatchCountdown 20, TrekReset 20,
-/// MissileCommand 5, QuietNotice 5. Subset weights: MissileCommand 45,
-/// QuietNotice 35, TrekReset 10, Bbs 5, BlackholeSwarm 3, HatchCountdown 2.
+/// weights: Bbs 20, BlackholeSwarm 20, HatchCountdown 16, TrekReset 16,
+/// FailWhale 16, MissileCommand 6, QuietNotice 6. Subset weights:
+/// MissileCommand 38, QuietNotice 28, FailWhale 10, TrekReset 8, Bbs 6,
+/// BlackholeSwarm 4, HatchCountdown 6.
 fn pick_takeover_from_roll(ev: &ResetEvent, roll: u8) -> Takeover {
     if ev.is_full {
         match roll {
-            0..=24 => Takeover::Bbs(BbsTakeover::new(ev)),
-            25..=49 => Takeover::BlackholeSwarm(BlackholeSwarmTakeover::new(ev)),
-            50..=69 => Takeover::HatchCountdown(HatchCountdownTakeover::new(ev)),
-            70..=89 => Takeover::TrekReset(TrekResetTakeover::new(ev)),
-            90..=94 => Takeover::MissileCommand(MissileCommandTakeover::new(ev)),
+            0..=19 => Takeover::Bbs(BbsTakeover::new(ev)),
+            20..=39 => Takeover::BlackholeSwarm(BlackholeSwarmTakeover::new(ev)),
+            40..=55 => Takeover::HatchCountdown(HatchCountdownTakeover::new(ev)),
+            56..=71 => Takeover::TrekReset(TrekResetTakeover::new(ev)),
+            72..=87 => Takeover::FailWhale(FailWhaleTakeover::new(ev)),
+            88..=93 => Takeover::MissileCommand(MissileCommandTakeover::new(ev)),
             _ => Takeover::QuietNotice(QuietNoticeTakeover::new(ev)),
         }
     } else {
         match roll {
-            0..=44 => Takeover::MissileCommand(MissileCommandTakeover::new(ev)),
-            45..=79 => Takeover::QuietNotice(QuietNoticeTakeover::new(ev)),
-            80..=89 => Takeover::TrekReset(TrekResetTakeover::new(ev)),
-            90..=94 => Takeover::Bbs(BbsTakeover::new(ev)),
-            95..=97 => Takeover::BlackholeSwarm(BlackholeSwarmTakeover::new(ev)),
+            0..=37 => Takeover::MissileCommand(MissileCommandTakeover::new(ev)),
+            38..=65 => Takeover::QuietNotice(QuietNoticeTakeover::new(ev)),
+            66..=75 => Takeover::FailWhale(FailWhaleTakeover::new(ev)),
+            76..=83 => Takeover::TrekReset(TrekResetTakeover::new(ev)),
+            84..=89 => Takeover::Bbs(BbsTakeover::new(ev)),
+            90..=93 => Takeover::BlackholeSwarm(BlackholeSwarmTakeover::new(ev)),
             _ => Takeover::HatchCountdown(HatchCountdownTakeover::new(ev)),
         }
     }
@@ -466,15 +478,23 @@ mod tests {
             Takeover::Bbs(_)
         ));
         assert!(matches!(
-            pick_takeover_from_roll(&full_ev(), 24),
+            pick_takeover_from_roll(&full_ev(), 19),
             Takeover::Bbs(_)
         ));
         assert!(matches!(
-            pick_takeover_from_roll(&full_ev(), 25),
+            pick_takeover_from_roll(&full_ev(), 20),
             Takeover::BlackholeSwarm(_)
         ));
         assert!(matches!(
-            pick_takeover_from_roll(&full_ev(), 90),
+            pick_takeover_from_roll(&full_ev(), 72),
+            Takeover::FailWhale(_)
+        ));
+        assert!(matches!(
+            pick_takeover_from_roll(&full_ev(), 87),
+            Takeover::FailWhale(_)
+        ));
+        assert!(matches!(
+            pick_takeover_from_roll(&full_ev(), 88),
             Takeover::MissileCommand(_)
         ));
         assert!(matches!(
@@ -490,8 +510,16 @@ mod tests {
             Takeover::MissileCommand(_)
         ));
         assert!(matches!(
-            pick_takeover_from_roll(&subset_ev(), 45),
+            pick_takeover_from_roll(&subset_ev(), 38),
             Takeover::QuietNotice(_)
+        ));
+        assert!(matches!(
+            pick_takeover_from_roll(&subset_ev(), 66),
+            Takeover::FailWhale(_)
+        ));
+        assert!(matches!(
+            pick_takeover_from_roll(&subset_ev(), 75),
+            Takeover::FailWhale(_)
         ));
         assert!(matches!(
             pick_takeover_from_roll(&subset_ev(), 99),
