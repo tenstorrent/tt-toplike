@@ -481,3 +481,65 @@ CPU/RSS: the kernel/weight-load progress probes never searched
 tt-metal and every diffusion/DiT model family use — so they always reported
 zero hits. Both env vars added to `host_exec`'s forwarded-variable
 allowlist.
+
+## Reset takeover animations (Sep 28, 2026)
+
+Prompt: "when we detect a `tt-smi -r` has been run... show a full screen
+takeover animation" — a BBS sysop interrupt, a 1024-Blackholes swarm, a Lost
+hatch countdown, Missile Command, a classic Trek reset screen, or (weighted
+toward subset resets) a quiet notification, chosen at random and scoped by
+whether the reset targets all chips or a subset. Opt-in only
+(`--reset-takeover`), off by default. HivemindSweeper gets a distinct
+treatment instead of a takeover: the reset is injected as a real feed event
+(`EventKind::Reset`) rather than an interruption of the one view whose whole
+purpose is watching real signals.
+
+Detection reuses the TUI's existing per-tick process scan (no new polling
+thread) and tracks the real `tt-smi -r` process's actual lifetime — "in
+progress"/"done" are never a fixed fake timer, only real pid liveness.
+Animation variants are six concrete structs behind a plain enum (matching
+this codebase's `DisplayMode`/`EventKind` convention over `dyn Trait`), each
+embedding a shared `TakeoverClock` for lifecycle bookkeeping.
+
+Independent task review (13-task subagent-driven build) caught two real bugs
+before merge: `is_full`'s boundary check was a length comparison, so a
+duplicated target (`tt-smi -r 0 0` on a 2-chip box) falsely read as a full
+reset — fixed with a `HashSet`-based coverage check. Separately,
+`ResetDetector::clear()` was called while the real process was often still
+alive (by design, right after a HivemindSweeper injection, and on any
+skip-key dismissal), so the same reset kept getting re-detected every scan —
+fixed by remembering the last-handled pid across `clear()`.
+
+The final whole-branch review then found three more, all fixed: `sysinfo`'s
+`ProcessRefreshKind::everything()` enumerates threads alongside processes,
+so the detector's naive first-match scan could latch onto a worker thread's
+tid instead of the real process (reproduced without hardware — a fake
+multithreaded stand-in plus a probe using this crate's exact sysinfo calls —
+fixed by filtering `thread_kind().is_none()`); the BBS variant labeled chips
+by loop position instead of the real targeted indices and claimed "reset ack
+received" while still in progress, violating the "never claim a specific
+chip completed when unknown" rule from the design spec; and HivemindSweeper's
+feed never got the spec-mandated distinct visual treatment for a reset event
+(no renderer anywhere matched on `EventKind::Reset`) — added a sticky
+`is_reset` flag threaded from `SniffEvent` through `FeedAgg` into a
+magenta-accented feed row, additive to the existing severity coloring.
+
+Hardware-verified live on 4× Blackhole (p300c): the real `tt-smi -r`
+invocation is a python-shebang script run via its venv interpreter
+(`<venv>/bin/python <path>/tt-smi -r <targets>`), not a bare binary — the
+parser's process-`comm`-based matching handles this correctly without
+needing its argv[0] fallback path. Real single-chip and full-box resets both
+took ~41-43 seconds, comfortably clearing the 2-second detection-scan
+cadence (an earlier un-timed spot check had wrongly suggested resets might
+complete in under a second). End-to-end runs of `tt-toplike-tui
+--reset-takeover` through both a real single-chip and a real full-box reset
+produced no panic. The rendered animation content itself (which variant
+appeared, glyph layout) could not be visually confirmed — ratatui's raw-mode
+full-screen rendering isn't inspectable through a non-interactive shell, a
+known limitation of this kind of automated verification, not a defect.
+
+The design spec's optional kmsg log-line enrichment (real per-chip tt-kmd
+text when `/dev/kmsg` is readable) was deliberately not built — every
+variant uses only the honest generic-fallback pacing described as the
+spec's fallback path. Flagged explicitly rather than silently dropped; a
+candidate follow-up, not a gap.
