@@ -5,6 +5,8 @@
 //! classifies it as a full-box or subset reset. See
 //! docs/superpowers/specs/2026-09-28-reset-takeover-design.md.
 
+use std::collections::HashSet;
+
 use crate::models::device::Device;
 
 /// A detected `tt-smi -r` invocation, still in progress or just finished.
@@ -69,14 +71,30 @@ pub fn parse_reset_process(
     let is_all_literal =
         raw_targets.is_empty() || raw_targets.iter().any(|t| t.eq_ignore_ascii_case("all"));
 
-    let device_indices: Vec<u8> = if is_all_literal {
+    let resolved_indices: Vec<u8> = if is_all_literal {
         (0..total_devices).filter_map(|i| u8::try_from(i).ok()).collect()
     } else {
         resolve_target_indices(&raw_targets, devices)
     };
 
-    let is_full =
-        is_all_literal || (total_devices > 0 && device_indices.len() >= total_devices);
+    // Check if the resolved indices actually cover all devices (coverage-based, not count-based).
+    // A duplicated target (e.g., `tt-smi -r 0 0` on a 2-chip box) should not count as full.
+    let is_full = if is_all_literal {
+        true
+    } else if total_devices == 0 {
+        false
+    } else {
+        // All distinct indices must be present in 0..total_devices for is_full to be true.
+        let resolved_set: HashSet<_> = resolved_indices.iter().collect();
+        (0..total_devices as u8).all(|i| resolved_set.contains(&i))
+    };
+
+    // When is_full, device_indices should be 0..total_devices; otherwise use resolved indices.
+    let device_indices = if is_full {
+        (0..total_devices).filter_map(|i| u8::try_from(i).ok()).collect()
+    } else {
+        resolved_indices
+    };
 
     let chip_count = if is_all_literal {
         total_devices
@@ -240,5 +258,20 @@ mod tests {
         let devices = fixture_devices(4);
         let ev = parse_reset_process(100, "tt-smi", "/usr/local/bin/tt-smi -r", &devices).unwrap();
         assert!(ev.is_full);
+    }
+
+    #[test]
+    fn duplicated_target_does_not_falsely_claim_full_coverage() {
+        // Regression test: on a 2-chip box, `tt-smi -r 0 0` should NOT be a full reset.
+        // Only device 0 is actually targeted, so is_full must be false.
+        let devices = fixture_devices(2);
+        let ev = parse_reset_process(100, "tt-smi", "tt-smi -r 0 0", &devices).unwrap();
+        assert!(!ev.is_full, "Duplicated target should not count as full coverage");
+        assert_eq!(ev.chip_count, 2, "chip_count should reflect the raw target count");
+        assert_eq!(
+            ev.device_indices,
+            vec![0, 0],
+            "device_indices should preserve duplicates"
+        );
     }
 }
