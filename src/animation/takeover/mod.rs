@@ -115,6 +115,112 @@ pub(crate) fn render_takeover_frame(
     f.render_widget(para, inner);
 }
 
+use crate::workload::reset_detect::ResetEvent;
+
+/// One active full-screen takeover animation.
+pub enum Takeover {
+    Bbs(BbsTakeover),
+    BlackholeSwarm(BlackholeSwarmTakeover),
+    HatchCountdown(HatchCountdownTakeover),
+    MissileCommand(MissileCommandTakeover),
+    TrekReset(TrekResetTakeover),
+    QuietNotice(QuietNoticeTakeover),
+}
+
+impl Takeover {
+    pub fn tick(&mut self, elapsed: Duration) {
+        match self {
+            Takeover::Bbs(v) => v.tick(elapsed),
+            Takeover::BlackholeSwarm(v) => v.tick(elapsed),
+            Takeover::HatchCountdown(v) => v.tick(elapsed),
+            Takeover::MissileCommand(v) => v.tick(elapsed),
+            Takeover::TrekReset(v) => v.tick(elapsed),
+            Takeover::QuietNotice(v) => v.tick(elapsed),
+        }
+    }
+
+    pub fn render(&self, f: &mut Frame, area: Rect) {
+        match self {
+            Takeover::Bbs(v) => v.render(f, area),
+            Takeover::BlackholeSwarm(v) => v.render(f, area),
+            Takeover::HatchCountdown(v) => v.render(f, area),
+            Takeover::MissileCommand(v) => v.render(f, area),
+            Takeover::TrekReset(v) => v.render(f, area),
+            Takeover::QuietNotice(v) => v.render(f, area),
+        }
+    }
+
+    pub fn is_done(&self) -> bool {
+        match self {
+            Takeover::Bbs(v) => v.is_done(),
+            Takeover::BlackholeSwarm(v) => v.is_done(),
+            Takeover::HatchCountdown(v) => v.is_done(),
+            Takeover::MissileCommand(v) => v.is_done(),
+            Takeover::TrekReset(v) => v.is_done(),
+            Takeover::QuietNotice(v) => v.is_done(),
+        }
+    }
+
+    pub fn note_reset_finished(&mut self) {
+        match self {
+            Takeover::Bbs(v) => v.note_reset_finished(),
+            Takeover::BlackholeSwarm(v) => v.note_reset_finished(),
+            Takeover::HatchCountdown(v) => v.note_reset_finished(),
+            Takeover::MissileCommand(v) => v.note_reset_finished(),
+            Takeover::TrekReset(v) => v.note_reset_finished(),
+            Takeover::QuietNotice(v) => v.note_reset_finished(),
+        }
+    }
+
+    pub fn skip(&mut self) {
+        match self {
+            Takeover::Bbs(v) => v.skip(),
+            Takeover::BlackholeSwarm(v) => v.skip(),
+            Takeover::HatchCountdown(v) => v.skip(),
+            Takeover::MissileCommand(v) => v.skip(),
+            Takeover::TrekReset(v) => v.skip(),
+            Takeover::QuietNotice(v) => v.skip(),
+        }
+    }
+}
+
+/// Weighted-random pick of a variant for a detected reset (real entropy —
+/// see `pick_takeover_from_roll` for the deterministic, testable core).
+/// `is_full` weights toward the four spectacle variants; a subset reset
+/// weights toward `MissileCommand` (scoped to the real targets) and
+/// `QuietNotice`.
+pub fn pick_takeover(ev: &ResetEvent) -> Takeover {
+    use rand::Rng;
+    let roll: u8 = rand::rng().random_range(0..100);
+    pick_takeover_from_roll(ev, roll)
+}
+
+/// Pure selection core: `roll` in `0..100` maps to a variant. Full-reset
+/// weights: Bbs 25, BlackholeSwarm 25, HatchCountdown 20, TrekReset 20,
+/// MissileCommand 5, QuietNotice 5. Subset weights: MissileCommand 45,
+/// QuietNotice 35, TrekReset 10, Bbs 5, BlackholeSwarm 3, HatchCountdown 2.
+fn pick_takeover_from_roll(ev: &ResetEvent, roll: u8) -> Takeover {
+    if ev.is_full {
+        match roll {
+            0..=24 => Takeover::Bbs(BbsTakeover::new(ev)),
+            25..=49 => Takeover::BlackholeSwarm(BlackholeSwarmTakeover::new(ev)),
+            50..=69 => Takeover::HatchCountdown(HatchCountdownTakeover::new(ev)),
+            70..=89 => Takeover::TrekReset(TrekResetTakeover::new(ev)),
+            90..=94 => Takeover::MissileCommand(MissileCommandTakeover::new(ev)),
+            _ => Takeover::QuietNotice(QuietNoticeTakeover::new(ev)),
+        }
+    } else {
+        match roll {
+            0..=44 => Takeover::MissileCommand(MissileCommandTakeover::new(ev)),
+            45..=79 => Takeover::QuietNotice(QuietNoticeTakeover::new(ev)),
+            80..=89 => Takeover::TrekReset(TrekResetTakeover::new(ev)),
+            90..=94 => Takeover::Bbs(BbsTakeover::new(ev)),
+            95..=97 => Takeover::BlackholeSwarm(BlackholeSwarmTakeover::new(ev)),
+            _ => Takeover::HatchCountdown(HatchCountdownTakeover::new(ev)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +293,78 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    fn full_ev() -> ResetEvent {
+        ResetEvent {
+            pid: 1,
+            is_full: true,
+            chip_count: 4,
+            total_devices: 4,
+            device_indices: vec![0, 1, 2, 3],
+            raw_targets: vec![],
+        }
+    }
+
+    fn subset_ev() -> ResetEvent {
+        ResetEvent {
+            pid: 1,
+            is_full: false,
+            chip_count: 1,
+            total_devices: 4,
+            device_indices: vec![2],
+            raw_targets: vec!["2".to_string()],
+        }
+    }
+
+    #[test]
+    fn full_reset_roll_boundaries_pick_expected_variant() {
+        assert!(matches!(
+            pick_takeover_from_roll(&full_ev(), 0),
+            Takeover::Bbs(_)
+        ));
+        assert!(matches!(
+            pick_takeover_from_roll(&full_ev(), 24),
+            Takeover::Bbs(_)
+        ));
+        assert!(matches!(
+            pick_takeover_from_roll(&full_ev(), 25),
+            Takeover::BlackholeSwarm(_)
+        ));
+        assert!(matches!(
+            pick_takeover_from_roll(&full_ev(), 90),
+            Takeover::MissileCommand(_)
+        ));
+        assert!(matches!(
+            pick_takeover_from_roll(&full_ev(), 99),
+            Takeover::QuietNotice(_)
+        ));
+    }
+
+    #[test]
+    fn subset_reset_roll_boundaries_pick_expected_variant() {
+        assert!(matches!(
+            pick_takeover_from_roll(&subset_ev(), 0),
+            Takeover::MissileCommand(_)
+        ));
+        assert!(matches!(
+            pick_takeover_from_roll(&subset_ev(), 45),
+            Takeover::QuietNotice(_)
+        ));
+        assert!(matches!(
+            pick_takeover_from_roll(&subset_ev(), 99),
+            Takeover::HatchCountdown(_)
+        ));
+    }
+
+    #[test]
+    fn every_roll_value_produces_some_variant() {
+        // Exhaustiveness check: no roll value should ever fail to match
+        // (the match is total via `_`, but this pins that every branch is
+        // actually reachable without panicking across the full range).
+        for roll in 0..=255u8 {
+            let _ = pick_takeover_from_roll(&full_ev(), roll);
+            let _ = pick_takeover_from_roll(&subset_ev(), roll);
+        }
     }
 }
