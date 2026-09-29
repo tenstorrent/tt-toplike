@@ -65,6 +65,10 @@ pub enum EventKind {
     DriverMsg,
     Emission,
     Inspector,
+    /// A detected `tt-smi -r` reset, injected by the main loop's own
+    /// detector rather than a collector thread. Distinct from `DriverMsg`
+    /// so the feed pane can give it its own visual treatment.
+    Reset,
 }
 
 #[derive(Debug, Clone)]

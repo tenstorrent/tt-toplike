@@ -267,6 +267,36 @@ impl Hivemind {
     pub fn test_sender(&self) -> SyncSender<SniffEvent> {
         self.tx.clone().expect("test_sender called before start()")
     }
+
+    /// Inject a detected `tt-smi -r` reset as a real event, from outside the
+    /// collector-thread pipeline (the main loop's own reset detector, which
+    /// runs regardless of whether this engine's collector threads are
+    /// started). Goes through the same grid/feed/ring update path `poll()`
+    /// uses for a collector-sourced event, plus one heat-grid bump per
+    /// actually-affected chip — not a fake amplitude multiplier — so a
+    /// full-box reset visibly lights up wider than a single-chip one.
+    pub fn inject_reset(&mut self, text: String, device_indices: &[u8]) {
+        let now = Instant::now();
+        let device = device_indices.first().copied();
+        let ev = SniffEvent {
+            ts: now,
+            source: Source::TtSmi,
+            device,
+            severity: Severity::Warn,
+            kind: EventKind::Reset,
+            text,
+            origin: "reset-detect".to_string(),
+        };
+        if device_indices.is_empty() {
+            self.grid.bump_at(Source::TtSmi, None, now);
+        } else {
+            for &d in device_indices {
+                self.grid.bump_at(Source::TtSmi, Some(d), now);
+            }
+        }
+        self.feed.ingest(&ev, now);
+        self.ingest(ev);
+    }
 }
 
 /// Belt-and-suspenders teardown: the render loop's mode-transition choke
@@ -473,5 +503,36 @@ mod engine_tests {
 
         h.stop();
         assert!(!h.is_running());
+    }
+}
+
+#[cfg(test)]
+mod inject_reset_tests {
+    use super::*;
+    use crate::workload::hivemind::grid::Column;
+
+    #[test]
+    fn inject_reset_lands_in_events_and_bumps_grid_per_chip() {
+        let mut hive = Hivemind::new();
+        hive.inject_reset("tt-smi -r: 2 chip(s) targeted".to_string(), &[0, 2]);
+
+        assert_eq!(hive.events().len(), 1);
+        let ev = hive.events().back().unwrap();
+        assert_eq!(ev.source, Source::TtSmi);
+        assert_eq!(ev.kind, EventKind::Reset);
+        assert_eq!(ev.severity, Severity::Warn);
+        assert!(ev.text.contains("2 chip(s)"));
+
+        // Both targeted chips got a real heat-grid bump — not just device 0.
+        assert!(hive.grid().heat(Source::TtSmi, Column::Device(0)) > 0.0);
+        assert!(hive.grid().heat(Source::TtSmi, Column::Device(2)) > 0.0);
+    }
+
+    #[test]
+    fn inject_reset_with_no_resolved_chips_still_bumps_the_host_column() {
+        let mut hive = Hivemind::new();
+        hive.inject_reset("tt-smi -r: unresolved target".to_string(), &[]);
+        assert_eq!(hive.events().len(), 1);
+        assert!(hive.grid().heat(Source::TtSmi, Column::Host) > 0.0);
     }
 }
