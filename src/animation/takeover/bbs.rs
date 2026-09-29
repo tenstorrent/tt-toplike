@@ -3,19 +3,31 @@
 
 //! BBS sysop takeover — "the sysop wants to chat." Per-chip log lines
 //! scroll in one at a time, paced by `chip_count`, looping while the real
-//! reset is still in progress rather than racing ahead of it.
+//! reset is still in progress rather than racing ahead of it. Rendered
+//! psychedelic-BBS-ANSI-art style: header, border, and each chip line cycle
+//! through the hue wheel, driven by the takeover's own real elapsed time
+//! (not a decorative timer independent of it) — settles to a steady green
+//! once the real reset has actually finished, as a clear "back to normal"
+//! signal against the churn.
 
 use super::{render_takeover_frame, TakeoverClock};
+use crate::animation::hsv_to_rgb;
 use crate::ui::colors;
 use crate::workload::reset_detect::ResetEvent;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
 use std::time::Duration;
 
 const DONE_TAIL: Duration = Duration::from_millis(700);
 const BEAT_MS: u128 = 400;
+/// Degrees/second the header + border hue rotates while the reset is in
+/// progress — a full rotation roughly every 4 seconds.
+const HUE_ROTATION_DEG_PER_SEC: f32 = 90.0;
+/// Hue spacing between successive chip lines, so simultaneous lines read as
+/// distinct colors rather than one flat rainbow smear.
+const CHIP_LINE_HUE_SPREAD_DEG: f32 = 40.0;
 
 pub struct BbsTakeover {
     clock: TakeoverClock,
@@ -66,11 +78,24 @@ impl BbsTakeover {
         }
     }
 
+    /// Header/border hue for this frame: a steady rotation through the full
+    /// hue wheel driven by real elapsed time, frozen at a fixed green once
+    /// the real reset has finished (see module docs).
+    fn header_hue(&self) -> f32 {
+        (self.clock.elapsed().as_secs_f32() * HUE_ROTATION_DEG_PER_SEC) % 360.0
+    }
+
     pub fn render(&self, f: &mut Frame, area: Rect) {
+        let finished = !self.clock.in_progress();
+        let header_color: Color = if finished {
+            colors::rgb(0, 255, 0)
+        } else {
+            hsv_to_rgb(self.header_hue(), 1.0, 1.0)
+        };
         let mut lines = vec![
             Line::from(Span::styled(
                 "** SYSOP HAS TAKEN OVER THIS TERMINAL **",
-                Style::default().fg(colors::rgb(0, 255, 0)),
+                Style::default().fg(header_color),
             )),
             Line::from(Span::raw("")),
         ];
@@ -82,12 +107,22 @@ impl BbsTakeover {
         // per-chip completion isn't actually known; the aggregate completion
         // claim ("CONNECTION RESTORED.") is made only once, below, and only
         // once the real reset has actually finished.
-        for &real_chip in self.device_indices.iter().take(visible) {
-            lines.push(Line::from(Span::raw(format!(
-                "CHIP {real_chip}: reset issued..."
-            ))));
+        for (i, &real_chip) in self.device_indices.iter().take(visible).enumerate() {
+            let line_color = if finished {
+                colors::rgb(0, 220, 0)
+            } else {
+                hsv_to_rgb(
+                    (self.header_hue() + i as f32 * CHIP_LINE_HUE_SPREAD_DEG) % 360.0,
+                    0.9,
+                    1.0,
+                )
+            };
+            lines.push(Line::from(Span::styled(
+                format!("CHIP {real_chip}: reset issued..."),
+                Style::default().fg(line_color),
+            )));
         }
-        if !self.clock.in_progress() {
+        if finished {
             lines.push(Line::from(Span::styled(
                 "CONNECTION RESTORED.",
                 Style::default().fg(colors::rgb(0, 255, 0)),
@@ -98,7 +133,12 @@ impl BbsTakeover {
         } else {
             "PARTIAL RESET"
         };
-        render_takeover_frame(f, area, title, colors::rgb(0, 220, 0), lines);
+        let border_color = if finished {
+            colors::rgb(0, 220, 0)
+        } else {
+            hsv_to_rgb((self.header_hue() + 180.0) % 360.0, 0.8, 0.9)
+        };
+        render_takeover_frame(f, area, title, border_color, lines);
     }
 }
 
@@ -129,6 +169,54 @@ mod tests {
             device_indices,
             raw_targets: vec![],
         }
+    }
+
+    /// Render `t` and return the foreground color of the first `'*'` cell
+    /// (part of the header's `"** SYSOP ..."` banner) — used to prove the
+    /// header actually changes color over real elapsed time, rather than
+    /// scanning for one fixed cell position that could shift with layout.
+    fn header_fg(t: &BbsTakeover) -> ratatui::style::Color {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| t.render(f, f.area())).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                if cell.symbol() == "*" {
+                    return cell.fg;
+                }
+            }
+        }
+        panic!("header '*' not found in rendered buffer");
+    }
+
+    /// Render `t` and return the foreground color of `needle`'s own first
+    /// character cell — NOT just "the first non-space cell on that row",
+    /// since the row's leftmost cell is the border glyph (styled with the
+    /// border color, not the line's own text color). Every symbol here is
+    /// single-width ASCII, so a character offset into the flattened row
+    /// string maps 1:1 to an x coordinate.
+    fn line_fg_containing(t: &BbsTakeover, needle: &str) -> ratatui::style::Color {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| t.render(f, f.area())).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        for y in 0..buf.area.height {
+            let mut row = String::new();
+            for x in 0..buf.area.width {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            if let Some(byte_offset) = row.find(needle) {
+                let x = row[..byte_offset].chars().count() as u16;
+                return buf[(x, y)].fg;
+            }
+        }
+        panic!("row containing {needle:?} not found in rendered buffer");
     }
 
     /// Render `t` into an 80x24 `TestBackend` and flatten the buffer into
@@ -239,6 +327,60 @@ mod tests {
         assert!(
             painted.contains("reset issued"),
             "expected honest in-progress wording:\n{painted}"
+        );
+    }
+
+    /// The header must actually cycle color over real elapsed time (not sit
+    /// on one static color) — this is the "psychedelic" requirement, and it
+    /// must be driven by the takeover's own real clock, not a decorative
+    /// timer independent of it.
+    #[test]
+    fn header_color_cycles_with_real_elapsed_time() {
+        let mut t = BbsTakeover::new(&ev(true, 4));
+        let color_at_start = header_fg(&t);
+        t.tick(Duration::from_millis(2000)); // 2s * 90deg/s = 180deg — opposite hue
+        let color_later = header_fg(&t);
+        assert_ne!(
+            color_at_start, color_later,
+            "header color should have visibly changed after 2s of real elapsed time"
+        );
+    }
+
+    /// Two simultaneously-visible chip lines must get distinct colors (a
+    /// hue-spread rainbow line-up), not all render the same flat color.
+    #[test]
+    fn simultaneous_chip_lines_get_distinct_colors() {
+        let mut t = BbsTakeover::new(&ev_subset(2, vec![0, 1]));
+        // beat = 450ms / 400ms = 1 → (1 % 2) + 1 = 2 lines visible.
+        t.tick(Duration::from_millis(450));
+        assert_eq!(t.visible_lines(), 2, "test setup: expected both lines visible");
+        let color_chip_0 = line_fg_containing(&t, "CHIP 0");
+        let color_chip_1 = line_fg_containing(&t, "CHIP 1");
+        assert_ne!(
+            color_chip_0, color_chip_1,
+            "simultaneously-visible chip lines should have distinct colors"
+        );
+    }
+
+    /// Once the real reset finishes, the takeover settles into a fixed green
+    /// (both header and border) rather than continuing to cycle — a clear
+    /// "back to normal" signal distinct from the in-progress churn.
+    #[test]
+    fn settles_to_fixed_green_once_finished() {
+        let mut t = BbsTakeover::new(&ev(true, 4));
+        t.tick(Duration::from_millis(1300)); // arbitrary mid-cycle elapsed time
+        t.note_reset_finished();
+        let color_a = header_fg(&t);
+        t.tick(Duration::from_millis(900)); // more time passes post-finish
+        let color_b = header_fg(&t);
+        assert_eq!(
+            color_a, color_b,
+            "header color must stop cycling once the real reset has finished"
+        );
+        assert_eq!(
+            color_a,
+            colors::rgb(0, 255, 0),
+            "finished header should settle to the fixed 'connection restored' green"
         );
     }
 }
