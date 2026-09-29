@@ -149,6 +149,18 @@ fn severity_style(sev: Severity) -> Style {
     Style::default().fg(c)
 }
 
+/// Bright, attention-grabbing color for a feed row that folds a detected
+/// `tt-smi -r` reset event — distinct from every `severity_style` color above
+/// so a reset row visually pops rather than blending in as an ordinary log
+/// line (an ordinary driver warning is `Severity::Warn`'s orange). Additive:
+/// applied alongside (not instead of) the row's existing severity coloring.
+fn reset_accent() -> Color {
+    colors::rgb(255, 70, 220)
+}
+
+/// Glyph prefixed onto a reset row's display text — see `reset_accent`.
+const RESET_GLYPH: &str = "⚡";
+
 fn collector_glyph(status: &CollectorStatus) -> (&'static str, Color) {
     match status {
         CollectorStatus::Ok => ("●", colors::rgb(90, 220, 140)),
@@ -694,20 +706,42 @@ pub fn render_hivemind(
 
         let prefix_w = 7 /* severity */ + 1 + label_w + 1 + 4 /* dev field */ + 1;
         let text_w = left_w.saturating_sub(prefix_w).saturating_sub(trailing_w);
+        // A detected reset gets a distinct glyph/color on the source label
+        // and display text, additive to (not replacing) the existing
+        // severity-based coloring of the severity-label column — see
+        // `reset_accent`. An ordinary row keeps exactly the prior styling.
+        let source_style = if row.is_reset {
+            Style::default().fg(reset_accent()).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(dim)
+        };
+        let display_text = if row.is_reset {
+            format!(
+                "{RESET_GLYPH} {}",
+                truncate_to_width(&row.display, text_w.saturating_sub(2))
+            )
+        } else {
+            truncate_to_width(&row.display, text_w)
+        };
+        let display_span = if row.is_reset {
+            Span::styled(
+                display_text,
+                Style::default().fg(reset_accent()).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw(display_text)
+        };
         feed_lines.push(Line::from(vec![
             Span::styled(
                 format!("{:<7}", severity_label(row.max_severity)),
                 severity_style(row.max_severity),
             ),
             Span::raw(" "),
-            Span::styled(
-                format!("{:label_w$}", row.source.label()),
-                Style::default().fg(dim),
-            ),
+            Span::styled(format!("{:label_w$}", row.source.label()), source_style),
             Span::raw(" "),
             Span::styled(format!("{:<4}", dev_str), Style::default().fg(dim)),
             Span::raw(" "),
-            Span::raw(truncate_to_width(&row.display, text_w)),
+            display_span,
             Span::styled(trailing, Style::default().fg(accent)),
         ]));
     }
@@ -1155,6 +1189,17 @@ mod tests {
             kind: EventKind::Compile,
             text: "brisc.cpp.o compiled in 1.2s (this line is intentionally very long to exercise feed-text truncation at the panel's right edge)".to_string(),
             origin: "cache_watch".to_string(),
+        });
+        // Finding 3 regression: a detected reset must render (its distinct
+        // feed-row glyph/color path) without panicking across every size.
+        active.push_for_test(SniffEvent {
+            ts: Instant::now(),
+            source: Source::TtSmi,
+            device: Some(1),
+            severity: Severity::Warn,
+            kind: EventKind::Reset,
+            text: "tt-smi -r 1 detected".to_string(),
+            origin: "reset_detect".to_string(),
         });
 
         for (w, h) in [(120u16, 40u16), (60, 20), (20, 8), (12, 6), (5, 4)] {
