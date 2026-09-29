@@ -233,6 +233,12 @@ pub struct Cli {
     /// Toggle live with the `/idle-on-blur` command. Off by default.
     #[arg(long)]
     pub idle_on_blur: bool,
+
+    /// Opt-in: react to a detected `tt-smi -r` reset with a full-screen
+    /// takeover animation (or, in HivemindSweeper, a real feed event). Off
+    /// by default.
+    #[arg(long)]
+    pub reset_takeover: bool,
 }
 
 /// Backend selection
@@ -539,6 +545,7 @@ impl Cli {
             profile: crate::config::AnimationProfile::Normal,
             throttle: false,
             idle_on_blur: false,
+            reset_takeover: false,
         }
     }
 
@@ -610,6 +617,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
+            reset_takeover: false,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Auto);
@@ -646,6 +654,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
+            reset_takeover: false,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Mock);
@@ -677,6 +686,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
+            reset_takeover: false,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Json);
@@ -708,6 +718,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
+            reset_takeover: false,
         };
 
         assert!(cli.should_monitor_device(0));
@@ -743,6 +754,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
+            reset_takeover: false,
         };
 
         assert_eq!(verbose_cli.log_level(), log::LevelFilter::Debug);
@@ -771,6 +783,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
+            reset_takeover: false,
         };
 
         assert_eq!(quiet_cli.log_level(), log::LevelFilter::Off);
@@ -802,6 +815,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
+            reset_takeover: false,
         };
 
         // `validate()` only rejects `--backend luwen` when the crate was built
@@ -842,6 +856,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
+            reset_takeover: false,
         };
 
         assert_eq!(auto_cli.backend_name(), "Auto-detect");
@@ -870,6 +885,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
+            reset_takeover: false,
         };
 
         assert_eq!(mock_cli.backend_name(), "Mock");
@@ -900,6 +916,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
+            reset_takeover: false,
         }
     }
 
@@ -1015,5 +1032,17 @@ mod tests {
             Cli::try_parse_from(["tt-toplike", "--mode", "trainingg"]).is_err(),
             "an unknown mode must be rejected, not silently defaulted"
         );
+    }
+
+    #[test]
+    fn reset_takeover_flag_defaults_to_false() {
+        let cli = Cli::try_parse_from(["tt-toplike"]).unwrap();
+        assert!(!cli.reset_takeover);
+    }
+
+    #[test]
+    fn reset_takeover_flag_can_be_set() {
+        let cli = Cli::try_parse_from(["tt-toplike", "--reset-takeover"]).unwrap();
+        assert!(cli.reset_takeover);
     }
 }

@@ -673,6 +673,23 @@ fn run_app(
     // `SnakeWorld` each tick and hands it the terminal at render time.
     let mut snake = crate::animation::Snake::new();
 
+    // Reset-takeover detection + animation (opt-in via `--reset-takeover` or
+    // the equivalent config-file key). `reset_detector` tracks at most one
+    // in-flight `tt-smi -r` invocation; `takeover` is the full-screen
+    // animation currently playing for it (HivemindSweeper mode never
+    // populates `takeover` — it injects a real feed event instead).
+    let reset_takeover_enabled = cli.reset_takeover
+        || crate::config::load_config_overrides()
+            .reset_takeover
+            .unwrap_or(false);
+    let mut reset_detector = crate::workload::reset_detect::ResetDetector::new();
+    let mut takeover: Option<crate::animation::takeover::Takeover> = None;
+    // Time-since-last-tick source for `takeover.tick()` — deliberately its
+    // own timer rather than reusing the nearby `draw_start` (which is
+    // captured immediately before `terminal.draw()` and would read back
+    // ~0 elapsed if consulted right after creation).
+    let mut last_takeover_tick = Instant::now();
+
     loop {
         // Decide whether to advance animations this iteration.
         // nvtop-style trick: input always polls at INPUT_POLL_MS (16 ms) so
@@ -1225,6 +1242,18 @@ fn run_app(
             // The rows the panel actually renders this frame: the remote list
             // when present, else the local scan.
             let display_proc_rows: &[ProcRow] = remote_proc_rows.as_deref().unwrap_or(&proc_rows);
+
+            // ── Reset takeover: tick + cleanup ─────────────────────────────
+            // Settled before this frame decides what to render.
+            if let Some(t) = takeover.as_mut() {
+                t.tick(last_takeover_tick.elapsed());
+                if t.is_done() {
+                    takeover = None;
+                    reset_detector.clear();
+                }
+            }
+            last_takeover_tick = Instant::now();
+
             let draw_start = Instant::now();
             terminal
                 .draw(|f| {
@@ -1344,6 +1373,11 @@ fn run_app(
                     if let Some(kind) = overlay {
                         render_overlay_panel(f, kind, display_mode);
                     }
+
+                    // ── Reset takeover (full-screen, drawn over everything) ──
+                    if let Some(t) = &takeover {
+                        t.render(f, f.area());
+                    }
                 })
                 .map_err(|e| TTTopError::Terminal(e.to_string()))?;
             perf_meter.record_frame(draw_start.elapsed());
@@ -1372,6 +1406,16 @@ fn run_app(
                     defrag = None;
                     train_view = None;
                     terminal.clear().ok();
+                }
+                // ── Reset takeover intercepts all keystrokes while active ──────
+                // Tried before the general key-handling arm below so a
+                // takeover in progress consumes the keypress entirely (any
+                // key skips straight to the animation's "done" tail) rather
+                // than also falling through to mode/view keybindings.
+                Event::Key(key) if key.kind == KeyEventKind::Press && takeover.is_some() => {
+                    if let Some(t) = takeover.as_mut() {
+                        t.skip();
+                    }
                 }
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     // ── Command mode intercepts all keystrokes ─────────────────
@@ -2336,6 +2380,34 @@ fn run_app(
         // Cross-platform: the host CPU/RAM bars and process panel work on macOS.
         if last_proc_rows_update.elapsed() >= Duration::from_secs(2) {
             host_proc_monitor.update();
+
+            // ── Reset takeover detection (opt-in, `--reset-takeover`) ──────
+            if reset_takeover_enabled {
+                let reset_procs = host_proc_monitor.processes_snapshot();
+                if let Some(ev) = reset_detector.observe(&reset_procs, backend.devices()) {
+                    if display_mode == DisplayMode::HivemindSweeper {
+                        if let Some(h) = hivemind.as_mut() {
+                            h.inject_reset(
+                                format!(
+                                    "tt-smi -r: {} chip(s) targeted{}",
+                                    ev.chip_count,
+                                    if ev.is_full { " (all)" } else { "" }
+                                ),
+                                &ev.device_indices,
+                            );
+                        }
+                        reset_detector.clear(); // no takeover to wait for
+                    } else {
+                        takeover = Some(crate::animation::takeover::pick_takeover(ev));
+                    }
+                }
+                if reset_detector.is_finished(&reset_procs) {
+                    if let Some(t) = takeover.as_mut() {
+                        t.note_reset_finished();
+                    }
+                }
+            }
+
             // Refresh the prober's target set; read back last cycle's verdicts.
             liveness_prober.submit(host_proc_monitor.detected_runtimes());
             // Refresh the inference-server monitor's target set (containers only).

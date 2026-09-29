@@ -102,6 +102,12 @@ impl AnimConfig {
 pub struct AnimConfigOverrides {
     pub sensitivity: Option<f32>,
     pub max_particles_scale: Option<f32>,
+
+    /// Equivalent of `--reset-takeover`, settable via config file instead of
+    /// the CLI flag. Not an animation-sensitivity value like the other
+    /// fields here — reuses this struct because it's the only config file
+    /// this project has.
+    pub reset_takeover: Option<bool>,
 }
 
 /// Load config overrides from `~/.config/tt-toplike/config.toml`.

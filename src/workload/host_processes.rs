@@ -225,6 +225,31 @@ impl HostProcessMonitor {
         out
     }
 
+    /// Cheap `(pid, name, full cmdline)` snapshot of every process seen in
+    /// the current refresh — no TT-specific filtering. Consumed by
+    /// `crate::workload::reset_detect::ResetDetector` so it doesn't need its
+    /// own `sysinfo` refresh cadence.
+    pub fn processes_snapshot(&self) -> Vec<(i32, String, String)> {
+        self.sys
+            .processes()
+            .iter()
+            .map(|(pid, p)| {
+                let name = p.name().to_string_lossy().to_string();
+                let cmdline = p
+                    .cmd()
+                    .iter()
+                    .map(|s| s.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                (
+                    i32::try_from(pid.as_u32()).unwrap_or(i32::MAX),
+                    name,
+                    cmdline,
+                )
+            })
+            .collect()
+    }
+
     /// The TT inference-server containers *and* direct (non-Docker) vLLM-on-TT
     /// processes detected in the current snapshot (deduped by identity key),
     /// as structured [`crate::workload::InferenceServer`] records — no
@@ -681,5 +706,16 @@ mod tests {
         ));
 
         assert!(classify_one("bash", "bash -c ls", "", 1).is_none());
+    }
+
+    #[test]
+    fn processes_snapshot_includes_pid_name_and_cmdline() {
+        let mut mon = HostProcessMonitor::new();
+        mon.update();
+        let snap = mon.processes_snapshot();
+        // Every running test process (at minimum this test binary itself)
+        // should show up with a non-empty name.
+        assert!(!snap.is_empty());
+        assert!(snap.iter().all(|(_, name, _)| !name.is_empty()));
     }
 }
