@@ -70,6 +70,9 @@ impl TakeoverClock {
     }
 }
 
+mod quiet_notice;
+pub use quiet_notice::QuietNoticeTakeover;
+
 /// Shared full-screen frame: clears the terminal cells, paints a bordered
 /// block (left/bottom borders only, per this project's no-right-border-glyph
 /// convention) with `title`, and renders `lines` as a centered paragraph.
