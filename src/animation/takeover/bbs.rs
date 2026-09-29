@@ -1,17 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! BBS sysop takeover — "the sysop wants to chat." Per-chip log lines
-//! scroll in one at a time, paced by `chip_count`, looping while the real
-//! reset is still in progress rather than racing ahead of it. Rendered
-//! psychedelic-BBS-ANSI-art style: header, border, and each chip line cycle
-//! through the hue wheel, driven by the takeover's own real elapsed time
-//! (not a decorative timer independent of it) — settles to a steady green
-//! once the real reset has actually finished, as a clear "back to normal"
-//! signal against the churn.
+//! BBS sysop takeover — "the sysop wants to chat." A classic ANSI-art
+//! terminal interrupt: fixed limited palette (bright green base, sparse
+//! cyan/yellow accents — no hue-cycling, that's BBS's alone to have given
+//! up, not everyone else's to inherit), a box-drawing border for real
+//! texture, modem-connect flavor lines, and each new chip status line
+//! typing out character-by-character in real time (a classic terminal
+//! typewriter effect) rather than popping in fully formed. Loops while the
+//! real reset is still in progress rather than racing ahead of it.
 
 use super::{render_takeover_frame, TakeoverClock};
-use crate::animation::hsv_to_rgb;
 use crate::ui::colors;
 use crate::workload::reset_detect::ResetEvent;
 use ratatui::layout::Rect;
@@ -22,12 +21,13 @@ use std::time::Duration;
 
 const DONE_TAIL: Duration = Duration::from_millis(700);
 const BEAT_MS: u128 = 400;
-/// Degrees/second the header + border hue rotates while the reset is in
-/// progress — a full rotation roughly every 4 seconds.
-const HUE_ROTATION_DEG_PER_SEC: f32 = 90.0;
-/// Hue spacing between successive chip lines, so simultaneous lines read as
-/// distinct colors rather than one flat rainbow smear.
-const CHIP_LINE_HUE_SPREAD_DEG: f32 = 40.0;
+/// How long a newly-appearing chip line takes to finish "typing" — well
+/// under `BEAT_MS`, so it sits fully typed for the rest of its beat before
+/// the next line begins.
+const TYPE_MS: u128 = 150;
+/// Banner blink half-cycle: a real ANSI blink (two fixed states), not a
+/// continuous hue rotation.
+const BLINK_MS: u128 = 500;
 
 pub struct BbsTakeover {
     clock: TakeoverClock,
@@ -65,7 +65,7 @@ impl BbsTakeover {
         self.clock.is_done(DONE_TAIL)
     }
 
-    /// How many "CHIP N: reset ack" lines should be visible right now,
+    /// How many "CHIP N: reset issued" lines should be visible right now,
     /// capped at `chip_count` and looping (mod `chip_count`) while the real
     /// reset is still in progress, so a longer real reset doesn't run out of
     /// choreography.
@@ -78,68 +78,112 @@ impl BbsTakeover {
         }
     }
 
-    /// Header/border hue for this frame: a steady rotation through the full
-    /// hue wheel driven by real elapsed time, frozen at a fixed green once
-    /// the real reset has finished (see module docs).
-    fn header_hue(&self) -> f32 {
-        (self.clock.elapsed().as_secs_f32() * HUE_ROTATION_DEG_PER_SEC) % 360.0
+    /// Fraction (0.0-1.0) of the most-recently-appeared chip line's text
+    /// that should be visible right now. Only meaningful when there's more
+    /// than one chip line to accumulate — with exactly one, there's never a
+    /// genuinely "new" line to type, so it stays fully shown throughout.
+    fn typing_progress(&self) -> f32 {
+        if self.chip_count <= 1 {
+            return 1.0;
+        }
+        let within_beat = self.clock.elapsed().as_millis() % BEAT_MS;
+        (within_beat as f32 / TYPE_MS as f32).min(1.0)
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
         let finished = !self.clock.in_progress();
-        let header_color: Color = if finished {
-            colors::rgb(0, 255, 0)
+        let green = colors::rgb(40, 220, 90);
+        let cyan = colors::rgb(60, 200, 210);
+        let dim_green = colors::rgb(20, 140, 60);
+        let yellow = colors::rgb(255, 210, 70);
+        let yellow_dim = colors::rgb(120, 100, 40);
+
+        let blink_on = (self.clock.elapsed().as_millis() / BLINK_MS) % 2 == 0;
+        let banner_color = if finished {
+            green
+        } else if blink_on {
+            yellow
         } else {
-            hsv_to_rgb(self.header_hue(), 1.0, 1.0)
+            yellow_dim
         };
-        let mut lines = vec![
+
+        let mut lines: Vec<Line<'static>> = vec![
+            Line::from(Span::styled("RING... RING...", Style::default().fg(dim_green))),
+            Line::from(Span::styled("CONNECT 14400", Style::default().fg(dim_green))),
+            Line::from(Span::styled(
+                "NODE 1 - TENSTORRENT BBS",
+                Style::default().fg(cyan),
+            )),
+            Line::from(Span::raw("")),
             Line::from(Span::styled(
                 "** SYSOP HAS TAKEN OVER THIS TERMINAL **",
-                Style::default().fg(header_color),
+                Style::default().fg(banner_color),
             )),
             Line::from(Span::raw("")),
         ];
+
         let visible = self.visible_lines();
-        // Iterate the REAL targeted chip indices (not `0..visible`, which was
-        // just loop position masquerading as a chip id) — a subset reset
-        // (e.g. `tt-smi -r 2`) must name chip 2, not chip 0. Wording stays in
-        // the present/in-progress tense ("issued", not "ack received") since
-        // per-chip completion isn't actually known; the aggregate completion
-        // claim ("CONNECTION RESTORED.") is made only once, below, and only
-        // once the real reset has actually finished.
+        let typing_progress = self.typing_progress();
         for (i, &real_chip) in self.device_indices.iter().take(visible).enumerate() {
-            let line_color = if finished {
-                colors::rgb(0, 220, 0)
+            let full_text = format!("CHIP {real_chip}: reset issued...");
+            let is_newest = i + 1 == visible && self.clock.in_progress();
+            let text = if is_newest && typing_progress < 1.0 {
+                let total_chars = full_text.chars().count();
+                let shown = ((total_chars as f32) * typing_progress).ceil() as usize;
+                full_text.chars().take(shown.max(1)).collect()
             } else {
-                hsv_to_rgb(
-                    (self.header_hue() + i as f32 * CHIP_LINE_HUE_SPREAD_DEG) % 360.0,
-                    0.9,
-                    1.0,
-                )
+                full_text
             };
-            lines.push(Line::from(Span::styled(
-                format!("CHIP {real_chip}: reset issued..."),
-                Style::default().fg(line_color),
-            )));
+            lines.push(Line::from(Span::styled(text, Style::default().fg(green))));
         }
         if finished {
             lines.push(Line::from(Span::styled(
                 "CONNECTION RESTORED.",
-                Style::default().fg(colors::rgb(0, 255, 0)),
+                Style::default().fg(green),
             )));
         }
+
+        let lines = box_it(lines, cyan);
+
         let title = if self.is_full {
             "SYSTEM-WIDE RESET"
         } else {
             "PARTIAL RESET"
         };
-        let border_color = if finished {
-            colors::rgb(0, 220, 0)
-        } else {
-            hsv_to_rgb((self.header_hue() + 180.0) % 360.0, 0.8, 0.9)
-        };
-        render_takeover_frame(f, area, title, border_color, lines);
+        render_takeover_frame(f, area, title, cyan, lines);
     }
+}
+
+/// Pad every line to the same width (see `TrekResetTakeover` for why —
+/// `Paragraph`'s `Alignment::Center` centers each `Line` independently, so
+/// without this every line would get a different left indent), then wrap
+/// the whole block in an ANSI box-drawing border for real terminal-art
+/// texture.
+fn box_it(mut lines: Vec<Line<'static>>, border_color: Color) -> Vec<Line<'static>> {
+    let inner_width = lines.iter().map(Line::width).max().unwrap_or(0).max(20);
+    for line in &mut lines {
+        let deficit = inner_width.saturating_sub(line.width());
+        if deficit > 0 {
+            line.spans.push(Span::raw(" ".repeat(deficit)));
+        }
+    }
+    let border_style = Style::default().fg(border_color);
+    let mut boxed = Vec::with_capacity(lines.len() + 2);
+    boxed.push(Line::from(Span::styled(
+        format!("┌{}┐", "─".repeat(inner_width + 2)),
+        border_style,
+    )));
+    for line in lines {
+        let mut spans = vec![Span::styled("│ ", border_style)];
+        spans.extend(line.spans);
+        spans.push(Span::styled(" │", border_style));
+        boxed.push(Line::from(spans));
+    }
+    boxed.push(Line::from(Span::styled(
+        format!("└{}┘", "─".repeat(inner_width + 2)),
+        border_style,
+    )));
+    boxed
 }
 
 #[cfg(test)]
@@ -169,54 +213,6 @@ mod tests {
             device_indices,
             raw_targets: vec![],
         }
-    }
-
-    /// Render `t` and return the foreground color of the first `'*'` cell
-    /// (part of the header's `"** SYSOP ..."` banner) — used to prove the
-    /// header actually changes color over real elapsed time, rather than
-    /// scanning for one fixed cell position that could shift with layout.
-    fn header_fg(t: &BbsTakeover) -> ratatui::style::Color {
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| t.render(f, f.area())).unwrap();
-        let buf = terminal.backend().buffer().clone();
-        for y in 0..buf.area.height {
-            for x in 0..buf.area.width {
-                let cell = &buf[(x, y)];
-                if cell.symbol() == "*" {
-                    return cell.fg;
-                }
-            }
-        }
-        panic!("header '*' not found in rendered buffer");
-    }
-
-    /// Render `t` and return the foreground color of `needle`'s own first
-    /// character cell — NOT just "the first non-space cell on that row",
-    /// since the row's leftmost cell is the border glyph (styled with the
-    /// border color, not the line's own text color). Every symbol here is
-    /// single-width ASCII, so a character offset into the flattened row
-    /// string maps 1:1 to an x coordinate.
-    fn line_fg_containing(t: &BbsTakeover, needle: &str) -> ratatui::style::Color {
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| t.render(f, f.area())).unwrap();
-        let buf = terminal.backend().buffer().clone();
-        for y in 0..buf.area.height {
-            let mut row = String::new();
-            for x in 0..buf.area.width {
-                row.push_str(buf[(x, y)].symbol());
-            }
-            if let Some(byte_offset) = row.find(needle) {
-                let x = row[..byte_offset].chars().count() as u16;
-                return buf[(x, y)].fg;
-            }
-        }
-        panic!("row containing {needle:?} not found in rendered buffer");
     }
 
     /// Render `t` into an 80x24 `TestBackend` and flatten the buffer into
@@ -289,10 +285,11 @@ mod tests {
 
     /// Regression for Finding 2: the rendered line must name the REAL
     /// targeted chip (2), not a fake index derived from loop position (0).
+    /// With `chip_count == 1` there's no typewriter reveal (nothing new
+    /// ever accumulates), so the full text is present from the first tick.
     #[test]
     fn render_labels_the_real_targeted_chip_not_loop_position() {
         let mut t = BbsTakeover::new(&ev_subset(1, vec![2]));
-        // Advance well past the first beat so at least one line is visible.
         t.tick(Duration::from_millis(BEAT_MS as u64));
         let painted = rendered_text(&t);
         assert!(
@@ -330,57 +327,87 @@ mod tests {
         );
     }
 
-    /// The header must actually cycle color over real elapsed time (not sit
-    /// on one static color) — this is the "psychedelic" requirement, and it
-    /// must be driven by the takeover's own real clock, not a decorative
-    /// timer independent of it.
+    /// The newest chip line (multi-chip case) must actually type out over
+    /// real time — a partial reveal shortly after it appears, the full
+    /// text once its type window has elapsed.
     #[test]
-    fn header_color_cycles_with_real_elapsed_time() {
-        let mut t = BbsTakeover::new(&ev(true, 4));
-        let color_at_start = header_fg(&t);
-        t.tick(Duration::from_millis(2000)); // 2s * 90deg/s = 180deg — opposite hue
-        let color_later = header_fg(&t);
-        assert_ne!(
-            color_at_start, color_later,
-            "header color should have visibly changed after 2s of real elapsed time"
+    fn newest_chip_line_types_out_over_real_time() {
+        let mut t = BbsTakeover::new(&ev_subset(2, vec![0, 7]));
+        // beat 0: only "CHIP 0" visible. Advance into beat 1, just after it
+        // starts, so "CHIP 7" is the newest line and is still mid-type.
+        t.tick(Duration::from_millis(BEAT_MS as u64 + 20));
+        let mid_type = rendered_text(&t);
+        assert!(
+            !mid_type.contains("CHIP 7: reset issued..."),
+            "the newest line should not be fully typed yet, 20ms into a 150ms type window:\n{mid_type}"
+        );
+
+        // Well past TYPE_MS within the same beat: fully typed now.
+        t.tick(Duration::from_millis((TYPE_MS as u64) + 50));
+        let fully_typed = rendered_text(&t);
+        assert!(
+            fully_typed.contains("CHIP 7: reset issued..."),
+            "the line should be fully typed once its type window has elapsed:\n{fully_typed}"
         );
     }
 
-    /// Two simultaneously-visible chip lines must get distinct colors (a
-    /// hue-spread rainbow line-up), not all render the same flat color.
+    /// The SYSOP banner blinks between two fixed states while in progress —
+    /// not a continuous hue rotation.
     #[test]
-    fn simultaneous_chip_lines_get_distinct_colors() {
-        let mut t = BbsTakeover::new(&ev_subset(2, vec![0, 1]));
-        // beat = 450ms / 400ms = 1 → (1 % 2) + 1 = 2 lines visible.
-        t.tick(Duration::from_millis(450));
-        assert_eq!(t.visible_lines(), 2, "test setup: expected both lines visible");
-        let color_chip_0 = line_fg_containing(&t, "CHIP 0");
-        let color_chip_1 = line_fg_containing(&t, "CHIP 1");
-        assert_ne!(
-            color_chip_0, color_chip_1,
-            "simultaneously-visible chip lines should have distinct colors"
-        );
+    fn banner_blinks_between_two_fixed_states() {
+        let mut t = BbsTakeover::new(&ev(true, 4));
+        let banner_a = rendered_banner_fg(&t);
+        t.tick(Duration::from_millis(BLINK_MS as u64));
+        let banner_b = rendered_banner_fg(&t);
+        assert_ne!(banner_a, banner_b, "banner should toggle across a blink boundary");
+        t.tick(Duration::from_millis(BLINK_MS as u64));
+        let banner_c = rendered_banner_fg(&t);
+        assert_eq!(banner_a, banner_c, "banner should return to its first state, not drift through a spectrum");
     }
 
-    /// Once the real reset finishes, the takeover settles into a fixed green
-    /// (both header and border) rather than continuing to cycle — a clear
-    /// "back to normal" signal distinct from the in-progress churn.
+    /// Once finished, the banner settles to a steady green and stops
+    /// blinking — a clear "back to normal" signal, matching the other
+    /// variants' settle-on-finish convention.
     #[test]
-    fn settles_to_fixed_green_once_finished() {
+    fn banner_settles_to_steady_green_once_finished() {
         let mut t = BbsTakeover::new(&ev(true, 4));
-        t.tick(Duration::from_millis(1300)); // arbitrary mid-cycle elapsed time
+        t.tick(Duration::from_millis(300));
         t.note_reset_finished();
-        let color_a = header_fg(&t);
-        t.tick(Duration::from_millis(900)); // more time passes post-finish
-        let color_b = header_fg(&t);
-        assert_eq!(
-            color_a, color_b,
-            "header color must stop cycling once the real reset has finished"
-        );
-        assert_eq!(
-            color_a,
-            colors::rgb(0, 255, 0),
-            "finished header should settle to the fixed 'connection restored' green"
-        );
+        let a = rendered_banner_fg(&t);
+        t.tick(Duration::from_millis(BLINK_MS as u64 * 3));
+        let b = rendered_banner_fg(&t);
+        assert_eq!(a, b, "banner should stop changing once finished");
+    }
+
+    fn rendered_banner_fg(t: &BbsTakeover) -> Color {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| t.render(f, f.area())).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        for y in 0..buf.area.height {
+            let mut row = String::new();
+            for x in 0..buf.area.width {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            if let Some(idx) = row.find('S') {
+                if row[idx..].starts_with("SYSOP") {
+                    let col = row[..idx].chars().count() as u16;
+                    return buf[(col, y)].fg;
+                }
+            }
+        }
+        panic!("SYSOP banner not found in rendered buffer");
+    }
+
+    /// The box-drawing border must actually be present — real ANSI-art
+    /// texture, not just plain text floating on a flat background.
+    #[test]
+    fn render_wraps_content_in_a_box_border() {
+        let t = BbsTakeover::new(&ev(true, 4));
+        let painted = rendered_text(&t);
+        assert!(painted.contains('┌'), "expected a box-drawing top-left corner:\n{painted}");
+        assert!(painted.contains('┘'), "expected a box-drawing bottom-right corner:\n{painted}");
     }
 }
