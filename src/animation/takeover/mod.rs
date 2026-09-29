@@ -82,6 +82,9 @@ pub use bbs::BbsTakeover;
 mod blackhole_swarm;
 pub use blackhole_swarm::BlackholeSwarmTakeover;
 
+mod hatch_countdown;
+pub use hatch_countdown::HatchCountdownTakeover;
+
 /// Shared full-screen frame: clears the terminal cells, paints a bordered
 /// block (left/bottom borders only, per this project's no-right-border-glyph
 /// convention) with `title`, and renders `lines` as a centered paragraph.
