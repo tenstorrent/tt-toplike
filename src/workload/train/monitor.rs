@@ -1742,7 +1742,7 @@ mod step_history_tests {
         assert_eq!(got, vec![(1, 410.0), (2, 395.0), (3, 402.0)]);
     }
 
-    /// Review Focus 3. Attaching mid-run to a trainer whose program cache is
+    /// Attaching mid-run to a trainer whose program cache is
     /// already full must not paint the first sample as a compile: there is no
     /// earlier sample to measure growth against.
     #[test]
@@ -1781,7 +1781,7 @@ mod step_history_tests {
         assert_eq!(st.step_history[0].ms, 450.0);
     }
 
-    /// Review Focus 1. A trainer that prints only loss (bar-only harnesses,
+    /// A trainer that prints only loss (bar-only harnesses,
     /// or cadence derived from log timing) has no per-step times. The history
     /// must stay empty rather than be filled from the derived average.
     #[test]
@@ -1967,18 +1967,6 @@ mod run_anchor_tests {
         assert!(!m.state.chunked_bar, "a new run is not a bar restart");
         assert_eq!(m.state.step_history.len(), 1, "a bar run is timed again");
         assert_eq!(m.state.step_history[0].step, 2);
-    }
-
-    /// Without the reset the stale anchor reads a new run's step 1 as a
-    /// regression (documents what the reset prevents).
-    #[test]
-    fn without_the_reset_a_stale_anchor_would_flag_the_new_run() {
-        let mut m = TrainMonitor::new();
-        let t0 = Instant::now();
-        m.last_step_seen = Some((500, t0));
-        m.state = TrainState::new();
-        parsed_step_at(&mut m, 1, t0 + Duration::from_secs(1));
-        assert!(m.state.chunked_bar);
     }
 
     /// Attaching during model load: the first polls see the default step 0

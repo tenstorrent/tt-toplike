@@ -145,6 +145,11 @@ pub fn logs_since_best(losses: &[f32]) -> Option<usize> {
 /// its input exists, so a trainer with no learning rate simply has no `lr`
 /// piece. `lr` is the configured base rate. The schedule position is how far
 /// through the run's step budget we are, which is not the live learning rate.
+///
+/// Non-finite losses (a diverged run can log `nan` or `inf`) are dropped
+/// before the three loss pieces are computed, so the slope and noise stay
+/// finite and "logs ago" counts only finite entries. A history with no
+/// finite loss has no loss pieces.
 pub fn convergence_parts(
     losses: &[f32],
     lr: Option<f32>,
@@ -152,6 +157,8 @@ pub fn convergence_parts(
     step: u64,
     max_steps: u64,
 ) -> Vec<String> {
+    let finite: Vec<f32> = losses.iter().copied().filter(|l| l.is_finite()).collect();
+    let losses = finite.as_slice();
     let mut parts = Vec::new();
     if let Some(s) = loss_slope_per_100(losses) {
         let arrow = if s < -SLOPE_EPS {
@@ -281,9 +288,11 @@ pub struct BandPlan {
 
 /// Fit the layers into a band `height` rows tall, header included. Rows are
 /// handed out in priority order: one bar row, verdict, chip lanes, gauges,
-/// strip, grid, then extra bar height. So a short terminal keeps the step
-/// chart and loses the convergence strip first. The total never exceeds
-/// `height - 1`.
+/// strip, grid, then extra bar height. As the terminal gets shorter, layers
+/// are lost in the reverse order: extra bar height first, then the grid row,
+/// then the convergence strip, then gauges, then lanes, then the verdict. The
+/// first bar row is kept as long as there is a row below the header. The
+/// total never exceeds `height - 1`.
 pub fn plan_band(height: usize, w: BandWants) -> BandPlan {
     let mut rem = height.saturating_sub(1);
     let mut take = |want: usize| -> usize {
@@ -532,6 +541,24 @@ mod tests {
         // A scheduler with no step budget names itself without a percentage.
         let p = convergence_parts(&[], None, Some("linear"), 5, 0);
         assert_eq!(p, vec!["linear".to_string()]);
+    }
+
+    /// A diverged run can log `nan`. Non-finite losses are left out of the
+    /// strip's loss pieces, so no piece prints `NaN`.
+    #[test]
+    fn non_finite_losses_never_reach_the_strip() {
+        let mut losses: Vec<f32> = (0..30).map(|i| 5.0 - 0.01 * i as f32).collect();
+        losses[12] = f32::NAN;
+        losses.push(f32::INFINITY);
+        let parts = convergence_parts(&losses, None, None, 0, 0);
+        let joined = parts.join(" | ");
+        assert!(joined.contains("loss"), "{joined}");
+        assert!(joined.contains("at best loss"), "{joined}");
+        assert!(
+            !joined.contains("NaN") && !joined.contains("inf"),
+            "{joined}"
+        );
+        assert!(convergence_parts(&[f32::NAN; 20], None, None, 0, 0).is_empty());
     }
 
     #[test]

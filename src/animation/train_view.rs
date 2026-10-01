@@ -10,7 +10,7 @@
 //!
 //! | Channel | Encodes |
 //! |---|---|
-//! | node/mountain hue red→cyan | loss magnitude (per-cell gradient in the river) |
+//! | mountain hue red→cyan | loss magnitude (per-cell gradient in the river) |
 //! | bar height (step band) | wall time per step, trainer-reported or observed from a progress bar (the title says which) |
 //! | bar colour teal / purple / amber | normal step / program cache grew / checkpoint written |
 //! | pulse cursor speed | one pass per measured step (never faster than 5/s) |
@@ -188,6 +188,11 @@ const WIRE_REST: Color = Color::Rgb(80, 90, 115);
 /// Placeholder for a lane column with no chip sample. A glyph used nowhere
 /// else, so a test can count missing samples exactly.
 const NO_SAMPLE: char = '⋅';
+/// A lane cell for a sample that exists when the lane's scale is 0 (no TDP
+/// known and every sample in the window reads 0 W). The lowest bar glyph, so
+/// the cell says "sampled, at the bottom of the scale" and is never taken
+/// for a missing sample.
+const ZERO_SCALE_SAMPLE: char = '▁';
 /// Columns between nodes in the grid backdrop.
 const GRID_STRIDE: usize = 4;
 
@@ -479,7 +484,7 @@ impl TrainView {
     fn layout(&self) -> Layout {
         // Row 0/1 are the title + subtitle bars, row `height-1` is the
         // bottom border — everything else is shared out between the
-        // network band, the river (which gets whatever's left over, since
+        // tapestry band, the river (which gets whatever's left over, since
         // it's the visual centerpiece), CHIPS, and the legend.
         let legend_row = self.height.saturating_sub(2);
         let chips_row = legend_row.saturating_sub(2);
@@ -837,8 +842,6 @@ impl TrainView {
         }
     }
 
-    /// Summed in+out PCIe bytes/sec across chips that report it, `None` when
-    /// no chip does (only the sysfs/hybrid backends have these counters).
     /// Advance the pulse phase to the current frame and return it, or `None`
     /// when no step time is known (the phase is then left alone). Advances by
     /// the frame delta, so repeated renders in one frame do not double-step.
@@ -856,6 +859,8 @@ impl TrainView {
         Some(phase)
     }
 
+    /// Summed in+out PCIe bytes/sec across chips that report it, `None` when
+    /// no chip does (only the sysfs/hybrid backends have these counters).
     fn pcie_total(backend: &dyn TelemetryBackend) -> Option<f64> {
         let mut any = false;
         let mut total = 0.0f64;
@@ -1221,7 +1226,10 @@ impl TrainView {
             let aimax = hist_chips.aiclk_max(dev.index);
             for (i, smp) in samples.iter().enumerate() {
                 let (ch, col) = match smp {
-                    Some(c) if scale > 0.0 => {
+                    // Sampled, but nothing to scale against: see
+                    // `ZERO_SCALE_SAMPLE`.
+                    Some(_) if scale <= 0.0 => (ZERO_SCALE_SAMPLE, tcolor),
+                    Some(c) => {
                         let dropped = c.aiclk_mhz > 0
                             && aimax > 0
                             && (c.aiclk_mhz as f32) < AICLK_DROP_FRAC * aimax as f32;
@@ -2053,8 +2061,8 @@ mod tests {
     #[test]
     fn side_panels_never_invert_at_any_width() {
         // Direct check of the layout invariant itself (not text-scraping):
-        // whichever side panels `panel_fit` says are shown, the network
-        // grid's own bounds must never reach into them.
+        // whichever side panels `panel_fit` says are shown, the tapestry
+        // band's own bounds must never reach into them.
         for w in 20..=140usize {
             let v = TrainView::new(w, 40);
             let (show_model, show_live) = v.panel_fit();
@@ -2064,18 +2072,18 @@ mod tests {
                 let rx = w.saturating_sub(v.right_w() + 1);
                 assert!(
                     net_end <= rx,
-                    "network overruns the LIVE panel at w={w}: x0={x0} netw={netw} rx={rx}"
+                    "band overruns the LIVE panel at w={w}: x0={x0} netw={netw} rx={rx}"
                 );
             } else {
                 assert!(
                     net_end <= w,
-                    "network overruns the screen at w={w}: x0={x0} netw={netw}"
+                    "band overruns the screen at w={w}: x0={x0} netw={netw}"
                 );
             }
             if show_model {
                 assert!(x0 >= 3, "model card column missing room at w={w}");
             } else {
-                assert_eq!(x0, 2, "network should start at the left margin at w={w}");
+                assert_eq!(x0, 2, "band should start at the left margin at w={w}");
             }
         }
     }
@@ -2556,13 +2564,22 @@ mod tests {
     }
 
     /// A bar restart sends `st.step` back to 1. It must not look like a new
-    /// run: lanes and best-so-far values keep their history.
+    /// run: lanes and best-so-far values keep their history. The samples'
+    /// step numbers (3193..=3195, then 1..=3) differ from their sequence
+    /// numbers (1..=6), so a lane looked up by step would come up empty.
     #[test]
     fn a_bar_restart_does_not_clear_the_chip_lanes() {
         let mut b = MockBackend::new(1);
         b.init().unwrap();
         let mut st = live_state();
-        st.step_history = (1..=6u64).map(|i| sample_at(i, 285.0, 0)).collect();
+        st.step_history = [3193u64, 3194, 3195, 1, 2, 3]
+            .into_iter()
+            .zip(1..=6u64)
+            .map(|(step, seq)| crate::workload::train::StepSample {
+                seq,
+                ..sample_at(step, 285.0, 0)
+            })
+            .collect();
         st.step_ms = 285.0;
         let v = TrainView::new(134, 40);
         // seq 1..=3 while the bar runs 3193..=3195, then the bar restarts.
@@ -2825,7 +2842,7 @@ mod tests {
         assert!((d - 0.5).abs() < 1e-3, "30 frames of a 1 s pass: {d}");
     }
 
-    /// Review Focus 2.
+    /// A backend that reports no chips: no lanes, and nothing panics.
     #[test]
     fn a_backend_with_no_chips_draws_no_lanes_and_does_not_panic() {
         // Not `init()`ed: `MockBackend::new(0)` refuses to initialise, and an
@@ -2891,7 +2908,8 @@ mod tests {
         );
     }
 
-    /// Review Focus 4.
+    /// Every width and height: no right-side border and no line wider than
+    /// the terminal.
     #[test]
     fn the_tapestry_fits_every_terminal_size() {
         let mut b = MockBackend::new(3);
@@ -3353,6 +3371,62 @@ mod tests {
             saw_full && saw_short && saw_none,
             "{saw_full} {saw_short} {saw_none}"
         );
+    }
+
+    /// A chip with no known TDP whose every sample in the window reads 0 W.
+    /// The scale is then 0, and each cell must still show that a sample
+    /// exists: the lowest bar glyph, never the no-sample marker.
+    #[test]
+    fn a_zero_power_window_with_no_tdp_draws_samples_as_present() {
+        let mut inner = MockBackend::new(1);
+        inner.init().unwrap();
+        struct ZeroPower {
+            devices: Vec<Device>,
+            telem: crate::models::Telemetry,
+        }
+        impl TelemetryBackend for ZeroPower {
+            fn init(&mut self) -> crate::error::BackendResult<()> {
+                Ok(())
+            }
+            fn update(&mut self) -> crate::error::BackendResult<()> {
+                Ok(())
+            }
+            fn devices(&self) -> &[Device] {
+                &self.devices
+            }
+            fn telemetry(&self, _i: usize) -> Option<&crate::models::Telemetry> {
+                Some(&self.telem)
+            }
+            fn smbus_telemetry(&self, _i: usize) -> Option<&crate::models::SmbusTelemetry> {
+                None // no TDP from SMBUS
+            }
+            fn backend_info(&self) -> String {
+                "zero power".into()
+            }
+        }
+        let mut telem = inner.telemetry(0).unwrap().clone();
+        telem.power = Some(0.0);
+        let mut devices = inner.devices().to_vec();
+        for d in &mut devices {
+            d.limits = None; // no TDP from the device limits either
+        }
+        let b = ZeroPower { devices, telem };
+        assert_eq!(TrainView::chip_tdp(&b, &b.devices[0]), None);
+        let mut st = live_state();
+        st.step_history = (1..=6u64).map(|i| sample_at(i, 100.0, 0)).collect();
+        st.step_ms = 100.0;
+        let v = TrainView::new(134, 40);
+        for seq in 1..=6u64 {
+            st.step_seq = seq;
+            st.step = seq;
+            v.render(&st, &b);
+        }
+        let lane = rows_of(&v.render(&st, &b))
+            .into_iter()
+            .find(|r| r.contains("chip0"))
+            .expect("a lane for chip 0");
+        assert_eq!(lane.matches(NO_SAMPLE).count(), 0, "{lane:?}");
+        assert_eq!(lane.matches(ZERO_SCALE_SAMPLE).count(), 6, "{lane:?}");
     }
 
     #[test]
