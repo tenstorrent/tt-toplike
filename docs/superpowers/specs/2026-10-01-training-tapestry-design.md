@@ -2,7 +2,7 @@
 
 Date: 2026-10-01
 Status: implemented in v0.13.6
-Files: `src/animation/train_view.rs`, `src/workload/train/monitor.rs`, `src/workload/train/mock.rs`
+Files: `src/animation/train_view.rs`, `src/animation/train_tapestry.rs`, `src/workload/train/monitor.rs`, `src/workload/train/mock.rs`
 
 ## Problem
 
@@ -142,7 +142,10 @@ scheduler without a percentage.
 
 - A chip with no telemetry has no lane.
 - A backend with no PCIe counters has no PCIe bar.
-- No `step_ms` means no bars, and the band says it is waiting for step timing.
+- With no step history the bars are left out and the header reads
+  `STEP ANATOMY  no per-step times reported`. The pulse (driven by `step_ms`,
+  which can be known from derived cadence) and the gauges still draw when their
+  own signals exist.
 - Nothing is drawn from a placeholder value.
 
 ## Shrinking
