@@ -24,20 +24,45 @@ pub const LOSS_HISTORY: usize = 512;
 /// bar per column, so this is also the widest the bar chart can ever be.
 pub const STEP_HISTORY: usize = 64;
 
-/// One step as the trainer itself reported it.
+/// Where the step history's times came from. The chart title discloses
+/// `Observed`, so a time measured by polling a progress bar is never taken
+/// for one the trainer printed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StepTimeSource {
+    /// No per-step times yet.
+    #[default]
+    Unknown,
+    /// The trainer printed the time (`Time: N ms`).
+    Reported,
+    /// Timed from the gap between progress-bar updates, to within one poll
+    /// interval.
+    Observed,
+}
+
+/// One step's wall time, either as the trainer reported it or as observed from
+/// a progress bar (see `StepTimeSource`).
 ///
-/// Only trainer-reported step times become samples. A trainer that prints no
-/// time has its cadence derived from log timing (`note_step_progress`), which
-/// is an average over however many steps one poll happened to read. Storing
-/// that as a per-step bar would invent resolution, so such runs have no
-/// history at all and the view says so.
+/// A sample is only recorded when it is a single step's own time. An
+/// observed time needs exactly one step between two polls
+/// (`note_step_progress`): a poll that read several steps measures an average,
+/// and storing that as a per-step bar would invent resolution. A trainer
+/// faster than one step per poll therefore has no history, and the view says
+/// so. Observed samples carry `cache_delta: 0`, which means unknown.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StepSample {
+    /// The trainer's own step number. Informational only: a progress-bar
+    /// harness restarts its bar every chunk, so this can go backwards.
     pub step: u64,
-    /// Wall time the trainer printed for this step, in milliseconds.
+    /// The run's own sequence number for this sample. It only rises within a
+    /// run, whatever the trainer's step counter does (a progress-bar harness
+    /// restarts its bar every chunk), so it is the key chip samples are joined
+    /// on. `step` stays the trainer's own number.
+    pub seq: u64,
+    /// Wall time for this step in milliseconds, reported or observed.
     pub ms: f32,
     /// How much the program cache grew on this step. Growth means kernels were
     /// compiled, which is the usual reason one step is far slower than the rest.
+    /// 0 also stands for unknown (observed samples never see the cache).
     pub cache_delta: u32,
     /// A checkpoint was written while this was the latest step.
     pub checkpoint: bool,
@@ -60,9 +85,18 @@ pub struct TrainState {
     pub loss: Option<f32>,
     pub prev_loss: Option<f32>,
     pub loss_history: Vec<f32>,
-    /// The last [`STEP_HISTORY`] trainer-reported step times, oldest first.
-    /// Empty for trainers that print no per-step time.
+    /// The last [`STEP_HISTORY`] per-step times (reported or observed, see
+    /// `step_time_source`), oldest first. Empty when neither a printed time nor
+    /// a one-step-per-poll bar is available.
     pub step_history: Vec<StepSample>,
+    /// Samples recorded this run. Rises by one per new sample, so it never goes
+    /// backwards when a progress bar restarts. Chip lanes are keyed on it.
+    pub step_seq: u64,
+    /// Where `step_history`'s times came from.
+    pub step_time_source: StepTimeSource,
+    /// A step regression was seen, so the bar counts a chunk and its total is
+    /// a chunk size, not the run's step budget.
+    pub chunked_bar: bool,
     pub step_ms: f32,
     pub cache_entries: u32,
     pub batch_size: u32,
@@ -96,6 +130,23 @@ impl TrainState {
         Self::default()
     }
 
+    /// Record a step timed by watching a progress bar. `ms` is the gap between
+    /// the two polls that saw `step - 1` and `step`.
+    pub fn record_observed_step(&mut self, step: u64, ms: f32) {
+        self.step_seq += 1;
+        self.step_time_source = StepTimeSource::Observed;
+        self.step_history.push(StepSample {
+            step,
+            seq: self.step_seq,
+            ms,
+            cache_delta: 0,
+            checkpoint: false,
+        });
+        if self.step_history.len() > STEP_HISTORY {
+            self.step_history.remove(0);
+        }
+    }
+
     pub fn apply_event(&mut self, ev: TrainEvent) {
         match ev {
             TrainEvent::Step { step, loss } => {
@@ -121,8 +172,12 @@ impl TrainState {
                 };
                 self.step_ms = ms;
                 self.cache_entries = cache_entries;
+                self.step_time_source = StepTimeSource::Reported;
                 let sample = StepSample {
                     step: self.step,
+                    // Used only when this is a new sample; the replace branch
+                    // below keeps the first line's seq.
+                    seq: self.step_seq + 1,
                     ms,
                     cache_delta,
                     checkpoint: false,
@@ -134,10 +189,12 @@ impl TrainState {
                         *last = StepSample {
                             cache_delta: last.cache_delta.max(sample.cache_delta),
                             checkpoint: last.checkpoint,
+                            seq: last.seq,
                             ..sample
                         };
                     }
                     _ => {
+                        self.step_seq += 1;
                         self.step_history.push(sample);
                         if self.step_history.len() > STEP_HISTORY {
                             self.step_history.remove(0);
@@ -507,13 +564,29 @@ impl TrainMonitor {
     /// our measurement of its logging. Deliberately skipped for the first
     /// observation (nothing to measure against) and for implausible gaps, so
     /// the burst of backlog read at attach can't be mistaken for one step.
+    ///
+    /// Three further behaviours, all for progress-bar harnesses:
+    /// * When exactly one step was seen since the previous poll, the gap is
+    ///   that step's own time (to within one poll interval) and is recorded as
+    ///   an observed sample. A poll that saw several steps measures an average,
+    ///   so it updates the rate but records no sample.
+    /// * When the step goes backwards the bar restarted for a new chunk. The
+    ///   monitor re-anchors without measuring (the gap spans validation and
+    ///   checkpoint work, not a step) and flags `chunked_bar`. Before this, the
+    ///   derivation froze until the bar passed its old position.
+    /// * `chunked_bar` also tells the view the bar's total is a chunk size.
     fn note_step_progress(&mut self, now: Instant) {
         if self.saw_reported_step_time {
             return;
         }
         let step = self.state.step;
-        if let Some((prev_step, prev_at)) = self.last_step_seen {
-            if step > prev_step {
+        match self.last_step_seen {
+            Some((prev_step, _)) if step < prev_step => {
+                self.state.chunked_bar = true;
+                self.last_step_seen = Some((step, now));
+                return;
+            }
+            Some((prev_step, prev_at)) if step > prev_step => {
                 let dt_ms = now.duration_since(prev_at).as_secs_f32() * 1000.0;
                 let dsteps = (step - prev_step) as f32;
                 let per_step = dt_ms / dsteps;
@@ -528,8 +601,15 @@ impl TrainMonitor {
                     } else {
                         per_step
                     };
+                    // Exactly one step since the last poll: the gap is that
+                    // step's own time, to within one poll interval. More than
+                    // one is an average, which is not recorded as a sample.
+                    if step - prev_step == 1 {
+                        self.state.record_observed_step(step, per_step);
+                    }
                 }
             }
+            _ => {}
         }
         if self.last_step_seen.map(|(s, _)| step > s).unwrap_or(true) {
             self.last_step_seen = Some((step, now));
@@ -1624,5 +1704,114 @@ mod step_history_tests {
         let mut st = TrainState::new();
         st.mark_checkpoint();
         assert_eq!(st.checkpoint_pulse, CKPT_PULSE_TICKS);
+    }
+}
+
+#[cfg(test)]
+mod observed_step_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn bar_state_at(m: &mut TrainMonitor, step: u64, now: Instant) {
+        m.state.step = step;
+        m.note_step_progress(now);
+    }
+
+    #[test]
+    fn one_step_between_polls_is_timed_from_the_gap() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        bar_state_at(&mut m, 10, t0);
+        bar_state_at(&mut m, 11, t0 + Duration::from_millis(300));
+        assert_eq!(m.state.step_history.len(), 1);
+        let s = m.state.step_history[0];
+        assert!((s.ms - 300.0).abs() < 1.0, "{}", s.ms);
+        assert_eq!(s.step, 11);
+        assert_eq!(s.seq, 1);
+        assert_eq!(s.cache_delta, 0, "unknown growth is not a compile");
+        assert_eq!(m.state.step_time_source, StepTimeSource::Observed);
+    }
+
+    /// A poll that read several steps measures an average, which would give
+    /// the chart resolution it does not have.
+    #[test]
+    fn several_steps_in_one_poll_record_no_sample_but_still_update_the_rate() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        bar_state_at(&mut m, 10, t0);
+        bar_state_at(&mut m, 13, t0 + Duration::from_millis(900));
+        assert!(m.state.step_history.is_empty());
+        assert!((m.state.step_ms - 300.0).abs() < 1.0, "{}", m.state.step_ms);
+    }
+
+    /// The existing freeze bug: after a bar restart the cadence derivation
+    /// must resume. The gap across the restart is validation work, not a step.
+    #[test]
+    fn a_bar_restart_records_no_sample_flags_the_bar_and_resumes_timing() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        bar_state_at(&mut m, 3194, t0);
+        bar_state_at(&mut m, 3195, t0 + Duration::from_millis(300));
+        assert_eq!(m.state.step_history.len(), 1);
+        // Validation and a checkpoint take 40 s, then the bar restarts at 1.
+        bar_state_at(&mut m, 1, t0 + Duration::from_millis(40_300));
+        assert_eq!(m.state.step_history.len(), 1, "no sample for the restart gap");
+        assert!(m.state.chunked_bar);
+        // Timing resumes straight away, far below the old step number.
+        let before = m.state.step_ms;
+        bar_state_at(&mut m, 2, t0 + Duration::from_millis(40_550));
+        assert_eq!(m.state.step_history.len(), 2);
+        assert!((m.state.step_history[1].ms - 250.0).abs() < 1.0);
+        assert_ne!(m.state.step_ms, before, "the derived rate must update again");
+        // seq keeps rising across the restart even though step went back.
+        assert_eq!(m.state.step_history[1].seq, 2);
+        assert!(m.state.step_history[1].step < m.state.step_history[0].step);
+    }
+
+    #[test]
+    fn a_trainer_that_reports_its_own_step_time_is_left_alone() {
+        let mut m = TrainMonitor::new();
+        m.saw_reported_step_time = true;
+        let t0 = Instant::now();
+        bar_state_at(&mut m, 10, t0);
+        bar_state_at(&mut m, 11, t0 + Duration::from_millis(300));
+        assert!(m.state.step_history.is_empty());
+        assert_eq!(m.state.step_time_source, StepTimeSource::Unknown);
+    }
+
+    #[test]
+    fn an_implausible_gap_records_no_sample() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        bar_state_at(&mut m, 10, t0);
+        bar_state_at(&mut m, 11, t0 + Duration::from_secs(300));
+        assert!(m.state.step_history.is_empty());
+    }
+
+    #[test]
+    fn reported_samples_carry_a_rising_seq_and_say_they_are_reported() {
+        let mut st = TrainState::new();
+        for i in [900u64, 901, 902] {
+            st.apply_event(TrainEvent::StepAndTime {
+                step: i,
+                loss: 2.0,
+                ms: 400.0,
+                cache_entries: 8,
+            });
+        }
+        let seqs: Vec<u64> = st.step_history.iter().map(|s| s.seq).collect();
+        assert_eq!(seqs, vec![1, 2, 3]);
+        assert_eq!(st.step_time_source, StepTimeSource::Reported);
+        assert_eq!(st.step_seq, 3);
+    }
+
+    #[test]
+    fn a_second_time_line_for_the_same_step_keeps_the_first_seq() {
+        let mut st = TrainState::new();
+        st.apply_event(TrainEvent::StepAndTime { step: 5, loss: 2.0, ms: 400.0, cache_entries: 8 });
+        st.apply_event(TrainEvent::StepTime { ms: 450.0, cache_entries: 8 });
+        assert_eq!(st.step_history.len(), 1);
+        assert_eq!(st.step_history[0].seq, 1);
+        assert_eq!(st.step_seq, 1);
     }
 }

@@ -11,7 +11,7 @@
 //! | Channel | Encodes |
 //! |---|---|
 //! | node/mountain hue red→cyan | loss magnitude (per-cell gradient in the river) |
-//! | bar height (step band) | trainer-reported wall time per step |
+//! | bar height (step band) | wall time per step, trainer-reported or observed from a progress bar (the title says which) |
 //! | bar colour teal / purple / amber | normal step / program cache grew / checkpoint written |
 //! | pulse cursor speed | one pass per measured step (never faster than 5/s) |
 //! | chip lane height | power as a fraction of that chip's TDP (coral = aiclk dropped) |
@@ -36,7 +36,7 @@ use crate::animation::train_tapestry::{
 use crate::models::Device;
 use crate::backend::TelemetryBackend;
 use crate::ui::colors;
-use crate::workload::train::{LogSource, TrainState};
+use crate::workload::train::{LogSource, StepTimeSource, TrainState};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::cell::{Cell as StdCell, RefCell};
@@ -813,7 +813,7 @@ impl TrainView {
             })
             .collect();
         let mut h = self.history.borrow_mut();
-        h.record(st.step, &chips);
+        h.record(st.step_seq, &chips);
         if let Some(tps) = st.tokens_per_sec() {
             h.note_tps(tps);
         }
@@ -999,7 +999,10 @@ impl TrainView {
             st.config.learning_rate,
             st.scheduler.as_deref(),
             st.step,
-            st.max_steps,
+            // Once the bar has restarted its total is a chunk size, not the
+            // run's budget, so 0 (unknown) keeps the strip from claiming a
+            // schedule position it cannot know.
+            if st.chunked_bar { 0 } else { st.max_steps },
         );
         let strip = Self::fit_parts(&parts, w);
         let diagnosis = diagnose(&Readings {
@@ -1042,9 +1045,16 @@ impl TrainView {
         let header = if shown.is_empty() {
             "STEP ANATOMY  no per-step times reported".to_string()
         } else {
+            // Times polled from a progress bar are disclosed in the title so
+            // they are never taken for ones the trainer printed.
+            let title = if st.step_time_source == StepTimeSource::Observed {
+                "STEP ANATOMY (from bar)"
+            } else {
+                "STEP ANATOMY"
+            };
             let ms: Vec<f32> = shown.iter().map(|s| s.ms).collect();
             let med = median(&ms).unwrap_or(0.0);
-            let mut h = format!("STEP ANATOMY  last {n} steps · median {med:.0} ms");
+            let mut h = format!("{title}  last {n} steps · median {med:.0} ms");
             // The pulse clause is atomic: it is appended only if the whole
             // clause fits, so the "(max 5/s)" note is never cut off while
             // "pulse = 1 step" is still shown.
@@ -1143,7 +1153,7 @@ impl TrainView {
             let tcolor = colors::temp_color(temp);
             let samples: Vec<_> = shown
                 .iter()
-                .map(|s| hist_chips.sample_at(dev.index, s.step))
+                .map(|s| hist_chips.sample_at(dev.index, s.seq))
                 .collect();
             // Scale to the chip's TDP. With no TDP known, to the highest power
             // in the window, so the lane still shows its own shape.
@@ -2444,6 +2454,7 @@ mod tests {
     fn sample_at(step: u64, ms: f32, delta: u32) -> crate::workload::train::StepSample {
         crate::workload::train::StepSample {
             step,
+            seq: step,
             ms,
             cache_delta: delta,
             checkpoint: false,
@@ -2455,6 +2466,64 @@ mod tests {
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect()
+    }
+
+    #[test]
+    fn the_title_says_when_step_times_were_observed_from_the_bar() {
+        use crate::workload::train::StepTimeSource;
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.step_history = (1..=10u64).map(|i| sample_at(i, 285.0, 0)).collect();
+        st.step_seq = 10;
+        st.step_ms = 285.0;
+        st.step_time_source = StepTimeSource::Reported;
+        let out = text_of(&TrainView::new(134, 40).render(&st, &b));
+        assert!(out.contains("STEP ANATOMY  last 10 steps"), "{out}");
+        assert!(!out.contains("from bar"), "{out}");
+        st.step_time_source = StepTimeSource::Observed;
+        let out = text_of(&TrainView::new(134, 40).render(&st, &b));
+        assert!(out.contains("STEP ANATOMY (from bar)  last 10 steps"), "{out}");
+    }
+
+    /// A bar restart sends `st.step` back to 1. It must not look like a new
+    /// run: lanes and best-so-far values keep their history.
+    #[test]
+    fn a_bar_restart_does_not_clear_the_chip_lanes() {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.step_history = (1..=6u64).map(|i| sample_at(i, 285.0, 0)).collect();
+        st.step_ms = 285.0;
+        let v = TrainView::new(134, 40);
+        // seq 1..=3 while the bar runs 3193..=3195, then the bar restarts.
+        for (seq, bar_step) in [(1u64, 3193u64), (2, 3194), (3, 3195), (4, 1), (5, 2), (6, 3)] {
+            st.step_seq = seq;
+            st.step = bar_step;
+            v.render(&st, &b);
+        }
+        let row = rows_of(&v.render(&st, &b))
+            .into_iter()
+            .find(|r| r.contains("chip0"))
+            .expect("a lane for chip 0");
+        assert_eq!(row.matches(NO_SAMPLE).count(), 0, "all six columns sampled: {row:?}");
+    }
+
+    #[test]
+    fn once_the_bar_is_known_to_be_chunked_the_strip_makes_no_schedule_claim() {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.loss_history = (0..120).map(|i| 5.0 - 0.01 * i as f32).collect();
+        st.scheduler = Some("cosine".into());
+        st.max_steps = 3195; // a chunk size, not the run's budget
+        st.step = 630;
+        let out = text_of(&TrainView::new(160, 40).render(&st, &b));
+        assert!(out.contains("cosine 19% through"), "{out}");
+        st.chunked_bar = true;
+        let out = text_of(&TrainView::new(160, 40).render(&st, &b));
+        assert!(out.contains("cosine"), "{out}");
+        assert!(!out.contains("% through"), "{out}");
     }
 
     #[test]
@@ -2610,6 +2679,7 @@ mod tests {
         // The view only sees steps 1..=4: the other four columns are missing.
         for step in 1..=4u64 {
             st.step = step;
+            st.step_seq = step;
             v.render(&st, &b);
         }
         let row = lane_row(&v, &st);
@@ -2617,6 +2687,7 @@ mod tests {
         // Seeing the rest fills every column.
         for step in 5..=8u64 {
             st.step = step;
+            st.step_seq = step;
             v.render(&st, &b);
         }
         let row = lane_row(&v, &st);
@@ -2735,9 +2806,11 @@ mod tests {
         st.step_history = vec![sample_at(1, 100.0, 0)];
         let v = TrainView::new(134, 40);
         st.step = 1;
+        st.step_seq = 1;
         st.step_ms = 100.0;
         v.render(&st, &b); // best so far is set by this step rate
         st.step = 2;
+        st.step_seq = 2;
         st.step_ms = 200.0; // half the rate
         let out = text_of(&v.render(&st, &b));
         assert!(out.contains("50% of best"), "{out}");

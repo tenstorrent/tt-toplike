@@ -22,7 +22,7 @@
 use super::config::TrainConfig;
 use super::detect::TrainProcess;
 use super::logsrc::LogSource;
-use super::monitor::{StepSample, TrainState, LOSS_HISTORY, STEP_HISTORY};
+use super::monitor::{StepSample, StepTimeSource, TrainState, LOSS_HISTORY, STEP_HISTORY};
 
 /// Wall-clock seconds for one simulated step.
 const STEP_SECS: f32 = 1.0 / 12.0;
@@ -134,12 +134,16 @@ impl MockTrainRun {
         st.step_history = (first_step..=step)
             .map(|s| StepSample {
                 step: s,
+                seq: s,
                 ms: step_ms_at(s),
                 cache_delta: if s > 1 { cache_at(s) - cache_at(s - 1) } else { 0 },
                 checkpoint: s >= SAVE_EVERY && s % SAVE_EVERY == 0,
             })
             .collect();
 
+        // The mock's step numbers are monotonic, so seq equals step.
+        st.step_seq = step;
+        st.step_time_source = StepTimeSource::Reported;
         st.checkpoint_step = step - (step % SAVE_EVERY);
         // Pulse for the handful of steps right after a save, so the comet
         // crosses the sky at the same cadence a real run's would.

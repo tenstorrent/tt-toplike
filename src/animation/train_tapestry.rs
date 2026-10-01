@@ -430,6 +430,7 @@ mod tests {
     fn sample(step: u64, delta: u32, ckpt: bool) -> StepSample {
         StepSample {
             step,
+            seq: step,
             ms: 400.0,
             cache_delta: delta,
             checkpoint: ckpt,
