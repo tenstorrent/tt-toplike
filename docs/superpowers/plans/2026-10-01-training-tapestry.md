@@ -2048,7 +2048,357 @@ git commit -m "feat: add hardware gauges, a one-line diagnosis and a convergence
 
 ---
 
-### Task 5: Docs, spec amendments, version and build
+### Task 5: Step times observed from a progress bar
+
+Added after the first real run. The tt-tnt harness (`python train/run.py`, ttml `train()`) prints a tqdm bar and no per-step time line. Its bar also restarts at step 1 for every chunk (630/3195, then 1/3195 after each validation boundary). Three consequences, all fixed here:
+
+1. The step chart stays empty (`no per-step times reported`). The user chose to time steps from bar updates.
+2. `ChipHistory` keys on `st.step`, so every bar restart looks like a new run and clears the lanes and best-so-far values.
+3. `note_step_progress` only re-anchors when the step rises, so after the first restart the derived step time and tokens/sec freeze until the bar passes its old position (an existing bug).
+
+**Files:**
+- Modify: `src/workload/train/monitor.rs` (`StepSample`, `TrainState`, `apply_event` `StepTime` arm, `note_step_progress`, tests)
+- Modify: `src/workload/train/mod.rs` (re-export `StepTimeSource`)
+- Modify: `src/workload/train/mock.rs` (`seq`, `step_seq`, `step_time_source`)
+- Modify: `src/animation/train_view.rs` (`sample`, lanes lookup, header title, strip budget, existing tests that set `st.step` to drive sampling, new tests)
+
+**Interfaces:**
+- Consumes: Task 1's `StepSample`, `TrainState.step_history`, `apply_event`; Task 3's `sample()`/lane code; Task 2's `convergence_parts(.., step, max_steps)`.
+- Produces:
+  - `StepSample.seq: u64` (new field). The run's own sample sequence number: it only rises within a run, whatever the trainer's step counter does. `step` stays the trainer's own number (informational).
+  - `pub enum StepTimeSource { Unknown (default), Reported, Observed }` and `TrainState.step_time_source`
+  - `TrainState.step_seq: u64` (count of samples recorded this run), `TrainState.chunked_bar: bool` (a step regression was seen: the bar is per chunk)
+  - `TrainState::record_observed_step(&mut self, step: u64, ms: f32)`
+
+**Design rules (from the user's choice and the honesty rule):**
+- An observed sample is recorded only when exactly one step was seen since the previous poll. A poll that saw several steps measures an average, so it records no sample. A trainer faster than one step per poll therefore has no history, and the header says so.
+- The time is the gap between the polls that saw step n-1 and step n, so it is accurate to within one poll interval. The header title says `STEP ANATOMY (from bar)` so it is never taken for a trainer-reported time.
+- The gap across a step regression (a new chunk) includes validation and checkpoint work. It is not a step time, so no sample is recorded for it.
+- Observed samples carry `cache_delta: 0` (unknown, not zero growth), so they are never coloured as compiles.
+- Samples are keyed by `seq` for chip lanes. `ChipHistory` is keyed by `st.step_seq`, not `st.step`, so a bar restart does not clear it.
+- Once a regression has been seen (`chunked_bar`), the bar's total is a chunk size and not the run's budget, so the strip's schedule position drops its percentage (name only) and the schedule claim is never made from a chunk.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `src/workload/train/monitor.rs` (a new test module at the end, like `step_history_tests`):
+
+```rust
+#[cfg(test)]
+mod observed_step_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn bar_state_at(m: &mut TrainMonitor, step: u64, now: Instant) {
+        m.state.step = step;
+        m.note_step_progress(now);
+    }
+
+    #[test]
+    fn one_step_between_polls_is_timed_from_the_gap() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        bar_state_at(&mut m, 10, t0);
+        bar_state_at(&mut m, 11, t0 + Duration::from_millis(300));
+        assert_eq!(m.state.step_history.len(), 1);
+        let s = m.state.step_history[0];
+        assert!((s.ms - 300.0).abs() < 1.0, "{}", s.ms);
+        assert_eq!(s.step, 11);
+        assert_eq!(s.seq, 1);
+        assert_eq!(s.cache_delta, 0, "unknown growth is not a compile");
+        assert_eq!(m.state.step_time_source, StepTimeSource::Observed);
+    }
+
+    /// A poll that read several steps measures an average, which would give
+    /// the chart resolution it does not have.
+    #[test]
+    fn several_steps_in_one_poll_record_no_sample_but_still_update_the_rate() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        bar_state_at(&mut m, 10, t0);
+        bar_state_at(&mut m, 13, t0 + Duration::from_millis(900));
+        assert!(m.state.step_history.is_empty());
+        assert!((m.state.step_ms - 300.0).abs() < 1.0, "{}", m.state.step_ms);
+    }
+
+    /// The existing freeze bug: after a bar restart the cadence derivation
+    /// must resume. The gap across the restart is validation work, not a step.
+    #[test]
+    fn a_bar_restart_records_no_sample_flags_the_bar_and_resumes_timing() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        bar_state_at(&mut m, 3194, t0);
+        bar_state_at(&mut m, 3195, t0 + Duration::from_millis(300));
+        assert_eq!(m.state.step_history.len(), 1);
+        // Validation and a checkpoint take 40 s, then the bar restarts at 1.
+        bar_state_at(&mut m, 1, t0 + Duration::from_millis(40_300));
+        assert_eq!(m.state.step_history.len(), 1, "no sample for the restart gap");
+        assert!(m.state.chunked_bar);
+        // Timing resumes straight away, far below the old step number.
+        let before = m.state.step_ms;
+        bar_state_at(&mut m, 2, t0 + Duration::from_millis(40_550));
+        assert_eq!(m.state.step_history.len(), 2);
+        assert!((m.state.step_history[1].ms - 250.0).abs() < 1.0);
+        assert_ne!(m.state.step_ms, before, "the derived rate must update again");
+        // seq keeps rising across the restart even though step went back.
+        assert_eq!(m.state.step_history[1].seq, 2);
+        assert!(m.state.step_history[1].step < m.state.step_history[0].step);
+    }
+
+    #[test]
+    fn a_trainer_that_reports_its_own_step_time_is_left_alone() {
+        let mut m = TrainMonitor::new();
+        m.saw_reported_step_time = true;
+        let t0 = Instant::now();
+        bar_state_at(&mut m, 10, t0);
+        bar_state_at(&mut m, 11, t0 + Duration::from_millis(300));
+        assert!(m.state.step_history.is_empty());
+        assert_eq!(m.state.step_time_source, StepTimeSource::Unknown);
+    }
+
+    #[test]
+    fn an_implausible_gap_records_no_sample() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        bar_state_at(&mut m, 10, t0);
+        bar_state_at(&mut m, 11, t0 + Duration::from_secs(300));
+        assert!(m.state.step_history.is_empty());
+    }
+
+    #[test]
+    fn reported_samples_carry_a_rising_seq_and_say_they_are_reported() {
+        let mut st = TrainState::new();
+        for i in [900u64, 901, 902] {
+            st.apply_event(TrainEvent::StepAndTime {
+                step: i,
+                loss: 2.0,
+                ms: 400.0,
+                cache_entries: 8,
+            });
+        }
+        let seqs: Vec<u64> = st.step_history.iter().map(|s| s.seq).collect();
+        assert_eq!(seqs, vec![1, 2, 3]);
+        assert_eq!(st.step_time_source, StepTimeSource::Reported);
+        assert_eq!(st.step_seq, 3);
+    }
+
+    #[test]
+    fn a_second_time_line_for_the_same_step_keeps_the_first_seq() {
+        let mut st = TrainState::new();
+        st.apply_event(TrainEvent::StepAndTime { step: 5, loss: 2.0, ms: 400.0, cache_entries: 8 });
+        st.apply_event(TrainEvent::StepTime { ms: 450.0, cache_entries: 8 });
+        assert_eq!(st.step_history.len(), 1);
+        assert_eq!(st.step_history[0].seq, 1);
+        assert_eq!(st.step_seq, 1);
+    }
+}
+```
+
+Add `seq` to every `StepSample` literal already in the repo (`seq: step` where the literal has a `step` value that is also the intended key; in `monitor.rs`'s `StepTime` arm it is the new `self.step_seq`): `mock.rs` `state_at`, the `sample()` helper in `src/animation/train_tapestry.rs` tests, and the `sample_at` helper in `src/animation/train_view.rs` tests (`seq: step`).
+
+In `src/animation/train_view.rs` tests add, and update the existing tests named below:
+
+```rust
+    #[test]
+    fn the_title_says_when_step_times_were_observed_from_the_bar() {
+        use crate::workload::train::StepTimeSource;
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.step_history = (1..=10u64).map(|i| sample_at(i, 285.0, 0)).collect();
+        st.step_seq = 10;
+        st.step_ms = 285.0;
+        st.step_time_source = StepTimeSource::Reported;
+        let out = text_of(&TrainView::new(134, 40).render(&st, &b));
+        assert!(out.contains("STEP ANATOMY  last 10 steps"), "{out}");
+        assert!(!out.contains("from bar"), "{out}");
+        st.step_time_source = StepTimeSource::Observed;
+        let out = text_of(&TrainView::new(134, 40).render(&st, &b));
+        assert!(out.contains("STEP ANATOMY (from bar)  last 10 steps"), "{out}");
+    }
+
+    /// A bar restart sends `st.step` back to 1. It must not look like a new
+    /// run: lanes and best-so-far values keep their history.
+    #[test]
+    fn a_bar_restart_does_not_clear_the_chip_lanes() {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.step_history = (1..=6u64).map(|i| sample_at(i, 285.0, 0)).collect();
+        st.step_ms = 285.0;
+        let v = TrainView::new(134, 40);
+        // seq 1..=3 while the bar runs 3193..=3195, then the bar restarts.
+        for (seq, bar_step) in [(1u64, 3193u64), (2, 3194), (3, 3195), (4, 1), (5, 2), (6, 3)] {
+            st.step_seq = seq;
+            st.step = bar_step;
+            v.render(&st, &b);
+        }
+        let row = rows_of(&v.render(&st, &b))
+            .into_iter()
+            .find(|r| r.contains("chip0"))
+            .expect("a lane for chip 0");
+        assert_eq!(row.matches(NO_SAMPLE).count(), 0, "all six columns sampled: {row:?}");
+    }
+
+    #[test]
+    fn once_the_bar_is_known_to_be_chunked_the_strip_makes_no_schedule_claim() {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.loss_history = (0..120).map(|i| 5.0 - 0.01 * i as f32).collect();
+        st.scheduler = Some("cosine".into());
+        st.max_steps = 3195; // a chunk size, not the run's budget
+        st.step = 630;
+        let out = text_of(&TrainView::new(160, 40).render(&st, &b));
+        assert!(out.contains("cosine 19% through"), "{out}");
+        st.chunked_bar = true;
+        let out = text_of(&TrainView::new(160, 40).render(&st, &b));
+        assert!(out.contains("cosine"), "{out}");
+        assert!(!out.contains("% through"), "{out}");
+    }
+```
+
+Update the existing view tests that drive chip sampling by setting `st.step` (`chip_lanes_line_up_with_the_step_bars_and_mark_missing_samples`, `the_tokens_per_second_gauge_is_relative_to_the_runs_own_best`, and any other test that does `st.step = n` to feed `sample()`) so they set `st.step_seq` as well as, or instead of, `st.step`. The lane test's `sample_at(i, ..)` entries already carry `seq: i`.
+
+- [ ] **Step 2: Run to confirm they fail**
+
+Run: `cargo test --lib observed_step_tests 2>&1 | tail -20`
+Expected: compile errors (`seq`, `StepTimeSource`, `step_seq`, `chunked_bar`, `record_observed_step` not found).
+
+- [ ] **Step 3: Implement**
+
+In `monitor.rs`:
+
+```rust
+/// Where the step history's times came from. The chart title discloses
+/// `Observed`, so a time measured by polling a progress bar is never taken
+/// for one the trainer printed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StepTimeSource {
+    /// No per-step times yet.
+    #[default]
+    Unknown,
+    /// The trainer printed the time (`Time: N ms`).
+    Reported,
+    /// Timed from the gap between progress-bar updates, to within one poll
+    /// interval.
+    Observed,
+}
+```
+
+Add `pub seq: u64,` to `StepSample` after `step`, with this doc: "The run's own sequence number for this sample. It only rises within a run, whatever the trainer's step counter does (a progress-bar harness restarts its bar every chunk), so it is the key chip samples are joined on. `step` stays the trainer's own number."
+
+Add to `TrainState` (after `step_history`):
+
+```rust
+    /// Samples recorded this run. Rises by one per new sample, so it never goes
+    /// backwards when a progress bar restarts. Chip lanes are keyed on it.
+    pub step_seq: u64,
+    /// Where `step_history`'s times came from.
+    pub step_time_source: StepTimeSource,
+    /// A step regression was seen, so the bar counts a chunk and its total is
+    /// a chunk size, not the run's step budget.
+    pub chunked_bar: bool,
+```
+
+In the `StepTime` arm of `apply_event`, set `self.step_time_source = StepTimeSource::Reported;`, and when a new sample is pushed (not on the same-step replace) do `self.step_seq += 1;` and put `seq: self.step_seq` in the pushed sample (the replace branch keeps `last.seq`; extend its struct update to `seq: last.seq`). Make the literal `StepSample { step: self.step, seq: self.step_seq + 1, ... }` consistent with that rule.
+
+Add:
+
+```rust
+    /// Record a step timed by watching a progress bar. `ms` is the gap between
+    /// the two polls that saw `step - 1` and `step`.
+    pub fn record_observed_step(&mut self, step: u64, ms: f32) {
+        self.step_seq += 1;
+        self.step_time_source = StepTimeSource::Observed;
+        self.step_history.push(StepSample {
+            step,
+            seq: self.step_seq,
+            ms,
+            cache_delta: 0,
+            checkpoint: false,
+        });
+        if self.step_history.len() > STEP_HISTORY {
+            self.step_history.remove(0);
+        }
+    }
+```
+
+Rewrite `note_step_progress`, keeping its existing doc comment and extending it with the three behaviours above:
+
+```rust
+    fn note_step_progress(&mut self, now: Instant) {
+        if self.saw_reported_step_time {
+            return;
+        }
+        let step = self.state.step;
+        match self.last_step_seen {
+            // The counter went backwards: a progress-bar harness starts a new
+            // bar for every chunk. Re-anchor without measuring. The gap to this
+            // step spans the validation and checkpoint work between chunks, and
+            // is not a step. Without this the derivation froze until the bar
+            // passed its old position.
+            Some((prev_step, _)) if step < prev_step => {
+                self.state.chunked_bar = true;
+                self.last_step_seen = Some((step, now));
+                return;
+            }
+            Some((prev_step, prev_at)) if step > prev_step => {
+                let dt_ms = now.duration_since(prev_at).as_secs_f32() * 1000.0;
+                let dsteps = (step - prev_step) as f32;
+                let per_step = dt_ms / dsteps;
+                // (keep the existing comment on the plausible range here)
+                if (1.0..=120_000.0).contains(&per_step) {
+                    // (keep the existing smoothing code and its comment)
+                    // Exactly one step since the last poll: the gap is that
+                    // step's own time, to within one poll interval. More than
+                    // one is an average, which is not recorded as a sample.
+                    if step - prev_step == 1 {
+                        self.state.record_observed_step(step, per_step);
+                    }
+                }
+            }
+            _ => {}
+        }
+        if self.last_step_seen.map(|(s, _)| step > s).unwrap_or(true) {
+            self.last_step_seen = Some((step, now));
+        }
+    }
+```
+
+Re-export `StepTimeSource` from `src/workload/train/mod.rs`.
+
+In `mock.rs` `state_at`: set `st.step_seq = step;`, `st.step_time_source = StepTimeSource::Reported;` and `seq: s` in each sample (the mock's step numbers are already monotonic, so `seq` equals `step`).
+
+In `train_view.rs`:
+- `sample()`: `h.record(st.step_seq, &chips);`
+- lanes: `hist_chips.sample_at(dev.index, s.seq)`.
+- header: the title is `STEP ANATOMY (from bar)` when `st.step_time_source == StepTimeSource::Observed`, and `STEP ANATOMY` otherwise. The title is never dropped. Keep the pulse clause atomic as it is now; with the longer title it may be omitted entirely at 134 columns when it does not fit, which is acceptable (an omitted clause states nothing false). The no-history header text is unchanged.
+- strip: pass `if st.chunked_bar { 0 } else { st.max_steps }` as the `max_steps` argument of `convergence_parts`.
+
+- [ ] **Step 4: Run**
+
+Run: `cargo test --lib workload::train 2>&1 | tail -15` then `cargo test --lib animation 2>&1 | tail -15`
+Expected: all pass.
+
+- [ ] **Step 5: Make the new tests prove themselves**
+
+1. In `note_step_progress`, delete the `Some((prev_step, _)) if step < prev_step => {...}` arm. Run `cargo test --lib a_bar_restart_records_no_sample`. Expected: FAIL (the freeze bug returns). Restore.
+2. Change `if step - prev_step == 1 {` to `if step > prev_step {`. Run `cargo test --lib several_steps_in_one_poll_record_no_sample`. Expected: FAIL. Restore.
+3. Change `h.record(st.step_seq, &chips);` back to `h.record(st.step, &chips);` in `sample()`. Run `cargo test --lib a_bar_restart_does_not_clear_the_chip_lanes`. Expected: FAIL. Restore.
+4. Change the strip's `if st.chunked_bar { 0 } else { st.max_steps }` to `st.max_steps`. Run `cargo test --lib once_the_bar_is_known_to_be_chunked`. Expected: FAIL. Restore.
+
+Re-run `cargo test --lib animation` and `cargo test --lib workload::train` and confirm green.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/workload/train/ src/animation/train_view.rs src/animation/train_tapestry.rs
+git commit -m "feat: time steps from progress-bar updates and survive per-chunk bar restarts"
+```
+
+---
+
+### Task 6: Docs, spec amendments, version and build
 
 **Files:**
 - Modify: `docs/superpowers/specs/2026-10-01-training-tapestry-design.md`
@@ -2064,7 +2414,8 @@ Apply these edits to the spec so it states what the code does:
 4. In "Layer B", add: "chip" in the gauges and verdict means the busiest chip (most power), because the trainer's own chips are not identified. The tok/s and PCIe bars are relative to the best value seen. The aiclk bar is relative to the highest aiclk seen on that chip. The power gauge and the power-based verdicts are absent when no chip reports a TDP.
 5. In "Layer D", add: the cursor never runs faster than one pass per 0.2 s. When it is slowed, the header says `pulse = 1 step (drawn at 5/s max)`.
 6. In "New state", replace "`--mock` emits every signal above" with: `--mock` emits step history, loss, config and chip telemetry. It has no PCIe gauge, because the mock backend has no PCIe counters and adding them would change the Insights sidebar that shares it.
-7. Set the spec's `Status:` line to `implemented in v0.13.6`.
+7. In "New state", add the bar-observed path: for trainers that print only a progress bar, step times are the gap between the polls that saw consecutive steps, recorded only when exactly one step was seen (accurate to within one poll interval), never for the gap across a bar restart, with `cache_delta` unknown (0). The title reads `STEP ANATOMY (from bar)`. `StepSample.seq` is the sample sequence number and keys the chip lanes. `TrainState.chunked_bar` marks a bar that restarts per chunk, and the strip then names the scheduler without a percentage.
+8. Set the spec's `Status:` line to `implemented in v0.13.6`.
 
 - [ ] **Step 2: Bump the version and log the release**
 
