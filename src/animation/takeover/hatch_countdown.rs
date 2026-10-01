@@ -98,7 +98,7 @@ impl HatchCountdownTakeover {
         ((CYCLE_MS - pos) / 1000) as u64
     }
 
-    /// The screen as lines: 9 rows, at most 15 columns wide.
+    /// The screen as lines: 9 rows, at most 17 columns wide.
     fn lines(&self) -> Vec<Line<'static>> {
         let amber = colors::rgb(255, 140, 0);
         let dim_amber = colors::rgb(140, 90, 30);

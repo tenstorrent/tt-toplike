@@ -601,4 +601,4 @@ background is the terminal default. Border is left and bottom only. The usable
 interior (`takeover_interior`) is 71x22 at full size, because ratatui gives
 the title its own row. Quiet Notice, Blackhole Swarm, Missile Command and Fail
 Whale size their art from the interior. BBS shows only the newest chip lines
-once the list would pass 22 rows. Trek (34x20) and Hatch (17x9) already fit.
+once the list would pass 22 rows. Trek (36x20) and Hatch (17x9) already fit.

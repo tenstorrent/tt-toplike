@@ -95,7 +95,7 @@ impl TrekResetTakeover {
         (STARTING_ENERGY - drained).max(MIN_ENERGY)
     }
 
-    /// The full screen as lines, all padded to one width. At most 34
+    /// The full screen as lines, all padded to one width. At most 36
     /// columns by 20 rows, so it fits the takeover box interior (71x22).
     fn lines(&self) -> Vec<Line<'static>> {
         let finished = !self.clock.in_progress();

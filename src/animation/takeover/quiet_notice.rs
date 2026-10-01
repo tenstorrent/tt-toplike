@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! Minimal status readout (a backdrop sized to the takeover box) — "the tool doing its thing." Still
+//! Minimal status readout (a backdrop sized to the takeover box) — "the
+//! tool doing its thing." Still
 //! the deliberately low-key option (no box art competing for attention,
 //! no hue-cycling), but dressed in a field of shaded ANSI blocks — the
 //! same block-character/value vocabulary this app already uses for its
@@ -122,10 +123,10 @@ impl QuietNoticeTakeover {
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
         let finished = !self.clock.in_progress();
-        // Compose the backdrop for the box interior (71x23 at full size),
-        // not for the whole screen. The floors keep the message-row math
-        // valid on a terminal too small to draw (the frame draws nothing
-        // there).
+        // Compose the backdrop for the box interior (71x22 at full size).
+        // The floors keep the message-row math valid on a small terminal.
+        // The frame still draws from 8x4 up, where the interior is only
+        // 1 row tall, so the 8x3 floor art is clipped there.
         let interior = takeover_interior(area);
         let cols = (interior.width as usize).max(8);
         let rows = (interior.height as usize).max(3);

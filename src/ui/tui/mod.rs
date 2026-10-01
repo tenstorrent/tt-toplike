@@ -675,8 +675,8 @@ fn run_app(
 
     // Reset-takeover detection + animation (opt-in via `--reset-takeover` or
     // the equivalent config-file key). `reset_detector` tracks at most one
-    // in-flight `tt-smi -r` invocation; `takeover` is the full-screen
-    // animation currently playing for it (HivemindSweeper mode never
+    // in-flight `tt-smi -r` invocation; `takeover` is the animation
+    // (drawn in a centered box over a full-screen tint) currently playing for it (HivemindSweeper mode never
     // populates `takeover` — it injects a real feed event instead).
     let reset_takeover_enabled = cli.reset_takeover
         || crate::config::load_config_overrides()

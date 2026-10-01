@@ -83,10 +83,9 @@ impl MissileCommandTakeover {
         let width = lane_width * total;
         let finished = !self.clock.in_progress();
 
-        // `None` cells are left as plain spaces with no style override, so
-        // the real screen beneath (revealed and tinted by
-        // `render_takeover_frame`'s `TintOverlay`) shows through even
-        // inside this canvas's empty space, not just its outer margins.
+        // `None` cells are drawn as plain spaces. The takeover box is
+        // cleared to the terminal's default background, so they show that
+        // background.
         let mut grid: Vec<Vec<Option<(char, Color)>>> = vec![vec![None; width]; ALTITUDE_ROWS];
         let impact_row = ALTITUDE_ROWS - 1;
 

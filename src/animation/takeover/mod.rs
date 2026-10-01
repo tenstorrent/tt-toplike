@@ -830,10 +830,10 @@ mod tests {
     fn every_variant_draws_something_inside_the_box() {
         for (name, t) in every_variant_state() {
             let buf = render_over_seed(134, 40, |f, a| t.render(f, a));
-            let b = takeover_box(Rect::new(0, 0, 134, 40));
+            let i = takeover_interior(Rect::new(0, 0, 134, 40));
             let mut painted = 0;
-            for y in b.y..b.bottom() {
-                for x in b.x + 1..b.right() {
+            for y in i.y..i.bottom() {
+                for x in i.x..i.right() {
                     if buf[(x, y)].symbol().trim().is_empty() {
                         continue;
                     }
