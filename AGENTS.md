@@ -618,7 +618,24 @@ is `--tt-smi-reset-behavior <ignore|inform|dazzle|demo>` (config key
 `resolve_reset_behavior` in `src/cli.rs`). `ignore` never runs the detector.
 `inform` and up show a status-bar segment in every view: `⟳ tt-smi -r ·
 {scope} · resetting`, then `✓ tt-smi -r done` for 10 seconds. `dazzle` adds
-the takeover. `demo` behaves like `dazzle` until its sequencer is added.
+the takeover. `demo` plays all seven takeovers in a fixed order (Quiet
+Notice, Blackhole Swarm, Hatch Countdown, BBS, Trek, Fail Whale, Missile
+Command) at boot and again on every real reset (Oct 1, 2026, Task 2).
+`Takeover::Demo(DemoSequence)` is in `src/animation/takeover/demo.rs`. Each
+animation gets an 8 s slot (`SLOT_LEN`) and is told its reset finished at
+5 s (`RESOLVE_AT`). The real reset's finish is ignored on purpose, so the
+sequence always runs to the end. That is a deliberate exception to
+the "follow the real reset lifecycle" rule, and the box title carries
+`DEMO - {title}` (boot) or `DEMO (real reset) - {title}` so a staged
+animation is never mistaken for a real one. The tag goes through
+`render_takeover_frame`'s `tag` argument. Esc and q/Q end a demo; any other
+key skips one animation; non-demo takeovers still treat every key as a skip.
+Key routing, boot gating and takeover choice are the pure functions in
+`reset_status.rs` (`demo_key_action`, `should_start_boot_demo`,
+`takeover_for_event`, `replace_takeover`). The boot demo uses a synthetic
+full reset over the real device count and is skipped in HivemindSweeper. On
+a terminal too small to draw the box the sequence plays unseen for 56 s,
+and keys still skip it.
 State and per-scan decisions live in `src/ui/tui/reset_status.rs`. The
 segment follows the real pid, so a skipped takeover or HivemindSweeper's
 early detector clear does not stop it reaching "done". The status bar now

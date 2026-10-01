@@ -77,6 +77,12 @@ impl MissileCommandTakeover {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
+        self.render_tagged(f, area, "");
+    }
+
+    /// Draws the takeover with `tag` (for example `DEMO`) in front of the
+    /// box title. An empty `tag` draws the plain title.
+    pub fn render_tagged(&self, f: &mut Frame, area: Rect, tag: &str) {
         let total = self.total_devices.max(1);
         let usable_width = (takeover_interior(area).width as usize).max(8);
         let lane_width = (usable_width / total).clamp(2, 7);
@@ -177,7 +183,7 @@ impl MissileCommandTakeover {
         } else {
             colors::rgb(25, 30, 55) // deep night-sky steel-blue, not flat red
         };
-        render_takeover_frame(f, area, "MISSILE COMMAND", border_color, lines);
+        render_takeover_frame(f, area, tag, "MISSILE COMMAND", border_color, lines);
     }
 }
 

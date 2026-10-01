@@ -678,8 +678,8 @@ fn run_app(
     // `tt_smi_reset_behavior` config key; default `inform`). `ignore` never
     // runs the detector. `inform` shows the status-bar segment. `dazzle`
     // and `demo` add a takeover animation (drawn in a centered box over a
-    // full-screen tint). `demo` behaves like `dazzle` until its sequencer
-    // exists. HivemindSweeper never gets a takeover; it injects a real feed
+    // full-screen tint). `demo` plays all seven in a row at boot and again
+    // on every real reset, tagged DEMO in the box title. HivemindSweeper never gets a takeover; it injects a real feed
     // event instead. `reset_detector` tracks at most one in-flight
     // `tt-smi -r`; `reset_status` is the status-bar segment's state, which
     // follows the real pid on its own (see `reset_status`).
@@ -691,7 +691,20 @@ fn run_app(
     );
     let mut reset_status: Option<reset_status::ResetStatus> = None;
     let mut reset_detector = crate::workload::reset_detect::ResetDetector::new();
-    let mut takeover: Option<crate::animation::takeover::Takeover> = None;
+    // `demo` opens with the whole sequence over the first view. A real reset
+    // later replaces it (see `reset_status::replace_takeover`). On a terminal
+    // too small to draw the box the sequence plays invisibly and then ends.
+    let mut takeover: Option<crate::animation::takeover::Takeover> =
+        if reset_status::should_start_boot_demo(
+            reset_behavior,
+            display_mode == DisplayMode::HivemindSweeper,
+        ) {
+            Some(crate::animation::takeover::Takeover::demo_boot(
+                backend.devices().len(),
+            ))
+        } else {
+            None
+        };
     // Time-since-last-tick source for `takeover.tick()` — deliberately its
     // own timer rather than reusing the nearby `draw_start` (which is
     // captured immediately before `terminal.draw()` and would read back
@@ -1425,8 +1438,9 @@ fn run_app(
                 // key skips straight to the animation's "done" tail) rather
                 // than also falling through to mode/view keybindings.
                 Event::Key(key) if key.kind == KeyEventKind::Press && takeover.is_some() => {
+                    // Any key skips; during a demo Esc and q/Q end it instead.
                     if let Some(t) = takeover.as_mut() {
-                        t.skip();
+                        reset_status::apply_key_action(t, key.code);
                     }
                 }
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -2419,7 +2433,7 @@ fn run_app(
                     }
                 }
                 if let Some(ev) = &outcome.takeover_for {
-                    takeover = Some(crate::animation::takeover::pick_takeover(ev));
+                    reset_status::replace_takeover(&mut takeover, reset_behavior, ev);
                 }
                 if reset_detector.is_finished(&reset_procs) {
                     if let Some(t) = takeover.as_mut() {

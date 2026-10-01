@@ -93,6 +93,9 @@ pub use trek_reset::TrekResetTakeover;
 mod fail_whale;
 pub use fail_whale::FailWhaleTakeover;
 
+mod demo;
+pub use demo::{DemoSequence, DemoSource, RESOLVE_AT, SLOT_LEN};
+
 /// How much a `TintOverlay` blends toward its tint color: 0.0 leaves cells
 /// untouched, 1.0 fully replaces them. Chosen so the real screen beneath a
 /// takeover stays clearly visible (a "color filter", per the design ask)
@@ -192,7 +195,8 @@ pub(crate) fn takeover_interior(area: Rect) -> Rect {
 /// A fixed, centered box ([`takeover_box`]) is then cleared to the
 /// terminal's default background. It gets a left and bottom border (no
 /// right border, per this project's no-right-border-glyph convention) with
-/// `title` on its top row, and `lines` are rendered as a centered paragraph
+/// `title` on its top row, preceded by `tag - ` when `tag` is not empty (a
+/// demo run passes `DEMO`; every other takeover passes `""`), and `lines` are rendered as a centered paragraph
 /// in the box interior ([`takeover_interior`]) only: lines wider or taller
 /// than the interior are clipped at the box edge. Every variant's `render` calls this,
 /// so every takeover gets the same box. No-ops on a terminal too small to
@@ -200,6 +204,7 @@ pub(crate) fn takeover_interior(area: Rect) -> Rect {
 pub(crate) fn render_takeover_frame(
     f: &mut Frame,
     area: Rect,
+    tag: &str,
     title: &str,
     border_color: Color,
     lines: Vec<Line<'static>>,
@@ -220,7 +225,11 @@ pub(crate) fn render_takeover_frame(
     f.render_widget(Clear, box_area);
     let block = Block::default()
         .borders(Borders::LEFT | Borders::BOTTOM)
-        .title(format!(" {title} "))
+        .title(if tag.is_empty() {
+            format!(" {title} ")
+        } else {
+            format!(" {tag} - {title} ")
+        })
         .border_style(Style::default().fg(border_color));
     let inner = takeover_interior(area);
     // `Paragraph` itself cuts lines wider than `inner` at its right edge
@@ -241,6 +250,8 @@ pub enum Takeover {
     TrekReset(TrekResetTakeover),
     FailWhale(FailWhaleTakeover),
     QuietNotice(QuietNoticeTakeover),
+    /// The `demo` behavior: all seven in a fixed order. See [`demo`].
+    Demo(DemoSequence),
 }
 
 impl Takeover {
@@ -253,6 +264,7 @@ impl Takeover {
             Takeover::TrekReset(v) => v.tick(elapsed),
             Takeover::FailWhale(v) => v.tick(elapsed),
             Takeover::QuietNotice(v) => v.tick(elapsed),
+            Takeover::Demo(v) => v.tick(elapsed),
         }
     }
 
@@ -265,6 +277,23 @@ impl Takeover {
             Takeover::TrekReset(v) => v.render(f, area),
             Takeover::FailWhale(v) => v.render(f, area),
             Takeover::QuietNotice(v) => v.render(f, area),
+            Takeover::Demo(v) => v.render(f, area),
+        }
+    }
+
+    /// Like `render`, with `tag` in front of the box title (see
+    /// [`render_takeover_frame`]). A demo sequence supplies its own tag, so
+    /// a nested call is not expected and draws the sequence as usual.
+    pub(crate) fn render_tagged(&self, f: &mut Frame, area: Rect, tag: &str) {
+        match self {
+            Takeover::Bbs(v) => v.render_tagged(f, area, tag),
+            Takeover::BlackholeSwarm(v) => v.render_tagged(f, area, tag),
+            Takeover::HatchCountdown(v) => v.render_tagged(f, area, tag),
+            Takeover::MissileCommand(v) => v.render_tagged(f, area, tag),
+            Takeover::TrekReset(v) => v.render_tagged(f, area, tag),
+            Takeover::FailWhale(v) => v.render_tagged(f, area, tag),
+            Takeover::QuietNotice(v) => v.render_tagged(f, area, tag),
+            Takeover::Demo(v) => v.render(f, area),
         }
     }
 
@@ -277,6 +306,7 @@ impl Takeover {
             Takeover::TrekReset(v) => v.is_done(),
             Takeover::FailWhale(v) => v.is_done(),
             Takeover::QuietNotice(v) => v.is_done(),
+            Takeover::Demo(v) => v.is_done(),
         }
     }
 
@@ -289,6 +319,53 @@ impl Takeover {
             Takeover::TrekReset(v) => v.note_reset_finished(),
             Takeover::FailWhale(v) => v.note_reset_finished(),
             Takeover::QuietNotice(v) => v.note_reset_finished(),
+            Takeover::Demo(v) => v.note_reset_finished(),
+        }
+    }
+
+    /// Starts the boot demo: every takeover in a row over a synthetic full
+    /// reset of `device_count` chips (`pid` 0, so nothing real is implied).
+    pub fn demo_boot(device_count: usize) -> Takeover {
+        let ev = ResetEvent {
+            pid: 0,
+            is_full: true,
+            chip_count: device_count,
+            total_devices: device_count,
+            device_indices: (0..device_count).map(|i| i as u8).collect(),
+            raw_targets: vec![],
+        };
+        Takeover::Demo(DemoSequence::new(DemoSource::Boot, ev))
+    }
+
+    /// Starts the demo for a real reset: every takeover in a row, scoped to
+    /// the real event's chips.
+    pub fn demo_real(ev: &ResetEvent) -> Takeover {
+        Takeover::Demo(DemoSequence::new(DemoSource::RealReset, ev.clone()))
+    }
+
+    pub fn is_demo(&self) -> bool {
+        matches!(self, Takeover::Demo(_))
+    }
+
+    /// Ends a demo at once. A single takeover has no early exit other than
+    /// `skip`, so this is a no-op for the other variants.
+    pub fn end(&mut self) {
+        if let Takeover::Demo(v) = self {
+            v.end();
+        }
+    }
+
+    /// The variant's name; for a demo, the animation now running.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Takeover::Bbs(_) => "Bbs",
+            Takeover::BlackholeSwarm(_) => "BlackholeSwarm",
+            Takeover::HatchCountdown(_) => "HatchCountdown",
+            Takeover::MissileCommand(_) => "MissileCommand",
+            Takeover::TrekReset(_) => "TrekReset",
+            Takeover::FailWhale(_) => "FailWhale",
+            Takeover::QuietNotice(_) => "QuietNotice",
+            Takeover::Demo(v) => v.current_name(),
         }
     }
 
@@ -301,6 +378,7 @@ impl Takeover {
             Takeover::TrekReset(v) => v.skip(),
             Takeover::FailWhale(v) => v.skip(),
             Takeover::QuietNotice(v) => v.skip(),
+            Takeover::Demo(v) => v.skip(),
         }
     }
 }
@@ -395,7 +473,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                render_takeover_frame(f, f.area(), "X", Color::White, vec![Line::raw("hi")]);
+                render_takeover_frame(f, f.area(), "", "X", Color::White, vec![Line::raw("hi")]);
             })
             .unwrap();
     }
@@ -411,6 +489,7 @@ mod tests {
                 render_takeover_frame(
                     f,
                     f.area(),
+                    "",
                     "RESET",
                     Color::Red,
                     vec![Line::raw("line one"), Line::raw("line two")],
@@ -471,6 +550,7 @@ mod tests {
                 render_takeover_frame(
                     f,
                     f.area(),
+                    "",
                     "TITLE",
                     Color::Rgb(tint.0, tint.1, tint.2),
                     vec![Line::raw("one line of content")],
@@ -886,6 +966,7 @@ mod tests {
             render_takeover_frame(
                 f,
                 a,
+                "",
                 "T",
                 Color::Rgb(255, 0, 255),
                 vec![Line::raw(wide.clone()), Line::raw("second")],
@@ -924,7 +1005,7 @@ mod tests {
     fn lines_taller_than_the_interior_are_clipped_at_the_bottom_border() {
         let many: Vec<Line<'static>> = (0..100).map(|i| Line::raw(format!("row {i}"))).collect();
         let buf = render_over_seed(134, 40, |f, a| {
-            render_takeover_frame(f, a, "T", Color::Rgb(255, 0, 255), many.clone());
+            render_takeover_frame(f, a, "", "T", Color::Rgb(255, 0, 255), many.clone());
         });
         let b = takeover_box(Rect::new(0, 0, 134, 40));
         assert_eq!(

@@ -90,6 +90,12 @@ impl BlackholeSwarmTakeover {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
+        self.render_tagged(f, area, "");
+    }
+
+    /// Draws the takeover with `tag` (for example `DEMO`) in front of the
+    /// box title. An empty `tag` draws the plain title.
+    pub fn render_tagged(&self, f: &mut Frame, area: Rect, tag: &str) {
         // The swarm is laid out across the takeover box interior.
         let interior = takeover_interior(area);
         let cols = (interior.width as usize).max(1);
@@ -125,6 +131,7 @@ impl BlackholeSwarmTakeover {
         render_takeover_frame(
             f,
             area,
+            tag,
             &format!("{} BLACKHOLES", self.density),
             colors::rgb(160, 100, 255),
             lines,

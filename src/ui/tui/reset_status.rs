@@ -23,9 +23,11 @@ use std::time::{Duration, Instant};
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::animation::takeover::{pick_takeover, Takeover};
 use crate::cli::ResetBehavior;
 use crate::models::device::Device;
 use crate::workload::reset_detect::{ResetDetector, ResetEvent};
+use crossterm::event::KeyCode;
 
 /// How long `✓ tt-smi -r done` stays in the status bar after the reset ends.
 pub const RESET_DONE_VISIBLE: Duration = Duration::from_secs(10);
@@ -165,6 +167,56 @@ pub fn scan_resets(
         }
     }
     out
+}
+
+/// What a keypress does to the active takeover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyAction {
+    /// End the whole demo (consumed; the app does not quit).
+    End,
+    /// Skip to the next animation, or finish a single takeover.
+    Skip,
+}
+
+/// Routes a keypress made while a takeover is on screen. During a demo, Esc
+/// and `q`/`Q` end the whole demo and every other key skips to the next
+/// animation. A single takeover (`dazzle`) treats every key as a skip,
+/// `q` included, as it always has.
+pub fn demo_key_action(code: KeyCode, is_demo: bool) -> KeyAction {
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') if is_demo => KeyAction::End,
+        _ => KeyAction::Skip,
+    }
+}
+
+/// Applies [`demo_key_action`] to `takeover`.
+pub fn apply_key_action(takeover: &mut Takeover, code: KeyCode) {
+    match demo_key_action(code, takeover.is_demo()) {
+        KeyAction::End => takeover.end(),
+        KeyAction::Skip => takeover.skip(),
+    }
+}
+
+/// True when the boot demo should start: the behavior is `demo` and the
+/// first view is not HivemindSweeper (which never gets a takeover).
+pub fn should_start_boot_demo(behavior: ResetBehavior, hivemind: bool) -> bool {
+    behavior.is_demo() && !hivemind
+}
+
+/// The takeover for a detected real reset: the demo sequence under `demo`,
+/// otherwise one weighted-random animation.
+pub fn takeover_for_event(behavior: ResetBehavior, ev: &ResetEvent) -> Takeover {
+    if behavior.is_demo() {
+        Takeover::demo_real(ev)
+    } else {
+        pick_takeover(ev)
+    }
+}
+
+/// Puts the takeover for a detected real reset into `slot`. It replaces
+/// whatever is running, including a boot demo that has not finished.
+pub fn replace_takeover(slot: &mut Option<Takeover>, behavior: ResetBehavior, ev: &ResetEvent) {
+    *slot = Some(takeover_for_event(behavior, ev));
 }
 
 /// How much of the reset segment the status bar draws.
@@ -549,5 +601,114 @@ mod tests {
         // Width 70: a hint has to go, from the right.
         let f = fit_left_zone(70, 25, Some((30, 20)), &[10, 10, 10], &[8, 8]);
         assert_eq!((f.hotkeys, f.hints), (0, 1));
+    }
+
+    // ── demo wiring: keys, boot gating, takeover choice ────────────────
+
+    use crossterm::event::KeyCode;
+
+    #[test]
+    fn demo_keys_end_on_esc_and_q_and_skip_on_anything_else() {
+        for code in [KeyCode::Esc, KeyCode::Char('q'), KeyCode::Char('Q')] {
+            assert_eq!(demo_key_action(code, true), KeyAction::End, "{code:?}");
+        }
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Char(' '),
+            KeyCode::Char('x'),
+            KeyCode::Right,
+            KeyCode::Tab,
+        ] {
+            assert_eq!(demo_key_action(code, true), KeyAction::Skip, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn plain_takeover_keys_always_skip_including_q_and_esc() {
+        for code in [
+            KeyCode::Esc,
+            KeyCode::Char('q'),
+            KeyCode::Char('Q'),
+            KeyCode::Enter,
+            KeyCode::Char('a'),
+        ] {
+            assert_eq!(demo_key_action(code, false), KeyAction::Skip, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn a_key_action_applied_to_a_takeover_ends_or_skips_it() {
+        use crate::animation::takeover::Takeover;
+        // End: the whole demo is over, whatever slot it was in.
+        let mut t = Takeover::demo_boot(2);
+        apply_key_action(&mut t, KeyCode::Char('q'));
+        assert!(t.is_done());
+        // Skip: one slot forward.
+        let mut t = Takeover::demo_boot(2);
+        apply_key_action(&mut t, KeyCode::Enter);
+        assert!(!t.is_done());
+        assert_eq!(t.variant_name(), "BlackholeSwarm");
+        // A plain takeover: q only skips it.
+        let mut t = crate::animation::takeover::pick_takeover(&ev(1, true, 4));
+        apply_key_action(&mut t, KeyCode::Char('q'));
+        assert!(t.is_done());
+    }
+
+    #[test]
+    fn boot_demo_starts_only_for_demo_and_never_in_hivemind() {
+        for b in [
+            ResetBehavior::Ignore,
+            ResetBehavior::Inform,
+            ResetBehavior::Dazzle,
+        ] {
+            assert!(!should_start_boot_demo(b, false), "{b:?}");
+            assert!(!should_start_boot_demo(b, true), "{b:?}");
+        }
+        assert!(should_start_boot_demo(ResetBehavior::Demo, false));
+        assert!(!should_start_boot_demo(ResetBehavior::Demo, true));
+    }
+
+    #[test]
+    fn demo_in_hivemind_turns_a_real_reset_into_a_feed_event_only() {
+        let mut det = ResetDetector::new();
+        let mut st = None;
+        let out = scan_resets(
+            ResetBehavior::Demo,
+            true,
+            &mut det,
+            &mut st,
+            &procs(&[(5, "tt-smi -r")]),
+            &[],
+            Instant::now(),
+        );
+        assert!(out.takeover_for.is_none());
+        assert!(out.feed_event_for.is_some());
+    }
+
+    #[test]
+    fn demo_behavior_picks_the_demo_and_dazzle_never_does() {
+        let e = ev(9, true, 4);
+        assert!(takeover_for_event(ResetBehavior::Demo, &e).is_demo());
+        for _ in 0..50 {
+            assert!(!takeover_for_event(ResetBehavior::Dazzle, &e).is_demo());
+        }
+    }
+
+    #[test]
+    fn a_real_reset_preempts_a_running_boot_demo() {
+        use crate::animation::takeover::{DemoSource, Takeover};
+        let mut slot = Some(Takeover::demo_boot(4));
+        // The boot demo has moved on to its third animation.
+        slot.as_mut().unwrap().skip();
+        slot.as_mut().unwrap().skip();
+        replace_takeover(&mut slot, ResetBehavior::Demo, &ev(9, true, 4));
+        match slot.as_ref().unwrap() {
+            Takeover::Demo(seq) => {
+                assert_eq!(seq.source(), DemoSource::RealReset);
+                assert_eq!(seq.current_index(), 0, "a fresh sequence starts");
+                assert_eq!(seq.event().pid, 9);
+            }
+            _ => panic!("expected a demo"),
+        }
     }
 }

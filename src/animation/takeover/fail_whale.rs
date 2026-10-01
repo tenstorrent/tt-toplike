@@ -122,6 +122,12 @@ impl FailWhaleTakeover {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
+        self.render_tagged(f, area, "");
+    }
+
+    /// Draws the takeover with `tag` (for example `DEMO`) in front of the
+    /// box title. An empty `tag` draws the plain title.
+    pub fn render_tagged(&self, f: &mut Frame, area: Rect, tag: &str) {
         let progress = self.landing_progress();
         let landed = progress >= 1.0;
 
@@ -188,7 +194,7 @@ impl FailWhaleTakeover {
         } else {
             colors::rgb(90, 130, 180)
         };
-        render_takeover_frame(f, area, title, tint, lines);
+        render_takeover_frame(f, area, tag, title, tint, lines);
     }
 }
 

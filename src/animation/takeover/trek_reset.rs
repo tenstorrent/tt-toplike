@@ -226,6 +226,12 @@ impl TrekResetTakeover {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
+        self.render_tagged(f, area, "");
+    }
+
+    /// Draws the takeover with `tag` (for example `DEMO`) in front of the
+    /// box title. An empty `tag` draws the plain title.
+    pub fn render_tagged(&self, f: &mut Frame, area: Rect, tag: &str) {
         let finished = !self.clock.in_progress();
         let lines = self.lines();
         let border_color = if finished {
@@ -233,7 +239,14 @@ impl TrekResetTakeover {
         } else {
             colors::rgb(40, 90, 60)
         };
-        render_takeover_frame(f, area, "USS ENTERPRISE — NCC-1701", border_color, lines);
+        render_takeover_frame(
+            f,
+            area,
+            tag,
+            "USS ENTERPRISE — NCC-1701",
+            border_color,
+            lines,
+        );
     }
 }
 

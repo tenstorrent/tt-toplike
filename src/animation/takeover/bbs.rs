@@ -176,6 +176,12 @@ impl BbsTakeover {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
+        self.render_tagged(f, area, "");
+    }
+
+    /// Draws the takeover with `tag` (for example `DEMO`) in front of the
+    /// box title. An empty `tag` draws the plain title.
+    pub fn render_tagged(&self, f: &mut Frame, area: Rect, tag: &str) {
         let cyan = colors::rgb(60, 200, 210);
         let lines = self.lines(takeover_interior(area).height as usize);
 
@@ -184,7 +190,7 @@ impl BbsTakeover {
         } else {
             "PARTIAL RESET"
         };
-        render_takeover_frame(f, area, title, cyan, lines);
+        render_takeover_frame(f, area, tag, title, cyan, lines);
     }
 }
 

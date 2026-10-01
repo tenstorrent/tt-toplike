@@ -122,6 +122,12 @@ impl QuietNoticeTakeover {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
+        self.render_tagged(f, area, "");
+    }
+
+    /// Draws the takeover with `tag` (for example `DEMO`) in front of the
+    /// box title. An empty `tag` draws the plain title.
+    pub fn render_tagged(&self, f: &mut Frame, area: Rect, tag: &str) {
         let finished = !self.clock.in_progress();
         // Compose the backdrop for the box interior (71x22 at full size).
         // The floors keep the message-row math valid on a small terminal.
@@ -184,7 +190,7 @@ impl QuietNoticeTakeover {
             lines.push(Line::from(spans));
         }
 
-        render_takeover_frame(f, area, "RESET", colors::rgb(140, 140, 150), lines);
+        render_takeover_frame(f, area, tag, "RESET", colors::rgb(140, 140, 150), lines);
     }
 }
 

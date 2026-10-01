@@ -243,9 +243,11 @@ pub struct Cli {
     ///         This is the default.
     /// dazzle  inform, plus a full-screen takeover animation (a feed event
     ///         in HivemindSweeper).
-    /// demo    start by playing every reset animation in a row, and play
-    ///         them all again whenever a real reset happens. Until the
-    ///         sequencer lands, demo behaves like dazzle.
+    /// demo    play all seven reset animations in a row (8 seconds each)
+    ///         when toplike starts, and again on every real reset. The box
+    ///         title says DEMO. Any key skips to the next animation; Esc or
+    ///         q ends the demo. Like dazzle, it shows the status segment
+    ///         for a real reset and uses a feed event in HivemindSweeper.
     ///
     /// Can also be set with `tt_smi_reset_behavior` in
     /// ~/.config/tt-toplike/config.toml. The flag wins over the file.
@@ -262,8 +264,8 @@ pub enum ResetBehavior {
     Inform,
     /// Inform, plus a full-screen takeover animation for each reset.
     Dazzle,
-    /// Play every reset animation in a row at start and on each real reset.
-    /// Behaves like `dazzle` until the demo sequencer is added.
+    /// Play all seven reset animations in a row at start and on each real
+    /// reset, tagged DEMO in the box title.
     Demo,
 }
 
@@ -278,7 +280,7 @@ impl ResetBehavior {
         matches!(self, ResetBehavior::Dazzle | ResetBehavior::Demo)
     }
 
-    /// True for the demo behavior (sequencer added separately).
+    /// True for the demo behavior (the `Takeover::Demo` sequencer).
     pub fn is_demo(self) -> bool {
         matches!(self, ResetBehavior::Demo)
     }

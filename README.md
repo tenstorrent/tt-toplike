@@ -95,7 +95,7 @@ When the TUI sees a `tt-smi -r` running, it can say so. `--tt-smi-reset-behavior
 - `ignore`: never look for resets.
 - `inform` (default): show `⟳ tt-smi -r · all chips · resetting` in the status bar of every view while the reset runs, then `✓ tt-smi -r done` for 10 seconds.
 - `dazzle`: `inform`, plus a full-screen takeover animation (a feed event in HivemindSweeper).
-- `demo`: accepted today and behaves like `dazzle`. It will play every reset animation in a row at start and again on each real reset.
+- `demo`: plays all seven reset animations in a row (8 seconds each) when toplike starts, and again on every real reset. The box title says `DEMO` (`DEMO (real reset)` after a real one), so a staged animation is never taken for a real reset. Any key skips to the next animation; `Esc` or `q` ends the demo. The demo always runs to the end, even if the real `tt-smi -r` finishes sooner. HivemindSweeper has no boot demo and gets a feed event for a real reset.
 
 ---
 

@@ -130,9 +130,16 @@ impl HatchCountdownTakeover {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
+        self.render_tagged(f, area, "");
+    }
+
+    /// Draws the takeover with `tag` (for example `DEMO`) in front of the
+    /// box title. An empty `tag` draws the plain title.
+    pub fn render_tagged(&self, f: &mut Frame, area: Rect, tag: &str) {
         render_takeover_frame(
             f,
             area,
+            tag,
             "DHARMA INITIATIVE",
             colors::rgb(255, 140, 0),
             self.lines(),

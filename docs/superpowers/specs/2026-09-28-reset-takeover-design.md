@@ -257,9 +257,34 @@ One setting: `--tt-smi-reset-behavior <ignore|inform|dazzle|demo>`
 `tt_smi_reset_behavior` (`src/config.rs`). The flag wins over the file.
 `ignore` never runs the detector. `inform` shows a status-bar segment
 (`⟳ tt-smi -r · {scope} · resetting`, then `✓ tt-smi -r done` for 10
-seconds). `dazzle` adds the takeover animation. `demo` is accepted and
-behaves like `dazzle` until its sequencer is added. This replaces the
+seconds). `dazzle` adds the takeover animation. `demo` plays all seven
+takeovers in a fixed order (see "Demo behavior"). This replaces the
 earlier opt-in `--reset-takeover` flag, which was never released.
+
+## Demo behavior
+
+`demo` plays all seven takeovers in a row, in this order: Quiet Notice,
+Blackhole Swarm, Hatch Countdown, BBS, Trek, Fail Whale, Missile Command.
+It plays once when toplike starts (not in HivemindSweeper) and again on
+every real reset. A boot demo uses a synthetic full reset over the real
+device count. A real reset uses the real event, so chip labels and scope
+match it, and it replaces a boot demo that is still running. A second
+real reset during a real-reset demo is dropped, as before.
+
+Each animation gets an 8 second slot. At 5 seconds the variant is told its
+reset finished and plays its "done" beat. A slot ends when 8 seconds have
+passed and the variant is done. `inform`'s status segment appears for a
+real reset and not for the boot demo, because nothing real is resetting.
+
+This is a deliberate exception to the rule that animations follow the
+real reset. The demo ignores the real `tt-smi -r` finishing, so all seven
+always play. To keep a staged animation from being mistaken for a real
+reset, the box title reads `DEMO - {title}` at boot and
+`DEMO (real reset) - {title}` after a real reset.
+
+Keys: Esc and `q`/`Q` end the demo. Any other key skips to the next
+animation, and skipping the last one ends the demo. Other takeovers treat
+every key as a skip.
 
 ## Testing approach
 
