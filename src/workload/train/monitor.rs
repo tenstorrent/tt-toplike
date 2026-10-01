@@ -274,11 +274,12 @@ impl TrainState {
             //   within a chunk, so letting it set `step` would make the step
             //   jump between the global and the chunk-local number, and its
             //   loss would add a second entry per step to `loss_history`. The
-            //   bar then contributes only the restart flag. A trainer that
-            //   reports progress only through a bar never reaches `Reported`,
-            //   so it keeps using the bar for step and loss as before. A bar
-            //   update read before the first time line still sets the step,
-            //   and the time line corrects it on arrival.
+            //   bar then contributes the restart flag, and its total only
+            //   while no budget was stated. A trainer that reports progress
+            //   only through a bar never reaches `Reported`, so it keeps using
+            //   the bar for step and loss as before. A bar update read before
+            //   the first time line still sets the step and adds one loss
+            //   entry; the time line then sets the step again.
             TrainEvent::BarProgress {
                 step,
                 max_steps,
