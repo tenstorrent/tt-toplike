@@ -147,6 +147,59 @@ impl TrainState {
         }
     }
 
+    /// Record a trainer-reported step time against the current step. With a
+    /// cache count, growth is measured against the previous count; without
+    /// one, growth is unknown (`cache_delta` 0) and `cache_entries` keeps
+    /// its value.
+    fn note_reported_time(&mut self, ms: f32, cache_entries: Option<u32>) {
+        // Growth is measured against the previous sample, so the first
+        // sample has no baseline. Without this guard, attaching to a
+        // run whose cache is already full would paint its first bar
+        // as a compile.
+        let cache_delta = if self.step_history.is_empty() {
+            0
+        } else {
+            match cache_entries {
+                Some(n) => n.saturating_sub(self.cache_entries),
+                // No count reported: growth is unknown, never a compile.
+                None => 0,
+            }
+        };
+        self.step_ms = ms;
+        if let Some(n) = cache_entries {
+            self.cache_entries = n;
+        }
+        self.step_time_source = StepTimeSource::Reported;
+        let sample = StepSample {
+            step: self.step,
+            // Used only when this is a new sample; the replace branch
+            // below keeps the first line's seq.
+            seq: self.step_seq + 1,
+            ms,
+            cache_delta,
+            checkpoint: false,
+        };
+        match self.step_history.last_mut() {
+            // A second time line for the same step replaces the first
+            // and keeps what the first already established.
+            Some(last) if last.step == sample.step => {
+                *last = StepSample {
+                    cache_delta: last.cache_delta.max(sample.cache_delta),
+                    checkpoint: last.checkpoint,
+                    seq: last.seq,
+                    ..sample
+                };
+            }
+            _ => {
+                self.step_seq += 1;
+                self.step_history.push(sample);
+                if self.step_history.len() > STEP_HISTORY {
+                    self.step_history.remove(0);
+                }
+            }
+        }
+    }
+
     pub fn apply_event(&mut self, ev: TrainEvent) {
         match ev {
             TrainEvent::Step { step, loss } => {
@@ -161,46 +214,13 @@ impl TrainState {
                 }
             }
             TrainEvent::StepTime { ms, cache_entries } => {
-                // Growth is measured against the previous sample, so the first
-                // sample has no baseline. Without this guard, attaching to a
-                // run whose cache is already full would paint its first bar
-                // as a compile.
-                let cache_delta = if self.step_history.is_empty() {
-                    0
-                } else {
-                    cache_entries.saturating_sub(self.cache_entries)
-                };
-                self.step_ms = ms;
-                self.cache_entries = cache_entries;
-                self.step_time_source = StepTimeSource::Reported;
-                let sample = StepSample {
-                    step: self.step,
-                    // Used only when this is a new sample; the replace branch
-                    // below keeps the first line's seq.
-                    seq: self.step_seq + 1,
-                    ms,
-                    cache_delta,
-                    checkpoint: false,
-                };
-                match self.step_history.last_mut() {
-                    // A second time line for the same step replaces the first
-                    // and keeps what the first already established.
-                    Some(last) if last.step == sample.step => {
-                        *last = StepSample {
-                            cache_delta: last.cache_delta.max(sample.cache_delta),
-                            checkpoint: last.checkpoint,
-                            seq: last.seq,
-                            ..sample
-                        };
-                    }
-                    _ => {
-                        self.step_seq += 1;
-                        self.step_history.push(sample);
-                        if self.step_history.len() > STEP_HISTORY {
-                            self.step_history.remove(0);
-                        }
-                    }
-                }
+                self.note_reported_time(ms, Some(cache_entries));
+            }
+            // A time with no cache count: record the step, then the time with
+            // growth unknown and the cache count left as it was.
+            TrainEvent::StepAndMs { step, loss, ms } => {
+                self.apply_event(TrainEvent::Step { step, loss });
+                self.note_reported_time(ms, None);
             }
             // Current tt-train packs all four fields onto one line; expand it
             // so both halves take exactly the paths the split shape does.
@@ -297,6 +317,16 @@ impl TrainState {
 pub struct Tailer {
     path: PathBuf,
     offset: u64,
+}
+
+/// True for every event that carries a trainer-printed step time, whether or
+/// not a cache count came with it. `poll` uses this to stop deriving or
+/// bar-observing step times once the trainer reports its own.
+fn is_reported_step_time(ev: &TrainEvent) -> bool {
+    matches!(
+        ev,
+        TrainEvent::StepTime { .. } | TrainEvent::StepAndTime { .. } | TrainEvent::StepAndMs { .. }
+    )
 }
 
 impl Tailer {
@@ -461,7 +491,8 @@ pub struct TrainMonitor {
     ckpt: Option<CheckpointWatch>,
     last_scan: Option<Instant>,
     /// True once the log has stated a step time itself (tt-train does, on
-    /// its combined per-step line). While false, step time is derived from
+    /// its combined per-step line, and the tt-tnt harness does with no cache
+    /// count; see `is_reported_step_time`). While false, step time is derived from
     /// how fast step lines arrive — see `note_step_progress`.
     saw_reported_step_time: bool,
     /// `(step number, when we saw it)` for the last poll that advanced the
@@ -923,7 +954,7 @@ impl TrainMonitor {
                 match ev {
                     // The trainer stated its own step time, so stop deriving
                     // one from log cadence.
-                    TrainEvent::StepTime { .. } | TrainEvent::StepAndTime { .. } => {
+                    ref e if is_reported_step_time(e) => {
                         self.saw_reported_step_time = true;
                         self.state.apply_event(ev);
                     }
@@ -1918,5 +1949,74 @@ mod run_anchor_tests {
         assert_eq!(m.state.step_history.len(), 1);
         assert_eq!(m.state.step_history[0].step, 2);
         assert!((m.state.step_history[0].ms - 400.0).abs() < 1.0);
+    }
+}
+
+#[cfg(test)]
+mod step_and_ms_tests {
+    use super::*;
+
+    fn line(step: u64, ms: f32) -> TrainEvent {
+        TrainEvent::StepAndMs {
+            step,
+            loss: 2.0,
+            ms,
+        }
+    }
+
+    #[test]
+    fn a_time_with_no_cache_count_is_a_reported_sample_with_unknown_growth() {
+        let mut st = TrainState::new();
+        st.cache_entries = 7; // an earlier reading must survive
+        st.apply_event(line(100, 285.0));
+        st.apply_event(line(101, 290.0));
+        assert_eq!(st.step, 101);
+        assert_eq!(st.step_ms, 290.0);
+        assert_eq!(st.cache_entries, 7, "no cache count was reported");
+        assert_eq!(st.step_time_source, StepTimeSource::Reported);
+        let got: Vec<(u64, u64, f32, u32)> = st
+            .step_history
+            .iter()
+            .map(|s| (s.step, s.seq, s.ms, s.cache_delta))
+            .collect();
+        assert_eq!(got, vec![(100, 1, 285.0, 0), (101, 2, 290.0, 0)]);
+    }
+
+    #[test]
+    fn a_trainer_that_prints_time_and_cache_still_measures_growth() {
+        let mut st = TrainState::new();
+        st.apply_event(TrainEvent::StepAndTime {
+            step: 1,
+            loss: 2.0,
+            ms: 300.0,
+            cache_entries: 8,
+        });
+        st.apply_event(TrainEvent::StepAndTime {
+            step: 2,
+            loss: 2.0,
+            ms: 300.0,
+            cache_entries: 12,
+        });
+        assert_eq!(st.step_history[1].cache_delta, 4);
+    }
+
+    #[test]
+    fn every_step_time_shape_counts_as_a_reported_time() {
+        assert!(is_reported_step_time(&line(1, 1.0)));
+        assert!(is_reported_step_time(&TrainEvent::StepTime {
+            ms: 1.0,
+            cache_entries: 1
+        }));
+        assert!(is_reported_step_time(&TrainEvent::StepAndTime {
+            step: 1,
+            loss: 1.0,
+            ms: 1.0,
+            cache_entries: 1
+        }));
+        assert!(!is_reported_step_time(&TrainEvent::Step {
+            step: 1,
+            loss: 1.0
+        }));
+        assert!(!is_reported_step_time(&TrainEvent::MaxSteps(5)));
     }
 }

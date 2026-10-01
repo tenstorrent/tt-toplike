@@ -14,9 +14,10 @@ tt-toplike (0.13.6) noble; urgency=medium
     more than one at a time are not timed.
   * Fix: derived step rate and tokens/sec froze after a progress-bar
     restart. They now keep updating.
-  * The tt-tnt harness's own output was not changed. A possible follow-up
-    is for it to emit one "Step: N, Loss: L, Time: T ms" line per step so
-    the view can use trainer-reported times.
+  * A step line with a time and no cache count ("Step: N, Loss: L,
+    Time: T ms", which the tt-tnt harness now prints) is read as a
+    trainer-reported step time. Cache growth is unknown for it. The LIVE
+    panel shows its cache row only when a cache count was reported.
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 01 Oct 2026 12:00:00 +0000
 

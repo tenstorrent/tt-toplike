@@ -8,6 +8,7 @@
 //!
 //! ```text
 //! Step: {step}, Loss: {loss}, Time: {ms} ms, cache entries: {n}   (nano_gpt)
+//! Step: {step}, Loss: {loss}, Time: {ms} ms                       (tt-tnt harness, no cache count)
 //! Step: {step} Loss: {loss}                          (linear_regression)
 //! Step: {step} | Average Loss: {loss}                       (mnist_mlp)
 //! Max steps {N}
@@ -47,6 +48,14 @@ pub enum TrainEvent {
         loss: f32,
         ms: f32,
         cache_entries: u32,
+    },
+    /// A step line with a wall time and no program-cache count. A trainer
+    /// that times its own steps but has no cache to report (the tt-tnt
+    /// harness, which drives ttml from Python) prints this shape.
+    StepAndMs {
+        step: u64,
+        loss: f32,
+        ms: f32,
     },
     MaxSteps(u64),
     BatchSize(u32),
@@ -101,6 +110,7 @@ pub fn parse_train_line(line: &str) -> Option<TrainEvent> {
     // on the pieces rather than on one exact layout:
     //
     //   nano_gpt           Step: 2431, Loss: 1.8342, Time: 1124.5 ms, cache entries: 21
+    //   tt-tnt harness     Step: 25565, Loss: 3.1367, Time: 285.0 ms
     //   linear_regression  Step: 7 Loss: 0.4213
     //   mnist_mlp          Step:    42 | Average Loss: 0.1337
     //
@@ -150,6 +160,7 @@ pub fn parse_train_line(line: &str) -> Option<TrainEvent> {
                 ms,
                 cache_entries,
             },
+            (Some(ms), None) => TrainEvent::StepAndMs { step, loss, ms },
             _ => TrainEvent::Step { step, loss },
         });
     }
@@ -614,5 +625,44 @@ mod tests {
             Some(TrainEvent::Step { loss, .. }) => assert!((loss - 0.12).abs() < 1e-6),
             other => panic!("expected Step, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_step_line_with_a_time_and_no_cache_count_carries_the_time() {
+        let ev = parse_train_line("Step: 25565, Loss: 3.1367, Time: 285.0 ms").unwrap();
+        assert_eq!(
+            ev,
+            TrainEvent::StepAndMs {
+                step: 25565,
+                loss: 3.1367,
+                ms: 285.0
+            }
+        );
+    }
+
+    #[test]
+    fn the_other_step_shapes_are_unchanged() {
+        assert!(matches!(
+            parse_train_line("Step: 2431, Loss: 1.8342, Time: 1124.5 ms, cache entries: 21"),
+            Some(TrainEvent::StepAndTime {
+                step: 2431,
+                cache_entries: 21,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_train_line("Step: 7 Loss: 0.4213"),
+            Some(TrainEvent::Step { step: 7, .. })
+        ));
+        // A time that does not parse is dropped, not guessed.
+        assert!(matches!(
+            parse_train_line("Step: 8, Loss: 0.5, Time: soon ms"),
+            Some(TrainEvent::Step { step: 8, .. })
+        ));
+        // A cache count with no time is still a plain step.
+        assert!(matches!(
+            parse_train_line("Step: 9, Loss: 0.5, cache entries: 4"),
+            Some(TrainEvent::Step { step: 9, .. })
+        ));
     }
 }

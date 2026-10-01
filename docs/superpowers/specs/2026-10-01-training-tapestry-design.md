@@ -125,6 +125,11 @@ scheduler without a percentage.
   step was seen, so it is accurate to within one poll interval. It is never
   recorded for the gap across a bar restart, and never from an unparsed step 0.
   `cache_delta` is unknown (0). The title reads `STEP ANATOMY (from bar)`.
+- A step line with a time and no cache count (`Step: N, Loss: L, Time: T ms`)
+  is a trainer-reported time with unknown cache growth. It parses as
+  `StepAndMs`, records a sample with `cache_delta` 0, leaves `cache_entries`
+  as it was, and turns off the derived and bar-observed paths. The LIVE cache
+  row appears only when a cache count has been reported.
 - `TrainState.chunked_bar` marks a bar that restarts per chunk. The first real
   run found that the harness prints one tqdm bar per 3195-step chunk.
 - The monitor's per-run anchors (`last_step_seen`, `saw_reported_step_time`,

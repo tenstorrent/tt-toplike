@@ -1299,18 +1299,25 @@ impl TrainView {
             }
             let climbing =
                 st.cache_entries > 0 && self.cache_steady_ticks.get() < CACHE_STEADY_TICKS;
-            let (txt, color) = if climbing {
-                (
-                    format!("cache   {} climbing", st.cache_entries),
-                    Color::Rgb(180, 140, 230),
-                )
-            } else {
-                (
-                    format!("cache   {} steady", st.cache_entries),
-                    Color::Rgb(120, 120, 140),
-                )
-            };
-            line!(txt, color, false);
+            // The row states a count, so it needs one the trainer reported.
+            // A trainer that prints no cache count (or only a bar) leaves
+            // `cache_entries` at 0, and "cache 0 steady" would claim a
+            // reading nobody made. The tracking above still runs so a count
+            // that appears later starts from the right baseline.
+            if st.cache_entries > 0 {
+                let (txt, color) = if climbing {
+                    (
+                        format!("cache   {} climbing", st.cache_entries),
+                        Color::Rgb(180, 140, 230),
+                    )
+                } else {
+                    (
+                        format!("cache   {} steady", st.cache_entries),
+                        Color::Rgb(120, 120, 140),
+                    )
+                };
+                line!(txt, color, false);
+            }
         }
         if let Some(first_seen) = st.first_seen {
             let elapsed = fmt_elapsed(first_seen.elapsed().as_secs());
@@ -3144,5 +3151,19 @@ mod tests {
             saw_full && saw_short && saw_none,
             "{saw_full} {saw_short} {saw_none}"
         );
+    }
+
+    #[test]
+    fn the_live_panel_shows_a_cache_row_only_when_a_cache_count_was_reported() {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.step = 50;
+        st.cache_entries = 0;
+        let out = text_of(&TrainView::new(134, 40).render(&st, &b));
+        assert!(!out.contains("cache "), "no count reported, no row:\n{out}");
+        st.cache_entries = 21;
+        let out = text_of(&TrainView::new(134, 40).render(&st, &b));
+        assert!(out.contains("cache   21"), "{out}");
     }
 }

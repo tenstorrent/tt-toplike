@@ -694,9 +694,12 @@ was seen, never across a bar restart or from an unparsed step 0). The
 title reads `STEP ANATOMY (from bar)`. The same run exposed a bug: derived
 step rate and tokens/sec froze after a bar restart; fixed. The monitor's
 per-run anchors reset at attach and detach. Narrow widths show whole
-clauses only. The tt-tnt harness's own output was NOT changed. Possible
-follow-up: emit one `Step: N, Loss: L, Time: T ms` line per step so the
-view can use trainer-reported times.
+clauses only.
+
+Follow-up: the tt-tnt harness change on branch `dazzle-me/tt-train` in the
+tt-tnt repo now prints one `Step: N, Loss: L, Time: T ms` line per step.
+tt-toplike reads it as a trainer-reported time (`StepAndMs`) with unknown
+cache growth. The LIVE cache row shows only when a cache count was reported.
 
 Process: brainstorming -> spec (docs/superpowers/specs/2026-10-01-
 training-tapestry-design.md) -> plan (docs/superpowers/plans/2026-10-01-
