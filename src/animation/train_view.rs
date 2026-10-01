@@ -1064,8 +1064,16 @@ impl TrainView {
         let phase = self.advance_pulse(pass.map(|(secs, _)| secs));
 
         // ── header ───────────────────────────────────────────────────
-        let header = if shown.is_empty() {
-            "STEP ANATOMY  no per-step times reported".to_string()
+        // The header is a title followed by clauses. Clauses are kept from
+        // the left while they fit whole; the first one that does not fit and
+        // every one after it are dropped, so a reading is never cut to a
+        // different number ("median 112" for "median 1125 ms"). The title is
+        // always drawn, clipped only when the band is narrower than the title.
+        let (title, clauses): (&str, Vec<String>) = if shown.is_empty() {
+            (
+                "STEP ANATOMY",
+                vec!["no per-step times reported".to_string()],
+            )
         } else {
             // Times polled from a progress bar are disclosed in the title so
             // they are never taken for ones the trainer printed.
@@ -1076,20 +1084,26 @@ impl TrainView {
             };
             let ms: Vec<f32> = shown.iter().map(|s| s.ms).collect();
             let med = median(&ms).unwrap_or(0.0);
-            let mut h = format!("{title}  last {n} steps · median {med:.0} ms");
-            // The pulse clause is atomic: it is appended only if the whole
-            // clause fits, so the "(max 5/s)" note is never cut off while
-            // "pulse = 1 step" is still shown.
-            let clause = match pass {
-                Some((_, true)) => " · pulse = 1 step (max 5/s)",
-                Some((_, false)) => " · pulse = 1 step",
-                None => "",
-            };
-            if h.chars().count() + clause.chars().count() <= w {
-                h.push_str(clause);
+            let mut clauses = vec![format!("last {n} steps"), format!("median {med:.0} ms")];
+            // One clause, so the "(max 5/s)" note is never shown apart from
+            // "pulse = 1 step".
+            match pass {
+                Some((_, true)) => clauses.push("pulse = 1 step (max 5/s)".to_string()),
+                Some((_, false)) => clauses.push("pulse = 1 step".to_string()),
+                None => {}
             }
-            h
+            (title, clauses)
         };
+        let mut header = title.to_string();
+        for (i, c) in clauses.iter().enumerate() {
+            // Two spaces after the title, a middle dot between clauses.
+            let sep = if i == 0 { "  " } else { " · " };
+            if header.chars().count() + sep.chars().count() + c.chars().count() > w {
+                break;
+            }
+            header.push_str(sep);
+            header.push_str(c);
+        }
         self.text(buf, x0, network_top, &Self::clip(&header, w), label, false);
 
         // ── step bars ────────────────────────────────────────────────
@@ -2709,6 +2723,56 @@ mod tests {
         }
         let out = text_of(&TrainView::new(120, 40).render(&st, &b));
         assert!(out.contains("STEP ANATOMY"), "{out}");
+    }
+
+    /// The header drops whole clauses from the right when the band is narrow.
+    /// A reading is never cut to a different number ("median 112" for
+    /// "median 1125 ms"), and the step count is never shown in part.
+    #[test]
+    fn the_header_drops_whole_clauses_and_never_cuts_a_reading() {
+        use crate::workload::train::StepTimeSource;
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        // `last N steps` with N all digits, if the header shows `last` at all.
+        let step_count_whole = |h: &str| -> bool {
+            match h.find("last ") {
+                None => true,
+                Some(i) => {
+                    let rest = &h[i + "last ".len()..];
+                    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+                    digits > 0 && rest[digits..].starts_with(" steps")
+                }
+            }
+        };
+        for (med, source) in [285u32, 1125]
+            .into_iter()
+            .flat_map(|m| [(m, StepTimeSource::Observed), (m, StepTimeSource::Reported)])
+        {
+            let mut st = live_state();
+            st.step_history = (1..=64u64).map(|i| sample_at(i, med as f32, 0)).collect();
+            st.step_seq = 64;
+            st.step = 64;
+            st.step_ms = med as f32;
+            st.step_time_source = source;
+            for w in 60..=134usize {
+                let rows = rows_of(&TrainView::new(w, 40).render(&st, &b));
+                let header = rows
+                    .iter()
+                    .find(|r| r.contains("STEP ANATOMY"))
+                    .unwrap_or_else(|| panic!("w={w}: no header"));
+                if header.contains("median") {
+                    assert!(
+                        header.contains(&format!("median {med} ms")),
+                        "w={w} med={med}: {header:?}"
+                    );
+                }
+                assert!(step_count_whole(header), "w={w} med={med}: {header:?}");
+                // Not vacuous: the widest terminal has room for the median.
+                if w == 134 {
+                    assert!(header.contains("median"), "w={w}: {header:?}");
+                }
+            }
+        }
     }
 
     /// Changing step_ms between frames must change the cursor's speed, not
