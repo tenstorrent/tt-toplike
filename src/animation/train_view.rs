@@ -29,7 +29,7 @@ use crate::animation::common::hsv_to_rgb;
 use crate::animation::inference_load::{fmt_bytes, fmt_elapsed, group_thousands};
 use crate::animation::train_sky::sky_cell;
 use crate::animation::train_tapestry::{
-    bar_cell, cause_of, median, pass_fraction, pass_secs, plan_band, BandWants, ChipHistory,
+    bar_cell, cause_of, advance_phase, median, pass_secs, plan_band, BandWants, ChipHistory,
     StepCause, AICLK_DROP_FRAC, LABEL_W, MAX_LANES,
 };
 use crate::models::Device;
@@ -276,6 +276,12 @@ pub struct TrainView {
     /// by `sample` during `render(&self, ...)`, so it is a `RefCell` for the
     /// same reason `cache_last` is a `Cell`.
     history: RefCell<ChipHistory>,
+    /// Pulse cursor position within its pass, `[0, 1)`. Accumulated across
+    /// frames so a change in step time alters the cursor's speed, not its
+    /// position (absolute-time phase jumped on every step-time update).
+    pulse_phase: StdCell<f32>,
+    /// The `frame` the phase was last advanced to.
+    pulse_frame: StdCell<u64>,
 }
 
 impl TrainView {
@@ -287,6 +293,8 @@ impl TrainView {
             cache_last: StdCell::new(0),
             cache_steady_ticks: StdCell::new(0),
             history: RefCell::new(ChipHistory::default()),
+            pulse_phase: StdCell::new(0.0),
+            pulse_frame: StdCell::new(0),
         }
     }
 
@@ -770,6 +778,23 @@ impl TrainView {
 
     /// Summed in+out PCIe bytes/sec across chips that report it, `None` when
     /// no chip does (only the sysfs/hybrid backends have these counters).
+    /// Advance the pulse phase to the current frame and return it, or `None`
+    /// when no step time is known (the phase is then left alone). Advances by
+    /// the frame delta, so repeated renders in one frame do not double-step.
+    fn advance_pulse(&self, secs: Option<f32>) -> Option<f32> {
+        let secs = secs?;
+        let frames = self.frame.saturating_sub(self.pulse_frame.get());
+        let phase = advance_phase(
+            self.pulse_phase.get(),
+            frames,
+            crate::animation::train_sky::ANIM_FPS,
+            secs,
+        );
+        self.pulse_phase.set(phase);
+        self.pulse_frame.set(self.frame);
+        Some(phase)
+    }
+
     fn pcie_total(backend: &dyn TelemetryBackend) -> Option<f64> {
         let mut any = false;
         let mut total = 0.0f64;
@@ -834,6 +859,10 @@ impl TrainView {
         let col0 = x_bars + (bar_w - n);
         let pass = pass_secs(st.step_ms);
 
+        // Advanced even when the grid row is not drawn, so the cursor does not
+        // jump when it reappears.
+        let phase = self.advance_pulse(pass.map(|(secs, _)| secs));
+
         // ── header ───────────────────────────────────────────────────
         let header = if shown.is_empty() {
             "STEP ANATOMY  no per-step times reported".to_string()
@@ -841,10 +870,16 @@ impl TrainView {
             let ms: Vec<f32> = shown.iter().map(|s| s.ms).collect();
             let med = median(&ms).unwrap_or(0.0);
             let mut h = format!("STEP ANATOMY  last {n} steps · median {med:.0} ms");
-            match pass {
-                Some((_, true)) => h.push_str(" · pulse = 1 step (drawn at 5/s max)"),
-                Some((_, false)) => h.push_str(" · pulse = 1 step"),
-                None => {}
+            // The pulse clause is atomic: it is appended only if the whole
+            // clause fits, so the "(max 5/s)" note is never cut off while
+            // "pulse = 1 step" is still shown.
+            let clause = match pass {
+                Some((_, true)) => " · pulse = 1 step (max 5/s)",
+                Some((_, false)) => " · pulse = 1 step",
+                None => "",
+            };
+            if h.chars().count() + clause.chars().count() <= w {
+                h.push_str(clause);
             }
             h
         };
@@ -895,9 +930,7 @@ impl TrainView {
             self.text(buf, x0, y, "pulse", dim, false);
             let gw = bar_w;
             let period = gw as f32 + SWEEP_TAIL + SWEEP_LEAD;
-            let head = pass.map(|(secs, _)| {
-                pass_fraction(self.frame, crate::animation::train_sky::ANIM_FPS, secs) * period
-            });
+            let head = phase.map(|p| p * period);
             let node_glyphs = ['●', '◉', '○', '◇', '·'];
             for c in 0..gw {
                 let lit = head.map(|h| sweep_at(h, c as f32, period)).unwrap_or(0.0);
@@ -2183,6 +2216,8 @@ mod tests {
         assert_eq!(wraps, 3, "three one-second passes in 180 frames at {fps} fps");
     }
 
+    use crate::animation::train_tapestry::pass_fraction;
+
     // ---- tapestry band -------------------------------------------------
 
     fn live_state() -> TrainState {
@@ -2266,12 +2301,71 @@ mod tests {
         st.step_history = (1..=10u64).map(|i| sample_at(i, 83.0, 0)).collect();
         st.step = 10;
         st.step_ms = 83.0;
-        let out = text_of(&TrainView::new(150, 40).render(&st, &b));
-        assert!(out.contains("pulse = 1 step (drawn at 5/s max)"), "{out}");
+        for w in [134usize, 150] {
+            let out = text_of(&TrainView::new(w, 40).render(&st, &b));
+            assert!(out.contains("pulse = 1 step (max 5/s)"), "w={w}\n{out}");
+        }
         st.step_ms = 400.0;
-        let out = text_of(&TrainView::new(150, 40).render(&st, &b));
-        assert!(out.contains("pulse = 1 step"), "{out}");
-        assert!(!out.contains("5/s max"), "{out}");
+        for w in [134usize, 150] {
+            let out = text_of(&TrainView::new(w, 40).render(&st, &b));
+            assert!(out.contains("pulse = 1 step"), "w={w}\n{out}");
+            assert!(!out.contains("5/s"), "w={w}\n{out}");
+        }
+    }
+
+    /// The pulse clause is all or nothing: the qualifier is never cut off
+    /// while the rest of the clause is shown.
+    #[test]
+    fn the_pulse_clause_is_never_shown_without_its_qualifier() {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.step_history = (1..=10u64).map(|i| sample_at(i, 83.0, 0)).collect();
+        st.step = 10;
+        st.step_ms = 83.0;
+        for w in 60..=134usize {
+            let out = text_of(&TrainView::new(w, 40).render(&st, &b));
+            if out.contains("pulse = 1 step") {
+                assert!(out.contains("pulse = 1 step (max 5/s)"), "w={w}\n{out}");
+            }
+        }
+        let out = text_of(&TrainView::new(120, 40).render(&st, &b));
+        assert!(out.contains("STEP ANATOMY"), "{out}");
+    }
+
+    /// Changing step_ms between frames must change the cursor's speed, not
+    /// its position. Absolute-time phase jumped by most of a pass.
+    #[test]
+    fn the_pulse_phase_is_continuous_across_step_time_changes() {
+        let mut v = TrainView::new(134, 40);
+        v.frame = 36000;
+        v.advance_pulse(Some(0.5));
+        let mut prev = v.advance_pulse(Some(0.5)).unwrap();
+        for (i, secs) in [0.505f32, 0.48, 0.5, 0.52].into_iter().enumerate() {
+            v.frame = 36001 + i as u64;
+            let cur = v.advance_pulse(Some(secs)).unwrap();
+            let d = (cur - prev).rem_euclid(1.0);
+            assert!(d < 0.05, "phase jumped {d:.3} in one frame");
+            prev = cur;
+        }
+        // Unknown step time leaves the phase alone.
+        let before = v.pulse_phase.get();
+        v.frame += 10;
+        assert_eq!(v.advance_pulse(None), None);
+        assert_eq!(v.pulse_phase.get(), before);
+    }
+
+    #[test]
+    fn the_pulse_phase_advances_at_the_step_rate_for_a_constant_step_time() {
+        let mut v = TrainView::new(134, 40);
+        v.advance_pulse(Some(1.0));
+        let start = v.pulse_phase.get();
+        // Two renders in the same frame must not advance it twice.
+        v.frame = 30;
+        v.advance_pulse(Some(1.0));
+        v.advance_pulse(Some(1.0));
+        let d = (v.pulse_phase.get() - start).rem_euclid(1.0);
+        assert!((d - 0.5).abs() < 1e-3, "30 frames of a 1 s pass: {d}");
     }
 
     /// Review Focus 2.

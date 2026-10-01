@@ -315,6 +315,17 @@ pub fn pass_fraction(frame: u64, fps: f32, pass_secs: f32) -> f32 {
     ((frame as f32 / fps) / pass_secs).fract()
 }
 
+/// Advance a pulse phase in `[0, 1)` by `frames` frames of a pass lasting
+/// `pass_secs`. Accumulating (rather than recomputing from absolute time)
+/// keeps the cursor where it is when the pass length changes: only its speed
+/// changes. An unusable `pass_secs` or `fps` leaves the phase alone.
+pub fn advance_phase(phase: f32, frames: u64, fps: f32, pass_secs: f32) -> f32 {
+    if !(pass_secs > 0.0) || !(fps > 0.0) {
+        return phase;
+    }
+    (phase + (frames as f32 / fps) / pass_secs).fract()
+}
+
 /// One chip's reading, taken when a new step was first seen.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChipSample {
@@ -656,5 +667,19 @@ mod tests {
         assert_eq!(h.note_tps(f32::NAN), 100.0);
         assert_eq!(h.note_pcie(2e9), 2e9);
         assert_eq!(h.note_pcie(1e9), 2e9);
+    }
+
+    #[test]
+    fn advance_phase_accumulates_wraps_and_ignores_bad_input() {
+        // 30 frames at 60 fps of a 1 s pass is half a pass.
+        assert!((advance_phase(0.0, 30, 60.0, 1.0) - 0.5).abs() < 1e-6);
+        // Wraps past 1.
+        assert!((advance_phase(0.75, 30, 60.0, 1.0) - 0.25).abs() < 1e-6);
+        // Changing the pass length mid-way keeps the position.
+        let p = advance_phase(0.0, 15, 60.0, 1.0);
+        assert!((advance_phase(p, 0, 60.0, 0.3) - p).abs() < 1e-6);
+        // Unusable inputs leave the phase alone.
+        assert_eq!(advance_phase(0.4, 10, 60.0, 0.0), 0.4);
+        assert_eq!(advance_phase(0.4, 10, 0.0, 1.0), 0.4);
     }
 }
