@@ -1033,22 +1033,28 @@ impl TrainView {
         let verdict = diagnosis
             .as_ref()
             .and_then(|d| Self::verdict_line(d, w).map(|t| (d.kind, t)));
-        let plan = plan_band(
-            network_h,
-            BandWants {
-                lanes: lane_devices.len(),
-                gauges: gauges.len(),
-                verdict: verdict.is_some(),
-                strip: !strip.is_empty(),
-            },
-        );
-
         // The newest `n` steps, right-aligned so the latest step is always at
         // the band's right edge and the lanes below share the same columns.
         let hist = &st.step_history;
         let bar_w = w.saturating_sub(LABEL_W + 1);
         let n = hist.len().min(bar_w);
         let shown = &hist[hist.len() - n..];
+        // A lane draws one cell per shown step, so with no step samples it
+        // would be a bare `chipN` label. Those rows go to the gauges and the
+        // strip instead.
+        let plan = plan_band(
+            network_h,
+            BandWants {
+                lanes: if shown.is_empty() {
+                    0
+                } else {
+                    lane_devices.len()
+                },
+                gauges: gauges.len(),
+                verdict: verdict.is_some(),
+                strip: !strip.is_empty(),
+            },
+        );
         let x_bars = x0 + LABEL_W;
         let col0 = x_bars + (bar_w - n);
         let pass = pass_secs(st.step_ms);
@@ -2631,7 +2637,10 @@ mod tests {
         assert!(bottom.matches('█').count() >= 31, "{bottom:?}");
     }
 
-    /// Review Focus 1.
+    /// A trainer that prints a loss but no per-step time: no bars, the pulse
+    /// still runs, and no lane rows are handed out, because a lane has no
+    /// column to draw without step samples. On a short terminal those rows go
+    /// to the gauges.
     #[test]
     fn a_trainer_with_no_per_step_times_gets_no_bars_but_keeps_the_pulse() {
         let mut b = MockBackend::new(2);
@@ -2646,6 +2655,20 @@ mod tests {
             "the grid backdrop still renders:
 {out}"
         );
+        // Three chips at 20 rows leave four band rows: with lanes granted,
+        // one bar row plus three label-only lanes would take them all.
+        let mut b3 = MockBackend::new(3);
+        b3.init().unwrap();
+        for h in [24usize, 20] {
+            let out = text_of(&TrainView::new(134, h).render(&st, &b3));
+            // "% TDP" is the power gauge's reading; the bare word "power"
+            // also appears in the legend ("chip power").
+            assert!(
+                out.contains("% TDP"),
+                "h={h} gauges keep their rows:\n{out}"
+            );
+            assert!(!out.contains("chip0"), "h={h} no samples, no lanes:\n{out}");
+        }
     }
 
     #[test]
