@@ -20,6 +20,29 @@ use std::time::{Duration, Instant, SystemTime};
 /// Loss samples retained for the mountain range.
 pub const LOSS_HISTORY: usize = 512;
 
+/// Per-step samples retained for the Training view's step-anatomy bars. One
+/// bar per column, so this is also the widest the bar chart can ever be.
+pub const STEP_HISTORY: usize = 64;
+
+/// One step as the trainer itself reported it.
+///
+/// Only trainer-reported step times become samples. A trainer that prints no
+/// time has its cadence derived from log timing (`note_step_progress`), which
+/// is an average over however many steps one poll happened to read. Storing
+/// that as a per-step bar would invent resolution, so such runs have no
+/// history at all and the view says so.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StepSample {
+    pub step: u64,
+    /// Wall time the trainer printed for this step, in milliseconds.
+    pub ms: f32,
+    /// How much the program cache grew on this step. Growth means kernels were
+    /// compiled, which is the usual reason one step is far slower than the rest.
+    pub cache_delta: u32,
+    /// A checkpoint was written while this was the latest step.
+    pub checkpoint: bool,
+}
+
 /// How long a checkpoint pulse stays lit, in poll ticks.
 const CKPT_PULSE_TICKS: u8 = 40;
 
@@ -37,6 +60,9 @@ pub struct TrainState {
     pub loss: Option<f32>,
     pub prev_loss: Option<f32>,
     pub loss_history: Vec<f32>,
+    /// The last [`STEP_HISTORY`] trainer-reported step times, oldest first.
+    /// Empty for trainers that print no per-step time.
+    pub step_history: Vec<StepSample>,
     pub step_ms: f32,
     pub cache_entries: u32,
     pub batch_size: u32,
@@ -84,8 +110,40 @@ impl TrainState {
                 }
             }
             TrainEvent::StepTime { ms, cache_entries } => {
+                // Growth is measured against the previous sample, so the first
+                // sample has no baseline. Without this guard, attaching to a
+                // run whose cache is already full would paint its first bar
+                // as a compile.
+                let cache_delta = if self.step_history.is_empty() {
+                    0
+                } else {
+                    cache_entries.saturating_sub(self.cache_entries)
+                };
                 self.step_ms = ms;
                 self.cache_entries = cache_entries;
+                let sample = StepSample {
+                    step: self.step,
+                    ms,
+                    cache_delta,
+                    checkpoint: false,
+                };
+                match self.step_history.last_mut() {
+                    // A second time line for the same step replaces the first
+                    // and keeps what the first already established.
+                    Some(last) if last.step == sample.step => {
+                        *last = StepSample {
+                            cache_delta: last.cache_delta.max(sample.cache_delta),
+                            checkpoint: last.checkpoint,
+                            ..sample
+                        };
+                    }
+                    _ => {
+                        self.step_history.push(sample);
+                        if self.step_history.len() > STEP_HISTORY {
+                            self.step_history.remove(0);
+                        }
+                    }
+                }
             }
             // Current tt-train packs all four fields onto one line; expand it
             // so both halves take exactly the paths the split shape does.
@@ -165,6 +223,16 @@ impl TrainState {
             return None;
         }
         Some((self.max_steps - self.step) as f32 * (self.step_ms / 1000.0))
+    }
+
+    /// A checkpoint was just written: start the pulse, remember the step, and
+    /// flag the latest step bar so the chart can mark it.
+    pub fn mark_checkpoint(&mut self) {
+        self.checkpoint_pulse = CKPT_PULSE_TICKS;
+        self.checkpoint_step = self.step;
+        if let Some(last) = self.step_history.last_mut() {
+            last.checkpoint = true;
+        }
     }
 }
 
@@ -804,8 +872,7 @@ impl TrainMonitor {
         }
         if let Some(w) = self.ckpt.as_mut() {
             if w.poll() {
-                self.state.checkpoint_pulse = CKPT_PULSE_TICKS;
-                self.state.checkpoint_step = self.state.step;
+                self.state.mark_checkpoint();
             }
         }
     }
@@ -1466,5 +1533,96 @@ mod tests {
         }
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod step_history_tests {
+    use super::*;
+
+    fn timed(step: u64, ms: f32, cache: u32) -> TrainEvent {
+        TrainEvent::StepAndTime {
+            step,
+            loss: 2.0,
+            ms,
+            cache_entries: cache,
+        }
+    }
+
+    #[test]
+    fn step_time_events_build_a_per_step_history() {
+        let mut st = TrainState::new();
+        st.apply_event(timed(1, 410.0, 8));
+        st.apply_event(timed(2, 395.0, 8));
+        st.apply_event(timed(3, 402.0, 8));
+        let got: Vec<(u64, f32)> = st.step_history.iter().map(|s| (s.step, s.ms)).collect();
+        assert_eq!(got, vec![(1, 410.0), (2, 395.0), (3, 402.0)]);
+    }
+
+    /// Review Focus 3. Attaching mid-run to a trainer whose program cache is
+    /// already full must not paint the first sample as a compile: there is no
+    /// earlier sample to measure growth against.
+    #[test]
+    fn the_first_sample_has_no_cache_baseline_so_it_is_never_a_compile() {
+        let mut st = TrainState::new();
+        st.apply_event(timed(900, 400.0, 64));
+        st.apply_event(timed(901, 400.0, 70));
+        st.apply_event(timed(902, 400.0, 70));
+        let deltas: Vec<u32> = st.step_history.iter().map(|s| s.cache_delta).collect();
+        assert_eq!(deltas, vec![0, 6, 0]);
+    }
+
+    #[test]
+    fn the_history_is_bounded() {
+        let mut st = TrainState::new();
+        for i in 1..=200u64 {
+            st.apply_event(timed(i, 400.0, 8));
+        }
+        assert_eq!(st.step_history.len(), STEP_HISTORY);
+        assert_eq!(st.step_history.last().unwrap().step, 200);
+        assert_eq!(st.step_history.first().unwrap().step, 200 - STEP_HISTORY as u64 + 1);
+    }
+
+    #[test]
+    fn a_second_time_line_for_the_same_step_replaces_rather_than_duplicates() {
+        let mut st = TrainState::new();
+        st.apply_event(timed(5, 400.0, 8));
+        st.apply_event(TrainEvent::StepTime {
+            ms: 450.0,
+            cache_entries: 8,
+        });
+        assert_eq!(st.step_history.len(), 1);
+        assert_eq!(st.step_history[0].ms, 450.0);
+    }
+
+    /// Review Focus 1. A trainer that prints only loss (bar-only harnesses,
+    /// or cadence derived from log timing) has no per-step times. The history
+    /// must stay empty rather than be filled from the derived average.
+    #[test]
+    fn loss_only_events_leave_the_history_empty() {
+        let mut st = TrainState::new();
+        for i in 1..=10u64 {
+            st.apply_event(TrainEvent::Step { step: i, loss: 2.0 });
+        }
+        assert!(st.step_history.is_empty());
+    }
+
+    #[test]
+    fn a_checkpoint_flags_the_latest_sample_and_starts_the_pulse() {
+        let mut st = TrainState::new();
+        st.apply_event(timed(7, 400.0, 8));
+        st.apply_event(timed(8, 400.0, 8));
+        st.mark_checkpoint();
+        assert!(!st.step_history[0].checkpoint);
+        assert!(st.step_history[1].checkpoint);
+        assert_eq!(st.checkpoint_step, 8);
+        assert_eq!(st.checkpoint_pulse, CKPT_PULSE_TICKS);
+    }
+
+    #[test]
+    fn a_checkpoint_with_no_history_still_pulses() {
+        let mut st = TrainState::new();
+        st.mark_checkpoint();
+        assert_eq!(st.checkpoint_pulse, CKPT_PULSE_TICKS);
     }
 }

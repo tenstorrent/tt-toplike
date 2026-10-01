@@ -22,7 +22,7 @@
 use super::config::TrainConfig;
 use super::detect::TrainProcess;
 use super::logsrc::LogSource;
-use super::monitor::{TrainState, LOSS_HISTORY};
+use super::monitor::{StepSample, TrainState, LOSS_HISTORY, STEP_HISTORY};
 
 /// Wall-clock seconds for one simulated step.
 const STEP_SECS: f32 = 1.0 / 12.0;
@@ -40,6 +40,22 @@ fn loss_at(step: u64) -> f32 {
     // Two incommensurate sine terms read as noise without being random.
     let wobble = (step as f32 * 0.7).sin() * 0.06 + (step as f32 * 0.13).sin() * 0.04;
     (base + wobble).max(0.05)
+}
+
+/// Program-cache entries after `step` steps: fills during the opening steps,
+/// then holds. Shared by the cache counter and the per-step compile marks so
+/// the two can never disagree.
+fn cache_at(step: u64) -> u32 {
+    64.min(8 + step as u32 / 6)
+}
+
+/// Wall time of one simulated step, in milliseconds. A smooth wobble gives the
+/// bars texture, and a step that grew the cache is slower, as a compile is.
+fn step_ms_at(step: u64) -> f32 {
+    let base = STEP_SECS * 1000.0;
+    let wobble = 1.0 + 0.12 * (step as f32 * 0.9).sin();
+    let compiled = step > 1 && cache_at(step) > cache_at(step - 1);
+    base * wobble * if compiled { 1.8 } else { 1.0 }
 }
 
 /// A deterministic stand-in for a live tt-train run.
@@ -102,7 +118,7 @@ impl MockTrainRun {
         st.scheduler = Some("cosine".into());
         // Kernel cache fills during the opening steps then goes quiet, which
         // is what drives the compiling -> steady shimmer.
-        st.cache_entries = 64.min(8 + step as u32 / 6);
+        st.cache_entries = cache_at(step);
         st.step = step;
 
         // Only the tail of the run is retained, exactly as the live path does.
@@ -110,6 +126,19 @@ impl MockTrainRun {
         st.loss_history = (first..=step).map(loss_at).collect();
         st.loss = Some(loss_at(step));
         st.prev_loss = (step > 1).then(|| loss_at(step - 1));
+
+        // Per-step times for the step-anatomy chart, derived from the same
+        // closed-form functions as everything else so a screenshot at t
+        // seconds is reproducible.
+        let first_step = step.saturating_sub(STEP_HISTORY as u64 - 1).max(1);
+        st.step_history = (first_step..=step)
+            .map(|s| StepSample {
+                step: s,
+                ms: step_ms_at(s),
+                cache_delta: if s > 1 { cache_at(s) - cache_at(s - 1) } else { 0 },
+                checkpoint: s >= SAVE_EVERY && s % SAVE_EVERY == 0,
+            })
+            .collect();
 
         st.checkpoint_step = step - (step % SAVE_EVERY);
         // Pulse for the handful of steps right after a save, so the comet
@@ -204,5 +233,24 @@ mod tests {
     fn loss_history_stays_bounded() {
         let st = MockTrainRun::new().state_at(10_000.0);
         assert!(st.loss_history.len() <= LOSS_HISTORY);
+    }
+
+    /// `--mock` has to carry every signal the step-anatomy chart draws:
+    /// compiles while the cache fills, a checkpoint, and per-step variation.
+    #[test]
+    fn a_mock_run_has_a_step_history_with_compiles_and_a_checkpoint() {
+        // 31 s is about step 371 (f32 rounding makes it 371, not 372): the
+        // 64-step window holds the cache still filling (growth stops at step
+        // 336) and the step-360 save.
+        let st = MockTrainRun::new().state_at(31.0);
+        assert_eq!(st.step_history.len(), crate::workload::train::STEP_HISTORY);
+        assert_eq!(st.step_history.last().unwrap().step, st.step);
+        assert!(st.step_history.iter().any(|s| s.cache_delta > 0));
+        assert!(st.step_history.iter().any(|s| s.checkpoint));
+        let ms: Vec<f32> = st.step_history.iter().map(|s| s.ms).collect();
+        let (lo, hi) = ms
+            .iter()
+            .fold((f32::MAX, 0.0f32), |(l, h), m| (l.min(*m), h.max(*m)));
+        assert!(hi > lo * 1.3, "bars need visible variation: {lo}..{hi}");
     }
 }
