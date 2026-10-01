@@ -109,6 +109,14 @@ pub struct TrainState {
     /// none has. Kept apart from `max_steps` so a chunked bar's total cannot
     /// replace it.
     pub stated_max_steps: u64,
+    /// The total shown by the last progress-bar update, 0 before the first.
+    pub last_bar_total: u64,
+    /// A line that carries both a step and a step time (`StepAndMs`,
+    /// `StepAndTime`) has been read. Its step is the trainer's own global
+    /// counter, so a bar no longer sets the step or adds a loss entry. A
+    /// time-only line (`StepTime`) does not set this: it has no step, so the
+    /// bar stays the step source.
+    pub step_from_reported_line: bool,
     pub step_ms: f32,
     pub cache_entries: u32,
     pub batch_size: u32,
@@ -231,6 +239,7 @@ impl TrainState {
             // A time with no cache count: record the step, then the time with
             // growth unknown and the cache count left as it was.
             TrainEvent::StepAndMs { step, loss, ms } => {
+                self.step_from_reported_line = true;
                 self.apply_event(TrainEvent::Step { step, loss });
                 self.note_reported_time(ms, None);
             }
@@ -242,6 +251,7 @@ impl TrainState {
                 ms,
                 cache_entries,
             } => {
+                self.step_from_reported_line = true;
                 self.apply_event(TrainEvent::Step { step, loss });
                 self.apply_event(TrainEvent::StepTime { ms, cache_entries });
             }
@@ -259,27 +269,30 @@ impl TrainState {
             TrainEvent::ModelConfigFile(_) => {}
             // A bar carries the step, its total and the loss together.
             //
-            // Three rules keep a bar from contradicting better sources:
+            // Rules that keep a bar from contradicting better sources:
             // * A bar step lower than the previous bar step is a restart for a
             //   new chunk, so `chunked_bar` is set here. The monitor's cadence
             //   derivation also detects it, but that derivation stops once the
             //   trainer prints its own step times.
-            // * The bar's total is used as the budget unless a `MaxSteps` or
-            //   `HarnessSummary` line stated one and the bar is known to be
-            //   chunked or a reported step is present. In those cases the
-            //   bar's total is a chunk size and the stated budget is kept.
-            // * Once the trainer has printed its own step time
-            //   (`step_time_source == Reported`), its `Step:` line is the
-            //   step counter and the loss source. The bar may count steps
-            //   within a chunk, so letting it set `step` would make the step
-            //   jump between the global and the chunk-local number, and its
-            //   loss would add a second entry per step to `loss_history`. The
-            //   bar then contributes the restart flag, and its total only
-            //   while no budget was stated. A trainer that reports progress
-            //   only through a bar never reaches `Reported`, so it keeps using
-            //   the bar for step and loss as before. A bar update read before
-            //   the first time line still sets the step and adds one loss
-            //   entry; the time line then sets the step again.
+            // * Once a line carrying both a step and a time has been read
+            //   (`step_from_reported_line`), that line is the step counter and
+            //   the loss source. The bar may count steps within a chunk, so
+            //   letting it set `step` would make the step jump between the
+            //   global and the chunk-local number, and its loss would add a
+            //   second entry per step to `loss_history`. The bar's total is
+            //   then used as the budget only when no budget was stated, the
+            //   bar has not restarted, and the total is at least the current
+            //   step. Otherwise the stated budget is kept, or the budget is 0
+            //   (unknown) when none was stated. A bar update read before the
+            //   first such line still sets the step and adds one loss entry;
+            //   the line then sets the step again.
+            // * Otherwise the bar is the step and loss source, as it always
+            //   was for bar-only trainers. A time-only `StepTime` line does
+            //   not change this, because it carries no step. The bar's total
+            //   is the budget unless the step is chunk-local (see
+            //   `step_is_chunk_local`) and a budget was stated, in which case
+            //   the stated budget is kept. The view and `eta_secs` show no
+            //   budget for a chunk-local step either way.
             TrainEvent::BarProgress {
                 step,
                 max_steps,
@@ -289,13 +302,21 @@ impl TrainState {
                     self.chunked_bar = true;
                 }
                 self.last_bar_step = Some(step);
-                let reported = self.step_time_source == StepTimeSource::Reported;
-                self.max_steps = if self.stated_max_steps > 0 && (self.chunked_bar || reported) {
-                    self.stated_max_steps
+                self.last_bar_total = max_steps;
+                if self.step_from_reported_line {
+                    self.max_steps = if self.stated_max_steps > 0 {
+                        self.stated_max_steps
+                    } else if !self.chunked_bar && max_steps >= self.step {
+                        max_steps
+                    } else {
+                        0
+                    };
                 } else {
-                    max_steps
-                };
-                if !reported {
+                    self.max_steps = if self.stated_max_steps > 0 && self.step_is_chunk_local() {
+                        self.stated_max_steps
+                    } else {
+                        max_steps
+                    };
                     self.apply_event(TrainEvent::Step { step, loss });
                 }
             }
@@ -343,7 +364,33 @@ impl TrainState {
         Some(self.batch_size as f32 * seq * accum * self.steps_per_sec())
     }
 
+    /// True when `step` counts steps within a chunk, so it cannot be set
+    /// against the run's budget: no percentage, no `step / budget` and no ETA
+    /// apply to it. That is the case when the step comes from a bar (or a
+    /// plain `Step:` line) and either the bar has restarted (`chunked_bar`)
+    /// or the bar's total is smaller than a stated budget. The second
+    /// condition makes the step chunk-local from the first bar, so the
+    /// display does not change at the first restart. A step taken from a
+    /// line that carries a step and a time (`step_from_reported_line`) is
+    /// the trainer's global counter and is never chunk-local.
+    ///
+    /// A resumed run whose bar counts only the remaining steps also has a
+    /// bar total below the budget, and is shown without the budget too.
+    pub fn step_is_chunk_local(&self) -> bool {
+        !self.step_from_reported_line
+            && (self.chunked_bar
+                || (self.stated_max_steps > 0
+                    && self.last_bar_total > 0
+                    && self.last_bar_total < self.stated_max_steps))
+    }
+
+    /// Seconds left in the run. `None` when the budget or step time is
+    /// unknown, or when the step is chunk-local (a chunk-relative ETA is not
+    /// the run's).
     pub fn eta_secs(&self) -> Option<f32> {
+        if self.step_is_chunk_local() {
+            return None;
+        }
         if self.max_steps == 0 || self.step_ms <= 0.0 || self.step >= self.max_steps {
             return None;
         }
@@ -2111,5 +2158,98 @@ mod step_and_ms_tests {
         assert_eq!(st.step, 2);
         assert_eq!(st.max_steps, 3195);
         assert_eq!(st.loss_history.len(), 4);
+    }
+
+    fn summary(max_steps: u64) -> TrainEvent {
+        TrainEvent::HarnessSummary {
+            max_steps,
+            batch_size: 8,
+            seq_len: 512,
+        }
+    }
+
+    /// The tt-tnt shape: a summary line states the run budget, and a bar
+    /// counts steps within a chunk and restarts every chunk. After the
+    /// restart the step is chunk-local, so no budget or ETA applies to it.
+    #[test]
+    fn a_bar_only_chunked_trainer_with_a_stated_budget_has_no_eta() {
+        let mut st = TrainState::new();
+        st.apply_event(summary(63906));
+        st.apply_event(bar(3195, 3195));
+        st.apply_event(bar(630, 3195));
+        st.step_ms = 285.0;
+        assert!(st.chunked_bar);
+        assert_eq!(st.step, 630, "the bar is the step source");
+        assert!(st.step_is_chunk_local());
+        assert_eq!(st.eta_secs(), None);
+    }
+
+    /// Before the first restart, a bar total smaller than the stated budget
+    /// already shows the bar counts something smaller than the run, so the
+    /// step is chunk-local from the first bar and the display does not
+    /// change at the restart.
+    #[test]
+    fn a_bar_smaller_than_the_stated_budget_is_chunk_local_before_any_restart() {
+        let mut st = TrainState::new();
+        st.apply_event(summary(63906));
+        st.apply_event(bar(630, 3195));
+        st.step_ms = 285.0;
+        assert!(!st.chunked_bar);
+        assert!(st.step_is_chunk_local());
+        assert_eq!(st.eta_secs(), None);
+    }
+
+    /// A bar whose total matches the stated budget (or with no budget
+    /// stated) is the run's own counter until it restarts: unchanged.
+    #[test]
+    fn a_bar_matching_the_budget_keeps_its_total_and_eta() {
+        for stated in [None, Some(3195u64)] {
+            let mut st = TrainState::new();
+            if let Some(v) = stated {
+                st.apply_event(summary(v));
+            }
+            st.apply_event(bar(630, 3195));
+            st.step_ms = 285.0;
+            assert!(!st.step_is_chunk_local(), "{stated:?}");
+            assert_eq!(st.max_steps, 3195);
+            assert!(st.eta_secs().is_some(), "{stated:?}");
+        }
+    }
+
+    /// The split `Full step time ... cache entries` line sets `Reported` but
+    /// carries no step or loss. With a bar beside it, the bar stays the step
+    /// and loss source.
+    #[test]
+    fn a_time_only_line_beside_a_bar_leaves_the_bar_as_the_step_source() {
+        let mut st = TrainState::new();
+        st.apply_event(bar(10, 100));
+        st.apply_event(TrainEvent::StepTime {
+            ms: 300.0,
+            cache_entries: 4,
+        });
+        st.apply_event(bar(11, 100));
+        st.apply_event(TrainEvent::StepTime {
+            ms: 300.0,
+            cache_entries: 4,
+        });
+        assert_eq!(st.step_time_source, StepTimeSource::Reported);
+        assert_eq!(st.step, 11, "the bar still advances the step");
+        assert_eq!(st.loss_history.len(), 2);
+        assert_eq!(st.step_history.len(), 2, "one sample per step");
+    }
+
+    /// Reported global steps, a chunked bar, and no stated budget: the
+    /// bar's total is a chunk size, so no budget is known.
+    #[test]
+    fn reported_steps_beside_a_chunk_bar_with_no_stated_budget_have_no_budget() {
+        let mut st = TrainState::new();
+        st.apply_event(line(25565, 285.0));
+        st.apply_event(bar(630, 3195));
+        assert_eq!(st.max_steps, 0, "a bar total below the step is no budget");
+        st.apply_event(bar(1, 3195));
+        assert!(st.chunked_bar);
+        assert_eq!(st.max_steps, 0);
+        assert_eq!(st.step, 25565);
+        assert_eq!(st.eta_secs(), None);
     }
 }

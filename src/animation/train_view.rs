@@ -659,7 +659,14 @@ impl TrainView {
             Some(LogSource::NotRedirected) => " auto-attached  stdout not redirected".to_string(),
             None => " scanning for log".to_string(),
         };
-        let right_w = if st.max_steps > 0 { 26 } else { 0 };
+        // A chunk-local step is shown alone: it has no place in the run's
+        // budget, so neither the total nor a percentage is drawn with it.
+        let chunk_local = st.step_is_chunk_local();
+        let right_w = if st.max_steps > 0 || chunk_local {
+            26
+        } else {
+            0
+        };
         let left_room = self.width.saturating_sub(right_w + 2);
         self.text(
             buf,
@@ -670,7 +677,11 @@ impl TrainView {
             false,
         );
 
-        if st.max_steps > 0 {
+        if chunk_local {
+            let step_str = format!("step {}", group_thousands(st.step as usize));
+            let sx = self.width.saturating_sub(step_str.chars().count() + 1);
+            self.text(buf, sx, 1, &step_str, bright, false);
+        } else if st.max_steps > 0 {
             let pct = (st.step as f64 / st.max_steps as f64 * 100.0).clamp(0.0, 100.0);
             let step_str = format!(
                 "step {} / {}  {pct:.1}%",
@@ -1033,10 +1044,14 @@ impl TrainView {
             st.config.learning_rate,
             st.scheduler.as_deref(),
             st.step,
-            // Once the bar has restarted its total is a chunk size, not the
-            // run's budget, so 0 (unknown) keeps the strip from claiming a
-            // schedule position it cannot know.
-            if st.chunked_bar { 0 } else { st.max_steps },
+            // Once the bar has restarted, or the step counts within a chunk,
+            // the step cannot be placed in the run's budget, so 0 (unknown)
+            // keeps the strip from claiming a schedule position.
+            if st.chunked_bar || st.step_is_chunk_local() {
+                0
+            } else {
+                st.max_steps
+            },
         );
         let strip = Self::fit_parts(&parts, w);
         let diagnosis = diagnose(&Readings {
@@ -2651,6 +2666,50 @@ mod tests {
         let out = text_of(&TrainView::new(160, 40).render(&st, &b));
         assert!(out.contains("cosine"), "{out}");
         assert!(!out.contains("% through"), "{out}");
+    }
+
+    /// A bar-only trainer whose summary states the run budget and whose bar
+    /// counts within a chunk. The header shows the chunk-local step with no
+    /// budget and no percentage, both before and after the bar restarts.
+    #[test]
+    fn a_chunk_local_step_is_shown_without_the_run_budget() {
+        use crate::workload::train::TrainEvent;
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let bar = |step: u64| TrainEvent::BarProgress {
+            step,
+            max_steps: 3195,
+            loss: 2.8,
+        };
+        let header_row = |st: &TrainState| -> String {
+            rows_of(&TrainView::new(134, 40).render(st, &b))
+                .into_iter()
+                .find(|r| r.contains("auto-attached"))
+                .expect("the second header row")
+        };
+        let mut st = live_state();
+        st.apply_event(TrainEvent::HarnessSummary {
+            max_steps: 63906,
+            batch_size: 8,
+            seq_len: 512,
+        });
+        st.step_ms = 285.0;
+        // Before any restart, then after one.
+        for (step, label) in [(3194u64, "before"), (630, "after")] {
+            st.apply_event(bar(step));
+            let row = header_row(&st);
+            let want = format!("step {}", group_thousands(step as usize));
+            assert!(row.contains(&want), "{label}: {row:?}");
+            assert!(
+                !row.contains("63,906") && !row.contains("3,195"),
+                "{label}: {row:?}"
+            );
+            assert!(
+                !row.contains('%') && !row.contains(" / "),
+                "{label}: {row:?}"
+            );
+        }
+        assert!(st.chunked_bar);
     }
 
     #[test]
