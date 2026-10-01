@@ -397,10 +397,6 @@ impl TrainView {
         }
     }
 
-    /// Truncate `s` to at most `w` characters — used everywhere a panel
-    /// column has a fixed width, so a long value never bleeds into its
-    /// neighbour (writes past the screen edge are already safe via `put`,
-    /// but this keeps adjacent *panels* from overlapping each other).
     /// The verdict row for a band `w` wide: the full text, else the text
     /// without its `host cpu` clause, else `None`. Never a prefix of either.
     fn verdict_line(d: &Diagnosis, w: usize) -> Option<String> {
@@ -428,6 +424,10 @@ impl TrainView {
         out
     }
 
+    /// Truncate `s` to at most `w` characters — used everywhere a panel
+    /// column has a fixed width, so a long value never bleeds into its
+    /// neighbour (writes past the screen edge are already safe via `put`,
+    /// but this keeps adjacent *panels* from overlapping each other).
     fn clip(s: &str, w: usize) -> String {
         s.chars().take(w).collect()
     }
@@ -2899,5 +2899,96 @@ mod tests {
             };
             assert_eq!(got, want, "w={w}");
         }
+    }
+
+    /// The `▸` verdict as rendered, at the view level, for a compute-bound
+    /// state with a cpu reading. At each width the drawn line is exactly the
+    /// full text, exactly the text without ", host cpu N%", or absent. This
+    /// guards the wiring in `draw_tapestry` (a clipped line, or a verdict row
+    /// reserved for a line that is not drawn, would fail it).
+    #[test]
+    fn the_rendered_verdict_is_whole_or_short_or_absent_at_every_width() {
+        use crate::animation::train_tapestry::{diagnose, Readings};
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        // The mock's power cannot be steered (it wanders and stays well under
+        // the compute-bound threshold), so a small test double replaces the
+        // one chip's telemetry with a fixed 58% of the mock's 120 W TDP.
+        struct Fixed {
+            inner: MockBackend,
+            telem: crate::models::Telemetry,
+        }
+        impl TelemetryBackend for Fixed {
+            fn init(&mut self) -> crate::error::BackendResult<()> {
+                self.inner.init()
+            }
+            fn update(&mut self) -> crate::error::BackendResult<()> {
+                self.inner.update()
+            }
+            fn devices(&self) -> &[Device] {
+                self.inner.devices()
+            }
+            fn telemetry(&self, _i: usize) -> Option<&crate::models::Telemetry> {
+                Some(&self.telem)
+            }
+            fn smbus_telemetry(&self, i: usize) -> Option<&crate::models::SmbusTelemetry> {
+                self.inner.smbus_telemetry(i)
+            }
+            fn backend_info(&self) -> String {
+                "fixed".into()
+            }
+        }
+        let mut telem = b.telemetry(0).unwrap().clone();
+        telem.power = Some(0.58 * 120.0);
+        let b = Fixed { inner: b, telem };
+        let probe = TrainView::new(134, 40);
+        let c = probe.busiest_chip(&b).unwrap();
+        let frac = c.power_w / c.tdp.expect("the mock reports a TDP");
+        assert!((0.57..0.59).contains(&frac), "{frac}");
+        let mut st = live_state();
+        st.host_cpu_pct = Some(120.0);
+        st.step_history = (1..=64u64).map(|i| sample_at(i, 100.0, 0)).collect();
+        st.step = 64;
+        st.step_ms = 100.0;
+        let d = diagnose(&Readings {
+            compiled_last_step: false,
+            busiest_tdp_frac: Some(frac),
+            host_cpu_pct: Some(120.0),
+        })
+        .unwrap();
+        assert!(d.text.ends_with("host cpu 120%") && d.short != d.text, "{d:?}");
+        let full = format!("▸ {}", d.text);
+        let short = format!("▸ {}", d.short);
+        let (mut saw_full, mut saw_short, mut saw_none) = (false, false, false);
+        for w in 20..=200usize {
+            let v = TrainView::new(w, 40);
+            let (x0, bw) = v.network_bounds();
+            let shown: Vec<String> = rows_of(&v.render(&st, &b))
+                .into_iter()
+                .filter_map(|r| {
+                    let chars: Vec<char> = r.chars().collect();
+                    (chars.get(x0) == Some(&'▸')).then(|| {
+                        chars[x0..chars.len().min(x0 + bw)].iter().collect::<String>().trim_end().to_string()
+                    })
+                })
+                .collect();
+            assert!(shown.len() <= 1, "w={w}: {shown:?}");
+            match shown.first() {
+                Some(l) if *l == full => saw_full = true,
+                Some(l) if *l == short => saw_short = true,
+                Some(l) => panic!("w={w} (band {bw}): verdict {l:?} is neither {full:?} nor {short:?}"),
+                None => saw_none = true,
+            }
+            // The rule itself: which one must appear at this band width.
+            let want = if full.chars().count() <= bw {
+                Some(&full)
+            } else if short.chars().count() <= bw {
+                Some(&short)
+            } else {
+                None
+            };
+            assert_eq!(shown.first(), want, "w={w} (band {bw})");
+        }
+        assert!(saw_full && saw_short && saw_none, "{saw_full} {saw_short} {saw_none}");
     }
 }
