@@ -2530,3 +2530,195 @@ git commit -m "v0.13.6: Training view tapestry band (step bars, chip lanes, gaug
 **Type consistency.** `StepSample { step, ms, cache_delta, checkpoint }` is defined in Task 1 and used with those fields in Tasks 2, 3 and 4. `plan_band(height, BandWants) -> BandPlan` and `BandWants::default()` match between Task 2 and Tasks 3 and 4. `ChipHistory::{record, sample_at, aiclk_max, note_tps, best_tps, note_pcie, best_pcie_bps}` are defined in Task 2 and used in Tasks 3 and 4 under the same names. `diagnose`, `Readings`, `DiagnosisKind` replace the spec's "verdict" naming consistently in code.
 
 **Known differences from the spec, all recorded in Task 5 Step 1:** the `checkpoint` field name, slope unit, TDP fallback for lane scale, busiest-chip meaning, pulse speed cap, and no PCIe gauge in `--mock`.
+
+---
+
+### Task 7: Read a step time that has no cache count
+
+Added after the tt-tnt follow-up. The tt-tnt harness (branch `dazzle-me/tt-train` in the tt-tnt repo) now writes one `Step: {absolute step}, Loss: {loss:.4f}, Time: {ms:.1f} ms` line per step when its output is a log. It has no program-cache count to report, and must not invent one. `parse_train_line` only returns a time when the line also carries `cache entries: N`, so today that line parses as a plain `Step` and the time is dropped.
+
+**Files:**
+- Modify: `src/workload/train/parse.rs` (`TrainEvent`, the `Step:` branch of `parse_train_line`, tests)
+- Modify: `src/workload/train/monitor.rs` (`apply_event`, the reported-time check in `poll`, tests)
+- Modify: `src/animation/train_view.rs` (`draw_live_stats` cache row, tests)
+- Modify: any other `match` on `TrainEvent` the compiler flags (adding a variant breaks exhaustive matches, including in tests)
+
+**Interfaces:**
+- Consumes: Task 1/5 `TrainState::apply_event`, the `StepTime` arm, `StepSample`, `StepTimeSource`, `step_seq`.
+- Produces:
+  - `TrainEvent::StepAndMs { step: u64, loss: f32, ms: f32 }`: a step line with a time and no cache count.
+  - `TrainState` records it as a trainer-reported sample with `cache_delta: 0` (growth unknown) and leaves `cache_entries` untouched.
+  - `fn is_reported_step_time(ev: &TrainEvent) -> bool` in `monitor.rs`: true for `StepTime`, `StepAndTime` and `StepAndMs`; `poll` uses it to set `saw_reported_step_time`.
+
+**Design rules:**
+- A trainer-printed time is reported, whether or not a cache count came with it: `step_time_source` is `Reported`, the title has no `(from bar)`, and `saw_reported_step_time` turns off the derived and bar-observed paths.
+- No cache count means growth is unknown. The sample carries `cache_delta: 0` and `cache_entries` keeps its value, so no bar is coloured as a compile and the LIVE panel is not told the cache holds 0 entries.
+- The LIVE panel shows its cache row only when a cache count has been reported (`cache_entries > 0`). Before this task a bar-only or Time-only trainer showed `cache 0 steady`, which states a count nobody reported.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `src/workload/train/parse.rs` tests:
+
+```rust
+    #[test]
+    fn a_step_line_with_a_time_and_no_cache_count_carries_the_time() {
+        let ev = parse_train_line("Step: 25565, Loss: 3.1367, Time: 285.0 ms").unwrap();
+        assert_eq!(
+            ev,
+            TrainEvent::StepAndMs { step: 25565, loss: 3.1367, ms: 285.0 }
+        );
+    }
+
+    #[test]
+    fn the_other_step_shapes_are_unchanged() {
+        assert!(matches!(
+            parse_train_line("Step: 2431, Loss: 1.8342, Time: 1124.5 ms, cache entries: 21"),
+            Some(TrainEvent::StepAndTime { step: 2431, cache_entries: 21, .. })
+        ));
+        assert!(matches!(
+            parse_train_line("Step: 7 Loss: 0.4213"),
+            Some(TrainEvent::Step { step: 7, .. })
+        ));
+        // A time that does not parse is dropped, not guessed.
+        assert!(matches!(
+            parse_train_line("Step: 8, Loss: 0.5, Time: soon ms"),
+            Some(TrainEvent::Step { step: 8, .. })
+        ));
+        // A cache count with no time is still a plain step.
+        assert!(matches!(
+            parse_train_line("Step: 9, Loss: 0.5, cache entries: 4"),
+            Some(TrainEvent::Step { step: 9, .. })
+        ));
+    }
+```
+
+In `src/workload/train/monitor.rs` add a test module `step_and_ms_tests`:
+
+```rust
+#[cfg(test)]
+mod step_and_ms_tests {
+    use super::*;
+
+    fn line(step: u64, ms: f32) -> TrainEvent {
+        TrainEvent::StepAndMs { step, loss: 2.0, ms }
+    }
+
+    #[test]
+    fn a_time_with_no_cache_count_is_a_reported_sample_with_unknown_growth() {
+        let mut st = TrainState::new();
+        st.cache_entries = 7; // an earlier reading must survive
+        st.apply_event(line(100, 285.0));
+        st.apply_event(line(101, 290.0));
+        assert_eq!(st.step, 101);
+        assert_eq!(st.step_ms, 290.0);
+        assert_eq!(st.cache_entries, 7, "no cache count was reported");
+        assert_eq!(st.step_time_source, StepTimeSource::Reported);
+        let got: Vec<(u64, u64, f32, u32)> = st
+            .step_history
+            .iter()
+            .map(|s| (s.step, s.seq, s.ms, s.cache_delta))
+            .collect();
+        assert_eq!(got, vec![(100, 1, 285.0, 0), (101, 2, 290.0, 0)]);
+    }
+
+    #[test]
+    fn a_trainer_that_prints_time_and_cache_still_measures_growth() {
+        let mut st = TrainState::new();
+        st.apply_event(TrainEvent::StepAndTime { step: 1, loss: 2.0, ms: 300.0, cache_entries: 8 });
+        st.apply_event(TrainEvent::StepAndTime { step: 2, loss: 2.0, ms: 300.0, cache_entries: 12 });
+        assert_eq!(st.step_history[1].cache_delta, 4);
+    }
+
+    #[test]
+    fn every_step_time_shape_counts_as_a_reported_time() {
+        assert!(is_reported_step_time(&line(1, 1.0)));
+        assert!(is_reported_step_time(&TrainEvent::StepTime { ms: 1.0, cache_entries: 1 }));
+        assert!(is_reported_step_time(&TrainEvent::StepAndTime {
+            step: 1, loss: 1.0, ms: 1.0, cache_entries: 1
+        }));
+        assert!(!is_reported_step_time(&TrainEvent::Step { step: 1, loss: 1.0 }));
+        assert!(!is_reported_step_time(&TrainEvent::MaxSteps(5)));
+    }
+}
+```
+
+In `src/animation/train_view.rs` tests:
+
+```rust
+    #[test]
+    fn the_live_panel_shows_a_cache_row_only_when_a_cache_count_was_reported() {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.step = 50;
+        st.cache_entries = 0;
+        let out = text_of(&TrainView::new(134, 40).render(&st, &b));
+        assert!(!out.contains("cache "), "no count reported, no row:\n{out}");
+        st.cache_entries = 21;
+        let out = text_of(&TrainView::new(134, 40).render(&st, &b));
+        assert!(out.contains("cache   21"), "{out}");
+    }
+```
+
+Run: `cargo test --lib parse:: 2>&1 | tail -15`
+Expected: compile errors (`StepAndMs`, `is_reported_step_time` not found).
+
+- [ ] **Step 2: Implement**
+
+`parse.rs`: add to `TrainEvent`:
+
+```rust
+    /// A step line with a wall time and no program-cache count. A trainer
+    /// that times its own steps but has no cache to report (the tt-tnt
+    /// harness, which drives ttml from Python) prints this shape.
+    StepAndMs {
+        step: u64,
+        loss: f32,
+        ms: f32,
+    },
+```
+and in `parse_train_line` change the final match to:
+
+```rust
+        return Some(match (ms, cache) {
+            (Some(ms), Some(cache_entries)) => TrainEvent::StepAndTime { step, loss, ms, cache_entries },
+            (Some(ms), None) => TrainEvent::StepAndMs { step, loss, ms },
+            _ => TrainEvent::Step { step, loss },
+        });
+```
+Update the doc comment above it to list the new shape (`Step: 25565, Loss: 3.1367, Time: 285.0 ms`) and the module header comment if it enumerates shapes.
+
+`monitor.rs`: refactor the `StepTime` arm body into a helper `fn note_reported_time(&mut self, ms: f32, cache_entries: Option<u32>)`:
+- with `Some(n)`: exactly today's behaviour (growth against the previous count, then update `cache_entries`);
+- with `None`: `cache_delta = 0`, `cache_entries` untouched;
+- both: set `step_ms`, `step_time_source = Reported`, push or replace the sample with the existing same-step and `seq` rules.
+`StepTime { ms, cache_entries }` calls `note_reported_time(ms, Some(cache_entries))`. Add the arm `TrainEvent::StepAndMs { step, loss, ms } => { self.apply_event(TrainEvent::Step { step, loss }); self.note_reported_time(ms, None); }`. Add `fn is_reported_step_time(ev: &TrainEvent) -> bool` (module level, `matches!` on the three variants) and use it in `poll` where the `StepTime | StepAndTime` arm sets `saw_reported_step_time`, so that arm covers `StepAndMs` too.
+
+`train_view.rs` `draw_live_stats`: wrap the cache row in `if st.cache_entries > 0 { ... }`. Keep the climbing/steady tracking (`cache_last`, `cache_steady_ticks`) updating as before so a count that appears later starts from the right baseline: update the cells whether or not the row is drawn. Update the comment to say why the row needs a reported count.
+
+Update every other `match` on `TrainEvent` the compiler flags (grep for `TrainEvent::StepAndTime` to find them) and the module docs in `parse.rs` and the `monitor.rs` doc for `saw_reported_step_time` if they list the shapes.
+
+- [ ] **Step 3: Run**
+
+Run: `cargo test --lib workload::train 2>&1 | tail -15` then `cargo test --lib animation 2>&1 | tail -15`
+Expected: all pass. If an existing test asserted `cache 0 steady` or a cache row with no count, update it minimally and list it in the report.
+
+- [ ] **Step 4: Make the new tests prove themselves**
+
+1. In `parse_train_line` change `(Some(ms), None) => TrainEvent::StepAndMs { .. }` to fall through to `Step`. Run `cargo test --lib a_step_line_with_a_time_and_no_cache_count`. Expected: FAIL. Restore.
+2. In `note_reported_time` make the `None` case set `cache_entries = 0`. Run `cargo test --lib a_time_with_no_cache_count_is_a_reported_sample`. Expected: FAIL. Restore.
+3. Remove `StepAndMs` from `is_reported_step_time`. Run `cargo test --lib every_step_time_shape_counts`. Expected: FAIL. Restore.
+4. Remove the `if st.cache_entries > 0` guard. Run `cargo test --lib the_live_panel_shows_a_cache_row_only`. Expected: FAIL. Restore.
+
+Re-run both suites and confirm green.
+
+- [ ] **Step 5: Docs**
+
+Update `docs/superpowers/specs/2026-10-01-training-tapestry-design.md`: in the bar-observed section add that a step line with a time and no cache count (`Step: N, Loss: L, Time: T ms`) is a trainer-reported time with unknown cache growth, and that the LIVE cache row needs a reported count. Add a short line to the `AGENTS.md` Phase entry for this release: the tt-tnt harness change on branch `dazzle-me/tt-train` in the tt-tnt repo now prints that line, and tt-toplike reads it. Update the `debian/changelog` 0.13.6 entry with one bullet (do not change the version). Apply the CLAUDE.md prose rules.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/workload/train/ src/animation/train_view.rs docs/superpowers/specs/ AGENTS.md debian/changelog
+git commit -m "feat: read a trainer-reported step time that has no cache count"
+```
