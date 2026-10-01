@@ -283,6 +283,12 @@ pub struct TrainView {
     pulse_phase: StdCell<f32>,
     /// The `frame` the phase was last advanced to.
     pulse_frame: StdCell<u64>,
+    /// `(pid, attach time)` of the run `history` belongs to. The view lives
+    /// across runs (it is rebuilt only on resize), and a new run's sample
+    /// sequence number need not go down: two runs with no samples both sit
+    /// at 0, and a backlog read at attach can start the new run at the old
+    /// run's last number. `sample` clears `history` when this changes.
+    run_id: StdCell<Option<(i32, Option<std::time::Instant>)>>,
 }
 
 /// One gauge row cell: a label, a fill fraction and the reading in words.
@@ -314,6 +320,7 @@ impl TrainView {
             history: RefCell::new(ChipHistory::default()),
             pulse_phase: StdCell::new(0.0),
             pulse_frame: StdCell::new(0),
+            run_id: StdCell::new(None),
         }
     }
 
@@ -800,9 +807,17 @@ impl TrainView {
         }
     }
 
-    /// Record this frame's chip readings against the current step, and fold
-    /// tokens/sec and PCIe throughput into their best-so-far values.
+    /// Record this frame's chip readings against the run's current sample
+    /// sequence number, and fold tokens/sec and PCIe throughput into their
+    /// best-so-far values. A new run (another pid or attach time) first
+    /// clears everything recorded for the previous one. `ChipHistory::record`
+    /// also clears on a lower sequence number, which remains as a fallback.
     fn sample(&self, st: &TrainState, backend: &dyn TelemetryBackend) {
+        let id = st.proc.as_ref().map(|p| (p.pid, st.first_seen));
+        if self.run_id.get() != id {
+            *self.history.borrow_mut() = ChipHistory::default();
+            self.run_id.set(id);
+        }
         // A chip with no telemetry is not sampled, so it never gets a lane.
         let chips: Vec<(usize, f32, u32)> = backend
             .devices()
@@ -2990,6 +3005,76 @@ mod tests {
         st.step_ms = 200.0; // half the rate
         let out = text_of(&v.render(&st, &b));
         assert!(out.contains("50% of best"), "{out}");
+    }
+
+    /// A state for a run attached at `first_seen` with process `pid`, with a
+    /// tokens/sec reading from `step_ms`.
+    fn run_state(pid: i32, first_seen: std::time::Instant, step_ms: f32) -> TrainState {
+        let mut st = live_state();
+        if let Some(p) = st.proc.as_mut() {
+            p.pid = pid;
+        }
+        st.first_seen = Some(first_seen);
+        st.config.max_sequence_length = Some(256);
+        st.batch_size = 8;
+        st.step_ms = step_ms;
+        st
+    }
+
+    /// The view outlives a run. A new run (another pid and attach time) must
+    /// start with empty chip history and bests even when its sample sequence
+    /// number does not go down: here run B's backlog is read at attach, so
+    /// its first frame is already at sequence number 5, the same as run A's
+    /// last.
+    #[test]
+    fn a_new_run_starts_with_empty_lanes_and_bests_through_the_same_view() {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let v = TrainView::new(134, 40);
+        let t0 = std::time::Instant::now();
+        let history: Vec<_> = (1..=5u64).map(|i| sample_at(i, 100.0, 0)).collect();
+
+        let mut a = run_state(100, t0, 100.0);
+        a.step_history = history.clone();
+        for seq in 1..=5u64 {
+            a.step_seq = seq;
+            a.step = seq;
+            v.render(&a, &b);
+        }
+
+        // Half run A's rate, so a carried-over best would read 50%.
+        let mut run_b = run_state(200, t0 + std::time::Duration::from_secs(1), 200.0);
+        run_b.step_history = history;
+        run_b.step_seq = 5;
+        run_b.step = 5;
+        let rows = rows_of(&v.render(&run_b, &b));
+        let lane = rows
+            .iter()
+            .find(|r| r.contains("chip0"))
+            .expect("a lane for chip 0");
+        assert_eq!(
+            lane.matches(NO_SAMPLE).count(),
+            4,
+            "run A's samples must not fill run B's columns: {lane:?}"
+        );
+        let out = rows.join("\n");
+        assert!(out.contains("100% of best"), "{out}");
+    }
+
+    /// Two runs that never produce a step sample both stay at sequence
+    /// number 0, so only the run identity can tell them apart.
+    #[test]
+    fn a_new_run_with_no_samples_does_not_inherit_the_best_tokens_per_sec() {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let v = TrainView::new(134, 40);
+        let t0 = std::time::Instant::now();
+        v.render(&run_state(100, t0, 100.0), &b);
+        let mut run_b = run_state(200, t0 + std::time::Duration::from_secs(1), 200.0);
+        v.render(&run_b, &b);
+        run_b.step_seq = 1;
+        let out = text_of(&v.render(&run_b, &b));
+        assert!(out.contains("100% of best"), "{out}");
     }
 
     #[test]

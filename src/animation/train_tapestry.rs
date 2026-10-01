@@ -342,20 +342,24 @@ pub fn advance_phase(phase: f32, frames: u64, fps: f32, pass_secs: f32) -> f32 {
     (phase + (frames as f32 / fps) / pass_secs).fract()
 }
 
-/// One chip's reading, taken when a new step was first seen.
+/// One chip's reading, taken when the view first saw a new step sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChipSample {
-    pub step: u64,
+    /// The run's sample sequence number (`TrainState::step_seq`) this
+    /// reading belongs to, matched against `StepSample::seq`. A step number
+    /// can repeat after a progress bar restarts, so it is not used as the key.
+    pub seq: u64,
     pub power_w: f32,
     pub aiclk_mhz: u32,
 }
 
-/// Chip readings keyed by training step, plus best-so-far values for the
-/// gauges. Samples are taken when the view first sees each step, so they are
-/// close to, not exactly at, the moment the step line was written.
+/// Chip readings keyed by the run's sample sequence number, plus best-so-far
+/// values for the gauges. A reading is taken when the view first sees each
+/// sequence number, so it is close to the moment the step was recorded, but
+/// not exactly at it.
 #[derive(Debug, Default)]
 pub struct ChipHistory {
-    last_step: Option<u64>,
+    last_seq: Option<u64>,
     rings: BTreeMap<usize, VecDeque<ChipSample>>,
     aiclk_max: BTreeMap<usize, u32>,
     best_tps: f32,
@@ -363,22 +367,31 @@ pub struct ChipHistory {
 }
 
 impl ChipHistory {
-    /// Record `(device index, power W, aiclk MHz)` for every chip at `step`.
-    /// A repeat of the same step is ignored. A step lower than the last one
-    /// means a new run restarted the counter, so everything is cleared:
-    /// old samples must not appear as the new run's lanes.
-    pub fn record(&mut self, step: u64, chips: &[(usize, f32, u32)]) {
-        if let Some(prev) = self.last_step {
-            if step < prev {
+    /// Record `(device index, power W, aiclk MHz)` for every chip at sample
+    /// sequence number `seq` (`TrainState::step_seq`). The sequence number
+    /// rises by one per recorded step sample and does not go down when a
+    /// progress bar restarts. A repeat of the same number is ignored. A lower
+    /// number can only come from a new run, so everything is cleared and old
+    /// samples never appear as the new run's lanes. (The view also clears
+    /// the history when the run's identity changes, which covers a new run
+    /// whose number does not go down.)
+    ///
+    /// Call `record` before `note_tps`/`note_pcie` each frame, because a
+    /// reset here clears the bests too. `record(seq, &[])` still marks `seq`
+    /// as seen, so a later call with the same number and some chips is
+    /// ignored.
+    pub fn record(&mut self, seq: u64, chips: &[(usize, f32, u32)]) {
+        if let Some(prev) = self.last_seq {
+            if seq < prev {
                 *self = Self::default();
-            } else if step == prev {
+            } else if seq == prev {
                 return;
             }
         }
         for &(idx, power_w, aiclk_mhz) in chips {
             let ring = self.rings.entry(idx).or_default();
             ring.push_back(ChipSample {
-                step,
+                seq,
                 power_w,
                 aiclk_mhz,
             });
@@ -388,15 +401,17 @@ impl ChipHistory {
             let m = self.aiclk_max.entry(idx).or_insert(0);
             *m = (*m).max(aiclk_mhz);
         }
-        self.last_step = Some(step);
+        self.last_seq = Some(seq);
     }
 
-    pub fn sample_at(&self, idx: usize, step: u64) -> Option<ChipSample> {
+    /// The reading for chip `idx` at sample sequence number `seq`, if the
+    /// view saw that number while the chip reported telemetry.
+    pub fn sample_at(&self, idx: usize, seq: u64) -> Option<ChipSample> {
         self.rings
             .get(&idx)?
             .iter()
             .rev()
-            .find(|s| s.step == step)
+            .find(|s| s.seq == seq)
             .copied()
     }
 
@@ -647,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn chip_samples_are_found_by_step_and_a_repeat_step_is_ignored() {
+    fn chip_samples_are_found_by_sequence_number_and_a_repeat_is_ignored() {
         let mut h = ChipHistory::default();
         h.record(1, &[(0, 50.0, 1000), (1, 60.0, 1000)]);
         h.record(2, &[(0, 55.0, 1000), (1, 65.0, 1000)]);
@@ -658,9 +673,10 @@ mod tests {
         assert_eq!(h.sample_at(7, 1), None);
     }
 
-    /// Review Focus 5. A restarted step counter is a new run.
+    /// A lower sample sequence number can only come from a new run, so it
+    /// clears the old samples, the aiclk maximum and the bests.
     #[test]
-    fn a_restarted_step_counter_clears_old_samples_and_bests() {
+    fn a_lower_sequence_number_clears_old_samples_and_bests() {
         let mut h = ChipHistory::default();
         h.record(500, &[(0, 80.0, 1200)]);
         h.note_tps(9000.0);
@@ -679,7 +695,7 @@ mod tests {
         for step in 1..=200u64 {
             h.record(step, &[(0, 50.0, 900 + (step % 3) as u32 * 100)]);
         }
-        assert_eq!(h.sample_at(0, 200).unwrap().step, 200);
+        assert_eq!(h.sample_at(0, 200).unwrap().seq, 200);
         assert_eq!(h.sample_at(0, 100), None, "old samples are dropped");
         assert_eq!(h.aiclk_max(0), 1100);
     }
