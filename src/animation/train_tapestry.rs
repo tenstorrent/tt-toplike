@@ -206,6 +206,11 @@ pub struct Diagnosis {
     pub kind: DiagnosisKind,
     /// Names the readings that triggered it, so the reason can be checked.
     pub text: String,
+    /// `text` without the trailing `, host cpu N%` clause, for a band too
+    /// narrow for the full line. Equal to `text` when there is no such clause
+    /// to drop (a compile verdict has none, and a host-bound verdict is
+    /// decided by the cpu reading so it is shown whole or not at all).
+    pub short: String,
 }
 
 /// A one-line verdict from plain thresholds, or `None` when the readings are
@@ -216,6 +221,7 @@ pub fn diagnose(r: &Readings) -> Option<Diagnosis> {
         return Some(Diagnosis {
             kind: DiagnosisKind::Compiling,
             text: "compiling - the program cache grew on the latest step".to_string(),
+            short: "compiling - the program cache grew on the latest step".to_string(),
         });
     }
     let frac = r.busiest_tdp_frac?;
@@ -227,16 +233,19 @@ pub fn diagnose(r: &Readings) -> Option<Diagnosis> {
         return Some(Diagnosis {
             kind: DiagnosisKind::ComputeBound,
             text: format!("compute-bound - busiest chip at {:.0}% of TDP{cpu}", frac * 100.0),
+            short: format!("compute-bound - busiest chip at {:.0}% of TDP", frac * 100.0),
         });
     }
     let cpu = r.host_cpu_pct?;
     if frac < HOST_BOUND_TDP_FRAC && cpu > HOST_BOUND_CPU_PCT {
+        let text = format!(
+            "host-bound - busiest chip at {:.0}% of TDP, host cpu {cpu:.0}%",
+            frac * 100.0
+        );
         return Some(Diagnosis {
             kind: DiagnosisKind::HostBound,
-            text: format!(
-                "host-bound - busiest chip at {:.0}% of TDP, host cpu {cpu:.0}%",
-                frac * 100.0
-            ),
+            short: text.clone(),
+            text,
         });
     }
     None

@@ -30,7 +30,7 @@ use crate::animation::inference_load::{fmt_bytes, fmt_elapsed, group_thousands};
 use crate::animation::train_sky::sky_cell;
 use crate::animation::train_tapestry::{
     bar_cell, cause_of, advance_phase, convergence_parts, diagnose, median, pass_secs, plan_band,
-    BandWants, ChipHistory, DiagnosisKind, Readings, StepCause, AICLK_DROP_FRAC, LABEL_W,
+    BandWants, ChipHistory, Diagnosis, DiagnosisKind, Readings, StepCause, AICLK_DROP_FRAC, LABEL_W,
     MAX_LANES,
 };
 use crate::models::Device;
@@ -401,6 +401,33 @@ impl TrainView {
     /// column has a fixed width, so a long value never bleeds into its
     /// neighbour (writes past the screen edge are already safe via `put`,
     /// but this keeps adjacent *panels* from overlapping each other).
+    /// The verdict row for a band `w` wide: the full text, else the text
+    /// without its `host cpu` clause, else `None`. Never a prefix of either.
+    fn verdict_line(d: &Diagnosis, w: usize) -> Option<String> {
+        [&d.text, &d.short]
+            .into_iter()
+            .map(|t| format!("▸ {t}"))
+            .find(|t| t.chars().count() <= w)
+    }
+
+    /// The leading `parts` that fit in `w` columns whole, joined by two
+    /// spaces. Order is kept; the first part that does not fit and every part
+    /// after it is dropped, never cut. Empty when not even the first fits.
+    fn fit_parts(parts: &[String], w: usize) -> String {
+        let mut out = String::new();
+        for p in parts {
+            let add = if out.is_empty() { 0 } else { 2 } + p.chars().count();
+            if out.chars().count() + add > w {
+                break;
+            }
+            if !out.is_empty() {
+                out.push_str("  ");
+            }
+            out.push_str(p);
+        }
+        out
+    }
+
     fn clip(s: &str, w: usize) -> String {
         s.chars().take(w).collect()
     }
@@ -432,7 +459,7 @@ impl TrainView {
         (show_model, show_live)
     }
 
-    /// `(x0, w)` of the tapestry band (step bars, grid, chip lanes) — the space between whichever side
+    /// `(x0, w)` of the tapestry band (header, step bars, grid, chip lanes, gauges, diagnosis line, convergence strip) — the space between whichever side
     /// panels are actually being drawn (see `panel_fit`).
     fn network_bounds(&self) -> (usize, usize) {
         let (show_model, show_live) = self.panel_fit();
@@ -855,8 +882,14 @@ impl TrainView {
     }
 
     /// The gauges that have a source, in display order. A gauge with no
-    /// source is absent, not drawn empty.
-    fn gauges(&self, st: &TrainState, backend: &dyn TelemetryBackend) -> Vec<Gauge> {
+    /// source is absent, not drawn empty. `busiest` is computed once per frame
+    /// by the caller so the gauges and the diagnosis describe the same chip.
+    fn gauges(
+        &self,
+        st: &TrainState,
+        backend: &dyn TelemetryBackend,
+        busiest: Option<&Busiest>,
+    ) -> Vec<Gauge> {
         let hist = self.history.borrow();
         let mut out = Vec::new();
         if let Some(tps) = st.tokens_per_sec() {
@@ -869,7 +902,7 @@ impl TrainView {
                 });
             }
         }
-        if let Some(chip) = self.busiest_chip(backend) {
+        if let Some(chip) = busiest {
             if let Some(tdp) = chip.tdp {
                 out.push(Gauge {
                     label: "power",
@@ -923,9 +956,12 @@ impl TrainView {
         self.text(buf, cx, y, &Self::clip(&g.text, room), Color::Rgb(210, 230, 220), false);
     }
 
-    /// The tapestry band: step bars, grid backdrop and chip lanes, drawn only
-    /// from `st.step_history`, the measured step time and chip telemetry. A
-    /// layer whose signal is missing is left out.
+    /// The tapestry band: step bars, grid backdrop, chip lanes, hardware
+    /// gauges, a one-line diagnosis and a convergence strip, drawn only from
+    /// `st.step_history`, the measured step time, chip telemetry, the loss
+    /// history and the run config. A layer whose signal is missing is left
+    /// out. Text layers (gauges, diagnosis, strip) show whole clauses or
+    /// nothing: a clause that does not fit the band is dropped, never cut.
     fn draw_tapestry(
         &self,
         buf: &mut [Vec<Cell>],
@@ -947,7 +983,17 @@ impl TrainView {
             .filter(|d| backend.telemetry(d.index).is_some())
             .take(MAX_LANES)
             .collect();
-        let gauges = self.gauges(st, backend);
+        let busiest = self.busiest_chip(backend);
+        let mut gauges = self.gauges(st, backend, busiest.as_ref());
+        // Gauge cells are two per row; the left one is `w / 2` wide and the
+        // right one the rest, each minus a one-column gap. A gauge is kept
+        // only if its label and whole reading fit in the narrower cell, so
+        // a reading is never cut ("10" for "1043 MHz") and no label is drawn
+        // without its value.
+        let gauge_cell = (w / 2).saturating_sub(1);
+        gauges.retain(|g| LABEL_W + g.text.chars().count() <= gauge_cell);
+        // The convergence strip keeps whole leading clauses only; later
+        // clauses that do not fit are dropped, never cut.
         let parts = convergence_parts(
             &st.loss_history,
             st.config.learning_rate,
@@ -955,7 +1001,7 @@ impl TrainView {
             st.step,
             st.max_steps,
         );
-        let busiest = self.busiest_chip(backend);
+        let strip = Self::fit_parts(&parts, w);
         let diagnosis = diagnose(&Readings {
             compiled_last_step: st.step_history.last().map(|s| s.cache_delta > 0).unwrap_or(false),
             busiest_tdp_frac: busiest
@@ -963,13 +1009,18 @@ impl TrainView {
                 .and_then(|b| b.tdp.map(|t| b.power_w / t)),
             host_cpu_pct: st.host_cpu_pct,
         });
+        // The verdict is shown whole, or without its `host cpu` clause, or
+        // not at all; a reading is never cut mid-number.
+        let verdict = diagnosis
+            .as_ref()
+            .and_then(|d| Self::verdict_line(d, w).map(|t| (d.kind, t)));
         let plan = plan_band(
             network_h,
             BandWants {
                 lanes: lane_devices.len(),
                 gauges: gauges.len(),
-                verdict: diagnosis.is_some(),
-                strip: !parts.is_empty(),
+                verdict: verdict.is_some(),
+                strip: !strip.is_empty(),
             },
         );
 
@@ -1140,26 +1191,19 @@ impl TrainView {
         y += plan.gauge_rows;
 
         // ── diagnosis ────────────────────────────────────────────────
-        if let (true, Some(d)) = (plan.verdict_row, diagnosis.as_ref()) {
-            let color = match d.kind {
+        if let (true, Some((kind, line))) = (plan.verdict_row, verdict.as_ref()) {
+            let color = match kind {
                 DiagnosisKind::Compiling => BAR_COMPILE,
                 DiagnosisKind::ComputeBound => Color::Rgb(111, 171, 160),
                 DiagnosisKind::HostBound => BAR_CHECKPOINT,
             };
-            self.text(buf, x0, y, &Self::clip(&format!("▸ {}", d.text), w), color, false);
+            self.text(buf, x0, y, line, color, false);
             y += 1;
         }
 
         // ── convergence strip ────────────────────────────────────────
         if plan.strip_row {
-            self.text(
-                buf,
-                x0,
-                y,
-                &Self::clip(&parts.join("  "), w),
-                Color::Rgb(190, 200, 220),
-                false,
-            );
+            self.text(buf, x0, y, &strip, Color::Rgb(190, 200, 220), false);
         }
     }
 
@@ -2728,7 +2772,7 @@ mod tests {
         st.scheduler = Some("cosine".into());
         st.max_steps = 100;
         st.step = 41;
-        // 160 columns leaves the band about 96 wide; the full strip is 85 to 90.
+        // 160 columns leaves the band 100 wide; the full strip is 85 to 90.
         let out = text_of(&TrainView::new(160, 40).render(&st, &b));
         assert!(out.contains("↘"), "{out}");
         assert!(out.contains("base lr 3.0e-4"), "{out}");
@@ -2737,5 +2781,123 @@ mod tests {
         st.loss_history = (0..120).map(|i| 1.0 + 0.01 * i as f32).collect();
         let out = text_of(&TrainView::new(160, 40).render(&st, &b));
         assert!(out.contains("↗") && !out.contains("↘"), "{out}");
+    }
+
+    /// At every width a gauge label that is drawn has its whole reading in
+    /// the same cell. A reading cut to "10" (of "1043 MHz") or a label with
+    /// no reading at all would state something the signal does not say.
+    #[test]
+    fn a_drawn_gauge_always_shows_its_whole_reading() {
+        let mut b = MockBackend::new(2);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.step_history = (1..=64u64).map(|i| sample_at(i, 100.0, 0)).collect();
+        st.step = 64;
+        st.step_ms = 100.0;
+        st.config.max_sequence_length = Some(256);
+        st.batch_size = 8;
+        let mut gauges_seen = 0;
+        for w in 20..=134usize {
+            let v = TrainView::new(w, 40);
+            v.render(&st, &b);
+            let (x0, bw) = v.network_bounds();
+            let half = bw / 2;
+            let cells = [(x0, half.saturating_sub(1)), (x0 + half, (bw - half).saturating_sub(1))];
+            for row in rows_of(&v.render(&st, &b)) {
+                let chars: Vec<char> = row.chars().collect();
+                for (start, cw) in cells {
+                    if chars.len() < start + LABEL_W {
+                        continue;
+                    }
+                    let head: String = chars[start..start + LABEL_W].iter().collect();
+                    let suffix = match head.as_str() {
+                        "aiclk " => "MHz",
+                        "power " => "% TDP",
+                        "tok/s " => "of best",
+                        _ => continue,
+                    };
+                    gauges_seen += 1;
+                    let cell: String = chars[start..chars.len().min(start + cw)].iter().collect();
+                    assert!(cell.contains(suffix), "w={w}: gauge cell {cell:?} lacks its reading: {row:?}");
+                }
+            }
+        }
+        assert!(gauges_seen > 100, "the sweep must actually meet gauges: {gauges_seen}");
+    }
+
+    /// A strip clause that is shown is whole at every width: the shown parts
+    /// are exactly a leading run of what `convergence_parts` returned.
+    #[test]
+    fn the_convergence_strip_never_cuts_a_clause() {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.loss_history = (0..120).map(|i| 5.0 - 0.01 * i as f32).collect();
+        st.config.learning_rate = Some(3.0e-4);
+        st.scheduler = Some("cosine".into());
+        st.max_steps = 100;
+        st.step = 41;
+        let parts = convergence_parts(
+            &st.loss_history,
+            st.config.learning_rate,
+            st.scheduler.as_deref(),
+            st.step,
+            st.max_steps,
+        );
+        assert!(parts.len() >= 3, "{parts:?}");
+        let mut shown_counts = std::collections::BTreeSet::new();
+        for w in 20..=200usize {
+            let v = TrainView::new(w, 40);
+            let (x0, bw) = v.network_bounds();
+            for row in rows_of(&v.render(&st, &b)) {
+                let chars: Vec<char> = row.chars().collect();
+                // The strip row starts with the first part's arrow.
+                if chars.len() <= x0 || !(parts[0].chars().next() == Some(chars[x0])) {
+                    continue;
+                }
+                let cell: String = chars[x0..chars.len().min(x0 + bw)].iter().collect();
+                let cell = cell.trim_end();
+                if !cell.starts_with(parts[0].as_str()) {
+                    continue;
+                }
+                // It must be a whole leading run of the parts.
+                let k = (1..=parts.len())
+                    .find(|k| parts[..*k].join("  ") == cell)
+                    .unwrap_or_else(|| panic!("w={w}: strip {cell:?} is not whole leading parts of {parts:?}"));
+                shown_counts.insert(k);
+            }
+        }
+        // The sweep passes through every part count that can occur (not just
+        // all or none), so the dropping path is exercised.
+        assert!(shown_counts.len() >= 2, "{shown_counts:?}");
+        for w in [134usize, 100] {
+            let out = text_of(&TrainView::new(w, 40).render(&st, &b));
+            assert!(!out.contains("cosi\n") && !out.contains("lr 3.0\n"), "{out}");
+        }
+    }
+
+    #[test]
+    fn the_verdict_drops_its_cpu_clause_before_it_would_cut_a_reading() {
+        use crate::animation::train_tapestry::{diagnose, Readings};
+        let d = diagnose(&Readings {
+            compiled_last_step: false,
+            busiest_tdp_frac: Some(0.58),
+            host_cpu_pct: Some(120.0),
+        })
+        .unwrap();
+        let full = format!("▸ {}", d.text);
+        let short = format!("▸ {}", d.short);
+        assert!(full.ends_with("host cpu 120%") && !short.contains("host cpu"), "{full} / {short}");
+        for w in 0..=full.chars().count() + 2 {
+            let got = TrainView::verdict_line(&d, w);
+            let want = if w >= full.chars().count() {
+                Some(full.clone())
+            } else if w >= short.chars().count() {
+                Some(short.clone())
+            } else {
+                None
+            };
+            assert_eq!(got, want, "w={w}");
+        }
     }
 }
