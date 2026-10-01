@@ -15,6 +15,7 @@ pub use bench::BenchResult;
 pub mod chip_portrait;
 pub mod perf;
 pub use perf::PerfMeter;
+pub(crate) mod reset_status;
 pub mod throttle;
 pub use throttle::ThrottleState;
 mod hivemind_view;
@@ -673,15 +674,22 @@ fn run_app(
     // `SnakeWorld` each tick and hands it the terminal at render time.
     let mut snake = crate::animation::Snake::new();
 
-    // Reset-takeover detection + animation (opt-in via `--reset-takeover` or
-    // the equivalent config-file key). `reset_detector` tracks at most one
-    // in-flight `tt-smi -r` invocation; `takeover` is the animation
-    // (drawn in a centered box over a full-screen tint) currently playing for it (HivemindSweeper mode never
-    // populates `takeover` — it injects a real feed event instead).
-    let reset_takeover_enabled = cli.reset_takeover
-        || crate::config::load_config_overrides()
-            .reset_takeover
-            .unwrap_or(false);
+    // `tt-smi -r` reset handling, chosen by `--tt-smi-reset-behavior` (or the
+    // `tt_smi_reset_behavior` config key; default `inform`). `ignore` never
+    // runs the detector. `inform` shows the status-bar segment. `dazzle`
+    // and `demo` add a takeover animation (drawn in a centered box over a
+    // full-screen tint). `demo` behaves like `dazzle` until its sequencer
+    // exists. HivemindSweeper never gets a takeover; it injects a real feed
+    // event instead. `reset_detector` tracks at most one in-flight
+    // `tt-smi -r`; `reset_status` is the status-bar segment's state, which
+    // follows the real pid on its own (see `reset_status`).
+    let reset_behavior = crate::cli::resolve_reset_behavior(
+        cli.tt_smi_reset_behavior,
+        crate::config::load_config_overrides()
+            .tt_smi_reset_behavior
+            .as_deref(),
+    );
+    let mut reset_status: Option<reset_status::ResetStatus> = None;
     let mut reset_detector = crate::workload::reset_detect::ResetDetector::new();
     let mut takeover: Option<crate::animation::takeover::Takeover> = None;
     // Time-since-last-tick source for `takeover.tick()` — deliberately its
@@ -1254,6 +1262,9 @@ fn run_app(
             }
             last_takeover_tick = Instant::now();
 
+            // Status-bar reset segment for this frame (None once expired).
+            let reset_seg = reset_status.as_ref().and_then(|st| st.text(Instant::now()));
+
             let draw_start = Instant::now();
             terminal
                 .draw(|f| {
@@ -1361,6 +1372,7 @@ fn run_app(
                         perf_arg,
                         throttle_hint,
                         serve_hint,
+                        reset_seg.as_ref(),
                     );
 
                     // ── Command bar overlay (all modes) ───────────────────────
@@ -2381,25 +2393,33 @@ fn run_app(
         if last_proc_rows_update.elapsed() >= Duration::from_secs(2) {
             host_proc_monitor.update();
 
-            // ── Reset takeover detection (opt-in, `--reset-takeover`) ──────
-            if reset_takeover_enabled {
+            // ── `tt-smi -r` detection (`--tt-smi-reset-behavior`) ─────────
+            // Reuses this 2-second process scan; `ignore` skips it entirely.
+            if reset_behavior.detects() {
                 let reset_procs = host_proc_monitor.processes_snapshot();
-                if let Some(ev) = reset_detector.observe(&reset_procs, backend.devices()) {
-                    if display_mode == DisplayMode::HivemindSweeper {
-                        if let Some(h) = hivemind.as_mut() {
-                            h.inject_reset(
-                                format!(
-                                    "tt-smi -r: {} chip(s) targeted{}",
-                                    ev.chip_count,
-                                    if ev.is_full { " (all)" } else { "" }
-                                ),
-                                &ev.device_indices,
-                            );
-                        }
-                        reset_detector.clear(); // no takeover to wait for
-                    } else {
-                        takeover = Some(crate::animation::takeover::pick_takeover(ev));
+                let outcome = reset_status::scan_resets(
+                    reset_behavior,
+                    display_mode == DisplayMode::HivemindSweeper,
+                    &mut reset_detector,
+                    &mut reset_status,
+                    &reset_procs,
+                    backend.devices(),
+                    Instant::now(),
+                );
+                if let Some(ev) = outcome.feed_event_for {
+                    if let Some(h) = hivemind.as_mut() {
+                        h.inject_reset(
+                            format!(
+                                "tt-smi -r: {} chip(s) targeted{}",
+                                ev.chip_count,
+                                if ev.is_full { " (all)" } else { "" }
+                            ),
+                            &ev.device_indices,
+                        );
                     }
+                }
+                if let Some(ev) = &outcome.takeover_for {
+                    takeover = Some(crate::animation::takeover::pick_takeover(ev));
                 }
                 if reset_detector.is_finished(&reset_procs) {
                     if let Some(t) = takeover.as_mut() {
@@ -2857,8 +2877,13 @@ fn ui_arcade(f: &mut Frame, arcade: &ArcadeVisualization, backend: &dyn Telemetr
 
 /// Global status bar — 1 raw row at the absolute bottom of every view.
 ///
-/// Left zone: uniform hotkey strip (all modes).  When in Insights, three
-/// Insights-specific keys are appended after the separator.
+/// Left zone, in order: the `tt-smi -r` reset segment (only while a reset is
+/// tracked, see [`reset_status`]), the uniform hotkey strip (all modes; three
+/// Insights-specific keys are appended in that mode), then the perf, throttle
+/// and serve hints. When the zone does not fit beside the right zone, whole
+/// hotkey groups are dropped from the right, then hint groups
+/// ([`reset_status::fit_left_zone`]). A group is never cut mid-label and the
+/// reset segment is never cut: it shrinks to its short form or is hidden.
 /// Right zone: per-chip telemetry with fixed-width columns so that a value
 /// incrementing from 99 → 100 never shifts the next chip's label.
 ///
@@ -2873,6 +2898,7 @@ fn render_global_statusbar(
     perf: Option<&str>,
     throttle_hint: Option<&str>,
     serve_hint: Option<&str>,
+    reset_seg: Option<&reset_status::ResetSegment>,
 ) {
     use crate::models::telemetry::parse_hex_or_dec;
 
@@ -2901,53 +2927,32 @@ fn render_global_statusbar(
     let key = |s: &'static str| Span::styled(s, key_style);
     let pipe = || Span::styled("  │  ", Style::default().fg(sep_fg));
 
-    let mut left: Vec<Span> = vec![
-        Span::raw(" "),
-        key(" v "),
-        lbl(" cycle"),
-        pipe(),
-        key(" a "),
-        lbl(" arcade"),
-        pipe(),
-        key(" d "),
-        lbl(" defrag"),
-        pipe(),
-        key(" l "),
-        lbl(" legend"),
-        pipe(),
-        key(" ? "),
-        lbl(" help"),
-        pipe(),
-        key(" ! "),
-        lbl(" explain"),
-        pipe(),
-        key(" / "),
-        lbl(" cmd"),
-        pipe(),
-        key(" q "),
-        lbl(" quit"),
+    // Each hotkey group is one `key label` unit; groups are joined by `pipe()`.
+    let mut hotkeys: Vec<Vec<Span>> = vec![
+        vec![key(" v "), lbl(" cycle")],
+        vec![key(" a "), lbl(" arcade")],
+        vec![key(" d "), lbl(" defrag")],
+        vec![key(" l "), lbl(" legend")],
+        vec![key(" ? "), lbl(" help")],
+        vec![key(" ! "), lbl(" explain")],
+        vec![key(" / "), lbl(" cmd")],
+        vec![key(" q "), lbl(" quit")],
     ];
 
     // Insights-specific nav appended when in that mode.
     if matches!(mode, DisplayMode::Insights) {
-        left.push(pipe());
-        left.push(Span::styled(
-            "↑↓",
-            Style::default().fg(colors::rgb(220, 220, 220)),
-        ));
-        left.push(lbl(" nav"));
-        left.push(pipe());
-        left.push(Span::styled(
-            "K",
-            Style::default().fg(colors::rgb(255, 100, 100)),
-        ));
-        left.push(lbl(" destroy"));
-        left.push(pipe());
-        left.push(Span::styled(
-            "k",
-            Style::default().fg(colors::rgb(220, 180, 80)),
-        ));
-        left.push(lbl(" silence"));
+        hotkeys.push(vec![
+            Span::styled("↑↓", Style::default().fg(colors::rgb(220, 220, 220))),
+            lbl(" nav"),
+        ]);
+        hotkeys.push(vec![
+            Span::styled("K", Style::default().fg(colors::rgb(255, 100, 100))),
+            lbl(" destroy"),
+        ]);
+        hotkeys.push(vec![
+            Span::styled("k", Style::default().fg(colors::rgb(220, 180, 80))),
+            lbl(" silence"),
+        ]);
     }
 
     // ── Right zone: per-chip telemetry ────────────────────────────────────
@@ -3060,35 +3065,84 @@ fn render_global_statusbar(
         right.push(Span::raw(" "));
     }
 
-    // Optional perf readout (toggled by `P`), dim, between hotkeys and telemetry.
+    // Hint groups after the hotkeys: optional perf readout (toggled by `P`,
+    // dim), throttle status (e.g. "⏷30" or "⏸2", dim), and the `/serve`
+    // indicator (`◉ serving :PORT · N clients`), bright since an active
+    // publisher is broadcasting this box's telemetry over the LAN.
+    let mut hints: Vec<Vec<Span>> = Vec::new();
     if let Some(p) = perf {
-        left.push(Span::styled("  │  ", Style::default().fg(sep_fg)));
-        left.push(Span::styled(
+        hints.push(vec![Span::styled(
             p.to_string(),
             Style::default().fg(colors::rgb(120, 120, 140)),
-        ));
+        )]);
     }
-
-    // Throttle status hint (e.g. "⏷30" or "⏸2") shown dim when active.
     if let Some(hint) = throttle_hint {
-        left.push(Span::styled("  │  ", Style::default().fg(sep_fg)));
-        left.push(Span::styled(
+        hints.push(vec![Span::styled(
             hint.to_string(),
             Style::default().fg(colors::rgb(100, 100, 120)),
-        ));
+        )]);
     }
-
-    // `/serve` indicator (`◉ serving :PORT · N clients`), shown bright (not
-    // dim like the hints above) since an active publisher is broadcasting
-    // this box's telemetry over the LAN — worth staying visible at a glance.
     if let Some(hint) = serve_hint {
-        left.push(Span::styled("  │  ", Style::default().fg(sep_fg)));
-        left.push(Span::styled(
+        hints.push(vec![Span::styled(
             hint.to_string(),
             Style::default()
                 .fg(colors::rgb(120, 220, 140))
                 .add_modifier(Modifier::BOLD),
-        ));
+        )]);
+    }
+
+    // ── Fit the left zone beside the right zone ───────────────────────────
+    let group_w =
+        |g: &Vec<Span>| -> usize { g.iter().map(|s| reset_status::text_width(&s.content)).sum() };
+    let right_w: usize = right
+        .iter()
+        .map(|s| reset_status::text_width(&s.content))
+        .sum();
+    let hotkey_ws: Vec<usize> = hotkeys.iter().map(group_w).collect();
+    let hint_ws: Vec<usize> = hints.iter().map(group_w).collect();
+    let fit = reset_status::fit_left_zone(
+        area.width as usize,
+        right_w,
+        reset_seg.map(|g| {
+            (
+                reset_status::text_width(&g.text),
+                reset_status::text_width(&g.short),
+            )
+        }),
+        &hotkey_ws,
+        &hint_ws,
+    );
+
+    // The reset segment comes first, in brand teal while resetting and brand
+    // green once done.
+    let mut items: Vec<Vec<Span>> = Vec::new();
+    if let Some(g) = reset_seg {
+        let text = match fit.segment {
+            reset_status::SegmentFit::Full => Some(g.text.clone()),
+            reset_status::SegmentFit::Short => Some(g.short.clone()),
+            reset_status::SegmentFit::Hidden => None,
+        };
+        if let Some(text) = text {
+            let fg = if g.done {
+                colors::rgb(0x6F, 0xAB, 0xA0)
+            } else {
+                colors::rgb(0x74, 0xC5, 0xDF)
+            };
+            items.push(vec![Span::styled(
+                text,
+                Style::default().fg(fg).add_modifier(Modifier::BOLD),
+            )]);
+        }
+    }
+    items.extend(hotkeys.into_iter().take(fit.hotkeys));
+    items.extend(hints.into_iter().take(fit.hints));
+
+    let mut left: Vec<Span> = vec![Span::raw(" ")];
+    for (i, item) in items.into_iter().enumerate() {
+        if i > 0 {
+            left.push(pipe());
+        }
+        left.extend(item);
     }
 
     left.extend(right);
@@ -9945,5 +9999,231 @@ mod stats_sidebar_tests {
             text.contains("1 uncorr") && text.contains("4 corr"),
             "expected the packed sums (1 uncorr · 4 corr); got {text:?}"
         );
+    }
+}
+
+/// Rendering tests for the global status bar's `tt-smi -r` segment: where it
+/// sits, how it shares the row with the hotkeys and chip telemetry, and that
+/// nothing is ever cut mid-label.
+#[cfg(test)]
+mod reset_statusbar_tests {
+    use super::reset_status::ResetSegment;
+    use super::*;
+    use crate::backend::mock::MockBackend;
+    use crate::backend::TelemetryBackend;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// Hotkey groups as `(key, label)`, in draw order (non-Insights modes).
+    const GROUPS: [(&str, &str); 8] = [
+        ("v", "cycle"),
+        ("a", "arcade"),
+        ("d", "defrag"),
+        ("l", "legend"),
+        ("?", "help"),
+        ("!", "explain"),
+        ("/", "cmd"),
+        ("q", "quit"),
+    ];
+
+    fn seg(done: bool) -> ResetSegment {
+        if done {
+            ResetSegment {
+                text: "✓ tt-smi -r done".into(),
+                short: "✓ tt-smi -r done".into(),
+                done: true,
+            }
+        } else {
+            ResetSegment {
+                text: "⟳ tt-smi -r · all chips · resetting".into(),
+                short: "⟳ tt-smi -r · resetting".into(),
+                done: false,
+            }
+        }
+    }
+
+    fn backend() -> MockBackend {
+        let mut b = MockBackend::new(2);
+        b.init().expect("mock init");
+        b.update().expect("mock update");
+        b
+    }
+
+    /// Draws the bar into a `width` x 3 terminal and returns the bottom row
+    /// as text plus the foreground colour of its first non-space cell.
+    fn draw_bar(
+        b: &MockBackend,
+        width: u16,
+        seg: Option<&ResetSegment>,
+        hints: bool,
+    ) -> (String, Option<ratatui::style::Color>) {
+        let mut term = Terminal::new(TestBackend::new(width, 3)).expect("terminal");
+        term.draw(|f| {
+            render_global_statusbar(
+                f,
+                b,
+                DisplayMode::Grid,
+                hints.then_some("12.0fps"),
+                hints.then_some("⏷30"),
+                hints.then_some("◉ serving :8080 · 2 clients"),
+                seg,
+            )
+        })
+        .expect("draw");
+        let buf = term.backend().buffer();
+        let row = u16::try_from(buf.area.height - 1).unwrap();
+        let mut text = String::new();
+        let mut fg = None;
+        for x in 0..buf.area.width {
+            let c = &buf[(x, row)];
+            if fg.is_none() && c.symbol() != " " {
+                fg = Some(c.fg);
+            }
+            text.push_str(c.symbol());
+        }
+        (text, fg)
+    }
+
+    /// The chip telemetry as drawn on a very wide bar (everything fits).
+    fn telemetry(b: &MockBackend) -> String {
+        let (wide, _) = draw_bar(b, 400, None, false);
+        let d = &b.devices()[0];
+        let label = format!("{}{}", d.architecture.abbrev(), d.index);
+        let at = wide.find(&label).expect("chip label on a wide bar");
+        wide[at..].trim_end().to_string()
+    }
+
+    fn collapse(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    const WIDTHS: [u16; 6] = [20, 40, 60, 80, 100, 134];
+
+    #[test]
+    fn segment_is_whole_or_absent_at_every_width() {
+        let b = backend();
+        for hints in [false, true] {
+            for done in [false, true] {
+                for w in WIDTHS {
+                    let s = seg(done);
+                    let (row, _) = draw_bar(&b, w, Some(&s), hints);
+                    if row.contains("tt-smi") {
+                        assert!(
+                            row.contains(&s.text) || row.contains(&s.short),
+                            "w={w} hints={hints} done={done}: partial segment in {row:?}"
+                        );
+                    }
+                    assert!(row.chars().count() >= w as usize);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn segment_appears_first_and_shows_in_full_when_there_is_room() {
+        let b = backend();
+        let s = seg(false);
+        let (row, _) = draw_bar(&b, 134, Some(&s), false);
+        let at_seg = row.find(&s.text).expect("full segment at 134");
+        let at_first_key = row.find(" cycle").unwrap_or(usize::MAX);
+        assert!(
+            at_seg < at_first_key,
+            "segment must precede the hotkeys: {row:?}"
+        );
+        assert!(row.trim_start().starts_with("⟳ tt-smi -r"), "{row:?}");
+    }
+
+    #[test]
+    fn segment_is_drawn_in_teal_while_resetting_and_green_when_done() {
+        let b = backend();
+        let (_, fg) = draw_bar(&b, 134, Some(&seg(false)), false);
+        assert_eq!(fg, Some(colors::rgb(0x74, 0xC5, 0xDF)));
+        let (_, fg) = draw_bar(&b, 134, Some(&seg(true)), false);
+        assert_eq!(fg, Some(colors::rgb(0x6F, 0xAB, 0xA0)));
+    }
+
+    #[test]
+    fn hotkey_groups_are_dropped_whole_never_cut() {
+        let b = backend();
+        for seg_on in [false, true] {
+            for hints in [false, true] {
+                for w in WIDTHS {
+                    let s = seg(false);
+                    let (row, _) = draw_bar(&b, w, seg_on.then_some(&s), hints);
+                    for chunk in row.split('│') {
+                        let words: Vec<&str> = chunk.split_whitespace().collect();
+                        if let Some((k, l)) = GROUPS.iter().find(|(k, _)| words.first() == Some(k))
+                        {
+                            assert_eq!(
+                                collapse(chunk),
+                                format!("{k} {l}"),
+                                "w={w} seg={seg_on} hints={hints}: cut group in {row:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn segment_displaces_hotkeys_from_the_right() {
+        // Pick the exact width at which hotkeys plus telemetry just fit; the
+        // segment then has to push the last hotkey groups out.
+        let b = backend();
+        let (wide, _) = draw_bar(&b, 400, None, false);
+        let w = u16::try_from(wide.trim_end().chars().count() + 1).unwrap();
+        let (without, _) = draw_bar(&b, w, None, false);
+        assert!(without.contains(" quit"), "{without:?}");
+        let (with, _) = draw_bar(&b, w, Some(&seg(false)), false);
+        assert!(
+            with.contains("⟳ tt-smi -r · all chips · resetting"),
+            "{with:?}"
+        );
+        assert!(
+            !with.contains(" quit"),
+            "quit should have been dropped: {with:?}"
+        );
+        assert!(with.contains(" cycle"), "leftmost group stays: {with:?}");
+    }
+
+    #[test]
+    fn chip_telemetry_is_unchanged_by_the_segment() {
+        let b = backend();
+        let tele = telemetry(&b);
+        for w in [100u16, 134] {
+            let (plain, _) = draw_bar(&b, w, None, false);
+            let (with, _) = draw_bar(&b, w, Some(&seg(false)), false);
+            assert!(plain.contains(&tele), "w={w} plain {plain:?}");
+            assert!(with.contains(&tele), "w={w} with {with:?}");
+        }
+    }
+
+    #[test]
+    fn telemetry_survives_whenever_it_fits_at_all() {
+        let b = backend();
+        let tele = telemetry(&b);
+        let tele_w = reset_status::text_width(&tele);
+        for hints in [false, true] {
+            for w in WIDTHS {
+                if (w as usize) < tele_w + 1 {
+                    continue;
+                }
+                let (row, _) = draw_bar(&b, w, Some(&seg(false)), hints);
+                assert!(row.contains(&tele), "w={w} hints={hints}: {row:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn very_narrow_widths_do_not_panic() {
+        let b = backend();
+        for w in [1u16, 2, 3, 5, 8, 12] {
+            for hints in [false, true] {
+                draw_bar(&b, w, Some(&seg(false)), hints);
+                draw_bar(&b, w, Some(&seg(true)), hints);
+                draw_bar(&b, w, None, hints);
+            }
+        }
     }
 }

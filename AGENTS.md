@@ -488,8 +488,9 @@ Prompt: "when we detect a `tt-smi -r` has been run... show a full screen
 takeover animation" — a BBS sysop interrupt, a 1024-Blackholes swarm, a Lost
 hatch countdown, Missile Command, a classic Trek reset screen, or (weighted
 toward subset resets) a quiet notification, chosen at random and scoped by
-whether the reset targets all chips or a subset. Opt-in only
-(`--reset-takeover`), off by default. HivemindSweeper gets a distinct
+whether the reset targets all chips or a subset. It began as an opt-in
+flag (`--reset-takeover`), since replaced by `--tt-smi-reset-behavior` (see
+the entry below). HivemindSweeper gets a distinct
 treatment instead of a takeover: the reset is injected as a real feed event
 (`EventKind::Reset`) rather than an interruption of the one view whose whole
 purpose is watching real signals.
@@ -602,3 +603,24 @@ interior (`takeover_interior`) is 71x22 at full size, because ratatui gives
 the title its own row. Quiet Notice, Blackhole Swarm, Missile Command and Fail
 Whale size their art from the interior. BBS shows only the newest chip lines
 once the list would pass 22 rows. Trek (36x20) and Hatch (17x9) already fit.
+
+### `--tt-smi-reset-behavior` (Oct 1, 2026)
+
+Prompt: "I feel like the --command for the tt-smi reset isn't obvious. can we
+get a --tt-smi-reset-behavior setting instead. `ignore` or `inform` or
+`dazzle`. inform incorporates it into the status bar of each view. inform is
+default. dazzle is what we've now made more or less. and then there's also
+`demo`..."
+
+`--reset-takeover` and its config key are gone (never released). The setting
+is `--tt-smi-reset-behavior <ignore|inform|dazzle|demo>` (config key
+`tt_smi_reset_behavior`, flag wins, default `inform`; `ResetBehavior` and
+`resolve_reset_behavior` in `src/cli.rs`). `ignore` never runs the detector.
+`inform` and up show a status-bar segment in every view: `⟳ tt-smi -r ·
+{scope} · resetting`, then `✓ tt-smi -r done` for 10 seconds. `dazzle` adds
+the takeover. `demo` behaves like `dazzle` until its sequencer is added.
+State and per-scan decisions live in `src/ui/tui/reset_status.rs`. The
+segment follows the real pid, so a skipped takeover or HivemindSweeper's
+early detector clear does not stop it reaching "done". The status bar now
+drops whole hotkey groups (then hint groups) from the right to fit beside
+the chip telemetry, so a narrow terminal no longer cuts a label.

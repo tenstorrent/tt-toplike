@@ -234,11 +234,62 @@ pub struct Cli {
     #[arg(long)]
     pub idle_on_blur: bool,
 
-    /// Opt-in: react to a detected `tt-smi -r` reset with a full-screen
-    /// takeover animation (or, in HivemindSweeper, a real feed event). Off
-    /// by default.
-    #[arg(long)]
-    pub reset_takeover: bool,
+    /// What to do when a `tt-smi -r` reset is detected on this box
+    /// (default: inform).
+    ///
+    /// ignore  never look for resets.
+    /// inform  show a `tt-smi -r` segment in the status bar of every view
+    ///         while a reset runs, and for 10 seconds after it finishes.
+    ///         This is the default.
+    /// dazzle  inform, plus a full-screen takeover animation (a feed event
+    ///         in HivemindSweeper).
+    /// demo    start by playing every reset animation in a row, and play
+    ///         them all again whenever a real reset happens. Until the
+    ///         sequencer lands, demo behaves like dazzle.
+    ///
+    /// Can also be set with `tt_smi_reset_behavior` in
+    /// ~/.config/tt-toplike/config.toml. The flag wins over the file.
+    #[arg(long, value_enum, value_name = "BEHAVIOR")]
+    pub tt_smi_reset_behavior: Option<ResetBehavior>,
+}
+
+/// What toplike does when it sees a `tt-smi -r` reset (`--tt-smi-reset-behavior`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ResetBehavior {
+    /// Never look for resets.
+    Ignore,
+    /// Show a status-bar segment in every view while a reset runs (default).
+    Inform,
+    /// Inform, plus a full-screen takeover animation for each reset.
+    Dazzle,
+    /// Play every reset animation in a row at start and on each real reset.
+    /// Behaves like `dazzle` until the demo sequencer is added.
+    Demo,
+}
+
+impl ResetBehavior {
+    /// True when the reset detector should run (every value but `Ignore`).
+    pub fn detects(self) -> bool {
+        !matches!(self, ResetBehavior::Ignore)
+    }
+
+    /// True when a detected reset starts a takeover animation.
+    pub fn animates(self) -> bool {
+        matches!(self, ResetBehavior::Dazzle | ResetBehavior::Demo)
+    }
+
+    /// True for the demo behavior (sequencer added separately).
+    pub fn is_demo(self) -> bool {
+        matches!(self, ResetBehavior::Demo)
+    }
+}
+
+/// Picks the effective behavior: the CLI flag first, then the config-file
+/// string, then `inform`. An unknown config string logs a warning (inside
+/// [`crate::config::parse_reset_behavior`]) and counts as absent.
+pub fn resolve_reset_behavior(cli: Option<ResetBehavior>, config: Option<&str>) -> ResetBehavior {
+    cli.or_else(|| config.and_then(crate::config::parse_reset_behavior))
+        .unwrap_or(ResetBehavior::Inform)
 }
 
 /// Backend selection
@@ -545,7 +596,7 @@ impl Cli {
             profile: crate::config::AnimationProfile::Normal,
             throttle: false,
             idle_on_blur: false,
-            reset_takeover: false,
+            tt_smi_reset_behavior: None,
         }
     }
 
@@ -617,7 +668,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
-            reset_takeover: false,
+            tt_smi_reset_behavior: None,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Auto);
@@ -654,7 +705,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
-            reset_takeover: false,
+            tt_smi_reset_behavior: None,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Mock);
@@ -686,7 +737,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
-            reset_takeover: false,
+            tt_smi_reset_behavior: None,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Json);
@@ -718,7 +769,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
-            reset_takeover: false,
+            tt_smi_reset_behavior: None,
         };
 
         assert!(cli.should_monitor_device(0));
@@ -754,7 +805,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
-            reset_takeover: false,
+            tt_smi_reset_behavior: None,
         };
 
         assert_eq!(verbose_cli.log_level(), log::LevelFilter::Debug);
@@ -783,7 +834,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
-            reset_takeover: false,
+            tt_smi_reset_behavior: None,
         };
 
         assert_eq!(quiet_cli.log_level(), log::LevelFilter::Off);
@@ -815,7 +866,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
-            reset_takeover: false,
+            tt_smi_reset_behavior: None,
         };
 
         // `validate()` only rejects `--backend luwen` when the crate was built
@@ -856,7 +907,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
-            reset_takeover: false,
+            tt_smi_reset_behavior: None,
         };
 
         assert_eq!(auto_cli.backend_name(), "Auto-detect");
@@ -885,7 +936,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
-            reset_takeover: false,
+            tt_smi_reset_behavior: None,
         };
 
         assert_eq!(mock_cli.backend_name(), "Mock");
@@ -916,7 +967,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
-            reset_takeover: false,
+            tt_smi_reset_behavior: None,
         }
     }
 
@@ -1035,14 +1086,78 @@ mod tests {
     }
 
     #[test]
-    fn reset_takeover_flag_defaults_to_false() {
+    fn reset_behavior_flag_absent_is_none_and_resolves_to_inform() {
         let cli = Cli::try_parse_from(["tt-toplike"]).unwrap();
-        assert!(!cli.reset_takeover);
+        assert_eq!(cli.tt_smi_reset_behavior, None);
+        assert_eq!(
+            resolve_reset_behavior(cli.tt_smi_reset_behavior, None),
+            ResetBehavior::Inform
+        );
     }
 
     #[test]
-    fn reset_takeover_flag_can_be_set() {
-        let cli = Cli::try_parse_from(["tt-toplike", "--reset-takeover"]).unwrap();
-        assert!(cli.reset_takeover);
+    fn reset_behavior_all_four_values_parse() {
+        for (arg, want) in [
+            ("ignore", ResetBehavior::Ignore),
+            ("inform", ResetBehavior::Inform),
+            ("dazzle", ResetBehavior::Dazzle),
+            ("demo", ResetBehavior::Demo),
+        ] {
+            let cli = Cli::try_parse_from(["tt-toplike", "--tt-smi-reset-behavior", arg]).unwrap();
+            assert_eq!(cli.tt_smi_reset_behavior, Some(want), "value {arg}");
+        }
+    }
+
+    #[test]
+    fn reset_behavior_unknown_value_is_rejected() {
+        assert!(Cli::try_parse_from(["tt-toplike", "--tt-smi-reset-behavior", "sparkle"]).is_err());
+        // The value names are lowercase on the command line.
+        assert!(Cli::try_parse_from(["tt-toplike", "--tt-smi-reset-behavior", "Dazzle"]).is_err());
+    }
+
+    #[test]
+    fn old_reset_takeover_flag_is_gone() {
+        assert!(Cli::try_parse_from(["tt-toplike", "--reset-takeover"]).is_err());
+    }
+
+    #[test]
+    fn reset_behavior_predicates() {
+        use ResetBehavior::*;
+        // (behavior, detects, animates, is_demo)
+        for (b, d, a, m) in [
+            (Ignore, false, false, false),
+            (Inform, true, false, false),
+            (Dazzle, true, true, false),
+            (Demo, true, true, true),
+        ] {
+            assert_eq!(b.detects(), d, "{b:?}.detects()");
+            assert_eq!(b.animates(), a, "{b:?}.animates()");
+            assert_eq!(b.is_demo(), m, "{b:?}.is_demo()");
+        }
+    }
+
+    #[test]
+    fn reset_behavior_precedence_cli_then_config_then_inform() {
+        use ResetBehavior::*;
+        // CLI beats config.
+        assert_eq!(resolve_reset_behavior(Some(Ignore), Some("dazzle")), Ignore);
+        // Config beats the default.
+        assert_eq!(resolve_reset_behavior(None, Some("dazzle")), Dazzle);
+        assert_eq!(resolve_reset_behavior(None, Some("DEMO")), Demo);
+        // Neither set gives inform.
+        assert_eq!(resolve_reset_behavior(None, None), Inform);
+        // An unknown config value falls back to inform.
+        assert_eq!(resolve_reset_behavior(None, Some("sparkle")), Inform);
+    }
+
+    #[test]
+    fn reset_behavior_help_lists_the_four_values_and_default() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+        for name in ["ignore", "inform", "dazzle", "demo"] {
+            assert!(help.contains(name), "help is missing {name}");
+        }
+        assert!(help.contains("--tt-smi-reset-behavior"));
+        assert!(help.contains("default: inform"));
     }
 }

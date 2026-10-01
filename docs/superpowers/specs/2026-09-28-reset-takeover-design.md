@@ -19,10 +19,11 @@ This is strictly a reaction to *someone else's* `tt-smi -r` invocation
 resets itself.
 
 Success looks like: running `tt-smi -r` on a box being watched by
-`tt-toplike-tui --reset-takeover` produces a full-screen animation that
+`tt-toplike-tui --tt-smi-reset-behavior dazzle` produces a full-screen animation that
 visibly tracks the real reset (not a fixed fake timer), is skippable with
 any key, correctly distinguishes full vs. subset resets in its content,
-and never fires when the feature is off (the default).
+and never fires unless the behavior is `dazzle` or `demo`. The default,
+`inform`, shows only a status-bar segment and never draws a takeover.
 
 ## Non-goals (explicit out of scope)
 
@@ -36,8 +37,9 @@ and never fires when the feature is off (the default).
   queue adds real state-machine complexity for a case that's cheap to
   just ignore.
 - Any GUI/config toggle to *disable mid-session* beyond the "any key
-  skips the current animation" behavior — the feature is opt-in at
-  launch (CLI flag / config), which is the only control surface asked for.
+  skips the current animation" behavior. The behavior is chosen at
+  launch (`--tt-smi-reset-behavior` or the config key), which is the only
+  control surface asked for.
 
 ## Detection & lifecycle
 
@@ -119,9 +121,11 @@ discipline (AGENTS.md).
 
 ### Gating
 
-All of the above — the extra process-list read, the kmsg tail, the
-detector's per-tick `observe()` call — only runs when the feature is
-enabled. With it off (the default), zero added work per tick.
+All of the above, the detector's per-tick `observe()` call and the
+extra process-list read, only runs when `--tt-smi-reset-behavior` is
+not `ignore`. With `ignore`, there is zero added work per tick. The
+default, `inform`, detects and shows a status-bar segment but never
+starts a takeover; takeovers need `dazzle` or `demo`.
 
 ## Animation framework
 
@@ -248,11 +252,14 @@ interruption of it.
 
 ## Config / CLI
 
-One new opt-in surface: `--reset-takeover` CLI flag (`src/cli.rs`) plus
-the equivalent config key (`src/config.rs`), following existing
-conventions for optional feature flags in this codebase. Off by default —
-with it off, `ResetDetector` is never constructed and no per-tick scanning
-or kmsg tailing happens.
+One setting: `--tt-smi-reset-behavior <ignore|inform|dazzle|demo>`
+(`src/cli.rs`, default `inform`) plus the config key
+`tt_smi_reset_behavior` (`src/config.rs`). The flag wins over the file.
+`ignore` never runs the detector. `inform` shows a status-bar segment
+(`⟳ tt-smi -r · {scope} · resetting`, then `✓ tt-smi -r done` for 10
+seconds). `dazzle` adds the takeover animation. `demo` is accepted and
+behaves like `dazzle` until its sequencer is added. This replaces the
+earlier opt-in `--reset-takeover` flag, which was never released.
 
 ## Testing approach
 

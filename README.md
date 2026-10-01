@@ -90,6 +90,13 @@ The adaptive baseline captures all of this and treats it as zero-point. What you
 
 The full reset-to-stable cycle typically takes 10–15 seconds. tt-toplike's safe backends (sysfs, JSON) survive the reset without crashing because they're just reading kernel files — they just see a brief gap in data.
 
+When the TUI sees a `tt-smi -r` running, it can say so. `--tt-smi-reset-behavior` (config key `tt_smi_reset_behavior`) takes four values:
+
+- `ignore`: never look for resets.
+- `inform` (default): show `⟳ tt-smi -r · all chips · resetting` in the status bar of every view while the reset runs, then `✓ tt-smi -r done` for 10 seconds.
+- `dazzle`: `inform`, plus a full-screen takeover animation (a feed event in HivemindSweeper).
+- `demo`: accepted today and behaves like `dazzle`. It will play every reset animation in a row at start and again on each real reset.
+
 ---
 
 ## Try it on any machine — no TT hardware required (experimental)

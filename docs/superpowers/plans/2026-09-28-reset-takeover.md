@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** When someone runs `tt-smi -r` on a box being watched by `tt-toplike-tui --reset-takeover`, react with a full-screen takeover animation (or, in the HivemindSweeper debug view, a real feed event) that honestly tracks the real reset's lifetime rather than a fixed fake timer.
+**Goal:** When someone runs `tt-smi -r` on a box being watched by `tt-toplike-tui --tt-smi-reset-behavior dazzle`, react with a full-screen takeover animation (or, in the HivemindSweeper debug view, a real feed event) that honestly tracks the real reset's lifetime rather than a fixed fake timer.
 
 **Architecture:** A pure, unit-testable detector (`src/workload/reset_detect.rs`) recognizes a `tt-smi -r`/`--reset` process from the TUI's existing per-tick `sysinfo` process scan and resolves its real target chip indices. A small enum-based animation framework (`src/animation/takeover/`, one concrete struct per variant — matching this codebase's existing enum+match convention rather than `dyn Trait`) renders one of six full-screen variants, weighted-random-selected by whether the reset is full-box or a subset. The main TUI loop (`src/ui/tui/mod.rs`) wires the detector into its existing 2-second process-refresh cadence, renders the active takeover as the last step of the existing draw closure, and special-cases the HivemindSweeper view to inject a real `SniffEvent` instead of showing a takeover.
 
@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Off by default; the entire feature (scanning, kmsg tail, rendering) is inert unless `--reset-takeover` (or the equivalent config key) is set.
+- The feature is controlled by `--tt-smi-reset-behavior <ignore|inform|dazzle|demo>` (config key `tt_smi_reset_behavior`, default `inform`). `ignore` never scans. `inform` scans and shows a status-bar segment only. Takeover animations stay inert unless the behavior is `dazzle` or `demo`. (This replaces the original opt-in `--reset-takeover` flag, which was never released; the task text below still shows that original flag.)
 - Detection reuses the TUI's existing per-tick/per-2s `sysinfo` process scan — no new polling thread.
 - Lifecycle honesty: "in progress" / "done" are driven by the real `tt-smi -r` pid's liveness, never a fixed fake timer. An animation may loop/hold its "in progress" beats until the real reset finishes.
 - The screen is tinted full-screen, and every takeover variant draws its animation in one fixed 72x24 box centered on it (it shrinks to fit a smaller terminal). The box is the terminal's default background. Full vs. subset scope changes *content* (which chips are shown as targeted, chip-row density), never the box. (Updated 2026-10-01; this originally said every variant renders full-screen.)
@@ -2282,7 +2282,7 @@ cp target/release/tt-toplike-tui ~/.local/bin/
 - [ ] **Step 3: Run the TUI with the feature enabled in one terminal**
 
 ```bash
-tt-toplike-tui --reset-takeover
+tt-toplike-tui --tt-smi-reset-behavior dazzle
 ```
 
 - [ ] **Step 4: In a second terminal, run a real single-chip reset**

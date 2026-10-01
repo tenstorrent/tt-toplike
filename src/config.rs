@@ -103,11 +103,10 @@ pub struct AnimConfigOverrides {
     pub sensitivity: Option<f32>,
     pub max_particles_scale: Option<f32>,
 
-    /// Equivalent of `--reset-takeover`, settable via config file instead of
-    /// the CLI flag. Not an animation-sensitivity value like the other
-    /// fields here — reuses this struct because it's the only config file
-    /// this project has.
-    pub reset_takeover: Option<bool>,
+    /// Equivalent of `--tt-smi-reset-behavior` (`ignore`, `inform`, `dazzle`
+    /// or `demo`, any letter case). The CLI flag wins when both are set. This
+    /// struct holds it because it is the only config file this project has.
+    pub tt_smi_reset_behavior: Option<String>,
 }
 
 /// Load config overrides from `~/.config/tt-toplike/config.toml`.
@@ -117,6 +116,20 @@ pub fn load_config_overrides() -> AnimConfigOverrides {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default()
+}
+
+/// Parses a `tt_smi_reset_behavior` config value. Case-insensitive; an
+/// unknown value logs a warning and returns `None` so the caller falls back
+/// to its default.
+pub fn parse_reset_behavior(text: &str) -> Option<crate::cli::ResetBehavior> {
+    use clap::ValueEnum;
+    let parsed = crate::cli::ResetBehavior::from_str(text.trim(), true).ok();
+    if parsed.is_none() {
+        log::warn!(
+            "config: unknown tt_smi_reset_behavior {text:?} (expected ignore, inform, dazzle or demo); using inform"
+        );
+    }
+    parsed
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -214,5 +227,36 @@ mod tests {
         let cfg = AnimConfig::from_profile(AnimationProfile::Relaxed);
         // 32 * 0.75 = 24
         assert_eq!(cfg.portrait_max_particles(), 24);
+    }
+
+    #[test]
+    fn reset_behavior_names_parse_case_insensitively() {
+        use crate::cli::ResetBehavior::*;
+        for (txt, want) in [
+            ("ignore", Ignore),
+            ("inform", Inform),
+            ("dazzle", Dazzle),
+            ("demo", Demo),
+            ("Dazzle", Dazzle),
+            ("INFORM", Inform),
+            ("  demo ", Demo),
+        ] {
+            assert_eq!(parse_reset_behavior(txt), Some(want), "{txt:?}");
+        }
+    }
+
+    #[test]
+    fn reset_behavior_unknown_name_is_none() {
+        assert_eq!(parse_reset_behavior("sparkle"), None);
+        assert_eq!(parse_reset_behavior(""), None);
+    }
+
+    #[test]
+    fn reset_behavior_config_key_loads_from_toml() {
+        let o: AnimConfigOverrides = toml::from_str(r#"tt_smi_reset_behavior = "Dazzle""#).unwrap();
+        assert_eq!(o.tt_smi_reset_behavior.as_deref(), Some("Dazzle"));
+        // The removed key is ignored and does not break the file.
+        let o: AnimConfigOverrides = toml::from_str("reset_takeover = true").unwrap();
+        assert_eq!(o.tt_smi_reset_behavior, None);
     }
 }
