@@ -29,8 +29,9 @@ use crate::animation::common::hsv_to_rgb;
 use crate::animation::inference_load::{fmt_bytes, fmt_elapsed, group_thousands};
 use crate::animation::train_sky::sky_cell;
 use crate::animation::train_tapestry::{
-    bar_cell, cause_of, advance_phase, median, pass_secs, plan_band, BandWants, ChipHistory,
-    StepCause, AICLK_DROP_FRAC, LABEL_W, MAX_LANES,
+    bar_cell, cause_of, advance_phase, convergence_parts, diagnose, median, pass_secs, plan_band,
+    BandWants, ChipHistory, DiagnosisKind, Readings, StepCause, AICLK_DROP_FRAC, LABEL_W,
+    MAX_LANES,
 };
 use crate::models::Device;
 use crate::backend::TelemetryBackend;
@@ -282,6 +283,24 @@ pub struct TrainView {
     pulse_phase: StdCell<f32>,
     /// The `frame` the phase was last advanced to.
     pulse_frame: StdCell<u64>,
+}
+
+/// One gauge row cell: a label, a fill fraction and the reading in words.
+struct Gauge {
+    label: &'static str,
+    frac: f32,
+    text: String,
+}
+
+/// The chip drawing the most power right now, standing in for "the chip the
+/// training run is on". Every chip the backend can see is a candidate because
+/// the trainer's chips are not identified, so an idle neighbour never dilutes
+/// the reading the way an average would.
+struct Busiest {
+    index: usize,
+    power_w: f32,
+    aiclk_mhz: u32,
+    tdp: Option<f32>,
 }
 
 impl TrainView {
@@ -817,6 +836,93 @@ impl TrainView {
             .filter(|v| *v > 0.0)
     }
 
+    /// The busiest chip (most power) among all chips with telemetry, or
+    /// `None` when no chip reports any.
+    fn busiest_chip(&self, backend: &dyn TelemetryBackend) -> Option<Busiest> {
+        backend
+            .devices()
+            .iter()
+            .filter_map(|d| {
+                let t = backend.telemetry(d.index)?;
+                Some(Busiest {
+                    index: d.index,
+                    power_w: t.power_w(),
+                    aiclk_mhz: t.aiclk_mhz(),
+                    tdp: Self::chip_tdp(backend, d),
+                })
+            })
+            .max_by(|a, b| a.power_w.total_cmp(&b.power_w))
+    }
+
+    /// The gauges that have a source, in display order. A gauge with no
+    /// source is absent, not drawn empty.
+    fn gauges(&self, st: &TrainState, backend: &dyn TelemetryBackend) -> Vec<Gauge> {
+        let hist = self.history.borrow();
+        let mut out = Vec::new();
+        if let Some(tps) = st.tokens_per_sec() {
+            let best = hist.best_tps().max(tps);
+            if best > 0.0 {
+                out.push(Gauge {
+                    label: "tok/s",
+                    frac: tps / best,
+                    text: format!("{:.0}% of best", tps / best * 100.0),
+                });
+            }
+        }
+        if let Some(chip) = self.busiest_chip(backend) {
+            if let Some(tdp) = chip.tdp {
+                out.push(Gauge {
+                    label: "power",
+                    frac: chip.power_w / tdp,
+                    text: format!("{:.0}% TDP", chip.power_w / tdp * 100.0),
+                });
+            }
+            let amax = hist.aiclk_max(chip.index);
+            if chip.aiclk_mhz > 0 && amax > 0 {
+                out.push(Gauge {
+                    label: "aiclk",
+                    frac: chip.aiclk_mhz as f32 / amax as f32,
+                    text: format!("{} MHz", chip.aiclk_mhz),
+                });
+            }
+        }
+        if let Some(bps) = Self::pcie_total(backend) {
+            // The bar is relative to the highest throughput seen, because no
+            // single ceiling is right for every link generation and width.
+            let best = hist.best_pcie_bps().max(bps);
+            out.push(Gauge {
+                label: "pcie",
+                frac: if best > 0.0 { (bps / best) as f32 } else { 0.0 },
+                text: format!("{:.0} MB/s", bps / 1e6),
+            });
+        }
+        out
+    }
+
+    /// One gauge in a cell `w` columns wide: label, bar (when there is room
+    /// for at least three cells) and the reading.
+    fn draw_gauge(&self, buf: &mut [Vec<Cell>], x: usize, y: usize, w: usize, g: &Gauge) {
+        let label = format!("{:<width$}", g.label, width = LABEL_W);
+        self.text(buf, x, y, &Self::clip(&label, w), Color::Rgb(150, 200, 255), false);
+        let val_len = g.text.chars().count();
+        let bar_w = w.saturating_sub(LABEL_W + 1 + val_len).min(10);
+        let mut cx = x + LABEL_W;
+        if bar_w >= 3 {
+            let filled = (g.frac.clamp(0.0, 1.0) * bar_w as f32).round() as usize;
+            for i in 0..bar_w {
+                let (ch, col) = if i < filled {
+                    ('█', BAR_NORMAL)
+                } else {
+                    ('░', WIRE_REST)
+                };
+                self.put(buf, cx + i, y, ch, col, false);
+            }
+            cx += bar_w + 1;
+        }
+        let room = (x + w).saturating_sub(cx);
+        self.text(buf, cx, y, &Self::clip(&g.text, room), Color::Rgb(210, 230, 220), false);
+    }
+
     /// The tapestry band: step bars, grid backdrop and chip lanes, drawn only
     /// from `st.step_history`, the measured step time and chip telemetry. A
     /// layer whose signal is missing is left out.
@@ -841,11 +947,29 @@ impl TrainView {
             .filter(|d| backend.telemetry(d.index).is_some())
             .take(MAX_LANES)
             .collect();
+        let gauges = self.gauges(st, backend);
+        let parts = convergence_parts(
+            &st.loss_history,
+            st.config.learning_rate,
+            st.scheduler.as_deref(),
+            st.step,
+            st.max_steps,
+        );
+        let busiest = self.busiest_chip(backend);
+        let diagnosis = diagnose(&Readings {
+            compiled_last_step: st.step_history.last().map(|s| s.cache_delta > 0).unwrap_or(false),
+            busiest_tdp_frac: busiest
+                .as_ref()
+                .and_then(|b| b.tdp.map(|t| b.power_w / t)),
+            host_cpu_pct: st.host_cpu_pct,
+        });
         let plan = plan_band(
             network_h,
             BandWants {
                 lanes: lane_devices.len(),
-                ..BandWants::default()
+                gauges: gauges.len(),
+                verdict: diagnosis.is_some(),
+                strip: !parts.is_empty(),
             },
         );
 
@@ -996,6 +1120,46 @@ impl TrainView {
                 self.put(buf, col0 + i, y, ch, col, false);
             }
             y += 1;
+        }
+        drop(hist_chips);
+
+        // ── gauges: two per row, half the band each ──────────────────
+        let half = w / 2;
+        for (i, g) in gauges.iter().enumerate() {
+            let row = i / 2;
+            if row >= plan.gauge_rows {
+                break;
+            }
+            let (gx, gw) = if i % 2 == 0 {
+                (x0, half)
+            } else {
+                (x0 + half, w - half)
+            };
+            self.draw_gauge(buf, gx, y + row, gw.saturating_sub(1), g);
+        }
+        y += plan.gauge_rows;
+
+        // ── diagnosis ────────────────────────────────────────────────
+        if let (true, Some(d)) = (plan.verdict_row, diagnosis.as_ref()) {
+            let color = match d.kind {
+                DiagnosisKind::Compiling => BAR_COMPILE,
+                DiagnosisKind::ComputeBound => Color::Rgb(111, 171, 160),
+                DiagnosisKind::HostBound => BAR_CHECKPOINT,
+            };
+            self.text(buf, x0, y, &Self::clip(&format!("▸ {}", d.text), w), color, false);
+            y += 1;
+        }
+
+        // ── convergence strip ────────────────────────────────────────
+        if plan.strip_row {
+            self.text(
+                buf,
+                x0,
+                y,
+                &Self::clip(&parts.join("  "), w),
+                Color::Rgb(190, 200, 220),
+                false,
+            );
         }
     }
 
@@ -2499,5 +2663,79 @@ mod tests {
         let out2 = text_of(&v.render(&st2, &b));
         assert!(out2.contains("blocks 12"), "{out2}");
         assert!(out2.contains("heads 8"), "{out2}");
+    }
+
+    #[test]
+    fn gauges_show_the_busiest_chip_and_name_their_readings() {
+        let mut b = MockBackend::new(2);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.step_history = (1..=10u64).map(|i| sample_at(i, 100.0, 0)).collect();
+        st.step_ms = 100.0;
+        st.step = 10;
+        let v = TrainView::new(134, 40);
+        let out = text_of(&v.render(&st, &b));
+        assert!(out.contains("power") && out.contains("% TDP"), "{out}");
+        assert!(out.contains("aiclk") && out.contains("MHz"), "{out}");
+        // The mock backend has no PCIe counters, so there is no PCIe gauge.
+        assert!(!out.contains("MB/s"), "{out}");
+    }
+
+    #[test]
+    fn the_tokens_per_second_gauge_is_relative_to_the_runs_own_best() {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.config.max_sequence_length = Some(256);
+        st.batch_size = 8;
+        st.step_history = vec![sample_at(1, 100.0, 0)];
+        let v = TrainView::new(134, 40);
+        st.step = 1;
+        st.step_ms = 100.0;
+        v.render(&st, &b); // best so far is set by this step rate
+        st.step = 2;
+        st.step_ms = 200.0; // half the rate
+        let out = text_of(&v.render(&st, &b));
+        assert!(out.contains("50% of best"), "{out}");
+    }
+
+    #[test]
+    fn the_diagnosis_line_appears_with_its_readings() {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.step_history = vec![sample_at(1, 100.0, 0), sample_at(2, 300.0, 6)];
+        st.step = 2;
+        st.step_ms = 300.0;
+        let out = text_of(&TrainView::new(134, 40).render(&st, &b));
+        assert!(
+            out.contains("compiling - the program cache grew on the latest step"),
+            "{out}"
+        );
+        // No compile and no readings that decide it: no verdict line at all.
+        st.step_history = vec![sample_at(1, 100.0, 0), sample_at(2, 100.0, 0)];
+        let out = text_of(&TrainView::new(134, 40).render(&st, &b));
+        assert!(!out.contains("compiling -"), "{out}");
+    }
+
+    #[test]
+    fn the_convergence_strip_reads_the_loss_history_and_config() {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.loss_history = (0..120).map(|i| 5.0 - 0.01 * i as f32).collect();
+        st.config.learning_rate = Some(3.0e-4);
+        st.scheduler = Some("cosine".into());
+        st.max_steps = 100;
+        st.step = 41;
+        // 160 columns leaves the band about 96 wide; the full strip is 85 to 90.
+        let out = text_of(&TrainView::new(160, 40).render(&st, &b));
+        assert!(out.contains("↘"), "{out}");
+        assert!(out.contains("base lr 3.0e-4"), "{out}");
+        assert!(out.contains("cosine 41% through"), "{out}");
+        // A rising loss flips the arrow.
+        st.loss_history = (0..120).map(|i| 1.0 + 0.01 * i as f32).collect();
+        let out = text_of(&TrainView::new(160, 40).render(&st, &b));
+        assert!(out.contains("↗") && !out.contains("↘"), "{out}");
     }
 }
