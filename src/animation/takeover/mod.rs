@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! Full-screen "reset takeover" animations, triggered by
+//! "Reset takeover" animations drawn in one fixed, centered box over a
+//! full-screen color wash, triggered by
 //! `crate::workload::reset_detect` when someone else runs `tt-smi -r`. Each
 //! variant is a concrete struct (not a trait object — matching this
 //! codebase's `DisplayMode`/`EventKind` convention of enum + match rather
@@ -15,7 +16,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 use std::time::Duration;
 
@@ -150,14 +151,52 @@ impl Widget for TintOverlay {
     }
 }
 
-/// Shared full-screen frame: tints the terminal cells toward `border_color`
-/// (see [`TintOverlay`] — the real screen shows through a color wash rather
-/// than being cleared to black), paints a bordered block (left/bottom
-/// borders only, per this project's no-right-border-glyph convention) with
-/// `title`, and renders `lines` as a centered paragraph on top. Every
-/// variant's `render` calls this so a takeover always reads as one
-/// consistent "something big just happened" moment. No-ops on a terminal too
-/// small to safely draw into (matches `render_overlay_panel`'s guard).
+/// Width of the takeover box on a terminal large enough to hold it.
+pub(crate) const BOX_WIDTH: u16 = 72;
+/// Height of the takeover box on a terminal large enough to hold it.
+pub(crate) const BOX_HEIGHT: u16 = 24;
+
+/// The takeover box: a fixed [`BOX_WIDTH`] x [`BOX_HEIGHT`] rectangle
+/// centered in `area`. On a smaller terminal it shrinks to leave at least
+/// 2 columns and 1 row of margin in total, and it never exceeds `area`.
+/// Every variant and [`render_takeover_frame`] take their sizes from here,
+/// so all seven animations share one box.
+pub(crate) fn takeover_box(area: Rect) -> Rect {
+    let width = BOX_WIDTH.min(area.width.saturating_sub(2));
+    let height = BOX_HEIGHT.min(area.height.saturating_sub(1));
+    Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    )
+}
+
+/// The drawable interior of [`takeover_box`]: the box minus its left border
+/// column, its top row (ratatui gives a block title a row of its own even
+/// with no top border) and its bottom border row. At full size this is 71
+/// columns by 22 rows. Variants that size their art to the screen use this
+/// in place of `area`.
+pub(crate) fn takeover_interior(area: Rect) -> Rect {
+    let b = takeover_box(area);
+    Rect::new(
+        b.x + 1,
+        b.y + 1,
+        b.width.saturating_sub(1),
+        b.height.saturating_sub(2),
+    )
+}
+
+/// Shared takeover frame. The whole `area` is tinted toward `border_color`
+/// (see [`TintOverlay`]), so the real screen shows through a color wash.
+/// A fixed, centered box ([`takeover_box`]) is then cleared to the
+/// terminal's default background. It gets a left and bottom border (no
+/// right border, per this project's no-right-border-glyph convention) with
+/// `title` on its top row, and `lines` are rendered as a centered paragraph
+/// in the box interior ([`takeover_interior`]) only: lines wider or taller
+/// than the interior are clipped at the box edge. Every variant's `render` calls this,
+/// so every takeover gets the same box. No-ops on a terminal too small to
+/// safely draw into (matches `render_overlay_panel`'s guard).
 pub(crate) fn render_takeover_frame(
     f: &mut Frame,
     area: Rect,
@@ -175,19 +214,25 @@ pub(crate) fn render_takeover_frame(
         },
         area,
     );
+    let box_area = takeover_box(area);
+    // `Clear` resets every cell in the box (blank symbol, default fg/bg), so
+    // no tinted or underlying cell shows through inside it.
+    f.render_widget(Clear, box_area);
     let block = Block::default()
         .borders(Borders::LEFT | Borders::BOTTOM)
         .title(format!(" {title} "))
         .border_style(Style::default().fg(border_color));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = takeover_interior(area);
+    // `Paragraph` itself cuts lines wider than `inner` at its right edge
+    // and stops after `inner.height` rows, so oversized art is clipped.
     let para = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
+    f.render_widget(block, box_area);
     f.render_widget(para, inner);
 }
 
 use crate::workload::reset_detect::ResetEvent;
 
-/// One active full-screen takeover animation.
+/// One active takeover animation (drawn in the shared centered box).
 pub enum Takeover {
     Bbs(BbsTakeover),
     BlackholeSwarm(BlackholeSwarmTakeover),
@@ -383,7 +428,10 @@ mod tests {
     #[test]
     fn blend_color_at_full_alpha_becomes_the_tint_exactly() {
         let original = Color::Rgb(10, 20, 30);
-        assert_eq!(blend_color(original, (200, 100, 50), 1.0), Color::Rgb(200, 100, 50));
+        assert_eq!(
+            blend_color(original, (200, 100, 50), 1.0),
+            Color::Rgb(200, 100, 50)
+        );
     }
 
     /// The whole point of `TintOverlay` replacing `Clear`: a cell the
@@ -443,8 +491,7 @@ mod tests {
             "must not have been cleared to black"
         );
         assert_ne!(
-            corner.bg,
-            underlying_bg,
+            corner.bg, underlying_bg,
             "must actually be tinted, not left 100% raw"
         );
     }
@@ -536,5 +583,489 @@ mod tests {
             let _ = pick_takeover_from_roll(&full_ev(), roll);
             let _ = pick_takeover_from_roll(&subset_ev(), roll);
         }
+    }
+
+    // ---- Centered box: geometry and rendering ------------------------------
+
+    #[test]
+    fn takeover_box_is_72x24_centered_on_a_large_terminal() {
+        let b = takeover_box(Rect::new(0, 0, 134, 40));
+        assert_eq!(b, Rect::new(31, 8, 72, 24));
+    }
+
+    #[test]
+    fn takeover_box_on_80x24_keeps_two_columns_and_one_row_of_margin() {
+        let b = takeover_box(Rect::new(0, 0, 80, 24));
+        assert_eq!((b.width, b.height), (72, 23));
+        assert_eq!((b.x, b.y), (4, 0));
+    }
+
+    #[test]
+    fn takeover_box_shrinks_exactly_at_the_boundary() {
+        // 74x25 is the smallest area that still holds the full 72x24 box.
+        let full = takeover_box(Rect::new(0, 0, 74, 25));
+        assert_eq!((full.width, full.height), (72, 24));
+        let one_less_w = takeover_box(Rect::new(0, 0, 73, 25));
+        assert_eq!((one_less_w.width, one_less_w.height), (71, 24));
+        let one_less_h = takeover_box(Rect::new(0, 0, 74, 24));
+        assert_eq!((one_less_h.width, one_less_h.height), (72, 23));
+    }
+
+    #[test]
+    fn takeover_box_respects_the_area_origin() {
+        let b = takeover_box(Rect::new(10, 5, 134, 40));
+        assert_eq!(b, Rect::new(41, 13, 72, 24));
+    }
+
+    #[test]
+    fn takeover_box_never_exceeds_the_area_at_any_size() {
+        for w in 8..=200u16 {
+            for h in 4..=80u16 {
+                let area = Rect::new(0, 0, w, h);
+                let b = takeover_box(area);
+                assert!(
+                    b.width <= BOX_WIDTH && b.height <= BOX_HEIGHT,
+                    "{w}x{h}: {b:?}"
+                );
+                assert_eq!(b.width, BOX_WIDTH.min(w - 2), "{w}x{h}");
+                assert_eq!(b.height, BOX_HEIGHT.min(h - 1), "{w}x{h}");
+                assert!(b.x >= area.x && b.right() <= area.right(), "{w}x{h}: {b:?}");
+                assert!(
+                    b.y >= area.y && b.bottom() <= area.bottom(),
+                    "{w}x{h}: {b:?}"
+                );
+                // Centered by integer division: the spare space splits
+                // evenly, with any odd cell going to the right/bottom.
+                assert_eq!(b.x - area.x, (w - b.width) / 2, "{w}x{h}");
+                assert_eq!(b.y - area.y, (h - b.height) / 2, "{w}x{h}");
+            }
+        }
+    }
+
+    #[test]
+    fn takeover_interior_drops_the_left_border_title_row_and_bottom_border() {
+        let area = Rect::new(0, 0, 134, 40);
+        let b = takeover_box(area);
+        let i = takeover_interior(area);
+        assert_eq!((i.width, i.height), (71, 22));
+        assert_eq!((i.x, i.y), (b.x + 1, b.y + 1));
+    }
+
+    /// The interior must match what ratatui itself reserves for a titled
+    /// block with only left and bottom borders, at every size.
+    #[test]
+    fn takeover_interior_matches_the_titled_blocks_own_inner_area() {
+        for (w, h) in [(134u16, 40u16), (80, 24), (40, 12), (20, 8), (8, 4)] {
+            let area = Rect::new(0, 0, w, h);
+            let block = Block::default()
+                .borders(Borders::LEFT | Borders::BOTTOM)
+                .title(" T ");
+            assert_eq!(
+                takeover_interior(area),
+                block.inner(takeover_box(area)),
+                "{w}x{h}"
+            );
+        }
+    }
+
+    /// A buffer cell value that no takeover ever writes, so any cell that
+    /// still holds it after a render was never touched by the art.
+    const SEED_SYMBOL: &str = ".";
+    const SEED_BG: Color = Color::Rgb(20, 80, 200);
+    const SEED_FG: Color = Color::Rgb(200, 200, 100);
+
+    /// Render `draw` onto a `w`x`h` terminal whose cells were first filled
+    /// with the seed value (standing in for the real screen beneath).
+    fn render_over_seed(
+        w: u16,
+        h: u16,
+        draw: impl Fn(&mut Frame, Rect),
+    ) -> ratatui::buffer::Buffer {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| {
+                for cell in f.buffer_mut().content.iter_mut() {
+                    cell.set_symbol(SEED_SYMBOL);
+                    cell.fg = SEED_FG;
+                    cell.bg = SEED_BG;
+                }
+                draw(f, f.area());
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// One of each variant, built from the same event.
+    fn every_variant(ev: &ResetEvent) -> Vec<(&'static str, Takeover)> {
+        vec![
+            ("bbs", Takeover::Bbs(BbsTakeover::new(ev))),
+            (
+                "blackhole",
+                Takeover::BlackholeSwarm(BlackholeSwarmTakeover::new(ev)),
+            ),
+            (
+                "hatch",
+                Takeover::HatchCountdown(HatchCountdownTakeover::new(ev)),
+            ),
+            (
+                "missile",
+                Takeover::MissileCommand(MissileCommandTakeover::new(ev)),
+            ),
+            ("trek", Takeover::TrekReset(TrekResetTakeover::new(ev))),
+            ("whale", Takeover::FailWhale(FailWhaleTakeover::new(ev))),
+            ("quiet", Takeover::QuietNotice(QuietNoticeTakeover::new(ev))),
+        ]
+    }
+
+    /// Every variant in both lifecycle states (running, and finished with
+    /// time for the landing/settling beats to play), for both a full and a
+    /// subset reset.
+    fn every_variant_state() -> Vec<(String, Takeover)> {
+        let mut out = Vec::new();
+        for (scope, ev) in [("full", full_ev()), ("subset", subset_ev())] {
+            for finished in [false, true] {
+                for (name, mut t) in every_variant(&ev) {
+                    t.tick(Duration::from_millis(900));
+                    if finished {
+                        t.note_reset_finished();
+                        t.tick(Duration::from_secs(3));
+                    }
+                    out.push((format!("{name}/{scope}/finished={finished}"), t));
+                }
+            }
+        }
+        out
+    }
+
+    const TERMINAL_SIZES: [(u16, u16); 6] =
+        [(134, 40), (80, 24), (74, 25), (40, 12), (20, 8), (8, 4)];
+
+    #[test]
+    fn every_variant_clears_exactly_the_box_to_the_default_background() {
+        for (name, t) in every_variant_state() {
+            for (w, h) in TERMINAL_SIZES {
+                let buf = render_over_seed(w, h, |f, a| t.render(f, a));
+                let b = takeover_box(Rect::new(0, 0, w, h));
+                for y in 0..h {
+                    for x in 0..w {
+                        let cell = &buf[(x, y)];
+                        let inside = x >= b.x && x < b.right() && y >= b.y && y < b.bottom();
+                        if inside {
+                            assert_eq!(
+                                cell.bg,
+                                Color::Reset,
+                                "{name} {w}x{h}: cell ({x},{y}) inside the box must have the default bg"
+                            );
+                        } else {
+                            assert_ne!(
+                                cell.bg,
+                                Color::Reset,
+                                "{name} {w}x{h}: cell ({x},{y}) outside the box must stay tinted"
+                            );
+                            assert_ne!(
+                                cell.bg, SEED_BG,
+                                "{name} {w}x{h}: cell ({x},{y}) outside the box must be tinted"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_is_drawn_outside_the_box_except_the_tint() {
+        for (name, t) in every_variant_state() {
+            for (w, h) in TERMINAL_SIZES {
+                let buf = render_over_seed(w, h, |f, a| t.render(f, a));
+                let b = takeover_box(Rect::new(0, 0, w, h));
+                for y in 0..h {
+                    for x in 0..w {
+                        let inside = x >= b.x && x < b.right() && y >= b.y && y < b.bottom();
+                        if !inside {
+                            assert_eq!(
+                                buf[(x, y)].symbol(),
+                                SEED_SYMBOL,
+                                "{name} {w}x{h}: art spilled to ({x},{y}) outside the box"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_variant_draws_the_same_box_at_a_given_terminal_size() {
+        for (w, h) in TERMINAL_SIZES {
+            let mut boxes: Vec<(String, Vec<(u16, u16)>)> = Vec::new();
+            for (name, t) in every_variant_state() {
+                let buf = render_over_seed(w, h, |f, a| t.render(f, a));
+                // The cleared rectangle, found from the buffer itself.
+                let mut reset_cells = Vec::new();
+                for y in 0..h {
+                    for x in 0..w {
+                        if buf[(x, y)].bg == Color::Reset {
+                            reset_cells.push((x, y));
+                        }
+                    }
+                }
+                boxes.push((name, reset_cells));
+            }
+            let (first_name, first) = &boxes[0];
+            for (name, cells) in &boxes {
+                assert_eq!(
+                    cells, first,
+                    "{name} drew a different box than {first_name} at {w}x{h}"
+                );
+            }
+            let b = takeover_box(Rect::new(0, 0, w, h));
+            assert_eq!(first.len(), (b.width * b.height) as usize, "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn every_variant_draws_something_inside_the_box() {
+        for (name, t) in every_variant_state() {
+            let buf = render_over_seed(134, 40, |f, a| t.render(f, a));
+            let b = takeover_box(Rect::new(0, 0, 134, 40));
+            let mut painted = 0;
+            for y in b.y..b.bottom() {
+                for x in b.x + 1..b.right() {
+                    if buf[(x, y)].symbol().trim().is_empty() {
+                        continue;
+                    }
+                    painted += 1;
+                }
+            }
+            assert!(
+                painted > 10,
+                "{name}: expected art inside the box, found {painted} glyph cells"
+            );
+        }
+    }
+
+    #[test]
+    fn no_right_side_border_glyphs_appear_in_the_box() {
+        for (name, t) in every_variant_state() {
+            for (w, h) in TERMINAL_SIZES {
+                let buf = render_over_seed(w, h, |f, a| t.render(f, a));
+                let b = takeover_box(Rect::new(0, 0, w, h));
+                for y in b.y..b.bottom() {
+                    for x in b.x..b.right() {
+                        let sym = buf[(x, y)].symbol();
+                        assert!(
+                            !matches!(sym, "\u{2557}" | "\u{255D}" | "\u{2551}"),
+                            "{name} {w}x{h}: double-line right-side glyph {sym:?} at ({x},{y})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn takeover_renders_do_not_panic_on_tiny_terminals() {
+        for w in 0..=12u16 {
+            for h in 0..=6u16 {
+                for (_, t) in every_variant_state() {
+                    let _ = render_over_seed(w, h, |f, a| t.render(f, a));
+                }
+            }
+        }
+    }
+
+    /// A line wider than the box interior is cut off at the box edge. It is
+    /// not wrapped onto the next row, and nothing lands outside the box.
+    #[test]
+    fn a_line_wider_than_the_interior_is_clipped_not_wrapped() {
+        let wide = "X".repeat(200);
+        let buf = render_over_seed(134, 40, |f, a| {
+            render_takeover_frame(
+                f,
+                a,
+                "T",
+                Color::Rgb(255, 0, 255),
+                vec![Line::raw(wide.clone()), Line::raw("second")],
+            );
+        });
+        let b = takeover_box(Rect::new(0, 0, 134, 40));
+        let row_text = |y: u16| -> String {
+            (0..134u16)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect()
+        };
+        // Row 0 of the interior (below the title row) holds the clipped
+        // wide line.
+        let first = row_text(b.y + 1);
+        assert_eq!(first.matches('X').count(), 71, "wide line missing: {first}");
+        // The second line is on the next row, and the X run did not wrap.
+        let second = row_text(b.y + 2);
+        assert!(second.contains("second"), "second line missing: {second}");
+        assert!(
+            !second.contains('X'),
+            "wide line wrapped onto the next row: {second}"
+        );
+        // Nothing outside the box columns.
+        for y in 0..40u16 {
+            for x in 0..134u16 {
+                if x < b.x || x >= b.right() {
+                    assert_eq!(buf[(x, y)].symbol(), SEED_SYMBOL, "spill at ({x},{y})");
+                }
+            }
+        }
+    }
+
+    /// More lines than the interior has rows are cut at the bottom border,
+    /// and the border itself stays intact.
+    #[test]
+    fn lines_taller_than_the_interior_are_clipped_at_the_bottom_border() {
+        let many: Vec<Line<'static>> = (0..100).map(|i| Line::raw(format!("row {i}"))).collect();
+        let buf = render_over_seed(134, 40, |f, a| {
+            render_takeover_frame(f, a, "T", Color::Rgb(255, 0, 255), many.clone());
+        });
+        let b = takeover_box(Rect::new(0, 0, 134, 40));
+        assert_eq!(
+            buf[(b.x, b.bottom() - 1)].symbol(),
+            "\u{2514}",
+            "bottom-left corner lost"
+        );
+        for y in b.bottom()..40 {
+            for x in 0..134u16 {
+                assert_eq!(
+                    buf[(x, y)].symbol(),
+                    SEED_SYMBOL,
+                    "spill below the box at ({x},{y})"
+                );
+            }
+        }
+        // The bottom border row holds the border only, no art text.
+        let last: String = (b.x + 1..b.right())
+            .map(|x| buf[(x, b.bottom() - 1)].symbol().to_string())
+            .collect();
+        assert!(
+            !last.contains("row"),
+            "art drawn over the bottom border: {last}"
+        );
+    }
+
+    // ---- Per-variant sizing: art is composed for the box ----
+    //
+    // The frame clips whatever a variant draws, so a variant that still sized
+    // its art from the whole screen would look fine in the "nothing spills"
+    // tests above and simply lose the part of its art that lands past the box
+    // edge. These tests check that the art survives whole inside the box.
+
+    /// Text of the box rows (left border column included), one string per row.
+    fn box_rows(buf: &ratatui::buffer::Buffer, w: u16, h: u16) -> Vec<String> {
+        let b = takeover_box(Rect::new(0, 0, w, h));
+        (b.y..b.bottom())
+            .map(|y| {
+                (b.x..b.right())
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn box_text(t: &Takeover, w: u16, h: u16) -> String {
+        let buf = render_over_seed(w, h, |f, a| t.render(f, a));
+        box_rows(&buf, w, h).join("\n")
+    }
+
+    #[test]
+    fn quiet_notice_message_sits_whole_inside_the_box_on_a_big_terminal() {
+        let t = Takeover::QuietNotice(QuietNoticeTakeover::new(&full_ev()));
+        let text = box_text(&t, 134, 40);
+        assert!(
+            text.contains("tt-smi -r \u{2014} all chips"),
+            "message cut off or off-box:\n{text}"
+        );
+        assert!(
+            text.contains("resetting"),
+            "status line cut off or off-box:\n{text}"
+        );
+    }
+
+    #[test]
+    fn blackhole_swarm_fills_the_box_not_the_screen() {
+        let ev = full_ev(); // 4 chips -> 128 glyphs
+        let t = Takeover::BlackholeSwarm(BlackholeSwarmTakeover::new(&ev));
+        let text = box_text(&t, 134, 40);
+        let glyphs = text.matches('\u{a4}').count();
+        // Placed across the 71x22 interior, nearly all 128 glyphs are visible
+        // (a few can land on the same cell). Placed across the screen, about a
+        // third would fall outside the box and be clipped.
+        assert!(
+            glyphs >= 110,
+            "only {glyphs} of 128 swarm glyphs are inside the box"
+        );
+    }
+
+    #[test]
+    fn missile_command_lanes_are_sized_to_fit_the_box_width() {
+        // 32 idle lanes: sized from the 71-column interior they are 2 columns
+        // wide and all 32 silo markers fit. Sized from a 134-column screen
+        // they would be 4 wide and half would be clipped away.
+        let ev = ResetEvent {
+            pid: 1,
+            is_full: false,
+            chip_count: 0,
+            total_devices: 32,
+            device_indices: vec![],
+            raw_targets: vec![],
+        };
+        let t = Takeover::MissileCommand(MissileCommandTakeover::new(&ev));
+        let text = box_text(&t, 134, 40);
+        assert_eq!(
+            text.matches('\u{b7}').count(),
+            32,
+            "silo markers lost:\n{text}"
+        );
+    }
+
+    #[test]
+    fn fail_whale_lands_inside_the_box_on_a_tall_terminal() {
+        let mut inner = FailWhaleTakeover::new(&full_ev());
+        inner.tick(Duration::from_millis(500));
+        inner.note_reset_finished();
+        inner.tick(Duration::from_secs(3));
+        let t = Takeover::FailWhale(inner);
+        let text = box_text(&t, 134, 60);
+        assert!(
+            text.contains("~~~~~~~~"),
+            "ground line past the box bottom:\n{text}"
+        );
+        assert!(
+            text.contains("...______..."),
+            "whale belly past the box bottom:\n{text}"
+        );
+    }
+
+    #[test]
+    fn bbs_scrolls_its_chip_list_to_keep_the_closing_line_inside_the_box() {
+        let ev = ResetEvent {
+            pid: 1,
+            is_full: true,
+            chip_count: 40,
+            total_devices: 40,
+            device_indices: (0..40).collect(),
+            raw_targets: vec![],
+        };
+        let mut inner = BbsTakeover::new(&ev);
+        inner.tick(Duration::from_millis(500));
+        inner.note_reset_finished();
+        let t = Takeover::Bbs(inner);
+        let text = box_text(&t, 134, 40);
+        assert!(
+            text.contains("CONNECTION RESTORED."),
+            "closing line clipped away:\n{text}"
+        );
+        assert!(
+            text.contains("CHIP 39"),
+            "newest chip line missing:\n{text}"
+        );
     }
 }

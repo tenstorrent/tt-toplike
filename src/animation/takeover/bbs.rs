@@ -10,7 +10,7 @@
 //! typewriter effect) rather than popping in fully formed. Loops while the
 //! real reset is still in progress rather than racing ahead of it.
 
-use super::{render_takeover_frame, TakeoverClock};
+use super::{render_takeover_frame, takeover_interior, TakeoverClock};
 use crate::ui::colors;
 use crate::workload::reset_detect::ResetEvent;
 use ratatui::layout::Rect;
@@ -28,6 +28,12 @@ const TYPE_MS: u128 = 150;
 /// Banner blink half-cycle: a real ANSI blink (two fixed states), not a
 /// continuous hue rotation.
 const BLINK_MS: u128 = 500;
+/// Rows above the chip lines (3 flavor lines, a blank, the banner, a blank).
+const HEADER_ROWS: usize = 6;
+/// Rows reserved below the chip lines for "CONNECTION RESTORED.".
+const CLOSING_ROWS: usize = 1;
+/// Rows the ANSI box adds (top and bottom edge).
+const BOX_ROWS: usize = 2;
 
 pub struct BbsTakeover {
     clock: TakeoverClock,
@@ -90,7 +96,12 @@ impl BbsTakeover {
         (within_beat as f32 / TYPE_MS as f32).min(1.0)
     }
 
-    pub fn render(&self, f: &mut Frame, area: Rect) {
+    /// Build the (unboxed-by-the-frame) screen lines, fitted to
+    /// `interior_height` rows: the 6 header rows, the chip lines and the
+    /// closing line, plus the 2 rows of the ANSI box. When there are more
+    /// chip lines than fit, only the newest ones are shown, like a terminal
+    /// scrolling.
+    fn lines(&self, interior_height: usize) -> Vec<Line<'static>> {
         let finished = !self.clock.in_progress();
         let green = colors::rgb(40, 220, 90);
         let cyan = colors::rgb(60, 200, 210);
@@ -108,8 +119,14 @@ impl BbsTakeover {
         };
 
         let mut lines: Vec<Line<'static>> = vec![
-            Line::from(Span::styled("RING... RING...", Style::default().fg(dim_green))),
-            Line::from(Span::styled("CONNECT 14400", Style::default().fg(dim_green))),
+            Line::from(Span::styled(
+                "RING... RING...",
+                Style::default().fg(dim_green),
+            )),
+            Line::from(Span::styled(
+                "CONNECT 14400",
+                Style::default().fg(dim_green),
+            )),
             Line::from(Span::styled(
                 "NODE 1 - TENSTORRENT BBS",
                 Style::default().fg(cyan),
@@ -124,7 +141,19 @@ impl BbsTakeover {
 
         let visible = self.visible_lines();
         let typing_progress = self.typing_progress();
-        for (i, &real_chip) in self.device_indices.iter().take(visible).enumerate() {
+        let max_chip_lines = interior_height
+            .saturating_sub(HEADER_ROWS + CLOSING_ROWS + BOX_ROWS)
+            .max(1);
+        let first_shown = visible
+            .min(self.device_indices.len())
+            .saturating_sub(max_chip_lines);
+        for (i, &real_chip) in self
+            .device_indices
+            .iter()
+            .take(visible)
+            .enumerate()
+            .skip(first_shown)
+        {
             let full_text = format!("CHIP {real_chip}: reset issued...");
             let is_newest = i + 1 == visible && self.clock.in_progress();
             let text = if is_newest && typing_progress < 1.0 {
@@ -143,7 +172,12 @@ impl BbsTakeover {
             )));
         }
 
-        let lines = box_it(lines, cyan);
+        box_it(lines, cyan)
+    }
+
+    pub fn render(&self, f: &mut Frame, area: Rect) {
+        let cyan = colors::rgb(60, 200, 210);
+        let lines = self.lines(takeover_interior(area).height as usize);
 
         let title = if self.is_full {
             "SYSTEM-WIDE RESET"
@@ -359,10 +393,16 @@ mod tests {
         let banner_a = rendered_banner_fg(&t);
         t.tick(Duration::from_millis(BLINK_MS as u64));
         let banner_b = rendered_banner_fg(&t);
-        assert_ne!(banner_a, banner_b, "banner should toggle across a blink boundary");
+        assert_ne!(
+            banner_a, banner_b,
+            "banner should toggle across a blink boundary"
+        );
         t.tick(Duration::from_millis(BLINK_MS as u64));
         let banner_c = rendered_banner_fg(&t);
-        assert_eq!(banner_a, banner_c, "banner should return to its first state, not drift through a spectrum");
+        assert_eq!(
+            banner_a, banner_c,
+            "banner should return to its first state, not drift through a spectrum"
+        );
     }
 
     /// Once finished, the banner settles to a steady green and stops
@@ -407,7 +447,53 @@ mod tests {
     fn render_wraps_content_in_a_box_border() {
         let t = BbsTakeover::new(&ev(true, 4));
         let painted = rendered_text(&t);
-        assert!(painted.contains('┌'), "expected a box-drawing top-left corner:\n{painted}");
-        assert!(painted.contains('┘'), "expected a box-drawing bottom-right corner:\n{painted}");
+        assert!(
+            painted.contains('┌'),
+            "expected a box-drawing top-left corner:\n{painted}"
+        );
+        assert!(
+            painted.contains('┘'),
+            "expected a box-drawing bottom-right corner:\n{painted}"
+        );
+    }
+
+    /// The BBS screen must fit the takeover box interior (71x22 at full
+    /// size) however many chips are targeted: the chip list scrolls instead
+    /// of growing past the box, and the closing line stays visible.
+    #[test]
+    fn lines_fit_the_box_interior_for_any_chip_count() {
+        let interior = crate::animation::takeover::takeover_interior(Rect::new(0, 0, 134, 40));
+        for chips in [1usize, 4, 13, 14, 40, 200] {
+            let indices: Vec<u8> = (0..chips as u16).map(|i| (i % 250) as u8).collect();
+            let mut t = BbsTakeover::new(&ev_subset(chips, indices));
+            for finished in [false, true] {
+                t.tick(Duration::from_millis(BEAT_MS as u64 * 7 + 300));
+                if finished {
+                    t.note_reset_finished();
+                }
+                let lines = t.lines(interior.height as usize);
+                let widest = lines.iter().map(Line::width).max().unwrap_or(0);
+                assert!(
+                    widest <= interior.width as usize,
+                    "{chips} chips: widest {widest}"
+                );
+                assert!(
+                    lines.len() <= interior.height as usize,
+                    "{chips} chips finished={finished}: {} rows",
+                    lines.len()
+                );
+                let text: String = lines
+                    .iter()
+                    .map(|l| {
+                        l.spans
+                            .iter()
+                            .map(|s| s.content.as_ref())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert_eq!(text.contains("CONNECTION RESTORED."), finished, "{text}");
+            }
+        }
     }
 }

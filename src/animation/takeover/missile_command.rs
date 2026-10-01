@@ -10,7 +10,7 @@
 //! ember once it's actually finished. Untargeted lanes stay idle (content
 //! scoped by the real reset, never overlay size — see the design spec).
 
-use super::{render_takeover_frame, TakeoverClock};
+use super::{render_takeover_frame, takeover_interior, TakeoverClock};
 use crate::animation::hsv_to_rgb;
 use crate::ui::colors;
 use crate::workload::reset_detect::ResetEvent;
@@ -78,7 +78,7 @@ impl MissileCommandTakeover {
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
         let total = self.total_devices.max(1);
-        let usable_width = area.width.saturating_sub(4).max(8) as usize;
+        let usable_width = (takeover_interior(area).width as usize).max(8);
         let lane_width = (usable_width / total).clamp(2, 7);
         let width = lane_width * total;
         let finished = !self.clock.in_progress();
@@ -109,8 +109,9 @@ impl MissileCommandTakeover {
                 let descent_t = t / DESCENT_FRACTION;
                 let head_row_f = descent_t * (impact_row as f32);
                 let head_row = (head_row_f.round() as usize).min(impact_row);
-                for (dist, (glyph, value)) in
-                    [('▼', 1.0_f32), ('¦', 0.65), ('·', 0.35)].into_iter().enumerate()
+                for (dist, (glyph, value)) in [('▼', 1.0_f32), ('¦', 0.65), ('·', 0.35)]
+                    .into_iter()
+                    .enumerate()
                 {
                     if dist > head_row {
                         break;
@@ -121,8 +122,7 @@ impl MissileCommandTakeover {
                 // A dim reticle at the impact point previews where this
                 // missile is headed, before it actually arrives.
                 if head_row != impact_row {
-                    grid[impact_row][center_col]
-                        .get_or_insert(('x', colors::rgb(90, 70, 50)));
+                    grid[impact_row][center_col].get_or_insert(('x', colors::rgb(90, 70, 50)));
                 }
             } else {
                 let burst_t = (t - DESCENT_FRACTION) / (1.0 - DESCENT_FRACTION);
@@ -141,8 +141,7 @@ impl MissileCommandTakeover {
                         if col_i < 0 || col_i as usize >= width {
                             continue;
                         }
-                        let dist =
-                            ((dx * dx) as f32 + (dy as f32 * ROW_ASPECT).powi(2)).sqrt();
+                        let dist = ((dx * dx) as f32 + (dy as f32 * ROW_ASPECT).powi(2)).sqrt();
                         if (dist - radius).abs() >= 0.9 {
                             continue;
                         }
@@ -167,9 +166,7 @@ impl MissileCommandTakeover {
             let spans: Vec<Span<'static>> = row
                 .into_iter()
                 .map(|cell| match cell {
-                    Some((ch, color)) => {
-                        Span::styled(ch.to_string(), Style::default().fg(color))
-                    }
+                    Some((ch, color)) => Span::styled(ch.to_string(), Style::default().fg(color)),
                     None => Span::raw(" "),
                 })
                 .collect();

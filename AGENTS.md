@@ -585,3 +585,20 @@ rather than a rendered snapshot); and a "landed" ground-row position
 computed from the bottom of the screen alone pushed the whale's own lower
 body and the ground line clean off the bottom of the terminal (fixed by
 reserving room for the scene's real height below that point).
+
+### Takeover box (Oct 1, 2026)
+
+Prompt: "for the overlays on tt-smi -r takeovers. let's make them all the same
+'size' centered in the screen. We show the filtered overlay behind this box,
+but the box itself is always the default terminal background color, and we
+show our focused art for tt-smi -r right there."
+
+All seven variants now draw in one box from `takeover_box(area)` in
+`src/animation/takeover/mod.rs`: 72 columns by 24 rows, centered, shrinking to
+keep at least 2 columns and 1 row of margin on a smaller terminal. The color
+wash still covers the whole screen. The box is cleared first, so inside it the
+background is the terminal default. Border is left and bottom only. The usable
+interior (`takeover_interior`) is 71x22 at full size, because ratatui gives
+the title its own row. Quiet Notice, Blackhole Swarm, Missile Command and Fail
+Whale size their art from the interior. BBS shows only the newest chip lines
+once the list would pass 22 rows. Trek (34x20) and Hatch (17x9) already fit.

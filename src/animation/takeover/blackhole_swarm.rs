@@ -9,7 +9,7 @@
 //! (a real swarm's stars don't drift, they shimmer), only brightness moves.
 //! Settles once the real reset has finished.
 
-use super::{render_takeover_frame, TakeoverClock};
+use super::{render_takeover_frame, takeover_interior, TakeoverClock};
 use crate::animation::hsv_to_rgb;
 use crate::ui::colors;
 use crate::workload::reset_detect::ResetEvent;
@@ -90,8 +90,10 @@ impl BlackholeSwarmTakeover {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
-        let cols = area.width.saturating_sub(4).max(1) as usize;
-        let rows = area.height.saturating_sub(4).max(1) as usize;
+        // The swarm is laid out across the takeover box interior.
+        let interior = takeover_interior(area);
+        let cols = (interior.width as usize).max(1);
+        let rows = (interior.height as usize).max(1);
         let cap = cols * rows;
         let filled = self.density.min(cap);
 
@@ -109,9 +111,10 @@ impl BlackholeSwarmTakeover {
                 let spans: Vec<Span<'static>> = row
                     .into_iter()
                     .map(|cell| match cell {
-                        Some(brightness) => {
-                            Span::styled("¤", Style::default().fg(hsv_to_rgb(PURPLE_HUE, 0.85, brightness)))
-                        }
+                        Some(brightness) => Span::styled(
+                            "¤",
+                            Style::default().fg(hsv_to_rgb(PURPLE_HUE, 0.85, brightness)),
+                        ),
                         None => Span::raw(" "),
                     })
                     .collect();
@@ -179,7 +182,10 @@ mod tests {
         let b0 = t.glyph_brightness(0);
         t.tick(Duration::from_millis(400));
         let b1 = t.glyph_brightness(0);
-        assert_ne!(b0, b1, "glyph brightness should vary with real elapsed time");
+        assert_ne!(
+            b0, b1,
+            "glyph brightness should vary with real elapsed time"
+        );
     }
 
     /// Different glyphs must not all twinkle in lockstep — that would read
@@ -200,7 +206,10 @@ mod tests {
         let t = BlackholeSwarmTakeover::new(&ev(4));
         for i in 0..64 {
             let b = t.glyph_brightness(i);
-            assert!((0.35..=1.0).contains(&b), "brightness {b} out of range for glyph {i}");
+            assert!(
+                (0.35..=1.0).contains(&b),
+                "brightness {b} out of range for glyph {i}"
+            );
         }
     }
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! Minimal full-screen status readout — "the tool doing its thing." Still
+//! Minimal status readout (a backdrop sized to the takeover box) — "the tool doing its thing." Still
 //! the deliberately low-key option (no box art competing for attention,
 //! no hue-cycling), but dressed in a field of shaded ANSI blocks — the
 //! same block-character/value vocabulary this app already uses for its
@@ -12,7 +12,7 @@
 //! the loading snake stays calm and monochrome rather than a neon sweep —
 //! fitting for the one variant that's meant to read as quiet.
 
-use super::{render_takeover_frame, TakeoverClock};
+use super::{render_takeover_frame, takeover_interior, TakeoverClock};
 use crate::animation::{hsv_to_grayskull, value_to_char_intensity, BLOCK_CHARS};
 use crate::ui::colors;
 use crate::workload::reset_detect::ResetEvent;
@@ -40,12 +40,7 @@ const BASE_VALUE: f32 = 0.45;
 const DITHER_STRENGTH: f32 = 0.55;
 
 /// Classic 4x4 ordered (Bayer) dither matrix, values 0-15.
-const BAYER_4X4: [[u8; 4]; 4] = [
-    [0, 8, 2, 10],
-    [12, 4, 14, 6],
-    [3, 11, 1, 9],
-    [15, 7, 13, 5],
-];
+const BAYER_4X4: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 
 /// Per-cell dither offset in roughly `[-0.5, 0.47]`, tiled every 4 cells in
 /// each direction — a fixed, structured pattern (not random, not
@@ -127,15 +122,24 @@ impl QuietNoticeTakeover {
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
         let finished = !self.clock.in_progress();
-        let cols = area.width.saturating_sub(4).max(8) as usize;
-        let rows = area.height.saturating_sub(4).max(3) as usize;
+        // Compose the backdrop for the box interior (71x23 at full size),
+        // not for the whole screen. The floors keep the message-row math
+        // valid on a terminal too small to draw (the frame draws nothing
+        // there).
+        let interior = takeover_interior(area);
+        let cols = (interior.width as usize).max(8);
+        let rows = (interior.height as usize).max(3);
 
         let scope = if self.is_full {
             "all chips".to_string()
         } else {
             format!("{} chip(s)", self.chip_count)
         };
-        let status = if finished { "reset complete" } else { "resetting…" };
+        let status = if finished {
+            "reset complete"
+        } else {
+            "resetting…"
+        };
         // A one-space gap on each side keeps the text from butting directly
         // against the block texture — a small but real legibility win.
         let msg1: Vec<char> = format!(" tt-smi -r — {scope} ").chars().collect();
@@ -244,7 +248,10 @@ mod tests {
         let v0 = t.cell_value(7);
         t.tick(Duration::from_millis(600));
         let v1 = t.cell_value(7);
-        assert_ne!(v0, v1, "background cell brightness should vary with real elapsed time");
+        assert_ne!(
+            v0, v1,
+            "background cell brightness should vary with real elapsed time"
+        );
     }
 
     /// Different cells must be out of phase — a gentle organic shimmer,

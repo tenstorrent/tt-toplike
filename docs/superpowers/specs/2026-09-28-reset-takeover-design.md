@@ -176,8 +176,11 @@ kmsg-line feed handle.
 
 Weighted random on every detected reset. `is_full` weights toward the four
 spectacle variants; a subset reset weights toward Missile Command (scoped)
-and the quiet notification. All variants always render full-screen — scope
-changes *content*, never overlay size, per the earlier design discussion.
+and the quiet notification. The real screen is tinted full-screen, and all
+variants draw in one fixed 72x24 box centered on it, in the terminal's default
+background. On a smaller terminal the box shrinks to keep at least 2 columns
+and 1 row of margin. Scope changes *content*, never the box. (Updated
+2026-10-01. This section originally said every variant renders full-screen.)
 
 ### Rendering integration
 

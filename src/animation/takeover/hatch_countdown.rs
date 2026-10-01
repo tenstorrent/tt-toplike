@@ -98,7 +98,8 @@ impl HatchCountdownTakeover {
         ((CYCLE_MS - pos) / 1000) as u64
     }
 
-    pub fn render(&self, f: &mut Frame, area: Rect) {
+    /// The screen as lines: 9 rows, at most 15 columns wide.
+    fn lines(&self) -> Vec<Line<'static>> {
         let amber = colors::rgb(255, 140, 0);
         let dim_amber = colors::rgb(140, 90, 30);
 
@@ -106,7 +107,10 @@ impl HatchCountdownTakeover {
             Line::from(Span::styled("THE HATCH", Style::default().fg(dim_amber))),
             Line::from(Span::raw("")),
         ];
-        lines.extend(led_lines(&format!("00:{:02}", self.remaining_secs()), amber));
+        lines.extend(led_lines(
+            &format!("00:{:02}", self.remaining_secs()),
+            amber,
+        ));
         lines.push(Line::from(Span::raw("")));
         lines.push(Line::from(Span::styled(
             if self.clock.in_progress() {
@@ -122,7 +126,17 @@ impl HatchCountdownTakeover {
             Style::default().fg(dim_amber),
         )));
 
-        render_takeover_frame(f, area, "DHARMA INITIATIVE", colors::rgb(255, 140, 0), lines);
+        lines
+    }
+
+    pub fn render(&self, f: &mut Frame, area: Rect) {
+        render_takeover_frame(
+            f,
+            area,
+            "DHARMA INITIATIVE",
+            colors::rgb(255, 140, 0),
+            self.lines(),
+        );
     }
 }
 
@@ -197,8 +211,14 @@ mod tests {
         }
         // "2" and "5" each have a distinctive top segment (" _ ") — presence
         // of the LED block characters confirms the digit grid rendered.
-        assert!(painted.contains('_'), "expected LED segment glyphs:\n{painted}");
-        assert!(painted.contains("4 8 15 16 23 42"), "expected the Lost numbers easter egg:\n{painted}");
+        assert!(
+            painted.contains('_'),
+            "expected LED segment glyphs:\n{painted}"
+        );
+        assert!(
+            painted.contains("4 8 15 16 23 42"),
+            "expected the Lost numbers easter egg:\n{painted}"
+        );
     }
 
     #[test]
@@ -206,6 +226,26 @@ mod tests {
         for ch in "0123456789:".chars() {
             let glyph = led_glyph(ch);
             assert_eq!(glyph.len(), 3);
+        }
+    }
+
+    /// The Hatch screen must fit the takeover box interior (71x22).
+    #[test]
+    fn lines_fit_the_box_interior() {
+        let interior = crate::animation::takeover::takeover_interior(Rect::new(0, 0, 134, 40));
+        let mut t = HatchCountdownTakeover::new(&ev());
+        for finished in [false, true] {
+            if finished {
+                t.note_reset_finished();
+            }
+            let lines = t.lines();
+            let widest = lines.iter().map(Line::width).max().unwrap_or(0);
+            assert!(widest <= interior.width as usize, "widest {widest}");
+            assert!(
+                lines.len() <= interior.height as usize,
+                "{} rows",
+                lines.len()
+            );
         }
     }
 }

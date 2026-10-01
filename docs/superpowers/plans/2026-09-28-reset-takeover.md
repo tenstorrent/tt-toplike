@@ -15,7 +15,7 @@
 - Off by default; the entire feature (scanning, kmsg tail, rendering) is inert unless `--reset-takeover` (or the equivalent config key) is set.
 - Detection reuses the TUI's existing per-tick/per-2s `sysinfo` process scan — no new polling thread.
 - Lifecycle honesty: "in progress" / "done" are driven by the real `tt-smi -r` pid's liveness, never a fixed fake timer. An animation may loop/hold its "in progress" beats until the real reset finishes.
-- Every takeover variant renders full-screen; full vs. subset scope changes *content* (which chips are shown as targeted, chip-row density), never overlay size.
+- The screen is tinted full-screen, and every takeover variant draws its animation in one fixed 72x24 box centered on it (it shrinks to fit a smaller terminal). The box is the terminal's default background. Full vs. subset scope changes *content* (which chips are shown as targeted, chip-row density), never the box. (Updated 2026-10-01; this originally said every variant renders full-screen.)
 - When `display_mode == DisplayMode::HivemindSweeper`, no takeover is created — the detected reset is injected as a real `SniffEvent` into the live `Hivemind` engine instead.
 - Any keypress while a takeover is active calls `skip()` and is fully consumed that keypress — it must never also reach normal key dispatch (mode switch, quit, etc.) in the same event.
 - A second reset detected while one is already being tracked (`ResetDetector` has an active entry) is dropped — no queueing.

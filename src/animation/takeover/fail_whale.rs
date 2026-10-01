@@ -7,7 +7,7 @@
 //! happy touchdown once the reset has actually finished. Bird count scales
 //! with the real chip count — a bigger reset needs more birds to carry.
 
-use super::{render_takeover_frame, TakeoverClock};
+use super::{render_takeover_frame, takeover_interior, TakeoverClock};
 use crate::ui::colors;
 use crate::workload::reset_detect::ResetEvent;
 use ratatui::layout::Rect;
@@ -94,12 +94,12 @@ impl FailWhaleTakeover {
         (self.clock.elapsed().as_millis() / FLAP_MS) % 2 == 0
     }
 
-    /// The scene's vertical position (in rows from the top of the drawable
-    /// area) at the current elapsed time — a pure function of state, kept
+    /// The scene's vertical position (in rows from the top of the box
+    /// interior) at the current elapsed time — a pure function of state, kept
     /// separate from `render` so the real motion it produces is directly
     /// testable without depending on exactly when a floating-point bob
     /// happens to cross an integer row boundary in a rendered snapshot.
-    fn scene_top(&self, area_height: u16) -> f32 {
+    fn scene_top(&self, interior_height: u16) -> f32 {
         let progress = self.landing_progress();
         let landed = progress >= 1.0;
         // Quadratic ease-out: fast at first, gentle as it settles.
@@ -109,7 +109,7 @@ impl FailWhaleTakeover {
         } else {
             BOB_AMPLITUDE_ROWS * (self.clock.elapsed().as_secs_f32() * BOB_RATE).sin()
         };
-        let available_rows = area_height.saturating_sub(6).max(12) as f32;
+        let available_rows = interior_height.saturating_sub(6).max(12) as f32;
         let hover_row = available_rows * 0.18;
         // Leave room below `ground_row` for the whale body itself plus the
         // rope/bird (or flight/ground) row that follows it — otherwise a
@@ -130,7 +130,8 @@ impl FailWhaleTakeover {
         let ground_color = colors::rgb(120, 165, 90);
         let rope_color = colors::rgb(150, 140, 120);
 
-        let top_pad = self.scene_top(area.height).max(0.0) as usize;
+        // The scene is laid out against the box interior height.
+        let top_pad = self.scene_top(takeover_interior(area).height).max(0.0) as usize;
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         for _ in 0..top_pad {
@@ -146,15 +147,25 @@ impl FailWhaleTakeover {
 
         if !landed {
             // Ropes + birds carrying the whale, wings alternating.
-            let wing = if self.wings_flap_open() { "/|\\" } else { "\\|/" };
+            let wing = if self.wings_flap_open() {
+                "/|\\"
+            } else {
+                "\\|/"
+            };
             let rope_row: String = (0..self.bird_count)
                 .map(|_| format!("{:^w$}", "|", w = WHALE_WIDTH / self.bird_count.max(1)))
                 .collect();
             let bird_row: String = (0..self.bird_count)
                 .map(|_| format!("{:^w$}", wing, w = WHALE_WIDTH / self.bird_count.max(1)))
                 .collect();
-            lines.push(Line::from(Span::styled(rope_row, Style::default().fg(rope_color))));
-            lines.push(Line::from(Span::styled(bird_row, Style::default().fg(bird_color))));
+            lines.push(Line::from(Span::styled(
+                rope_row,
+                Style::default().fg(rope_color),
+            )));
+            lines.push(Line::from(Span::styled(
+                bird_row,
+                Style::default().fg(bird_color),
+            )));
         } else {
             // Settled: birds have let go and flown off, happy, above.
             let flight_row: String = (0..self.bird_count)
@@ -165,7 +176,10 @@ impl FailWhaleTakeover {
                 top_pad,
                 Line::from(Span::styled(flight_row, Style::default().fg(bird_color))),
             );
-            lines.push(Line::from(Span::styled(ground_row_str, Style::default().fg(ground_color))));
+            lines.push(Line::from(Span::styled(
+                ground_row_str,
+                Style::default().fg(ground_color),
+            )));
         }
 
         let title = if landed { "TOUCHDOWN" } else { "FAIL WHALE" };
@@ -268,7 +282,10 @@ mod tests {
         assert!(p1 > p0, "landing should advance over real elapsed time");
         t.tick(Duration::from_secs(5));
         let p2 = t.landing_progress();
-        assert_eq!(p2, 1.0, "landing should settle at fully-landed and stop climbing past it");
+        assert_eq!(
+            p2, 1.0,
+            "landing should settle at fully-landed and stop climbing past it"
+        );
     }
 
     /// While airborne, the scene must actually bob — real motion, not a
@@ -282,7 +299,10 @@ mod tests {
         let a = t.scene_top(30);
         t.tick(Duration::from_millis(700));
         let b = t.scene_top(30);
-        assert_ne!(a, b, "the scene's position should change while hovering, not sit static");
+        assert_ne!(
+            a, b,
+            "the scene's position should change while hovering, not sit static"
+        );
     }
 
     /// The bob amplitude must be wide enough to actually cross a row

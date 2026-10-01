@@ -95,9 +95,15 @@ impl TrekResetTakeover {
         (STARTING_ENERGY - drained).max(MIN_ENERGY)
     }
 
-    pub fn render(&self, f: &mut Frame, area: Rect) {
+    /// The full screen as lines, all padded to one width. At most 34
+    /// columns by 20 rows, so it fits the takeover box interior (71x22).
+    fn lines(&self) -> Vec<Line<'static>> {
         let finished = !self.clock.in_progress();
-        let klingons_remaining = if finished { 0 } else { self.device_indices.len() };
+        let klingons_remaining = if finished {
+            0
+        } else {
+            self.device_indices.len()
+        };
         let condition = if finished { "GREEN" } else { "RED" };
         let condition_color = if finished {
             colors::rgb(90, 220, 120)
@@ -160,12 +166,13 @@ impl TrekResetTakeover {
         let enterprise_index = self.total_devices.min(GRID_SIZE * GRID_SIZE - 1);
 
         for row in 0..GRID_SIZE {
-            let mut spans: Vec<Span<'static>> =
-                vec![Span::styled(format!("{} ", row + 1), Style::default().fg(colors::rgb(70, 150, 110)))];
+            let mut spans: Vec<Span<'static>> = vec![Span::styled(
+                format!("{} ", row + 1),
+                Style::default().fg(colors::rgb(70, 150, 110)),
+            )];
             for col in 0..GRID_SIZE {
                 let index = row * GRID_SIZE + col;
-                let (glyph, color): (&str, ratatui::style::Color) = if index < self.total_devices
-                {
+                let (glyph, color): (&str, ratatui::style::Color) = if index < self.total_devices {
                     let chip = index as u8;
                     if self.device_indices.contains(&chip) {
                         if finished {
@@ -183,7 +190,10 @@ impl TrekResetTakeover {
                 } else {
                     ("...", colors::rgb(40, 80, 60))
                 };
-                spans.push(Span::styled(format!("{glyph} "), Style::default().fg(color)));
+                spans.push(Span::styled(
+                    format!("{glyph} "),
+                    Style::default().fg(color),
+                ));
             }
             lines.push(Line::from(spans));
         }
@@ -212,6 +222,12 @@ impl TrekResetTakeover {
             }
         }
 
+        lines
+    }
+
+    pub fn render(&self, f: &mut Frame, area: Rect) {
+        let finished = !self.clock.in_progress();
+        let lines = self.lines();
         let border_color = if finished {
             colors::rgb(60, 100, 80)
         } else {
@@ -316,5 +332,32 @@ mod tests {
         t.tick(Duration::from_secs(5));
         let e3 = t.energy();
         assert_eq!(e2, e3, "energy should stop changing once finished");
+    }
+
+    /// The Trek screen must fit the takeover box interior (71x22 at full
+    /// size), including with more chips than the 8x8 grid holds.
+    #[test]
+    fn lines_fit_the_box_interior() {
+        let interior = crate::animation::takeover::takeover_interior(Rect::new(0, 0, 134, 40));
+        for chips in [1usize, 4, 70] {
+            let all: Vec<u8> = (0..chips as u8).collect();
+            let mut t = TrekResetTakeover::new(&ev(all, chips));
+            for finished in [false, true] {
+                if finished {
+                    t.note_reset_finished();
+                }
+                let lines = t.lines();
+                let widest = lines.iter().map(Line::width).max().unwrap_or(0);
+                assert!(
+                    widest <= interior.width as usize,
+                    "{chips} chips: widest {widest}"
+                );
+                assert!(
+                    lines.len() <= interior.height as usize,
+                    "{chips} chips: {} rows",
+                    lines.len()
+                );
+            }
+        }
     }
 }
