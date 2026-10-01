@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! Training view — a live tt-train run drawn as a character-grid network
-//! being fed tokens, with loss "mountains" against an aurora nightscape.
+//! Training view — a live tt-train run drawn as a step-time chart over chip power,
+//! with loss "mountains" against an aurora nightscape.
 //!
 //! ## The colour language
 //!
@@ -11,8 +11,10 @@
 //! | Channel | Encodes |
 //! |---|---|
 //! | node/mountain hue red→cyan | loss magnitude (per-cell gradient in the river) |
-//! | amber sweep left→right | forward pass |
-//! | violet sweep right→left | backward pass / gradients |
+//! | bar height (step band) | trainer-reported wall time per step |
+//! | bar colour teal / purple / amber | normal step / program cache grew / checkpoint written |
+//! | pulse cursor speed | one pass per measured step (never faster than 5/s) |
+//! | chip lane height | power as a fraction of that chip's TDP (coral = aiclk dropped) |
 //! | per-column river hue | the run's history (each column keeps its own loss's hue) |
 //! | mint ▼ / coral ▲ | loss delta direction |
 //! | cyan→green→amber→red | chip temperature (the app's existing ramp) |
@@ -26,12 +28,17 @@
 use crate::animation::common::hsv_to_rgb;
 use crate::animation::inference_load::{fmt_bytes, fmt_elapsed, group_thousands};
 use crate::animation::train_sky::sky_cell;
+use crate::animation::train_tapestry::{
+    bar_cell, cause_of, median, pass_fraction, pass_secs, plan_band, BandWants, ChipHistory,
+    StepCause, AICLK_DROP_FRAC, LABEL_W, MAX_LANES,
+};
+use crate::models::Device;
 use crate::backend::TelemetryBackend;
 use crate::ui::colors;
 use crate::workload::train::{LogSource, TrainState};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use std::cell::Cell as StdCell;
+use std::cell::{Cell as StdCell, RefCell};
 
 /// The loss a model that has learned nothing would report — the top of the
 /// hue ramp, derived from the job rather than fixed.
@@ -114,12 +121,6 @@ fn mountain_hsv(base_hue: f32, depth: f32, x: usize, t: f32) -> (f32, f32, f32) 
 }
 
 const FWD_HUE: f32 = 42.0;
-const BWD_HUE: f32 = 268.0;
-
-/// Sub-columns the forward/backward pass advances per second. Expressed in
-/// wall-clock terms so the pulse travels at the same visible speed whatever
-/// the redraw rate — a higher frame rate buys smoothness, not speed.
-const SWEEP_SUBCOLS_PER_SEC: f32 = 26.0;
 
 /// How far behind the sweep head a cell still glows, in sub-columns. The
 /// falloff over this distance is what turns a hard lit block into a tail.
@@ -138,16 +139,6 @@ const SWEEP_LEAD: f32 = 3.0;
 fn smoothstep(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
-}
-
-/// Current sweep-head position, wrapped into `period`. Fractional, so the
-/// head moves smoothly between cells rather than snapping to one per tick.
-fn sweep_head(frame: u64, period: f32) -> f32 {
-    if period <= 0.0 {
-        return 0.0;
-    }
-    let secs = frame as f32 / crate::animation::train_sky::ANIM_FPS;
-    (secs * SWEEP_SUBCOLS_PER_SEC) % period
 }
 
 /// Glow at sub-column `at` given the head position: brightest under the head,
@@ -183,6 +174,21 @@ fn sweep_at(head: f32, at: f32, period: f32) -> f32 {
 
 /// Muted violet-blue used for the frame border everywhere it appears.
 const BORDER: Color = Color::Rgb(90, 90, 130);
+
+/// Step bar colours. Teal, yellow and red are the docs-site brand tints; the
+/// compile purple is the LIVE panel's cache colour so one meaning has one hue.
+const BAR_NORMAL: Color = Color::Rgb(116, 197, 223);
+const BAR_COMPILE: Color = Color::Rgb(180, 140, 230);
+const BAR_CHECKPOINT: Color = Color::Rgb(246, 188, 66);
+/// A chip lane cell where aiclk had dropped well below that chip's best.
+const AICLK_DROP: Color = Color::Rgb(255, 158, 138);
+/// Resting colour of the grid backdrop, median line and empty gauge cells.
+const WIRE_REST: Color = Color::Rgb(80, 90, 115);
+/// Placeholder for a lane column with no chip sample. A glyph used nowhere
+/// else, so a test can count missing samples exactly.
+const NO_SAMPLE: char = '⋅';
+/// Columns between nodes in the grid backdrop.
+const GRID_STRIDE: usize = 4;
 
 /// Consecutive `render()` calls with no growth in `cache_entries` before the
 /// cache indicator settles from "climbing" to "steady". A single stalled
@@ -238,11 +244,11 @@ impl Default for Cell {
 /// go without threading a dozen extra parameters through `render()`.
 #[derive(Clone, Copy)]
 struct Layout {
-    /// First row of the model-card / network / live-stats band.
+    /// First row of the model-card / tapestry / live-stats band.
     network_top: usize,
     /// Height, in rows, of that band (including its own header row).
     network_h: usize,
-    /// First row of the loss river (below the network band).
+    /// First row of the loss river (below the tapestry band).
     river_top: usize,
     /// One past the last row of the river (the row the "low/high" labels
     /// and the blank spacer before CHIPS occupy).
@@ -266,6 +272,10 @@ pub struct TrainView {
     cache_last: StdCell<u32>,
     /// Consecutive render calls since `cache_entries` last grew.
     cache_steady_ticks: StdCell<u32>,
+    /// Chip readings per step and best-so-far values for the gauges. Filled
+    /// by `sample` during `render(&self, ...)`, so it is a `RefCell` for the
+    /// same reason `cache_last` is a `Cell`.
+    history: RefCell<ChipHistory>,
 }
 
 impl TrainView {
@@ -276,6 +286,7 @@ impl TrainView {
             frame: 0,
             cache_last: StdCell::new(0),
             cache_steady_ticks: StdCell::new(0),
+            history: RefCell::new(ChipHistory::default()),
         }
     }
 
@@ -290,6 +301,7 @@ impl TrainView {
         match st.proc.as_ref() {
             None => self.draw_scanning(&mut buf),
             Some(_) => {
+                self.sample(st, backend);
                 self.draw_header(&mut buf, st);
                 match st.log.as_ref() {
                     Some(LogSource::File(_)) => {
@@ -297,20 +309,20 @@ impl TrainView {
                         // overlapping at narrow widths: the model card and
                         // live-stats panel are dropped, in that priority
                         // order, whenever there isn't room for all three
-                        // columns — the network grid and the river (the
+                        // columns — the tapestry band and the river (the
                         // visual centerpiece) always get drawn.
                         let (show_model, show_live) = self.panel_fit();
                         if show_model {
                             self.draw_model_card(&mut buf, st);
                         }
-                        self.draw_network(&mut buf, st);
+                        self.draw_tapestry(&mut buf, st, backend);
                         if show_live {
                             self.draw_live_stats(&mut buf, st);
                         }
                         self.draw_river(&mut buf, st);
                     }
                     // The log is unreadable, but the *config* isn't — the
-                    // model card and the network band come from it, and
+                    // model card and the tapestry band come from it, and
                     // `draw_river` already paints its nightscape when there
                     // is no loss history. Only the mountains genuinely
                     // depend on the stream. Replacing the whole body left
@@ -320,7 +332,7 @@ impl TrainView {
                         if show_model {
                             self.draw_model_card(&mut buf, st);
                         }
-                        self.draw_network(&mut buf, st);
+                        self.draw_tapestry(&mut buf, st, backend);
                         // `draw_live_stats` needs no special case: its rows
                         // are emitted only for values that exist, so with no
                         // stream it degrades by itself to cpu / rss /
@@ -382,7 +394,7 @@ impl TrainView {
     /// draw would corrupt whichever panel is drawn first.
     ///
     /// `show_model` requires room for: a 2-col left margin, the model
-    /// card, a 1-col gap, a minimum 4-col network, another 1-col gap, the
+    /// card, a 1-col gap, a minimum 4-col tapestry band, another 1-col gap, the
     /// live panel, and a trailing 1-col margin. `show_live` alone (with the
     /// model card dropped) needs the same minus the card's width.
     fn panel_fit(&self) -> (bool, bool) {
@@ -393,7 +405,7 @@ impl TrainView {
         (show_model, show_live)
     }
 
-    /// `(x0, w)` of the network grid — the space between whichever side
+    /// `(x0, w)` of the tapestry band (step bars, grid, chip lanes) — the space between whichever side
     /// panels are actually being drawn (see `panel_fit`).
     fn network_bounds(&self) -> (usize, usize) {
         let (show_model, show_live) = self.panel_fit();
@@ -411,8 +423,9 @@ impl TrainView {
         let legend_row = self.height.saturating_sub(2);
         let chips_row = legend_row.saturating_sub(2);
         let network_top = 3;
-        // Tall terminals give the network enough rows to space its heads out
-        // (see `draw_network`'s `row_stride`); short ones fall back. Capped at
+        // Tall terminals give the tapestry band enough rows for its step bars,
+        // grid row and chip lanes (see `plan_band` in `train_tapestry`); short
+        // ones fall back. Capped at
         // half the content band either way so the river — the centerpiece —
         // always keeps the larger share.
         let content_h = chips_row.saturating_sub(network_top + 3);
@@ -612,7 +625,7 @@ impl TrainView {
             .map(|p| p.binary.as_str())
             .unwrap_or("The training run");
         // Centred in the river band rather than at row 4: the model card and
-        // network band occupy the top of the screen now, and the river's
+        // tapestry band occupy the top of the screen now, and the river's
         // nightscape is the space this message used to leave empty.
         let Layout {
             river_top,
@@ -733,8 +746,61 @@ impl TrainView {
         }
     }
 
-    fn draw_network(&self, buf: &mut [Vec<Cell>], st: &TrainState) {
-        let ceiling = loss_ceiling(st.config.vocab_size);
+    /// Record this frame's chip readings against the current step, and fold
+    /// tokens/sec and PCIe throughput into their best-so-far values.
+    fn sample(&self, st: &TrainState, backend: &dyn TelemetryBackend) {
+        // A chip with no telemetry is not sampled, so it never gets a lane.
+        let chips: Vec<(usize, f32, u32)> = backend
+            .devices()
+            .iter()
+            .filter_map(|d| {
+                let t = backend.telemetry(d.index)?;
+                Some((d.index, t.power_w(), t.aiclk_mhz()))
+            })
+            .collect();
+        let mut h = self.history.borrow_mut();
+        h.record(st.step, &chips);
+        if let Some(tps) = st.tokens_per_sec() {
+            h.note_tps(tps);
+        }
+        if let Some(bps) = Self::pcie_total(backend) {
+            h.note_pcie(bps);
+        }
+    }
+
+    /// Summed in+out PCIe bytes/sec across chips that report it, `None` when
+    /// no chip does (only the sysfs/hybrid backends have these counters).
+    fn pcie_total(backend: &dyn TelemetryBackend) -> Option<f64> {
+        let mut any = false;
+        let mut total = 0.0f64;
+        for d in backend.devices() {
+            if let Some(bw) = backend.pcie_bandwidth(d.index) {
+                any = true;
+                total += bw.rx_bytes_per_sec + bw.tx_bytes_per_sec;
+            }
+        }
+        any.then_some(total)
+    }
+
+    /// A chip's TDP in watts, from SMBUS telemetry first and the tt-smi
+    /// `limits` block second. `None` when neither reports a positive value.
+    fn chip_tdp(backend: &dyn TelemetryBackend, device: &Device) -> Option<f32> {
+        backend
+            .smbus_telemetry(device.index)
+            .and_then(|s| s.tdp_watts())
+            .or_else(|| device.limits.as_ref().and_then(|l| l.tdp_limit))
+            .filter(|v| *v > 0.0)
+    }
+
+    /// The tapestry band: step bars, grid backdrop and chip lanes, drawn only
+    /// from `st.step_history`, the measured step time and chip telemetry. A
+    /// layer whose signal is missing is left out.
+    fn draw_tapestry(
+        &self,
+        buf: &mut [Vec<Cell>],
+        st: &TrainState,
+        backend: &dyn TelemetryBackend,
+    ) {
         let (x0, w) = self.network_bounds();
         let Layout {
             network_top,
@@ -742,143 +808,161 @@ impl TrainView {
             ..
         } = self.layout();
         let label = Color::Rgb(150, 200, 255);
-        // The grid's row/column counts are decorative shape only — when the
-        // real config is unknown we still need *some* shape to animate, so
-        // default to nanollama3's 6x6. But the header text is a claim about
-        // the actual model, so it must never assert those defaulted numbers
-        // as fact: only print counts when both are genuinely known.
-        let blocks = st.config.num_blocks.unwrap_or(6).max(1) as usize;
-        let heads = st.config.num_heads.unwrap_or(6).max(1) as usize;
+        let dim = Color::Rgb(120, 130, 155);
 
-        let topology_label = match (st.config.num_blocks, st.config.num_heads) {
-            (Some(b), Some(h)) => format!("{b} blocks × {h} heads"),
-            _ => "topology unknown".to_string(),
-        };
-
-        self.text(
-            buf,
-            x0,
-            network_top,
-            &Self::clip(&format!("tokens →   [ {topology_label} ]   ∇ gradients"), w),
-            label,
-            false,
+        let lane_devices: Vec<&Device> = backend
+            .devices()
+            .iter()
+            .filter(|d| backend.telemetry(d.index).is_some())
+            .take(MAX_LANES)
+            .collect();
+        let plan = plan_band(
+            network_h,
+            BandWants {
+                lanes: lane_devices.len(),
+                ..BandWants::default()
+            },
         );
 
-        // ── Grid sizing ──────────────────────────────────────────────
-        // The band has spare width at typical terminal sizes, so the grid
-        // breathes: pick the widest per-block stride that still fits, and
-        // put a blank row between head rows when the band is tall enough.
-        // Both back off to the old tight packing on small terminals — the
-        // river below is the centerpiece and never gives up height for this.
-        let max_rows = network_h.saturating_sub(1).max(1);
-        let usable_w = w.saturating_sub(1);
+        // The newest `n` steps, right-aligned so the latest step is always at
+        // the band's right edge and the lanes below share the same columns.
+        let hist = &st.step_history;
+        let bar_w = w.saturating_sub(LABEL_W + 1);
+        let n = hist.len().min(bar_w);
+        let shown = &hist[hist.len() - n..];
+        let x_bars = x0 + LABEL_W;
+        let col0 = x_bars + (bar_w - n);
+        let pass = pass_secs(st.step_ms);
 
-        // stride = columns consumed per block (1 node + stride-1 connectors).
-        // `(cols-1)*stride + 1` must fit `usable_w`.
-        let cols_at = |stride: usize| -> usize {
-            if usable_w == 0 {
-                return 1;
-            }
-            (usable_w.saturating_sub(1) / stride + 1).max(1)
-        };
-        let stride = [5usize, 4, 3]
-            .into_iter()
-            .find(|&s| cols_at(s) >= blocks)
-            .unwrap_or(2);
-        let cols = blocks.min(cols_at(stride)).max(1);
-
-        // Row stride 2 (a blank row between heads) only when every head still
-        // fits; otherwise stay at 1 rather than truncating the network.
-        let row_stride = if heads > 0 && (heads - 1) * 2 < max_rows {
-            2
+        // ── header ───────────────────────────────────────────────────
+        let header = if shown.is_empty() {
+            "STEP ANATOMY  no per-step times reported".to_string()
         } else {
-            1
-        };
-        let rows = heads
-            .min((max_rows.saturating_sub(1)) / row_stride + 1)
-            .max(1);
-
-        let node_glyphs = ['●', '◉', '○', '◇', '·'];
-
-        for r in 0..rows {
-            let y = network_top + 1 + r * row_stride;
-            for c in 0..cols {
-                let x = x0 + c * stride;
-                if x >= x0 + w {
-                    break;
-                }
-                // Sweep intensity is continuous, not a binary on/off: the head
-                // advances in fractional columns and each cell's brightness
-                // falls off behind it, so at animation cadence the pulse
-                // *flows* through the network instead of stepping between
-                // discrete lit blocks. Measured in sub-column units so the
-                // connector cells between nodes light in sequence too.
-                let sub = stride.max(1) as f32;
-                let head = sweep_head(self.frame, (cols + 4) as f32 * sub);
-                let fwd = sweep_at(head, c as f32 * sub, (cols + 4) as f32 * sub);
-                let bwd = sweep_at(head, (cols - 1 - c) as f32 * sub, (cols + 4) as f32 * sub);
-
-                // Connectors run from this node toward the next block. They
-                // light with whichever sweep is passing, so the pulse reads as
-                // travelling *through* the network rather than hopping nodes.
-                if c + 1 < cols {
-                    for k in 1..stride {
-                        let cx = x + k;
-                        if cx >= x0 + w {
-                            break;
-                        }
-                        // Fan the middle of a wide gap into ╱/╲ so adjacent
-                        // heads look wired together, not just railed straight.
-                        let ch = if stride >= 4 && k == stride / 2 {
-                            if (r + c) % 2 == 0 {
-                                '╲'
-                            } else {
-                                '╱'
-                            }
-                        } else {
-                            '─'
-                        };
-                        // Each connector cell sits a fraction of a block
-                        // further along, so the sweep crosses the gap smoothly
-                        // rather than jumping node-to-node.
-                        let at = c as f32 * sub + k as f32;
-                        let period = (cols + 4) as f32 * sub;
-                        let f = sweep_at(head, at, period);
-                        let b = sweep_at(head, (cols - 1 - c) as f32 * sub - k as f32, period);
-                        let lit = f.max(b);
-                        let (col, bold) = if lit > 0.04 {
-                            let hue = if f >= b { FWD_HUE } else { BWD_HUE };
-                            // Blend from the resting wire colour up to the
-                            // sweep's own hue as the pulse passes.
-                            (
-                                hsv_to_rgb(hue, 0.35 + lit * 0.4, 0.30 + lit * 0.45),
-                                lit > 0.55,
-                            )
-                        } else {
-                            (Color::Rgb(80, 90, 115), false)
-                        };
-                        self.put(buf, cx, y, ch, col, bold);
-                    }
-                }
-
-                // Node glyph tracks the sweep's local intensity: a passing
-                // pulse swells it ●, and it rests at ·. Previously this cycled
-                // on a frame counter, which read as random flicker unrelated
-                // to the pass travelling through.
-                let lit = fwd.max(bwd);
-                let glyph = node_glyphs[((1.0 - lit) * (node_glyphs.len() - 1) as f32).round()
-                    as usize
-                    % node_glyphs.len()];
-                let color = if lit > 0.04 {
-                    let hue = if fwd >= bwd { FWD_HUE } else { BWD_HUE };
-                    hsv_to_rgb(hue, 0.55 + lit * 0.3, 0.5 + lit * 0.45)
-                } else if let Some(loss) = st.loss {
-                    hsv_to_rgb(loss_hue(loss, ceiling), 0.55, 0.6)
-                } else {
-                    Color::Rgb(90, 100, 130)
-                };
-                self.put(buf, x, y, glyph, color, lit > 0.55);
+            let ms: Vec<f32> = shown.iter().map(|s| s.ms).collect();
+            let med = median(&ms).unwrap_or(0.0);
+            let mut h = format!("STEP ANATOMY  last {n} steps · median {med:.0} ms");
+            match pass {
+                Some((_, true)) => h.push_str(" · pulse = 1 step (drawn at 5/s max)"),
+                Some((_, false)) => h.push_str(" · pulse = 1 step"),
+                None => {}
             }
+            h
+        };
+        self.text(buf, x0, network_top, &Self::clip(&header, w), label, false);
+
+        // ── step bars ────────────────────────────────────────────────
+        let y_bars = network_top + 1;
+        let max_ms = shown.iter().map(|s| s.ms).fold(0.0f32, f32::max);
+        if plan.bar_rows > 0 && max_ms > 0.0 {
+            // The scale is printed, not implied: window maximum on the top
+            // row and zero on the bottom one.
+            self.text(buf, x0, y_bars, &format!("{max_ms:>5.0}"), dim, false);
+            if plan.bar_rows > 1 {
+                let y_last = y_bars + plan.bar_rows - 1;
+                self.text(buf, x0, y_last, &format!("{:>5}", 0), dim, false);
+            }
+            for (i, s) in shown.iter().enumerate() {
+                let frac = s.ms / max_ms;
+                let color = match cause_of(s) {
+                    StepCause::Normal => BAR_NORMAL,
+                    StepCause::Compile => BAR_COMPILE,
+                    StepCause::Checkpoint => BAR_CHECKPOINT,
+                };
+                for r in 0..plan.bar_rows {
+                    let from_bottom = plan.bar_rows - 1 - r;
+                    let ch = bar_cell(frac, from_bottom, plan.bar_rows);
+                    self.put(buf, col0 + i, y_bars + r, ch, color, false);
+                }
+            }
+            // Median line: a dotted rule across every column whose bar is
+            // shorter than the median, so it shows through gaps and never
+            // overwrites a bar.
+            let ms: Vec<f32> = shown.iter().map(|s| s.ms).collect();
+            let med = median(&ms).unwrap_or(0.0);
+            let eighths = ((med / max_ms * plan.bar_rows as f32 * 8.0).round() as usize).max(1);
+            let med_from_bottom = ((eighths - 1) / 8).min(plan.bar_rows - 1);
+            let y_med = y_bars + plan.bar_rows - 1 - med_from_bottom;
+            for (i, s) in shown.iter().enumerate() {
+                if bar_cell(s.ms / max_ms, med_from_bottom, plan.bar_rows) == ' ' {
+                    self.put(buf, col0 + i, y_med, '┈', WIRE_REST, false);
+                }
+            }
+        }
+
+        // ── grid backdrop with the step-rate cursor ──────────────────
+        let mut y = y_bars + plan.bar_rows;
+        if plan.grid_row {
+            self.text(buf, x0, y, "pulse", dim, false);
+            let gw = bar_w;
+            let period = gw as f32 + SWEEP_TAIL + SWEEP_LEAD;
+            let head = pass.map(|(secs, _)| {
+                pass_fraction(self.frame, crate::animation::train_sky::ANIM_FPS, secs) * period
+            });
+            let node_glyphs = ['●', '◉', '○', '◇', '·'];
+            for c in 0..gw {
+                let lit = head.map(|h| sweep_at(h, c as f32, period)).unwrap_or(0.0);
+                let ch = if c % GRID_STRIDE == 0 {
+                    node_glyphs[((1.0 - lit) * (node_glyphs.len() - 1) as f32).round() as usize
+                        % node_glyphs.len()]
+                } else {
+                    '─'
+                };
+                let (col, bold) = if lit > 0.04 {
+                    (hsv_to_rgb(FWD_HUE, 0.45 + lit * 0.4, 0.35 + lit * 0.6), lit > 0.55)
+                } else {
+                    (WIRE_REST, false)
+                };
+                self.put(buf, x_bars + c, y, ch, col, bold);
+            }
+            y += 1;
+        }
+
+        // ── chip lanes ───────────────────────────────────────────────
+        let hist_chips = self.history.borrow();
+        for dev in lane_devices.iter().take(plan.lane_rows) {
+            self.text(
+                buf,
+                x0,
+                y,
+                &Self::clip(&format!("chip{}", dev.index), LABEL_W),
+                dim,
+                false,
+            );
+            let temp = backend
+                .telemetry(dev.index)
+                .map(|t| t.temp_c())
+                .unwrap_or(0.0);
+            let tcolor = colors::temp_color(temp);
+            let samples: Vec<_> = shown
+                .iter()
+                .map(|s| hist_chips.sample_at(dev.index, s.step))
+                .collect();
+            // Scale to the chip's TDP. With no TDP known, to the highest power
+            // in the window, so the lane still shows its own shape.
+            let scale = Self::chip_tdp(backend, dev).unwrap_or_else(|| {
+                samples
+                    .iter()
+                    .flatten()
+                    .map(|c| c.power_w)
+                    .fold(0.0, f32::max)
+            });
+            let aimax = hist_chips.aiclk_max(dev.index);
+            for (i, smp) in samples.iter().enumerate() {
+                let (ch, col) = match smp {
+                    Some(c) if scale > 0.0 => {
+                        let dropped = c.aiclk_mhz > 0
+                            && aimax > 0
+                            && (c.aiclk_mhz as f32) < AICLK_DROP_FRAC * aimax as f32;
+                        (
+                            bar_cell(c.power_w / scale, 0, 1),
+                            if dropped { AICLK_DROP } else { tcolor },
+                        )
+                    }
+                    _ => (NO_SAMPLE, WIRE_REST),
+                };
+                self.put(buf, col0 + i, y, ch, col, false);
+            }
+            y += 1;
         }
     }
 
@@ -1278,7 +1362,7 @@ impl TrainView {
             .loss
             .map(|l| hsv_to_rgb(loss_hue(l, ceiling), 0.75, 0.85))
             .unwrap_or(Color::Rgb(200, 150, 220));
-        // A run whose stdout can't be read draws no loss curve, no sweeps and
+        // A run whose stdout can't be read draws no loss curve and
         // no comet — so advertising their symbols in the legend describes a
         // screen the viewer is not looking at. Only the channels that survive
         // that state are listed. `log` is `None` while still scanning, which
@@ -1286,8 +1370,8 @@ impl TrainView {
         let has_stream = matches!(st.log, Some(LogSource::File(_)));
         let all: [(char, &str, Color); 9] = [
             ('●', "loss", loss_color),
-            ('─', "forward", hsv_to_rgb(FWD_HUE, 0.85, 0.9)),
-            ('∙', "gradients", hsv_to_rgb(BWD_HUE, 0.7, 0.85)),
+            ('▇', "step time", BAR_NORMAL),
+            ('▇', "compile", BAR_COMPILE),
             ('▼', "loss ↓", Color::Rgb(120, 230, 190)),
             ('▲', "loss ↑", Color::Rgb(255, 140, 120)),
             ('█', "chip temp", colors::temp_color(70.0)),
@@ -1296,18 +1380,22 @@ impl TrainView {
             ('░', "aurora", Color::Rgb(120, 180, 150)),
         ];
         // Every channel is drawn without a stream *except* the ones that need
-        // a loss value: the network band and the river (nightscape, aurora,
+        // a loss value: the tapestry band and the river (nightscape, aurora,
         // and the checkpoint comet drawn inside it) all still render from the
         // config and from chip telemetry. Only the mountains and the header's
         // delta arrows depend on a per-step loss.
+        // `step time` and `compile` need step samples, so a trainer that
+        // prints no per-step time does not advertise them.
         //
         // This tracks whether the river is drawn, not whether a stream
         // exists — an earlier version keyed on the stream and dropped the
         // aurora and comet, which was right only while the no-log state
         // replaced the river wholesale.
+        let has_steps = !st.step_history.is_empty();
         let entries: Vec<(char, &str, Color)> = all
             .into_iter()
             .filter(|(_, label, _)| has_stream || !matches!(*label, "loss" | "loss ↓" | "loss ↑"))
+            .filter(|(_, label, _)| has_steps || !matches!(*label, "step time" | "compile"))
             .collect();
         let mut x = 2;
         for (glyph, label, color) in entries {
@@ -1794,14 +1882,13 @@ mod tests {
 
         // Unreadable stdout: no per-step stream exists.
         let out = render(Some(LogSource::NotRedirected));
-        // The river and network still render from the config in this state,
+        // The river and tapestry band still render from the config in this state,
         // so only the loss-derived channels are unreachable.
         for present in [
             "chip temp",
             "chip power",
             "aurora",
             "checkpoint",
-            "gradients",
         ] {
             assert!(
                 out.contains(present),
@@ -1816,7 +1903,7 @@ mod tests {
         }
         // A readable log gets the full legend back.
         let out = render(Some(LogSource::File("/tmp/x.log".into())));
-        for present in ["loss ↓", "checkpoint", "gradients"] {
+        for present in ["loss ↓", "checkpoint"] {
             assert!(
                 out.contains(present),
                 "legend lost {present:?} on a live run"
@@ -2046,79 +2133,60 @@ mod tests {
         }
     }
 
-    /// Fluidity guard. The sweep used to be a binary `% period < 2` on/off,
-    /// which at any frame rate reads as blocks blinking rather than a pulse
-    /// travelling. Now it's a continuous head with a lead-in and a trailing
-    /// falloff, so a cell's brightness changes by small increments between
-    /// consecutive frames. Asserts that directly: a regression to on/off
-    /// would produce a 1.0 jump, and dropping the lead-in ramp measured 0.95.
+    /// Fluidity guard. The cursor head is continuous with a lead-in and a
+    /// trailing falloff, so a cell's brightness changes by small increments
+    /// between consecutive frames. A regression to on/off would produce a 1.0
+    /// jump, and dropping the lead-in ramp measured 0.95.
     #[test]
     fn sweep_intensity_changes_smoothly_between_consecutive_frames() {
-        let period = 50.0; // (cols+4) * stride for a typical 6-block grid
+        let period = 50.0;
+        // A 2 s pass over 50 columns moves the head 25 columns/s (about 0.42
+        // per frame), the speed the old fixed sweep used. At a 1 s pass the
+        // head moves 0.83 columns/frame and the lead-in's steepest slope
+        // alone gives a 0.39 step, so 0.25 would test the wrong speed.
+        let head = |f: u64| pass_fraction(f, crate::animation::train_sky::ANIM_FPS, 2.0) * period;
         let mut worst: f32 = 0.0;
-        // Sample several cells so the wrap-around boundary is covered too.
         for at in [0.0f32, 7.5, 15.0, 33.0, 49.0] {
-            let mut prev = sweep_at(sweep_head(0, period), at, period);
+            let mut prev = sweep_at(head(0), at, period);
             for f in 1..240u64 {
-                let cur = sweep_at(sweep_head(f, period), at, period);
+                let cur = sweep_at(head(f), at, period);
                 worst = worst.max((cur - prev).abs());
                 prev = cur;
             }
         }
         assert!(
             worst < 0.25,
-            "sweep steps by {worst:.3} between frames — motion should be \
-             continuous, not a blink"
+            "sweep steps by {worst:.3} between frames - motion should be continuous"
         );
-
-        // And it must actually reach full brightness, or "smooth" would be
-        // satisfied by a flat line that never lights up at all.
         let peak = (0..240u64)
-            .map(|f| sweep_at(sweep_head(f, period), 15.0, period))
+            .map(|f| sweep_at(head(f), 15.0, period))
             .fold(0.0f32, f32::max);
-        assert!(
-            peak > 0.85,
-            "sweep never reaches full brightness: {peak:.3}"
-        );
+        assert!(peak > 0.85, "sweep never reaches full brightness: {peak:.3}");
     }
 
-    /// The pulse must travel in a consistent direction, not shimmer in place:
-    /// as the head advances, the lit cell index should advance with it.
+    /// The pulse must travel in one direction and complete one pass per
+    /// measured step: at a 1 s step it wraps once per 60 frames.
     #[test]
-    fn sweep_head_advances_monotonically_within_a_cycle() {
-        let period = 50.0;
-        let mut last = sweep_head(0, period);
+    fn the_cursor_advances_monotonically_and_wraps_once_per_pass() {
+        let fps = crate::animation::train_sky::ANIM_FPS;
+        let mut last = pass_fraction(0, fps, 1.0);
         let mut wraps = 0;
-        for f in 1..200u64 {
-            let h = sweep_head(f, period);
+        for f in 1..=180u64 {
+            let h = pass_fraction(f, fps, 1.0);
             if h < last {
-                wraps += 1; // a wrap is expected, a jitter is not
+                wraps += 1;
             } else {
-                assert!(
-                    h - last < 1.0,
-                    "head jumped {:.2} sub-columns in one frame at f={f}",
-                    h - last
-                );
+                assert!(h - last < 0.05, "cursor jumped {:.3} in one frame", h - last);
             }
             last = h;
         }
-        assert!(
-            (1..=3).contains(&wraps),
-            "expected the sweep to wrap a couple of times over 200 frames, got {wraps}"
-        );
+        assert_eq!(wraps, 3, "three one-second passes in 180 frames at {fps} fps");
     }
 
-    /// The grid should breathe on a normal terminal: blocks spaced several
-    /// columns apart with visible connectors between them, and — when the
-    /// band is tall enough — a blank row between head rows. A regression to
-    /// the old tight `node,connector,node` packing (2 columns per block,
-    /// rows touching) would make the network read as a solid clump, so this
-    /// asserts the spacing directly rather than eyeballing it.
-    #[test]
-    fn network_grid_is_spaced_out_on_a_roomy_terminal() {
+    // ---- tapestry band -------------------------------------------------
+
+    fn live_state() -> TrainState {
         use crate::workload::train::{LogSource, TrainProcess};
-        let mut b = MockBackend::new(4);
-        b.init().unwrap();
         let mut st = TrainState::new();
         st.proc = Some(TrainProcess {
             pid: 1,
@@ -2126,113 +2194,216 @@ mod tests {
             config_path: None,
         });
         st.log = Some(LogSource::File("/tmp/x.log".into()));
-        st.config.num_blocks = Some(6);
-        st.config.num_heads = Some(6);
-        // Through `apply_event`, as a real run does: setting `loss` alone
-        // leaves `loss_history` empty, which no live run can be in — and the
-        // river label (this test's anchor) is drawn only when there is
-        // history to label.
         st.apply_event(crate::workload::train::TrainEvent::Step { step: 1, loss: 2.0 });
+        st
+    }
 
-        let v = TrainView::new(134, 40);
-        let lines = v.render(&st, &b);
-        let rows: Vec<String> = lines
+    fn sample_at(step: u64, ms: f32, delta: u32) -> crate::workload::train::StepSample {
+        crate::workload::train::StepSample {
+            step,
+            ms,
+            cache_delta: delta,
+            checkpoint: false,
+        }
+    }
+
+    fn rows_of(lines: &[Line<'static>]) -> Vec<String> {
+        lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect();
-
-        // Scope to the network band: everything above the river's "LOSS"
-        // label. The legend row also mixes node glyphs with `─`, so an
-        // unscoped scan would count it as a seventh head row.
-        let river_label = rows
-            .iter()
-            .position(|r| r.contains("LOSS  ·"))
-            .expect("river label row should render");
-        let node_rows: Vec<usize> = rows
-            .iter()
-            .enumerate()
-            .take(river_label)
-            .filter(|(_, r)| r.contains('─') && r.chars().any(|c| "●◉○◇·".contains(c)))
-            .map(|(i, _)| i)
-            .collect();
-        assert_eq!(
-            node_rows.len(),
-            6,
-            "all six head rows should render; got {node_rows:?}"
-        );
-
-        // Vertical: consecutive head rows are two apart (a blank row between).
-        for pair in node_rows.windows(2) {
-            assert_eq!(
-                pair[1] - pair[0],
-                2,
-                "head rows should be spaced on a 40-row terminal; got {node_rows:?}"
-            );
-        }
-
-        // Horizontal: at least two connector chars between adjacent nodes.
-        // The old packing put exactly one, so `──` never appeared.
-        let first = &rows[node_rows[0]];
-        assert!(
-            first.contains("──"),
-            "expected multi-column connectors between blocks, got {first:?}"
-        );
+            .collect()
     }
 
     #[test]
-    fn network_header_never_fabricates_topology_it_cannot_source() {
-        use crate::workload::train::{LogSource, TrainEvent, TrainProcess};
+    fn step_bars_are_drawn_from_the_step_history() {
+        let mut b = MockBackend::new(2);
+        b.init().unwrap();
+        let mut st = live_state();
+        // Thirty normal steps and one four times slower: the bar scale is the
+        // window maximum, so only the slow step reaches the top row.
+        st.step_history = (1..=31u64)
+            .map(|i| sample_at(i, if i == 20 { 400.0 } else { 100.0 }, 0))
+            .collect();
+        st.step = 31;
+        st.step_ms = 100.0;
+        let rows = rows_of(&TrainView::new(134, 40).render(&st, &b));
+        let header = rows
+            .iter()
+            .position(|r| r.contains("STEP ANATOMY"))
+            .expect("the band header should render");
+        assert!(rows[header].contains("last 31 steps"), "{}", rows[header]);
+        assert!(rows[header].contains("median 100 ms"), "{}", rows[header]);
+        let top = &rows[header + 1];
+        assert_eq!(
+            top.matches('█').count(),
+            1,
+            "only the slow step reaches the top bar row: {top:?}"
+        );
+        // The normal steps are a quarter of the scale: one full bottom cell.
+        let bottom = &rows[header + 4];
+        assert!(bottom.matches('█').count() >= 31, "{bottom:?}");
+    }
+
+    /// Review Focus 1.
+    #[test]
+    fn a_trainer_with_no_per_step_times_gets_no_bars_but_keeps_the_pulse() {
+        let mut b = MockBackend::new(2);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.step_ms = 400.0; // derived from log cadence; no per-step history
+        let out = text_of(&TrainView::new(134, 40).render(&st, &b));
+        assert!(out.contains("STEP ANATOMY"), "{out}");
+        assert!(out.contains("no per-step times reported"), "{out}");
+        assert!(out.contains("pulse"), "the grid backdrop still renders:
+{out}");
+    }
+
+    #[test]
+    fn the_header_says_when_the_pulse_is_slowed_to_stay_visible() {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.step_history = (1..=10u64).map(|i| sample_at(i, 83.0, 0)).collect();
+        st.step = 10;
+        st.step_ms = 83.0;
+        let out = text_of(&TrainView::new(150, 40).render(&st, &b));
+        assert!(out.contains("pulse = 1 step (drawn at 5/s max)"), "{out}");
+        st.step_ms = 400.0;
+        let out = text_of(&TrainView::new(150, 40).render(&st, &b));
+        assert!(out.contains("pulse = 1 step"), "{out}");
+        assert!(!out.contains("5/s max"), "{out}");
+    }
+
+    /// Review Focus 2.
+    #[test]
+    fn a_backend_with_no_chips_draws_no_lanes_and_does_not_panic() {
+        // Not `init()`ed: `MockBackend::new(0)` refuses to initialise, and an
+        // un-initialised backend reports no devices, which is the case.
+        let b = MockBackend::new(0);
+        let mut st = live_state();
+        st.step_history = (1..=10u64).map(|i| sample_at(i, 100.0, 0)).collect();
+        st.step = 10;
+        let out = text_of(&TrainView::new(134, 40).render(&st, &b));
+        assert!(out.contains("STEP ANATOMY"), "{out}");
+        assert!(!out.contains("chip0"), "no chip, no lane:
+{out}");
+    }
+
+    /// The lane columns share the bars' time axis, and a column with no chip
+    /// sample says so rather than drawing a value.
+    #[test]
+    fn chip_lanes_line_up_with_the_step_bars_and_mark_missing_samples() {
+        let mut b = MockBackend::new(2);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.step_history = (1..=8u64).map(|i| sample_at(i, 100.0, 0)).collect();
+        st.step_ms = 100.0;
+        let v = TrainView::new(134, 40);
+        let lane_row = |v: &TrainView, st: &TrainState| -> String {
+            rows_of(&v.render(st, &b))
+                .into_iter()
+                .find(|r| r.contains("chip0"))
+                .expect("a lane for chip 0")
+        };
+        // The view only sees steps 1..=4: the other four columns are missing.
+        for step in 1..=4u64 {
+            st.step = step;
+            v.render(&st, &b);
+        }
+        let row = lane_row(&v, &st);
+        assert_eq!(row.matches(NO_SAMPLE).count(), 4, "{row:?}");
+        // Seeing the rest fills every column.
+        for step in 5..=8u64 {
+            st.step = step;
+            v.render(&st, &b);
+        }
+        let row = lane_row(&v, &st);
+        assert_eq!(row.matches(NO_SAMPLE).count(), 0, "{row:?}");
+        // Right-aligned: the newest step's column is the band's right edge.
+        // The `pulse` row always spans the full bar width, so the lane's last
+        // glyph must end in the same column as it does.
+        let last_col = |r: &str| r.trim_end().chars().count();
+        let rows = rows_of(&v.render(&st, &b));
+        let pulse = rows
+            .iter()
+            .find(|r| r.contains("pulse") && !r.contains("STEP ANATOMY"))
+            .expect("a pulse row");
+        assert_eq!(
+            last_col(&row),
+            last_col(pulse),
+            "lane is not right-aligned with the band:\n{row:?}\n{pulse:?}"
+        );
+    }
+
+    /// Review Focus 4.
+    #[test]
+    fn the_tapestry_fits_every_terminal_size() {
+        let mut b = MockBackend::new(3);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.step_history = (1..=64u64).map(|i| sample_at(i, 100.0 + i as f32, (i % 9 == 0) as u32)).collect();
+        st.step = 64;
+        st.step_ms = 150.0;
+        for w in [20usize, 40, 60, 80, 100, 134] {
+            for h in [10usize, 14, 20, 30, 40] {
+                let v = TrainView::new(w, h);
+                v.render(&st, &b);
+                for line in v.render(&st, &b) {
+                    let s: String = line.spans.iter().map(|sp| sp.content.as_ref()).collect();
+                    assert!(
+                        !s.contains('╗') && !s.contains('╝'),
+                        "right-side corner (w={w} h={h}): {s:?}"
+                    );
+                    for (pos, _) in s.match_indices('║') {
+                        assert_eq!(pos, 0, "`║` only at column 0 (w={w} h={h}): {s:?}");
+                    }
+                    let cols = unicode_width::UnicodeWidthStr::width(s.as_str());
+                    assert!(cols <= w, "line is {cols} cols at width {w}x{h}: {s:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_legend_lists_step_symbols_only_when_there_are_step_samples() {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let legend = |st: &TrainState| -> String {
+            rows_of(&TrainView::new(150, 40).render(st, &b))
+                .into_iter()
+                .find(|r| r.contains("chip temp"))
+                .unwrap_or_default()
+        };
+        let mut st = live_state();
+        let without = legend(&st);
+        assert!(!without.contains("step time") && !without.contains("compile"), "{without}");
+        st.step_history = vec![sample_at(1, 100.0, 0)];
+        let with = legend(&st);
+        assert!(with.contains("step time") && with.contains("compile"), "{with}");
+    }
+
+    /// The topology text left the band, so it has to be findable on the MODEL
+    /// card, and still must not state a count nobody sourced.
+    #[test]
+    fn the_model_card_states_known_topology_and_nothing_unknown() {
         let mut b = MockBackend::new(4);
         b.init().unwrap();
         let v = TrainView::new(100, 30);
 
-        // Unknown config (no readable YAML): the header must not assert a
-        // specific block/head count, fabricated or otherwise.
-        let mut st = TrainState::new();
-        st.proc = Some(TrainProcess {
-            pid: 1,
-            binary: "nano_gpt".into(),
-            config_path: None,
-        });
-        st.log = Some(LogSource::File("/tmp/x.log".into()));
-        st.apply_event(TrainEvent::Step { step: 1, loss: 2.0 });
+        let st = live_state();
         assert_eq!(st.config.num_blocks, None);
         assert_eq!(st.config.num_heads, None);
-        let out: String = v
-            .render(&st, &b)
-            .iter()
-            .flat_map(|l| l.spans.iter().map(|sp| sp.content.as_ref()))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let out = text_of(&v.render(&st, &b));
         assert!(
-            !out.contains("6 blocks"),
-            "must not assert a fabricated block/head count when config is unknown:\n{out}"
-        );
-        assert!(
-            out.contains("topology unknown"),
-            "should say the topology is unknown rather than guess:\n{out}"
+            !out.contains("blocks") && !out.contains("heads"),
+            "must not assert a block/head count when the config is unknown:\n{out}"
         );
 
-        // Known config: the header should state the real numbers.
-        let mut st2 = TrainState::new();
-        st2.proc = Some(TrainProcess {
-            pid: 1,
-            binary: "nano_gpt".into(),
-            config_path: None,
-        });
-        st2.log = Some(LogSource::File("/tmp/x.log".into()));
-        st2.apply_event(TrainEvent::Step { step: 1, loss: 2.0 });
+        let mut st2 = live_state();
         st2.config.num_blocks = Some(12);
         st2.config.num_heads = Some(8);
-        let out2: String = v
-            .render(&st2, &b)
-            .iter()
-            .flat_map(|l| l.spans.iter().map(|sp| sp.content.as_ref()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            out2.contains("12 blocks × 8 heads"),
-            "known topology should be stated exactly:\n{out2}"
-        );
+        let out2 = text_of(&v.render(&st2, &b));
+        assert!(out2.contains("blocks 12"), "{out2}");
+        assert!(out2.contains("heads 8"), "{out2}");
     }
 }
