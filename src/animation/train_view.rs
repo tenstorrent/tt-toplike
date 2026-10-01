@@ -2571,6 +2571,36 @@ mod tests {
         assert!(!out.contains("% through"), "{out}");
     }
 
+    /// A trainer that prints its own global step times and also shows a bar
+    /// that restarts every chunk. Driven through `apply_event`, so the strip
+    /// depends on the state noticing the restart by itself.
+    #[test]
+    fn a_chunked_bar_beside_reported_steps_makes_no_schedule_claim() {
+        use crate::workload::train::TrainEvent;
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.scheduler = Some("cosine".into());
+        st.apply_event(TrainEvent::MaxSteps(63906));
+        for i in 0..20u64 {
+            st.apply_event(TrainEvent::StepAndMs {
+                step: 25546 + i,
+                loss: 3.0 - 0.01 * i as f32,
+                ms: 285.0,
+            });
+        }
+        for step in [630u64, 1] {
+            st.apply_event(TrainEvent::BarProgress {
+                step,
+                max_steps: 3195,
+                loss: 2.8,
+            });
+        }
+        let out = text_of(&TrainView::new(160, 40).render(&st, &b));
+        assert!(out.contains("cosine"), "{out}");
+        assert!(!out.contains("% through"), "{out}");
+    }
+
     #[test]
     fn step_bars_are_drawn_from_the_step_history() {
         let mut b = MockBackend::new(2);
