@@ -579,6 +579,14 @@ impl TrainMonitor {
         if self.saw_reported_step_time {
             return;
         }
+        // Nothing has been parsed yet: `step` is the default 0 and no loss has
+        // been seen (the parser drops a `0/N` bar, which has no loss). Anchoring
+        // on that placeholder would time the first real step from an arbitrary
+        // attach poll, so the 0 -> 1 gap (model load, data load, compile) would
+        // be recorded as step 1's time. The first parsed step only anchors.
+        if self.state.step == 0 && self.state.loss.is_none() {
+            return;
+        }
         let step = self.state.step;
         match self.last_step_seen {
             Some((prev_step, _)) if step < prev_step => {
@@ -850,12 +858,28 @@ impl TrainMonitor {
         std::path::Path::new(&format!("/proc/{pid}")).exists()
     }
 
+    /// Forget everything the monitor itself remembers about the previous run.
+    ///
+    /// `poll` replaces `self.state` at detach and again at attach, but these
+    /// fields live on the monitor, not the state. Left alone, the old run's
+    /// step anchor makes a new run's first step look like a bar restart (so
+    /// `chunked_bar` is set on a fresh run), a previous run's printed step
+    /// times stop a bar harness from ever being timed, and the old process's
+    /// CPU ticks would be differenced against the new process's. Both sites
+    /// call this so they cannot drift apart.
+    fn reset_run_anchors(&mut self) {
+        self.last_step_seen = None;
+        self.saw_reported_step_time = false;
+        self.last_cpu = None;
+    }
+
     /// One tick: attach if needed, drain new log lines, check the checkpoint.
     pub fn poll(&mut self) {
         // Detach if the run ended.
         if let Some(p) = self.state.proc.as_ref() {
             if !Self::still_alive(p.pid) {
                 self.state = TrainState::new();
+                self.reset_run_anchors();
                 self.tailer = None;
                 self.ckpt = None;
             }
@@ -879,6 +903,7 @@ impl TrainMonitor {
                 }
                 self.ckpt = Self::checkpoint_watch_for(&p, &cfg);
                 self.state = TrainState::new();
+                self.reset_run_anchors();
                 self.state.first_seen = Some(Instant::now());
                 self.state.config = cfg;
                 self.state.log = Some(log);
@@ -1813,5 +1838,67 @@ mod observed_step_tests {
         assert_eq!(st.step_history.len(), 1);
         assert_eq!(st.step_history[0].seq, 1);
         assert_eq!(st.step_seq, 1);
+    }
+}
+
+#[cfg(test)]
+mod run_anchor_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Drive one poll's worth of progress: set the parsed step (and loss, as a
+    /// real `Step` event does) then run the cadence derivation.
+    fn parsed_step_at(m: &mut TrainMonitor, step: u64, now: Instant) {
+        m.state.step = step;
+        m.state.loss = Some(2.0);
+        m.note_step_progress(now);
+    }
+
+    /// The anchors are monitor-level, so a replaced `TrainState` does not
+    /// clear them; `reset_run_anchors` is what detach and attach both call.
+    #[test]
+    fn a_fresh_run_after_a_previous_one_is_not_flagged_chunked_and_is_timed() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        // The previous run printed its own times and ended at step 500.
+        m.saw_reported_step_time = true;
+        m.last_step_seen = Some((500, t0));
+        // What detach/attach do: a new state plus the shared reset.
+        m.state = TrainState::new();
+        m.reset_run_anchors();
+        parsed_step_at(&mut m, 1, t0 + Duration::from_secs(1));
+        parsed_step_at(&mut m, 2, t0 + Duration::from_millis(1300));
+        assert!(!m.state.chunked_bar, "a new run is not a bar restart");
+        assert_eq!(m.state.step_history.len(), 1, "a bar run is timed again");
+        assert_eq!(m.state.step_history[0].step, 2);
+    }
+
+    /// Without the reset the stale anchor reads a new run's step 1 as a
+    /// regression (documents what the reset prevents).
+    #[test]
+    fn without_the_reset_a_stale_anchor_would_flag_the_new_run() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        m.last_step_seen = Some((500, t0));
+        m.state = TrainState::new();
+        parsed_step_at(&mut m, 1, t0 + Duration::from_secs(1));
+        assert!(m.state.chunked_bar);
+    }
+
+    /// Attaching during model load: the first polls see the default step 0
+    /// (the parser drops the `0/N` bar). The first parsed step only anchors.
+    #[test]
+    fn the_gap_from_an_unparsed_step_zero_is_never_a_step_time() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        m.note_step_progress(t0); // step is still the default 0, no loss
+        m.note_step_progress(t0 + Duration::from_secs(5));
+        parsed_step_at(&mut m, 1, t0 + Duration::from_secs(60));
+        assert!(m.state.step_history.is_empty(), "load time is not step 1");
+        assert_eq!(m.state.step_ms, 0.0);
+        parsed_step_at(&mut m, 2, t0 + Duration::from_millis(60_400));
+        assert_eq!(m.state.step_history.len(), 1);
+        assert_eq!(m.state.step_history[0].step, 2);
+        assert!((m.state.step_history[0].ms - 400.0).abs() < 1.0);
     }
 }
