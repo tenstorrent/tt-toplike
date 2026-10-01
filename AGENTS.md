@@ -666,3 +666,38 @@ Review minors from the two tasks above, fixed in one pass.
   checks which lanes are lit. The Task 2 report said this was covered by
   Missile's own tests. It was not: those only check that rendering does
   not panic.
+
+## Phase 37: Training tapestry (Oct 1, 2026, v0.13.6)
+
+Prompt: the Training View's top-left block-head scanner was "not the right
+usage of space or signal"; asked for three alternatives rooted in hardware
+and training performance data. Chosen: all of them together, with the old
+grid kept as a backdrop.
+
+Finding that drove the design: the grid's sweep was driven by the frame
+counter and every node took the same loss hue, so none of it was data, and
+tt-train logs no per-block or per-head signal. Any per-node mapping would
+have been invented.
+
+Decisions: per-step history only from trainer-reported times (derived
+cadence is an average and would fake resolution); "chip" in gauges and the
+verdict means the busiest chip because the trainer's chips are not
+identified; MockBackend left alone (its telemetry feeds the Insights
+sidebar tests), so --mock has no PCIe gauge; slope is per 100 logged
+losses; pulse capped at 5 passes/s so it stays visible.
+
+Finding that drove the bar-timing work: the first real run showed `no
+per-step times reported`, because tt-tnt prints only a tqdm bar per
+3195-step chunk. Step times are now observed from progress-bar updates
+(gap between polls that saw consecutive steps, only when exactly one step
+was seen, never across a bar restart or from an unparsed step 0). The
+title reads `STEP ANATOMY (from bar)`. The same run exposed a bug: derived
+step rate and tokens/sec froze after a bar restart; fixed. The monitor's
+per-run anchors reset at attach and detach. Narrow widths show whole
+clauses only. The tt-tnt harness's own output was NOT changed. Possible
+follow-up: emit one `Step: N, Loss: L, Time: T ms` line per step so the
+view can use trainer-reported times.
+
+Process: brainstorming -> spec (docs/superpowers/specs/2026-10-01-
+training-tapestry-design.md) -> plan (docs/superpowers/plans/2026-10-01-
+training-tapestry.md).

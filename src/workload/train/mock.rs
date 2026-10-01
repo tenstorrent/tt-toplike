@@ -136,7 +136,11 @@ impl MockTrainRun {
                 step: s,
                 seq: s,
                 ms: step_ms_at(s),
-                cache_delta: if s > 1 { cache_at(s) - cache_at(s - 1) } else { 0 },
+                cache_delta: if s > 1 {
+                    cache_at(s) - cache_at(s - 1)
+                } else {
+                    0
+                },
                 checkpoint: s >= SAVE_EVERY && s % SAVE_EVERY == 0,
             })
             .collect();

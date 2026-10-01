@@ -18,6 +18,7 @@ pub use detect::{parse_train_process, TrainProcess, TRAIN_BINARIES};
 pub use logsrc::{classify_fd_target, discover_log, LogSource};
 pub use mock::MockTrainRun;
 pub use monitor::{
-    CheckpointWatch, StepSample, StepTimeSource, Tailer, TrainMonitor, TrainState, LOSS_HISTORY, STEP_HISTORY,
+    CheckpointWatch, StepSample, StepTimeSource, Tailer, TrainMonitor, TrainState, LOSS_HISTORY,
+    STEP_HISTORY,
 };
 pub use parse::{parse_train_line, TrainEvent};

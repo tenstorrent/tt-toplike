@@ -1,3 +1,25 @@
+tt-toplike (0.13.6) noble; urgency=medium
+
+  * Training view: the top-left band no longer draws a decorative 6x6
+    node grid. It now shows the step-time chart (bars coloured by cause:
+    normal, program-cache compile, checkpoint), per-chip power lanes on
+    the same time axis, hardware gauges with a one-line diagnosis
+    (compiling, compute-bound, host-bound), and a loss-convergence strip.
+    The pulse cursor makes one pass per measured step. Layers whose
+    signal is missing are left out. The MODEL card keeps the block and
+    head counts.
+  * Step times are now observed from progress-bar updates for trainers
+    that print only a bar (the tt-tnt harness). The title reads
+    "STEP ANATOMY (from bar)". Gaps across a bar restart and steps seen
+    more than one at a time are not timed.
+  * Fix: derived step rate and tokens/sec froze after a progress-bar
+    restart. They now keep updating.
+  * The tt-tnt harness's own output was not changed. A possible follow-up
+    is for it to emit one "Step: N, Loss: L, Time: T ms" line per step so
+    the view can use trainer-reported times.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 01 Oct 2026 12:00:00 +0000
+
 tt-toplike (0.13.5) noble; urgency=medium
 
   * Fix: the Inference Server monitor still missed a tt-model-manager

@@ -29,12 +29,12 @@ use crate::animation::common::hsv_to_rgb;
 use crate::animation::inference_load::{fmt_bytes, fmt_elapsed, group_thousands};
 use crate::animation::train_sky::sky_cell;
 use crate::animation::train_tapestry::{
-    bar_cell, cause_of, advance_phase, convergence_parts, diagnose, median, pass_secs, plan_band,
-    BandWants, ChipHistory, Diagnosis, DiagnosisKind, Readings, StepCause, AICLK_DROP_FRAC, LABEL_W,
-    MAX_LANES,
+    advance_phase, bar_cell, cause_of, convergence_parts, diagnose, median, pass_secs, plan_band,
+    BandWants, ChipHistory, Diagnosis, DiagnosisKind, Readings, StepCause, AICLK_DROP_FRAC,
+    LABEL_W, MAX_LANES,
 };
-use crate::models::Device;
 use crate::backend::TelemetryBackend;
+use crate::models::Device;
 use crate::ui::colors;
 use crate::workload::train::{LogSource, StepTimeSource, TrainState};
 use ratatui::style::{Color, Modifier, Style};
@@ -936,7 +936,14 @@ impl TrainView {
     /// for at least three cells) and the reading.
     fn draw_gauge(&self, buf: &mut [Vec<Cell>], x: usize, y: usize, w: usize, g: &Gauge) {
         let label = format!("{:<width$}", g.label, width = LABEL_W);
-        self.text(buf, x, y, &Self::clip(&label, w), Color::Rgb(150, 200, 255), false);
+        self.text(
+            buf,
+            x,
+            y,
+            &Self::clip(&label, w),
+            Color::Rgb(150, 200, 255),
+            false,
+        );
         let val_len = g.text.chars().count();
         let bar_w = w.saturating_sub(LABEL_W + 1 + val_len).min(10);
         let mut cx = x + LABEL_W;
@@ -953,7 +960,14 @@ impl TrainView {
             cx += bar_w + 1;
         }
         let room = (x + w).saturating_sub(cx);
-        self.text(buf, cx, y, &Self::clip(&g.text, room), Color::Rgb(210, 230, 220), false);
+        self.text(
+            buf,
+            cx,
+            y,
+            &Self::clip(&g.text, room),
+            Color::Rgb(210, 230, 220),
+            false,
+        );
     }
 
     /// The tapestry band: step bars, grid backdrop, chip lanes, hardware
@@ -1006,10 +1020,12 @@ impl TrainView {
         );
         let strip = Self::fit_parts(&parts, w);
         let diagnosis = diagnose(&Readings {
-            compiled_last_step: st.step_history.last().map(|s| s.cache_delta > 0).unwrap_or(false),
-            busiest_tdp_frac: busiest
-                .as_ref()
-                .and_then(|b| b.tdp.map(|t| b.power_w / t)),
+            compiled_last_step: st
+                .step_history
+                .last()
+                .map(|s| s.cache_delta > 0)
+                .unwrap_or(false),
+            busiest_tdp_frac: busiest.as_ref().and_then(|b| b.tdp.map(|t| b.power_w / t)),
             host_cpu_pct: st.host_cpu_pct,
         });
         // The verdict is shown whole, or without its `host cpu` clause, or
@@ -1126,7 +1142,10 @@ impl TrainView {
                     '─'
                 };
                 let (col, bold) = if lit > 0.04 {
-                    (hsv_to_rgb(FWD_HUE, 0.45 + lit * 0.4, 0.35 + lit * 0.6), lit > 0.55)
+                    (
+                        hsv_to_rgb(FWD_HUE, 0.45 + lit * 0.4, 0.35 + lit * 0.6),
+                        lit > 0.55,
+                    )
                 } else {
                     (WIRE_REST, false)
                 };
@@ -2135,12 +2154,7 @@ mod tests {
         let out = render(Some(LogSource::NotRedirected));
         // The river and tapestry band still render from the config in this state,
         // so only the loss-derived channels are unreachable.
-        for present in [
-            "chip temp",
-            "chip power",
-            "aurora",
-            "checkpoint",
-        ] {
+        for present in ["chip temp", "chip power", "aurora", "checkpoint"] {
             assert!(
                 out.contains(present),
                 "legend dropped {present:?}, which this state still draws"
@@ -2412,7 +2426,10 @@ mod tests {
         let peak = (0..240u64)
             .map(|f| sweep_at(head(f), 15.0, period))
             .fold(0.0f32, f32::max);
-        assert!(peak > 0.85, "sweep never reaches full brightness: {peak:.3}");
+        assert!(
+            peak > 0.85,
+            "sweep never reaches full brightness: {peak:.3}"
+        );
     }
 
     /// The pulse must travel in one direction and complete one pass per
@@ -2427,11 +2444,18 @@ mod tests {
             if h < last {
                 wraps += 1;
             } else {
-                assert!(h - last < 0.05, "cursor jumped {:.3} in one frame", h - last);
+                assert!(
+                    h - last < 0.05,
+                    "cursor jumped {:.3} in one frame",
+                    h - last
+                );
             }
             last = h;
         }
-        assert_eq!(wraps, 3, "three one-second passes in 180 frames at {fps} fps");
+        assert_eq!(
+            wraps, 3,
+            "three one-second passes in 180 frames at {fps} fps"
+        );
     }
 
     use crate::animation::train_tapestry::pass_fraction;
@@ -2483,7 +2507,10 @@ mod tests {
         assert!(!out.contains("from bar"), "{out}");
         st.step_time_source = StepTimeSource::Observed;
         let out = text_of(&TrainView::new(134, 40).render(&st, &b));
-        assert!(out.contains("STEP ANATOMY (from bar)  last 10 steps"), "{out}");
+        assert!(
+            out.contains("STEP ANATOMY (from bar)  last 10 steps"),
+            "{out}"
+        );
     }
 
     /// A bar restart sends `st.step` back to 1. It must not look like a new
@@ -2497,7 +2524,14 @@ mod tests {
         st.step_ms = 285.0;
         let v = TrainView::new(134, 40);
         // seq 1..=3 while the bar runs 3193..=3195, then the bar restarts.
-        for (seq, bar_step) in [(1u64, 3193u64), (2, 3194), (3, 3195), (4, 1), (5, 2), (6, 3)] {
+        for (seq, bar_step) in [
+            (1u64, 3193u64),
+            (2, 3194),
+            (3, 3195),
+            (4, 1),
+            (5, 2),
+            (6, 3),
+        ] {
             st.step_seq = seq;
             st.step = bar_step;
             v.render(&st, &b);
@@ -2506,7 +2540,11 @@ mod tests {
             .into_iter()
             .find(|r| r.contains("chip0"))
             .expect("a lane for chip 0");
-        assert_eq!(row.matches(NO_SAMPLE).count(), 0, "all six columns sampled: {row:?}");
+        assert_eq!(
+            row.matches(NO_SAMPLE).count(),
+            0,
+            "all six columns sampled: {row:?}"
+        );
     }
 
     #[test]
@@ -2566,8 +2604,11 @@ mod tests {
         let out = text_of(&TrainView::new(134, 40).render(&st, &b));
         assert!(out.contains("STEP ANATOMY"), "{out}");
         assert!(out.contains("no per-step times reported"), "{out}");
-        assert!(out.contains("pulse"), "the grid backdrop still renders:
-{out}");
+        assert!(
+            out.contains("pulse"),
+            "the grid backdrop still renders:
+{out}"
+        );
     }
 
     #[test]
@@ -2656,8 +2697,11 @@ mod tests {
         st.step = 10;
         let out = text_of(&TrainView::new(134, 40).render(&st, &b));
         assert!(out.contains("STEP ANATOMY"), "{out}");
-        assert!(!out.contains("chip0"), "no chip, no lane:
-{out}");
+        assert!(
+            !out.contains("chip0"),
+            "no chip, no lane:
+{out}"
+        );
     }
 
     /// The lane columns share the bars' time axis, and a column with no chip
@@ -2714,7 +2758,9 @@ mod tests {
         let mut b = MockBackend::new(3);
         b.init().unwrap();
         let mut st = live_state();
-        st.step_history = (1..=64u64).map(|i| sample_at(i, 100.0 + i as f32, (i % 9 == 0) as u32)).collect();
+        st.step_history = (1..=64u64)
+            .map(|i| sample_at(i, 100.0 + i as f32, (i % 9 == 0) as u32))
+            .collect();
         st.step = 64;
         st.step_ms = 150.0;
         for w in [20usize, 40, 60, 80, 100, 134] {
@@ -2749,10 +2795,16 @@ mod tests {
         };
         let mut st = live_state();
         let without = legend(&st);
-        assert!(!without.contains("step time") && !without.contains("compile"), "{without}");
+        assert!(
+            !without.contains("step time") && !without.contains("compile"),
+            "{without}"
+        );
         st.step_history = vec![sample_at(1, 100.0, 0)];
         let with = legend(&st);
-        assert!(with.contains("step time") && with.contains("compile"), "{with}");
+        assert!(
+            with.contains("step time") && with.contains("compile"),
+            "{with}"
+        );
     }
 
     /// The topology text left the band, so it has to be findable on the MODEL
@@ -2875,7 +2927,10 @@ mod tests {
             v.render(&st, &b);
             let (x0, bw) = v.network_bounds();
             let half = bw / 2;
-            let cells = [(x0, half.saturating_sub(1)), (x0 + half, (bw - half).saturating_sub(1))];
+            let cells = [
+                (x0, half.saturating_sub(1)),
+                (x0 + half, (bw - half).saturating_sub(1)),
+            ];
             for row in rows_of(&v.render(&st, &b)) {
                 let chars: Vec<char> = row.chars().collect();
                 for (start, cw) in cells {
@@ -2891,11 +2946,17 @@ mod tests {
                     };
                     gauges_seen += 1;
                     let cell: String = chars[start..chars.len().min(start + cw)].iter().collect();
-                    assert!(cell.contains(suffix), "w={w}: gauge cell {cell:?} lacks its reading: {row:?}");
+                    assert!(
+                        cell.contains(suffix),
+                        "w={w}: gauge cell {cell:?} lacks its reading: {row:?}"
+                    );
                 }
             }
         }
-        assert!(gauges_seen > 100, "the sweep must actually meet gauges: {gauges_seen}");
+        assert!(
+            gauges_seen > 100,
+            "the sweep must actually meet gauges: {gauges_seen}"
+        );
     }
 
     /// A strip clause that is shown is whole at every width: the shown parts
@@ -2925,7 +2986,7 @@ mod tests {
             for row in rows_of(&v.render(&st, &b)) {
                 let chars: Vec<char> = row.chars().collect();
                 // The strip row starts with the first part's arrow.
-                if chars.len() <= x0 || !(parts[0].chars().next() == Some(chars[x0])) {
+                if chars.len() <= x0 || !parts[0].starts_with(chars[x0]) {
                     continue;
                 }
                 let cell: String = chars[x0..chars.len().min(x0 + bw)].iter().collect();
@@ -2936,7 +2997,9 @@ mod tests {
                 // It must be a whole leading run of the parts.
                 let k = (1..=parts.len())
                     .find(|k| parts[..*k].join("  ") == cell)
-                    .unwrap_or_else(|| panic!("w={w}: strip {cell:?} is not whole leading parts of {parts:?}"));
+                    .unwrap_or_else(|| {
+                        panic!("w={w}: strip {cell:?} is not whole leading parts of {parts:?}")
+                    });
                 shown_counts.insert(k);
             }
         }
@@ -2945,7 +3008,10 @@ mod tests {
         assert!(shown_counts.len() >= 2, "{shown_counts:?}");
         for w in [134usize, 100] {
             let out = text_of(&TrainView::new(w, 40).render(&st, &b));
-            assert!(!out.contains("cosi\n") && !out.contains("lr 3.0\n"), "{out}");
+            assert!(
+                !out.contains("cosi\n") && !out.contains("lr 3.0\n"),
+                "{out}"
+            );
         }
     }
 
@@ -2960,7 +3026,10 @@ mod tests {
         .unwrap();
         let full = format!("▸ {}", d.text);
         let short = format!("▸ {}", d.short);
-        assert!(full.ends_with("host cpu 120%") && !short.contains("host cpu"), "{full} / {short}");
+        assert!(
+            full.ends_with("host cpu 120%") && !short.contains("host cpu"),
+            "{full} / {short}"
+        );
         for w in 0..=full.chars().count() + 2 {
             let got = TrainView::verdict_line(&d, w);
             let want = if w >= full.chars().count() {
@@ -3029,7 +3098,10 @@ mod tests {
             host_cpu_pct: Some(120.0),
         })
         .unwrap();
-        assert!(d.text.ends_with("host cpu 120%") && d.short != d.text, "{d:?}");
+        assert!(
+            d.text.ends_with("host cpu 120%") && d.short != d.text,
+            "{d:?}"
+        );
         let full = format!("▸ {}", d.text);
         let short = format!("▸ {}", d.short);
         let (mut saw_full, mut saw_short, mut saw_none) = (false, false, false);
@@ -3041,7 +3113,11 @@ mod tests {
                 .filter_map(|r| {
                     let chars: Vec<char> = r.chars().collect();
                     (chars.get(x0) == Some(&'▸')).then(|| {
-                        chars[x0..chars.len().min(x0 + bw)].iter().collect::<String>().trim_end().to_string()
+                        chars[x0..chars.len().min(x0 + bw)]
+                            .iter()
+                            .collect::<String>()
+                            .trim_end()
+                            .to_string()
                     })
                 })
                 .collect();
@@ -3049,7 +3125,9 @@ mod tests {
             match shown.first() {
                 Some(l) if *l == full => saw_full = true,
                 Some(l) if *l == short => saw_short = true,
-                Some(l) => panic!("w={w} (band {bw}): verdict {l:?} is neither {full:?} nor {short:?}"),
+                Some(l) => {
+                    panic!("w={w} (band {bw}): verdict {l:?} is neither {full:?} nor {short:?}")
+                }
                 None => saw_none = true,
             }
             // The rule itself: which one must appear at this band width.
@@ -3062,6 +3140,9 @@ mod tests {
             };
             assert_eq!(shown.first(), want, "w={w} (band {bw})");
         }
-        assert!(saw_full && saw_short && saw_none, "{saw_full} {saw_short} {saw_none}");
+        assert!(
+            saw_full && saw_short && saw_none,
+            "{saw_full} {saw_short} {saw_none}"
+        );
     }
 }

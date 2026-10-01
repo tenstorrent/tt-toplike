@@ -1,7 +1,7 @@
 # Training View tapestry: replace the node-grid scanner with data-driven layers
 
 Date: 2026-10-01
-Status: design approved in chat, spec awaiting review
+Status: implemented in v0.13.6
 Files: `src/animation/train_view.rs`, `src/workload/train/monitor.rs`, `src/workload/train/mock.rs`
 
 ## Problem
@@ -44,6 +44,10 @@ The band stays between the MODEL card and the LIVE panel. At full height
 - A dotted line marks the window median.
 - Chip lanes use the same columns. Each shows power as a fraction of the chip's
   TDP. They are sampled when each step line arrived.
+- Lane power is scaled to the chip's TDP, or to the window maximum when no TDP
+  is known. A column with no chip sample shows `⋅`. A lane cell is coral where
+  aiclk is below 90% of that chip's highest. Chip samples are taken for all
+  chips the backend reports. Lanes show the first three.
 
 ### Layer B: roofline gauges and verdict
 
@@ -67,16 +71,32 @@ triggered it:
 The 50% and 30% values are first guesses. They are constants to tune on a real
 run.
 
+"Chip" in the gauges and the verdict means the busiest chip (most power),
+because the trainer's own chips are not identified. The tok/s and PCIe bars are
+relative to the best value seen. The aiclk bar is relative to the highest aiclk
+seen on that chip. The power gauge and the power-based verdicts are absent when
+no chip reports a TDP.
+
+Narrow-width rule: a clause that is shown is whole. The strip keeps only the
+leading parts that fit. The diagnosis drops its `, host cpu N%` suffix before it
+drops entirely. A gauge is drawn only when its whole reading fits.
+
 ### Layer C: convergence strip
 
 One row from `loss_history`, `lr` and `scheduler`:
 
-- loss slope per 100 steps (arrow and number);
+- loss slope per 100 logged losses (arrow and number);
 - noise (standard deviation of recent loss deltas);
 - steps since the best loss;
 - learning-rate value and schedule position.
 
-It uses only data every trainer provides, including bar-only trainers.
+The unit is logged losses, because a trainer that prints every tenth step has
+ten steps per entry. `lr` is the configured base rate. The schedule position is
+the fraction of the step budget completed.
+
+It uses only data every trainer provides, including bar-only trainers. When the
+progress bar restarts per chunk (`TrainState.chunked_bar`), the strip names the
+scheduler without a percentage.
 
 ### Layer D: node-grid backdrop
 
@@ -84,17 +104,39 @@ It uses only data every trainer provides, including bar-only trainers.
 - The cursor makes one pass per measured `step_ms`, so the pulse speed is the
   real step rate.
 - The backward-pass hue is removed. We do not measure a forward/backward split.
+- The cursor never runs faster than one pass per 0.2 s. The pulse clause is
+  atomic. When the cursor is slowed, the header says
+  `pulse = 1 step (max 5/s)`.
 - Grid dimensions no longer imply a topology. The `N blocks x M heads` text
   moves to the MODEL card, which already shows blocks and heads.
 
 ## New state
 
-- `TrainState.step_history`: ring of 64 `StepSample { ms, cache_delta,
-  checkpoint_near }`, pushed when a step line arrives.
+- `TrainState.step_history`: ring of 64 `StepSample { seq, step, ms,
+  cache_delta, checkpoint }`, pushed when a step time is known. `seq` is the
+  per-run sample sequence number (`TrainState.step_seq`). It keys the chip
+  lanes.
+- Trainer-reported step times become samples. A trainer that prints no
+  per-step time and gives no bar has no history, and the band header reads
+  `STEP ANATOMY  no per-step times reported`.
+- Bar-observed path: a trainer that prints only a progress bar (the tt-tnt
+  Python harness) gets step times from the bar. A step time is the gap between
+  the polls that saw consecutive steps. It is recorded only when exactly one
+  step was seen, so it is accurate to within one poll interval. It is never
+  recorded for the gap across a bar restart, and never from an unparsed step 0.
+  `cache_delta` is unknown (0). The title reads `STEP ANATOMY (from bar)`.
+- `TrainState.chunked_bar` marks a bar that restarts per chunk. The first real
+  run found that the harness prints one tqdm bar per 3195-step chunk.
+- The monitor's per-run anchors (`last_step_seen`, `saw_reported_step_time`,
+  `last_cpu`) reset at attach and at detach.
+- The derived step cadence used to freeze after a bar restart. That is fixed,
+  so derived step rate and tokens/sec keep updating.
 - `TrainView` chip samples: per chip power, aiclk and PCIe throughput, recorded
   once per new step. They live in a `RefCell` ring in the same style as
   `cache_last`, and are described as sampled when the step line arrived.
-- `--mock` emits every signal above so the full band can be shown and recorded.
+- `--mock` emits step history, loss, config and chip telemetry. It has no PCIe
+  gauge, because the mock backend has no PCIe counters and adding them would
+  change the Insights sidebar that shares it.
 
 ## Missing signals
 
@@ -132,7 +174,7 @@ Side-panel narrow-width rules (`panel_fit`) are unchanged.
 ## Housekeeping
 
 - Bump the version.
-- Log the prompt, decisions and this design in the repo `CLAUDE.md`.
+- Log the prompt, decisions and this design in the repo `AGENTS.md`.
 - After `cargo build --release`, copy `tt-toplike` and `tt-toplike-tui` to
   `~/.local/bin`.
 

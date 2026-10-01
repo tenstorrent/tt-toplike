@@ -1685,7 +1685,10 @@ mod step_history_tests {
         }
         assert_eq!(st.step_history.len(), STEP_HISTORY);
         assert_eq!(st.step_history.last().unwrap().step, 200);
-        assert_eq!(st.step_history.first().unwrap().step, 200 - STEP_HISTORY as u64 + 1);
+        assert_eq!(
+            st.step_history.first().unwrap().step,
+            200 - STEP_HISTORY as u64 + 1
+        );
     }
 
     #[test]
@@ -1780,14 +1783,21 @@ mod observed_step_tests {
         assert_eq!(m.state.step_history.len(), 1);
         // Validation and a checkpoint take 40 s, then the bar restarts at 1.
         bar_state_at(&mut m, 1, t0 + Duration::from_millis(40_300));
-        assert_eq!(m.state.step_history.len(), 1, "no sample for the restart gap");
+        assert_eq!(
+            m.state.step_history.len(),
+            1,
+            "no sample for the restart gap"
+        );
         assert!(m.state.chunked_bar);
         // Timing resumes straight away, far below the old step number.
         let before = m.state.step_ms;
         bar_state_at(&mut m, 2, t0 + Duration::from_millis(40_550));
         assert_eq!(m.state.step_history.len(), 2);
         assert!((m.state.step_history[1].ms - 250.0).abs() < 1.0);
-        assert_ne!(m.state.step_ms, before, "the derived rate must update again");
+        assert_ne!(
+            m.state.step_ms, before,
+            "the derived rate must update again"
+        );
         // seq keeps rising across the restart even though step went back.
         assert_eq!(m.state.step_history[1].seq, 2);
         assert!(m.state.step_history[1].step < m.state.step_history[0].step);
@@ -1833,8 +1843,16 @@ mod observed_step_tests {
     #[test]
     fn a_second_time_line_for_the_same_step_keeps_the_first_seq() {
         let mut st = TrainState::new();
-        st.apply_event(TrainEvent::StepAndTime { step: 5, loss: 2.0, ms: 400.0, cache_entries: 8 });
-        st.apply_event(TrainEvent::StepTime { ms: 450.0, cache_entries: 8 });
+        st.apply_event(TrainEvent::StepAndTime {
+            step: 5,
+            loss: 2.0,
+            ms: 400.0,
+            cache_entries: 8,
+        });
+        st.apply_event(TrainEvent::StepTime {
+            ms: 450.0,
+            cache_entries: 8,
+        });
         assert_eq!(st.step_history.len(), 1);
         assert_eq!(st.step_history[0].seq, 1);
         assert_eq!(st.step_seq, 1);

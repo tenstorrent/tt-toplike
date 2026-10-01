@@ -56,7 +56,7 @@ pub fn median(values: &[f32]) -> Option<f32> {
 pub fn bar_cell(frac: f32, row_from_bottom: usize, rows: usize) -> char {
     const GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     // `!(x > 0.0)` is also true for NaN, which draws nothing.
-    if rows == 0 || !(frac > 0.0) {
+    if rows == 0 || frac.is_nan() || frac <= 0.0 {
         return ' ';
     }
     let total = ((frac.min(1.0) * rows as f32 * 8.0).round() as usize).max(1);
@@ -175,9 +175,10 @@ pub fn convergence_parts(
         parts.push(format!("base lr {lr:.1e}"));
     }
     match (scheduler, max_steps) {
-        (Some(name), m) if m > 0 => {
-            parts.push(format!("{name} {}% through", (step.saturating_mul(100) / m).min(100)))
-        }
+        (Some(name), m) if m > 0 => parts.push(format!(
+            "{name} {}% through",
+            (step.saturating_mul(100) / m).min(100)
+        )),
         (Some(name), _) => parts.push(name.to_string()),
         _ => {}
     }
@@ -232,8 +233,14 @@ pub fn diagnose(r: &Readings) -> Option<Diagnosis> {
             .unwrap_or_default();
         return Some(Diagnosis {
             kind: DiagnosisKind::ComputeBound,
-            text: format!("compute-bound - busiest chip at {:.0}% of TDP{cpu}", frac * 100.0),
-            short: format!("compute-bound - busiest chip at {:.0}% of TDP", frac * 100.0),
+            text: format!(
+                "compute-bound - busiest chip at {:.0}% of TDP{cpu}",
+                frac * 100.0
+            ),
+            short: format!(
+                "compute-bound - busiest chip at {:.0}% of TDP",
+                frac * 100.0
+            ),
         });
     }
     let cpu = r.host_cpu_pct?;
@@ -305,7 +312,7 @@ pub fn plan_band(height: usize, w: BandWants) -> BandPlan {
 /// visible minimum. The cursor makes one pass per measured step. `None` until
 /// a step time is known.
 pub fn pass_secs(step_ms: f32) -> Option<(f32, bool)> {
-    if !(step_ms > 0.0) {
+    if step_ms.is_nan() || step_ms <= 0.0 {
         return None;
     }
     let secs = step_ms / 1000.0;
@@ -318,7 +325,7 @@ pub fn pass_secs(step_ms: f32) -> Option<(f32, bool)> {
 
 /// Position within the current pass, in `[0, 1)`.
 pub fn pass_fraction(frame: u64, fps: f32, pass_secs: f32) -> f32 {
-    if !(pass_secs > 0.0) || !(fps > 0.0) {
+    if pass_secs.is_nan() || pass_secs <= 0.0 || fps.is_nan() || fps <= 0.0 {
         return 0.0;
     }
     ((frame as f32 / fps) / pass_secs).fract()
@@ -329,7 +336,7 @@ pub fn pass_fraction(frame: u64, fps: f32, pass_secs: f32) -> f32 {
 /// keeps the cursor where it is when the pass length changes: only its speed
 /// changes. An unusable `pass_secs` or `fps` leaves the phase alone.
 pub fn advance_phase(phase: f32, frames: u64, fps: f32, pass_secs: f32) -> f32 {
-    if !(pass_secs > 0.0) || !(fps > 0.0) {
+    if pass_secs.is_nan() || pass_secs <= 0.0 || fps.is_nan() || fps <= 0.0 {
         return phase;
     }
     (phase + (frames as f32 / fps) / pass_secs).fract()
@@ -525,10 +532,18 @@ mod tests {
         );
         let d = diagnose(&r(false, Some(0.58), Some(140.0))).unwrap();
         assert_eq!(d.kind, DiagnosisKind::ComputeBound);
-        assert!(d.text.contains("58%") && d.text.contains("140%"), "{}", d.text);
+        assert!(
+            d.text.contains("58%") && d.text.contains("140%"),
+            "{}",
+            d.text
+        );
         let d = diagnose(&r(false, Some(0.2), Some(380.0))).unwrap();
         assert_eq!(d.kind, DiagnosisKind::HostBound);
-        assert!(d.text.contains("20%") && d.text.contains("380%"), "{}", d.text);
+        assert!(
+            d.text.contains("20%") && d.text.contains("380%"),
+            "{}",
+            d.text
+        );
         // Between the two thresholds, or idle with a quiet host: no verdict.
         assert_eq!(diagnose(&r(false, Some(0.4), Some(500.0))), None);
         assert_eq!(diagnose(&r(false, Some(0.2), Some(50.0))), None);
