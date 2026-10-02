@@ -76,6 +76,12 @@ const CKPT_PULSE_TICKS: u8 = 40;
 /// Re-scan for a training process at most this often when none is attached.
 const RESCAN_EVERY: Duration = Duration::from_secs(2);
 
+/// If more than this passes between two calls of `note_step_progress`, the
+/// monitor was not being polled (the Training view was off screen) and the
+/// call is treated as a fresh baseline. While the view is up the monitor is
+/// polled every frame, tens of milliseconds apart, so 5 s is far above normal.
+const POLL_GAP_REBASE: Duration = Duration::from_secs(5);
+
 /// Everything the view draws.
 #[derive(Debug, Clone, Default)]
 pub struct TrainState {
@@ -669,6 +675,10 @@ pub struct TrainMonitor {
     /// an OBSERVED CHANGE (a poll that saw the step rise or restart). Only an
     /// observed change can be the start of a measurement.
     anchor_is_baseline: bool,
+    /// When `note_step_progress` last ran on a parsed step. A gap longer than
+    /// `POLL_GAP_REBASE` since then means the view was away and the anchor
+    /// is stale.
+    last_note_at: Option<Instant>,
     /// `(cumulative CPU ticks, when read)` for the trainer, so CPU percent
     /// is a rate between polls rather than the process's lifetime average —
     /// the latter would understate a run that has only just got busy.
@@ -691,6 +701,7 @@ impl TrainMonitor {
             saw_reported_step_time: false,
             last_step_seen: None,
             anchor_is_baseline: false,
+            last_note_at: None,
             last_cpu: None,
         }
     }
@@ -797,6 +808,15 @@ impl TrainMonitor {
     /// effective throughput slightly below pure training speed. Until then
     /// `step_ms` is 0 and `tokens_per_sec()` is `None`.
     ///
+    /// The monitor is polled only while the Training view is on screen. After
+    /// a pause longer than `POLL_GAP_REBASE` the anchor may be minutes old, and
+    /// a chunk that ended during the pause would be timed from it (too fast
+    /// if the anchor is old and the end is seen late in the next window, too
+    /// slow in the other order). So the first call after a pause re-baselines:
+    /// it re-anchors at the current step, measures nothing and records no
+    /// sample, whatever changed. Returning to the view therefore costs one
+    /// more observed change before a rate appears.
+    ///
     /// A bar restart is an observed event with a known time, so the
     /// regression arm anchors as an observed change. The next step is timed
     /// from the restart poll and includes that chunk's first-step warm-up,
@@ -816,6 +836,20 @@ impl TrainMonitor {
             return;
         }
         let step = self.state.step;
+        let paused = self
+            .last_note_at
+            .is_some_and(|t| now.saturating_duration_since(t) > POLL_GAP_REBASE);
+        self.last_note_at = Some(now);
+        if paused {
+            if let Some((prev_step, _)) = self.last_step_seen {
+                if step < prev_step {
+                    self.state.chunked_bar = true;
+                }
+                self.last_step_seen = Some((step, now));
+                self.anchor_is_baseline = true;
+                return;
+            }
+        }
         match self.last_step_seen {
             Some((prev_step, _)) if step < prev_step => {
                 self.state.chunked_bar = true;
@@ -1110,6 +1144,7 @@ impl TrainMonitor {
     fn reset_run_anchors(&mut self) {
         self.last_step_seen = None;
         self.anchor_is_baseline = false;
+        self.last_note_at = None;
         self.saw_reported_step_time = false;
         self.last_cpu = None;
     }
@@ -1207,6 +1242,7 @@ impl TrainMonitor {
                         if self.state.holds_run_data() {
                             self.last_step_seen = None;
                             self.anchor_is_baseline = false;
+                            self.last_note_at = None;
                             self.saw_reported_step_time = false;
                         }
                         self.state.apply_event(ev);
@@ -1582,6 +1618,8 @@ mod tests {
         m.note_step_progress(t0);
         m.state.step = 2;
         m.note_step_progress(t0 + Duration::from_millis(50));
+        m.state.step = 3;
+        m.note_step_progress(t0 + Duration::from_millis(100));
 
         assert_eq!(
             m.state.step_ms, 1124.5,
@@ -1599,17 +1637,21 @@ mod tests {
         // One poll jumps from nothing to step 4000 — the backlog.
         m.state.step = 4000;
         m.note_step_progress(t0);
-        // The very next poll, microseconds later, advances one step.
+        // The first increase only anchors (it is not measured at all).
         m.state.step = 4001;
-        m.note_step_progress(t0 + Duration::from_micros(200));
+        m.note_step_progress(t0 + Duration::from_millis(100));
+        // The very next poll, microseconds later, advances one step. This
+        // increase is measured, and the 1 ms lower bound rejects it.
+        m.state.step = 4002;
+        m.note_step_progress(t0 + Duration::from_millis(100) + Duration::from_micros(200));
         assert_eq!(
             m.state.step_ms, 0.0,
             "a sub-millisecond gap is replay, not a training step"
         );
 
         // A genuine gap afterwards is still measured.
-        m.state.step = 4002;
-        m.note_step_progress(t0 + Duration::from_millis(300));
+        m.state.step = 4003;
+        m.note_step_progress(t0 + Duration::from_millis(400));
         assert!(
             m.state.step_ms > 0.0,
             "real cadence must still be picked up"
@@ -1996,6 +2038,18 @@ mod step_history_tests {
     }
 }
 
+/// Test helper: poll once a second at the current step from `from` (exclusive)
+/// up to `to` (exclusive), as the Training view does while it is on screen.
+/// Without it a long jump in injected time would look like a pause in polling.
+#[cfg(test)]
+fn keep_polling(m: &mut TrainMonitor, from: Instant, to: Instant) {
+    let mut t = from + Duration::from_secs(1);
+    while t < to {
+        m.note_step_progress(t);
+        t += Duration::from_secs(1);
+    }
+}
+
 #[cfg(test)]
 mod observed_step_tests {
     use super::*;
@@ -2048,6 +2102,11 @@ mod observed_step_tests {
         bar_state_at(&mut m, 3195, t0 + Duration::from_millis(600));
         assert_eq!(m.state.step_history.len(), 1);
         // Validation and a checkpoint take 40 s, then the bar restarts at 1.
+        keep_polling(
+            &mut m,
+            t0 + Duration::from_millis(600),
+            t0 + Duration::from_millis(40_600),
+        );
         bar_state_at(&mut m, 1, t0 + Duration::from_millis(40_600));
         assert_eq!(
             m.state.step_history.len(),
@@ -2076,6 +2135,7 @@ mod observed_step_tests {
         let t0 = Instant::now();
         bar_state_at(&mut m, 10, t0);
         bar_state_at(&mut m, 11, t0 + Duration::from_millis(300));
+        bar_state_at(&mut m, 12, t0 + Duration::from_millis(600));
         assert!(m.state.step_history.is_empty());
         assert_eq!(m.state.step_time_source, StepTimeSource::Unknown);
     }
@@ -2531,12 +2591,19 @@ mod step_and_ms_tests {
         m.state.apply_event(resumed(38346, 63906));
         m.note_step_progress(t0);
         assert_eq!(m.last_step_seen, None);
+        keep_polling(&mut m, t0, t0 + Duration::from_secs(800));
         m.state.apply_event(val(41541));
         m.note_step_progress(t0 + Duration::from_secs(800));
         assert_eq!(m.state.step_ms, 0.0, "one observation is no rate");
+        let (a, b) = (
+            t0 + Duration::from_secs(800),
+            t0 + Duration::from_secs(1600),
+        );
+        keep_polling(&mut m, a, b);
         m.state.apply_event(val(44736));
-        m.note_step_progress(t0 + Duration::from_secs(1600));
+        m.note_step_progress(b);
         assert_eq!(m.state.step_ms, 0.0, "the first jump only re-anchors");
+        keep_polling(&mut m, b, t0 + Duration::from_secs(2400));
         m.state.apply_event(val(47931));
         m.note_step_progress(t0 + Duration::from_secs(2400));
         assert!((m.state.step_ms - 250.4).abs() < 1.0, "{}", m.state.step_ms);
@@ -2601,6 +2668,7 @@ mod baseline_anchor_tests {
         m.note_step_progress(t0);
         assert_eq!(m.state.step_ms, 0.0);
 
+        keep_polling(&mut m, t0, t0 + Duration::from_secs(166));
         feed(&mut m, &val_line(63906));
         assert_eq!(m.state.step, 63906);
         m.note_step_progress(t0 + Duration::from_secs(166));
@@ -2608,6 +2676,11 @@ mod baseline_anchor_tests {
         assert_eq!(m.state.tokens_per_sec(), None);
 
         // The next chunk end is measured chunk to chunk: 780 s / 3195.
+        keep_polling(
+            &mut m,
+            t0 + Duration::from_secs(166),
+            t0 + Duration::from_secs(166 + 780),
+        );
         feed(&mut m, &val_line(67101));
         m.note_step_progress(t0 + Duration::from_secs(166 + 780));
         assert!((m.state.step_ms - 244.1).abs() < 0.5, "{}", m.state.step_ms);
@@ -2644,6 +2717,11 @@ mod baseline_anchor_tests {
         at_step(&mut m, 100, t0);
         at_step(&mut m, 101, t0 + Duration::from_millis(300));
         assert!(!m.anchor_is_baseline);
+        keep_polling(
+            &mut m,
+            t0 + Duration::from_millis(300),
+            t0 + Duration::from_secs(40),
+        );
         at_step(&mut m, 1, t0 + Duration::from_secs(40));
         assert!(m.state.chunked_bar);
         assert!(!m.anchor_is_baseline, "the restart is an observed event");
@@ -2704,11 +2782,17 @@ mod baseline_anchor_tests {
                 let mut m = TrainMonitor::new();
                 let t0 = Instant::now();
                 at_step(&mut m, 1000, t0);
+                keep_polling(&mut m, t0, t0 + Duration::from_secs(gap1));
                 at_step(&mut m, 1000 + jump, t0 + Duration::from_secs(gap1));
                 assert_eq!(m.state.step_ms, 0.0, "jump {jump} gap {gap1}");
                 assert!(m.state.step_history.is_empty(), "jump {jump} gap {gap1}");
                 // A second gap long enough for a plausible per-step time.
                 let gap2_ms = jump * 250;
+                keep_polling(
+                    &mut m,
+                    t0 + Duration::from_secs(gap1),
+                    t0 + Duration::from_secs(gap1) + Duration::from_millis(gap2_ms),
+                );
                 at_step(
                     &mut m,
                     1000 + 2 * jump,
@@ -2722,5 +2806,135 @@ mod baseline_anchor_tests {
                 );
             }
         }
+    }
+
+    fn secs(t0: Instant, s: f32) -> Instant {
+        t0 + Duration::from_secs_f32(s)
+    }
+
+    /// Chunks of 13 minutes (780 s, 3195 steps). The viewer attaches, leaves,
+    /// a chunk ends while it is away, and it returns. All times in minutes.
+    #[test]
+    fn returning_to_the_view_never_times_a_chunk_from_a_stale_anchor() {
+        let min = 60.0;
+        let mut m = tnt_monitor();
+        let t0 = Instant::now();
+        at_step(&mut m, 60711, t0); // attach, baseline
+        keep_polling(&mut m, t0, secs(t0, 1.0 * min)); // polled until leaving
+                                                       // The chunk ends at 5 min, unseen. The viewer returns at 12 min.
+        at_step(&mut m, 63906, secs(t0, 12.0 * min));
+        assert_eq!(m.state.step_ms, 0.0, "the return poll only re-anchors");
+        // Polling continues. The chunk end at 18 min is the first observed
+        // change after the re-baseline, so it only anchors.
+        keep_polling(&mut m, secs(t0, 12.0 * min), secs(t0, 18.0 * min));
+        at_step(&mut m, 67101, secs(t0, 18.0 * min));
+        assert_eq!(m.state.step_ms, 0.0, "6 min / 3195 would be 113 ms");
+        // The next jump is timed chunk to chunk.
+        keep_polling(&mut m, secs(t0, 18.0 * min), secs(t0, 31.0 * min));
+        at_step(&mut m, 70296, secs(t0, 31.0 * min));
+        assert!((m.state.step_ms - 244.1).abs() < 0.5, "{}", m.state.step_ms);
+    }
+
+    /// Returning 6 s before a chunk end would otherwise time 3195 steps over
+    /// 6 s (1.9 ms each), which passes the plausibility range.
+    #[test]
+    fn returning_just_before_a_chunk_end_produces_no_value() {
+        let min = 60.0;
+        let mut m = tnt_monitor();
+        let t0 = Instant::now();
+        at_step(&mut m, 60711, t0);
+        keep_polling(&mut m, t0, secs(t0, 1.0 * min));
+        // The chunk ended at 5 min, unseen. The return poll at 17.9 min sees
+        // 63906, and the next chunk ends 6 s later.
+        at_step(&mut m, 63906, secs(t0, 17.9 * min));
+        keep_polling(&mut m, secs(t0, 17.9 * min), secs(t0, 17.9 * min + 6.0));
+        at_step(&mut m, 67101, secs(t0, 17.9 * min + 6.0));
+        assert_eq!(m.state.step_ms, 0.0);
+        assert_eq!(m.state.tokens_per_sec(), None);
+    }
+
+    /// A pause under the limit changes nothing.
+    #[test]
+    fn a_short_pause_is_still_timed() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        at_step(&mut m, 1, t0);
+        at_step(&mut m, 2, secs(t0, 0.3));
+        at_step(&mut m, 3, secs(t0, 0.6));
+        // 4 s without a poll, under the 5 s limit.
+        at_step(&mut m, 4, secs(t0, 4.6));
+        assert_eq!(m.state.step_history.len(), 2);
+        assert!((m.state.step_history[1].ms - 4000.0).abs() < 1.0);
+    }
+
+    /// A per-step trainer that pauses for 10 s and carries on: the first
+    /// increase after the pause only anchors.
+    #[test]
+    fn a_per_step_trainer_re_anchors_after_a_pause() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        at_step(&mut m, 1, t0);
+        at_step(&mut m, 2, secs(t0, 0.3));
+        at_step(&mut m, 3, secs(t0, 0.6));
+        assert_eq!(m.state.step_history.len(), 1);
+        at_step(&mut m, 40, secs(t0, 10.6)); // returns, 37 steps later
+        assert_eq!(m.state.step_history.len(), 1, "no sample for the return");
+        at_step(&mut m, 41, secs(t0, 10.9));
+        assert_eq!(m.state.step_history.len(), 1, "first increase only anchors");
+        at_step(&mut m, 42, secs(t0, 11.2));
+        assert_eq!(m.state.step_history.len(), 2);
+        assert!((m.state.step_history[1].ms - 300.0).abs() < 1.0);
+    }
+
+    /// Frame-rate polling, 50 ms apart, never trips the pause rule.
+    #[test]
+    fn polls_50ms_apart_are_unaffected() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        // A step every 300 ms, a poll every 50 ms for 20 s.
+        for i in 0..400u64 {
+            at_step(&mut m, 1 + i / 6, t0 + Duration::from_millis(50 * i));
+        }
+        assert!(m.state.step_history.len() > 50);
+        assert!(
+            (m.state.step_ms - 300.0).abs() < 60.0,
+            "{}",
+            m.state.step_ms
+        );
+    }
+
+    /// A second run header in the log clears every monitor anchor, including
+    /// the pause clock. The test process is alive, so `poll` does not detach.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_second_run_header_in_poll_clears_the_anchors() {
+        use crate::workload::train::TrainProcess;
+        let dir = std::env::temp_dir().join(format!("ttanchor_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("train.log");
+        std::fs::write(
+            &path,
+            "tt-tnt training - steps=4000 batch=8 seq_len=512 arch=blackhole\n",
+        )
+        .unwrap();
+        let mut m = TrainMonitor::new();
+        m.state.proc = Some(TrainProcess {
+            pid: std::process::id() as i32,
+            binary: "test".into(),
+            config_path: None,
+        });
+        m.tailer = Some(Tailer::new(path.clone()));
+        // Run data from an earlier run, and live anchors.
+        m.state.step = 100;
+        m.state.loss = Some(2.0);
+        let t0 = Instant::now();
+        m.last_step_seen = Some((100, t0));
+        m.anchor_is_baseline = true;
+        m.last_note_at = Some(t0);
+        m.poll();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(m.last_step_seen, None);
+        assert!(!m.anchor_is_baseline);
+        assert_eq!(m.last_note_at, None);
     }
 }

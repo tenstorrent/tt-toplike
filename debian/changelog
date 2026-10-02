@@ -21,6 +21,7 @@ tt-toplike (0.13.7) noble; urgency=medium
     over 600k tok/s when attached part-way through a chunk. The first
     increase after attach now only sets a baseline, so tok/s appears at
     the second chunk end and covers train, checkpoint and validation time.
+    Returning to the view after more than 5 s away re-baselines the same way.
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 02 Oct 2026 12:00:00 +0000
 

@@ -182,7 +182,9 @@ For bar-only and chunk-jump trainers the step time is derived from log
 cadence, and the first step seen after attach is only a baseline. The first
 increase after it measures nothing, so a trainer that prints one line per
 chunk shows no tok/s until its second chunk end after attach. The value then
-spans train, checkpoint and validation time for a chunk.
+spans train, checkpoint and validation time for a chunk. The monitor is polled
+only while the view is on screen, so a pause of more than 5 s re-baselines the
+same way when the user returns.
 
 ### Layer D: removed
 
@@ -265,6 +267,10 @@ The starfield is the band's main layer, so it gets 3 rows before any aux
 row. With no step samples there is no star row and no chip row. When steps
 exist but none has a time the canvas can place (every time is 0, negative or
 not finite), there is no star row and the chip rows still draw.
+
+At a 24-row terminal with 3 chips the new order leaves 2 star rows and no aux
+row (the aiclk row the old order kept is dropped). This is accepted because
+host CPU and tokens/s are in the LIVE panel.
 
 Side-panel narrow-width rules (`panel_fit`) are unchanged.
 

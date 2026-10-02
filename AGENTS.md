@@ -782,6 +782,22 @@ tok/s. That is the true state: nothing has been measured yet.
 
 Tests: `baseline_anchor_tests` in `monitor.rs` (the reported 60711 to 63906
 case, a per-step trainer, bar restart, new run, reported time, and a sweep
-of jump sizes and gaps). Six existing tests that measured from the attach
-baseline gained one more step before their first measurement. Version not
-bumped.
+of jump sizes and gaps, and a `poll` test for the new-header branch).
+Eight existing tests that measured from the attach baseline gained one more
+step before their first measurement: the cadence derivation test, the
+one-step sample, the several-steps poll, the bar restart (two copies), the
+implausible gap, the fresh run after a previous one, the unparsed step zero
+and the resume start step. Version not bumped.
+
+Follow-up (Oct 2, 2026): the monitor is polled only while the Training view
+is on screen, so a stale anchor could still time a chunk jump after the user
+returned (a 13 minute chunk seen 6 s after the return would show about 17M
+tok/s). `note_step_progress` now remembers `last_note_at`. A gap over
+`POLL_GAP_REBASE` (5 s) makes that call a re-baseline: it anchors at the
+current step, measures nothing and records no sample. Returning to the view
+therefore costs one more observed change before a rate appears. The monitor
+still does not poll in other views. The backlog test and the two reported-time
+tests had become vacuous under the baseline rule and each gained an anchoring
+step so they fail again when the lower bound or the early return is removed.
+Tests that jump minutes of injected time use `keep_polling`, so they do not
+look like a pause.
