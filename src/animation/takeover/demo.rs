@@ -412,8 +412,9 @@ mod tests {
 
     #[test]
     fn subset_event_scopes_the_chip_labels_and_boot_uses_every_device() {
-        // Slot 3 is BBS, slot 6 is Missile Command: the two variants that
-        // print chip labels.
+        // Slot 3 is BBS, the variant that prints a `CHIP n` line per
+        // targeted chip. Missile Command (slot 6) prints no labels; it draws
+        // one lane per device and is covered by the lane test below.
         let mut real = Takeover::demo_real(&ev(&[1, 3], 4));
         let mut bt = boot();
         for _ in 0..3 {
@@ -433,6 +434,47 @@ mod tests {
         for c in 0..4 {
             assert!(b.contains(&format!("CHIP {c}")), "boot missing chip {c}");
         }
+    }
+
+    #[test]
+    fn missile_command_slot_highlights_only_the_targeted_lanes() {
+        // Chips 1 and 3 of 4 reset. Slot 6 is Missile Command.
+        let mut t = Takeover::demo_real(&ev(&[1, 3], 4));
+        for _ in 0..6 {
+            t.skip();
+        }
+        assert_eq!(t.variant_name(), "MissileCommand");
+        match &t {
+            Takeover::Demo(seq) => assert_eq!(seq.event().device_indices, vec![1, 3]),
+            _ => panic!("expected a demo"),
+        }
+        // Past the 5 s resolve point and inside the 8 s slot, the variant
+        // shows its settled frame: a `+` ember on each targeted lane and a
+        // `·` idle silo on each other lane, all on the impact row.
+        for _ in 0..120 {
+            t.tick(STEP);
+        }
+        assert_eq!(t.variant_name(), "MissileCommand");
+        let (w, h) = (134u16, 40u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| t.render(f, f.area())).unwrap();
+        let buf = term.backend().buffer();
+        let b = takeover_box(ratatui::layout::Rect::new(0, 0, w, h));
+        let mut markers: Vec<(u16, u16, String)> = vec![];
+        for y in b.y..b.bottom() {
+            for x in b.x..b.right() {
+                let sym = buf[(x, y)].symbol();
+                if sym == "+" || sym == "·" {
+                    markers.push((x, y, sym.to_string()));
+                }
+            }
+        }
+        // One marker per lane, left to right, all on one row.
+        assert_eq!(markers.len(), 4, "{markers:?}");
+        assert!(markers.iter().all(|m| m.1 == markers[0].1), "{markers:?}");
+        markers.sort_by_key(|m| m.0);
+        let glyphs: Vec<&str> = markers.iter().map(|m| m.2.as_str()).collect();
+        assert_eq!(glyphs, ["·", "+", "·", "+"], "lanes 1 and 3 are targeted");
     }
 
     #[test]
