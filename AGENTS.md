@@ -717,3 +717,30 @@ treat a step past its budget like a chunk-local step. Version not bumped here.
 Process: brainstorming -> spec (docs/superpowers/specs/2026-10-01-
 training-tapestry-design.md) -> plan (docs/superpowers/plans/2026-10-01-
 training-tapestry.md).
+
+### Starfield over a signal weave (Oct 2, 2026, v0.13.7)
+
+Prompt: "the pulse doesn't make efficient use of the space the way the old
+knots / stars did. rethink that area of the viz again". Chosen: "Starfield
+over a signal weave".
+
+The step bars, the pulse row, the node-grid backdrop and the four gauge rows
+are gone. The band now draws a braille starfield (one star per step, two
+steps per column, up to 6 rows, `◆` compile, `✺` checkpoint, a dotted median
+horizon, the newest three stars swelling once per measured step) over weave
+rows on the same columns: chip power, the busiest chip's aiclk, PCIe and host
+CPU, each ending in its current value. Pure geometry lives in
+`train_canvas.rs`; `plan_band` grants star, chip, aux, verdict and strip rows.
+
+Decisions: the value column (10 wide) appears only when 20 data columns
+remain, and a value that does not fit is left out whole; a weave reading of
+zero draws `▁` so a sampled column is never blank; with no step samples the
+aux rows keep their label and value and get no cells; the tokens/sec best was
+removed with its gauge (tok/s stays in LIVE); `--mock` gained a closed-form
+host CPU and RSS so the host row shows in screenshots, and still has no PCIe
+row. The band stays capped at 13 rows, so with three chips and all aux rows
+the starfield gets 4 rows; it reaches 6 with fewer weave rows.
+
+Notable: a deliberate break that drew a PCIe row with no counters passed the
+first weave test, because it only checked the rows it expected. The test now
+asserts that a row with no signal is absent.

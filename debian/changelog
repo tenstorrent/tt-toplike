@@ -1,3 +1,22 @@
+tt-toplike (0.13.7) noble; urgency=medium
+
+  * Training view: the step bars, the pulse row and the gauge rows are
+    replaced by a starfield over a signal weave. The starfield draws one
+    braille star per step, two steps per column, with a purple diamond
+    for a compile, an amber burst for a checkpoint and a dotted median
+    line; the newest three stars swell once per measured step. Weave
+    rows on the same columns show each chip's power, the busiest chip's
+    aiclk, PCIe throughput and host CPU, each ending in its current
+    value. A row whose signal is missing is left out. tok/s stays in
+    the LIVE panel.
+  * --mock carries a host CPU and RSS reading, so the host row appears.
+  * A resumed run that appends to the same log no longer draws a step
+    above its budget: the resume line sets the absolute budget, a new
+    run header resets the per-run data, and a step past its budget is
+    shown alone.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 02 Oct 2026 12:00:00 +0000
+
 tt-toplike (0.13.6) noble; urgency=medium
 
   * Training view: the top-left band no longer draws a decorative 6x6

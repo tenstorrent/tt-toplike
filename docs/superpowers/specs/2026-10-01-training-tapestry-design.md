@@ -1,8 +1,28 @@
 # Training View tapestry: replace the node-grid scanner with data-driven layers
 
-Date: 2026-10-01
-Status: implemented in v0.13.6
-Files: `src/animation/train_view.rs`, `src/animation/train_tapestry.rs`, `src/workload/train/monitor.rs`, `src/workload/train/mock.rs`
+Date: 2026-10-01 (revised 2026-10-02)
+Status: implemented in v0.13.6; starfield and signal weave in v0.13.7
+Files: `src/animation/train_view.rs`, `src/animation/train_tapestry.rs`, `src/animation/train_canvas.rs`, `src/workload/train/monitor.rs`, `src/workload/train/mock.rs`
+
+## Revision 2026-10-02: starfield over a signal weave
+
+The user on v0.13.6: "the pulse doesn't make efficient use of the space the
+way the old knots / stars did. rethink that area of the viz again". They chose
+"Starfield over a signal weave". The step bars, the pulse row and the four
+gauge rows are replaced:
+
+- The step bars became a starfield (Layer A below). A bar took a whole
+  column per step. Braille dots put two steps in each column, so the same
+  width shows twice the steps, and the starfield grows to six rows where the
+  bars had four.
+- The pulse row (Layer D) is removed. It spent a full row on a cursor whose
+  only information was the step rate. The step rate now drives a swell on the
+  newest three stars, which uses no row of its own.
+- The gauge rows (Layer B) are removed. Each gauge showed one current value.
+  The weave rows show the same signals over the same steps as the stars, and
+  each still ends in its current value. tok/s stays in the LIVE panel.
+
+The sections below describe the band as it is now.
 
 ## Problem
 
@@ -22,41 +42,86 @@ already read. A signal that is missing is left out of the picture.
 
 ## Approved layout
 
-The band stays between the MODEL card and the LIVE panel. At full height
-(13 rows) it holds, top to bottom:
+The band stays between the MODEL card and the LIVE panel. It is at most 13
+rows tall (half the content area, capped, so the river keeps the larger
+share). Top to bottom it holds:
 
 1. Header: `STEP ANATOMY  last N steps · median M ms`.
-2. Step-time bars, one column per step, newest at the right (Layer A).
-3. Node-grid backdrop with a cursor (Layer D).
-4. One power lane per chip on the same columns (Layer A).
-5. Gauge rows (Layer B).
-6. Verdict line (Layer B).
-7. Convergence strip (Layer C).
+2. Starfield of step times, up to 6 rows, newest at the right (Layer A).
+3. One power row per chip on the same columns (Layer A).
+4. Aux weave rows: aiclk, PCIe, host CPU (Layer B).
+5. Verdict line (Layer B).
+6. Convergence strip (Layer C).
+
+```
+STEP ANATOMY  last 112 steps · median 85 ms
+  173 ·        ◆                          ·
+      · ·   ·       ·      ·   ·        · ·
+   64 ──·─·──·──·─·──·──·─·──·──·─·──·─·──── median
+chip0  ▃▃▄▃▃▃▄▄▃▃▃▄▃▃▃▄▃▃▃▄▃▃  58% TDP
+chip1  ▄▄▄▃▄▄▄▅▄▄▄▄▃▄▄▄▄▃▄▄▄▄  61% TDP
+aiclk  ▇▇▇▇▇▇▅▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇  1086 MHz
+pcie   ▁▁▃▁▁▂▁▁▁▃▁▁▁▂▁▁▁▃▁▁▁▂  310 MB/s
+host   ▃▃▃▃▄▃▃▃▃▃▃▄▃▃▃▃▃▃▄▃▃▃  cpu 140%
+▸ compute-bound - busiest chip at 58% of TDP
+loss ↘ -0.309/100 logs  noise 0.029
+```
+
+With three chips and all three aux rows, a 13-row band leaves 4 star rows.
+The starfield reaches 6 rows when fewer weave rows are present.
+
+Columns: the first 6 hold row labels and the starfield's axis values. One
+column is left free at the right. When at least 20 data columns remain
+beside it, a 10-column value label (after a one-column gap) ends each weave
+row. Otherwise the value labels are left out whole and the data takes their
+columns. A value that does not fit whole is left out.
 
 ### Layer A: step anatomy
 
-- One bar per step, height proportional to step time, scaled to the window's
-  maximum.
-- Bar colour by cause:
-  - teal: normal step;
-  - purple: the program-cache count rose on this step (a compile);
-  - amber: a checkpoint was written within one tick of this step.
-- A dotted line marks the window median.
-- Chip lanes use the same columns. Each shows power as a fraction of the chip's
-  TDP. They are sampled when each step line arrived.
-- Lane power is scaled to the chip's TDP, or to the window maximum when no TDP
-  is known. A column with no chip sample shows `⋅`. A lane cell is coral where
-  aiclk is below 90% of that chip's highest. Chip samples are taken for all
-  chips the backend reports. Lanes show the first three.
+- Starfield: one star per step on a braille canvas. A cell holds 2 dots across
+  and 4 down, so two steps share a column. Steps are right-aligned, so the
+  newest is in the last data column; steps older than the canvas are dropped.
+  The header's `last N steps` counts the steps shown.
+- y is the step time, auto-ranged over the shown steps (`y_range`: 10% of the
+  span below the smallest, 5% above the largest). The top and bottom of the
+  range are printed in the label column (`{:>5.0}` ms).
+- Star glyph by cause:
+  - teal braille dot: normal step;
+  - purple `◆`: the program-cache count rose on this step (a compile);
+  - amber `✺`: a checkpoint was written within one tick of this step.
+  A cell holding both a compile and a checkpoint draws `◆`.
+- A dotted `┈` horizon marks the median of the shown steps. It is drawn on
+  every column of its row that has no star in it, and the value column says
+  `median`. The axis range, the horizon and the header's median come from
+  the same shown steps.
+- The newest three stars swell once per measured step: their colour lifts
+  towards white and back. Only the brightness changes. The swell's phase
+  accumulates frame by frame, so a change in step time changes its speed and
+  never makes it jump. A cycle never runs faster than 0.2 s. With no step
+  time nothing swells.
+- Chip rows use the same columns, with the larger of a column's two readings.
+  Each shows power as a fraction of the chip's TDP, ending in the current
+  value (`58% TDP`, or watts with no TDP). Readings are sampled when each
+  step line arrived.
+- Chip power is scaled to the chip's TDP, or to the window maximum when no TDP
+  is known. A column with no chip sample shows `⋅`. A reading with no height
+  (a zero scale or a zero reading) shows `▁`. A chip cell is coral where aiclk
+  is below 90% of that chip's highest. Chip samples are taken for all chips
+  the backend reports. The band shows the first three.
 
-### Layer B: roofline gauges and verdict
+### Layer B: aux weave rows and verdict
 
-Four bars:
+Up to three rows on the starfield's columns, each ending in its current value:
 
-- tok/s against the run's own best so far;
-- power against TDP;
-- aiclk against the highest value observed for that chip;
-- PCIe throughput in MB/s, with no ceiling.
+- `aiclk`: the busiest chip's aiclk against the highest value observed for
+  that chip, coral where it dropped below 90% (`1086 MHz`);
+- `pcie`: summed PCIe throughput against the best seen, only when PCIe
+  counters exist (`310 MB/s`);
+- `host`: host CPU of the trainer process against the window maximum, only
+  when a host reading exists (`cpu 140%`).
+
+With no step samples the aux rows have no cells. They still draw their label
+and current value when the value column is shown.
 
 The verdict line applies plain thresholds and names the readings that
 triggered it:
@@ -71,15 +136,14 @@ triggered it:
 The 50% and 30% values are first guesses. They are constants to tune on a real
 run.
 
-"Chip" in the gauges and the verdict means the busiest chip (most power),
-because the trainer's own chips are not identified. The tok/s and PCIe bars are
-relative to the best value seen. The aiclk bar is relative to the highest aiclk
-seen on that chip. The power gauge and the power-based verdicts are absent when
-no chip reports a TDP.
+"Chip" in the aiclk row and the verdict means the busiest chip (most power),
+because the trainer's own chips are not identified. The power-based verdicts
+are absent when no chip reports a TDP.
 
-Narrow-width rule: a clause that is shown is whole. The strip keeps only the
-leading parts that fit. The diagnosis drops its `, host cpu N%` suffix before it
-drops entirely. A gauge is drawn only when its whole reading fits.
+Narrow-width rule: a clause that is shown is whole. The header and the strip
+keep only the leading parts that fit. The diagnosis drops its `, host cpu N%`
+suffix before it drops entirely. A value label is drawn only when it fits
+whole.
 
 ### Layer C: convergence strip
 
@@ -98,21 +162,17 @@ It uses only data every trainer provides, including bar-only trainers. When the
 progress bar restarts per chunk (`TrainState.chunked_bar`), the strip names the
 scheduler without a percentage.
 
-### Layer D: node-grid backdrop
+### Layer D: removed
 
-- The grid stays as a dim backdrop under the bars.
-- The cursor makes one pass per measured `step_ms`, so the pulse speed is the
-  real step rate.
-- The backward-pass hue is removed. We do not measure a forward/backward split.
-- The cursor never runs faster than one pass per 0.2 s. The pulse clause is
-  atomic. When the cursor is slowed, the header says
-  `pulse = 1 step (max 5/s)`.
-- Grid dimensions no longer imply a topology. The `N blocks x M heads` text
-  moves to the MODEL card, which already shows blocks and heads.
+v0.13.6 kept the node grid as a dim backdrop with a cursor that made one pass
+per measured step, and the header said `pulse = 1 step (max 5/s)` when the
+cursor was slowed. v0.13.7 removes the row, its cursor and the header clause
+(see the revision note at the top). The step rate drives the starfield's
+swell instead. The `N blocks x M heads` text stays on the MODEL card.
 
 ## New state
 
-- `TrainState.step_history`: ring of 64 `StepSample { seq, step, ms,
+- `TrainState.step_history`: ring of 160 (`STEP_HISTORY`) `StepSample { seq, step, ms,
   cache_delta, checkpoint }`, pushed when a step time is known. `seq` is the
   per-run sample sequence number (`TrainState.step_seq`). It keys the chip
   lanes.
@@ -146,40 +206,47 @@ scheduler without a percentage.
   `step N`, and the strip makes no schedule claim.
 - The derived step cadence used to freeze after a bar restart. That is fixed,
   so derived step rate and tokens/sec keep updating.
-- `TrainView` chip samples: per chip power, aiclk and PCIe throughput, recorded
-  once per new step. They live in a `RefCell` ring in the same style as
-  `cache_last`, and are described as sampled when the step line arrived.
-- `--mock` emits step history, loss, config and chip telemetry. It has no PCIe
-  gauge, because the mock backend has no PCIe counters and adding them would
-  change the Insights sidebar that shares it.
+- `TrainView` chip samples: per chip power and aiclk, plus summed PCIe
+  throughput and host CPU, recorded once per new step (`ChipHistory`). They
+  live in a `RefCell` in the same style as `cache_last`, and are described as
+  sampled when the step line arrived. The view clears them when the run's
+  identity (pid and attach time) changes.
+- `--mock` emits step history, loss, config, chip telemetry and a closed-form
+  host CPU and RSS, so the host row appears and a screenshot at t seconds is
+  reproducible. It has no PCIe row, because the mock backend has no PCIe
+  counters and adding them would change the Insights sidebar that shares it.
 
 ## Missing signals
 
-- A chip with no telemetry has no lane.
-- A backend with no PCIe counters has no PCIe bar.
-- With no step history the bars are left out and the header reads
-  `STEP ANATOMY  no per-step times reported`. The pulse (driven by `step_ms`,
-  which can be known from derived cadence) and the gauges still draw when their
-  own signals exist.
+- A chip with no telemetry has no row.
+- A backend with no PCIe counters has no PCIe row. A run with no host reading
+  has no host row.
+- With no step history the starfield and the chip rows are left out and the
+  header reads `STEP ANATOMY  no per-step times reported`. The aux rows still
+  draw their current values when their signals exist.
 - Nothing is drawn from a placeholder value.
 
 ## Shrinking
 
-When the band is shorter than 13 rows, layers drop in this order:
+`plan_band` hands rows out in this order, and a shorter band loses them in
+reverse:
 
-1. Bars and header (minimum 2 rows, always kept).
+1. Header and one star row (minimum 2 rows, always kept).
 2. Verdict.
-3. Chip lanes.
-4. Gauges.
+3. Chip rows.
+4. Aux rows.
 5. Convergence strip.
+6. Extra star rows, up to 6 in all.
+
+With no step samples there is no star row and no chip row.
 
 Side-panel narrow-width rules (`panel_fit`) are unchanged.
 
 ## Testing
 
 - Each layer has a test that changes its input and asserts the output cells
-  change: `cache_delta` recolours a bar, chip power changes a lane, loss slope
-  changes the strip, `step_ms` changes the cursor period.
+  change: `cache_delta` turns a star into `◆`, chip power changes a chip row,
+  loss slope changes the strip, `step_ms` changes the swell's speed.
 - Each new test is run against a deliberately broken implementation to confirm
   it fails, then the fix is restored.
 - Existing tests stay green, including `never_emits_a_right_side_border_and_fits_the_width`
