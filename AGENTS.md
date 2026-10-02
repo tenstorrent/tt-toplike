@@ -801,3 +801,51 @@ tests had become vacuous under the baseline rule and each gained an anchoring
 step so they fail again when the lower bound or the early return is removed.
 Tests that jump minutes of injected time use `keep_polling`, so they do not
 look like a pause.
+
+### Process scan off the render thread (Oct 2, 2026, v0.13.8)
+
+Report: "this branch seems to have a systematic lag again. where you can
+really see the polling shift every 2 seconds or so". The user ran
+`--tt-smi-reset-behavior demo`, where smooth animation makes a stall easy to
+see.
+
+Measurement (548 processes, 2,909 threads, release build): the 2 s block in
+`run_app` cost about 135 ms on the render and input thread. Most of it was
+`HostProcessMonitor::update` (30 ms, sysinfo with every process field) and
+`ProcessMonitor::update` (82 ms, the `/proc` fd and hugepage scan). Building
+rows and lists added about 22 ms. `InferenceServerProbe::update` makes
+network probes with a 150 ms timeout each. That is about eight dropped frames
+at 60 fps. Rendering the Training view costs 0.4 ms, so rendering was not the
+cause. The block is the same on `origin/main`.
+
+Design: `src/ui/tui/proc_scan.rs`. `Scanner` owns the three monitors and does
+what the block did, in the same order, with the same `cfg` variants.
+`ScannerHandle` runs it on a worker thread named `tt-toplike-proc-scan`.
+`request` and `try_result` never block. At most one request is outstanding,
+so a slow scan never queues a second one. The worker catches a panic in a
+scan, logs it and keeps serving. The TUI panic hook returns early on that
+thread, so a caught panic leaves the terminal in the alternate screen. Drop
+waits up to 250 ms for the worker and then detaches it.
+
+Loop: setup runs one synchronous scan so the first frame has rows. Every
+iteration checks `try_result` and, when a result is ready,
+`apply_scan_result` swaps in `proc_rows` and `serving_metrics`. The loop then
+runs the reset scan over the result's process list, submits runtimes and
+inference servers, checks the Defrag unload edge and runs the `/serve`
+publisher step. The 2 s cadence block only sends a request, then refreshes
+host CPU and memory as before. `ScanRequest.want_processes` comes from
+`reset_behavior.detects()`, so `ignore` still never takes the process
+snapshot.
+
+After (release, same box, 274 processes at the time): `request` about 5 us,
+`try_result` about 1 us, apply plus reset scan about 45 us. Before, measured
+in the same run: 131 to 135 ms per refresh. The cost of the move is one scan
+of latency: results appear about 0.15 s after the request.
+
+Tests: `proc_scan::tests`, with a fake scanner that sleeps and can panic, the
+apply step as a pure function, the real scanner on this machine, and a source
+guard that `run_app` reaches the monitors only through the handle. Each
+wiring test was seen to fail under a deliberate break: a blocking `request`,
+a blocking `try_result`, no outstanding gate, an unbounded join on drop, no
+panic catch, an unnamed thread, an apply that keeps old rows or drops the
+process list, an inline scan in the loop, and `want_processes: true`.

@@ -1,3 +1,13 @@
+tt-toplike (0.13.8) noble; urgency=medium
+
+  * The 2-second process scan runs on a background thread. It cost about
+    135 ms on the render thread on a box with 548 processes, which showed
+    as a hitch in the animation every 2 s. The render thread now spends
+    under 0.1 ms per refresh. Process panel results appear about 0.15 s
+    after each refresh starts.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 02 Oct 2026 14:00:00 +0000
+
 tt-toplike (0.13.7) noble; urgency=medium
 
   * Training view: the step bars, the pulse row and the gauge rows are
