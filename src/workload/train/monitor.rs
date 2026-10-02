@@ -109,6 +109,9 @@ pub struct TrainState {
     /// none has. Kept apart from `max_steps` so a chunked bar's total cannot
     /// replace it.
     pub stated_max_steps: u64,
+    /// The absolute step this process started from, `Some` once a resume line
+    /// has been read. `None` for a run that began at step 0 or never said.
+    pub resume_start: Option<u64>,
     /// The total shown by the last progress-bar update, 0 before the first.
     pub last_bar_total: u64,
     /// A line that carries both a step and a step time (`StepAndMs`,
@@ -220,6 +223,51 @@ impl TrainState {
         }
     }
 
+    /// True when the state already holds data from a run, so a new run header
+    /// means a second run was appended to the same log. Any of a step, a loss
+    /// sample, a step sample or a stated budget qualifies. The first header of
+    /// a fresh state has none of them, so it resets nothing.
+    fn holds_run_data(&self) -> bool {
+        self.step > 0
+            || !self.loss_history.is_empty()
+            || !self.step_history.is_empty()
+            || self.stated_max_steps > 0
+    }
+
+    /// Clear the per-run data when a new run header follows an earlier run in
+    /// the same log (a resumed run appends to the file the first run wrote).
+    ///
+    /// Cleared: step, losses, step history and its source, bar tracking, the
+    /// budget, checkpoint markers, scheduler and grad accumulation, all of
+    /// which belong to the old run. Kept: `proc`, `log` and `first_seen`
+    /// (the attachment is the same), `config` (the model and YAML do not change
+    /// with a restart), `is_mock`, and the host cost fields, which the monitor
+    /// samples from the live process on every poll. `batch_size` and
+    /// `param_count` are kept too: the header restates the batch size, and the
+    /// parameter count is a property of the model.
+    pub fn begin_new_run(&mut self) {
+        self.step = 0;
+        self.loss = None;
+        self.prev_loss = None;
+        self.loss_history.clear();
+        self.step_history.clear();
+        self.step_seq = 0;
+        self.step_ms = 0.0;
+        self.cache_entries = 0;
+        self.max_steps = 0;
+        self.stated_max_steps = 0;
+        self.last_bar_step = None;
+        self.last_bar_total = 0;
+        self.chunked_bar = false;
+        self.step_from_reported_line = false;
+        self.step_time_source = StepTimeSource::Unknown;
+        self.checkpoint_step = 0;
+        self.checkpoint_pulse = 0;
+        self.resume_start = None;
+        self.scheduler = None;
+        self.grad_accum = 0;
+    }
+
     pub fn apply_event(&mut self, ev: TrainEvent) {
         match ev {
             TrainEvent::Step { step, loss } => {
@@ -325,9 +373,22 @@ impl TrainState {
                 batch_size,
                 seq_len,
             } => {
+                if self.holds_run_data() {
+                    self.begin_new_run();
+                }
                 self.apply_event(TrainEvent::MaxSteps(max_steps));
                 self.apply_event(TrainEvent::BatchSize(batch_size));
                 self.apply_event(TrainEvent::SeqLen(seq_len));
+            }
+            // The run's absolute budget. It follows the header, whose `steps=`
+            // counts only this process's steps, so it overrides it.
+            TrainEvent::Resumed {
+                start_step,
+                end_step,
+            } => {
+                self.resume_start = Some(start_step);
+                self.max_steps = end_step;
+                self.stated_max_steps = end_step;
             }
             TrainEvent::MaxSteps(v) => {
                 self.max_steps = v;
@@ -1081,6 +1142,19 @@ impl TrainMonitor {
                                 }
                             }
                         }
+                    }
+                    // A run header after an earlier run in the same log starts
+                    // a new run (the state resets itself on it). The monitor's
+                    // step anchor and reported-time flag belong to the old run
+                    // too: a second run may be a bar-only trainer after a
+                    // reported one. `last_cpu` stays, because it differences
+                    // ticks of the attached process, which has not changed.
+                    TrainEvent::HarnessSummary { .. } => {
+                        if self.state.holds_run_data() {
+                            self.last_step_seen = None;
+                            self.saw_reported_step_time = false;
+                        }
+                        self.state.apply_event(ev);
                     }
                     _ => self.state.apply_event(ev),
                 }
@@ -2251,5 +2325,83 @@ mod step_and_ms_tests {
         assert_eq!(st.max_steps, 0);
         assert_eq!(st.step, 25565);
         assert_eq!(st.eta_secs(), None);
+    }
+
+    fn resumed(start_step: u64, end_step: u64) -> TrainEvent {
+        TrainEvent::Resumed {
+            start_step,
+            end_step,
+        }
+    }
+
+    fn val(step: u64) -> TrainEvent {
+        TrainEvent::Step { step, loss: 3.0 }
+    }
+
+    /// The resume line states the absolute budget and overrides the header's
+    /// relative `steps=`, so a later absolute val step stays inside it.
+    #[test]
+    fn the_resume_line_sets_the_absolute_budget() {
+        let mut st = TrainState::new();
+        st.apply_event(summary(25560));
+        assert_eq!(st.max_steps, 25560);
+        st.apply_event(resumed(38346, 63906));
+        assert_eq!(st.max_steps, 63906);
+        assert_eq!(st.stated_max_steps, 63906);
+        assert_eq!(st.resume_start, Some(38346));
+        st.apply_event(val(41541));
+        assert!(st.step <= st.max_steps);
+    }
+
+    /// A miniature of the user's appended two-run log.
+    #[test]
+    fn a_second_run_header_resets_the_first_runs_data() {
+        let mut st = TrainState::new();
+        st.log = Some(LogSource::NotRedirected);
+        st.first_seen = Some(Instant::now());
+        st.host_cpu_pct = Some(80.0);
+        st.host_rss_bytes = Some(1 << 30);
+        st.device_backed = true;
+        st.config.max_sequence_length = Some(512);
+        st.apply_event(summary(63906));
+        for s in [3195u64, 6390, 38340] {
+            st.apply_event(val(s));
+        }
+        st.mark_checkpoint();
+        st.scheduler = Some("cosine".into());
+        assert_eq!(st.step, 38340);
+        assert_eq!(st.loss_history.len(), 3);
+
+        st.apply_event(summary(25560));
+        assert_eq!(st.step, 0);
+        assert!(st.loss_history.is_empty() && st.step_history.is_empty());
+        assert_eq!(st.loss, None);
+        assert_eq!(st.checkpoint_step, 0);
+        assert_eq!(st.scheduler, None);
+        assert_eq!(st.max_steps, 25560, "the new header's own budget");
+        assert!(st.log.is_some() && st.first_seen.is_some());
+        assert_eq!(st.host_cpu_pct, Some(80.0));
+        assert_eq!(st.host_rss_bytes, Some(1 << 30));
+        assert!(st.device_backed);
+        assert_eq!(st.config.max_sequence_length, Some(512));
+
+        st.apply_event(resumed(38346, 63906));
+        st.apply_event(val(41541));
+        assert_eq!(st.max_steps, 63906);
+        assert_eq!(st.step, 41541);
+        assert_eq!(st.loss_history.len(), 1);
+    }
+
+    /// The first header of a fresh state resets nothing.
+    #[test]
+    fn the_first_header_resets_nothing() {
+        let mut st = TrainState::new();
+        st.config.max_sequence_length = Some(512);
+        st.scheduler = Some("cosine".into());
+        st.grad_accum = 4;
+        st.apply_event(summary(100));
+        assert_eq!(st.scheduler.as_deref(), Some("cosine"));
+        assert_eq!(st.grad_accum, 4);
+        assert_eq!(st.max_steps, 100);
     }
 }

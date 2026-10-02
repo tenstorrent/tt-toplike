@@ -85,12 +85,31 @@ pub enum TrainEvent {
         batch_size: u32,
         seq_len: u32,
     },
+    /// A resumed run's own statement of where it started and where it ends,
+    /// in absolute steps. tt-tnt prints it after the run header:
+    /// `resumed from <ckpt> at step 38346 (...); running 25560 more steps to
+    /// step 63906`. The header's `steps=` is only the steps this process runs,
+    /// so this line is the source of the run's absolute budget.
+    Resumed {
+        start_step: u64,
+        end_step: u64,
+    },
 }
 
 /// The integer immediately following `key` in a `key=value` line.
 fn kv_num(s: &str, key: &str) -> Option<u64> {
     let i = s.find(key)?;
     let digits: String = s[i + key.len()..]
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
+/// The unsigned integer at the start of `s`, after any leading spaces.
+fn digits_after(s: &str) -> Option<u64> {
+    let digits: String = s
         .trim_start()
         .chars()
         .take_while(char::is_ascii_digit)
@@ -209,6 +228,45 @@ pub fn parse_train_line(line: &str) -> Option<TrainEvent> {
                 loss,
             });
         }
+    }
+
+    // A resumed run's statement of its absolute range, e.g.
+    //   "resumed from artifacts/x/tt_tnt_step00038346.pkl at step 38346
+    //    (created_at=...); running 25560 more steps to step 63906"
+    // The end comes from `to step E`, or from `running M more steps` as
+    // start + M. A line that yields neither is skipped: the budget is never
+    // guessed. Checked before the header shape, which it does not match.
+    if let Some(i) = line.find("resumed from") {
+        let rest = &line[i..];
+        let start = rest
+            .find("at step")
+            .and_then(|j| digits_after(&rest[j + "at step".len()..]));
+        let end = rest
+            .rfind("to step")
+            .and_then(|j| digits_after(&rest[j + "to step".len()..]))
+            .or_else(|| {
+                let m = rest.find("running").and_then(|j| {
+                    let t = &rest[j + "running".len()..];
+                    // Only `running M more steps` counts, so a stray
+                    // "running" elsewhere on the line cannot supply M.
+                    let m = digits_after(t)?;
+                    t.trim_start()
+                        .trim_start_matches(|c: char| c.is_ascii_digit())
+                        .trim_start()
+                        .starts_with("more steps")
+                        .then_some(m)
+                })?;
+                start?.checked_add(m)
+            });
+        return match (start, end) {
+            (Some(start_step), Some(end_step)) if end_step >= start_step => {
+                Some(TrainEvent::Resumed {
+                    start_step,
+                    end_step,
+                })
+            }
+            _ => None,
+        };
     }
 
     // A Python harness's own run summary. tt-tnt prints, on one line:
@@ -663,6 +721,64 @@ mod tests {
         assert!(matches!(
             parse_train_line("Step: 9, Loss: 0.5, cache entries: 4"),
             Some(TrainEvent::Step { step: 9, .. })
+        ));
+    }
+
+    const RESUME_LINE: &str = "  resumed from artifacts/checkpoints-storyreg-s20260815/tt_tnt_step00038346.pkl at step 38346 (created_at=2026-10-02T03:28:05.992431+00:00); running 25560 more steps to step 63906";
+
+    #[test]
+    fn parses_the_resume_line_with_its_absolute_range() {
+        assert_eq!(
+            parse_train_line(RESUME_LINE),
+            Some(TrainEvent::Resumed {
+                start_step: 38346,
+                end_step: 63906
+            })
+        );
+    }
+
+    #[test]
+    fn a_resume_line_without_to_step_uses_start_plus_more_steps() {
+        assert_eq!(
+            parse_train_line(
+                "  resumed from x.pkl at step 100 (created_at=z); running 50 more steps"
+            ),
+            Some(TrainEvent::Resumed {
+                start_step: 100,
+                end_step: 150
+            })
+        );
+    }
+
+    #[test]
+    fn a_truncated_or_garbled_resume_line_is_skipped() {
+        for l in [
+            "  resumed from x.pkl",
+            "  resumed from x.pkl at step (created_at=z); running 50 more steps to step 9",
+            "  resumed from x.pkl at step 100 (created_at=z); running soon",
+            "  resumed from x.pkl at step 100 (created_at=z); running fifty more steps",
+            // An end before the start is unreadable.
+            "  resumed from x.pkl at step 100 (created_at=z); running 5 more steps to step 50",
+        ] {
+            assert_eq!(parse_train_line(l), None, "{l}");
+        }
+    }
+
+    #[test]
+    fn the_run_header_and_val_lines_still_parse_beside_the_resume_line() {
+        assert_eq!(
+            parse_train_line(
+                "tt-tnt training \u{2014} steps=25560 batch=64 seq_len=512 arch=blackhole"
+            ),
+            Some(TrainEvent::HarnessSummary {
+                max_steps: 25560,
+                batch_size: 64,
+                seq_len: 512
+            })
+        );
+        assert!(matches!(
+            parse_train_line("  step=  38340 train_loss=3.1 val_loss=3.2 lr=3.0e-4"),
+            Some(TrainEvent::Step { step: 38340, .. })
         ));
     }
 }

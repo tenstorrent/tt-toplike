@@ -661,7 +661,10 @@ impl TrainView {
         };
         // A chunk-local step is shown alone: it has no place in the run's
         // budget, so neither the total nor a percentage is drawn with it.
-        let chunk_local = st.step_is_chunk_local();
+        // A step past its budget (a stale budget from an earlier run, or a
+        // trainer that overran) is shown alone as well, never as `x / y`
+        // with x above y.
+        let chunk_local = st.step_is_chunk_local() || st.step > st.max_steps && st.max_steps > 0;
         let right_w = if st.max_steps > 0 || chunk_local {
             26
         } else {
@@ -1046,8 +1049,9 @@ impl TrainView {
             st.step,
             // Once the bar has restarted, or the step counts within a chunk,
             // the step cannot be placed in the run's budget, so 0 (unknown)
-            // keeps the strip from claiming a schedule position.
-            if st.chunked_bar || st.step_is_chunk_local() {
+            // keeps the strip from claiming a schedule position. A step past
+            // the budget gets the same treatment.
+            if st.chunked_bar || st.step_is_chunk_local() || st.step > st.max_steps {
                 0
             } else {
                 st.max_steps
@@ -3500,5 +3504,84 @@ mod tests {
         st.cache_entries = 21;
         let out = text_of(&TrainView::new(134, 40).render(&st, &b));
         assert!(out.contains("cache   21"), "{out}");
+    }
+
+    /// The second header row of a render at 134 columns.
+    fn header_row_of(st: &TrainState) -> String {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        rows_of(&TrainView::new(134, 40).render(st, &b))
+            .into_iter()
+            .find(|r| r.contains("auto-attached"))
+            .expect("the second header row")
+    }
+
+    #[test]
+    fn the_header_never_draws_a_step_past_its_budget() {
+        let mut st = live_state();
+        st.step = 38340;
+        st.max_steps = 25560;
+        let row = header_row_of(&st);
+        assert!(row.contains("step 38,340"), "{row:?}");
+        assert!(!row.contains("25,560") && !row.contains(" / "), "{row:?}");
+        st.step = 41541;
+        st.max_steps = 63906;
+        let row = header_row_of(&st);
+        assert!(row.contains("step 41,541 / 63,906  65.0%"), "{row:?}");
+    }
+
+    #[test]
+    fn the_strip_makes_no_schedule_claim_for_a_step_past_its_budget() {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = live_state();
+        st.loss_history = (0..120).map(|i| 5.0 - 0.01 * i as f32).collect();
+        st.scheduler = Some("cosine".into());
+        st.step = 38340;
+        st.max_steps = 25560;
+        let out = text_of(&TrainView::new(160, 40).render(&st, &b));
+        assert!(out.contains("cosine"), "{out}");
+        assert!(!out.contains("% through"), "{out}");
+    }
+
+    /// Replays the shape of the user's appended two-run log through the parser
+    /// and the state. The header never draws a ratio with x above y.
+    #[test]
+    fn replaying_a_resumed_two_run_log_never_draws_x_over_y_below_x() {
+        use crate::workload::train::{parse_train_line, TrainEvent};
+        let dash = "\u{2014}";
+        let lines = [
+            format!("tt-tnt training {dash} steps=63906 batch=64 seq_len=512 arch=blackhole"),
+            "  step=   3195 train_loss=3.5 val_loss=3.6 lr=3.0e-4".to_string(),
+            "  step=  38340 train_loss=3.1 val_loss=3.2 lr=2.0e-4".to_string(),
+            format!("tt-tnt training {dash} steps=25560 batch=64 seq_len=512 arch=blackhole"),
+            "  resumed from a/tt_tnt_step00038346.pkl at step 38346 (created_at=2026-10-02T03:28:05+00:00); running 25560 more steps to step 63906".to_string(),
+            "  step=  41541 train_loss=3.0 val_loss=3.1 lr=2.0e-4".to_string(),
+        ];
+        let mut st = live_state();
+        let mut saw_resume = false;
+        for l in &lines {
+            let ev = parse_train_line(l).expect("every replayed line parses");
+            saw_resume |= matches!(ev, TrainEvent::Resumed { .. });
+            st.apply_event(ev);
+            let row = header_row_of(&st);
+            if let Some(i) = row.find("step ") {
+                let t = &row[i + 5..];
+                if let Some((x, y)) = t.split_once(" / ") {
+                    let num = |s: &str| -> u64 {
+                        s.trim()
+                            .chars()
+                            .take_while(|c| c.is_ascii_digit() || *c == ',')
+                            .filter(char::is_ascii_digit)
+                            .collect::<String>()
+                            .parse()
+                            .unwrap()
+                    };
+                    assert!(num(x) <= num(y), "after {l:?}: {row:?}");
+                }
+            }
+        }
+        assert!(saw_resume);
+        assert_eq!((st.step, st.max_steps), (41541, 63906));
     }
 }

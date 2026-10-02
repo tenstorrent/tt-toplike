@@ -701,6 +701,19 @@ tt-tnt repo now prints one `Step: N, Loss: L, Time: T ms` line per step.
 tt-toplike reads it as a trainer-reported time (`StepAndMs`) with unknown
 cache growth. The LIVE cache row shows only when a cache count was reported.
 
+### Resumed runs: `step x / y` with y below x (Oct 2, 2026)
+
+The user's log holds two runs in one file. Run 2's header says `steps=25560`
+(the steps that process runs) while its val lines carry absolute steps
+(38340 and up), so the header drew `step 38,340 / 25,560`. Three changes:
+`parse.rs` reads `resumed from ... at step S ...; running M more steps to
+step E` as `TrainEvent::Resumed` (E, or S + M when `to step` is missing, and
+`None` when neither is readable); the state takes E as the absolute budget and
+records `resume_start`. A run header that follows run data calls
+`TrainState::begin_new_run`, and `poll` clears the monitor's step anchor and
+reported-time flag at the same point. `draw_header` and the convergence strip
+treat a step past its budget like a chunk-local step. Version not bumped here.
+
 Process: brainstorming -> spec (docs/superpowers/specs/2026-10-01-
 training-tapestry-design.md) -> plan (docs/superpowers/plans/2026-10-01-
 training-tapestry.md).

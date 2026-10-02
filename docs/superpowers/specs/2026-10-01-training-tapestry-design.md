@@ -134,6 +134,16 @@ scheduler without a percentage.
   run found that the harness prints one tqdm bar per 3195-step chunk.
 - The monitor's per-run anchors (`last_step_seen`, `saw_reported_step_time`,
   `last_cpu`) reset at attach and at detach.
+- A resumed run appends to the same log. Its header states `steps=` for this
+  process only, and its val lines carry absolute steps. The line
+  `resumed from <ckpt> at step S ...; running M more steps to step E` parses as
+  `Resumed` and sets the absolute budget (`max_steps` and `stated_max_steps` =
+  E, `resume_start` = S). A run header that arrives when the state already
+  holds run data calls `TrainState::begin_new_run`, which clears the per-run
+  data and keeps the attachment, config and host cost. The monitor also clears
+  `last_step_seen` and `saw_reported_step_time` then, and leaves `last_cpu`.
+  The header draws `step N / M` only when N is at most M; otherwise it draws
+  `step N`, and the strip makes no schedule claim.
 - The derived step cadence used to freeze after a bar restart. That is fixed,
   so derived step rate and tokens/sec keep updating.
 - `TrainView` chip samples: per chip power, aiclk and PCIe throughput, recorded
