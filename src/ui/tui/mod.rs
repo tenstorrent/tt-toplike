@@ -15,6 +15,7 @@ pub use bench::BenchResult;
 pub mod chip_portrait;
 pub mod perf;
 pub use perf::PerfMeter;
+pub(crate) mod proc_scan;
 pub(crate) mod reset_status;
 pub mod throttle;
 pub use throttle::ThrottleState;
@@ -29,11 +30,11 @@ use crate::cli::{BackendType, Cli};
 use crate::error::TTTopError;
 use crate::ui::colors;
 use crate::workload::train::{MockTrainRun, TrainMonitor};
-use crate::workload::{HostProcessMonitor, ProcRow};
+use crate::workload::ProcRow;
 // InferenceEngine + the /proc-based probes are only used on the Linux/TT path,
 // so gate the import to match (keeps non-Linux builds warning-clean under -D warnings).
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-use crate::workload::{InferenceEngine, InferenceServerProbe, ProcessMonitor, ServingMetrics};
+use crate::workload::{InferenceEngine, ProcessMonitor, ServingMetrics};
 use crossterm::{
     event::{self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyEventKind},
     execute,
@@ -267,6 +268,14 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     {
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            // The process-scan worker catches its own panics and keeps
+            // serving (see `proc_scan`), so the UI stays up. Log it and
+            // leave the terminal alone; restoring it here would drop the
+            // live UI out of the alternate screen.
+            if proc_scan::is_scan_thread() {
+                log::warn!("process scan thread panicked: {info}");
+                return;
+            }
             let _ = disable_raw_mode();
             let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableFocusChange);
             crate::logging::enable_stderr();
@@ -356,29 +365,37 @@ fn run_app(
     let mut perf_meter = PerfMeter::new();
     let mut show_perf = false;
 
-    // TT process attribution (Linux-only, update every 2 seconds). This reads
-    // /proc to map PIDs → device fds / hugepages and is merged into the
-    // cross-platform `proc_rows` by PID via `enrich_proc_rows_tt`.
-    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-    let mut process_monitor = crate::workload::ProcessMonitor::new();
-
-    // Cross-platform process listing for the Insights process panel. Enumerates
-    // host processes via sysinfo and tags inference runtimes; on Linux it is
-    // enriched by PID with TT device attribution (see the refresh tick).
-    let mut host_proc_monitor = HostProcessMonitor::new();
-    host_proc_monitor.update();
+    // The 2-second process scan (see `proc_scan`). `Scanner` owns the
+    // cross-platform sysinfo process listing and, on Linux with
+    // `linux-procfs`, the /proc TT attribution and the serving probes. One
+    // synchronous scan here fills the panels for the first frame; after that
+    // the scanner moves to a worker thread (`scan_handle`, below) so the
+    // ~135 ms refresh never runs on this render/input thread.
+    let mut scanner = proc_scan::Scanner::new();
+    let initial_scan = {
+        use proc_scan::Scan;
+        scanner.scan(&proc_scan::ScanRequest {
+            // TT-attributed backends (Sysfs/Hybrid/Json/Luwen — anything but
+            // --host/--mock) show the TT-filtered list from the first frame.
+            only_tt: crate::cli::backend_shows_only_tt(backend_type),
+            // The prober has no verdicts before its first cycle.
+            verdicts: std::collections::HashMap::new(),
+            // No reset scan at start-up, as before.
+            want_processes: false,
+        })
+    };
     // Background liveness prober: confirms server runtimes (vllm, ollama) via
     // their local API off the render path. First cycle has no verdicts yet, so
     // rows() relies on the cheap snapshot tier until the worker reports back.
     let liveness_prober = crate::workload::LivenessProber::spawn();
-    liveness_prober.submit(host_proc_monitor.detected_runtimes());
+    liveness_prober.submit(initial_scan.runtimes);
     // Background inference-server monitor: probes detected TT inference-server
     // containers (docker stats + /health) off the render path. Not yet read by
     // any panel — used by the [i] panel in the next task.
     #[cfg(target_os = "linux")]
     let inference_monitor = crate::workload::InferenceServerMonitor::spawn();
     #[cfg(target_os = "linux")]
-    inference_monitor.submit(host_proc_monitor.detected_inference_servers());
+    inference_monitor.submit(initial_scan.inference_servers);
     // Previous inference snapshot, for detecting the model-unload edge that
     // triggers the Defrag EVICT animation.
     #[cfg(target_os = "linux")]
@@ -398,24 +415,14 @@ fn run_app(
     // Background model-catalog refresher: curl-refreshes the compatibility
     // catalog off the render path; feeds the cold-trail starfield screensaver.
     let catalog_refresher = crate::workload::CatalogRefresher::spawn();
-    let mut proc_rows: Vec<ProcRow> =
-        host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts());
-    // Linux/TT: seed /proc attribution immediately so a TT-attributed backend
-    // (Sysfs/Hybrid/Json/Luwen — anything but --host/--mock, per
-    // `backend_shows_only_tt`) shows the TT-filtered process list from the
-    // very first frame, not just after the first 2s refresh tick below.
+    // Linux `/proc` builds also keep the start-up serving metrics; the
+    // loop's `serving_metrics` is seeded from them further down.
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-    {
-        process_monitor.update();
-        if crate::cli::backend_shows_only_tt(backend_type) {
-            let tt_pids: std::collections::HashSet<i32> = flat_process_list(&process_monitor)
-                .iter()
-                .map(|p| p.pid)
-                .collect();
-            proc_rows = host_proc_monitor.tt_rows(PROC_PANEL_MAX_ROWS, &tt_pids);
-        }
-        enrich_proc_rows_tt(&mut proc_rows, &process_monitor);
-    }
+    let initial_serving_metrics = initial_scan.serving_metrics;
+    let mut proc_rows: Vec<ProcRow> = initial_scan.proc_rows;
+    // From here on every scan runs on the worker. The loop asks for one at
+    // the 2 s cadence and applies each result when it arrives.
+    let mut scan_handle = proc_scan::ScannerHandle::spawn(scanner);
     let mut last_proc_rows_update = Instant::now();
 
     // Host CPU / RAM monitoring — sampled on the same 2s cadence as processes.
@@ -641,10 +648,8 @@ fn run_app(
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut inference_engine = InferenceEngine::new();
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-    let mut inference_probe = InferenceServerProbe::new();
-    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut serving_metrics: std::collections::HashMap<i32, ServingMetrics> =
-        std::collections::HashMap::new();
+        initial_serving_metrics;
     // Cross-platform: the unified render path reads these. They're only mutated
     // by the Linux-gated process-navigation / kill key handlers; off-Linux they
     // stay at their defaults (cursor 0, no kill dialog).
@@ -2401,21 +2406,38 @@ fn run_app(
             }
         }
 
-        // Update process list + host stats (every 2 seconds to avoid overhead).
-        // Cross-platform: the host CPU/RAM bars and process panel work on macOS.
-        if last_proc_rows_update.elapsed() >= Duration::from_secs(2) {
-            host_proc_monitor.update();
+        // ── Apply a finished process scan (checked every iteration) ──────
+        // The 2-second scan runs on the `proc_scan` worker thread; the
+        // cadence block below only asks for one. When a result is ready it
+        // is applied here, about one scan duration (~0.15 s) after the
+        // request. Everything in this block is cheap: moves, the reset
+        // scan over an already-collected list, channel sends and an
+        // `ArcSwap` load. It replaces a ~135 ms inline refresh that dropped
+        // about eight frames every 2 s.
+        if let Some(res) = scan_handle.try_result() {
+            if res.took > Duration::from_millis(500) {
+                log::debug!("process scan took {:?}", res.took);
+            }
+            let applied = proc_scan::apply_scan_result(
+                res,
+                &mut proc_rows,
+                #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+                &mut serving_metrics,
+            );
+            let scanned_processes = applied.processes;
 
             // ── `tt-smi -r` detection (`--tt-smi-reset-behavior`) ─────────
-            // Reuses this 2-second process scan. `scan_resets` takes the
-            // process snapshot only when the behavior detects resets, so
-            // `ignore` never reads the process list.
+            // Reuses the 2-second process scan. The worker takes the
+            // process snapshot only when the request asked for it
+            // (`reset_behavior.detects()`), and `scan_resets` reads it only
+            // when the behavior detects resets, so `ignore` never reads the
+            // process list.
             let outcome = reset_status::scan_resets(
                 reset_behavior,
                 display_mode == DisplayMode::HivemindSweeper,
                 &mut reset_detector,
                 &mut reset_status,
-                || host_proc_monitor.processes_snapshot(),
+                || scanned_processes,
                 backend.devices(),
                 Instant::now(),
             );
@@ -2434,10 +2456,10 @@ fn run_app(
             reset_status::apply_takeover_outcome(&mut takeover, reset_behavior, &outcome);
 
             // Refresh the prober's target set; read back last cycle's verdicts.
-            liveness_prober.submit(host_proc_monitor.detected_runtimes());
+            liveness_prober.submit(applied.runtimes);
             // Refresh the inference-server monitor's target set (containers only).
             #[cfg(target_os = "linux")]
-            inference_monitor.submit(host_proc_monitor.detected_inference_servers());
+            inference_monitor.submit(applied.inference_servers);
             // Model-unload edge → kick off the Defrag EVICT animation. The
             // power-EMA heuristic can't detect unload on Blackhole (see
             // DefragVis::trigger_evict), so we drive it from this discrete signal.
@@ -2451,39 +2473,11 @@ fn run_app(
                 }
                 prev_inference_snapshot = cur_inf;
             }
-            // Non-Linux / no-procfs: always the cross-platform host snapshot —
-            // TT filtering needs the /proc device-fd attribution below, which
-            // doesn't exist on these builds.
-            #[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
-            {
-                proc_rows =
-                    host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts());
-            }
 
-            // Linux/TT: refresh /proc attribution + serving probes, choose the
-            // TT-filtered or full host row set by backend, then merge TT device
-            // info into proc_rows by PID.
-            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-            {
-                process_monitor.update();
-                // Probe inference servers at the same 2s cadence to avoid
-                // hammering HTTP endpoints on every backend tick.
-                let flat = flat_process_list(&process_monitor);
-                serving_metrics = inference_probe.update(&flat);
-                proc_rows = if crate::cli::backend_shows_only_tt(backend_type) {
-                    let tt_pids: std::collections::HashSet<i32> =
-                        flat.iter().map(|p| p.pid).collect();
-                    host_proc_monitor.tt_rows(PROC_PANEL_MAX_ROWS, &tt_pids)
-                } else {
-                    host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts())
-                };
-                enrich_proc_rows_tt(&mut proc_rows, &process_monitor);
-            }
-
-            // `/serve` per-tick broadcast. Same 2s cadence as the process/
-            // inference refresh above — NOT the 60fps render loop — so
-            // clients get one fresh frame per refresh instead of the same
-            // frame re-sent dozens of times a second for no visible benefit.
+            // `/serve` per-tick broadcast. It runs once per applied scan
+            // result, so once per 2 s refresh. Clients get one fresh frame
+            // per refresh; the 60fps render loop would re-send the same
+            // frame dozens of times a second for no visible benefit.
             // `proc_rows` is current as of just above; the inference snapshot
             // is re-read here (cheap: an `ArcSwap` load + clone, see
             // `InferenceServerMonitor::snapshot`) rather than threaded out of
@@ -2520,6 +2514,18 @@ fn run_app(
                     }
                 }
             }
+        }
+
+        // Ask for a process scan and refresh host stats (every 2 seconds to
+        // avoid overhead). Cross-platform: the host CPU/RAM bars and process
+        // panel work on macOS. `request` never blocks and is refused while
+        // the previous scan is still running, so slow scans never pile up.
+        if last_proc_rows_update.elapsed() >= Duration::from_secs(2) {
+            scan_handle.request(proc_scan::ScanRequest {
+                only_tt: crate::cli::backend_shows_only_tt(backend_type),
+                verdicts: liveness_prober.fresh_verdicts(),
+                want_processes: reset_behavior.detects(),
+            });
 
             sys_monitor.refresh_cpu_usage();
             sys_monitor.refresh_memory();
