@@ -5,29 +5,30 @@
 //! `--tt-smi-reset-behavior inform|dazzle|demo`, the per-scan decision
 //! logic that feeds it, and the width-fitting rule for the status bar's
 //! left zone. Nothing here touches terminal types or the clock: callers
-//! pass `now`, so tests do not sleep.
+//! pass `now` and the process snapshot, so tests do not sleep.
 //!
 //! Lifecycle of the segment text:
-//! 1. `⟳ tt-smi -r · {scope} · resetting` from the moment the reset is
-//!    detected until the real `tt-smi -r` pid is no longer in the process
-//!    list.
-//! 2. `✓ tt-smi -r done` for [`RESET_DONE_VISIBLE`] after that.
+//! 1. `⟳ tt-smi -r · {scope} · resetting` while any `tt-smi -r` process is
+//!    alive. The scope is that of the most recently started one.
+//! 2. `✓ tt-smi -r done` for [`RESET_DONE_VISIBLE`] after the last one ends.
 //! 3. Nothing.
 //!
-//! The segment follows the pid itself.
-//! A takeover can be skipped (and the detector cleared) while
-//! `tt-smi` is still running, and HivemindSweeper clears the detector right
-//! after injecting its feed event. Neither changes what the text says.
+//! [`ResetStatus`] tracks every live `tt-smi -r` process on its own. It does
+//! not depend on the takeover's [`ResetDetector`]. The detector only records
+//! which reset a takeover animation is waiting on, so a second reset that
+//! starts while a takeover runs gets no takeover of its own, but it still
+//! shows in the segment and is still reported once to HivemindSweeper.
 
 use std::time::{Duration, Instant};
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::animation::takeover::{pick_takeover, Takeover};
+use crate::animation::takeover::{pick_takeover, takeover_fits, Takeover};
 use crate::cli::ResetBehavior;
 use crate::models::device::Device;
-use crate::workload::reset_detect::{ResetDetector, ResetEvent};
+use crate::workload::reset_detect::{parse_reset_process, ResetDetector, ResetEvent};
 use crossterm::event::KeyCode;
+use ratatui::layout::Rect;
 
 /// How long `✓ tt-smi -r done` stays in the status bar after the reset ends.
 pub const RESET_DONE_VISIBLE: Duration = Duration::from_secs(10);
@@ -43,74 +44,101 @@ pub struct ResetSegment {
     pub done: bool,
 }
 
-/// One tracked `tt-smi -r` invocation as the status bar sees it.
+/// One live `tt-smi -r` process that has already been reported.
 #[derive(Debug, Clone)]
+struct LiveReset {
+    /// The cmdline seen when the reset was first detected. The process is
+    /// identified by pid and cmdline together, so a pid the kernel reuses
+    /// for a different command between two scans counts as a new reset.
+    cmdline: String,
+    event: ResetEvent,
+}
+
+impl LiveReset {
+    fn matches(&self, pid: i32, cmdline: &str) -> bool {
+        self.event.pid == pid && self.cmdline == cmdline
+    }
+}
+
+/// Every live `tt-smi -r` process, plus when the last one ended. This is
+/// also the set of already-handled resets: a process in `live` is never
+/// reported again, and it leaves the set on the first scan it is absent
+/// from, so the set stays as small as the number of running resets.
+#[derive(Debug, Clone, Default)]
 pub struct ResetStatus {
-    pid: i32,
-    chip_count: usize,
-    is_full: bool,
+    /// Live resets in the order they were first seen. The last entry is the
+    /// most recently started one.
+    live: Vec<LiveReset>,
+    /// When `live` last became empty. Cleared when a new reset starts.
     finished_at: Option<Instant>,
 }
 
 impl ResetStatus {
-    /// Starts in the "resetting" state for a freshly detected reset.
-    pub fn from_event(ev: &ResetEvent) -> Self {
-        Self {
-            pid: ev.pid,
-            chip_count: ev.chip_count,
-            is_full: ev.is_full,
-            finished_at: None,
+    /// No reset seen yet: nothing is drawn.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Updates the tracked set from one process snapshot (`(pid, name,
+    /// cmdline)` triples) and returns the resets seen for the first time,
+    /// in snapshot order. Resets that have left the snapshot are dropped.
+    /// When the last one goes, the "done" countdown starts at `now`.
+    pub fn observe(
+        &mut self,
+        processes: &[(i32, String, String)],
+        devices: &[Device],
+        now: Instant,
+    ) -> Vec<ResetEvent> {
+        let had_live = !self.live.is_empty();
+        self.live
+            .retain(|r| processes.iter().any(|(pid, _, cmd)| r.matches(*pid, cmd)));
+        let mut new = Vec::new();
+        for (pid, name, cmdline) in processes {
+            if self.live.iter().any(|r| r.matches(*pid, cmdline)) {
+                continue;
+            }
+            if let Some(ev) = parse_reset_process(*pid, name, cmdline, devices) {
+                self.live.push(LiveReset {
+                    cmdline: cmdline.clone(),
+                    event: ev.clone(),
+                });
+                new.push(ev);
+            }
         }
-    }
-
-    /// The pid of the `tt-smi -r` process being followed (used by tests).
-    #[cfg(test)]
-    pub fn pid(&self) -> i32 {
-        self.pid
-    }
-
-    /// Marks the reset finished at `now`. The first call wins.
-    pub fn note_finished(&mut self, now: Instant) {
-        self.finished_at.get_or_insert(now);
-    }
-
-    /// Marks the reset finished when its pid is absent from `processes`
-    /// (the same test `ResetDetector::is_finished` uses).
-    pub fn observe_processes(&mut self, processes: &[(i32, String, String)], now: Instant) {
-        if !processes.iter().any(|(pid, _, _)| *pid == self.pid) {
-            self.note_finished(now);
+        if !self.live.is_empty() {
+            self.finished_at = None;
+        } else if had_live {
+            self.finished_at = Some(now);
         }
+        new
     }
 
-    /// True once the "done" text has been visible for [`RESET_DONE_VISIBLE`].
-    pub fn is_expired(&self, now: Instant) -> bool {
-        self.finished_at
-            .is_some_and(|t| now.saturating_duration_since(t) >= RESET_DONE_VISIBLE)
-    }
-
-    /// The segment to draw at `now`, or `None` once it has expired.
+    /// The segment to draw at `now`, or `None` when no reset is running and
+    /// the "done" text has been visible for [`RESET_DONE_VISIBLE`].
     pub fn text(&self, now: Instant) -> Option<ResetSegment> {
-        if self.is_expired(now) {
-            return None;
-        }
-        if self.finished_at.is_some() {
-            let t = "✓ tt-smi -r done".to_string();
+        if let Some(latest) = self.live.last() {
+            // Same scope wording as the Quiet Notice takeover.
+            let ev = &latest.event;
+            let scope = if ev.is_full {
+                "all chips".to_string()
+            } else {
+                format!("{} chip(s)", ev.chip_count)
+            };
             return Some(ResetSegment {
-                text: t.clone(),
-                short: t,
-                done: true,
+                text: format!("⟳ tt-smi -r · {scope} · resetting"),
+                short: "⟳ tt-smi -r · resetting".to_string(),
+                done: false,
             });
         }
-        // Same scope wording as the Quiet Notice takeover.
-        let scope = if self.is_full {
-            "all chips".to_string()
-        } else {
-            format!("{} chip(s)", self.chip_count)
-        };
+        let finished = self.finished_at?;
+        if now.saturating_duration_since(finished) >= RESET_DONE_VISIBLE {
+            return None;
+        }
+        let t = "✓ tt-smi -r done".to_string();
         Some(ResetSegment {
-            text: format!("⟳ tt-smi -r · {scope} · resetting"),
-            short: "⟳ tt-smi -r · resetting".to_string(),
-            done: false,
+            text: t.clone(),
+            short: t,
+            done: true,
         })
     }
 }
@@ -119,28 +147,31 @@ impl ResetStatus {
 #[derive(Debug, Default)]
 pub struct ScanOutcome {
     /// Set when a new reset was detected and a takeover animation should
-    /// start for it (`dazzle`/`demo`, never in HivemindSweeper).
+    /// start for it (`dazzle`/`demo`, never in HivemindSweeper, and only
+    /// while no takeover is already waiting on a reset).
     pub takeover_for: Option<ResetEvent>,
-    /// Set when a new reset was detected in HivemindSweeper and should
-    /// become a real feed event (`inform`/`dazzle`/`demo`).
-    pub feed_event_for: Option<ResetEvent>,
+    /// Every reset seen for the first time this scan, when the view is
+    /// HivemindSweeper. Each becomes one feed event.
+    pub feed_events: Vec<ResetEvent>,
+    /// True when the reset the running takeover waits on has ended. The
+    /// caller passes this on with `Takeover::note_reset_finished`.
+    pub takeover_reset_finished: bool,
 }
 
-/// One scan of the process list for the reset feature. Runs only when
-/// `behavior.detects()`. Updates `status` (creating it on a new reset,
-/// marking it finished when the pid disappears, dropping it once the done
-/// text has expired) and tells the caller whether to start a takeover or
-/// inject a feed event.
+/// One scan of the process list for the reset feature.
 ///
-/// The detector stays occupied only while a takeover is waiting on it. In
-/// every other case it is cleared at once, so the next reset is detected
-/// normally and the still-running pid is not reported twice.
+/// Does nothing, and never calls `snapshot`, unless `behavior.detects()`.
+/// Otherwise it takes one snapshot, updates `status` with it, and tells the
+/// caller what to do: one feed event per new reset in HivemindSweeper, or a
+/// takeover for the newest new reset when the behavior animates and
+/// `detector` is free. A takeover marks `detector` as occupied until the
+/// caller clears it when the animation ends.
 pub fn scan_resets(
     behavior: ResetBehavior,
     hivemind: bool,
     detector: &mut ResetDetector,
-    status: &mut Option<ResetStatus>,
-    processes: &[(i32, String, String)],
+    status: &mut ResetStatus,
+    snapshot: impl FnOnce() -> Vec<(i32, String, String)>,
     devices: &[Device],
     now: Instant,
 ) -> ScanOutcome {
@@ -148,24 +179,18 @@ pub fn scan_resets(
     if !behavior.detects() {
         return out;
     }
-    if let Some(ev) = detector.observe(processes, devices).cloned() {
-        *status = Some(ResetStatus::from_event(&ev));
-        if hivemind {
-            // HivemindSweeper never gets a takeover; the reset is a feed event.
-            out.feed_event_for = Some(ev);
-            detector.clear();
-        } else if behavior.animates() {
-            out.takeover_for = Some(ev);
-        } else {
-            detector.clear();
+    let processes = snapshot();
+    let new = status.observe(&processes, devices, now);
+    if hivemind {
+        // HivemindSweeper never gets a takeover; each reset is a feed event.
+        out.feed_events = new;
+    } else if behavior.animates() && !detector.is_active() {
+        if let Some(ev) = new.last() {
+            detector.begin(ev.clone());
+            out.takeover_for = Some(ev.clone());
         }
     }
-    if let Some(st) = status.as_mut() {
-        st.observe_processes(processes, now);
-        if st.is_expired(now) {
-            *status = None;
-        }
-    }
+    out.takeover_reset_finished = detector.is_finished(&processes);
     out
 }
 
@@ -201,6 +226,25 @@ pub fn apply_key_action(takeover: &mut Takeover, code: KeyCode) {
 /// first view is not HivemindSweeper (which never gets a takeover).
 pub fn should_start_boot_demo(behavior: ResetBehavior, hivemind: bool) -> bool {
     behavior.is_demo() && !hivemind
+}
+
+/// The takeover to show at boot, if any. `behavior` must be `demo`,
+/// `hivemind` (true when the first view is HivemindSweeper) must be false,
+/// and `area` (the whole terminal) must be at least the 8x4 that
+/// `render_takeover_frame` draws at. On a smaller terminal the demo would
+/// play unseen and swallow the user's keys for up to 56 s, so it does not
+/// start. `device_count` is the backend's real device count.
+pub fn boot_takeover(
+    behavior: ResetBehavior,
+    hivemind: bool,
+    device_count: usize,
+    area: Rect,
+) -> Option<Takeover> {
+    if should_start_boot_demo(behavior, hivemind) && takeover_fits(area) {
+        Some(Takeover::demo_boot(device_count))
+    } else {
+        None
+    }
 }
 
 /// The takeover for a detected real reset: the demo sequence under `demo`,
@@ -332,67 +376,89 @@ mod tests {
             .collect()
     }
 
+    /// The status text at `now`, or `None` when nothing is drawn.
+    fn seg(st: &ResetStatus, now: Instant) -> Option<String> {
+        st.text(now).map(|s| s.text)
+    }
+
+    const ALL: &str = "⟳ tt-smi -r · all chips · resetting";
+    const ONE: &str = "⟳ tt-smi -r · 1 chip(s) · resetting";
+    const DONE: &str = "✓ tt-smi -r done";
+
+    // ── ResetStatus: the segment text ──────────────────────────────────
+
     #[test]
     fn resetting_text_full_and_subset() {
         let t0 = Instant::now();
-        let full = ResetStatus::from_event(&ev(1, true, 4)).text(t0).unwrap();
-        assert_eq!(full.text, "⟳ tt-smi -r · all chips · resetting");
+        let mut st = ResetStatus::new();
+        st.observe(&procs(&[(1, "tt-smi -r")]), &[], t0);
+        let full = st.text(t0).unwrap();
+        assert_eq!(full.text, ALL);
         assert_eq!(full.short, "⟳ tt-smi -r · resetting");
         assert!(!full.done);
-        let one = ResetStatus::from_event(&ev(1, false, 1)).text(t0).unwrap();
-        assert_eq!(one.text, "⟳ tt-smi -r · 1 chip(s) · resetting");
-        let many = ResetStatus::from_event(&ev(1, false, 3)).text(t0).unwrap();
-        assert_eq!(many.text, "⟳ tt-smi -r · 3 chip(s) · resetting");
+        let mut st = ResetStatus::new();
+        st.observe(&procs(&[(1, "tt-smi -r 2")]), &[], t0);
+        assert_eq!(seg(&st, t0).unwrap(), ONE);
+        let mut st = ResetStatus::new();
+        st.observe(&procs(&[(1, "tt-smi -r 0,1,2")]), &[], t0);
+        assert_eq!(seg(&st, t0).unwrap(), "⟳ tt-smi -r · 3 chip(s) · resetting");
     }
 
     #[test]
-    fn done_text_after_note_finished() {
+    fn nothing_is_drawn_before_any_reset() {
         let t0 = Instant::now();
-        let mut s = ResetStatus::from_event(&ev(1, true, 4));
-        s.note_finished(t0);
-        let seg = s.text(t0).unwrap();
-        assert_eq!(seg.text, "✓ tt-smi -r done");
-        assert_eq!(seg.short, "✓ tt-smi -r done");
-        assert!(seg.done);
+        let mut st = ResetStatus::new();
+        assert!(st.text(t0).is_none());
+        st.observe(&procs(&[(1, "tt-smi -s"), (2, "bash")]), &[], t0);
+        assert!(st.text(t0).is_none());
     }
 
     #[test]
     fn done_is_visible_for_ten_seconds_then_gone() {
         let t0 = Instant::now();
-        let mut s = ResetStatus::from_event(&ev(1, true, 4));
-        s.note_finished(t0);
-        assert!(s.text(t0 + Duration::from_millis(9_900)).is_some());
-        assert!(!s.is_expired(t0 + Duration::from_millis(9_900)));
-        assert!(s.text(t0 + RESET_DONE_VISIBLE).is_none());
-        assert!(s.is_expired(t0 + RESET_DONE_VISIBLE));
+        let mut st = ResetStatus::new();
+        st.observe(&procs(&[(1, "tt-smi -r")]), &[], t0);
+        let t1 = t0 + Duration::from_secs(3);
+        st.observe(&procs(&[]), &[], t1);
+        let done = st.text(t1).unwrap();
+        assert_eq!((done.text.as_str(), done.short.as_str()), (DONE, DONE));
+        assert!(done.done);
+        assert!(st.text(t1 + Duration::from_millis(9_900)).is_some());
+        assert!(st.text(t1 + RESET_DONE_VISIBLE).is_none());
     }
 
     #[test]
     fn resetting_never_expires_on_its_own() {
         let t0 = Instant::now();
-        let s = ResetStatus::from_event(&ev(1, true, 4));
+        let mut st = ResetStatus::new();
+        st.observe(&procs(&[(1, "tt-smi -r")]), &[], t0);
         let later = t0 + Duration::from_secs(3600);
-        assert!(s.text(later).is_some());
-        assert!(!s.is_expired(later));
+        st.observe(&procs(&[(1, "tt-smi -r")]), &[], later);
+        assert_eq!(seg(&st, later).unwrap(), ALL);
     }
 
     #[test]
-    fn note_finished_keeps_the_first_finish_time() {
+    fn later_empty_scans_keep_the_first_finish_time() {
         let t0 = Instant::now();
-        let mut s = ResetStatus::from_event(&ev(1, true, 4));
-        s.note_finished(t0);
-        s.note_finished(t0 + Duration::from_secs(8));
-        assert!(s.text(t0 + Duration::from_secs(10)).is_none());
+        let mut st = ResetStatus::new();
+        st.observe(&procs(&[(1, "tt-smi -r")]), &[], t0);
+        st.observe(&procs(&[]), &[], t0);
+        st.observe(&procs(&[]), &[], t0 + Duration::from_secs(8));
+        assert!(st.text(t0 + Duration::from_secs(10)).is_none());
     }
 
     #[test]
-    fn observe_processes_finishes_only_when_the_pid_is_gone() {
+    fn a_new_reset_during_done_goes_back_to_resetting() {
         let t0 = Instant::now();
-        let mut s = ResetStatus::from_event(&ev(7, true, 4));
-        s.observe_processes(&procs(&[(7, "tt-smi -r")]), t0);
-        assert!(!s.text(t0).unwrap().done, "pid still alive");
-        s.observe_processes(&procs(&[(8, "bash")]), t0);
-        assert!(s.text(t0).unwrap().done, "pid gone");
+        let mut st = ResetStatus::new();
+        st.observe(&procs(&[(1, "tt-smi -r")]), &[], t0);
+        st.observe(&procs(&[]), &[], t0);
+        assert_eq!(seg(&st, t0).unwrap(), DONE);
+        let t1 = t0 + Duration::from_secs(4);
+        st.observe(&procs(&[(2, "tt-smi -r 1")]), &[], t1);
+        assert_eq!(seg(&st, t1).unwrap(), ONE);
+        // The old finish time does not expire the new reset.
+        assert_eq!(seg(&st, t1 + Duration::from_secs(20)).unwrap(), ONE);
     }
 
     // ── scan_resets: gating + lifecycle ────────────────────────────────
@@ -401,64 +467,96 @@ mod tests {
         behavior: ResetBehavior,
         hivemind: bool,
         det: &mut ResetDetector,
-        status: &mut Option<ResetStatus>,
+        status: &mut ResetStatus,
         list: &[(i32, &str)],
         now: Instant,
     ) -> ScanOutcome {
-        scan_resets(behavior, hivemind, det, status, &procs(list), &[], now)
+        scan_resets(behavior, hivemind, det, status, || procs(list), &[], now)
+    }
+
+    fn feed_pids(out: &ScanOutcome) -> Vec<i32> {
+        out.feed_events.iter().map(|e| e.pid).collect()
     }
 
     #[test]
-    fn ignore_never_observes_a_reset() {
+    fn ignore_never_takes_a_process_snapshot() {
+        let called = std::cell::Cell::new(false);
         let mut det = ResetDetector::new();
-        let mut st = None;
-        let out = scan(
+        let mut st = ResetStatus::new();
+        let out = scan_resets(
             ResetBehavior::Ignore,
             false,
             &mut det,
             &mut st,
-            &[(5, "tt-smi -r")],
+            || {
+                called.set(true);
+                procs(&[(5, "tt-smi -r")])
+            },
+            &[],
             Instant::now(),
         );
-        assert!(out.takeover_for.is_none() && out.feed_event_for.is_none());
-        assert!(st.is_none());
-        // The detector was never fed, so it still has nothing to finish.
-        assert!(!det.is_finished(&procs(&[])));
+        assert!(!called.get(), "ignore must not read the process list");
+        assert!(out.takeover_for.is_none() && out.feed_events.is_empty());
+        assert!(st.text(Instant::now()).is_none());
+        assert!(!det.is_active());
+    }
+
+    #[test]
+    fn every_detecting_behavior_takes_the_snapshot() {
+        for b in [
+            ResetBehavior::Inform,
+            ResetBehavior::Dazzle,
+            ResetBehavior::Demo,
+        ] {
+            let called = std::cell::Cell::new(false);
+            let mut det = ResetDetector::new();
+            let mut st = ResetStatus::new();
+            scan_resets(
+                b,
+                false,
+                &mut det,
+                &mut st,
+                || {
+                    called.set(true);
+                    vec![]
+                },
+                &[],
+                Instant::now(),
+            );
+            assert!(called.get(), "{b:?}");
+        }
     }
 
     #[test]
     fn inform_shows_a_segment_without_a_takeover() {
+        let t0 = Instant::now();
         let mut det = ResetDetector::new();
-        let mut st = None;
+        let mut st = ResetStatus::new();
         let out = scan(
             ResetBehavior::Inform,
             false,
             &mut det,
             &mut st,
             &[(5, "tt-smi -r")],
-            Instant::now(),
+            t0,
         );
         assert!(out.takeover_for.is_none());
-        assert!(out.feed_event_for.is_none());
-        assert!(st.is_some());
+        assert!(out.feed_events.is_empty());
+        assert_eq!(seg(&st, t0).unwrap(), ALL);
+        assert!(!det.is_active(), "inform never occupies the detector");
     }
 
     #[test]
     fn dazzle_and_demo_request_a_takeover() {
+        let t0 = Instant::now();
         for b in [ResetBehavior::Dazzle, ResetBehavior::Demo] {
             let mut det = ResetDetector::new();
-            let mut st = None;
-            let out = scan(
-                b,
-                false,
-                &mut det,
-                &mut st,
-                &[(5, "tt-smi -r")],
-                Instant::now(),
-            );
+            let mut st = ResetStatus::new();
+            let out = scan(b, false, &mut det, &mut st, &[(5, "tt-smi -r")], t0);
             assert_eq!(out.takeover_for.as_ref().map(|e| e.pid), Some(5), "{b:?}");
-            assert!(out.feed_event_for.is_none());
-            assert!(st.is_some());
+            assert!(out.feed_events.is_empty());
+            assert_eq!(seg(&st, t0).unwrap(), ALL);
+            assert!(det.is_active());
         }
     }
 
@@ -471,24 +569,24 @@ mod tests {
             ResetBehavior::Demo,
         ] {
             let mut det = ResetDetector::new();
-            let mut st = None;
+            let mut st = ResetStatus::new();
             // Detected: resetting segment, feed event, no takeover.
             let out = scan(b, true, &mut det, &mut st, &[(5, "tt-smi -r")], t0);
             assert!(out.takeover_for.is_none(), "{b:?}");
-            assert_eq!(out.feed_event_for.as_ref().map(|e| e.pid), Some(5));
-            assert!(!st.as_ref().unwrap().text(t0).unwrap().done);
+            assert_eq!(feed_pids(&out), vec![5]);
+            assert_eq!(seg(&st, t0).unwrap(), ALL);
             // Still running one scan later: still resetting, no repeat event.
             let out = scan(b, true, &mut det, &mut st, &[(5, "tt-smi -r")], t0);
-            assert!(out.feed_event_for.is_none(), "same pid is not re-injected");
-            assert!(!st.as_ref().unwrap().text(t0).unwrap().done);
+            assert!(out.feed_events.is_empty(), "same pid is not re-injected");
+            assert_eq!(seg(&st, t0).unwrap(), ALL);
             // Process ends: done.
             let t1 = t0 + Duration::from_secs(4);
             scan(b, true, &mut det, &mut st, &[], t1);
-            assert!(st.as_ref().unwrap().text(t1).unwrap().done);
+            assert_eq!(seg(&st, t1).unwrap(), DONE);
             // Ten seconds later: gone.
             let t2 = t1 + RESET_DONE_VISIBLE;
             scan(b, true, &mut det, &mut st, &[], t2);
-            assert!(st.is_none());
+            assert!(st.text(t2).is_none());
         }
     }
 
@@ -496,55 +594,194 @@ mod tests {
     fn segment_reaches_done_even_if_the_takeover_cleared_the_detector_early() {
         let t0 = Instant::now();
         let mut det = ResetDetector::new();
-        let mut st = None;
-        scan(
-            ResetBehavior::Dazzle,
-            false,
-            &mut det,
-            &mut st,
-            &[(5, "tt-smi -r")],
-            t0,
-        );
+        let mut st = ResetStatus::new();
+        let b = ResetBehavior::Dazzle;
+        scan(b, false, &mut det, &mut st, &[(5, "tt-smi -r")], t0);
         det.clear(); // the user skipped the takeover while tt-smi still runs
-        scan(
-            ResetBehavior::Dazzle,
-            false,
-            &mut det,
-            &mut st,
-            &[(5, "tt-smi -r")],
-            t0,
+        let out = scan(b, false, &mut det, &mut st, &[(5, "tt-smi -r")], t0);
+        assert!(
+            out.takeover_for.is_none(),
+            "a skipped reset is not replayed"
         );
-        assert!(!st.as_ref().unwrap().text(t0).unwrap().done);
-        scan(ResetBehavior::Dazzle, false, &mut det, &mut st, &[], t0);
-        assert!(st.as_ref().unwrap().text(t0).unwrap().done);
+        assert_eq!(seg(&st, t0).unwrap(), ALL);
+        scan(b, false, &mut det, &mut st, &[], t0);
+        assert_eq!(seg(&st, t0).unwrap(), DONE);
     }
 
     #[test]
-    fn detector_is_free_for_the_next_reset_after_inform_and_hivemind() {
+    fn the_takeover_hears_when_its_own_reset_ends() {
+        let t0 = Instant::now();
+        let mut det = ResetDetector::new();
+        let mut st = ResetStatus::new();
+        let b = ResetBehavior::Dazzle;
+        let out = scan(b, false, &mut det, &mut st, &[(5, "tt-smi -r")], t0);
+        assert!(!out.takeover_reset_finished);
+        // A second reset ending does not finish the takeover's reset.
+        let out = scan(
+            b,
+            false,
+            &mut det,
+            &mut st,
+            &[(5, "tt-smi -r"), (6, "tt-smi -r 1")],
+            t0,
+        );
+        assert!(!out.takeover_reset_finished);
+        let out = scan(b, false, &mut det, &mut st, &[(6, "tt-smi -r 1")], t0);
+        assert!(out.takeover_reset_finished);
+    }
+
+    // ── overlapping resets, pid reuse, occupied detector ───────────────
+
+    #[test]
+    fn two_overlapping_resets_give_one_feed_event_each_and_a_stable_status() {
+        let t0 = Instant::now();
+        let mut det = ResetDetector::new();
+        let mut st = ResetStatus::new();
+        let b = ResetBehavior::Inform;
+        // A (all chips) starts, then B (one chip) starts while A runs.
+        let out = scan(b, true, &mut det, &mut st, &[(5, "tt-smi -r")], t0);
+        assert_eq!(feed_pids(&out), vec![5]);
+        let both = [(5, "tt-smi -r"), (6, "tt-smi -r 1")];
+        let out = scan(b, true, &mut det, &mut st, &both, t0);
+        assert_eq!(feed_pids(&out), vec![6]);
+        assert_eq!(seg(&st, t0).unwrap(), ONE, "the newer reset's scope");
+        // Both keep running: no repeat events, and the text does not flip.
+        for i in 1..=5 {
+            let now = t0 + Duration::from_secs(2 * i);
+            let out = scan(b, true, &mut det, &mut st, &both, now);
+            assert!(
+                out.feed_events.is_empty(),
+                "scan {i}: {:?}",
+                feed_pids(&out)
+            );
+            assert_eq!(seg(&st, now).unwrap(), ONE, "scan {i}");
+        }
+        // The same holds outside HivemindSweeper.
+        let mut det2 = ResetDetector::new();
+        let mut st2 = ResetStatus::new();
+        scan(b, false, &mut det2, &mut st2, &[(5, "tt-smi -r")], t0);
+        for _ in 0..4 {
+            scan(b, false, &mut det2, &mut st2, &both, t0);
+            assert_eq!(seg(&st2, t0).unwrap(), ONE);
+        }
+        // B ends: A is still running, so the text is A's.
+        let t1 = t0 + Duration::from_secs(20);
+        scan(b, true, &mut det, &mut st, &[(5, "tt-smi -r")], t1);
+        assert_eq!(seg(&st, t1).unwrap(), ALL);
+        // A ends too: done, then gone.
+        scan(b, true, &mut det, &mut st, &[], t1);
+        assert_eq!(seg(&st, t1).unwrap(), DONE);
+        assert!(st.text(t1 + RESET_DONE_VISIBLE).is_none());
+    }
+
+    #[test]
+    fn two_resets_first_seen_in_the_same_scan_give_two_feed_events() {
+        let t0 = Instant::now();
+        let mut det = ResetDetector::new();
+        let mut st = ResetStatus::new();
+        let both = [(5, "tt-smi -r"), (6, "tt-smi -r 1")];
+        let out = scan(ResetBehavior::Inform, true, &mut det, &mut st, &both, t0);
+        assert_eq!(feed_pids(&out), vec![5, 6]);
+        // Outside HivemindSweeper the takeover is for the newer one.
+        let mut det = ResetDetector::new();
+        let mut st = ResetStatus::new();
+        let out = scan(ResetBehavior::Dazzle, false, &mut det, &mut st, &both, t0);
+        assert_eq!(out.takeover_for.map(|e| e.pid), Some(6));
+        assert_eq!(seg(&st, t0).unwrap(), ONE);
+    }
+
+    #[test]
+    fn a_second_reset_during_an_occupied_detector_appears_in_the_status() {
+        let t0 = Instant::now();
+        for b in [ResetBehavior::Dazzle, ResetBehavior::Demo] {
+            let mut det = ResetDetector::new();
+            let mut st = ResetStatus::new();
+            let out = scan(b, false, &mut det, &mut st, &[(5, "tt-smi -r")], t0);
+            assert!(out.takeover_for.is_some());
+            let out = scan(
+                b,
+                false,
+                &mut det,
+                &mut st,
+                &[(5, "tt-smi -r"), (6, "tt-smi -r 1")],
+                t0,
+            );
+            assert!(out.takeover_for.is_none(), "{b:?}: no second takeover");
+            assert_eq!(seg(&st, t0).unwrap(), ONE, "{b:?}");
+        }
+    }
+
+    #[test]
+    fn a_reset_that_runs_entirely_inside_an_occupied_detector_still_shows_done() {
+        let t0 = Instant::now();
+        let mut det = ResetDetector::new();
+        let mut st = ResetStatus::new();
+        let b = ResetBehavior::Demo;
+        // A starts a 56 s demo and ends after 2 s. The demo keeps running,
+        // so the detector stays occupied.
+        scan(b, false, &mut det, &mut st, &[(5, "tt-smi -r")], t0);
+        let t1 = t0 + Duration::from_secs(2);
+        scan(b, false, &mut det, &mut st, &[], t1);
+        assert_eq!(seg(&st, t1).unwrap(), DONE);
+        // B starts and ends while the demo is still on screen.
+        let t2 = t0 + Duration::from_secs(20);
+        let out = scan(b, false, &mut det, &mut st, &[(9, "tt-smi -r 3")], t2);
+        assert!(out.takeover_for.is_none());
+        assert!(det.is_active());
+        assert_eq!(seg(&st, t2).unwrap(), ONE);
+        let t3 = t2 + Duration::from_secs(2);
+        scan(b, false, &mut det, &mut st, &[], t3);
+        assert_eq!(seg(&st, t3).unwrap(), DONE);
+        assert!(st.text(t3 + Duration::from_millis(9_900)).is_some());
+        assert!(st.text(t3 + RESET_DONE_VISIBLE).is_none());
+    }
+
+    #[test]
+    fn pid_reuse_with_a_different_cmdline_is_a_new_reset() {
+        let t0 = Instant::now();
+        let mut det = ResetDetector::new();
+        let mut st = ResetStatus::new();
+        let b = ResetBehavior::Inform;
+        let out = scan(b, true, &mut det, &mut st, &[(5, "tt-smi -r")], t0);
+        assert_eq!(feed_pids(&out), vec![5]);
+        // Between two scans pid 5 exited and was reused by another reset.
+        let out = scan(b, true, &mut det, &mut st, &[(5, "tt-smi -r 1")], t0);
+        assert_eq!(feed_pids(&out), vec![5], "reported as a new reset");
+        assert_eq!(seg(&st, t0).unwrap(), ONE);
+        // The same pid and cmdline again is the same reset.
+        let out = scan(b, true, &mut det, &mut st, &[(5, "tt-smi -r 1")], t0);
+        assert!(out.feed_events.is_empty());
+        // The reused pid ends: done (the old command is gone as well).
+        scan(b, true, &mut det, &mut st, &[(5, "bash")], t0);
+        assert_eq!(seg(&st, t0).unwrap(), DONE);
+    }
+
+    #[test]
+    fn after_everything_ends_the_next_reset_works() {
         let t0 = Instant::now();
         for hive in [false, true] {
             let mut det = ResetDetector::new();
-            let mut st = None;
+            let mut st = ResetStatus::new();
+            let b = ResetBehavior::Dazzle;
+            scan(b, hive, &mut det, &mut st, &[(5, "tt-smi -r")], t0);
             scan(
-                ResetBehavior::Inform,
+                b,
                 hive,
                 &mut det,
                 &mut st,
-                &[(5, "tt-smi -r")],
+                &[(5, "tt-smi -r"), (6, "tt-smi -r 1")],
                 t0,
             );
-            scan(ResetBehavior::Inform, hive, &mut det, &mut st, &[], t0);
-            let out = scan(
-                ResetBehavior::Dazzle,
-                hive,
-                &mut det,
-                &mut st,
-                &[(9, "tt-smi -r")],
-                t0,
-            );
-            assert_eq!(st.as_ref().unwrap().pid(), 9, "hive={hive}");
-            assert_eq!(out.takeover_for.is_some(), !hive);
-            assert_eq!(out.feed_event_for.is_some(), hive);
+            det.clear(); // the takeover (if any) finished
+            scan(b, hive, &mut det, &mut st, &[], t0);
+            assert_eq!(seg(&st, t0).unwrap(), DONE);
+            // A new reset, even one that reuses pid 5 with the same command,
+            // is detected normally.
+            let t1 = t0 + Duration::from_secs(30);
+            let out = scan(b, hive, &mut det, &mut st, &[(5, "tt-smi -r")], t1);
+            assert_eq!(out.takeover_for.is_some(), !hive, "hive={hive}");
+            assert_eq!(feed_pids(&out), if hive { vec![5] } else { vec![] });
+            assert_eq!(seg(&st, t1).unwrap(), ALL);
         }
     }
 
@@ -601,6 +838,42 @@ mod tests {
         // Width 70: a hint has to go, from the right.
         let f = fit_left_zone(70, 25, Some((30, 20)), &[10, 10, 10], &[8, 8]);
         assert_eq!((f.hotkeys, f.hints), (0, 1));
+    }
+
+    #[test]
+    fn fit_never_exceeds_the_bar_width() {
+        // Left-zone width of a fit, computed the same way the bar draws it.
+        let used = |f: &LeftFit, seg: (usize, usize), hk: &[usize], ht: &[usize]| {
+            let seg_w = match f.segment {
+                SegmentFit::Full => Some(seg.0),
+                SegmentFit::Short => Some(seg.1),
+                SegmentFit::Hidden => None,
+            };
+            let ws: Vec<usize> = seg_w
+                .into_iter()
+                .chain(hk[..f.hotkeys].iter().copied())
+                .chain(ht[..f.hints].iter().copied())
+                .collect();
+            1 + ws.iter().sum::<usize>() + LEFT_SEP_WIDTH * ws.len().saturating_sub(1)
+        };
+        let hk = [12, 9, 14, 11];
+        let ht = [7, 6, 25];
+        for right in [0, 25, 60] {
+            for seg in [Some((34, 22)), None] {
+                for width in 0..=220 {
+                    let f = fit_left_zone(width, right, seg, &hk, &ht);
+                    let empty = f.segment == SegmentFit::Hidden && f.hotkeys == 0 && f.hints == 0;
+                    if empty {
+                        continue; // nothing on the left; only the right zone is drawn
+                    }
+                    let left = used(&f, seg.unwrap_or((0, 0)), &hk, &ht);
+                    assert!(
+                        left + right <= width,
+                        "width {width} right {right} seg {seg:?}: {f:?} uses {left}"
+                    );
+                }
+            }
+        }
     }
 
     // ── demo wiring: keys, boot gating, takeover choice ────────────────
@@ -668,21 +941,71 @@ mod tests {
         assert!(!should_start_boot_demo(ResetBehavior::Demo, true));
     }
 
+    // ── boot_takeover: the arguments the boot site passes ──────────────
+
+    fn screen(w: u16, h: u16) -> Rect {
+        Rect::new(0, 0, w, h)
+    }
+
+    #[test]
+    fn boot_takeover_starts_the_demo_only_for_demo_outside_hivemind() {
+        let big = screen(134, 40);
+        let t = boot_takeover(ResetBehavior::Demo, false, 3, big);
+        assert!(t.as_ref().is_some_and(|t| t.is_demo()));
+        assert!(
+            boot_takeover(ResetBehavior::Demo, true, 3, big).is_none(),
+            "HivemindSweeper never gets a takeover"
+        );
+        for b in [
+            ResetBehavior::Ignore,
+            ResetBehavior::Inform,
+            ResetBehavior::Dazzle,
+        ] {
+            assert!(boot_takeover(b, false, 3, big).is_none(), "{b:?}");
+        }
+    }
+
+    #[test]
+    fn boot_takeover_uses_the_real_device_count() {
+        use crate::animation::takeover::Takeover;
+        for n in [1usize, 2, 4] {
+            match boot_takeover(ResetBehavior::Demo, false, n, screen(134, 40)) {
+                Some(Takeover::Demo(seq)) => {
+                    assert_eq!(seq.event().total_devices, n);
+                    assert_eq!(seq.event().chip_count, n);
+                }
+                _ => panic!("expected a demo for {n} devices"),
+            }
+        }
+    }
+
+    #[test]
+    fn boot_takeover_skips_a_terminal_too_small_to_draw_the_box() {
+        // 8x4 is the smallest size render_takeover_frame draws at.
+        assert!(boot_takeover(ResetBehavior::Demo, false, 2, screen(8, 4)).is_some());
+        for (w, h) in [(7, 4), (8, 3), (7, 3), (0, 0), (200, 2), (5, 60)] {
+            assert!(
+                boot_takeover(ResetBehavior::Demo, false, 2, screen(w, h)).is_none(),
+                "{w}x{h}"
+            );
+        }
+    }
+
     #[test]
     fn demo_in_hivemind_turns_a_real_reset_into_a_feed_event_only() {
         let mut det = ResetDetector::new();
-        let mut st = None;
+        let mut st = ResetStatus::new();
         let out = scan_resets(
             ResetBehavior::Demo,
             true,
             &mut det,
             &mut st,
-            &procs(&[(5, "tt-smi -r")]),
+            || procs(&[(5, "tt-smi -r")]),
             &[],
             Instant::now(),
         );
         assert!(out.takeover_for.is_none());
-        assert!(out.feed_event_for.is_some());
+        assert_eq!(out.feed_events.len(), 1);
     }
 
     #[test]

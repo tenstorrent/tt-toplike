@@ -190,17 +190,26 @@ pub(crate) fn takeover_interior(area: Rect) -> Rect {
     )
 }
 
+/// True when `area` is large enough for [`render_takeover_frame`] to draw
+/// anything: at least 8 columns by 4 rows (the same guard as
+/// `render_overlay_panel`). Below that the frame draws nothing.
+pub(crate) fn takeover_fits(area: Rect) -> bool {
+    area.width >= 8 && area.height >= 4
+}
+
 /// Shared takeover frame. The whole `area` is tinted toward `border_color`
 /// (see [`TintOverlay`]), so the real screen shows through a color wash.
 /// A fixed, centered box ([`takeover_box`]) is then cleared to the
 /// terminal's default background. It gets a left and bottom border (no
 /// right border, per this project's no-right-border-glyph convention) with
 /// `title` on its top row, preceded by `tag - ` when `tag` is not empty (a
-/// demo run passes `DEMO`; every other takeover passes `""`), and `lines` are rendered as a centered paragraph
-/// in the box interior ([`takeover_interior`]) only: lines wider or taller
-/// than the interior are clipped at the box edge. Every variant's `render` calls this,
-/// so every takeover gets the same box. No-ops on a terminal too small to
-/// safely draw into (matches `render_overlay_panel`'s guard).
+/// demo run passes `DEMO`; every other takeover passes `""`). `lines` are
+/// rendered as a centered paragraph in the box interior
+/// ([`takeover_interior`]) only: lines wider or taller than the interior
+/// are clipped at the box edge. Every variant's `render` calls this, so
+/// every takeover gets the same box. No-ops on a terminal too small to
+/// safely draw into ([`takeover_fits`], the same guard as
+/// `render_overlay_panel`).
 pub(crate) fn render_takeover_frame(
     f: &mut Frame,
     area: Rect,
@@ -209,7 +218,7 @@ pub(crate) fn render_takeover_frame(
     border_color: Color,
     lines: Vec<Line<'static>>,
 ) {
-    if area.width < 8 || area.height < 4 {
+    if !takeover_fits(area) {
         return;
     }
     f.render_widget(

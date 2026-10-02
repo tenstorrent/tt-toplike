@@ -226,9 +226,9 @@ impl HostProcessMonitor {
     }
 
     /// Cheap `(pid, name, full cmdline)` snapshot of every process seen in
-    /// the current refresh — no TT-specific filtering. Consumed by
-    /// `crate::workload::reset_detect::ResetDetector` so it doesn't need its
-    /// own `sysinfo` refresh cadence.
+    /// the current refresh — no TT-specific filtering. Consumed by the
+    /// `tt-smi -r` tracker (`ui::tui::reset_status::scan_resets`) so it
+    /// doesn't need its own `sysinfo` refresh cadence.
     ///
     /// `self.sys` is refreshed with `ProcessRefreshKind::everything()`, which
     /// sets sysinfo's `tasks: true` — meaning `self.sys.processes()` yields
@@ -236,10 +236,10 @@ impl HostProcessMonitor {
     /// `p.pid()`. `p.thread_kind()` distinguishes them: `Some(_)` for a
     /// thread, `None` for the process itself. Without filtering, a
     /// multithreaded `tt-smi -r` could appear multiple times with identical
-    /// name/cmdline, and `ResetDetector::observe()` (which takes the first
-    /// match) could latch onto a worker thread's tid instead of the real
-    /// pid — a thread can exit independently of the process, breaking the
-    /// detector's lifecycle tracking. Keep only real processes.
+    /// name/cmdline, and the reset tracker could follow a worker thread's
+    /// tid as if it were a separate reset — a thread can exit independently
+    /// of the process, breaking the tracker's lifecycle. Keep only real
+    /// processes.
     pub fn processes_snapshot(&self) -> Vec<(i32, String, String)> {
         self.sys
             .processes()
@@ -735,9 +735,9 @@ mod tests {
     /// `ProcessRefreshKind::everything()`, which sets sysinfo's `tasks: true`
     /// — `self.sys.processes()` therefore yields one entry per THREAD, not
     /// one per process (each thread under its own tid, `p.thread_kind() ==
-    /// Some(_)`). `processes_snapshot()` must filter those out so
-    /// `ResetDetector` can never latch onto a worker thread's tid instead of
-    /// the real process pid.
+    /// Some(_)`). `processes_snapshot()` must filter those out so the
+    /// `tt-smi -r` tracker follows only real process pids, never a worker
+    /// thread's tid.
     ///
     /// This is checked two ways against a real `sysinfo` refresh on whatever
     /// box CI runs on (deliberately not hardcoding a thread count, since

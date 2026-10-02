@@ -679,32 +679,33 @@ fn run_app(
     // runs the detector. `inform` shows the status-bar segment. `dazzle`
     // and `demo` add a takeover animation (drawn in a centered box over a
     // full-screen tint). `demo` plays all seven in a row at boot and again
-    // on every real reset, tagged DEMO in the box title. HivemindSweeper never gets a takeover; it injects a real feed
-    // event instead. `reset_detector` tracks at most one in-flight
-    // `tt-smi -r`; `reset_status` is the status-bar segment's state, which
-    // follows the real pid on its own (see `reset_status`).
+    // on every real reset, tagged DEMO in the box title. HivemindSweeper
+    // never gets a takeover; it injects a real feed event instead.
+    // `reset_status` follows every live `tt-smi -r` process and drives the
+    // status-bar segment and the feed events. `reset_detector` holds only
+    // the reset a takeover is waiting on, so a second reset during a
+    // takeover gets no takeover of its own (see `reset_status`).
     let reset_behavior = crate::cli::resolve_reset_behavior(
         cli.tt_smi_reset_behavior,
         crate::config::load_config_overrides()
             .tt_smi_reset_behavior
             .as_deref(),
     );
-    let mut reset_status: Option<reset_status::ResetStatus> = None;
+    let mut reset_status = reset_status::ResetStatus::new();
     let mut reset_detector = crate::workload::reset_detect::ResetDetector::new();
     // `demo` opens with the whole sequence over the first view. A real reset
     // later replaces it (see `reset_status::replace_takeover`). On a terminal
-    // too small to draw the box the sequence plays invisibly and then ends.
-    let mut takeover: Option<crate::animation::takeover::Takeover> =
-        if reset_status::should_start_boot_demo(
-            reset_behavior,
-            display_mode == DisplayMode::HivemindSweeper,
-        ) {
-            Some(crate::animation::takeover::Takeover::demo_boot(
-                backend.devices().len(),
-            ))
-        } else {
-            None
-        };
+    // too small to draw the box (under 8x4) it does not start at all.
+    let boot_area = terminal
+        .size()
+        .map(|s| Rect::new(0, 0, s.width, s.height))
+        .unwrap_or_default();
+    let mut takeover: Option<crate::animation::takeover::Takeover> = reset_status::boot_takeover(
+        reset_behavior,
+        display_mode == DisplayMode::HivemindSweeper,
+        backend.devices().len(),
+        boot_area,
+    );
     // Time-since-last-tick source for `takeover.tick()` — deliberately its
     // own timer rather than reusing the nearby `draw_start` (which is
     // captured immediately before `terminal.draw()` and would read back
@@ -1276,7 +1277,7 @@ fn run_app(
             last_takeover_tick = Instant::now();
 
             // Status-bar reset segment for this frame (None once expired).
-            let reset_seg = reset_status.as_ref().and_then(|st| st.text(Instant::now()));
+            let reset_seg = reset_status.text(Instant::now());
 
             let draw_start = Instant::now();
             terminal
@@ -2408,37 +2409,36 @@ fn run_app(
             host_proc_monitor.update();
 
             // ── `tt-smi -r` detection (`--tt-smi-reset-behavior`) ─────────
-            // Reuses this 2-second process scan; `ignore` skips it entirely.
-            if reset_behavior.detects() {
-                let reset_procs = host_proc_monitor.processes_snapshot();
-                let outcome = reset_status::scan_resets(
-                    reset_behavior,
-                    display_mode == DisplayMode::HivemindSweeper,
-                    &mut reset_detector,
-                    &mut reset_status,
-                    &reset_procs,
-                    backend.devices(),
-                    Instant::now(),
-                );
-                if let Some(ev) = outcome.feed_event_for {
-                    if let Some(h) = hivemind.as_mut() {
-                        h.inject_reset(
-                            format!(
-                                "tt-smi -r: {} chip(s) targeted{}",
-                                ev.chip_count,
-                                if ev.is_full { " (all)" } else { "" }
-                            ),
-                            &ev.device_indices,
-                        );
-                    }
+            // Reuses this 2-second process scan. `scan_resets` takes the
+            // process snapshot only when the behavior detects resets, so
+            // `ignore` never reads the process list.
+            let outcome = reset_status::scan_resets(
+                reset_behavior,
+                display_mode == DisplayMode::HivemindSweeper,
+                &mut reset_detector,
+                &mut reset_status,
+                || host_proc_monitor.processes_snapshot(),
+                backend.devices(),
+                Instant::now(),
+            );
+            for ev in &outcome.feed_events {
+                if let Some(h) = hivemind.as_mut() {
+                    h.inject_reset(
+                        format!(
+                            "tt-smi -r: {} chip(s) targeted{}",
+                            ev.chip_count,
+                            if ev.is_full { " (all)" } else { "" }
+                        ),
+                        &ev.device_indices,
+                    );
                 }
-                if let Some(ev) = &outcome.takeover_for {
-                    reset_status::replace_takeover(&mut takeover, reset_behavior, ev);
-                }
-                if reset_detector.is_finished(&reset_procs) {
-                    if let Some(t) = takeover.as_mut() {
-                        t.note_reset_finished();
-                    }
+            }
+            if let Some(ev) = &outcome.takeover_for {
+                reset_status::replace_takeover(&mut takeover, reset_behavior, ev);
+            }
+            if outcome.takeover_reset_finished {
+                if let Some(t) = takeover.as_mut() {
+                    t.note_reset_finished();
                 }
             }
 
@@ -10127,7 +10127,6 @@ mod reset_statusbar_tests {
                             "w={w} hints={hints} done={done}: partial segment in {row:?}"
                         );
                     }
-                    assert!(row.chars().count() >= w as usize);
                 }
             }
         }

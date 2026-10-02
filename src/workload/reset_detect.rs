@@ -141,6 +141,13 @@ fn resolve_target_indices(targets: &[String], devices: &[Device]) -> Vec<u8> {
 /// consequence (a takeover animation, or a HivemindSweeper injection) is
 /// also done, not merely once the process itself exits.
 ///
+/// The TUI no longer scans with `observe()`. It follows every live reset in
+/// `ui::tui::reset_status::ResetStatus` (status segment and HivemindSweeper
+/// feed events) and uses this type only for the takeover: `begin()` records
+/// the reset a takeover is for, `is_finished()` says when that reset ended,
+/// and `clear()` runs when the animation ends. So the "dropped" rule above
+/// now applies to the takeover only.
+///
 /// `clear()` is routinely called well before the real `tt-smi -r` process
 /// actually exits (HivemindSweeper clears right after injecting a feed
 /// event; a skipped takeover clears the instant the user hits a key) — the
@@ -190,6 +197,22 @@ impl ResetDetector {
             }
         }
         None
+    }
+
+    /// Records `ev` as the reset a takeover animation is waiting on. Does
+    /// nothing if one is already tracked. The TUI uses this in place of
+    /// [`observe`](Self::observe): it finds new resets with
+    /// `ui::tui::reset_status::ResetStatus`, which follows every live
+    /// `tt-smi -r`, and hands the detector only the reset a takeover is for.
+    pub fn begin(&mut self, ev: ResetEvent) {
+        if self.active.is_none() {
+            self.active = Some(ev);
+        }
+    }
+
+    /// True while a reset is tracked (between `begin`/`observe` and `clear`).
+    pub fn is_active(&self) -> bool {
+        self.active.is_some()
     }
 
     /// True once the tracked pid is no longer present in `processes`.
@@ -409,6 +432,26 @@ mod tests {
         let det = ResetDetector::new();
         let any = procs(&[(1, "bash", "bash")]);
         assert!(!det.is_finished(&any));
+    }
+
+    #[test]
+    fn begin_tracks_one_reset_until_clear() {
+        let devices = fixture_devices(4);
+        let a = parse_reset_process(500, "tt-smi", "tt-smi -r 0", &devices).unwrap();
+        let b = parse_reset_process(600, "tt-smi", "tt-smi -r 1", &devices).unwrap();
+        let mut det = ResetDetector::new();
+        assert!(!det.is_active());
+        det.begin(a);
+        assert!(det.is_active());
+        // A second begin while one is tracked is ignored: 500 is still the
+        // pid whose exit finishes the takeover.
+        det.begin(b.clone());
+        assert!(!det.is_finished(&procs(&[(500, "tt-smi", "tt-smi -r 0")])));
+        assert!(det.is_finished(&procs(&[(600, "tt-smi", "tt-smi -r 1")])));
+        det.clear();
+        assert!(!det.is_active());
+        det.begin(b);
+        assert!(!det.is_finished(&procs(&[(600, "tt-smi", "tt-smi -r 1")])));
     }
 
     #[test]
