@@ -2281,12 +2281,12 @@ printf '#!/bin/sh\nsleep "${SLEEP:-20}"\nexit 0\n' > tt-smi
 chmod +x tt-smi
 ```
 
-Terminal 1, once per behavior:
+Terminal 1, from the repository, once per behavior. `cargo run` builds the current tree and runs that build. A plain `tt-toplike-tui` would run whatever older copy is in `~/.local/bin`, which shadows the fresh build until Step 2 copies it there.
 
 ```bash
-tt-toplike-tui --mock 2
-tt-toplike-tui --mock 2 --tt-smi-reset-behavior dazzle
-tt-toplike-tui --mock 2 --tt-smi-reset-behavior demo
+cargo run --release --features tui --bin tt-toplike-tui -- --mock 2
+cargo run --release --features tui --bin tt-toplike-tui -- --mock 2 --tt-smi-reset-behavior dazzle
+cargo run --release --features tui --bin tt-toplike-tui -- --mock 2 --tt-smi-reset-behavior demo
 ```
 
 Terminal 2, from `/tmp/fake-tt-smi`, while the TUI runs:
