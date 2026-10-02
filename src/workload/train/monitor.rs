@@ -387,6 +387,13 @@ impl TrainState {
                 end_step,
             } => {
                 self.resume_start = Some(start_step);
+                // The process starts at the start step, so that is the first
+                // position it can claim. Without it the header shows 0% of a
+                // run that is partly done until the first val line arrives
+                // (about 3195 steps later). `max` keeps a step that is
+                // already further along. `holds_run_data` stays correct:
+                // the budget is already stated here, so it was true before.
+                self.step = self.step.max(start_step);
                 self.max_steps = end_step;
                 self.stated_max_steps = end_step;
             }
@@ -766,12 +773,14 @@ impl TrainMonitor {
         if self.saw_reported_step_time {
             return;
         }
-        // Nothing has been parsed yet: `step` is the default 0 and no loss has
-        // been seen (the parser drops a `0/N` bar, which has no loss). Anchoring
-        // on that placeholder would time the first real step from an arbitrary
-        // attach poll, so the 0 -> 1 gap (model load, data load, compile) would
-        // be recorded as step 1's time. The first parsed step only anchors.
-        if self.state.step == 0 && self.state.loss.is_none() {
+        // No step line has been parsed yet: no loss has been seen (the parser
+        // drops a `0/N` bar, which has no loss). `step` may still be non-zero,
+        // because a resume line sets it to the start step. Anchoring on that
+        // placeholder would time the first real step from an arbitrary poll,
+        // so the gap (model load, data load, compile) would be recorded as
+        // step time. The first parsed step only anchors.
+        if self.state.loss.is_none() && (self.state.step == 0 || self.state.resume_start.is_some())
+        {
             return;
         }
         let step = self.state.step;
@@ -2349,6 +2358,7 @@ mod step_and_ms_tests {
         assert_eq!(st.max_steps, 63906);
         assert_eq!(st.stated_max_steps, 63906);
         assert_eq!(st.resume_start, Some(38346));
+        assert_eq!(st.step, 38346, "the run starts at its start step");
         st.apply_event(val(41541));
         assert!(st.step <= st.max_steps);
     }
@@ -2356,30 +2366,64 @@ mod step_and_ms_tests {
     /// A miniature of the user's appended two-run log.
     #[test]
     fn a_second_run_header_resets_the_first_runs_data() {
+        use crate::workload::train::TrainProcess;
         let mut st = TrainState::new();
+        st.proc = Some(TrainProcess {
+            pid: 7,
+            binary: "python".into(),
+            config_path: None,
+        });
         st.log = Some(LogSource::NotRedirected);
         st.first_seen = Some(Instant::now());
+        st.is_mock = true;
         st.host_cpu_pct = Some(80.0);
         st.host_rss_bytes = Some(1 << 30);
         st.device_backed = true;
         st.config.max_sequence_length = Some(512);
         st.apply_event(summary(63906));
+        st.apply_event(resumed(100, 63906));
         for s in [3195u64, 6390, 38340] {
-            st.apply_event(val(s));
+            st.apply_event(TrainEvent::StepAndTime {
+                step: s,
+                loss: 3.0,
+                ms: 285.0,
+                cache_entries: 9,
+            });
         }
+        st.apply_event(bar(5, 3195));
+        st.apply_event(bar(2, 3195));
         st.mark_checkpoint();
         st.scheduler = Some("cosine".into());
-        assert_eq!(st.step, 38340);
+        st.grad_accum = 4;
+        // Every per-run field now holds first-run data.
+        assert!(st.step > 0 && st.step_seq > 0 && st.cache_entries > 0);
+        assert!(st.last_bar_step.is_some() && st.last_bar_total > 0 && st.chunked_bar);
+        assert!(st.step_from_reported_line && st.checkpoint_pulse > 0);
+        assert!(st.step_ms > 0.0 && st.loss.is_some() && st.prev_loss.is_some());
         assert_eq!(st.loss_history.len(), 3);
 
         st.apply_event(summary(25560));
         assert_eq!(st.step, 0);
-        assert!(st.loss_history.is_empty() && st.step_history.is_empty());
         assert_eq!(st.loss, None);
+        assert_eq!(st.prev_loss, None);
+        assert!(st.loss_history.is_empty() && st.step_history.is_empty());
+        assert_eq!(st.step_seq, 0);
+        assert_eq!(st.step_time_source, StepTimeSource::Unknown);
+        assert_eq!(st.step_ms, 0.0);
+        assert_eq!(st.cache_entries, 0);
+        assert_eq!(st.last_bar_step, None);
+        assert_eq!(st.last_bar_total, 0);
+        assert!(!st.chunked_bar && !st.step_from_reported_line);
         assert_eq!(st.checkpoint_step, 0);
+        assert_eq!(st.checkpoint_pulse, 0);
+        assert_eq!(st.resume_start, None);
         assert_eq!(st.scheduler, None);
+        assert_eq!(st.grad_accum, 0);
         assert_eq!(st.max_steps, 25560, "the new header's own budget");
-        assert!(st.log.is_some() && st.first_seen.is_some());
+        assert_eq!(st.stated_max_steps, 25560);
+        // Kept.
+        assert_eq!(st.proc.as_ref().map(|p| p.pid), Some(7));
+        assert!(st.log.is_some() && st.first_seen.is_some() && st.is_mock);
         assert_eq!(st.host_cpu_pct, Some(80.0));
         assert_eq!(st.host_rss_bytes, Some(1 << 30));
         assert!(st.device_backed);
@@ -2390,6 +2434,45 @@ mod step_and_ms_tests {
         assert_eq!(st.max_steps, 63906);
         assert_eq!(st.step, 41541);
         assert_eq!(st.loss_history.len(), 1);
+    }
+
+    /// The resume line puts the process at its start step, so a resumed run
+    /// does not claim 0% until the first val line. A step already further
+    /// along is kept, and no ETA exists until a step time does.
+    #[test]
+    fn the_resume_line_places_the_run_at_its_start_step() {
+        let mut st = TrainState::new();
+        st.apply_event(summary(25560));
+        st.apply_event(resumed(38346, 63906));
+        assert_eq!(st.step, 38346);
+        assert_eq!(st.eta_secs(), None);
+        st.step_ms = 285.0;
+        assert!(st.eta_secs().is_some());
+        st.apply_event(val(41541));
+        st.apply_event(resumed(100, 63906));
+        assert_eq!(st.step, 41541, "never moved backwards");
+        // A header after that is a new run and resets, as before.
+        st.apply_event(summary(10));
+        assert_eq!(st.step, 0);
+    }
+
+    /// The start step is a placeholder with no measurement behind it. The monitor does
+    /// not anchor its cadence on it, so the first val line only anchors and
+    /// the next one gives a rate.
+    #[test]
+    fn a_resume_start_step_is_not_a_cadence_anchor() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        m.state.apply_event(summary(25560));
+        m.state.apply_event(resumed(38346, 63906));
+        m.note_step_progress(t0);
+        assert_eq!(m.last_step_seen, None);
+        m.state.apply_event(val(41541));
+        m.note_step_progress(t0 + Duration::from_secs(800));
+        assert_eq!(m.state.step_ms, 0.0, "one observation is no rate");
+        m.state.apply_event(val(44736));
+        m.note_step_progress(t0 + Duration::from_secs(1600));
+        assert!((m.state.step_ms - 250.4).abs() < 1.0, "{}", m.state.step_ms);
     }
 
     /// The first header of a fresh state resets nothing.

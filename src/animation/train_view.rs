@@ -3544,44 +3544,97 @@ mod tests {
         assert!(!out.contains("% through"), "{out}");
     }
 
+    /// A state with a process and a log but no step data, as at attach.
+    fn attached_state() -> TrainState {
+        use crate::workload::train::{LogSource, TrainProcess};
+        let mut st = TrainState::new();
+        st.proc = Some(TrainProcess {
+            pid: 1,
+            binary: "python".into(),
+            config_path: None,
+        });
+        st.log = Some(LogSource::File("/tmp/x.log".into()));
+        st
+    }
+
+    /// The `x` and `y` of a `step x / y` clause in a header row, if drawn.
+    fn drawn_ratio(row: &str) -> Option<(u64, u64)> {
+        let t = &row[row.find("step ")? + 5..];
+        let (x, y) = t.split_once(" / ")?;
+        let num = |s: &str| -> u64 {
+            s.trim()
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == ',')
+                .filter(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .unwrap()
+        };
+        Some((num(x), num(y)))
+    }
+
     /// Replays the shape of the user's appended two-run log through the parser
-    /// and the state. The header never draws a ratio with x above y.
-    #[test]
-    fn replaying_a_resumed_two_run_log_never_draws_x_over_y_below_x() {
-        use crate::workload::train::{parse_train_line, TrainEvent};
+    /// and the state, from a fresh attach, checking the header after every
+    /// line. `with_resume` includes the resume line a harness may not print.
+    fn replay_two_run_log(with_resume: bool) -> TrainState {
+        use crate::workload::train::parse_train_line;
         let dash = "\u{2014}";
-        let lines = [
+        let mut lines = vec![
             format!("tt-tnt training {dash} steps=63906 batch=64 seq_len=512 arch=blackhole"),
             "  step=   3195 train_loss=3.5 val_loss=3.6 lr=3.0e-4".to_string(),
             "  step=  38340 train_loss=3.1 val_loss=3.2 lr=2.0e-4".to_string(),
             format!("tt-tnt training {dash} steps=25560 batch=64 seq_len=512 arch=blackhole"),
-            "  resumed from a/tt_tnt_step00038346.pkl at step 38346 (created_at=2026-10-02T03:28:05+00:00); running 25560 more steps to step 63906".to_string(),
-            "  step=  41541 train_loss=3.0 val_loss=3.1 lr=2.0e-4".to_string(),
         ];
-        let mut st = live_state();
-        let mut saw_resume = false;
+        if with_resume {
+            lines.push("  resumed from a/tt_tnt_step00038346.pkl at step 38346 (created_at=2026-10-02T03:28:05+00:00); running 25560 more steps to step 63906".to_string());
+        }
+        lines.push("  step=  41541 train_loss=3.0 val_loss=3.1 lr=2.0e-4".to_string());
+        let mut st = attached_state();
         for l in &lines {
-            let ev = parse_train_line(l).expect("every replayed line parses");
-            saw_resume |= matches!(ev, TrainEvent::Resumed { .. });
-            st.apply_event(ev);
+            st.apply_event(parse_train_line(l).expect("every replayed line parses"));
             let row = header_row_of(&st);
-            if let Some(i) = row.find("step ") {
-                let t = &row[i + 5..];
-                if let Some((x, y)) = t.split_once(" / ") {
-                    let num = |s: &str| -> u64 {
-                        s.trim()
-                            .chars()
-                            .take_while(|c| c.is_ascii_digit() || *c == ',')
-                            .filter(char::is_ascii_digit)
-                            .collect::<String>()
-                            .parse()
-                            .unwrap()
-                    };
-                    assert!(num(x) <= num(y), "after {l:?}: {row:?}");
-                }
+            if let Some((x, y)) = drawn_ratio(&row) {
+                assert!(x <= y, "after {l:?}: {row:?}");
             }
         }
-        assert!(saw_resume);
+        st
+    }
+
+    #[test]
+    fn replaying_a_resumed_two_run_log_never_draws_x_over_y_below_x() {
+        let st = replay_two_run_log(true);
         assert_eq!((st.step, st.max_steps), (41541, 63906));
+        // Only the second run's one sample survives the reset.
+        assert_eq!(st.loss_history.len(), 1);
+    }
+
+    /// A harness that does not print the resume line leaves the header's
+    /// relative budget (25560) in place beside absolute steps, so the guard
+    /// is the only protection here.
+    #[test]
+    fn replaying_without_the_resume_line_still_never_draws_x_over_y_below_x() {
+        let st = replay_two_run_log(false);
+        assert_eq!((st.step, st.max_steps), (41541, 25560));
+        assert_eq!(st.loss_history.len(), 1);
+        assert!(!header_row_of(&st).contains(" / "));
+    }
+
+    /// Between the resume line and the first val line the header already
+    /// places the run at its start step.
+    #[test]
+    fn a_resumed_run_shows_its_start_step_before_the_first_val_line() {
+        use crate::workload::train::TrainEvent;
+        let mut st = attached_state();
+        st.apply_event(TrainEvent::HarnessSummary {
+            max_steps: 25560,
+            batch_size: 64,
+            seq_len: 512,
+        });
+        st.apply_event(TrainEvent::Resumed {
+            start_step: 38346,
+            end_step: 63906,
+        });
+        let row = header_row_of(&st);
+        assert!(row.contains("step 38,346 / 63,906  60.0%"), "{row:?}");
     }
 }

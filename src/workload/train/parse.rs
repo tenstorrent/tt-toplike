@@ -108,12 +108,15 @@ fn kv_num(s: &str, key: &str) -> Option<u64> {
 }
 
 /// The unsigned integer at the start of `s`, after any leading spaces.
+/// `None` when the digit run is followed by a thousands separator (`38,346`),
+/// because the digits before the comma are a different number.
 fn digits_after(s: &str) -> Option<u64> {
-    let digits: String = s
-        .trim_start()
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
+    let s = s.trim_start();
+    let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
+    let mut tail = s[digits.len()..].chars();
+    if tail.next() == Some(',') && tail.next().is_some_and(|c| c.is_ascii_digit()) {
+        return None;
+    }
     digits.parse().ok()
 }
 
@@ -241,10 +244,11 @@ pub fn parse_train_line(line: &str) -> Option<TrainEvent> {
         let start = rest
             .find("at step")
             .and_then(|j| digits_after(&rest[j + "at step".len()..]));
-        let end = rest
-            .rfind("to step")
-            .and_then(|j| digits_after(&rest[j + "to step".len()..]))
-            .or_else(|| {
+        // A `to step` that is present but unreadable ends the parse: falling
+        // back to `running M` would hide a garbled number.
+        let end = match rest.rfind("to step") {
+            Some(j) => digits_after(&rest[j + "to step".len()..]),
+            None => {
                 let m = rest.find("running").and_then(|j| {
                     let t = &rest[j + "running".len()..];
                     // Only `running M more steps` counts, so a stray
@@ -257,7 +261,8 @@ pub fn parse_train_line(line: &str) -> Option<TrainEvent> {
                         .then_some(m)
                 })?;
                 start?.checked_add(m)
-            });
+            }
+        };
         return match (start, end) {
             (Some(start_step), Some(end_step)) if end_step >= start_step => {
                 Some(TrainEvent::Resumed {
@@ -759,6 +764,17 @@ mod tests {
             "  resumed from x.pkl at step 100 (created_at=z); running fifty more steps",
             // An end before the start is unreadable.
             "  resumed from x.pkl at step 100 (created_at=z); running 5 more steps to step 50",
+        ] {
+            assert_eq!(parse_train_line(l), None, "{l}");
+        }
+    }
+
+    #[test]
+    fn a_thousands_separator_in_the_resume_line_gives_none() {
+        for l in [
+            "  resumed from x.pkl at step 38,346 (created_at=z); running 25,560 more steps to step 63,906",
+            "  resumed from x.pkl at step 38346 (created_at=z); running 25560 more steps to step 63,906",
+            "  resumed from x.pkl at step 100 (created_at=z); running 2,500 more steps",
         ] {
             assert_eq!(parse_train_line(l), None, "{l}");
         }
