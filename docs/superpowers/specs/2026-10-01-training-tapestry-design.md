@@ -178,6 +178,12 @@ It uses only data every trainer provides, including bar-only trainers. When the
 progress bar restarts per chunk (`TrainState.chunked_bar`), the strip names the
 scheduler without a percentage.
 
+For bar-only and chunk-jump trainers the step time is derived from log
+cadence, and the first step seen after attach is only a baseline. The first
+increase after it measures nothing, so a trainer that prints one line per
+chunk shows no tok/s until its second chunk end after attach. The value then
+spans train, checkpoint and validation time for a chunk.
+
 ### Layer D: removed
 
 v0.13.6 kept the node grid as a dim backdrop with a cursor that made one pass

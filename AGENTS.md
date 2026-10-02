@@ -754,3 +754,34 @@ a history of zero times leaves no blank star rows; its chip rows still draw.
 Notable: a deliberate break that drew a PCIe row with no counters passed the
 first weave test, because it only checked the rows it expected. The test now
 asserts that a row with no signal is absent.
+
+### Step jump timed from the attach baseline (Oct 2, 2026)
+
+Bug: the Training view showed 630,111 tok/s against a true rate near 110k.
+The tt-tnt harness prints no per-step times and its bars reach the log only
+when a chunk ends, so the only step signal is the validation line every 3195
+steps. `note_step_progress` timed the first jump from the attach poll. The
+viewer had attached 166 s into the chunk, so 3195 steps over 166 s gave 52
+ms/step. A per-step trainer had the same flaw on a smaller scale: its first
+step after attach was timed from the attach poll.
+
+Fix: `TrainMonitor.anchor_is_baseline` marks the anchor set by the first step
+seen after attach or a new-run reset. The first increase after a baseline
+re-anchors as an observed change and records no `step_ms` and no observed
+sample. A measurement needs two observed changes. A bar restart (the
+regression arm) anchors as an observed change, because the restart is an
+event with a known time; the old test's intent (timing resumes at once)
+stays. `reset_run_anchors` and the new-run header clear the flag.
+
+Consequences: a per-step trainer loses one step of cadence after attach. A
+chunk-jump trainer gets its first `step_ms` at the second chunk end after
+attach, and that value spans train, checkpoint and validation time, so it is
+an effective throughput a little below pure training speed. Until then
+`step_ms` is 0, `tokens_per_sec()` is `None` and the LIVE panel shows no
+tok/s. That is the true state: nothing has been measured yet.
+
+Tests: `baseline_anchor_tests` in `monitor.rs` (the reported 60711 to 63906
+case, a per-step trainer, bar restart, new run, reported time, and a sweep
+of jump sizes and gaps). Six existing tests that measured from the attach
+baseline gained one more step before their first measurement. Version not
+bumped.

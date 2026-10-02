@@ -663,6 +663,12 @@ pub struct TrainMonitor {
     /// `(step number, when we saw it)` for the last poll that advanced the
     /// step. The gap to the next one is what the derivation measures.
     last_step_seen: Option<(u64, Instant)>,
+    /// True while `last_step_seen` is a BASELINE: the first step seen after
+    /// attach or after a new-run reset. The viewer chose when to look, so the
+    /// step it shows may have started long before. False once the anchor is
+    /// an OBSERVED CHANGE (a poll that saw the step rise or restart). Only an
+    /// observed change can be the start of a measurement.
+    anchor_is_baseline: bool,
     /// `(cumulative CPU ticks, when read)` for the trainer, so CPU percent
     /// is a rate between polls rather than the process's lifetime average —
     /// the latter would understate a run that has only just got busy.
@@ -684,6 +690,7 @@ impl TrainMonitor {
             last_scan: None,
             saw_reported_step_time: false,
             last_step_seen: None,
+            anchor_is_baseline: false,
             last_cpu: None,
         }
     }
@@ -771,6 +778,29 @@ impl TrainMonitor {
     ///   checkpoint work, not a step) and flags `chunked_bar`. Before this, the
     ///   derivation froze until the bar passed its old position.
     /// * `chunked_bar` also tells the view the bar's total is a chunk size.
+    ///
+    /// A measurement needs both ends to be observed step changes. The first
+    /// step seen after attach (or after a new-run reset) is only a baseline:
+    /// the step may have begun at any time before the viewer looked. The
+    /// first increase after a baseline therefore re-anchors at that poll and
+    /// measures nothing, and records no observed sample. This matters most for
+    /// a trainer that prints one step line per chunk (the tt-tnt harness
+    /// prints an absolute validation line every 3195 steps). Attached 166 s
+    /// into a chunk, the first 3195-step jump used to be divided by 166 s,
+    /// which gave 52 ms/step and 630k tokens/s against a true 300 ms/step.
+    /// A jump that began before the anchor must not be timed from the anchor.
+    ///
+    /// Consequences: a trainer that advances one step at a time loses one
+    /// step of cadence after attach. A chunk-jump trainer gets its first
+    /// `step_ms` at the second chunk end after attach, and that value spans
+    /// train, checkpoint and validation time for a chunk, so it is an
+    /// effective throughput slightly below pure training speed. Until then
+    /// `step_ms` is 0 and `tokens_per_sec()` is `None`.
+    ///
+    /// A bar restart is an observed event with a known time, so the
+    /// regression arm anchors as an observed change. The next step is timed
+    /// from the restart poll and includes that chunk's first-step warm-up,
+    /// which this code has always accepted.
     fn note_step_progress(&mut self, now: Instant) {
         if self.saw_reported_step_time {
             return;
@@ -790,6 +820,13 @@ impl TrainMonitor {
             Some((prev_step, _)) if step < prev_step => {
                 self.state.chunked_bar = true;
                 self.last_step_seen = Some((step, now));
+                self.anchor_is_baseline = false;
+                return;
+            }
+            Some((prev_step, _)) if step > prev_step && self.anchor_is_baseline => {
+                // First increase after the baseline: re-anchor, measure nothing.
+                self.last_step_seen = Some((step, now));
+                self.anchor_is_baseline = false;
                 return;
             }
             Some((prev_step, prev_at)) if step > prev_step => {
@@ -817,8 +854,13 @@ impl TrainMonitor {
             }
             _ => {}
         }
-        if self.last_step_seen.map(|(s, _)| step > s).unwrap_or(true) {
+        if self.last_step_seen.is_none() {
+            // The first step seen is a baseline and starts no measurement.
             self.last_step_seen = Some((step, now));
+            self.anchor_is_baseline = true;
+        } else if self.last_step_seen.map(|(s, _)| step > s).unwrap_or(false) {
+            self.last_step_seen = Some((step, now));
+            self.anchor_is_baseline = false;
         }
     }
 
@@ -1067,6 +1109,7 @@ impl TrainMonitor {
     /// call this so they cannot drift apart.
     fn reset_run_anchors(&mut self) {
         self.last_step_seen = None;
+        self.anchor_is_baseline = false;
         self.saw_reported_step_time = false;
         self.last_cpu = None;
     }
@@ -1163,6 +1206,7 @@ impl TrainMonitor {
                     TrainEvent::HarnessSummary { .. } => {
                         if self.state.holds_run_data() {
                             self.last_step_seen = None;
+                            self.anchor_is_baseline = false;
                             self.saw_reported_step_time = false;
                         }
                         self.state.apply_event(ev);
@@ -1508,9 +1552,15 @@ mod tests {
         m.note_step_progress(t0);
         assert_eq!(m.state.step_ms, 0.0, "one observation cannot be a rate");
 
+        // The first increase only re-anchors (the baseline is not a step
+        // boundary), so it measures nothing.
+        m.state.step = 11;
+        m.note_step_progress(t0 + Duration::from_millis(100));
+        assert_eq!(m.state.step_ms, 0.0, "the first increase is not measured");
+
         // 400 ms later, 2 steps on: 200 ms per step.
-        m.state.step = 12;
-        m.note_step_progress(t0 + Duration::from_millis(400));
+        m.state.step = 13;
+        m.note_step_progress(t0 + Duration::from_millis(500));
         assert!(
             (m.state.step_ms - 200.0).abs() < 1.0,
             "expected ~200ms/step from a 400ms gap over 2 steps, got {}",
@@ -1961,11 +2011,14 @@ mod observed_step_tests {
         let mut m = TrainMonitor::new();
         let t0 = Instant::now();
         bar_state_at(&mut m, 10, t0);
-        bar_state_at(&mut m, 11, t0 + Duration::from_millis(300));
+        // The first increase after attach only re-anchors.
+        bar_state_at(&mut m, 11, t0 + Duration::from_millis(100));
+        assert!(m.state.step_history.is_empty());
+        bar_state_at(&mut m, 12, t0 + Duration::from_millis(400));
         assert_eq!(m.state.step_history.len(), 1);
         let s = m.state.step_history[0];
         assert!((s.ms - 300.0).abs() < 1.0, "{}", s.ms);
-        assert_eq!(s.step, 11);
+        assert_eq!(s.step, 12);
         assert_eq!(s.seq, 1);
         assert_eq!(s.cache_delta, 0, "unknown growth is not a compile");
         assert_eq!(m.state.step_time_source, StepTimeSource::Observed);
@@ -1978,7 +2031,8 @@ mod observed_step_tests {
         let mut m = TrainMonitor::new();
         let t0 = Instant::now();
         bar_state_at(&mut m, 10, t0);
-        bar_state_at(&mut m, 13, t0 + Duration::from_millis(900));
+        bar_state_at(&mut m, 11, t0 + Duration::from_millis(100));
+        bar_state_at(&mut m, 14, t0 + Duration::from_millis(1000));
         assert!(m.state.step_history.is_empty());
         assert!((m.state.step_ms - 300.0).abs() < 1.0, "{}", m.state.step_ms);
     }
@@ -1989,11 +2043,12 @@ mod observed_step_tests {
     fn a_bar_restart_records_no_sample_flags_the_bar_and_resumes_timing() {
         let mut m = TrainMonitor::new();
         let t0 = Instant::now();
-        bar_state_at(&mut m, 3194, t0);
-        bar_state_at(&mut m, 3195, t0 + Duration::from_millis(300));
+        bar_state_at(&mut m, 3193, t0);
+        bar_state_at(&mut m, 3194, t0 + Duration::from_millis(300));
+        bar_state_at(&mut m, 3195, t0 + Duration::from_millis(600));
         assert_eq!(m.state.step_history.len(), 1);
         // Validation and a checkpoint take 40 s, then the bar restarts at 1.
-        bar_state_at(&mut m, 1, t0 + Duration::from_millis(40_300));
+        bar_state_at(&mut m, 1, t0 + Duration::from_millis(40_600));
         assert_eq!(
             m.state.step_history.len(),
             1,
@@ -2002,7 +2057,7 @@ mod observed_step_tests {
         assert!(m.state.chunked_bar);
         // Timing resumes straight away, far below the old step number.
         let before = m.state.step_ms;
-        bar_state_at(&mut m, 2, t0 + Duration::from_millis(40_550));
+        bar_state_at(&mut m, 2, t0 + Duration::from_millis(40_850));
         assert_eq!(m.state.step_history.len(), 2);
         assert!((m.state.step_history[1].ms - 250.0).abs() < 1.0);
         assert_ne!(
@@ -2030,7 +2085,8 @@ mod observed_step_tests {
         let mut m = TrainMonitor::new();
         let t0 = Instant::now();
         bar_state_at(&mut m, 10, t0);
-        bar_state_at(&mut m, 11, t0 + Duration::from_secs(300));
+        bar_state_at(&mut m, 11, t0 + Duration::from_millis(100));
+        bar_state_at(&mut m, 12, t0 + Duration::from_secs(300));
         assert!(m.state.step_history.is_empty());
     }
 
@@ -2097,9 +2153,10 @@ mod run_anchor_tests {
         m.reset_run_anchors();
         parsed_step_at(&mut m, 1, t0 + Duration::from_secs(1));
         parsed_step_at(&mut m, 2, t0 + Duration::from_millis(1300));
+        parsed_step_at(&mut m, 3, t0 + Duration::from_millis(1600));
         assert!(!m.state.chunked_bar, "a new run is not a bar restart");
         assert_eq!(m.state.step_history.len(), 1, "a bar run is timed again");
-        assert_eq!(m.state.step_history[0].step, 2);
+        assert_eq!(m.state.step_history[0].step, 3);
     }
 
     /// Attaching during model load: the first polls see the default step 0
@@ -2114,8 +2171,13 @@ mod run_anchor_tests {
         assert!(m.state.step_history.is_empty(), "load time is not step 1");
         assert_eq!(m.state.step_ms, 0.0);
         parsed_step_at(&mut m, 2, t0 + Duration::from_millis(60_400));
+        assert!(
+            m.state.step_history.is_empty(),
+            "first increase only anchors"
+        );
+        parsed_step_at(&mut m, 3, t0 + Duration::from_millis(60_800));
         assert_eq!(m.state.step_history.len(), 1);
-        assert_eq!(m.state.step_history[0].step, 2);
+        assert_eq!(m.state.step_history[0].step, 3);
         assert!((m.state.step_history[0].ms - 400.0).abs() < 1.0);
     }
 }
@@ -2459,8 +2521,8 @@ mod step_and_ms_tests {
     }
 
     /// The start step is a placeholder with no measurement behind it. The monitor does
-    /// not anchor its cadence on it, so the first val line only anchors and
-    /// the next one gives a rate.
+    /// not anchor its cadence on it, so the first val line only anchors,
+    /// the second re-anchors and the third gives a rate.
     #[test]
     fn a_resume_start_step_is_not_a_cadence_anchor() {
         let mut m = TrainMonitor::new();
@@ -2474,6 +2536,9 @@ mod step_and_ms_tests {
         assert_eq!(m.state.step_ms, 0.0, "one observation is no rate");
         m.state.apply_event(val(44736));
         m.note_step_progress(t0 + Duration::from_secs(1600));
+        assert_eq!(m.state.step_ms, 0.0, "the first jump only re-anchors");
+        m.state.apply_event(val(47931));
+        m.note_step_progress(t0 + Duration::from_secs(2400));
         assert!((m.state.step_ms - 250.4).abs() < 1.0, "{}", m.state.step_ms);
     }
 
@@ -2488,5 +2553,174 @@ mod step_and_ms_tests {
         assert_eq!(st.scheduler.as_deref(), Some("cosine"));
         assert_eq!(st.grad_accum, 4);
         assert_eq!(st.max_steps, 100);
+    }
+}
+
+/// The attach baseline is not a step boundary, so no measurement starts from
+/// it. These tests drive `note_step_progress` with injected `Instant`s.
+#[cfg(test)]
+mod baseline_anchor_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Apply a parsed log line to the state, as `poll` does for a plain event.
+    fn feed(m: &mut TrainMonitor, line: &str) {
+        let ev = parse_train_line(line).unwrap_or_else(|| panic!("line did not parse: {line}"));
+        m.state.apply_event(ev);
+    }
+
+    /// A tt-tnt monitor: batch 64, sequence 512, no step time in the log.
+    fn tnt_monitor() -> TrainMonitor {
+        let mut m = TrainMonitor::new();
+        m.state.apply_event(TrainEvent::HarnessSummary {
+            max_steps: 63906,
+            batch_size: 64,
+            seq_len: 512,
+        });
+        m
+    }
+
+    fn val_line(step: u64) -> String {
+        format!("  step={step:>7} train_loss=2.5000 val_loss=3.1000")
+    }
+
+    fn at_step(m: &mut TrainMonitor, step: u64, now: Instant) {
+        m.state.step = step;
+        m.state.loss = Some(2.0);
+        m.note_step_progress(now);
+    }
+
+    /// The reported run: attached at step 60711, the chunk ended 166 s later
+    /// and the old code divided 3195 steps by 166 s.
+    #[test]
+    fn the_first_validation_jump_after_attach_is_never_timed() {
+        let mut m = tnt_monitor();
+        let t0 = Instant::now();
+        m.state.step = 60711;
+        m.state.loss = Some(2.0);
+        m.note_step_progress(t0);
+        assert_eq!(m.state.step_ms, 0.0);
+
+        feed(&mut m, &val_line(63906));
+        assert_eq!(m.state.step, 63906);
+        m.note_step_progress(t0 + Duration::from_secs(166));
+        assert_eq!(m.state.step_ms, 0.0, "the jump began before the attach");
+        assert_eq!(m.state.tokens_per_sec(), None);
+
+        // The next chunk end is measured chunk to chunk: 780 s / 3195.
+        feed(&mut m, &val_line(67101));
+        m.note_step_progress(t0 + Duration::from_secs(166 + 780));
+        assert!((m.state.step_ms - 244.1).abs() < 0.5, "{}", m.state.step_ms);
+        let tps = m.state.tokens_per_sec().expect("a rate now exists");
+        assert!((tps - 134_000.0).abs() < 1_500.0, "{tps}");
+    }
+
+    /// A per-step trainer loses one step of cadence after attach, and then
+    /// every step is timed from the previous one.
+    #[test]
+    fn a_per_step_trainer_is_timed_from_the_second_increase() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        at_step(&mut m, 1, t0);
+        at_step(&mut m, 2, t0 + Duration::from_millis(300));
+        assert!(m.state.step_history.is_empty(), "no sample yet");
+        assert_eq!(m.state.step_ms, 0.0);
+        at_step(&mut m, 3, t0 + Duration::from_millis(600));
+        at_step(&mut m, 4, t0 + Duration::from_millis(900));
+        assert_eq!(m.state.step_history.len(), 2);
+        for s in &m.state.step_history {
+            assert!((s.ms - 300.0).abs() < 1.0, "{}", s.ms);
+        }
+        assert!((m.state.step_ms - 300.0).abs() < 1.0);
+    }
+
+    /// A bar restart is an observed event with a known time, so the restart
+    /// poll is a valid start for the next measurement and timing resumes at
+    /// once (the restart gap itself records nothing).
+    #[test]
+    fn a_bar_restart_anchors_as_an_observed_change() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        at_step(&mut m, 100, t0);
+        at_step(&mut m, 101, t0 + Duration::from_millis(300));
+        assert!(!m.anchor_is_baseline);
+        at_step(&mut m, 1, t0 + Duration::from_secs(40));
+        assert!(m.state.chunked_bar);
+        assert!(!m.anchor_is_baseline, "the restart is an observed event");
+        assert!(
+            m.state.step_history.is_empty(),
+            "the restart gap is no step"
+        );
+        at_step(&mut m, 2, t0 + Duration::from_millis(40_300));
+        assert_eq!(m.state.step_history.len(), 1);
+        assert!((m.state.step_history[0].ms - 300.0).abs() < 1.0);
+    }
+
+    /// A new run resets the baseline flag, so its first increase only anchors.
+    #[test]
+    fn a_new_run_makes_the_next_increase_only_anchor() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        at_step(&mut m, 10, t0);
+        at_step(&mut m, 11, t0 + Duration::from_millis(300));
+        assert!(!m.anchor_is_baseline);
+        m.state = TrainState::new();
+        m.reset_run_anchors();
+        assert_eq!(m.last_step_seen, None);
+        at_step(&mut m, 1, t0 + Duration::from_secs(5));
+        assert!(
+            m.anchor_is_baseline,
+            "the first step of a run is a baseline"
+        );
+        at_step(&mut m, 2, t0 + Duration::from_millis(5300));
+        assert_eq!(m.state.step_ms, 0.0);
+        assert!(m.state.step_history.is_empty());
+        assert!(!m.anchor_is_baseline);
+        at_step(&mut m, 3, t0 + Duration::from_millis(5600));
+        assert_eq!(m.state.step_history.len(), 1);
+    }
+
+    /// A trainer that reports its own time never reaches the derivation.
+    #[test]
+    fn a_reported_step_time_ignores_the_baseline_rule() {
+        let mut m = TrainMonitor::new();
+        m.saw_reported_step_time = true;
+        m.state.step_ms = 1124.5;
+        let t0 = Instant::now();
+        for i in 1..=4u64 {
+            at_step(&mut m, i, t0 + Duration::from_millis(300 * i));
+        }
+        assert_eq!(m.state.step_ms, 1124.5);
+        assert!(m.state.step_history.is_empty());
+        assert_eq!(m.last_step_seen, None, "the derivation never ran");
+    }
+
+    /// For every jump size and attach gap, the first increase measures
+    /// nothing and the second equals its own gap divided by its own jump.
+    #[test]
+    fn the_first_increase_never_inflates_the_rate_for_any_jump_or_gap() {
+        for &jump in &[1u64, 10, 3195] {
+            for &gap1 in &[1u64, 5, 30, 166, 400, 1000] {
+                let mut m = TrainMonitor::new();
+                let t0 = Instant::now();
+                at_step(&mut m, 1000, t0);
+                at_step(&mut m, 1000 + jump, t0 + Duration::from_secs(gap1));
+                assert_eq!(m.state.step_ms, 0.0, "jump {jump} gap {gap1}");
+                assert!(m.state.step_history.is_empty(), "jump {jump} gap {gap1}");
+                // A second gap long enough for a plausible per-step time.
+                let gap2_ms = jump * 250;
+                at_step(
+                    &mut m,
+                    1000 + 2 * jump,
+                    t0 + Duration::from_secs(gap1) + Duration::from_millis(gap2_ms),
+                );
+                let want = gap2_ms as f32 / jump as f32;
+                assert!(
+                    (m.state.step_ms - want).abs() < 0.5,
+                    "jump {jump} gap {gap1}: {} vs {want}",
+                    m.state.step_ms
+                );
+            }
+        }
     }
 }
