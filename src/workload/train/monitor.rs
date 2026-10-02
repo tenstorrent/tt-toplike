@@ -120,6 +120,28 @@ pub struct TrainState {
     /// The absolute step this process started from, `Some` once a resume line
     /// has been read. `None` for a run that began at step 0 or never said.
     pub resume_start: Option<u64>,
+    /// The run's absolute step at the start of the current bar chunk. `None`
+    /// when the log has given no absolute position.
+    ///
+    /// A bar that counts the current chunk (tt-tnt's restarts at 1 every
+    /// chunk) shows only the chunk-local step, so the run's step is
+    /// `abs_base + local`. Set to 0 by a run header (a fresh run starts at
+    /// step 0), to the start step by a resume line, and to the printed step
+    /// by any absolute step line (a `step=` validation line or a `Step:`
+    /// line), which is authoritative. A bar restart with no absolute line
+    /// before it adds the finished chunk's length. With no base the bar's
+    /// step is used as it is, as it always was.
+    pub abs_base: Option<u64>,
+    /// An absolute line set `abs_base` after the last bar frame, so the next
+    /// bar restart starts on top of it and adds nothing.
+    base_from_line: bool,
+    /// The bar's step jumped a chunk boundary (an absolute line arrived while
+    /// a bar is the step source, or the bar restarted on a base). The gap
+    /// since the previous frame spans checkpoint, validation and the next
+    /// chunk's warm-up, so the monitor re-baselines its cadence anchor on its
+    /// next check and times nothing across it. Consumed by
+    /// `TrainMonitor::note_step_progress`.
+    cadence_rebase: bool,
     /// The total shown by the last progress-bar update, 0 before the first.
     pub last_bar_total: u64,
     /// A line that carries both a step and a step time (`StepAndMs`,
@@ -272,22 +294,51 @@ impl TrainState {
         self.checkpoint_step = 0;
         self.checkpoint_pulse = 0;
         self.resume_start = None;
+        self.abs_base = None;
+        self.base_from_line = false;
+        self.cadence_rebase = false;
         self.scheduler = None;
         self.grad_accum = 0;
     }
 
+    /// Set the step and fold the loss into the history. Shared by every event
+    /// that carries a step; touches neither `abs_base` nor the bar tracking.
+    fn apply_step_and_loss(&mut self, step: u64, loss: f32) {
+        if self.loss.is_some() {
+            self.prev_loss = self.loss;
+        }
+        self.step = step;
+        self.loss = Some(loss);
+        self.loss_history.push(loss);
+        if self.loss_history.len() > LOSS_HISTORY {
+            self.loss_history.remove(0);
+        }
+    }
+
+    /// An absolute step printed by the trainer itself (a `step=` validation
+    /// line, or a `Step:` line with or without a time). It is the run's real
+    /// position, so it becomes the base the next bar chunk counts from. When
+    /// a bar is the step source this line marks a chunk boundary, and the
+    /// monitor re-baselines its cadence so the boundary gap is never timed.
+    /// A trainer with no bar keeps its cadence: a per-step `Step:` trainer
+    /// would otherwise never be timed, and a validation-only log would lose
+    /// its chunk-to-chunk rate.
+    fn note_absolute_step(&mut self, step: u64) {
+        self.abs_base = Some(step);
+        self.base_from_line = true;
+        if self.last_bar_step.is_some() {
+            self.cadence_rebase = true;
+        }
+    }
+
     pub fn apply_event(&mut self, ev: TrainEvent) {
         match ev {
+            // Only the parser produces this event (the bar arm below calls
+            // `apply_step_and_loss` directly), so its step is always one the
+            // trainer printed as absolute.
             TrainEvent::Step { step, loss } => {
-                if self.loss.is_some() {
-                    self.prev_loss = self.loss;
-                }
-                self.step = step;
-                self.loss = Some(loss);
-                self.loss_history.push(loss);
-                if self.loss_history.len() > LOSS_HISTORY {
-                    self.loss_history.remove(0);
-                }
+                self.note_absolute_step(step);
+                self.apply_step_and_loss(step, loss);
             }
             TrainEvent::StepTime { ms, cache_entries } => {
                 self.note_reported_time(ms, Some(cache_entries));
@@ -349,14 +400,34 @@ impl TrainState {
             //   `step_is_chunk_local`) and a budget was stated, in which case
             //   the stated budget is kept. The view and `eta_secs` show no
             //   budget for a chunk-local step either way.
+            // * With a base (`abs_base`), the bar's step is chunk-local and
+            //   the run's step is `base + local`, so it is global and never
+            //   goes backwards at a restart. The stated budget (the header's
+            //   `steps=` for a fresh run, the resume line's end for a resumed
+            //   one) is kept; the bar's total is a chunk size. With no stated
+            //   budget the bar's total is used only while the bar has not
+            //   restarted and the total covers the step, as for reported
+            //   steps above.
             TrainEvent::BarProgress {
                 step,
                 max_steps,
                 loss,
             } => {
-                if self.last_bar_step.is_some_and(|prev| step < prev) {
+                let restarted = self.last_bar_step.is_some_and(|prev| step < prev);
+                if restarted {
                     self.chunked_bar = true;
+                    // A restart with no absolute line since the last frame
+                    // (a checkpoint-only boundary prints none): the finished
+                    // chunk's length moves the base on, so the step stays
+                    // global. The boundary gap is not a step either.
+                    if !self.base_from_line {
+                        if let (Some(base), Some(prev)) = (self.abs_base, self.last_bar_step) {
+                            self.abs_base = Some(base + prev);
+                            self.cadence_rebase = true;
+                        }
+                    }
                 }
+                self.base_from_line = false;
                 self.last_bar_step = Some(step);
                 self.last_bar_total = max_steps;
                 if self.step_from_reported_line {
@@ -367,13 +438,23 @@ impl TrainState {
                     } else {
                         0
                     };
+                } else if let Some(base) = self.abs_base {
+                    let global = base + step;
+                    self.max_steps = if self.stated_max_steps > 0 {
+                        self.stated_max_steps
+                    } else if !self.chunked_bar && max_steps >= global {
+                        max_steps
+                    } else {
+                        0
+                    };
+                    self.apply_step_and_loss(global, loss);
                 } else {
                     self.max_steps = if self.stated_max_steps > 0 && self.step_is_chunk_local() {
                         self.stated_max_steps
                     } else {
                         max_steps
                     };
-                    self.apply_event(TrainEvent::Step { step, loss });
+                    self.apply_step_and_loss(step, loss);
                 }
             }
             TrainEvent::HarnessSummary {
@@ -383,6 +464,11 @@ impl TrainState {
             } => {
                 if self.holds_run_data() {
                     self.begin_new_run();
+                }
+                // A fresh run starts at step 0. A resume line, which follows
+                // the header, replaces this with its start step.
+                if self.abs_base.is_none() {
+                    self.abs_base = Some(0);
                 }
                 self.apply_event(TrainEvent::MaxSteps(max_steps));
                 self.apply_event(TrainEvent::BatchSize(batch_size));
@@ -395,6 +481,11 @@ impl TrainState {
                 end_step,
             } => {
                 self.resume_start = Some(start_step);
+                // The bar of a resumed process counts from its start step. A
+                // bar frame left from before this line must not be read as a
+                // restart that adds a chunk on top of it.
+                self.abs_base = Some(start_step);
+                self.base_from_line = true;
                 // The process starts at the start step, so that is the first
                 // position it can claim. Without it the header shows 0% of a
                 // run that is partly done until the first val line arrives
@@ -452,8 +543,12 @@ impl TrainState {
     ///
     /// A resumed run whose bar counts only the remaining steps also has a
     /// bar total below the budget, and is shown without the budget too.
+    ///
+    /// Never true once `abs_base` is known: the bar's step is then rebuilt
+    /// as `base + local`, which is the run's global step.
     pub fn step_is_chunk_local(&self) -> bool {
-        !self.step_from_reported_line
+        self.abs_base.is_none()
+            && !self.step_from_reported_line
             && (self.chunked_bar
                 || (self.stated_max_steps > 0
                     && self.last_bar_total > 0
@@ -820,7 +915,17 @@ impl TrainMonitor {
     /// A bar restart is an observed event with a known time, so the
     /// regression arm anchors as an observed change. The next step is timed
     /// from the restart poll and includes that chunk's first-step warm-up,
-    /// which this code has always accepted.
+    /// which this code has always accepted. This applies to a bar with no
+    /// base (`TrainState::abs_base`), whose step really goes down.
+    ///
+    /// A bar rebuilt on a base never goes down: the next chunk's first frame
+    /// is `base + 1`, one more than the last. Without a guard that +1 would
+    /// be timed across checkpoint save, validation and the first step's
+    /// warm-up, which is one huge step: a spike in `step_ms`, a giant star
+    /// and a poisoned average. So a chunk boundary in such a run (an absolute
+    /// step line beside a bar, or a restart that moved the base) re-baselines
+    /// the anchor as a pause does. The step after the boundary only
+    /// re-anchors, and timing resumes from the step after that.
     fn note_step_progress(&mut self, now: Instant) {
         if self.saw_reported_step_time {
             return;
@@ -840,7 +945,13 @@ impl TrainMonitor {
             .last_note_at
             .is_some_and(|t| now.saturating_duration_since(t) > POLL_GAP_REBASE);
         self.last_note_at = Some(now);
-        if paused {
+        // A chunk boundary in a bar run (see `TrainState::cadence_rebase`)
+        // re-baselines exactly as a pause does. The step is global there, so
+        // the regression arm below no longer sees the boundary, and the first
+        // step after it would be timed across checkpoint, validation and
+        // warm-up (about a minute on a live tt-tnt run).
+        let boundary = std::mem::take(&mut self.state.cadence_rebase);
+        if paused || boundary {
             if let Some((prev_step, _)) = self.last_step_seen {
                 if step < prev_step {
                     self.state.chunked_bar = true;
@@ -1191,65 +1302,7 @@ impl TrainMonitor {
         // Drain newly-appended log lines.
         if let Some(t) = self.tailer.as_mut() {
             let lines = t.read_new();
-            let pid = self.state.proc.as_ref().map(|p| p.pid);
-            for line in lines {
-                let Some(ev) = parse_train_line(&line) else {
-                    continue;
-                };
-                match ev {
-                    // The trainer stated its own step time, so stop deriving
-                    // one from log cadence.
-                    ref e if is_reported_step_time(e) => {
-                        self.saw_reported_step_time = true;
-                        self.state.apply_event(ev);
-                    }
-                    // A topology YAML named in the log: locate it near the
-                    // run and merge it, the same as a `--config`-supplied
-                    // one. Any `SeqLen` later in the log still wins, since
-                    // the harness prints its summary after this line.
-                    TrainEvent::ModelConfigFile(ref name) => {
-                        if let Some(pid) = pid {
-                            if let Some(path) = Self::find_named_config(pid, name) {
-                                if let Ok(text) = std::fs::read_to_string(&path) {
-                                    // The YAML states the topology's *declared*
-                                    // maximum sequence length; a run may narrow
-                                    // it (tt-tnt runs 512 against a declared
-                                    // 2048). Taking the YAML's number would
-                                    // overstate tokens/sec fourfold, so a
-                                    // length the run already told us survives
-                                    // the merge. In practice the log names the
-                                    // YAML before stating its length, so this
-                                    // guards the other ordering — but tokens
-                                    // /sec being wrong by a factor of four is
-                                    // not something to leave resting on the
-                                    // order two lines happen to be printed in.
-                                    let run_seq = self.state.config.max_sequence_length;
-                                    merge_model_yaml(&mut self.state.config, &text);
-                                    if run_seq.is_some() {
-                                        self.state.config.max_sequence_length = run_seq;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // A run header after an earlier run in the same log starts
-                    // a new run (the state resets itself on it). The monitor's
-                    // step anchor and reported-time flag belong to the old run
-                    // too: a second run may be a bar-only trainer after a
-                    // reported one. `last_cpu` stays, because it differences
-                    // ticks of the attached process, which has not changed.
-                    TrainEvent::HarnessSummary { .. } => {
-                        if self.state.holds_run_data() {
-                            self.last_step_seen = None;
-                            self.anchor_is_baseline = false;
-                            self.last_note_at = None;
-                            self.saw_reported_step_time = false;
-                        }
-                        self.state.apply_event(ev);
-                    }
-                    _ => self.state.apply_event(ev),
-                }
-            }
+            self.ingest_lines(lines);
         }
         // Measure the step cadence after the batch, so a poll that read many
         // lines counts as one observation rather than many.
@@ -1269,6 +1322,71 @@ impl TrainMonitor {
         if let Some(w) = self.ckpt.as_mut() {
             if w.poll() {
                 self.state.mark_checkpoint();
+            }
+        }
+    }
+
+    /// Parse one poll's batch of log lines and fold them into the state.
+    /// Split out of `poll` so tests can replay a log through exactly the
+    /// path a live poll takes, with injected times for the cadence check.
+    fn ingest_lines(&mut self, lines: Vec<String>) {
+        let pid = self.state.proc.as_ref().map(|p| p.pid);
+        for line in lines {
+            let Some(ev) = parse_train_line(&line) else {
+                continue;
+            };
+            match ev {
+                // The trainer stated its own step time, so stop deriving
+                // one from log cadence.
+                ref e if is_reported_step_time(e) => {
+                    self.saw_reported_step_time = true;
+                    self.state.apply_event(ev);
+                }
+                // A topology YAML named in the log: locate it near the
+                // run and merge it, the same as a `--config`-supplied
+                // one. Any `SeqLen` later in the log still wins, since
+                // the harness prints its summary after this line.
+                TrainEvent::ModelConfigFile(ref name) => {
+                    if let Some(pid) = pid {
+                        if let Some(path) = Self::find_named_config(pid, name) {
+                            if let Ok(text) = std::fs::read_to_string(&path) {
+                                // The YAML states the topology's *declared*
+                                // maximum sequence length; a run may narrow
+                                // it (tt-tnt runs 512 against a declared
+                                // 2048). Taking the YAML's number would
+                                // overstate tokens/sec fourfold, so a
+                                // length the run already told us survives
+                                // the merge. In practice the log names the
+                                // YAML before stating its length, so this
+                                // guards the other ordering — but tokens
+                                // /sec being wrong by a factor of four is
+                                // not something to leave resting on the
+                                // order two lines happen to be printed in.
+                                let run_seq = self.state.config.max_sequence_length;
+                                merge_model_yaml(&mut self.state.config, &text);
+                                if run_seq.is_some() {
+                                    self.state.config.max_sequence_length = run_seq;
+                                }
+                            }
+                        }
+                    }
+                }
+                // A run header after an earlier run in the same log starts
+                // a new run (the state resets itself on it). The monitor's
+                // step anchor and reported-time flag belong to the old run
+                // too: a second run may be a bar-only trainer after a
+                // reported one. `last_cpu` stays, because it differences
+                // ticks of the attached process, which has not changed.
+                TrainEvent::HarnessSummary { .. } => {
+                    if self.state.holds_run_data() {
+                        self.last_step_seen = None;
+                        self.anchor_is_baseline = false;
+                        self.last_note_at = None;
+                        self.saw_reported_step_time = false;
+                    }
+                    self.state.apply_event(ev);
+                }
+                _ => self.state.apply_event(ev),
             }
         }
     }
@@ -2375,13 +2493,16 @@ mod step_and_ms_tests {
         }
     }
 
-    /// The tt-tnt shape: a summary line states the run budget, and a bar
-    /// counts steps within a chunk and restarts every chunk. After the
-    /// restart the step is chunk-local, so no budget or ETA applies to it.
+    /// A `Max steps` line states the run budget, and a bar counts steps
+    /// within a chunk and restarts every chunk. With no run header and no
+    /// absolute step line there is no base to rebuild the global step from,
+    /// so after the restart the step is chunk-local and no budget or ETA
+    /// applies to it. (A tt-tnt run header sets a base of 0; see
+    /// `abs_base_tests` for that case.)
     #[test]
     fn a_bar_only_chunked_trainer_with_a_stated_budget_has_no_eta() {
         let mut st = TrainState::new();
-        st.apply_event(summary(63906));
+        st.apply_event(TrainEvent::MaxSteps(63906));
         st.apply_event(bar(3195, 3195));
         st.apply_event(bar(630, 3195));
         st.step_ms = 285.0;
@@ -2394,11 +2515,12 @@ mod step_and_ms_tests {
     /// Before the first restart, a bar total smaller than the stated budget
     /// already shows the bar counts something smaller than the run, so the
     /// step is chunk-local from the first bar and the display does not
-    /// change at the restart.
+    /// change at the restart. Stated by a `Max steps` line, which sets no
+    /// base.
     #[test]
     fn a_bar_smaller_than_the_stated_budget_is_chunk_local_before_any_restart() {
         let mut st = TrainState::new();
-        st.apply_event(summary(63906));
+        st.apply_event(TrainEvent::MaxSteps(63906));
         st.apply_event(bar(630, 3195));
         st.step_ms = 285.0;
         assert!(!st.chunked_bar);
@@ -2936,5 +3058,297 @@ mod baseline_anchor_tests {
         assert_eq!(m.last_step_seen, None);
         assert!(!m.anchor_is_baseline);
         assert_eq!(m.last_note_at, None);
+    }
+}
+
+/// Test helper: one tt-tnt bar frame in the real shape (see the verbatim
+/// frames in `parse::tests::parses_tt_tnt_bar_frames_that_carry_train_loss`),
+/// at chunk-local step `local` of a `total`-step chunk.
+#[cfg(test)]
+pub(crate) fn tnt_frame(local: u64, total: u64, loss: f32) -> String {
+    let pct = local * 100 / total.max(1);
+    format!(
+        "{pct:>3}%|\u{2588}         | {local}/{total} [00:19<30:41,  3.43it/s, train_loss={loss:.4}, val_loss={loss:.4}]"
+    )
+}
+
+#[cfg(test)]
+impl TrainMonitor {
+    /// Test helper: one poll at an injected time. Folds `lines` into the state
+    /// through the same path `poll` uses, then runs the cadence check.
+    pub(crate) fn replay_poll(&mut self, lines: &[String], now: Instant) {
+        self.ingest_lines(lines.to_vec());
+        self.note_step_progress(now);
+    }
+}
+
+/// The run's global step rebuilt from a chunk-local bar (`abs_base`), and the
+/// cadence guard at the chunk boundary.
+#[cfg(test)]
+mod abs_base_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn header(steps: u64) -> TrainEvent {
+        parse_train_line(&format!(
+            "tt-tnt training \u{2014} steps={steps} batch=64 seq_len=512 arch=blackhole"
+        ))
+        .expect("the header parses")
+    }
+
+    fn resume(start: u64, more: u64) -> TrainEvent {
+        parse_train_line(&format!(
+            "  resumed from artifacts/x/tt_tnt_step{start:08}.pkl at step {start} (created_at=2026-10-02T12:00:00+00:00); running {more} more steps to step {}",
+            start + more
+        ))
+        .expect("the resume line parses")
+    }
+
+    fn frame(local: u64) -> TrainEvent {
+        parse_train_line(&tnt_frame(local, 6391, 3.1)).expect("the bar frame parses")
+    }
+
+    fn val(step: u64) -> TrainEvent {
+        parse_train_line(&format!(
+            "  step={step:>7} train_loss=2.9570 val_loss=3.1508 lr=5.274e-05"
+        ))
+        .expect("the val line parses")
+    }
+
+    #[test]
+    fn a_run_header_sets_the_base_to_zero() {
+        let mut st = TrainState::new();
+        assert_eq!(st.abs_base, None);
+        st.apply_event(header(31951));
+        assert_eq!(st.abs_base, Some(0));
+    }
+
+    #[test]
+    fn a_resume_line_overrides_the_headers_base() {
+        let mut st = TrainState::new();
+        st.apply_event(header(31951));
+        st.apply_event(resume(31955, 31951));
+        assert_eq!(st.abs_base, Some(31955));
+        assert_eq!(st.step, 31955);
+        assert_eq!(st.max_steps, 63906);
+    }
+
+    #[test]
+    fn an_absolute_step_line_sets_the_base() {
+        let mut st = TrainState::new();
+        st.apply_event(header(31951));
+        st.apply_event(val(38346));
+        assert_eq!(st.abs_base, Some(38346));
+        let mut st = TrainState::new();
+        st.apply_event(parse_train_line("Step: 25565, Loss: 3.1367, Time: 285.0 ms").unwrap());
+        assert_eq!(st.abs_base, Some(25565));
+        let mut st = TrainState::new();
+        st.apply_event(parse_train_line("Step: 7 Loss: 0.4213").unwrap());
+        assert_eq!(st.abs_base, Some(7));
+    }
+
+    /// The bar's step is chunk-local, so it never becomes the base itself.
+    #[test]
+    fn a_bar_frame_never_sets_the_base() {
+        let mut st = TrainState::new();
+        st.apply_event(header(31951));
+        for local in [1u64, 2, 3, 200] {
+            st.apply_event(frame(local));
+            assert_eq!(st.abs_base, Some(0), "after frame {local}");
+        }
+        assert_eq!(st.step, 200, "a fresh run's base is 0");
+    }
+
+    #[test]
+    fn a_new_run_clears_the_base() {
+        let mut st = TrainState::new();
+        st.apply_event(header(31951));
+        st.apply_event(resume(31955, 31951));
+        st.apply_event(frame(10));
+        st.begin_new_run();
+        assert_eq!(st.abs_base, None);
+        // A second header after run data resets, then states its own base.
+        let mut st = TrainState::new();
+        st.apply_event(header(31951));
+        st.apply_event(resume(31955, 31951));
+        st.apply_event(frame(10));
+        st.apply_event(header(4000));
+        assert_eq!(st.abs_base, Some(0));
+        st.apply_event(frame(3));
+        assert_eq!(st.step, 3);
+    }
+
+    /// A trainer with no header and no absolute line keeps the bar's own step.
+    #[test]
+    fn with_no_base_the_bar_step_is_used_as_it_is() {
+        let mut st = TrainState::new();
+        st.apply_event(frame(200));
+        assert_eq!(st.abs_base, None);
+        assert_eq!(st.step, 200);
+        assert_eq!(st.max_steps, 6391);
+    }
+
+    #[test]
+    fn a_resumed_run_shows_its_global_step_and_keeps_its_budget() {
+        let mut st = TrainState::new();
+        st.apply_event(header(31951));
+        st.apply_event(resume(31955, 31951));
+        st.apply_event(frame(200));
+        assert_eq!(st.step, 32155);
+        assert_eq!(st.max_steps, 63906, "the chunk size is not the budget");
+        assert_eq!(st.stated_max_steps, 63906);
+        assert!(!st.step_is_chunk_local());
+        st.step_ms = 300.0;
+        let eta = st.eta_secs().expect("a global step has an ETA");
+        assert!((eta - (63906 - 32155) as f32 * 0.3).abs() < 1.0, "{eta}");
+    }
+
+    #[test]
+    fn a_fresh_run_counts_globally_across_chunks() {
+        let mut st = TrainState::new();
+        st.apply_event(header(31951));
+        st.apply_event(frame(6390));
+        st.apply_event(frame(6391));
+        assert_eq!(st.step, 6391);
+        st.apply_event(val(6391));
+        st.apply_event(frame(1));
+        assert_eq!(
+            st.step, 6392,
+            "the next chunk starts on top of the val line"
+        );
+        assert_eq!(st.max_steps, 31951);
+        assert!(!st.step_is_chunk_local());
+        assert!(st.chunked_bar, "the bar still restarted");
+    }
+
+    /// The harness's absolute line is authoritative even when it disagrees
+    /// with the base plus the bar's step.
+    #[test]
+    fn an_absolute_line_that_disagrees_with_the_bar_wins() {
+        let mut st = TrainState::new();
+        st.apply_event(header(31951));
+        st.apply_event(resume(31955, 31951));
+        st.apply_event(frame(6391));
+        assert_eq!(st.step, 38346);
+        st.apply_event(val(40000));
+        assert_eq!(st.step, 40000);
+        st.apply_event(frame(1));
+        assert_eq!(st.step, 40001);
+    }
+
+    /// tt-tnt ends a chunk at a checkpoint boundary too, which prints no
+    /// validation line when `--save-every` is shorter than `--val-every`. A
+    /// restart with no absolute line before it adds the finished chunk.
+    #[test]
+    fn a_restart_with_no_absolute_line_adds_the_finished_chunk() {
+        let mut st = TrainState::new();
+        st.apply_event(header(31951));
+        st.apply_event(frame(3000));
+        st.apply_event(frame(3195));
+        st.apply_event(frame(1));
+        assert_eq!(st.abs_base, Some(3195));
+        assert_eq!(st.step, 3196);
+        assert!(st.cadence_rebase, "the boundary gap is never timed");
+    }
+
+    /// Without a base the old chunk-local rule is unchanged: a stated budget
+    /// with no header (a `Max steps` line) and a smaller bar total.
+    #[test]
+    fn without_a_base_the_chunk_local_rule_is_unchanged() {
+        let mut st = TrainState::new();
+        st.apply_event(TrainEvent::MaxSteps(63906));
+        st.apply_event(frame(630));
+        assert_eq!(st.abs_base, None);
+        assert!(st.step_is_chunk_local());
+        assert_eq!(st.max_steps, 63906);
+    }
+
+    /// The validation line ends a chunk. Checkpoint save, validation and the
+    /// first step's warm-up fall between the chunk's last frame and the next
+    /// chunk's first, so the first step after the boundary is never timed.
+    #[test]
+    fn the_chunk_boundary_gap_is_never_timed() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        m.replay_poll(
+            &[
+                "tt-tnt training \u{2014} steps=31951 batch=64 seq_len=512 arch=blackhole".into(),
+                tnt_frame(6388, 6391, 3.1),
+            ],
+            ms(0),
+        );
+        for (i, local) in (6389..=6391u64).enumerate() {
+            m.replay_poll(&[tnt_frame(local, 6391, 3.1)], ms(300 * (i as u64 + 1)));
+        }
+        let samples = m.state.step_history.len();
+        assert!(samples >= 1, "the chunk's last steps are timed");
+        // 60 s of checkpoint and validation, polled every second.
+        keep_polling(&mut m, ms(900), ms(60_900));
+        m.replay_poll(
+            &["  step=   6391 train_loss=2.9570 val_loss=3.1508 lr=5.274e-05".into()],
+            ms(60_900),
+        );
+        assert!(m.anchor_is_baseline, "the val line re-baselines");
+        // The first frame of the next chunk arrives after the warm-up.
+        m.replay_poll(&[tnt_frame(1, 6391, 3.0)], ms(62_000));
+        assert_eq!(m.state.step, 6392, "global: one more than the last frame");
+        assert!(m.state.chunked_bar, "the bar restarted");
+        assert!(!m.state.step_is_chunk_local());
+        assert_eq!(m.state.step_history.len(), samples, "no sample for the gap");
+        assert!(m.state.step_ms < 400.0, "no spike: {}", m.state.step_ms);
+        // The first step after the boundary only re-anchors; the next two are
+        // timed from their own gaps.
+        m.replay_poll(&[tnt_frame(2, 6391, 3.0)], ms(62_300));
+        m.replay_poll(&[tnt_frame(3, 6391, 3.0)], ms(62_600));
+        assert_eq!(m.state.step_history.len(), samples + 2);
+        let last = m.state.step_history.last().unwrap();
+        assert_eq!(last.step, 6394);
+        assert!((last.ms - 300.0).abs() < 1.0, "{}", last.ms);
+        assert!(
+            m.state.step_history.iter().all(|s| s.ms < 400.0),
+            "no spike in the history"
+        );
+    }
+
+    /// The same guard for a restart with no validation line in front of it.
+    #[test]
+    fn a_restart_with_no_val_line_is_never_timed_either() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        m.replay_poll(
+            &[
+                "tt-tnt training \u{2014} steps=31951 batch=64 seq_len=512 arch=blackhole".into(),
+                tnt_frame(3192, 3195, 3.1),
+            ],
+            ms(0),
+        );
+        for (i, local) in (3193..=3195u64).enumerate() {
+            m.replay_poll(&[tnt_frame(local, 3195, 3.1)], ms(300 * (i as u64 + 1)));
+        }
+        let samples = m.state.step_history.len();
+        keep_polling(&mut m, ms(900), ms(20_900));
+        m.replay_poll(&[tnt_frame(1, 3195, 3.0)], ms(20_900));
+        assert_eq!(m.state.step, 3196);
+        m.replay_poll(&[tnt_frame(2, 3195, 3.0)], ms(21_200));
+        assert_eq!(m.state.step_history.len(), samples, "no sample for the gap");
+        assert!(m.state.step_ms < 400.0, "no spike: {}", m.state.step_ms);
+    }
+
+    /// A trainer that prints a plain `Step:` line every step, with no bar,
+    /// keeps its cadence: an absolute line re-baselines only beside a bar.
+    #[test]
+    fn a_per_step_line_trainer_with_no_bar_is_still_timed() {
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        for i in 1..=4u64 {
+            m.replay_poll(
+                &[format!("Step: {i} Loss: 0.4213")],
+                t0 + Duration::from_millis(300 * i),
+            );
+        }
+        assert_eq!(m.state.step_history.len(), 2);
+        assert!((m.state.step_ms - 300.0).abs() < 1.0, "{}", m.state.step_ms);
     }
 }

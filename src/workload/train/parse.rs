@@ -211,19 +211,38 @@ pub fn parse_train_line(line: &str) -> Option<TrainEvent> {
                 total.parse::<u64>().ok()?,
             ))
         });
-        // `loss=`, but not the tail of `train_loss=` / `val_loss=`, which
-        // are different quantities reported by other harnesses.
-        let loss = line.match_indices("loss=").find_map(|(i, _)| {
-            let prev = line[..i].chars().next_back();
-            if matches!(prev, Some(c) if c == '_') {
-                return None;
-            }
-            let v: String = line[i + "loss=".len()..]
-                .chars()
-                .take_while(|c| !c.is_whitespace() && *c != ',' && *c != ']')
-                .collect();
-            v.parse::<f32>().ok()
-        });
+        // The raw text of the postfix value `key=` names, matched as a whole
+        // key: `loss=` does not match the tail of `train_loss=` or
+        // `val_loss=`.
+        let postfix = |key: &str| -> Option<String> {
+            line.match_indices(key).find_map(|(i, _)| {
+                let prev = line[..i].chars().next_back();
+                if matches!(prev, Some(c) if c == '_' || c.is_alphanumeric()) {
+                    return None;
+                }
+                Some(
+                    line[i + key.len()..]
+                        .chars()
+                        .take_while(|c| !c.is_whitespace() && *c != ',' && *c != ']')
+                        .collect(),
+                )
+            })
+        };
+        // The loss, in order of preference:
+        // * a standalone `loss=` (ttml's SFTTrainer: `loss=1.2345, lr=...`);
+        // * else `train_loss=` (the tt-tnt harness's bar:
+        //   `61/6391 [00:19<30:41,  3.43it/s, train_loss=3.1016, val_loss=3.0977]`).
+        //   It must be a finite number. `nan` or text drops the frame, so no
+        //   placeholder point reaches the loss curve.
+        // `val_loss=` is never used. In tt-tnt's bar it is ttml's placeholder
+        // copy of the train loss, and in SFTTrainer's eval variant it is a
+        // different quantity from the training loss.
+        let loss = match postfix("loss=") {
+            Some(v) => v.parse::<f32>().ok(),
+            None => postfix("train_loss=")
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|l| l.is_finite()),
+        };
         if let (Some((step, max_steps)), Some(loss)) = (counter, loss) {
             return Some(TrainEvent::BarProgress {
                 step,
@@ -482,6 +501,77 @@ mod tests {
             parse_train_line("SFTTrainer:   0%|          | 0/250 [00:00<?, ?it/s]"),
             None
         );
+    }
+
+    /// tt-tnt's bar, verbatim from a live resumed run's log. Its postfix is
+    /// `train_loss=` (the bar's `val_loss=` is ttml's placeholder copy of the
+    /// train loss). The parser used to accept only a standalone `loss=`, so
+    /// none of these frames parsed and the view saw one step per chunk end
+    /// (6391 steps, about 28 minutes apart).
+    #[test]
+    fn parses_tt_tnt_bar_frames_that_carry_train_loss() {
+        assert_eq!(
+            parse_train_line(
+                "  0%|          | 1/6391 [00:00<1:19:34,  1.34it/s, train_loss=3.0117, val_loss=3.0117]"
+            ),
+            Some(TrainEvent::BarProgress {
+                step: 1,
+                max_steps: 6391,
+                loss: 3.0117,
+            }),
+        );
+        assert_eq!(
+            parse_train_line(
+                "  1%|          | 61/6391 [00:19<30:41,  3.43it/s, train_loss=3.1016, val_loss=3.0977]"
+            ),
+            Some(TrainEvent::BarProgress {
+                step: 61,
+                max_steps: 6391,
+                loss: 3.1016,
+            }),
+            "the bar's val_loss is never the loss",
+        );
+        assert_eq!(
+            parse_train_line(
+                " 95%|\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{258d}| 6053/6391 [25:58<01:34,  3.57it/s, train_loss=3.2070, val_loss=3.2305]"
+            ),
+            Some(TrainEvent::BarProgress {
+                step: 6053,
+                max_steps: 6391,
+                loss: 3.2070,
+            }),
+        );
+        // The first frame has no postfix yet, so it carries no loss.
+        assert_eq!(
+            parse_train_line("  0%|          | 0/6391 [00:00<?, ?it/s]"),
+            None
+        );
+    }
+
+    /// A standalone `loss=` wins over `train_loss=`, `val_loss=` alone is
+    /// never a loss, and a `train_loss=` that is not a finite number drops the
+    /// frame. A placeholder value would put a false point on the curve.
+    #[test]
+    fn the_bar_loss_prefers_loss_then_train_loss_and_never_val_loss() {
+        let frame =
+            |postfix: &str| format!(" 10%|#         | 30/250 [00:45<05:30,  1.50s/it, {postfix}]");
+        let loss_of = |postfix: &str| match parse_train_line(&frame(postfix)) {
+            Some(TrainEvent::BarProgress { loss, .. }) => Some(loss),
+            None => None,
+            other => panic!("{postfix}: unexpected {other:?}"),
+        };
+        assert_eq!(
+            loss_of("train_loss=2.5000, loss=1.2345, lr=3.00e-04"),
+            Some(1.2345)
+        );
+        assert_eq!(loss_of("loss=1.2345, train_loss=2.5000"), Some(1.2345));
+        assert_eq!(loss_of("train_loss=2.5000, val_loss=9.0000"), Some(2.5));
+        assert_eq!(loss_of("val_loss=0.9500"), None);
+        assert_eq!(loss_of("val_loss=0.9500, lr=3.00e-04"), None);
+        assert_eq!(loss_of("train_loss=nan, val_loss=nan"), None);
+        assert_eq!(loss_of("train_loss=inf"), None);
+        assert_eq!(loss_of("train_loss=garbage"), None);
+        assert_eq!(loss_of("train_loss="), None);
     }
 
     /// A bar's step, budget and loss must all reach the state, or the run

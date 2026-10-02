@@ -1172,6 +1172,12 @@ impl TrainView {
         let busiest = self.busiest_chip(backend);
         // The convergence strip keeps whole leading clauses only; later
         // clauses that do not fit are dropped, never cut.
+        // A bar restart hides the schedule position unless the bar's step is
+        // rebuilt on a base (`abs_base`): that step is global, so its
+        // restarts do not count here. A bar beside reported step lines keeps
+        // the old rule.
+        let restart_hides_schedule =
+            st.chunked_bar && (st.abs_base.is_none() || st.step_from_reported_line);
         let parts = convergence_parts(
             &st.loss_history,
             st.config.learning_rate,
@@ -1181,7 +1187,7 @@ impl TrainView {
             // the step cannot be placed in the run's budget, so 0 (unknown)
             // keeps the strip from claiming a schedule position. A step past
             // the budget gets the same treatment.
-            if st.chunked_bar || st.step_is_chunk_local() || st.step > st.max_steps {
+            if restart_hides_schedule || st.step_is_chunk_local() || st.step > st.max_steps {
                 0
             } else {
                 st.max_steps
@@ -2631,7 +2637,9 @@ mod tests {
     fn once_the_bar_is_known_to_be_chunked_the_strip_makes_no_schedule_claim() {
         let mut b = MockBackend::new(1);
         b.init().unwrap();
-        let mut st = live_state();
+        // `attached_state`: `live_state` folds in a `Step:` line, which would
+        // give the bar a base and make its step global.
+        let mut st = attached_state();
         st.loss_history = (0..120).map(|i| 5.0 - 0.01 * i as f32).collect();
         st.scheduler = Some("cosine".into());
         st.max_steps = 3195; // a chunk size, not the run's budget
@@ -2674,9 +2682,11 @@ mod tests {
         assert!(!out.contains("% through"), "{out}");
     }
 
-    /// A bar-only trainer whose summary states the run budget and whose bar
-    /// counts within a chunk. The header shows the chunk-local step with no
-    /// budget and no percentage, both before and after the bar restarts.
+    /// A bar-only trainer whose `Max steps` line states the run budget and
+    /// whose bar counts within a chunk. It prints no run header and no
+    /// absolute step, so there is no base to rebuild the global step from.
+    /// The header shows the chunk-local step with no budget and no
+    /// percentage, both before and after the bar restarts.
     #[test]
     fn a_chunk_local_step_is_shown_without_the_run_budget() {
         use crate::workload::train::TrainEvent;
@@ -2693,12 +2703,10 @@ mod tests {
                 .find(|r| r.contains("auto-attached"))
                 .expect("the second header row")
         };
-        let mut st = live_state();
-        st.apply_event(TrainEvent::HarnessSummary {
-            max_steps: 63906,
-            batch_size: 8,
-            seq_len: 512,
-        });
+        // `attached_state`: `live_state` folds in a `Step:` line, and an
+        // absolute step line would itself give the bar a base.
+        let mut st = attached_state();
+        st.apply_event(TrainEvent::MaxSteps(63906));
         st.step_ms = 285.0;
         // Before any restart, then after one.
         for (step, label) in [(3194u64, "before"), (630, "after")] {
@@ -2716,6 +2724,268 @@ mod tests {
             );
         }
         assert!(st.chunked_bar);
+    }
+
+    /// The header row for a monitor's state, as the view draws it at 134
+    /// columns once attached to a log file.
+    fn monitor_header(m: &crate::workload::train::TrainMonitor) -> String {
+        let mut st = m.state().clone();
+        st.proc = attached_state().proc;
+        st.log = attached_state().log;
+        header_row_of(&st)
+    }
+
+    /// A distinct loss per frame, so each frame's entry can be recognised.
+    fn frame_loss(local: u64) -> f32 {
+        3.2 - (local % 97) as f32 * 0.001
+    }
+
+    /// Replays one bar chunk through the monitor, one frame per poll at
+    /// 300 ms, starting at `t`, and checks after every poll that the step is
+    /// `base + local`, never goes backwards, gets one loss entry per frame and
+    /// produces no step time spike. Returns the time of the last poll.
+    fn replay_chunk(
+        m: &mut crate::workload::train::TrainMonitor,
+        base: u64,
+        locals: std::ops::RangeInclusive<u64>,
+        total: u64,
+        mut t: std::time::Instant,
+    ) -> std::time::Instant {
+        use crate::workload::train::monitor::tnt_frame;
+        use crate::workload::train::LOSS_HISTORY;
+        for local in locals {
+            t += std::time::Duration::from_millis(300);
+            let before_step = m.state().step;
+            let before_losses = m.state().loss_history.len();
+            m.replay_poll(&[tnt_frame(local, total, frame_loss(local))], t);
+            let st = m.state();
+            assert_eq!(st.step, base + local, "frame {local}");
+            assert!(st.step > before_step, "monotonic at frame {local}");
+            assert_eq!(
+                st.loss_history.len(),
+                (before_losses + 1).min(LOSS_HISTORY),
+                "one loss entry per frame at {local}"
+            );
+            // The frame prints the loss to four places.
+            let loss = st.loss.expect("every frame carries a loss");
+            assert!(
+                (loss - frame_loss(local)).abs() < 1e-4,
+                "frame {local}: {loss}"
+            );
+            assert!(
+                st.step_ms < 400.0,
+                "no spike at frame {local}: {}",
+                st.step_ms
+            );
+        }
+        t
+    }
+
+    /// The chunk boundary as the live log has it: the last frame, about a
+    /// minute of checkpoint and validation (polled every second), the
+    /// absolute validation line, then the next chunk's frames after the first
+    /// step's warm-up. Returns the time of the validation-line poll.
+    fn replay_boundary(
+        m: &mut crate::workload::train::TrainMonitor,
+        val_step: u64,
+        t: std::time::Instant,
+    ) -> std::time::Instant {
+        use std::time::Duration;
+        let samples = m.state().step_history.clone();
+        let step_before = m.state().step;
+        let losses_before = m.state().loss_history.len();
+        for s in 1..60u64 {
+            m.replay_poll(&[], t + Duration::from_secs(s));
+        }
+        let t_val = t + Duration::from_secs(60);
+        m.replay_poll(
+            &[format!(
+                "  step={val_step:>7} train_loss=2.9570 val_loss=3.1508 lr=5.274e-05"
+            )],
+            t_val,
+        );
+        let st = m.state();
+        assert_eq!(st.step, val_step);
+        assert!(st.step >= step_before, "the val line never moves back");
+        assert_eq!(
+            st.loss_history.len(),
+            (losses_before + 1).min(crate::workload::train::LOSS_HISTORY)
+        );
+        assert_eq!(st.loss, Some(2.957));
+        assert_eq!(st.step_history, samples, "no sample for the boundary gap");
+        t_val
+    }
+
+    /// End to end, for the user's live shape: a resumed tt-tnt run whose bar
+    /// counts each chunk from 1 and carries `train_loss=`. Every stage shows
+    /// the global step against the absolute budget, the observed cadence,
+    /// tokens/s and an ETA, and the chunk boundary leaves no spike.
+    #[test]
+    fn replaying_a_resumed_tt_tnt_run_shows_the_global_step_live() {
+        use crate::workload::train::{StepTimeSource, TrainMonitor, STEP_HISTORY};
+        use std::time::{Duration, Instant};
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        // Attach: the backlog holds the header, the resume line and the
+        // bar's first frame, which has no loss yet.
+        m.replay_poll(
+            &[
+                "tt-tnt training \u{2014} steps=31951 batch=64 seq_len=512 arch=blackhole".into(),
+                "  resumed from artifacts/x/tt_tnt_step00031955.pkl at step 31955 (created_at=2026-10-02T12:00:00+00:00); running 31951 more steps to step 63906".into(),
+                "  0%|          | 0/6391 [00:00<?, ?it/s]".into(),
+            ],
+            t0,
+        );
+        let st = m.state();
+        assert_eq!((st.step, st.max_steps), (31955, 63906));
+        assert_eq!(st.loss, None);
+        assert!(monitor_header(&m).contains("step 31,955 / 63,906  50.0%"));
+
+        // 200 frames at 300 ms.
+        let t = replay_chunk(&mut m, 31955, 1..=200, 6391, t0);
+        let st = m.state();
+        assert_eq!((st.step, st.max_steps), (32155, 63906));
+        let row = monitor_header(&m);
+        assert!(row.contains("step 32,155 / 63,906  50.3%"), "{row:?}");
+        assert!((st.step_ms - 300.0).abs() < 1.0, "{}", st.step_ms);
+        let tps = st.tokens_per_sec().expect("a rate after two increments");
+        assert!((tps - 109_227.0).abs() < 500.0, "{tps}");
+        // The first frame anchors, the second re-anchors, the rest are timed.
+        assert_eq!(st.step_history.len(), 198.min(STEP_HISTORY));
+        assert_eq!(st.step_time_source, StepTimeSource::Observed);
+        assert_eq!(st.loss_history.len(), 200);
+        let eta = st.eta_secs().expect("an ETA for the global step");
+        assert!((eta - (63906 - 32155) as f32 * 0.3).abs() < 10.0, "{eta}");
+
+        // The rest of the chunk, then the boundary.
+        let t = replay_chunk(&mut m, 31955, 201..=6391, 6391, t);
+        assert_eq!(m.state().step, 38346);
+        let t_val = replay_boundary(&mut m, 38346, t);
+        assert!(monitor_header(&m).contains("step 38,346 / 63,906  60.0%"));
+
+        // The next chunk's first frame lands after a 1.1 s warm-up and is
+        // only an anchor; the frames after it are timed at 300 ms.
+        let samples = m.state().step_history.len();
+        let first = t_val + Duration::from_millis(1100);
+        m.replay_poll(
+            &[crate::workload::train::monitor::tnt_frame(1, 6391, 3.0)],
+            first,
+        );
+        assert_eq!(m.state().step, 38347);
+        assert!(m.state().step_ms < 400.0, "no spike: {}", m.state().step_ms);
+        let _ = replay_chunk(&mut m, 38346, 2..=10, 6391, first);
+        let st = m.state();
+        assert_eq!(st.step, 38356);
+        assert!(st.chunked_bar && !st.step_is_chunk_local());
+        assert_eq!(st.max_steps, 63906, "the chunk size never replaces it");
+        assert!(st.step_history.iter().all(|s| (s.ms - 300.0).abs() < 1.0));
+        assert_eq!(
+            st.step_history.last().map(|s| s.step),
+            Some(38356),
+            "timing resumed after the boundary"
+        );
+        assert!(st.step_history.len() <= STEP_HISTORY && samples > 0);
+        let row = monitor_header(&m);
+        assert!(row.contains("step 38,356 / 63,906  60.0%"), "{row:?}");
+    }
+
+    /// The same for a fresh tt-tnt run: the header's `steps=` is the budget
+    /// and the base starts at 0.
+    #[test]
+    fn replaying_a_fresh_tt_tnt_run_shows_the_global_step_live() {
+        use crate::workload::train::TrainMonitor;
+        use std::time::{Duration, Instant};
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        m.replay_poll(
+            &[
+                "tt-tnt training \u{2014} steps=31951 batch=64 seq_len=512 arch=blackhole".into(),
+                "  0%|          | 0/6391 [00:00<?, ?it/s]".into(),
+            ],
+            t0,
+        );
+        assert_eq!((m.state().step, m.state().max_steps), (0, 31951));
+        let t = replay_chunk(&mut m, 0, 1..=200, 6391, t0);
+        let st = m.state();
+        assert_eq!((st.step, st.max_steps), (200, 31951));
+        assert!(monitor_header(&m).contains("step 200 / 31,951  0.6%"));
+        assert!((st.step_ms - 300.0).abs() < 1.0);
+        let tps = st.tokens_per_sec().expect("a rate");
+        assert!((tps - 109_227.0).abs() < 500.0, "{tps}");
+        let t = replay_chunk(&mut m, 0, 201..=6391, 6391, t);
+        let t_val = replay_boundary(&mut m, 6391, t);
+        let first = t_val + Duration::from_millis(1100);
+        m.replay_poll(
+            &[crate::workload::train::monitor::tnt_frame(1, 6391, 3.0)],
+            first,
+        );
+        assert_eq!(m.state().step, 6392);
+        let _ = replay_chunk(&mut m, 6391, 2..=10, 6391, first);
+        let st = m.state();
+        assert_eq!((st.step, st.max_steps), (6401, 31951));
+        assert!(st.step_history.iter().all(|s| (s.ms - 300.0).abs() < 1.0));
+        assert!(monitor_header(&m).contains("step 6,401 / 31,951  20.0%"));
+    }
+
+    /// ttml's SFTTrainer: no header, no absolute line, a standalone `loss=`.
+    /// The bar is the step source exactly as before.
+    #[test]
+    fn replaying_an_sft_trainer_bar_is_unchanged() {
+        use crate::workload::train::TrainMonitor;
+        use std::time::{Duration, Instant};
+        let mut m = TrainMonitor::new();
+        let t0 = Instant::now();
+        for i in 1..=250u64 {
+            let loss = 2.0 - i as f32 * 0.001;
+            m.replay_poll(
+                &[format!(
+                    "SFTTrainer:  12%|#1        | {i}/250 [00:45<05:30,  1.50s/it, loss={loss:.4}, lr=3.00e-04]"
+                )],
+                t0 + Duration::from_millis(300 * i),
+            );
+            assert_eq!(m.state().step, i);
+        }
+        let st = m.state();
+        assert_eq!(st.abs_base, None);
+        assert_eq!(st.max_steps, 250);
+        assert_eq!(st.loss_history.len(), 250);
+        assert!((st.step_ms - 300.0).abs() < 1.0);
+        assert_eq!(st.step_history.len(), 160);
+        assert!(!st.step_is_chunk_local());
+        assert!(monitor_header(&m).contains("step 250 / 250  100.0%"));
+    }
+
+    /// With a base the bar's restarts are absorbed into a global step, so the
+    /// convergence strip may place it in the run's budget.
+    #[test]
+    fn a_rebuilt_global_step_keeps_the_strip_schedule_position() {
+        use crate::workload::train::{parse_train_line, TrainEvent};
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let mut st = attached_state();
+        st.scheduler = Some("cosine".into());
+        let frame = |local: u64| crate::workload::train::monitor::tnt_frame(local, 6391, 3.1);
+        for l in [
+            "tt-tnt training \u{2014} steps=31951 batch=64 seq_len=512 arch=blackhole".to_string(),
+            "  resumed from a/tt_tnt_step00031955.pkl at step 31955 (created_at=x); running 31951 more steps to step 63906".to_string(),
+            frame(6390),
+            frame(6391),
+            "  step=  38346 train_loss=2.9570 val_loss=3.1508 lr=5.274e-05".to_string(),
+            frame(1),
+            frame(2),
+        ] {
+            st.apply_event(parse_train_line(&l).expect("parses"));
+        }
+        for i in 0..120 {
+            st.apply_event(TrainEvent::BarProgress {
+                step: 3 + i,
+                max_steps: 6391,
+                loss: 3.0 - 0.001 * i as f32,
+            });
+        }
+        assert!(st.chunked_bar);
+        let out = text_of(&TrainView::new(160, 40).render(&st, &b));
+        assert!(out.contains("cosine 60% through"), "{out}");
     }
 
     /// The header counts the steps the starfield shows and states their
