@@ -135,82 +135,34 @@ fn resolve_target_indices(targets: &[String], devices: &[Device]) -> Vec<u8> {
     out
 }
 
-/// Tracks at most one active `tt-smi -r` invocation at a time. A second
-/// reset detected while one is already tracked is dropped (see design
-/// spec's "overlapping resets" non-goal) — call `clear()` once its visual
-/// consequence (a takeover animation, or a HivemindSweeper injection) is
-/// also done, not merely once the process itself exits.
+/// The reset a takeover animation is waiting on, if any. Holds at most one.
 ///
-/// The TUI no longer scans with `observe()`. It follows every live reset in
-/// `ui::tui::reset_status::ResetStatus` (status segment and HivemindSweeper
-/// feed events) and uses this type only for the takeover: `begin()` records
-/// the reset a takeover is for, `is_finished()` says when that reset ended,
-/// and `clear()` runs when the animation ends. So the "dropped" rule above
-/// now applies to the takeover only.
-///
-/// `clear()` is routinely called well before the real `tt-smi -r` process
-/// actually exits (HivemindSweeper clears right after injecting a feed
-/// event; a skipped takeover clears the instant the user hits a key) — the
-/// visual consequence finishing has nothing to do with the process's own
-/// lifetime. Without remembering which pid was already handled,
-/// `observe()` would re-detect that same still-running invocation on the
-/// very next scan and treat it as a brand-new reset. `last_handled_pid`
-/// closes that gap: it survives `clear()` and is only replaced once a
-/// *different* pid is observed, so the same invocation is never reported
-/// twice, while a later, genuinely different `tt-smi -r` (a new pid) is
-/// still detected normally.
+/// The TUI finds resets with `ui::tui::reset_status::ResetStatus`, which
+/// follows every live `tt-smi -r` process and drives the status segment and
+/// HivemindSweeper's feed events. This type only tracks the takeover:
+/// `begin()` records the reset a new takeover is for, `is_active()` says a
+/// takeover is waiting on one (so a second reset gets no takeover of its
+/// own, see the design spec's "overlapping resets" non-goal),
+/// `is_finished()` says when that reset's process has exited, and `clear()`
+/// runs when the animation ends, which frees it for the next reset.
 pub struct ResetDetector {
     active: Option<ResetEvent>,
-    last_handled_pid: Option<i32>,
 }
 
 impl ResetDetector {
     pub fn new() -> Self {
-        Self {
-            active: None,
-            last_handled_pid: None,
-        }
-    }
-
-    /// Scans `processes` — `(pid, name, cmdline)` triples for every process
-    /// currently visible, e.g. from
-    /// `HostProcessMonitor::processes_snapshot()` — for a new `tt-smi -r`
-    /// invocation. Returns `None` if one is already tracked, if none is
-    /// found, or if the only match is the pid most recently handled (its
-    /// visual consequence already ran and was `clear()`-ed, but the
-    /// process itself may still be alive).
-    pub fn observe(
-        &mut self,
-        processes: &[(i32, String, String)],
-        devices: &[Device],
-    ) -> Option<&ResetEvent> {
-        if self.active.is_some() {
-            return None;
-        }
-        for (pid, name, cmdline) in processes {
-            if self.last_handled_pid == Some(*pid) {
-                continue;
-            }
-            if let Some(ev) = parse_reset_process(*pid, name, cmdline, devices) {
-                self.active = Some(ev);
-                return self.active.as_ref();
-            }
-        }
-        None
+        Self { active: None }
     }
 
     /// Records `ev` as the reset a takeover animation is waiting on. Does
-    /// nothing if one is already tracked. The TUI uses this in place of
-    /// [`observe`](Self::observe): it finds new resets with
-    /// `ui::tui::reset_status::ResetStatus`, which follows every live
-    /// `tt-smi -r`, and hands the detector only the reset a takeover is for.
+    /// nothing if one is already tracked.
     pub fn begin(&mut self, ev: ResetEvent) {
         if self.active.is_none() {
             self.active = Some(ev);
         }
     }
 
-    /// True while a reset is tracked (between `begin`/`observe` and `clear`).
+    /// True while a reset is tracked (between `begin` and `clear`).
     pub fn is_active(&self) -> bool {
         self.active.is_some()
     }
@@ -224,13 +176,9 @@ impl ResetDetector {
         }
     }
 
-    /// Ends tracking of the current reset's visual consequence. Remembers
-    /// its pid (see [`ResetDetector`] docs) so `observe()` doesn't
-    /// re-detect the same still-running invocation as a new one.
+    /// Stops tracking: the takeover has ended. The next `begin` is accepted.
     pub fn clear(&mut self) {
-        if let Some(ev) = self.active.take() {
-            self.last_handled_pid = Some(ev.pid);
-        }
+        self.active = None;
     }
 }
 
@@ -387,42 +335,25 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn detector_observes_a_new_reset() {
-        let devices = fixture_devices(4);
+    /// A detector tracking the reset `tt-smi -r 0` (pid 500).
+    fn tracking_500(devices: &[Device]) -> ResetDetector {
         let mut det = ResetDetector::new();
-        let live = procs(&[(1, "bash", "bash"), (500, "tt-smi", "tt-smi -r 1")]);
-        let ev = det.observe(&live, &devices).expect("should detect reset");
-        assert_eq!(ev.pid, 500);
-        assert_eq!(ev.device_indices, vec![1]);
-    }
-
-    #[test]
-    fn detector_ignores_overlapping_second_reset() {
-        let devices = fixture_devices(4);
-        let mut det = ResetDetector::new();
-        let first = procs(&[(500, "tt-smi", "tt-smi -r 0")]);
-        assert!(det.observe(&first, &devices).is_some());
-
-        let second = procs(&[(500, "tt-smi", "tt-smi -r 0"), (600, "tt-smi", "tt-smi -r 1")]);
-        assert!(det.observe(&second, &devices).is_none());
+        det.begin(parse_reset_process(500, "tt-smi", "tt-smi -r 0", devices).unwrap());
+        det
     }
 
     #[test]
     fn is_finished_false_while_pid_present() {
         let devices = fixture_devices(4);
-        let mut det = ResetDetector::new();
+        let det = tracking_500(&devices);
         let live = procs(&[(500, "tt-smi", "tt-smi -r 0")]);
-        det.observe(&live, &devices);
         assert!(!det.is_finished(&live));
     }
 
     #[test]
     fn is_finished_true_once_pid_gone() {
         let devices = fixture_devices(4);
-        let mut det = ResetDetector::new();
-        let live = procs(&[(500, "tt-smi", "tt-smi -r 0")]);
-        det.observe(&live, &devices);
+        let det = tracking_500(&devices);
         let gone = procs(&[(1, "bash", "bash")]);
         assert!(det.is_finished(&gone));
     }
@@ -457,58 +388,11 @@ mod tests {
     #[test]
     fn clear_allows_a_later_reset_to_be_tracked() {
         let devices = fixture_devices(4);
-        let mut det = ResetDetector::new();
-        let first = procs(&[(500, "tt-smi", "tt-smi -r 0")]);
-        det.observe(&first, &devices);
+        let mut det = tracking_500(&devices);
         det.clear();
-        let second = procs(&[(600, "tt-smi", "tt-smi -r 1")]);
-        let ev = det.observe(&second, &devices).expect("should detect after clear");
-        assert_eq!(ev.pid, 600);
-    }
-
-    /// Regression: `clear()` is called well before the real `tt-smi -r`
-    /// process exits (HivemindSweeper clears right after injecting a feed
-    /// event; a skipped takeover clears immediately). If the same
-    /// still-running pid shows up on the very next scan, it must NOT be
-    /// re-detected as a brand-new reset — that would flood HivemindSweeper's
-    /// feed with duplicate injections, or instantly re-show a takeover the
-    /// user just skipped.
-    #[test]
-    fn clear_does_not_let_the_same_still_alive_pid_be_redetected() {
-        let devices = fixture_devices(4);
-        let mut det = ResetDetector::new();
-        let live = procs(&[(500, "tt-smi", "tt-smi -r 0")]);
-        det.observe(&live, &devices)
-            .expect("should detect the reset");
-        det.clear();
-
-        // Same pid, still present in the process list (the real `tt-smi -r`
-        // process commonly outlives the visual consequence's `clear()`).
-        assert!(
-            det.observe(&live, &devices).is_none(),
-            "the same already-handled pid must not be reported as a new reset"
-        );
-    }
-
-    /// Companion to the regression above: dedup is by pid identity, not a
-    /// blanket "never detect again" — once a genuinely different `tt-smi -r`
-    /// invocation (a different pid) shows up, it must still be detected.
-    #[test]
-    fn clear_still_allows_a_different_pid_to_be_detected_afterward() {
-        let devices = fixture_devices(4);
-        let mut det = ResetDetector::new();
-        let first = procs(&[(500, "tt-smi", "tt-smi -r 0")]);
-        det.observe(&first, &devices)
-            .expect("should detect the first reset");
-        det.clear();
-
-        let second = procs(&[
-            (500, "tt-smi", "tt-smi -r 0"),
-            (600, "tt-smi", "tt-smi -r 1"),
-        ]);
-        let ev = det
-            .observe(&second, &devices)
-            .expect("a different pid must still be detected as a new reset");
-        assert_eq!(ev.pid, 600);
+        assert!(!det.is_finished(&procs(&[])), "nothing tracked after clear");
+        det.begin(parse_reset_process(600, "tt-smi", "tt-smi -r 1", &devices).unwrap());
+        assert!(det.is_active());
+        assert!(det.is_finished(&procs(&[(500, "tt-smi", "tt-smi -r 0")])));
     }
 }

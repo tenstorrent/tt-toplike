@@ -84,6 +84,11 @@ impl ResetDetector {
 }
 ```
 
+(Updated 2026-10-01: `observe()` has been removed. New resets are found by
+`ui::tui::reset_status::ResetStatus`, which follows every live
+`tt-smi -r`. `ResetDetector` now holds only the reset a takeover is
+waiting on, through `begin`, `is_active`, `is_finished` and `clear`.)
+
 Matching logic (pure, unit-testable):
 - Candidate process: name or cmdline basename is `tt-smi`.
 - Cmdline contains `-r` or `--reset` as a standalone token (not e.g. part

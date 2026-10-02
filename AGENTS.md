@@ -636,8 +636,8 @@ Key routing, boot gating and takeover choice are the pure functions in
 uses a synthetic full reset over the real device count and is skipped in
 HivemindSweeper.
 State and per-scan decisions live in `src/ui/tui/reset_status.rs`. The
-segment follows the real pid, so a skipped takeover or HivemindSweeper's
-early detector clear does not stop it reaching "done". The status bar now
+segment follows the real process itself, so a skipped takeover does not
+stop it reaching "done" (see the fix-wave entry below). The status bar now
 drops whole hotkey groups (then hint groups) from the right to fit beside
 the chip telemetry. The old bar was one clipped paragraph, so on a narrow
 terminal it cut off the chip telemetry at the right edge; now the
