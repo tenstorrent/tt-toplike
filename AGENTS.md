@@ -739,7 +739,17 @@ aux rows keep their label and value and get no cells; the tokens/sec best was
 removed with its gauge (tok/s stays in LIVE); `--mock` gained a closed-form
 host CPU and RSS so the host row shows in screenshots, and still has no PCIe
 row. The band stays capped at 13 rows, so with three chips and all aux rows
-the starfield gets 4 rows; it reaches 6 with fewer weave rows.
+the starfield gets 4 rows with a verdict (5 without); it reaches 6 with fewer
+weave rows.
+
+Row order, decided after review: `plan_band` grants one star row, the
+verdict, chip rows, star rows up to 3, aux rows, the strip, then star rows up
+to 6. The first order put the aux rows and the strip ahead of the second star
+row, so a 30-row terminal (a 10-row band) with three chips and two aux rows
+left the starfield 2 rows. It now keeps 3 and drops the strip. Raising the
+13-row cap was not done, because it would take rows from the river. Star
+rows are granted only when a shown step has a time the canvas can place, so
+a history of zero times leaves no blank star rows; its chip rows still draw.
 
 Notable: a deliberate break that drew a PCIe row with no counters passed the
 first weave test, because it only checked the rows it expected. The test now

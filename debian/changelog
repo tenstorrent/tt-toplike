@@ -8,12 +8,14 @@ tt-toplike (0.13.7) noble; urgency=medium
     rows on the same columns show each chip's power, the busiest chip's
     aiclk, PCIe throughput and host CPU, each ending in its current
     value. A row whose signal is missing is left out. tok/s stays in
-    the LIVE panel.
+    the LIVE panel. On a short band the starfield keeps 3 rows before
+    the aiclk, PCIe and host rows and the convergence strip get theirs.
   * --mock carries a host CPU and RSS reading, so the host row appears.
   * A resumed run that appends to the same log no longer draws a step
     above its budget: the resume line sets the absolute budget, a new
-    run header resets the per-run data, and a step past its budget is
-    shown alone.
+    run header resets the per-run data. When the step is past its
+    budget, the header shows `step N` without `/ M` and the convergence
+    strip makes no schedule claim.
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 02 Oct 2026 12:00:00 +0000
 

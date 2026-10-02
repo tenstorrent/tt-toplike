@@ -53,22 +53,38 @@ share). Top to bottom it holds:
 5. Verdict line (Layer B).
 6. Convergence strip (Layer C).
 
+This frame is copied from a 134x40 render of `--mock` (two mock chips, after
+consecutive steps). The mock backend has no PCIe counters, so it has no
+`pcie` row. A backend with counters adds one between `aiclk` and `host`,
+ending in its throughput (`310 MB/s`).
+
 ```
-STEP ANATOMY  last 112 steps · median 85 ms
-  173 ·        ◆                          ·
-      · ·   ·       ·      ·   ·        · ·
-   64 ──·─·──·──·─·──·──·─·──·──·─·──·─·──── median
-chip0  ▃▃▄▃▃▃▄▄▃▃▃▄▃▃▃▄▃▃▃▄▃▃  58% TDP
-chip1  ▄▄▄▃▄▄▄▅▄▄▄▄▃▄▄▄▄▃▄▄▄▄  61% TDP
-aiclk  ▇▇▇▇▇▇▅▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇  1086 MHz
-pcie   ▁▁▃▁▁▂▁▁▁▃▁▁▁▂▁▁▁▃▁▁▁▂  310 MB/s
-host   ▃▃▃▃▄▃▃▃▃▃▃▄▃▃▃▃▃▃▄▃▃▃  cpu 140%
-▸ compute-bound - busiest chip at 58% of TDP
-loss ↘ -0.309/100 logs  noise 0.029
+STEP ANATOMY  last 112 steps · median 83 ms
+  173           ◆  ◆  ◆              ◆  ◆  ◆
+             ◆           ◆        ◆
+       ◆  ◆                 ◆  ◆
+
+      ⢄┈⡠⠢⡀⢀⠔⠄┈⡠⠂⡀⢀⠄⢄┈⡀⠢⡀┈⠔⠄┈⡠⠢┈⢀⠒⠄┈⡐⠂┈⢀⠂⠄┈⡀⠢┈⢀⠒⠄┈⡐⠢┈⢀⠒⠄┈⡐⠢┈⢀⠒ median
+   64  ⠂   ⠂  ⠒  ⠐⠂  ⠒  ⠐⠂ ⠈⠂  ⠁⠂  ⠒  ⠑⠂ ⠈⠒  ⠑⠂ ⠈⠒  ⠑⠂ ✺⠒  ⠑⠂
+chip0 ⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▂▂▂▂▂▂▂▂▂▂▃▃▃▃▃▃▃▃ 37% TDP
+chip1 ⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▃▃▃▃▃▃▃▃▃▃▃▃▃▄▄▄▄▄▄ 52% TDP
+aiclk ⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅███████▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇████████████ 1003 MHz
+host  ⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅⋅███████▇▇▇▇▇▇▇▇▇▇▇▆▆▆▆▆▆▇▇▇▆▆▆▆▆▇▇▇▇▇ cpu 136%
+▸ compute-bound - busiest chip at 52% of TDP, host cpu 136%
+loss ↘ -0.367/100 logs  noise 0.029  best 6 logs ago  base lr 3.0e-4
 ```
 
-With three chips and all three aux rows, a 13-row band leaves 4 star rows.
-The starfield reaches 6 rows when fewer weave rows are present.
+The `⋅` cells at the left of the weave rows are steps taken before the view
+first saw them, so no chip reading exists for them. The `┈` horizon shows
+on the median's row wherever no star is drawn. The fourth star row is blank
+in this frame because no shown step fell in its time range.
+
+With three chips and all three aux rows, a 13-row band leaves 4 star rows
+when a verdict is shown and 5 without one. The starfield reaches 6 rows when
+fewer weave rows are present. The band is capped at 13 rows so the river
+keeps the larger share of the screen. At a 30-row terminal the band is 10
+rows: with three chips, two aux rows and a verdict the starfield gets 3 rows
+and the strip is left out.
 
 Columns: the first 6 hold row labels and the starfield's axis values. One
 column is left free at the right. When at least 20 data columns remain
@@ -234,11 +250,15 @@ reverse:
 1. Header and one star row (minimum 2 rows, always kept).
 2. Verdict.
 3. Chip rows.
-4. Aux rows.
-5. Convergence strip.
-6. Extra star rows, up to 6 in all.
+4. Star rows, up to 3 in all.
+5. Aux rows.
+6. Convergence strip.
+7. Star rows, up to 6 in all.
 
-With no step samples there is no star row and no chip row.
+The starfield is the band's main layer, so it gets 3 rows before any aux
+row. With no step samples there is no star row and no chip row. When steps
+exist but none has a time the canvas can place (every time is 0, negative or
+not finite), there is no star row and the chip rows still draw.
 
 Side-panel narrow-width rules (`panel_fit`) are unchanged.
 
