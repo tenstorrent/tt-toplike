@@ -19,7 +19,7 @@
 - The screen is tinted full-screen, and every takeover variant draws its animation in one fixed 72x24 box centered on it (it shrinks to fit a smaller terminal). The box is the terminal's default background. Full vs. subset scope changes *content* (which chips are shown as targeted, chip-row density), never the box. (Updated 2026-10-01; this originally said every variant renders full-screen.)
 - When `display_mode == DisplayMode::HivemindSweeper`, no takeover is created — the detected reset is injected as a real `SniffEvent` into the live `Hivemind` engine instead.
 - Any keypress while a takeover is active calls `skip()` (during a `demo`, Esc and q/Q end the whole demo instead) and is fully consumed that keypress — it must never also reach normal key dispatch (mode switch, quit, etc.) in the same event.
-- A second reset detected while one is already being tracked (`ResetDetector` has an active entry) is dropped — no queueing.
+- A second reset detected while a takeover is running (`ResetDetector` has an active entry) gets no takeover of its own — no queueing. (Updated 2026-10-01: this is now true of the takeover only. The status segment and HivemindSweeper feed events follow every live `tt-smi -r` through `ResetStatus`, so the second reset still shows in the segment and is reported once.)
 - Out of scope: Galaxy-tray resets (`-glx_reset`/`-glx_reset_auto`), the egui GUI binary, any mid-session disable toggle beyond per-animation skip.
 - **Descoped from the spec, flagged for explicit sign-off:** the spec's "optional kmsg enrichment" (tailing `/dev/kmsg` for real tt-kmd per-chip reset lines when readable) is not built by this plan. Every variant (Tasks 4–9) only implements the spec's *fallback* path — generic, honestly-labeled per-chip pacing driven by `chip_count` and real process-liveness, never a real per-chip completion claim. This still satisfies the spec's "never claim a specific chip completed when that isn't actually known" requirement; it just means no variant currently shows literal captured tt-kmd log text. Real kmsg-line enrichment is a clean follow-up (its own task, added on top of the existing per-variant pacing) once the base feature is verified end-to-end — not built here to keep this plan's scope to what's needed for a correct, honest first version.
 
@@ -2270,6 +2270,37 @@ git commit -m "feat: wire reset takeover detection into the TUI main loop"
 **Interfaces:** N/A.
 
 This project's established practice (AGENTS.md Phase 27/28/33 entries) is: don't ship an assumption about real hardware/CLI behavior without checking it against the real thing. This plan's parsing logic (Task 1) was written against `tt-smi --help`'s documented grammar, not observed real invocations.
+
+- [ ] **Step 0: No-hardware smoke test with a stand-in `tt-smi`** (added 2026-10-01; needs no chip and no lease)
+
+Make a stand-in script that only sleeps. It never touches a device. The kernel names a script's process after the file, so the detector sees a process called `tt-smi` whose cmdline contains `-r`.
+
+```bash
+mkdir -p /tmp/fake-tt-smi && cd /tmp/fake-tt-smi
+printf '#!/bin/sh\nsleep "${SLEEP:-20}"\nexit 0\n' > tt-smi
+chmod +x tt-smi
+```
+
+Terminal 1, once per behavior:
+
+```bash
+tt-toplike-tui --mock 2
+tt-toplike-tui --mock 2 --tt-smi-reset-behavior dazzle
+tt-toplike-tui --mock 2 --tt-smi-reset-behavior demo
+```
+
+Terminal 2, from `/tmp/fake-tt-smi`, while the TUI runs:
+
+```bash
+./tt-smi -r
+```
+
+Observe:
+- Within about 2 s the status bar shows `⟳ tt-smi -r · all chips · resetting`. It stays until the stand-in exits (20 s), then shows `✓ tt-smi -r done` for 10 s, then disappears.
+- Default (`inform`): no takeover appears.
+- `dazzle`: a takeover appears in a centered box over a tinted screen and ends shortly after the stand-in exits.
+- `demo`: the seven-animation sequence plays at boot with `DEMO` in the box title (any key skips one, Esc, q or Q ends it). Running `./tt-smi -r` again starts the sequence over with `DEMO (real reset)` in the title, and the status segment runs as above.
+- Optional: start a second `./tt-smi -r 1` while the first runs. The segment switches to `1 chip(s)` once and stays there until that one exits. It does not alternate.
 
 - [ ] **Step 1: Lease a chip** per this project's hardware-safety convention (see the "Tenstorrent hardware: always lease first" guidance) before running any reset.
 

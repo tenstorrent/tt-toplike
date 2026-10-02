@@ -632,12 +632,37 @@ animation is never mistaken for a real one. The tag goes through
 key skips one animation; non-demo takeovers still treat every key as a skip.
 Key routing, boot gating and takeover choice are the pure functions in
 `reset_status.rs` (`demo_key_action`, `should_start_boot_demo`,
-`takeover_for_event`, `replace_takeover`). The boot demo uses a synthetic
-full reset over the real device count and is skipped in HivemindSweeper. On
-a terminal too small to draw the box the sequence plays unseen for 56 s,
-and keys still skip it.
+`boot_takeover`, `takeover_for_event`, `replace_takeover`). The boot demo
+uses a synthetic full reset over the real device count and is skipped in
+HivemindSweeper.
 State and per-scan decisions live in `src/ui/tui/reset_status.rs`. The
 segment follows the real pid, so a skipped takeover or HivemindSweeper's
 early detector clear does not stop it reaching "done". The status bar now
 drops whole hotkey groups (then hint groups) from the right to fit beside
-the chip telemetry, so a narrow terminal no longer cuts a label.
+the chip telemetry. The old bar was one clipped paragraph, so on a narrow
+terminal it cut off the chip telemetry at the right edge; now the
+telemetry stays and hotkeys go first.
+
+### Reset-behavior fix wave (Oct 1, 2026)
+
+Review minors from the two tasks above, fixed in one pass.
+- `ResetStatus` now follows every live `tt-smi -r` process by itself (pid
+  and cmdline together, pruned each scan). Before, it was replaced only when
+  the single-slot `ResetDetector` reported a new reset. Two overlapping
+  resets made the segment flip between them every 2 s and sent a
+  HivemindSweeper feed event every 2 s. A reset during a 56 s demo got no
+  segment at all. Now each distinct reset is reported once, the segment
+  shows the newest live reset's scope, and `done` starts when the last one
+  ends. `ResetDetector` only holds the reset a takeover is for
+  (`begin`/`is_finished`/`clear`), so a second reset still gets no second
+  takeover.
+- `scan_resets` takes the process snapshot as a closure and calls it only
+  when the behavior detects resets, so the loop has one tested gate.
+- `boot_takeover` does not start the boot demo on a terminal under 8x4
+  (`takeover_fits`). Before, the demo played unseen there and swallowed
+  keys for up to 56 s.
+- `--help` lists each value once, from the `ResetBehavior` doc comments.
+- A demo test renders the Missile Command slot for chips 1 and 3 of 4 and
+  checks which lanes are lit. The Task 2 report said this was covered by
+  Missile's own tests. It was not: those only check that rendering does
+  not panic.

@@ -32,7 +32,9 @@ and never fires unless the behavior is `dazzle` or `demo`. The default,
   a candidate follow-up, not built here.
 - The egui GUI binary (`tt-toplike-egui`) — TUI only for this pass.
 - Overlapping/queued resets — if a second reset is detected while a
-  takeover is already active or pending, it is dropped. Rare in practice
+  takeover is already active or pending, it gets no takeover of its own.
+  (Updated 2026-10-01: the status segment and HivemindSweeper feed events
+  still follow every live reset.) Rare in practice
   (resets are usually deliberate, spaced-out operator actions), and a
   queue adds real state-machine complexity for a case that's cheap to
   just ignore.
@@ -269,7 +271,8 @@ It plays once when toplike starts (not in HivemindSweeper) and again on
 every real reset. A boot demo uses a synthetic full reset over the real
 device count. A real reset uses the real event, so chip labels and scope
 match it, and it replaces a boot demo that is still running. A second
-real reset during a real-reset demo is dropped, as before.
+real reset during a real-reset demo gets no takeover of its own, as
+before. It still shows in the status segment (updated 2026-10-01).
 
 Each animation gets an 8 second slot. At 5 seconds the variant is told its
 reset finished and plays its "done" beat. A slot ends when 8 seconds have
