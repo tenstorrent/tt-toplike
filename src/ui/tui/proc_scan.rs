@@ -371,14 +371,36 @@ mod tests {
         )
     }
 
+    /// Upper bound for one `request` or `try_result` call. A blocking call
+    /// waits for a whole fake scan (300 ms or more), so 50 ms still catches
+    /// one, with room for a loaded box running the suite in parallel.
+    const CALL_BOUND: Duration = Duration::from_millis(50);
+
+    /// How long a test waits for a worker event before failing. Generous,
+    /// because each wait ends as soon as the event happens.
+    const EVENT_DEADLINE: Duration = Duration::from_secs(5);
+
+    /// Poll `cond` every few milliseconds until it holds or `EVENT_DEADLINE`
+    /// passes. Returns whether it held.
+    fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + EVENT_DEADLINE;
+        while Instant::now() < deadline {
+            if cond() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        cond()
+    }
+
     /// Poll `try_result` until a reply arrives or `limit` passes. Every
-    /// individual call must return quickly.
+    /// individual call must stay under `CALL_BOUND`.
     fn wait_result(h: &mut ScannerHandle, limit: Duration) -> Option<ScanResult> {
         let deadline = Instant::now() + limit;
         while Instant::now() < deadline {
             let t = Instant::now();
             let r = h.try_result();
-            assert!(t.elapsed() < Duration::from_millis(5), "try_result blocked");
+            assert!(t.elapsed() < CALL_BOUND, "try_result blocked");
             if r.is_some() {
                 return r;
             }
@@ -389,20 +411,22 @@ mod tests {
 
     #[test]
     fn request_returns_immediately_while_scan_is_slow() {
-        let (f, _) = fake(300);
+        let (f, _) = fake(1_000);
         let mut h = ScannerHandle::spawn(f);
         let t = Instant::now();
         assert!(h.request(ScanRequest::default()));
-        assert!(t.elapsed() < Duration::from_millis(5), "request blocked");
+        assert!(t.elapsed() < CALL_BOUND, "request blocked");
     }
 
     #[test]
     fn try_result_never_blocks_during_a_scan() {
         // The calls run on a helper thread so a blocking `try_result` fails
-        // this test on a timeout and cannot hang the suite.
+        // this test on a timeout and cannot hang the suite. The fake scan
+        // lasts 1.5 s, far longer than the ten polls below need even on a
+        // loaded box, so every poll lands while the scan runs.
         let (done_tx, done_rx) = mpsc::channel::<Vec<Duration>>();
         std::thread::spawn(move || {
-            let (f, _) = fake(300);
+            let (f, _) = fake(1_500);
             let mut h = ScannerHandle::spawn(f);
             let mut took = Vec::new();
             let t = Instant::now();
@@ -418,11 +442,15 @@ mod tests {
             let _ = done_tx.send(took);
             std::mem::forget(h); // keep a blocked worker out of the timing
         });
-        let took = done_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("try_result blocked");
+        let took = match done_rx.recv_timeout(EVENT_DEADLINE) {
+            Ok(took) => took,
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!("try_result blocked"),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the helper thread failed an assertion (see its panic above)")
+            }
+        };
         for t in took {
-            assert!(t < Duration::from_millis(5), "try_result took {t:?}");
+            assert!(t < CALL_BOUND, "try_result took {t:?}");
         }
     }
 
@@ -433,10 +461,15 @@ mod tests {
         assert!(h.request(ScanRequest::default()));
         assert!(!h.request(ScanRequest::default()));
         assert!(!h.request(ScanRequest::default()));
-        let r = wait_result(&mut h, Duration::from_secs(2)).expect("first result");
+        let r = wait_result(&mut h, EVENT_DEADLINE).expect("first result");
         assert_eq!(r.took, Duration::from_millis(1));
-        // Give a wrongly queued second scan time to run, then check none did.
-        std::thread::sleep(Duration::from_millis(300));
+        // A wrongly queued second scan would start as soon as the first one
+        // ended. Watch for it for one second (over six fake scan lengths);
+        // the wait ends early if it starts.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while calls.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(h.try_result().is_none(), "no second result exists");
     }
@@ -447,7 +480,7 @@ mod tests {
         let mut h = ScannerHandle::spawn(f);
         for n in 1..=3u64 {
             assert!(h.request(ScanRequest::default()), "request {n} accepted");
-            let r = wait_result(&mut h, Duration::from_secs(2)).expect("result");
+            let r = wait_result(&mut h, EVENT_DEADLINE).expect("result");
             assert_eq!(r.took, Duration::from_millis(n));
             assert!(h.try_result().is_none(), "result {n} delivered once");
         }
@@ -456,10 +489,13 @@ mod tests {
 
     #[test]
     fn drop_mid_scan_returns_promptly() {
-        let (f, _) = fake(3_000);
+        let (f, calls) = fake(3_000);
         let mut h = ScannerHandle::spawn(f);
         h.request(ScanRequest::default());
-        std::thread::sleep(Duration::from_millis(20)); // the scan is running
+        assert!(
+            wait_until(|| calls.load(Ordering::SeqCst) == 1),
+            "the scan started"
+        );
         let t = Instant::now();
         drop(h);
         assert!(t.elapsed() < Duration::from_secs(1), "drop hung");
@@ -475,22 +511,26 @@ mod tests {
         };
         let mut h = ScannerHandle::spawn(f);
         assert!(h.request(ScanRequest::default()));
-        // Wait for the panic reply to be taken: try_result returns None but
-        // clears the outstanding flag, so a new request is accepted.
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while calls.load(Ordering::SeqCst) < 1 && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
+        // The panic reply arrives after the fake's sleep, the panic hook (slow
+        // when RUST_BACKTRACE makes it capture a backtrace), the unwind and
+        // the send. Taking it returns None and clears the outstanding flag,
+        // so poll: every pass must see no result, and the loop ends when a
+        // new request is accepted.
+        let deadline = Instant::now() + EVENT_DEADLINE;
+        let mut accepted = false;
+        while Instant::now() < deadline {
+            assert!(h.try_result().is_none(), "a panicked scan yields no result");
+            if h.request(ScanRequest::default()) {
+                accepted = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
         }
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(h.try_result().is_none(), "a panicked scan yields no result");
-        assert!(
-            h.request(ScanRequest::default()),
-            "accepted after the panic"
-        );
-        let r = wait_result(&mut h, Duration::from_secs(2)).expect("worker still serves");
+        assert!(accepted, "accepted after the panic");
+        let r = wait_result(&mut h, EVENT_DEADLINE).expect("worker still serves");
         assert_eq!(r.took, Duration::from_millis(2));
         assert!(h.request(ScanRequest::default()));
-        assert!(wait_result(&mut h, Duration::from_secs(2)).is_some());
+        assert!(wait_result(&mut h, EVENT_DEADLINE).is_some());
     }
 
     #[test]
@@ -505,7 +545,7 @@ mod tests {
         let seen = Arc::new(std::sync::Mutex::new(None));
         let mut h = ScannerHandle::spawn(NameProbe(seen.clone()));
         h.request(ScanRequest::default());
-        wait_result(&mut h, Duration::from_secs(2)).expect("result");
+        wait_result(&mut h, EVENT_DEADLINE).expect("result");
         assert_eq!(*seen.lock().unwrap(), Some(true));
         assert!(!is_scan_thread(), "the test thread is not the worker");
     }
@@ -573,6 +613,10 @@ mod tests {
         assert!(serving.is_empty());
     }
 
+    /// Runs the real scanner on this machine. It reads /proc (Linux) or the
+    /// sysinfo process table (other platforms), so it stays ungated. With a
+    /// TT inference server up, the real `InferenceServerProbe` may make
+    /// localhost HTTP calls to it (150 ms timeout each).
     #[test]
     fn real_scanner_reads_this_machine_twice_without_panicking() {
         let mut s = Scanner::new();
@@ -592,20 +636,126 @@ mod tests {
         }
     }
 
-    /// The body of `run_app` in `mod.rs`, the render/input loop.
-    fn run_app_source() -> &'static str {
-        let src = include_str!("mod.rs");
-        let start = src.find("\nfn run_app(").expect("run_app exists");
-        let len = src[start + 1..].find("\n}\n").expect("run_app ends");
-        &src[start..start + 1 + len]
+    /// `src` with `//` and `/* */` comments removed. String, raw string and
+    /// char literals are copied through untouched, so a `//` or a brace
+    /// inside one is kept as text. A small lexer for the source guard
+    /// below; it covers the Rust in `mod.rs` and is not a full parser.
+    fn strip_comments(src: &str) -> String {
+        let b = src.as_bytes();
+        let mut out = String::with_capacity(src.len());
+        let mut i = 0;
+        while i < b.len() {
+            let c = b[i];
+            if c == b'/' && b.get(i + 1) == Some(&b'/') {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+            } else if c == b'r' && matches!(b.get(i + 1), Some(b'"') | Some(b'#')) {
+                // Raw string: r"..." or r#"..."#.
+                let start = i;
+                let mut j = i + 1;
+                let mut hashes = 0;
+                while b.get(j) == Some(&b'#') {
+                    hashes += 1;
+                    j += 1;
+                }
+                if b.get(j) != Some(&b'"') {
+                    out.push('r');
+                    i += 1;
+                    continue;
+                }
+                j += 1;
+                let close: String = std::iter::once('"')
+                    .chain(std::iter::repeat_n('#', hashes))
+                    .collect();
+                let end = src[j..]
+                    .find(&close)
+                    .map_or(b.len(), |k| j + k + close.len());
+                out.push_str(&src[start..end]);
+                i = end;
+            } else if c == b'"' {
+                let start = i;
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i = (i + 1).min(b.len());
+                out.push_str(&src[start..i]);
+            } else if c == b'\'' {
+                // A char literal ('x', '\n', '{') or a lifetime ('a).
+                let len = if b.get(i + 1) == Some(&b'\\') {
+                    src[i + 2..].find('\'').map(|k| k + 3)
+                } else {
+                    let ch_len = src[i + 1..].chars().next().map_or(0, char::len_utf8);
+                    (b.get(i + 1 + ch_len) == Some(&b'\'')).then_some(ch_len + 2)
+                };
+                let len = len.unwrap_or(1);
+                out.push_str(&src[i..i + len]);
+                i += len;
+            } else {
+                let ch_len = src[i..].chars().next().map_or(1, char::len_utf8);
+                out.push_str(&src[i..i + ch_len]);
+                i += ch_len;
+            }
+        }
+        out
     }
 
-    /// Guard at the wiring layer: the loop must reach the monitors only
+    /// The text of `run_app` in `mod.rs` (the render/input loop), comments
+    /// removed. The end is found by matching braces from the body's opening
+    /// brace, skipping braces inside string and char literals.
+    fn run_app_source() -> String {
+        let code = strip_comments(include_str!("mod.rs"));
+        let start = code.find("\nfn run_app(").expect("run_app exists");
+        let b = code.as_bytes();
+        let open = start + code[start..].find('{').expect("run_app body");
+        let mut depth = 0usize;
+        let mut i = open;
+        while i < b.len() {
+            match b[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return code[start..=i].to_string();
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'"' {
+                        i += if b[i] == b'\\' { 2 } else { 1 };
+                    }
+                }
+                b'\'' if b.get(i + 2) == Some(&b'\'') => i += 2, // '{' or '}'
+                _ => {}
+            }
+            i += 1;
+        }
+        panic!("run_app has no closing brace");
+    }
+
+    #[test]
+    fn strip_comments_keeps_literals_and_drops_comments() {
+        let src = "a // x.scan(\nb /* y.scan( */ \"// {\" '{' r#\"}\"# c";
+        assert_eq!(strip_comments(src), "a \nb  \"// {\" '{' r#\"}\"# c");
+    }
+
+    /// Tripwire at the wiring layer: the loop must reach the monitors only
     /// through the scanner. A monitor constructed or refreshed inside
-    /// `run_app` would put the ~135 ms scan back on the render thread.
+    /// `run_app` would put the ~135 ms scan back on the render thread. It
+    /// matches source text, so it catches the plain ways back to an inline
+    /// scan; an indirect call through a helper function would get past it.
     #[test]
     fn render_loop_reaches_the_monitors_only_through_the_handle() {
         let body = run_app_source();
+        let body = body.as_str();
+        assert!(body.ends_with('}') && !body.contains("fn render_header("));
         for banned in [
             "HostProcessMonitor::new",
             "ProcessMonitor::new",
@@ -630,6 +780,8 @@ mod tests {
         assert!(body.contains("want_processes: reset_behavior.detects()"));
     }
 
+    /// Runs the real scanner on this machine; ungated, and it may probe a
+    /// local TT inference server over HTTP, as the test above notes.
     #[test]
     fn real_scanner_skips_the_reset_snapshot_when_not_wanted() {
         let mut s = Scanner::new();
