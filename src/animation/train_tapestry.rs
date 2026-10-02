@@ -3,11 +3,12 @@
 
 //! Pure helpers behind the Training view's tapestry band.
 //!
-//! The band replaces a decorative node grid with layers drawn from signals we
-//! really read: per-step wall time, per-chip power, hardware gauges, a
-//! diagnosis, and loss-convergence numbers. Everything that can be computed
-//! without a terminal lives here so each piece can be tested directly; the
-//! renderer in `train_view.rs` only places what these functions return.
+//! The band draws layers from signals we really read: a starfield of per-step
+//! wall time, a weave of per-chip power, aiclk, PCIe and host CPU on the same
+//! time axis, a diagnosis, and loss-convergence numbers. Everything that can
+//! be computed without a terminal lives here (and in `train_canvas.rs`) so
+//! each piece can be tested directly; the renderer in `train_view.rs` only
+//! places what these functions return.
 
 use crate::workload::train::{StepSample, STEP_HISTORY};
 use std::collections::{BTreeMap, VecDeque};
@@ -19,8 +20,10 @@ pub const MAX_LANES: usize = 3;
 /// A chip whose aiclk falls below this fraction of the highest it has shown
 /// is marked as throttled in its lane.
 pub const AICLK_DROP_FRAC: f32 = 0.90;
-/// Tallest the step-time bars grow.
-const MAX_BAR_ROWS: usize = 4;
+/// Tallest the starfield grows, in cell rows (4 dot rows each).
+pub const STAR_MAX_ROWS: usize = 6;
+/// Weave rows below the chip rows: aiclk, PCIe and host CPU.
+pub const MAX_AUX_ROWS: usize = 3;
 
 /// Compute-bound: the busiest chip is at least this fraction of its TDP.
 const COMPUTE_BOUND_TDP_FRAC: f32 = 0.50;
@@ -31,8 +34,9 @@ const HOST_BOUND_TDP_FRAC: f32 = 0.30;
 const HOST_BOUND_CPU_PCT: f32 = 100.0;
 /// Loss slope (per 100 logged losses) smaller than this counts as flat.
 const SLOPE_EPS: f32 = 0.002;
-/// A pass of the grid cursor never runs faster than this, because a cursor
-/// that crosses the band several times between frames is not visible.
+/// One swell of the newest stars never runs faster than this, because a
+/// brightness cycle that completes several times between frames is not
+/// visible.
 const MIN_PASS_SECS: f32 = 0.2;
 
 /// Median of `values`, `None` when empty.
@@ -268,31 +272,39 @@ pub fn diagnose(r: &Readings) -> Option<Diagnosis> {
 /// What the band would like to draw, before it is fitted to the height.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BandWants {
+    /// There are step samples to draw as stars. Without them neither the
+    /// starfield nor the chip rows have a column to draw.
+    pub stars: bool,
+    /// Chip power rows (one per chip, at most `MAX_LANES`).
     pub lanes: usize,
-    pub gauges: usize,
+    /// Aux weave rows with a signal: aiclk, PCIe, host CPU (0 to 3).
+    pub aux: usize,
     pub verdict: bool,
     pub strip: bool,
 }
 
-/// Rows granted to each layer. Top to bottom the band draws: header, bars,
-/// grid, lanes, gauges, verdict, strip.
+/// Rows granted to each layer. Top to bottom the band draws: header,
+/// starfield, chip rows, aux rows, verdict, strip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BandPlan {
-    pub bar_rows: usize,
-    pub grid_row: bool,
+    pub star_rows: usize,
     pub lane_rows: usize,
-    pub gauge_rows: usize,
+    pub aux_rows: usize,
     pub verdict_row: bool,
     pub strip_row: bool,
 }
 
 /// Fit the layers into a band `height` rows tall, header included. Rows are
-/// handed out in priority order: one bar row, verdict, chip lanes, gauges,
-/// strip, grid, then extra bar height. As the terminal gets shorter, layers
-/// are lost in the reverse order: extra bar height first, then the grid row,
-/// then the convergence strip, then gauges, then lanes, then the verdict. The
-/// first bar row is kept as long as there is a row below the header. The
-/// total never exceeds `height - 1`.
+/// handed out in priority order: one star row, verdict, chip rows, aux rows,
+/// strip, then extra star rows up to [`STAR_MAX_ROWS`]. As the terminal gets
+/// shorter, layers are lost in the reverse order: extra star rows first, then
+/// the strip, then aux rows, then chip rows, then the verdict. The first star
+/// row is kept as long as there is a row below the header.
+///
+/// With no step samples (`stars` false) there is no starfield and no chip
+/// row, whatever `lanes` asks for, because both draw one column per step.
+/// Aux rows still draw their current values. The total never exceeds
+/// `height - 1`.
 pub fn plan_band(height: usize, w: BandWants) -> BandPlan {
     let mut rem = height.saturating_sub(1);
     let mut take = |want: usize| -> usize {
@@ -300,49 +312,41 @@ pub fn plan_band(height: usize, w: BandWants) -> BandPlan {
         rem -= n;
         n
     };
-    let bar_min = take(1);
+    let star_min = if w.stars { take(1) } else { 0 };
     let verdict_row = w.verdict && take(1) == 1;
-    let lane_rows = take(w.lanes);
-    let gauge_rows = take(w.gauges.div_ceil(2).min(2));
+    let lane_rows = if w.stars {
+        take(w.lanes.min(MAX_LANES))
+    } else {
+        0
+    };
+    let aux_rows = take(w.aux.min(MAX_AUX_ROWS));
     let strip_row = w.strip && take(1) == 1;
-    let grid_row = take(1) == 1;
-    let bar_rows = bar_min + take(MAX_BAR_ROWS - 1);
+    let star_rows = if star_min > 0 {
+        star_min + take(STAR_MAX_ROWS - 1)
+    } else {
+        0
+    };
     BandPlan {
-        bar_rows,
-        grid_row,
+        star_rows,
         lane_rows,
-        gauge_rows,
+        aux_rows,
         verdict_row,
         strip_row,
     }
 }
 
-/// Seconds for one pass of the grid cursor, and whether that was raised to the
-/// visible minimum. The cursor makes one pass per measured step. `None` until
-/// a step time is known.
-pub fn pass_secs(step_ms: f32) -> Option<(f32, bool)> {
+/// Seconds for one swell of the newest stars: one per measured step, never
+/// shorter than [`MIN_PASS_SECS`]. `None` until a step time is known.
+pub fn pass_secs(step_ms: f32) -> Option<f32> {
     if step_ms.is_nan() || step_ms <= 0.0 {
         return None;
     }
-    let secs = step_ms / 1000.0;
-    if secs < MIN_PASS_SECS {
-        Some((MIN_PASS_SECS, true))
-    } else {
-        Some((secs, false))
-    }
+    Some((step_ms / 1000.0).max(MIN_PASS_SECS))
 }
 
-/// Position within the current pass, in `[0, 1)`.
-pub fn pass_fraction(frame: u64, fps: f32, pass_secs: f32) -> f32 {
-    if pass_secs.is_nan() || pass_secs <= 0.0 || fps.is_nan() || fps <= 0.0 {
-        return 0.0;
-    }
-    ((frame as f32 / fps) / pass_secs).fract()
-}
-
-/// Advance a pulse phase in `[0, 1)` by `frames` frames of a pass lasting
+/// Advance a phase in `[0, 1)` by `frames` frames of a pass lasting
 /// `pass_secs`. Accumulating (rather than recomputing from absolute time)
-/// keeps the cursor where it is when the pass length changes: only its speed
+/// keeps the phase where it is when the pass length changes: only its speed
 /// changes. An unusable `pass_secs` or `fps` leaves the phase alone.
 pub fn advance_phase(phase: f32, frames: u64, fps: f32, pass_secs: f32) -> f32 {
     if pass_secs.is_nan() || pass_secs <= 0.0 || fps.is_nan() || fps <= 0.0 {
@@ -362,8 +366,8 @@ pub struct ChipSample {
     pub aiclk_mhz: u32,
 }
 
-/// Chip readings keyed by the run's sample sequence number, plus best-so-far
-/// values for the gauges. A reading is taken when the view first sees each
+/// Chip readings keyed by the run's sample sequence number, plus the
+/// best-so-far values the weave rows are scaled to. A reading is taken when the view first sees each
 /// sequence number, so it is close to the moment the step was recorded, but
 /// not exactly at it.
 #[derive(Debug, Default)]
@@ -378,7 +382,6 @@ pub struct ChipHistory {
     /// number, with the same gap rule as `pcie`.
     host: VecDeque<(u64, f32)>,
     aiclk_max: BTreeMap<usize, u32>,
-    best_tps: f32,
     best_pcie_bps: f64,
 }
 
@@ -387,16 +390,17 @@ impl ChipHistory {
     /// summed PCIe bytes/sec and host CPU percent (each `None` when that
     /// signal is absent), at sample sequence number `seq`
     /// (`TrainState::step_seq`). Each ring keeps the newest `STEP_HISTORY`
-    /// readings. The sequence number
-    /// rises by one per recorded step sample and does not go down when a
-    /// progress bar restarts. A repeat of the same number is ignored. A lower
-    /// number can only come from a new run, so everything is cleared and old
-    /// samples never appear as the new run's lanes. (The view also clears
-    /// the history when the run's identity changes, which covers a new run
-    /// whose number does not go down.)
+    /// readings.
     ///
-    /// Call `record` before `note_tps`/`note_pcie` each frame, because a
-    /// reset here clears the bests too. `record(seq, &[])` still marks `seq`
+    /// The sequence number rises by one per recorded step sample and does
+    /// not go down when a progress bar restarts. A repeat of the same number
+    /// is ignored. A lower number can only come from a new run, so everything
+    /// is cleared and old samples never appear as the new run's lanes. (The
+    /// view also clears the history when the run's identity changes, which
+    /// covers a new run whose number does not go down.)
+    ///
+    /// Call `record` before `note_pcie` each frame, because a reset here
+    /// clears the best too. `record(seq, &[])` still marks `seq`
     /// as seen, so a later call with the same number and some chips is
     /// ignored.
     pub fn record(
@@ -486,18 +490,6 @@ impl ChipHistory {
     /// Highest aiclk this chip has shown since the run (or tool) started.
     pub fn aiclk_max(&self, idx: usize) -> u32 {
         self.aiclk_max.get(&idx).copied().unwrap_or(0)
-    }
-
-    /// Fold in a tokens/sec reading and return the best so far.
-    pub fn note_tps(&mut self, tps: f32) -> f32 {
-        if tps.is_finite() && tps > self.best_tps {
-            self.best_tps = tps;
-        }
-        self.best_tps
-    }
-
-    pub fn best_tps(&self) -> f32 {
-        self.best_tps
     }
 
     /// Fold in a summed PCIe bytes/sec reading and return the best so far.
@@ -657,32 +649,52 @@ mod tests {
         );
     }
 
+    fn all_wants() -> BandWants {
+        BandWants {
+            stars: true,
+            lanes: 3,
+            aux: 3,
+            verdict: true,
+            strip: true,
+        }
+    }
+
+    /// Every height a band can have and every combination of wants: the
+    /// rows granted never exceed the rows below the header, no layer gets
+    /// more than it can draw, and nothing that draws per step is granted
+    /// without step samples.
     #[test]
     fn the_band_never_hands_out_more_rows_than_it_has() {
-        for height in 0..30usize {
-            for lanes in 0..=4usize {
-                for gauges in 0..=5usize {
-                    for verdict in [false, true] {
-                        for strip in [false, true] {
-                            let p = plan_band(
-                                height,
-                                BandWants {
+        for height in 0..=40usize {
+            for stars in [false, true] {
+                for lanes in 0..=4usize {
+                    for aux in 0..=4usize {
+                        for verdict in [false, true] {
+                            for strip in [false, true] {
+                                let want = BandWants {
+                                    stars,
                                     lanes,
-                                    gauges,
+                                    aux,
                                     verdict,
                                     strip,
-                                },
-                            );
-                            let used = p.bar_rows
-                                + usize::from(p.grid_row)
-                                + p.lane_rows
-                                + p.gauge_rows
-                                + usize::from(p.verdict_row)
-                                + usize::from(p.strip_row);
-                            assert!(
-                                used <= height.saturating_sub(1),
-                                "h={height} lanes={lanes} gauges={gauges}: used {used}"
-                            );
+                                };
+                                let p = plan_band(height, want);
+                                let used = p.star_rows
+                                    + p.lane_rows
+                                    + p.aux_rows
+                                    + usize::from(p.verdict_row)
+                                    + usize::from(p.strip_row);
+                                let ctx = format!("h={height} {want:?}: {p:?}");
+                                assert!(used <= height.saturating_sub(1), "{ctx}");
+                                assert!(p.star_rows <= STAR_MAX_ROWS, "{ctx}");
+                                assert!(p.lane_rows <= lanes.min(MAX_LANES), "{ctx}");
+                                assert!(p.aux_rows <= aux.min(MAX_AUX_ROWS), "{ctx}");
+                                assert!(!p.verdict_row || verdict, "{ctx}");
+                                assert!(!p.strip_row || strip, "{ctx}");
+                                if !stars {
+                                    assert_eq!((p.star_rows, p.lane_rows), (0, 0), "{ctx}");
+                                }
+                            }
                         }
                     }
                 }
@@ -692,59 +704,85 @@ mod tests {
 
     #[test]
     fn a_full_height_band_gives_every_layer_its_rows() {
-        let all = BandWants {
-            lanes: 3,
-            gauges: 4,
-            verdict: true,
-            strip: true,
+        // Header, 6 star rows, 3 chip rows, 3 aux rows, verdict, strip.
+        let full = BandPlan {
+            star_rows: STAR_MAX_ROWS,
+            lane_rows: 3,
+            aux_rows: 3,
+            verdict_row: true,
+            strip_row: true,
         };
+        assert_eq!(plan_band(15, all_wants()), full);
+        // Taller adds nothing: every layer is already whole.
+        assert_eq!(plan_band(40, all_wants()), full);
+        // One row short of that loses one star row and nothing else.
         assert_eq!(
-            plan_band(13, all),
+            plan_band(14, all_wants()),
             BandPlan {
-                bar_rows: 4,
-                grid_row: true,
-                lane_rows: 3,
-                gauge_rows: 2,
-                verdict_row: true,
-                strip_row: true,
+                star_rows: STAR_MAX_ROWS - 1,
+                ..full
             }
         );
     }
 
     #[test]
     fn short_bands_drop_layers_in_the_documented_order() {
-        let all = BandWants {
-            lanes: 3,
-            gauges: 4,
-            verdict: true,
-            strip: true,
+        let all = all_wants();
+        let rows = |h: usize| {
+            let p = plan_band(h, all);
+            (
+                p.star_rows,
+                p.verdict_row,
+                p.lane_rows,
+                p.aux_rows,
+                p.strip_row,
+            )
         };
-        // Header plus one bar row is the floor.
-        let p = plan_band(2, all);
-        assert_eq!((p.bar_rows, p.lane_rows, p.gauge_rows), (1, 0, 0));
-        assert!(!p.verdict_row && !p.strip_row && !p.grid_row);
-        // The verdict is the first thing added, then lanes, then gauges.
-        let p = plan_band(3, all);
-        assert!(p.verdict_row && p.lane_rows == 0);
-        let p = plan_band(4, all);
-        assert!(p.verdict_row && p.lane_rows == 1 && p.gauge_rows == 0);
-        // The strip and grid come last, before extra bar height.
-        let p = plan_band(9, all);
-        assert!(p.strip_row && !p.grid_row && p.bar_rows == 1);
-        let p = plan_band(10, all);
-        assert!(p.strip_row && p.grid_row && p.bar_rows == 1);
+        // Nothing below the header, then the header plus one star row.
+        assert_eq!(rows(1), (0, false, 0, 0, false));
+        assert_eq!(rows(2), (1, false, 0, 0, false));
+        // The verdict is added first, then chip rows, then aux rows.
+        assert_eq!(rows(3), (1, true, 0, 0, false));
+        assert_eq!(rows(4), (1, true, 1, 0, false));
+        assert_eq!(rows(6), (1, true, 3, 0, false));
+        assert_eq!(rows(7), (1, true, 3, 1, false));
+        assert_eq!(rows(9), (1, true, 3, 3, false));
+        // Then the strip, then extra star rows.
+        assert_eq!(rows(10), (1, true, 3, 3, true));
+        assert_eq!(rows(11), (2, true, 3, 3, true));
+        assert_eq!(rows(13), (4, true, 3, 3, true));
+    }
+
+    /// No step samples: no starfield and no chip rows even when chips exist,
+    /// and the rows go to the aux rows, the verdict and the strip.
+    #[test]
+    fn without_step_samples_only_the_aux_rows_verdict_and_strip_are_granted() {
+        let want = BandWants {
+            stars: false,
+            ..all_wants()
+        };
+        assert_eq!(
+            plan_band(13, want),
+            BandPlan {
+                star_rows: 0,
+                lane_rows: 0,
+                aux_rows: 3,
+                verdict_row: true,
+                strip_row: true,
+            }
+        );
+        // A short band hands its rows out in the same order.
+        let p = plan_band(3, want);
+        assert_eq!((p.verdict_row, p.aux_rows, p.strip_row), (true, 1, false));
     }
 
     #[test]
-    fn the_cursor_makes_one_pass_per_step_but_never_faster_than_visible() {
+    fn the_swell_makes_one_pass_per_step_but_never_faster_than_visible() {
         assert_eq!(pass_secs(0.0), None);
+        assert_eq!(pass_secs(-5.0), None);
         assert_eq!(pass_secs(f32::NAN), None);
-        assert_eq!(pass_secs(412.0), Some((0.412, false)));
-        assert_eq!(pass_secs(83.0), Some((MIN_PASS_SECS, true)));
-        assert_eq!(pass_fraction(0, 60.0, 1.0), 0.0);
-        assert!((pass_fraction(30, 60.0, 1.0) - 0.5).abs() < 1e-6);
-        assert!(pass_fraction(61, 60.0, 1.0) < 0.05, "wraps after a pass");
-        assert_eq!(pass_fraction(5, 60.0, 0.0), 0.0);
+        assert_eq!(pass_secs(412.0), Some(0.412));
+        assert_eq!(pass_secs(83.0), Some(MIN_PASS_SECS));
     }
 
     #[test]
@@ -760,18 +798,16 @@ mod tests {
     }
 
     /// A lower sample sequence number can only come from a new run, so it
-    /// clears the old samples, the aiclk maximum and the bests.
+    /// clears the old samples, the aiclk maximum and the PCIe best.
     #[test]
     fn a_lower_sequence_number_clears_old_samples_and_bests() {
         let mut h = ChipHistory::default();
         h.record(500, &[(0, 80.0, 1200)], None, None);
-        h.note_tps(9000.0);
         h.note_pcie(5e9);
         h.record(1, &[(0, 20.0, 800)], None, None);
         assert_eq!(h.sample_at(0, 500), None);
         assert_eq!(h.sample_at(0, 1).unwrap().power_w, 20.0);
         assert_eq!(h.aiclk_max(0), 800);
-        assert_eq!(h.best_tps(), 0.0);
         assert_eq!(h.best_pcie_bps(), 0.0);
     }
 
@@ -855,21 +891,21 @@ mod tests {
         assert_eq!(h.host_at(1), Some(10.0));
     }
 
+    /// The starfield puts two steps in each column. A 134-column terminal
+    /// leaves 56 data columns, which show 112 steps, and the design allows
+    /// up to 134 steps. A band wider than the history can fill keeps its
+    /// oldest columns empty.
     #[test]
     fn the_step_history_is_long_enough_for_a_full_width_starfield() {
-        // 134 steps at full width is about 67 columns of two dots, and the
-        // widest band is wider than that.
         assert!(STEP_HISTORY >= 134);
     }
 
     #[test]
     fn best_so_far_values_only_rise() {
         let mut h = ChipHistory::default();
-        assert_eq!(h.note_tps(100.0), 100.0);
-        assert_eq!(h.note_tps(50.0), 100.0);
-        assert_eq!(h.note_tps(f32::NAN), 100.0);
         assert_eq!(h.note_pcie(2e9), 2e9);
         assert_eq!(h.note_pcie(1e9), 2e9);
+        assert_eq!(h.note_pcie(f64::NAN), 2e9);
     }
 
     #[test]

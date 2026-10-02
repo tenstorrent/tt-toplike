@@ -58,6 +58,19 @@ fn step_ms_at(step: u64) -> f32 {
     base * wobble * if compiled { 1.8 } else { 1.0 }
 }
 
+/// Host CPU percent (100 is one saturated core) after `step` steps: a
+/// little over one core, the shape of a data loader plus the trainer's own
+/// thread, with two slow sine terms so the band's host row has texture.
+fn host_cpu_at(step: u64) -> f32 {
+    135.0 + 20.0 * (step as f32 * 0.05).sin() + 8.0 * (step as f32 * 0.31).sin()
+}
+
+/// Host resident memory after `step` steps: grows while the program cache
+/// fills and the data pipeline warms up, then holds.
+fn host_rss_at(step: u64) -> u64 {
+    1_800_000_000 + step.min(2_400) * 100_000
+}
+
 /// A deterministic stand-in for a live tt-train run.
 pub struct MockTrainRun {
     started: std::time::Instant,
@@ -158,6 +171,10 @@ impl MockTrainRun {
             0
         };
         st.first_seen = Some(self.started);
+        // The host reading the band's host row and the LIVE panel draw. The
+        // mock backend has no PCIe counters, so `--mock` shows no PCIe row.
+        st.host_cpu_pct = Some(host_cpu_at(step));
+        st.host_rss_bytes = Some(host_rss_at(step));
         st
     }
 }
@@ -241,6 +258,24 @@ mod tests {
     fn loss_history_stays_bounded() {
         let st = MockTrainRun::new().state_at(10_000.0);
         assert!(st.loss_history.len() <= LOSS_HISTORY);
+    }
+
+    /// `--mock` draws the band's host-CPU row, so the state carries a host
+    /// reading, and it comes from elapsed time so a screenshot is
+    /// reproducible. The mock backend has no PCIe counters, so there is no
+    /// PCIe row in mock.
+    #[test]
+    fn a_mock_run_has_a_reproducible_host_reading() {
+        let r = MockTrainRun::new();
+        let st = r.state_at(31.0);
+        let cpu = st.host_cpu_pct.expect("the host row needs a cpu reading");
+        assert!((50.0..400.0).contains(&cpu), "{cpu}");
+        assert!(st.host_rss_bytes.is_some_and(|b| b > 0));
+        assert_eq!(r.state_at(31.0).host_cpu_pct, st.host_cpu_pct);
+        assert_eq!(r.state_at(31.0).host_rss_bytes, st.host_rss_bytes);
+        // It moves over time, as a real reading does.
+        let later = r.state_at(37.0).host_cpu_pct.unwrap();
+        assert!((later - cpu).abs() > 0.5, "{cpu} vs {later}");
     }
 
     /// `--mock` has to carry every signal the step-anatomy chart draws:
