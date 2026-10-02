@@ -281,9 +281,10 @@ struct BandGeom {
 }
 
 /// The chip drawing the most power right now, standing in for "the chip the
-/// training run is on". The diagnosis and the aiclk row both describe it. Every chip the backend can see is a candidate because
-/// the trainer's chips are not identified, so an idle neighbour never dilutes
-/// the reading the way an average would.
+/// training run is on". The diagnosis and the aiclk row both describe it.
+/// Every chip the backend can see is a candidate because the trainer's chips
+/// are not identified, so an idle neighbour never dilutes the reading the way
+/// an average would.
 struct Busiest {
     index: usize,
     power_w: f32,
@@ -805,9 +806,10 @@ impl TrainView {
     }
 
     /// Record this frame's chip readings against the run's current sample
-    /// sequence number, and fold PCIe throughput into its best-so-far value. A new run (another pid or attach time) first
-    /// clears everything recorded for the previous one. `ChipHistory::record`
-    /// also clears on a lower sequence number, which remains as a fallback.
+    /// sequence number, and fold PCIe throughput into its best-so-far value.
+    /// A new run (another pid or attach time) first clears everything
+    /// recorded for the previous one. `ChipHistory::record` also clears on a
+    /// lower sequence number, which remains as a fallback.
     fn sample(&self, st: &TrainState, backend: &dyn TelemetryBackend) {
         let id = st.proc.as_ref().map(|p| (p.pid, st.first_seen));
         if self.run_id.get() != id {
@@ -1213,6 +1215,10 @@ impl TrainView {
             .map(|s| s.ms)
             .filter(|m| m.is_finite() && *m > 0.0)
             .collect();
+        // The plan grants star rows only when this range exists, and the
+        // starfield below draws from the same range, so every granted star
+        // row is drawn and no star is drawn in a row that was not granted.
+        let range = y_range(&ms);
         let lanes = self.chip_rows(backend, &lane_devices, shown, cols);
         let mut aux = self.aux_rows(st, backend, busiest.as_ref(), shown, cols);
         if shown.is_empty() {
@@ -1223,7 +1229,8 @@ impl TrainView {
         let plan = plan_band(
             network_h,
             BandWants {
-                stars: !shown.is_empty(),
+                steps: !shown.is_empty(),
+                stars: range.is_some(),
                 lanes: lanes.len(),
                 aux: aux.len(),
                 verdict: verdict.is_some(),
@@ -1279,8 +1286,8 @@ impl TrainView {
         let y_stars = network_top + 1;
         let rows = plan.star_rows;
         // `place_stars` is only called with a usable range: `y_range` is
-        // `None` when no step time can be placed.
-        if let (true, Some((lo, hi))) = (rows > 0, y_range(&ms)) {
+        // `None` when no step time can be placed, and then `rows` is 0.
+        if let (true, Some((lo, hi))) = (rows > 0, range) {
             // The scale is printed: the top of the range on the first star
             // row and the bottom on the last. A value too wide for the label
             // column is left out.
@@ -2984,8 +2991,8 @@ mod tests {
         assert!(out2.contains("heads 8"), "{out2}");
     }
 
-    /// A state for a run attached at `first_seen` with process `pid`, with a
-    /// tokens/sec reading from `step_ms`.
+    /// A state for a run attached at `first_seen` with process `pid` and a
+    /// measured step time of `step_ms`.
     fn run_state(pid: i32, first_seen: std::time::Instant, step_ms: f32) -> TrainState {
         let mut st = live_state();
         if let Some(p) = st.proc.as_mut() {
@@ -2999,12 +3006,12 @@ mod tests {
     }
 
     /// The view outlives a run. A new run (another pid and attach time) must
-    /// start with empty chip history and bests even when its sample sequence
-    /// number does not go down: here run B's backlog is read at attach, so
-    /// its first frame is already at sequence number 5, the same as run A's
-    /// last.
+    /// start with an empty chip history even when its sample sequence number
+    /// does not go down: here run B's backlog is read at attach, so its first
+    /// frame is already at sequence number 5, the same as run A's last. Run
+    /// A's samples must not fill run B's chip lane.
     #[test]
-    fn a_new_run_starts_with_empty_lanes_and_bests_through_the_same_view() {
+    fn a_new_run_starts_with_an_empty_chip_lane_through_the_same_view() {
         let mut b = MockBackend::new(1);
         b.init().unwrap();
         let v = TrainView::new(134, 40);
@@ -3019,7 +3026,7 @@ mod tests {
             v.render(&a, &b);
         }
 
-        // Half run A's rate, so a carried-over best would read 50%.
+        // Another pid and attach time: the view must treat this as a new run.
         let mut run_b = run_state(200, t0 + std::time::Duration::from_secs(1), 200.0);
         run_b.step_history = history;
         run_b.step_seq = 5;
@@ -3708,6 +3715,65 @@ mod tests {
         assert_eq!(label(star_rows[nrows - 1]), format!("{lo:>5.0}"));
     }
 
+    /// Steps whose times are all 0 have no place on the canvas. No star row
+    /// is granted, so the chip row follows the header directly with no blank
+    /// rows in between, and nothing panics. A history that mixes such steps
+    /// with placeable ones still draws its starfield.
+    #[test]
+    fn steps_with_no_placeable_time_get_no_star_rows() {
+        let mut b = MockBackend::new(1);
+        b.init().unwrap();
+        let render = |times: &dyn Fn(u64) -> f32| -> (Vec<Vec<char>>, TrainView) {
+            let mut st = live_state();
+            st.step_history = (1..=12u64).map(|i| sample_at(i, times(i), 0)).collect();
+            st.step = 12;
+            st.step_seq = 12;
+            st.step_ms = 100.0;
+            let v = TrainView::new(134, 40);
+            let rows = rows_of(&v.render(&st, &b))
+                .iter()
+                .map(|r| r.chars().collect())
+                .collect();
+            (rows, v)
+        };
+        for zero in [0.0f32, -3.0, f32::NAN] {
+            let (rows, v) = render(&|_| zero);
+            let (x0, bw, ..) = band_geom(&v);
+            let header = band_rows(&rows, x0, "STEP ANATOMY")[0];
+            let chip = band_rows(&rows, x0, "chip0");
+            assert_eq!(
+                chip,
+                vec![header + 1],
+                "times {zero}: {:?}",
+                rows[header + 1]
+            );
+            let Layout {
+                network_top,
+                network_h,
+                ..
+            } = v.layout();
+            for row in &rows[network_top..network_top + network_h] {
+                let band = span_text(row, x0, x0 + bw);
+                assert!(!band.chars().any(is_star), "times {zero}: {band:?}");
+            }
+        }
+        // Every other step placeable: star rows are granted and each holds
+        // a star or the median horizon.
+        let (rows, v) = render(&|i| if i % 2 == 0 { 0.0 } else { 100.0 + i as f32 });
+        let (x0, ..) = band_geom(&v);
+        let header = band_rows(&rows, x0, "STEP ANATOMY")[0];
+        let chip = band_rows(&rows, x0, "chip0")[0];
+        let star_rows = chip - header - 1;
+        assert!(star_rows >= 2, "star rows {star_rows}");
+        for r in header + 1..chip {
+            assert!(
+                rows[r].iter().any(|&c| is_star(c) || c == '┈'),
+                "a granted star row is blank: {:?}",
+                rows[r]
+            );
+        }
+    }
+
     /// The expected value-column text for each weave row of `b` and `st`.
     fn weave_values(b: &dyn TelemetryBackend, st: &TrainState) -> Vec<(String, String)> {
         let mut out = Vec::new();
@@ -4032,5 +4098,316 @@ mod tests {
         let (x0, _, x_data, data_w, _) = band_geom(&v);
         let r = band_rows(&rows, x0, "pcie")[0];
         assert_eq!(rows[r][x_data + data_w - 1], '█', "{:?}", rows[r]);
+    }
+
+    /// A backend double whose chips report readings set per frame:
+    /// `frames[k][chip]` is chip `chip`'s telemetry while `k` is the current
+    /// frame. No chip has a TDP (no device limits and no SMBUS).
+    struct Scripted {
+        devices: Vec<Device>,
+        frames: Vec<Vec<crate::models::Telemetry>>,
+        k: std::sync::atomic::AtomicUsize,
+    }
+
+    impl TelemetryBackend for Scripted {
+        fn init(&mut self) -> crate::error::BackendResult<()> {
+            Ok(())
+        }
+        fn update(&mut self) -> crate::error::BackendResult<()> {
+            Ok(())
+        }
+        fn devices(&self) -> &[Device] {
+            &self.devices
+        }
+        fn telemetry(&self, i: usize) -> Option<&crate::models::Telemetry> {
+            self.frames[self.k.load(std::sync::atomic::Ordering::Relaxed)].get(i)
+        }
+        fn smbus_telemetry(&self, _i: usize) -> Option<&crate::models::SmbusTelemetry> {
+            None
+        }
+        fn backend_info(&self) -> String {
+            "scripted".into()
+        }
+    }
+
+    /// `chips` chips with no TDP; frame `k` gives chip `c` the power and
+    /// aiclk `reading(k, c)` returns.
+    fn scripted(
+        chips: usize,
+        frames: usize,
+        reading: impl Fn(usize, usize) -> (f32, u32),
+    ) -> Scripted {
+        let mut inner = MockBackend::new(chips);
+        inner.init().unwrap();
+        let mut devices = inner.devices().to_vec();
+        for d in &mut devices {
+            d.limits = None;
+        }
+        let frames = (0..frames)
+            .map(|k| {
+                (0..chips)
+                    .map(|c| {
+                        let mut t = inner.telemetry(c).unwrap().clone();
+                        let (p, a) = reading(k, c);
+                        t.power = Some(p);
+                        t.aiclk = Some(a);
+                        t
+                    })
+                    .collect()
+            })
+            .collect();
+        Scripted {
+            devices,
+            frames,
+            k: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Render `b` once per step of an 8-step history, frame `k` for step
+    /// `k + 1`, so the view records each frame's readings against its step.
+    /// Returns the last frame's rows and colours.
+    fn render_steps(b: &Scripted, v: &TrainView) -> Vec<Vec<(char, Color)>> {
+        let mut st = live_state();
+        st.step_history = (1..=8u64).map(|i| sample_at(i, 100.0, 0)).collect();
+        st.step_ms = 100.0;
+        let mut last = Vec::new();
+        for k in 0..8usize {
+            b.k.store(k, std::sync::atomic::Ordering::Relaxed);
+            st.step_seq = k as u64 + 1;
+            st.step = k as u64 + 1;
+            last = cells_of(&v.render(&st, b));
+        }
+        last
+    }
+
+    /// A chip with no TDP is scaled to the highest power in the window and
+    /// its value is shown in watts. Steps draw 20, 40, 60 and 80 W two at a
+    /// time, so the four columns are a quarter, a half, three quarters and
+    /// all of the 80 W maximum.
+    #[test]
+    fn a_chip_with_no_tdp_is_scaled_to_the_window_maximum_and_shown_in_watts() {
+        let b = scripted(1, 8, |k, _| (20.0 * (k / 2 + 1) as f32, 1000));
+        assert_eq!(TrainView::chip_tdp(&b, &b.devices[0]), None);
+        let v = TrainView::new(134, 40);
+        let cells = render_steps(&b, &v);
+        let rows: Vec<Vec<char>> = cells
+            .iter()
+            .map(|r| r.iter().map(|p| p.0).collect())
+            .collect();
+        let (x0, w, x_data, data_w, value_x) = band_geom(&v);
+        let r = band_rows(&rows, x0, "chip0")[0];
+        assert_eq!(
+            span_text(&rows[r], x_data + data_w - 4, x_data + data_w),
+            "▂▄▆█",
+            "{:?}",
+            rows[r]
+        );
+        let shown = span_text(&rows[r], value_x.unwrap(), x0 + w);
+        assert_eq!(shown.trim_end(), "80 W", "{:?}", rows[r]);
+    }
+
+    /// The aiclk row describes the busiest chip. Chip 1 draws the most power
+    /// and its aiclk falls from 1000 to 800 MHz on the last two steps; chip 0
+    /// holds 1200 MHz. The row's value and its coral drop cell come from
+    /// chip 1.
+    #[test]
+    fn the_aiclk_row_follows_the_busiest_chip() {
+        let b = scripted(2, 8, |k, c| match c {
+            0 => (30.0, 1200),
+            _ => (90.0, if k >= 6 { 800 } else { 1000 }),
+        });
+        let v = TrainView::new(134, 40);
+        assert_eq!(v.busiest_chip(&b).map(|c| c.index), Some(1));
+        let cells = render_steps(&b, &v);
+        let rows: Vec<Vec<char>> = cells
+            .iter()
+            .map(|r| r.iter().map(|p| p.0).collect())
+            .collect();
+        let (x0, w, x_data, data_w, value_x) = band_geom(&v);
+        let r = band_rows(&rows, x0, "aiclk")[0];
+        let shown = span_text(&rows[r], value_x.unwrap(), x0 + w);
+        assert_eq!(shown.trim_end(), "800 MHz", "{:?}", rows[r]);
+        // Four columns of two steps each: only the last one dropped.
+        let colours: Vec<Color> = (x_data + data_w - 4..x_data + data_w)
+            .map(|x| cells[r][x].1)
+            .collect();
+        assert_eq!(
+            colours,
+            vec![AICLK_ROW, AICLK_ROW, AICLK_ROW, AICLK_DROP],
+            "{:?}",
+            rows[r]
+        );
+    }
+
+    /// At every width from 20 to 134 and every height from 10 to 40, the band
+    /// draws exactly the rows `plan_band` granted, in order, inside its
+    /// rectangle. Below it the loss river's `LOSS` header row is unchanged
+    /// and in its place, and no band glyph appears in the MODEL card or LIVE
+    /// panel columns.
+    #[test]
+    fn the_band_draws_only_the_rows_it_was_granted_inside_its_rectangle() {
+        use crate::animation::train_tapestry::{diagnose, Readings};
+        let b = pcie_double(3, Some(3.1e8));
+        let mut st = live_state();
+        // A falling loss gives the convergence strip something to say.
+        for i in 2..=40u64 {
+            st.apply_event(crate::workload::train::TrainEvent::Step {
+                step: i,
+                loss: 2.0 - i as f32 * 0.01,
+            });
+        }
+        // The newest step compiled, so the verdict is the fixed compile line.
+        st.step_history = (1..=64u64)
+            .map(|i| sample_at(i, 100.0 + i as f32, u32::from(i == 64)))
+            .collect();
+        st.step = 64;
+        st.step_seq = 64;
+        st.step_ms = 150.0;
+        st.host_cpu_pct = Some(140.0);
+        let compile = diagnose(&Readings {
+            compiled_last_step: true,
+            busiest_tdp_frac: None,
+            host_cpu_pct: None,
+        })
+        .unwrap();
+        let loss_label = "LOSS  · mountains colored by their own value";
+        let mut granted_strip = 0;
+        for w in 20..=134usize {
+            for h in 10..=40usize {
+                let v = TrainView::new(w, h);
+                let rows: Vec<Vec<char>> = rows_of(&v.render(&st, &b))
+                    .iter()
+                    .map(|r| r.chars().collect())
+                    .collect();
+                let (x0, bw, _, data_w, value_x) = band_geom(&v);
+                let Layout {
+                    network_top,
+                    network_h,
+                    river_top,
+                    river_bottom,
+                    ..
+                } = v.layout();
+                let ctx = format!("w={w} h={h}");
+                // What the band asks for, stated from the inputs: one row
+                // per chip and per aux signal while there are data columns
+                // (an aux row with no steps needs its value column), the
+                // compile verdict when it fits, the strip when a clause fits.
+                let steps = data_w > 0;
+                let strip_parts = convergence_parts(
+                    &st.loss_history,
+                    st.config.learning_rate,
+                    st.scheduler.as_deref(),
+                    st.step,
+                    if st.step > st.max_steps {
+                        0
+                    } else {
+                        st.max_steps
+                    },
+                );
+                let want = BandWants {
+                    steps,
+                    stars: steps,
+                    lanes: 3,
+                    aux: if steps || value_x.is_some() { 3 } else { 0 },
+                    verdict: TrainView::verdict_line(&compile, bw).is_some(),
+                    strip: !TrainView::fit_parts(&strip_parts, bw).is_empty(),
+                };
+                let p = plan_band(network_h, want);
+                granted_strip += usize::from(p.strip_row);
+                let label_at = |y: usize, label: &str| {
+                    span_text(&rows[y], x0, x0 + label.chars().count()) == label
+                };
+                // Row by row, top to bottom, the layers the plan granted.
+                let mut y = network_top + 1 + p.star_rows;
+                for lane in 0..p.lane_rows {
+                    assert!(label_at(y, &format!("chip{lane}")), "{ctx} {p:?} y={y}");
+                    y += 1;
+                }
+                for aux in ["aiclk", "pcie", "host"].iter().take(p.aux_rows) {
+                    assert!(label_at(y, aux), "{ctx} {p:?} y={y} {:?}", rows[y]);
+                    y += 1;
+                }
+                if p.verdict_row {
+                    assert!(label_at(y, "▸ compiling"), "{ctx} {p:?} y={y}");
+                    y += 1;
+                }
+                if p.strip_row {
+                    assert!(label_at(y, "loss"), "{ctx} {p:?} y={y} {:?}", rows[y]);
+                    y += 1;
+                }
+                // No layer row above the weave: the star rows hold no label.
+                for r in network_top + 1..network_top + 1 + p.star_rows {
+                    for label in ["chip", "aiclk", "pcie", "host", "▸", "loss"] {
+                        assert!(!label_at(r, label), "{ctx} {p:?} star row {r}");
+                    }
+                }
+                // Granted rows end at `y`; the rest of the band is empty.
+                for r in y..network_top + network_h {
+                    let band = span_text(&rows[r], x0, x0 + bw);
+                    assert!(band.trim().is_empty(), "{ctx} {p:?} row {r}: {band:?}");
+                }
+                // Nothing the band draws lands outside its columns: on the
+                // band's rows every other column holds exactly what the frame,
+                // the MODEL card and the LIVE panel draw on their own.
+                let panels = {
+                    let p = TrainView::new(w, h);
+                    let mut buf = vec![vec![Cell::default(); p.width]; p.height];
+                    p.draw_frame(&mut buf);
+                    let (show_model, show_live) = p.panel_fit();
+                    if show_model {
+                        p.draw_model_card(&mut buf, &st);
+                    }
+                    if show_live {
+                        p.draw_live_stats(&mut buf, &st);
+                    }
+                    buf
+                };
+                for r in network_top..network_top + network_h {
+                    for (x, &c) in rows[r].iter().enumerate() {
+                        if x < x0 || x >= x0 + bw {
+                            assert_eq!(c, panels[r][x].ch, "{ctx} row {r} col {x}: {:?}", rows[r]);
+                        }
+                    }
+                }
+                // The first row below the band is the river's header, as the
+                // river draws it.
+                let below = network_top + network_h;
+                assert_eq!(river_top - 1, below, "{ctx}");
+                if river_bottom > river_top + 1 {
+                    assert_eq!(
+                        span_text(&rows[below], 2, w).trim_end(),
+                        TrainView::clip(loss_label, w.saturating_sub(3)).trim_end(),
+                        "{ctx}"
+                    );
+                }
+            }
+        }
+        assert!(granted_strip > 0, "the sweep never granted a strip");
+    }
+
+    /// A value wider than the value column is left out whole; one that fits
+    /// is drawn.
+    #[test]
+    fn a_value_wider_than_the_value_column_is_left_out_whole() {
+        let v = TrainView::new(134, 40);
+        let g = TrainView::band_geom(10, 80);
+        let vx = g.value_x.expect("80 columns leave room for values");
+        for (value, drawn) in [("1234567890", true), ("12345678901", false)] {
+            let mut buf = vec![vec![Cell::default(); 134]; 3];
+            let row = WeaveRow {
+                label: "pcie".into(),
+                cells: vec![Some(('▄', PCIE_ROW)); g.data_w],
+                value: value.into(),
+            };
+            v.draw_weave_row(&mut buf, 10, 1, g, &row);
+            let text: String = buf[1][vx..vx + VALUE_W + 2].iter().map(|c| c.ch).collect();
+            if drawn {
+                assert_eq!(text.trim_end(), value);
+            } else {
+                assert!(text.trim().is_empty(), "{value}: {text:?}");
+            }
+            // The cells are drawn either way.
+            assert_eq!(buf[1][g.x_data].ch, '▄');
+        }
     }
 }

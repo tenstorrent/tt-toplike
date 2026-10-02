@@ -22,6 +22,9 @@ pub const MAX_LANES: usize = 3;
 pub const AICLK_DROP_FRAC: f32 = 0.90;
 /// Tallest the starfield grows, in cell rows (4 dot rows each).
 pub const STAR_MAX_ROWS: usize = 6;
+/// Star rows granted before any aux row, the strip or the rest of the
+/// starfield, so a short band keeps a starfield worth reading.
+pub const STAR_FIRST_ROWS: usize = 3;
 /// Weave rows below the chip rows: aiclk, PCIe and host CPU.
 pub const MAX_AUX_ROWS: usize = 3;
 
@@ -272,8 +275,12 @@ pub fn diagnose(r: &Readings) -> Option<Diagnosis> {
 /// What the band would like to draw, before it is fitted to the height.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BandWants {
-    /// There are step samples to draw as stars. Without them neither the
-    /// starfield nor the chip rows have a column to draw.
+    /// There are step samples to draw. Without them the chip rows have no
+    /// column to draw.
+    pub steps: bool,
+    /// At least one shown step has a time the canvas can place (finite and
+    /// above 0, so `y_range` returns a range). Without one the starfield
+    /// has nothing to draw.
     pub stars: bool,
     /// Chip power rows (one per chip, at most `MAX_LANES`).
     pub lanes: usize,
@@ -295,15 +302,26 @@ pub struct BandPlan {
 }
 
 /// Fit the layers into a band `height` rows tall, header included. Rows are
-/// handed out in priority order: one star row, verdict, chip rows, aux rows,
-/// strip, then extra star rows up to [`STAR_MAX_ROWS`]. As the terminal gets
-/// shorter, layers are lost in the reverse order: extra star rows first, then
-/// the strip, then aux rows, then chip rows, then the verdict. The first star
-/// row is kept as long as there is a row below the header.
+/// handed out in priority order:
 ///
-/// With no step samples (`stars` false) there is no starfield and no chip
-/// row, whatever `lanes` asks for, because both draw one column per step.
-/// Aux rows still draw their current values. The total never exceeds
+/// 1. one star row,
+/// 2. the verdict,
+/// 3. chip rows (at most [`MAX_LANES`]),
+/// 4. star rows up to [`STAR_FIRST_ROWS`] in total,
+/// 5. aux rows (at most [`MAX_AUX_ROWS`]),
+/// 6. the strip,
+/// 7. star rows up to [`STAR_MAX_ROWS`] in total.
+///
+/// As the terminal gets shorter, layers are lost in the reverse order: star
+/// rows past the third first, then the strip, then aux rows, then the second
+/// and third star rows, then chip rows, then the verdict. The first star row
+/// is kept as long as there is a row below the header. The starfield is the
+/// band's main layer, so it keeps 3 rows before the aux rows get any.
+///
+/// With no step samples (`steps` false) there is no chip row, whatever
+/// `lanes` asks for, because a chip row draws one column per step. With no
+/// step time the canvas can place (`stars` false) there is no star row. Aux
+/// rows still draw their current values. The total never exceeds
 /// `height - 1`.
 pub fn plan_band(height: usize, w: BandWants) -> BandPlan {
     let mut rem = height.saturating_sub(1);
@@ -314,15 +332,22 @@ pub fn plan_band(height: usize, w: BandWants) -> BandPlan {
     };
     let star_min = if w.stars { take(1) } else { 0 };
     let verdict_row = w.verdict && take(1) == 1;
-    let lane_rows = if w.stars {
+    let lane_rows = if w.steps {
         take(w.lanes.min(MAX_LANES))
+    } else {
+        0
+    };
+    // Later star rows go only to a starfield that got its first row, so a
+    // band with no star row never grows one later.
+    let star_early = if star_min > 0 {
+        take(STAR_FIRST_ROWS - 1)
     } else {
         0
     };
     let aux_rows = take(w.aux.min(MAX_AUX_ROWS));
     let strip_row = w.strip && take(1) == 1;
     let star_rows = if star_min > 0 {
-        star_min + take(STAR_MAX_ROWS - 1)
+        star_min + star_early + take(STAR_MAX_ROWS - STAR_FIRST_ROWS)
     } else {
         0
     };
@@ -367,9 +392,9 @@ pub struct ChipSample {
 }
 
 /// Chip readings keyed by the run's sample sequence number, plus the
-/// best-so-far values the weave rows are scaled to. A reading is taken when the view first sees each
-/// sequence number, so it is close to the moment the step was recorded, but
-/// not exactly at it.
+/// best-so-far values the weave rows are scaled to. A reading is taken when
+/// the view first sees each sequence number, so it is close to the moment the
+/// step was recorded, but not exactly at it.
 #[derive(Debug, Default)]
 pub struct ChipHistory {
     last_seq: Option<u64>,
@@ -651,6 +676,7 @@ mod tests {
 
     fn all_wants() -> BandWants {
         BandWants {
+            steps: true,
             stars: true,
             lanes: 3,
             aux: 3,
@@ -661,38 +687,45 @@ mod tests {
 
     /// Every height a band can have and every combination of wants: the
     /// rows granted never exceed the rows below the header, no layer gets
-    /// more than it can draw, and nothing that draws per step is granted
-    /// without step samples.
+    /// more than it can draw, nothing that draws per step is granted
+    /// without step samples, and no star row is granted without a step time
+    /// the canvas can place.
     #[test]
     fn the_band_never_hands_out_more_rows_than_it_has() {
         for height in 0..=40usize {
-            for stars in [false, true] {
-                for lanes in 0..=4usize {
-                    for aux in 0..=4usize {
-                        for verdict in [false, true] {
-                            for strip in [false, true] {
-                                let want = BandWants {
-                                    stars,
-                                    lanes,
-                                    aux,
-                                    verdict,
-                                    strip,
-                                };
-                                let p = plan_band(height, want);
-                                let used = p.star_rows
-                                    + p.lane_rows
-                                    + p.aux_rows
-                                    + usize::from(p.verdict_row)
-                                    + usize::from(p.strip_row);
-                                let ctx = format!("h={height} {want:?}: {p:?}");
-                                assert!(used <= height.saturating_sub(1), "{ctx}");
-                                assert!(p.star_rows <= STAR_MAX_ROWS, "{ctx}");
-                                assert!(p.lane_rows <= lanes.min(MAX_LANES), "{ctx}");
-                                assert!(p.aux_rows <= aux.min(MAX_AUX_ROWS), "{ctx}");
-                                assert!(!p.verdict_row || verdict, "{ctx}");
-                                assert!(!p.strip_row || strip, "{ctx}");
-                                if !stars {
-                                    assert_eq!((p.star_rows, p.lane_rows), (0, 0), "{ctx}");
+            for steps in [false, true] {
+                for stars in [false, true] {
+                    for lanes in 0..=4usize {
+                        for aux in 0..=4usize {
+                            for verdict in [false, true] {
+                                for strip in [false, true] {
+                                    let want = BandWants {
+                                        steps,
+                                        stars,
+                                        lanes,
+                                        aux,
+                                        verdict,
+                                        strip,
+                                    };
+                                    let p = plan_band(height, want);
+                                    let used = p.star_rows
+                                        + p.lane_rows
+                                        + p.aux_rows
+                                        + usize::from(p.verdict_row)
+                                        + usize::from(p.strip_row);
+                                    let ctx = format!("h={height} {want:?}: {p:?}");
+                                    assert!(used <= height.saturating_sub(1), "{ctx}");
+                                    assert!(p.star_rows <= STAR_MAX_ROWS, "{ctx}");
+                                    assert!(p.lane_rows <= lanes.min(MAX_LANES), "{ctx}");
+                                    assert!(p.aux_rows <= aux.min(MAX_AUX_ROWS), "{ctx}");
+                                    assert!(!p.verdict_row || verdict, "{ctx}");
+                                    assert!(!p.strip_row || strip, "{ctx}");
+                                    if !stars {
+                                        assert_eq!(p.star_rows, 0, "{ctx}");
+                                    }
+                                    if !steps {
+                                        assert_eq!(p.lane_rows, 0, "{ctx}");
+                                    }
                                 }
                             }
                         }
@@ -725,6 +758,9 @@ mod tests {
         );
     }
 
+    /// The grant at every height from 1 to the full band, pinned. Rows go
+    /// out in this order: one star row, verdict, chip rows, star rows up to
+    /// 3, aux rows, strip, star rows up to 6.
     #[test]
     fn short_bands_drop_layers_in_the_documented_order() {
         let all = all_wants();
@@ -738,19 +774,53 @@ mod tests {
                 p.strip_row,
             )
         };
-        // Nothing below the header, then the header plus one star row.
-        assert_eq!(rows(1), (0, false, 0, 0, false));
-        assert_eq!(rows(2), (1, false, 0, 0, false));
-        // The verdict is added first, then chip rows, then aux rows.
-        assert_eq!(rows(3), (1, true, 0, 0, false));
-        assert_eq!(rows(4), (1, true, 1, 0, false));
-        assert_eq!(rows(6), (1, true, 3, 0, false));
-        assert_eq!(rows(7), (1, true, 3, 1, false));
-        assert_eq!(rows(9), (1, true, 3, 3, false));
-        // Then the strip, then extra star rows.
-        assert_eq!(rows(10), (1, true, 3, 3, true));
-        assert_eq!(rows(11), (2, true, 3, 3, true));
-        assert_eq!(rows(13), (4, true, 3, 3, true));
+        let want = [
+            // Nothing below the header, then the header plus one star row.
+            (1, (0, false, 0, 0, false)),
+            (2, (1, false, 0, 0, false)),
+            // The verdict, then the chip rows.
+            (3, (1, true, 0, 0, false)),
+            (4, (1, true, 1, 0, false)),
+            (5, (1, true, 2, 0, false)),
+            (6, (1, true, 3, 0, false)),
+            // The starfield grows to 3 rows before any aux row.
+            (7, (2, true, 3, 0, false)),
+            (8, (3, true, 3, 0, false)),
+            // Then the aux rows, then the strip.
+            (9, (3, true, 3, 1, false)),
+            (10, (3, true, 3, 2, false)),
+            (11, (3, true, 3, 3, false)),
+            (12, (3, true, 3, 3, true)),
+            // Then the starfield grows to its full 6 rows.
+            (13, (4, true, 3, 3, true)),
+            (14, (5, true, 3, 3, true)),
+            (15, (6, true, 3, 3, true)),
+        ];
+        for (h, grant) in want {
+            assert_eq!(rows(h), grant, "h={h}");
+        }
+    }
+
+    /// A 30-row terminal gets a 10-row band. With 3 chips, 2 aux rows and a
+    /// verdict the starfield still gets 3 rows and the strip is left out.
+    #[test]
+    fn a_ten_row_band_with_three_chips_keeps_three_star_rows() {
+        let want = BandWants {
+            aux: 2,
+            ..all_wants()
+        };
+        let p = plan_band(10, want);
+        assert!(p.star_rows >= 3, "{p:?}");
+        assert_eq!(
+            p,
+            BandPlan {
+                star_rows: 3,
+                lane_rows: 3,
+                aux_rows: 2,
+                verdict_row: true,
+                strip_row: false,
+            }
+        );
     }
 
     /// No step samples: no starfield and no chip rows even when chips exist,
@@ -758,6 +828,7 @@ mod tests {
     #[test]
     fn without_step_samples_only_the_aux_rows_verdict_and_strip_are_granted() {
         let want = BandWants {
+            steps: false,
             stars: false,
             ..all_wants()
         };
@@ -774,6 +845,26 @@ mod tests {
         // A short band hands its rows out in the same order.
         let p = plan_band(3, want);
         assert_eq!((p.verdict_row, p.aux_rows, p.strip_row), (true, 1, false));
+    }
+
+    /// Steps whose times the canvas cannot place: no star row, but the chip
+    /// rows still have a column per step and are granted.
+    #[test]
+    fn steps_with_no_placeable_time_get_chip_rows_and_no_star_rows() {
+        let want = BandWants {
+            stars: false,
+            ..all_wants()
+        };
+        assert_eq!(
+            plan_band(40, want),
+            BandPlan {
+                star_rows: 0,
+                lane_rows: 3,
+                aux_rows: 3,
+                verdict_row: true,
+                strip_row: true,
+            }
+        );
     }
 
     #[test]
