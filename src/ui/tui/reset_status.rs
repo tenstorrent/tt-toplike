@@ -194,6 +194,38 @@ pub fn scan_resets(
     out
 }
 
+/// The takeover half of the loop's hand-off after [`scan_resets`]: starts
+/// the takeover for `outcome.takeover_for` (see [`replace_takeover`]) and
+/// tells the running takeover when its reset has ended. Feed events are
+/// injected by the caller, which owns the Hivemind engine.
+pub fn apply_takeover_outcome(
+    takeover: &mut Option<Takeover>,
+    behavior: ResetBehavior,
+    outcome: &ScanOutcome,
+) {
+    if let Some(ev) = &outcome.takeover_for {
+        replace_takeover(takeover, behavior, ev);
+    }
+    if outcome.takeover_reset_finished {
+        if let Some(t) = takeover.as_mut() {
+            t.note_reset_finished();
+        }
+    }
+}
+
+/// Advances the running takeover by `dt`. When it is done it is removed and
+/// `detector` is cleared, so the next reset can start a takeover. Without
+/// the clear, `dazzle` would show one takeover per session.
+pub fn tick_takeover(takeover: &mut Option<Takeover>, detector: &mut ResetDetector, dt: Duration) {
+    if let Some(t) = takeover.as_mut() {
+        t.tick(dt);
+        if t.is_done() {
+            *takeover = None;
+            detector.clear();
+        }
+    }
+}
+
 /// What a keypress does to the active takeover.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyAction {
@@ -939,6 +971,86 @@ mod tests {
         }
         assert!(should_start_boot_demo(ResetBehavior::Demo, false));
         assert!(!should_start_boot_demo(ResetBehavior::Demo, true));
+    }
+
+    // ── tick_takeover + apply_takeover_outcome: the loop's wiring ──────
+
+    #[test]
+    fn a_finished_takeover_frees_the_detector_for_the_next_reset() {
+        let t0 = Instant::now();
+        let b = ResetBehavior::Dazzle;
+        // Two ways a takeover ends: the user skips it, or its reset ends
+        // and the done tail plays out.
+        for skipped in [true, false] {
+            let mut det = ResetDetector::new();
+            let mut st = ResetStatus::new();
+            let mut takeover: Option<Takeover> = None;
+            let out = scan(b, false, &mut det, &mut st, &[(5, "tt-smi -r")], t0);
+            apply_takeover_outcome(&mut takeover, b, &out);
+            assert!(takeover.is_some() && det.is_active());
+            if skipped {
+                takeover.as_mut().unwrap().skip();
+            } else {
+                let out = scan(b, false, &mut det, &mut st, &[], t0);
+                assert!(out.takeover_reset_finished);
+                apply_takeover_outcome(&mut takeover, b, &out);
+            }
+            // Longer than any variant's done tail.
+            tick_takeover(&mut takeover, &mut det, Duration::from_secs(10));
+            assert!(takeover.is_none(), "skipped={skipped}: takeover ended");
+            assert!(!det.is_active(), "skipped={skipped}: detector freed");
+            // A later reset gets a takeover of its own.
+            let out = scan(b, false, &mut det, &mut st, &[(9, "tt-smi -r 1")], t0);
+            assert_eq!(out.takeover_for.as_ref().map(|e| e.pid), Some(9));
+            apply_takeover_outcome(&mut takeover, b, &out);
+            assert!(takeover.is_some(), "skipped={skipped}");
+        }
+    }
+
+    #[test]
+    fn a_running_takeover_keeps_the_detector_active() {
+        let t0 = Instant::now();
+        let b = ResetBehavior::Dazzle;
+        let mut det = ResetDetector::new();
+        let mut st = ResetStatus::new();
+        let mut takeover: Option<Takeover> = None;
+        let out = scan(b, false, &mut det, &mut st, &[(5, "tt-smi -r")], t0);
+        apply_takeover_outcome(&mut takeover, b, &out);
+        for _ in 0..20 {
+            tick_takeover(&mut takeover, &mut det, Duration::from_millis(100));
+        }
+        assert!(takeover.is_some(), "the reset is still running");
+        assert!(det.is_active());
+        let out = scan(
+            b,
+            false,
+            &mut det,
+            &mut st,
+            &[(5, "tt-smi -r"), (6, "tt-smi -r 1")],
+            t0,
+        );
+        assert!(out.takeover_for.is_none());
+        apply_takeover_outcome(&mut takeover, b, &out);
+        tick_takeover(&mut takeover, &mut det, Duration::from_millis(100));
+        assert!(takeover.is_some() && det.is_active());
+    }
+
+    #[test]
+    fn apply_takeover_outcome_passes_the_reset_end_to_the_takeover() {
+        let t0 = Instant::now();
+        let b = ResetBehavior::Dazzle;
+        let mut det = ResetDetector::new();
+        let mut st = ResetStatus::new();
+        let mut takeover: Option<Takeover> = None;
+        let out = scan(b, false, &mut det, &mut st, &[(5, "tt-smi -r")], t0);
+        apply_takeover_outcome(&mut takeover, b, &out);
+        // The reset is still running: no amount of time ends the takeover.
+        tick_takeover(&mut takeover, &mut det, Duration::from_secs(60));
+        assert!(takeover.is_some());
+        let out = scan(b, false, &mut det, &mut st, &[], t0);
+        apply_takeover_outcome(&mut takeover, b, &out);
+        tick_takeover(&mut takeover, &mut det, Duration::from_secs(10));
+        assert!(takeover.is_none());
     }
 
     // ── boot_takeover: the arguments the boot site passes ──────────────

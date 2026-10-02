@@ -1267,13 +1267,11 @@ fn run_app(
 
             // ── Reset takeover: tick + cleanup ─────────────────────────────
             // Settled before this frame decides what to render.
-            if let Some(t) = takeover.as_mut() {
-                t.tick(last_takeover_tick.elapsed());
-                if t.is_done() {
-                    takeover = None;
-                    reset_detector.clear();
-                }
-            }
+            reset_status::tick_takeover(
+                &mut takeover,
+                &mut reset_detector,
+                last_takeover_tick.elapsed(),
+            );
             last_takeover_tick = Instant::now();
 
             // Status-bar reset segment for this frame (None once expired).
@@ -2433,14 +2431,7 @@ fn run_app(
                     );
                 }
             }
-            if let Some(ev) = &outcome.takeover_for {
-                reset_status::replace_takeover(&mut takeover, reset_behavior, ev);
-            }
-            if outcome.takeover_reset_finished {
-                if let Some(t) = takeover.as_mut() {
-                    t.note_reset_finished();
-                }
-            }
+            reset_status::apply_takeover_outcome(&mut takeover, reset_behavior, &outcome);
 
             // Refresh the prober's target set; read back last cycle's verdicts.
             liveness_prober.submit(host_proc_monitor.detected_runtimes());
