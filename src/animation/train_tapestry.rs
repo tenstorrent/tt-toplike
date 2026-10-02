@@ -370,14 +370,24 @@ pub struct ChipSample {
 pub struct ChipHistory {
     last_seq: Option<u64>,
     rings: BTreeMap<usize, VecDeque<ChipSample>>,
+    /// Summed PCIe bytes/sec per sample sequence number. A sample is only
+    /// pushed when the backend reported the counters, so a missing reading
+    /// leaves a gap that `pcie_at` answers with `None`.
+    pcie: VecDeque<(u64, f64)>,
+    /// Host CPU percent (100 is one saturated core) per sample sequence
+    /// number, with the same gap rule as `pcie`.
+    host: VecDeque<(u64, f32)>,
     aiclk_max: BTreeMap<usize, u32>,
     best_tps: f32,
     best_pcie_bps: f64,
 }
 
 impl ChipHistory {
-    /// Record `(device index, power W, aiclk MHz)` for every chip at sample
-    /// sequence number `seq` (`TrainState::step_seq`). The sequence number
+    /// Record `(device index, power W, aiclk MHz)` for every chip, plus the
+    /// summed PCIe bytes/sec and host CPU percent (each `None` when that
+    /// signal is absent), at sample sequence number `seq`
+    /// (`TrainState::step_seq`). Each ring keeps the newest `STEP_HISTORY`
+    /// readings. The sequence number
     /// rises by one per recorded step sample and does not go down when a
     /// progress bar restarts. A repeat of the same number is ignored. A lower
     /// number can only come from a new run, so everything is cleared and old
@@ -389,7 +399,13 @@ impl ChipHistory {
     /// reset here clears the bests too. `record(seq, &[])` still marks `seq`
     /// as seen, so a later call with the same number and some chips is
     /// ignored.
-    pub fn record(&mut self, seq: u64, chips: &[(usize, f32, u32)]) {
+    pub fn record(
+        &mut self,
+        seq: u64,
+        chips: &[(usize, f32, u32)],
+        pcie_bps: Option<f64>,
+        host_cpu_pct: Option<f32>,
+    ) {
         if let Some(prev) = self.last_seq {
             if seq < prev {
                 *self = Self::default();
@@ -410,6 +426,18 @@ impl ChipHistory {
             let m = self.aiclk_max.entry(idx).or_insert(0);
             *m = (*m).max(aiclk_mhz);
         }
+        if let Some(bps) = pcie_bps {
+            self.pcie.push_back((seq, bps));
+            while self.pcie.len() > STEP_HISTORY {
+                self.pcie.pop_front();
+            }
+        }
+        if let Some(pct) = host_cpu_pct {
+            self.host.push_back((seq, pct));
+            while self.host.len() > STEP_HISTORY {
+                self.host.pop_front();
+            }
+        }
         self.last_seq = Some(seq);
     }
 
@@ -422,6 +450,37 @@ impl ChipHistory {
             .rev()
             .find(|s| s.seq == seq)
             .copied()
+    }
+
+    /// Summed PCIe bytes/sec the view read at sample sequence number `seq`,
+    /// `None` when no chip reported the counters then or the sample is older
+    /// than the ring.
+    pub fn pcie_at(&self, seq: u64) -> Option<f64> {
+        self.pcie
+            .iter()
+            .rev()
+            .find(|(s, _)| *s == seq)
+            .map(|&(_, v)| v)
+    }
+
+    /// Host CPU percent the view read at sample sequence number `seq`, with
+    /// the same `None` cases as [`Self::pcie_at`].
+    pub fn host_at(&self, seq: u64) -> Option<f32> {
+        self.host
+            .iter()
+            .rev()
+            .find(|(s, _)| *s == seq)
+            .map(|&(_, v)| v)
+    }
+
+    #[cfg(test)]
+    fn pcie_ring_len(&self) -> usize {
+        self.pcie.len()
+    }
+
+    #[cfg(test)]
+    fn host_ring_len(&self) -> usize {
+        self.host.len()
     }
 
     /// Highest aiclk this chip has shown since the run (or tool) started.
@@ -691,9 +750,9 @@ mod tests {
     #[test]
     fn chip_samples_are_found_by_sequence_number_and_a_repeat_is_ignored() {
         let mut h = ChipHistory::default();
-        h.record(1, &[(0, 50.0, 1000), (1, 60.0, 1000)]);
-        h.record(2, &[(0, 55.0, 1000), (1, 65.0, 1000)]);
-        h.record(2, &[(0, 99.0, 1000), (1, 99.0, 1000)]);
+        h.record(1, &[(0, 50.0, 1000), (1, 60.0, 1000)], None, None);
+        h.record(2, &[(0, 55.0, 1000), (1, 65.0, 1000)], None, None);
+        h.record(2, &[(0, 99.0, 1000), (1, 99.0, 1000)], None, None);
         assert_eq!(h.sample_at(0, 2).unwrap().power_w, 55.0);
         assert_eq!(h.sample_at(1, 1).unwrap().power_w, 60.0);
         assert_eq!(h.sample_at(0, 3), None);
@@ -705,10 +764,10 @@ mod tests {
     #[test]
     fn a_lower_sequence_number_clears_old_samples_and_bests() {
         let mut h = ChipHistory::default();
-        h.record(500, &[(0, 80.0, 1200)]);
+        h.record(500, &[(0, 80.0, 1200)], None, None);
         h.note_tps(9000.0);
         h.note_pcie(5e9);
-        h.record(1, &[(0, 20.0, 800)]);
+        h.record(1, &[(0, 20.0, 800)], None, None);
         assert_eq!(h.sample_at(0, 500), None);
         assert_eq!(h.sample_at(0, 1).unwrap().power_w, 20.0);
         assert_eq!(h.aiclk_max(0), 800);
@@ -719,12 +778,88 @@ mod tests {
     #[test]
     fn chip_history_is_bounded_and_tracks_the_highest_aiclk() {
         let mut h = ChipHistory::default();
-        for step in 1..=200u64 {
-            h.record(step, &[(0, 50.0, 900 + (step % 3) as u32 * 100)]);
+        let total = STEP_HISTORY as u64 + 40;
+        for step in 1..=total {
+            h.record(
+                step,
+                &[(0, 50.0, 900 + (step % 3) as u32 * 100)],
+                None,
+                None,
+            );
         }
-        assert_eq!(h.sample_at(0, 200).unwrap().seq, 200);
-        assert_eq!(h.sample_at(0, 100), None, "old samples are dropped");
+        assert_eq!(h.sample_at(0, total).unwrap().seq, total);
+        let oldest_kept = total - STEP_HISTORY as u64 + 1;
+        assert!(h.sample_at(0, oldest_kept).is_some());
+        assert_eq!(
+            h.sample_at(0, oldest_kept - 1),
+            None,
+            "old samples are dropped"
+        );
         assert_eq!(h.aiclk_max(0), 1100);
+    }
+
+    #[test]
+    fn pcie_and_host_readings_are_found_by_sequence_number() {
+        let mut h = ChipHistory::default();
+        h.record(1, &[], Some(2.0e9), Some(35.0));
+        h.record(2, &[], None, Some(80.0));
+        h.record(3, &[], Some(4.0e9), None);
+        // A repeat of a sequence number is ignored, as for chip samples.
+        h.record(3, &[], Some(9.0e9), Some(99.0));
+        assert_eq!(h.pcie_at(1), Some(2.0e9));
+        assert_eq!(h.host_at(1), Some(35.0));
+        assert_eq!(h.pcie_at(2), None, "no pcie signal at seq 2");
+        assert_eq!(h.host_at(2), Some(80.0));
+        assert_eq!(h.pcie_at(3), Some(4.0e9));
+        assert_eq!(h.host_at(3), None, "no host reading at seq 3");
+        assert_eq!(h.pcie_at(4), None);
+        assert_eq!(h.host_at(4), None);
+    }
+
+    #[test]
+    fn the_pcie_and_host_rings_are_bounded_by_step_history() {
+        let mut h = ChipHistory::default();
+        let total = STEP_HISTORY as u64 + 40;
+        for seq in 1..=total {
+            h.record(seq, &[], Some(seq as f64), Some(seq as f32));
+        }
+        assert_eq!(h.pcie_at(total), Some(total as f64));
+        assert_eq!(h.host_at(total), Some(total as f32));
+        let oldest_kept = total - STEP_HISTORY as u64 + 1;
+        assert_eq!(h.pcie_at(oldest_kept), Some(oldest_kept as f64));
+        assert_eq!(h.host_at(oldest_kept), Some(oldest_kept as f32));
+        assert_eq!(h.pcie_at(oldest_kept - 1), None, "older pcie dropped");
+        assert_eq!(h.host_at(oldest_kept - 1), None, "older host dropped");
+        assert_eq!(h.pcie_ring_len(), STEP_HISTORY);
+        assert_eq!(h.host_ring_len(), STEP_HISTORY);
+    }
+
+    #[test]
+    fn a_missing_pcie_or_host_signal_does_not_grow_its_ring() {
+        let mut h = ChipHistory::default();
+        for seq in 1..=10u64 {
+            h.record(seq, &[], None, None);
+        }
+        assert_eq!(h.pcie_ring_len(), 0);
+        assert_eq!(h.host_ring_len(), 0);
+    }
+
+    #[test]
+    fn a_lower_sequence_number_clears_the_pcie_and_host_rings() {
+        let mut h = ChipHistory::default();
+        h.record(500, &[], Some(5.0e9), Some(70.0));
+        h.record(1, &[], Some(1.0e9), Some(10.0));
+        assert_eq!(h.pcie_at(500), None);
+        assert_eq!(h.host_at(500), None);
+        assert_eq!(h.pcie_at(1), Some(1.0e9));
+        assert_eq!(h.host_at(1), Some(10.0));
+    }
+
+    #[test]
+    fn the_step_history_is_long_enough_for_a_full_width_starfield() {
+        // 134 steps at full width is about 67 columns of two dots, and the
+        // widest band is wider than that.
+        assert!(STEP_HISTORY >= 134);
     }
 
     #[test]

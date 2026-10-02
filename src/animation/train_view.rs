@@ -847,7 +847,12 @@ impl TrainView {
             })
             .collect();
         let mut h = self.history.borrow_mut();
-        h.record(st.step_seq, &chips);
+        h.record(
+            st.step_seq,
+            &chips,
+            Self::pcie_total(backend),
+            st.host_cpu_pct,
+        );
         if let Some(tps) = st.tokens_per_sec() {
             h.note_tps(tps);
         }
@@ -3331,6 +3336,63 @@ mod tests {
             };
             assert_eq!(got, want, "w={w}");
         }
+    }
+
+    /// `sample` hands the summed PCIe throughput and the host CPU reading to
+    /// the history under the run's sample sequence number, and a missing
+    /// signal stays missing. The ring arithmetic has its own tests in `train_tapestry`.
+    #[test]
+    fn sample_passes_pcie_and_host_cpu_to_the_history() {
+        use crate::backend::pcie_counters::PcieBandwidth;
+        struct WithPcie {
+            inner: MockBackend,
+            pcie: bool,
+        }
+        impl TelemetryBackend for WithPcie {
+            fn init(&mut self) -> crate::error::BackendResult<()> {
+                self.inner.init()
+            }
+            fn update(&mut self) -> crate::error::BackendResult<()> {
+                self.inner.update()
+            }
+            fn devices(&self) -> &[Device] {
+                self.inner.devices()
+            }
+            fn telemetry(&self, i: usize) -> Option<&crate::models::Telemetry> {
+                self.inner.telemetry(i)
+            }
+            fn smbus_telemetry(&self, i: usize) -> Option<&crate::models::SmbusTelemetry> {
+                self.inner.smbus_telemetry(i)
+            }
+            fn backend_info(&self) -> String {
+                "pcie-double".into()
+            }
+            fn pcie_bandwidth(&self, _i: usize) -> Option<PcieBandwidth> {
+                self.pcie.then_some(PcieBandwidth {
+                    rx_bytes_per_sec: 1.0e9,
+                    tx_bytes_per_sec: 0.5e9,
+                })
+            }
+        }
+        let mut inner = MockBackend::new(2);
+        inner.init().unwrap();
+        let mut b = WithPcie { inner, pcie: true };
+        let v = TrainView::new(134, 40);
+        let mut st = live_state();
+        st.step_seq = 7;
+        st.host_cpu_pct = Some(42.0);
+        v.sample(&st, &b);
+        // Two chips at 1.5e9 each.
+        assert_eq!(v.history.borrow().pcie_at(7), Some(3.0e9));
+        assert_eq!(v.history.borrow().host_at(7), Some(42.0));
+        // Next sample: no PCIe counters and no host reading.
+        b.pcie = false;
+        st.step_seq = 8;
+        st.host_cpu_pct = None;
+        v.sample(&st, &b);
+        assert_eq!(v.history.borrow().pcie_at(8), None);
+        assert_eq!(v.history.borrow().host_at(8), None);
+        assert_eq!(v.history.borrow().pcie_at(7), Some(3.0e9));
     }
 
     /// The `▸` verdict as rendered, at the view level, for a compute-bound

@@ -248,8 +248,8 @@ mod tests {
     #[test]
     fn a_mock_run_has_a_step_history_with_compiles_and_a_checkpoint() {
         // 31 s is about step 371 (f32 rounding makes it 371, not 372): the
-        // 64-step window holds the cache still filling (growth stops at step
-        // 336) and the step-360 save.
+        // 160-step window (steps 212 to 371) holds the cache still filling
+        // (growth stops at step 336) and the step-360 save.
         let st = MockTrainRun::new().state_at(31.0);
         assert_eq!(st.step_history.len(), crate::workload::train::STEP_HISTORY);
         assert_eq!(st.step_history.last().unwrap().step, st.step);

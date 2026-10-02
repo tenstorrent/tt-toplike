@@ -20,9 +20,11 @@ use std::time::{Duration, Instant, SystemTime};
 /// Loss samples retained for the mountain range.
 pub const LOSS_HISTORY: usize = 512;
 
-/// Per-step samples retained for the Training view's step-anatomy bars. One
-/// bar per column, so this is also the widest the bar chart can ever be.
-pub const STEP_HISTORY: usize = 64;
+/// Per-step samples retained for the Training view's step history. The
+/// starfield puts two steps in each terminal column, so 160 fills a band
+/// about 80 columns wide. The chip, PCIe and host-CPU rings in `ChipHistory`
+/// keep the same number so the weave lines up with the stars.
+pub const STEP_HISTORY: usize = 160;
 
 /// Where the step history's times came from. The chart title discloses
 /// `Observed`, so a time measured by polling a progress bar is never taken
