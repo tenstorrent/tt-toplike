@@ -1,3 +1,15 @@
+tt-toplike (0.13.9) noble; urgency=medium
+
+  * The Training view reads tt-tnt's progress bar on every frame. Its
+    postfix is `train_loss=`, which the parser refused, so a live tt-tnt run
+    updated only at chunk ends, about 28 minutes apart. The bar counts each
+    chunk from 1, so the run's step is now rebuilt from the run header, the
+    resume line and the validation lines. The header, ETA, loss curve, step
+    times and tokens/s update live, and the gap at a chunk boundary is never
+    timed as a step.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 02 Oct 2026 16:00:00 +0000
+
 tt-toplike (0.13.8) noble; urgency=medium
 
   * The 2-second process scan runs on a background thread. It cost about

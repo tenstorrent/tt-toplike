@@ -176,7 +176,12 @@ the fraction of the step budget completed.
 
 It uses only data every trainer provides, including bar-only trainers. When the
 progress bar restarts per chunk (`TrainState.chunked_bar`), the strip names the
-scheduler without a percentage.
+scheduler without a percentage. The exception (v0.13.9) is a bar rebuilt on a
+base: when the log gives an absolute position (a run header, a resume line or
+an absolute step line), `TrainState.abs_base` holds the step at the start of
+the chunk and the step is `abs_base + local`. That step is global, so the
+header, the ETA and the strip's percentage all apply. tt-tnt's bar, whose
+postfix is `train_loss=`, is read this way on every frame.
 
 For bar-only and chunk-jump trainers the step time is derived from log
 cadence, and the first step seen after attach is only a baseline. The first
@@ -184,7 +189,10 @@ increase after it measures nothing, so a trainer that prints one line per
 chunk shows no tok/s until its second chunk end after attach. The value then
 spans train, checkpoint and validation time for a chunk. The monitor is polled
 only while the view is on screen, so a pause of more than 5 s re-baselines the
-same way when the user returns.
+same way when the user returns. A chunk boundary in a bar run with a base (an
+absolute step line beside the bar, or a restart that moved the base)
+re-baselines the same way, so checkpoint, validation and warm-up time is never
+timed as one step.
 
 ### Layer D: removed
 

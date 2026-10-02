@@ -849,3 +849,78 @@ wiring test was seen to fail under a deliberate break: a blocking `request`,
 a blocking `try_result`, no outstanding gate, an unbounded join on drop, no
 panic catch, an unnamed thread, an apply that keeps old rows or drops the
 process list, an inline scan in the loop, and `want_processes: true`.
+
+### tt-tnt progress bars read live, global step rebuilt (Oct 2, 2026, v0.13.9)
+
+Report: "i have training going on right now but don't see as much evidence in
+the training viz as usual". The run was a resumed tt-tnt run (`--resume latest
+--steps 31951 --save-every 6391 --val-every 6391`). The real monitor, run
+read-only against its log, showed only the resume point at attach (`step=31955
+max=63906 loss=None step_ms=0`). 52 s later the first chunk ended and the
+harness printed `step=  38346 train_loss=2.906 ...`, giving one loss sample and
+still no step time. Nothing changed for the next 28 minutes, the length of a
+6391-step chunk at about 3.5 steps/s.
+
+Cause: `Tailer::read_new` already hands every tqdm frame to the parser live.
+The bar branch of `parse_train_line` accepted only a standalone `loss=`
+postfix. tt-tnt's bar is `61/6391 [00:19<30:41,  3.43it/s, train_loss=3.1016,
+val_loss=3.0977]`, so none of its frames parsed. No existing test pinned the
+refusal; only the comment stated it.
+
+Fix, three parts:
+
+- Parser: a bar frame's loss is a standalone `loss=` when present (SFTTrainer),
+  else `train_loss=`, which must be a finite number. `val_loss=` is never used;
+  in tt-tnt's bar it is ttml's placeholder copy of the train loss. A frame with
+  no loss (`0/6391 [00:00<?, ?it/s]`) still gives `None`.
+- Global step: tt-tnt's bar counts the current chunk (1 to 6391, restarting
+  every chunk). `TrainState.abs_base` holds the run's absolute step at the
+  start of the chunk. A run header sets it to 0, a resume line to its start
+  step, and any absolute step line (`step=` validation, `Step:`) to the printed
+  step. The bar's step is `abs_base + local`. A bar restart with no absolute
+  line before it adds the finished chunk's length, because tt-tnt also ends a
+  chunk at a checkpoint-only boundary (see `_chunk_size` in tt-tnt's
+  `train/run.py`). `step_is_chunk_local` is false whenever a base exists, so
+  the header shows `step 32,155 / 63,906  50.3%`, the ETA applies and the
+  strip shows the schedule position. The bar's total no longer replaces the
+  stated budget for such a run. A trainer with no header and no absolute line
+  (SFTTrainer) has no base and behaves as before.
+- Cadence at the chunk boundary: the step no longer goes backwards at a
+  restart, so the regression arm no longer sees the boundary, and the first
+  step after it would have been timed across checkpoint, validation and
+  warm-up (about a minute). An absolute step line beside a bar, or a restart
+  that moved the base, now sets `TrainState.cadence_rebase`, and
+  `note_step_progress` re-baselines as it does after a pause. The brief asked
+  for every absolute line to do this. That breaks the per-step `Step:`
+  trainer and the validation-only cadence (two existing cadence tests and the
+  new per-step test went red), so the re-baseline applies only once a bar has
+  been seen.
+
+Downstream, with no further code: one loss entry per frame, observed step
+samples (`(from bar)`), the starfield and weave, tokens/s (about 109k for
+batch 64 x seq 512 at 300 ms) and the ETA all work live. `poll`'s line loop
+moved into `ingest_lines` so tests replay a log through the same path with
+injected times.
+
+Side effect worth knowing: `loss_history` (512 entries) now fills at about 3.5
+entries/s and covers about 2.5 minutes of per-step training loss. The header's
+delta arrow, the strip's slope, noise and `best N logs ago` clauses now change
+on almost every frame, and the mountains show batch-to-batch noise over that
+window. Not redesigned here.
+
+Tests: parser (the three verbatim frames, precedence, `nan`/`inf`/text,
+no-loss frame), `abs_base_tests` in `monitor.rs` (each base rule, global step
+for fresh and resumed runs, budget kept, chunk-local rule unchanged without a
+base, a disagreeing absolute line wins, the boundary with and without a
+validation line, a per-step trainer still timed), and three end-to-end
+replays in `train_view.rs` (resumed tt-tnt, fresh tt-tnt, SFTTrainer) that
+check step, budget, header text, `step_ms`, tokens/s, samples and loss entries
+at every poll. Each new wiring test was seen to fail under a deliberate break.
+Changed tests: two `step_and_ms_tests` and the view test
+`a_chunk_local_step_is_shown_without_the_run_budget` used a run header to
+state the budget and pinned the chunk-local display; they now state it with
+`Max steps` (no base) so the old rule stays covered. The view tests
+`a_chunk_local_step_is_shown_without_the_run_budget` and
+`once_the_bar_is_known_to_be_chunked_the_strip_makes_no_schedule_claim` now
+start from `attached_state`, because `live_state` folds in a `Step:` line,
+which gives the bar a base.
