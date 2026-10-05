@@ -741,7 +741,10 @@ mod tests {
                 Takeover::BlackholeSwarm(BlackholeSwarmTakeover::new(ev)),
             ),
             ("trek", Takeover::TrekReset(TrekResetTakeover::new(ev))),
-            ("cetacean", Takeover::SillyCetacean(SillyCetaceanTakeover::new(ev))),
+            (
+                "cetacean",
+                Takeover::SillyCetacean(SillyCetaceanTakeover::new(ev)),
+            ),
             ("quiet", Takeover::QuietNotice(QuietNoticeTakeover::new(ev))),
         ]
     }

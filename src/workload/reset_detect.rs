@@ -72,7 +72,9 @@ pub fn parse_reset_process(
         raw_targets.is_empty() || raw_targets.iter().any(|t| t.eq_ignore_ascii_case("all"));
 
     let resolved_indices: Vec<u8> = if is_all_literal {
-        (0..total_devices).filter_map(|i| u8::try_from(i).ok()).collect()
+        (0..total_devices)
+            .filter_map(|i| u8::try_from(i).ok())
+            .collect()
     } else {
         resolve_target_indices(&raw_targets, devices)
     };
@@ -91,7 +93,9 @@ pub fn parse_reset_process(
 
     // When is_full, device_indices should be 0..total_devices; otherwise use resolved indices.
     let device_indices = if is_full {
-        (0..total_devices).filter_map(|i| u8::try_from(i).ok()).collect()
+        (0..total_devices)
+            .filter_map(|i| u8::try_from(i).ok())
+            .collect()
     } else {
         resolved_indices
     };
@@ -124,7 +128,10 @@ fn resolve_target_indices(targets: &[String], devices: &[Device]) -> Vec<u8> {
         } else if let Ok(n) = t.parse::<usize>() {
             Some(n)
         } else {
-            devices.iter().find(|d| d.bus_id.eq_ignore_ascii_case(t)).map(|d| d.index)
+            devices
+                .iter()
+                .find(|d| d.bus_id.eq_ignore_ascii_case(t))
+                .map(|d| d.index)
         };
         if let Some(i) = idx {
             if let Ok(b) = u8::try_from(i) {
@@ -291,8 +298,7 @@ mod tests {
     #[test]
     fn unresolvable_target_is_dropped_from_device_indices_but_still_counted() {
         let devices = fixture_devices(4);
-        let ev =
-            parse_reset_process(100, "tt-smi", "tt-smi -r 0000:ff:00.0", &devices).unwrap();
+        let ev = parse_reset_process(100, "tt-smi", "tt-smi -r 0000:ff:00.0", &devices).unwrap();
         assert!(!ev.is_full);
         assert_eq!(ev.chip_count, 1); // one token was asked for...
         assert!(ev.device_indices.is_empty()); // ...but it couldn't be resolved, never guessed
@@ -319,8 +325,14 @@ mod tests {
         // Only device 0 is actually targeted, so is_full must be false.
         let devices = fixture_devices(2);
         let ev = parse_reset_process(100, "tt-smi", "tt-smi -r 0 0", &devices).unwrap();
-        assert!(!ev.is_full, "Duplicated target should not count as full coverage");
-        assert_eq!(ev.chip_count, 2, "chip_count should reflect the raw target count");
+        assert!(
+            !ev.is_full,
+            "Duplicated target should not count as full coverage"
+        );
+        assert_eq!(
+            ev.chip_count, 2,
+            "chip_count should reflect the raw target count"
+        );
         assert_eq!(
             ev.device_indices,
             vec![0, 0],

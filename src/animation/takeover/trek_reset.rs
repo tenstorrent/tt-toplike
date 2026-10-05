@@ -239,14 +239,7 @@ impl TrekResetTakeover {
         } else {
             colors::rgb(40, 90, 60)
         };
-        render_takeover_frame(
-            f,
-            area,
-            tag,
-            "TT-TREKLIKE",
-            border_color,
-            lines,
-        );
+        render_takeover_frame(f, area, tag, "TT-TREKLIKE", border_color, lines);
     }
 }
 
@@ -387,6 +380,9 @@ mod tests {
             .map(|(x, y)| buf[(x, y)].symbol().to_string())
             .collect();
         assert!(text.contains("TT-TREKLIKE"), "{text}");
-        assert!(!text.contains("ENTERPRISE") && !text.contains("NCC-1701"), "{text}");
+        assert!(
+            !text.contains("ENTERPRISE") && !text.contains("NCC-1701"),
+            "{text}"
+        );
     }
 }

@@ -711,7 +711,9 @@ pub fn render_hivemind(
         // severity-based coloring of the severity-label column — see
         // `reset_accent`. An ordinary row keeps exactly the prior styling.
         let source_style = if row.is_reset {
-            Style::default().fg(reset_accent()).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(reset_accent())
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(dim)
         };
@@ -726,7 +728,9 @@ pub fn render_hivemind(
         let display_span = if row.is_reset {
             Span::styled(
                 display_text,
-                Style::default().fg(reset_accent()).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(reset_accent())
+                    .add_modifier(Modifier::BOLD),
             )
         } else {
             Span::raw(display_text)
