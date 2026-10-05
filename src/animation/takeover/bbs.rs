@@ -201,7 +201,11 @@ impl BbsTakeover {
             .into_iter()
             .skip(first)
             .map(|(who, text)| {
-                let color = if who == Speaker::Sysop { cyan } else { dim_green };
+                let color = if who == Speaker::Sysop {
+                    cyan
+                } else {
+                    dim_green
+                };
                 Line::from(Span::styled(text, Style::default().fg(color)))
             })
             .collect();
@@ -647,14 +651,30 @@ mod tests {
     fn chat_advances_then_holds_on_the_last_line() {
         let mut t = BbsTakeover::new(&ev(true, 4));
         t.tick(Duration::from_millis(CHAT_LINE_MS as u64 * 2 + 900));
-        let text: String = t.chat_lines(8).iter().map(line_text).collect::<Vec<_>>().join("\n");
+        let text: String = t
+            .chat_lines(8)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(text.contains("WHY ARE YOU RESETTING THE CHIPS?"), "{text}");
         assert!(!text.contains("STRANGE GAME"), "{text}");
         t.tick(Duration::from_secs(60));
         assert!(t.clock.in_progress());
-        let end: String = t.chat_lines(8).iter().map(line_text).collect::<Vec<_>>().join("\n");
-        assert!(end.contains("THE ONLY WINNING MOVE IS NOT TO RESET."), "{end}");
-        assert!(!end.contains("GOODBYE"), "no goodbye while still resetting:\n{end}");
+        let end: String = t
+            .chat_lines(8)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            end.contains("THE ONLY WINNING MOVE IS NOT TO RESET."),
+            "{end}"
+        );
+        assert!(
+            !end.contains("GOODBYE"),
+            "no goodbye while still resetting:\n{end}"
+        );
     }
 
     /// ELIZA and Dr. Sbaitso are in the script, and only the real finish
@@ -668,7 +688,12 @@ mod tests {
         let mut t = BbsTakeover::new(&ev(true, 4));
         t.tick(Duration::from_secs(2));
         t.note_reset_finished();
-        let done: String = t.chat_lines(5).iter().map(line_text).collect::<Vec<_>>().join("\n");
+        let done: String = t
+            .chat_lines(5)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(done.contains("GOODBYE, PROFESSOR."), "{done}");
     }
 

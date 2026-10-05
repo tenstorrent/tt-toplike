@@ -592,7 +592,10 @@ mod tests {
     fn non_reset_event_row_is_not_flagged() {
         let mut agg = FeedAgg::new();
         let t0 = Instant::now();
-        agg.ingest(&ev(Source::Vllm, Some(0), Severity::Warn, "some warning"), t0);
+        agg.ingest(
+            &ev(Source::Vllm, Some(0), Severity::Warn, "some warning"),
+            t0,
+        );
 
         let rows = agg.rows(None, Severity::Trace);
         assert_eq!(rows.len(), 1);
