@@ -160,11 +160,16 @@ pub fn parse_train_line(line: &str) -> Option<TrainEvent> {
         let step = step_s.parse().ok()?;
         let loss = loss_s.trim().parse().ok()?;
 
-        // Optional trailing "Time: {} ms" and "cache entries: {}".
+        // Optional trailing "Time: {} ms" and "cache entries: {}". A step time
+        // must be a finite, positive number: `nan`, `inf`, zero or a negative
+        // would give an infinite or negative tokens/s and a false sample in the
+        // step history. Such a time is dropped, not guessed, and the line is
+        // read as a plain step.
         let ms = tail
             .find("Time:")
             .and_then(|i| tail[i + "Time:".len()..].split_once("ms"))
-            .and_then(|(v, _)| v.trim().parse::<f32>().ok());
+            .and_then(|(v, _)| v.trim().parse::<f32>().ok())
+            .filter(|ms| ms.is_finite() && *ms > 0.0);
         let cache = tail
             .find("cache entries:")
             .and_then(|i| {
@@ -796,6 +801,32 @@ mod tests {
                 ms: 285.0
             }
         );
+    }
+
+    /// A step time that is not a finite positive number is dropped, for both
+    /// timed shapes (with and without a cache count). The step and loss still
+    /// arrive, as a plain `Step`.
+    #[test]
+    fn a_non_finite_or_non_positive_step_time_is_dropped() {
+        for bad in ["nan", "inf", "-inf", "0", "0.0", "-285.0"] {
+            let plain = format!("Step: 9, Loss: 2.5, Time: {bad} ms");
+            assert_eq!(
+                parse_train_line(&plain),
+                Some(TrainEvent::Step { step: 9, loss: 2.5 }),
+                "{plain}"
+            );
+            let cached = format!("Step: 9, Loss: 2.5, Time: {bad} ms, cache entries: 21");
+            assert_eq!(
+                parse_train_line(&cached),
+                Some(TrainEvent::Step { step: 9, loss: 2.5 }),
+                "{cached}"
+            );
+        }
+        // A good time is untouched.
+        assert!(matches!(
+            parse_train_line("Step: 9, Loss: 2.5, Time: 0.5 ms"),
+            Some(TrainEvent::StepAndMs { step: 9, .. })
+        ));
     }
 
     #[test]
