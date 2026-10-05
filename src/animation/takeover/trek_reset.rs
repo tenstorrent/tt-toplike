@@ -3,7 +3,7 @@
 
 //! Classic 1971-BASIC-style "Super Star Trek" screen: a real status
 //! sidebar (STARDATE, CONDITION, KLINGONS REMAINING) plus a fixed 8x8
-//! short-range sensor scan grid — Enterprise `<*>`, a `+K+` Klingon on each
+//! short-range sensor scan grid — our ship `<*>`, a `+K+` Klingon on each
 //! targeted chip, scattered decorative stars, dots for empty space — ending
 //! in a command-prompt line so it reads as walking in on a game already in
 //! progress, not a title screen. Classic green-phosphor/amber palette, no
@@ -163,7 +163,7 @@ impl TrekResetTakeover {
             Style::default().fg(colors::rgb(70, 150, 110)),
         )));
 
-        let enterprise_index = self.total_devices.min(GRID_SIZE * GRID_SIZE - 1);
+        let ship_index = self.total_devices.min(GRID_SIZE * GRID_SIZE - 1);
 
         for row in 0..GRID_SIZE {
             let mut spans: Vec<Span<'static>> = vec![Span::styled(
@@ -183,7 +183,7 @@ impl TrekResetTakeover {
                     } else {
                         ("...", colors::rgb(40, 80, 60))
                     }
-                } else if index == enterprise_index {
+                } else if index == ship_index {
                     ("<*>", colors::rgb(210, 230, 255))
                 } else if self.has_star(index) {
                     (" * ", colors::rgb(80, 130, 150))
@@ -243,7 +243,7 @@ impl TrekResetTakeover {
             f,
             area,
             tag,
-            "USS ENTERPRISE — NCC-1701",
+            "TT-TREKLIKE",
             border_color,
             lines,
         );
@@ -372,5 +372,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn box_title_is_tt_treklike_and_not_the_enterprise() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let t = TrekResetTakeover::new(&ev(vec![0], 4));
+        terminal.draw(|f| t.render(f, f.area())).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect();
+        assert!(text.contains("TT-TREKLIKE"), "{text}");
+        assert!(!text.contains("ENTERPRISE") && !text.contains("NCC-1701"), "{text}");
     }
 }

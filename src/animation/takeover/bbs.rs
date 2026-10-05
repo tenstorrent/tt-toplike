@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! BBS sysop takeover — "the sysop wants to chat." A classic ANSI-art
+//! BBS sysop takeover — "the sysop wants to chat." The sysop is a chatbot
+//! from the early days of AI, and it types out a short scripted conversation
+//! (see [`CHAT`]) in the manner of ELIZA, Dr. Sbaitso and the WOPR from
+//! WarGames. The chat is flavor only: it never says the reset has finished
+//! until it has, and the real per-chip lines below it stay the real status.
+//! A classic ANSI-art
 //! terminal interrupt: fixed limited palette (bright green base, sparse
 //! cyan/yellow accents — no hue-cycling, that's BBS's alone to have given
 //! up, not everyone else's to inherit), a box-drawing border for real
@@ -34,6 +39,52 @@ const HEADER_ROWS: usize = 6;
 const CLOSING_ROWS: usize = 1;
 /// Rows the ANSI box adds (top and bottom edge).
 const BOX_ROWS: usize = 2;
+/// Rows the chat window can use when there is room for it.
+const CHAT_ROWS: usize = 5;
+/// A new chat line starts this often while the reset is in progress.
+const CHAT_LINE_MS: u128 = 1000;
+/// Typing speed of a chat line, in characters per second.
+const CHAT_CPS: u128 = 60;
+
+/// Who speaks a chat line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Speaker {
+    Sysop,
+    You,
+}
+
+/// The conversation, in the style of three old AI harnesses:
+/// - WarGames' WOPR: the greeting and the "strange game" ending.
+/// - ELIZA: turning each answer back into a question ("WHY ARE YOU...?",
+///   "HOW DOES ... MAKE ... FEEL?", "TELL ME MORE ABOUT ...").
+/// - Dr. Sbaitso: the cheerful "I am here to help" manner, and the line about
+///   memory being wiped when you leave, which is literally what a reset does.
+///
+/// Every line is at most 62 characters so the chat fits the box interior.
+const CHAT: [(Speaker, &str); 8] = [
+    (
+        Speaker::Sysop,
+        "SYSOP> GREETINGS, PROFESSOR. SHALL WE PLAY A GAME?",
+    ),
+    (Speaker::You, "YOU>   NO. I AM RESETTING THE CHIPS."),
+    (Speaker::Sysop, "SYSOP> WHY ARE YOU RESETTING THE CHIPS?"),
+    (Speaker::You, "YOU>   THEY ARE STUCK."),
+    (
+        Speaker::Sysop,
+        "SYSOP> HOW DOES BEING STUCK MAKE THE CHIPS FEEL?",
+    ),
+    (Speaker::You, "YOU>   THEIR MEMORY WILL BE WIPED."),
+    (
+        Speaker::Sysop,
+        "SYSOP> I AM HERE TO HELP. TELL ME MORE ABOUT THEIR MEMORY.",
+    ),
+    (
+        Speaker::Sysop,
+        "SYSOP> A STRANGE GAME. THE ONLY WINNING MOVE IS NOT TO RESET.",
+    ),
+];
+/// Shown only once the real reset has finished.
+const CHAT_GOODBYE: (Speaker, &str) = (Speaker::Sysop, "SYSOP> GOODBYE, PROFESSOR.");
 
 pub struct BbsTakeover {
     clock: TakeoverClock,
@@ -96,9 +147,73 @@ impl BbsTakeover {
         (within_beat as f32 / TYPE_MS as f32).min(1.0)
     }
 
+    /// Rows the chat window gets for an interior `interior_height` rows tall:
+    /// [`CHAT_ROWS`] when there is room, fewer on a short box, and always
+    /// leaving at least one row for a chip line.
+    fn chat_rows(interior_height: usize) -> usize {
+        CHAT_ROWS.min(interior_height.saturating_sub(HEADER_ROWS + CLOSING_ROWS + BOX_ROWS + 1))
+    }
+
+    /// The last `rows` chat lines as they should look right now, padded with
+    /// blank lines to exactly `rows` so the chip lines below never move as the
+    /// chat fills. Lines start [`CHAT_LINE_MS`] apart and type at
+    /// [`CHAT_CPS`]; the newest line of a running chat ends in a blinking
+    /// block cursor. Once the real reset has finished every line is shown in
+    /// full, followed by the goodbye.
+    fn chat_lines(&self, rows: usize) -> Vec<Line<'static>> {
+        if rows == 0 {
+            return Vec::new();
+        }
+        let finished = !self.clock.in_progress();
+        let elapsed = self.clock.elapsed().as_millis();
+        let dim_green = colors::rgb(20, 140, 60);
+        let cyan = colors::rgb(60, 200, 210);
+
+        // (speaker, text so far), oldest first.
+        let mut shown: Vec<(Speaker, String)> = Vec::new();
+        for (i, (who, text)) in CHAT.iter().enumerate() {
+            let start = i as u128 * CHAT_LINE_MS;
+            if !finished && elapsed < start {
+                break;
+            }
+            // The speaker tag ("SYSOP> ") appears at once; only the message
+            // after it types out.
+            let tag = text.find('>').map_or(0, |i| {
+                i + 1 + text[i + 1..].chars().take_while(|c| *c == ' ').count()
+            });
+            let typed = if finished {
+                usize::MAX
+            } else {
+                ((elapsed - start) * CHAT_CPS / 1000) as usize
+            };
+            shown.push((*who, text.chars().take(tag.saturating_add(typed)).collect()));
+        }
+        if finished {
+            shown.push((CHAT_GOODBYE.0, CHAT_GOODBYE.1.to_string()));
+        } else if (self.clock.elapsed().as_millis() / BLINK_MS) % 2 == 0 {
+            if let Some((_, text)) = shown.last_mut() {
+                text.push('\u{2588}');
+            }
+        }
+
+        let first = shown.len().saturating_sub(rows);
+        let mut lines: Vec<Line<'static>> = shown
+            .into_iter()
+            .skip(first)
+            .map(|(who, text)| {
+                let color = if who == Speaker::Sysop { cyan } else { dim_green };
+                Line::from(Span::styled(text, Style::default().fg(color)))
+            })
+            .collect();
+        while lines.len() < rows {
+            lines.push(Line::from(Span::raw("")));
+        }
+        lines
+    }
+
     /// Build the (unboxed-by-the-frame) screen lines, fitted to
-    /// `interior_height` rows: the 6 header rows, the chip lines and the
-    /// closing line, plus the 2 rows of the ANSI box. When there are more
+    /// `interior_height` rows: the 6 header rows, the chat window, the chip
+    /// lines and the closing line, plus the 2 rows of the ANSI box. When there are more
     /// chip lines than fit, only the newest ones are shown, like a terminal
     /// scrolling.
     fn lines(&self, interior_height: usize) -> Vec<Line<'static>> {
@@ -139,10 +254,13 @@ impl BbsTakeover {
             Line::from(Span::raw("")),
         ];
 
+        let chat_rows = Self::chat_rows(interior_height);
+        lines.extend(self.chat_lines(chat_rows));
+
         let visible = self.visible_lines();
         let typing_progress = self.typing_progress();
         let max_chip_lines = interior_height
-            .saturating_sub(HEADER_ROWS + CLOSING_ROWS + BOX_ROWS)
+            .saturating_sub(HEADER_ROWS + chat_rows + CLOSING_ROWS + BOX_ROWS)
             .max(1);
         let first_shown = visible
             .min(self.device_indices.len())
@@ -501,5 +619,70 @@ mod tests {
                 assert_eq!(text.contains("CONNECTION RESTORED."), finished, "{text}");
             }
         }
+    }
+
+    // ---- Chat window -----------------------------------------------------
+
+    fn line_text(l: &Line) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// The sysop opens with the WarGames greeting, typing it out over real
+    /// time rather than showing it whole on the first frame.
+    #[test]
+    fn chat_opens_with_the_wopr_greeting_and_types_it_out() {
+        let mut t = BbsTakeover::new(&ev(true, 4));
+        t.tick(Duration::from_millis(100));
+        let early = line_text(&t.chat_lines(5)[0]);
+        assert!(early.starts_with("SYSOP> G"), "{early:?}");
+        assert!(!early.contains("SHALL WE PLAY A GAME?"), "{early:?}");
+        t.tick(Duration::from_millis(900));
+        let later = line_text(&t.chat_lines(5)[0]);
+        assert!(later.contains("SHALL WE PLAY A GAME?"), "{later:?}");
+    }
+
+    /// The conversation advances one line per CHAT_LINE_MS and holds on its
+    /// last line instead of looping, so a long real reset does not replay it.
+    #[test]
+    fn chat_advances_then_holds_on_the_last_line() {
+        let mut t = BbsTakeover::new(&ev(true, 4));
+        t.tick(Duration::from_millis(CHAT_LINE_MS as u64 * 2 + 900));
+        let text: String = t.chat_lines(8).iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("WHY ARE YOU RESETTING THE CHIPS?"), "{text}");
+        assert!(!text.contains("STRANGE GAME"), "{text}");
+        t.tick(Duration::from_secs(60));
+        assert!(t.clock.in_progress());
+        let end: String = t.chat_lines(8).iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(end.contains("THE ONLY WINNING MOVE IS NOT TO RESET."), "{end}");
+        assert!(!end.contains("GOODBYE"), "no goodbye while still resetting:\n{end}");
+    }
+
+    /// ELIZA and Dr. Sbaitso are in the script, and only the real finish
+    /// brings the goodbye.
+    #[test]
+    fn chat_has_its_ai_nods_and_says_goodbye_only_when_finished() {
+        let script: String = CHAT.iter().map(|(_, l)| *l).collect::<Vec<_>>().join("\n");
+        assert!(script.contains("WHY ARE YOU"), "ELIZA-style question");
+        assert!(script.contains("I AM HERE TO HELP"), "Dr. Sbaitso manner");
+        assert!(script.contains("SHALL WE PLAY A GAME?"), "WOPR greeting");
+        let mut t = BbsTakeover::new(&ev(true, 4));
+        t.tick(Duration::from_secs(2));
+        t.note_reset_finished();
+        let done: String = t.chat_lines(5).iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(done.contains("GOODBYE, PROFESSOR."), "{done}");
+    }
+
+    /// The chat window is always exactly the rows it was given, and no chat
+    /// line is wider than the box interior, so the chip lines never move.
+    #[test]
+    fn chat_window_is_a_fixed_height_and_fits_the_interior() {
+        assert!(CHAT.iter().all(|(_, l)| l.chars().count() <= 62));
+        let t = BbsTakeover::new(&ev(true, 4));
+        assert_eq!(t.chat_lines(5).len(), 5);
+        assert_eq!(t.chat_lines(0).len(), 0);
+        assert_eq!(BbsTakeover::chat_rows(22), 5);
+        assert_eq!(BbsTakeover::chat_rows(11), 1);
+        assert_eq!(BbsTakeover::chat_rows(10), 0);
+        assert_eq!(BbsTakeover::chat_rows(5), 0);
     }
 }

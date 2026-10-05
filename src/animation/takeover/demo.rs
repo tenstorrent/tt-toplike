@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! The `demo` reset behavior: all seven takeovers played in a fixed order.
+//! The `demo` reset behavior: all five takeovers played in a fixed order.
 //!
 //! `--tt-smi-reset-behavior demo` plays the whole sequence once at boot and
 //! again on every real `tt-smi -r`. [`DemoSequence`] is the sequencer. It
@@ -13,7 +13,7 @@
 //! Every other takeover follows the real reset: `note_reset_finished` fires
 //! the tick the real process exits. A demo does not. Each slot is a fixed
 //! [`SLOT_LEN`] long and calls `note_reset_finished` on the variant at
-//! [`RESOLVE_AT`], and the real reset's own finish is ignored, so all seven
+//! [`RESOLVE_AT`], and the real reset's own finish is ignored, so all five
 //! animations always play out. Because that timing is staged, the box title
 //! carries a `DEMO` tag (see [`DemoSequence::tag`]) so a viewer cannot take a
 //! staged animation for a real reset.
@@ -22,8 +22,8 @@
 //! drive the whole sequence deterministically.
 
 use super::{
-    BbsTakeover, BlackholeSwarmTakeover, FailWhaleTakeover, HatchCountdownTakeover,
-    MissileCommandTakeover, QuietNoticeTakeover, Takeover, TrekResetTakeover,
+    BbsTakeover, BlackholeSwarmTakeover, QuietNoticeTakeover, SillyCetaceanTakeover, Takeover,
+    TrekResetTakeover,
 };
 use crate::workload::reset_detect::ResetEvent;
 use ratatui::layout::Rect;
@@ -40,7 +40,7 @@ pub const SLOT_LEN: Duration = Duration::from_secs(8);
 pub const RESOLVE_AT: Duration = Duration::from_secs(5);
 
 /// Number of animations in the sequence.
-const SLOT_COUNT: usize = 7;
+const SLOT_COUNT: usize = 5;
 
 /// What started a demo run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +51,7 @@ pub enum DemoSource {
     RealReset,
 }
 
-/// The seven takeovers in their fixed order, built lazily as each slot
+/// The five takeovers in their fixed order, built lazily as each slot
 /// begins (so an animation's own clock starts when its slot does).
 ///
 /// This type deliberately bends the project rule that takeovers follow the
@@ -70,17 +70,15 @@ pub struct DemoSequence {
     ended: bool,
 }
 
-/// Builds the takeover for slot `index`: Quiet Notice, Blackhole Swarm,
-/// Hatch Countdown, BBS, Trek, Fail Whale, Missile Command.
+/// Builds the takeover for slot `index`: Quiet Notice, Blackhole Swarm, BBS,
+/// Trek, Silly Cetacean.
 fn build_slot(index: usize, ev: &ResetEvent) -> Takeover {
     match index {
         0 => Takeover::QuietNotice(QuietNoticeTakeover::new(ev)),
         1 => Takeover::BlackholeSwarm(BlackholeSwarmTakeover::new(ev)),
-        2 => Takeover::HatchCountdown(HatchCountdownTakeover::new(ev)),
-        3 => Takeover::Bbs(BbsTakeover::new(ev)),
-        4 => Takeover::TrekReset(TrekResetTakeover::new(ev)),
-        5 => Takeover::FailWhale(FailWhaleTakeover::new(ev)),
-        _ => Takeover::MissileCommand(MissileCommandTakeover::new(ev)),
+        2 => Takeover::Bbs(BbsTakeover::new(ev)),
+        3 => Takeover::TrekReset(TrekResetTakeover::new(ev)),
+        _ => Takeover::SillyCetacean(SillyCetaceanTakeover::new(ev)),
     }
 }
 
@@ -198,14 +196,12 @@ mod tests {
     use ratatui::Terminal;
     use std::time::Duration;
 
-    const ORDER: [&str; 7] = [
+    const ORDER: [&str; 5] = [
         "QuietNotice",
         "BlackholeSwarm",
-        "HatchCountdown",
         "Bbs",
         "TrekReset",
-        "FailWhale",
-        "MissileCommand",
+        "SillyCetacean",
     ];
     const STEP: Duration = Duration::from_millis(50);
 
@@ -243,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn plays_the_seven_takeovers_in_the_fixed_order() {
+    fn plays_the_five_takeovers_in_the_fixed_order() {
         let mut t = boot();
         let slots = run_to_end(&mut t, Duration::from_secs(80));
         let names: Vec<&str> = slots.iter().map(|(n, _)| n.as_str()).collect();
@@ -262,7 +258,7 @@ mod tests {
             );
         }
         let total: Duration = slots.iter().map(|(_, d)| *d).sum();
-        assert_eq!(total, Duration::from_secs(56));
+        assert_eq!(total, Duration::from_secs(40));
     }
 
     #[test]
@@ -279,7 +275,7 @@ mod tests {
 
     #[test]
     fn resolve_point_is_five_seconds_and_reaches_the_variant() {
-        for start in 0..7 {
+        for start in 0..5 {
             let mut seq = DemoSequence::new(DemoSource::Boot, ev(&[0, 1, 2, 3], 4));
             for _ in 0..start {
                 seq.skip();
@@ -308,7 +304,7 @@ mod tests {
     #[test]
     fn skip_advances_exactly_one_slot_at_a_time() {
         let mut t = boot();
-        for expected in 1..7 {
+        for expected in 1..5 {
             t.skip();
             assert_eq!(t.variant_name(), ORDER[expected]);
             assert!(!t.is_done());
@@ -318,7 +314,7 @@ mod tests {
     #[test]
     fn skip_on_the_last_slot_ends_the_sequence() {
         let mut t = boot();
-        for _ in 0..6 {
+        for _ in 0..4 {
             t.skip();
         }
         assert!(!t.is_done());
@@ -328,7 +324,7 @@ mod tests {
 
     #[test]
     fn end_stops_the_sequence_from_any_slot() {
-        for start in 0..7 {
+        for start in 0..5 {
             let mut t = boot();
             for _ in 0..start {
                 t.skip();
@@ -346,8 +342,8 @@ mod tests {
         let slots = run_to_end(&mut t, Duration::from_secs(80));
         let total: Duration =
             slots.iter().map(|(_, d)| *d).sum::<Duration>() + Duration::from_secs(1);
-        assert_eq!(slots.len(), 7);
-        assert_eq!(total, Duration::from_secs(56));
+        assert_eq!(slots.len(), 5);
+        assert_eq!(total, Duration::from_secs(40));
     }
 
     /// Text of the box's top row after rendering `t` into a `w` x `h` buffer.
@@ -374,7 +370,7 @@ mod tests {
     fn boot_title_row_carries_the_demo_tag_in_every_variant_and_size() {
         for (w, h) in [(134, 40), (50, 14)] {
             let mut t = boot();
-            for i in 0..7 {
+            for i in 0..5 {
                 let row = top_row(&t, w, h);
                 assert!(row.contains("DEMO - "), "{} at {w}x{h}: {row:?}", ORDER[i]);
                 assert!(!row.contains("real reset"), "{row:?}");
@@ -387,7 +383,7 @@ mod tests {
     fn real_title_row_carries_the_real_reset_tag_in_every_variant_and_size() {
         for (w, h) in [(134, 40), (50, 14)] {
             let mut t = Takeover::demo_real(&ev(&[1, 3], 4));
-            for i in 0..7 {
+            for i in 0..5 {
                 let row = top_row(&t, w, h);
                 assert!(
                     row.contains("DEMO (real reset) - "),
@@ -412,12 +408,11 @@ mod tests {
 
     #[test]
     fn subset_event_scopes_the_chip_labels_and_boot_uses_every_device() {
-        // Slot 3 is BBS, the variant that prints a `CHIP n` line per
-        // targeted chip. Missile Command (slot 6) prints no labels; it draws
-        // one lane per device and is covered by the lane test below.
+        // Slot 2 is BBS, the variant that prints a `CHIP n` line per
+        // targeted chip.
         let mut real = Takeover::demo_real(&ev(&[1, 3], 4));
         let mut bt = boot();
-        for _ in 0..3 {
+        for _ in 0..2 {
             real.skip();
             bt.skip();
         }
@@ -434,47 +429,6 @@ mod tests {
         for c in 0..4 {
             assert!(b.contains(&format!("CHIP {c}")), "boot missing chip {c}");
         }
-    }
-
-    #[test]
-    fn missile_command_slot_highlights_only_the_targeted_lanes() {
-        // Chips 1 and 3 of 4 reset. Slot 6 is Missile Command.
-        let mut t = Takeover::demo_real(&ev(&[1, 3], 4));
-        for _ in 0..6 {
-            t.skip();
-        }
-        assert_eq!(t.variant_name(), "MissileCommand");
-        match &t {
-            Takeover::Demo(seq) => assert_eq!(seq.event().device_indices, vec![1, 3]),
-            _ => panic!("expected a demo"),
-        }
-        // Past the 5 s resolve point and inside the 8 s slot, the variant
-        // shows its settled frame: a `+` ember on each targeted lane and a
-        // `·` idle silo on each other lane, all on the impact row.
-        for _ in 0..120 {
-            t.tick(STEP);
-        }
-        assert_eq!(t.variant_name(), "MissileCommand");
-        let (w, h) = (134u16, 40u16);
-        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-        term.draw(|f| t.render(f, f.area())).unwrap();
-        let buf = term.backend().buffer();
-        let b = takeover_box(ratatui::layout::Rect::new(0, 0, w, h));
-        let mut markers: Vec<(u16, u16, String)> = vec![];
-        for y in b.y..b.bottom() {
-            for x in b.x..b.right() {
-                let sym = buf[(x, y)].symbol();
-                if sym == "+" || sym == "·" {
-                    markers.push((x, y, sym.to_string()));
-                }
-            }
-        }
-        // One marker per lane, left to right, all on one row.
-        assert_eq!(markers.len(), 4, "{markers:?}");
-        assert!(markers.iter().all(|m| m.1 == markers[0].1), "{markers:?}");
-        markers.sort_by_key(|m| m.0);
-        let glyphs: Vec<&str> = markers.iter().map(|m| m.2.as_str()).collect();
-        assert_eq!(glyphs, ["·", "+", "·", "+"], "lanes 1 and 3 are targeted");
     }
 
     #[test]

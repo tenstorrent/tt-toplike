@@ -666,3 +666,44 @@ Review minors from the two tasks above, fixed in one pass.
   checks which lanes are lit. The Task 2 report said this was covered by
   Missile's own tests. It was not: those only check that rendering does
   not panic.
+
+### Five takeovers, a cetacean sky and a chatbot sysop (Oct 5, 2026)
+
+Prompt: "let's take out missile command and the hatch animations (and from the
+recorded demo). change USS Enterprise to the TT-TREKLIKE. Rename FAIL WHALE to
+'SILLY CETACEAN' and let's add a little background to that one to liven it up.
+The SysOp chat should have some kind of throwback to the AI harnesses of the
+past. Like Eliza or Dr. Spaitso. or War Games"
+
+- Missile Command and Hatch Countdown are removed from the enum, the picker,
+  the demo and the docs. Five variants remain, so `demo` plays five
+  animations (40 s). New roll weights, full reset: Bbs 25, BlackholeSwarm 25,
+  TrekReset 20, SillyCetacean 20, QuietNotice 10. Subset reset: QuietNotice 40,
+  SillyCetacean 25, TrekReset 15, Bbs 13, BlackholeSwarm 7. Missile Command
+  used to carry the subset case because it lit only the targeted lanes; no
+  remaining variant does, so a subset reset now says which chips only through
+  Quiet Notice, BBS and Trek.
+- `TrekResetTakeover` keeps its name; its box title is `TT-TREKLIKE`
+  (was `USS ENTERPRISE — NCC-1701`).
+- `FailWhaleTakeover` is now `SillyCetaceanTakeover` (`silly_cetacean.rs`),
+  titled `SILLY CETACEAN`, and `SILLY CETACEAN - TOUCHDOWN` once landed. It
+  composes a character canvas the size of the box interior: a sun with two ray
+  shapes, three clouds drifting at 1.2, 2.4 and 3.6 cells/s, and a two-row
+  shimmering sea, then the whale, ropes and birds over that. Everything is a
+  function of the takeover's own elapsed time. The whale's body rows are
+  opaque between the outline's edges so clouds do not show through it.
+- BBS gains a chat window of 5 rows between the header and the chip lines
+  (fewer on a short box, never fewer than one chip row). The sysop is a
+  period chatbot: the WarGames greeting and the "strange game" ending
+  (changed to "not to reset"), ELIZA-style questions that turn each answer
+  back ("WHY ARE YOU RESETTING THE CHIPS?"), and Dr. Sbaitso's "I am here to
+  help". Lines start 1 s apart and type at 60 characters a second; the
+  speaker tag appears at once. The chat holds on its last line instead of
+  looping, and "GOODBYE, PROFESSOR." shows only after the real reset finishes,
+  like the closing line. The chip lines remain the real status.
+
+Caught while testing: the first whale-opacity test passed with the opacity
+removed, because the belly row has no interior spaces. It now fills the canvas
+with a marker and checks the eye row, and it was seen to fail with the change
+reverted. The typewriter first counted the `SYSOP> ` tag as typed text, so the
+speaker name appeared a letter at a time; the tag now shows at once.
