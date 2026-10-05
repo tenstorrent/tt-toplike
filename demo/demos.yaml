@@ -40,14 +40,14 @@ scenes:
       workload view with nothing to show.
 
   - id: reset-demo
-    title: "tt-smi -r: the seven reset animations"
+    title: "tt-smi -r: the five reset animations"
     layout: single
     right:
       run: "tt-toplike-tui {backend} --tt-smi-reset-behavior demo"
-    # Seven animations at 8 s each, played back to back at startup.
-    duration: 58s
+    # Five animations at 8 s each, played back to back at startup.
+    duration: 44s
     caption: >-
-      `--tt-smi-reset-behavior demo` plays all seven reset animations in a row,
+      `--tt-smi-reset-behavior demo` plays all five reset animations in a row,
       eight seconds each, in a box titled DEMO so a staged animation is never
       taken for a real reset. No reset is run for this capture. The same
       animations play over a real `tt-smi -r` under `dazzle`.
