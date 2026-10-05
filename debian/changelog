@@ -1,3 +1,20 @@
+tt-toplike (0.13.10) noble; urgency=medium
+
+  * The Inference view (`i`) shows the port and chips each model runs on,
+    for example `:8000 · chips 0,1`. Chips come from the device files the
+    server holds open, or from the device nodes its container was started
+    with. With several models the text is on each roster row; with one it
+    is a header line.
+  * `--tt-smi-reset-behavior` (`ignore`, `inform`, `dazzle`, `demo`) says
+    when tt-toplike sees a `tt-smi -r` in another terminal. `inform` is the
+    default and adds a status-bar segment. `dazzle` adds a takeover box with
+    one of five animations: Quiet Notice, 128 Blackholes, a BBS sysop
+    chatbot, TT-TREKLIKE and Silly Cetacean. `demo` plays all five at start
+    and on each real reset, with DEMO in the box title.
+  * README and site: a section on the reset behaviors with a looping clip.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 05 Oct 2026 12:00:00 +0000
+
 tt-toplike (0.13.9) noble; urgency=medium
 
   * The Training view reads tt-tnt's progress bar on every frame. Its

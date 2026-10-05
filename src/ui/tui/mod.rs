@@ -1020,7 +1020,8 @@ fn run_app(
                     // A lone service has no roster; give it the one-line
                     // placement header instead.
                     if inference_roster.is_empty() {
-                        inference_roster = inference_single_service_line(&rows, size.width as usize);
+                        inference_roster =
+                            inference_single_service_line(&rows, size.width as usize);
                     }
                     // Under `--remote`, while `remote_rows` is `None` (the peer
                     // isn't streaming inference data) this view is still
@@ -5635,7 +5636,14 @@ fn inference_roster_lines(
             2 + stat.chars().count()
         };
         let fixed_of = |placement: &str| {
-            2 + 7 + 2 + stat_w + if placement.is_empty() { 0 } else { 2 + placement.chars().count() }
+            2 + 7
+                + 2
+                + stat_w
+                + if placement.is_empty() {
+                    0
+                } else {
+                    2 + placement.chars().count()
+                }
         };
         if width.saturating_sub(fixed_of(&placement)) < 12 {
             placement.clear();
@@ -5665,10 +5673,7 @@ fn inference_roster_lines(
         ];
         if !placement.is_empty() {
             spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                placement,
-                Style::default().fg(colors::info()),
-            ));
+            spans.push(Span::styled(placement, Style::default().fg(colors::info())));
         }
         if !stat.is_empty() {
             spans.push(Span::raw("  "));
@@ -8130,8 +8135,16 @@ mod inference_roster_tests {
         b.port = Some(8002);
         b.chips = vec![2];
         let lines = inference_roster_lines(&[a, b], 80);
-        assert!(text(&lines[1]).contains(":8000 · chips 0,1"), "{}", text(&lines[1]));
-        assert!(text(&lines[2]).contains(":8002 · chip 2"), "{}", text(&lines[2]));
+        assert!(
+            text(&lines[1]).contains(":8000 · chips 0,1"),
+            "{}",
+            text(&lines[1])
+        );
+        assert!(
+            text(&lines[2]).contains(":8002 · chip 2"),
+            "{}",
+            text(&lines[2])
+        );
     }
 
     #[test]
