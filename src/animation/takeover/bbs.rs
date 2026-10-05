@@ -93,7 +93,7 @@ pub struct BbsTakeover {
     /// Real targeted device indices (see `ResetEvent::device_indices`), used
     /// so each "CHIP N" line names the chip actually being reset rather than
     /// a fake index derived from loop position.
-    device_indices: Vec<u8>,
+    device_indices: Vec<usize>,
 }
 
 impl BbsTakeover {
@@ -366,7 +366,7 @@ mod tests {
     /// Like `ev()`, but lets a test control the real targeted device indices
     /// independently of `chip_count` — needed to exercise a subset reset
     /// (e.g. `tt-smi -r 2`) where the targeted chip is NOT chip 0.
-    fn ev_subset(chip_count: usize, device_indices: Vec<u8>) -> ResetEvent {
+    fn ev_subset(chip_count: usize, device_indices: Vec<usize>) -> ResetEvent {
         ResetEvent {
             pid: 1,
             is_full: false,
@@ -592,7 +592,7 @@ mod tests {
     fn lines_fit_the_box_interior_for_any_chip_count() {
         let interior = crate::animation::takeover::takeover_interior(Rect::new(0, 0, 134, 40));
         for chips in [1usize, 4, 13, 14, 40, 200] {
-            let indices: Vec<u8> = (0..chips as u16).map(|i| (i % 250) as u8).collect();
+            let indices: Vec<usize> = (0..chips).map(|i| i % 250).collect();
             let mut t = BbsTakeover::new(&ev_subset(chips, indices));
             for finished in [false, true] {
                 t.tick(Duration::from_millis(BEAT_MS as u64 * 7 + 300));

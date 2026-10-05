@@ -205,7 +205,7 @@ mod tests {
     ];
     const STEP: Duration = Duration::from_millis(50);
 
-    fn ev(chips: &[u8], total: usize) -> ResetEvent {
+    fn ev(chips: &[usize], total: usize) -> ResetEvent {
         ResetEvent {
             pid: 7,
             is_full: chips.len() == total,

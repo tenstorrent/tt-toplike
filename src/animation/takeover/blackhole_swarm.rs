@@ -149,7 +149,7 @@ mod tests {
             is_full: true,
             chip_count,
             total_devices: chip_count,
-            device_indices: (0..chip_count as u8).collect(),
+            device_indices: (0..chip_count).collect(),
             raw_targets: vec![],
         }
     }

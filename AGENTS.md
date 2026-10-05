@@ -994,3 +994,29 @@ removed, because the belly row has no interior spaces. It now fills the canvas
 with a marker and checks the eye row, and it was seen to fail with the change
 reverted. The typewriter first counted the `SYSOP> ` tag as typed text, so the
 speaker name appeared a letter at a time; the tag now shows at once.
+
+### Review fixes for reset detection (Oct 5, 2026)
+
+Copilot's review of the reset PR found three real problems in
+`src/workload/reset_detect.rs`:
+
+- **Device ids are `usize`, not `u8`.** `ResetEvent.device_indices` is now
+  `Vec<usize>`. With exactly 256 devices `total_devices as u8` was 0, the
+  coverage check passed vacuously and `tt-smi -r 0` was classed as a full
+  reset; ids above 255 were dropped. Full coverage is now judged against the
+  ids the backend actually reports, not `0..total_devices`, so a sparse set
+  such as devices 1 and 2 works (an omitted target lists those two ids).
+  HivemindSweeper keys its grid by `u8`, so `inject_reset` still gets only the
+  chips that fit; the status segment and takeovers name all of them.
+- **`python /path/to/tt-smi -r` is recognized.** A plain `tt-smi -r` has process
+  name `tt-smi` (checked on this box with a shebang script), which already
+  matched. The explicit interpreter form has name `python`, which did not. The
+  matcher now also accepts a `python*` argv0 whose first non-flag argument is
+  `tt-smi`. `vim tt-smi -r`, `grep -r tt-smi .` and `python train.py tt-smi -r`
+  stay unmatched.
+- **A reused pid no longer holds a takeover open.** `ResetDetector` records the
+  cmdline with the reset and `is_finished` needs pid and cmdline to match, the
+  same identity `ResetStatus` uses. `begin` takes the cmdline.
+
+Each fix was seen to fail its test with the change reverted. The review's
+Missile Command lane comment is moot: that variant was removed.

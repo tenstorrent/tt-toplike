@@ -29,7 +29,7 @@ const MIN_ENERGY: i32 = 200;
 
 pub struct TrekResetTakeover {
     clock: TakeoverClock,
-    device_indices: Vec<u8>,
+    device_indices: Vec<usize>,
     total_devices: usize,
     /// Cosmetic flavor text only — derived from real wall-clock time so
     /// repeated runs aren't identical, never used for any real pacing
@@ -173,8 +173,7 @@ impl TrekResetTakeover {
             for col in 0..GRID_SIZE {
                 let index = row * GRID_SIZE + col;
                 let (glyph, color): (&str, ratatui::style::Color) = if index < self.total_devices {
-                    let chip = index as u8;
-                    if self.device_indices.contains(&chip) {
+                    if self.device_indices.contains(&index) {
                         if finished {
                             (" x ", colors::rgb(120, 90, 60))
                         } else {
@@ -247,7 +246,7 @@ impl TrekResetTakeover {
 mod tests {
     use super::*;
 
-    fn ev(device_indices: Vec<u8>, total_devices: usize) -> ResetEvent {
+    fn ev(device_indices: Vec<usize>, total_devices: usize) -> ResetEvent {
         ResetEvent {
             pid: 1,
             is_full: device_indices.len() == total_devices,
@@ -293,7 +292,7 @@ mod tests {
         use ratatui::Terminal;
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        let all: Vec<u8> = (0..70).collect();
+        let all: Vec<usize> = (0..70).collect();
         let t = TrekResetTakeover::new(&ev(all, 70));
         terminal.draw(|f| t.render(f, f.area())).unwrap();
     }
@@ -346,7 +345,7 @@ mod tests {
     fn lines_fit_the_box_interior() {
         let interior = crate::animation::takeover::takeover_interior(Rect::new(0, 0, 134, 40));
         for chips in [1usize, 4, 70] {
-            let all: Vec<u8> = (0..chips as u8).collect();
+            let all: Vec<usize> = (0..chips).collect();
             let mut t = TrekResetTakeover::new(&ev(all, chips));
             for finished in [false, true] {
                 if finished {

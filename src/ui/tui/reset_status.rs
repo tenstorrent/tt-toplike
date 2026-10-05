@@ -186,7 +186,14 @@ pub fn scan_resets(
         out.feed_events = new;
     } else if behavior.animates() && !detector.is_active() {
         if let Some(ev) = new.last() {
-            detector.begin(ev.clone());
+            // The cmdline this reset was seen with, from the same snapshot, so
+            // the detector can tell it from a process that later reuses its pid.
+            let cmdline = processes
+                .iter()
+                .find(|(pid, _, _)| *pid == ev.pid)
+                .map(|(_, _, cmd)| cmd.as_str())
+                .unwrap_or("");
+            detector.begin(ev.clone(), cmdline);
             out.takeover_for = Some(ev.clone());
         }
     }

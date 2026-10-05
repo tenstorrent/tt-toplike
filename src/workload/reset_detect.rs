@@ -21,11 +21,12 @@ pub struct ResetEvent {
     pub chip_count: usize,
     /// Total devices known on this box right now (from the active backend).
     pub total_devices: usize,
-    /// Resolved real device indices for the targeted chip(s). Equals
-    /// `0..total_devices` when `is_full`. A target token that couldn't be
-    /// resolved (unknown BDF, junk) is dropped from this list but still
-    /// counted in `raw_targets`/`chip_count` — never guessed.
-    pub device_indices: Vec<u8>,
+    /// Resolved real device indices for the targeted chip(s). Equals the
+    /// indices of every known device when `is_full` (which need not be
+    /// `0..total_devices` if the backend exposes sparse ids). A target token
+    /// that couldn't be resolved (unknown BDF, junk) is dropped from this list
+    /// but still counted in `raw_targets`/`chip_count` — never guessed.
+    pub device_indices: Vec<usize>,
     /// The original TARGETS tokens, for display/log text.
     pub raw_targets: Vec<String>,
 }
@@ -39,20 +40,22 @@ pub struct ResetEvent {
 /// process. `devices` is the active backend's current device list, used to
 /// know the true device count and to resolve each target token to a real
 /// device index.
+///
+/// `tt-smi` is a Python entry-point script. Launched as `tt-smi -r` the
+/// process name is `tt-smi`; launched as `python /path/to/tt-smi -r` the name
+/// is `python` and the script is the first non-flag argument, which is also
+/// accepted. Any other command that merely mentions `tt-smi` is not.
 pub fn parse_reset_process(
     pid: i32,
     name: &str,
     cmdline: &str,
     devices: &[Device],
 ) -> Option<ResetEvent> {
-    let base = name.rsplit('/').next().unwrap_or(name);
-    let first_tok = cmdline.split_whitespace().next().unwrap_or("");
-    let first_base = first_tok.rsplit('/').next().unwrap_or(first_tok);
-    if base != "tt-smi" && first_base != "tt-smi" {
+    let tokens: Vec<&str> = cmdline.split_whitespace().collect();
+    if !is_tt_smi_process(name, &tokens) {
         return None;
     }
 
-    let tokens: Vec<&str> = cmdline.split_whitespace().collect();
     let flag_idx = tokens.iter().position(|t| *t == "-r" || *t == "--reset")?;
 
     let mut raw_targets: Vec<String> = Vec::new();
@@ -71,10 +74,12 @@ pub fn parse_reset_process(
     let is_all_literal =
         raw_targets.is_empty() || raw_targets.iter().any(|t| t.eq_ignore_ascii_case("all"));
 
-    let resolved_indices: Vec<u8> = if is_all_literal {
-        (0..total_devices)
-            .filter_map(|i| u8::try_from(i).ok())
-            .collect()
+    // The indices of every device the backend knows. Not assumed to be
+    // `0..total_devices`: a backend can expose sparse ids.
+    let known_indices: Vec<usize> = devices.iter().map(|d| d.index).collect();
+
+    let resolved_indices: Vec<usize> = if is_all_literal {
+        known_indices.clone()
     } else {
         resolve_target_indices(&raw_targets, devices)
     };
@@ -86,16 +91,15 @@ pub fn parse_reset_process(
     } else if total_devices == 0 {
         false
     } else {
-        // All distinct indices must be present in 0..total_devices for is_full to be true.
+        // Every known device must be among the resolved indices for is_full.
         let resolved_set: HashSet<_> = resolved_indices.iter().collect();
-        (0..total_devices as u8).all(|i| resolved_set.contains(&i))
+        known_indices.iter().all(|i| resolved_set.contains(i))
     };
 
-    // When is_full, device_indices should be 0..total_devices; otherwise use resolved indices.
+    // When is_full, device_indices is every known device; otherwise the
+    // resolved indices as given.
     let device_indices = if is_full {
-        (0..total_devices)
-            .filter_map(|i| u8::try_from(i).ok())
-            .collect()
+        known_indices
     } else {
         resolved_indices
     };
@@ -116,11 +120,36 @@ pub fn parse_reset_process(
     })
 }
 
+/// File name part of a path-like token.
+fn base_name(tok: &str) -> &str {
+    tok.rsplit('/').next().unwrap_or(tok)
+}
+
+/// True for a process named `tt-smi`, for one whose first argument is
+/// `tt-smi`, or for a Python interpreter whose script (its first non-flag
+/// argument) is `tt-smi`.
+fn is_tt_smi_process(name: &str, tokens: &[&str]) -> bool {
+    if base_name(name) == "tt-smi" {
+        return true;
+    }
+    let Some(first) = tokens.first() else {
+        return false;
+    };
+    if base_name(first) == "tt-smi" {
+        return true;
+    }
+    if base_name(first).starts_with("python") {
+        let script = tokens[1..].iter().find(|t| !t.starts_with('-'));
+        return script.is_some_and(|t| base_name(t) == "tt-smi");
+    }
+    false
+}
+
 /// Resolve each raw TARGETS token to a real device index: a bare integer or
 /// `/dev/tenstorrent/<n>` is taken as the UMD logical id directly; anything
 /// else is matched against each device's real PCI bus id. Unresolvable
 /// tokens are silently dropped — never guessed.
-fn resolve_target_indices(targets: &[String], devices: &[Device]) -> Vec<u8> {
+fn resolve_target_indices(targets: &[String], devices: &[Device]) -> Vec<usize> {
     let mut out = Vec::new();
     for t in targets {
         let idx = if let Some(rest) = t.strip_prefix("/dev/tenstorrent/") {
@@ -134,9 +163,7 @@ fn resolve_target_indices(targets: &[String], devices: &[Device]) -> Vec<u8> {
                 .map(|d| d.index)
         };
         if let Some(i) = idx {
-            if let Ok(b) = u8::try_from(i) {
-                out.push(b);
-            }
+            out.push(i);
         }
     }
     out
@@ -153,7 +180,10 @@ fn resolve_target_indices(targets: &[String], devices: &[Device]) -> Vec<u8> {
 /// `is_finished()` says when that reset's process has exited, and `clear()`
 /// runs when the animation ends, which frees it for the next reset.
 pub struct ResetDetector {
-    active: Option<ResetEvent>,
+    /// The tracked reset and the cmdline it was seen with. The process is
+    /// identified by pid and cmdline together, as `ResetStatus` does, so a pid
+    /// the kernel reuses for an unrelated process is not mistaken for it.
+    active: Option<(ResetEvent, String)>,
 }
 
 impl ResetDetector {
@@ -161,11 +191,11 @@ impl ResetDetector {
         Self { active: None }
     }
 
-    /// Records `ev` as the reset a takeover animation is waiting on. Does
-    /// nothing if one is already tracked.
-    pub fn begin(&mut self, ev: ResetEvent) {
+    /// Records `ev` (seen with `cmdline`) as the reset a takeover animation
+    /// is waiting on. Does nothing if one is already tracked.
+    pub fn begin(&mut self, ev: ResetEvent, cmdline: &str) {
         if self.active.is_none() {
-            self.active = Some(ev);
+            self.active = Some((ev, cmdline.to_string()));
         }
     }
 
@@ -174,11 +204,14 @@ impl ResetDetector {
         self.active.is_some()
     }
 
-    /// True once the tracked pid is no longer present in `processes`.
-    /// `false` if nothing is being tracked.
+    /// True once no process in `processes` has the tracked pid AND cmdline.
+    /// A different command under the same pid (the kernel reused it) does not
+    /// keep the reset alive. `false` if nothing is being tracked.
     pub fn is_finished(&self, processes: &[(i32, String, String)]) -> bool {
         match &self.active {
-            Some(ev) => !processes.iter().any(|(pid, _, _)| *pid == ev.pid),
+            Some((ev, cmdline)) => !processes
+                .iter()
+                .any(|(pid, _, cmd)| *pid == ev.pid && cmd == cmdline),
             None => false,
         }
     }
@@ -350,7 +383,10 @@ mod tests {
     /// A detector tracking the reset `tt-smi -r 0` (pid 500).
     fn tracking_500(devices: &[Device]) -> ResetDetector {
         let mut det = ResetDetector::new();
-        det.begin(parse_reset_process(500, "tt-smi", "tt-smi -r 0", devices).unwrap());
+        det.begin(
+            parse_reset_process(500, "tt-smi", "tt-smi -r 0", devices).unwrap(),
+            "tt-smi -r 0",
+        );
         det
     }
 
@@ -384,16 +420,16 @@ mod tests {
         let b = parse_reset_process(600, "tt-smi", "tt-smi -r 1", &devices).unwrap();
         let mut det = ResetDetector::new();
         assert!(!det.is_active());
-        det.begin(a);
+        det.begin(a, "tt-smi -r 0");
         assert!(det.is_active());
         // A second begin while one is tracked is ignored: 500 is still the
         // pid whose exit finishes the takeover.
-        det.begin(b.clone());
+        det.begin(b.clone(), "tt-smi -r 1");
         assert!(!det.is_finished(&procs(&[(500, "tt-smi", "tt-smi -r 0")])));
         assert!(det.is_finished(&procs(&[(600, "tt-smi", "tt-smi -r 1")])));
         det.clear();
         assert!(!det.is_active());
-        det.begin(b);
+        det.begin(b, "tt-smi -r 1");
         assert!(!det.is_finished(&procs(&[(600, "tt-smi", "tt-smi -r 1")])));
     }
 
@@ -403,8 +439,106 @@ mod tests {
         let mut det = tracking_500(&devices);
         det.clear();
         assert!(!det.is_finished(&procs(&[])), "nothing tracked after clear");
-        det.begin(parse_reset_process(600, "tt-smi", "tt-smi -r 1", &devices).unwrap());
+        det.begin(
+            parse_reset_process(600, "tt-smi", "tt-smi -r 1", &devices).unwrap(),
+            "tt-smi -r 1",
+        );
         assert!(det.is_active());
         assert!(det.is_finished(&procs(&[(500, "tt-smi", "tt-smi -r 0")])));
+    }
+
+    // ---- Python-launched tt-smi ------------------------------------------
+
+    #[test]
+    fn python_interpreter_form_is_recognized() {
+        // `python /path/to/tt-smi -r 2`: the process name is `python`.
+        let devices = fixture_devices(4);
+        let ev = parse_reset_process(
+            100,
+            "python",
+            "/home/u/.venv/bin/python /home/u/.venv/bin/tt-smi -r 2",
+            &devices,
+        )
+        .unwrap();
+        assert_eq!(ev.device_indices, vec![2]);
+        // Interpreter flags before the script are skipped.
+        let ev = parse_reset_process(100, "python3", "python3 -u /x/tt-smi -r", &devices).unwrap();
+        assert!(ev.is_full);
+    }
+
+    #[test]
+    fn other_commands_that_mention_tt_smi_are_not_resets() {
+        let devices = fixture_devices(4);
+        // The script is not tt-smi.
+        assert!(parse_reset_process(1, "python", "python train.py tt-smi -r", &devices).is_none());
+        // Not a Python interpreter, and tt-smi is only an argument.
+        assert!(parse_reset_process(1, "vim", "vim tt-smi -r", &devices).is_none());
+        assert!(parse_reset_process(1, "grep", "grep -r tt-smi .", &devices).is_none());
+        // A Python tt-smi that is not a reset.
+        assert!(parse_reset_process(1, "python", "python /x/tt-smi -s", &devices).is_none());
+    }
+
+    // ---- Device ids beyond u8, and sparse ids ----------------------------
+
+    #[test]
+    fn exactly_256_devices_does_not_make_every_reset_full() {
+        // `total_devices as u8` was 0 here, so the coverage check passed
+        // vacuously and `-r 0` was classed as a full reset.
+        let devices = fixture_devices(256);
+        let ev = parse_reset_process(100, "tt-smi", "tt-smi -r 0", &devices).unwrap();
+        assert!(!ev.is_full);
+        assert_eq!(ev.device_indices, vec![0]);
+        let all = parse_reset_process(100, "tt-smi", "tt-smi -r", &devices).unwrap();
+        assert!(all.is_full);
+        assert_eq!(all.device_indices.len(), 256);
+    }
+
+    #[test]
+    fn indices_above_255_are_kept() {
+        let devices = fixture_devices(300);
+        let ev = parse_reset_process(100, "tt-smi", "tt-smi -r 299 256", &devices).unwrap();
+        assert_eq!(ev.device_indices, vec![299, 256]);
+        assert!(!ev.is_full);
+    }
+
+    fn sparse_devices(ids: &[usize]) -> Vec<Device> {
+        ids.iter()
+            .map(|&i| {
+                Device::new(
+                    i,
+                    "wormhole".to_string(),
+                    format!("0000:{i:02x}:00.0"),
+                    format!("({i})"),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sparse_device_ids_are_judged_against_the_ids_that_exist() {
+        // Devices 1 and 2 only. A reset of 2 is a subset; naming both is full;
+        // an omitted target resets both, and lists those two ids.
+        let devices = sparse_devices(&[1, 2]);
+        let one = parse_reset_process(100, "tt-smi", "tt-smi -r 2", &devices).unwrap();
+        assert!(!one.is_full);
+        assert_eq!(one.device_indices, vec![2]);
+        let both = parse_reset_process(100, "tt-smi", "tt-smi -r 1 2", &devices).unwrap();
+        assert!(both.is_full);
+        let all = parse_reset_process(100, "tt-smi", "tt-smi -r", &devices).unwrap();
+        assert_eq!(all.device_indices, vec![1, 2]);
+    }
+
+    // ---- Reused pids -----------------------------------------------------
+
+    #[test]
+    fn a_reused_pid_running_another_command_does_not_keep_the_reset_alive() {
+        let devices = fixture_devices(4);
+        let det = tracking_500(&devices);
+        // tt-smi exited and the kernel gave pid 500 to something else.
+        let reused = procs(&[(500, "nginx", "nginx -g daemon off;")]);
+        assert!(det.is_finished(&reused));
+        // The same pid with the same cmdline is still the reset.
+        let same = procs(&[(500, "tt-smi", "tt-smi -r 0")]);
+        assert!(!det.is_finished(&same));
     }
 }
