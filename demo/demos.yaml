@@ -38,3 +38,17 @@ scenes:
       `--rotate` cycles every view — including the three normally reachable only
       by their own key — dwelling 30s on each, 45s on arcade, and only 10s on a
       workload view with nothing to show.
+
+  - id: reset-demo
+    title: "tt-smi -r: the seven reset animations"
+    layout: single
+    right:
+      run: "tt-toplike-tui {backend} --tt-smi-reset-behavior demo"
+    # Seven animations at 8 s each, played back to back at startup.
+    duration: 58s
+    caption: >-
+      `--tt-smi-reset-behavior demo` plays all seven reset animations in a row,
+      eight seconds each, in a box titled DEMO so a staged animation is never
+      taken for a real reset. No reset is run for this capture. The same
+      animations play over a real `tt-smi -r` under `dazzle`.
+

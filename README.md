@@ -101,6 +101,20 @@ Every running `tt-smi -r` is tracked. While more than one runs, the status segme
 
 ---
 
+## What `tt-smi -r` looks like
+
+Run `tt-smi -r` in another terminal while tt-toplike is open and the status bar of every view shows `⟳ tt-smi -r · all chips · resetting`, then `✓ tt-smi -r done`. The `--tt-smi-reset-behavior` flag (`ignore`, `inform`, `dazzle`, `demo`) controls how much more happens. To preview the seven reset animations without resetting anything:
+
+```bash
+tt-toplike --tt-smi-reset-behavior demo
+```
+
+<img src="assets/tt-toplike-reset-demo.gif" alt="The seven tt-smi -r reset animations playing in a row in a box titled DEMO over the Insights view" width="100%" />
+
+Details on each behavior are in [Running `tt-smi -r` while watching](#running-tt-smi--r-while-watching).
+
+---
+
 ## Try it on any machine — no TT hardware required (experimental)
 
 ```bash

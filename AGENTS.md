@@ -850,6 +850,35 @@ a blocking `try_result`, no outstanding gate, an unbounded join on drop, no
 panic catch, an unnamed thread, an apply that keeps old rows or drops the
 process list, an inline scan in the loop, and `want_processes: true`.
 
+### Inference view shows port and chips (Oct 5, 2026, v0.13.10)
+
+Request: "The inference server view should show which port and which chips a
+model is running on". Classified as a bounded change and approved in chat before
+any code.
+
+The port was already parsed (`InferenceServer.port`) and used for probing, then
+dropped. `ServiceState` now carries `port: Option<u16>` and `chips: Vec<usize>`.
+`rebuild_snapshot` sets both on the monitor thread, so nothing runs on the render
+path.
+
+Chip source, in order: the `/dev/tenstorrent/N` fds held by the server's host
+PIDs (`docker top` for a container, the process tree for a host launch), then
+the explicit nodes in `docker inspect .HostConfig.Devices`. A whole-directory
+mapping with no readable fds gives no chips, and the view shows the port alone.
+Reading another user's `/proc/<pid>/fd` needs privilege, so the Docker fallback
+matters on an unprivileged box. A model still compiling may have opened no chip
+yet.
+
+Display: each `[i]` roster row shows `:8000 · chips 0,1` after the label (dropped
+first on narrow terminals). A single service has no roster, so it gets a one-line
+header with the same text. `RemoteInference` gained `port` and `chips`, both
+`#[serde(default)]`, so older peers still decode.
+
+Tests: `placement_text`, the path and `Devices` JSON parsers, roster and
+single-service rendering, `rebuild_snapshot` carrying the probe's chips, and the
+older-peer decode. The wiring test was seen to fail with `state.chips` set empty.
+Not verified: a live run against a real container on this box.
+
 ### tt-tnt progress bars read live, global step rebuilt (Oct 2, 2026, v0.13.9)
 
 Report: "i have training going on right now but don't see as much evidence in

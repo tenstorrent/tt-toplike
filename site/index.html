@@ -751,6 +751,7 @@
   <ul class="topnav-links">
     <li><a href="#visuals">Visuals</a></li>
     <li><a href="#modes">Modes</a></li>
+    <li><a href="#reset">Resets</a></li>
     <li><a href="#inspiration">Inspiration</a></li>
     <li><a href="#install">Install</a></li>
     <li><a href="https://github.com/tenstorrent/tt-toplike" target="_blank" rel="noopener">GitHub</a></li>
@@ -1314,6 +1315,43 @@
              aria-label="Host/CPU mode demo"></video>
     </div>
 
+  </div>
+</section>
+
+<!-- ── tt-smi -r ──────────────────────────────────────────────────────────── -->
+<section class="section edge" id="reset">
+  <p class="section-label">Resets</p>
+  <h2 class="section-heading">Run <code>tt-smi -r</code> and watch</h2>
+  <p class="section-sub">
+    tt-toplike notices a <code>tt-smi -r</code> running in another terminal and
+    says so in the status bar of every view. Set
+    <code>--tt-smi-reset-behavior dazzle</code> and each reset also gets a
+    takeover animation in a box over the screen.
+  </p>
+
+  <div class="modes-grid">
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">--tt-smi-reset-behavior demo</span>
+        <p class="mode-title">The seven reset animations</p>
+        <p class="mode-desc">
+          <code>demo</code> plays all seven animations in a row, eight seconds
+          each, when tt-toplike starts, and again on every real reset. The box
+          title says <code>DEMO</code> (<code>DEMO (real reset)</code> after a
+          real one), so a staged animation is never taken for a real reset. The
+          clip is that startup run on a 4-chip box. No reset was run to make it.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>any key</kbd> next animation</span>
+          <span class="mode-hint"><kbd>Esc</kbd> / <kbd>q</kbd> end the demo</span>
+          <span class="mode-hint"><code>ignore</code> · <code>inform</code> (default) · <code>dazzle</code> · <code>demo</code></span>
+        </div>
+      </div>
+      <video class="mode-gif" src="assets/tt-toplike-reset-demo.mp4"
+             poster="assets/tt-toplike-reset-demo.png"
+             autoplay loop muted playsinline
+             aria-label="The seven tt-smi -r reset animations playing one after another in a box titled DEMO over the Insights view of a 4-chip Blackhole box"></video>
+    </div>
   </div>
 </section>
 
