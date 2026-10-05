@@ -318,9 +318,10 @@ impl BbsTakeover {
 
 /// Pad every line to the same width (see `TrekResetTakeover` for why —
 /// `Paragraph`'s `Alignment::Center` centers each `Line` independently, so
-/// without this every line would get a different left indent), then wrap
-/// the whole block in an ANSI box-drawing border for real terminal-art
-/// texture.
+/// without this every line would get a different left indent), then give the
+/// block an ANSI box-drawing border on the left and bottom for real
+/// terminal-art texture. There is no right border, as everywhere in this
+/// project: a right-hand glyph wraps or clips on a narrow terminal.
 fn box_it(mut lines: Vec<Line<'static>>, border_color: Color) -> Vec<Line<'static>> {
     let inner_width = lines.iter().map(Line::width).max().unwrap_or(0).max(20);
     for line in &mut lines {
@@ -332,17 +333,16 @@ fn box_it(mut lines: Vec<Line<'static>>, border_color: Color) -> Vec<Line<'stati
     let border_style = Style::default().fg(border_color);
     let mut boxed = Vec::with_capacity(lines.len() + 2);
     boxed.push(Line::from(Span::styled(
-        format!("┌{}┐", "─".repeat(inner_width + 2)),
+        format!("┌{}", "─".repeat(inner_width + 1)),
         border_style,
     )));
     for line in lines {
         let mut spans = vec![Span::styled("│ ", border_style)];
         spans.extend(line.spans);
-        spans.push(Span::styled(" │", border_style));
         boxed.push(Line::from(spans));
     }
     boxed.push(Line::from(Span::styled(
-        format!("└{}┘", "─".repeat(inner_width + 2)),
+        format!("└{}", "─".repeat(inner_width + 1)),
         border_style,
     )));
     boxed
@@ -580,8 +580,33 @@ mod tests {
             "expected a box-drawing top-left corner:\n{painted}"
         );
         assert!(
-            painted.contains('┘'),
-            "expected a box-drawing bottom-right corner:\n{painted}"
+            painted.contains('└'),
+            "expected a box-drawing bottom-left corner:\n{painted}"
+        );
+    }
+
+    /// No right-side border glyphs, per the project convention (they wrap or
+    /// clip on a narrow terminal): no `┐` or `┘`, and no row carries a third
+    /// `│`. Every row already has the shared frame's left border and this
+    /// box's own left edge, so a right edge would make three.
+    #[test]
+    fn box_has_no_right_side_border() {
+        let t = BbsTakeover::new(&ev(true, 4));
+        let painted = rendered_text(&t);
+        assert!(
+            !painted.contains('┐') && !painted.contains('┘'),
+            "{painted}"
+        );
+        for row in painted.lines() {
+            assert!(
+                row.matches('│').count() <= 2,
+                "a row has a right-side border: {row:?}"
+            );
+        }
+        // The box's left edge is still drawn.
+        assert!(
+            painted.lines().any(|r| r.matches('│').count() == 2),
+            "{painted}"
         );
     }
 

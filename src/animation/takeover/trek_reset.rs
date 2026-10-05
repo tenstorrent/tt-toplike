@@ -163,7 +163,14 @@ impl TrekResetTakeover {
             Style::default().fg(colors::rgb(70, 150, 110)),
         )));
 
-        let ship_index = self.total_devices.min(GRID_SIZE * GRID_SIZE - 1);
+        // The first cell past the chip cells that no targeted chip occupies.
+        // A sparse backend can target an id at or beyond `total_devices`
+        // (devices 1 and 2: `total_devices` is 2, and chip 2 sits where the
+        // ship would), so the ship moves aside instead of hiding the chip.
+        let last_cell = GRID_SIZE * GRID_SIZE - 1;
+        let ship_index = (self.total_devices..=last_cell)
+            .find(|i| !self.device_indices.contains(i))
+            .unwrap_or(last_cell);
 
         for row in 0..GRID_SIZE {
             let mut spans: Vec<Span<'static>> = vec![Span::styled(
@@ -172,23 +179,25 @@ impl TrekResetTakeover {
             )];
             for col in 0..GRID_SIZE {
                 let index = row * GRID_SIZE + col;
-                let (glyph, color): (&str, ratatui::style::Color) = if index < self.total_devices {
+                // A targeted chip is drawn wherever its id falls, then the
+                // other chip cells, then the ship and the stars. The grid does
+                // not assume ids are `0..total_devices`.
+                let (glyph, color): (&str, ratatui::style::Color) =
                     if self.device_indices.contains(&index) {
                         if finished {
                             (" x ", colors::rgb(120, 90, 60))
                         } else {
                             ("+K+", colors::rgb(230, 90, 70))
                         }
+                    } else if index < self.total_devices {
+                        ("...", colors::rgb(40, 80, 60))
+                    } else if index == ship_index {
+                        ("<*>", colors::rgb(210, 230, 255))
+                    } else if self.has_star(index) {
+                        (" * ", colors::rgb(80, 130, 150))
                     } else {
                         ("...", colors::rgb(40, 80, 60))
-                    }
-                } else if index == ship_index {
-                    ("<*>", colors::rgb(210, 230, 255))
-                } else if self.has_star(index) {
-                    (" * ", colors::rgb(80, 130, 150))
-                } else {
-                    ("...", colors::rgb(40, 80, 60))
-                };
+                    };
                 spans.push(Span::styled(
                     format!("{glyph} "),
                     Style::default().fg(color),
@@ -383,5 +392,32 @@ mod tests {
             !text.contains("ENTERPRISE") && !text.contains("NCC-1701"),
             "{text}"
         );
+    }
+
+    /// Rendered plain text of `t` on an 80x30 buffer.
+    fn painted(t: &TrekResetTakeover) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|f| t.render(f, f.area())).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    /// With sparse ids (devices 1 and 2: `total_devices` is 2), a reset of
+    /// chip 2 must show a Klingon, not the ship that used to sit at index 2.
+    #[test]
+    fn a_targeted_chip_at_or_past_total_devices_is_drawn_as_a_chip() {
+        let t = TrekResetTakeover::new(&ev(vec![2], 2));
+        let text = painted(&t);
+        assert_eq!(text.matches("+K+").count(), 1, "{text}");
+        // The ship is still on the grid, in a cell that is not chip 2's.
+        assert_eq!(text.matches("<*>").count(), 1, "{text}");
+        // Same for a full reset of sparse devices 1 and 2.
+        let full = TrekResetTakeover::new(&ev(vec![1, 2], 2));
+        assert_eq!(painted(&full).matches("+K+").count(), 2);
     }
 }

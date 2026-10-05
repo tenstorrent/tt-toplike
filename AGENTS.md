@@ -1042,3 +1042,38 @@ Copilot's review of the stacked PR found three real problems:
 
 Each has a test that was seen to fail with the fix reverted. The version
 consistency findings in the same review were fixed in the CI pass.
+
+### Second review pass on the reset PR (Oct 5, 2026)
+
+Copilot's second pass on the reset branch found four more things:
+
+- **Trek assumed dense device ids.** A cell was a chip only when
+  `index < total_devices`, so with devices 1 and 2 the targeted chip 2 fell
+  through to the ship branch. Targeted chips are now drawn first, wherever their
+  id falls; the ship moves to the first free cell past the chip cells.
+- **`chip_count` on a full reset counted duplicates.** `tt-smi -r 0 1 1` on two
+  devices said 3 chips. A full reset now reports `total_devices`; a subset keeps
+  the raw target count.
+- **The BBS box had right-side borders** (`┐ │ ┘`), against the project rule
+  (they wrap or clip on a narrow terminal). It now has a left edge and a bottom
+  only. The recorded demo clip shows the old box and has to be re-recorded.
+- **The PR title and description still said seven takeovers.** Rewritten to the
+  five that ship.
+
+The three code fixes each have a test that was seen to fail with the fix
+reverted. One of my tests passed vacuously the first time: the mutation script
+could not find the code after `cargo fmt` reflowed it, so no mutation was
+applied. Re-run against the reflowed code, it fails as it should.
+
+### Step times must be finite and positive (Oct 5, 2026)
+
+Copilot's second pass on the stacked PR: the `Step: N, Loss: L, Time: T ms`
+line parsed any `f32`, so `nan`, `inf`, zero and negative times became
+`StepAndMs` / `StepAndTime` events and reached `step_ms` and the step history
+(infinite or negative tokens/s, a false sample in the tapestry). A time that is
+not finite and positive is now dropped, and the line is read as a plain `Step`
+with its step and loss. The test covers both timed shapes and was seen to fail
+with the filter removed.
+
+The reset demo clip was re-recorded because the BBS box lost its right border
+(see the second review pass above).

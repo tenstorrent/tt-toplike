@@ -104,7 +104,10 @@ pub fn parse_reset_process(
         resolved_indices
     };
 
-    let chip_count = if is_all_literal {
+    // A full reset resets every known device once, however the targets were
+    // spelled (`0 1 1` on two devices is still two chips). A subset keeps the
+    // raw target count.
+    let chip_count = if is_full {
         total_devices
     } else {
         raw_targets.len()
@@ -540,5 +543,19 @@ mod tests {
         // The same pid with the same cmdline is still the reset.
         let same = procs(&[(500, "tt-smi", "tt-smi -r 0")]);
         assert!(!det.is_finished(&same));
+    }
+
+    #[test]
+    fn full_enumeration_with_duplicates_still_counts_each_chip_once() {
+        // `0 1 1` on two devices covers everything: a full reset of 2 chips,
+        // not 3, and device_indices is the two devices.
+        let devices = fixture_devices(2);
+        let ev = parse_reset_process(100, "tt-smi", "tt-smi -r 0 1 1", &devices).unwrap();
+        assert!(ev.is_full);
+        assert_eq!(ev.chip_count, 2);
+        assert_eq!(ev.device_indices, vec![0, 1]);
+        // A subset still reports the raw target count (see the `0 0` test).
+        let sub = parse_reset_process(100, "tt-smi", "tt-smi -r 0 0", &devices).unwrap();
+        assert_eq!(sub.chip_count, 2);
     }
 }
