@@ -733,3 +733,25 @@ Copilot's review of the reset PR found three real problems in
 
 Each fix was seen to fail its test with the change reverted. The review's
 Missile Command lane comment is moot: that variant was removed.
+
+### Second review pass on the reset PR (Oct 5, 2026)
+
+Copilot's second pass on the reset branch found four more things:
+
+- **Trek assumed dense device ids.** A cell was a chip only when
+  `index < total_devices`, so with devices 1 and 2 the targeted chip 2 fell
+  through to the ship branch. Targeted chips are now drawn first, wherever their
+  id falls; the ship moves to the first free cell past the chip cells.
+- **`chip_count` on a full reset counted duplicates.** `tt-smi -r 0 1 1` on two
+  devices said 3 chips. A full reset now reports `total_devices`; a subset keeps
+  the raw target count.
+- **The BBS box had right-side borders** (`┐ │ ┘`), against the project rule
+  (they wrap or clip on a narrow terminal). It now has a left edge and a bottom
+  only. The recorded demo clip shows the old box and has to be re-recorded.
+- **The PR title and description still said seven takeovers.** Rewritten to the
+  five that ship.
+
+The three code fixes each have a test that was seen to fail with the fix
+reverted. One of my tests passed vacuously the first time: the mutation script
+could not find the code after `cargo fmt` reflowed it, so no mutation was
+applied. Re-run against the reflowed code, it fails as it should.
