@@ -322,7 +322,7 @@ impl Takeover {
             is_full: true,
             chip_count: device_count,
             total_devices: device_count,
-            device_indices: (0..device_count).map(|i| i as u8).collect(),
+            device_indices: (0..device_count).collect(),
             raw_targets: vec![],
         };
         Takeover::Demo(DemoSequence::new(DemoSource::Boot, ev))

@@ -2421,13 +2421,21 @@ fn run_app(
             );
             for ev in &outcome.feed_events {
                 if let Some(h) = hivemind.as_mut() {
+                    // HivemindSweeper keys its grid by `u8` device, so a chip
+                    // above 255 has no column there. Drop it; the status
+                    // segment and the takeover still name it.
+                    let grid_devices: Vec<u8> = ev
+                        .device_indices
+                        .iter()
+                        .filter_map(|&i| u8::try_from(i).ok())
+                        .collect();
                     h.inject_reset(
                         format!(
                             "tt-smi -r: {} chip(s) targeted{}",
                             ev.chip_count,
                             if ev.is_full { " (all)" } else { "" }
                         ),
-                        &ev.device_indices,
+                        &grid_devices,
                     );
                 }
             }
