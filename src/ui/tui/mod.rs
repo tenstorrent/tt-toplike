@@ -5710,7 +5710,14 @@ fn inference_single_service_line(
     if placement.is_empty() || width < 12 {
         return Vec::new();
     }
-    let label_w = width.saturating_sub(2 + placement.chars().count()).max(4);
+    // Room for at least four label characters, or the line would run past the
+    // terminal width and clip the placement it exists to show.
+    let Some(label_w) = width
+        .checked_sub(2 + placement.chars().count())
+        .filter(|w| *w >= 4)
+    else {
+        return Vec::new();
+    };
     let label: String = s.label.chars().take(label_w).collect();
     vec![Line::from(vec![
         Span::styled(label, Style::default().fg(colors::text_primary())),
@@ -8176,6 +8183,32 @@ mod inference_roster_tests {
         assert_eq!(text(&l[0]), "Model-A  :8000 · chips 0,1");
         // Two services use the roster, not this line.
         assert!(inference_single_service_line(&[a.clone(), a], 80).is_empty());
+    }
+
+    /// The line must never be wider than the terminal: a width that cannot
+    /// hold four label characters plus the placement gets no line at all,
+    /// rather than a line the terminal clips.
+    #[test]
+    fn single_service_line_never_exceeds_the_width() {
+        use super::inference_single_service_line;
+        let mut a = svc("a", "Model-With-A-Long-Name", Phase::Ready);
+        a.port = Some(8000);
+        a.chips = vec![0, 1];
+        for width in 0..=60 {
+            for l in inference_single_service_line(&[a.clone()], width) {
+                assert!(
+                    l.width() <= width,
+                    "width {width}: {:?} is {} wide",
+                    text(&l),
+                    l.width()
+                );
+            }
+        }
+        // 12 columns cannot hold ":8000 · chips 0,1" (17) and a label.
+        assert!(inference_single_service_line(&[a.clone()], 12).is_empty());
+        // 17 + 2 + 4 = 23 is the narrowest that fits.
+        assert!(inference_single_service_line(&[a.clone()], 22).is_empty());
+        assert_eq!(inference_single_service_line(&[a], 23).len(), 1);
     }
 
     #[test]

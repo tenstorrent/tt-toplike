@@ -321,10 +321,14 @@ pub(crate) fn rebuild_snapshot(
         // dropping them left the [i] view cold while the server was actually up.
         let (key, label, port, health_path): (String, String, u16, &str) =
             match service_for(server.model.as_deref()) {
+                // The key, label and health path come from the table. The port
+                // is the one this deployment actually publishes (parsed from
+                // `--publish`/`--port`/docker inspect), and only falls back to
+                // the table's default when none was parsed.
                 Some(def) => (
                     def.key.to_string(),
                     def.label.to_string(),
-                    def.port,
+                    server.port.unwrap_or(def.port),
                     def.health_path,
                 ),
                 None => {
@@ -747,6 +751,62 @@ mod tests {
         fn chips(&self, _key: &str) -> Vec<usize> {
             vec![2, 3]
         }
+    }
+
+    /// Records every port the monitor probes over HTTP.
+    struct PortProbe {
+        ports: std::sync::Mutex<Vec<u16>>,
+    }
+    impl ContainerProbe for PortProbe {
+        fn env(&self, c: &str) -> String {
+            FakeProbe.env(c)
+        }
+        fn stats(&self, c: &str) -> String {
+            FakeProbe.stats(c)
+        }
+        fn exec(&self, c: &str, sh: &str) -> String {
+            FakeProbe.exec(c, sh)
+        }
+        fn http(&self, port: u16, path: &str) -> (u16, String) {
+            self.ports.lock().unwrap().push(port);
+            FakeProbe.http(port, path)
+        }
+    }
+
+    /// A model in the SERVERS table (default port 8000) published on another
+    /// host port: the state shows, and the monitor probes, the published port.
+    /// The table's port is only the fallback when none was parsed.
+    #[test]
+    fn a_known_model_on_a_non_default_port_uses_the_parsed_port() {
+        let server = |port| InferenceServer {
+            source: Source::Docker {
+                container: "c".into(),
+            },
+            image: "ghcr.io/tenstorrent/tt-media-inference-server:0.17.0".into(),
+            model: Some("Z-Image-Turbo".into()), // in SERVERS, default port 8000
+            mesh: None,
+            arch: None,
+            device: None,
+            port,
+            uses_tt_device: true,
+        };
+        let probe = PortProbe {
+            ports: Default::default(),
+        };
+        let snap = rebuild_snapshot(&[server(Some(8002))], &[], &probe, 5);
+        assert_eq!(snap[0].port, Some(8002));
+        let probed = probe.ports.lock().unwrap().clone();
+        assert!(
+            !probed.is_empty() && probed.iter().all(|p| *p == 8002),
+            "{probed:?}"
+        );
+
+        let fallback = rebuild_snapshot(&[server(None)], &[], &FakeProbe, 5);
+        assert_eq!(
+            fallback[0].port,
+            Some(8000),
+            "no parsed port: the table's default"
+        );
     }
 
     #[test]

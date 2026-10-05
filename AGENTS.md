@@ -1020,3 +1020,25 @@ Copilot's review of the reset PR found three real problems in
 
 Each fix was seen to fail its test with the change reverted. The review's
 Missile Command lane comment is moot: that variant was removed.
+
+### Review fixes for port and chips, and bar loss (Oct 5, 2026)
+
+Copilot's review of the stacked PR found three real problems:
+
+- **The displayed and probed port ignored the parsed one for known models.**
+  `rebuild_snapshot` took the port from the SERVERS table whenever the model
+  matched, so a server published on 8002 showed `:8000` and the monitor probed
+  8000 (it also meant the health probe polled the wrong endpoint, which this
+  PR's port display made visible). The table now supplies the key, label and
+  health path, and the port comes from the parsed `--publish`/`--port`/docker
+  inspect value, falling back to the table's only when none was parsed.
+- **The single-service header overflowed a narrow terminal.** The label was
+  forced to at least 4 characters, so below 23 columns for the longest
+  placement the line ran past the width and was clipped. It now returns no
+  line when four label characters do not fit.
+- **A standalone `loss=nan` / `loss=inf` in a progress-bar frame reached the
+  loss history.** Only the `train_loss=` fallback was guarded. A non-finite
+  standalone loss now drops the frame (it does not fall back to `train_loss=`).
+
+Each has a test that was seen to fail with the fix reverted. The version
+consistency findings in the same review were fixed in the CI pass.

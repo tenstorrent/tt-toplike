@@ -232,13 +232,14 @@ pub fn parse_train_line(line: &str) -> Option<TrainEvent> {
         // * a standalone `loss=` (ttml's SFTTrainer: `loss=1.2345, lr=...`);
         // * else `train_loss=` (the tt-tnt harness's bar:
         //   `61/6391 [00:19<30:41,  3.43it/s, train_loss=3.1016, val_loss=3.0977]`).
-        //   It must be a finite number. `nan` or text drops the frame, so no
-        //   placeholder point reaches the loss curve.
+        // Either must be a finite number. `nan`, `inf` or text drops the frame
+        // (a non-finite standalone `loss=` does not fall back to `train_loss=`),
+        // so no placeholder point reaches the loss curve.
         // `val_loss=` is never used. In tt-tnt's bar it is ttml's placeholder
         // copy of the train loss, and in SFTTrainer's eval variant it is a
         // different quantity from the training loss.
         let loss = match postfix("loss=") {
-            Some(v) => v.parse::<f32>().ok(),
+            Some(v) => v.parse::<f32>().ok().filter(|l| l.is_finite()),
             None => postfix("train_loss=")
                 .and_then(|v| v.parse::<f32>().ok())
                 .filter(|l| l.is_finite()),
@@ -569,6 +570,10 @@ mod tests {
         assert_eq!(loss_of("val_loss=0.9500"), None);
         assert_eq!(loss_of("val_loss=0.9500, lr=3.00e-04"), None);
         assert_eq!(loss_of("train_loss=nan, val_loss=nan"), None);
+        // The standalone form gets the same guard.
+        assert_eq!(loss_of("loss=nan, lr=3.00e-04"), None);
+        assert_eq!(loss_of("loss=inf"), None);
+        assert_eq!(loss_of("loss=-inf, train_loss=2.5000"), None);
         assert_eq!(loss_of("train_loss=inf"), None);
         assert_eq!(loss_of("train_loss=garbage"), None);
         assert_eq!(loss_of("train_loss="), None);
