@@ -119,6 +119,8 @@ fn fresh_state(key: &str, label: &str) -> ServiceState {
         flat_ticks: 0,
         serving: None,
         media: None,
+        port: None,
+        chips: Vec::new(),
     }
 }
 
@@ -201,6 +203,10 @@ pub(crate) fn fold_tick(
         flat_ticks,
         serving,
         media,
+        // Placement is not part of the sampled tick; `rebuild_snapshot` fills it
+        // in right after folding. Carry the prior value so a bare fold keeps it.
+        port: prev.port,
+        chips: prev.chips.clone(),
     }
 }
 
@@ -345,12 +351,12 @@ pub(crate) fn rebuild_snapshot(
             .find(|s| s.key == key)
             .cloned()
             .unwrap_or_else(|| fresh_state(&key, &label));
-        next_states.push(fold_tick(
-            &prev_state,
-            sample,
-            &ModelProfile::default(),
-            cadence_secs,
-        ));
+        let mut state = fold_tick(&prev_state, sample, &ModelProfile::default(), cadence_secs);
+        // Where the model runs: the port we just probed, and the chips the
+        // server holds open. Both are cheap enough for the monitor thread.
+        state.port = Some(port);
+        state.chips = probe.chips(&container);
+        next_states.push(state);
     }
     next_states
 }
@@ -720,6 +726,51 @@ mod tests {
                 (405, "{\"detail\":\"Model is not ready\"}".into())
             }
         }
+    }
+
+    /// `FakeProbe` plus a fixed chip attribution, to prove `rebuild_snapshot`
+    /// carries the probe's chips and the probed port onto the published state.
+    struct ChipProbe;
+    impl ContainerProbe for ChipProbe {
+        fn env(&self, c: &str) -> String {
+            FakeProbe.env(c)
+        }
+        fn stats(&self, c: &str) -> String {
+            FakeProbe.stats(c)
+        }
+        fn exec(&self, c: &str, sh: &str) -> String {
+            FakeProbe.exec(c, sh)
+        }
+        fn http(&self, port: u16, path: &str) -> (u16, String) {
+            FakeProbe.http(port, path)
+        }
+        fn chips(&self, _key: &str) -> Vec<usize> {
+            vec![2, 3]
+        }
+    }
+
+    #[test]
+    fn snapshot_carries_port_and_chips_from_the_probe() {
+        let srv = InferenceServer {
+            source: Source::Docker {
+                container: "tt-inference-server-x".into(),
+            },
+            image: "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release:0.14.0"
+                .into(),
+            model: Some("Qwen/Qwen3-32B".into()),
+            mesh: None,
+            arch: None,
+            device: None,
+            port: Some(8002),
+            uses_tt_device: true,
+        };
+        let snap = rebuild_snapshot(std::slice::from_ref(&srv), &[], &ChipProbe, 5);
+        assert_eq!(snap[0].port, Some(8002));
+        assert_eq!(snap[0].chips, vec![2, 3]);
+        // The default probe knows no chips: an empty list, not a panic.
+        let none = rebuild_snapshot(std::slice::from_ref(&srv), &[], &FakeProbe, 5);
+        assert!(none[0].chips.is_empty());
+        assert_eq!(none[0].port, Some(8002));
     }
 
     /// Regression test for the bug where an empty `detected` set (all tracked

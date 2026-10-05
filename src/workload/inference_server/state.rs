@@ -113,12 +113,42 @@ pub struct ServiceState {
     /// models like SkyReels), `None` for vLLM/non-media servers. Mutually
     /// exclusive with `serving` — a server exposes one namespace or the other.
     pub media: Option<MediaStats>,
+    /// Host port the server answers on (the one the monitor probes), `None`
+    /// when unknown (e.g. a remote peer that predates this field).
+    pub port: Option<u16>,
+    /// Chip indices (`/dev/tenstorrent/N`) this server holds open, sorted. Empty
+    /// when none are attributable yet (still starting up) or the box doesn't
+    /// let us read the server's fds and the container maps the whole device dir.
+    pub chips: Vec<usize>,
+}
+
+/// Compact "where is this model running" text: `:8000 · chips 0,1`. Either
+/// half is dropped when unknown; empty string when both are.
+pub fn placement_text(port: Option<u16>, chips: &[usize]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(p) = port {
+        parts.push(format!(":{p}"));
+    }
+    if !chips.is_empty() {
+        let list: Vec<String> = chips.iter().map(|c| c.to_string()).collect();
+        let noun = if chips.len() == 1 { "chip" } else { "chips" };
+        parts.push(format!("{noun} {}", list.join(",")));
+    }
+    parts.join(" · ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::workload::inference_server::probe::Readiness;
+    #[test]
+    fn placement_text_formats_port_and_chips() {
+        assert_eq!(placement_text(Some(8000), &[0, 1]), ":8000 · chips 0,1");
+        assert_eq!(placement_text(Some(8002), &[3]), ":8002 · chip 3");
+        assert_eq!(placement_text(Some(8000), &[]), ":8000");
+        assert_eq!(placement_text(None, &[2]), "chip 2");
+        assert_eq!(placement_text(None, &[]), "");
+    }
     #[test]
     fn phase_derivation() {
         assert_eq!(Phase::derive(0, false, 0, 0, &Readiness::Down), Phase::Down);

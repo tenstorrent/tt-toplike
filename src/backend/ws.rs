@@ -788,6 +788,8 @@ mod tests {
                 progress: None,
                 serving: None,
                 media: None,
+                port: None,
+                chips: Vec::new(),
             }]),
         };
         let frame_with_ext = inject_extension(FRAME, &ext);

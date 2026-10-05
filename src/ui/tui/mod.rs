@@ -1017,6 +1017,11 @@ fn run_app(
                     // same rows for the roster and the fixed-dim loading/roaming
                     // renderers line up.
                     inference_roster = inference_roster_lines(&rows, size.width as usize);
+                    // A lone service has no roster; give it the one-line
+                    // placement header instead.
+                    if inference_roster.is_empty() {
+                        inference_roster = inference_single_service_line(&rows, size.width as usize);
+                    }
                     // Under `--remote`, while `remote_rows` is `None` (the peer
                     // isn't streaming inference data) this view is still
                     // probing LOCAL docker, not the remote box's serving stack.
@@ -5544,6 +5549,8 @@ fn remote_inference_to_service_state(
         flat_ticks: 0,
         serving: ri.serving.as_ref().map(remote_serving_to_stats),
         media: ri.media.as_ref().map(remote_media_to_stats),
+        port: ri.port,
+        chips: ri.chips.clone(),
     }
 }
 
@@ -5619,16 +5626,22 @@ fn inference_roster_lines(
                 None => String::new(),
             },
         };
-        // Truncate the label (char-safe) so marker+tag+label+stat fit `width`.
-        let fixed = 2
-            + 7
-            + 2
-            + if stat.is_empty() {
-                0
-            } else {
-                2 + stat.chars().count()
-            };
-        let label_w = width.saturating_sub(fixed).max(4);
+        // Where it runs (`:8000 · chips 0,1`). Dropped first when the row is
+        // too narrow, so the label and live stat keep their room.
+        let mut placement = crate::workload::inference_server::placement_text(s.port, &s.chips);
+        let stat_w = if stat.is_empty() {
+            0
+        } else {
+            2 + stat.chars().count()
+        };
+        let fixed_of = |placement: &str| {
+            2 + 7 + 2 + stat_w + if placement.is_empty() { 0 } else { 2 + placement.chars().count() }
+        };
+        if width.saturating_sub(fixed_of(&placement)) < 12 {
+            placement.clear();
+        }
+        // Truncate the label (char-safe) so marker+tag+label+placement+stat fit `width`.
+        let label_w = width.saturating_sub(fixed_of(&placement)).max(4);
         let label: String = s.label.chars().take(label_w).collect();
 
         let mut spans = vec![
@@ -5650,6 +5663,13 @@ fn inference_roster_lines(
                 }),
             ),
         ];
+        if !placement.is_empty() {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                placement,
+                Style::default().fg(colors::info()),
+            ));
+        }
         if !stat.is_empty() {
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
@@ -5660,6 +5680,30 @@ fn inference_roster_lines(
         lines.push(Line::from(spans));
     }
     lines
+}
+
+/// One-line header for the `[i]` view when exactly one service is detected
+/// (the roster stays hidden for a single service, so this is where its port and
+/// chips show): `Model-Name  :8000 · chips 0,1`. Empty when the service has
+/// neither a known port nor chips, or `width` is too small to be useful.
+fn inference_single_service_line(
+    rows: &[crate::workload::inference_server::ServiceState],
+    width: usize,
+) -> Vec<Line<'static>> {
+    let [s] = rows else {
+        return Vec::new();
+    };
+    let placement = crate::workload::inference_server::placement_text(s.port, &s.chips);
+    if placement.is_empty() || width < 12 {
+        return Vec::new();
+    }
+    let label_w = width.saturating_sub(2 + placement.chars().count()).max(4);
+    let label: String = s.label.chars().take(label_w).collect();
+    vec![Line::from(vec![
+        Span::styled(label, Style::default().fg(colors::text_primary())),
+        Span::raw("  "),
+        Span::styled(placement, Style::default().fg(colors::info())),
+    ])]
 }
 
 /// Render a btop-style horizontal bar: `[████████░░░░░░░░]  42%`.
@@ -8068,11 +8112,49 @@ mod inference_roster_tests {
             flat_ticks: 0,
             serving: None,
             media: None,
+            port: None,
+            chips: Vec::new(),
         }
     }
 
     fn text(line: &ratatui::text::Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn roster_rows_show_port_and_chips() {
+        let mut a = svc("a", "Model-A", Phase::Ready);
+        a.port = Some(8000);
+        a.chips = vec![0, 1];
+        let mut b = svc("b", "Model-B", Phase::Loading);
+        b.port = Some(8002);
+        b.chips = vec![2];
+        let lines = inference_roster_lines(&[a, b], 80);
+        assert!(text(&lines[1]).contains(":8000 · chips 0,1"), "{}", text(&lines[1]));
+        assert!(text(&lines[2]).contains(":8002 · chip 2"), "{}", text(&lines[2]));
+    }
+
+    #[test]
+    fn roster_drops_placement_before_squeezing_the_label() {
+        let mut a = svc("a", "Model-A", Phase::Ready);
+        a.port = Some(8000);
+        a.chips = vec![0, 1, 2, 3];
+        let lines = inference_roster_lines(&[a, svc("b", "B", Phase::Down)], 24);
+        assert!(!text(&lines[1]).contains("chips"), "{}", text(&lines[1]));
+        assert!(text(&lines[1]).contains("Model-A"));
+    }
+
+    #[test]
+    fn single_service_gets_a_placement_line() {
+        use super::inference_single_service_line;
+        let mut a = svc("a", "Model-A", Phase::Ready);
+        assert!(inference_single_service_line(&[a.clone()], 80).is_empty());
+        a.port = Some(8000);
+        a.chips = vec![0, 1];
+        let l = inference_single_service_line(&[a.clone()], 80);
+        assert_eq!(text(&l[0]), "Model-A  :8000 · chips 0,1");
+        // Two services use the roster, not this line.
+        assert!(inference_single_service_line(&[a.clone(), a], 80).is_empty());
     }
 
     #[test]
@@ -8284,6 +8366,8 @@ mod remote_mapper_tests {
             progress: Some(1.0),
             serving: Some(serving),
             media: None,
+            port: None,
+            chips: Vec::new(),
         };
         let state = remote_inference_to_service_state(&ri);
         assert_eq!(state.key, "vllm-llama3-70b");
@@ -8326,6 +8410,8 @@ mod remote_mapper_tests {
             progress: None,
             serving: None,
             media: None,
+            port: None,
+            chips: Vec::new(),
         };
         let state = remote_inference_to_service_state(&down);
         assert_eq!(state.phase, Phase::Down);
@@ -8340,6 +8426,8 @@ mod remote_mapper_tests {
             progress: Some(0.4),
             serving: None,
             media: None,
+            port: None,
+            chips: Vec::new(),
         };
         let state = remote_inference_to_service_state(&loading);
         assert_eq!(state.phase, Phase::Loading);
@@ -8356,6 +8444,8 @@ mod remote_mapper_tests {
             progress: None,
             serving: None,
             media: None,
+            port: None,
+            chips: Vec::new(),
         };
         let state = remote_inference_to_service_state(&ri);
         assert_eq!(state.phase, Phase::Down);
@@ -8386,6 +8476,8 @@ mod remote_mapper_tests {
                 inference_avg_s: 0.0,
                 warmup_avg_s: 0.0,
             }),
+            port: None,
+            chips: Vec::new(),
         };
         let state = remote_inference_to_service_state(&ri);
         assert!(state.serving.is_none());
@@ -8978,6 +9070,8 @@ pub fn run_render_bench(
             flat_ticks: 0,
             serving,
             media: None,
+            port: None,
+            chips: Vec::new(),
         };
         // 4 models → the featured one Feeds the full serving dashboard, and the
         // roster lists all four (the multi-model case the view now handles).

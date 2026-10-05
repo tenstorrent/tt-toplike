@@ -30,4 +30,4 @@ pub use probe::{
     DockerProbe, Readiness, TickSample,
 };
 pub use services::{service_for, ServiceDef, SERVERS};
-pub use state::{estimate_progress, is_alarm, ModelProfile, Phase, ServiceState};
+pub use state::{estimate_progress, is_alarm, placement_text, ModelProfile, Phase, ServiceState};
