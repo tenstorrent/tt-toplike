@@ -683,7 +683,7 @@ fn run_app(
     // `tt_smi_reset_behavior` config key; default `inform`). `ignore` never
     // runs the detector. `inform` shows the status-bar segment. `dazzle`
     // and `demo` add a takeover animation (drawn in a centered box over a
-    // full-screen tint). `demo` plays all seven in a row at boot and again
+    // full-screen tint). `demo` plays all five in a row at boot and again
     // on every real reset, tagged DEMO in the box title. HivemindSweeper
     // never gets a takeover; it injects a real feed event instead.
     // `reset_status` follows every live `tt-smi -r` process and drives the

@@ -143,9 +143,8 @@ src/animation/takeover/
   mod.rs              // TakeoverAnimation trait, variant enum, weighted picker
   bbs.rs              // BBS sysop takeover
   blackhole_swarm.rs  // 1024-Blackholes swarm
-  hatch_countdown.rs  // Lost-hatch countdown
-  missile_command.rs  // Missile Command
-  trek_reset.rs       // classic "Star Trek" BASIC-game reset screen
+  trek_reset.rs       // TT-TREKLIKE: classic "Star Trek" BASIC-game reset screen
+  silly_cetacean.rs   // a whale carried down by birds through a drifting sky
   quiet_notice.rs     // minimal full-screen status readout
 ```
 
@@ -264,14 +263,14 @@ One setting: `--tt-smi-reset-behavior <ignore|inform|dazzle|demo>`
 `tt_smi_reset_behavior` (`src/config.rs`). The flag wins over the file.
 `ignore` never runs the detector. `inform` shows a status-bar segment
 (`⟳ tt-smi -r · {scope} · resetting`, then `✓ tt-smi -r done` for 10
-seconds). `dazzle` adds the takeover animation. `demo` plays all seven
+seconds). `dazzle` adds the takeover animation. `demo` plays all five
 takeovers in a fixed order (see "Demo behavior"). This replaces the
 earlier opt-in `--reset-takeover` flag, which was never released.
 
 ## Demo behavior
 
-`demo` plays all seven takeovers in a row, in this order: Quiet Notice,
-Blackhole Swarm, Hatch Countdown, BBS, Trek, Fail Whale, Missile Command.
+`demo` plays all five takeovers in a row, in this order: Quiet Notice,
+Blackhole Swarm, BBS, Trek (TT-TREKLIKE), Silly Cetacean.
 It plays once when toplike starts (not in HivemindSweeper) and again on
 every real reset. A boot demo uses a synthetic full reset over the real
 device count. A real reset uses the real event, so chip labels and scope
@@ -285,7 +284,7 @@ passed and the variant is done. `inform`'s status segment appears for a
 real reset and not for the boot demo, because nothing real is resetting.
 
 This is a deliberate exception to the rule that animations follow the
-real reset. The demo ignores the real `tt-smi -r` finishing, so all seven
+real reset. The demo ignores the real `tt-smi -r` finishing, so all five
 always play. To keep a staged animation from being mistaken for a real
 reset, the box title reads `DEMO - {title}` at boot and
 `DEMO (real reset) - {title}` after a real reset.

@@ -95,7 +95,7 @@ When the TUI sees a `tt-smi -r` running, it can say so. `--tt-smi-reset-behavior
 - `ignore`: never look for resets.
 - `inform` (default): show `⟳ tt-smi -r · all chips · resetting` in the status bar of every view while the reset runs, then `✓ tt-smi -r done` for 10 seconds.
 - `dazzle`: `inform`, plus a takeover animation for each reset, drawn in a centered box over a tinted screen (a feed event in HivemindSweeper).
-- `demo`: plays all seven reset animations in a row (8 seconds each) when toplike starts, and again on every real reset. The box title says `DEMO` (`DEMO (real reset)` after a real one), so a staged animation is never taken for a real reset. Any key skips to the next animation; `Esc`, `q` or `Q` ends the demo. The demo always runs to the end, even if the real `tt-smi -r` finishes sooner. HivemindSweeper has no boot demo and gets a feed event for a real reset. The boot demo does not start on a terminal smaller than 8x4.
+- `demo`: plays all five reset animations in a row (8 seconds each) when toplike starts, and again on every real reset. The box title says `DEMO` (`DEMO (real reset)` after a real one), so a staged animation is never taken for a real reset. Any key skips to the next animation; `Esc`, `q` or `Q` ends the demo. The demo always runs to the end, even if the real `tt-smi -r` finishes sooner. HivemindSweeper has no boot demo and gets a feed event for a real reset. The boot demo does not start on a terminal smaller than 8x4.
 
 Every running `tt-smi -r` is tracked. While more than one runs, the status segment shows the scope of the newest, and `done` appears when the last one ends. A reset that starts while a takeover is on screen gets no takeover of its own, but it still shows in the status segment.
 

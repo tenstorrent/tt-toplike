@@ -255,7 +255,7 @@ pub enum ResetBehavior {
     /// centered box over a tinted screen. HivemindSweeper gets a feed event
     /// in its place.
     Dazzle,
-    /// Play all seven reset animations in a row (8 seconds each) at start
+    /// Play all five reset animations in a row (8 seconds each) at start
     /// and again on each real reset, with DEMO in the box title. Any key
     /// skips to the next animation. Esc, q or Q ends the demo. A real reset
     /// also gets the status segment, and a feed event in HivemindSweeper.
@@ -1177,7 +1177,7 @@ mod tests {
             ("ignore", "never look for resets"),
             ("inform", "segment in the status bar"),
             ("dazzle", "centered box over a tinted screen"),
-            ("demo", "all seven reset animations in a row"),
+            ("demo", "all five reset animations in a row"),
         ] {
             let item = format!("- {name}:");
             assert_eq!(block.matches(&item).count(), 1, "{item}\n{block}");
