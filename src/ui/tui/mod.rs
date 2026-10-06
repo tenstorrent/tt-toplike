@@ -3548,8 +3548,11 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
     macro_rules! row {
         ($k:expr, $v:expr, $kc:expr) => {
             ln!(vec![
+                // Pad to 12 columns, but never less than the label plus one
+                // space: a longer label (`/serve [bind:port]`) used to run
+                // straight into its description.
                 Span::styled(
-                    format!("{:<12}", $k),
+                    format!("{:<w$}", $k, w = 12.max($k.chars().count() + 1)),
                     Style::default().fg($kc).add_modifier(Modifier::BOLD)
                 ),
                 Span::styled($v, Style::default().fg(dim)),
@@ -3627,6 +3630,22 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 row!(
                     " /wrap <cmd…>",
                     "spawn + capture a command (confirm: repeat it)",
+                    lbl
+                ),
+                ln!(vec![Span::styled(
+                    "──────────────────────────────────────",
+                    Style::default().fg(bar)
+                )]),
+                sep!("Status bar"),
+                row!(" ⟳ tt-smi -r", "a reset is running (chips shown)", lbl),
+                row!(
+                    " ✓ tt-smi -r done",
+                    "shown for 10 s after the last one ends",
+                    lbl
+                ),
+                row!(
+                    " --tt-smi-reset-behavior",
+                    "ignore · inform · dazzle · demo",
                     lbl
                 ),
             ]
@@ -3726,6 +3745,10 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "",
                     "Particle color encodes the memory tier.",
                     "Density reflects current bandwidth.",
+                    "",
+                    "The base shows one DDR gate per channel: ▪ is",
+                    "healthy, · is harvested (fused off), ✗ failed",
+                    "its BIST.",
                 ],
                 cols,
             ),
@@ -3751,6 +3774,10 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "Block character intensity (░▒▓█) encodes",
                     "relative activity within each cell.",
                     "Color encodes channel temperature.",
+                    "",
+                    "A dark-red ✗ is a bad sector: a channel that",
+                    "failed its BIST, and stays that way. A bright",
+                    "red ✗ flashes on an uncorrectable error.",
                 ],
                 cols,
             ),
@@ -3838,6 +3865,12 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "pipe: weights streaming in at load time,",
                     "results coming back during inference.",
                     "",
+                    "The GDDR row counts memory channels (needs",
+                    "tt-smi 6.3+): n/m trn is trained out of all,",
+                    "hv is harvested (fused off), flt is a BIST",
+                    "fault. It turns amber when any are harvested",
+                    "and red on a fault.",
+                    "",
                     "GDDR ECC and thermal-trip rows appear only",
                     "when those counters are non-zero, because",
                     "zero is the healthy answer and a quiet",
@@ -3879,7 +3912,8 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "Inference Server Monitor",
                     "",
                     "One creature across the whole lifecycle of",
-                    "a TT inference-server (docker-detected):",
+                    "a TT inference-server (a docker container, or a",
+                    "vLLM process run directly on the host):",
                     "",
                     "COLD  — no model up: a hungry snake roams",
                     "  the model-catalog starfield (what could",
@@ -3893,6 +3927,18 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "  decode), and a TT silicon strip tying",
                     "  tokens/s to real chip power/temp/clock.",
                     "ALARM — stalled 5+ min: the snake reddens.",
+                    "",
+                    "With two or more models a roster tops the view, one",
+                    "row each: phase, name, where it runs (:port · chips)",
+                    "and a live stat. ▸ marks the one the snake features.",
+                    "A single model gets one header line with the same",
+                    "text. The port is the one it answers on. Chips are the",
+                    "/dev/tenstorrent devices the server holds open, or",
+                    "else the device nodes its container was given; none",
+                    "show while it is still starting, or when the container",
+                    "was given the whole device directory. Diffusion and",
+                    "video servers show jobs in flight and done in place of",
+                    "tokens/s.",
                     "",
                     "Press l for the symbol legend · i to return.",
                 ],
@@ -3909,33 +3955,52 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 &[
                     "Training — Robot Brain Food",
                     "",
-                    "A live tt-train run, drawn as the model",
-                    "itself: one column per transformer block,",
-                    "one node per attention head.",
+                    "A live training run, drawn from what the trainer",
+                    "prints plus tt-toplike's own chip telemetry.",
+                    "Nothing here is invented.",
                     "",
-                    "Each step feeds tokens in from the left",
-                    "(amber), then gradients flow back out to",
-                    "the right (violet). The loss mountains",
-                    "below are coloured by their own value, so",
-                    "the range is the whole run's history —",
-                    "magenta chaos resolving to teal calm.",
+                    "STEP ANATOMY (top band). Each star is one step, two to",
+                    "a column. Its height is that step's wall time, with the",
+                    "scale printed at the left. A teal ⠂ is a normal step, a",
+                    "purple ◆ means the program cache grew (a compile), an",
+                    "amber ✺ is a checkpoint write. The dotted ┈ line is the",
+                    "median of the steps shown, and the newest three stars",
+                    "swell once per measured step. The title says (from bar)",
+                    "when the times were polled from a progress bar instead",
+                    "of printed by the trainer.",
                     "",
-                    "The view attaches by itself: it scans /proc",
-                    "for a process whose binary is a tt-train",
-                    "example (nano_gpt, mnist_mlp, …), then reads",
-                    "/proc/<pid>/fd/1 to locate its log.",
+                    "Under the stars: one row per chip (height = power as a",
+                    "share of that chip's TDP, coral where aiclk has dropped),",
+                    "then aiclk, PCIe and host-CPU rows. Then a one-line",
+                    "verdict: compiling, compute-bound (busiest chip at 50%",
+                    "of TDP or more) or host-bound (under 30% of TDP with the",
+                    "host CPU over 100%). Last, a convergence strip: loss",
+                    "slope per 100 logs, noise, how long since the best loss,",
+                    "the base learning rate and how far through the schedule",
+                    "the run is.",
                     "",
-                    "tt-train prints step, loss, step time and",
-                    "kernel-cache size; tokens/sec and ETA are",
-                    "derived from those plus the run's YAML.",
-                    "Nothing here is invented — gradient norms",
-                    "and MFU aren't emitted live, so they",
+                    "The loss mountains below are coloured by their own value,",
+                    "so the range is the whole run's history: red (untrained)",
+                    "to cyan (converged), under an aurora sky that opens as the",
+                    "loss falls. A comet crosses it when a checkpoint is saved.",
+                    "",
+                    "The view attaches by itself. It scans /proc for a",
+                    "tt-train example (nano_gpt, mnist_mlp, linear_regression)",
+                    "or a Python script that drives ttml, then reads",
+                    "/proc/<pid>/fd/1 to locate its log. A tt-tnt progress",
+                    "bar is read live, so a resumed or chunked run shows its",
+                    "real global step. The ETA appears only when the run's",
+                    "step budget is known.",
+                    "",
+                    "tt-train prints step, loss and step time; tokens/s and",
+                    "ETA are derived from those plus the run's config.",
+                    "Gradient norms and MFU aren't emitted live, so they",
                     "aren't shown.",
                     "",
-                    "If stdout wasn't redirected to a file, the",
-                    "per-step stream can't be read after the",
-                    "fact — relaunch with '> train.log' and the",
-                    "view picks it up automatically.",
+                    "If stdout wasn't redirected to a file, the per-step",
+                    "stream can't be read after the fact: relaunch with",
+                    "'> train.log' and the view picks it up automatically.",
+                    "Press l for the symbol legend.",
                 ],
                 cols,
             ),
@@ -4074,6 +4139,13 @@ fn insights_legend_lines(
             ),
         ]),
         ln!(vec![
+            Span::styled("GDDR n/m ", Style::default().fg(colors::rgb(79, 209, 197))),
+            Span::styled(
+                "trn·hv·flt = trained · harvested · BIST-fault",
+                Style::default().fg(dim),
+            ),
+        ]),
+        ln!(vec![
             Span::styled("ECC ", Style::default().fg(colors::error())),
             Span::styled(
                 "= GDDR errors, shown only when non-zero (uncorr = red)",
@@ -4168,6 +4240,40 @@ fn inference_legend_lines(
             Span::styled("silicon ", Style::default().fg(colors::rgb(120, 180, 200))),
             Span::styled(
                 "= per-chip power/temp/AICLK (live)",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled(
+                ":8000 · chips 0,1 ",
+                Style::default().fg(colors::rgb(120, 180, 200))
+            ),
+            Span::styled(
+                "= port it answers on · chips it holds",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("roster ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled(
+                "(2+ models) down·compile·loading·serving·stalled",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("▸ ", Style::default().fg(colors::primary())),
+            Span::styled(
+                "= the model the snake features (loading wins)",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled(
+                "N in flight · M done ",
+                Style::default().fg(colors::text_secondary())
+            ),
+            Span::styled(
+                "= diffusion/video servers (no tok/s)",
                 Style::default().fg(dim)
             ),
         ]),
@@ -4355,59 +4461,118 @@ fn train_legend_lines(
             Line::from(v)
         }};
     }
+    // One line per thing the view draws, top of the screen to the bottom: the
+    // step band (starfield, chip rows, verdict, strip), then the loss river.
+    // Glyph colours match the view's own constants. The test
+    // `train_legend_documents_every_glyph_the_view_draws` ties the glyphs to
+    // `train_view::legend_channels`.
+    let teal = colors::rgb(116, 197, 223);
+    let purple = colors::rgb(180, 140, 230);
+    let amber = colors::rgb(246, 188, 66);
+    let mint = colors::rgb(124, 242, 156);
+    let label = colors::rgb(200, 230, 255);
     vec![
         ln!(vec![
-            Span::styled("●", Style::default().fg(colors::rgb(214, 92, 208))),
-            Span::styled(" → ", Style::default().fg(dim)),
-            Span::styled("●", Style::default().fg(colors::rgb(79, 209, 197))),
+            Span::styled("● ", Style::default().fg(colors::rgb(214, 92, 208))),
+            Span::styled("loss hue: ", Style::default().fg(dim)),
+            Span::styled("red", Style::default().fg(colors::rgb(255, 110, 120))),
+            Span::styled(" (untrained) → ", Style::default().fg(dim)),
+            Span::styled("cyan", Style::default().fg(colors::rgb(79, 209, 197))),
+            Span::styled(" (converged)", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("· ⠂ ", Style::default().fg(teal)),
+            Span::styled("◆ ", Style::default().fg(purple)),
+            Span::styled("✺ ", Style::default().fg(amber)),
             Span::styled(
-                "  loss: magenta chaos → teal converged",
+                "a step: normal / cache grew / checkpoint",
                 Style::default().fg(dim)
             ),
         ]),
         ln!(vec![
-            Span::styled("─", Style::default().fg(colors::rgb(242, 180, 62))),
-            Span::styled(" forward pass (left→right)", Style::default().fg(dim)),
-        ]),
-        ln!(vec![
-            Span::styled("∙", Style::default().fg(colors::rgb(150, 120, 240))),
-            Span::styled(" gradients (right→left)", Style::default().fg(dim)),
-        ]),
-        ln!(vec![
-            Span::styled("▁▄█", Style::default().fg(colors::rgb(180, 120, 200))),
+            Span::styled("↕ ", Style::default().fg(teal)),
             Span::styled(
-                " loss river — each column keeps its own value's hue",
+                "star height = wall time of that step",
                 Style::default().fg(dim)
             ),
         ]),
         ln!(vec![
-            Span::styled("▼", Style::default().fg(colors::rgb(124, 242, 156))),
+            Span::styled("┈ ", Style::default().fg(colors::rgb(80, 90, 115))),
+            Span::styled(
+                "median step time of the steps shown",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("(from bar) ", Style::default().fg(teal)),
+            Span::styled("times polled from a progress bar", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("chipN ", Style::default().fg(colors::rgb(200, 200, 120))),
+            Span::styled("row height = power / TDP; ", Style::default().fg(dim)),
+            Span::styled("coral", Style::default().fg(colors::rgb(255, 158, 138))),
+            Span::styled(" = aiclk dropped", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled(
+                "aiclk pcie host ",
+                Style::default().fg(colors::rgb(120, 180, 200))
+            ),
+            Span::styled("vs best / best seen / window max", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("verdict ", Style::default().fg(label)),
+            Span::styled(
+                "compiling · compute-bound (≥50% TDP) ·",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("        ", Style::default().fg(dim)),
+            Span::styled(
+                "host-bound (<30% TDP and host CPU >100%)",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("strip ", Style::default().fg(label)),
+            Span::styled(
+                "loss ↘↗→ per 100 logs · noise · best · lr",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("▁▄█ ", Style::default().fg(colors::rgb(180, 120, 200))),
+            Span::styled(
+                "loss mountains: each column keeps its own hue",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("▼", Style::default().fg(mint)),
             Span::styled(" improving   ", Style::default().fg(dim)),
             Span::styled("▲", Style::default().fg(colors::rgb(255, 138, 107))),
-            Span::styled(" regressing", Style::default().fg(dim)),
+            Span::styled(" regressing (header)", Style::default().fg(dim)),
         ]),
         ln!(vec![
-            Span::styled("█", Style::default().fg(colors::temp_color(70.0))),
-            Span::styled(" chip temp (varies with heat)", Style::default().fg(dim)),
-        ]),
-        ln!(vec![
-            Span::styled("▓", Style::default().fg(colors::rgb(200, 200, 120))),
-            Span::styled(" chip power draw", Style::default().fg(dim)),
-        ]),
-        ln!(vec![
-            Span::styled("░▒", Style::default().fg(colors::rgb(120, 180, 150))),
+            Span::styled("░▒ ", Style::default().fg(colors::rgb(120, 180, 150))),
             Span::styled(
-                " aurora + stars — sky opens as loss falls",
+                "aurora + stars: the sky opens as loss falls",
                 Style::default().fg(dim)
             ),
         ]),
         ln!(vec![
-            Span::styled("◆", Style::default().fg(colors::rgb(170, 120, 245))),
-            Span::styled(" kernel cache compiling → steady", Style::default().fg(dim)),
+            Span::styled("█ ", Style::default().fg(colors::temp_color(70.0))),
+            Span::styled("chip temp  ", Style::default().fg(dim)),
+            Span::styled("▓ ", Style::default().fg(colors::rgb(200, 200, 120))),
+            Span::styled("chip power draw", Style::default().fg(dim)),
         ]),
         ln!(vec![
-            Span::styled("✦", Style::default().fg(colors::rgb(124, 242, 156))),
-            Span::styled(" checkpoint saved", Style::default().fg(dim)),
+            Span::styled("✦ ", Style::default().fg(mint)),
+            Span::styled(
+                "checkpoint saved (comet in the river)",
+                Style::default().fg(dim)
+            ),
         ]),
     ]
 }
@@ -8586,12 +8751,14 @@ mod host_default_screen_tests {
         );
     }
 
-    /// The Training legend must document every one of the view's nine colour
-    /// channels (loss, forward, gradients, river history, delta direction,
-    /// chip temp/power, aurora, cache, checkpoint) — not just render *some*
-    /// lines.
+    /// The Training `l` overlay must document every glyph the view's own
+    /// bottom legend row lists (`train_view::legend_channels`), every row of
+    /// the step band, and nothing the view no longer draws. The old overlay
+    /// described a transformer node grid with forward and gradient sweeps that
+    /// had been replaced by the starfield, and the test that was meant to guard
+    /// it only checked the overlay against its own previous wording.
     #[test]
-    fn train_legend_documents_every_colour_channel() {
+    fn train_legend_documents_every_glyph_the_view_draws() {
         use super::{colors, train_legend_lines};
 
         let lines = train_legend_lines(
@@ -8599,47 +8766,173 @@ mod host_default_screen_tests {
             colors::rgb(0, 0, 0),
             colors::rgb(120, 120, 120),
         );
-        // Per-line text, lowercased, so a dropped line is caught even when its
-        // one distinguishing word ("loss") also appears on another line — a
-        // single pooled-and-joined blob (the previous version of this test)
-        // can't tell "the loss river line is gone" from "the loss line moved".
-        let line_texts: Vec<String> = lines
+        let all: String = lines
             .iter()
             .map(|l| {
                 l.spans
                     .iter()
                     .map(|s| s.content.to_string())
                     .collect::<String>()
-                    .to_lowercase()
             })
-            .collect();
-        let all = line_texts.join("\n");
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lower = all.to_lowercase();
 
-        // Every one of the nine colour channels must have its own line with
-        // its own distinguishing text.
-        let expected_per_line: [&str; 10] = [
-            "loss: magenta chaos", // loss
-            "forward pass",        // forward
-            "gradients",           // gradients (backward)
-            "loss river",          // loss history (river)
-            "improving",           // delta direction (▼/▲ on one line)
-            "chip temp",           // chip temp
-            "chip power draw",     // chip power
-            "aurora",              // aurora + stars
-            "cache compiling",     // kernel cache
-            "checkpoint saved",    // checkpoint
-        ];
-        for needle in expected_per_line {
+        // 1. Every glyph in the view's own legend row is explained here.
+        for (glyph, label, _) in crate::animation::train_view::legend_channels(colors::rgb(1, 2, 3))
+        {
             assert!(
-                line_texts.iter().any(|t| t.contains(needle)),
-                "legend is missing a line containing {needle:?}; got:\n{all}"
+                all.contains(glyph),
+                "overlay never shows {glyph:?} ({label}), which the view's legend row lists:\n{all}"
             );
         }
-        assert_eq!(
-            lines.len(),
-            expected_per_line.len(),
-            "expected exactly one line per channel entry, got:\n{all}"
+        // 2. The band's own vocabulary: star glyph, median horizon, the three
+        //    kinds of row and the two lines under them.
+        for needle in [
+            "⠂",
+            "┈",
+            "star height",
+            "median",
+            "(from bar)",
+            "chipn",
+            "tdp",
+            "aiclk",
+            "pcie",
+            "host",
+            "compute-bound",
+            "host-bound",
+            "compiling",
+            "per 100 logs",
+            "mountains",
+            "aurora",
+            "checkpoint",
+        ] {
+            assert!(
+                lower.contains(needle),
+                "legend is missing {needle:?}:\n{all}"
+            );
+        }
+        // 3. Nothing the view no longer draws.
+        for gone in [
+            "forward pass",
+            "gradients",
+            "attention head",
+            "transformer block",
+        ] {
+            assert!(
+                !lower.contains(gone),
+                "legend still describes {gone:?}:\n{all}"
+            );
+        }
+    }
+
+    /// Plain text of an overlay, one string per line, border prefix included.
+    fn overlay_text(panel: super::OverlayPanel, mode: super::DisplayMode) -> String {
+        super::overlay_lines(panel, mode, 80)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The `l` and `!` text must say what each view draws now. Each check ties
+    /// the text to the thing it describes (the real formatter or glyph
+    /// constant) where one exists, so a rename in the view breaks the test
+    /// instead of leaving the text behind.
+    #[test]
+    fn legend_and_explain_text_names_what_the_views_draw() {
+        use super::{DisplayMode as M, OverlayPanel as P};
+
+        // Training: the step band, and nothing from the removed node grid.
+        let explain = overlay_text(P::Explain, M::Training);
+        for needle in ["STEP ANATOMY", "(from bar)", "verdict", "convergence strip"] {
+            assert!(
+                explain.contains(needle),
+                "Training ! lacks {needle:?}:\n{explain}"
+            );
+        }
+        for gone in ["transformer block", "attention head", "gradients flow"] {
+            assert!(
+                !explain.contains(gone),
+                "Training ! still says {gone:?}:\n{explain}"
+            );
+        }
+
+        // Inference: the port and chips text, in the form the view prints it.
+        let placement = crate::workload::inference_server::placement_text(Some(8000), &[0, 1]);
+        for panel in [P::Legend, P::Explain] {
+            let text = overlay_text(panel, M::InferenceMonitor).to_lowercase();
+            for needle in ["roster", "chips", "port"] {
+                assert!(
+                    text.contains(needle),
+                    "Inference {panel:?} does not mention {needle:?}:\n{text}"
+                );
+            }
+        }
+        let legend = overlay_text(P::Legend, M::InferenceMonitor);
+        assert!(
+            legend.contains(&placement),
+            "Inference legend does not show {placement:?}:\n{legend}"
         );
+
+        // HivemindSweeper: the reset row glyph the feed actually prefixes.
+        let glyph = crate::ui::tui::hivemind_view::RESET_GLYPH;
+        for panel in [P::Legend, P::Explain] {
+            let text = overlay_text(panel, M::HivemindSweeper);
+            assert!(
+                text.contains(glyph),
+                "Hivemind {panel:?} lacks {glyph:?}:\n{text}"
+            );
+        }
+
+        // Defrag and Memory Castle: the bad-sector / gate markers their
+        // legends already list.
+        for mode in [M::Defrag, M::MemoryCastle] {
+            for panel in [P::Legend, P::Explain] {
+                let text = overlay_text(panel, mode);
+                assert!(
+                    text.contains("BIST"),
+                    "{mode:?} {panel:?} lacks BIST:\n{text}"
+                );
+            }
+        }
+
+        // Insights: the GDDR channel counts shown on every panel.
+        let insights =
+            overlay_text(P::Legend, M::Insights) + &overlay_text(P::Explain, M::Insights);
+        for needle in ["trn", "hv", "flt", "BIST"] {
+            assert!(
+                insights.contains(needle),
+                "Insights lacks {needle:?}:\n{insights}"
+            );
+        }
+
+        // Help: the status-bar segment and the flag that controls it.
+        let help = overlay_text(P::Help, M::Insights);
+        for needle in ["⟳ tt-smi -r", "✓ tt-smi -r", "--tt-smi-reset-behavior"] {
+            assert!(help.contains(needle), "Help lacks {needle:?}:\n{help}");
+        }
+    }
+
+    /// A Help row's label must never run into its description: every row that
+    /// has a description has at least one space between them.
+    #[test]
+    fn help_rows_keep_a_gap_between_label_and_description() {
+        use super::{DisplayMode as M, OverlayPanel as P};
+        let help = overlay_text(P::Help, M::Insights);
+        for needle in [
+            "/serve [bind:port] broadcast",
+            "/remote [n|box] discover",
+            "⟳ tt-smi -r a reset",
+            "--tt-smi-reset-behavior ignore",
+        ] {
+            assert!(help.contains(needle), "{needle:?} has no gap:\n{help}");
+        }
     }
 
     /// The explain panels are prose. They used to be hand-broken to a width

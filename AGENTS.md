@@ -1077,3 +1077,38 @@ with the filter removed.
 
 The reset demo clip was re-recorded because the BBS box lost its right border
 (see the second review pass above).
+
+### Legends and explain text brought up to date (Oct 6, 2026)
+
+Prompt: "are our legends and explain modes all up to date with changes to viz
+for training and others?" They were not. Found by comparing each view's `l`
+and `!` text with the code it describes, with git history to see which text had
+not moved since the view last changed.
+
+- **Training `l` and `!`** were last edited Sep 1; the view was redesigned Oct 1
+  and 2. They still described the transformer node grid with forward and
+  gradient sweeps. Rewritten from the channel table in `train_view.rs`: the
+  step starfield (`⠂ ◆ ✺`, star height = step time, `┈` median, `(from bar)`),
+  chip power rows, aiclk/PCIe/host rows, the verdict line and its thresholds,
+  the convergence strip, loss mountains, aurora and comet.
+- **Inference `l` and `!`** gain the roster, the `▸` featured marker, the
+  `:8000 · chips 0,1` text, media servers' "N in flight · M done", and host-vLLM
+  detection (the `!` text said docker only).
+- **HivemindSweeper** gains the magenta `⚡` reset row.
+- **Help panel** gains a "Status bar" block for `⟳ tt-smi -r`, `✓ tt-smi -r`
+  and `--tt-smi-reset-behavior`.
+- **Insights** gains the GDDR `n/m trn·hv·flt` row (trained, harvested,
+  BIST-fault). **Defrag** and **Memory Castle** `!` text gain the bad-sector
+  and DDR-gate markers their legends already had.
+- The Help `row!` macro padded labels to 12 columns, so a longer label such as
+  `/serve [bind:port]` ran into its description. It now pads to label + 1.
+
+Guards. The old Training test (`train_legend_documents_every_colour_channel`)
+only compared the overlay with its own earlier wording, so it stayed green on
+stale text. `train_view::legend_channels` now holds the glyph list the view's
+own legend row uses, and `train_legend_documents_every_glyph_the_view_draws`
+requires the overlay to show each glyph and to omit the removed terms.
+`legend_and_explain_text_names_what_the_views_draw` ties the Inference text to
+`placement_text` and the Hivemind text to `RESET_GLYPH`. Each was seen to fail
+with its text removed. Views not touched (Grid, Starfield, Memory Flow, Arcade's
+hero) were read against their code and still match.

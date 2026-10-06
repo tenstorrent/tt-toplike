@@ -65,6 +65,26 @@ pub fn loss_ceiling(vocab_size: Option<u32>) -> f32 {
     }
 }
 
+/// The channels the Training view's own bottom legend row lists, as
+/// `(glyph, label, colour)`. The `l` overlay (`train_legend_lines` in
+/// `ui/tui/mod.rs`) must document every glyph here; a test checks it, so the
+/// overlay cannot drift from the view the way it did when the node grid and
+/// its forward/gradient sweeps were replaced by the starfield.
+pub(crate) fn legend_channels(loss_color: Color) -> [(char, &'static str, Color); 10] {
+    [
+        ('●', "loss", loss_color),
+        ('·', "step", BAR_NORMAL),
+        ('◆', "compile", BAR_COMPILE),
+        ('✺', "ckpt", BAR_CHECKPOINT),
+        ('▼', "loss ↓", Color::Rgb(120, 230, 190)),
+        ('▲', "loss ↑", Color::Rgb(255, 140, 120)),
+        ('█', "chip temp", colors::temp_color(70.0)),
+        ('▓', "chip power", Color::Rgb(200, 200, 120)),
+        ('✦', "checkpoint", Color::Rgb(120, 230, 190)),
+        ('░', "aurora", Color::Rgb(120, 180, 150)),
+    ]
+}
+
 /// The pre-2026-08-31 fixed ceiling, kept for runs with no vocabulary.
 const LEGACY_LOSS_CEILING: f32 = 4.6;
 
@@ -1774,18 +1794,7 @@ impl TrainView {
         // that state are listed. `log` is `None` while still scanning, which
         // is also a state with no curve.
         let has_stream = matches!(st.log, Some(LogSource::File(_)));
-        let all: [(char, &str, Color); 10] = [
-            ('●', "loss", loss_color),
-            ('·', "step", BAR_NORMAL),
-            ('◆', "compile", BAR_COMPILE),
-            ('✺', "ckpt", BAR_CHECKPOINT),
-            ('▼', "loss ↓", Color::Rgb(120, 230, 190)),
-            ('▲', "loss ↑", Color::Rgb(255, 140, 120)),
-            ('█', "chip temp", colors::temp_color(70.0)),
-            ('▓', "chip power", Color::Rgb(200, 200, 120)),
-            ('✦', "checkpoint", Color::Rgb(120, 230, 190)),
-            ('░', "aurora", Color::Rgb(120, 180, 150)),
-        ];
+        let all = legend_channels(loss_color);
         // Every channel is drawn without a stream *except* the ones that need
         // a loss value: the tapestry band and the river (nightscape, aurora,
         // and the checkpoint comet drawn inside it) all still render from the
