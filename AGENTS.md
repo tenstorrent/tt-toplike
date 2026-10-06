@@ -481,3 +481,290 @@ CPU/RSS: the kernel/weight-load progress probes never searched
 tt-metal and every diffusion/DiT model family use — so they always reported
 zero hits. Both env vars added to `host_exec`'s forwarded-variable
 allowlist.
+
+## Reset takeover animations (Sep 28, 2026)
+
+Prompt: "when we detect a `tt-smi -r` has been run... show a full screen
+takeover animation" — a BBS sysop interrupt, a 1024-Blackholes swarm, a Lost
+hatch countdown, Missile Command, a classic Trek reset screen, or (weighted
+toward subset resets) a quiet notification, chosen at random and scoped by
+whether the reset targets all chips or a subset. It began as an opt-in
+flag (`--reset-takeover`), since replaced by `--tt-smi-reset-behavior` (see
+the entry below). HivemindSweeper gets a distinct
+treatment instead of a takeover: the reset is injected as a real feed event
+(`EventKind::Reset`) rather than an interruption of the one view whose whole
+purpose is watching real signals.
+
+Detection reuses the TUI's existing per-tick process scan (no new polling
+thread) and tracks the real `tt-smi -r` process's actual lifetime — "in
+progress"/"done" are never a fixed fake timer, only real pid liveness.
+Animation variants are six concrete structs behind a plain enum (matching
+this codebase's `DisplayMode`/`EventKind` convention over `dyn Trait`), each
+embedding a shared `TakeoverClock` for lifecycle bookkeeping.
+
+Independent task review (13-task subagent-driven build) caught two real bugs
+before merge: `is_full`'s boundary check was a length comparison, so a
+duplicated target (`tt-smi -r 0 0` on a 2-chip box) falsely read as a full
+reset — fixed with a `HashSet`-based coverage check. Separately,
+`ResetDetector::clear()` was called while the real process was often still
+alive (by design, right after a HivemindSweeper injection, and on any
+skip-key dismissal), so the same reset kept getting re-detected every scan —
+fixed by remembering the last-handled pid across `clear()`.
+
+The final whole-branch review then found three more, all fixed: `sysinfo`'s
+`ProcessRefreshKind::everything()` enumerates threads alongside processes,
+so the detector's naive first-match scan could latch onto a worker thread's
+tid instead of the real process (reproduced without hardware — a fake
+multithreaded stand-in plus a probe using this crate's exact sysinfo calls —
+fixed by filtering `thread_kind().is_none()`); the BBS variant labeled chips
+by loop position instead of the real targeted indices and claimed "reset ack
+received" while still in progress, violating the "never claim a specific
+chip completed when unknown" rule from the design spec; and HivemindSweeper's
+feed never got the spec-mandated distinct visual treatment for a reset event
+(no renderer anywhere matched on `EventKind::Reset`) — added a sticky
+`is_reset` flag threaded from `SniffEvent` through `FeedAgg` into a
+magenta-accented feed row, additive to the existing severity coloring.
+
+Hardware-verified live on 4× Blackhole (p300c): the real `tt-smi -r`
+invocation is a python-shebang script run via its venv interpreter
+(`<venv>/bin/python <path>/tt-smi -r <targets>`), not a bare binary — the
+parser's process-`comm`-based matching handles this correctly without
+needing its argv[0] fallback path. Real single-chip and full-box resets both
+took ~41-43 seconds, comfortably clearing the 2-second detection-scan
+cadence (an earlier un-timed spot check had wrongly suggested resets might
+complete in under a second). End-to-end runs of `tt-toplike-tui
+--reset-takeover` through both a real single-chip and a real full-box reset
+produced no panic. The rendered animation content itself (which variant
+appeared, glyph layout) could not be visually confirmed — ratatui's raw-mode
+full-screen rendering isn't inspectable through a non-interactive shell, a
+known limitation of this kind of automated verification, not a defect.
+
+The design spec's optional kmsg log-line enrichment (real per-chip tt-kmd
+text when `/dev/kmsg` is readable) was deliberately not built — every
+variant uses only the honest generic-fallback pacing described as the
+spec's fallback path. Flagged explicitly rather than silently dropped; a
+candidate follow-up, not a gap.
+
+### Follow-up polish pass (Sep 29, 2026)
+
+Live feedback after using the feature: Missile Command's original blinking
+bracket-strip had no real motion and a flat red tint that read as harsh —
+rebuilt as a per-lane missile that actually descends over real elapsed
+time toward each targeted chip, blooms into a fading burst ring on impact,
+staggered per lane, over a deep steel-blue night-sky wash instead of red.
+Trek's single sensor-scan row became the real "Super Star Trek" (1971
+BASIC) screen: a status sidebar (STARDATE/CONDITION/KLINGONS REMAINING
+tied to real reset state) plus a fixed 8x8 sensor grid, so it reads as
+walking in on a game already in progress rather than a title card.
+Separately: takeovers now reveal the real screen beneath them through a
+55%-blend color filter (a `TintOverlay` widget replacing the old `Clear`)
+instead of blacking it out — Block/Paragraph only patch the style fields
+they explicitly set, so untouched cells keep showing (tinted) real content.
+
+BBS's rainbow hue-cycling turned out to be too much — toned down to a
+fixed classic-BBS palette, an ANSI box border, modem-connect flavor lines,
+and a real typewriter reveal per chip line, with the "psychedelic"
+treatment kept specific to BBS rather than spreading everywhere. Quiet
+Notice, Blackhole Swarm, and Hatch Countdown were brought up to the same
+bar: Quiet Notice got a shaded ANSI block backdrop (this app's own
+`BLOCK_CHARS`/`hsv_to_grayskull` vocabulary, plus a 4x4 Bayer ordered
+dither so nearby cells actually spread across the full glyph ramp instead
+of clustering on one shade) that shimmers gently; Blackhole Swarm — never
+read the clock at all before this — now has each glyph twinkling
+independently; Hatch Countdown gained a real seven-segment LED digit
+display and the show's own numbers as an easter egg.
+
+Added a 7th variant, Fail Whale: a flock of birds (count scales with the
+real chip count) carries the whale on ropes, hovering and wing-flapping
+while the real reset is still in progress — never faking a landing time —
+then gliding into a soft touchdown once it's actually finished, birds
+flying off happily. Caught during its own build: a sub-one-row bob
+amplitude computed a technically-changing position that rendered as a
+frozen scene, since terminal cells only have integer rows (fixed by
+widening the amplitude and testing the position calculation directly
+rather than a rendered snapshot); and a "landed" ground-row position
+computed from the bottom of the screen alone pushed the whale's own lower
+body and the ground line clean off the bottom of the terminal (fixed by
+reserving room for the scene's real height below that point).
+
+### Takeover box (Oct 1, 2026)
+
+Prompt: "for the overlays on tt-smi -r takeovers. let's make them all the same
+'size' centered in the screen. We show the filtered overlay behind this box,
+but the box itself is always the default terminal background color, and we
+show our focused art for tt-smi -r right there."
+
+All seven variants now draw in one box from `takeover_box(area)` in
+`src/animation/takeover/mod.rs`: 72 columns by 24 rows, centered, shrinking to
+keep at least 2 columns and 1 row of margin on a smaller terminal. The color
+wash still covers the whole screen. The box is cleared first, so inside it the
+background is the terminal default. Border is left and bottom only. The usable
+interior (`takeover_interior`) is 71x22 at full size, because ratatui gives
+the title its own row. Quiet Notice, Blackhole Swarm, Missile Command and Fail
+Whale size their art from the interior. BBS shows only the newest chip lines
+once the list would pass 22 rows. Trek (36x20) and Hatch (17x9) already fit.
+
+### `--tt-smi-reset-behavior` (Oct 1, 2026)
+
+Prompt: "I feel like the --command for the tt-smi reset isn't obvious. can we
+get a --tt-smi-reset-behavior setting instead. `ignore` or `inform` or
+`dazzle`. inform incorporates it into the status bar of each view. inform is
+default. dazzle is what we've now made more or less. and then there's also
+`demo`..."
+
+`--reset-takeover` and its config key are gone (never released). The setting
+is `--tt-smi-reset-behavior <ignore|inform|dazzle|demo>` (config key
+`tt_smi_reset_behavior`, flag wins, default `inform`; `ResetBehavior` and
+`resolve_reset_behavior` in `src/cli.rs`). `ignore` never runs the detector.
+`inform` and up show a status-bar segment in every view: `⟳ tt-smi -r ·
+{scope} · resetting`, then `✓ tt-smi -r done` for 10 seconds. `dazzle` adds
+the takeover. `demo` plays all seven takeovers in a fixed order (Quiet
+Notice, Blackhole Swarm, Hatch Countdown, BBS, Trek, Fail Whale, Missile
+Command) at boot and again on every real reset (Oct 1, 2026, Task 2).
+`Takeover::Demo(DemoSequence)` is in `src/animation/takeover/demo.rs`. Each
+animation gets an 8 s slot (`SLOT_LEN`) and is told its reset finished at
+5 s (`RESOLVE_AT`). The real reset's finish is ignored on purpose, so the
+sequence always runs to the end. That is a deliberate exception to
+the "follow the real reset lifecycle" rule, and the box title carries
+`DEMO - {title}` (boot) or `DEMO (real reset) - {title}` so a staged
+animation is never mistaken for a real one. The tag goes through
+`render_takeover_frame`'s `tag` argument. Esc and q/Q end a demo; any other
+key skips one animation; non-demo takeovers still treat every key as a skip.
+Key routing, boot gating and takeover choice are the pure functions in
+`reset_status.rs` (`demo_key_action`, `should_start_boot_demo`,
+`boot_takeover`, `takeover_for_event`, `replace_takeover`). The boot demo
+uses a synthetic full reset over the real device count and is skipped in
+HivemindSweeper.
+State and per-scan decisions live in `src/ui/tui/reset_status.rs`. The
+segment follows the real process itself, so a skipped takeover does not
+stop it reaching "done" (see the fix-wave entry below). The status bar now
+drops whole hotkey groups (then hint groups) from the right to fit beside
+the chip telemetry. The old bar was one clipped paragraph, so on a narrow
+terminal it cut off the chip telemetry at the right edge; now the
+telemetry stays and hotkeys go first.
+
+### Reset-behavior fix wave (Oct 1, 2026)
+
+Review minors from the two tasks above, fixed in one pass.
+- `ResetStatus` now follows every live `tt-smi -r` process by itself (pid
+  and cmdline together, pruned each scan). Before, it was replaced only when
+  the single-slot `ResetDetector` reported a new reset. Two overlapping
+  resets made the segment flip between them every 2 s and sent a
+  HivemindSweeper feed event every 2 s. A reset during a 56 s demo got no
+  segment at all. Now each distinct reset is reported once, the segment
+  shows the newest live reset's scope, and `done` starts when the last one
+  ends. `ResetDetector` only holds the reset a takeover is for
+  (`begin`/`is_finished`/`clear`), so a second reset still gets no second
+  takeover.
+- `scan_resets` takes the process snapshot as a closure and calls it only
+  when the behavior detects resets, so the loop has one tested gate.
+- `boot_takeover` does not start the boot demo on a terminal under 8x4
+  (`takeover_fits`). Before, the demo played unseen there and swallowed
+  keys for up to 56 s.
+- `--help` lists each value once, from the `ResetBehavior` doc comments.
+- A demo test renders the Missile Command slot for chips 1 and 3 of 4 and
+  checks which lanes are lit. The Task 2 report said this was covered by
+  Missile's own tests. It was not: those only check that rendering does
+  not panic.
+
+### Five takeovers, a cetacean sky and a chatbot sysop (Oct 5, 2026)
+
+Prompt: "let's take out missile command and the hatch animations (and from the
+recorded demo). change USS Enterprise to the TT-TREKLIKE. Rename FAIL WHALE to
+'SILLY CETACEAN' and let's add a little background to that one to liven it up.
+The SysOp chat should have some kind of throwback to the AI harnesses of the
+past. Like Eliza or Dr. Spaitso. or War Games"
+
+- Missile Command and Hatch Countdown are removed from the enum, the picker,
+  the demo and the docs. Five variants remain, so `demo` plays five
+  animations (40 s). New roll weights, full reset: Bbs 25, BlackholeSwarm 25,
+  TrekReset 20, SillyCetacean 20, QuietNotice 10. Subset reset: QuietNotice 40,
+  SillyCetacean 25, TrekReset 15, Bbs 13, BlackholeSwarm 7. Missile Command
+  used to carry the subset case because it lit only the targeted lanes; no
+  remaining variant does, so a subset reset now says which chips only through
+  Quiet Notice, BBS and Trek.
+- `TrekResetTakeover` keeps its name; its box title is `TT-TREKLIKE`
+  (was `USS ENTERPRISE — NCC-1701`).
+- `FailWhaleTakeover` is now `SillyCetaceanTakeover` (`silly_cetacean.rs`),
+  titled `SILLY CETACEAN`, and `SILLY CETACEAN - TOUCHDOWN` once landed. It
+  composes a character canvas the size of the box interior: a sun with two ray
+  shapes, three clouds drifting at 1.2, 2.4 and 3.6 cells/s, and a two-row
+  shimmering sea, then the whale, ropes and birds over that. Everything is a
+  function of the takeover's own elapsed time. The whale's body rows are
+  opaque between the outline's edges so clouds do not show through it.
+- BBS gains a chat window of 5 rows between the header and the chip lines
+  (fewer on a short box, never fewer than one chip row). The sysop is a
+  period chatbot: the WarGames greeting and the "strange game" ending
+  (changed to "not to reset"), ELIZA-style questions that turn each answer
+  back ("WHY ARE YOU RESETTING THE CHIPS?"), and Dr. Sbaitso's "I am here to
+  help". Lines start 1 s apart and type at 60 characters a second; the
+  speaker tag appears at once. The chat holds on its last line instead of
+  looping, and "GOODBYE, PROFESSOR." shows only after the real reset finishes,
+  like the closing line. The chip lines remain the real status.
+
+Caught while testing: the first whale-opacity test passed with the opacity
+removed, because the belly row has no interior spaces. It now fills the canvas
+with a marker and checks the eye row, and it was seen to fail with the change
+reverted. The typewriter first counted the `SYSOP> ` tag as typed text, so the
+speaker name appeared a letter at a time; the tag now shows at once.
+
+### Review fixes for reset detection (Oct 5, 2026)
+
+Copilot's review of the reset PR found three real problems in
+`src/workload/reset_detect.rs`:
+
+- **Device ids are `usize`, not `u8`.** `ResetEvent.device_indices` is now
+  `Vec<usize>`. With exactly 256 devices `total_devices as u8` was 0, the
+  coverage check passed vacuously and `tt-smi -r 0` was classed as a full
+  reset; ids above 255 were dropped. Full coverage is now judged against the
+  ids the backend actually reports, not `0..total_devices`, so a sparse set
+  such as devices 1 and 2 works (an omitted target lists those two ids).
+  HivemindSweeper keys its grid by `u8`, so `inject_reset` still gets only the
+  chips that fit; the status segment and takeovers name all of them.
+- **`python /path/to/tt-smi -r` is recognized.** A plain `tt-smi -r` has process
+  name `tt-smi` (checked on this box with a shebang script), which already
+  matched. The explicit interpreter form has name `python`, which did not. The
+  matcher now also accepts a `python*` argv0 whose first non-flag argument is
+  `tt-smi`. `vim tt-smi -r`, `grep -r tt-smi .` and `python train.py tt-smi -r`
+  stay unmatched.
+- **A reused pid no longer holds a takeover open.** `ResetDetector` records the
+  cmdline with the reset and `is_finished` needs pid and cmdline to match, the
+  same identity `ResetStatus` uses. `begin` takes the cmdline.
+
+Each fix was seen to fail its test with the change reverted. The review's
+Missile Command lane comment is moot: that variant was removed.
+
+### Second review pass on the reset PR (Oct 5, 2026)
+
+Copilot's second pass on the reset branch found four more things:
+
+- **Trek assumed dense device ids.** A cell was a chip only when
+  `index < total_devices`, so with devices 1 and 2 the targeted chip 2 fell
+  through to the ship branch. Targeted chips are now drawn first, wherever their
+  id falls; the ship moves to the first free cell past the chip cells.
+- **`chip_count` on a full reset counted duplicates.** `tt-smi -r 0 1 1` on two
+  devices said 3 chips. A full reset now reports `total_devices`; a subset keeps
+  the raw target count.
+- **The BBS box had right-side borders** (`┐ │ ┘`), against the project rule
+  (they wrap or clip on a narrow terminal). It now has a left edge and a bottom
+  only. The recorded demo clip shows the old box and has to be re-recorded.
+- **The PR title and description still said seven takeovers.** Rewritten to the
+  five that ship.
+
+The three code fixes each have a test that was seen to fail with the fix
+reverted. One of my tests passed vacuously the first time: the mutation script
+could not find the code after `cargo fmt` reflowed it, so no mutation was
+applied. Re-run against the reflowed code, it fails as it should.
+
+### Third review pass on the reset PR (Oct 6, 2026)
+
+- **A duplicated reset target bumped one Hivemind cell twice.** `reset_detect`
+  keeps duplicates on a subset reset (`tt-smi -r 0 0` is two raw targets), and
+  `inject_reset` bumped the grid once per entry, so one chip looked twice as
+  active. The contract says one bump per affected chip, so `inject_reset` now
+  dedupes the ids itself (first-seen order), which protects every caller. The
+  test compares `[1, 1]` with `[1]` and `[1, 3]` with `[1]`, so it is not
+  vacuous, and was seen to fail without the dedupe.
+- **Open thread "align PR metadata with five takeovers".** The title and
+  description were already rewritten; the description now drops the sentence
+  that recounted the removed variants, which read as the old claim.

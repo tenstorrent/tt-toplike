@@ -124,6 +124,13 @@ struct FeedRow {
     current_bucket: u32,
     /// Recomputed by `tick`: `sum(buckets) / BUCKETS`, events/sec.
     rate: f32,
+    /// True if ANY event folded into this row was `EventKind::Reset` — sticky
+    /// once set, so a detected reset keeps its distinct feed-row treatment
+    /// even if a later non-reset event happens to fold into the same
+    /// coalesce key. In practice a `Reset` event's text is distinct enough
+    /// (see `coalesce_key`) that this rarely mixes with other kinds, but the
+    /// stickiness keeps the flag honest even in that edge case.
+    is_reset: bool,
 }
 
 /// A read-only snapshot of one coalesced row, returned by `FeedAgg::rows`.
@@ -139,6 +146,10 @@ pub struct FeedRowView {
     /// sparkline. Length is always `BUCKETS` (zero-padded at the front until
     /// enough ticks have elapsed).
     pub spark: Vec<u8>,
+    /// True if this row folds a detected `tt-smi -r` reset event — the feed
+    /// row rendering gives these a distinct glyph/color rather than blending
+    /// in as an ordinary log line. See `FeedRow::is_reset`.
+    pub is_reset: bool,
 }
 
 /// Coalescing aggregator: folds a stream of `SniffEvent`s into count+rate
@@ -177,12 +188,18 @@ impl FeedAgg {
             buckets: VecDeque::with_capacity(BUCKETS),
             current_bucket: 0,
             rate: 0.0,
+            is_reset: false,
         });
         row.count += 1;
         row.last = now;
         row.current_bucket = row.current_bucket.saturating_add(1);
         if ev.severity > row.max_severity {
             row.max_severity = ev.severity;
+        }
+        // Sticky: once a row has folded a Reset event, it stays flagged even
+        // if a later non-reset event folds into the same coalesce key.
+        if ev.kind == EventKind::Reset {
+            row.is_reset = true;
         }
         // Eviction can only be needed when the map actually grew.
         if is_new_row {
@@ -262,6 +279,7 @@ impl FeedAgg {
                     s.extend(r.buckets.iter().map(|&c| c.min(u8::MAX as u32) as u8));
                     s
                 },
+                is_reset: r.is_reset,
             })
             .collect()
     }
@@ -313,6 +331,24 @@ mod tests {
             device,
             severity,
             kind: EventKind::Fd,
+            text: text.to_string(),
+            origin: "test".into(),
+        }
+    }
+
+    fn ev_kind(
+        source: Source,
+        device: Option<u8>,
+        severity: Severity,
+        kind: EventKind,
+        text: &str,
+    ) -> SniffEvent {
+        SniffEvent {
+            ts: Instant::now(),
+            source,
+            device,
+            severity,
+            kind,
             text: text.to_string(),
             origin: "test".into(),
         }
@@ -528,6 +564,80 @@ mod tests {
                 "recently-ingested row (iteration {i}, pattern {pattern:?}) should still be present"
             );
         }
+    }
+
+    // ── Finding 3: reset events get a sticky `is_reset` flag ─────────────
+
+    #[test]
+    fn reset_event_marks_its_row_is_reset() {
+        let mut agg = FeedAgg::new();
+        let t0 = Instant::now();
+        agg.ingest(
+            &ev_kind(
+                Source::TtSmi,
+                Some(2),
+                Severity::Warn,
+                EventKind::Reset,
+                "tt-smi -r 2 detected",
+            ),
+            t0,
+        );
+
+        let rows = agg.rows(None, Severity::Trace);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].is_reset, "a Reset-kind event must mark its row");
+    }
+
+    #[test]
+    fn non_reset_event_row_is_not_flagged() {
+        let mut agg = FeedAgg::new();
+        let t0 = Instant::now();
+        agg.ingest(
+            &ev(Source::Vllm, Some(0), Severity::Warn, "some warning"),
+            t0,
+        );
+
+        let rows = agg.rows(None, Severity::Trace);
+        assert_eq!(rows.len(), 1);
+        assert!(
+            !rows[0].is_reset,
+            "an ordinary (non-Reset) event must not be flagged"
+        );
+    }
+
+    #[test]
+    fn is_reset_is_sticky_once_set_even_if_a_non_reset_event_later_folds_in() {
+        // Contrived same-key fold: same (source, device, pattern) key, first
+        // event is a Reset, second is not — the row must stay flagged.
+        let mut agg = FeedAgg::new();
+        let t0 = Instant::now();
+        agg.ingest(
+            &ev_kind(
+                Source::TtSmi,
+                Some(0),
+                Severity::Warn,
+                EventKind::Reset,
+                "shared text",
+            ),
+            t0,
+        );
+        agg.ingest(
+            &ev_kind(
+                Source::TtSmi,
+                Some(0),
+                Severity::Warn,
+                EventKind::Log,
+                "shared text",
+            ),
+            t0 + Duration::from_millis(1),
+        );
+
+        let rows = agg.rows(None, Severity::Trace);
+        assert_eq!(rows.len(), 1, "same key must fold into a single row");
+        assert!(
+            rows[0].is_reset,
+            "is_reset must stay sticky once a Reset event has folded in"
+        );
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub mod liveness_probe;
 pub mod model_catalog;
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 pub mod process_monitor;
+pub mod reset_detect;
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 pub mod serving;
 pub mod train;

@@ -225,6 +225,43 @@ impl HostProcessMonitor {
         out
     }
 
+    /// Cheap `(pid, name, full cmdline)` snapshot of every process seen in
+    /// the current refresh — no TT-specific filtering. Consumed by the
+    /// `tt-smi -r` tracker (`ui::tui::reset_status::scan_resets`) so it
+    /// doesn't need its own `sysinfo` refresh cadence.
+    ///
+    /// `self.sys` is refreshed with `ProcessRefreshKind::everything()`, which
+    /// sets sysinfo's `tasks: true` — meaning `self.sys.processes()` yields
+    /// one entry per THREAD, not one per process, each with its own tid under
+    /// `p.pid()`. `p.thread_kind()` distinguishes them: `Some(_)` for a
+    /// thread, `None` for the process itself. Without filtering, a
+    /// multithreaded `tt-smi -r` could appear multiple times with identical
+    /// name/cmdline, and the reset tracker could follow a worker thread's
+    /// tid as if it were a separate reset — a thread can exit independently
+    /// of the process, breaking the tracker's lifecycle. Keep only real
+    /// processes.
+    pub fn processes_snapshot(&self) -> Vec<(i32, String, String)> {
+        self.sys
+            .processes()
+            .iter()
+            .filter(|(_, p)| p.thread_kind().is_none())
+            .map(|(pid, p)| {
+                let name = p.name().to_string_lossy().to_string();
+                let cmdline = p
+                    .cmd()
+                    .iter()
+                    .map(|s| s.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                (
+                    i32::try_from(pid.as_u32()).unwrap_or(i32::MAX),
+                    name,
+                    cmdline,
+                )
+            })
+            .collect()
+    }
+
     /// The TT inference-server containers *and* direct (non-Docker) vLLM-on-TT
     /// processes detected in the current snapshot (deduped by identity key),
     /// as structured [`crate::workload::InferenceServer`] records — no
@@ -681,5 +718,66 @@ mod tests {
         ));
 
         assert!(classify_one("bash", "bash -c ls", "", 1).is_none());
+    }
+
+    #[test]
+    fn processes_snapshot_includes_pid_name_and_cmdline() {
+        let mut mon = HostProcessMonitor::new();
+        mon.update();
+        let snap = mon.processes_snapshot();
+        // Every running test process (at minimum this test binary itself)
+        // should show up with a non-empty name.
+        assert!(!snap.is_empty());
+        assert!(snap.iter().all(|(_, name, _)| !name.is_empty()));
+    }
+
+    /// Regression for Finding 1: `HostProcessMonitor` refreshes with
+    /// `ProcessRefreshKind::everything()`, which sets sysinfo's `tasks: true`
+    /// — `self.sys.processes()` therefore yields one entry per THREAD, not
+    /// one per process (each thread under its own tid, `p.thread_kind() ==
+    /// Some(_)`). `processes_snapshot()` must filter those out so the
+    /// `tt-smi -r` tracker follows only real process pids, never a worker
+    /// thread's tid.
+    ///
+    /// This is checked two ways against a real `sysinfo` refresh on whatever
+    /// box CI runs on (deliberately not hardcoding a thread count, since
+    /// that's box/OS-dependent):
+    /// 1. every pid returned by `processes_snapshot()` really is a
+    ///    `thread_kind() == None` entry in the raw `sysinfo` table (direct
+    ///    proof the filter is applied to every returned row);
+    /// 2. the snapshot's length matches counting only the non-thread rows in
+    ///    the raw table (proof nothing else slips through either direction).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn processes_snapshot_excludes_thread_entries() {
+        let mut mon = HostProcessMonitor::new();
+        mon.update();
+
+        let expected_process_count = mon
+            .sys
+            .processes()
+            .values()
+            .filter(|p| p.thread_kind().is_none())
+            .count();
+
+        let snap = mon.processes_snapshot();
+        assert_eq!(
+            snap.len(),
+            expected_process_count,
+            "processes_snapshot() must return exactly the non-thread rows"
+        );
+
+        for (pid, name, _) in &snap {
+            let real = mon
+                .sys
+                .process(sysinfo::Pid::from_u32(*pid as u32))
+                .unwrap_or_else(|| panic!("pid {pid} ({name}) missing from raw sysinfo table"));
+            assert!(
+                real.thread_kind().is_none(),
+                "pid {pid} ({name}) is a thread entry (thread_kind = {:?}), \
+                 leaked past the processes_snapshot() filter",
+                real.thread_kind()
+            );
+        }
     }
 }

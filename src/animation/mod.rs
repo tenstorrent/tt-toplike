@@ -30,6 +30,7 @@ pub mod serving_creature;
 pub mod serving_panels;
 pub mod snake;
 pub mod starfield;
+pub mod takeover;
 pub mod topology;
 pub mod train_sky;
 pub mod train_view;

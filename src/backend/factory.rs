@@ -365,6 +365,7 @@ mod tests {
             bench: false,
             throttle: false,
             idle_on_blur: false,
+            tt_smi_reset_behavior: None,
         };
 
         let result = create_backend(BackendType::Mock, config, &cli);
