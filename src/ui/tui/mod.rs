@@ -5748,7 +5748,8 @@ fn inference_roster_lines(
     width: usize,
 ) -> Vec<Line<'static>> {
     use crate::workload::inference_server::Phase;
-    if rows.len() < 2 || width < 12 {
+    // A row is marker (2) + tag (7) + gap (2) + at least 4 label characters.
+    if rows.len() < 2 || width < 15 {
         return Vec::new();
     }
     // Which service the snake is showing (mirror choose_behavior's priority).
@@ -5768,6 +5769,8 @@ fn inference_roster_lines(
         format!("inference services ({})", rows.len())
     };
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(shown + 1);
+    // Clipped to the width, so a narrow terminal does not clip it mid-word.
+    let header: String = header.chars().take(width).collect();
     lines.push(Line::from(Span::styled(
         header,
         Style::default()
@@ -5800,29 +5803,36 @@ fn inference_roster_lines(
                 None => String::new(),
             },
         };
-        // Where it runs (`:8000 · chips 0,1`). Dropped first when the row is
-        // too narrow, so the label and live stat keep their room.
+        // Where it runs (`:8000 · chips 0,1`).
         let mut placement = crate::workload::inference_server::placement_text(s.port, &s.chips);
-        let stat_w = if stat.is_empty() {
-            0
-        } else {
-            2 + stat.chars().count()
-        };
-        let fixed_of = |placement: &str| {
-            2 + 7
-                + 2
-                + stat_w
-                + if placement.is_empty() {
+        let mut stat = stat;
+        // Columns left for the label once the marker, tag, gaps, placement and
+        // stat are placed. Negative means they do not fit at all.
+        let room = |placement: &str, stat: &str| -> isize {
+            let part = |t: &str| {
+                if t.is_empty() {
                     0
                 } else {
-                    2 + placement.chars().count()
+                    2 + t.chars().count()
                 }
+            };
+            width as isize - (2 + 7 + 2 + part(placement) + part(stat)) as isize
         };
-        if width.saturating_sub(fixed_of(&placement)) < 12 {
+        // Drop what can go, least important first, so the label keeps at
+        // least 4 characters: the placement when under 12 are left, then the
+        // live stat. A row that still cannot fit is skipped rather than drawn
+        // past the terminal edge, where it would be clipped.
+        if room(&placement, &stat) < 12 {
             placement.clear();
         }
+        if room(&placement, &stat) < 4 {
+            stat.clear();
+        }
+        if room(&placement, &stat) < 4 {
+            continue;
+        }
         // Truncate the label (char-safe) so marker+tag+label+placement+stat fit `width`.
-        let label_w = width.saturating_sub(fixed_of(&placement)).max(4);
+        let label_w = room(&placement, &stat) as usize;
         let label: String = s.label.chars().take(label_w).collect();
 
         let mut spans = vec![
@@ -8325,6 +8335,37 @@ mod inference_roster_tests {
             "{}",
             text(&lines[2])
         );
+    }
+
+    /// No roster line may be wider than the terminal at any width: a line
+    /// that is would be clipped by ratatui, silently losing the placement or
+    /// stat it exists to show. A row that cannot fit is skipped instead.
+    #[test]
+    fn roster_lines_never_exceed_the_width() {
+        let mut a = svc("a", "Model-With-A-Long-Name", Phase::Ready);
+        a.port = Some(8000);
+        a.chips = vec![0, 1, 2, 3];
+        a.serving = Some(serving_zero());
+        let mut b = svc("b", "B", Phase::Loading);
+        b.port = Some(8002);
+        b.chips = vec![4];
+        b.progress = Some(0.5);
+        let c = svc("c", "Third-Model", Phase::Down);
+        for width in 0..=120 {
+            for l in inference_roster_lines(&[a.clone(), b.clone(), c.clone()], width) {
+                assert!(
+                    l.width() <= width,
+                    "width {width}: {:?} is {} wide",
+                    text(&l),
+                    l.width()
+                );
+            }
+        }
+        // Below the narrowest useful width there is no roster at all.
+        assert!(inference_roster_lines(&[a.clone(), b.clone()], 14).is_empty());
+        // Just above it, every row has a label of at least four characters.
+        let rows = inference_roster_lines(&[a, b], 15);
+        assert!(rows.len() >= 2, "{rows:?}");
     }
 
     #[test]

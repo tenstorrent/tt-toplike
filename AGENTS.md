@@ -1125,3 +1125,28 @@ hero) were read against their code and still match.
 - **Open thread "align PR metadata with five takeovers".** The title and
   description were already rewritten; the description now drops the sentence
   that recounted the removed variants, which read as the old claim.
+
+### Roster width, and a version audit before the stacked PR lands (Oct 6, 2026)
+
+- **Roster rows could run past the terminal.** `inference_roster_lines` forced a
+  4-character label with `.max(4)` even when fewer than 4 columns were left, so
+  a row at 12 to 14 columns was wider than the terminal and ratatui clipped the
+  placement. It now drops the placement first, then the live stat, and skips a
+  row that still cannot fit; the roster needs at least 15 columns, and its
+  header is clipped to the width. `roster_lines_never_exceed_the_width` checks
+  every width from 0 to 120. It does not fail when only the `.max(4)` is
+  restored (the new 15-column guard already covers that case); it fails when
+  the old 12-column guard and the forced label are both restored, which is the
+  original bug.
+- **Version audit for 0.13.10.** Every displayed version derives from
+  `CARGO_PKG_VERSION` (`--version`, the GUI title, the app), so `Cargo.toml` is
+  the single source. The four files CI compares agree on 0.13.10 (`Cargo.toml`,
+  `QUICK_START.md`, the site hero, the first `debian/changelog` line), and
+  `Cargo.lock` carries 0.13.10 (`--locked` builds fail otherwise). `main` is
+  0.13.5. `install.sh`, `build-deb.sh` and `debian/control` pin no version.
+  The macOS and Windows artifacts take their version from the git tag (see
+  `release.yml`), so the release must be tagged `v0.13.10` from `main` after
+  #32 merges; nothing checks that the tag matches `Cargo.toml`. Fixed here: the
+  `CHANGELOG.md` summary stopped at 0.11.0 and now has 0.13.10 and a note that
+  0.11.1 to 0.13.9 live in `debian/changelog` only; `QUICK_START.md` said
+  "Last Updated: August 30, 2026" and now says October 6, 2026.
