@@ -32,7 +32,9 @@ pub mod snake;
 pub mod starfield;
 pub mod takeover;
 pub mod topology;
+pub mod train_canvas;
 pub mod train_sky;
+pub mod train_tapestry;
 pub mod train_view;
 
 pub use arcade::ArcadeVisualization;

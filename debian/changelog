@@ -1,3 +1,96 @@
+tt-toplike (0.13.10) noble; urgency=medium
+
+  * The Inference view (`i`) shows the port and chips each model runs on,
+    for example `:8000 · chips 0,1`. Chips come from the device files the
+    server holds open, or from the device nodes its container was started
+    with. With several models the text is on each roster row; with one it
+    is a header line.
+  * `--tt-smi-reset-behavior` (`ignore`, `inform`, `dazzle`, `demo`) says
+    when tt-toplike sees a `tt-smi -r` in another terminal. `inform` is the
+    default and adds a status-bar segment. `dazzle` adds a takeover box with
+    one of five animations: Quiet Notice, 128 Blackholes, a BBS sysop
+    chatbot, TT-TREKLIKE and Silly Cetacean. `demo` plays all five at start
+    and on each real reset, with DEMO in the box title.
+  * README and site: a section on the reset behaviors with a looping clip.
+  * The legend (`l`) and explain (`!`) text for the Training, Inference,
+    HivemindSweeper, Insights, Defrag and Memory Castle views matches what
+    they draw now, and the Help panel shows the `tt-smi -r` status segment.
+    The Training text had still described the removed transformer node grid.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 05 Oct 2026 12:00:00 +0000
+
+tt-toplike (0.13.9) noble; urgency=medium
+
+  * The Training view reads tt-tnt's progress bar on every frame. Its
+    postfix is `train_loss=`, which the parser refused, so a live tt-tnt run
+    updated only at chunk ends, about 28 minutes apart. The bar counts each
+    chunk from 1, so the run's step is now rebuilt from the run header, the
+    resume line and the validation lines. The header, ETA, loss curve, step
+    times and tokens/s update live, and the gap at a chunk boundary is never
+    timed as a step.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 02 Oct 2026 16:00:00 +0000
+
+tt-toplike (0.13.8) noble; urgency=medium
+
+  * The 2-second process scan runs on a background thread. It cost about
+    135 ms on the render thread on a box with 548 processes, which showed
+    as a hitch in the animation every 2 s. The render thread now spends
+    under 0.1 ms per refresh. Process panel results appear about 0.15 s
+    after each refresh starts.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 02 Oct 2026 14:00:00 +0000
+
+tt-toplike (0.13.7) noble; urgency=medium
+
+  * Training view: the step bars, the pulse row and the gauge rows are
+    replaced by a starfield over a signal weave. The starfield draws one
+    braille star per step, two steps per column, with a purple diamond
+    for a compile, an amber burst for a checkpoint and a dotted median
+    line; the newest three stars swell once per measured step. Weave
+    rows on the same columns show each chip's power, the busiest chip's
+    aiclk, PCIe throughput and host CPU, each ending in its current
+    value. A row whose signal is missing is left out. tok/s stays in
+    the LIVE panel. On a short band the starfield keeps 3 rows before
+    the aiclk, PCIe and host rows and the convergence strip get theirs.
+  * --mock carries a host CPU and RSS reading, so the host row appears.
+  * A resumed run that appends to the same log no longer draws a step
+    above its budget: the resume line sets the absolute budget, a new
+    run header resets the per-run data. When the step is past its
+    budget, the header shows `step N` without `/ M` and the convergence
+    strip makes no schedule claim.
+  * Training view: a step jump is no longer timed from the moment you
+    attached. A trainer that prints one line per 3195-step chunk showed
+    over 600k tok/s when attached part-way through a chunk. The first
+    increase after attach now only sets a baseline, so tok/s appears at
+    the second chunk end and covers train, checkpoint and validation time.
+    Returning to the view after more than 5 s away re-baselines the same way.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 02 Oct 2026 12:00:00 +0000
+
+tt-toplike (0.13.6) noble; urgency=medium
+
+  * Training view: the top-left band no longer draws a decorative 6x6
+    node grid. It now shows the step-time chart (bars coloured by cause:
+    normal, program-cache compile, checkpoint), per-chip power lanes on
+    the same time axis, hardware gauges with a one-line diagnosis
+    (compiling, compute-bound, host-bound), and a loss-convergence strip.
+    The pulse cursor makes one pass per measured step. Layers whose
+    signal is missing are left out. The MODEL card keeps the block and
+    head counts.
+  * Step times are now observed from progress-bar updates for trainers
+    that print only a bar (the tt-tnt harness). The title reads
+    "STEP ANATOMY (from bar)". Gaps across a bar restart and steps seen
+    more than one at a time are not timed.
+  * Fix: derived step rate and tokens/sec froze after a progress-bar
+    restart. They now keep updating.
+  * A step line with a time and no cache count ("Step: N, Loss: L,
+    Time: T ms", which the tt-tnt harness now prints) is read as a
+    trainer-reported step time. Cache growth is unknown for it. The LIVE
+    panel shows its cache row only when a cache count was reported.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 01 Oct 2026 12:00:00 +0000
+
 tt-toplike (0.13.5) noble; urgency=medium
 
   * Fix: the Inference Server monitor still missed a tt-model-manager

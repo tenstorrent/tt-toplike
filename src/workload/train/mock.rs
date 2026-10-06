@@ -22,7 +22,7 @@
 use super::config::TrainConfig;
 use super::detect::TrainProcess;
 use super::logsrc::LogSource;
-use super::monitor::{TrainState, LOSS_HISTORY};
+use super::monitor::{StepSample, StepTimeSource, TrainState, LOSS_HISTORY, STEP_HISTORY};
 
 /// Wall-clock seconds for one simulated step.
 const STEP_SECS: f32 = 1.0 / 12.0;
@@ -40,6 +40,35 @@ fn loss_at(step: u64) -> f32 {
     // Two incommensurate sine terms read as noise without being random.
     let wobble = (step as f32 * 0.7).sin() * 0.06 + (step as f32 * 0.13).sin() * 0.04;
     (base + wobble).max(0.05)
+}
+
+/// Program-cache entries after `step` steps: fills during the opening steps,
+/// then holds. Shared by the cache counter and the per-step compile marks so
+/// the two can never disagree.
+fn cache_at(step: u64) -> u32 {
+    64.min(8 + step as u32 / 6)
+}
+
+/// Wall time of one simulated step, in milliseconds. A smooth wobble gives the
+/// bars texture, and a step that grew the cache is slower, as a compile is.
+fn step_ms_at(step: u64) -> f32 {
+    let base = STEP_SECS * 1000.0;
+    let wobble = 1.0 + 0.12 * (step as f32 * 0.9).sin();
+    let compiled = step > 1 && cache_at(step) > cache_at(step - 1);
+    base * wobble * if compiled { 1.8 } else { 1.0 }
+}
+
+/// Host CPU percent (100 is one saturated core) after `step` steps: a
+/// little over one core, the shape of a data loader plus the trainer's own
+/// thread, with two slow sine terms so the band's host row has texture.
+fn host_cpu_at(step: u64) -> f32 {
+    135.0 + 20.0 * (step as f32 * 0.05).sin() + 8.0 * (step as f32 * 0.31).sin()
+}
+
+/// Host resident memory after `step` steps: grows while the program cache
+/// fills and the data pipeline warms up, then holds.
+fn host_rss_at(step: u64) -> u64 {
+    1_800_000_000 + step.min(2_400) * 100_000
 }
 
 /// A deterministic stand-in for a live tt-train run.
@@ -102,7 +131,7 @@ impl MockTrainRun {
         st.scheduler = Some("cosine".into());
         // Kernel cache fills during the opening steps then goes quiet, which
         // is what drives the compiling -> steady shimmer.
-        st.cache_entries = 64.min(8 + step as u32 / 6);
+        st.cache_entries = cache_at(step);
         st.step = step;
 
         // Only the tail of the run is retained, exactly as the live path does.
@@ -111,6 +140,27 @@ impl MockTrainRun {
         st.loss = Some(loss_at(step));
         st.prev_loss = (step > 1).then(|| loss_at(step - 1));
 
+        // Per-step times for the step-anatomy chart, derived from the same
+        // closed-form functions as everything else so a screenshot at t
+        // seconds is reproducible.
+        let first_step = step.saturating_sub(STEP_HISTORY as u64 - 1).max(1);
+        st.step_history = (first_step..=step)
+            .map(|s| StepSample {
+                step: s,
+                seq: s,
+                ms: step_ms_at(s),
+                cache_delta: if s > 1 {
+                    cache_at(s) - cache_at(s - 1)
+                } else {
+                    0
+                },
+                checkpoint: s >= SAVE_EVERY && s % SAVE_EVERY == 0,
+            })
+            .collect();
+
+        // The mock's step numbers are monotonic, so seq equals step.
+        st.step_seq = step;
+        st.step_time_source = StepTimeSource::Reported;
         st.checkpoint_step = step - (step % SAVE_EVERY);
         // Pulse for the handful of steps right after a save, so the comet
         // crosses the sky at the same cadence a real run's would.
@@ -121,6 +171,10 @@ impl MockTrainRun {
             0
         };
         st.first_seen = Some(self.started);
+        // The host reading the band's host row and the LIVE panel draw. The
+        // mock backend has no PCIe counters, so `--mock` shows no PCIe row.
+        st.host_cpu_pct = Some(host_cpu_at(step));
+        st.host_rss_bytes = Some(host_rss_at(step));
         st
     }
 }
@@ -204,5 +258,42 @@ mod tests {
     fn loss_history_stays_bounded() {
         let st = MockTrainRun::new().state_at(10_000.0);
         assert!(st.loss_history.len() <= LOSS_HISTORY);
+    }
+
+    /// `--mock` draws the band's host-CPU row, so the state carries a host
+    /// reading, and it comes from elapsed time so a screenshot is
+    /// reproducible. The mock backend has no PCIe counters, so there is no
+    /// PCIe row in mock.
+    #[test]
+    fn a_mock_run_has_a_reproducible_host_reading() {
+        let r = MockTrainRun::new();
+        let st = r.state_at(31.0);
+        let cpu = st.host_cpu_pct.expect("the host row needs a cpu reading");
+        assert!((50.0..400.0).contains(&cpu), "{cpu}");
+        assert!(st.host_rss_bytes.is_some_and(|b| b > 0));
+        assert_eq!(r.state_at(31.0).host_cpu_pct, st.host_cpu_pct);
+        assert_eq!(r.state_at(31.0).host_rss_bytes, st.host_rss_bytes);
+        // It moves over time, as a real reading does.
+        let later = r.state_at(37.0).host_cpu_pct.unwrap();
+        assert!((later - cpu).abs() > 0.5, "{cpu} vs {later}");
+    }
+
+    /// `--mock` has to carry every signal the step-anatomy chart draws:
+    /// compiles while the cache fills, a checkpoint, and per-step variation.
+    #[test]
+    fn a_mock_run_has_a_step_history_with_compiles_and_a_checkpoint() {
+        // 31 s is about step 371 (f32 rounding makes it 371, not 372): the
+        // 160-step window (steps 212 to 371) holds the cache still filling
+        // (growth stops at step 336) and the step-360 save.
+        let st = MockTrainRun::new().state_at(31.0);
+        assert_eq!(st.step_history.len(), crate::workload::train::STEP_HISTORY);
+        assert_eq!(st.step_history.last().unwrap().step, st.step);
+        assert!(st.step_history.iter().any(|s| s.cache_delta > 0));
+        assert!(st.step_history.iter().any(|s| s.checkpoint));
+        let ms: Vec<f32> = st.step_history.iter().map(|s| s.ms).collect();
+        let (lo, hi) = ms
+            .iter()
+            .fold((f32::MAX, 0.0f32), |(l, h), m| (l.min(*m), h.max(*m)));
+        assert!(hi > lo * 1.3, "bars need visible variation: {lo}..{hi}");
     }
 }

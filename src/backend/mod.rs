@@ -529,6 +529,8 @@ mod tests {
                 progress: None,
                 serving: None,
                 media: None,
+                port: None,
+                chips: Vec::new(),
             }]),
         };
         let frame = inject_extension(MINIMAL_FRAME, &ext);

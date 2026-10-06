@@ -102,6 +102,13 @@ pub struct RemoteInference {
     /// field still decodes (the key is simply absent → `None`).
     #[serde(default)]
     pub media: Option<RemoteMedia>,
+    /// Host port the server answers on. `#[serde(default)]` so a frame from a
+    /// peer that predates this field still decodes (absent → `None`).
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Chip indices the server holds open; absent from older peers → empty.
+    #[serde(default)]
+    pub chips: Vec<usize>,
 }
 
 /// Serving metrics mirrored from the *display* fields of
@@ -206,6 +213,8 @@ fn remote_inference_from_state(
         progress: state.progress,
         serving: state.serving.as_ref().map(remote_serving_from_stats),
         media: state.media.as_ref().map(remote_media_from_stats),
+        port: state.port,
+        chips: state.chips.clone(),
     }
 }
 
@@ -375,6 +384,8 @@ mod tests {
                     preemptions_delta: 2,
                 }),
                 media: None,
+                port: None,
+                chips: Vec::new(),
             }]),
         }
     }
@@ -534,6 +545,8 @@ mod tests {
                 counters: Default::default(),
             }),
             media: None,
+            port: None,
+            chips: Vec::new(),
         }];
 
         let ext = build_extension(&procs, &inference);
@@ -591,6 +604,8 @@ mod tests {
                     ..Default::default()
                 },
             }),
+            port: None,
+            chips: Vec::new(),
         }];
 
         // build → inject → parse round-trips the media sub-shape through serde.
@@ -638,5 +653,27 @@ mod tests {
         let stripped = serde_json::to_string(&value).unwrap();
         let parsed = parse_extension(&stripped).expect("older-peer frame still parses");
         assert!(parsed.inference.unwrap()[0].media.is_none());
+    }
+
+    /// Back-compat: a peer that predates `port`/`chips` omits both keys; the
+    /// frame must still decode, with no port and no chips.
+    #[test]
+    fn inference_without_port_or_chips_decodes_as_unknown() {
+        let frame = inject_extension(MINIMAL_TTSMI_JSON, &sample_ext());
+        let mut value: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        for inf in value["tt_toplike"]["inference"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+        {
+            let o = inf.as_object_mut().unwrap();
+            o.remove("port");
+            o.remove("chips");
+        }
+        let parsed = parse_extension(&serde_json::to_string(&value).unwrap())
+            .expect("older-peer frame still parses");
+        let inf = &parsed.inference.unwrap()[0];
+        assert_eq!(inf.port, None);
+        assert!(inf.chips.is_empty());
     }
 }

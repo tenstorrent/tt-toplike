@@ -667,6 +667,293 @@ Review minors from the two tasks above, fixed in one pass.
   Missile's own tests. It was not: those only check that rendering does
   not panic.
 
+## Phase 37: Training tapestry (Oct 1, 2026, v0.13.6)
+
+Prompt: the Training View's top-left block-head scanner was "not the right
+usage of space or signal"; asked for three alternatives rooted in hardware
+and training performance data. Chosen: all of them together, with the old
+grid kept as a backdrop.
+
+Finding that drove the design: the grid's sweep was driven by the frame
+counter and every node took the same loss hue, so none of it was data, and
+tt-train logs no per-block or per-head signal. Any per-node mapping would
+have been invented.
+
+Decisions: per-step history only from trainer-reported times (derived
+cadence is an average and would fake resolution); "chip" in gauges and the
+verdict means the busiest chip because the trainer's chips are not
+identified; MockBackend left alone (its telemetry feeds the Insights
+sidebar tests), so --mock has no PCIe gauge; slope is per 100 logged
+losses; pulse capped at 5 passes/s so it stays visible.
+
+Finding that drove the bar-timing work: the first real run showed `no
+per-step times reported`, because tt-tnt prints only a tqdm bar per
+3195-step chunk. Step times are now observed from progress-bar updates
+(gap between polls that saw consecutive steps, only when exactly one step
+was seen, never across a bar restart or from an unparsed step 0). The
+title reads `STEP ANATOMY (from bar)`. The same run exposed a bug: derived
+step rate and tokens/sec froze after a bar restart; fixed. The monitor's
+per-run anchors reset at attach and detach. Narrow widths show whole
+clauses only.
+
+Follow-up: the tt-tnt harness change on branch `dazzle-me/tt-train` in the
+tt-tnt repo now prints one `Step: N, Loss: L, Time: T ms` line per step.
+tt-toplike reads it as a trainer-reported time (`StepAndMs`) with unknown
+cache growth. The LIVE cache row shows only when a cache count was reported.
+
+### Resumed runs: `step x / y` with y below x (Oct 2, 2026)
+
+The user's log holds two runs in one file. Run 2's header says `steps=25560`
+(the steps that process runs) while its val lines carry absolute steps
+(38340 and up), so the header drew `step 38,340 / 25,560`. Three changes:
+`parse.rs` reads `resumed from ... at step S ...; running M more steps to
+step E` as `TrainEvent::Resumed` (E, or S + M when `to step` is missing, and
+`None` when neither is readable); the state takes E as the absolute budget and
+records `resume_start`. A run header that follows run data calls
+`TrainState::begin_new_run`, and `poll` clears the monitor's step anchor and
+reported-time flag at the same point. `draw_header` and the convergence strip
+treat a step past its budget like a chunk-local step. Version not bumped here.
+
+Process: brainstorming -> spec (docs/superpowers/specs/2026-10-01-
+training-tapestry-design.md) -> plan (docs/superpowers/plans/2026-10-01-
+training-tapestry.md).
+
+### Starfield over a signal weave (Oct 2, 2026, v0.13.7)
+
+Prompt: "the pulse doesn't make efficient use of the space the way the old
+knots / stars did. rethink that area of the viz again". Chosen: "Starfield
+over a signal weave".
+
+The step bars, the pulse row, the node-grid backdrop and the four gauge rows
+are gone. The band now draws a braille starfield (one star per step, two
+steps per column, up to 6 rows, `◆` compile, `✺` checkpoint, a dotted median
+horizon, the newest three stars swelling once per measured step) over weave
+rows on the same columns: chip power, the busiest chip's aiclk, PCIe and host
+CPU, each ending in its current value. Pure geometry lives in
+`train_canvas.rs`; `plan_band` grants star, chip, aux, verdict and strip rows.
+
+Decisions: the value column (10 wide) appears only when 20 data columns
+remain, and a value that does not fit is left out whole; a weave reading of
+zero draws `▁` so a sampled column is never blank; with no step samples the
+aux rows keep their label and value and get no cells; the tokens/sec best was
+removed with its gauge (tok/s stays in LIVE); `--mock` gained a closed-form
+host CPU and RSS so the host row shows in screenshots, and still has no PCIe
+row. The band stays capped at 13 rows, so with three chips and all aux rows
+the starfield gets 4 rows with a verdict (5 without); it reaches 6 with fewer
+weave rows.
+
+Row order, decided after review: `plan_band` grants one star row, the
+verdict, chip rows, star rows up to 3, aux rows, the strip, then star rows up
+to 6. The first order put the aux rows and the strip ahead of the second star
+row, so a 30-row terminal (a 10-row band) with three chips and two aux rows
+left the starfield 2 rows. It now keeps 3 and drops the strip. Raising the
+13-row cap was not done, because it would take rows from the river. Star
+rows are granted only when a shown step has a time the canvas can place, so
+a history of zero times leaves no blank star rows; its chip rows still draw.
+
+Notable: a deliberate break that drew a PCIe row with no counters passed the
+first weave test, because it only checked the rows it expected. The test now
+asserts that a row with no signal is absent.
+
+### Step jump timed from the attach baseline (Oct 2, 2026)
+
+Bug: the Training view showed 630,111 tok/s against a true rate near 110k.
+The tt-tnt harness prints no per-step times and its bars reach the log only
+when a chunk ends, so the only step signal is the validation line every 3195
+steps. `note_step_progress` timed the first jump from the attach poll. The
+viewer had attached 166 s into the chunk, so 3195 steps over 166 s gave 52
+ms/step. A per-step trainer had the same flaw on a smaller scale: its first
+step after attach was timed from the attach poll.
+
+Fix: `TrainMonitor.anchor_is_baseline` marks the anchor set by the first step
+seen after attach or a new-run reset. The first increase after a baseline
+re-anchors as an observed change and records no `step_ms` and no observed
+sample. A measurement needs two observed changes. A bar restart (the
+regression arm) anchors as an observed change, because the restart is an
+event with a known time; the old test's intent (timing resumes at once)
+stays. `reset_run_anchors` and the new-run header clear the flag.
+
+Consequences: a per-step trainer loses one step of cadence after attach. A
+chunk-jump trainer gets its first `step_ms` at the second chunk end after
+attach, and that value spans train, checkpoint and validation time, so it is
+an effective throughput a little below pure training speed. Until then
+`step_ms` is 0, `tokens_per_sec()` is `None` and the LIVE panel shows no
+tok/s. That is the true state: nothing has been measured yet.
+
+Tests: `baseline_anchor_tests` in `monitor.rs` (the reported 60711 to 63906
+case, a per-step trainer, bar restart, new run, reported time, and a sweep
+of jump sizes and gaps, and a `poll` test for the new-header branch).
+Eight existing tests that measured from the attach baseline gained one more
+step before their first measurement: the cadence derivation test, the
+one-step sample, the several-steps poll, the bar restart (two copies), the
+implausible gap, the fresh run after a previous one, the unparsed step zero
+and the resume start step. Version not bumped.
+
+Follow-up (Oct 2, 2026): the monitor is polled only while the Training view
+is on screen, so a stale anchor could still time a chunk jump after the user
+returned (a 13 minute chunk seen 6 s after the return would show about 17M
+tok/s). `note_step_progress` now remembers `last_note_at`. A gap over
+`POLL_GAP_REBASE` (5 s) makes that call a re-baseline: it anchors at the
+current step, measures nothing and records no sample. Returning to the view
+therefore costs one more observed change before a rate appears. The monitor
+still does not poll in other views. The backlog test and the two reported-time
+tests had become vacuous under the baseline rule and each gained an anchoring
+step so they fail again when the lower bound or the early return is removed.
+Tests that jump minutes of injected time use `keep_polling`, so they do not
+look like a pause.
+
+### Process scan off the render thread (Oct 2, 2026, v0.13.8)
+
+Report: "this branch seems to have a systematic lag again. where you can
+really see the polling shift every 2 seconds or so". The user ran
+`--tt-smi-reset-behavior demo`, where smooth animation makes a stall easy to
+see.
+
+Measurement (548 processes, 2,909 threads, release build): the 2 s block in
+`run_app` cost about 135 ms on the render and input thread. Most of it was
+`HostProcessMonitor::update` (30 ms, sysinfo with every process field) and
+`ProcessMonitor::update` (82 ms, the `/proc` fd and hugepage scan). Building
+rows and lists added about 22 ms. `InferenceServerProbe::update` makes
+network probes with a 150 ms timeout each. That is about eight dropped frames
+at 60 fps. Rendering the Training view costs 0.4 ms, so rendering was not the
+cause. The block is the same on `origin/main`.
+
+Design: `src/ui/tui/proc_scan.rs`. `Scanner` owns the three monitors and does
+what the block did, in the same order, with the same `cfg` variants.
+`ScannerHandle` runs it on a worker thread named `tt-toplike-proc-scan`.
+`request` and `try_result` never block. At most one request is outstanding,
+so a slow scan never queues a second one. The worker catches a panic in a
+scan, logs it and keeps serving. The TUI panic hook returns early on that
+thread, so a caught panic leaves the terminal in the alternate screen. Drop
+waits up to 250 ms for the worker and then detaches it.
+
+Loop: setup runs one synchronous scan so the first frame has rows. Every
+iteration checks `try_result` and, when a result is ready,
+`apply_scan_result` swaps in `proc_rows` and `serving_metrics`. The loop then
+runs the reset scan over the result's process list, submits runtimes and
+inference servers, checks the Defrag unload edge and runs the `/serve`
+publisher step. The 2 s cadence block only sends a request, then refreshes
+host CPU and memory as before. `ScanRequest.want_processes` comes from
+`reset_behavior.detects()`, so `ignore` still never takes the process
+snapshot.
+
+After (release, same box, 274 processes at the time): `request` about 5 us,
+`try_result` about 1 us, apply plus reset scan about 45 us. Before, measured
+in the same run: 131 to 135 ms per refresh. The cost of the move is one scan
+of latency: results appear about 0.15 s after the request.
+
+Tests: `proc_scan::tests`, with a fake scanner that sleeps and can panic, the
+apply step as a pure function, the real scanner on this machine, and a source
+guard that `run_app` reaches the monitors only through the handle. Each
+wiring test was seen to fail under a deliberate break: a blocking `request`,
+a blocking `try_result`, no outstanding gate, an unbounded join on drop, no
+panic catch, an unnamed thread, an apply that keeps old rows or drops the
+process list, an inline scan in the loop, and `want_processes: true`.
+
+### Inference view shows port and chips (Oct 5, 2026, v0.13.10)
+
+Request: "The inference server view should show which port and which chips a
+model is running on". Classified as a bounded change and approved in chat before
+any code.
+
+The port was already parsed (`InferenceServer.port`) and used for probing, then
+dropped. `ServiceState` now carries `port: Option<u16>` and `chips: Vec<usize>`.
+`rebuild_snapshot` sets both on the monitor thread, so nothing runs on the render
+path.
+
+Chip source, in order: the `/dev/tenstorrent/N` fds held by the server's host
+PIDs (`docker top` for a container, the process tree for a host launch), then
+the explicit nodes in `docker inspect .HostConfig.Devices`. A whole-directory
+mapping with no readable fds gives no chips, and the view shows the port alone.
+Reading another user's `/proc/<pid>/fd` needs privilege, so the Docker fallback
+matters on an unprivileged box. A model still compiling may have opened no chip
+yet.
+
+Display: each `[i]` roster row shows `:8000 · chips 0,1` after the label (dropped
+first on narrow terminals). A single service has no roster, so it gets a one-line
+header with the same text. `RemoteInference` gained `port` and `chips`, both
+`#[serde(default)]`, so older peers still decode.
+
+Tests: `placement_text`, the path and `Devices` JSON parsers, roster and
+single-service rendering, `rebuild_snapshot` carrying the probe's chips, and the
+older-peer decode. The wiring test was seen to fail with `state.chips` set empty.
+Not verified: a live run against a real container on this box.
+
+### tt-tnt progress bars read live, global step rebuilt (Oct 2, 2026, v0.13.9)
+
+Report: "i have training going on right now but don't see as much evidence in
+the training viz as usual". The run was a resumed tt-tnt run (`--resume latest
+--steps 31951 --save-every 6391 --val-every 6391`). The real monitor, run
+read-only against its log, showed only the resume point at attach (`step=31955
+max=63906 loss=None step_ms=0`). 52 s later the first chunk ended and the
+harness printed `step=  38346 train_loss=2.906 ...`, giving one loss sample and
+still no step time. Nothing changed for the next 28 minutes, the length of a
+6391-step chunk at about 3.5 steps/s.
+
+Cause: `Tailer::read_new` already hands every tqdm frame to the parser live.
+The bar branch of `parse_train_line` accepted only a standalone `loss=`
+postfix. tt-tnt's bar is `61/6391 [00:19<30:41,  3.43it/s, train_loss=3.1016,
+val_loss=3.0977]`, so none of its frames parsed. No existing test pinned the
+refusal; only the comment stated it.
+
+Fix, three parts:
+
+- Parser: a bar frame's loss is a standalone `loss=` when present (SFTTrainer),
+  else `train_loss=`, which must be a finite number. `val_loss=` is never used;
+  in tt-tnt's bar it is ttml's placeholder copy of the train loss. A frame with
+  no loss (`0/6391 [00:00<?, ?it/s]`) still gives `None`.
+- Global step: tt-tnt's bar counts the current chunk (1 to 6391, restarting
+  every chunk). `TrainState.abs_base` holds the run's absolute step at the
+  start of the chunk. A run header sets it to 0, a resume line to its start
+  step, and any absolute step line (`step=` validation, `Step:`) to the printed
+  step. The bar's step is `abs_base + local`. A bar restart with no absolute
+  line before it adds the finished chunk's length, because tt-tnt also ends a
+  chunk at a checkpoint-only boundary (see `_chunk_size` in tt-tnt's
+  `train/run.py`). `step_is_chunk_local` is false whenever a base exists, so
+  the header shows `step 32,155 / 63,906  50.3%`, the ETA applies and the
+  strip shows the schedule position. The bar's total no longer replaces the
+  stated budget for such a run. A trainer with no header and no absolute line
+  (SFTTrainer) has no base and behaves as before.
+- Cadence at the chunk boundary: the step no longer goes backwards at a
+  restart, so the regression arm no longer sees the boundary, and the first
+  step after it would have been timed across checkpoint, validation and
+  warm-up (about a minute). An absolute step line beside a bar, or a restart
+  that moved the base, now sets `TrainState.cadence_rebase`, and
+  `note_step_progress` re-baselines as it does after a pause. The brief asked
+  for every absolute line to do this. That breaks the per-step `Step:`
+  trainer and the validation-only cadence (two existing cadence tests and the
+  new per-step test went red), so the re-baseline applies only once a bar has
+  been seen.
+
+Downstream, with no further code: one loss entry per frame, observed step
+samples (`(from bar)`), the starfield and weave, tokens/s (about 109k for
+batch 64 x seq 512 at 300 ms) and the ETA all work live. `poll`'s line loop
+moved into `ingest_lines` so tests replay a log through the same path with
+injected times.
+
+Side effect worth knowing: `loss_history` (512 entries) now fills at about 3.5
+entries/s and covers about 2.5 minutes of per-step training loss. The header's
+delta arrow, the strip's slope, noise and `best N logs ago` clauses now change
+on almost every frame, and the mountains show batch-to-batch noise over that
+window. Not redesigned here.
+
+Tests: parser (the three verbatim frames, precedence, `nan`/`inf`/text,
+no-loss frame), `abs_base_tests` in `monitor.rs` (each base rule, global step
+for fresh and resumed runs, budget kept, chunk-local rule unchanged without a
+base, a disagreeing absolute line wins, the boundary with and without a
+validation line, a per-step trainer still timed), and three end-to-end
+replays in `train_view.rs` (resumed tt-tnt, fresh tt-tnt, SFTTrainer) that
+check step, budget, header text, `step_ms`, tokens/s, samples and loss entries
+at every poll. Each new wiring test was seen to fail under a deliberate break.
+Changed tests: two `step_and_ms_tests` and the view test
+`a_chunk_local_step_is_shown_without_the_run_budget` used a run header to
+state the budget and pinned the chunk-local display; they now state it with
+`Max steps` (no base) so the old rule stays covered. The view tests
+`a_chunk_local_step_is_shown_without_the_run_budget` and
+`once_the_bar_is_known_to_be_chunked_the_strip_makes_no_schedule_claim` now
+start from `attached_state`, because `live_state` folds in a `Step:` line,
+which gives the bar a base.
+
 ### Five takeovers, a cetacean sky and a chatbot sysop (Oct 5, 2026)
 
 Prompt: "let's take out missile command and the hatch animations (and from the
@@ -734,6 +1021,28 @@ Copilot's review of the reset PR found three real problems in
 Each fix was seen to fail its test with the change reverted. The review's
 Missile Command lane comment is moot: that variant was removed.
 
+### Review fixes for port and chips, and bar loss (Oct 5, 2026)
+
+Copilot's review of the stacked PR found three real problems:
+
+- **The displayed and probed port ignored the parsed one for known models.**
+  `rebuild_snapshot` took the port from the SERVERS table whenever the model
+  matched, so a server published on 8002 showed `:8000` and the monitor probed
+  8000 (it also meant the health probe polled the wrong endpoint, which this
+  PR's port display made visible). The table now supplies the key, label and
+  health path, and the port comes from the parsed `--publish`/`--port`/docker
+  inspect value, falling back to the table's only when none was parsed.
+- **The single-service header overflowed a narrow terminal.** The label was
+  forced to at least 4 characters, so below 23 columns for the longest
+  placement the line ran past the width and was clipped. It now returns no
+  line when four label characters do not fit.
+- **A standalone `loss=nan` / `loss=inf` in a progress-bar frame reached the
+  loss history.** Only the `train_loss=` fallback was guarded. A non-finite
+  standalone loss now drops the frame (it does not fall back to `train_loss=`).
+
+Each has a test that was seen to fail with the fix reverted. The version
+consistency findings in the same review were fixed in the CI pass.
+
 ### Second review pass on the reset PR (Oct 5, 2026)
 
 Copilot's second pass on the reset branch found four more things:
@@ -756,6 +1065,54 @@ reverted. One of my tests passed vacuously the first time: the mutation script
 could not find the code after `cargo fmt` reflowed it, so no mutation was
 applied. Re-run against the reflowed code, it fails as it should.
 
+### Step times must be finite and positive (Oct 5, 2026)
+
+Copilot's second pass on the stacked PR: the `Step: N, Loss: L, Time: T ms`
+line parsed any `f32`, so `nan`, `inf`, zero and negative times became
+`StepAndMs` / `StepAndTime` events and reached `step_ms` and the step history
+(infinite or negative tokens/s, a false sample in the tapestry). A time that is
+not finite and positive is now dropped, and the line is read as a plain `Step`
+with its step and loss. The test covers both timed shapes and was seen to fail
+with the filter removed.
+
+The reset demo clip was re-recorded because the BBS box lost its right border
+(see the second review pass above).
+
+### Legends and explain text brought up to date (Oct 6, 2026)
+
+Prompt: "are our legends and explain modes all up to date with changes to viz
+for training and others?" They were not. Found by comparing each view's `l`
+and `!` text with the code it describes, with git history to see which text had
+not moved since the view last changed.
+
+- **Training `l` and `!`** were last edited Sep 1; the view was redesigned Oct 1
+  and 2. They still described the transformer node grid with forward and
+  gradient sweeps. Rewritten from the channel table in `train_view.rs`: the
+  step starfield (`⠂ ◆ ✺`, star height = step time, `┈` median, `(from bar)`),
+  chip power rows, aiclk/PCIe/host rows, the verdict line and its thresholds,
+  the convergence strip, loss mountains, aurora and comet.
+- **Inference `l` and `!`** gain the roster, the `▸` featured marker, the
+  `:8000 · chips 0,1` text, media servers' "N in flight · M done", and host-vLLM
+  detection (the `!` text said docker only).
+- **HivemindSweeper** gains the magenta `⚡` reset row.
+- **Help panel** gains a "Status bar" block for `⟳ tt-smi -r`, `✓ tt-smi -r`
+  and `--tt-smi-reset-behavior`.
+- **Insights** gains the GDDR `n/m trn·hv·flt` row (trained, harvested,
+  BIST-fault). **Defrag** and **Memory Castle** `!` text gain the bad-sector
+  and DDR-gate markers their legends already had.
+- The Help `row!` macro padded labels to 12 columns, so a longer label such as
+  `/serve [bind:port]` ran into its description. It now pads to label + 1.
+
+Guards. The old Training test (`train_legend_documents_every_colour_channel`)
+only compared the overlay with its own earlier wording, so it stayed green on
+stale text. `train_view::legend_channels` now holds the glyph list the view's
+own legend row uses, and `train_legend_documents_every_glyph_the_view_draws`
+requires the overlay to show each glyph and to omit the removed terms.
+`legend_and_explain_text_names_what_the_views_draw` ties the Inference text to
+`placement_text` and the Hivemind text to `RESET_GLYPH`. Each was seen to fail
+with its text removed. Views not touched (Grid, Starfield, Memory Flow, Arcade's
+hero) were read against their code and still match.
+
 ### Third review pass on the reset PR (Oct 6, 2026)
 
 - **A duplicated reset target bumped one Hivemind cell twice.** `reset_detect`
@@ -768,3 +1125,28 @@ applied. Re-run against the reflowed code, it fails as it should.
 - **Open thread "align PR metadata with five takeovers".** The title and
   description were already rewritten; the description now drops the sentence
   that recounted the removed variants, which read as the old claim.
+
+### Roster width, and a version audit before the stacked PR lands (Oct 6, 2026)
+
+- **Roster rows could run past the terminal.** `inference_roster_lines` forced a
+  4-character label with `.max(4)` even when fewer than 4 columns were left, so
+  a row at 12 to 14 columns was wider than the terminal and ratatui clipped the
+  placement. It now drops the placement first, then the live stat, and skips a
+  row that still cannot fit; the roster needs at least 15 columns, and its
+  header is clipped to the width. `roster_lines_never_exceed_the_width` checks
+  every width from 0 to 120. It does not fail when only the `.max(4)` is
+  restored (the new 15-column guard already covers that case); it fails when
+  the old 12-column guard and the forced label are both restored, which is the
+  original bug.
+- **Version audit for 0.13.10.** Every displayed version derives from
+  `CARGO_PKG_VERSION` (`--version`, the GUI title, the app), so `Cargo.toml` is
+  the single source. The four files CI compares agree on 0.13.10 (`Cargo.toml`,
+  `QUICK_START.md`, the site hero, the first `debian/changelog` line), and
+  `Cargo.lock` carries 0.13.10 (`--locked` builds fail otherwise). `main` is
+  0.13.5. `install.sh`, `build-deb.sh` and `debian/control` pin no version.
+  The macOS and Windows artifacts take their version from the git tag (see
+  `release.yml`), so the release must be tagged `v0.13.10` from `main` after
+  #32 merges; nothing checks that the tag matches `Cargo.toml`. Fixed here: the
+  `CHANGELOG.md` summary stopped at 0.11.0 and now has 0.13.10 and a note that
+  0.11.1 to 0.13.9 live in `debian/changelog` only; `QUICK_START.md` said
+  "Last Updated: August 30, 2026" and now says October 6, 2026.

@@ -141,6 +141,8 @@ fn service_at(key: &str, model: &str, t: f32, phase_offset: f32) -> ServiceState
         flat_ticks: 0,
         serving: (phase == Phase::Ready).then(|| serving_stats(t)),
         media: None,
+        port: Some(8000),
+        chips: vec![0, 1],
     }
 }
 

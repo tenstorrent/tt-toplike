@@ -295,6 +295,8 @@ mod tests {
             flat_ticks: 0,
             serving: None,
             media: None,
+            port: None,
+            chips: Vec::new(),
         }
     }
 

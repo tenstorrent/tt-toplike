@@ -221,6 +221,65 @@ pub trait ContainerProbe: Send {
     fn list_servers(&self) -> Vec<super::InferenceServer> {
         Vec::new()
     }
+
+    /// Chip indices (`/dev/tenstorrent/N`) the service `key` is using, sorted
+    /// and deduped. Default: none known (test fakes opt out).
+    fn chips(&self, key: &str) -> Vec<usize> {
+        let _ = key;
+        Vec::new()
+    }
+}
+
+/// Chip index of a `/dev/tenstorrent/N` path, `None` for anything else
+/// (including the bare directory and non-numeric nodes).
+pub(crate) fn chip_of_device_path(path: &str) -> Option<usize> {
+    path.trim().strip_prefix("/dev/tenstorrent/")?.parse().ok()
+}
+
+/// Sorted, deduped chip indices among a set of paths (fd link targets or
+/// `docker inspect` `PathOnHost` values). Pure.
+pub(crate) fn chips_from_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<usize> {
+    let mut chips: Vec<usize> = paths.into_iter().filter_map(chip_of_device_path).collect();
+    chips.sort_unstable();
+    chips.dedup();
+    chips
+}
+
+/// Chips the given host PIDs hold open, by reading `/proc/<pid>/fd` link
+/// targets. A PID we may not read (a root-owned container process, seen from an
+/// unprivileged user) contributes nothing, so callers fall back to the
+/// container's configured devices.
+fn chips_from_pid_fds(pids: &[i32]) -> Vec<usize> {
+    let mut targets: Vec<String> = Vec::new();
+    for pid in pids {
+        let Ok(dir) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+            continue;
+        };
+        for entry in dir.flatten() {
+            if let Ok(t) = std::fs::read_link(entry.path()) {
+                targets.push(t.to_string_lossy().into_owned());
+            }
+        }
+    }
+    chips_from_paths(targets.iter().map(String::as_str))
+}
+
+/// Chips named by `docker inspect <c> --format '{{json .HostConfig.Devices}}'`
+/// output (`[{"PathOnHost":"/dev/tenstorrent/0",...}]`). A whole-directory
+/// mapping (`/dev/tenstorrent`) names no specific chip and yields none.
+pub(crate) fn chips_from_devices_json(json: &str) -> Vec<usize> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json.trim()) else {
+        return Vec::new();
+    };
+    let paths: Vec<&str> = v
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|d| d.get("PathOnHost").and_then(|p| p.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    chips_from_paths(paths)
 }
 
 /// Real `docker`-CLI-backed [`ContainerProbe`]. All calls shell out; every
@@ -247,6 +306,26 @@ impl ContainerProbe for DockerProbe {
     fn http(&self, port: u16, path: &str) -> (u16, String) {
         // Reuse the crate's localhost HTTP helper (liveness_probe) for status+body.
         crate::workload::liveness_probe::http_get_status_body(port, path)
+    }
+
+    fn chips(&self, c: &str) -> Vec<usize> {
+        // What the container really has open (host PIDs from `docker top`),
+        // else the explicit device nodes it was started with.
+        let pids: Vec<i32> = docker(&["top", c, "-o", "pid"])
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.trim().parse().ok())
+            .collect();
+        let open = chips_from_pid_fds(&pids);
+        if !open.is_empty() {
+            return open;
+        }
+        chips_from_devices_json(&docker(&[
+            "inspect",
+            "--format",
+            "{{json .HostConfig.Devices}}",
+            c,
+        ]))
     }
 
     fn list_servers(&self) -> Vec<super::InferenceServer> {
@@ -535,6 +614,12 @@ impl ContainerProbe for SystemProbe {
             None => self.docker.top_proc_cmd(key),
         }
     }
+    fn chips(&self, key: &str) -> Vec<usize> {
+        match pid_from_key(key) {
+            Some(pid) => chips_from_pid_fds(&self.cache.tree_pids(pid)),
+            None => self.docker.chips(key),
+        }
+    }
     fn list_servers(&self) -> Vec<super::InferenceServer> {
         // Detached host processes are already found by the periodic
         // `HostProcesses::detected_inference_servers()` re-scan (there's no
@@ -620,6 +705,29 @@ fn run_local(args: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chips_from_paths_keeps_only_numbered_nodes_sorted_deduped() {
+        let got = chips_from_paths([
+            "/dev/tenstorrent/3",
+            "/dev/tenstorrent/1",
+            "/dev/tenstorrent/3",
+            "/dev/tenstorrent",
+            "/dev/tenstorrent/x",
+            "/dev/null",
+        ]);
+        assert_eq!(got, vec![1, 3]);
+    }
+
+    #[test]
+    fn chips_from_devices_json_reads_explicit_nodes_not_the_whole_dir() {
+        let two = r#"[{"PathOnHost":"/dev/tenstorrent/0","PathInContainer":"/dev/tenstorrent/0"},{"PathOnHost":"/dev/tenstorrent/1"}]"#;
+        assert_eq!(chips_from_devices_json(two), vec![0, 1]);
+        let whole = r#"[{"PathOnHost":"/dev/tenstorrent","PathInContainer":"/dev/tenstorrent"}]"#;
+        assert!(chips_from_devices_json(whole).is_empty());
+        assert!(chips_from_devices_json("null").is_empty());
+        assert!(chips_from_devices_json("").is_empty());
+    }
 
     /// Poll `/proc/<pid>/environ` (bypassing any cache) until it contains
     /// `marker`, or panic after a generous bounded wait.

@@ -15,6 +15,7 @@ pub use bench::BenchResult;
 pub mod chip_portrait;
 pub mod perf;
 pub use perf::PerfMeter;
+pub(crate) mod proc_scan;
 pub(crate) mod reset_status;
 pub mod throttle;
 pub use throttle::ThrottleState;
@@ -29,11 +30,11 @@ use crate::cli::{BackendType, Cli};
 use crate::error::TTTopError;
 use crate::ui::colors;
 use crate::workload::train::{MockTrainRun, TrainMonitor};
-use crate::workload::{HostProcessMonitor, ProcRow};
+use crate::workload::ProcRow;
 // InferenceEngine + the /proc-based probes are only used on the Linux/TT path,
 // so gate the import to match (keeps non-Linux builds warning-clean under -D warnings).
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-use crate::workload::{InferenceEngine, InferenceServerProbe, ProcessMonitor, ServingMetrics};
+use crate::workload::{InferenceEngine, ProcessMonitor, ServingMetrics};
 use crossterm::{
     event::{self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyEventKind},
     execute,
@@ -267,6 +268,14 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     {
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            // The process-scan worker catches its own panics and keeps
+            // serving (see `proc_scan`), so the UI stays up. Log it and
+            // leave the terminal alone; restoring it here would drop the
+            // live UI out of the alternate screen.
+            if proc_scan::is_scan_thread() {
+                log::warn!("process scan thread panicked: {info}");
+                return;
+            }
             let _ = disable_raw_mode();
             let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableFocusChange);
             crate::logging::enable_stderr();
@@ -356,29 +365,37 @@ fn run_app(
     let mut perf_meter = PerfMeter::new();
     let mut show_perf = false;
 
-    // TT process attribution (Linux-only, update every 2 seconds). This reads
-    // /proc to map PIDs → device fds / hugepages and is merged into the
-    // cross-platform `proc_rows` by PID via `enrich_proc_rows_tt`.
-    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-    let mut process_monitor = crate::workload::ProcessMonitor::new();
-
-    // Cross-platform process listing for the Insights process panel. Enumerates
-    // host processes via sysinfo and tags inference runtimes; on Linux it is
-    // enriched by PID with TT device attribution (see the refresh tick).
-    let mut host_proc_monitor = HostProcessMonitor::new();
-    host_proc_monitor.update();
+    // The 2-second process scan (see `proc_scan`). `Scanner` owns the
+    // cross-platform sysinfo process listing and, on Linux with
+    // `linux-procfs`, the /proc TT attribution and the serving probes. One
+    // synchronous scan here fills the panels for the first frame; after that
+    // the scanner moves to a worker thread (`scan_handle`, below) so the
+    // ~135 ms refresh never runs on this render/input thread.
+    let mut scanner = proc_scan::Scanner::new();
+    let initial_scan = {
+        use proc_scan::Scan;
+        scanner.scan(&proc_scan::ScanRequest {
+            // TT-attributed backends (Sysfs/Hybrid/Json/Luwen — anything but
+            // --host/--mock) show the TT-filtered list from the first frame.
+            only_tt: crate::cli::backend_shows_only_tt(backend_type),
+            // The prober has no verdicts before its first cycle.
+            verdicts: std::collections::HashMap::new(),
+            // No reset scan at start-up, as before.
+            want_processes: false,
+        })
+    };
     // Background liveness prober: confirms server runtimes (vllm, ollama) via
     // their local API off the render path. First cycle has no verdicts yet, so
     // rows() relies on the cheap snapshot tier until the worker reports back.
     let liveness_prober = crate::workload::LivenessProber::spawn();
-    liveness_prober.submit(host_proc_monitor.detected_runtimes());
+    liveness_prober.submit(initial_scan.runtimes);
     // Background inference-server monitor: probes detected TT inference-server
     // containers (docker stats + /health) off the render path. Not yet read by
     // any panel — used by the [i] panel in the next task.
     #[cfg(target_os = "linux")]
     let inference_monitor = crate::workload::InferenceServerMonitor::spawn();
     #[cfg(target_os = "linux")]
-    inference_monitor.submit(host_proc_monitor.detected_inference_servers());
+    inference_monitor.submit(initial_scan.inference_servers);
     // Previous inference snapshot, for detecting the model-unload edge that
     // triggers the Defrag EVICT animation.
     #[cfg(target_os = "linux")]
@@ -398,24 +415,14 @@ fn run_app(
     // Background model-catalog refresher: curl-refreshes the compatibility
     // catalog off the render path; feeds the cold-trail starfield screensaver.
     let catalog_refresher = crate::workload::CatalogRefresher::spawn();
-    let mut proc_rows: Vec<ProcRow> =
-        host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts());
-    // Linux/TT: seed /proc attribution immediately so a TT-attributed backend
-    // (Sysfs/Hybrid/Json/Luwen — anything but --host/--mock, per
-    // `backend_shows_only_tt`) shows the TT-filtered process list from the
-    // very first frame, not just after the first 2s refresh tick below.
+    // Linux `/proc` builds also keep the start-up serving metrics; the
+    // loop's `serving_metrics` is seeded from them further down.
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-    {
-        process_monitor.update();
-        if crate::cli::backend_shows_only_tt(backend_type) {
-            let tt_pids: std::collections::HashSet<i32> = flat_process_list(&process_monitor)
-                .iter()
-                .map(|p| p.pid)
-                .collect();
-            proc_rows = host_proc_monitor.tt_rows(PROC_PANEL_MAX_ROWS, &tt_pids);
-        }
-        enrich_proc_rows_tt(&mut proc_rows, &process_monitor);
-    }
+    let initial_serving_metrics = initial_scan.serving_metrics;
+    let mut proc_rows: Vec<ProcRow> = initial_scan.proc_rows;
+    // From here on every scan runs on the worker. The loop asks for one at
+    // the 2 s cadence and applies each result when it arrives.
+    let mut scan_handle = proc_scan::ScannerHandle::spawn(scanner);
     let mut last_proc_rows_update = Instant::now();
 
     // Host CPU / RAM monitoring — sampled on the same 2s cadence as processes.
@@ -641,10 +648,8 @@ fn run_app(
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut inference_engine = InferenceEngine::new();
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-    let mut inference_probe = InferenceServerProbe::new();
-    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut serving_metrics: std::collections::HashMap<i32, ServingMetrics> =
-        std::collections::HashMap::new();
+        initial_serving_metrics;
     // Cross-platform: the unified render path reads these. They're only mutated
     // by the Linux-gated process-navigation / kill key handlers; off-Linux they
     // stay at their defaults (cursor 0, no kill dialog).
@@ -1012,6 +1017,12 @@ fn run_app(
                     // same rows for the roster and the fixed-dim loading/roaming
                     // renderers line up.
                     inference_roster = inference_roster_lines(&rows, size.width as usize);
+                    // A lone service has no roster; give it the one-line
+                    // placement header instead.
+                    if inference_roster.is_empty() {
+                        inference_roster =
+                            inference_single_service_line(&rows, size.width as usize);
+                    }
                     // Under `--remote`, while `remote_rows` is `None` (the peer
                     // isn't streaming inference data) this view is still
                     // probing LOCAL docker, not the remote box's serving stack.
@@ -2401,21 +2412,38 @@ fn run_app(
             }
         }
 
-        // Update process list + host stats (every 2 seconds to avoid overhead).
-        // Cross-platform: the host CPU/RAM bars and process panel work on macOS.
-        if last_proc_rows_update.elapsed() >= Duration::from_secs(2) {
-            host_proc_monitor.update();
+        // ── Apply a finished process scan (checked every iteration) ──────
+        // The 2-second scan runs on the `proc_scan` worker thread; the
+        // cadence block below only asks for one. When a result is ready it
+        // is applied here, about one scan duration (~0.15 s) after the
+        // request. Everything in this block is cheap: moves, the reset
+        // scan over an already-collected list, channel sends and an
+        // `ArcSwap` load. It replaces a ~135 ms inline refresh that dropped
+        // about eight frames every 2 s.
+        if let Some(res) = scan_handle.try_result() {
+            if res.took > Duration::from_millis(500) {
+                log::debug!("process scan took {:?}", res.took);
+            }
+            let applied = proc_scan::apply_scan_result(
+                res,
+                &mut proc_rows,
+                #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+                &mut serving_metrics,
+            );
+            let scanned_processes = applied.processes;
 
             // ── `tt-smi -r` detection (`--tt-smi-reset-behavior`) ─────────
-            // Reuses this 2-second process scan. `scan_resets` takes the
-            // process snapshot only when the behavior detects resets, so
-            // `ignore` never reads the process list.
+            // Reuses the 2-second process scan. The worker takes the
+            // process snapshot only when the request asked for it
+            // (`reset_behavior.detects()`), and `scan_resets` reads it only
+            // when the behavior detects resets, so `ignore` never reads the
+            // process list.
             let outcome = reset_status::scan_resets(
                 reset_behavior,
                 display_mode == DisplayMode::HivemindSweeper,
                 &mut reset_detector,
                 &mut reset_status,
-                || host_proc_monitor.processes_snapshot(),
+                || scanned_processes,
                 backend.devices(),
                 Instant::now(),
             );
@@ -2442,10 +2470,10 @@ fn run_app(
             reset_status::apply_takeover_outcome(&mut takeover, reset_behavior, &outcome);
 
             // Refresh the prober's target set; read back last cycle's verdicts.
-            liveness_prober.submit(host_proc_monitor.detected_runtimes());
+            liveness_prober.submit(applied.runtimes);
             // Refresh the inference-server monitor's target set (containers only).
             #[cfg(target_os = "linux")]
-            inference_monitor.submit(host_proc_monitor.detected_inference_servers());
+            inference_monitor.submit(applied.inference_servers);
             // Model-unload edge → kick off the Defrag EVICT animation. The
             // power-EMA heuristic can't detect unload on Blackhole (see
             // DefragVis::trigger_evict), so we drive it from this discrete signal.
@@ -2459,39 +2487,11 @@ fn run_app(
                 }
                 prev_inference_snapshot = cur_inf;
             }
-            // Non-Linux / no-procfs: always the cross-platform host snapshot —
-            // TT filtering needs the /proc device-fd attribution below, which
-            // doesn't exist on these builds.
-            #[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
-            {
-                proc_rows =
-                    host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts());
-            }
 
-            // Linux/TT: refresh /proc attribution + serving probes, choose the
-            // TT-filtered or full host row set by backend, then merge TT device
-            // info into proc_rows by PID.
-            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-            {
-                process_monitor.update();
-                // Probe inference servers at the same 2s cadence to avoid
-                // hammering HTTP endpoints on every backend tick.
-                let flat = flat_process_list(&process_monitor);
-                serving_metrics = inference_probe.update(&flat);
-                proc_rows = if crate::cli::backend_shows_only_tt(backend_type) {
-                    let tt_pids: std::collections::HashSet<i32> =
-                        flat.iter().map(|p| p.pid).collect();
-                    host_proc_monitor.tt_rows(PROC_PANEL_MAX_ROWS, &tt_pids)
-                } else {
-                    host_proc_monitor.rows(PROC_PANEL_MAX_ROWS, &liveness_prober.fresh_verdicts())
-                };
-                enrich_proc_rows_tt(&mut proc_rows, &process_monitor);
-            }
-
-            // `/serve` per-tick broadcast. Same 2s cadence as the process/
-            // inference refresh above — NOT the 60fps render loop — so
-            // clients get one fresh frame per refresh instead of the same
-            // frame re-sent dozens of times a second for no visible benefit.
+            // `/serve` per-tick broadcast. It runs once per applied scan
+            // result, so once per 2 s refresh. Clients get one fresh frame
+            // per refresh; the 60fps render loop would re-send the same
+            // frame dozens of times a second for no visible benefit.
             // `proc_rows` is current as of just above; the inference snapshot
             // is re-read here (cheap: an `ArcSwap` load + clone, see
             // `InferenceServerMonitor::snapshot`) rather than threaded out of
@@ -2528,6 +2528,18 @@ fn run_app(
                     }
                 }
             }
+        }
+
+        // Ask for a process scan and refresh host stats (every 2 seconds to
+        // avoid overhead). Cross-platform: the host CPU/RAM bars and process
+        // panel work on macOS. `request` never blocks and is refused while
+        // the previous scan is still running, so slow scans never pile up.
+        if last_proc_rows_update.elapsed() >= Duration::from_secs(2) {
+            scan_handle.request(proc_scan::ScanRequest {
+                only_tt: crate::cli::backend_shows_only_tt(backend_type),
+                verdicts: liveness_prober.fresh_verdicts(),
+                want_processes: reset_behavior.detects(),
+            });
 
             sys_monitor.refresh_cpu_usage();
             sys_monitor.refresh_memory();
@@ -3536,8 +3548,11 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
     macro_rules! row {
         ($k:expr, $v:expr, $kc:expr) => {
             ln!(vec![
+                // Pad to 12 columns, but never less than the label plus one
+                // space: a longer label (`/serve [bind:port]`) used to run
+                // straight into its description.
                 Span::styled(
-                    format!("{:<12}", $k),
+                    format!("{:<w$}", $k, w = 12.max($k.chars().count() + 1)),
                     Style::default().fg($kc).add_modifier(Modifier::BOLD)
                 ),
                 Span::styled($v, Style::default().fg(dim)),
@@ -3615,6 +3630,22 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 row!(
                     " /wrap <cmd…>",
                     "spawn + capture a command (confirm: repeat it)",
+                    lbl
+                ),
+                ln!(vec![Span::styled(
+                    "──────────────────────────────────────",
+                    Style::default().fg(bar)
+                )]),
+                sep!("Status bar"),
+                row!(" ⟳ tt-smi -r", "a reset is running (chips shown)", lbl),
+                row!(
+                    " ✓ tt-smi -r done",
+                    "shown for 10 s after the last one ends",
+                    lbl
+                ),
+                row!(
+                    " --tt-smi-reset-behavior",
+                    "ignore · inform · dazzle · demo",
                     lbl
                 ),
             ]
@@ -3714,6 +3745,10 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "",
                     "Particle color encodes the memory tier.",
                     "Density reflects current bandwidth.",
+                    "",
+                    "The base shows one DDR gate per channel: ▪ is",
+                    "healthy, · is harvested (fused off), ✗ failed",
+                    "its BIST.",
                 ],
                 cols,
             ),
@@ -3739,6 +3774,10 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "Block character intensity (░▒▓█) encodes",
                     "relative activity within each cell.",
                     "Color encodes channel temperature.",
+                    "",
+                    "A dark-red ✗ is a bad sector: a channel that",
+                    "failed its BIST, and stays that way. A bright",
+                    "red ✗ flashes on an uncorrectable error.",
                 ],
                 cols,
             ),
@@ -3826,6 +3865,12 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "pipe: weights streaming in at load time,",
                     "results coming back during inference.",
                     "",
+                    "The GDDR row counts memory channels (needs",
+                    "tt-smi 6.3+): n/m trn is trained out of all,",
+                    "hv is harvested (fused off), flt is a BIST",
+                    "fault. It turns amber when any are harvested",
+                    "and red on a fault.",
+                    "",
                     "GDDR ECC and thermal-trip rows appear only",
                     "when those counters are non-zero, because",
                     "zero is the healthy answer and a quiet",
@@ -3867,7 +3912,8 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "Inference Server Monitor",
                     "",
                     "One creature across the whole lifecycle of",
-                    "a TT inference-server (docker-detected):",
+                    "a TT inference-server (a docker container, or a",
+                    "vLLM process run directly on the host):",
                     "",
                     "COLD  — no model up: a hungry snake roams",
                     "  the model-catalog starfield (what could",
@@ -3881,6 +3927,18 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "  decode), and a TT silicon strip tying",
                     "  tokens/s to real chip power/temp/clock.",
                     "ALARM — stalled 5+ min: the snake reddens.",
+                    "",
+                    "With two or more models a roster tops the view, one",
+                    "row each: phase, name, where it runs (:port · chips)",
+                    "and a live stat. ▸ marks the one the snake features.",
+                    "A single model gets one header line with the same",
+                    "text. The port is the one it answers on. Chips are the",
+                    "/dev/tenstorrent devices the server holds open, or",
+                    "else the device nodes its container was given; none",
+                    "show while it is still starting, or when the container",
+                    "was given the whole device directory. Diffusion and",
+                    "video servers show jobs in flight and done in place of",
+                    "tokens/s.",
                     "",
                     "Press l for the symbol legend · i to return.",
                 ],
@@ -3897,33 +3955,52 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 &[
                     "Training — Robot Brain Food",
                     "",
-                    "A live tt-train run, drawn as the model",
-                    "itself: one column per transformer block,",
-                    "one node per attention head.",
+                    "A live training run, drawn from what the trainer",
+                    "prints plus tt-toplike's own chip telemetry.",
+                    "Nothing here is invented.",
                     "",
-                    "Each step feeds tokens in from the left",
-                    "(amber), then gradients flow back out to",
-                    "the right (violet). The loss mountains",
-                    "below are coloured by their own value, so",
-                    "the range is the whole run's history —",
-                    "magenta chaos resolving to teal calm.",
+                    "STEP ANATOMY (top band). Each star is one step, two to",
+                    "a column. Its height is that step's wall time, with the",
+                    "scale printed at the left. A teal ⠂ is a normal step, a",
+                    "purple ◆ means the program cache grew (a compile), an",
+                    "amber ✺ is a checkpoint write. The dotted ┈ line is the",
+                    "median of the steps shown, and the newest three stars",
+                    "swell once per measured step. The title says (from bar)",
+                    "when the times were polled from a progress bar instead",
+                    "of printed by the trainer.",
                     "",
-                    "The view attaches by itself: it scans /proc",
-                    "for a process whose binary is a tt-train",
-                    "example (nano_gpt, mnist_mlp, …), then reads",
-                    "/proc/<pid>/fd/1 to locate its log.",
+                    "Under the stars: one row per chip (height = power as a",
+                    "share of that chip's TDP, coral where aiclk has dropped),",
+                    "then aiclk, PCIe and host-CPU rows. Then a one-line",
+                    "verdict: compiling, compute-bound (busiest chip at 50%",
+                    "of TDP or more) or host-bound (under 30% of TDP with the",
+                    "host CPU over 100%). Last, a convergence strip: loss",
+                    "slope per 100 logs, noise, how long since the best loss,",
+                    "the base learning rate and how far through the schedule",
+                    "the run is.",
                     "",
-                    "tt-train prints step, loss, step time and",
-                    "kernel-cache size; tokens/sec and ETA are",
-                    "derived from those plus the run's YAML.",
-                    "Nothing here is invented — gradient norms",
-                    "and MFU aren't emitted live, so they",
+                    "The loss mountains below are coloured by their own value,",
+                    "so the range is the whole run's history: red (untrained)",
+                    "to cyan (converged), under an aurora sky that opens as the",
+                    "loss falls. A comet crosses it when a checkpoint is saved.",
+                    "",
+                    "The view attaches by itself. It scans /proc for a",
+                    "tt-train example (nano_gpt, mnist_mlp, linear_regression)",
+                    "or a Python script that drives ttml, then reads",
+                    "/proc/<pid>/fd/1 to locate its log. A tt-tnt progress",
+                    "bar is read live, so a resumed or chunked run shows its",
+                    "real global step. The ETA appears only when the run's",
+                    "step budget is known.",
+                    "",
+                    "tt-train prints step, loss and step time; tokens/s and",
+                    "ETA are derived from those plus the run's config.",
+                    "Gradient norms and MFU aren't emitted live, so they",
                     "aren't shown.",
                     "",
-                    "If stdout wasn't redirected to a file, the",
-                    "per-step stream can't be read after the",
-                    "fact — relaunch with '> train.log' and the",
-                    "view picks it up automatically.",
+                    "If stdout wasn't redirected to a file, the per-step",
+                    "stream can't be read after the fact: relaunch with",
+                    "'> train.log' and the view picks it up automatically.",
+                    "Press l for the symbol legend.",
                 ],
                 cols,
             ),
@@ -4062,6 +4139,13 @@ fn insights_legend_lines(
             ),
         ]),
         ln!(vec![
+            Span::styled("GDDR n/m ", Style::default().fg(colors::rgb(79, 209, 197))),
+            Span::styled(
+                "trn·hv·flt = trained · harvested · BIST-fault",
+                Style::default().fg(dim),
+            ),
+        ]),
+        ln!(vec![
             Span::styled("ECC ", Style::default().fg(colors::error())),
             Span::styled(
                 "= GDDR errors, shown only when non-zero (uncorr = red)",
@@ -4156,6 +4240,40 @@ fn inference_legend_lines(
             Span::styled("silicon ", Style::default().fg(colors::rgb(120, 180, 200))),
             Span::styled(
                 "= per-chip power/temp/AICLK (live)",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled(
+                ":8000 · chips 0,1 ",
+                Style::default().fg(colors::rgb(120, 180, 200))
+            ),
+            Span::styled(
+                "= port it answers on · chips it holds",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("roster ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled(
+                "(2+ models) down·compile·loading·serving·stalled",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("▸ ", Style::default().fg(colors::primary())),
+            Span::styled(
+                "= the model the snake features (loading wins)",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled(
+                "N in flight · M done ",
+                Style::default().fg(colors::text_secondary())
+            ),
+            Span::styled(
+                "= diffusion/video servers (no tok/s)",
                 Style::default().fg(dim)
             ),
         ]),
@@ -4343,59 +4461,118 @@ fn train_legend_lines(
             Line::from(v)
         }};
     }
+    // One line per thing the view draws, top of the screen to the bottom: the
+    // step band (starfield, chip rows, verdict, strip), then the loss river.
+    // Glyph colours match the view's own constants. The test
+    // `train_legend_documents_every_glyph_the_view_draws` ties the glyphs to
+    // `train_view::legend_channels`.
+    let teal = colors::rgb(116, 197, 223);
+    let purple = colors::rgb(180, 140, 230);
+    let amber = colors::rgb(246, 188, 66);
+    let mint = colors::rgb(124, 242, 156);
+    let label = colors::rgb(200, 230, 255);
     vec![
         ln!(vec![
-            Span::styled("●", Style::default().fg(colors::rgb(214, 92, 208))),
-            Span::styled(" → ", Style::default().fg(dim)),
-            Span::styled("●", Style::default().fg(colors::rgb(79, 209, 197))),
+            Span::styled("● ", Style::default().fg(colors::rgb(214, 92, 208))),
+            Span::styled("loss hue: ", Style::default().fg(dim)),
+            Span::styled("red", Style::default().fg(colors::rgb(255, 110, 120))),
+            Span::styled(" (untrained) → ", Style::default().fg(dim)),
+            Span::styled("cyan", Style::default().fg(colors::rgb(79, 209, 197))),
+            Span::styled(" (converged)", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("· ⠂ ", Style::default().fg(teal)),
+            Span::styled("◆ ", Style::default().fg(purple)),
+            Span::styled("✺ ", Style::default().fg(amber)),
             Span::styled(
-                "  loss: magenta chaos → teal converged",
+                "a step: normal / cache grew / checkpoint",
                 Style::default().fg(dim)
             ),
         ]),
         ln!(vec![
-            Span::styled("─", Style::default().fg(colors::rgb(242, 180, 62))),
-            Span::styled(" forward pass (left→right)", Style::default().fg(dim)),
-        ]),
-        ln!(vec![
-            Span::styled("∙", Style::default().fg(colors::rgb(150, 120, 240))),
-            Span::styled(" gradients (right→left)", Style::default().fg(dim)),
-        ]),
-        ln!(vec![
-            Span::styled("▁▄█", Style::default().fg(colors::rgb(180, 120, 200))),
+            Span::styled("↕ ", Style::default().fg(teal)),
             Span::styled(
-                " loss river — each column keeps its own value's hue",
+                "star height = wall time of that step",
                 Style::default().fg(dim)
             ),
         ]),
         ln!(vec![
-            Span::styled("▼", Style::default().fg(colors::rgb(124, 242, 156))),
+            Span::styled("┈ ", Style::default().fg(colors::rgb(80, 90, 115))),
+            Span::styled(
+                "median step time of the steps shown",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("(from bar) ", Style::default().fg(teal)),
+            Span::styled("times polled from a progress bar", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("chipN ", Style::default().fg(colors::rgb(200, 200, 120))),
+            Span::styled("row height = power / TDP; ", Style::default().fg(dim)),
+            Span::styled("coral", Style::default().fg(colors::rgb(255, 158, 138))),
+            Span::styled(" = aiclk dropped", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled(
+                "aiclk pcie host ",
+                Style::default().fg(colors::rgb(120, 180, 200))
+            ),
+            Span::styled("vs best / best seen / window max", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("verdict ", Style::default().fg(label)),
+            Span::styled(
+                "compiling · compute-bound (≥50% TDP) ·",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("        ", Style::default().fg(dim)),
+            Span::styled(
+                "host-bound (<30% TDP and host CPU >100%)",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("strip ", Style::default().fg(label)),
+            Span::styled(
+                "loss ↘↗→ per 100 logs · noise · best · lr",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("▁▄█ ", Style::default().fg(colors::rgb(180, 120, 200))),
+            Span::styled(
+                "loss mountains: each column keeps its own hue",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("▼", Style::default().fg(mint)),
             Span::styled(" improving   ", Style::default().fg(dim)),
             Span::styled("▲", Style::default().fg(colors::rgb(255, 138, 107))),
-            Span::styled(" regressing", Style::default().fg(dim)),
+            Span::styled(" regressing (header)", Style::default().fg(dim)),
         ]),
         ln!(vec![
-            Span::styled("█", Style::default().fg(colors::temp_color(70.0))),
-            Span::styled(" chip temp (varies with heat)", Style::default().fg(dim)),
-        ]),
-        ln!(vec![
-            Span::styled("▓", Style::default().fg(colors::rgb(200, 200, 120))),
-            Span::styled(" chip power draw", Style::default().fg(dim)),
-        ]),
-        ln!(vec![
-            Span::styled("░▒", Style::default().fg(colors::rgb(120, 180, 150))),
+            Span::styled("░▒ ", Style::default().fg(colors::rgb(120, 180, 150))),
             Span::styled(
-                " aurora + stars — sky opens as loss falls",
+                "aurora + stars: the sky opens as loss falls",
                 Style::default().fg(dim)
             ),
         ]),
         ln!(vec![
-            Span::styled("◆", Style::default().fg(colors::rgb(170, 120, 245))),
-            Span::styled(" kernel cache compiling → steady", Style::default().fg(dim)),
+            Span::styled("█ ", Style::default().fg(colors::temp_color(70.0))),
+            Span::styled("chip temp  ", Style::default().fg(dim)),
+            Span::styled("▓ ", Style::default().fg(colors::rgb(200, 200, 120))),
+            Span::styled("chip power draw", Style::default().fg(dim)),
         ]),
         ln!(vec![
-            Span::styled("✦", Style::default().fg(colors::rgb(124, 242, 156))),
-            Span::styled(" checkpoint saved", Style::default().fg(dim)),
+            Span::styled("✦ ", Style::default().fg(mint)),
+            Span::styled(
+                "checkpoint saved (comet in the river)",
+                Style::default().fg(dim)
+            ),
         ]),
     ]
 }
@@ -5546,6 +5723,8 @@ fn remote_inference_to_service_state(
         flat_ticks: 0,
         serving: ri.serving.as_ref().map(remote_serving_to_stats),
         media: ri.media.as_ref().map(remote_media_to_stats),
+        port: ri.port,
+        chips: ri.chips.clone(),
     }
 }
 
@@ -5569,7 +5748,8 @@ fn inference_roster_lines(
     width: usize,
 ) -> Vec<Line<'static>> {
     use crate::workload::inference_server::Phase;
-    if rows.len() < 2 || width < 12 {
+    // A row is marker (2) + tag (7) + gap (2) + at least 4 label characters.
+    if rows.len() < 2 || width < 15 {
         return Vec::new();
     }
     // Which service the snake is showing (mirror choose_behavior's priority).
@@ -5589,6 +5769,8 @@ fn inference_roster_lines(
         format!("inference services ({})", rows.len())
     };
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(shown + 1);
+    // Clipped to the width, so a narrow terminal does not clip it mid-word.
+    let header: String = header.chars().take(width).collect();
     lines.push(Line::from(Span::styled(
         header,
         Style::default()
@@ -5621,16 +5803,36 @@ fn inference_roster_lines(
                 None => String::new(),
             },
         };
-        // Truncate the label (char-safe) so marker+tag+label+stat fit `width`.
-        let fixed = 2
-            + 7
-            + 2
-            + if stat.is_empty() {
-                0
-            } else {
-                2 + stat.chars().count()
+        // Where it runs (`:8000 · chips 0,1`).
+        let mut placement = crate::workload::inference_server::placement_text(s.port, &s.chips);
+        let mut stat = stat;
+        // Columns left for the label once the marker, tag, gaps, placement and
+        // stat are placed. Negative means they do not fit at all.
+        let room = |placement: &str, stat: &str| -> isize {
+            let part = |t: &str| {
+                if t.is_empty() {
+                    0
+                } else {
+                    2 + t.chars().count()
+                }
             };
-        let label_w = width.saturating_sub(fixed).max(4);
+            width as isize - (2 + 7 + 2 + part(placement) + part(stat)) as isize
+        };
+        // Drop what can go, least important first, so the label keeps at
+        // least 4 characters: the placement when under 12 are left, then the
+        // live stat. A row that still cannot fit is skipped rather than drawn
+        // past the terminal edge, where it would be clipped.
+        if room(&placement, &stat) < 12 {
+            placement.clear();
+        }
+        if room(&placement, &stat) < 4 {
+            stat.clear();
+        }
+        if room(&placement, &stat) < 4 {
+            continue;
+        }
+        // Truncate the label (char-safe) so marker+tag+label+placement+stat fit `width`.
+        let label_w = room(&placement, &stat) as usize;
         let label: String = s.label.chars().take(label_w).collect();
 
         let mut spans = vec![
@@ -5652,6 +5854,10 @@ fn inference_roster_lines(
                 }),
             ),
         ];
+        if !placement.is_empty() {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(placement, Style::default().fg(colors::info())));
+        }
         if !stat.is_empty() {
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
@@ -5662,6 +5868,37 @@ fn inference_roster_lines(
         lines.push(Line::from(spans));
     }
     lines
+}
+
+/// One-line header for the `[i]` view when exactly one service is detected
+/// (the roster stays hidden for a single service, so this is where its port and
+/// chips show): `Model-Name  :8000 · chips 0,1`. Empty when the service has
+/// neither a known port nor chips, or `width` is too small to be useful.
+fn inference_single_service_line(
+    rows: &[crate::workload::inference_server::ServiceState],
+    width: usize,
+) -> Vec<Line<'static>> {
+    let [s] = rows else {
+        return Vec::new();
+    };
+    let placement = crate::workload::inference_server::placement_text(s.port, &s.chips);
+    if placement.is_empty() || width < 12 {
+        return Vec::new();
+    }
+    // Room for at least four label characters, or the line would run past the
+    // terminal width and clip the placement it exists to show.
+    let Some(label_w) = width
+        .checked_sub(2 + placement.chars().count())
+        .filter(|w| *w >= 4)
+    else {
+        return Vec::new();
+    };
+    let label: String = s.label.chars().take(label_w).collect();
+    vec![Line::from(vec![
+        Span::styled(label, Style::default().fg(colors::text_primary())),
+        Span::raw("  "),
+        Span::styled(placement, Style::default().fg(colors::info())),
+    ])]
 }
 
 /// Render a btop-style horizontal bar: `[████████░░░░░░░░]  42%`.
@@ -8070,11 +8307,114 @@ mod inference_roster_tests {
             flat_ticks: 0,
             serving: None,
             media: None,
+            port: None,
+            chips: Vec::new(),
         }
     }
 
     fn text(line: &ratatui::text::Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn roster_rows_show_port_and_chips() {
+        let mut a = svc("a", "Model-A", Phase::Ready);
+        a.port = Some(8000);
+        a.chips = vec![0, 1];
+        let mut b = svc("b", "Model-B", Phase::Loading);
+        b.port = Some(8002);
+        b.chips = vec![2];
+        let lines = inference_roster_lines(&[a, b], 80);
+        assert!(
+            text(&lines[1]).contains(":8000 · chips 0,1"),
+            "{}",
+            text(&lines[1])
+        );
+        assert!(
+            text(&lines[2]).contains(":8002 · chip 2"),
+            "{}",
+            text(&lines[2])
+        );
+    }
+
+    /// No roster line may be wider than the terminal at any width: a line
+    /// that is would be clipped by ratatui, silently losing the placement or
+    /// stat it exists to show. A row that cannot fit is skipped instead.
+    #[test]
+    fn roster_lines_never_exceed_the_width() {
+        let mut a = svc("a", "Model-With-A-Long-Name", Phase::Ready);
+        a.port = Some(8000);
+        a.chips = vec![0, 1, 2, 3];
+        a.serving = Some(serving_zero());
+        let mut b = svc("b", "B", Phase::Loading);
+        b.port = Some(8002);
+        b.chips = vec![4];
+        b.progress = Some(0.5);
+        let c = svc("c", "Third-Model", Phase::Down);
+        for width in 0..=120 {
+            for l in inference_roster_lines(&[a.clone(), b.clone(), c.clone()], width) {
+                assert!(
+                    l.width() <= width,
+                    "width {width}: {:?} is {} wide",
+                    text(&l),
+                    l.width()
+                );
+            }
+        }
+        // Below the narrowest useful width there is no roster at all.
+        assert!(inference_roster_lines(&[a.clone(), b.clone()], 14).is_empty());
+        // Just above it, every row has a label of at least four characters.
+        let rows = inference_roster_lines(&[a, b], 15);
+        assert!(rows.len() >= 2, "{rows:?}");
+    }
+
+    #[test]
+    fn roster_drops_placement_before_squeezing_the_label() {
+        let mut a = svc("a", "Model-A", Phase::Ready);
+        a.port = Some(8000);
+        a.chips = vec![0, 1, 2, 3];
+        let lines = inference_roster_lines(&[a, svc("b", "B", Phase::Down)], 24);
+        assert!(!text(&lines[1]).contains("chips"), "{}", text(&lines[1]));
+        assert!(text(&lines[1]).contains("Model-A"));
+    }
+
+    #[test]
+    fn single_service_gets_a_placement_line() {
+        use super::inference_single_service_line;
+        let mut a = svc("a", "Model-A", Phase::Ready);
+        assert!(inference_single_service_line(&[a.clone()], 80).is_empty());
+        a.port = Some(8000);
+        a.chips = vec![0, 1];
+        let l = inference_single_service_line(&[a.clone()], 80);
+        assert_eq!(text(&l[0]), "Model-A  :8000 · chips 0,1");
+        // Two services use the roster, not this line.
+        assert!(inference_single_service_line(&[a.clone(), a], 80).is_empty());
+    }
+
+    /// The line must never be wider than the terminal: a width that cannot
+    /// hold four label characters plus the placement gets no line at all,
+    /// rather than a line the terminal clips.
+    #[test]
+    fn single_service_line_never_exceeds_the_width() {
+        use super::inference_single_service_line;
+        let mut a = svc("a", "Model-With-A-Long-Name", Phase::Ready);
+        a.port = Some(8000);
+        a.chips = vec![0, 1];
+        for width in 0..=60 {
+            for l in inference_single_service_line(&[a.clone()], width) {
+                assert!(
+                    l.width() <= width,
+                    "width {width}: {:?} is {} wide",
+                    text(&l),
+                    l.width()
+                );
+            }
+        }
+        // 12 columns cannot hold ":8000 · chips 0,1" (17) and a label.
+        assert!(inference_single_service_line(&[a.clone()], 12).is_empty());
+        // 17 + 2 + 4 = 23 is the narrowest that fits.
+        assert!(inference_single_service_line(&[a.clone()], 22).is_empty());
+        assert_eq!(inference_single_service_line(&[a], 23).len(), 1);
     }
 
     #[test]
@@ -8286,6 +8626,8 @@ mod remote_mapper_tests {
             progress: Some(1.0),
             serving: Some(serving),
             media: None,
+            port: None,
+            chips: Vec::new(),
         };
         let state = remote_inference_to_service_state(&ri);
         assert_eq!(state.key, "vllm-llama3-70b");
@@ -8328,6 +8670,8 @@ mod remote_mapper_tests {
             progress: None,
             serving: None,
             media: None,
+            port: None,
+            chips: Vec::new(),
         };
         let state = remote_inference_to_service_state(&down);
         assert_eq!(state.phase, Phase::Down);
@@ -8342,6 +8686,8 @@ mod remote_mapper_tests {
             progress: Some(0.4),
             serving: None,
             media: None,
+            port: None,
+            chips: Vec::new(),
         };
         let state = remote_inference_to_service_state(&loading);
         assert_eq!(state.phase, Phase::Loading);
@@ -8358,6 +8704,8 @@ mod remote_mapper_tests {
             progress: None,
             serving: None,
             media: None,
+            port: None,
+            chips: Vec::new(),
         };
         let state = remote_inference_to_service_state(&ri);
         assert_eq!(state.phase, Phase::Down);
@@ -8388,6 +8736,8 @@ mod remote_mapper_tests {
                 inference_avg_s: 0.0,
                 warmup_avg_s: 0.0,
             }),
+            port: None,
+            chips: Vec::new(),
         };
         let state = remote_inference_to_service_state(&ri);
         assert!(state.serving.is_none());
@@ -8442,12 +8792,14 @@ mod host_default_screen_tests {
         );
     }
 
-    /// The Training legend must document every one of the view's nine colour
-    /// channels (loss, forward, gradients, river history, delta direction,
-    /// chip temp/power, aurora, cache, checkpoint) — not just render *some*
-    /// lines.
+    /// The Training `l` overlay must document every glyph the view's own
+    /// bottom legend row lists (`train_view::legend_channels`), every row of
+    /// the step band, and nothing the view no longer draws. The old overlay
+    /// described a transformer node grid with forward and gradient sweeps that
+    /// had been replaced by the starfield, and the test that was meant to guard
+    /// it only checked the overlay against its own previous wording.
     #[test]
-    fn train_legend_documents_every_colour_channel() {
+    fn train_legend_documents_every_glyph_the_view_draws() {
         use super::{colors, train_legend_lines};
 
         let lines = train_legend_lines(
@@ -8455,47 +8807,173 @@ mod host_default_screen_tests {
             colors::rgb(0, 0, 0),
             colors::rgb(120, 120, 120),
         );
-        // Per-line text, lowercased, so a dropped line is caught even when its
-        // one distinguishing word ("loss") also appears on another line — a
-        // single pooled-and-joined blob (the previous version of this test)
-        // can't tell "the loss river line is gone" from "the loss line moved".
-        let line_texts: Vec<String> = lines
+        let all: String = lines
             .iter()
             .map(|l| {
                 l.spans
                     .iter()
                     .map(|s| s.content.to_string())
                     .collect::<String>()
-                    .to_lowercase()
             })
-            .collect();
-        let all = line_texts.join("\n");
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lower = all.to_lowercase();
 
-        // Every one of the nine colour channels must have its own line with
-        // its own distinguishing text.
-        let expected_per_line: [&str; 10] = [
-            "loss: magenta chaos", // loss
-            "forward pass",        // forward
-            "gradients",           // gradients (backward)
-            "loss river",          // loss history (river)
-            "improving",           // delta direction (▼/▲ on one line)
-            "chip temp",           // chip temp
-            "chip power draw",     // chip power
-            "aurora",              // aurora + stars
-            "cache compiling",     // kernel cache
-            "checkpoint saved",    // checkpoint
-        ];
-        for needle in expected_per_line {
+        // 1. Every glyph in the view's own legend row is explained here.
+        for (glyph, label, _) in crate::animation::train_view::legend_channels(colors::rgb(1, 2, 3))
+        {
             assert!(
-                line_texts.iter().any(|t| t.contains(needle)),
-                "legend is missing a line containing {needle:?}; got:\n{all}"
+                all.contains(glyph),
+                "overlay never shows {glyph:?} ({label}), which the view's legend row lists:\n{all}"
             );
         }
-        assert_eq!(
-            lines.len(),
-            expected_per_line.len(),
-            "expected exactly one line per channel entry, got:\n{all}"
+        // 2. The band's own vocabulary: star glyph, median horizon, the three
+        //    kinds of row and the two lines under them.
+        for needle in [
+            "⠂",
+            "┈",
+            "star height",
+            "median",
+            "(from bar)",
+            "chipn",
+            "tdp",
+            "aiclk",
+            "pcie",
+            "host",
+            "compute-bound",
+            "host-bound",
+            "compiling",
+            "per 100 logs",
+            "mountains",
+            "aurora",
+            "checkpoint",
+        ] {
+            assert!(
+                lower.contains(needle),
+                "legend is missing {needle:?}:\n{all}"
+            );
+        }
+        // 3. Nothing the view no longer draws.
+        for gone in [
+            "forward pass",
+            "gradients",
+            "attention head",
+            "transformer block",
+        ] {
+            assert!(
+                !lower.contains(gone),
+                "legend still describes {gone:?}:\n{all}"
+            );
+        }
+    }
+
+    /// Plain text of an overlay, one string per line, border prefix included.
+    fn overlay_text(panel: super::OverlayPanel, mode: super::DisplayMode) -> String {
+        super::overlay_lines(panel, mode, 80)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The `l` and `!` text must say what each view draws now. Each check ties
+    /// the text to the thing it describes (the real formatter or glyph
+    /// constant) where one exists, so a rename in the view breaks the test
+    /// instead of leaving the text behind.
+    #[test]
+    fn legend_and_explain_text_names_what_the_views_draw() {
+        use super::{DisplayMode as M, OverlayPanel as P};
+
+        // Training: the step band, and nothing from the removed node grid.
+        let explain = overlay_text(P::Explain, M::Training);
+        for needle in ["STEP ANATOMY", "(from bar)", "verdict", "convergence strip"] {
+            assert!(
+                explain.contains(needle),
+                "Training ! lacks {needle:?}:\n{explain}"
+            );
+        }
+        for gone in ["transformer block", "attention head", "gradients flow"] {
+            assert!(
+                !explain.contains(gone),
+                "Training ! still says {gone:?}:\n{explain}"
+            );
+        }
+
+        // Inference: the port and chips text, in the form the view prints it.
+        let placement = crate::workload::inference_server::placement_text(Some(8000), &[0, 1]);
+        for panel in [P::Legend, P::Explain] {
+            let text = overlay_text(panel, M::InferenceMonitor).to_lowercase();
+            for needle in ["roster", "chips", "port"] {
+                assert!(
+                    text.contains(needle),
+                    "Inference {panel:?} does not mention {needle:?}:\n{text}"
+                );
+            }
+        }
+        let legend = overlay_text(P::Legend, M::InferenceMonitor);
+        assert!(
+            legend.contains(&placement),
+            "Inference legend does not show {placement:?}:\n{legend}"
         );
+
+        // HivemindSweeper: the reset row glyph the feed actually prefixes.
+        let glyph = crate::ui::tui::hivemind_view::RESET_GLYPH;
+        for panel in [P::Legend, P::Explain] {
+            let text = overlay_text(panel, M::HivemindSweeper);
+            assert!(
+                text.contains(glyph),
+                "Hivemind {panel:?} lacks {glyph:?}:\n{text}"
+            );
+        }
+
+        // Defrag and Memory Castle: the bad-sector / gate markers their
+        // legends already list.
+        for mode in [M::Defrag, M::MemoryCastle] {
+            for panel in [P::Legend, P::Explain] {
+                let text = overlay_text(panel, mode);
+                assert!(
+                    text.contains("BIST"),
+                    "{mode:?} {panel:?} lacks BIST:\n{text}"
+                );
+            }
+        }
+
+        // Insights: the GDDR channel counts shown on every panel.
+        let insights =
+            overlay_text(P::Legend, M::Insights) + &overlay_text(P::Explain, M::Insights);
+        for needle in ["trn", "hv", "flt", "BIST"] {
+            assert!(
+                insights.contains(needle),
+                "Insights lacks {needle:?}:\n{insights}"
+            );
+        }
+
+        // Help: the status-bar segment and the flag that controls it.
+        let help = overlay_text(P::Help, M::Insights);
+        for needle in ["⟳ tt-smi -r", "✓ tt-smi -r", "--tt-smi-reset-behavior"] {
+            assert!(help.contains(needle), "Help lacks {needle:?}:\n{help}");
+        }
+    }
+
+    /// A Help row's label must never run into its description: every row that
+    /// has a description has at least one space between them.
+    #[test]
+    fn help_rows_keep_a_gap_between_label_and_description() {
+        use super::{DisplayMode as M, OverlayPanel as P};
+        let help = overlay_text(P::Help, M::Insights);
+        for needle in [
+            "/serve [bind:port] broadcast",
+            "/remote [n|box] discover",
+            "⟳ tt-smi -r a reset",
+            "--tt-smi-reset-behavior ignore",
+        ] {
+            assert!(help.contains(needle), "{needle:?} has no gap:\n{help}");
+        }
     }
 
     /// The explain panels are prose. They used to be hand-broken to a width
@@ -8980,6 +9458,8 @@ pub fn run_render_bench(
             flat_ticks: 0,
             serving,
             media: None,
+            port: None,
+            chips: Vec::new(),
         };
         // 4 models → the featured one Feeds the full serving dashboard, and the
         // roster lists all four (the multi-model case the view now handles).

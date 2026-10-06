@@ -154,12 +154,12 @@ fn severity_style(sev: Severity) -> Style {
 /// so a reset row visually pops rather than blending in as an ordinary log
 /// line (an ordinary driver warning is `Severity::Warn`'s orange). Additive:
 /// applied alongside (not instead of) the row's existing severity coloring.
-fn reset_accent() -> Color {
+pub(crate) fn reset_accent() -> Color {
     colors::rgb(255, 70, 220)
 }
 
 /// Glyph prefixed onto a reset row's display text — see `reset_accent`.
-const RESET_GLYPH: &str = "⚡";
+pub(crate) const RESET_GLYPH: &str = "⚡";
 
 fn collector_glyph(status: &CollectorStatus) -> (&'static str, Color) {
     match status {
@@ -864,6 +864,13 @@ pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'stati
             ),
         ]),
         ln!(vec![
+            Span::styled("⚡     ", Style::default().fg(reset_accent())),
+            Span::styled(
+                "= a tt-smi -r reset; warms the chips it targets",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
             Span::styled(
                 "FOCUS      ",
                 Style::default().fg(colors::rgb(200, 230, 255))
@@ -958,6 +965,11 @@ pub(crate) const EXPLAIN_TEXT: &[&str] = &[
     "events (e.g. device-poll open/close churn) into one",
     "row with a running count and events/sec rate, for",
     "whichever cell is selected (or every row, unified).",
+    "",
+    "A tt-smi -r run in another terminal appears as a magenta",
+    "⚡ row and warms the cell of each chip it targets (the",
+    "Host column when none could be resolved). It gets no",
+    "takeover animation here, only this row.",
     "",
     "The FOCUS pane names the busiest cell and describes it — heat, events,",
     "rate, worst severity, age, and its top coalesced rows — and tracks that",

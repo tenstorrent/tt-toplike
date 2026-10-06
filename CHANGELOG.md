@@ -14,6 +14,22 @@ git tag                        # released versions
 
 ## Recent releases
 
+Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
+list is a summary and is not kept for every release.
+
+### 0.13.10
+- **Add**: Inference view (`i`) shows the port and chips each model runs on,
+  for example `:8000 · chips 0,1`, on each roster row or in a header line for a
+  single model.
+- **Add**: `--tt-smi-reset-behavior` (`ignore`, `inform` default, `dazzle`,
+  `demo`). A `tt-smi -r` in another terminal shows in the status bar of every
+  view. `dazzle` adds a takeover box with one of five animations (Quiet
+  Notice, 128 Blackholes, a BBS sysop chatbot, TT-TREKLIKE, Silly Cetacean);
+  `demo` plays all five at start and on every real reset.
+- **Change**: the legend (`l`) and explain (`!`) text for the Training,
+  Inference, HivemindSweeper, Insights, Defrag and Memory Castle views matches
+  what they draw now; the Help panel shows the reset status segment.
+
 ### 0.11.0
 - **Add**: Training view (`t`) — a full-screen visualization of a live
   tt-train run, drawn as the network it is: a character grid of transformer

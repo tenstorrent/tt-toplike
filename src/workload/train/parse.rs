@@ -8,6 +8,7 @@
 //!
 //! ```text
 //! Step: {step}, Loss: {loss}, Time: {ms} ms, cache entries: {n}   (nano_gpt)
+//! Step: {step}, Loss: {loss}, Time: {ms} ms                       (tt-tnt harness, no cache count)
 //! Step: {step} Loss: {loss}                          (linear_regression)
 //! Step: {step} | Average Loss: {loss}                       (mnist_mlp)
 //! Max steps {N}
@@ -48,6 +49,14 @@ pub enum TrainEvent {
         ms: f32,
         cache_entries: u32,
     },
+    /// A step line with a wall time and no program-cache count. A trainer
+    /// that times its own steps but has no cache to report (the tt-tnt
+    /// harness, which drives ttml from Python) prints this shape.
+    StepAndMs {
+        step: u64,
+        loss: f32,
+        ms: f32,
+    },
     MaxSteps(u64),
     BatchSize(u32),
     GradAccum(u32),
@@ -76,6 +85,15 @@ pub enum TrainEvent {
         batch_size: u32,
         seq_len: u32,
     },
+    /// A resumed run's own statement of where it started and where it ends,
+    /// in absolute steps. tt-tnt prints it after the run header:
+    /// `resumed from <ckpt> at step 38346 (...); running 25560 more steps to
+    /// step 63906`. The header's `steps=` is only the steps this process runs,
+    /// so this line is the source of the run's absolute budget.
+    Resumed {
+        start_step: u64,
+        end_step: u64,
+    },
 }
 
 /// The integer immediately following `key` in a `key=value` line.
@@ -86,6 +104,19 @@ fn kv_num(s: &str, key: &str) -> Option<u64> {
         .chars()
         .take_while(char::is_ascii_digit)
         .collect();
+    digits.parse().ok()
+}
+
+/// The unsigned integer at the start of `s`, after any leading spaces.
+/// `None` when the digit run is followed by a thousands separator (`38,346`),
+/// because the digits before the comma are a different number.
+fn digits_after(s: &str) -> Option<u64> {
+    let s = s.trim_start();
+    let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
+    let mut tail = s[digits.len()..].chars();
+    if tail.next() == Some(',') && tail.next().is_some_and(|c| c.is_ascii_digit()) {
+        return None;
+    }
     digits.parse().ok()
 }
 
@@ -101,6 +132,7 @@ pub fn parse_train_line(line: &str) -> Option<TrainEvent> {
     // on the pieces rather than on one exact layout:
     //
     //   nano_gpt           Step: 2431, Loss: 1.8342, Time: 1124.5 ms, cache entries: 21
+    //   tt-tnt harness     Step: 25565, Loss: 3.1367, Time: 285.0 ms
     //   linear_regression  Step: 7 Loss: 0.4213
     //   mnist_mlp          Step:    42 | Average Loss: 0.1337
     //
@@ -128,11 +160,16 @@ pub fn parse_train_line(line: &str) -> Option<TrainEvent> {
         let step = step_s.parse().ok()?;
         let loss = loss_s.trim().parse().ok()?;
 
-        // Optional trailing "Time: {} ms" and "cache entries: {}".
+        // Optional trailing "Time: {} ms" and "cache entries: {}". A step time
+        // must be a finite, positive number: `nan`, `inf`, zero or a negative
+        // would give an infinite or negative tokens/s and a false sample in the
+        // step history. Such a time is dropped, not guessed, and the line is
+        // read as a plain step.
         let ms = tail
             .find("Time:")
             .and_then(|i| tail[i + "Time:".len()..].split_once("ms"))
-            .and_then(|(v, _)| v.trim().parse::<f32>().ok());
+            .and_then(|(v, _)| v.trim().parse::<f32>().ok())
+            .filter(|ms| ms.is_finite() && *ms > 0.0);
         let cache = tail
             .find("cache entries:")
             .and_then(|i| {
@@ -150,6 +187,7 @@ pub fn parse_train_line(line: &str) -> Option<TrainEvent> {
                 ms,
                 cache_entries,
             },
+            (Some(ms), None) => TrainEvent::StepAndMs { step, loss, ms },
             _ => TrainEvent::Step { step, loss },
         });
     }
@@ -178,19 +216,39 @@ pub fn parse_train_line(line: &str) -> Option<TrainEvent> {
                 total.parse::<u64>().ok()?,
             ))
         });
-        // `loss=`, but not the tail of `train_loss=` / `val_loss=`, which
-        // are different quantities reported by other harnesses.
-        let loss = line.match_indices("loss=").find_map(|(i, _)| {
-            let prev = line[..i].chars().next_back();
-            if matches!(prev, Some(c) if c == '_') {
-                return None;
-            }
-            let v: String = line[i + "loss=".len()..]
-                .chars()
-                .take_while(|c| !c.is_whitespace() && *c != ',' && *c != ']')
-                .collect();
-            v.parse::<f32>().ok()
-        });
+        // The raw text of the postfix value `key=` names, matched as a whole
+        // key: `loss=` does not match the tail of `train_loss=` or
+        // `val_loss=`.
+        let postfix = |key: &str| -> Option<String> {
+            line.match_indices(key).find_map(|(i, _)| {
+                let prev = line[..i].chars().next_back();
+                if matches!(prev, Some(c) if c == '_' || c.is_alphanumeric()) {
+                    return None;
+                }
+                Some(
+                    line[i + key.len()..]
+                        .chars()
+                        .take_while(|c| !c.is_whitespace() && *c != ',' && *c != ']')
+                        .collect(),
+                )
+            })
+        };
+        // The loss, in order of preference:
+        // * a standalone `loss=` (ttml's SFTTrainer: `loss=1.2345, lr=...`);
+        // * else `train_loss=` (the tt-tnt harness's bar:
+        //   `61/6391 [00:19<30:41,  3.43it/s, train_loss=3.1016, val_loss=3.0977]`).
+        // Either must be a finite number. `nan`, `inf` or text drops the frame
+        // (a non-finite standalone `loss=` does not fall back to `train_loss=`),
+        // so no placeholder point reaches the loss curve.
+        // `val_loss=` is never used. In tt-tnt's bar it is ttml's placeholder
+        // copy of the train loss, and in SFTTrainer's eval variant it is a
+        // different quantity from the training loss.
+        let loss = match postfix("loss=") {
+            Some(v) => v.parse::<f32>().ok().filter(|l| l.is_finite()),
+            None => postfix("train_loss=")
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|l| l.is_finite()),
+        };
         if let (Some((step, max_steps)), Some(loss)) = (counter, loss) {
             return Some(TrainEvent::BarProgress {
                 step,
@@ -198,6 +256,47 @@ pub fn parse_train_line(line: &str) -> Option<TrainEvent> {
                 loss,
             });
         }
+    }
+
+    // A resumed run's statement of its absolute range, e.g.
+    //   "resumed from artifacts/x/tt_tnt_step00038346.pkl at step 38346
+    //    (created_at=...); running 25560 more steps to step 63906"
+    // The end comes from `to step E`, or from `running M more steps` as
+    // start + M. A line that yields neither is skipped: the budget is never
+    // guessed. Checked before the header shape, which it does not match.
+    if let Some(i) = line.find("resumed from") {
+        let rest = &line[i..];
+        let start = rest
+            .find("at step")
+            .and_then(|j| digits_after(&rest[j + "at step".len()..]));
+        // A `to step` that is present but unreadable ends the parse: falling
+        // back to `running M` would hide a garbled number.
+        let end = match rest.rfind("to step") {
+            Some(j) => digits_after(&rest[j + "to step".len()..]),
+            None => {
+                let m = rest.find("running").and_then(|j| {
+                    let t = &rest[j + "running".len()..];
+                    // Only `running M more steps` counts, so a stray
+                    // "running" elsewhere on the line cannot supply M.
+                    let m = digits_after(t)?;
+                    t.trim_start()
+                        .trim_start_matches(|c: char| c.is_ascii_digit())
+                        .trim_start()
+                        .starts_with("more steps")
+                        .then_some(m)
+                })?;
+                start?.checked_add(m)
+            }
+        };
+        return match (start, end) {
+            (Some(start_step), Some(end_step)) if end_step >= start_step => {
+                Some(TrainEvent::Resumed {
+                    start_step,
+                    end_step,
+                })
+            }
+            _ => None,
+        };
     }
 
     // A Python harness's own run summary. tt-tnt prints, on one line:
@@ -410,6 +509,81 @@ mod tests {
         );
     }
 
+    /// tt-tnt's bar, verbatim from a live resumed run's log. Its postfix is
+    /// `train_loss=` (the bar's `val_loss=` is ttml's placeholder copy of the
+    /// train loss). The parser used to accept only a standalone `loss=`, so
+    /// none of these frames parsed and the view saw one step per chunk end
+    /// (6391 steps, about 28 minutes apart).
+    #[test]
+    fn parses_tt_tnt_bar_frames_that_carry_train_loss() {
+        assert_eq!(
+            parse_train_line(
+                "  0%|          | 1/6391 [00:00<1:19:34,  1.34it/s, train_loss=3.0117, val_loss=3.0117]"
+            ),
+            Some(TrainEvent::BarProgress {
+                step: 1,
+                max_steps: 6391,
+                loss: 3.0117,
+            }),
+        );
+        assert_eq!(
+            parse_train_line(
+                "  1%|          | 61/6391 [00:19<30:41,  3.43it/s, train_loss=3.1016, val_loss=3.0977]"
+            ),
+            Some(TrainEvent::BarProgress {
+                step: 61,
+                max_steps: 6391,
+                loss: 3.1016,
+            }),
+            "the bar's val_loss is never the loss",
+        );
+        assert_eq!(
+            parse_train_line(
+                " 95%|\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{258d}| 6053/6391 [25:58<01:34,  3.57it/s, train_loss=3.2070, val_loss=3.2305]"
+            ),
+            Some(TrainEvent::BarProgress {
+                step: 6053,
+                max_steps: 6391,
+                loss: 3.2070,
+            }),
+        );
+        // The first frame has no postfix yet, so it carries no loss.
+        assert_eq!(
+            parse_train_line("  0%|          | 0/6391 [00:00<?, ?it/s]"),
+            None
+        );
+    }
+
+    /// A standalone `loss=` wins over `train_loss=`, `val_loss=` alone is
+    /// never a loss, and a `train_loss=` that is not a finite number drops the
+    /// frame. A placeholder value would put a false point on the curve.
+    #[test]
+    fn the_bar_loss_prefers_loss_then_train_loss_and_never_val_loss() {
+        let frame =
+            |postfix: &str| format!(" 10%|#         | 30/250 [00:45<05:30,  1.50s/it, {postfix}]");
+        let loss_of = |postfix: &str| match parse_train_line(&frame(postfix)) {
+            Some(TrainEvent::BarProgress { loss, .. }) => Some(loss),
+            None => None,
+            other => panic!("{postfix}: unexpected {other:?}"),
+        };
+        assert_eq!(
+            loss_of("train_loss=2.5000, loss=1.2345, lr=3.00e-04"),
+            Some(1.2345)
+        );
+        assert_eq!(loss_of("loss=1.2345, train_loss=2.5000"), Some(1.2345));
+        assert_eq!(loss_of("train_loss=2.5000, val_loss=9.0000"), Some(2.5));
+        assert_eq!(loss_of("val_loss=0.9500"), None);
+        assert_eq!(loss_of("val_loss=0.9500, lr=3.00e-04"), None);
+        assert_eq!(loss_of("train_loss=nan, val_loss=nan"), None);
+        // The standalone form gets the same guard.
+        assert_eq!(loss_of("loss=nan, lr=3.00e-04"), None);
+        assert_eq!(loss_of("loss=inf"), None);
+        assert_eq!(loss_of("loss=-inf, train_loss=2.5000"), None);
+        assert_eq!(loss_of("train_loss=inf"), None);
+        assert_eq!(loss_of("train_loss=garbage"), None);
+        assert_eq!(loss_of("train_loss="), None);
+    }
+
     /// A bar's step, budget and loss must all reach the state, or the run
     /// has no curve, no progress and no ETA.
     #[test]
@@ -614,5 +788,139 @@ mod tests {
             Some(TrainEvent::Step { loss, .. }) => assert!((loss - 0.12).abs() < 1e-6),
             other => panic!("expected Step, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_step_line_with_a_time_and_no_cache_count_carries_the_time() {
+        let ev = parse_train_line("Step: 25565, Loss: 3.1367, Time: 285.0 ms").unwrap();
+        assert_eq!(
+            ev,
+            TrainEvent::StepAndMs {
+                step: 25565,
+                loss: 3.1367,
+                ms: 285.0
+            }
+        );
+    }
+
+    /// A step time that is not a finite positive number is dropped, for both
+    /// timed shapes (with and without a cache count). The step and loss still
+    /// arrive, as a plain `Step`.
+    #[test]
+    fn a_non_finite_or_non_positive_step_time_is_dropped() {
+        for bad in ["nan", "inf", "-inf", "0", "0.0", "-285.0"] {
+            let plain = format!("Step: 9, Loss: 2.5, Time: {bad} ms");
+            assert_eq!(
+                parse_train_line(&plain),
+                Some(TrainEvent::Step { step: 9, loss: 2.5 }),
+                "{plain}"
+            );
+            let cached = format!("Step: 9, Loss: 2.5, Time: {bad} ms, cache entries: 21");
+            assert_eq!(
+                parse_train_line(&cached),
+                Some(TrainEvent::Step { step: 9, loss: 2.5 }),
+                "{cached}"
+            );
+        }
+        // A good time is untouched.
+        assert!(matches!(
+            parse_train_line("Step: 9, Loss: 2.5, Time: 0.5 ms"),
+            Some(TrainEvent::StepAndMs { step: 9, .. })
+        ));
+    }
+
+    #[test]
+    fn the_other_step_shapes_are_unchanged() {
+        assert!(matches!(
+            parse_train_line("Step: 2431, Loss: 1.8342, Time: 1124.5 ms, cache entries: 21"),
+            Some(TrainEvent::StepAndTime {
+                step: 2431,
+                cache_entries: 21,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_train_line("Step: 7 Loss: 0.4213"),
+            Some(TrainEvent::Step { step: 7, .. })
+        ));
+        // A time that does not parse is dropped, not guessed.
+        assert!(matches!(
+            parse_train_line("Step: 8, Loss: 0.5, Time: soon ms"),
+            Some(TrainEvent::Step { step: 8, .. })
+        ));
+        // A cache count with no time is still a plain step.
+        assert!(matches!(
+            parse_train_line("Step: 9, Loss: 0.5, cache entries: 4"),
+            Some(TrainEvent::Step { step: 9, .. })
+        ));
+    }
+
+    const RESUME_LINE: &str = "  resumed from artifacts/checkpoints-storyreg-s20260815/tt_tnt_step00038346.pkl at step 38346 (created_at=2026-10-02T03:28:05.992431+00:00); running 25560 more steps to step 63906";
+
+    #[test]
+    fn parses_the_resume_line_with_its_absolute_range() {
+        assert_eq!(
+            parse_train_line(RESUME_LINE),
+            Some(TrainEvent::Resumed {
+                start_step: 38346,
+                end_step: 63906
+            })
+        );
+    }
+
+    #[test]
+    fn a_resume_line_without_to_step_uses_start_plus_more_steps() {
+        assert_eq!(
+            parse_train_line(
+                "  resumed from x.pkl at step 100 (created_at=z); running 50 more steps"
+            ),
+            Some(TrainEvent::Resumed {
+                start_step: 100,
+                end_step: 150
+            })
+        );
+    }
+
+    #[test]
+    fn a_truncated_or_garbled_resume_line_is_skipped() {
+        for l in [
+            "  resumed from x.pkl",
+            "  resumed from x.pkl at step (created_at=z); running 50 more steps to step 9",
+            "  resumed from x.pkl at step 100 (created_at=z); running soon",
+            "  resumed from x.pkl at step 100 (created_at=z); running fifty more steps",
+            // An end before the start is unreadable.
+            "  resumed from x.pkl at step 100 (created_at=z); running 5 more steps to step 50",
+        ] {
+            assert_eq!(parse_train_line(l), None, "{l}");
+        }
+    }
+
+    #[test]
+    fn a_thousands_separator_in_the_resume_line_gives_none() {
+        for l in [
+            "  resumed from x.pkl at step 38,346 (created_at=z); running 25,560 more steps to step 63,906",
+            "  resumed from x.pkl at step 38346 (created_at=z); running 25560 more steps to step 63,906",
+            "  resumed from x.pkl at step 100 (created_at=z); running 2,500 more steps",
+        ] {
+            assert_eq!(parse_train_line(l), None, "{l}");
+        }
+    }
+
+    #[test]
+    fn the_run_header_and_val_lines_still_parse_beside_the_resume_line() {
+        assert_eq!(
+            parse_train_line(
+                "tt-tnt training \u{2014} steps=25560 batch=64 seq_len=512 arch=blackhole"
+            ),
+            Some(TrainEvent::HarnessSummary {
+                max_steps: 25560,
+                batch_size: 64,
+                seq_len: 512
+            })
+        );
+        assert!(matches!(
+            parse_train_line("  step=  38340 train_loss=3.1 val_loss=3.2 lr=3.0e-4"),
+            Some(TrainEvent::Step { step: 38340, .. })
+        ));
     }
 }
