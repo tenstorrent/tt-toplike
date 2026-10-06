@@ -755,3 +755,16 @@ The three code fixes each have a test that was seen to fail with the fix
 reverted. One of my tests passed vacuously the first time: the mutation script
 could not find the code after `cargo fmt` reflowed it, so no mutation was
 applied. Re-run against the reflowed code, it fails as it should.
+
+### Third review pass on the reset PR (Oct 6, 2026)
+
+- **A duplicated reset target bumped one Hivemind cell twice.** `reset_detect`
+  keeps duplicates on a subset reset (`tt-smi -r 0 0` is two raw targets), and
+  `inject_reset` bumped the grid once per entry, so one chip looked twice as
+  active. The contract says one bump per affected chip, so `inject_reset` now
+  dedupes the ids itself (first-seen order), which protects every caller. The
+  test compares `[1, 1]` with `[1]` and `[1, 3]` with `[1]`, so it is not
+  vacuous, and was seen to fail without the dedupe.
+- **Open thread "align PR metadata with five takeovers".** The title and
+  description were already rewritten; the description now drops the sentence
+  that recounted the removed variants, which read as the old claim.
