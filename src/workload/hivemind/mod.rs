@@ -275,8 +275,19 @@ impl Hivemind {
     /// uses for a collector-sourced event, plus one heat-grid bump per
     /// actually-affected chip — not a fake amplitude multiplier — so a
     /// full-box reset visibly lights up wider than a single-chip one.
+    ///
+    /// `device_indices` may name a chip twice (`tt-smi -r 0 0` keeps both
+    /// copies, as the raw target count). A chip is bumped once however often it
+    /// is named, in first-seen order, so a duplicated target does not make one
+    /// chip look twice as active.
     pub fn inject_reset(&mut self, text: String, device_indices: &[u8]) {
         let now = Instant::now();
+        let mut seen = std::collections::HashSet::new();
+        let device_indices: Vec<u8> = device_indices
+            .iter()
+            .copied()
+            .filter(|d| seen.insert(*d))
+            .collect();
         let device = device_indices.first().copied();
         let ev = SniffEvent {
             ts: now,
@@ -290,7 +301,7 @@ impl Hivemind {
         if device_indices.is_empty() {
             self.grid.bump_at(Source::TtSmi, None, now);
         } else {
-            for &d in device_indices {
+            for &d in &device_indices {
                 self.grid.bump_at(Source::TtSmi, Some(d), now);
             }
         }
@@ -526,6 +537,25 @@ mod inject_reset_tests {
         // Both targeted chips got a real heat-grid bump — not just device 0.
         assert!(hive.grid().heat(Source::TtSmi, Column::Device(0)) > 0.0);
         assert!(hive.grid().heat(Source::TtSmi, Column::Device(2)) > 0.0);
+    }
+
+    /// `tt-smi -r 1 1` names chip 1 twice. It must be bumped once, not twice,
+    /// so it reads the same as `tt-smi -r 1`.
+    #[test]
+    fn inject_reset_bumps_a_duplicated_chip_once() {
+        let heat_of = |ids: &[u8]| {
+            let mut hive = Hivemind::new();
+            hive.inject_reset("tt-smi -r".to_string(), ids);
+            (
+                hive.grid().heat(Source::TtSmi, Column::Device(1)),
+                hive.grid().heat(Source::TtSmi, Column::Device(3)),
+            )
+        };
+        assert_eq!(heat_of(&[1, 1]), heat_of(&[1]));
+        assert_eq!(heat_of(&[1, 3, 1, 3, 1]), heat_of(&[1, 3]));
+        // Sanity: the guard is not vacuous. Naming a second chip does change
+        // the grid.
+        assert_ne!(heat_of(&[1, 3]), heat_of(&[1]));
     }
 
     #[test]
