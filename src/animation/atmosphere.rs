@@ -7,6 +7,8 @@
 //! [`ServiceState`]; see the spec for the table. Everything here is deterministic:
 //! no randomness, positions come from a spatial hash, motion from a frame counter.
 
+use crate::animation::hsv_to_rgb;
+use crate::animation::train_sky::{aurora, sky_cell, star_hash, STAR_THRESHOLD};
 use crate::workload::inference_server::{Phase, ServiceState};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -149,6 +151,156 @@ pub fn composite(canvas: &Canvas, lines: Vec<Line<'static>>, width: usize) -> Ve
         out.push(Line { spans, ..line });
     }
     out
+}
+
+/// Smallest area the backdrop is drawn in.
+const MIN_W: usize = 4;
+const MIN_H: usize = 3;
+
+/// Per-update smoothing of the gauges (a fraction of the gap closed each call).
+const SMOOTH: f32 = 0.15;
+/// Per-update decay of a gauge's remembered peak, so it adapts to any hardware.
+const PEAK_DECAY: f32 = 0.999;
+
+/// A rate scaled against the largest value seen recently, so a slow box and a
+/// fast one both fill the 0..1 range.
+#[derive(Debug, Clone, Copy)]
+struct Gauge {
+    peak: f32,
+    value: f32,
+}
+
+impl Gauge {
+    fn new() -> Self {
+        Self {
+            peak: 1.0,
+            value: 0.0,
+        }
+    }
+
+    fn feed(&mut self, rate: f32) {
+        let rate = rate.max(0.0);
+        self.peak = (self.peak * PEAK_DECAY).max(rate).max(1.0);
+        let target = (rate / self.peak).clamp(0.0, 1.0);
+        self.value += (target - self.value) * SMOOTH;
+    }
+}
+
+/// The Inference atmosphere: observe the roster each update, then paint a
+/// backdrop for the featured service's scene.
+#[derive(Debug, Clone)]
+pub struct Atmosphere {
+    frame: u64,
+    scene: Scene,
+    /// Generation tokens per second, normalised.
+    energy: Gauge,
+    /// KV-cache use, 0..1, smoothed.
+    kv: f32,
+}
+
+impl Default for Atmosphere {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Atmosphere {
+    pub fn new() -> Self {
+        Self {
+            frame: 0,
+            scene: Scene::None,
+            energy: Gauge::new(),
+            kv: 0.0,
+        }
+    }
+
+    /// Take in this update's roster. Cheap: a few float operations.
+    pub fn observe(&mut self, rows: &[ServiceState]) {
+        self.frame = self.frame.wrapping_add(1);
+        let row = featured(rows);
+        self.scene = scene_of(row);
+        let serving = row.and_then(|r| r.serving.as_ref());
+        self.energy
+            .feed(serving.map(|s| s.generation_tps).unwrap_or(0.0));
+        let kv = serving
+            .map(|s| s.kv_cache_usage)
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+        self.kv += (kv - self.kv) * SMOOTH;
+    }
+
+    /// True when a service is featured, so the backdrop should be drawn.
+    pub fn active(&self) -> bool {
+        self.scene != Scene::None
+    }
+
+    /// The backdrop for `w` by `h` cells. Pure: the same state gives the same
+    /// canvas. Nothing is drawn below the minimum size or with no scene.
+    pub fn render_backdrop(&self, w: usize, h: usize) -> Canvas {
+        let mut canvas: Canvas = vec![vec![None; w]; h];
+        if self.scene == Scene::None || w < MIN_W || h < MIN_H {
+            return canvas;
+        }
+        self.paint_sky(&mut canvas, w, h);
+        if matches!(self.scene, Scene::Aurora | Scene::Storm | Scene::Dream) {
+            self.paint_tide(&mut canvas, w, h);
+        }
+        canvas
+    }
+
+    /// Stars everywhere in the upper sky, and the aurora where the scene has
+    /// one: bright and moving with tokens per second while generating, faint
+    /// when idle, none elsewhere.
+    fn paint_sky(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        let aurora_energy = match self.scene {
+            Scene::Aurora => 0.25 + 0.75 * self.energy.value,
+            Scene::Dream => 0.15,
+            _ => 0.0,
+        };
+        let sky_h = ((h as f32) * 0.7).ceil() as usize;
+        for y in 0..sky_h.min(h) {
+            let rel_y = y as f32 / sky_h.max(1) as f32;
+            for x in 0..w {
+                if star_hash(x, y) > STAR_THRESHOLD {
+                    if let Some(c) = sky_cell(x, y, rel_y, self.frame) {
+                        canvas[y][x] = Some((c.ch, c.color));
+                    }
+                    continue;
+                }
+                if aurora_energy > 0.0 {
+                    let (lit, hue) = aurora(x, rel_y, self.frame);
+                    let l = lit * aurora_energy;
+                    if l > 0.14 {
+                        let ch = if l > 0.62 { '▒' } else { '░' };
+                        let hue = (hue + self.kv * 120.0) % 360.0;
+                        canvas[y][x] = Some((ch, hsv_to_rgb(hue, 0.62, 0.10 + l * 0.2)));
+                    }
+                }
+            }
+        }
+    }
+
+    /// A liquid level along the bottom: as high as the KV cache is full, blue,
+    /// then amber above half, then red above 80%.
+    fn paint_tide(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        let rows = ((self.kv * 3.0).round() as usize).min(3).min(h / 4);
+        let hue = if self.kv < 0.5 {
+            200.0
+        } else if self.kv < 0.8 {
+            40.0
+        } else {
+            5.0
+        };
+        for r in 0..rows {
+            let y = h - 1 - r;
+            for x in 0..w {
+                let phase = (x + (self.frame / 6) as usize + r * 2) % 4;
+                let glyph = if phase < 2 { '≈' } else { '~' };
+                let v = 0.35 + 0.15 * (x as f32 * 0.4 + self.frame as f32 * 0.08).sin();
+                canvas[y][x] = Some((glyph, hsv_to_rgb(hue, 0.7, v)));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -321,5 +473,110 @@ mod tests {
         let panel = Line::from(vec![Span::styled("   ", Style::default().bg(Color::Blue))]);
         let out = composite(&canvas, vec![panel.clone()], 3);
         assert_eq!(text(&out[0]), "   ");
+    }
+
+    // ---- Task 2: the sky and the tide -----------------------------------
+
+    fn lit(c: &Canvas) -> usize {
+        c.iter().flatten().filter(|x| x.is_some()).count()
+    }
+
+    fn observed(rows: &[ServiceState], times: usize) -> Atmosphere {
+        let mut a = Atmosphere::new();
+        for _ in 0..times {
+            a.observe(rows);
+        }
+        a
+    }
+
+    #[test]
+    fn the_backdrop_is_deterministic() {
+        let rows = vec![ready_serving(|s| {
+            s.generation_tps = 30.0;
+            s.kv_cache_usage = 0.4;
+        })];
+        let a = observed(&rows, 20);
+        let b = observed(&rows, 20);
+        assert_eq!(a.render_backdrop(80, 30), b.render_backdrop(80, 30));
+        // And the same atmosphere asked twice.
+        assert_eq!(a.render_backdrop(80, 30), a.render_backdrop(80, 30));
+    }
+
+    #[test]
+    fn nothing_featured_means_no_backdrop_and_not_active() {
+        let a = observed(&[], 10);
+        assert!(!a.active());
+        assert_eq!(lit(&a.render_backdrop(80, 30)), 0);
+        let down = observed(&[svc(Phase::Down)], 10);
+        assert!(!down.active());
+    }
+
+    #[test]
+    fn an_idle_sky_is_quiet_and_a_generating_sky_is_brighter() {
+        let idle = observed(&[svc(Phase::Ready)], 60);
+        assert!(idle.active());
+        let busy = observed(&[ready_serving(|s| s.generation_tps = 100.0)], 120);
+        let (i, b) = (
+            lit(&idle.render_backdrop(100, 30)),
+            lit(&busy.render_backdrop(100, 30)),
+        );
+        assert!(i > 0, "stars at least");
+        assert!(b > i, "aurora lights more cells: idle {i}, generating {b}");
+    }
+
+    #[test]
+    fn the_tide_height_follows_the_kv_cache() {
+        let bottom_lit = |kv: f32| {
+            let a = observed(
+                &[ready_serving(|s| {
+                    s.generation_tps = 20.0;
+                    s.kv_cache_usage = kv;
+                })],
+                200,
+            );
+            let c = a.render_backdrop(60, 20);
+            (0..3)
+                .filter(|r| c[19 - r].iter().any(|x| x.is_some()))
+                .count()
+        };
+        assert_eq!(bottom_lit(0.0), 0);
+        assert_eq!(bottom_lit(0.34), 1);
+        assert_eq!(bottom_lit(0.95), 3);
+    }
+
+    #[test]
+    fn the_tide_warms_from_blue_to_amber_to_red() {
+        let colour_at = |kv: f32| {
+            let a = observed(
+                &[ready_serving(|s| {
+                    s.generation_tps = 20.0;
+                    s.kv_cache_usage = kv;
+                })],
+                200,
+            );
+            a.render_backdrop(60, 20)[19]
+                .iter()
+                .flatten()
+                .next()
+                .unwrap()
+                .1
+        };
+        let (low, mid, high) = (colour_at(0.4), colour_at(0.7), colour_at(0.95));
+        assert!(
+            low != mid && mid != high && low != high,
+            "{low:?} {mid:?} {high:?}"
+        );
+    }
+
+    #[test]
+    fn any_size_is_safe_and_returns_the_asked_dimensions() {
+        let a = observed(&[ready_serving(|s| s.generation_tps = 50.0)], 30);
+        for (w, h) in [(0, 0), (1, 1), (3, 2), (4, 3), (5, 3), (40, 12), (160, 50)] {
+            let c = a.render_backdrop(w, h);
+            assert_eq!(c.len(), h, "{w}x{h}");
+            assert!(c.iter().all(|r| r.len() == w), "{w}x{h}");
+        }
+        // Below the minimum nothing is drawn.
+        assert_eq!(lit(&a.render_backdrop(3, 2)), 0);
     }
 }
