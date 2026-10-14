@@ -18,6 +18,25 @@ tt-toplike (0.13.11) noble; urgency=medium
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 16 Oct 2026 12:00:00 +0000
 
+  * Arcade shows what is running. While a training run, a model load or a
+    model serving is active, the top starfield rows become lanes (up to two,
+    most urgent first) with the name, progress and rate, and a key to open the
+    full view. The stars take a tint by kind and flare once per finished step
+    or request. Nothing running, nothing changes. A training run is noticed
+    from the background process scan, so Arcade adds no work to the render
+    thread.
+  * The Inference view has an atmosphere behind the snake. A forge of rising
+    beams while a model compiles or loads. A storm while it reads a prompt. An
+    aurora while it generates, with comets for running requests, rain for
+    prompt and output tokens, and a tide for KV-cache use. A forming canvas for
+    diffusion and video jobs. Each effect follows a real signal, and it fills
+    blank cells only, so the dashboards stay on top.
+  * A model launched from a weights path is labelled by its run, not by its
+    last directory: `rag-gate-27b`, not `model-dir` or `bundle`. A vLLM
+    `--served-model-name` is used when given.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Wed, 14 Oct 2026 12:00:00 +0000
+
 tt-toplike (0.13.10) noble; urgency=medium
 
   * The Inference view (`i`) shows the port and chips each model runs on,

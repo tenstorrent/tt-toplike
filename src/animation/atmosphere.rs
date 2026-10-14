@@ -38,6 +38,31 @@ pub enum Scene {
     Stalled,
 }
 
+impl Scene {
+    /// Every scene that draws something.
+    pub const ALL: [Scene; 6] = [
+        Scene::Forge,
+        Scene::Storm,
+        Scene::Aurora,
+        Scene::Dream,
+        Scene::Forming,
+        Scene::Stalled,
+    ];
+
+    /// The lowercase name the legend uses for the scene.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Scene::None => "none",
+            Scene::Forge => "forge",
+            Scene::Storm => "storm",
+            Scene::Aurora => "aurora",
+            Scene::Dream => "dream",
+            Scene::Forming => "forming",
+            Scene::Stalled => "stalled",
+        }
+    }
+}
+
 /// The service the backdrop follows: a loading (or stalled) one wins, else the
 /// first ready one. The same rule the snake uses to pick its behaviour.
 pub fn featured(rows: &[ServiceState]) -> Option<&ServiceState> {
@@ -431,12 +456,12 @@ impl Atmosphere {
             _ => 0.0,
         };
         let sky_h = ((h as f32) * 0.7).ceil() as usize;
-        for y in 0..sky_h.min(h) {
+        for (y, row) in canvas.iter_mut().enumerate().take(sky_h.min(h)) {
             let rel_y = y as f32 / sky_h.max(1) as f32;
-            for x in 0..w {
+            for (x, cell) in row.iter_mut().enumerate().take(w) {
                 if star_hash(x, y) > STAR_THRESHOLD {
                     if let Some(c) = sky_cell(x, y, rel_y, self.frame) {
-                        canvas[y][x] = Some((c.ch, c.color));
+                        *cell = Some((c.ch, c.color));
                     }
                     continue;
                 }
@@ -446,7 +471,7 @@ impl Atmosphere {
                     if l > AURORA_MIN {
                         let ch = if l > 0.62 { '▒' } else { '░' };
                         let hue = (hue + self.kv * 120.0) % 360.0;
-                        canvas[y][x] = Some((ch, hsv_to_rgb(hue, 0.62, 0.10 + l * 0.2)));
+                        *cell = Some((ch, hsv_to_rgb(hue, 0.62, 0.10 + l * 0.2)));
                     }
                 }
             }
@@ -554,8 +579,8 @@ impl Atmosphere {
         let tri = if p < 0.5 { p * 2.0 } else { 2.0 - 2.0 * p };
         let density = 0.8 - 0.65 * tri;
         let hue = (200.0 + self.frame as f32 / 4.0) % 360.0;
-        for y in y0..y1.min(h) {
-            for x in x0..x1.min(w) {
+        for (y, row) in canvas.iter_mut().enumerate().take(y1.min(h)).skip(y0) {
+            for (x, cell) in row.iter_mut().enumerate().take(x1.min(w)).skip(x0) {
                 let v = star_hash(x, y);
                 let (dx, dy) = ((x as i32 - cx).abs(), (y as i32 - cy).abs());
                 let on = if density > 0.45 {
@@ -564,7 +589,7 @@ impl Atmosphere {
                     (dx + dy) % 4 == 0 && v < 0.9
                 };
                 if on {
-                    canvas[y][x] = Some(('▒', hsv_to_rgb(hue, 0.5, 0.5)));
+                    *cell = Some(('▒', hsv_to_rgb(hue, 0.5, 0.5)));
                 }
             }
         }
@@ -578,8 +603,8 @@ impl Atmosphere {
         let band = ((h as f32) * 0.35) as usize;
         let f = self.frame as f32;
         let threshold = 1.0 - 0.6 * intensity;
-        for y in 0..band.min(h) {
-            for x in 0..w {
+        for (y, row) in canvas.iter_mut().enumerate().take(band.min(h)) {
+            for (x, cell) in row.iter_mut().enumerate().take(w) {
                 let (xf, yf) = (x as f32, y as f32);
                 let v = 0.5
                     + 0.25 * (xf * 0.07 + f * 0.01).sin()
@@ -593,17 +618,17 @@ impl Atmosphere {
                         '░'
                     };
                     let lum = 0.2 + 0.25 * (v - threshold).clamp(0.0, 1.0);
-                    canvas[y][x] = Some((ch, hsv_to_rgb(220.0, 0.25, lum)));
+                    *cell = Some((ch, hsv_to_rgb(220.0, 0.25, lum)));
                 }
             }
         }
         if intensity >= 1.0 && self.frame >= 90 && self.frame % 90 < 3 {
             let x0 = (star_hash((self.frame / 90) as usize, 5) * w as f32) as usize;
-            for dy in 0..5usize {
+            for (dy, row) in canvas.iter_mut().enumerate().take(5) {
                 let x = x0 + dy % 2;
-                if dy < h && x < w {
+                if let Some(cell) = row.get_mut(x).filter(|_| x < w) {
                     let ch = if dy % 2 == 0 { '╲' } else { '╱' };
-                    canvas[dy][x] = Some((ch, hsv_to_rgb(210.0, 0.2, 1.0)));
+                    *cell = Some((ch, hsv_to_rgb(210.0, 0.2, 1.0)));
                 }
             }
         }
@@ -693,9 +718,9 @@ impl Atmosphere {
         if y >= h {
             return;
         }
-        for x in 0..w {
+        for (x, cell) in canvas[y].iter_mut().enumerate().take(w) {
             if star_hash(x, y + step) < 0.3 {
-                canvas[y][x] = Some(('▚', hsv_to_rgb(0.0, 0.6, 0.35)));
+                *cell = Some(('▚', hsv_to_rgb(0.0, 0.6, 0.35)));
             }
         }
     }
@@ -713,14 +738,14 @@ impl Atmosphere {
         };
         for r in 0..rows {
             let y = h - 1 - r;
-            for x in 0..w {
+            for (x, cell) in canvas[y].iter_mut().enumerate().take(w) {
                 let phase = (x + (self.frame / 6) as usize + r * 2) % 4;
                 let glyph = if phase < 2 { '≈' } else { '~' };
                 let v = 0.35 + 0.15 * (x as f32 * 0.4 + self.frame as f32 * 0.08).sin();
-                canvas[y][x] = Some((glyph, hsv_to_rgb(hue, 0.7, v)));
+                *cell = Some((glyph, hsv_to_rgb(hue, 0.7, v)));
                 // A preemption splashes the top of the tide.
                 if r + 1 == rows && self.frame < self.splash_until && x % 3 == 0 {
-                    canvas[y][x] = Some(('^', hsv_to_rgb(hue, 0.3, 0.9)));
+                    *cell = Some(('^', hsv_to_rgb(hue, 0.3, 0.9)));
                 }
             }
         }
@@ -1472,5 +1497,49 @@ mod tests {
         // And no forming canvas without a job in flight.
         let idle = observed(&[svc(Phase::Ready)], 10).render_backdrop(w, h);
         assert_eq!(count(&idle, &['▒']), 0);
+    }
+
+    /// The backdrop plus the composite is built every frame, so its cost is a
+    /// bound, not a hope: best of several batches, at the largest size and the
+    /// busiest scene, in a debug build.
+    #[test]
+    fn building_and_compositing_a_full_backdrop_is_cheap() {
+        let mut a = Atmosphere::new();
+        for i in 0..300u64 {
+            a.observe(&[serving_row(|s| {
+                s.generation_tps = 500.0;
+                s.prompt_tps = 5000.0;
+                s.requests_running = 8;
+                s.requests_waiting = 30;
+                s.kv_cache_usage = 0.95;
+                s.counters.requests_succeeded_total = i * 5;
+            })]);
+        }
+        let (w, h) = (160, 50);
+        let foreground: Vec<Line<'static>> = (0..h)
+            .map(|y| {
+                Line::from(if y % 3 == 0 {
+                    "x".repeat(w / 2)
+                } else {
+                    String::new()
+                })
+            })
+            .collect();
+        let per_frame = (0..7)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                for _ in 0..20 {
+                    let c = a.render_backdrop(w, h);
+                    let _ = composite(&c, foreground.clone(), w);
+                }
+                start.elapsed() / 20
+            })
+            .min()
+            .unwrap();
+        eprintln!("per frame: {per_frame:?}");
+        assert!(
+            per_frame < std::time::Duration::from_millis(8),
+            "{per_frame:?}"
+        );
     }
 }

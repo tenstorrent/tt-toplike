@@ -1268,3 +1268,57 @@ Differences from the plan, found while building:
 
 Checked on this box: Arcade showed `▎● SERVE stable-diffusion-v1-4 · :20077 · chip 0  [i]`
 for the real server, and under `--mock` two lanes (`◐ LOAD`, `▶ TRAIN … +1 more`).
+
+### Inference atmosphere, and what building it turned up (Oct 14, 2026)
+
+Prompt: "inference server is boring to watch. there's more we could do to show all
+the other info about what's happening behind the snake. like the clouds from
+training mode but let's imagine some ways to add the feeling of something...
+thinking.. generating... something being made", then "finish the plan, do this and
+just keep working through all of it to show off to me later". Spec and plan:
+`docs/superpowers/specs/2026-10-14-inference-atmosphere-design.md` and the plan of
+the same name. Written and built without a review gate, as asked; the decisions are
+in the spec so each can be reversed.
+
+What it is: `animation/atmosphere.rs`. A backdrop of optional cells drawn *behind*
+whichever `Snake` renderer is active, filling blank cells only (`composite`), so
+the snake, dashboards and roster always win. The featured service picks a scene:
+forge (compiling or loading), storm (requests in, no token out yet), aurora (tokens
+flowing), dream (ready, idle), forming (a diffusion job in flight), stalled. Every
+effect is tied to a signal in `ServiceState`; the spec has the table. Nothing is
+drawn with no featured service.
+
+Things found while building, each now covered by a test that was seen to fail:
+
+- **A bug in my own Arcade lanes.** The monitor snapshot repeats for several
+  seconds while the render loop reads it every frame. The Arcade tracker summed
+  `completed_delta` per update, so a pulse count was overcounted about sixty to
+  one. Both features now use the cumulative counters (`requests_succeeded_total`,
+  `requests_errored_total`, `preemptions_total`, `kernel_count`, `loaded_count`)
+  and treat a *rise* as an event: the first sight of a counter is a baseline and
+  a drop is a reset.
+- **The density cap caught a real problem.** At full signal the first aurora and
+  tide lit 49% of an 80 by 24 view; a test written to be vacuous at first showed
+  it once it had something to measure. Aurora cells under 0.20 are dropped and the
+  tide is limited to a tenth of the height.
+- **Forge beams looked like frames.** They were drawn with `│` and `┼`, the same
+  glyphs as the load box's borders. They are ASCII `|` and `+` now.
+- **A second model label bug, on the same box.** After `model-dir` was fixed, a
+  launch under `.../stages/7/verify/bundle/model-dir` showed as `bundle`. The
+  generic-directory list now has the packaging names (`bundle`, `verify`,
+  `release`, `export`, `merged`, ...). A label is a guess about naming, so expect
+  more of these; the list is one constant.
+- **A guard that could not fail.** The sentinel test passed with the sentinel
+  check removed, because only a real count followed by the sentinel produces the
+  leap. A test for exactly that was added. In practice published rows never carry
+  the sentinel (a snapshot is always folded first), so the check is defensive.
+- **Dead code in my first `composite`.** The placeholder column for a wide
+  character was filtered out of the output, so the mutation that removed it
+  survived. The real alignment is `x += width`; the placeholder was deleted.
+
+Checked on screen under `--mock` at 80 and 150 columns and on this box: the
+serving scene shows aurora, comets, rain and the tide; the forge shows beams
+growing behind the compile box. The compile box fills much of the view with its own
+pattern, and the backdrop shows only where the foreground is blank, by design.
+Not verified: colours on a real terminal (the capture is plain text), and a live
+diffusion job in the forming scene.
