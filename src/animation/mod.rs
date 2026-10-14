@@ -20,6 +20,7 @@
 pub mod activity;
 pub mod activity_lanes;
 pub mod arcade;
+pub mod atmosphere;
 pub mod baseline;
 pub mod common;
 pub mod defrag;
