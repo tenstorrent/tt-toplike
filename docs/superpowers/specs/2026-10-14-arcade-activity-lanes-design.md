@@ -209,8 +209,10 @@ Each behaviour gets a test that was seen to fail first.
 - **Lane width.** For widths 0 to 200 and every activity mix, no lane is wider
   than the width and none contains a right-border glyph (`│ ┐ ┘ ║` at the end of
   a row).
-- **No-change guarantee.** With no activities, an Arcade render is byte-identical
-  to a render from before this change (a stored fixture).
+- **No-change guarantee.** With no activities no lane rows are reserved, no lane
+  tag appears, and the render keeps its row count. This is a structural check:
+  Arcade's render uses randomness (three runs of the same code produced three
+  different frames), so a stored byte-for-byte frame cannot work.
 - **Takeover.** With activities, the first starfield rows are lanes and the row
   count of the whole render is unchanged.
 - **Pulse.** A `pulse_seq` increase spawns flares; the same value does not; a
