@@ -1322,3 +1322,12 @@ growing behind the compile box. The compile box fills much of the view with its 
 pattern, and the backdrop shows only where the foreground is blank, by design.
 Not verified: colours on a real terminal (the capture is plain text), and a live
 diffusion job in the forming scene.
+
+The synthetic `--mock` server now pauses to read a prompt early in each 24 s beat
+(requests running, no tokens out), so the storm scene shows under `--mock`. A
+loading service is always featured over a serving one, and the mock's two services
+are usually in different phases, so the serving and storm scenes only show in the
+window before the second model starts compiling (the first ~9 seconds). Recordings
+of Arcade and the Inference view under `--mock` are in `demo/assets/arcade-atmosphere.{mp4,gif}`
+(gitignored); they were made with a tmux session driven by `tmux send-keys` under
+`asciinema rec`, because `tt-demo`'s manifest has no way to send keys.
