@@ -363,6 +363,7 @@ impl HardwareStarfield {
         self.flares.push(flare);
     }
 
+    #[cfg(test)]
     pub(crate) fn live_flares(&self) -> usize {
         self.flares.len()
     }

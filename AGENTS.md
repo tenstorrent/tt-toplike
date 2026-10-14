@@ -1220,3 +1220,51 @@ real app on this box while the model loaded: the Inference header read
 
 Built test-first: five tests failed with the old label (the monitor test failed
 with `left: "model-dir"`) before the implementation, two guard unchanged cases.
+
+### Arcade activity lanes (Oct 14, 2026, `updates/reality`)
+
+Prompt: "making arcade mode more actionable -- or any mode -- when a time or goal
+oriented viz is active is important: training and inference server viz both have
+no representation in arcade view, but they could have some kind of takeover of the
+starfield perhaps when active." Spec and plan: `docs/superpowers/specs/` and
+`docs/superpowers/plans/2026-10-14-arcade-activity-lanes*`. Decisions: Arcade only;
+a status strip plus a starfield that reacts; no status-bar chip.
+
+What exists now:
+
+- `animation/activity.rs` turns `TrainState` and the inference roster into
+  `Activity` values (pure). `ActivityTracker` keeps a load clock per service and
+  a completed-request pulse count. A chunk-local training step has no `%` or ETA;
+  a load with no real progress has no `%`.
+- `animation/activity_lanes.rs` draws at most two one-row lanes. A narrow width
+  drops the `[t]`/`[i]` hint first, then fields from the last, and skips a lane
+  whose tag and name do not fit. No right-side border.
+- Arcade lays the lanes over the first starfield rows after the hero is drawn,
+  keeps the hero below them, and reserves nothing when idle or when the starfield
+  has fewer than 6 rows.
+- `HardwareStarfield` takes an `ActivityTint` (strength capped at 0.45) and
+  `pulse()` flares (at most 6 live). Arcade tints by the most urgent activity and
+  flares on a rising pulse count; the first sight of a count and a drop are not
+  bursts.
+- Training is followed with `TrainWatch`: a trainer is picked out of the process
+  list the background scan already collects (`find_trainer`, which reads
+  `/proc/<pid>/maps` only for Python processes, cached by pid), then followed with
+  `TrainMonitor::attach` and `poll_attached`. Following a run costs about 35 us
+  per tick; the scan request asks for the process list when Arcade is on screen.
+  A source tripwire keeps `.poll()` and `TrainMonitor` out of the Arcade arm.
+- `--mock` uses the synthetic run and roster; `--remote` shows no lanes.
+
+Differences from the plan, found while building:
+
+- Arcade's render is not deterministic (three runs gave three frames), so the
+  "byte-identical when idle" test is structural.
+- The hero is clamped only in `hero_y`; clamping its lerp target too was
+  redundant, and a test on the target let the real clamp be removed unnoticed.
+- Star colours come from `colors::rgb`, which is indexed without truecolour, so
+  the tint blend falls back to the target colour and the cap is tested through
+  `effective_tint_strength`.
+- The cost test takes the best of fifteen batches: it failed once under the full
+  parallel suite with a single batch.
+
+Checked on this box: Arcade showed `▎● SERVE stable-diffusion-v1-4 · :20077 · chip 0  [i]`
+for the real server, and under `--mock` two lanes (`◐ LOAD`, `▶ TRAIN … +1 more`).

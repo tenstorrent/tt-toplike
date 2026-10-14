@@ -777,7 +777,38 @@ mod tests {
         assert!(body.contains("ScannerHandle::spawn(scanner)"));
         assert!(body.contains("scan_handle.try_result()"));
         assert!(body.contains("scan_handle.request("));
-        assert!(body.contains("want_processes: reset_behavior.detects()"));
+        // The scan asks for the process list when a reset is watched or Arcade
+        // is on screen (it finds a training run from that list).
+        assert!(body.contains(
+            "want_processes: reset_behavior.detects() || display_mode == DisplayMode::Arcade"
+        ));
+    }
+
+    /// Arcade follows a training run through `TrainWatch`, which reads the
+    /// process list the scanner already collected. The Arcade arm must not poll
+    /// a `TrainMonitor` itself (its `poll` walks `/proc` inline), and must hand
+    /// the activity lanes to Arcade.
+    #[test]
+    fn the_arcade_arm_follows_training_through_the_watch_not_an_inline_scan() {
+        let body = run_app_source();
+        let start = body
+            .find("DisplayMode::Arcade => {")
+            .expect("the Arcade update arm");
+        let end = body[start..]
+            .find("DisplayMode::Insights => {")
+            .map(|i| start + i)
+            .expect("the arm after Arcade");
+        let arm = &body[start..end];
+        for needed in [
+            "train_watch.update(",
+            "activity_tracker.update(",
+            "arc.set_activities(",
+        ] {
+            assert!(arm.contains(needed), "the Arcade arm lacks `{needed}`");
+        }
+        for banned in [".poll()", "TrainMonitor", "scan_for_process"] {
+            assert!(!arm.contains(banned), "the Arcade arm mentions `{banned}`");
+        }
     }
 
     /// Runs the real scanner on this machine; ungated, and it may probe a

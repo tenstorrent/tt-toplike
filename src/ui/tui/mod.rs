@@ -472,6 +472,14 @@ fn run_app(
     let mut defrag: Option<DefragVis> = None;
     let mut train_view: Option<TrainView> = None;
     let mut train_monitor: Option<TrainMonitor> = None;
+    // Arcade's activity lanes. A training run is found from the process list the
+    // background scan already collects (never an inline /proc walk); the tracker
+    // turns that run and the inference roster into lanes. `latest_scan` holds the
+    // newest process list for one tick; `arcade_clock` is the lanes' time base.
+    let mut train_watch = crate::workload::train::TrainWatch::new();
+    let mut activity_tracker = crate::animation::ActivityTracker::new();
+    let mut latest_scan: Option<Vec<(i32, String, String)>> = None;
+    let arcade_clock = Instant::now();
     // `--mock` substitutes a synthetic run for the /proc scan; see the
     // Training arm of the per-mode update below.
     // Shared clock for both synthetic sources, so a mock session's training
@@ -922,8 +930,42 @@ fn run_app(
                         serving
                     };
 
+                    // The activity lanes: a training run (from the background
+                    // scan, or the synthetic run under `--mock`) and the
+                    // inference roster. Suppressed under `--remote`, where the
+                    // silicon on screen is not this machine's.
+                    let train_state: Option<crate::workload::train::TrainState> =
+                        if backend_type == BackendType::Mock {
+                            Some(mock_train.get_or_insert_with(MockTrainRun::new).state())
+                        } else if backend_type == BackendType::Remote {
+                            None
+                        } else {
+                            train_watch.update(latest_scan.take().as_deref());
+                            train_watch.state().cloned()
+                        };
+                    #[cfg(target_os = "linux")]
+                    let service_rows = if backend_type == BackendType::Mock {
+                        crate::workload::inference_server::mock::mock_services(
+                            mock_started.elapsed().as_secs_f32(),
+                        )
+                    } else if backend_type == BackendType::Remote {
+                        Vec::new()
+                    } else {
+                        inference_monitor.snapshot()
+                    };
+                    #[cfg(not(target_os = "linux"))]
+                    let service_rows: Vec<
+                        crate::workload::inference_server::ServiceState,
+                    > = Vec::new();
+                    let activities = activity_tracker.update(
+                        train_state.as_ref(),
+                        &service_rows,
+                        arcade_clock.elapsed().as_secs_f32(),
+                    );
+
                     if let Some(ref mut arc) = arcade {
                         arc.set_serving(serving);
+                        arc.set_activities(activities);
                         arc.update(backend);
                     }
                 }
@@ -2431,6 +2473,11 @@ fn run_app(
                 &mut serving_metrics,
             );
             let scanned_processes = applied.processes;
+            // Arcade finds a training run in this list. Keep a copy for it
+            // before `scan_resets` takes the list.
+            if display_mode == DisplayMode::Arcade && !scanned_processes.is_empty() {
+                latest_scan = Some(scanned_processes.clone());
+            }
 
             // ── `tt-smi -r` detection (`--tt-smi-reset-behavior`) ─────────
             // Reuses the 2-second process scan. The worker takes the
@@ -2538,7 +2585,7 @@ fn run_app(
             scan_handle.request(proc_scan::ScanRequest {
                 only_tt: crate::cli::backend_shows_only_tt(backend_type),
                 verdicts: liveness_prober.fresh_verdicts(),
-                want_processes: reset_behavior.detects(),
+                want_processes: reset_behavior.detects() || display_mode == DisplayMode::Arcade,
             });
 
             sys_monitor.refresh_cpu_usage();
@@ -3692,6 +3739,12 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     )]));
                     v.push(sep!("@ Hero"));
                     v.extend(hero_legend_lines(bar, bg, dim));
+                    v.push(ln!(vec![Span::styled(
+                        "──────────────────────────────────────",
+                        Style::default().fg(bar)
+                    )]));
+                    v.push(sep!("▶ Activity lanes"));
+                    v.extend(activity_legend_lines(bar, bg, dim));
                     v
                 }
             }
@@ -3830,6 +3883,21 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "Hero glyph encodes chip health state:",
                     "  @  healthy   !  throttled/faulted",
                     "  ?  ARC stall  %  undervolt",
+                    "",
+                    "Activity lanes: while a training run, a model",
+                    "load or a model serving is running, the top",
+                    "starfield rows become lanes, up to two, most",
+                    "urgent first (stalled, loading, training,",
+                    "serving):",
+                    "  ▶ TRAIN  step, % and bar, ETA, step/s, loss",
+                    "  ◐ LOAD   :port · chips, load time",
+                    "  ● SERVE  tok/s, requests running",
+                    "A key in brackets opens the full view: [t]",
+                    "Training, [i] Inference. The stars take a tint",
+                    "(warm = training, violet = loading, teal =",
+                    "serving, red = stalled) and a flare marks each",
+                    "step or request. Nothing running, nothing",
+                    "changes. Not shown under --remote.",
                 ],
                 cols,
             ),
@@ -4625,6 +4693,79 @@ fn flow_legend_lines(
                 Style::default().fg(colors::rgb(200, 230, 255))
             ),
             Span::styled("= GDDR channel ring", Style::default().fg(dim))
+        ]),
+    ]
+}
+
+/// Legend for Arcade's activity lanes, which appear over the top of the
+/// starfield only while something with a goal or a clock is running. The tags
+/// are the ones `animation::activity_lanes` draws.
+fn activity_legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    macro_rules! ln {
+        ($spans:expr) => {{
+            let mut v: Vec<Span<'static>> =
+                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+            v.extend($spans);
+            Line::from(v)
+        }};
+    }
+    let amber = colors::rgb(246, 188, 66);
+    let violet = colors::rgb(180, 140, 230);
+    let teal = colors::rgb(79, 209, 197);
+    vec![
+        ln!(vec![
+            Span::styled("▶ TRAIN  ", Style::default().fg(amber)),
+            Span::styled(
+                "a training run: step, % and bar, ETA, step/s",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("◐ LOAD   ", Style::default().fg(violet)),
+            Span::styled(
+                "a model compiling or loading: :port · chips",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("● SERVE  ", Style::default().fg(teal)),
+            Span::styled(
+                "a model serving: tok/s and requests running",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("✗ STALLED ", Style::default().fg(colors::error())),
+            Span::styled("no progress for 5+ minutes", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("[t] [i]  ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled(
+                "open the Training / Inference view",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("tint     ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled(
+                "stars warm = training, violet = loading,",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("         ", Style::default().fg(dim)),
+            Span::styled("teal = serving, red = stalled", Style::default().fg(dim)),
+        ]),
+        ln!(vec![
+            Span::styled("○ ◌ ·   ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled(
+                "a flare = one step or one request finished",
+                Style::default().fg(dim)
+            ),
         ]),
     ]
 }
@@ -8928,6 +9069,30 @@ mod host_default_screen_tests {
             assert!(
                 text.contains(glyph),
                 "Hivemind {panel:?} lacks {glyph:?}:\n{text}"
+            );
+        }
+
+        // Arcade: the activity lanes, their tags, key hints and tints.
+        for panel in [P::Legend, P::Explain] {
+            let text = overlay_text(panel, M::Arcade);
+            for needle in ["TRAIN", "LOAD", "SERVE", "[t]", "[i]"] {
+                assert!(
+                    text.contains(needle),
+                    "Arcade {panel:?} lacks {needle:?}:\n{text}"
+                );
+            }
+        }
+        // The legend tags are the ones the lane renderer draws.
+        let legend = overlay_text(P::Legend, M::Arcade);
+        for (_, word) in [
+            ("▶", "TRAIN"),
+            ("◐", "LOAD"),
+            ("●", "SERVE"),
+            ("✗", "STALLED"),
+        ] {
+            assert!(
+                legend.contains(word),
+                "{word} missing from the Arcade legend"
             );
         }
 

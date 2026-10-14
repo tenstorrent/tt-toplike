@@ -1585,3 +1585,16 @@ git add -A && git commit -m "feat: Arcade activity lanes (v0.13.11)" && git push
 - **Placeholders:** none. The one stub in Task 1 Step 3 is called out and replaced in place.
 - **Type consistency:** `Activity`, `ActivityKind`, `ActivityTracker`, `render_lanes`, `set_activities`, `lane_rows`, `ActivityTint`, `set_activity_tint`, `pulse`, `find_trainer`, `attach`, `poll_attached`, `detach`, `TrainWatch` are used with the same names throughout.
 - **Review Focus:** each line has its test in the task named.
+
+## As built (notes added after execution)
+
+- Task 3: only `hero_y` is clamped below the lanes; the plan's extra clamp on
+  `hero_target_y` was redundant and is not in the code.
+- Task 4: `effective_tint_strength` is a public pure function and the cap test
+  uses it, because star colours are indexed (not RGB) on a terminal without
+  true-colour support. `live_flares()` is `#[cfg(test)] pub(crate)` (clippy rejects it as dead code otherwise).
+- Task 5: the live-pid tests in `watch.rs` are Linux-only, and the cost test takes
+  the best of fifteen batches. The scan guard in `proc_scan.rs` gained a test that
+  the Arcade arm follows training through `TrainWatch`.
+- Task 6: the version bump moved to the end of the branch, after the inference
+  atmosphere work, so one release covers both.
