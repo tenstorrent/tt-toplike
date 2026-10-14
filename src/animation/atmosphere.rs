@@ -352,10 +352,16 @@ impl Atmosphere {
         if matches!(self.scene, Scene::Aurora | Scene::Storm | Scene::Dream) {
             self.paint_tide(&mut canvas, w, h);
         }
+        if self.scene == Scene::Storm {
+            self.paint_storm(&mut canvas, w, h);
+        }
         if matches!(self.scene, Scene::Aurora | Scene::Storm) {
             self.paint_rain(&mut canvas, w, h);
             self.paint_horizon(&mut canvas, w, h);
             self.paint_comets(&mut canvas, w, h);
+        }
+        if self.scene == Scene::Storm {
+            self.paint_heartbeat(&mut canvas, w);
         }
         self.paint_flares(&mut canvas, w, h);
         self.paint_static(&mut canvas, w, h);
@@ -434,6 +440,58 @@ impl Atmosphere {
                     canvas[y as usize][x] = Some((glyph, hsv_to_rgb(45.0, 0.8, 0.85)));
                 }
             }
+        }
+    }
+
+    /// Prefill: requests are in and the model is reading. A cloud band builds
+    /// across the top, heavier while requests are running than while they only
+    /// wait, with lightning every ninety frames while they run.
+    fn paint_storm(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        let intensity = if self.running > 0 { 1.0 } else { 0.5 };
+        let band = ((h as f32) * 0.35) as usize;
+        let f = self.frame as f32;
+        let threshold = 1.0 - 0.6 * intensity;
+        for y in 0..band.min(h) {
+            for x in 0..w {
+                let (xf, yf) = (x as f32, y as f32);
+                let v = 0.5
+                    + 0.25 * (xf * 0.07 + f * 0.01).sin()
+                    + 0.3 * (xf * 0.19 - f * 0.017 + yf).sin();
+                if v > threshold {
+                    let ch = if v > 0.9 {
+                        '▓'
+                    } else if v > 0.7 {
+                        '▒'
+                    } else {
+                        '░'
+                    };
+                    let lum = 0.2 + 0.25 * (v - threshold).clamp(0.0, 1.0);
+                    canvas[y][x] = Some((ch, hsv_to_rgb(220.0, 0.25, lum)));
+                }
+            }
+        }
+        if intensity >= 1.0 && self.frame >= 90 && self.frame % 90 < 3 {
+            let x0 = (star_hash((self.frame / 90) as usize, 5) * w as f32) as usize;
+            for dy in 0..5usize {
+                let x = x0 + dy % 2;
+                if dy < h && x < w {
+                    let ch = if dy % 2 == 0 { '╲' } else { '╱' };
+                    canvas[dy][x] = Some((ch, hsv_to_rgb(210.0, 0.2, 1.0)));
+                }
+            }
+        }
+    }
+
+    /// Three dots at the top centre, one brighter in turn: the model thinking.
+    fn paint_heartbeat(&self, canvas: &mut Canvas, w: usize) {
+        if w < 7 || canvas.len() < 2 {
+            return;
+        }
+        let cx = w / 2;
+        let lit = ((self.frame / 20) % 3) as usize;
+        for (i, x) in [cx - 3, cx, cx + 3].into_iter().enumerate() {
+            let v = if i == lit { 1.0 } else { 0.4 };
+            canvas[1][x] = Some(('◦', hsv_to_rgb(200.0, 0.3, v)));
         }
     }
 
@@ -1032,5 +1090,64 @@ mod tests {
             a.observe(&[row(1)]);
         }
         assert_eq!(count(&a.render_backdrop(60, 20), &['^']), 0);
+    }
+
+    // ---- Task 4: the storm ----------------------------------------------
+
+    const CLOUD: [char; 3] = ['░', '▒', '▓'];
+    const BOLT: [char; 2] = ['╲', '╱'];
+    const BEAT: char = '◦';
+
+    fn storm(running: u32, waiting: u32, frames: usize) -> Atmosphere {
+        observed(
+            &[serving_row(|s| {
+                s.requests_running = running;
+                s.requests_waiting = waiting;
+            })],
+            frames,
+        )
+    }
+
+    #[test]
+    fn a_storm_is_a_cloud_band_across_the_top_and_nothing_low() {
+        let a = storm(2, 0, 30);
+        assert_eq!(a.scene, Scene::Storm);
+        let c = a.render_backdrop(100, 30);
+        let top: usize = c[..11]
+            .iter()
+            .map(|r| count(&vec![r.clone()], &CLOUD))
+            .sum();
+        let low: usize = c[20..]
+            .iter()
+            .map(|r| count(&vec![r.clone()], &CLOUD))
+            .sum();
+        assert!(top > 100, "a band of cloud: {top}");
+        assert_eq!(low, 0, "no cloud in the lower third");
+    }
+
+    #[test]
+    fn running_requests_make_a_heavier_storm_than_waiting_ones() {
+        let heavy = count(&storm(2, 0, 30).render_backdrop(100, 30), &CLOUD);
+        let light = count(&storm(0, 3, 30).render_backdrop(100, 30), &CLOUD);
+        assert!(heavy > light && light > 0, "heavy {heavy}, light {light}");
+    }
+
+    #[test]
+    fn lightning_strikes_on_a_schedule_while_requests_run() {
+        let bolts = |frames: usize| count(&storm(2, 0, frames).render_backdrop(100, 30), &BOLT);
+        assert_eq!(bolts(40), 0);
+        assert!(bolts(90) > 0, "a strike at frame 90");
+        assert_eq!(bolts(95), 0, "it is over after three frames");
+        // A waiting-only storm has no lightning.
+        assert_eq!(count(&storm(0, 3, 90).render_backdrop(100, 30), &BOLT), 0);
+    }
+
+    #[test]
+    fn the_storm_has_a_heartbeat_and_only_the_storm_does() {
+        assert_eq!(count(&storm(2, 0, 30).render_backdrop(100, 30), &[BEAT]), 3);
+        let aurora = observed(&[serving_row(|s| s.generation_tps = 50.0)], 30);
+        let c = aurora.render_backdrop(100, 30);
+        assert_eq!(count(&c, &[BEAT]), 0);
+        assert_eq!(count(&c, &BOLT), 0);
     }
 }
