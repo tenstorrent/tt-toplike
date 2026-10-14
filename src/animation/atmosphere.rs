@@ -153,6 +153,30 @@ pub fn composite(canvas: &Canvas, lines: Vec<Line<'static>>, width: usize) -> Ve
     out
 }
 
+/// Cumulative failed-request count of a service (vLLM errors and aborts, or a
+/// media server's failed generations).
+fn errors_total(row: &ServiceState) -> u64 {
+    if let Some(sv) = &row.serving {
+        sv.counters.requests_errored_total
+    } else if let Some(m) = &row.media {
+        m.counters.errored_total
+    } else {
+        0
+    }
+}
+
+/// Cumulative preemptions of a vLLM service.
+fn preemptions_total(row: &ServiceState) -> u64 {
+    row.serving
+        .as_ref()
+        .map(|s| s.counters.preemptions_total)
+        .unwrap_or(0)
+}
+
+/// Aurora cells fainter than this are left empty, which keeps the aurora from
+/// covering a third of the screen at full signal.
+const AURORA_MIN: f32 = 0.20;
+
 /// Smallest area the backdrop is drawn in.
 const MIN_W: usize = 4;
 const MIN_H: usize = 3;
@@ -196,7 +220,43 @@ pub struct Atmosphere {
     energy: Gauge,
     /// KV-cache use, 0..1, smoothed.
     kv: f32,
+    /// Prompt tokens per second, normalised.
+    reading: Gauge,
+    running: u32,
+    waiting: u32,
+    /// The service the counters below belong to. A different service, or none,
+    /// starts a fresh baseline.
+    key: Option<String>,
+    seen: Seen,
+    /// Birth frame and index of each live completion flare.
+    flares: Vec<(u64, u32)>,
+    static_until: u64,
+    splash_until: u64,
 }
+
+/// Cumulative counters from the last observed scrape. The monitor snapshot
+/// repeats for several seconds while the render loop reads it every frame, so
+/// every event is a *rise* of one of these, never a per-tick delta.
+#[derive(Debug, Clone, Copy, Default)]
+struct Seen {
+    done: Option<u64>,
+    errored: Option<u64>,
+    preempted: Option<u64>,
+}
+
+/// How much a counter rose since last seen. The first sight of a counter is a
+/// baseline (0), and a counter that went down (a restarted server) is a reset
+/// (0), never a burst.
+fn rise(prev: &mut Option<u64>, now: u64) -> u64 {
+    let r = prev.map(|p| now.saturating_sub(p)).unwrap_or(0);
+    *prev = Some(now);
+    r
+}
+
+const FLARE_FRAMES: u64 = 24;
+const MAX_FLARES: usize = 8;
+const STATIC_FRAMES: u64 = 40;
+const SPLASH_FRAMES: u64 = 30;
 
 impl Default for Atmosphere {
     fn default() -> Self {
@@ -211,6 +271,14 @@ impl Atmosphere {
             scene: Scene::None,
             energy: Gauge::new(),
             kv: 0.0,
+            reading: Gauge::new(),
+            running: 0,
+            waiting: 0,
+            key: None,
+            seen: Seen::default(),
+            flares: Vec::new(),
+            static_until: 0,
+            splash_until: 0,
         }
     }
 
@@ -222,11 +290,50 @@ impl Atmosphere {
         let serving = row.and_then(|r| r.serving.as_ref());
         self.energy
             .feed(serving.map(|s| s.generation_tps).unwrap_or(0.0));
+        self.reading
+            .feed(serving.map(|s| s.prompt_tps).unwrap_or(0.0));
         let kv = serving
             .map(|s| s.kv_cache_usage)
             .unwrap_or(0.0)
             .clamp(0.0, 1.0);
         self.kv += (kv - self.kv) * SMOOTH;
+        self.running = serving.map(|s| s.requests_running).unwrap_or(0);
+        self.waiting = serving.map(|s| s.requests_waiting).unwrap_or(0);
+
+        // Events are rises of the cumulative counters of the featured service.
+        let key = row.map(|r| r.key.clone());
+        if key != self.key {
+            self.seen = Seen::default();
+            self.key = key;
+        }
+        let Some(row) = row else {
+            return;
+        };
+        let done = rise(
+            &mut self.seen.done,
+            crate::animation::activity::pulse_total(row),
+        );
+        let errored = rise(&mut self.seen.errored, errors_total(row));
+        let preempted = rise(&mut self.seen.preempted, preemptions_total(row));
+        for i in 0..done.min(3) as u32 {
+            if self.flares.len() >= MAX_FLARES {
+                self.flares.remove(0);
+            }
+            self.flares.push((self.frame, i));
+        }
+        let frame = self.frame;
+        self.flares.retain(|(born, _)| frame - born < FLARE_FRAMES);
+        if errored > 0 {
+            self.static_until = self.frame + STATIC_FRAMES;
+        }
+        if preempted > 0 {
+            self.splash_until = self.frame + SPLASH_FRAMES;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_flares(&self) -> usize {
+        self.flares.len()
     }
 
     /// True when a service is featured, so the backdrop should be drawn.
@@ -245,6 +352,13 @@ impl Atmosphere {
         if matches!(self.scene, Scene::Aurora | Scene::Storm | Scene::Dream) {
             self.paint_tide(&mut canvas, w, h);
         }
+        if matches!(self.scene, Scene::Aurora | Scene::Storm) {
+            self.paint_rain(&mut canvas, w, h);
+            self.paint_horizon(&mut canvas, w, h);
+            self.paint_comets(&mut canvas, w, h);
+        }
+        self.paint_flares(&mut canvas, w, h);
+        self.paint_static(&mut canvas, w, h);
         canvas
     }
 
@@ -270,7 +384,7 @@ impl Atmosphere {
                 if aurora_energy > 0.0 {
                     let (lit, hue) = aurora(x, rel_y, self.frame);
                     let l = lit * aurora_energy;
-                    if l > 0.14 {
+                    if l > AURORA_MIN {
                         let ch = if l > 0.62 { '▒' } else { '░' };
                         let hue = (hue + self.kv * 120.0) % 360.0;
                         canvas[y][x] = Some((ch, hsv_to_rgb(hue, 0.62, 0.10 + l * 0.2)));
@@ -280,10 +394,131 @@ impl Atmosphere {
         }
     }
 
+    /// Falling dim glyphs in proportion to prompt tokens per second ("reading"),
+    /// and, while tokens flow, rising gold braille in proportion to generation
+    /// tokens per second ("writing"). A column is a drop when its hash is under
+    /// the density, so the same inputs always draw the same columns.
+    fn paint_rain(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        let reading = self.reading.value;
+        let writing = if self.scene == Scene::Aurora {
+            self.energy.value
+        } else {
+            0.0
+        };
+        for x in 0..w {
+            if star_hash(x, 7) < 0.10 * reading {
+                let speed = 0.25 + star_hash(x, 11) * 0.5;
+                let cycle = (h + 4) as f32;
+                let head = ((self.frame as f32 * speed + star_hash(x, 5) * cycle * 7.0) % cycle
+                    - 2.0) as i32;
+                for t in 0..4i32 {
+                    let y = head - t;
+                    if y >= 0 && (y as usize) < h {
+                        let (ch, v) = if t == 0 {
+                            (':', 0.5)
+                        } else {
+                            ('.', 0.3 - 0.05 * t as f32)
+                        };
+                        canvas[y as usize][x] = Some((ch, hsv_to_rgb(190.0, 0.45, v)));
+                    }
+                }
+            }
+            if star_hash(x, 13) < 0.12 * writing {
+                let speed = 0.2 + star_hash(x, 17) * 0.4;
+                let cycle = (h + 2) as f32;
+                let up =
+                    ((self.frame as f32 * speed + star_hash(x, 19) * cycle * 5.0) % cycle) as i32;
+                let y = h as i32 - 1 - up;
+                if y >= 0 && (y as usize) < h {
+                    let glyph = ['⠁', '⠃', '⠇', '⡇'][((self.frame / 4) as usize + x) % 4];
+                    canvas[y as usize][x] = Some((glyph, hsv_to_rgb(45.0, 0.8, 0.85)));
+                }
+            }
+        }
+    }
+
+    /// One dim star on the horizon per waiting request, at most twelve.
+    fn paint_horizon(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        let n = self.waiting.min(12) as usize;
+        let y = ((h as f32) * 0.8) as usize;
+        for i in 0..n {
+            let x = (i + 1) * w / (n + 1);
+            if x < w && y < h {
+                let v = 0.35 + 0.25 * (self.frame as f32 * 0.05 + i as f32).sin();
+                canvas[y][x] = Some(('⋅', hsv_to_rgb(200.0, 0.2, v)));
+            }
+        }
+    }
+
+    /// One comet per running request, at most six, orbiting the centre with a
+    /// short fading trail.
+    fn paint_comets(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        let n = self.running.min(6) as usize;
+        let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+        let (rx, ry) = (w as f32 * 0.40, h as f32 * 0.35);
+        for i in 0..n {
+            let ang = self.frame as f32 * 0.02 * (1.0 + 0.15 * i as f32)
+                + i as f32 * std::f32::consts::TAU / n as f32;
+            for (t, ch) in ['◉', '●', '•', '∘', '˙'].iter().enumerate() {
+                let a = ang - t as f32 * 0.12;
+                let x = (cx + rx * a.cos()).round() as i32;
+                let y = (cy + ry * a.sin()).round() as i32;
+                if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
+                    let v = 1.0 - 0.17 * t as f32;
+                    canvas[y as usize][x as usize] = Some((*ch, hsv_to_rgb(175.0, 0.5, v)));
+                }
+            }
+        }
+    }
+
+    /// An expanding ring for each recent completion.
+    fn paint_flares(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        for (born, idx) in &self.flares {
+            let age = self.frame - born;
+            if age >= FLARE_FRAMES {
+                continue;
+            }
+            let seed = (*born as usize).wrapping_mul(7).wrapping_add(*idx as usize);
+            let x0 = (star_hash(seed, 41) * w as f32) as i32;
+            let y0 = (star_hash(seed, 43) * h as f32 * 0.6) as i32;
+            let r = (age / 3 + 1) as i32;
+            let glyph = match age {
+                0..=7 => '○',
+                8..=15 => '◌',
+                _ => '˙',
+            };
+            let v = 1.0 - age as f32 / FLARE_FRAMES as f32;
+            let color = hsv_to_rgb(175.0, 0.4, 0.4 + 0.6 * v);
+            for (dx, dy) in [(r * 2, 0), (-r * 2, 0), (0, r), (0, -r)] {
+                let (x, y) = (x0 + dx, y0 + dy);
+                if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
+                    canvas[y as usize][x as usize] = Some((glyph, color));
+                }
+            }
+        }
+    }
+
+    /// A row of dim red static for a moment after a request errors.
+    fn paint_static(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        if self.frame >= self.static_until {
+            return;
+        }
+        let step = (self.frame / 2) as usize;
+        let y = (star_hash(step, 3) * h as f32) as usize;
+        if y >= h {
+            return;
+        }
+        for x in 0..w {
+            if star_hash(x, y + step) < 0.3 {
+                canvas[y][x] = Some(('▚', hsv_to_rgb(0.0, 0.6, 0.35)));
+            }
+        }
+    }
+
     /// A liquid level along the bottom: as high as the KV cache is full, blue,
     /// then amber above half, then red above 80%.
     fn paint_tide(&self, canvas: &mut Canvas, w: usize, h: usize) {
-        let rows = ((self.kv * 3.0).round() as usize).min(3).min(h / 4);
+        let rows = ((self.kv * 3.0).round() as usize).min(3).min(h / 10);
         let hue = if self.kv < 0.5 {
             200.0
         } else if self.kv < 0.8 {
@@ -298,6 +533,10 @@ impl Atmosphere {
                 let glyph = if phase < 2 { '≈' } else { '~' };
                 let v = 0.35 + 0.15 * (x as f32 * 0.4 + self.frame as f32 * 0.08).sin();
                 canvas[y][x] = Some((glyph, hsv_to_rgb(hue, 0.7, v)));
+                // A preemption splashes the top of the tide.
+                if r + 1 == rows && self.frame < self.splash_until && x % 3 == 0 {
+                    canvas[y][x] = Some(('^', hsv_to_rgb(hue, 0.3, 0.9)));
+                }
             }
         }
     }
@@ -534,9 +773,9 @@ mod tests {
                 })],
                 200,
             );
-            let c = a.render_backdrop(60, 20);
+            let c = a.render_backdrop(60, 30);
             (0..3)
-                .filter(|r| c[19 - r].iter().any(|x| x.is_some()))
+                .filter(|r| c[29 - r].iter().any(|x| x.is_some()))
                 .count()
         };
         assert_eq!(bottom_lit(0.0), 0);
@@ -578,5 +817,220 @@ mod tests {
         }
         // Below the minimum nothing is drawn.
         assert_eq!(lit(&a.render_backdrop(3, 2)), 0);
+    }
+
+    // ---- Task 3: rain, comets, horizon stars, flares, static -------------
+
+    /// Glyphs unique to each layer, so a test can count what a layer drew.
+    const FALL: [char; 2] = [':', '.'];
+    const RISE: [char; 4] = ['⠁', '⠃', '⠇', '⡇'];
+    const COMET_HEAD: char = '◉';
+    const HORIZON: char = '⋅';
+    const RING: char = '○';
+    const STATIC: char = '▚';
+
+    fn count(c: &Canvas, set: &[char]) -> usize {
+        c.iter()
+            .flatten()
+            .filter(|x| x.is_some_and(|(ch, _)| set.contains(&ch)))
+            .count()
+    }
+
+    fn serving_row(f: impl FnOnce(&mut ServingStats)) -> ServiceState {
+        ready_serving(f)
+    }
+
+    #[test]
+    fn no_rain_without_rates() {
+        let a = observed(&[serving_row(|s| s.requests_running = 2)], 100);
+        let c = a.render_backdrop(100, 30);
+        assert_eq!(count(&c, &FALL), 0);
+        assert_eq!(count(&c, &RISE), 0);
+    }
+
+    /// A gauge is scaled against the peak it has seen, so feed a high rate
+    /// first and then compare a held-high rate with one that dropped to a tenth.
+    fn held_vs_dropped(f: impl Fn(&mut ServingStats, f32)) -> (Canvas, Canvas) {
+        let hi = |rate: f32| {
+            serving_row(|s| {
+                s.generation_tps = 50.0;
+                f(s, rate)
+            })
+        };
+        let mut held = Atmosphere::new();
+        for _ in 0..200 {
+            held.observe(&[hi(500.0)]);
+        }
+        let mut dropped = Atmosphere::new();
+        dropped.observe(&[hi(500.0)]);
+        for _ in 0..200 {
+            dropped.observe(&[hi(50.0)]);
+        }
+        (
+            held.render_backdrop(120, 30),
+            dropped.render_backdrop(120, 30),
+        )
+    }
+
+    #[test]
+    fn falling_glyphs_follow_the_prompt_rate() {
+        let (held, dropped) = held_vs_dropped(|s, r| s.prompt_tps = r);
+        assert!(
+            count(&held, &FALL) > count(&dropped, &FALL),
+            "reading density"
+        );
+        assert!(count(&held, &FALL) > 0);
+    }
+
+    #[test]
+    fn rising_glyphs_follow_the_generation_rate() {
+        let (held, dropped) = held_vs_dropped(|s, r| s.generation_tps = r);
+        assert!(
+            count(&held, &RISE) > count(&dropped, &RISE),
+            "writing density"
+        );
+        assert!(count(&held, &RISE) > 0);
+    }
+
+    #[test]
+    fn comets_are_the_running_requests_up_to_six() {
+        let heads = |running: u32| {
+            let a = observed(
+                &[serving_row(|s| {
+                    s.generation_tps = 20.0;
+                    s.requests_running = running;
+                })],
+                30,
+            );
+            count(&a.render_backdrop(100, 30), &[COMET_HEAD])
+        };
+        assert_eq!(heads(0), 0);
+        assert_eq!(heads(3), 3);
+        assert_eq!(heads(40), 6);
+    }
+
+    #[test]
+    fn horizon_stars_are_the_waiting_requests_up_to_twelve() {
+        let stars = |waiting: u32| {
+            let a = observed(
+                &[serving_row(|s| {
+                    s.generation_tps = 20.0;
+                    s.requests_waiting = waiting;
+                })],
+                30,
+            );
+            count(&a.render_backdrop(100, 30), &[HORIZON])
+        };
+        assert_eq!(stars(0), 0);
+        assert_eq!(stars(4), 4);
+        assert_eq!(stars(50), 12);
+    }
+
+    fn with_done(total: u64) -> ServiceState {
+        serving_row(|s| {
+            s.generation_tps = 20.0;
+            s.counters.requests_succeeded_total = total;
+        })
+    }
+
+    #[test]
+    fn each_finished_request_flares_once_and_the_flare_expires() {
+        let mut a = Atmosphere::new();
+        a.observe(&[with_done(10)]); // first sight: a baseline, not a burst
+        assert_eq!(a.live_flares(), 0);
+        a.observe(&[with_done(12)]);
+        assert_eq!(a.live_flares(), 2);
+        assert!(count(&a.render_backdrop(100, 30), &[RING]) > 0);
+        // The same snapshot read on later frames adds nothing.
+        for _ in 0..5 {
+            a.observe(&[with_done(12)]);
+        }
+        assert_eq!(a.live_flares(), 2);
+        for _ in 0..40 {
+            a.observe(&[with_done(12)]);
+        }
+        assert_eq!(a.live_flares(), 0, "flares expire");
+        assert_eq!(count(&a.render_backdrop(100, 30), &[RING]), 0);
+    }
+
+    #[test]
+    fn flares_are_capped_per_tick_and_overall() {
+        let mut a = Atmosphere::new();
+        a.observe(&[with_done(0)]);
+        a.observe(&[with_done(1000)]);
+        assert_eq!(a.live_flares(), 3, "at most three per observe");
+        for i in 2..20u64 {
+            a.observe(&[with_done(i * 1000)]);
+        }
+        assert!(a.live_flares() <= 8, "{}", a.live_flares());
+        // A counter that drops (a restarted server) is a reset, not a burst.
+        let mut b = Atmosphere::new();
+        b.observe(&[with_done(500)]);
+        b.observe(&[with_done(3)]);
+        assert_eq!(b.live_flares(), 0);
+    }
+
+    #[test]
+    fn an_error_draws_static_that_clears() {
+        let with_errors = |n: u64| {
+            serving_row(|s| {
+                s.generation_tps = 20.0;
+                s.counters.requests_errored_total = n;
+            })
+        };
+        let mut a = Atmosphere::new();
+        a.observe(&[with_errors(0)]);
+        assert_eq!(count(&a.render_backdrop(100, 30), &[STATIC]), 0);
+        a.observe(&[with_errors(1)]);
+        assert!(count(&a.render_backdrop(100, 30), &[STATIC]) > 0);
+        for _ in 0..60 {
+            a.observe(&[with_errors(1)]);
+        }
+        assert_eq!(count(&a.render_backdrop(100, 30), &[STATIC]), 0);
+    }
+
+    #[test]
+    fn at_full_signal_the_backdrop_stays_readable() {
+        let mut a = Atmosphere::new();
+        let row = |done: u64| {
+            serving_row(|s| {
+                s.generation_tps = 500.0;
+                s.prompt_tps = 5000.0;
+                s.requests_running = 8;
+                s.requests_waiting = 30;
+                s.kv_cache_usage = 0.95;
+                s.counters.requests_succeeded_total = done;
+            })
+        };
+        for i in 0..300u64 {
+            a.observe(&[row(i * 5)]);
+        }
+        for (w, h) in [(80, 24), (100, 30), (160, 50)] {
+            let c = a.render_backdrop(w, h);
+            let frac = lit(&c) as f32 / (w * h) as f32;
+            assert!(frac <= 0.45, "{w}x{h}: {:.0}% lit", frac * 100.0);
+        }
+    }
+
+    #[test]
+    fn a_preemption_splashes_the_tide() {
+        let row = |n: u64| {
+            serving_row(|s| {
+                s.generation_tps = 20.0;
+                s.kv_cache_usage = 0.6;
+                s.counters.preemptions_total = n;
+            })
+        };
+        let mut a = Atmosphere::new();
+        for _ in 0..80 {
+            a.observe(&[row(0)]);
+        }
+        assert_eq!(count(&a.render_backdrop(60, 20), &['^']), 0);
+        a.observe(&[row(1)]);
+        assert!(count(&a.render_backdrop(60, 20), &['^']) > 0);
+        for _ in 0..40 {
+            a.observe(&[row(1)]);
+        }
+        assert_eq!(count(&a.render_backdrop(60, 20), &['^']), 0);
     }
 }
