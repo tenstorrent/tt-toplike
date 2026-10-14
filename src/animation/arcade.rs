@@ -91,6 +91,8 @@ pub struct ArcadeVisualization {
     /// from the TUI. `None` when nothing is serving — the duel strip is hidden
     /// and Row 1 stays exactly as Task 3 left it.
     serving: Option<ServingStats>,
+    /// Activities running this tick (training, loading, serving), most urgent first.
+    activities: Vec<crate::animation::Activity>,
     /// Motion + glyph state for the duel strip.
     duel: DuelState,
     /// Running peak of observed device power (W), floored at 1.0. Normalizes the
@@ -178,6 +180,7 @@ impl ArcadeVisualization {
             flow_end,
             board_topology: None,
             serving: None,
+            activities: Vec::new(),
             duel: DuelState::new(),
             power_peak: 1.0,
         }
@@ -189,6 +192,30 @@ impl ArcadeVisualization {
     /// Row 1 as the plain telemetry strip. Called once per tick from the TUI.
     pub fn set_serving(&mut self, serving: Option<ServingStats>) {
         self.serving = serving;
+    }
+
+    /// Hand Arcade the activities running this tick (already in urgency order).
+    /// An empty list leaves Arcade exactly as it was.
+    pub fn set_activities(&mut self, activities: Vec<crate::animation::Activity>) {
+        self.activities = activities;
+    }
+
+    /// Rows the lanes take from the top of the starfield region: up to 2, and 0
+    /// unless the starfield has at least 6 rows so it stays readable.
+    pub fn lane_rows(&self) -> usize {
+        const MIN_STARFIELD_ROWS: usize = 6;
+        if self.activities.is_empty()
+            || self.starfield_end.saturating_sub(self.starfield_start) < MIN_STARFIELD_ROWS
+        {
+            return 0;
+        }
+        self.activities.len().min(2)
+    }
+
+    /// First row index (in the whole render) below the lanes, used to keep the
+    /// hero off them. The header, Row 1 and the separator come first.
+    fn lanes_end_row(&self) -> usize {
+        3 + self.lane_rows()
     }
 
     /// Propagate a sensitivity multiplier to all three sub-visualizations.
@@ -502,6 +529,10 @@ impl ArcadeVisualization {
         // Smooth interpolation toward target
         self.hero_x = lerp(self.hero_x, self.hero_target_x, self.hero_lerp_speed);
         self.hero_y = lerp(self.hero_y, self.hero_target_y, self.hero_lerp_speed);
+        // Keep the hero below any lanes, so it never sits on one.
+        if self.lane_rows() > 0 {
+            self.hero_y = self.hero_y.max(self.lanes_end_row() as f32);
+        }
 
         // Update trail
         self.update_trail();
@@ -670,8 +701,21 @@ impl ArcadeVisualization {
             lines.push(line);
         }
 
-        // Overlay hero character and trail on the composite canvas
-        self.overlay_hero(lines, backend)
+        // Overlay hero character and trail on the composite canvas, then lay
+        // the activity lanes over the first starfield rows so nothing covers
+        // them. With no activities `lane_rows()` is 0 and this does nothing.
+        let mut lines = self.overlay_hero(lines, backend);
+        let n = self.lane_rows();
+        if n > 0 {
+            let lanes = crate::animation::render_lanes(&self.activities, self.width);
+            for (i, lane) in lanes.into_iter().enumerate() {
+                // Header (0), Row 1 (1), separator (2), then the starfield rows.
+                if let Some(slot) = lines.get_mut(3 + i) {
+                    *slot = lane;
+                }
+            }
+        }
+        lines
     }
 
     /// Build the single shared per-device telemetry strip.
@@ -1310,6 +1354,106 @@ mod tests {
         assert!(
             text.contains("°C"),
             "standalone MemoryCastle (chrome default) must still show °C"
+        );
+    }
+
+    fn lane_act(label: &str) -> crate::animation::Activity {
+        crate::animation::Activity {
+            kind: crate::animation::ActivityKind::Train,
+            label: label.into(),
+            stalled: false,
+            fields: vec!["step 1/10 █░░░░░░░ 10%".into()],
+            pulse_seq: 0,
+            key_hint: 't',
+        }
+    }
+
+    fn rows_of(a: &ArcadeVisualization, backend: &dyn TelemetryBackend) -> Vec<String> {
+        a.render(backend)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn mock_backend() -> crate::backend::mock::MockBackend {
+        let mut b = crate::backend::mock::MockBackend::new(2);
+        b.init().unwrap();
+        b.update().unwrap();
+        b
+    }
+
+    /// With no activities nothing changes: no lanes are reserved and no lane tag
+    /// appears. (Arcade's render uses randomness, so this checks the structure
+    /// rather than comparing bytes with a stored frame.)
+    #[test]
+    fn no_activities_means_no_lanes() {
+        let backend = mock_backend();
+        let mut a = ArcadeVisualization::new(120, 40);
+        a.update(&backend);
+        assert_eq!(a.lane_rows(), 0);
+        let text = rows_of(&a, &backend).join("\n");
+        assert!(!text.contains("TRAIN") && !text.contains('▎'), "{text}");
+    }
+
+    #[test]
+    fn activities_replace_the_first_starfield_rows_and_keep_the_row_count() {
+        let backend = mock_backend();
+        let mut idle = ArcadeVisualization::new(120, 40);
+        idle.update(&backend);
+        let idle_rows = rows_of(&idle, &backend).len();
+
+        let mut a = ArcadeVisualization::new(120, 40);
+        a.set_activities(vec![lane_act("nano_gpt"), lane_act("second")]);
+        a.update(&backend);
+        assert_eq!(a.lane_rows(), 2);
+        let rows = rows_of(&a, &backend);
+        assert_eq!(rows.len(), idle_rows, "the render must keep its height");
+        // Header, Row 1, separator, then the lanes.
+        assert!(rows[3].contains("nano_gpt"), "{:?}", &rows[..6]);
+        assert!(rows[4].contains("second"), "{:?}", &rows[..6]);
+        // No lane row ends in a right-side border glyph.
+        for r in &rows[3..5] {
+            assert!(
+                !"│┐┘║▕".contains(r.trim_end().chars().last().unwrap_or(' ')),
+                "{r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_starfield_gets_no_lanes() {
+        let backend = mock_backend();
+        let mut a = ArcadeVisualization::new(120, 12); // starfield region < 6 rows
+        assert!((a.starfield_end - a.starfield_start) < 6);
+        a.set_activities(vec![lane_act("nano_gpt")]);
+        a.update(&backend);
+        assert_eq!(a.lane_rows(), 0);
+        assert!(!rows_of(&a, &backend).join("\n").contains("nano_gpt"));
+    }
+
+    /// The hero must not cover a lane. Force the hero to the top of the screen
+    /// and check the lane text survives intact.
+    #[test]
+    fn the_hero_never_covers_a_lane() {
+        let backend = mock_backend();
+        let mut a = ArcadeVisualization::new(120, 40);
+        a.set_activities(vec![lane_act("nano_gpt")]);
+        a.update(&backend);
+        a.hero_x = 10.0;
+        a.hero_y = 0.0;
+        a.hero_target_y = 0.0;
+        a.update(&backend);
+        let rows = rows_of(&a, &backend);
+        assert!(rows[3].contains("nano_gpt"), "{:?}", &rows[..5]);
+        assert!(
+            a.hero_y >= a.lane_rows() as f32 + 3.0,
+            "hero_y {}",
+            a.hero_y
         );
     }
 }
