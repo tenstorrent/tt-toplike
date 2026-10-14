@@ -173,6 +173,20 @@ pub fn from_service(
     })
 }
 
+/// Cumulative count of finished requests for a service, from the scrape's
+/// monotonic counters (vLLM: succeeded plus errored; a media server: completed
+/// generations). It only ever rises, so reading the same snapshot again on the
+/// next frame adds nothing. A drop means the server restarted.
+pub fn pulse_total(row: &ServiceState) -> u64 {
+    if let Some(sv) = &row.serving {
+        sv.counters.requests_succeeded_total + sv.counters.requests_errored_total
+    } else if let Some(m) = &row.media {
+        m.counters.requests_total
+    } else {
+        0
+    }
+}
+
 /// Most urgent first: stalled, then loading or compiling, then training, then
 /// serving. Stable within a group (input order kept).
 pub fn ordered(mut all: Vec<Activity>) -> Vec<Activity> {
@@ -192,13 +206,12 @@ pub fn ordered(mut all: Vec<Activity>) -> Vec<Activity> {
 }
 
 /// Keeps the per-service state the pure builders need: when each service was
-/// first seen (for the load clock) and its accumulated completed-request count
-/// (for the pulse counter). A service that disappears is forgotten, so a
-/// restarted server starts fresh.
+/// first seen, for the load clock. A service that disappears is forgotten, so a
+/// restarted server starts its clock fresh. The pulse count needs no state: it
+/// is the scrape's cumulative counter (see [`pulse_total`]).
 #[derive(Debug, Default)]
 pub struct ActivityTracker {
     first_seen: HashMap<String, f32>,
-    pulses: HashMap<String, u64>,
 }
 
 impl ActivityTracker {
@@ -216,7 +229,6 @@ impl ActivityTracker {
     ) -> Vec<Activity> {
         let live: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
         self.first_seen.retain(|k, _| live.contains(&k.as_str()));
-        self.pulses.retain(|k, _| live.contains(&k.as_str()));
 
         let mut out: Vec<Activity> = Vec::new();
         if let Some(a) = train.and_then(from_train) {
@@ -224,14 +236,7 @@ impl ActivityTracker {
         }
         for row in rows {
             let started = *self.first_seen.entry(row.key.clone()).or_insert(now_secs);
-            let completed = row
-                .serving
-                .as_ref()
-                .map(|s| u64::from(s.completed_delta))
-                .unwrap_or(0);
-            let total = self.pulses.entry(row.key.clone()).or_insert(0);
-            *total += completed;
-            if let Some(a) = from_service(row, Some(now_secs - started), *total) {
+            if let Some(a) = from_service(row, Some(now_secs - started), pulse_total(row)) {
                 out.push(a);
             }
         }
@@ -388,24 +393,55 @@ mod tests {
         assert_eq!(fmt_eta(3600.0 + 5.0 * 60.0), "1h05m left");
     }
 
+    /// The monitor snapshot repeats for several seconds while the render loop
+    /// reads it every frame, so a pulse count must come from the cumulative
+    /// counters: the same snapshot seen again adds nothing.
     #[test]
-    fn the_tracker_counts_completed_requests_as_pulses_and_treats_a_drop_as_a_reset() {
+    fn the_pulse_count_is_cumulative_and_a_repeated_snapshot_adds_nothing() {
         let mut serving = crate::workload::inference_server::metrics::ServingStats::zeroed();
-        serving.completed_delta = 3;
+        serving.completed_delta = 3; // a per-tick delta, which must NOT be summed
+        serving.counters.requests_succeeded_total = 3;
+        serving.counters.requests_errored_total = 1;
         let mut ready = svc("m", Phase::Ready);
-        ready.serving = Some(serving.clone());
+        ready.serving = Some(serving);
         let mut t = ActivityTracker::new();
         let a = t.update(None, &[ready.clone()], 1.0);
-        assert_eq!(a[0].pulse_seq, 3);
-        let a = t.update(None, &[ready.clone()], 2.0);
-        assert_eq!(a[0].pulse_seq, 6);
-        // The server restarted: the key is gone for a tick, then returns.
-        let _ = t.update(None, &[], 3.0);
-        let a = t.update(None, &[ready], 4.0);
-        assert_eq!(
-            a[0].pulse_seq, 3,
-            "a returning service starts a fresh count"
-        );
+        assert_eq!(a[0].pulse_seq, 4, "succeeded plus errored");
+        // The same snapshot, seen on later frames.
+        for frame in 2..60 {
+            let a = t.update(None, &[ready.clone()], frame as f32 * 0.016);
+            assert_eq!(a[0].pulse_seq, 4, "frame {frame}");
+        }
+        // A new scrape with more finished requests.
+        let mut more = ready.clone();
+        more.serving
+            .as_mut()
+            .unwrap()
+            .counters
+            .requests_succeeded_total = 9;
+        let a = t.update(None, &[more], 2.0);
+        assert_eq!(a[0].pulse_seq, 10);
+    }
+
+    #[test]
+    fn a_media_servers_pulse_count_is_its_completed_generations() {
+        let mut m = svc("flux", Phase::Ready);
+        let mut media = crate::workload::inference_server::metrics::MediaStats {
+            generations_per_min: 0.0,
+            jobs_in_progress: 1,
+            completed_delta: 0,
+            errored_delta: 0,
+            duration_avg_s: 0.0,
+            post_avg_s: 0.0,
+            pre_avg_s: 0.0,
+            inference_avg_s: 0.0,
+            warmup_avg_s: 0.0,
+            counters: Default::default(),
+        };
+        media.counters.requests_total = 7;
+        m.media = Some(media);
+        let a = from_service(&m, None, pulse_total(&m)).unwrap();
+        assert_eq!(a.pulse_seq, 7);
     }
 
     #[test]
