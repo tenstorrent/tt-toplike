@@ -232,6 +232,13 @@ pub struct Atmosphere {
     flares: Vec<(u64, u32)>,
     static_until: u64,
     splash_until: u64,
+    /// Kernels compiled plus weight shards loaded during this load, as seen.
+    /// A measure of how much has been built, not a percentage: there is no known
+    /// total to divide by.
+    built: f32,
+    spark_until: u64,
+    /// Host CPU load, normalised, smoothed.
+    cpu: f32,
 }
 
 /// Cumulative counters from the last observed scrape. The monitor snapshot
@@ -242,6 +249,22 @@ struct Seen {
     done: Option<u64>,
     errored: Option<u64>,
     preempted: Option<u64>,
+    kernels: Option<usize>,
+    shards: Option<usize>,
+}
+
+/// The monitor's "never observed" value for the kernel and shard counts, which
+/// holds until the first real sample. It is not a count.
+const NEVER_OBSERVED: usize = i64::MAX as usize;
+
+/// Like [`rise`] for the monitor's `usize` counts, ignoring the sentinel.
+fn rise_count(prev: &mut Option<usize>, now: usize) -> u64 {
+    if now >= NEVER_OBSERVED {
+        return 0;
+    }
+    let r = prev.map(|p| now.saturating_sub(p)).unwrap_or(0);
+    *prev = Some(now);
+    r as u64
 }
 
 /// How much a counter rose since last seen. The first sight of a counter is a
@@ -257,6 +280,7 @@ const FLARE_FRAMES: u64 = 24;
 const MAX_FLARES: usize = 8;
 const STATIC_FRAMES: u64 = 40;
 const SPLASH_FRAMES: u64 = 30;
+const SPARK_FRAMES: u64 = 20;
 
 impl Default for Atmosphere {
     fn default() -> Self {
@@ -279,6 +303,9 @@ impl Atmosphere {
             flares: Vec::new(),
             static_until: 0,
             splash_until: 0,
+            built: 0.0,
+            spark_until: 0,
+            cpu: 0.0,
         }
     }
 
@@ -287,6 +314,13 @@ impl Atmosphere {
         self.frame = self.frame.wrapping_add(1);
         let row = featured(rows);
         self.scene = scene_of(row);
+        if !matches!(self.scene, Scene::Forge | Scene::Stalled) {
+            self.built = 0.0;
+        }
+        let cpu = row
+            .map(|r| (r.cpu_pct / 400.0).clamp(0.0, 1.0))
+            .unwrap_or(0.0);
+        self.cpu += (cpu - self.cpu) * SMOOTH;
         let serving = row.and_then(|r| r.serving.as_ref());
         self.energy
             .feed(serving.map(|s| s.generation_tps).unwrap_or(0.0));
@@ -315,6 +349,14 @@ impl Atmosphere {
         );
         let errored = rise(&mut self.seen.errored, errors_total(row));
         let preempted = rise(&mut self.seen.preempted, preemptions_total(row));
+        let kernels = rise_count(&mut self.seen.kernels, row.kernel_count);
+        let shards = rise_count(&mut self.seen.shards, row.loaded_count);
+        if self.scene == Scene::Forge {
+            self.built += (kernels + shards) as f32;
+            if kernels > 0 {
+                self.spark_until = self.frame + SPARK_FRAMES;
+            }
+        }
         for i in 0..done.min(3) as u32 {
             if self.flares.len() >= MAX_FLARES {
                 self.flares.remove(0);
@@ -336,6 +378,11 @@ impl Atmosphere {
         self.flares.len()
     }
 
+    #[cfg(test)]
+    pub(crate) fn built(&self) -> f32 {
+        self.built
+    }
+
     /// True when a service is featured, so the backdrop should be drawn.
     pub fn active(&self) -> bool {
         self.scene != Scene::None
@@ -351,6 +398,12 @@ impl Atmosphere {
         self.paint_sky(&mut canvas, w, h);
         if matches!(self.scene, Scene::Aurora | Scene::Storm | Scene::Dream) {
             self.paint_tide(&mut canvas, w, h);
+        }
+        if matches!(self.scene, Scene::Forge | Scene::Stalled) {
+            self.paint_forge(&mut canvas, w, h);
+        }
+        if self.scene == Scene::Forming {
+            self.paint_forming(&mut canvas, w, h);
         }
         if self.scene == Scene::Storm {
             self.paint_storm(&mut canvas, w, h);
@@ -438,6 +491,78 @@ impl Atmosphere {
                 if y >= 0 && (y as usize) < h {
                     let glyph = ['⠁', '⠃', '⠇', '⡇'][((self.frame / 4) as usize + x) % 4];
                     canvas[y as usize][x] = Some((glyph, hsv_to_rgb(45.0, 0.8, 0.85)));
+                }
+            }
+        }
+    }
+
+    /// Compiling and loading: a scaffold of beams rises from the floor as kernels
+    /// compile and weight shards land, sparks fly off the beam tops while kernels
+    /// compile, and the floor glows with host CPU load. A stalled load keeps its
+    /// beams as dim red embers, with no sparks and no growth.
+    fn paint_forge(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        let stalled = self.scene == Scene::Stalled;
+        let level = 1.0 - (-self.built / 150.0).exp();
+        let beam_color = |v: f32| {
+            if stalled {
+                hsv_to_rgb(0.0, 0.7, 0.12 + 0.08 * v)
+            } else {
+                hsv_to_rgb(25.0, 0.8, 0.30 + 0.30 * self.cpu)
+            }
+        };
+        let mut tops: Vec<(usize, usize)> = Vec::new();
+        let mut i = 0usize;
+        let mut x = 3usize;
+        while x < w {
+            let bh = (level * (0.6 + 0.4 * star_hash(i, 2)) * 0.7 * h as f32) as usize;
+            for r in 0..bh.min(h) {
+                let ch = if r % 4 == 3 { '┼' } else { '│' };
+                canvas[h - 1 - r][x] = Some((ch, beam_color(0.0)));
+            }
+            if bh > 0 && bh <= h {
+                tops.push((x, h - bh));
+            }
+            i += 1;
+            x += 7;
+        }
+        if !stalled && self.frame < self.spark_until && !tops.is_empty() {
+            let (x, y) = tops[((self.frame / 3) as usize) % tops.len()];
+            let y = y.saturating_sub(1);
+            canvas[y][x] = Some(('✧', hsv_to_rgb(40.0, 0.5, 1.0)));
+        }
+        // The floor glows with host CPU load.
+        let step = (self.frame / 3) as usize;
+        let hue = if stalled { 0.0 } else { 20.0 };
+        for x in 0..w {
+            if star_hash(x, step) < self.cpu * 0.6 {
+                let glyph = ['▁', '▂', '▃', '▅'][(x + step) % 4];
+                let v = if stalled { 0.2 } else { 0.5 + 0.4 * self.cpu };
+                canvas[h - 1][x] = Some((glyph, hsv_to_rgb(hue, 0.9, v)));
+            }
+        }
+    }
+
+    /// A diffusion or video job in flight: a canvas in the middle that loops
+    /// from noise toward structure and back. Indeterminate on purpose: the
+    /// monitor knows a job is running, not how far along it is.
+    fn paint_forming(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        let (x0, x1, y0, y1) = (w / 3, 2 * w / 3, h / 4, 3 * h / 4);
+        let (cx, cy) = ((x0 + x1) as i32 / 2, (y0 + y1) as i32 / 2);
+        let p = (self.frame % 360) as f32 / 360.0;
+        let tri = if p < 0.5 { p * 2.0 } else { 2.0 - 2.0 * p };
+        let density = 0.8 - 0.65 * tri;
+        let hue = (200.0 + self.frame as f32 / 4.0) % 360.0;
+        for y in y0..y1.min(h) {
+            for x in x0..x1.min(w) {
+                let v = star_hash(x, y);
+                let (dx, dy) = ((x as i32 - cx).abs(), (y as i32 - cy).abs());
+                let on = if density > 0.45 {
+                    v < density
+                } else {
+                    (dx + dy) % 4 == 0 && v < 0.9
+                };
+                if on {
+                    canvas[y][x] = Some(('▒', hsv_to_rgb(hue, 0.5, 0.5)));
                 }
             }
         }
@@ -1149,5 +1274,201 @@ mod tests {
         let c = aurora.render_backdrop(100, 30);
         assert_eq!(count(&c, &[BEAT]), 0);
         assert_eq!(count(&c, &BOLT), 0);
+    }
+
+    // ---- Task 5: the forge, the embers and the forming canvas -----------
+
+    const BEAM: [char; 2] = ['│', '┼'];
+    const SPARK: char = '✧';
+    const GLOW: [char; 4] = ['▁', '▂', '▃', '▅'];
+    const NEVER: usize = i64::MAX as usize; // the monitor's "never observed" sentinel
+
+    fn loading(kernels: usize, shards: usize, cpu: f32) -> ServiceState {
+        let mut s = svc(Phase::Loading);
+        s.kernel_count = kernels;
+        s.loaded_count = shards;
+        s.cpu_pct = cpu;
+        s
+    }
+
+    #[test]
+    fn the_forge_grows_only_from_real_rises_never_from_the_sentinel() {
+        let mut a = Atmosphere::new();
+        a.observe(&[loading(NEVER, NEVER, 0.0)]);
+        a.observe(&[loading(NEVER, NEVER, 0.0)]);
+        assert_eq!(a.built(), 0.0, "the sentinel is not growth");
+        // The first real sample is a baseline, even when large.
+        a.observe(&[loading(5000, 40, 0.0)]);
+        assert_eq!(a.built(), 0.0, "first sight is a baseline");
+        assert_eq!(
+            count(&a.render_backdrop(100, 30), &BEAM),
+            0,
+            "nothing built yet"
+        );
+        a.observe(&[loading(5150, 40, 0.0)]);
+        assert_eq!(a.built(), 150.0);
+        assert!(count(&a.render_backdrop(100, 30), &BEAM) > 0);
+    }
+
+    /// A real count followed by the sentinel (a fresh sample for the same
+    /// service) must not read as a leap of nearly `i64::MAX` kernels.
+    #[test]
+    fn a_real_count_followed_by_the_sentinel_is_not_a_leap() {
+        let mut a = Atmosphere::new();
+        a.observe(&[loading(100, 10, 0.0)]);
+        a.observe(&[loading(NEVER, NEVER, 0.0)]);
+        assert_eq!(a.built(), 0.0);
+        a.observe(&[loading(160, 25, 0.0)]);
+        assert_eq!(a.built(), 75.0, "growth resumes from the last real count");
+    }
+
+    #[test]
+    fn a_repeated_snapshot_adds_nothing_and_growth_is_monotonic_but_bounded() {
+        let mut a = Atmosphere::new();
+        a.observe(&[loading(100, 0, 0.0)]);
+        a.observe(&[loading(300, 0, 0.0)]);
+        let built = a.built();
+        for _ in 0..100 {
+            a.observe(&[loading(300, 0, 0.0)]);
+        }
+        assert_eq!(a.built(), built, "the same snapshot, frame after frame");
+        let mut last = 0;
+        for k in 1..60usize {
+            a.observe(&[loading(300 + k * 400, 0, 0.0)]);
+            let n = count(&a.render_backdrop(100, 30), &BEAM);
+            assert!(n >= last, "beams never shrink while loading");
+            last = n;
+        }
+        // Even a huge build leaves the beams under the screen height.
+        let c = a.render_backdrop(100, 30);
+        for x in 0..100 {
+            let col = (0..30)
+                .filter(|y| c[*y][x].is_some_and(|(ch, _)| BEAM.contains(&ch)))
+                .count();
+            assert!(col < 30, "column {x} is {col} tall");
+        }
+    }
+
+    #[test]
+    fn shards_landing_grow_the_forge_too() {
+        let mut a = Atmosphere::new();
+        a.observe(&[loading(10, 5, 0.0)]);
+        a.observe(&[loading(10, 25, 0.0)]);
+        assert_eq!(a.built(), 20.0);
+    }
+
+    #[test]
+    fn the_forge_resets_when_the_load_ends() {
+        let mut a = Atmosphere::new();
+        a.observe(&[loading(0, 0, 0.0)]);
+        a.observe(&[loading(500, 0, 0.0)]);
+        assert!(a.built() > 0.0);
+        a.observe(&[svc(Phase::Ready)]);
+        assert_eq!(a.built(), 0.0);
+    }
+
+    #[test]
+    fn sparks_fly_only_while_kernels_are_compiling() {
+        let mut a = Atmosphere::new();
+        a.observe(&[loading(0, 0, 0.0)]);
+        a.observe(&[loading(400, 0, 0.0)]); // built enough for beams, and a rise
+        let during = count(&a.render_backdrop(100, 30), &[SPARK]);
+        assert!(during > 0, "a spark while compiling");
+        for _ in 0..60 {
+            a.observe(&[loading(400, 0, 0.0)]);
+        }
+        assert_eq!(
+            count(&a.render_backdrop(100, 30), &[SPARK]),
+            0,
+            "none once it stops"
+        );
+    }
+
+    #[test]
+    fn a_stalled_load_has_dim_embers_no_sparks_and_no_growth() {
+        let stalled = |kernels: usize| {
+            let mut s = svc(Phase::Alarm);
+            s.kernel_count = kernels;
+            s
+        };
+        let mut a = Atmosphere::new();
+        a.observe(&[loading(0, 0, 0.0)]);
+        a.observe(&[loading(300, 0, 0.0)]);
+        let built = a.built();
+        a.observe(&[stalled(300)]);
+        a.observe(&[stalled(900)]);
+        assert_eq!(a.scene, Scene::Stalled);
+        assert_eq!(a.built(), built, "no growth while stalled");
+        assert_eq!(count(&a.render_backdrop(100, 30), &[SPARK]), 0);
+        assert!(
+            count(&a.render_backdrop(100, 30), &BEAM) > 0,
+            "the beams stay, dim"
+        );
+    }
+
+    #[test]
+    fn host_load_lights_the_floor() {
+        let glow = |cpu: f32| {
+            let mut a = Atmosphere::new();
+            for _ in 0..80 {
+                a.observe(&[loading(0, 0, cpu)]);
+            }
+            count(&vec![a.render_backdrop(100, 30)[29].clone()], &GLOW)
+        };
+        assert_eq!(glow(0.0), 0);
+        assert!(glow(400.0) > glow(80.0), "more CPU, more glow");
+    }
+
+    #[test]
+    fn the_forge_draws_nothing_from_the_serving_scenes() {
+        let mut a = Atmosphere::new();
+        a.observe(&[loading(0, 0, 200.0)]);
+        a.observe(&[loading(500, 10, 200.0)]);
+        let c = a.render_backdrop(100, 30);
+        for set in [
+            &FALL[..],
+            &RISE[..],
+            &[COMET_HEAD],
+            &[HORIZON],
+            &[BEAT],
+            &BOLT[..],
+            &[STATIC],
+            &['≈', '~'],
+        ] {
+            assert_eq!(count(&c, set), 0, "{set:?}");
+        }
+    }
+
+    fn forming(frames: usize) -> Atmosphere {
+        let mut s = svc(Phase::Ready);
+        let mut m = media(1);
+        m.counters.requests_total = 1;
+        s.media = Some(m);
+        observed(&[s], frames)
+    }
+
+    #[test]
+    fn forming_is_a_canvas_in_the_middle_that_resolves_over_time() {
+        let (w, h) = (90, 30);
+        let c = forming(10).render_backdrop(w, h);
+        let mut inside = 0;
+        for (y, row) in c.iter().enumerate() {
+            for (x, cell) in row.iter().enumerate() {
+                if cell.is_some_and(|(ch, _)| ch == '▒') {
+                    assert!(
+                        x >= w / 3 && x < 2 * w / 3 && y >= h / 4 && y < 3 * h / 4,
+                        "({x},{y})"
+                    );
+                    inside += 1;
+                }
+            }
+        }
+        assert!(inside > 0);
+        // Later in the loop the noise has resolved toward structure: fewer cells.
+        let late = count(&forming(180).render_backdrop(w, h), &['▒']);
+        assert!(late < inside, "{late} vs {inside}");
+        // And no forming canvas without a job in flight.
+        let idle = observed(&[svc(Phase::Ready)], 10).render_backdrop(w, h);
+        assert_eq!(count(&idle, &['▒']), 0);
     }
 }
