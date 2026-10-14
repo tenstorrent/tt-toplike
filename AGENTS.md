@@ -1200,3 +1200,23 @@ PR description if it was available.
 Version and merge order: this fix is 0.13.11 and merges first (PR 36). PR 34 was
 renumbered from 0.13.11-0.13.16 to 0.13.12-0.13.17 and is rebased onto this
 branch, so the two merge in order without conflicts.
+
+### Model labels from weights paths (Oct 14, 2026)
+
+Report: "a model is loading right now and it shows in inference view but it
+lists it as `model-dir` and I think we can do better." The launch was a direct
+host vLLM with `--model /home/ttuser/orchard-runs/thakicloud--rag-gate-27b/stages/2/model-dir`,
+and the label was `model_basename`'s last path segment.
+
+`services::friendly_model_label(model, served_name)` replaces it for servers not
+in the SERVERS table: the `--served-model-name` if the launch gave one (read on
+all three detection paths into `InferenceServer.served_name`, `=` form and first
+of several names); else, for a weights path, the nearest segment that is not
+generic (`model-dir`, `final`, `checkpoint-N`, `snapshots`, revision hashes, bare
+numbers, `stages`), with `org--name` and `models--org--name` stripped to `name`;
+else the last segment as before. That launch is now `rag-gate-27b`. Checked in the
+real app on this box while the model loaded: the Inference header read
+`rag-gate-27b  :8100 · chips 0,1`.
+
+Built test-first: five tests failed with the old label (the monitor test failed
+with `left: "model-dir"`) before the implementation, two guard unchanged cases.

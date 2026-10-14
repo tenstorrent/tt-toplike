@@ -42,6 +42,9 @@ pub struct InferenceServer {
     pub source: Source,
     pub image: String,
     pub model: Option<String>,
+    /// vLLM's `--served-model-name` (first value): the name API clients use,
+    /// which is a better label than a weights path. `None` when not given.
+    pub served_name: Option<String>,
     pub mesh: Option<String>,
     pub arch: Option<String>,
     pub device: Option<String>,
@@ -216,6 +219,21 @@ fn port_flag(toks: &[&str], flag: &str) -> Option<u16> {
         .and_then(|p| p.parse().ok())
 }
 
+/// vLLM's `--served-model-name <name> [<alias>…]` / `--served-model-name=<name>`:
+/// the first name, which is what API clients send as `model`. `None` when the
+/// flag is absent or empty.
+fn served_name_from_toks(toks: &[&str]) -> Option<String> {
+    let flag = "--served-model-name";
+    let eq = format!("{flag}=");
+    toks.iter()
+        .position(|t| t == &flag)
+        .and_then(|i| value_after(toks, i))
+        .or_else(|| toks.iter().find_map(|t| t.strip_prefix(eq.as_str())))
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+}
+
 /// Recognize a TT inference server from `name` + full `cmdline`, or `None`.
 /// v1 only recognizes the `docker run` form.
 pub fn parse_inference_server(name: &str, cmdline: &str) -> Option<InferenceServer> {
@@ -250,6 +268,7 @@ pub fn parse_inference_server(name: &str, cmdline: &str) -> Option<InferenceServ
         // `--model=X`) arg, which is how vLLM/LLM deployments pass the model
         // (e.g. Qwen/Qwen3-32B) rather than an env var.
         model: env_value(&toks, "MODEL").or_else(|| model_arg(&toks)),
+        served_name: served_name_from_toks(&toks),
         mesh: env_value(&toks, "MESH_DEVICE"),
         arch: env_value(&toks, "ARCH_NAME"),
         device: env_value(&toks, "DEVICE"),
@@ -367,6 +386,7 @@ pub fn parse_inspect(json: &str) -> Option<InferenceServer> {
             // serve`/other recognized launch shape at all) — `vllm_model_from_toks`
             // only looks for `--model` within a shape it already recognized.
             .or_else(|| model_arg(&full_argv_flat)),
+        served_name: served_name_from_toks(&full_argv_flat),
         mesh: env_val("MESH_DEVICE"),
         arch: env_val("ARCH_NAME"),
         device: env_val("DEVICE"),
@@ -444,6 +464,7 @@ pub fn parse_direct_vllm(
         // only used for the monitor's display/signature formatting.
         image: "vllm-direct".to_string(),
         model: Some(model),
+        served_name: served_name_from_toks(&toks),
         mesh,
         arch: None,
         device: None,
@@ -509,6 +530,68 @@ mod tests {
         assert_eq!(s.port, Some(8002));
         assert!(s.image.contains("tt-inference-server"));
         assert!(s.uses_tt_device);
+    }
+
+    /// `--served-model-name` is the name API clients use. It is read on every
+    /// detection path, in both spellings, and the first of several wins.
+    #[test]
+    fn reads_the_served_model_name_on_every_detection_path() {
+        // Direct host vLLM, separated form.
+        let direct = parse_direct_vllm(
+            "python",
+            "python -m vllm.entrypoints.openai.api_server --model /m/model-dir \
+             --served-model-name my-llm --port 8100",
+            "MESH_DEVICE=P300x2\n",
+            7,
+        )
+        .expect("direct vLLM");
+        assert_eq!(direct.served_name.as_deref(), Some("my-llm"));
+
+        // `=` form, and the first of several names.
+        let eq = parse_direct_vllm(
+            "python",
+            "python -m vllm.entrypoints.openai.api_server --model /m/model-dir \
+             --served-model-name=alpha --port 8100",
+            "MESH_DEVICE=P300x2\n",
+            7,
+        )
+        .expect("direct vLLM");
+        assert_eq!(eq.served_name.as_deref(), Some("alpha"));
+        let many = parse_direct_vllm(
+            "python",
+            "python -m vllm.entrypoints.openai.api_server --model /m/model-dir \
+             --served-model-name alpha beta --port 8100",
+            "MESH_DEVICE=P300x2\n",
+            7,
+        )
+        .expect("direct vLLM");
+        assert_eq!(many.served_name.as_deref(), Some("alpha"));
+
+        // No flag: none.
+        let none = parse_direct_vllm(
+            "python",
+            "python -m vllm.entrypoints.openai.api_server --model /m/model-dir --port 8100",
+            "MESH_DEVICE=P300x2\n",
+            7,
+        )
+        .expect("direct vLLM");
+        assert_eq!(none.served_name, None);
+
+        // `docker run` command line.
+        let run = parse_inference_server(
+            "docker",
+            &format!("{DOCKER_RUN_VLLM} --served-model-name served-by-run"),
+        )
+        .expect("docker run");
+        assert_eq!(run.served_name.as_deref(), Some("served-by-run"));
+
+        // `docker inspect` Cmd.
+        let inspected = INSPECT_VLLM.replace(
+            r#""--no-auth"]"#,
+            r#""--no-auth", "--served-model-name", "served-by-inspect"]"#,
+        );
+        let ins = parse_inspect(&inspected).expect("inspect");
+        assert_eq!(ins.served_name.as_deref(), Some("served-by-inspect"));
     }
 
     #[test]

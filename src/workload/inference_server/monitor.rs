@@ -28,7 +28,7 @@ use crate::workload::inference_server::probe::{
     contains_python, count_lines, parse_docker_stats, parse_env_var, parse_liveness, top_process,
     ContainerProbe, DockerProbe, Readiness, SystemProbe, TickSample,
 };
-use crate::workload::inference_server::services::{model_basename, service_for};
+use crate::workload::inference_server::services::{friendly_model_label, service_for};
 use crate::workload::inference_server::state::{
     estimate_progress, is_alarm, ModelProfile, Phase, ServiceState,
 };
@@ -332,10 +332,14 @@ pub(crate) fn rebuild_snapshot(
                     def.health_path,
                 ),
                 None => {
+                    // The served name if the launch gave one, else the informative
+                    // part of the weights path (see `friendly_model_label`), so a
+                    // path ending in `model-dir` is not shown as `model-dir`.
                     let label = server
                         .model
                         .as_deref()
-                        .map(|m| model_basename(m).to_string())
+                        .or(server.served_name.as_deref())
+                        .map(|m| friendly_model_label(m, server.served_name.as_deref()))
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| container.clone());
                     // Key by the (unique, stable) container name so prev-state
@@ -784,6 +788,7 @@ mod tests {
             },
             image: "ghcr.io/tenstorrent/tt-media-inference-server:0.17.0".into(),
             model: Some("Z-Image-Turbo".into()), // in SERVERS, default port 8000
+            served_name: None,
             mesh: None,
             arch: None,
             device: None,
@@ -809,6 +814,29 @@ mod tests {
         );
     }
 
+    /// The label a user sees for a generic (not-in-the-table) server: the
+    /// served name if it has one, else the informative part of a weights path,
+    /// never a bare `model-dir`.
+    #[test]
+    fn a_generic_server_is_labelled_by_its_served_name_or_its_run() {
+        let server = |model: &str, served: Option<&str>| InferenceServer {
+            source: Source::Host { pid: 42 },
+            image: "vllm-direct".into(),
+            model: Some(model.into()),
+            served_name: served.map(str::to_string),
+            mesh: Some("P300x2".into()),
+            arch: None,
+            device: None,
+            port: Some(8100),
+            uses_tt_device: true,
+        };
+        let path = "/home/u/orchard-runs/thakicloud--rag-gate-27b/stages/2/model-dir";
+        let snap = rebuild_snapshot(&[server(path, None)], &[], &FakeProbe, 5);
+        assert_eq!(snap[0].label, "rag-gate-27b");
+        let named = rebuild_snapshot(&[server(path, Some("rag-gate"))], &[], &FakeProbe, 5);
+        assert_eq!(named[0].label, "rag-gate");
+    }
+
     #[test]
     fn snapshot_carries_port_and_chips_from_the_probe() {
         let srv = InferenceServer {
@@ -818,6 +846,7 @@ mod tests {
             image: "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release:0.14.0"
                 .into(),
             model: Some("Qwen/Qwen3-32B".into()),
+            served_name: None,
             mesh: None,
             arch: None,
             device: None,
@@ -847,6 +876,7 @@ mod tests {
             },
             image: "ghcr.io/tenstorrent/tt-media-inference-server:0.17.0".into(),
             model: Some("Z-Image-Turbo".into()),
+            served_name: None,
             mesh: None,
             arch: None,
             device: None,
@@ -874,6 +904,7 @@ mod tests {
             image: "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release:0.14.0"
                 .into(),
             model: Some("Qwen/Qwen3-32B".into()), // not in SERVERS
+            served_name: None,
             mesh: None,
             arch: None,
             device: None,
@@ -900,6 +931,7 @@ mod tests {
             source: Source::Host { pid: 4242 },
             image: "vllm-direct".into(),
             model: Some("episod/tt-tnt-1024".into()),
+            served_name: None,
             mesh: Some("P300x2".into()),
             arch: None,
             device: None,
@@ -923,6 +955,7 @@ mod tests {
             },
             image: "ghcr.io/tenstorrent/tt-inference-server/vllm:0.14.0".into(),
             model: Some(model.into()),
+            served_name: None,
             mesh: None,
             arch: None,
             device: None,
