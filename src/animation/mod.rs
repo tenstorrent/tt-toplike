@@ -18,6 +18,7 @@
 //! No fake animations that move regardless of hardware state.
 
 pub mod activity;
+pub mod activity_lanes;
 pub mod arcade;
 pub mod baseline;
 pub mod common;
@@ -39,6 +40,7 @@ pub mod train_tapestry;
 pub mod train_view;
 
 pub use activity::{Activity, ActivityKind, ActivityTracker};
+pub use activity_lanes::render_lanes;
 pub use arcade::ArcadeVisualization;
 pub use baseline::AdaptiveBaseline;
 pub use common::*;
