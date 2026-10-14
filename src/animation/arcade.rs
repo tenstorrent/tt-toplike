@@ -93,6 +93,8 @@ pub struct ArcadeVisualization {
     serving: Option<ServingStats>,
     /// Activities running this tick (training, loading, serving), most urgent first.
     activities: Vec<crate::animation::Activity>,
+    /// Last pulse counts seen per shown lane, to tell a rise from a reset.
+    last_pulse: Vec<u64>,
     /// Motion + glyph state for the duel strip.
     duel: DuelState,
     /// Running peak of observed device power (W), floored at 1.0. Normalizes the
@@ -181,6 +183,7 @@ impl ArcadeVisualization {
             board_topology: None,
             serving: None,
             activities: Vec::new(),
+            last_pulse: Vec::new(),
             duel: DuelState::new(),
             power_peak: 1.0,
         }
@@ -210,6 +213,44 @@ impl ArcadeVisualization {
             return 0;
         }
         self.activities.len().min(2)
+    }
+
+    /// The tint for the most urgent activity: red stalled, violet loading, warm
+    /// training, teal serving. `None` when nothing runs.
+    fn activity_tint(&self) -> Option<crate::animation::ActivityTint> {
+        use crate::animation::{ActivityKind, ActivityTint};
+        let a = self.activities.first()?;
+        let hue = if a.stalled {
+            0.0
+        } else {
+            match a.kind {
+                ActivityKind::Train => 40.0,
+                ActivityKind::Load => 275.0,
+                ActivityKind::Serve => 175.0,
+            }
+        };
+        Some(ActivityTint { hue, strength: 0.3 })
+    }
+
+    /// One flare per new pulse across the lanes shown (at most three per tick).
+    /// The first sight of a count is a baseline, and a count that goes down (a
+    /// new run, a restarted server) is a reset, not a burst.
+    fn pulse_activities(&mut self) {
+        let seen: Vec<u64> = self
+            .activities
+            .iter()
+            .take(2)
+            .map(|a| a.pulse_seq)
+            .collect();
+        for (i, now) in seen.iter().enumerate() {
+            let prev = self.last_pulse.get(i).copied().unwrap_or(*now);
+            if *now > prev {
+                for _ in 0..(*now - prev).min(3) {
+                    self.starfield.pulse();
+                }
+            }
+        }
+        self.last_pulse = seen;
     }
 
     /// First row index (in the whole render) below the lanes, used to keep the
@@ -454,6 +495,8 @@ impl ArcadeVisualization {
 
         // Update sub-visualizations
         self.starfield.update_from_telemetry(backend);
+        self.starfield.set_activity_tint(self.activity_tint());
+        self.pulse_activities();
         self.memory_castle.update(backend);
         self.memory_flow.update(backend);
         self.defrag.update(backend);
@@ -1455,5 +1498,59 @@ mod tests {
             "hero_y {}",
             a.hero_y
         );
+    }
+
+    #[test]
+    fn a_new_pulse_flares_the_starfield_but_a_drop_does_not() {
+        let backend = mock_backend();
+        let mut a = ArcadeVisualization::new(120, 40);
+        let mut act = lane_act("nano_gpt");
+        act.pulse_seq = 10;
+        a.set_activities(vec![act.clone()]);
+        a.update(&backend);
+        assert_eq!(
+            a.starfield.live_flares(),
+            0,
+            "the first sight of a count is a baseline"
+        );
+        act.pulse_seq = 12;
+        a.set_activities(vec![act.clone()]);
+        a.update(&backend);
+        assert!(a.starfield.live_flares() >= 1, "a rise flares");
+        let before = a.starfield.live_flares();
+        act.pulse_seq = 1; // a new run: the count went down
+        a.set_activities(vec![act]);
+        a.update(&backend);
+        assert!(
+            a.starfield.live_flares() <= before,
+            "a drop is a reset, not a burst"
+        );
+    }
+
+    #[test]
+    fn running_activities_tint_the_starfield_by_kind_and_idle_does_not() {
+        use crate::animation::ActivityKind;
+        let backend = mock_backend();
+        let mut a = ArcadeVisualization::new(120, 40);
+        a.update(&backend);
+        assert!(a.activity_tint().is_none());
+        let mut load = lane_act("m");
+        load.kind = ActivityKind::Load;
+        let mut serve = lane_act("m");
+        serve.kind = ActivityKind::Serve;
+        let mut stalled = lane_act("m");
+        stalled.stalled = true;
+        let mut hue = |act: crate::animation::Activity| {
+            a.set_activities(vec![act]);
+            a.activity_tint().unwrap().hue
+        };
+        let (train, load, serve, stalled) =
+            (hue(lane_act("m")), hue(load), hue(serve), hue(stalled));
+        let all = [train, load, serve, stalled];
+        for (i, x) in all.iter().enumerate() {
+            for y in &all[i + 1..] {
+                assert_ne!(x, y, "each kind has its own tint: {all:?}");
+            }
+        }
     }
 }

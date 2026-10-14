@@ -53,7 +53,7 @@ pub use model_starfield::ModelStarfield;
 pub use serving_creature::ServingCreature;
 pub use serving_panels::{exhaust_count, format_chip, lane_segments, sparkline, ChipReading};
 pub use snake::{Behavior, Snake, SnakeWorld};
-pub use starfield::{DataStream, HardwareStarfield, MemoryPlanet, Star};
+pub use starfield::{ActivityTint, DataStream, HardwareStarfield, MemoryPlanet, Star};
 pub use topology::{sync_score, BoardTopology};
 pub use train_sky::{sky_cell, star_hash, SkyCell, STAR_THRESHOLD};
 pub use train_view::TrainView;
