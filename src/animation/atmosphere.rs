@@ -516,7 +516,9 @@ impl Atmosphere {
         while x < w {
             let bh = (level * (0.6 + 0.4 * star_hash(i, 2)) * 0.7 * h as f32) as usize;
             for r in 0..bh.min(h) {
-                let ch = if r % 4 == 3 { '┼' } else { '│' };
+                // ASCII, not box-drawing, so the scaffold cannot be mistaken for
+                // the load box's own borders.
+                let ch = if r % 4 == 3 { '+' } else { '|' };
                 canvas[h - 1 - r][x] = Some((ch, beam_color(0.0)));
             }
             if bh > 0 && bh <= h {
@@ -1278,7 +1280,7 @@ mod tests {
 
     // ---- Task 5: the forge, the embers and the forming canvas -----------
 
-    const BEAM: [char; 2] = ['│', '┼'];
+    const BEAM: [char; 2] = ['|', '+'];
     const SPARK: char = '✧';
     const GLOW: [char; 4] = ['▁', '▂', '▃', '▅'];
     const NEVER: usize = i64::MAX as usize; // the monitor's "never observed" sentinel

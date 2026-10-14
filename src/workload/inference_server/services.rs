@@ -129,7 +129,7 @@ pub fn friendly_model_label(model: &str, served_name: Option<&str>) -> String {
 /// or a revision hash.
 fn is_generic_path_segment(seg: &str) -> bool {
     let s = seg.to_lowercase();
-    const NAMES: [&str; 17] = [
+    const NAMES: &[&str] = &[
         "model-dir",
         "model_dir",
         "modeldir",
@@ -146,7 +146,23 @@ fn is_generic_path_segment(seg: &str) -> bool {
         "snapshots",
         "stage",
         "stages",
-        "ckpt",
+        "ckpt", // weights and stages
+        "bundle",
+        "bundles",
+        "verify",
+        "release",
+        "export",
+        "exported",
+        "merged",
+        "converted",
+        "output",
+        "outputs",
+        "artifacts",
+        "build",
+        "dist",
+        "deploy",
+        "serve",
+        "eval", // packaging
     ];
     if NAMES.contains(&s.as_str()) {
         return true;
@@ -245,6 +261,45 @@ mod tests {
                 None
             ),
             "rag-gate-27b"
+        );
+    }
+
+    /// The second launch reported on the same box: more generic directories
+    /// (`verify`, `bundle`) between the run name and the weights.
+    #[test]
+    fn packaging_and_stage_directories_are_not_the_model_name() {
+        assert_eq!(
+            friendly_model_label(
+                "/home/ttuser/orchard-runs/thakicloud--rag-gate-27b/stages/7/verify/bundle/model-dir",
+                None
+            ),
+            "rag-gate-27b"
+        );
+        for generic in [
+            "bundle",
+            "bundles",
+            "verify",
+            "release",
+            "export",
+            "exported",
+            "merged",
+            "converted",
+            "output",
+            "outputs",
+            "artifacts",
+            "build",
+            "dist",
+            "deploy",
+            "serve",
+            "eval",
+        ] {
+            let path = format!("/runs/acme--chat-7b/{generic}/model-dir");
+            assert_eq!(friendly_model_label(&path, None), "chat-7b", "{generic}");
+        }
+        // A real model directory with one of these as a *substring* is kept.
+        assert_eq!(
+            friendly_model_label("/models/bundler-7b-instruct", None),
+            "bundler-7b-instruct"
         );
     }
 
