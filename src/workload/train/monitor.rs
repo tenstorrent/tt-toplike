@@ -1106,7 +1106,7 @@ impl TrainMonitor {
     /// cmdline for our own processes, and fails closed (`false`) for
     /// anything we can't read, so a foreign process is never claimed.
     #[cfg(target_os = "linux")]
-    fn maps_ttml(pid: i32) -> bool {
+    pub(crate) fn maps_ttml(pid: i32) -> bool {
         // Fail closed without paying an audited denial for a pid we may not
         // read. See `crate::workload::proc_access`.
         if !crate::workload::proc_access::may_read(pid) {
@@ -1127,6 +1127,11 @@ impl TrainMonitor {
     #[cfg(not(target_os = "linux"))]
     fn scan_for_process() -> Option<TrainProcess> {
         None
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn maps_ttml(_pid: i32) -> bool {
+        false
     }
 
     /// Load the run's YAML config, following `transformer_config` to the
@@ -1284,19 +1289,58 @@ impl TrainMonitor {
     }
 
     /// One tick: attach if needed, drain new log lines, check the checkpoint.
+    /// Poll the attached run, and look for one to attach (a `/proc` walk,
+    /// rate-limited) when none is attached.
     pub fn poll(&mut self) {
+        self.poll_inner(true);
+    }
+
+    /// Like `poll`, but never walks `/proc` looking for a trainer. For callers
+    /// that find the trainer another way and call [`TrainMonitor::attach`]; the
+    /// per-tick cost is a few syscalls on the attached pid.
+    pub fn poll_attached(&mut self) {
+        self.poll_inner(false);
+    }
+
+    /// Start following `p`: load its config, find its log, begin tailing.
+    pub fn attach(&mut self, p: TrainProcess) {
+        let cfg = Self::load_config(&p);
+        let log = discover_log(p.pid);
+        if let LogSource::File(ref path) = log {
+            self.tailer = Some(Tailer::new(path.clone()));
+        }
+        self.ckpt = Self::checkpoint_watch_for(&p, &cfg);
+        self.state = TrainState::new();
+        self.reset_run_anchors();
+        self.state.first_seen = Some(Instant::now());
+        self.state.config = cfg;
+        self.state.log = Some(log);
+        self.state.proc = Some(p);
+    }
+
+    /// Stop following the attached run and forget its state.
+    pub fn detach(&mut self) {
+        self.state = TrainState::new();
+        self.reset_run_anchors();
+        self.tailer = None;
+        self.ckpt = None;
+    }
+
+    fn poll_inner(&mut self, allow_scan: bool) {
         // Detach if the run ended.
         if let Some(p) = self.state.proc.as_ref() {
             if !Self::still_alive(p.pid) {
-                self.state = TrainState::new();
-                self.reset_run_anchors();
-                self.tailer = None;
-                self.ckpt = None;
+                self.detach();
             }
         }
 
         // Attach (rate-limited so a bare /proc walk isn't done every frame).
+        // A caller that finds the trainer itself passes `allow_scan = false`
+        // and calls `attach`.
         if self.state.proc.is_none() {
+            if !allow_scan {
+                return;
+            }
             let due = self
                 .last_scan
                 .map(|t| t.elapsed() >= RESCAN_EVERY)
@@ -1306,18 +1350,7 @@ impl TrainMonitor {
             }
             self.last_scan = Some(Instant::now());
             if let Some(p) = Self::scan_for_process() {
-                let cfg = Self::load_config(&p);
-                let log = discover_log(p.pid);
-                if let LogSource::File(ref path) = log {
-                    self.tailer = Some(Tailer::new(path.clone()));
-                }
-                self.ckpt = Self::checkpoint_watch_for(&p, &cfg);
-                self.state = TrainState::new();
-                self.reset_run_anchors();
-                self.state.first_seen = Some(Instant::now());
-                self.state.config = cfg;
-                self.state.log = Some(log);
-                self.state.proc = Some(p);
+                self.attach(p);
             }
             return;
         }
@@ -3373,6 +3406,23 @@ mod abs_base_tests {
         }
         assert_eq!(m.state.step_history.len(), 2);
         assert!((m.state.step_ms - 300.0).abs() < 1.0, "{}", m.state.step_ms);
+    }
+
+    #[test]
+    fn poll_attached_never_walks_proc_and_attach_takes_a_trainer() {
+        let mut m = TrainMonitor::new();
+        // Unattached: poll_attached does nothing (no scan, no state change).
+        m.poll_attached();
+        assert!(m.state().proc.is_none());
+        assert!(m.last_scan.is_none(), "poll_attached must not rescan");
+        // attach() records the process without scanning.
+        m.attach(TrainProcess {
+            pid: std::process::id() as i32,
+            binary: "nano_gpt".into(),
+            config_path: None,
+        });
+        assert_eq!(m.state().proc.as_ref().unwrap().binary, "nano_gpt");
+        assert!(m.last_scan.is_none());
     }
 }
 

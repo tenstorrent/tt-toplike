@@ -12,9 +12,10 @@ pub mod logsrc;
 pub mod mock;
 pub mod monitor;
 pub mod parse;
+pub mod watch;
 
 pub use config::{merge_model_yaml, parse_train_yaml, TrainConfig};
-pub use detect::{parse_train_process, TrainProcess, TRAIN_BINARIES};
+pub use detect::{find_trainer, parse_train_process, TrainProcess, TRAIN_BINARIES};
 pub use logsrc::{classify_fd_target, discover_log, LogSource};
 pub use mock::MockTrainRun;
 pub use monitor::{
@@ -22,3 +23,4 @@ pub use monitor::{
     STEP_HISTORY,
 };
 pub use parse::{parse_train_line, TrainEvent};
+pub use watch::TrainWatch;
