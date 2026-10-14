@@ -17,6 +17,7 @@
 //! The key philosophy: **Every visual element is informationally meaningful**.
 //! No fake animations that move regardless of hardware state.
 
+pub mod activity;
 pub mod arcade;
 pub mod baseline;
 pub mod common;
@@ -37,6 +38,7 @@ pub mod train_sky;
 pub mod train_tapestry;
 pub mod train_view;
 
+pub use activity::{Activity, ActivityKind, ActivityTracker};
 pub use arcade::ArcadeVisualization;
 pub use baseline::AdaptiveBaseline;
 pub use common::*;

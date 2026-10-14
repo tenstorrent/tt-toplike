@@ -389,6 +389,30 @@ pub struct ServingStats {
     pub counters: VllmCounters,
 }
 
+#[cfg(test)]
+impl ServingStats {
+    /// All-zero stats, so a test overrides only the fields it cares about.
+    pub(crate) fn zeroed() -> Self {
+        ServingStats {
+            generation_tps: 0.0,
+            prompt_tps: 0.0,
+            requests_running: 0,
+            requests_waiting: 0,
+            kv_cache_usage: 0.0,
+            ttft_avg_s: 0.0,
+            queue_avg_s: 0.0,
+            prefill_avg_s: 0.0,
+            decode_avg_s: 0.0,
+            tpot_avg_s: 0.0,
+            completed_delta: 0,
+            errored_delta: 0,
+            prefix_hit_rate: 0.0,
+            preemptions_delta: 0,
+            counters: Default::default(),
+        }
+    }
+}
+
 impl ServingStats {
     /// Fold `cur` against the previous tick's counters over `cadence_secs`.
     /// A counter reset (cur < prev, e.g. server restart) clamps that
