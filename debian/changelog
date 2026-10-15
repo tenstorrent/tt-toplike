@@ -1,3 +1,12 @@
+tt-toplike (0.13.12) noble; urgency=medium
+
+  * A model server with no /health route is no longer shown as loading
+    while it serves. The Inference view now also asks /v1/health, which the
+    MiniMax-Music3 audio server uses, and treats a 200 with status ok as
+    ready. A 200 that says warming or loading still counts as not ready.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 15 Oct 2026 15:40:00 +0000
+
 tt-toplike (0.13.11) noble; urgency=medium
 
   * tt-toplike no longer fills the audit log on hosts that run the STIG or

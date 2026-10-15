@@ -267,7 +267,18 @@ fn build_sample(
     };
 
     let (status, body) = probe.http(port, health_path);
-    let readiness = parse_liveness(status, &body);
+    let mut readiness = parse_liveness(status, &body);
+    // A generic server is probed at `/health`. Some (the MiniMax-Music3 audio
+    // server) have no `/health` and report at `/v1/health`, so a 404 there
+    // would leave a serving model shown as loading forever. Ask the versioned
+    // path only on a definite non-answer (a live server that is not Ready), so
+    // a ready server and a down one cost no extra request.
+    if health_path == "/health" && readiness == Readiness::NotReady {
+        let (st, b) = probe.http(port, "/v1/health");
+        if st == 200 && v1_health_says_ready(&b) {
+            readiness = parse_liveness(st, &b);
+        }
+    }
 
     // Trail: `ContainerProbe` has no docker-logs method yet, so there's no
     // line source to hand `last_non_health_line` here. Keeping the call
@@ -291,6 +302,21 @@ fn build_sample(
         last_log,
         metrics_text,
     }
+}
+
+/// `/v1/health` bodies are JSON with a `status` field (`"ok"` when serving).
+/// A 200 whose status says the model is still coming up (`warming`,
+/// `loading`, ...) is not ready. A body with no status field counts as ready,
+/// since the 200 is all a bare health route says.
+fn v1_health_says_ready(body: &str) -> bool {
+    let Some((_, rest)) = body.split_once("\"status\"") else {
+        return true;
+    };
+    let value = rest
+        .split_once(':')
+        .and_then(|(_, r)| r.split('"').nth(1))
+        .unwrap_or("");
+    matches!(value, "ok" | "ready" | "healthy" | "serving")
 }
 
 /// Build one tick's full snapshot: map each detected server to its
@@ -1223,5 +1249,49 @@ mod tests {
             "when $TT_METAL_CACHE is set, only $TT_METAL_CACHE/tt-metal-cache counts — \
              stale legacy roots must be ignored"
         );
+    }
+
+    /// A server that has no `/health` but reports readiness at `/v1/health`
+    /// (the MiniMax-Music3 server answers 404 and then 200) is Ready. A
+    /// `/v1/health` that says it is still loading is not.
+    #[test]
+    fn build_sample_falls_back_to_v1_health_when_health_is_missing() {
+        struct Fake(&'static str);
+        impl ContainerProbe for Fake {
+            fn env(&self, _key: &str) -> String {
+                String::new()
+            }
+            fn stats(&self, _key: &str) -> String {
+                "5.0%|1GiB / 249GiB".into()
+            }
+            fn exec(&self, _key: &str, _sh: &str) -> String {
+                "PCPU RSS COMM\n1.0 100 python\n".into()
+            }
+            fn http(&self, _port: u16, path: &str) -> (u16, String) {
+                match path {
+                    "/health" => (404, "{\"detail\":\"Not Found\"}".into()),
+                    "/v1/health" => (200, self.0.into()),
+                    _ => (404, String::new()),
+                }
+            }
+        }
+        let ok = build_sample(
+            &Fake("{\"status\":\"ok\",\"busy\":false}"),
+            "tt-model-music",
+            20000,
+            "/health",
+        );
+        assert!(
+            matches!(ok.readiness, Readiness::Ready { .. }),
+            "{:?}",
+            ok.readiness
+        );
+        let warming = build_sample(
+            &Fake("{\"status\":\"warming\"}"),
+            "tt-model-music",
+            20000,
+            "/health",
+        );
+        assert_eq!(warming.readiness, Readiness::NotReady);
     }
 }
