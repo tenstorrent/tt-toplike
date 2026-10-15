@@ -12,7 +12,7 @@ tmux -L "$SOCK" new-session -d -s demo -x 160 -y 44 \
 (
   sleep 5
   tmux -L "$SOCK" send-keys -t demo i
-  sleep 50
+  sleep "${DEMO_SECS:-50}"
   tmux -L "$SOCK" send-keys -t demo q
 ) &
 tmux -L "$SOCK" attach -t demo

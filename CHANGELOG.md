@@ -17,14 +17,15 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
-### 0.13.14
-- **Fix**: a container's visible-devices list narrows the chips it holds open,
-  so a server pinned to one chip shows one chip.
+### 0.13.15
+- **Change**: chips stay the ones a server holds open; `TT_METAL_VISIBLE_DEVICES`
+  is not used to narrow them (it indexes the runtime's order, not the host's).
+- **Add**: demo scenes `arcade-lanes` and `inference-music`.
 
 ### 0.13.13
 - **Fix**: the MiniMax-Music3 audio server shows jobs in flight and finished
-  requests (from `/v1/health`), is labelled `MiniMax-Music3` (from
-  `/v1/models`), and shows only the chip it is pinned to.
+  requests (from `/v1/health`) and is labelled `MiniMax-Music3` (from
+  `/v1/models`).
 
 ### 0.13.12
 - **Fix**: a model server with no `/health` route (the MiniMax-Music3 audio

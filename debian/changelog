@@ -1,8 +1,14 @@
+tt-toplike (0.13.15) noble; urgency=medium
+
+  * A server's chips stay the ones it holds open. A container's
+    TT_METAL_VISIBLE_DEVICES list is not used to narrow them: on this box the
+    music server sets it to 0 while only /dev/tenstorrent/1 draws power, so the
+    list indexes the runtime's own device order and not the host's numbering.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 15 Oct 2026 17:30:00 +0000
+
 tt-toplike (0.13.14) noble; urgency=medium
 
-  * A container's TT_METAL_VISIBLE_DEVICES list now narrows the chips it holds
-    open as well as the ones it maps. A runtime can open every mapped chip and
-    use one, which showed an audio server pinned to chip 0 as chips 0,1.
   * New demo scenes: arcade-lanes and inference-music (demo/demos.yaml).
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 15 Oct 2026 17:10:00 +0000
@@ -16,8 +22,6 @@ tt-toplike (0.13.13) noble; urgency=medium
   * A ready server with no metrics and no served-name flag is labelled from
     its /v1/models listing (MiniMax-Music3), asked once, instead of the
     weights directory (fiona-merged).
-  * A container that maps several chips but sets TT_METAL_VISIBLE_DEVICES or
-    TT_VISIBLE_DEVICES shows only the chips that setting allows.
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 15 Oct 2026 16:10:00 +0000
 

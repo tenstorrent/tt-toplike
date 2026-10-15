@@ -1331,3 +1331,15 @@ window before the second model starts compiling (the first ~9 seconds). Recordin
 of Arcade and the Inference view under `--mock` are in `demo/assets/arcade-atmosphere.{mp4,gif}`
 (gitignored); they were made with a tmux session driven by `tmux send-keys` under
 `asciinema rec`, because `tt-demo`'s manifest has no way to send keys.
+
+## 2026-10-15: do not narrow chips by TT_METAL_VISIBLE_DEVICES
+
+I added a filter that narrowed a container's chips to its `TT_METAL_VISIBLE_DEVICES`
+list (v0.13.13, v0.13.14) and removed it in v0.13.15. The music server sets the
+variable to `0` and holds `/dev/tenstorrent/0` and `/1` open, but while it
+generated, only chip 1 drew power (about 125 W; chip 0 stayed at 40 W, read from
+hwmon, which maps to `/dev/tenstorrent/N` in the same order). The list indexes the
+runtime's own device order, so applying it to host device numbers shows the wrong
+chip. The unit tests passed because they encoded the same assumption. The check
+that caught it was power draw on the live box, which does not share the assumption.
+The view shows the chips the server holds open.
