@@ -1319,6 +1319,40 @@
 </section>
 
 <!-- ── tt-smi -r ──────────────────────────────────────────────────────────── -->
+<section class="section edge" id="activity">
+  <p class="section-label">Activity</p>
+  <h2 class="section-heading">Arcade shows what is running</h2>
+  <p class="section-sub">
+    While a model compiles, loads or serves, or a training run is going, the
+    top of Arcade's starfield becomes a lane. With nothing running, Arcade
+    looks as it always did.
+  </p>
+
+  <div class="modes-grid">
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">Arcade lane</span>
+        <p class="mode-title">The model, where it runs, what it is doing</p>
+        <p class="mode-desc">
+          The lane names the model, the port and the chips the server holds
+          open, and the work in flight and finished. A training run shows its
+          step and loss direction. The stars take a tint for the kind of work
+          and flare once per finished request. The clip is an audio-model
+          server making tracks on a 4-chip Blackhole box.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>i</kbd> open the Inference view</span>
+          <span class="mode-hint"><kbd>t</kbd> open the Training view</span>
+        </div>
+      </div>
+      <video class="mode-gif" src="assets/tt-toplike-arcade-lanes.mp4"
+             poster="assets/tt-toplike-arcade-lanes.png"
+             autoplay loop muted playsinline
+             aria-label="Arcade mode on a 4-chip Blackhole box with a lane under the starfield title: SERVE MiniMax-Music3, port 20000, chips 0 and 1, 1 in flight, 9 done"></video>
+    </div>
+  </div>
+</section>
+
 <section class="section edge" id="reset">
   <p class="section-label">Resets</p>
   <h2 class="section-heading">Run <code>tt-smi -r</code> and watch</h2>
