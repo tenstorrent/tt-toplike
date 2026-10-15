@@ -1,3 +1,21 @@
+tt-toplike (0.13.16) noble; urgency=medium
+
+  * Arcade and the Inference atmosphere no longer flare for events that did
+    not happen. A service whose stats go missing for a scrape and return at the
+    same totals adds nothing, lane reordering moves no baseline (pulse counts
+    follow each activity's identity), and a newly shown activity starts from a
+    baseline.
+  * A server that reloads after serving starts its load clock at zero. The
+    clock runs only while it compiles, loads or is stalled.
+  * When one loading model finishes and another is featured, the forge, sparks
+    and flares start over instead of carrying across.
+  * Noticing a training run in Arcade moved to the background scan worker. The
+    /proc/<pid>/maps reads it needs no longer run on the render and input
+    thread. A Python script scanned before it imports ttml is checked again
+    after a few scans instead of being written off for good.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 15 Oct 2026 18:00:00 +0000
+
 tt-toplike (0.13.15) noble; urgency=medium
 
   * A server's chips stay the ones it holds open. A container's

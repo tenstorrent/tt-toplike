@@ -23,4 +23,4 @@ pub use monitor::{
     STEP_HISTORY,
 };
 pub use parse::{parse_train_line, TrainEvent};
-pub use watch::TrainWatch;
+pub use watch::{TrainWatch, TrainerFinder};

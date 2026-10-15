@@ -244,3 +244,15 @@ User-facing, so the version goes to 0.13.11: `scripts/bump-version.sh 0.13.11`, 
   cap on the blend.
 - **Rotation.** `--rotate` gives Arcade a fixed dwell. Extending the dwell while
   an activity runs, as Training does, is out of scope here.
+
+## Amendment (v0.13.16, review of PR 34)
+
+- Trainer discovery runs in the background scan worker (`TrainerFinder`), not
+  on the render thread. The `/proc/<pid>/maps` read it needs is not free, and
+  reusing the worker's process list did not move it. The loop passes the
+  worker's result to `TrainWatch`.
+- A negative `maps` result is retried every five scans, since a script can be
+  scanned before it imports `ttml`.
+- `Activity` has a stable `id`, and `pulse_seq` is `Option<u64>`. Pulse
+  baselines follow the id, and an unavailable count keeps its baseline.
+- The load clock runs only while a service compiles, loads or is stalled.

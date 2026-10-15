@@ -1343,3 +1343,36 @@ runtime's own device order, so applying it to host device numbers shows the wron
 chip. The unit tests passed because they encoded the same assumption. The check
 that caught it was power draw on the live box, which does not share the assumption.
 The view shows the chips the server holds open.
+
+## 2026-10-15: review findings on the lanes and atmosphere (PR 34)
+
+Copilot's review found six real faults in my own Arcade and atmosphere code. All
+six were checked against the code, fixed with a test that fails without the fix,
+and recorded here.
+
+- **A missing total was a measured zero.** `pulse_total` returned 0 for a row
+  with no stats, so stats that dropped out for one scrape and came back at the
+  same total read as that many new events. Totals are `Option` now, and `None`
+  keeps the baseline.
+- **Baselines were keyed by lane position.** Lanes reorder when a load finishes,
+  so a different activity's count was compared with the old baseline. `Activity`
+  carries an `id` (`train:<pid>`, `svc:<key>`) and baselines follow it.
+- **The load clock never stopped.** It started at first sight, for any phase, so
+  a server that served for an hour and reloaded showed an hour of loading. It
+  now runs only while compiling, loading or stalled.
+- **The forge carried across models.** The scene stays Forge when one loading
+  model is replaced by another, so the scene-based reset never fired. The reset
+  is keyed on the featured service.
+- **I claimed "no render-thread /proc work" and reused a list, but the maps reads
+  still ran on the render thread.** `find_trainer` reads `/proc/<pid>/maps` for
+  each uncached Python process. It now runs in the scan worker
+  (`TrainerFinder`), and the loop only passes the result to `TrainWatch`. A
+  tripwire test bans `TrainerFinder`, `find_trainer` and `maps_ttml` from
+  `run_app`.
+- **A negative maps probe was cached for the pid's life.** A script scanned
+  before it imports `ttml` was never found. Negatives are retried every five
+  scans.
+
+The common cause for three of them: I tested the new state against a fixed
+snapshot and never against the transition into it (stats gone and back, lanes
+reordered, one model replaced by the next).

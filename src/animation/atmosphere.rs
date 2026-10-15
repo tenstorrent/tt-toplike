@@ -180,22 +180,17 @@ pub fn composite(canvas: &Canvas, lines: Vec<Line<'static>>, width: usize) -> Ve
 
 /// Cumulative failed-request count of a service (vLLM errors and aborts, or a
 /// media server's failed generations).
-fn errors_total(row: &ServiceState) -> u64 {
+fn errors_total(row: &ServiceState) -> Option<u64> {
     if let Some(sv) = &row.serving {
-        sv.counters.requests_errored_total
-    } else if let Some(m) = &row.media {
-        m.counters.errored_total
+        Some(sv.counters.requests_errored_total)
     } else {
-        0
+        row.media.as_ref().map(|m| m.counters.errored_total)
     }
 }
 
 /// Cumulative preemptions of a vLLM service.
-fn preemptions_total(row: &ServiceState) -> u64 {
-    row.serving
-        .as_ref()
-        .map(|s| s.counters.preemptions_total)
-        .unwrap_or(0)
+fn preemptions_total(row: &ServiceState) -> Option<u64> {
+    row.serving.as_ref().map(|s| s.counters.preemptions_total)
 }
 
 /// Aurora cells fainter than this are left empty, which keeps the aurora from
@@ -301,6 +296,16 @@ fn rise(prev: &mut Option<u64>, now: u64) -> u64 {
     r
 }
 
+/// [`rise`] for a total that may be unavailable this tick. `None` is not a
+/// zero: it adds nothing and keeps the baseline, so a counter that comes back
+/// at the value it had before does not read as new events.
+fn rise_opt(prev: &mut Option<u64>, now: Option<u64>) -> u64 {
+    match now {
+        Some(n) => rise(prev, n),
+        None => 0,
+    }
+}
+
 const FLARE_FRAMES: u64 = 24;
 const MAX_FLARES: usize = 8;
 const STATIC_FRAMES: u64 = 40;
@@ -362,18 +367,27 @@ impl Atmosphere {
         // Events are rises of the cumulative counters of the featured service.
         let key = row.map(|r| r.key.clone());
         if key != self.key {
+            // A different service is featured: its counters start over, and so
+            // do the effects the last one left running. Without this a model
+            // that finishes loading hands the next loading model its scaffold,
+            // its spark timer and its flares, because the scene stays Forge.
             self.seen = Seen::default();
+            self.built = 0.0;
+            self.spark_until = 0;
+            self.static_until = 0;
+            self.splash_until = 0;
+            self.flares.clear();
             self.key = key;
         }
         let Some(row) = row else {
             return;
         };
-        let done = rise(
+        let done = rise_opt(
             &mut self.seen.done,
             crate::animation::activity::pulse_total(row),
         );
-        let errored = rise(&mut self.seen.errored, errors_total(row));
-        let preempted = rise(&mut self.seen.preempted, preemptions_total(row));
+        let errored = rise_opt(&mut self.seen.errored, errors_total(row));
+        let preempted = rise_opt(&mut self.seen.preempted, preemptions_total(row));
         let kernels = rise_count(&mut self.seen.kernels, row.kernel_count);
         let shards = rise_count(&mut self.seen.shards, row.loaded_count);
         if self.scene == Scene::Forge {
@@ -1540,6 +1554,44 @@ mod tests {
         assert!(
             per_frame < std::time::Duration::from_millis(8),
             "{per_frame:?}"
+        );
+    }
+
+    /// Stats that go missing for a scrape and come back at the same totals add
+    /// no flares; a real rise afterwards still flares.
+    #[test]
+    fn a_total_that_goes_missing_and_returns_unchanged_is_not_new_events() {
+        let mut a = Atmosphere::new();
+        a.observe(&[with_done(100)]);
+        let mut gone = with_done(100);
+        gone.serving = None; // one scrape with no stats
+        a.observe(&[gone]);
+        a.observe(&[with_done(100)]);
+        assert_eq!(a.live_flares(), 0, "the same 100 again is not 100 events");
+        a.observe(&[with_done(101)]);
+        assert_eq!(a.live_flares(), 1);
+    }
+
+    /// One loading model finishes and another is featured. The scene stays
+    /// Forge, so the new model must not inherit the old one's scaffold or sparks.
+    #[test]
+    fn a_new_featured_service_starts_its_own_forge() {
+        let mut a = Atmosphere::new();
+        let mut first = loading(100, 5, 0.0);
+        first.key = "one".into();
+        a.observe(&[first.clone()]);
+        first.kernel_count = 400;
+        first.loaded_count = 20;
+        a.observe(&[first.clone()]);
+        assert!(a.built() > 0.0, "the first model built something");
+        let mut second = loading(50, 1, 0.0);
+        second.key = "two".into();
+        a.observe(&[second]);
+        assert_eq!(a.built(), 0.0, "the second model starts from nothing");
+        assert_eq!(
+            count(&a.render_backdrop(100, 30), &[SPARK]),
+            0,
+            "no leftover sparks"
         );
     }
 }

@@ -94,7 +94,9 @@ pub struct ArcadeVisualization {
     /// Activities running this tick (training, loading, serving), most urgent first.
     activities: Vec<crate::animation::Activity>,
     /// Last pulse counts seen per shown lane, to tell a rise from a reset.
-    last_pulse: Vec<u64>,
+    /// The last pulse count seen per activity id. Keyed by identity, not lane
+    /// position, because lanes reorder and exit.
+    last_pulse: std::collections::HashMap<String, u64>,
     /// Motion + glyph state for the duel strip.
     duel: DuelState,
     /// Running peak of observed device power (W), floored at 1.0. Normalizes the
@@ -183,7 +185,7 @@ impl ArcadeVisualization {
             board_topology: None,
             serving: None,
             activities: Vec::new(),
-            last_pulse: Vec::new(),
+            last_pulse: std::collections::HashMap::new(),
             duel: DuelState::new(),
             power_peak: 1.0,
         }
@@ -232,25 +234,29 @@ impl ArcadeVisualization {
         Some(ActivityTint { hue, strength: 0.3 })
     }
 
-    /// One flare per new pulse across the lanes shown (at most three per tick).
-    /// The first sight of a count is a baseline, and a count that goes down (a
-    /// new run, a restarted server) is a reset, not a burst.
+    /// One flare per new pulse (at most three per activity per tick). Counts are
+    /// followed by activity id, so a reorder or an exit moves no baseline. The
+    /// first sight of an activity is a baseline, a count that goes down (a new
+    /// run, a restarted server) is a reset, and an unavailable count keeps the
+    /// last baseline, so a count that returns unchanged adds nothing.
     fn pulse_activities(&mut self) {
-        let seen: Vec<u64> = self
-            .activities
-            .iter()
-            .take(2)
-            .map(|a| a.pulse_seq)
-            .collect();
-        for (i, now) in seen.iter().enumerate() {
-            let prev = self.last_pulse.get(i).copied().unwrap_or(*now);
-            if *now > prev {
-                for _ in 0..(*now - prev).min(3) {
-                    self.starfield.pulse();
+        let mut flares = 0;
+        for a in &self.activities {
+            let Some(now) = a.pulse_seq else {
+                continue;
+            };
+            if let Some(prev) = self.last_pulse.get(&a.id) {
+                if now > *prev {
+                    flares += (now - *prev).min(3);
                 }
             }
+            self.last_pulse.insert(a.id.clone(), now);
         }
-        self.last_pulse = seen;
+        let ids: Vec<&str> = self.activities.iter().map(|a| a.id.as_str()).collect();
+        self.last_pulse.retain(|id, _| ids.contains(&id.as_str()));
+        for _ in 0..flares {
+            self.starfield.pulse();
+        }
     }
 
     /// First row index (in the whole render) below the lanes, used to keep the
@@ -1402,11 +1408,12 @@ mod tests {
 
     fn lane_act(label: &str) -> crate::animation::Activity {
         crate::animation::Activity {
+            id: format!("train:{label}"),
             kind: crate::animation::ActivityKind::Train,
             label: label.into(),
             stalled: false,
             fields: vec!["step 1/10 █░░░░░░░ 10%".into()],
-            pulse_seq: 0,
+            pulse_seq: Some(0),
             key_hint: 't',
         }
     }
@@ -1505,7 +1512,7 @@ mod tests {
         let backend = mock_backend();
         let mut a = ArcadeVisualization::new(120, 40);
         let mut act = lane_act("nano_gpt");
-        act.pulse_seq = 10;
+        act.pulse_seq = Some(10);
         a.set_activities(vec![act.clone()]);
         a.update(&backend);
         assert_eq!(
@@ -1513,12 +1520,12 @@ mod tests {
             0,
             "the first sight of a count is a baseline"
         );
-        act.pulse_seq = 12;
+        act.pulse_seq = Some(12);
         a.set_activities(vec![act.clone()]);
         a.update(&backend);
         assert!(a.starfield.live_flares() >= 1, "a rise flares");
         let before = a.starfield.live_flares();
-        act.pulse_seq = 1; // a new run: the count went down
+        act.pulse_seq = Some(1); // a new run: the count went down
         a.set_activities(vec![act]);
         a.update(&backend);
         assert!(
@@ -1552,5 +1559,74 @@ mod tests {
                 assert_ne!(x, y, "each kind has its own tint: {all:?}");
             }
         }
+    }
+
+    fn id_act(
+        id: &str,
+        kind: crate::animation::ActivityKind,
+        pulse: Option<u64>,
+    ) -> crate::animation::Activity {
+        let mut a = lane_act(id);
+        a.id = id.into();
+        a.kind = kind;
+        a.pulse_seq = pulse;
+        a
+    }
+
+    /// Lanes reorder when a load finishes. Baselines follow the activity, not
+    /// the lane position, so `[LOAD(0), TRAIN(100)]` becoming
+    /// `[TRAIN(100), SERVE(0)]` flares nothing.
+    #[test]
+    fn reordering_lanes_does_not_flare_the_starfield() {
+        use crate::animation::ActivityKind::{Load, Serve, Train};
+        let backend = mock_backend();
+        let mut a = ArcadeVisualization::new(120, 40);
+        a.set_activities(vec![
+            id_act("svc:m", Load, Some(0)),
+            id_act("train:7", Train, Some(100)),
+        ]);
+        a.update(&backend);
+        a.set_activities(vec![
+            id_act("train:7", Train, Some(100)),
+            id_act("svc:m", Serve, Some(0)),
+        ]);
+        a.update(&backend);
+        assert_eq!(a.starfield.live_flares(), 0, "no counter advanced");
+    }
+
+    /// A service that loses its stats for a scrape and comes back at the same
+    /// count adds no flares. One that comes back higher flares for the rise.
+    #[test]
+    fn an_unavailable_count_keeps_its_baseline() {
+        use crate::animation::ActivityKind::Serve;
+        let backend = mock_backend();
+        let mut a = ArcadeVisualization::new(120, 40);
+        a.set_activities(vec![id_act("svc:m", Serve, Some(100))]);
+        a.update(&backend);
+        a.set_activities(vec![id_act("svc:m", Serve, None)]);
+        a.update(&backend);
+        a.set_activities(vec![id_act("svc:m", Serve, Some(100))]);
+        a.update(&backend);
+        assert_eq!(a.starfield.live_flares(), 0, "same 100 again is not new");
+        a.set_activities(vec![id_act("svc:m", Serve, Some(102))]);
+        a.update(&backend);
+        assert!(a.starfield.live_flares() >= 1, "a real rise still flares");
+    }
+
+    /// An activity that appears in view for the first time gets a baseline, not
+    /// a burst for its whole count.
+    #[test]
+    fn a_newly_shown_activity_is_a_baseline_not_a_burst() {
+        use crate::animation::ActivityKind::{Serve, Train};
+        let backend = mock_backend();
+        let mut a = ArcadeVisualization::new(120, 40);
+        a.set_activities(vec![id_act("train:7", Train, Some(5))]);
+        a.update(&backend);
+        a.set_activities(vec![
+            id_act("train:7", Train, Some(5)),
+            id_act("svc:m", Serve, Some(9_000)),
+        ]);
+        a.update(&backend);
+        assert_eq!(a.starfield.live_flares(), 0);
     }
 }

@@ -17,6 +17,12 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.13.16
+- **Fix**: review findings on the lanes and atmosphere. No false flares when stats drop
+  out or lanes reorder, a fresh load clock after a reload, a forge that starts over
+  per model, and trainer discovery moved off the render thread (with retries for
+  a Python script that imports `ttml` late).
+
 ### 0.13.15
 - **Change**: chips stay the ones a server holds open; `TT_METAL_VISIBLE_DEVICES`
   is not used to narrow them (it indexes the runtime's order, not the host's).

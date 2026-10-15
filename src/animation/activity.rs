@@ -26,13 +26,18 @@ pub enum ActivityKind {
 /// terminal should keep them (most important first).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Activity {
+    /// Stable identity of the thing running (`train:<pid>` or `svc:<key>`), so
+    /// a consumer can follow one activity while the lanes reorder around it.
+    pub id: String,
     pub kind: ActivityKind,
     pub label: String,
     pub stalled: bool,
     pub fields: Vec<String>,
     /// Increases by one per finished training step or completed request. A
     /// consumer treats a *decrease* as a reset (new run, restarted server).
-    pub pulse_seq: u64,
+    /// `None` when the count is unavailable right now (a scrape with no
+    /// stats): that is not a zero, and a consumer keeps its last baseline.
+    pub pulse_seq: Option<u64>,
     /// The key that opens the full view: `t` (Training) or `i` (Inference).
     pub key_hint: char,
 }
@@ -111,11 +116,12 @@ pub fn from_train(state: &TrainState) -> Option<Activity> {
         fields.push(format!("loss {arrow}"));
     }
     Some(Activity {
+        id: format!("train:{}", proc.pid),
         kind: ActivityKind::Train,
         label: proc.binary.clone(),
         stalled: false,
         fields,
-        pulse_seq: state.step_seq,
+        pulse_seq: Some(state.step_seq),
         key_hint: 't',
     })
 }
@@ -125,7 +131,7 @@ pub fn from_train(state: &TrainState) -> Option<Activity> {
 pub fn from_service(
     row: &ServiceState,
     elapsed_secs: Option<f32>,
-    pulse_seq: u64,
+    pulse_seq: Option<u64>,
 ) -> Option<Activity> {
     let (kind, stalled) = match row.phase {
         Phase::Down => return None,
@@ -164,6 +170,7 @@ pub fn from_service(
         }
     }
     Some(Activity {
+        id: format!("svc:{}", row.key),
         kind,
         label: row.label.clone(),
         stalled,
@@ -176,14 +183,13 @@ pub fn from_service(
 /// Cumulative count of finished requests for a service, from the scrape's
 /// monotonic counters (vLLM: succeeded plus errored; a media server: completed
 /// generations). It only ever rises, so reading the same snapshot again on the
-/// next frame adds nothing. A drop means the server restarted.
-pub fn pulse_total(row: &ServiceState) -> u64 {
+/// next frame adds nothing. A drop means the server restarted. `None` when the
+/// service has no stats this tick, which is not the same as a count of zero.
+pub fn pulse_total(row: &ServiceState) -> Option<u64> {
     if let Some(sv) = &row.serving {
-        sv.counters.requests_succeeded_total + sv.counters.requests_errored_total
-    } else if let Some(m) = &row.media {
-        m.counters.requests_total
+        Some(sv.counters.requests_succeeded_total + sv.counters.requests_errored_total)
     } else {
-        0
+        row.media.as_ref().map(|m| m.counters.requests_total)
     }
 }
 
@@ -205,13 +211,15 @@ pub fn ordered(mut all: Vec<Activity>) -> Vec<Activity> {
     all
 }
 
-/// Keeps the per-service state the pure builders need: when each service was
-/// first seen, for the load clock. A service that disappears is forgotten, so a
-/// restarted server starts its clock fresh. The pulse count needs no state: it
-/// is the scrape's cumulative counter (see [`pulse_total`]).
+/// Keeps the per-service state the pure builders need: when each service
+/// started its current load, for the load clock. The clock runs only while a
+/// service is compiling, loading or stalled. It is cleared when the service is
+/// Ready or Down, so a server that served for an hour and then reloads starts
+/// from zero. A service that disappears is forgotten too. The pulse count needs
+/// no state: it is the scrape's cumulative counter (see [`pulse_total`]).
 #[derive(Debug, Default)]
 pub struct ActivityTracker {
-    first_seen: HashMap<String, f32>,
+    loading_since: HashMap<String, f32>,
 }
 
 impl ActivityTracker {
@@ -228,15 +236,25 @@ impl ActivityTracker {
         now_secs: f32,
     ) -> Vec<Activity> {
         let live: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
-        self.first_seen.retain(|k, _| live.contains(&k.as_str()));
+        self.loading_since.retain(|k, _| live.contains(&k.as_str()));
 
         let mut out: Vec<Activity> = Vec::new();
         if let Some(a) = train.and_then(from_train) {
             out.push(a);
         }
         for row in rows {
-            let started = *self.first_seen.entry(row.key.clone()).or_insert(now_secs);
-            if let Some(a) = from_service(row, Some(now_secs - started), pulse_total(row)) {
+            let loading = matches!(row.phase, Phase::Compiling | Phase::Loading | Phase::Alarm);
+            let elapsed = if loading {
+                let started = *self
+                    .loading_since
+                    .entry(row.key.clone())
+                    .or_insert(now_secs);
+                Some(now_secs - started)
+            } else {
+                self.loading_since.remove(&row.key);
+                None
+            };
+            if let Some(a) = from_service(row, elapsed, pulse_total(row)) {
                 out.push(a);
             }
         }
@@ -332,29 +350,31 @@ mod tests {
     #[test]
     fn service_phases_map_to_kinds_and_down_is_nothing() {
         assert_eq!(
-            from_service(&svc("m", Phase::Compiling), Some(7.0), 0)
+            from_service(&svc("m", Phase::Compiling), Some(7.0), Some(0))
                 .unwrap()
                 .kind,
             ActivityKind::Load
         );
         assert_eq!(
-            from_service(&svc("m", Phase::Loading), Some(7.0), 0)
+            from_service(&svc("m", Phase::Loading), Some(7.0), Some(0))
                 .unwrap()
                 .kind,
             ActivityKind::Load
         );
         assert_eq!(
-            from_service(&svc("m", Phase::Ready), None, 0).unwrap().kind,
+            from_service(&svc("m", Phase::Ready), None, Some(0))
+                .unwrap()
+                .kind,
             ActivityKind::Serve
         );
-        let stalled = from_service(&svc("m", Phase::Alarm), Some(300.0), 0).unwrap();
+        let stalled = from_service(&svc("m", Phase::Alarm), Some(300.0), Some(0)).unwrap();
         assert!(stalled.stalled);
-        assert!(from_service(&svc("m", Phase::Down), None, 0).is_none());
+        assert!(from_service(&svc("m", Phase::Down), None, Some(0)).is_none());
     }
 
     #[test]
     fn a_load_shows_placement_and_elapsed_but_no_invented_percent() {
-        let a = from_service(&svc("rag-gate-27b", Phase::Loading), Some(7.0), 0).unwrap();
+        let a = from_service(&svc("rag-gate-27b", Phase::Loading), Some(7.0), Some(0)).unwrap();
         assert_eq!(a.label, "rag-gate-27b");
         assert_eq!(a.fields[0], ":8100 · chips 0,1");
         assert_eq!(a.fields[1], "loading 0:07");
@@ -362,18 +382,19 @@ mod tests {
         // A real progress value is shown.
         let mut with = svc("m", Phase::Loading);
         with.progress = Some(0.63);
-        let a = from_service(&with, Some(7.0), 0).unwrap();
+        let a = from_service(&with, Some(7.0), Some(0)).unwrap();
         assert!(a.fields.iter().any(|f| f.contains("63%")), "{:?}", a.fields);
     }
 
     #[test]
     fn urgency_order_is_stalled_then_load_then_train_then_serve() {
         let mk = |kind, stalled, label: &str| Activity {
+            id: label.into(),
             kind,
             label: label.into(),
             stalled,
             fields: vec![],
-            pulse_seq: 0,
+            pulse_seq: Some(0),
             key_hint: 'i',
         };
         let got = ordered(vec![
@@ -406,11 +427,11 @@ mod tests {
         ready.serving = Some(serving);
         let mut t = ActivityTracker::new();
         let a = t.update(None, &[ready.clone()], 1.0);
-        assert_eq!(a[0].pulse_seq, 4, "succeeded plus errored");
+        assert_eq!(a[0].pulse_seq, Some(4), "succeeded plus errored");
         // The same snapshot, seen on later frames.
         for frame in 2..60 {
             let a = t.update(None, &[ready.clone()], frame as f32 * 0.016);
-            assert_eq!(a[0].pulse_seq, 4, "frame {frame}");
+            assert_eq!(a[0].pulse_seq, Some(4), "frame {frame}");
         }
         // A new scrape with more finished requests.
         let mut more = ready.clone();
@@ -420,7 +441,7 @@ mod tests {
             .counters
             .requests_succeeded_total = 9;
         let a = t.update(None, &[more], 2.0);
-        assert_eq!(a[0].pulse_seq, 10);
+        assert_eq!(a[0].pulse_seq, Some(10));
     }
 
     #[test]
@@ -441,7 +462,7 @@ mod tests {
         media.counters.requests_total = 7;
         m.media = Some(media);
         let a = from_service(&m, None, pulse_total(&m)).unwrap();
-        assert_eq!(a.pulse_seq, 7);
+        assert_eq!(a.pulse_seq, Some(7));
     }
 
     #[test]
@@ -466,6 +487,58 @@ mod tests {
             a[0].fields.iter().any(|f| f == "loading 0:00"),
             "{:?}",
             a[0].fields
+        );
+    }
+
+    /// A service that served for an hour and then reloads under the same key
+    /// starts its load clock at zero, not at an hour. The clock runs only while
+    /// it is compiling, loading or stalled.
+    #[test]
+    fn the_load_clock_runs_only_during_a_load_and_restarts_after_serving() {
+        let mut t = ActivityTracker::new();
+        let loading = svc("m", Phase::Loading);
+        let ready = svc("m", Phase::Ready);
+        let a = t.update(None, &[loading.clone()], 0.0);
+        assert!(a[0].fields.iter().any(|f| f == "loading 0:00"));
+        // An hour of serving: no load clock on a Ready row.
+        let a = t.update(None, &[ready.clone()], 30.0);
+        assert!(a[0].fields.iter().all(|f| !f.starts_with("loading")));
+        let a = t.update(None, &[ready], 3600.0);
+        assert!(a[0].fields.iter().all(|f| !f.starts_with("loading")));
+        // The same key reloads: zero, not an hour.
+        let a = t.update(None, &[loading.clone()], 3605.0);
+        assert!(
+            a[0].fields.iter().any(|f| f == "loading 0:00"),
+            "{:?}",
+            a[0].fields
+        );
+        // A Down row clears it too.
+        let _ = t.update(None, &[svc("m", Phase::Down)], 3700.0);
+        let a = t.update(None, &[loading], 3800.0);
+        assert!(a[0].fields.iter().any(|f| f == "loading 0:00"));
+    }
+
+    #[test]
+    fn a_service_with_no_stats_has_no_pulse_count_rather_than_zero() {
+        let bare = svc("m", Phase::Ready);
+        assert_eq!(pulse_total(&bare), None);
+        assert_eq!(
+            from_service(&bare, None, pulse_total(&bare))
+                .unwrap()
+                .pulse_seq,
+            None
+        );
+    }
+
+    #[test]
+    fn activities_carry_a_stable_identity() {
+        let st = running();
+        assert_eq!(from_train(&st).unwrap().id, "train:7");
+        assert_eq!(
+            from_service(&svc("m", Phase::Ready), None, None)
+                .unwrap()
+                .id,
+            "svc:m"
         );
     }
 }

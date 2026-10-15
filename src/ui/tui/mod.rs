@@ -382,6 +382,7 @@ fn run_app(
             verdicts: std::collections::HashMap::new(),
             // No reset scan at start-up, as before.
             want_processes: false,
+            want_trainer: false,
         })
     };
     // Background liveness prober: confirms server runtimes (vllm, ollama) via
@@ -472,13 +473,14 @@ fn run_app(
     let mut defrag: Option<DefragVis> = None;
     let mut train_view: Option<TrainView> = None;
     let mut train_monitor: Option<TrainMonitor> = None;
-    // Arcade's activity lanes. A training run is found from the process list the
-    // background scan already collects (never an inline /proc walk); the tracker
-    // turns that run and the inference roster into lanes. `latest_scan` holds the
-    // newest process list for one tick; `arcade_clock` is the lanes' time base.
+    // Arcade's activity lanes. A training run is found by the background scan
+    // worker (it reads `/proc/<pid>/maps`, which must not run on this thread);
+    // the tracker turns that run and the inference roster into lanes.
+    // `latest_trainer` holds the newest search result for one tick;
+    // `arcade_clock` is the lanes' time base.
     let mut train_watch = crate::workload::train::TrainWatch::new();
     let mut activity_tracker = crate::animation::ActivityTracker::new();
-    let mut latest_scan: Option<Vec<(i32, String, String)>> = None;
+    let mut latest_trainer: Option<Option<crate::workload::train::TrainProcess>> = None;
     let arcade_clock = Instant::now();
     // `--mock` substitutes a synthetic run for the /proc scan; see the
     // Training arm of the per-mode update below.
@@ -940,7 +942,7 @@ fn run_app(
                         } else if backend_type == BackendType::Remote {
                             None
                         } else {
-                            train_watch.update(latest_scan.take().as_deref());
+                            train_watch.update(latest_trainer.take());
                             train_watch.state().cloned()
                         };
                     #[cfg(target_os = "linux")]
@@ -2473,10 +2475,9 @@ fn run_app(
                 &mut serving_metrics,
             );
             let scanned_processes = applied.processes;
-            // Arcade finds a training run in this list. Keep a copy for it
-            // before `scan_resets` takes the list.
-            if display_mode == DisplayMode::Arcade && !scanned_processes.is_empty() {
-                latest_scan = Some(scanned_processes.clone());
+            // The worker's trainer search result, for Arcade's lane.
+            if applied.trainer.is_some() {
+                latest_trainer = applied.trainer;
             }
 
             // ── `tt-smi -r` detection (`--tt-smi-reset-behavior`) ─────────
@@ -2585,7 +2586,13 @@ fn run_app(
             scan_handle.request(proc_scan::ScanRequest {
                 only_tt: crate::cli::backend_shows_only_tt(backend_type),
                 verdicts: liveness_prober.fresh_verdicts(),
-                want_processes: reset_behavior.detects() || display_mode == DisplayMode::Arcade,
+                want_processes: reset_behavior.detects(),
+                // Arcade follows a training run. The worker finds it (the
+                // `maps` reads must stay off this thread). Mock and remote
+                // build their lanes from elsewhere.
+                want_trainer: display_mode == DisplayMode::Arcade
+                    && backend_type != BackendType::Mock
+                    && backend_type != BackendType::Remote,
             });
 
             sys_monitor.refresh_cpu_usage();

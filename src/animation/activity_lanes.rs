@@ -119,11 +119,12 @@ mod tests {
 
     fn act(kind: ActivityKind, label: &str, fields: &[&str], hint: char) -> Activity {
         Activity {
+            id: label.into(),
             kind,
             label: label.into(),
             stalled: false,
             fields: fields.iter().map(|s| s.to_string()).collect(),
-            pulse_seq: 0,
+            pulse_seq: Some(0),
             key_hint: hint,
         }
     }

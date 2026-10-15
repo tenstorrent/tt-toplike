@@ -46,6 +46,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::workload::train::{TrainProcess, TrainerFinder};
 #[cfg(target_os = "linux")]
 use crate::workload::InferenceServer;
 use crate::workload::{DetectedRuntime, HostProcessMonitor, ProcRow};
@@ -85,6 +86,10 @@ pub(crate) struct ScanRequest {
     /// The loop sets this from `ResetBehavior::detects()`, so `ignore` never
     /// reads the process list, as before the move.
     pub want_processes: bool,
+    /// Look for a training run in the process list (Arcade). The worker does
+    /// it, because noticing a Python trainer reads `/proc/<pid>/maps`, which
+    /// must not happen on the render thread.
+    pub want_trainer: bool,
 }
 
 /// Everything one scan produced. Owned values only, so it can cross threads.
@@ -98,6 +103,9 @@ pub(crate) struct ScanResult {
     /// `(pid, name, cmdline)` for every real process, for the reset scan.
     /// Empty unless the request set `want_processes`.
     pub processes: Vec<(i32, String, String)>,
+    /// What the trainer search found. `None` when the request did not ask;
+    /// `Some(None)` when it asked and saw no trainer.
+    pub trainer: Option<Option<TrainProcess>>,
     /// Inference runtimes for the liveness prober.
     pub runtimes: Vec<DetectedRuntime>,
     /// TT inference servers for the inference monitor (Linux only, as before).
@@ -117,6 +125,7 @@ pub(crate) trait Scan: Send + 'static {
 /// `linux-procfs`, the `/proc` TT attribution monitor and the serving probe.
 pub(crate) struct Scanner {
     host: HostProcessMonitor,
+    finder: TrainerFinder,
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     procs: ProcessMonitor,
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
@@ -127,6 +136,7 @@ impl Scanner {
     pub fn new() -> Self {
         Scanner {
             host: HostProcessMonitor::new(),
+            finder: TrainerFinder::new(),
             #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
             procs: ProcessMonitor::new(),
             #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
@@ -146,8 +156,16 @@ impl Scan for Scanner {
         let start = Instant::now();
         self.host.update();
 
-        let processes = if req.want_processes {
+        let snapshot = if req.want_processes || req.want_trainer {
             self.host.processes_snapshot()
+        } else {
+            Vec::new()
+        };
+        // Noticing a trainer reads `/proc/<pid>/maps` for Python processes, so
+        // it happens here and not on the loop thread.
+        let trainer = req.want_trainer.then(|| self.finder.find(&snapshot));
+        let processes = if req.want_processes {
+            snapshot
         } else {
             Vec::new()
         };
@@ -180,6 +198,7 @@ impl Scan for Scanner {
             #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
             serving_metrics,
             processes,
+            trainer,
             runtimes,
             #[cfg(target_os = "linux")]
             inference_servers,
@@ -300,6 +319,7 @@ impl Drop for ScannerHandle {
 #[derive(Debug, Default)]
 pub(crate) struct Applied {
     pub processes: Vec<(i32, String, String)>,
+    pub trainer: Option<Option<TrainProcess>>,
     pub runtimes: Vec<DetectedRuntime>,
     #[cfg(target_os = "linux")]
     pub inference_servers: Vec<InferenceServer>,
@@ -324,6 +344,7 @@ pub(crate) fn apply_scan_result(
     }
     Applied {
         processes: res.processes,
+        trainer: res.trainer,
         runtimes: res.runtimes,
         #[cfg(target_os = "linux")]
         inference_servers: res.inference_servers,
@@ -624,6 +645,7 @@ mod tests {
             only_tt: false,
             verdicts: HashMap::new(),
             want_processes: true,
+            want_trainer: true,
         };
         for _ in 0..2 {
             let r = s.scan(&req);
@@ -763,6 +785,11 @@ mod tests {
             "host_proc_monitor",
             "process_monitor.update",
             "inference_probe",
+            // Noticing a trainer reads `/proc/<pid>/maps`; that is the
+            // worker's job (`Scanner`), never this thread's.
+            "TrainerFinder",
+            "find_trainer",
+            "maps_ttml",
         ] {
             assert!(!body.contains(banned), "run_app mentions `{banned}`");
         }
@@ -777,15 +804,14 @@ mod tests {
         assert!(body.contains("ScannerHandle::spawn(scanner)"));
         assert!(body.contains("scan_handle.try_result()"));
         assert!(body.contains("scan_handle.request("));
-        // The scan asks for the process list when a reset is watched or Arcade
-        // is on screen (it finds a training run from that list).
-        assert!(body.contains(
-            "want_processes: reset_behavior.detects() || display_mode == DisplayMode::Arcade"
-        ));
+        // The scan asks for the process list when a reset is watched, and for
+        // the trainer search when Arcade is on screen.
+        assert!(body.contains("want_processes: reset_behavior.detects(),"));
+        assert!(body.contains("want_trainer: display_mode == DisplayMode::Arcade"));
     }
 
-    /// Arcade follows a training run through `TrainWatch`, which reads the
-    /// process list the scanner already collected. The Arcade arm must not poll
+    /// Arcade follows a training run through `TrainWatch`, which is handed the
+    /// scan worker's search result. The Arcade arm must not poll
     /// a `TrainMonitor` itself (its `poll` walks `/proc` inline), and must hand
     /// the activity lanes to Arcade.
     #[test]
@@ -818,5 +844,26 @@ mod tests {
         let mut s = Scanner::new();
         let r = s.scan(&ScanRequest::default());
         assert!(r.processes.is_empty());
+    }
+
+    /// The trainer search runs in the worker, only when asked, and answers
+    /// `Some(_)` when it ran (even if it found nothing).
+    #[test]
+    fn the_worker_runs_the_trainer_search_only_when_asked() {
+        let mut s = Scanner::new();
+        let mut req = ScanRequest {
+            only_tt: false,
+            verdicts: HashMap::new(),
+            want_processes: false,
+            want_trainer: false,
+        };
+        assert!(s.scan(&req).trainer.is_none(), "not asked, not searched");
+        req.want_trainer = true;
+        let r = s.scan(&req);
+        assert!(r.trainer.is_some(), "asked: the search ran");
+        assert!(
+            r.processes.is_empty(),
+            "the reset list is still only returned when asked"
+        );
     }
 }
