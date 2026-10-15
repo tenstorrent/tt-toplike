@@ -17,6 +17,11 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.13.13
+- **Fix**: the MiniMax-Music3 audio server shows jobs in flight and finished
+  requests (from `/v1/health`), is labelled `MiniMax-Music3` (from
+  `/v1/models`), and shows only the chip it is pinned to.
+
 ### 0.13.12
 - **Fix**: a model server with no `/health` route (the MiniMax-Music3 audio
   server) shows as serving. The Inference view also asks `/v1/health`.

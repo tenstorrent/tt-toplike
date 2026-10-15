@@ -167,6 +167,26 @@ pub struct MediaCounters {
     pub warmup_count: u64,
 }
 
+/// Counters for a media server that has no `/metrics` but reports activity in
+/// its `/v1/health` JSON (`busy`, `queue_depth`, `requests_served`; the
+/// MiniMax-Music3 audio server). A busy server counts as one job in flight
+/// plus whatever is queued. `None` when the body is not JSON or carries none
+/// of those fields, so a bare `{"status":"ok"}` invents no stats.
+pub fn parse_health_media(body: &str) -> Option<MediaCounters> {
+    let v: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    let busy = v.get("busy").and_then(|b| b.as_bool());
+    let queued = v.get("queue_depth").and_then(|q| q.as_u64());
+    let served = v.get("requests_served").and_then(|r| r.as_u64());
+    if busy.is_none() && queued.is_none() && served.is_none() {
+        return None;
+    }
+    Some(MediaCounters {
+        requests_total: served.unwrap_or(0),
+        jobs_in_progress: (busy == Some(true)) as u32 + queued.unwrap_or(0) as u32,
+        ..MediaCounters::default()
+    })
+}
+
 /// Parse the media-server counters we render. `None` if the text carries no
 /// `tt_media_server_` metric lines at all (e.g. a vLLM or non-media server),
 /// which folds to `media: None` downstream — mirroring `parse_vllm_metrics`.
@@ -866,5 +886,22 @@ tt_media_server_jobs_in_progress{model_type=\"m\",device_id=\"2\"} 1.0
         let first = MediaStats::fold(None, &cur, 5);
         assert_eq!(first.generations_per_min, 0.0);
         assert!((first.duration_avg_s - 30.0).abs() < 1e-4);
+    }
+
+    /// MiniMax-Music3 has no `/metrics`; its `/v1/health` carries `busy`,
+    /// `queue_depth` and `requests_served`, which stand in for the media
+    /// counters (a busy server with two queued jobs has three in flight).
+    #[test]
+    fn health_json_maps_to_media_counters() {
+        let idle = "{\"status\":\"ok\",\"busy\":false,\"queue_depth\":0,\"requests_served\":4}";
+        let c = parse_health_media(idle).unwrap();
+        assert_eq!((c.requests_total, c.jobs_in_progress), (4, 0));
+        let busy = "{\"status\":\"ok\",\"busy\":true,\"queue_depth\":2,\"requests_served\":9}";
+        let c = parse_health_media(busy).unwrap();
+        assert_eq!((c.requests_total, c.jobs_in_progress), (9, 3));
+        // No activity fields (a plain `{"status":"ok"}` or an empty body): no stats.
+        assert!(parse_health_media("{\"status\":\"ok\"}").is_none());
+        assert!(parse_health_media("").is_none());
+        assert!(parse_health_media("not json").is_none());
     }
 }

@@ -187,6 +187,10 @@ pub struct TickSample {
     /// serving stats this tick). Parsing happens in `fold_tick`, not here,
     /// so `probe.rs` stays a pure-parser + I/O-trait module.
     pub metrics_text: String,
+    /// Body of the health request that decided `readiness` (`/health`, or
+    /// `/v1/health` when that is where the server answers). A server with no
+    /// `/metrics` may report busy/queued jobs in it; parsed in `fold_tick`.
+    pub health_body: String,
 }
 
 /// Abstract container access so the monitor is testable with a fake. Trail: a
@@ -292,6 +296,62 @@ pub(crate) fn chips_from_devices_json(json: &str) -> Vec<usize> {
     chips_from_paths(paths)
 }
 
+/// Chips a container is restricted to by `TT_METAL_VISIBLE_DEVICES` (or
+/// `TT_VISIBLE_DEVICES`) in its environment, from `docker inspect`'s
+/// `{{json .Config.Env}}` array. `None` when unset or not a list of numbers
+/// (`all`, empty).
+pub(crate) fn visible_devices_from_env_json(json: &str) -> Option<Vec<usize>> {
+    let v: serde_json::Value = serde_json::from_str(json.trim()).ok()?;
+    for entry in v.as_array()?.iter().filter_map(|e| e.as_str()) {
+        let Some((k, val)) = entry.split_once('=') else {
+            continue;
+        };
+        if k != "TT_METAL_VISIBLE_DEVICES" && k != "TT_VISIBLE_DEVICES" {
+            continue;
+        }
+        let ids: Option<Vec<usize>> = val.split(',').map(|p| p.trim().parse().ok()).collect();
+        return ids.filter(|l| !l.is_empty()).map(|mut l| {
+            l.sort_unstable();
+            l.dedup();
+            l
+        });
+    }
+    None
+}
+
+/// Narrow the chips a container maps to the ones its visible-devices list
+/// allows. With no explicit device nodes (the whole directory is mapped) the
+/// visible list is the answer. A list that matches none of the mapped chips is
+/// ignored, so a mismatch never hides a chip that is in use.
+pub(crate) fn restrict_to_visible(devices: Vec<usize>, visible: Option<&[usize]>) -> Vec<usize> {
+    let Some(visible) = visible else {
+        return devices;
+    };
+    if devices.is_empty() {
+        return visible.to_vec();
+    }
+    let kept: Vec<usize> = devices
+        .iter()
+        .copied()
+        .filter(|d| visible.contains(d))
+        .collect();
+    if kept.is_empty() {
+        devices
+    } else {
+        kept
+    }
+}
+
+/// The model a server says it serves: the first `id` in its `/v1/models`
+/// listing, without the organisation prefix (`MiniMaxAI/MiniMax-Music3` becomes
+/// `MiniMax-Music3`). `None` for an empty list or a body that is not JSON.
+pub fn served_model_id(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    let id = v.get("data")?.as_array()?.first()?.get("id")?.as_str()?;
+    let name = super::services::model_basename(id);
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 /// Real `docker`-CLI-backed [`ContainerProbe`]. All calls shell out; every
 /// method degrades to an empty string / status 0 on error rather than
 /// panicking, since a mid-tick docker hiccup shouldn't take down the monitor.
@@ -330,12 +390,20 @@ impl ContainerProbe for DockerProbe {
         if !open.is_empty() {
             return open;
         }
-        chips_from_devices_json(&docker(&[
+        let mapped = chips_from_devices_json(&docker(&[
             "inspect",
             "--format",
             "{{json .HostConfig.Devices}}",
             c,
-        ]))
+        ]));
+        // The container may map several chips yet be told to use one.
+        let visible = visible_devices_from_env_json(&docker(&[
+            "inspect",
+            "--format",
+            "{{json .Config.Env}}",
+            c,
+        ]));
+        restrict_to_visible(mapped, visible.as_deref())
     }
 
     fn list_servers(&self) -> Vec<super::InferenceServer> {
@@ -1005,6 +1073,37 @@ mod tests {
         let (cpu, rss) = parse_docker_stats(&formatted).expect("must parse");
         assert!((cpu - 12.5).abs() < 0.01);
         assert_eq!(rss, 1024 * 1024);
+    }
+
+    #[test]
+    fn visible_devices_narrow_the_chips_a_container_maps() {
+        let env = r#"["PATH=/bin","TT_METAL_VISIBLE_DEVICES=0"]"#;
+        assert_eq!(visible_devices_from_env_json(env), Some(vec![0]));
+        let two = r#"["TT_VISIBLE_DEVICES=1,0"]"#;
+        assert_eq!(visible_devices_from_env_json(two), Some(vec![0, 1]));
+        assert_eq!(visible_devices_from_env_json(r#"["A=b"]"#), None);
+        assert_eq!(
+            visible_devices_from_env_json(r#"["TT_METAL_VISIBLE_DEVICES=all"]"#),
+            None
+        );
+        assert_eq!(visible_devices_from_env_json("garbage"), None);
+        // Both devices mapped, one visible: only the visible one is in use.
+        assert_eq!(restrict_to_visible(vec![0, 1], Some(&[0])), vec![0]);
+        // Whole directory mapped (no explicit nodes): the visible list is the answer.
+        assert_eq!(restrict_to_visible(vec![], Some(&[1])), vec![1]);
+        // Nothing declared: unchanged. A list that matches nothing never hides the chips.
+        assert_eq!(restrict_to_visible(vec![0, 1], None), vec![0, 1]);
+        assert_eq!(restrict_to_visible(vec![0, 1], Some(&[5])), vec![0, 1]);
+    }
+
+    #[test]
+    fn served_model_id_reads_the_first_models_entry() {
+        let body =
+            r#"{"object":"list","data":[{"id":"MiniMaxAI/MiniMax-Music3","object":"model"}]}"#;
+        assert_eq!(served_model_id(body).as_deref(), Some("MiniMax-Music3"));
+        assert_eq!(served_model_id(r#"{"data":[]}"#), None);
+        assert_eq!(served_model_id("<html>"), None);
+        assert_eq!(served_model_id(""), None);
     }
 }
 

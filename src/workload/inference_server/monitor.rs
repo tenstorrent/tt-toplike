@@ -24,9 +24,10 @@ use std::time::{Duration, Instant};
 
 use crate::workload::inference_server::detect::{service_key, InferenceServer, HOST_KEY_PREFIX};
 use crate::workload::inference_server::logs::last_non_health_line;
+use crate::workload::inference_server::metrics::{parse_media_metrics, parse_vllm_metrics};
 use crate::workload::inference_server::probe::{
-    contains_python, count_lines, parse_docker_stats, parse_env_var, parse_liveness, top_process,
-    ContainerProbe, DockerProbe, Readiness, SystemProbe, TickSample,
+    contains_python, count_lines, parse_docker_stats, parse_env_var, parse_liveness,
+    served_model_id, top_process, ContainerProbe, DockerProbe, Readiness, SystemProbe, TickSample,
 };
 use crate::workload::inference_server::services::{friendly_model_label, service_for};
 use crate::workload::inference_server::state::{
@@ -175,8 +176,17 @@ pub(crate) fn fold_tick(
     // Same shape for diffusion/video servers (tt-media-inference-server), which
     // expose the `tt_media_server_*` namespace instead of `vllm:`. A given
     // scrape only ever carries one namespace, so at most one of these is `Some`.
-    let media =
-        crate::workload::inference_server::parse_media_metrics(&sample.metrics_text).map(|cur| {
+    // A media server with no `/metrics` (MiniMax-Music3) reports busy and
+    // queued jobs in its health JSON instead; that fills in when the scrape
+    // carried nothing.
+    let media = crate::workload::inference_server::parse_media_metrics(&sample.metrics_text)
+        .or_else(|| {
+            if serving.is_some() {
+                return None;
+            }
+            crate::workload::inference_server::metrics::parse_health_media(&sample.health_body)
+        })
+        .map(|cur| {
             crate::workload::inference_server::MediaStats::fold(
                 prev.media.as_ref().map(|m| &m.counters),
                 &cur,
@@ -266,7 +276,7 @@ fn build_sample(
         contains_python(&ps_output)
     };
 
-    let (status, body) = probe.http(port, health_path);
+    let (status, mut body) = probe.http(port, health_path);
     let mut readiness = parse_liveness(status, &body);
     // A generic server is probed at `/health`. Some (the MiniMax-Music3 audio
     // server) have no `/health` and report at `/v1/health`, so a 404 there
@@ -277,6 +287,7 @@ fn build_sample(
         let (st, b) = probe.http(port, "/v1/health");
         if st == 200 && v1_health_says_ready(&b) {
             readiness = parse_liveness(st, &b);
+            body = b;
         }
     }
 
@@ -301,6 +312,7 @@ fn build_sample(
         python_alive,
         last_log,
         metrics_text,
+        health_body: body,
     }
 }
 
@@ -385,7 +397,26 @@ pub(crate) fn rebuild_snapshot(
             .find(|s| s.key == key)
             .cloned()
             .unwrap_or_else(|| fresh_state(&key, &label));
+        // A generic server with no metrics and no served-name flag is labelled
+        // from a weights path, which can be a run directory. Once it is ready,
+        // ask `/v1/models` what it serves, and keep that name (`prev_state`
+        // carries it, so this asks again only while the label is unresolved).
+        let ask_models = service_for(server.model.as_deref()).is_none()
+            && server.served_name.is_none()
+            && prev_state.label == label
+            && matches!(sample.readiness, Readiness::Ready { .. })
+            && parse_vllm_metrics(&sample.metrics_text).is_none()
+            && parse_media_metrics(&sample.metrics_text).is_none();
+        let resolved = if ask_models {
+            let (st, body) = probe.http(port, "/v1/models");
+            (st == 200).then(|| served_model_id(&body)).flatten()
+        } else {
+            None
+        };
         let mut state = fold_tick(&prev_state, sample, &ModelProfile::default(), cadence_secs);
+        if let Some(name) = resolved {
+            state.label = name;
+        }
         // Where the model runs: the port we just probed, and the chips the
         // server holds open. Both are cheap enough for the monitor thread.
         state.port = Some(port);
@@ -576,6 +607,7 @@ mod tests {
             python_alive: true,
             last_log: state.last_log.clone(),
             metrics_text: String::new(),
+            health_body: String::new(),
         }
     }
 
@@ -594,6 +626,7 @@ mod tests {
             python_alive: true,
             last_log: None,
             metrics_text: text.into(),
+            health_body: String::new(),
         }
     }
 
@@ -611,6 +644,7 @@ mod tests {
             python_alive: true,
             last_log: None,
             metrics_text: String::new(),
+            health_body: String::new(),
         };
         let next = fold_tick(&prev, sample, &ModelProfile::default(), 5);
         assert_eq!(
@@ -1293,5 +1327,74 @@ mod tests {
             "/health",
         );
         assert_eq!(warming.readiness, Readiness::NotReady);
+    }
+
+    /// An audio server with no `/metrics` reports busy and queued jobs in
+    /// `/v1/health`; the fold turns that into media stats, so the view has
+    /// jobs in flight and a completion pulse. A server that does serve
+    /// `/metrics` keeps those figures (health does not override them).
+    #[test]
+    fn health_json_fills_media_stats_when_there_is_no_metrics_scrape() {
+        let mut s = sample_with_metrics("");
+        s.readiness = Readiness::Ready { runner: None };
+        s.health_body =
+            "{\"status\":\"ok\",\"busy\":true,\"queue_depth\":1,\"requests_served\":4}".into();
+        let st = fold_tick(&fresh_state("k", "Music"), s, &ModelProfile::default(), 5);
+        let m = st.media.expect("media stats from health");
+        assert_eq!((m.jobs_in_progress, m.counters.requests_total), (2, 4));
+        assert!(st.serving.is_none());
+        // A second tick with one more request served is one completion.
+        let mut s2 = sample_with_metrics("");
+        s2.readiness = Readiness::Ready { runner: None };
+        s2.health_body =
+            "{\"status\":\"ok\",\"busy\":false,\"queue_depth\":0,\"requests_served\":5}".into();
+        let st2 = fold_tick(&st, s2, &ModelProfile::default(), 5);
+        assert_eq!(st2.media.unwrap().completed_delta, 1);
+        // No activity fields: no media stats.
+        let mut s3 = sample_with_metrics("");
+        s3.health_body = "{\"status\":\"ok\"}".into();
+        assert!(
+            fold_tick(&fresh_state("k", "M"), s3, &ModelProfile::default(), 5)
+                .media
+                .is_none()
+        );
+    }
+
+    /// A server with no metrics and no served-name flag is labelled from its
+    /// `/v1/models` listing once it is ready, and keeps that label.
+    #[test]
+    fn a_ready_server_with_no_metrics_takes_its_label_from_v1_models() {
+        struct Fake(std::cell::Cell<u32>);
+        impl ContainerProbe for Fake {
+            fn env(&self, _k: &str) -> String {
+                String::new()
+            }
+            fn stats(&self, _k: &str) -> String {
+                "5.0%|1GiB / 9GiB".into()
+            }
+            fn exec(&self, _k: &str, _sh: &str) -> String {
+                "PCPU RSS COMM\n1.0 100 python\n".into()
+            }
+            fn http(&self, _p: u16, path: &str) -> (u16, String) {
+                match path {
+                    "/v1/health" => (200, "{\"status\":\"ok\",\"busy\":false,\"queue_depth\":0,\"requests_served\":1}".into()),
+                    "/v1/models" => {
+                        self.0.set(self.0.get() + 1);
+                        (200, "{\"data\":[{\"id\":\"MiniMaxAI/MiniMax-Music3\"}]}".into())
+                    }
+                    _ => (404, String::new()),
+                }
+            }
+        }
+        let mut server = srv("tt-model-music", "/home/u/orchard-runs/music/fiona-merged");
+        server.port = Some(20000);
+        let probe = Fake(std::cell::Cell::new(0));
+        let first = rebuild_snapshot(std::slice::from_ref(&server), &[], &probe, 5);
+        assert_eq!(first[0].label, "MiniMax-Music3");
+        // The label survives the next tick (found from `prev`, no flapping),
+        // and the server is asked only once.
+        let second = rebuild_snapshot(std::slice::from_ref(&server), &first, &probe, 5);
+        assert_eq!(second[0].label, "MiniMax-Music3");
+        assert_eq!(probe.0.get(), 1, "/v1/models is asked once, not every tick");
     }
 }

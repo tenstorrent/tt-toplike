@@ -1,3 +1,17 @@
+tt-toplike (0.13.13) noble; urgency=medium
+
+  * An audio server with no /metrics shows its work. MiniMax-Music3 reports
+    busy, queue_depth and requests_served in /v1/health. The Inference view
+    uses them for jobs in flight and finished requests, so the forming canvas
+    and the Arcade lane react while it makes a track.
+  * A ready server with no metrics and no served-name flag is labelled from
+    its /v1/models listing (MiniMax-Music3), asked once, instead of the
+    weights directory (fiona-merged).
+  * A container that maps several chips but sets TT_METAL_VISIBLE_DEVICES or
+    TT_VISIBLE_DEVICES shows only the chips that setting allows.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 15 Oct 2026 16:10:00 +0000
+
 tt-toplike (0.13.12) noble; urgency=medium
 
   * A model server with no /health route is no longer shown as loading
