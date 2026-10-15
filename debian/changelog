@@ -1,3 +1,12 @@
+tt-toplike (0.13.14) noble; urgency=medium
+
+  * A container's TT_METAL_VISIBLE_DEVICES list now narrows the chips it holds
+    open as well as the ones it maps. A runtime can open every mapped chip and
+    use one, which showed an audio server pinned to chip 0 as chips 0,1.
+  * New demo scenes: arcade-lanes and inference-music (demo/demos.yaml).
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 15 Oct 2026 17:10:00 +0000
+
 tt-toplike (0.13.13) noble; urgency=medium
 
   * An audio server with no /metrics shows its work. MiniMax-Music3 reports

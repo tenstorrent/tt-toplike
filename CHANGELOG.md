@@ -17,6 +17,10 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.13.14
+- **Fix**: a container's visible-devices list narrows the chips it holds open,
+  so a server pinned to one chip shows one chip.
+
 ### 0.13.13
 - **Fix**: the MiniMax-Music3 audio server shows jobs in flight and finished
   requests (from `/v1/health`), is labelled `MiniMax-Music3` (from

@@ -342,6 +342,19 @@ pub(crate) fn restrict_to_visible(devices: Vec<usize>, visible: Option<&[usize]>
     }
 }
 
+/// Which chips a container uses: the ones it holds open, else the device nodes
+/// it was started with, narrowed by its visible-devices list. The list applies
+/// to both, since a runtime can hold descriptors on every mapped chip while
+/// using only the one it was told to.
+pub(crate) fn resolve_chips(
+    open: Vec<usize>,
+    mapped: Vec<usize>,
+    visible: Option<&[usize]>,
+) -> Vec<usize> {
+    let base = if open.is_empty() { mapped } else { open };
+    restrict_to_visible(base, visible)
+}
+
 /// The model a server says it serves: the first `id` in its `/v1/models`
 /// listing, without the organisation prefix (`MiniMaxAI/MiniMax-Music3` becomes
 /// `MiniMax-Music3`). `None` for an empty list or a body that is not JSON.
@@ -387,23 +400,23 @@ impl ContainerProbe for DockerProbe {
             .filter_map(|l| l.trim().parse().ok())
             .collect();
         let open = chips_from_pid_fds(&pids);
-        if !open.is_empty() {
-            return open;
-        }
-        let mapped = chips_from_devices_json(&docker(&[
-            "inspect",
-            "--format",
-            "{{json .HostConfig.Devices}}",
-            c,
-        ]));
-        // The container may map several chips yet be told to use one.
+        let mapped = if open.is_empty() {
+            chips_from_devices_json(&docker(&[
+                "inspect",
+                "--format",
+                "{{json .HostConfig.Devices}}",
+                c,
+            ]))
+        } else {
+            Vec::new()
+        };
         let visible = visible_devices_from_env_json(&docker(&[
             "inspect",
             "--format",
             "{{json .Config.Env}}",
             c,
         ]));
-        restrict_to_visible(mapped, visible.as_deref())
+        resolve_chips(open, mapped, visible.as_deref())
     }
 
     fn list_servers(&self) -> Vec<super::InferenceServer> {
@@ -1104,6 +1117,16 @@ mod tests {
         assert_eq!(served_model_id(r#"{"data":[]}"#), None);
         assert_eq!(served_model_id("<html>"), None);
         assert_eq!(served_model_id(""), None);
+    }
+
+    /// A runtime can hold descriptors on both mapped chips and use one. The
+    /// visible-devices list narrows the open set too, not only the mapped one.
+    #[test]
+    fn resolve_chips_narrows_the_open_set_and_falls_back_to_mapped() {
+        assert_eq!(resolve_chips(vec![0, 1], vec![], Some(&[0])), vec![0]);
+        assert_eq!(resolve_chips(vec![], vec![0, 1], Some(&[0])), vec![0]);
+        assert_eq!(resolve_chips(vec![0, 1], vec![], None), vec![0, 1]);
+        assert_eq!(resolve_chips(vec![], vec![], None), Vec::<usize>::new());
     }
 }
 
