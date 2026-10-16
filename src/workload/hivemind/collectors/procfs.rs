@@ -428,8 +428,14 @@ mod real {
             if cmdline_source != Source::Unknown {
                 return cmdline_source;
             }
-            let maps_source = std::fs::read_to_string(format!("/proc/{pid}/maps"))
-                .ok()
+            // Skip a pid we may not read; a refused open is an audited event.
+            // See `crate::workload::proc_access`.
+            let maps_source = crate::workload::proc_access::may_read(pid)
+                .then(|| std::fs::read_to_string(format!("/proc/{pid}/maps")))
+                .and_then(|r| {
+                    r.map_err(|e| crate::workload::proc_access::note_io_error(pid, &e))
+                        .ok()
+                })
                 .map(|maps_content| {
                     let so_paths = parse_maps_so_paths(&maps_content);
                     classify_from_so_paths(Some(name), &so_paths)
@@ -579,6 +585,26 @@ mod real {
                 }
                 std::thread::sleep(Duration::from_secs(1));
             }
+        }
+    }
+
+    /// Wiring test: `classify_open` must not read `maps` for a pid this user
+    /// cannot read. See `proc_access::foreign_pid_for_test`.
+    #[cfg(test)]
+    mod proc_guard_tests {
+        use super::*;
+        use crate::workload::proc_access::{foreign_pid_for_test, is_denied_for_test};
+
+        #[test]
+        fn foreign_pid_is_never_attempted() {
+            let Some(pid) = foreign_pid_for_test() else {
+                return;
+            };
+            let _ = ProcfsCollector::classify_open(pid, "python", "python x.py");
+            assert!(
+                !is_denied_for_test(pid),
+                "a /proc read was attempted on a foreign pid"
+            );
         }
     }
 }

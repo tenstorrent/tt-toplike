@@ -1018,7 +1018,12 @@ impl TrainMonitor {
     #[cfg(target_os = "linux")]
     fn find_named_config(pid: i32, name: &str) -> Option<PathBuf> {
         const MAX_DEPTH: usize = 4;
-        let root = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
+        if !crate::workload::proc_access::may_read(pid) {
+            return None;
+        }
+        let root = std::fs::read_link(format!("/proc/{pid}/cwd"))
+            .map_err(|e| crate::workload::proc_access::note_io_error(pid, &e))
+            .ok()?;
         let mut queue = vec![(root, 0usize)];
         while let Some((dir, depth)) = queue.pop() {
             let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -1145,9 +1150,15 @@ impl TrainMonitor {
         if p.is_absolute() {
             return p;
         }
+        if !crate::workload::proc_access::may_read(pid) {
+            return p;
+        }
         match std::fs::read_link(format!("/proc/{pid}/cwd")) {
             Ok(cwd) => cwd.join(p),
-            Err(_) => p,
+            Err(e) => {
+                crate::workload::proc_access::note_io_error(pid, &e);
+                p
+            }
         }
     }
 
@@ -3380,6 +3391,8 @@ mod proc_guard_tests {
         assert!(!TrainMonitor::maps_ttml(pid));
         // The expanded value is irrelevant here; only that no read was tried.
         let _ = TrainMonitor::expand_env_for_pid(pid, "${X}/y");
+        let _ = TrainMonitor::resolve_for_pid(pid, "rel/path.yaml");
+        assert_eq!(TrainMonitor::find_named_config(pid, "x"), None);
         assert!(
             !is_denied_for_test(pid),
             "a /proc read was attempted on a foreign pid"
