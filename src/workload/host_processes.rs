@@ -821,17 +821,13 @@ mod tests {
             mine.len()
         );
 
-        // pid 1 is root-owned. Skip when the suite itself runs as root,
-        // where reading it legitimately succeeds.
-        let uid = {
-            use std::os::unix::fs::MetadataExt;
-            std::fs::metadata("/proc/self")
-                .map(|m| m.uid())
-                .unwrap_or(0)
-        };
-        if uid != 0 {
+        // Another user's environ must come back empty. `foreign_pid_for_test`
+        // returns pid 1 only when we are not root and do not own it, so the
+        // check is skipped for a root run and for a container whose pid 1
+        // belongs to the user running the tests (both can legitimately read it).
+        if let Some(pid) = crate::workload::proc_access::foreign_pid_for_test() {
             assert_eq!(
-                own_uid_environ(sysinfo::Pid::from_u32(1)),
+                own_uid_environ(sysinfo::Pid::from_u32(pid as u32)),
                 "",
                 "another user's environ must come back empty"
             );

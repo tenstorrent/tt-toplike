@@ -199,31 +199,52 @@ mod tests {
         let me = i32::try_from(std::process::id()).unwrap_or(i32::MAX);
         assert!(owned_by_us(me), "we must recognise our own process");
 
+        // Expected answer comes from pid 1's real owner. It is root on a host,
+        // but inside a container it can belong to the user running the tests,
+        // and root may read anything (the guard's fast path).
+        use std::os::unix::fs::MetadataExt;
         let running_as_root = our_uid() == Some(0);
+        let pid1_is_ours = std::fs::metadata("/proc/1")
+            .map(|m| Some(m.uid()) == our_uid())
+            .unwrap_or(false);
         assert_eq!(
             owned_by_us(1),
-            running_as_root,
-            "pid 1 is root-owned: readable only when we are root"
+            running_as_root || pid1_is_ours,
+            "pid 1 is readable only when we are root or own it"
         );
     }
 
-    /// A pid that cannot exist must be declined rather than attempted.
+    /// A pid that cannot exist is declined rather than attempted. Root is the
+    /// exception: the guard answers `true` for uid 0 before looking at the pid,
+    /// so a root test run expects `true` here.
     #[test]
     fn declines_a_nonexistent_pid() {
-        assert!(!owned_by_us(i32::MAX));
+        assert_eq!(owned_by_us(i32::MAX), our_uid() == Some(0));
     }
 
     /// A remembered denial blocks reads of that pid, and only that pid.
+    ///
+    /// The cache is process-wide and tests run in parallel, so this must never
+    /// deny the test runner's own pid: other tests read it. A throwaway child
+    /// owned by us passes the ownership check, so only the cache can decline it.
     #[test]
     fn denial_is_remembered_per_pid() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a throwaway child");
+        let pid = i32::try_from(child.id()).unwrap_or(i32::MAX);
         let me = i32::try_from(std::process::id()).unwrap_or(i32::MAX);
-        // Use our own pid: ownership passes, so only the cache can decline it.
-        clear_denied_for_test(me);
-        assert!(may_read(me), "own pid readable before any denial");
-        note_denied(me);
-        assert!(!may_read(me), "own pid declined after a denial");
-        clear_denied_for_test(me);
-        assert!(may_read(me), "own pid readable once the entry is cleared");
+
+        assert!(may_read(pid), "child readable before any denial");
+        note_denied(pid);
+        assert!(!may_read(pid), "child declined after a denial");
+        assert!(may_read(me), "a denial for one pid must not affect another");
+        clear_denied_for_test(pid);
+        assert!(may_read(pid), "child readable once the entry is cleared");
+
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     /// Only a permission error is remembered. A vanished pid is not a denial.
