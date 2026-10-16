@@ -343,6 +343,16 @@ impl Atmosphere {
     pub fn observe(&mut self, rows: &[ServiceState]) {
         self.frame = self.frame.wrapping_add(1);
         let row = featured(rows);
+        // A different service is featured: its smoothed gauges start from rest.
+        // They are reset before they are fed so this update's first sample
+        // counts, and so a model with a high KV cache does not hand its tide to
+        // the next one for the several updates smoothing takes to decay. The
+        // counters and effects are reset further down, with `self.key`.
+        if row.map(|r| &r.key) != self.key.as_ref() {
+            self.energy = Gauge::new();
+            self.reading = Gauge::new();
+            self.kv = 0.0;
+        }
         self.scene = scene_of(row);
         if !matches!(self.scene, Scene::Forge | Scene::Stalled) {
             self.built = 0.0;
@@ -1593,5 +1603,34 @@ mod tests {
             0,
             "no leftover sparks"
         );
+    }
+
+    /// The smoothed gauges (generation, reading, KV tide) belong to one service.
+    /// When another is featured they restart, so a high-cache model followed by
+    /// an idle one does not render the idle one with the old tide.
+    #[test]
+    fn a_new_featured_service_restarts_the_smoothed_gauges() {
+        let mut a = Atmosphere::new();
+        let busy = |key: &str| {
+            let mut s = ready_serving(|sv| {
+                sv.kv_cache_usage = 0.9;
+                sv.generation_tps = 50.0;
+                sv.prompt_tps = 200.0;
+            });
+            s.key = key.into();
+            s
+        };
+        for _ in 0..40 {
+            a.observe(&[busy("one")]);
+        }
+        assert!(a.kv > 0.8, "the first model settled at a high KV tide");
+        assert!(a.energy.value > 0.5, "and a high generation level");
+
+        let mut idle = ready_serving(|sv| sv.kv_cache_usage = 0.0);
+        idle.key = "two".into();
+        a.observe(&[idle]);
+        assert_eq!(a.kv, 0.0, "the new service does not inherit the old tide");
+        assert_eq!(a.energy.value, 0.0, "nor the old generation level");
+        assert_eq!(a.reading.value, 0.0, "nor the old reading level");
     }
 }

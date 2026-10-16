@@ -86,6 +86,37 @@ pub fn owned_by_us(pid: i32) -> bool {
         .unwrap_or(false)
 }
 
+// ── Process identity ─────────────────────────────────────────────────────────
+
+/// Field 22 of `/proc/<pid>/stat`: when the process started, in clock ticks
+/// since boot. A pid number is reused after a process exits; the pair
+/// (pid, start time) is not, so it tells a replacement process from the one a
+/// cache entry or an attached run was made for.
+///
+/// `stat` is world-readable (mode 0444), so reading it for any pid is not an
+/// audited denial. `None` when the pid is gone, the file is unparseable, or the
+/// target has no `/proc`.
+#[cfg(target_os = "linux")]
+pub fn start_time(pid: i32) -> Option<u64> {
+    parse_start_time(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// Non-Linux: no `/proc`, so no identity beyond the pid.
+#[cfg(not(target_os = "linux"))]
+pub fn start_time(_pid: i32) -> Option<u64> {
+    None
+}
+
+/// Parse `starttime` out of a `/proc/<pid>/stat` line. The command name is the
+/// second field, sits in parentheses and may itself contain spaces and
+/// parentheses, so the fields are counted from the LAST `)`. After it come
+/// `state` (field 3) onward; `starttime` is field 22, the 20th token.
+#[cfg(target_os = "linux")]
+fn parse_start_time(stat: &str) -> Option<u64> {
+    let after_comm = &stat[stat.rfind(')')? + 1..];
+    after_comm.split_whitespace().nth(19)?.parse().ok()
+}
+
 // ── Negative cache ───────────────────────────────────────────────────────────
 //
 // Ownership is necessary but not sufficient. A process this user owns can
@@ -260,5 +291,25 @@ mod tests {
         );
         assert!(is_denied_for_test(pid));
         clear_denied_for_test(pid);
+    }
+
+    /// The command name may hold spaces and parentheses; fields count from the
+    /// last `)`. Field 22 here is 987654.
+    #[test]
+    fn start_time_is_parsed_from_after_the_last_paren() {
+        let stat = "123 (we ird) name) S 1 123 123 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654 1000 100 18446744073709551615";
+        assert_eq!(parse_start_time(stat), Some(987654));
+        assert_eq!(parse_start_time("garbage"), None);
+        assert_eq!(parse_start_time("1 (x) S 1 2"), None, "too few fields");
+    }
+
+    /// Our own start time is readable and does not change between reads.
+    #[test]
+    fn own_start_time_is_stable() {
+        let me = i32::try_from(std::process::id()).unwrap_or(i32::MAX);
+        let a = start_time(me);
+        assert!(a.is_some(), "a live process has a start time");
+        assert_eq!(a, start_time(me));
+        assert_eq!(start_time(i32::MAX), None, "no such pid");
     }
 }

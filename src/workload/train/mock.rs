@@ -107,6 +107,7 @@ impl MockTrainRun {
             pid: 0,
             binary: "nano_gpt".into(),
             config_path: Some("train.yaml".into()),
+            start_time: None,
         });
         st.config = TrainConfig {
             num_blocks: Some(6),

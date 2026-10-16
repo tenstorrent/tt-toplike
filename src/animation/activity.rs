@@ -299,6 +299,7 @@ mod tests {
             pid: 7,
             binary: "nano_gpt".into(),
             config_path: None,
+            start_time: None,
         });
         st
     }

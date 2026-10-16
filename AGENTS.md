@@ -1376,3 +1376,34 @@ and recorded here.
 The common cause for three of them: I tested the new state against a fixed
 snapshot and never against the transition into it (stats gone and back, lanes
 reordered, one model replaced by the next).
+
+### Copilot review of PR 34: pid reuse and gauge carry-over (Oct 16, 2026, v0.13.17)
+
+Copilot's second pass on PR 34 left eleven comments. One was wrong (`shown` in
+`render_lanes` is read by `Vec::with_capacity`; clippy `-D warnings` passed on
+that commit). Five were on older commits and the current code already covers
+them, each with a test: pulse counts follow activity identity, a missing stats
+total is `None` and not zero, the load clock runs only during a load, a new
+featured service clears the forge, and a negative `ttml` probe is retried.
+The release instruction in the PR body still said `v0.13.16` after the
+renumbering; the body now says `v0.13.17`.
+
+Three were right and are fixed here:
+- `Atmosphere::observe` reset the event counters when the featured service
+  changed but not the smoothed `energy`, `reading` and `kv` gauges, so an idle
+  model briefly inherited a busy one's tide. They now restart before they are fed.
+- The `ttml` probe cache and the attached run were keyed by pid alone. A pid
+  reused by an unrelated Python process could take the cached `true`, or keep the
+  old run's state attached. `proc_access::start_time` reads field 22 of
+  `/proc/<pid>/stat` (world-readable, so no audited denial), `TrainerFinder` stores
+  it per entry and puts it on `TrainProcess::start_time`, and `TrainWatch`
+  re-attaches when it differs. Unknown on either side counts as the same process,
+  so one failed read does not drop a run. The read happens in the scan worker.
+- A stale doc comment on `Arcade::last_pulse` still said "per shown lane".
+
+Tests: `a_new_featured_service_restarts_the_smoothed_gauges`,
+`a_reused_pid_is_probed_afresh_not_taken_from_the_cache`,
+`a_reused_pid_reattaches_instead_of_keeping_the_old_run` and two for
+`start_time`. The first three were seen to fail with the fix disabled (a leftover
+tide of 0.76; the replacement process taken for the trainer; the old run kept).
+No version bump: these are fixes inside an unmerged PR.

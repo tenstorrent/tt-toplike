@@ -17,6 +17,10 @@ pub struct TrainProcess {
     pub binary: String,
     /// Value of `-c` / `--config`, when this version's CLI has one.
     pub config_path: Option<String>,
+    /// `/proc/<pid>/stat` start time, filled in by `TrainerFinder` in the scan
+    /// worker. Tells a replacement process that reused this pid from the run it
+    /// replaced; `None` when unknown (non-Linux, or the pid vanished).
+    pub start_time: Option<u64>,
 }
 
 /// Extract `-c <path>` / `--config <path>` / `--config=<path>` from an argv.
@@ -52,6 +56,7 @@ pub fn parse_train_process(name: &str, cmdline: &str, pid: i32) -> Option<TrainP
         pid,
         binary: (*binary).to_string(),
         config_path: config_arg(&toks),
+        start_time: None,
     })
 }
 
@@ -113,6 +118,7 @@ pub fn parse_python_trainer(cmdline: &str, pid: i32, ttml_loaded: bool) -> Optio
         pid,
         binary: script.to_string(),
         config_path: config_arg(&toks),
+        start_time: None,
     })
 }
 

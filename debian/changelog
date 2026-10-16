@@ -13,6 +13,12 @@ tt-toplike (0.13.17) noble; urgency=medium
     /proc/<pid>/maps reads it needs no longer run on the render and input
     thread. A Python script scanned before it imports ttml is checked again
     after a few scans instead of being written off for good.
+  * When another model is featured, the Inference atmosphere's generation,
+    reading and cache gauges start from rest instead of showing the previous
+    model's levels for a few updates. When a process exits and its pid is
+    reused, Arcade and the trainer cache now notice (by process start time)
+    and no longer attach the new process to the old run or reuse its cached
+    answer.
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 15 Oct 2026 18:00:00 +0000
 

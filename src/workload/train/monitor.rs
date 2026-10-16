@@ -1490,6 +1490,7 @@ mod tests {
             binary: "nano_gpt".into(),
             // Relative, as the real CLI is almost always invoked.
             config_path: Some("train.yaml".into()),
+            start_time: None,
         };
         let cfg = TrainMonitor::load_config(&p);
 
@@ -1860,6 +1861,7 @@ mod tests {
             pid,
             binary: "nano_gpt".into(),
             config_path: Some("train.yaml".into()),
+            start_time: None,
         };
         let cfg = TrainConfig {
             // Relative, exactly as tt-train's sample configs ship it.
@@ -1920,6 +1922,7 @@ mod tests {
             pid: 999_999_998,
             binary: "nano_gpt".into(),
             config_path: Some(cfg_path.to_string_lossy().into_owned()),
+            start_time: None,
         };
         let cfg = TrainMonitor::load_config(&p);
         assert_eq!(cfg.num_blocks, Some(4), "absolute paths must be unaffected");
@@ -1930,6 +1933,7 @@ mod tests {
             pid: 999_999_998,
             binary: "nano_gpt".into(),
             config_path: Some("train.yaml".into()),
+            start_time: None,
         };
         let cfg2 = TrainMonitor::load_config(&p2);
         assert_eq!(cfg2.num_blocks, None);
@@ -2674,6 +2678,7 @@ mod step_and_ms_tests {
             pid: 7,
             binary: "python".into(),
             config_path: None,
+            start_time: None,
         });
         st.log = Some(LogSource::NotRedirected);
         st.first_seen = Some(Instant::now());
@@ -3100,6 +3105,7 @@ mod baseline_anchor_tests {
             pid: std::process::id() as i32,
             binary: "test".into(),
             config_path: None,
+            start_time: None,
         });
         m.tailer = Some(Tailer::new(path.clone()));
         // Run data from an earlier run, and live anchors.
@@ -3420,6 +3426,7 @@ mod abs_base_tests {
             pid: std::process::id() as i32,
             binary: "nano_gpt".into(),
             config_path: None,
+            start_time: None,
         });
         assert_eq!(m.state().proc.as_ref().unwrap().binary, "nano_gpt");
         assert!(m.last_scan.is_none());

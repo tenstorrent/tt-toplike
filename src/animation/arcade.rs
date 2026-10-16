@@ -93,9 +93,8 @@ pub struct ArcadeVisualization {
     serving: Option<ServingStats>,
     /// Activities running this tick (training, loading, serving), most urgent first.
     activities: Vec<crate::animation::Activity>,
-    /// Last pulse counts seen per shown lane, to tell a rise from a reset.
-    /// The last pulse count seen per activity id. Keyed by identity, not lane
-    /// position, because lanes reorder and exit.
+    /// The last pulse count seen per activity id, to tell a rise from a reset.
+    /// Keyed by identity, not lane position, because lanes reorder and exit.
     last_pulse: std::collections::HashMap<String, u64>,
     /// Motion + glyph state for the duel strip.
     duel: DuelState,
