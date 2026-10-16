@@ -63,13 +63,39 @@ fn rapl_energy_uj(socket: usize) -> Option<u64> {
         ),
     ];
     for path in &paths {
-        if let Ok(s) = std::fs::read_to_string(path) {
-            if let Ok(v) = s.trim().parse::<u64>() {
-                return Some(v);
+        // `energy_uj` is root-only on current kernels (a power side channel).
+        // Once a path has refused us it will keep refusing, and each retry is
+        // an audited denied open, so remember it and stop asking.
+        if rapl_denied()
+            .lock()
+            .map(|d| d.contains(path))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        match std::fs::read_to_string(path) {
+            Ok(s) => {
+                if let Ok(v) = s.trim().parse::<u64>() {
+                    return Some(v);
+                }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                if let Ok(mut d) = rapl_denied().lock() {
+                    d.insert(path.clone());
+                }
+            }
+            Err(_) => {}
         }
     }
     None
+}
+
+/// RAPL paths that returned `EACCES`; never read again this run.
+#[cfg(target_os = "linux")]
+fn rapl_denied() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static DENIED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    DENIED.get_or_init(Default::default)
 }
 
 #[cfg(not(target_os = "linux"))]

@@ -208,9 +208,8 @@ impl HostProcessMonitor {
     }
 
     pub fn new() -> Self {
-        let sys = System::new_with_specifics(
-            RefreshKind::nothing().with_processes(Self::refresh_kind()),
-        );
+        let sys =
+            System::new_with_specifics(RefreshKind::nothing().with_processes(Self::refresh_kind()));
         HostProcessMonitor { sys }
     }
 
@@ -220,11 +219,8 @@ impl HostProcessMonitor {
     /// `(ProcessesToUpdate, remove_dead: bool, ProcessRefreshKind)` — the
     /// brief's single-argument form was written against an older API sketch.
     pub fn update(&mut self) {
-        self.sys.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            Self::refresh_kind(),
-        );
+        self.sys
+            .refresh_processes_specifics(ProcessesToUpdate::All, true, Self::refresh_kind());
     }
 
     /// The inference runtimes detected in the current snapshot (deduped by label),
@@ -454,12 +450,16 @@ impl HostProcessMonitor {
 #[cfg(target_os = "linux")]
 fn own_uid_environ(pid: sysinfo::Pid) -> String {
     let pid_i32 = i32::try_from(pid.as_u32()).unwrap_or(i32::MAX);
-    if !crate::workload::proc_access::owned_by_us(pid_i32) {
+    if !crate::workload::proc_access::may_read(pid_i32) {
         return String::new();
     }
-    std::fs::read(format!("/proc/{pid}/environ"))
-        .map(|b| String::from_utf8_lossy(&b).replace('\0', "\n"))
-        .unwrap_or_default()
+    match std::fs::read(format!("/proc/{pid}/environ")) {
+        Ok(b) => String::from_utf8_lossy(&b).replace('\0', "\n"),
+        Err(e) => {
+            crate::workload::proc_access::note_io_error(pid_i32, &e);
+            String::new()
+        }
+    }
 }
 
 impl Default for HostProcessMonitor {
@@ -825,7 +825,9 @@ mod tests {
         // where reading it legitimately succeeds.
         let uid = {
             use std::os::unix::fs::MetadataExt;
-            std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(0)
+            std::fs::metadata("/proc/self")
+                .map(|m| m.uid())
+                .unwrap_or(0)
         };
         if uid != 0 {
             assert_eq!(

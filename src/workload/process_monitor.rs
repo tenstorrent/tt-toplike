@@ -98,10 +98,13 @@ impl ProcessMonitor {
                         // this loop runs every 2 s over every process. The old
                         // "silently skip if permission denied" was silent to us
                         // but not to auditd. See `crate::workload::proc_access`.
-                        if !crate::workload::proc_access::owned_by_us(process.pid()) {
+                        if !crate::workload::proc_access::may_read(process.pid()) {
                             continue;
                         }
-                        // Scan process, silently skip if permission denied
+                        // A denied open is silent to this program but not to
+                        // the host: auditd can log each one. Ownership and the
+                        // denial cache are checked above; the scan itself
+                        // still tolerates a refusal, which it then remembers.
                         let _ = self.scan_process(&process);
                     }
                 }
@@ -124,7 +127,15 @@ impl ProcessMonitor {
         let mut has_tt_mapping = false;
 
         // Check file descriptors for /dev/tenstorrent/* devices
-        if let Ok(fds) = process.fd() {
+        let fds = process.fd();
+        if matches!(fds, Err(procfs::ProcError::PermissionDenied(_))) {
+            // We own this pid but the kernel's ptrace-style access check still
+            // refuses `fd/`; `maps` is refused for the same reason, so skip it
+            // too and remember the pid so later scans do not retry for a while.
+            crate::workload::proc_access::note_denied(process.pid());
+            return Ok(());
+        }
+        if let Ok(fds) = fds {
             for fd_result in fds {
                 if let Ok(fd_info) = fd_result {
                     // Check if FD points to /dev/tenstorrent/*
@@ -294,5 +305,25 @@ mod tests {
         let err = result.unwrap_err();
         // Expected: ESRCH (no such process)
         assert_eq!(err.raw_os_error(), Some(libc::ESRCH));
+    }
+}
+
+/// Wiring tests: no guarded reader may attempt a `/proc` read on a pid this
+/// user cannot read. See `proc_access::foreign_pid_for_test`.
+#[cfg(all(test, target_os = "linux"))]
+mod proc_guard_tests {
+    use super::*;
+    use crate::workload::proc_access::{foreign_pid_for_test, is_denied_for_test};
+
+    #[test]
+    fn full_scan_never_attempts_a_foreign_pid() {
+        let Some(pid) = foreign_pid_for_test() else {
+            return;
+        };
+        ProcessMonitor::new().update();
+        assert!(
+            !is_denied_for_test(pid),
+            "a /proc read was attempted on a foreign pid"
+        );
     }
 }

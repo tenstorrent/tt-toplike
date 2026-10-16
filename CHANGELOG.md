@@ -17,6 +17,14 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.13.11
+- **Fix**: on hosts that run the STIG or CIS audit rules, tt-toplike wrote
+  4 to 6 GB of audit log per hour. The process scans opened `/proc/<pid>`
+  files that only the owning user can read, and each refused open became an
+  audit event. The scans now check ownership first and remember pids that
+  refuse access. Thanks to Eugene Valkov, who reported it and wrote the first
+  fix (issue 35).
+
 ### 0.13.10
 - **Add**: Inference view (`i`) shows the port and chips each model runs on,
   for example `:8000 · chips 0,1`, on each roster row or in a header line for a

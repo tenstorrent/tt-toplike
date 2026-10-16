@@ -272,8 +272,15 @@ fn extract_model_from_cmdline(cmdline: &str) -> Option<String> {
 
 /// Read one environment variable from `/proc/PID/environ`.
 fn read_proc_env(pid: i32, key: &str) -> Option<String> {
+    // Skip pids we cannot read: a denied open is an audited event. See
+    // `crate::workload::proc_access`.
+    if !crate::workload::proc_access::may_read(pid) {
+        return None;
+    }
     let path = format!("/proc/{}/environ", pid);
-    let data = std::fs::read(&path).ok()?;
+    let data = std::fs::read(&path)
+        .map_err(|e| crate::workload::proc_access::note_io_error(pid, &e))
+        .ok()?;
     let prefix = format!("{}=", key);
     for entry in data.split(|&b| b == 0) {
         if let Ok(s) = std::str::from_utf8(entry) {
@@ -291,9 +298,16 @@ fn read_proc_env(pid: i32, key: &str) -> Option<String> {
 /// empty set on any I/O error so callers degrade gracefully.
 fn pid_socket_inodes(pid: i32) -> std::collections::HashSet<u64> {
     let mut inodes = std::collections::HashSet::new();
-    let fd_dir = format!("/proc/{}/fd", pid);
-    let Ok(dir) = std::fs::read_dir(&fd_dir) else {
+    if !crate::workload::proc_access::may_read(pid) {
         return inodes;
+    }
+    let fd_dir = format!("/proc/{}/fd", pid);
+    let dir = match std::fs::read_dir(&fd_dir) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::workload::proc_access::note_io_error(pid, &e);
+            return inodes;
+        }
     };
     for entry in dir.flatten() {
         if let Ok(target) = std::fs::read_link(entry.path()) {
@@ -351,8 +365,13 @@ fn find_listen_port_from_proc(pid: i32) -> Option<u16> {
 
 /// Scan `/proc/PID/fd/` for symlinks whose target looks like a log file.
 fn find_log_path(pid: i32) -> Option<PathBuf> {
+    if !crate::workload::proc_access::may_read(pid) {
+        return None;
+    }
     let fd_dir = format!("/proc/{}/fd", pid);
-    let dir = std::fs::read_dir(&fd_dir).ok()?;
+    let dir = std::fs::read_dir(&fd_dir)
+        .map_err(|e| crate::workload::proc_access::note_io_error(pid, &e))
+        .ok()?;
     for entry in dir.flatten() {
         if let Ok(target) = std::fs::read_link(entry.path()) {
             let name = target.to_string_lossy();
@@ -617,5 +636,27 @@ mod tests {
 
         let unrelated = "tt_num_active_sessions 3";
         assert_eq!(parse_kv_cache_line(unrelated), None);
+    }
+}
+
+/// Wiring tests: no guarded reader may attempt a `/proc` read on a pid this
+/// user cannot read. See `proc_access::foreign_pid_for_test`.
+#[cfg(all(test, target_os = "linux"))]
+mod proc_guard_tests {
+    use super::*;
+    use crate::workload::proc_access::{foreign_pid_for_test, is_denied_for_test};
+
+    #[test]
+    fn foreign_pid_is_never_attempted() {
+        let Some(pid) = foreign_pid_for_test() else {
+            return;
+        };
+        assert_eq!(read_proc_env(pid, "PATH"), None);
+        assert!(pid_socket_inodes(pid).is_empty());
+        assert_eq!(find_log_path(pid), None);
+        assert!(
+            !is_denied_for_test(pid),
+            "a /proc read was attempted on a foreign pid"
+        );
     }
 }

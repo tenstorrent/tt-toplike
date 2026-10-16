@@ -1102,7 +1102,13 @@ impl TrainMonitor {
     /// anything we can't read, so a foreign process is never claimed.
     #[cfg(target_os = "linux")]
     fn maps_ttml(pid: i32) -> bool {
+        // Fail closed without paying an audited denial for a pid we may not
+        // read. See `crate::workload::proc_access`.
+        if !crate::workload::proc_access::may_read(pid) {
+            return false;
+        }
         std::fs::read_to_string(format!("/proc/{pid}/maps"))
+            .map_err(|e| crate::workload::proc_access::note_io_error(pid, &e))
             .map(|m| {
                 m.lines().any(|l| {
                     // The compiled binding (`_ttml*.so`) or the package
@@ -1214,7 +1220,13 @@ impl TrainMonitor {
         if !path.contains("${") {
             return path.to_string();
         }
-        let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+        let environ = if crate::workload::proc_access::may_read(pid) {
+            std::fs::read(format!("/proc/{pid}/environ"))
+                .map_err(|e| crate::workload::proc_access::note_io_error(pid, &e))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let text = String::from_utf8_lossy(&environ);
         let mut out = path.to_string();
         for entry in text.split('\0') {
@@ -3350,5 +3362,27 @@ mod abs_base_tests {
         }
         assert_eq!(m.state.step_history.len(), 2);
         assert!((m.state.step_ms - 300.0).abs() < 1.0, "{}", m.state.step_ms);
+    }
+}
+
+/// Wiring tests: no guarded reader may attempt a `/proc` read on a pid this
+/// user cannot read. See `proc_access::foreign_pid_for_test`.
+#[cfg(all(test, target_os = "linux"))]
+mod proc_guard_tests {
+    use super::*;
+    use crate::workload::proc_access::{foreign_pid_for_test, is_denied_for_test};
+
+    #[test]
+    fn foreign_pid_is_never_attempted() {
+        let Some(pid) = foreign_pid_for_test() else {
+            return;
+        };
+        assert!(!TrainMonitor::maps_ttml(pid));
+        // The expanded value is irrelevant here; only that no read was tried.
+        let _ = TrainMonitor::expand_env_for_pid(pid, "${X}/y");
+        assert!(
+            !is_denied_for_test(pid),
+            "a /proc read was attempted on a foreign pid"
+        );
     }
 }
