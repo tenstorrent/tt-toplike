@@ -252,8 +252,18 @@ pub(crate) fn chips_from_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> 
 fn chips_from_pid_fds(pids: &[i32]) -> Vec<usize> {
     let mut targets: Vec<String> = Vec::new();
     for pid in pids {
-        let Ok(dir) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        // Same reason as `host_environ_text`: a pid we may not read was always
+        // going to contribute nothing, so do not pay an audit record to learn
+        // that. See `crate::workload::proc_access`.
+        if !crate::workload::proc_access::may_read(*pid) {
             continue;
+        }
+        let dir = match std::fs::read_dir(format!("/proc/{pid}/fd")) {
+            Ok(d) => d,
+            Err(e) => {
+                crate::workload::proc_access::note_io_error(*pid, &e);
+                continue;
+            }
         };
         for entry in dir.flatten() {
             if let Ok(t) = std::fs::read_link(entry.path()) {
@@ -387,13 +397,21 @@ fn pid_from_key(key: &str) -> Option<i32> {
 /// `env`/`printenv` dump shape). Missing/unreadable (process exited,
 /// permission denied) degrades to `""`, same as every other probe method.
 fn host_environ_text(pid: i32) -> String {
+    // Cross-uid `environ` can never be read, and the denied open is an audited
+    // event. See `crate::workload::proc_access`.
+    if !crate::workload::proc_access::may_read(pid) {
+        return String::new();
+    }
     match std::fs::read(format!("/proc/{pid}/environ")) {
         Ok(bytes) => String::from_utf8_lossy(&bytes)
             .split('\0')
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join("\n"),
-        Err(_) => String::new(),
+        Err(e) => {
+            crate::workload::proc_access::note_io_error(pid, &e);
+            String::new()
+        }
     }
 }
 
@@ -987,5 +1005,26 @@ mod tests {
         let (cpu, rss) = parse_docker_stats(&formatted).expect("must parse");
         assert!((cpu - 12.5).abs() < 0.01);
         assert_eq!(rss, 1024 * 1024);
+    }
+}
+
+/// Wiring tests: no guarded reader may attempt a `/proc` read on a pid this
+/// user cannot read. See `proc_access::foreign_pid_for_test`.
+#[cfg(all(test, target_os = "linux"))]
+mod proc_guard_tests {
+    use super::*;
+    use crate::workload::proc_access::{foreign_pid_for_test, is_denied_for_test};
+
+    #[test]
+    fn foreign_pid_is_never_attempted() {
+        let Some(pid) = foreign_pid_for_test() else {
+            return;
+        };
+        assert_eq!(host_environ_text(pid), "");
+        assert!(chips_from_pid_fds(&[pid]).is_empty());
+        assert!(
+            !is_denied_for_test(pid),
+            "a /proc read was attempted on a foreign pid"
+        );
     }
 }

@@ -1150,3 +1150,53 @@ hero) were read against their code and still match.
   `CHANGELOG.md` summary stopped at 0.11.0 and now has 0.13.10 and a note that
   0.11.1 to 0.13.9 live in `debian/changelog` only; `QUICK_START.md` said
   "Last Updated: August 30, 2026" and now says October 6, 2026.
+
+### Audit-log flood from denied /proc opens (Oct 16, 2026, v0.13.11)
+
+Request: issue 35 from Eugene Valkov reported that tt-toplike filled a 20 GB
+`/var/log/audit` volume in about three hours on a STIG host and stopped
+`auditd`. Taylor asked for a fix "for the dev and devs who haven't even noticed
+yet", then agreed to cherry-pick the reporter's commit and extend it, with
+continued attribution.
+
+Cause: the process scans open `/proc/<pid>/{environ,io,fd,maps}` for every
+process and thread. Cross-uid those opens fail with `EACCES`, every caller
+already returned an empty value, and the STIG rule `-F exit=-EACCES` writes a
+1.2 KB event for each. Nothing was lost by not asking, and the asking was the cost.
+
+What landed:
+- The reporter's commit, cherry-picked with its authorship intact:
+  `proc_access::owned_by_us` (a `stat` of `/proc/<pid>`, not audited, true for
+  root), `refresh_kind()` without `environ` and `disk_usage` (`tasks` stays on
+  because `processes_snapshot` filters thread entries), and guards in
+  `process_monitor`, `probe` and `host_processes`.
+- A per-pid negative cache (`may_read`, `note_denied`, `note_io_error`, 60 s
+  TTL, pruned at 4096 entries). Ownership is necessary but not sufficient: the
+  kernel's ptrace-style access check can refuse a pid we own, which was the
+  residual ~24 denials per 14 s the reporter measured.
+- The same guard on the readers the reporter's patch did not reach:
+  `serving.rs` (`read_proc_env`, `pid_socket_inodes`, `find_log_path`),
+  `train/logsrc.rs` (`discover_log`) and `train/monitor.rs` (`maps_ttml`,
+  `expand_env_for_pid` and the two `cwd` reads), `liveness_probe.rs`
+  (`listening_port_for_pid`) and `hivemind/collectors/procfs.rs`
+  (`classify_open`). The last four turned up in a second sweep after the first
+  commit: `grep -rnE 'format!\("/proc/\{[a-z_.]*\}/(environ|fd|maps|io|cwd|exe)'`.
+  `process_monitor` also skips `maps` once `fd` is refused.
+- `backend/host.rs` remembers a RAPL `energy_uj` path that returned `EACCES`
+  and stops retrying it.
+- A rule in `CONTRIBUTING.md` for any new `/proc/<pid>` reader.
+
+Tests: one wiring test per module (seven in all), run against pid 1 as a non-root user. A
+caller that attempts the read gets `EACCES` and records a denial, so the test
+asserts the pid is absent from the cache. That checks the call site and not the
+arithmetic in `owned_by_us`. Each test skips itself when pid 1 is readable (root
+or a rootless container). All seven went red when `may_read` was made to ignore
+ownership, and green when it was restored.
+
+Not verified here: a count of denied opens on a host running the STIG ruleset.
+The 19,716 to 72 figures are the reporter's. A same-box strace count is in the
+PR description if it was available.
+
+Version and merge order: this fix is 0.13.11 and merges first (PR 36). PR 34 was
+renumbered from 0.13.11-0.13.16 to 0.13.12-0.13.17 and is rebased onto this
+branch, so the two merge in order without conflicts.

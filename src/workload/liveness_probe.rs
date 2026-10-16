@@ -198,10 +198,19 @@ fn parse_listen_table(contents: &str) -> HashMap<u64, u16> {
 #[cfg(target_os = "linux")]
 fn listening_port_for_pid(pid: i32, listen_table: &HashMap<u64, u16>) -> Option<u16> {
     use std::fs;
+    // Another user's `fd/` can never be read, and each refused open is an
+    // audited event, so do not ask. See `crate::workload::proc_access`.
+    if !crate::workload::proc_access::may_read(pid) {
+        return None;
+    }
     let fd_dir = format!("/proc/{pid}/fd");
     let mut best: Option<u16> = None;
-    // Permission denied (another user's process) just yields no port → fallback.
-    for entry in fs::read_dir(fd_dir).ok()?.flatten() {
+    // A refusal that still happens (ptrace-protected pid) is remembered and
+    // yields no port → fallback.
+    let dir = fs::read_dir(fd_dir)
+        .map_err(|e| crate::workload::proc_access::note_io_error(pid, &e))
+        .ok()?;
+    for entry in dir.flatten() {
         let Ok(link) = fs::read_link(entry.path()) else {
             continue;
         };
@@ -612,5 +621,25 @@ mod tests {
             pid: 1,
             cmdline: "vllm serve m --port 65000".into(), // nothing listening → no verdict
         }]);
+    }
+}
+
+/// Wiring tests: no guarded reader may attempt a `/proc` read on a pid this
+/// user cannot read. See `proc_access::foreign_pid_for_test`.
+#[cfg(all(test, target_os = "linux"))]
+mod proc_guard_tests {
+    use super::*;
+    use crate::workload::proc_access::{foreign_pid_for_test, is_denied_for_test};
+
+    #[test]
+    fn foreign_pid_is_never_attempted() {
+        let Some(pid) = foreign_pid_for_test() else {
+            return;
+        };
+        assert_eq!(listening_port_for_pid(pid, &HashMap::new()), None);
+        assert!(
+            !is_denied_for_test(pid),
+            "a /proc read was attempted on a foreign pid"
+        );
     }
 }

@@ -119,6 +119,24 @@ Normal `cargo build`/`cargo test` don't need it at all.
   // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
   ```
 
+### Reading `/proc/<pid>`
+
+A failed open is not free. Hosts that run the STIG or CIS audit rules log every
+open that fails with `EACCES`, and a scan that repeats every 2 seconds across
+every process and thread filled a 20 GB audit volume in three hours (issue 35).
+Before opening `environ`, `io`, `fd/`, `maps` or any other file under
+`/proc/<pid>` that only the owning user can read:
+
+- Ask `workload::proc_access::may_read(pid)`. It checks ownership with a `stat`,
+  which is not audited, and skips pids that refused access recently.
+- If the open still fails, call `proc_access::note_io_error(pid, &err)` so the
+  next scan skips that pid.
+- Do not ask `sysinfo` for fields nothing uses. `environ` and `disk_usage` each
+  cost one open per process.
+
+To check a change, count refused opens:
+`strace -f -e trace=openat -p $(pgrep -x tt-toplike-tui) 2>&1 | grep -c EACCES`
+
 ### Testing
 
 - Write unit tests for new functionality

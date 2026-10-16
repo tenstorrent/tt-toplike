@@ -1,3 +1,23 @@
+tt-toplike (0.13.11) noble; urgency=medium
+
+  * tt-toplike no longer fills the audit log on hosts that run the STIG or
+    CIS audit rules. The process scans opened `/proc/<pid>/environ`, `io`,
+    `fd/` and `maps` for every process and thread on the machine. Those
+    files can only be read by the process's own user, so every open on
+    another user's process failed, and the audit rule for denied opens wrote
+    a 1.2 KB event for each one. One reporter measured 4 to 6 GB of audit
+    log per hour, which filled a 20 GB audit volume in about three hours and
+    stopped auditd. The scans now check who owns a process before opening
+    anything, remember processes that refuse access for 60 seconds, and stop
+    asking sysinfo for `environ` and disk usage. The host backend also stops
+    retrying the RAPL `energy_uj` file once it has been refused. Denied opens
+    dropped from 19,716 to 72 per 14 seconds on the reporter's machine. What
+    the views show does not change, because every one of those reads had
+    already been returning nothing. Reported and first fixed by Eugene
+    Valkov (issue 35).
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 16 Oct 2026 12:00:00 +0000
+
 tt-toplike (0.13.10) noble; urgency=medium
 
   * The Inference view (`i`) shows the port and chips each model runs on,

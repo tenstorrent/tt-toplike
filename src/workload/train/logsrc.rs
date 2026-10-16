@@ -62,9 +62,17 @@ pub fn classify_fd_target(target: &Path) -> LogSource {
 /// Resolve a pid's stdout. Never errors: an exited process, a permission
 /// denial, or a non-Linux target all read as `NotRedirected`.
 pub fn discover_log(pid: i32) -> LogSource {
+    // A pid we may not read would only produce an audited denial. See
+    // `crate::workload::proc_access`.
+    if !crate::workload::proc_access::may_read(pid) {
+        return LogSource::NotRedirected;
+    }
     match std::fs::read_link(format!("/proc/{pid}/fd/1")) {
         Ok(target) => classify_fd_target(&target),
-        Err(_) => LogSource::NotRedirected,
+        Err(e) => {
+            crate::workload::proc_access::note_io_error(pid, &e);
+            LogSource::NotRedirected
+        }
     }
 }
 
@@ -180,5 +188,25 @@ mod tests {
         assert_eq!(classify_fd_target(&fifo), LogSource::NotRedirected);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+/// Wiring tests: no guarded reader may attempt a `/proc` read on a pid this
+/// user cannot read. See `proc_access::foreign_pid_for_test`.
+#[cfg(all(test, target_os = "linux"))]
+mod proc_guard_tests {
+    use super::*;
+    use crate::workload::proc_access::{foreign_pid_for_test, is_denied_for_test};
+
+    #[test]
+    fn foreign_pid_is_never_attempted() {
+        let Some(pid) = foreign_pid_for_test() else {
+            return;
+        };
+        assert_eq!(discover_log(pid), LogSource::NotRedirected);
+        assert!(
+            !is_denied_for_test(pid),
+            "a /proc read was attempted on a foreign pid"
+        );
     }
 }
