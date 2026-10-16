@@ -92,6 +92,15 @@ impl ProcessMonitor {
             Ok(processes) => {
                 for process_result in processes {
                     if let Ok(process) = process_result {
+                        // Skip processes this user does not own BEFORE touching
+                        // `fd()` or `maps()`. Both are denied cross-uid, and a
+                        // denied open is an audited event on a STIG host while
+                        // this loop runs every 2 s over every process. The old
+                        // "silently skip if permission denied" was silent to us
+                        // but not to auditd. See `crate::workload::proc_access`.
+                        if !crate::workload::proc_access::owned_by_us(process.pid()) {
+                            continue;
+                        }
                         // Scan process, silently skip if permission denied
                         let _ = self.scan_process(&process);
                     }

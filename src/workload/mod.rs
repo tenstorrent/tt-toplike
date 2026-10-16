@@ -10,6 +10,7 @@ pub mod inference_match;
 pub mod inference_server;
 pub mod liveness_probe;
 pub mod model_catalog;
+pub mod proc_access;
 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
 pub mod process_monitor;
 pub mod reset_detect;

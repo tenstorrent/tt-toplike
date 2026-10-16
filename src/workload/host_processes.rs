@@ -176,9 +176,40 @@ pub struct HostProcessMonitor {
 }
 
 impl HostProcessMonitor {
+    /// How the process table is refreshed.
+    ///
+    /// This is `ProcessRefreshKind::everything()` minus two fields, and the
+    /// omissions are load-bearing rather than an optimisation:
+    ///
+    /// - `environ` makes sysinfo open `/proc/<pid>/environ` for every entry.
+    /// - `disk_usage` makes it open `/proc/<pid>/io` for every entry.
+    ///
+    /// Both files are mode 0400 owned by the process's own user, so for any
+    /// process this user does not own the open fails with `EACCES` and sysinfo
+    /// stores an empty value. The data was therefore never obtainable — but
+    /// the attempt is not free. A host running the STIG audit ruleset records
+    /// every denied open as a four-record event, and `tasks: true` means this
+    /// refresh walks every THREAD, not every process. On a ~1,000-thread box
+    /// at the 2 s cadence that is ~1,000 denials/s, measured at roughly 4 GB
+    /// of audit log per hour; it filled a 20 GB audit volume in an afternoon
+    /// and stopped audit logging host-wide.
+    ///
+    /// Nothing reads disk usage. `environ` has exactly one consumer,
+    /// [`Self::detected_inference_servers`], which now reads it directly for
+    /// processes this user owns — see [`own_uid_environ`]. Behaviour is
+    /// unchanged, because the value being replaced was always empty.
+    ///
+    /// `tasks` stays ON: `processes_snapshot` depends on thread entries being
+    /// present in order to filter them out.
+    fn refresh_kind() -> ProcessRefreshKind {
+        ProcessRefreshKind::everything()
+            .without_environ()
+            .without_disk_usage()
+    }
+
     pub fn new() -> Self {
         let sys = System::new_with_specifics(
-            RefreshKind::nothing().with_processes(ProcessRefreshKind::everything()),
+            RefreshKind::nothing().with_processes(Self::refresh_kind()),
         );
         HostProcessMonitor { sys }
     }
@@ -192,7 +223,7 @@ impl HostProcessMonitor {
         self.sys.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
-            ProcessRefreshKind::everything(),
+            Self::refresh_kind(),
         );
     }
 
@@ -230,8 +261,8 @@ impl HostProcessMonitor {
     /// `tt-smi -r` tracker (`ui::tui::reset_status::scan_resets`) so it
     /// doesn't need its own `sysinfo` refresh cadence.
     ///
-    /// `self.sys` is refreshed with `ProcessRefreshKind::everything()`, which
-    /// sets sysinfo's `tasks: true` — meaning `self.sys.processes()` yields
+    /// `self.sys` is refreshed with [`Self::refresh_kind`], which keeps
+    /// sysinfo's `tasks: true` — meaning `self.sys.processes()` yields
     /// one entry per THREAD, not one per process, each with its own tid under
     /// `p.pid()`. `p.thread_kind()` distinguishes them: `Some(_)` for a
     /// thread, `None` for the process itself. Without filtering, a
@@ -296,12 +327,7 @@ impl HostProcessMonitor {
                 .map(|s| s.to_string_lossy())
                 .collect::<Vec<_>>()
                 .join(" ");
-            let environ = p
-                .environ()
-                .iter()
-                .map(|s| s.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("\n");
+            let environ = own_uid_environ(*pid);
             let pid_i32 = i32::try_from(pid.as_u32()).unwrap_or(i32::MAX);
             if let Some(server) = classify_one(&name, &cmdline, &environ, pid_i32) {
                 // Only the host path needs the container check: a `Source::Docker`
@@ -412,6 +438,28 @@ impl HostProcessMonitor {
             })
             .collect()
     }
+}
+
+/// Read `/proc/<pid>/environ` for a process this user owns, as `KEY=VALUE`
+/// lines; an empty string for anything else.
+///
+/// Ownership is established by `stat`-ing `/proc/<pid>`, which is world
+/// readable, rather than by attempting the open and handling the failure.
+/// That distinction is the whole point: on an audited host a denied `openat`
+/// is a logged event while a successful `stat` is not. See
+/// [`HostProcessMonitor::refresh_kind`] for what that cost in practice.
+///
+/// Returning empty for a process owned by someone else matches exactly what
+/// sysinfo produced before, since the read could never have succeeded.
+#[cfg(target_os = "linux")]
+fn own_uid_environ(pid: sysinfo::Pid) -> String {
+    let pid_i32 = i32::try_from(pid.as_u32()).unwrap_or(i32::MAX);
+    if !crate::workload::proc_access::owned_by_us(pid_i32) {
+        return String::new();
+    }
+    std::fs::read(format!("/proc/{pid}/environ"))
+        .map(|b| String::from_utf8_lossy(&b).replace('\0', "\n"))
+        .unwrap_or_default()
 }
 
 impl Default for HostProcessMonitor {
@@ -731,8 +779,65 @@ mod tests {
         assert!(snap.iter().all(|(_, name, _)| !name.is_empty()));
     }
 
+    /// Guards the audit-log blowup that stopped audit logging host-wide:
+    /// `refresh_kind()` must not ask sysinfo for `environ` or `disk_usage`.
+    /// Collecting either means one denied `openat` per entry this user does
+    /// not own — per THREAD, since `tasks` is on — and on a host running the
+    /// STIG ruleset every denial is a logged four-record event. That measured
+    /// ~4 GB of audit log per hour and filled a 20 GB audit volume in an
+    /// afternoon, taking audit logging down with it.
+    ///
+    /// `tasks` is asserted ON in the same breath deliberately:
+    /// `processes_snapshot` relies on thread entries being present so it can
+    /// filter them out, so switching tasks off to save the same syscalls
+    /// would silently change what that function returns.
+    #[test]
+    fn refresh_kind_requests_no_cross_uid_denied_reads() {
+        let k = HostProcessMonitor::refresh_kind();
+        assert_eq!(
+            k.environ(),
+            sysinfo::UpdateKind::Never,
+            "environ must stay off: it opens /proc/<pid>/environ for every entry"
+        );
+        assert!(
+            !k.disk_usage(),
+            "disk_usage must stay off: it opens /proc/<pid>/io for every entry"
+        );
+        assert!(
+            k.tasks(),
+            "tasks must stay on: processes_snapshot filters thread entries out"
+        );
+    }
+
+    /// `own_uid_environ` reads this user's own environment and declines
+    /// everyone else's. The declining half is the point of the function.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn own_uid_environ_reads_self_and_declines_others() {
+        let mine = own_uid_environ(sysinfo::Pid::from_u32(std::process::id()));
+        assert!(
+            mine.contains('='),
+            "our own environ should hold KEY=VALUE records, got {} bytes",
+            mine.len()
+        );
+
+        // pid 1 is root-owned. Skip when the suite itself runs as root,
+        // where reading it legitimately succeeds.
+        let uid = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(0)
+        };
+        if uid != 0 {
+            assert_eq!(
+                own_uid_environ(sysinfo::Pid::from_u32(1)),
+                "",
+                "another user's environ must come back empty"
+            );
+        }
+    }
+
     /// Regression for Finding 1: `HostProcessMonitor` refreshes with
-    /// `ProcessRefreshKind::everything()`, which sets sysinfo's `tasks: true`
+    /// `refresh_kind()`, which keeps sysinfo's `tasks: true`
     /// — `self.sys.processes()` therefore yields one entry per THREAD, not
     /// one per process (each thread under its own tid, `p.thread_kind() ==
     /// Some(_)`). `processes_snapshot()` must filter those out so the

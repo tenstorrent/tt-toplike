@@ -252,6 +252,12 @@ pub(crate) fn chips_from_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> 
 fn chips_from_pid_fds(pids: &[i32]) -> Vec<usize> {
     let mut targets: Vec<String> = Vec::new();
     for pid in pids {
+        // Same reason as `host_environ_text`: a pid we may not read was always
+        // going to contribute nothing, so do not pay an audit record to learn
+        // that. See `crate::workload::proc_access`.
+        if !crate::workload::proc_access::owned_by_us(*pid) {
+            continue;
+        }
         let Ok(dir) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
             continue;
         };
@@ -387,6 +393,11 @@ fn pid_from_key(key: &str) -> Option<i32> {
 /// `env`/`printenv` dump shape). Missing/unreadable (process exited,
 /// permission denied) degrades to `""`, same as every other probe method.
 fn host_environ_text(pid: i32) -> String {
+    // Cross-uid `environ` can never be read, and the denied open is an audited
+    // event. See `crate::workload::proc_access`.
+    if !crate::workload::proc_access::owned_by_us(pid) {
+        return String::new();
+    }
     match std::fs::read(format!("/proc/{pid}/environ")) {
         Ok(bytes) => String::from_utf8_lossy(&bytes)
             .split('\0')
