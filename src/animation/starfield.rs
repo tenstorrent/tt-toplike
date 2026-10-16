@@ -205,6 +205,50 @@ impl DataStream {
     }
 }
 
+/// A colour tint applied to the whole starfield while an activity runs.
+/// `strength` is capped (see [`effective_tint_strength`]) so the power-driven
+/// brightness the stars carry stays readable underneath.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActivityTint {
+    pub hue: f32,
+    pub strength: f32,
+}
+
+const MAX_TINT: f32 = 0.45;
+const MAX_FLARES: usize = 6;
+const FLARE_FRAMES: u32 = 24;
+
+/// The blend actually applied for a requested strength: never above
+/// [`MAX_TINT`], never below zero.
+pub fn effective_tint_strength(strength: f32) -> f32 {
+    strength.clamp(0.0, MAX_TINT)
+}
+
+/// One expanding ring born at `frame` around (`x`, `y`).
+#[derive(Debug, Clone, Copy)]
+struct Flare {
+    born: u32,
+    x: usize,
+    y: usize,
+}
+
+/// Blend `base` toward `to` by `k`. A colour that is not RGB (a terminal with no
+/// true-colour support gets indexed colours) cannot be blended, so it takes the
+/// target itself: the tint still shows, and removing it restores the original.
+fn blend_toward(base: Color, to: Color, k: f32) -> Color {
+    match (base, to) {
+        (Color::Rgb(br, bg, bb), Color::Rgb(tr, tg, tb)) => {
+            let m = |a: u8, b: u8| {
+                (a as f32 * (1.0 - k) + b as f32 * k)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            };
+            Color::Rgb(m(br, tr), m(bg, tg), m(bb, tb))
+        }
+        _ => to,
+    }
+}
+
 /// Hardware-responsive starfield visualization system
 pub struct HardwareStarfield {
     /// All stars (Tensix cores)
@@ -254,6 +298,13 @@ pub struct HardwareStarfield {
     /// this `false` so the composite view owns a single shared telemetry strip
     /// instead of each embedded section printing its own header.
     chrome: bool,
+
+    /// Activity tint (training, loading, serving), if any.
+    tint: Option<ActivityTint>,
+    /// Live flares, oldest first, at most `MAX_FLARES`.
+    flares: Vec<Flare>,
+    /// Total pulses so far; seeds each flare's position.
+    pulse_count: u32,
 }
 
 impl HardwareStarfield {
@@ -278,12 +329,45 @@ impl HardwareStarfield {
             device_powers: HashMap::new(),
             device_count: 0,
             chrome: true,
+            tint: None,
+            flares: Vec::new(),
+            pulse_count: 0,
         }
     }
 
     /// Toggle section chrome (header label).  `true` = standalone look
     /// (default); `false` suppresses the section header so a composite view
     /// (Arcade) can render one shared telemetry strip instead.
+    /// Tint the stars toward a hue while an activity runs; `None` removes it.
+    pub fn set_activity_tint(&mut self, tint: Option<ActivityTint>) {
+        self.tint = tint;
+    }
+
+    /// Spawn one flare. Its position is a deterministic function of how many
+    /// pulses have happened, so it is stable and testable. At most
+    /// `MAX_FLARES` are alive at once; the oldest goes first.
+    pub fn pulse(&mut self) {
+        if self.width == 0 || self.height == 0 {
+            return;
+        }
+        self.pulse_count = self.pulse_count.wrapping_add(1);
+        let n = self.pulse_count as usize;
+        let flare = Flare {
+            born: self.frame,
+            x: (n * 37 + 11) % self.width,
+            y: (n * 5) % self.height,
+        };
+        if self.flares.len() >= MAX_FLARES {
+            self.flares.remove(0);
+        }
+        self.flares.push(flare);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_flares(&self) -> usize {
+        self.flares.len()
+    }
+
     pub fn set_chrome(&mut self, chrome: bool) {
         self.chrome = chrome;
     }
@@ -853,6 +937,9 @@ impl HardwareStarfield {
 
         // Increment animation frame
         self.frame = self.frame.wrapping_add(1);
+        let frame = self.frame;
+        self.flares
+            .retain(|f| frame.wrapping_sub(f.born) < FLARE_FRAMES);
     }
 
     /// Render the starfield to Ratatui Lines
@@ -1034,6 +1121,42 @@ impl HardwareStarfield {
                 let value = 0.5 + stream.intensity * 0.5;
                 let stream_color = hsv_to_rgb(stream_hue, 0.9, value);
                 canvas[stream.y][stream.x] = (stream.get_char(), stream_color);
+            }
+        }
+
+        // Activity tint: blend every lit cell toward the tint hue.
+        if let Some(t) = self.tint {
+            use crate::animation::hsv_to_rgb;
+            let k = effective_tint_strength(t.strength);
+            let target = hsv_to_rgb(t.hue, 0.6, 0.9);
+            for row in canvas.iter_mut() {
+                for (ch, color) in row.iter_mut() {
+                    if *ch != ' ' {
+                        *color = blend_toward(*color, target, k);
+                    }
+                }
+            }
+        }
+        // Flares: an expanding ring (wider than tall, so it looks round) that fades.
+        for f in &self.flares {
+            let age = self.frame.wrapping_sub(f.born);
+            if age >= FLARE_FRAMES {
+                continue;
+            }
+            let r = (age / 3 + 1) as i32;
+            let glyph = match age {
+                0..=7 => '○',
+                8..=15 => '◌',
+                _ => '·',
+            };
+            let v = 1.0 - age as f32 / FLARE_FRAMES as f32;
+            let hue = self.tint.map(|t| t.hue).unwrap_or(190.0);
+            let color = crate::animation::hsv_to_rgb(hue, 0.4, 0.4 + 0.6 * v);
+            for (dx, dy) in [(r * 2, 0), (-r * 2, 0), (0, r), (0, -r)] {
+                let (x, y) = (f.x as i32 + dx, f.y as i32 + dy);
+                if x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height {
+                    canvas[y as usize][x as usize] = (glyph, color);
+                }
             }
         }
 
@@ -1669,5 +1792,70 @@ mod tests {
             sf.planets.iter().any(|p| p.pulse > 0.0),
             "planets must be animated by the surviving card's telemetry"
         );
+    }
+
+    fn lit_cells(lines: &[ratatui::text::Line<'static>]) -> usize {
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.chars().filter(|c| !c.is_whitespace()).count())
+            .sum()
+    }
+
+    fn colours(lines: &[ratatui::text::Line<'static>]) -> Vec<Option<ratatui::style::Color>> {
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.style.fg))
+            .collect()
+    }
+
+    fn lit_starfield() -> HardwareStarfield {
+        let mut backend = crate::backend::mock::MockBackend::new(2);
+        backend.init().unwrap();
+        backend.update().unwrap();
+        let mut sf = HardwareStarfield::new(80, 12);
+        sf.initialize_from_devices(backend.devices());
+        sf.update_from_telemetry(&backend);
+        sf
+    }
+
+    #[test]
+    fn a_tint_changes_star_colours_and_none_restores_them() {
+        let mut sf = lit_starfield();
+        let plain = colours(&sf.render());
+        sf.set_activity_tint(Some(ActivityTint {
+            hue: 40.0,
+            strength: 0.4,
+        }));
+        let tinted = colours(&sf.render());
+        assert_ne!(plain, tinted);
+        sf.set_activity_tint(None);
+        assert_eq!(plain, colours(&sf.render()));
+    }
+
+    #[test]
+    fn the_tint_blend_is_capped() {
+        assert_eq!(effective_tint_strength(5.0), 0.45);
+        assert_eq!(effective_tint_strength(0.3), 0.3);
+        assert_eq!(effective_tint_strength(-1.0), 0.0);
+    }
+
+    #[test]
+    fn a_pulse_adds_a_flare_that_fades_and_is_bounded() {
+        let mut sf = lit_starfield();
+        let before = lit_cells(&sf.render());
+        sf.pulse();
+        let during = lit_cells(&sf.render());
+        assert!(during > before, "{before} -> {during}");
+        for _ in 0..200 {
+            sf.pulse();
+        }
+        assert!(sf.live_flares() <= 6, "{}", sf.live_flares());
+        for _ in 0..60 {
+            let mut backend = crate::backend::mock::MockBackend::new(2);
+            backend.init().unwrap();
+            sf.update_from_telemetry(&backend);
+        }
+        assert_eq!(sf.live_flares(), 0, "flares expire");
     }
 }

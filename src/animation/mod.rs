@@ -17,7 +17,10 @@
 //! The key philosophy: **Every visual element is informationally meaningful**.
 //! No fake animations that move regardless of hardware state.
 
+pub mod activity;
+pub mod activity_lanes;
 pub mod arcade;
+pub mod atmosphere;
 pub mod baseline;
 pub mod common;
 pub mod defrag;
@@ -37,6 +40,8 @@ pub mod train_sky;
 pub mod train_tapestry;
 pub mod train_view;
 
+pub use activity::{Activity, ActivityKind, ActivityTracker};
+pub use activity_lanes::render_lanes;
 pub use arcade::ArcadeVisualization;
 pub use baseline::AdaptiveBaseline;
 pub use common::*;
@@ -49,7 +54,7 @@ pub use model_starfield::ModelStarfield;
 pub use serving_creature::ServingCreature;
 pub use serving_panels::{exhaust_count, format_chip, lane_segments, sparkline, ChipReading};
 pub use snake::{Behavior, Snake, SnakeWorld};
-pub use starfield::{DataStream, HardwareStarfield, MemoryPlanet, Star};
+pub use starfield::{ActivityTint, DataStream, HardwareStarfield, MemoryPlanet, Star};
 pub use topology::{sync_score, BoardTopology};
 pub use train_sky::{sky_cell, star_hash, SkyCell, STAR_THRESHOLD};
 pub use train_view::TrainView;

@@ -98,6 +98,102 @@ pub fn model_basename(model: &str) -> &str {
     model.rsplit('/').next().unwrap_or(model).trim()
 }
 
+/// The label to show for a model. `served_name` is vLLM's
+/// `--served-model-name` when given; `model` is the `--model` / `MODEL` value,
+/// which can be a bare id (`Qwen/Qwen3-32B`) or a weights path.
+///
+/// Order: the served name, else for a weights *path* the nearest segment that
+/// says what the model is (skipping directories like `model-dir`, `final`,
+/// `checkpoint-1200`, `snapshots` and revision hashes), else the last segment,
+/// which is what [`model_basename`] always gave. HuggingFace-style
+/// `org--name` and `models--org--name` directory names lose their prefix.
+pub fn friendly_model_label(model: &str, served_name: Option<&str>) -> String {
+    if let Some(name) = served_name.map(str::trim).filter(|n| !n.is_empty()) {
+        return model_basename(name).to_string();
+    }
+    let model = model.trim();
+    let is_path = model.starts_with('/') || model.starts_with("./") || model.starts_with('~');
+    if !is_path {
+        return model_basename(model).to_string();
+    }
+    model
+        .rsplit('/')
+        .filter(|seg| !seg.is_empty() && !is_generic_path_segment(seg))
+        .map(strip_hf_dir_prefix)
+        .next()
+        .unwrap_or_else(|| model_basename(model).to_string())
+}
+
+/// A directory name that holds weights or marks a stage but does not name the
+/// model: `model-dir`, `final`, `checkpoint-1200`, `snapshots`, a bare number
+/// or a revision hash.
+fn is_generic_path_segment(seg: &str) -> bool {
+    let s = seg.to_lowercase();
+    const NAMES: &[&str] = &[
+        "model-dir",
+        "model_dir",
+        "modeldir",
+        "model",
+        "models",
+        "weights",
+        "checkpoint",
+        "checkpoints",
+        "final",
+        "best",
+        "latest",
+        "hf",
+        "huggingface",
+        "snapshots",
+        "stage",
+        "stages",
+        "ckpt", // weights and stages
+        "bundle",
+        "bundles",
+        "verify",
+        "release",
+        "export",
+        "exported",
+        "merged",
+        "converted",
+        "output",
+        "outputs",
+        "artifacts",
+        "build",
+        "dist",
+        "deploy",
+        "serve",
+        "eval", // packaging
+    ];
+    if NAMES.contains(&s.as_str()) {
+        return true;
+    }
+    if s.chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    // A revision hash (git sha or similar).
+    if s.len() >= 32 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return true;
+    }
+    // checkpoint-1200, step_300, stage-2, epoch-3, global_step100.
+    ["checkpoint", "step", "global_step", "stage", "epoch"]
+        .iter()
+        .any(|p| {
+            s.strip_prefix(p)
+                .map(|rest| {
+                    let rest = rest.trim_start_matches(['-', '_']);
+                    !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+                })
+                .unwrap_or(false)
+        })
+}
+
+/// `models--org--name` and `org--name` (HuggingFace cache and many run
+/// directories) to `name`. Anything without `--` is returned as is.
+fn strip_hf_dir_prefix(seg: &str) -> String {
+    let seg = seg.strip_prefix("models--").unwrap_or(seg);
+    seg.rsplit("--").next().unwrap_or(seg).to_string()
+}
+
 /// Normalize a model name for comparison: lowercase; `.`, `_`, whitespace → `-`.
 fn norm(s: &str) -> String {
     s.trim().to_lowercase().replace(['.', '_', ' '], "-")
@@ -150,6 +246,117 @@ mod tests {
                 .unwrap()
                 .key,
             "sdxl"
+        );
+    }
+
+    // ---- friendly_model_label --------------------------------------------
+
+    /// The launch a user reported: a fine-tune whose weights sit in a generic
+    /// `model-dir` two levels below the name that says what it is.
+    #[test]
+    fn a_generic_weights_dir_is_labelled_by_the_run_it_belongs_to() {
+        assert_eq!(
+            friendly_model_label(
+                "/home/ttuser/orchard-runs/thakicloud--rag-gate-27b/stages/2/model-dir",
+                None
+            ),
+            "rag-gate-27b"
+        );
+    }
+
+    /// The second launch reported on the same box: more generic directories
+    /// (`verify`, `bundle`) between the run name and the weights.
+    #[test]
+    fn packaging_and_stage_directories_are_not_the_model_name() {
+        assert_eq!(
+            friendly_model_label(
+                "/home/ttuser/orchard-runs/thakicloud--rag-gate-27b/stages/7/verify/bundle/model-dir",
+                None
+            ),
+            "rag-gate-27b"
+        );
+        for generic in [
+            "bundle",
+            "bundles",
+            "verify",
+            "release",
+            "export",
+            "exported",
+            "merged",
+            "converted",
+            "output",
+            "outputs",
+            "artifacts",
+            "build",
+            "dist",
+            "deploy",
+            "serve",
+            "eval",
+        ] {
+            let path = format!("/runs/acme--chat-7b/{generic}/model-dir");
+            assert_eq!(friendly_model_label(&path, None), "chat-7b", "{generic}");
+        }
+        // A real model directory with one of these as a *substring* is kept.
+        assert_eq!(
+            friendly_model_label("/models/bundler-7b-instruct", None),
+            "bundler-7b-instruct"
+        );
+    }
+
+    #[test]
+    fn huggingface_cache_and_checkpoint_dirs_are_labelled_by_the_model() {
+        let sha = "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5";
+        assert_eq!(
+            friendly_model_label(
+                &format!("/home/u/.cache/huggingface/hub/models--Qwen--Qwen3-32B/snapshots/{sha}"),
+                None
+            ),
+            "Qwen3-32B"
+        );
+        assert_eq!(
+            friendly_model_label("/data/runs/acme--chat-7b/final", None),
+            "chat-7b"
+        );
+        assert_eq!(
+            friendly_model_label("/data/runs/acme--chat-7b/checkpoint-1200", None),
+            "chat-7b"
+        );
+    }
+
+    #[test]
+    fn plain_ids_and_informative_dirs_are_unchanged() {
+        assert_eq!(friendly_model_label("Qwen/Qwen3-32B", None), "Qwen3-32B");
+        assert_eq!(friendly_model_label("Z-Image-Turbo", None), "Z-Image-Turbo");
+        assert_eq!(
+            friendly_model_label("/models/llama-3.1-8b-instruct", None),
+            "llama-3.1-8b-instruct"
+        );
+    }
+
+    #[test]
+    fn a_path_with_nothing_informative_falls_back_to_its_last_segment() {
+        assert_eq!(friendly_model_label("/model-dir", None), "model-dir");
+        assert_eq!(
+            friendly_model_label("/stages/2/model-dir", None),
+            "model-dir"
+        );
+    }
+
+    #[test]
+    fn the_served_model_name_wins_over_any_path() {
+        assert_eq!(
+            friendly_model_label("/x/model-dir", Some("my-llm")),
+            "my-llm"
+        );
+        // An org prefix in a served name is stripped, like any other id.
+        assert_eq!(
+            friendly_model_label("/x/model-dir", Some("acme/my-llm")),
+            "my-llm"
+        );
+        // An empty served name is no name at all.
+        assert_eq!(
+            friendly_model_label("/r/acme--chat-7b/model-dir", Some("  ")),
+            "chat-7b"
         );
     }
 }

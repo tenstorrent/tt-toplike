@@ -17,6 +17,10 @@ pub struct TrainProcess {
     pub binary: String,
     /// Value of `-c` / `--config`, when this version's CLI has one.
     pub config_path: Option<String>,
+    /// `/proc/<pid>/stat` start time, filled in by `TrainerFinder` in the scan
+    /// worker. Tells a replacement process that reused this pid from the run it
+    /// replaced; `None` when unknown (non-Linux, or the pid vanished).
+    pub start_time: Option<u64>,
 }
 
 /// Extract `-c <path>` / `--config <path>` / `--config=<path>` from an argv.
@@ -52,6 +56,7 @@ pub fn parse_train_process(name: &str, cmdline: &str, pid: i32) -> Option<TrainP
         pid,
         binary: (*binary).to_string(),
         config_path: config_arg(&toks),
+        start_time: None,
     })
 }
 
@@ -113,6 +118,7 @@ pub fn parse_python_trainer(cmdline: &str, pid: i32, ttml_loaded: bool) -> Optio
         pid,
         binary: script.to_string(),
         config_path: config_arg(&toks),
+        start_time: None,
     })
 }
 
@@ -125,6 +131,32 @@ fn is_training_script(script: &str, toks: &[&str]) -> bool {
     // A script living under a `train/` directory (tt-tnt's `train/run.py`).
     toks.iter()
         .any(|t| t.ends_with(".py") && t.contains("train/"))
+}
+
+/// A trainer among already-collected processes `(pid, name, cmdline)`, or
+/// `None`. Pure apart from `ttml_loaded`, which is asked only for Python
+/// processes (it reads `/proc/<pid>/maps`). A compiled example (`nano_gpt`,
+/// `mnist_mlp`, `linear_regression`) costs no extra read.
+pub fn find_trainer(
+    processes: &[(i32, String, String)],
+    ttml_loaded: &mut dyn FnMut(i32) -> bool,
+) -> Option<TrainProcess> {
+    for (pid, name, cmdline) in processes {
+        if cmdline.is_empty() {
+            continue;
+        }
+        if let Some(p) = parse_train_process(name, cmdline, *pid) {
+            return Some(p);
+        }
+        let argv0 = cmdline.split_whitespace().next().unwrap_or("");
+        let base = argv0.rsplit('/').next().unwrap_or(argv0);
+        if is_python(base) {
+            if let Some(p) = parse_python_trainer(cmdline, *pid, ttml_loaded(*pid)) {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -271,5 +303,42 @@ mod tests {
         assert!(parse_train_process("python3", "python3 train.py", 2).is_none());
         // A vLLM serve process must not be mistaken for training.
         assert!(parse_train_process("vllm", "vllm serve meta-llama/Llama-3", 3).is_none());
+    }
+
+    fn p(pid: i32, name: &str, cmd: &str) -> (i32, String, String) {
+        (pid, name.to_string(), cmd.to_string())
+    }
+
+    #[test]
+    fn find_trainer_picks_a_compiled_example_without_reading_maps() {
+        let procs = vec![
+            p(1, "bash", "bash"),
+            p(2, "nano_gpt", "/x/nano_gpt -c train.yaml"),
+        ];
+        let mut maps_reads = 0;
+        let t = find_trainer(&procs, &mut |_| {
+            maps_reads += 1;
+            false
+        })
+        .expect("nano_gpt");
+        assert_eq!((t.pid, t.binary.as_str()), (2, "nano_gpt"));
+        assert_eq!(maps_reads, 0, "a compiled example costs no maps read");
+    }
+
+    #[test]
+    fn find_trainer_reads_maps_only_for_python_processes() {
+        let procs = vec![
+            p(1, "bash", "bash -l"),
+            p(3, "python3", "python3 /w/train_run.py --steps 100"),
+            p(4, "nginx", "nginx -g daemon off;"),
+        ];
+        let mut asked: Vec<i32> = Vec::new();
+        let t = find_trainer(&procs, &mut |pid| {
+            asked.push(pid);
+            true
+        })
+        .expect("a ttml python trainer");
+        assert_eq!(t.pid, 3);
+        assert_eq!(asked, vec![3], "only the python process is probed");
     }
 }

@@ -101,6 +101,14 @@ Every running `tt-smi -r` is tracked. While more than one runs, the status segme
 
 ---
 
+## What a running model looks like in Arcade
+
+While a training run, a model load or a model serving is active, the top rows of Arcade's starfield become a lane: the model name, the port and chips it holds, what it is doing, and the key that opens its full view (`[i]` for inference, `[t]` for training). The stars take a tint for the kind of work and flare once per finished request. With nothing running, Arcade looks as it always did.
+
+<img src="assets/tt-toplike-arcade-lanes.gif" alt="Arcade mode on a 4-chip Blackhole box with a lane under the starfield title reading SERVE MiniMax-Music3, port 20000, chips 0,1, 1 in flight, 9 done, and [i] to open the Inference view" width="100%" />
+
+---
+
 ## What `tt-smi -r` looks like
 
 Run `tt-smi -r` in another terminal while tt-toplike is open and the status bar of every view shows `⟳ tt-smi -r · all chips · resetting`, then `✓ tt-smi -r done`. The `--tt-smi-reset-behavior` flag (`ignore`, `inform`, `dazzle`, `demo`) controls how much more happens. To preview the five reset animations without resetting anything:

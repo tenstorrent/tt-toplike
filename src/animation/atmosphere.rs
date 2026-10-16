@@ -1,0 +1,1636 @@
+//! The Inference view's atmosphere: a backdrop drawn *behind* whatever the view
+//! already shows, so loading, thinking and generating have a feel.
+//!
+//! The backdrop is a canvas of optional cells. [`composite`] lays it under the
+//! existing renderer's lines and fills blank cells only, so the snake, the
+//! dashboards and the roster always win. Every effect maps to a real signal in a
+//! [`ServiceState`]; see the spec for the table. Everything here is deterministic:
+//! no randomness, positions come from a spatial hash, motion from a frame counter.
+
+use crate::animation::hsv_to_rgb;
+use crate::animation::train_sky::{aurora, sky_cell, star_hash, STAR_THRESHOLD};
+use crate::workload::inference_server::{Phase, ServiceState};
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthChar;
+
+/// One backdrop cell: a glyph and its colour, or nothing.
+pub type Cell = Option<(char, Color)>;
+/// A backdrop, `height` rows of `width` cells.
+pub type Canvas = Vec<Vec<Cell>>;
+
+/// What the featured service is doing, which decides the backdrop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scene {
+    /// Nothing featured: the view is left exactly as it is.
+    None,
+    /// Compiling or loading.
+    Forge,
+    /// Requests are in but no token has come out yet (prefill: reading).
+    Storm,
+    /// Tokens are flowing.
+    Aurora,
+    /// Ready and idle.
+    Dream,
+    /// A diffusion or video server has a job in flight.
+    Forming,
+    /// No progress for five minutes.
+    Stalled,
+}
+
+impl Scene {
+    /// Every scene that draws something.
+    pub const ALL: [Scene; 6] = [
+        Scene::Forge,
+        Scene::Storm,
+        Scene::Aurora,
+        Scene::Dream,
+        Scene::Forming,
+        Scene::Stalled,
+    ];
+
+    /// The lowercase name the legend uses for the scene.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Scene::None => "none",
+            Scene::Forge => "forge",
+            Scene::Storm => "storm",
+            Scene::Aurora => "aurora",
+            Scene::Dream => "dream",
+            Scene::Forming => "forming",
+            Scene::Stalled => "stalled",
+        }
+    }
+}
+
+/// The service the backdrop follows: a loading (or stalled) one wins, else the
+/// first ready one. The same rule the snake uses to pick its behaviour.
+pub fn featured(rows: &[ServiceState]) -> Option<&ServiceState> {
+    rows.iter()
+        .find(|s| matches!(s.phase, Phase::Compiling | Phase::Loading | Phase::Alarm))
+        .or_else(|| rows.iter().find(|s| s.phase == Phase::Ready))
+}
+
+/// The scene for a featured service.
+pub fn scene_of(row: Option<&ServiceState>) -> Scene {
+    let Some(s) = row else {
+        return Scene::None;
+    };
+    match s.phase {
+        Phase::Down => Scene::None,
+        Phase::Compiling | Phase::Loading => Scene::Forge,
+        Phase::Alarm => Scene::Stalled,
+        Phase::Ready => {
+            if s.media.as_ref().is_some_and(|m| m.jobs_in_progress > 0) {
+                return Scene::Forming;
+            }
+            match &s.serving {
+                Some(sv) if sv.generation_tps >= 1.0 => Scene::Aurora,
+                Some(sv) if sv.requests_running > 0 || sv.requests_waiting > 0 => Scene::Storm,
+                _ => Scene::Dream,
+            }
+        }
+    }
+}
+
+/// One output character of a composited row, with its style.
+struct Col {
+    ch: char,
+    style: Style,
+}
+
+/// Lay `canvas` under `lines`, filling blank cells only. A cell the foreground
+/// draws is never replaced: not a non-space character, and not a space that has
+/// its own background (a panel). A wide character keeps its width so later
+/// columns stay aligned. A short line is padded with backdrop cells up to the
+/// row's last lit cell (and no further than `width`). A row with no backdrop, or
+/// a zero `width`, is returned unchanged.
+pub fn composite(canvas: &Canvas, lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    if width == 0 {
+        return lines;
+    }
+    let mut out = Vec::with_capacity(lines.len());
+    for (y, line) in lines.into_iter().enumerate() {
+        let Some(row) = canvas.get(y) else {
+            out.push(line);
+            continue;
+        };
+        let Some(last) = row.iter().rposition(|c| c.is_some()) else {
+            out.push(line);
+            continue;
+        };
+        let mut cols: Vec<Col> = Vec::with_capacity(width);
+        let mut x = 0usize;
+        for span in &line.spans {
+            for c in span.content.chars() {
+                let w = c.width().unwrap_or(0);
+                if w == 0 {
+                    // A combining mark: it attaches to the previous column.
+                    cols.push(Col {
+                        ch: c,
+                        style: span.style,
+                    });
+                    continue;
+                }
+                let blank = c == ' ' && span.style.bg.is_none();
+                match row.get(x).copied().flatten() {
+                    Some((ch, color)) if blank && w == 1 => cols.push(Col {
+                        ch,
+                        style: Style::default().fg(color),
+                    }),
+                    _ => cols.push(Col {
+                        ch: c,
+                        style: span.style,
+                    }),
+                }
+                x += w;
+            }
+        }
+        while x <= last && x < width {
+            match row.get(x).copied().flatten() {
+                Some((ch, color)) => cols.push(Col {
+                    ch,
+                    style: Style::default().fg(color),
+                }),
+                None => cols.push(Col {
+                    ch: ' ',
+                    style: Style::default(),
+                }),
+            }
+            x += 1;
+        }
+        // Group runs of one style back into spans.
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut run = String::new();
+        let mut run_style = Style::default();
+        for col in cols.iter() {
+            if !run.is_empty() && col.style != run_style {
+                spans.push(Span::styled(std::mem::take(&mut run), run_style));
+            }
+            run_style = col.style;
+            run.push(col.ch);
+        }
+        if !run.is_empty() {
+            spans.push(Span::styled(run, run_style));
+        }
+        out.push(Line { spans, ..line });
+    }
+    out
+}
+
+/// Cumulative failed-request count of a service (vLLM errors and aborts, or a
+/// media server's failed generations).
+fn errors_total(row: &ServiceState) -> Option<u64> {
+    if let Some(sv) = &row.serving {
+        Some(sv.counters.requests_errored_total)
+    } else {
+        row.media.as_ref().map(|m| m.counters.errored_total)
+    }
+}
+
+/// Cumulative preemptions of a vLLM service.
+fn preemptions_total(row: &ServiceState) -> Option<u64> {
+    row.serving.as_ref().map(|s| s.counters.preemptions_total)
+}
+
+/// Aurora cells fainter than this are left empty, which keeps the aurora from
+/// covering a third of the screen at full signal.
+const AURORA_MIN: f32 = 0.20;
+
+/// Smallest area the backdrop is drawn in.
+const MIN_W: usize = 4;
+const MIN_H: usize = 3;
+
+/// Per-update smoothing of the gauges (a fraction of the gap closed each call).
+const SMOOTH: f32 = 0.15;
+/// Per-update decay of a gauge's remembered peak, so it adapts to any hardware.
+const PEAK_DECAY: f32 = 0.999;
+
+/// A rate scaled against the largest value seen recently, so a slow box and a
+/// fast one both fill the 0..1 range.
+#[derive(Debug, Clone, Copy)]
+struct Gauge {
+    peak: f32,
+    value: f32,
+}
+
+impl Gauge {
+    fn new() -> Self {
+        Self {
+            peak: 1.0,
+            value: 0.0,
+        }
+    }
+
+    fn feed(&mut self, rate: f32) {
+        let rate = rate.max(0.0);
+        self.peak = (self.peak * PEAK_DECAY).max(rate).max(1.0);
+        let target = (rate / self.peak).clamp(0.0, 1.0);
+        self.value += (target - self.value) * SMOOTH;
+    }
+}
+
+/// The Inference atmosphere: observe the roster each update, then paint a
+/// backdrop for the featured service's scene.
+#[derive(Debug, Clone)]
+pub struct Atmosphere {
+    frame: u64,
+    scene: Scene,
+    /// Generation tokens per second, normalised.
+    energy: Gauge,
+    /// KV-cache use, 0..1, smoothed.
+    kv: f32,
+    /// Prompt tokens per second, normalised.
+    reading: Gauge,
+    running: u32,
+    waiting: u32,
+    /// The service the counters below belong to. A different service, or none,
+    /// starts a fresh baseline.
+    key: Option<String>,
+    seen: Seen,
+    /// Birth frame and index of each live completion flare.
+    flares: Vec<(u64, u32)>,
+    static_until: u64,
+    splash_until: u64,
+    /// Kernels compiled plus weight shards loaded during this load, as seen.
+    /// A measure of how much has been built, not a percentage: there is no known
+    /// total to divide by.
+    built: f32,
+    spark_until: u64,
+    /// Host CPU load, normalised, smoothed.
+    cpu: f32,
+}
+
+/// Cumulative counters from the last observed scrape. The monitor snapshot
+/// repeats for several seconds while the render loop reads it every frame, so
+/// every event is a *rise* of one of these, never a per-tick delta.
+#[derive(Debug, Clone, Copy, Default)]
+struct Seen {
+    done: Option<u64>,
+    errored: Option<u64>,
+    preempted: Option<u64>,
+    kernels: Option<usize>,
+    shards: Option<usize>,
+}
+
+/// The monitor's "never observed" value for the kernel and shard counts, which
+/// holds until the first real sample. It is not a count.
+const NEVER_OBSERVED: usize = i64::MAX as usize;
+
+/// Like [`rise`] for the monitor's `usize` counts, ignoring the sentinel.
+fn rise_count(prev: &mut Option<usize>, now: usize) -> u64 {
+    if now >= NEVER_OBSERVED {
+        return 0;
+    }
+    let r = prev.map(|p| now.saturating_sub(p)).unwrap_or(0);
+    *prev = Some(now);
+    r as u64
+}
+
+/// How much a counter rose since last seen. The first sight of a counter is a
+/// baseline (0), and a counter that went down (a restarted server) is a reset
+/// (0), never a burst.
+fn rise(prev: &mut Option<u64>, now: u64) -> u64 {
+    let r = prev.map(|p| now.saturating_sub(p)).unwrap_or(0);
+    *prev = Some(now);
+    r
+}
+
+/// [`rise`] for a total that may be unavailable this tick. `None` is not a
+/// zero: it adds nothing and keeps the baseline, so a counter that comes back
+/// at the value it had before does not read as new events.
+fn rise_opt(prev: &mut Option<u64>, now: Option<u64>) -> u64 {
+    match now {
+        Some(n) => rise(prev, n),
+        None => 0,
+    }
+}
+
+const FLARE_FRAMES: u64 = 24;
+const MAX_FLARES: usize = 8;
+const STATIC_FRAMES: u64 = 40;
+const SPLASH_FRAMES: u64 = 30;
+const SPARK_FRAMES: u64 = 20;
+
+impl Default for Atmosphere {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Atmosphere {
+    pub fn new() -> Self {
+        Self {
+            frame: 0,
+            scene: Scene::None,
+            energy: Gauge::new(),
+            kv: 0.0,
+            reading: Gauge::new(),
+            running: 0,
+            waiting: 0,
+            key: None,
+            seen: Seen::default(),
+            flares: Vec::new(),
+            static_until: 0,
+            splash_until: 0,
+            built: 0.0,
+            spark_until: 0,
+            cpu: 0.0,
+        }
+    }
+
+    /// Take in this update's roster. Cheap: a few float operations.
+    pub fn observe(&mut self, rows: &[ServiceState]) {
+        self.frame = self.frame.wrapping_add(1);
+        let row = featured(rows);
+        // A different service is featured: its smoothed gauges start from rest.
+        // They are reset before they are fed so this update's first sample
+        // counts, and so a model with a high KV cache does not hand its tide to
+        // the next one for the several updates smoothing takes to decay. The
+        // counters and effects are reset further down, with `self.key`.
+        if row.map(|r| &r.key) != self.key.as_ref() {
+            self.energy = Gauge::new();
+            self.reading = Gauge::new();
+            self.kv = 0.0;
+        }
+        self.scene = scene_of(row);
+        if !matches!(self.scene, Scene::Forge | Scene::Stalled) {
+            self.built = 0.0;
+        }
+        let cpu = row
+            .map(|r| (r.cpu_pct / 400.0).clamp(0.0, 1.0))
+            .unwrap_or(0.0);
+        self.cpu += (cpu - self.cpu) * SMOOTH;
+        let serving = row.and_then(|r| r.serving.as_ref());
+        self.energy
+            .feed(serving.map(|s| s.generation_tps).unwrap_or(0.0));
+        self.reading
+            .feed(serving.map(|s| s.prompt_tps).unwrap_or(0.0));
+        let kv = serving
+            .map(|s| s.kv_cache_usage)
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+        self.kv += (kv - self.kv) * SMOOTH;
+        self.running = serving.map(|s| s.requests_running).unwrap_or(0);
+        self.waiting = serving.map(|s| s.requests_waiting).unwrap_or(0);
+
+        // Events are rises of the cumulative counters of the featured service.
+        let key = row.map(|r| r.key.clone());
+        if key != self.key {
+            // A different service is featured: its counters start over, and so
+            // do the effects the last one left running. Without this a model
+            // that finishes loading hands the next loading model its scaffold,
+            // its spark timer and its flares, because the scene stays Forge.
+            self.seen = Seen::default();
+            self.built = 0.0;
+            self.spark_until = 0;
+            self.static_until = 0;
+            self.splash_until = 0;
+            self.flares.clear();
+            self.key = key;
+        }
+        let Some(row) = row else {
+            return;
+        };
+        let done = rise_opt(
+            &mut self.seen.done,
+            crate::animation::activity::pulse_total(row),
+        );
+        let errored = rise_opt(&mut self.seen.errored, errors_total(row));
+        let preempted = rise_opt(&mut self.seen.preempted, preemptions_total(row));
+        let kernels = rise_count(&mut self.seen.kernels, row.kernel_count);
+        let shards = rise_count(&mut self.seen.shards, row.loaded_count);
+        if self.scene == Scene::Forge {
+            self.built += (kernels + shards) as f32;
+            if kernels > 0 {
+                self.spark_until = self.frame + SPARK_FRAMES;
+            }
+        }
+        for i in 0..done.min(3) as u32 {
+            if self.flares.len() >= MAX_FLARES {
+                self.flares.remove(0);
+            }
+            self.flares.push((self.frame, i));
+        }
+        let frame = self.frame;
+        self.flares.retain(|(born, _)| frame - born < FLARE_FRAMES);
+        if errored > 0 {
+            self.static_until = self.frame + STATIC_FRAMES;
+        }
+        if preempted > 0 {
+            self.splash_until = self.frame + SPLASH_FRAMES;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_flares(&self) -> usize {
+        self.flares.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn built(&self) -> f32 {
+        self.built
+    }
+
+    /// True when a service is featured, so the backdrop should be drawn.
+    pub fn active(&self) -> bool {
+        self.scene != Scene::None
+    }
+
+    /// The backdrop for `w` by `h` cells. Pure: the same state gives the same
+    /// canvas. Nothing is drawn below the minimum size or with no scene.
+    pub fn render_backdrop(&self, w: usize, h: usize) -> Canvas {
+        let mut canvas: Canvas = vec![vec![None; w]; h];
+        if self.scene == Scene::None || w < MIN_W || h < MIN_H {
+            return canvas;
+        }
+        self.paint_sky(&mut canvas, w, h);
+        if matches!(self.scene, Scene::Aurora | Scene::Storm | Scene::Dream) {
+            self.paint_tide(&mut canvas, w, h);
+        }
+        if matches!(self.scene, Scene::Forge | Scene::Stalled) {
+            self.paint_forge(&mut canvas, w, h);
+        }
+        if self.scene == Scene::Forming {
+            self.paint_forming(&mut canvas, w, h);
+        }
+        if self.scene == Scene::Storm {
+            self.paint_storm(&mut canvas, w, h);
+        }
+        if matches!(self.scene, Scene::Aurora | Scene::Storm) {
+            self.paint_rain(&mut canvas, w, h);
+            self.paint_horizon(&mut canvas, w, h);
+            self.paint_comets(&mut canvas, w, h);
+        }
+        if self.scene == Scene::Storm {
+            self.paint_heartbeat(&mut canvas, w);
+        }
+        self.paint_flares(&mut canvas, w, h);
+        self.paint_static(&mut canvas, w, h);
+        canvas
+    }
+
+    /// Stars everywhere in the upper sky, and the aurora where the scene has
+    /// one: bright and moving with tokens per second while generating, faint
+    /// when idle, none elsewhere.
+    fn paint_sky(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        let aurora_energy = match self.scene {
+            Scene::Aurora => 0.25 + 0.75 * self.energy.value,
+            Scene::Dream => 0.15,
+            _ => 0.0,
+        };
+        let sky_h = ((h as f32) * 0.7).ceil() as usize;
+        for (y, row) in canvas.iter_mut().enumerate().take(sky_h.min(h)) {
+            let rel_y = y as f32 / sky_h.max(1) as f32;
+            for (x, cell) in row.iter_mut().enumerate().take(w) {
+                if star_hash(x, y) > STAR_THRESHOLD {
+                    if let Some(c) = sky_cell(x, y, rel_y, self.frame) {
+                        *cell = Some((c.ch, c.color));
+                    }
+                    continue;
+                }
+                if aurora_energy > 0.0 {
+                    let (lit, hue) = aurora(x, rel_y, self.frame);
+                    let l = lit * aurora_energy;
+                    if l > AURORA_MIN {
+                        let ch = if l > 0.62 { '▒' } else { '░' };
+                        let hue = (hue + self.kv * 120.0) % 360.0;
+                        *cell = Some((ch, hsv_to_rgb(hue, 0.62, 0.10 + l * 0.2)));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Falling dim glyphs in proportion to prompt tokens per second ("reading"),
+    /// and, while tokens flow, rising gold braille in proportion to generation
+    /// tokens per second ("writing"). A column is a drop when its hash is under
+    /// the density, so the same inputs always draw the same columns.
+    fn paint_rain(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        let reading = self.reading.value;
+        let writing = if self.scene == Scene::Aurora {
+            self.energy.value
+        } else {
+            0.0
+        };
+        for x in 0..w {
+            if star_hash(x, 7) < 0.10 * reading {
+                let speed = 0.25 + star_hash(x, 11) * 0.5;
+                let cycle = (h + 4) as f32;
+                let head = ((self.frame as f32 * speed + star_hash(x, 5) * cycle * 7.0) % cycle
+                    - 2.0) as i32;
+                for t in 0..4i32 {
+                    let y = head - t;
+                    if y >= 0 && (y as usize) < h {
+                        let (ch, v) = if t == 0 {
+                            (':', 0.5)
+                        } else {
+                            ('.', 0.3 - 0.05 * t as f32)
+                        };
+                        canvas[y as usize][x] = Some((ch, hsv_to_rgb(190.0, 0.45, v)));
+                    }
+                }
+            }
+            if star_hash(x, 13) < 0.12 * writing {
+                let speed = 0.2 + star_hash(x, 17) * 0.4;
+                let cycle = (h + 2) as f32;
+                let up =
+                    ((self.frame as f32 * speed + star_hash(x, 19) * cycle * 5.0) % cycle) as i32;
+                let y = h as i32 - 1 - up;
+                if y >= 0 && (y as usize) < h {
+                    let glyph = ['⠁', '⠃', '⠇', '⡇'][((self.frame / 4) as usize + x) % 4];
+                    canvas[y as usize][x] = Some((glyph, hsv_to_rgb(45.0, 0.8, 0.85)));
+                }
+            }
+        }
+    }
+
+    /// Compiling and loading: a scaffold of beams rises from the floor as kernels
+    /// compile and weight shards land, sparks fly off the beam tops while kernels
+    /// compile, and the floor glows with host CPU load. A stalled load keeps its
+    /// beams as dim red embers, with no sparks and no growth.
+    fn paint_forge(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        let stalled = self.scene == Scene::Stalled;
+        let level = 1.0 - (-self.built / 150.0).exp();
+        let beam_color = |v: f32| {
+            if stalled {
+                hsv_to_rgb(0.0, 0.7, 0.12 + 0.08 * v)
+            } else {
+                hsv_to_rgb(25.0, 0.8, 0.30 + 0.30 * self.cpu)
+            }
+        };
+        let mut tops: Vec<(usize, usize)> = Vec::new();
+        let mut i = 0usize;
+        let mut x = 3usize;
+        while x < w {
+            let bh = (level * (0.6 + 0.4 * star_hash(i, 2)) * 0.7 * h as f32) as usize;
+            for r in 0..bh.min(h) {
+                // ASCII, not box-drawing, so the scaffold cannot be mistaken for
+                // the load box's own borders.
+                let ch = if r % 4 == 3 { '+' } else { '|' };
+                canvas[h - 1 - r][x] = Some((ch, beam_color(0.0)));
+            }
+            if bh > 0 && bh <= h {
+                tops.push((x, h - bh));
+            }
+            i += 1;
+            x += 7;
+        }
+        if !stalled && self.frame < self.spark_until && !tops.is_empty() {
+            let (x, y) = tops[((self.frame / 3) as usize) % tops.len()];
+            let y = y.saturating_sub(1);
+            canvas[y][x] = Some(('✧', hsv_to_rgb(40.0, 0.5, 1.0)));
+        }
+        // The floor glows with host CPU load.
+        let step = (self.frame / 3) as usize;
+        let hue = if stalled { 0.0 } else { 20.0 };
+        for x in 0..w {
+            if star_hash(x, step) < self.cpu * 0.6 {
+                let glyph = ['▁', '▂', '▃', '▅'][(x + step) % 4];
+                let v = if stalled { 0.2 } else { 0.5 + 0.4 * self.cpu };
+                canvas[h - 1][x] = Some((glyph, hsv_to_rgb(hue, 0.9, v)));
+            }
+        }
+    }
+
+    /// A diffusion or video job in flight: a canvas in the middle that loops
+    /// from noise toward structure and back. Indeterminate on purpose: the
+    /// monitor knows a job is running, not how far along it is.
+    fn paint_forming(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        let (x0, x1, y0, y1) = (w / 3, 2 * w / 3, h / 4, 3 * h / 4);
+        let (cx, cy) = ((x0 + x1) as i32 / 2, (y0 + y1) as i32 / 2);
+        let p = (self.frame % 360) as f32 / 360.0;
+        let tri = if p < 0.5 { p * 2.0 } else { 2.0 - 2.0 * p };
+        let density = 0.8 - 0.65 * tri;
+        let hue = (200.0 + self.frame as f32 / 4.0) % 360.0;
+        for (y, row) in canvas.iter_mut().enumerate().take(y1.min(h)).skip(y0) {
+            for (x, cell) in row.iter_mut().enumerate().take(x1.min(w)).skip(x0) {
+                let v = star_hash(x, y);
+                let (dx, dy) = ((x as i32 - cx).abs(), (y as i32 - cy).abs());
+                let on = if density > 0.45 {
+                    v < density
+                } else {
+                    (dx + dy) % 4 == 0 && v < 0.9
+                };
+                if on {
+                    *cell = Some(('▒', hsv_to_rgb(hue, 0.5, 0.5)));
+                }
+            }
+        }
+    }
+
+    /// Prefill: requests are in and the model is reading. A cloud band builds
+    /// across the top, heavier while requests are running than while they only
+    /// wait, with lightning every ninety frames while they run.
+    fn paint_storm(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        let intensity = if self.running > 0 { 1.0 } else { 0.5 };
+        let band = ((h as f32) * 0.35) as usize;
+        let f = self.frame as f32;
+        let threshold = 1.0 - 0.6 * intensity;
+        for (y, row) in canvas.iter_mut().enumerate().take(band.min(h)) {
+            for (x, cell) in row.iter_mut().enumerate().take(w) {
+                let (xf, yf) = (x as f32, y as f32);
+                let v = 0.5
+                    + 0.25 * (xf * 0.07 + f * 0.01).sin()
+                    + 0.3 * (xf * 0.19 - f * 0.017 + yf).sin();
+                if v > threshold {
+                    let ch = if v > 0.9 {
+                        '▓'
+                    } else if v > 0.7 {
+                        '▒'
+                    } else {
+                        '░'
+                    };
+                    let lum = 0.2 + 0.25 * (v - threshold).clamp(0.0, 1.0);
+                    *cell = Some((ch, hsv_to_rgb(220.0, 0.25, lum)));
+                }
+            }
+        }
+        if intensity >= 1.0 && self.frame >= 90 && self.frame % 90 < 3 {
+            let x0 = (star_hash((self.frame / 90) as usize, 5) * w as f32) as usize;
+            for (dy, row) in canvas.iter_mut().enumerate().take(5) {
+                let x = x0 + dy % 2;
+                if let Some(cell) = row.get_mut(x).filter(|_| x < w) {
+                    let ch = if dy % 2 == 0 { '╲' } else { '╱' };
+                    *cell = Some((ch, hsv_to_rgb(210.0, 0.2, 1.0)));
+                }
+            }
+        }
+    }
+
+    /// Three dots at the top centre, one brighter in turn: the model thinking.
+    fn paint_heartbeat(&self, canvas: &mut Canvas, w: usize) {
+        if w < 7 || canvas.len() < 2 {
+            return;
+        }
+        let cx = w / 2;
+        let lit = ((self.frame / 20) % 3) as usize;
+        for (i, x) in [cx - 3, cx, cx + 3].into_iter().enumerate() {
+            let v = if i == lit { 1.0 } else { 0.4 };
+            canvas[1][x] = Some(('◦', hsv_to_rgb(200.0, 0.3, v)));
+        }
+    }
+
+    /// One dim star on the horizon per waiting request, at most twelve.
+    fn paint_horizon(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        let n = self.waiting.min(12) as usize;
+        let y = ((h as f32) * 0.8) as usize;
+        for i in 0..n {
+            let x = (i + 1) * w / (n + 1);
+            if x < w && y < h {
+                let v = 0.35 + 0.25 * (self.frame as f32 * 0.05 + i as f32).sin();
+                canvas[y][x] = Some(('⋅', hsv_to_rgb(200.0, 0.2, v)));
+            }
+        }
+    }
+
+    /// One comet per running request, at most six, orbiting the centre with a
+    /// short fading trail.
+    fn paint_comets(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        let n = self.running.min(6) as usize;
+        let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+        let (rx, ry) = (w as f32 * 0.40, h as f32 * 0.35);
+        for i in 0..n {
+            let ang = self.frame as f32 * 0.02 * (1.0 + 0.15 * i as f32)
+                + i as f32 * std::f32::consts::TAU / n as f32;
+            for (t, ch) in ['◉', '●', '•', '∘', '˙'].iter().enumerate() {
+                let a = ang - t as f32 * 0.12;
+                let x = (cx + rx * a.cos()).round() as i32;
+                let y = (cy + ry * a.sin()).round() as i32;
+                if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
+                    let v = 1.0 - 0.17 * t as f32;
+                    canvas[y as usize][x as usize] = Some((*ch, hsv_to_rgb(175.0, 0.5, v)));
+                }
+            }
+        }
+    }
+
+    /// An expanding ring for each recent completion.
+    fn paint_flares(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        for (born, idx) in &self.flares {
+            let age = self.frame - born;
+            if age >= FLARE_FRAMES {
+                continue;
+            }
+            let seed = (*born as usize).wrapping_mul(7).wrapping_add(*idx as usize);
+            let x0 = (star_hash(seed, 41) * w as f32) as i32;
+            let y0 = (star_hash(seed, 43) * h as f32 * 0.6) as i32;
+            let r = (age / 3 + 1) as i32;
+            let glyph = match age {
+                0..=7 => '○',
+                8..=15 => '◌',
+                _ => '˙',
+            };
+            let v = 1.0 - age as f32 / FLARE_FRAMES as f32;
+            let color = hsv_to_rgb(175.0, 0.4, 0.4 + 0.6 * v);
+            for (dx, dy) in [(r * 2, 0), (-r * 2, 0), (0, r), (0, -r)] {
+                let (x, y) = (x0 + dx, y0 + dy);
+                if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
+                    canvas[y as usize][x as usize] = Some((glyph, color));
+                }
+            }
+        }
+    }
+
+    /// A row of dim red static for a moment after a request errors.
+    fn paint_static(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        if self.frame >= self.static_until {
+            return;
+        }
+        let step = (self.frame / 2) as usize;
+        let y = (star_hash(step, 3) * h as f32) as usize;
+        if y >= h {
+            return;
+        }
+        for (x, cell) in canvas[y].iter_mut().enumerate().take(w) {
+            if star_hash(x, y + step) < 0.3 {
+                *cell = Some(('▚', hsv_to_rgb(0.0, 0.6, 0.35)));
+            }
+        }
+    }
+
+    /// A liquid level along the bottom: as high as the KV cache is full, blue,
+    /// then amber above half, then red above 80%.
+    fn paint_tide(&self, canvas: &mut Canvas, w: usize, h: usize) {
+        let rows = ((self.kv * 3.0).round() as usize).min(3).min(h / 10);
+        let hue = if self.kv < 0.5 {
+            200.0
+        } else if self.kv < 0.8 {
+            40.0
+        } else {
+            5.0
+        };
+        for r in 0..rows {
+            let y = h - 1 - r;
+            for (x, cell) in canvas[y].iter_mut().enumerate().take(w) {
+                let phase = (x + (self.frame / 6) as usize + r * 2) % 4;
+                let glyph = if phase < 2 { '≈' } else { '~' };
+                let v = 0.35 + 0.15 * (x as f32 * 0.4 + self.frame as f32 * 0.08).sin();
+                *cell = Some((glyph, hsv_to_rgb(hue, 0.7, v)));
+                // A preemption splashes the top of the tide.
+                if r + 1 == rows && self.frame < self.splash_until && x % 3 == 0 {
+                    *cell = Some(('^', hsv_to_rgb(hue, 0.3, 0.9)));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workload::inference_server::metrics::{MediaStats, ServingStats};
+    use crate::workload::inference_server::{Phase, Readiness, ServiceState};
+    use ratatui::style::{Color, Style};
+    use ratatui::text::{Line, Span};
+
+    pub(super) fn svc(phase: Phase) -> ServiceState {
+        ServiceState {
+            key: "m".into(),
+            label: "m".into(),
+            phase,
+            cpu_pct: 0.0,
+            rss_bytes: 0,
+            rss_delta: 0,
+            kernel_count: 0,
+            kernel_delta: 0,
+            loaded_count: 0,
+            loaded_delta: 0,
+            safetensors_fds: 0,
+            readiness: Readiness::Down,
+            top_proc: None,
+            last_log: None,
+            progress: None,
+            flat_ticks: 0,
+            serving: None,
+            media: None,
+            port: None,
+            chips: vec![],
+        }
+    }
+
+    pub(super) fn ready_serving(f: impl FnOnce(&mut ServingStats)) -> ServiceState {
+        let mut s = svc(Phase::Ready);
+        let mut sv = ServingStats::zeroed();
+        f(&mut sv);
+        s.serving = Some(sv);
+        s
+    }
+
+    fn media(jobs: u32) -> MediaStats {
+        MediaStats {
+            generations_per_min: 0.0,
+            jobs_in_progress: jobs,
+            completed_delta: 0,
+            errored_delta: 0,
+            duration_avg_s: 0.0,
+            post_avg_s: 0.0,
+            pre_avg_s: 0.0,
+            inference_avg_s: 0.0,
+            warmup_avg_s: 0.0,
+            counters: Default::default(),
+        }
+    }
+
+    #[test]
+    fn scene_follows_the_phase_and_the_stats() {
+        assert_eq!(scene_of(None), Scene::None);
+        assert_eq!(scene_of(Some(&svc(Phase::Down))), Scene::None);
+        assert_eq!(scene_of(Some(&svc(Phase::Compiling))), Scene::Forge);
+        assert_eq!(scene_of(Some(&svc(Phase::Loading))), Scene::Forge);
+        assert_eq!(scene_of(Some(&svc(Phase::Alarm))), Scene::Stalled);
+        assert_eq!(scene_of(Some(&svc(Phase::Ready))), Scene::Dream);
+        assert_eq!(
+            scene_of(Some(&ready_serving(|s| s.generation_tps = 40.0))),
+            Scene::Aurora
+        );
+        // Prefill: requests are in but no token has come out.
+        assert_eq!(
+            scene_of(Some(&ready_serving(|s| s.requests_running = 2))),
+            Scene::Storm
+        );
+        assert_eq!(
+            scene_of(Some(&ready_serving(|s| s.requests_waiting = 3))),
+            Scene::Storm
+        );
+        // Tokens flowing wins over a queue.
+        assert_eq!(
+            scene_of(Some(&ready_serving(|s| {
+                s.generation_tps = 12.0;
+                s.requests_waiting = 3;
+            }))),
+            Scene::Aurora
+        );
+        let mut diffusion = svc(Phase::Ready);
+        diffusion.media = Some(media(1));
+        assert_eq!(scene_of(Some(&diffusion)), Scene::Forming);
+        diffusion.media = Some(media(0));
+        assert_eq!(scene_of(Some(&diffusion)), Scene::Dream);
+    }
+
+    #[test]
+    fn a_loading_service_is_featured_over_a_ready_one() {
+        let rows = vec![svc(Phase::Ready), svc(Phase::Loading)];
+        assert_eq!(featured(&rows).unwrap().phase, Phase::Loading);
+        let rows = vec![svc(Phase::Down), svc(Phase::Ready)];
+        assert_eq!(featured(&rows).unwrap().phase, Phase::Ready);
+        assert!(featured(&[svc(Phase::Down)]).is_none());
+        assert!(featured(&[]).is_none());
+    }
+
+    fn text(l: &Line) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn row_of(w: usize, cell: Cell) -> Vec<Cell> {
+        vec![cell; w]
+    }
+
+    #[test]
+    fn composite_fills_blank_cells_and_never_replaces_foreground() {
+        let red = Color::Rgb(255, 0, 0);
+        let canvas: Canvas = vec![row_of(4, Some(('x', red)))];
+        let out = composite(&canvas, vec![Line::from("ab c")], 4);
+        assert_eq!(text(&out[0]), "abxc");
+        let x = out[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains('x'))
+            .unwrap();
+        assert_eq!(x.style.fg, Some(red));
+    }
+
+    #[test]
+    fn a_wide_foreground_character_keeps_later_columns_aligned() {
+        let canvas: Canvas = vec![vec![
+            Some(('1', Color::Red)),
+            Some(('2', Color::Red)),
+            Some(('q', Color::Red)),
+            Some(('4', Color::Red)),
+        ]];
+        // `日` is two columns wide: columns 0 and 1. The space is column 2.
+        let out = composite(&canvas, vec![Line::from("日 a")], 4);
+        assert_eq!(text(&out[0]), "日qa");
+    }
+
+    #[test]
+    fn a_short_line_is_padded_with_backdrop_up_to_its_last_cell() {
+        let canvas: Canvas = vec![vec![
+            None,
+            Some(('x', Color::Red)),
+            Some(('y', Color::Red)),
+            None,
+            None,
+        ]];
+        let out = composite(&canvas, vec![Line::from("a")], 5);
+        assert_eq!(text(&out[0]), "axy");
+    }
+
+    #[test]
+    fn rows_without_backdrop_and_a_zero_width_are_returned_unchanged() {
+        let canvas: Canvas = vec![row_of(4, None)];
+        let line = Line::from(vec![Span::styled("ab c", Style::default().fg(Color::Blue))]);
+        let out = composite(&canvas, vec![line.clone()], 4);
+        assert_eq!(out[0], line);
+        let busy: Canvas = vec![row_of(4, Some(('x', Color::Red)))];
+        let out = composite(&busy, vec![line.clone()], 0);
+        assert_eq!(out[0], line);
+        // More lines than canvas rows: the extra lines pass through.
+        let out = composite(&busy, vec![Line::from("   "), line.clone()], 4);
+        assert_eq!(out[1], line);
+    }
+
+    #[test]
+    fn a_blank_cell_with_its_own_background_belongs_to_the_foreground() {
+        let canvas: Canvas = vec![row_of(3, Some(('x', Color::Red)))];
+        let panel = Line::from(vec![Span::styled("   ", Style::default().bg(Color::Blue))]);
+        let out = composite(&canvas, vec![panel.clone()], 3);
+        assert_eq!(text(&out[0]), "   ");
+    }
+
+    // ---- Task 2: the sky and the tide -----------------------------------
+
+    fn lit(c: &Canvas) -> usize {
+        c.iter().flatten().filter(|x| x.is_some()).count()
+    }
+
+    fn observed(rows: &[ServiceState], times: usize) -> Atmosphere {
+        let mut a = Atmosphere::new();
+        for _ in 0..times {
+            a.observe(rows);
+        }
+        a
+    }
+
+    #[test]
+    fn the_backdrop_is_deterministic() {
+        let rows = vec![ready_serving(|s| {
+            s.generation_tps = 30.0;
+            s.kv_cache_usage = 0.4;
+        })];
+        let a = observed(&rows, 20);
+        let b = observed(&rows, 20);
+        assert_eq!(a.render_backdrop(80, 30), b.render_backdrop(80, 30));
+        // And the same atmosphere asked twice.
+        assert_eq!(a.render_backdrop(80, 30), a.render_backdrop(80, 30));
+    }
+
+    #[test]
+    fn nothing_featured_means_no_backdrop_and_not_active() {
+        let a = observed(&[], 10);
+        assert!(!a.active());
+        assert_eq!(lit(&a.render_backdrop(80, 30)), 0);
+        let down = observed(&[svc(Phase::Down)], 10);
+        assert!(!down.active());
+    }
+
+    #[test]
+    fn an_idle_sky_is_quiet_and_a_generating_sky_is_brighter() {
+        let idle = observed(&[svc(Phase::Ready)], 60);
+        assert!(idle.active());
+        let busy = observed(&[ready_serving(|s| s.generation_tps = 100.0)], 120);
+        let (i, b) = (
+            lit(&idle.render_backdrop(100, 30)),
+            lit(&busy.render_backdrop(100, 30)),
+        );
+        assert!(i > 0, "stars at least");
+        assert!(b > i, "aurora lights more cells: idle {i}, generating {b}");
+    }
+
+    #[test]
+    fn the_tide_height_follows_the_kv_cache() {
+        let bottom_lit = |kv: f32| {
+            let a = observed(
+                &[ready_serving(|s| {
+                    s.generation_tps = 20.0;
+                    s.kv_cache_usage = kv;
+                })],
+                200,
+            );
+            let c = a.render_backdrop(60, 30);
+            (0..3)
+                .filter(|r| c[29 - r].iter().any(|x| x.is_some()))
+                .count()
+        };
+        assert_eq!(bottom_lit(0.0), 0);
+        assert_eq!(bottom_lit(0.34), 1);
+        assert_eq!(bottom_lit(0.95), 3);
+    }
+
+    #[test]
+    fn the_tide_warms_from_blue_to_amber_to_red() {
+        let colour_at = |kv: f32| {
+            let a = observed(
+                &[ready_serving(|s| {
+                    s.generation_tps = 20.0;
+                    s.kv_cache_usage = kv;
+                })],
+                200,
+            );
+            a.render_backdrop(60, 20)[19]
+                .iter()
+                .flatten()
+                .next()
+                .unwrap()
+                .1
+        };
+        let (low, mid, high) = (colour_at(0.4), colour_at(0.7), colour_at(0.95));
+        assert!(
+            low != mid && mid != high && low != high,
+            "{low:?} {mid:?} {high:?}"
+        );
+    }
+
+    #[test]
+    fn any_size_is_safe_and_returns_the_asked_dimensions() {
+        let a = observed(&[ready_serving(|s| s.generation_tps = 50.0)], 30);
+        for (w, h) in [(0, 0), (1, 1), (3, 2), (4, 3), (5, 3), (40, 12), (160, 50)] {
+            let c = a.render_backdrop(w, h);
+            assert_eq!(c.len(), h, "{w}x{h}");
+            assert!(c.iter().all(|r| r.len() == w), "{w}x{h}");
+        }
+        // Below the minimum nothing is drawn.
+        assert_eq!(lit(&a.render_backdrop(3, 2)), 0);
+    }
+
+    // ---- Task 3: rain, comets, horizon stars, flares, static -------------
+
+    /// Glyphs unique to each layer, so a test can count what a layer drew.
+    const FALL: [char; 2] = [':', '.'];
+    const RISE: [char; 4] = ['⠁', '⠃', '⠇', '⡇'];
+    const COMET_HEAD: char = '◉';
+    const HORIZON: char = '⋅';
+    const RING: char = '○';
+    const STATIC: char = '▚';
+
+    fn count(c: &Canvas, set: &[char]) -> usize {
+        c.iter()
+            .flatten()
+            .filter(|x| x.is_some_and(|(ch, _)| set.contains(&ch)))
+            .count()
+    }
+
+    fn serving_row(f: impl FnOnce(&mut ServingStats)) -> ServiceState {
+        ready_serving(f)
+    }
+
+    #[test]
+    fn no_rain_without_rates() {
+        let a = observed(&[serving_row(|s| s.requests_running = 2)], 100);
+        let c = a.render_backdrop(100, 30);
+        assert_eq!(count(&c, &FALL), 0);
+        assert_eq!(count(&c, &RISE), 0);
+    }
+
+    /// A gauge is scaled against the peak it has seen, so feed a high rate
+    /// first and then compare a held-high rate with one that dropped to a tenth.
+    fn held_vs_dropped(f: impl Fn(&mut ServingStats, f32)) -> (Canvas, Canvas) {
+        let hi = |rate: f32| {
+            serving_row(|s| {
+                s.generation_tps = 50.0;
+                f(s, rate)
+            })
+        };
+        let mut held = Atmosphere::new();
+        for _ in 0..200 {
+            held.observe(&[hi(500.0)]);
+        }
+        let mut dropped = Atmosphere::new();
+        dropped.observe(&[hi(500.0)]);
+        for _ in 0..200 {
+            dropped.observe(&[hi(50.0)]);
+        }
+        (
+            held.render_backdrop(120, 30),
+            dropped.render_backdrop(120, 30),
+        )
+    }
+
+    #[test]
+    fn falling_glyphs_follow_the_prompt_rate() {
+        let (held, dropped) = held_vs_dropped(|s, r| s.prompt_tps = r);
+        assert!(
+            count(&held, &FALL) > count(&dropped, &FALL),
+            "reading density"
+        );
+        assert!(count(&held, &FALL) > 0);
+    }
+
+    #[test]
+    fn rising_glyphs_follow_the_generation_rate() {
+        let (held, dropped) = held_vs_dropped(|s, r| s.generation_tps = r);
+        assert!(
+            count(&held, &RISE) > count(&dropped, &RISE),
+            "writing density"
+        );
+        assert!(count(&held, &RISE) > 0);
+    }
+
+    #[test]
+    fn comets_are_the_running_requests_up_to_six() {
+        let heads = |running: u32| {
+            let a = observed(
+                &[serving_row(|s| {
+                    s.generation_tps = 20.0;
+                    s.requests_running = running;
+                })],
+                30,
+            );
+            count(&a.render_backdrop(100, 30), &[COMET_HEAD])
+        };
+        assert_eq!(heads(0), 0);
+        assert_eq!(heads(3), 3);
+        assert_eq!(heads(40), 6);
+    }
+
+    #[test]
+    fn horizon_stars_are_the_waiting_requests_up_to_twelve() {
+        let stars = |waiting: u32| {
+            let a = observed(
+                &[serving_row(|s| {
+                    s.generation_tps = 20.0;
+                    s.requests_waiting = waiting;
+                })],
+                30,
+            );
+            count(&a.render_backdrop(100, 30), &[HORIZON])
+        };
+        assert_eq!(stars(0), 0);
+        assert_eq!(stars(4), 4);
+        assert_eq!(stars(50), 12);
+    }
+
+    fn with_done(total: u64) -> ServiceState {
+        serving_row(|s| {
+            s.generation_tps = 20.0;
+            s.counters.requests_succeeded_total = total;
+        })
+    }
+
+    #[test]
+    fn each_finished_request_flares_once_and_the_flare_expires() {
+        let mut a = Atmosphere::new();
+        a.observe(&[with_done(10)]); // first sight: a baseline, not a burst
+        assert_eq!(a.live_flares(), 0);
+        a.observe(&[with_done(12)]);
+        assert_eq!(a.live_flares(), 2);
+        assert!(count(&a.render_backdrop(100, 30), &[RING]) > 0);
+        // The same snapshot read on later frames adds nothing.
+        for _ in 0..5 {
+            a.observe(&[with_done(12)]);
+        }
+        assert_eq!(a.live_flares(), 2);
+        for _ in 0..40 {
+            a.observe(&[with_done(12)]);
+        }
+        assert_eq!(a.live_flares(), 0, "flares expire");
+        assert_eq!(count(&a.render_backdrop(100, 30), &[RING]), 0);
+    }
+
+    #[test]
+    fn flares_are_capped_per_tick_and_overall() {
+        let mut a = Atmosphere::new();
+        a.observe(&[with_done(0)]);
+        a.observe(&[with_done(1000)]);
+        assert_eq!(a.live_flares(), 3, "at most three per observe");
+        for i in 2..20u64 {
+            a.observe(&[with_done(i * 1000)]);
+        }
+        assert!(a.live_flares() <= 8, "{}", a.live_flares());
+        // A counter that drops (a restarted server) is a reset, not a burst.
+        let mut b = Atmosphere::new();
+        b.observe(&[with_done(500)]);
+        b.observe(&[with_done(3)]);
+        assert_eq!(b.live_flares(), 0);
+    }
+
+    #[test]
+    fn an_error_draws_static_that_clears() {
+        let with_errors = |n: u64| {
+            serving_row(|s| {
+                s.generation_tps = 20.0;
+                s.counters.requests_errored_total = n;
+            })
+        };
+        let mut a = Atmosphere::new();
+        a.observe(&[with_errors(0)]);
+        assert_eq!(count(&a.render_backdrop(100, 30), &[STATIC]), 0);
+        a.observe(&[with_errors(1)]);
+        assert!(count(&a.render_backdrop(100, 30), &[STATIC]) > 0);
+        for _ in 0..60 {
+            a.observe(&[with_errors(1)]);
+        }
+        assert_eq!(count(&a.render_backdrop(100, 30), &[STATIC]), 0);
+    }
+
+    #[test]
+    fn at_full_signal_the_backdrop_stays_readable() {
+        let mut a = Atmosphere::new();
+        let row = |done: u64| {
+            serving_row(|s| {
+                s.generation_tps = 500.0;
+                s.prompt_tps = 5000.0;
+                s.requests_running = 8;
+                s.requests_waiting = 30;
+                s.kv_cache_usage = 0.95;
+                s.counters.requests_succeeded_total = done;
+            })
+        };
+        for i in 0..300u64 {
+            a.observe(&[row(i * 5)]);
+        }
+        for (w, h) in [(80, 24), (100, 30), (160, 50)] {
+            let c = a.render_backdrop(w, h);
+            let frac = lit(&c) as f32 / (w * h) as f32;
+            assert!(frac <= 0.45, "{w}x{h}: {:.0}% lit", frac * 100.0);
+        }
+    }
+
+    #[test]
+    fn a_preemption_splashes_the_tide() {
+        let row = |n: u64| {
+            serving_row(|s| {
+                s.generation_tps = 20.0;
+                s.kv_cache_usage = 0.6;
+                s.counters.preemptions_total = n;
+            })
+        };
+        let mut a = Atmosphere::new();
+        for _ in 0..80 {
+            a.observe(&[row(0)]);
+        }
+        assert_eq!(count(&a.render_backdrop(60, 20), &['^']), 0);
+        a.observe(&[row(1)]);
+        assert!(count(&a.render_backdrop(60, 20), &['^']) > 0);
+        for _ in 0..40 {
+            a.observe(&[row(1)]);
+        }
+        assert_eq!(count(&a.render_backdrop(60, 20), &['^']), 0);
+    }
+
+    // ---- Task 4: the storm ----------------------------------------------
+
+    const CLOUD: [char; 3] = ['░', '▒', '▓'];
+    const BOLT: [char; 2] = ['╲', '╱'];
+    const BEAT: char = '◦';
+
+    fn storm(running: u32, waiting: u32, frames: usize) -> Atmosphere {
+        observed(
+            &[serving_row(|s| {
+                s.requests_running = running;
+                s.requests_waiting = waiting;
+            })],
+            frames,
+        )
+    }
+
+    #[test]
+    fn a_storm_is_a_cloud_band_across_the_top_and_nothing_low() {
+        let a = storm(2, 0, 30);
+        assert_eq!(a.scene, Scene::Storm);
+        let c = a.render_backdrop(100, 30);
+        let top: usize = c[..11]
+            .iter()
+            .map(|r| count(&vec![r.clone()], &CLOUD))
+            .sum();
+        let low: usize = c[20..]
+            .iter()
+            .map(|r| count(&vec![r.clone()], &CLOUD))
+            .sum();
+        assert!(top > 100, "a band of cloud: {top}");
+        assert_eq!(low, 0, "no cloud in the lower third");
+    }
+
+    #[test]
+    fn running_requests_make_a_heavier_storm_than_waiting_ones() {
+        let heavy = count(&storm(2, 0, 30).render_backdrop(100, 30), &CLOUD);
+        let light = count(&storm(0, 3, 30).render_backdrop(100, 30), &CLOUD);
+        assert!(heavy > light && light > 0, "heavy {heavy}, light {light}");
+    }
+
+    #[test]
+    fn lightning_strikes_on_a_schedule_while_requests_run() {
+        let bolts = |frames: usize| count(&storm(2, 0, frames).render_backdrop(100, 30), &BOLT);
+        assert_eq!(bolts(40), 0);
+        assert!(bolts(90) > 0, "a strike at frame 90");
+        assert_eq!(bolts(95), 0, "it is over after three frames");
+        // A waiting-only storm has no lightning.
+        assert_eq!(count(&storm(0, 3, 90).render_backdrop(100, 30), &BOLT), 0);
+    }
+
+    #[test]
+    fn the_storm_has_a_heartbeat_and_only_the_storm_does() {
+        assert_eq!(count(&storm(2, 0, 30).render_backdrop(100, 30), &[BEAT]), 3);
+        let aurora = observed(&[serving_row(|s| s.generation_tps = 50.0)], 30);
+        let c = aurora.render_backdrop(100, 30);
+        assert_eq!(count(&c, &[BEAT]), 0);
+        assert_eq!(count(&c, &BOLT), 0);
+    }
+
+    // ---- Task 5: the forge, the embers and the forming canvas -----------
+
+    const BEAM: [char; 2] = ['|', '+'];
+    const SPARK: char = '✧';
+    const GLOW: [char; 4] = ['▁', '▂', '▃', '▅'];
+    const NEVER: usize = i64::MAX as usize; // the monitor's "never observed" sentinel
+
+    fn loading(kernels: usize, shards: usize, cpu: f32) -> ServiceState {
+        let mut s = svc(Phase::Loading);
+        s.kernel_count = kernels;
+        s.loaded_count = shards;
+        s.cpu_pct = cpu;
+        s
+    }
+
+    #[test]
+    fn the_forge_grows_only_from_real_rises_never_from_the_sentinel() {
+        let mut a = Atmosphere::new();
+        a.observe(&[loading(NEVER, NEVER, 0.0)]);
+        a.observe(&[loading(NEVER, NEVER, 0.0)]);
+        assert_eq!(a.built(), 0.0, "the sentinel is not growth");
+        // The first real sample is a baseline, even when large.
+        a.observe(&[loading(5000, 40, 0.0)]);
+        assert_eq!(a.built(), 0.0, "first sight is a baseline");
+        assert_eq!(
+            count(&a.render_backdrop(100, 30), &BEAM),
+            0,
+            "nothing built yet"
+        );
+        a.observe(&[loading(5150, 40, 0.0)]);
+        assert_eq!(a.built(), 150.0);
+        assert!(count(&a.render_backdrop(100, 30), &BEAM) > 0);
+    }
+
+    /// A real count followed by the sentinel (a fresh sample for the same
+    /// service) must not read as a leap of nearly `i64::MAX` kernels.
+    #[test]
+    fn a_real_count_followed_by_the_sentinel_is_not_a_leap() {
+        let mut a = Atmosphere::new();
+        a.observe(&[loading(100, 10, 0.0)]);
+        a.observe(&[loading(NEVER, NEVER, 0.0)]);
+        assert_eq!(a.built(), 0.0);
+        a.observe(&[loading(160, 25, 0.0)]);
+        assert_eq!(a.built(), 75.0, "growth resumes from the last real count");
+    }
+
+    #[test]
+    fn a_repeated_snapshot_adds_nothing_and_growth_is_monotonic_but_bounded() {
+        let mut a = Atmosphere::new();
+        a.observe(&[loading(100, 0, 0.0)]);
+        a.observe(&[loading(300, 0, 0.0)]);
+        let built = a.built();
+        for _ in 0..100 {
+            a.observe(&[loading(300, 0, 0.0)]);
+        }
+        assert_eq!(a.built(), built, "the same snapshot, frame after frame");
+        let mut last = 0;
+        for k in 1..60usize {
+            a.observe(&[loading(300 + k * 400, 0, 0.0)]);
+            let n = count(&a.render_backdrop(100, 30), &BEAM);
+            assert!(n >= last, "beams never shrink while loading");
+            last = n;
+        }
+        // Even a huge build leaves the beams under the screen height.
+        let c = a.render_backdrop(100, 30);
+        for x in 0..100 {
+            let col = (0..30)
+                .filter(|y| c[*y][x].is_some_and(|(ch, _)| BEAM.contains(&ch)))
+                .count();
+            assert!(col < 30, "column {x} is {col} tall");
+        }
+    }
+
+    #[test]
+    fn shards_landing_grow_the_forge_too() {
+        let mut a = Atmosphere::new();
+        a.observe(&[loading(10, 5, 0.0)]);
+        a.observe(&[loading(10, 25, 0.0)]);
+        assert_eq!(a.built(), 20.0);
+    }
+
+    #[test]
+    fn the_forge_resets_when_the_load_ends() {
+        let mut a = Atmosphere::new();
+        a.observe(&[loading(0, 0, 0.0)]);
+        a.observe(&[loading(500, 0, 0.0)]);
+        assert!(a.built() > 0.0);
+        a.observe(&[svc(Phase::Ready)]);
+        assert_eq!(a.built(), 0.0);
+    }
+
+    #[test]
+    fn sparks_fly_only_while_kernels_are_compiling() {
+        let mut a = Atmosphere::new();
+        a.observe(&[loading(0, 0, 0.0)]);
+        a.observe(&[loading(400, 0, 0.0)]); // built enough for beams, and a rise
+        let during = count(&a.render_backdrop(100, 30), &[SPARK]);
+        assert!(during > 0, "a spark while compiling");
+        for _ in 0..60 {
+            a.observe(&[loading(400, 0, 0.0)]);
+        }
+        assert_eq!(
+            count(&a.render_backdrop(100, 30), &[SPARK]),
+            0,
+            "none once it stops"
+        );
+    }
+
+    #[test]
+    fn a_stalled_load_has_dim_embers_no_sparks_and_no_growth() {
+        let stalled = |kernels: usize| {
+            let mut s = svc(Phase::Alarm);
+            s.kernel_count = kernels;
+            s
+        };
+        let mut a = Atmosphere::new();
+        a.observe(&[loading(0, 0, 0.0)]);
+        a.observe(&[loading(300, 0, 0.0)]);
+        let built = a.built();
+        a.observe(&[stalled(300)]);
+        a.observe(&[stalled(900)]);
+        assert_eq!(a.scene, Scene::Stalled);
+        assert_eq!(a.built(), built, "no growth while stalled");
+        assert_eq!(count(&a.render_backdrop(100, 30), &[SPARK]), 0);
+        assert!(
+            count(&a.render_backdrop(100, 30), &BEAM) > 0,
+            "the beams stay, dim"
+        );
+    }
+
+    #[test]
+    fn host_load_lights_the_floor() {
+        let glow = |cpu: f32| {
+            let mut a = Atmosphere::new();
+            for _ in 0..80 {
+                a.observe(&[loading(0, 0, cpu)]);
+            }
+            count(&vec![a.render_backdrop(100, 30)[29].clone()], &GLOW)
+        };
+        assert_eq!(glow(0.0), 0);
+        assert!(glow(400.0) > glow(80.0), "more CPU, more glow");
+    }
+
+    #[test]
+    fn the_forge_draws_nothing_from_the_serving_scenes() {
+        let mut a = Atmosphere::new();
+        a.observe(&[loading(0, 0, 200.0)]);
+        a.observe(&[loading(500, 10, 200.0)]);
+        let c = a.render_backdrop(100, 30);
+        for set in [
+            &FALL[..],
+            &RISE[..],
+            &[COMET_HEAD],
+            &[HORIZON],
+            &[BEAT],
+            &BOLT[..],
+            &[STATIC],
+            &['≈', '~'],
+        ] {
+            assert_eq!(count(&c, set), 0, "{set:?}");
+        }
+    }
+
+    fn forming(frames: usize) -> Atmosphere {
+        let mut s = svc(Phase::Ready);
+        let mut m = media(1);
+        m.counters.requests_total = 1;
+        s.media = Some(m);
+        observed(&[s], frames)
+    }
+
+    #[test]
+    fn forming_is_a_canvas_in_the_middle_that_resolves_over_time() {
+        let (w, h) = (90, 30);
+        let c = forming(10).render_backdrop(w, h);
+        let mut inside = 0;
+        for (y, row) in c.iter().enumerate() {
+            for (x, cell) in row.iter().enumerate() {
+                if cell.is_some_and(|(ch, _)| ch == '▒') {
+                    assert!(
+                        x >= w / 3 && x < 2 * w / 3 && y >= h / 4 && y < 3 * h / 4,
+                        "({x},{y})"
+                    );
+                    inside += 1;
+                }
+            }
+        }
+        assert!(inside > 0);
+        // Later in the loop the noise has resolved toward structure: fewer cells.
+        let late = count(&forming(180).render_backdrop(w, h), &['▒']);
+        assert!(late < inside, "{late} vs {inside}");
+        // And no forming canvas without a job in flight.
+        let idle = observed(&[svc(Phase::Ready)], 10).render_backdrop(w, h);
+        assert_eq!(count(&idle, &['▒']), 0);
+    }
+
+    /// The backdrop plus the composite is built every frame, so its cost is a
+    /// bound, not a hope: best of several batches, at the largest size and the
+    /// busiest scene, in a debug build.
+    #[test]
+    fn building_and_compositing_a_full_backdrop_is_cheap() {
+        let mut a = Atmosphere::new();
+        for i in 0..300u64 {
+            a.observe(&[serving_row(|s| {
+                s.generation_tps = 500.0;
+                s.prompt_tps = 5000.0;
+                s.requests_running = 8;
+                s.requests_waiting = 30;
+                s.kv_cache_usage = 0.95;
+                s.counters.requests_succeeded_total = i * 5;
+            })]);
+        }
+        let (w, h) = (160, 50);
+        let foreground: Vec<Line<'static>> = (0..h)
+            .map(|y| {
+                Line::from(if y % 3 == 0 {
+                    "x".repeat(w / 2)
+                } else {
+                    String::new()
+                })
+            })
+            .collect();
+        let per_frame = (0..7)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                for _ in 0..20 {
+                    let c = a.render_backdrop(w, h);
+                    let _ = composite(&c, foreground.clone(), w);
+                }
+                start.elapsed() / 20
+            })
+            .min()
+            .unwrap();
+        eprintln!("per frame: {per_frame:?}");
+        assert!(
+            per_frame < std::time::Duration::from_millis(8),
+            "{per_frame:?}"
+        );
+    }
+
+    /// Stats that go missing for a scrape and come back at the same totals add
+    /// no flares; a real rise afterwards still flares.
+    #[test]
+    fn a_total_that_goes_missing_and_returns_unchanged_is_not_new_events() {
+        let mut a = Atmosphere::new();
+        a.observe(&[with_done(100)]);
+        let mut gone = with_done(100);
+        gone.serving = None; // one scrape with no stats
+        a.observe(&[gone]);
+        a.observe(&[with_done(100)]);
+        assert_eq!(a.live_flares(), 0, "the same 100 again is not 100 events");
+        a.observe(&[with_done(101)]);
+        assert_eq!(a.live_flares(), 1);
+    }
+
+    /// One loading model finishes and another is featured. The scene stays
+    /// Forge, so the new model must not inherit the old one's scaffold or sparks.
+    #[test]
+    fn a_new_featured_service_starts_its_own_forge() {
+        let mut a = Atmosphere::new();
+        let mut first = loading(100, 5, 0.0);
+        first.key = "one".into();
+        a.observe(&[first.clone()]);
+        first.kernel_count = 400;
+        first.loaded_count = 20;
+        a.observe(&[first.clone()]);
+        assert!(a.built() > 0.0, "the first model built something");
+        let mut second = loading(50, 1, 0.0);
+        second.key = "two".into();
+        a.observe(&[second]);
+        assert_eq!(a.built(), 0.0, "the second model starts from nothing");
+        assert_eq!(
+            count(&a.render_backdrop(100, 30), &[SPARK]),
+            0,
+            "no leftover sparks"
+        );
+    }
+
+    /// The smoothed gauges (generation, reading, KV tide) belong to one service.
+    /// When another is featured they restart, so a high-cache model followed by
+    /// an idle one does not render the idle one with the old tide.
+    #[test]
+    fn a_new_featured_service_restarts_the_smoothed_gauges() {
+        let mut a = Atmosphere::new();
+        let busy = |key: &str| {
+            let mut s = ready_serving(|sv| {
+                sv.kv_cache_usage = 0.9;
+                sv.generation_tps = 50.0;
+                sv.prompt_tps = 200.0;
+            });
+            s.key = key.into();
+            s
+        };
+        for _ in 0..40 {
+            a.observe(&[busy("one")]);
+        }
+        assert!(a.kv > 0.8, "the first model settled at a high KV tide");
+        assert!(a.energy.value > 0.5, "and a high generation level");
+
+        let mut idle = ready_serving(|sv| sv.kv_cache_usage = 0.0);
+        idle.key = "two".into();
+        a.observe(&[idle]);
+        assert_eq!(a.kv, 0.0, "the new service does not inherit the old tide");
+        assert_eq!(a.energy.value, 0.0, "nor the old generation level");
+        assert_eq!(a.reading.value, 0.0, "nor the old reading level");
+    }
+}

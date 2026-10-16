@@ -1200,3 +1200,210 @@ PR description if it was available.
 Version and merge order: this fix is 0.13.11 and merges first (PR 36). PR 34 was
 renumbered from 0.13.11-0.13.16 to 0.13.12-0.13.17 and is rebased onto this
 branch, so the two merge in order without conflicts.
+
+### Model labels from weights paths (Oct 14, 2026)
+
+Report: "a model is loading right now and it shows in inference view but it
+lists it as `model-dir` and I think we can do better." The launch was a direct
+host vLLM with `--model /home/ttuser/orchard-runs/thakicloud--rag-gate-27b/stages/2/model-dir`,
+and the label was `model_basename`'s last path segment.
+
+`services::friendly_model_label(model, served_name)` replaces it for servers not
+in the SERVERS table: the `--served-model-name` if the launch gave one (read on
+all three detection paths into `InferenceServer.served_name`, `=` form and first
+of several names); else, for a weights path, the nearest segment that is not
+generic (`model-dir`, `final`, `checkpoint-N`, `snapshots`, revision hashes, bare
+numbers, `stages`), with `org--name` and `models--org--name` stripped to `name`;
+else the last segment as before. That launch is now `rag-gate-27b`. Checked in the
+real app on this box while the model loaded: the Inference header read
+`rag-gate-27b  :8100 · chips 0,1`.
+
+Built test-first: five tests failed with the old label (the monitor test failed
+with `left: "model-dir"`) before the implementation, two guard unchanged cases.
+
+### Arcade activity lanes (Oct 14, 2026, `updates/reality`)
+
+Prompt: "making arcade mode more actionable -- or any mode -- when a time or goal
+oriented viz is active is important: training and inference server viz both have
+no representation in arcade view, but they could have some kind of takeover of the
+starfield perhaps when active." Spec and plan: `docs/superpowers/specs/` and
+`docs/superpowers/plans/2026-10-14-arcade-activity-lanes*`. Decisions: Arcade only;
+a status strip plus a starfield that reacts; no status-bar chip.
+
+What exists now:
+
+- `animation/activity.rs` turns `TrainState` and the inference roster into
+  `Activity` values (pure). `ActivityTracker` keeps a load clock per service and
+  a completed-request pulse count. A chunk-local training step has no `%` or ETA;
+  a load with no real progress has no `%`.
+- `animation/activity_lanes.rs` draws at most two one-row lanes. A narrow width
+  drops the `[t]`/`[i]` hint first, then fields from the last, and skips a lane
+  whose tag and name do not fit. No right-side border.
+- Arcade lays the lanes over the first starfield rows after the hero is drawn,
+  keeps the hero below them, and reserves nothing when idle or when the starfield
+  has fewer than 6 rows.
+- `HardwareStarfield` takes an `ActivityTint` (strength capped at 0.45) and
+  `pulse()` flares (at most 6 live). Arcade tints by the most urgent activity and
+  flares on a rising pulse count; the first sight of a count and a drop are not
+  bursts.
+- Training is followed with `TrainWatch`: a trainer is picked out of the process
+  list the background scan already collects (`find_trainer`, which reads
+  `/proc/<pid>/maps` only for Python processes, cached by pid), then followed with
+  `TrainMonitor::attach` and `poll_attached`. Following a run costs about 35 us
+  per tick; the scan request asks for the process list when Arcade is on screen.
+  A source tripwire keeps `.poll()` and `TrainMonitor` out of the Arcade arm.
+- `--mock` uses the synthetic run and roster; `--remote` shows no lanes.
+
+Differences from the plan, found while building:
+
+- Arcade's render is not deterministic (three runs gave three frames), so the
+  "byte-identical when idle" test is structural.
+- The hero is clamped only in `hero_y`; clamping its lerp target too was
+  redundant, and a test on the target let the real clamp be removed unnoticed.
+- Star colours come from `colors::rgb`, which is indexed without truecolour, so
+  the tint blend falls back to the target colour and the cap is tested through
+  `effective_tint_strength`.
+- The cost test takes the best of fifteen batches: it failed once under the full
+  parallel suite with a single batch.
+
+Checked on this box: Arcade showed `▎● SERVE stable-diffusion-v1-4 · :20077 · chip 0  [i]`
+for the real server, and under `--mock` two lanes (`◐ LOAD`, `▶ TRAIN … +1 more`).
+
+### Inference atmosphere, and what building it turned up (Oct 14, 2026)
+
+Prompt: "inference server is boring to watch. there's more we could do to show all
+the other info about what's happening behind the snake. like the clouds from
+training mode but let's imagine some ways to add the feeling of something...
+thinking.. generating... something being made", then "finish the plan, do this and
+just keep working through all of it to show off to me later". Spec and plan:
+`docs/superpowers/specs/2026-10-14-inference-atmosphere-design.md` and the plan of
+the same name. Written and built without a review gate, as asked; the decisions are
+in the spec so each can be reversed.
+
+What it is: `animation/atmosphere.rs`. A backdrop of optional cells drawn *behind*
+whichever `Snake` renderer is active, filling blank cells only (`composite`), so
+the snake, dashboards and roster always win. The featured service picks a scene:
+forge (compiling or loading), storm (requests in, no token out yet), aurora (tokens
+flowing), dream (ready, idle), forming (a diffusion job in flight), stalled. Every
+effect is tied to a signal in `ServiceState`; the spec has the table. Nothing is
+drawn with no featured service.
+
+Things found while building, each now covered by a test that was seen to fail:
+
+- **A bug in my own Arcade lanes.** The monitor snapshot repeats for several
+  seconds while the render loop reads it every frame. The Arcade tracker summed
+  `completed_delta` per update, so a pulse count was overcounted about sixty to
+  one. Both features now use the cumulative counters (`requests_succeeded_total`,
+  `requests_errored_total`, `preemptions_total`, `kernel_count`, `loaded_count`)
+  and treat a *rise* as an event: the first sight of a counter is a baseline and
+  a drop is a reset.
+- **The density cap caught a real problem.** At full signal the first aurora and
+  tide lit 49% of an 80 by 24 view; a test written to be vacuous at first showed
+  it once it had something to measure. Aurora cells under 0.20 are dropped and the
+  tide is limited to a tenth of the height.
+- **Forge beams looked like frames.** They were drawn with `│` and `┼`, the same
+  glyphs as the load box's borders. They are ASCII `|` and `+` now.
+- **A second model label bug, on the same box.** After `model-dir` was fixed, a
+  launch under `.../stages/7/verify/bundle/model-dir` showed as `bundle`. The
+  generic-directory list now has the packaging names (`bundle`, `verify`,
+  `release`, `export`, `merged`, ...). A label is a guess about naming, so expect
+  more of these; the list is one constant.
+- **A guard that could not fail.** The sentinel test passed with the sentinel
+  check removed, because only a real count followed by the sentinel produces the
+  leap. A test for exactly that was added. In practice published rows never carry
+  the sentinel (a snapshot is always folded first), so the check is defensive.
+- **Dead code in my first `composite`.** The placeholder column for a wide
+  character was filtered out of the output, so the mutation that removed it
+  survived. The real alignment is `x += width`; the placeholder was deleted.
+
+Checked on screen under `--mock` at 80 and 150 columns and on this box: the
+serving scene shows aurora, comets, rain and the tide; the forge shows beams
+growing behind the compile box. The compile box fills much of the view with its own
+pattern, and the backdrop shows only where the foreground is blank, by design.
+Not verified: colours on a real terminal (the capture is plain text), and a live
+diffusion job in the forming scene.
+
+The synthetic `--mock` server now pauses to read a prompt early in each 24 s beat
+(requests running, no tokens out), so the storm scene shows under `--mock`. A
+loading service is always featured over a serving one, and the mock's two services
+are usually in different phases, so the serving and storm scenes only show in the
+window before the second model starts compiling (the first ~9 seconds). Recordings
+of Arcade and the Inference view under `--mock` are in `demo/assets/arcade-atmosphere.{mp4,gif}`
+(gitignored); they were made with a tmux session driven by `tmux send-keys` under
+`asciinema rec`, because `tt-demo`'s manifest has no way to send keys.
+
+## 2026-10-15: do not narrow chips by TT_METAL_VISIBLE_DEVICES
+
+I added a filter that narrowed a container's chips to its `TT_METAL_VISIBLE_DEVICES`
+list (v0.13.14, v0.13.15) and removed it in v0.13.16. The music server sets the
+variable to `0` and holds `/dev/tenstorrent/0` and `/1` open, but while it
+generated, only chip 1 drew power (about 125 W; chip 0 stayed at 40 W, read from
+hwmon, which maps to `/dev/tenstorrent/N` in the same order). The list indexes the
+runtime's own device order, so applying it to host device numbers shows the wrong
+chip. The unit tests passed because they encoded the same assumption. The check
+that caught it was power draw on the live box, which does not share the assumption.
+The view shows the chips the server holds open.
+
+## 2026-10-15: review findings on the lanes and atmosphere (PR 34)
+
+Copilot's review found six real faults in my own Arcade and atmosphere code. All
+six were checked against the code, fixed with a test that fails without the fix,
+and recorded here.
+
+- **A missing total was a measured zero.** `pulse_total` returned 0 for a row
+  with no stats, so stats that dropped out for one scrape and came back at the
+  same total read as that many new events. Totals are `Option` now, and `None`
+  keeps the baseline.
+- **Baselines were keyed by lane position.** Lanes reorder when a load finishes,
+  so a different activity's count was compared with the old baseline. `Activity`
+  carries an `id` (`train:<pid>`, `svc:<key>`) and baselines follow it.
+- **The load clock never stopped.** It started at first sight, for any phase, so
+  a server that served for an hour and reloaded showed an hour of loading. It
+  now runs only while compiling, loading or stalled.
+- **The forge carried across models.** The scene stays Forge when one loading
+  model is replaced by another, so the scene-based reset never fired. The reset
+  is keyed on the featured service.
+- **I claimed "no render-thread /proc work" and reused a list, but the maps reads
+  still ran on the render thread.** `find_trainer` reads `/proc/<pid>/maps` for
+  each uncached Python process. It now runs in the scan worker
+  (`TrainerFinder`), and the loop only passes the result to `TrainWatch`. A
+  tripwire test bans `TrainerFinder`, `find_trainer` and `maps_ttml` from
+  `run_app`.
+- **A negative maps probe was cached for the pid's life.** A script scanned
+  before it imports `ttml` was never found. Negatives are retried every five
+  scans.
+
+The common cause for three of them: I tested the new state against a fixed
+snapshot and never against the transition into it (stats gone and back, lanes
+reordered, one model replaced by the next).
+
+### Copilot review of PR 34: pid reuse and gauge carry-over (Oct 16, 2026, v0.13.17)
+
+Copilot's second pass on PR 34 left eleven comments. One was wrong (`shown` in
+`render_lanes` is read by `Vec::with_capacity`; clippy `-D warnings` passed on
+that commit). Five were on older commits and the current code already covers
+them, each with a test: pulse counts follow activity identity, a missing stats
+total is `None` and not zero, the load clock runs only during a load, a new
+featured service clears the forge, and a negative `ttml` probe is retried.
+The release instruction in the PR body still said `v0.13.16` after the
+renumbering; the body now says `v0.13.17`.
+
+Three were right and are fixed here:
+- `Atmosphere::observe` reset the event counters when the featured service
+  changed but not the smoothed `energy`, `reading` and `kv` gauges, so an idle
+  model briefly inherited a busy one's tide. They now restart before they are fed.
+- The `ttml` probe cache and the attached run were keyed by pid alone. A pid
+  reused by an unrelated Python process could take the cached `true`, or keep the
+  old run's state attached. `proc_access::start_time` reads field 22 of
+  `/proc/<pid>/stat` (world-readable, so no audited denial), `TrainerFinder` stores
+  it per entry and puts it on `TrainProcess::start_time`, and `TrainWatch`
+  re-attaches when it differs. Unknown on either side counts as the same process,
+  so one failed read does not drop a run. The read happens in the scan worker.
+- A stale doc comment on `Arcade::last_pulse` still said "per shown lane".
+
+Tests: `a_new_featured_service_restarts_the_smoothed_gauges`,
+`a_reused_pid_is_probed_afresh_not_taken_from_the_cache`,
+`a_reused_pid_reattaches_instead_of_keeping_the_old_run` and two for
+`start_time`. The first three were seen to fail with the fix disabled (a leftover
+tide of 0.76; the replacement process taken for the trainer; the old run kept).
+No version bump: these are fixes inside an unmerged PR.

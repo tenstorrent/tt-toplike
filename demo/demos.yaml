@@ -52,3 +52,28 @@ scenes:
       taken for a real reset. No reset is run for this capture. The same
       animations play over a real `tt-smi -r` under `dazzle`.
 
+
+  - id: arcade-lanes
+    title: "Arcade: an activity lane for the running model"
+    layout: single
+    right:
+      run: "tt-toplike-tui {backend} --mode arcade"
+    duration: 30s
+    caption: >-
+      Arcade shows what is running. While a model compiles, loads or serves,
+      the top starfield rows become a lane with the model name, where it runs
+      (port and chips) and what it is doing, with `[i]` to open the full view.
+      The stars take a tint for the kind of work and flare once per finished
+      request.
+
+  - id: inference-music
+    title: "Inference view: an audio model making tracks"
+    raw_script: demo/raw/inference-music.sh
+    duration: 66s
+    caption: >-
+      The Inference view beside a live audio-model server. The model is named
+      from what the server reports, the header shows the port and the chips the
+      server holds open, and the dashboard counts the jobs in flight and
+      finished. While the server is busy, a forming canvas fills the space
+      behind the dashboard. The backdrop follows the server's own busy and
+      queue figures.

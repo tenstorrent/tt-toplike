@@ -17,6 +17,39 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.13.17
+- **Fix**: review findings on the lanes and atmosphere. No false flares when stats drop
+  out or lanes reorder, a fresh load clock after a reload, a forge that starts over
+  per model, and trainer discovery moved off the render thread (with retries for
+  a Python script that imports `ttml` late). The atmosphere's smoothed gauges
+  restart when another model is featured, and a reused pid no longer keeps the
+  previous training run attached or its cached `ttml` answer.
+
+### 0.13.16
+- **Change**: chips stay the ones a server holds open; `TT_METAL_VISIBLE_DEVICES`
+  is not used to narrow them (it indexes the runtime's order, not the host's).
+- **Add**: demo scenes `arcade-lanes` and `inference-music`.
+
+### 0.13.14
+- **Fix**: the MiniMax-Music3 audio server shows jobs in flight and finished
+  requests (from `/v1/health`) and is labelled `MiniMax-Music3` (from
+  `/v1/models`).
+
+### 0.13.13
+- **Fix**: a model server with no `/health` route (the MiniMax-Music3 audio
+  server) shows as serving. The Inference view also asks `/v1/health`.
+
+### 0.13.12
+- **Add**: Arcade activity lanes. While a training run, a model load or a model
+  serving is active, the top starfield rows show up to two lanes (name,
+  progress, rate, `[t]`/`[i]` to open the full view); the stars tint by kind and
+  flare per step or request.
+- **Add**: an atmosphere behind the Inference view's snake: a forge while
+  loading, a storm while a prompt is read, an aurora with comets, rain and a
+  KV-cache tide while generating, a forming canvas for diffusion jobs.
+- **Fix**: models launched from a weights path are labelled by their run
+  (`rag-gate-27b`), not `model-dir` or `bundle`.
+
 ### 0.13.11
 - **Fix**: on hosts that run the STIG or CIS audit rules, tt-toplike wrote
   4 to 6 GB of audit log per hour. The process scans opened `/proc/<pid>`

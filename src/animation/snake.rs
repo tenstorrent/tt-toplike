@@ -107,6 +107,9 @@ pub struct Snake {
     /// the phase) can't snap the view back to the cold model-catalog mid-load.
     last_loading: Option<Instant>,
     last_featured: Option<ServiceState>,
+    /// The backdrop behind whichever renderer is active; see
+    /// [`crate::animation::atmosphere`].
+    atmosphere: crate::animation::atmosphere::Atmosphere,
 }
 
 /// How long the loading snake sticks after the last featured-loading tick. The
@@ -133,6 +136,7 @@ impl Snake {
             roam_frame: 0,
             last_loading: None,
             last_featured: None,
+            atmosphere: crate::animation::atmosphere::Atmosphere::new(),
         }
     }
 
@@ -147,6 +151,7 @@ impl Snake {
     /// behavior (pure [`choose_behavior`] plus the loading→ready burst override)
     /// and updates only the active sub-renderer.
     pub fn update(&mut self, world: &SnakeWorld) {
+        self.atmosphere.observe(world.rows);
         // Recreate the fixed-dim renderers when the view resizes (mirrors the
         // old inline recreate-on-resize). ServingCreature takes dims at render,
         // so it needs no rebuild here.
@@ -222,7 +227,22 @@ impl Snake {
     /// The `width`/`height` match what [`update`](Self::update) built the
     /// fixed-dim renderers with, so Growing/Roaming ignore them (they carry
     /// their own grid) while Feeding sizes its canvas to them here. Never panics.
+    ///
+    /// When a service is featured, an atmosphere (a forge while loading, a storm
+    /// while thinking, an aurora while generating) is laid *behind* the active
+    /// renderer: it fills blank cells only, so the snake, dashboards and roster
+    /// always win. With nothing featured this is exactly the foreground.
     pub fn render(&self, width: usize, height: usize) -> Vec<Line<'static>> {
+        let foreground = self.render_foreground(width, height);
+        if !self.atmosphere.active() {
+            return foreground;
+        }
+        let backdrop = self.atmosphere.render_backdrop(width, height);
+        crate::animation::atmosphere::composite(&backdrop, foreground, width)
+    }
+
+    /// The active renderer's own output, with no atmosphere behind it.
+    pub(crate) fn render_foreground(&self, width: usize, height: usize) -> Vec<Line<'static>> {
         match self.behavior {
             Behavior::Feeding => self.serving_creature.render(width, height),
             Behavior::Growing => self.load_snake.render(),
@@ -407,5 +427,104 @@ mod tests {
         z.rows = &ready;
         s.update(&z); // Feeding
         let _ = s.render(0, 0);
+    }
+
+    // ---- the atmosphere behind the snake ---------------------------------
+
+    /// One entry per display column of a line: the character, or `'\0'` for the
+    /// second column of a wide character.
+    fn columns(line: &ratatui::text::Line) -> Vec<char> {
+        use unicode_width::UnicodeWidthChar;
+        let mut out = Vec::new();
+        for span in &line.spans {
+            for c in span.content.chars() {
+                out.push(c);
+                for _ in 1..c.width().unwrap_or(0) {
+                    out.push('\0');
+                }
+            }
+        }
+        out
+    }
+
+    fn serving_row() -> ServiceState {
+        let mut r = svc(Phase::Ready);
+        let mut sv = crate::workload::inference_server::metrics::ServingStats::zeroed();
+        sv.generation_tps = 40.0;
+        sv.requests_running = 2;
+        sv.kv_cache_usage = 0.5;
+        r.serving = Some(sv);
+        r
+    }
+
+    #[test]
+    fn with_nothing_featured_the_view_is_exactly_the_foreground() {
+        let mut s = Snake::new();
+        s.update(&world(&[]));
+        assert_eq!(s.render(60, 16), s.render_foreground(60, 16));
+        let down = [svc(Phase::Down)];
+        s.update(&world(&down));
+        assert_eq!(s.render(60, 16), s.render_foreground(60, 16));
+    }
+
+    #[test]
+    fn the_atmosphere_fills_blank_cells_and_never_replaces_foreground() {
+        let rows = [serving_row()];
+        let mut s = Snake::new();
+        for _ in 0..40 {
+            s.update(&world(&rows));
+        }
+        let fg = s.render_foreground(60, 16);
+        let out = s.render(60, 16);
+        assert_eq!(fg.len(), out.len());
+        let mut changed = 0;
+        for (f, o) in fg.iter().zip(&out) {
+            let (fc, oc) = (columns(f), columns(o));
+            for (x, c) in fc.iter().enumerate() {
+                if *c != ' ' {
+                    assert_eq!(oc.get(x), Some(c), "foreground cell {x} changed");
+                } else if oc.get(x).is_some_and(|o| *o != ' ') {
+                    changed += 1;
+                }
+            }
+        }
+        assert!(changed > 0, "the backdrop shows in at least one blank cell");
+    }
+
+    #[test]
+    fn a_service_going_cold_switches_the_atmosphere_off() {
+        let rows = [serving_row()];
+        let mut s = Snake::new();
+        for _ in 0..40 {
+            s.update(&world(&rows));
+        }
+        assert_ne!(s.render(60, 16), s.render_foreground(60, 16));
+        s.update(&world(&[]));
+        assert_eq!(s.render(60, 16), s.render_foreground(60, 16));
+    }
+
+    #[test]
+    fn every_behavior_renders_with_the_atmosphere_at_every_size() {
+        for rows in [
+            vec![svc(Phase::Loading)],
+            vec![serving_row()],
+            vec![svc(Phase::Alarm)],
+        ] {
+            let mut s = Snake::new();
+            for (w, h) in [
+                (0usize, 0usize),
+                (1, 1),
+                (4, 3),
+                (30, 8),
+                (60, 16),
+                (160, 50),
+            ] {
+                let mut wd = world(&rows);
+                wd.width = w;
+                wd.height = h;
+                s.update(&wd);
+                let _ = s.render(w, h);
+            }
+        }
     }
 }

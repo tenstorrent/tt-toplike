@@ -187,6 +187,10 @@ pub struct TickSample {
     /// serving stats this tick). Parsing happens in `fold_tick`, not here,
     /// so `probe.rs` stays a pure-parser + I/O-trait module.
     pub metrics_text: String,
+    /// Body of the health request that decided `readiness` (`/health`, or
+    /// `/v1/health` when that is where the server answers). A server with no
+    /// `/metrics` may report busy/queued jobs in it; parsed in `fold_tick`.
+    pub health_body: String,
 }
 
 /// Abstract container access so the monitor is testable with a fake. Trail: a
@@ -290,6 +294,16 @@ pub(crate) fn chips_from_devices_json(json: &str) -> Vec<usize> {
         })
         .unwrap_or_default();
     chips_from_paths(paths)
+}
+
+/// The model a server says it serves: the first `id` in its `/v1/models`
+/// listing, without the organisation prefix (`MiniMaxAI/MiniMax-Music3` becomes
+/// `MiniMax-Music3`). `None` for an empty list or a body that is not JSON.
+pub fn served_model_id(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    let id = v.get("data")?.as_array()?.first()?.get("id")?.as_str()?;
+    let name = super::services::model_basename(id);
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 /// Real `docker`-CLI-backed [`ContainerProbe`]. All calls shell out; every
@@ -1005,6 +1019,16 @@ mod tests {
         let (cpu, rss) = parse_docker_stats(&formatted).expect("must parse");
         assert!((cpu - 12.5).abs() < 0.01);
         assert_eq!(rss, 1024 * 1024);
+    }
+
+    #[test]
+    fn served_model_id_reads_the_first_models_entry() {
+        let body =
+            r#"{"object":"list","data":[{"id":"MiniMaxAI/MiniMax-Music3","object":"model"}]}"#;
+        assert_eq!(served_model_id(body).as_deref(), Some("MiniMax-Music3"));
+        assert_eq!(served_model_id(r#"{"data":[]}"#), None);
+        assert_eq!(served_model_id("<html>"), None);
+        assert_eq!(served_model_id(""), None);
     }
 }
 

@@ -91,6 +91,11 @@ pub struct ArcadeVisualization {
     /// from the TUI. `None` when nothing is serving — the duel strip is hidden
     /// and Row 1 stays exactly as Task 3 left it.
     serving: Option<ServingStats>,
+    /// Activities running this tick (training, loading, serving), most urgent first.
+    activities: Vec<crate::animation::Activity>,
+    /// The last pulse count seen per activity id, to tell a rise from a reset.
+    /// Keyed by identity, not lane position, because lanes reorder and exit.
+    last_pulse: std::collections::HashMap<String, u64>,
     /// Motion + glyph state for the duel strip.
     duel: DuelState,
     /// Running peak of observed device power (W), floored at 1.0. Normalizes the
@@ -178,6 +183,8 @@ impl ArcadeVisualization {
             flow_end,
             board_topology: None,
             serving: None,
+            activities: Vec::new(),
+            last_pulse: std::collections::HashMap::new(),
             duel: DuelState::new(),
             power_peak: 1.0,
         }
@@ -189,6 +196,72 @@ impl ArcadeVisualization {
     /// Row 1 as the plain telemetry strip. Called once per tick from the TUI.
     pub fn set_serving(&mut self, serving: Option<ServingStats>) {
         self.serving = serving;
+    }
+
+    /// Hand Arcade the activities running this tick (already in urgency order).
+    /// An empty list leaves Arcade exactly as it was.
+    pub fn set_activities(&mut self, activities: Vec<crate::animation::Activity>) {
+        self.activities = activities;
+    }
+
+    /// Rows the lanes take from the top of the starfield region: up to 2, and 0
+    /// unless the starfield has at least 6 rows so it stays readable.
+    pub fn lane_rows(&self) -> usize {
+        const MIN_STARFIELD_ROWS: usize = 6;
+        if self.activities.is_empty()
+            || self.starfield_end.saturating_sub(self.starfield_start) < MIN_STARFIELD_ROWS
+        {
+            return 0;
+        }
+        self.activities.len().min(2)
+    }
+
+    /// The tint for the most urgent activity: red stalled, violet loading, warm
+    /// training, teal serving. `None` when nothing runs.
+    fn activity_tint(&self) -> Option<crate::animation::ActivityTint> {
+        use crate::animation::{ActivityKind, ActivityTint};
+        let a = self.activities.first()?;
+        let hue = if a.stalled {
+            0.0
+        } else {
+            match a.kind {
+                ActivityKind::Train => 40.0,
+                ActivityKind::Load => 275.0,
+                ActivityKind::Serve => 175.0,
+            }
+        };
+        Some(ActivityTint { hue, strength: 0.3 })
+    }
+
+    /// One flare per new pulse (at most three per activity per tick). Counts are
+    /// followed by activity id, so a reorder or an exit moves no baseline. The
+    /// first sight of an activity is a baseline, a count that goes down (a new
+    /// run, a restarted server) is a reset, and an unavailable count keeps the
+    /// last baseline, so a count that returns unchanged adds nothing.
+    fn pulse_activities(&mut self) {
+        let mut flares = 0;
+        for a in &self.activities {
+            let Some(now) = a.pulse_seq else {
+                continue;
+            };
+            if let Some(prev) = self.last_pulse.get(&a.id) {
+                if now > *prev {
+                    flares += (now - *prev).min(3);
+                }
+            }
+            self.last_pulse.insert(a.id.clone(), now);
+        }
+        let ids: Vec<&str> = self.activities.iter().map(|a| a.id.as_str()).collect();
+        self.last_pulse.retain(|id, _| ids.contains(&id.as_str()));
+        for _ in 0..flares {
+            self.starfield.pulse();
+        }
+    }
+
+    /// First row index (in the whole render) below the lanes, used to keep the
+    /// hero off them. The header, Row 1 and the separator come first.
+    fn lanes_end_row(&self) -> usize {
+        3 + self.lane_rows()
     }
 
     /// Propagate a sensitivity multiplier to all three sub-visualizations.
@@ -427,6 +500,8 @@ impl ArcadeVisualization {
 
         // Update sub-visualizations
         self.starfield.update_from_telemetry(backend);
+        self.starfield.set_activity_tint(self.activity_tint());
+        self.pulse_activities();
         self.memory_castle.update(backend);
         self.memory_flow.update(backend);
         self.defrag.update(backend);
@@ -502,6 +577,10 @@ impl ArcadeVisualization {
         // Smooth interpolation toward target
         self.hero_x = lerp(self.hero_x, self.hero_target_x, self.hero_lerp_speed);
         self.hero_y = lerp(self.hero_y, self.hero_target_y, self.hero_lerp_speed);
+        // Keep the hero below any lanes, so it never sits on one.
+        if self.lane_rows() > 0 {
+            self.hero_y = self.hero_y.max(self.lanes_end_row() as f32);
+        }
 
         // Update trail
         self.update_trail();
@@ -670,8 +749,21 @@ impl ArcadeVisualization {
             lines.push(line);
         }
 
-        // Overlay hero character and trail on the composite canvas
-        self.overlay_hero(lines, backend)
+        // Overlay hero character and trail on the composite canvas, then lay
+        // the activity lanes over the first starfield rows so nothing covers
+        // them. With no activities `lane_rows()` is 0 and this does nothing.
+        let mut lines = self.overlay_hero(lines, backend);
+        let n = self.lane_rows();
+        if n > 0 {
+            let lanes = crate::animation::render_lanes(&self.activities, self.width);
+            for (i, lane) in lanes.into_iter().enumerate() {
+                // Header (0), Row 1 (1), separator (2), then the starfield rows.
+                if let Some(slot) = lines.get_mut(3 + i) {
+                    *slot = lane;
+                }
+            }
+        }
+        lines
     }
 
     /// Build the single shared per-device telemetry strip.
@@ -1311,5 +1403,229 @@ mod tests {
             text.contains("°C"),
             "standalone MemoryCastle (chrome default) must still show °C"
         );
+    }
+
+    fn lane_act(label: &str) -> crate::animation::Activity {
+        crate::animation::Activity {
+            id: format!("train:{label}"),
+            kind: crate::animation::ActivityKind::Train,
+            label: label.into(),
+            stalled: false,
+            fields: vec!["step 1/10 █░░░░░░░ 10%".into()],
+            pulse_seq: Some(0),
+            key_hint: 't',
+        }
+    }
+
+    fn rows_of(a: &ArcadeVisualization, backend: &dyn TelemetryBackend) -> Vec<String> {
+        a.render(backend)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn mock_backend() -> crate::backend::mock::MockBackend {
+        let mut b = crate::backend::mock::MockBackend::new(2);
+        b.init().unwrap();
+        b.update().unwrap();
+        b
+    }
+
+    /// With no activities nothing changes: no lanes are reserved and no lane tag
+    /// appears. (Arcade's render uses randomness, so this checks the structure
+    /// rather than comparing bytes with a stored frame.)
+    #[test]
+    fn no_activities_means_no_lanes() {
+        let backend = mock_backend();
+        let mut a = ArcadeVisualization::new(120, 40);
+        a.update(&backend);
+        assert_eq!(a.lane_rows(), 0);
+        let text = rows_of(&a, &backend).join("\n");
+        assert!(!text.contains("TRAIN") && !text.contains('▎'), "{text}");
+    }
+
+    #[test]
+    fn activities_replace_the_first_starfield_rows_and_keep_the_row_count() {
+        let backend = mock_backend();
+        let mut idle = ArcadeVisualization::new(120, 40);
+        idle.update(&backend);
+        let idle_rows = rows_of(&idle, &backend).len();
+
+        let mut a = ArcadeVisualization::new(120, 40);
+        a.set_activities(vec![lane_act("nano_gpt"), lane_act("second")]);
+        a.update(&backend);
+        assert_eq!(a.lane_rows(), 2);
+        let rows = rows_of(&a, &backend);
+        assert_eq!(rows.len(), idle_rows, "the render must keep its height");
+        // Header, Row 1, separator, then the lanes.
+        assert!(rows[3].contains("nano_gpt"), "{:?}", &rows[..6]);
+        assert!(rows[4].contains("second"), "{:?}", &rows[..6]);
+        // No lane row ends in a right-side border glyph.
+        for r in &rows[3..5] {
+            assert!(
+                !"│┐┘║▕".contains(r.trim_end().chars().last().unwrap_or(' ')),
+                "{r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_starfield_gets_no_lanes() {
+        let backend = mock_backend();
+        let mut a = ArcadeVisualization::new(120, 12); // starfield region < 6 rows
+        assert!((a.starfield_end - a.starfield_start) < 6);
+        a.set_activities(vec![lane_act("nano_gpt")]);
+        a.update(&backend);
+        assert_eq!(a.lane_rows(), 0);
+        assert!(!rows_of(&a, &backend).join("\n").contains("nano_gpt"));
+    }
+
+    /// The hero must not cover a lane. Force the hero to the top of the screen
+    /// and check the lane text survives intact.
+    #[test]
+    fn the_hero_never_covers_a_lane() {
+        let backend = mock_backend();
+        let mut a = ArcadeVisualization::new(120, 40);
+        a.set_activities(vec![lane_act("nano_gpt")]);
+        a.update(&backend);
+        a.hero_x = 10.0;
+        a.hero_y = 0.0;
+        a.hero_target_y = 0.0;
+        a.update(&backend);
+        let rows = rows_of(&a, &backend);
+        assert!(rows[3].contains("nano_gpt"), "{:?}", &rows[..5]);
+        assert!(
+            a.hero_y >= a.lane_rows() as f32 + 3.0,
+            "hero_y {}",
+            a.hero_y
+        );
+    }
+
+    #[test]
+    fn a_new_pulse_flares_the_starfield_but_a_drop_does_not() {
+        let backend = mock_backend();
+        let mut a = ArcadeVisualization::new(120, 40);
+        let mut act = lane_act("nano_gpt");
+        act.pulse_seq = Some(10);
+        a.set_activities(vec![act.clone()]);
+        a.update(&backend);
+        assert_eq!(
+            a.starfield.live_flares(),
+            0,
+            "the first sight of a count is a baseline"
+        );
+        act.pulse_seq = Some(12);
+        a.set_activities(vec![act.clone()]);
+        a.update(&backend);
+        assert!(a.starfield.live_flares() >= 1, "a rise flares");
+        let before = a.starfield.live_flares();
+        act.pulse_seq = Some(1); // a new run: the count went down
+        a.set_activities(vec![act]);
+        a.update(&backend);
+        assert!(
+            a.starfield.live_flares() <= before,
+            "a drop is a reset, not a burst"
+        );
+    }
+
+    #[test]
+    fn running_activities_tint_the_starfield_by_kind_and_idle_does_not() {
+        use crate::animation::ActivityKind;
+        let backend = mock_backend();
+        let mut a = ArcadeVisualization::new(120, 40);
+        a.update(&backend);
+        assert!(a.activity_tint().is_none());
+        let mut load = lane_act("m");
+        load.kind = ActivityKind::Load;
+        let mut serve = lane_act("m");
+        serve.kind = ActivityKind::Serve;
+        let mut stalled = lane_act("m");
+        stalled.stalled = true;
+        let mut hue = |act: crate::animation::Activity| {
+            a.set_activities(vec![act]);
+            a.activity_tint().unwrap().hue
+        };
+        let (train, load, serve, stalled) =
+            (hue(lane_act("m")), hue(load), hue(serve), hue(stalled));
+        let all = [train, load, serve, stalled];
+        for (i, x) in all.iter().enumerate() {
+            for y in &all[i + 1..] {
+                assert_ne!(x, y, "each kind has its own tint: {all:?}");
+            }
+        }
+    }
+
+    fn id_act(
+        id: &str,
+        kind: crate::animation::ActivityKind,
+        pulse: Option<u64>,
+    ) -> crate::animation::Activity {
+        let mut a = lane_act(id);
+        a.id = id.into();
+        a.kind = kind;
+        a.pulse_seq = pulse;
+        a
+    }
+
+    /// Lanes reorder when a load finishes. Baselines follow the activity, not
+    /// the lane position, so `[LOAD(0), TRAIN(100)]` becoming
+    /// `[TRAIN(100), SERVE(0)]` flares nothing.
+    #[test]
+    fn reordering_lanes_does_not_flare_the_starfield() {
+        use crate::animation::ActivityKind::{Load, Serve, Train};
+        let backend = mock_backend();
+        let mut a = ArcadeVisualization::new(120, 40);
+        a.set_activities(vec![
+            id_act("svc:m", Load, Some(0)),
+            id_act("train:7", Train, Some(100)),
+        ]);
+        a.update(&backend);
+        a.set_activities(vec![
+            id_act("train:7", Train, Some(100)),
+            id_act("svc:m", Serve, Some(0)),
+        ]);
+        a.update(&backend);
+        assert_eq!(a.starfield.live_flares(), 0, "no counter advanced");
+    }
+
+    /// A service that loses its stats for a scrape and comes back at the same
+    /// count adds no flares. One that comes back higher flares for the rise.
+    #[test]
+    fn an_unavailable_count_keeps_its_baseline() {
+        use crate::animation::ActivityKind::Serve;
+        let backend = mock_backend();
+        let mut a = ArcadeVisualization::new(120, 40);
+        a.set_activities(vec![id_act("svc:m", Serve, Some(100))]);
+        a.update(&backend);
+        a.set_activities(vec![id_act("svc:m", Serve, None)]);
+        a.update(&backend);
+        a.set_activities(vec![id_act("svc:m", Serve, Some(100))]);
+        a.update(&backend);
+        assert_eq!(a.starfield.live_flares(), 0, "same 100 again is not new");
+        a.set_activities(vec![id_act("svc:m", Serve, Some(102))]);
+        a.update(&backend);
+        assert!(a.starfield.live_flares() >= 1, "a real rise still flares");
+    }
+
+    /// An activity that appears in view for the first time gets a baseline, not
+    /// a burst for its whole count.
+    #[test]
+    fn a_newly_shown_activity_is_a_baseline_not_a_burst() {
+        use crate::animation::ActivityKind::{Serve, Train};
+        let backend = mock_backend();
+        let mut a = ArcadeVisualization::new(120, 40);
+        a.set_activities(vec![id_act("train:7", Train, Some(5))]);
+        a.update(&backend);
+        a.set_activities(vec![
+            id_act("train:7", Train, Some(5)),
+            id_act("svc:m", Serve, Some(9_000)),
+        ]);
+        a.update(&backend);
+        assert_eq!(a.starfield.live_flares(), 0);
     }
 }

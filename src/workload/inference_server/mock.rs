@@ -36,12 +36,23 @@ pub fn is_mock_label(label: &str) -> bool {
 fn serving_stats(t: f32) -> ServingStats {
     // A plausible decode cadence that breathes rather than sitting flat.
     let wave = (t * 0.7).sin() * 0.5 + 0.5;
+    // Early in each 24 s beat the server reads a prompt: requests are in, the
+    // prompt is being processed, and no token has come out yet.
+    let reading = (6.0..10.0).contains(&(t % 24.0));
     ServingStats {
-        generation_tps: 380.0 + wave * 260.0,
+        generation_tps: if reading { 0.0 } else { 380.0 + wave * 260.0 },
         prompt_tps: 1_900.0 + (t * 0.31).sin() * 700.0,
-        completed_delta: 2 + ((t * 0.5) as u32 % 4),
+        completed_delta: if reading {
+            0
+        } else {
+            2 + ((t * 0.5) as u32 % 4)
+        },
         errored_delta: 0,
-        requests_running: 1 + ((t * 0.4) as u32 % 5),
+        requests_running: if reading {
+            3
+        } else {
+            1 + ((t * 0.4) as u32 % 5)
+        },
         requests_waiting: (t * 0.23) as u32 % 3,
         kv_cache_usage: (0.18 + wave * 0.55).clamp(0.0, 1.0),
         ttft_avg_s: 0.09 + wave * 0.06,
@@ -212,6 +223,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A real server pauses to read a prompt before the first token comes out.
+    /// The synthetic one does too, early in each beat, so the Inference view's
+    /// storm (requests running, no tokens flowing) shows under `--mock`.
+    #[test]
+    fn the_mock_server_pauses_to_read_a_prompt_now_and_then() {
+        let samples: Vec<ServingStats> = (0..960).map(|i| serving_stats(i as f32 * 0.1)).collect();
+        let reading: Vec<&ServingStats> =
+            samples.iter().filter(|s| s.generation_tps == 0.0).collect();
+        assert!(!reading.is_empty(), "a prefill pause exists");
+        assert!(
+            reading.len() * 4 < samples.len(),
+            "and it is the exception: {} of {}",
+            reading.len(),
+            samples.len()
+        );
+        for s in reading {
+            assert!(s.requests_running > 0, "requests are in while it reads");
+            assert!(s.prompt_tps > 0.0, "and the prompt is being read");
+            assert_eq!(s.completed_delta, 0, "nothing finishes mid-read");
+        }
+        // The pause falls early in the beat, inside the window where this
+        // service is the only one featured at start-up.
+        assert!(serving_stats(7.0).generation_tps == 0.0);
+        assert!(serving_stats(2.0).generation_tps > 0.0);
     }
 
     /// The offset exists so the roster shows two different phases at once —

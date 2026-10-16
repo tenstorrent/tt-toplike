@@ -2064,6 +2064,7 @@ mod tests {
             pid: 4242,
             binary: "nano_gpt".into(),
             config_path: None,
+            start_time: None,
         });
         st.log = Some(LogSource::NotRedirected);
 
@@ -2099,6 +2100,7 @@ mod tests {
             pid: 48213,
             binary: "nano_gpt".into(),
             config_path: Some("t.yaml".into()),
+            start_time: None,
         });
         st.log = Some(LogSource::File("/tmp/x.log".into()));
         st.apply_event(TrainEvent::MaxSteps(50000));
@@ -2136,6 +2138,7 @@ mod tests {
             pid: 48213,
             binary: "linear_regression".into(),
             config_path: None,
+            start_time: None,
         });
         st.log = Some(LogSource::File("/tmp/x.log".into()));
         st.apply_event(TrainEvent::Step {
@@ -2196,6 +2199,7 @@ mod tests {
             pid: 1,
             binary: "nano_gpt".into(),
             config_path: Some("t.yaml".into()),
+            start_time: None,
         });
         st.log = Some(LogSource::File("/tmp/x.log".into()));
         st.apply_event(TrainEvent::MaxSteps(1000));
@@ -2240,6 +2244,7 @@ mod tests {
             pid: 1,
             binary: "nano_gpt".into(),
             config_path: None,
+            start_time: None,
         });
         st.log = Some(LogSource::File("/tmp/x.log".into()));
         st.apply_event(TrainEvent::Step { step: 1, loss: 4.0 });
@@ -2282,6 +2287,7 @@ mod tests {
                 pid: 1,
                 binary: "nano_gpt".into(),
                 config_path: None,
+                start_time: None,
             });
             st.log = log;
             let lines: Vec<String> = TrainView::new(120, 40)
@@ -2437,6 +2443,7 @@ mod tests {
                 pid: 1,
                 binary: "nano_gpt".into(),
                 config_path: None,
+                start_time: None,
             });
             st.log = Some(LogSource::File("/tmp/x.log".into()));
             for (i, l) in losses.iter().enumerate() {
@@ -2491,6 +2498,7 @@ mod tests {
             pid: 1,
             binary: "nano_gpt".into(),
             config_path: None,
+            start_time: None,
         });
         st.log = Some(LogSource::File("/tmp/x.log".into()));
         for i in 1..=20u64 {
@@ -2520,6 +2528,7 @@ mod tests {
             pid: 1,
             binary: "nano_gpt".into(),
             config_path: None,
+            start_time: None,
         });
         st.log = Some(LogSource::File("/tmp/x.log".into()));
         for i in 1..=200u64 {
@@ -2555,6 +2564,7 @@ mod tests {
             pid: 1,
             binary: "nano_gpt".into(),
             config_path: None,
+            start_time: None,
         });
         st.log = Some(LogSource::File("/tmp/x.log".into()));
         st.apply_event(crate::workload::train::TrainEvent::Step { step: 1, loss: 2.0 });
@@ -3725,6 +3735,7 @@ mod tests {
             pid: 1,
             binary: "python".into(),
             config_path: None,
+            start_time: None,
         });
         st.log = Some(LogSource::File("/tmp/x.log".into()));
         st

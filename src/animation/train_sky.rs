@@ -45,7 +45,7 @@ pub const ANIM_FPS: f32 = 60.0;
 
 /// Aurora intensity and hue at a cell. `rel_y` is 0.0 at the top of the sky
 /// band and 1.0 at the mountain line.
-fn aurora(x: usize, rel_y: f32, frame: u64) -> (f32, f32) {
+pub(crate) fn aurora(x: usize, rel_y: f32, frame: u64) -> (f32, f32) {
     let fx = x as f32;
     // Seconds-since-start, scaled so the constants below stay in the units
     // they were tuned in (one "old frame" = 1/10 s).
