@@ -1,4 +1,4 @@
-tt-toplike (0.13.16) noble; urgency=medium
+tt-toplike (0.13.17) noble; urgency=medium
 
   * Arcade and the Inference atmosphere no longer flare for events that did
     not happen. A service whose stats go missing for a scrape and return at the
@@ -16,7 +16,7 @@ tt-toplike (0.13.16) noble; urgency=medium
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 15 Oct 2026 18:00:00 +0000
 
-tt-toplike (0.13.15) noble; urgency=medium
+tt-toplike (0.13.16) noble; urgency=medium
 
   * A server's chips stay the ones it holds open. A container's
     TT_METAL_VISIBLE_DEVICES list is not used to narrow them: on this box the
@@ -25,13 +25,13 @@ tt-toplike (0.13.15) noble; urgency=medium
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 15 Oct 2026 17:30:00 +0000
 
-tt-toplike (0.13.14) noble; urgency=medium
+tt-toplike (0.13.15) noble; urgency=medium
 
   * New demo scenes: arcade-lanes and inference-music (demo/demos.yaml).
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 15 Oct 2026 17:10:00 +0000
 
-tt-toplike (0.13.13) noble; urgency=medium
+tt-toplike (0.13.14) noble; urgency=medium
 
   * An audio server with no /metrics shows its work. MiniMax-Music3 reports
     busy, queue_depth and requests_served in /v1/health. The Inference view
@@ -43,7 +43,7 @@ tt-toplike (0.13.13) noble; urgency=medium
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 15 Oct 2026 16:10:00 +0000
 
-tt-toplike (0.13.12) noble; urgency=medium
+tt-toplike (0.13.13) noble; urgency=medium
 
   * A model server with no /health route is no longer shown as loading
     while it serves. The Inference view now also asks /v1/health, which the
@@ -51,6 +51,27 @@ tt-toplike (0.13.12) noble; urgency=medium
     ready. A 200 that says warming or loading still counts as not ready.
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 15 Oct 2026 15:40:00 +0000
+
+tt-toplike (0.13.12) noble; urgency=medium
+
+  * Arcade shows what is running. While a training run, a model load or a
+    model serving is active, the top starfield rows become lanes (up to two,
+    most urgent first) with the name, progress and rate, and a key to open the
+    full view. The stars take a tint by kind and flare once per finished step
+    or request. Nothing running, nothing changes. A training run is noticed
+    from the background process scan, so Arcade adds no work to the render
+    thread.
+  * The Inference view has an atmosphere behind the snake. A forge of rising
+    beams while a model compiles or loads. A storm while it reads a prompt. An
+    aurora while it generates, with comets for running requests, rain for
+    prompt and output tokens, and a tide for KV-cache use. A forming canvas for
+    diffusion and video jobs. Each effect follows a real signal, and it fills
+    blank cells only, so the dashboards stay on top.
+  * A model launched from a weights path is labelled by its run, not by its
+    last directory: `rag-gate-27b`, not `model-dir` or `bundle`. A vLLM
+    `--served-model-name` is used when given.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Wed, 14 Oct 2026 12:00:00 +0000
 
 tt-toplike (0.13.11) noble; urgency=medium
 
@@ -71,25 +92,6 @@ tt-toplike (0.13.11) noble; urgency=medium
     Valkov (issue 35).
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 16 Oct 2026 12:00:00 +0000
-
-  * Arcade shows what is running. While a training run, a model load or a
-    model serving is active, the top starfield rows become lanes (up to two,
-    most urgent first) with the name, progress and rate, and a key to open the
-    full view. The stars take a tint by kind and flare once per finished step
-    or request. Nothing running, nothing changes. A training run is noticed
-    from the background process scan, so Arcade adds no work to the render
-    thread.
-  * The Inference view has an atmosphere behind the snake. A forge of rising
-    beams while a model compiles or loads. A storm while it reads a prompt. An
-    aurora while it generates, with comets for running requests, rain for
-    prompt and output tokens, and a tide for KV-cache use. A forming canvas for
-    diffusion and video jobs. Each effect follows a real signal, and it fills
-    blank cells only, so the dashboards stay on top.
-  * A model launched from a weights path is labelled by its run, not by its
-    last directory: `rag-gate-27b`, not `model-dir` or `bundle`. A vLLM
-    `--served-model-name` is used when given.
-
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Wed, 14 Oct 2026 12:00:00 +0000
 
 tt-toplike (0.13.10) noble; urgency=medium
 

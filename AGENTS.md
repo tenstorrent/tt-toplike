@@ -1335,7 +1335,7 @@ of Arcade and the Inference view under `--mock` are in `demo/assets/arcade-atmos
 ## 2026-10-15: do not narrow chips by TT_METAL_VISIBLE_DEVICES
 
 I added a filter that narrowed a container's chips to its `TT_METAL_VISIBLE_DEVICES`
-list (v0.13.13, v0.13.14) and removed it in v0.13.15. The music server sets the
+list (v0.13.14, v0.13.15) and removed it in v0.13.16. The music server sets the
 variable to `0` and holds `/dev/tenstorrent/0` and `/1` open, but while it
 generated, only chip 1 drew power (about 125 W; chip 0 stayed at 40 W, read from
 hwmon, which maps to `/dev/tenstorrent/N` in the same order). The list indexes the
