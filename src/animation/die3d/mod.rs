@@ -34,14 +34,14 @@ use crate::backend::TelemetryBackend;
 use crate::models::Architecture;
 use camera::{dissolve, scramble, Camera, Director, TransitionKind};
 use palette::GRAYSKULL;
-use raster::PixelBuf;
-use ratatui::style::{Color, Style};
+use raster::{Iso, PixelBuf};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use scene::{
-    board_grid, chip_inputs, draw_board_scene, fit_pixels, has_per_tile_data, ChipInputs, Detail,
-    SceneFit, ESTIMATE_LABEL, MIN_CELLS,
+    board_band_origin, board_grid, chip_inputs, die_centre, draw_board_scene, fit_pixels,
+    has_per_tile_data, ChipInputs, Detail, SceneFit, ESTIMATE_LABEL, MIN_CELLS,
 };
-use super_scene::{draw_super_scene, super_grid};
+use super_scene::{band_origin, draw_super_scene, super_grid};
 use switching::{Scene, Switcher};
 use triggers::TriggerDetector;
 
@@ -129,6 +129,8 @@ die3d_keys! {
     /// `X`: how cuts change the picture: a shuffle of the kinds, or always
     /// chaos, always a dissolve, or always a spin.
     CycleTransition,
+    /// `L`: chip labels on the dies on or off.
+    ToggleLabels,
 }
 
 impl Die3dKey {
@@ -141,7 +143,8 @@ impl Die3dKey {
             | Die3dKey::ToggleAuto
             | Die3dKey::ToggleBraille
             | Die3dKey::ToggleTransparent
-            | Die3dKey::CycleTransition => true,
+            | Die3dKey::CycleTransition
+            | Die3dKey::ToggleLabels => true,
             Die3dKey::NextBoard | Die3dKey::PrevBoard | Die3dKey::CutNow => false,
         }
     }
@@ -158,6 +161,7 @@ pub fn key_to_die3d(c: char) -> Option<Die3dKey> {
         'B' => Some(Die3dKey::ToggleBraille),
         'T' => Some(Die3dKey::ToggleTransparent),
         'X' => Some(Die3dKey::CycleTransition),
+        'L' => Some(Die3dKey::ToggleLabels),
         _ => None,
     }
 }
@@ -184,6 +188,17 @@ enum Shown {
     Fallback(usize),
 }
 
+/// Where the dies of a drawn scene are: the projection it was drawn with
+/// (spin included), the grid that projection is for, and each die's centre on
+/// that grid with the label to put there. The labels are placed from this, so
+/// they follow the picture exactly.
+#[derive(Debug, Clone)]
+struct Placement {
+    iso: Iso,
+    grid: (usize, usize),
+    dies: Vec<((f32, f32), String)>,
+}
+
 /// The Die 3D view.
 ///
 /// Holds no pixel buffers between frames: `render` allocates one sized to the
@@ -199,6 +214,8 @@ pub struct Die3dView {
     /// Leave the background unpainted so the terminal's own colour (and any
     /// translucency) shows through. Off paints it opaque black.
     transparent: bool,
+    /// Draw each die's name and power over it (`L`).
+    show_labels: bool,
     director: Director,
     detector: TriggerDetector,
     switcher: Switcher,
@@ -212,7 +229,7 @@ pub struct Die3dView {
 
 impl Die3dView {
     /// A view for a terminal of `cols` x `rows` cells, in braille, showing
-    /// every board, with automatic cuts on. It shows nothing until `update`.
+    /// every board, with automatic cuts and chip labels on. It shows nothing until `update`.
     pub fn new(cols: usize, rows: usize) -> Die3dView {
         Die3dView::with_reserved_rows(cols, rows, 0)
     }
@@ -228,6 +245,7 @@ impl Die3dView {
             reserved_rows,
             braille: true,
             transparent: true,
+            show_labels: true,
             director: Director::new(CAMERA_SEED),
             detector: TriggerDetector::new(),
             switcher: Switcher::new(),
@@ -313,12 +331,23 @@ impl Die3dView {
                 self.switcher.choose(next);
             }
             Die3dKey::CutNow => {
-                self.director.cut_by_hand(now);
+                // A scene switch still waiting for the midpoint of the cut in
+                // progress would land part way through this new cut's
+                // transition. This cut takes it over: it is told the scene
+                // changes (so it never spins) and the switch moves to its
+                // swap.
+                let switching = self.switcher.pending_after(now);
+                self.director.cut_by_hand_with_scene(now, switching);
+                if switching {
+                    let swap = self.director.swapped_at().unwrap_or(now);
+                    self.switcher.hand_pending_to(now, swap);
+                }
             }
             Die3dKey::ToggleAuto => self.director.set_auto(!self.director.auto()),
             Die3dKey::ToggleBraille => self.braille = !self.braille,
             Die3dKey::ToggleTransparent => self.transparent = !self.transparent,
             Die3dKey::CycleTransition => self.director.cycle_transition_mode(),
+            Die3dKey::ToggleLabels => self.show_labels = !self.show_labels,
         }
     }
 
@@ -343,12 +372,28 @@ impl Die3dView {
         let scene_rows = self.rows - FOOTER_ROWS;
         let frame = self.frame(now);
         let mut lines = match &frame {
-            Some((buf, _)) if self.braille => cells::to_braille_lines(buf),
-            Some((buf, _)) => cells::to_halfblock_lines(buf),
+            Some((buf, ..)) if self.braille => cells::to_braille_lines(buf),
+            Some((buf, ..)) => cells::to_halfblock_lines(buf),
             None => vec![hint(no_fit_hint(self.braille).into())],
         };
         lines.resize(scene_rows, Line::default());
-        lines.extend(self.footer(now, frame.map(|(_, shown)| shown)));
+        lines.extend(self.footer(now, frame.as_ref().map(|f| f.1)));
+        // The labels go over the converted cells, placed with the projection
+        // the frame was drawn with. While a transition runs the picture is
+        // noise, a mix of two frames or turning, so no label could stay on
+        // its die: they wait for it to end.
+        if let Some((_, _, Some(placed))) = &frame {
+            if self.show_labels && self.director.progress(now).is_none() {
+                let anchors = self.label_anchors(placed, scene_rows);
+                draw_labels(
+                    &mut lines,
+                    scene_rows,
+                    self.cols,
+                    &anchors,
+                    self.label_style(),
+                );
+            }
+        }
         lines
     }
 
@@ -374,33 +419,38 @@ impl Die3dView {
     ///   scene until the swap at the midpoint, the new one after it.
     /// - Spin: the scene drawn from the angle part way between the two
     ///   cameras. The scene and the footer do not change.
-    fn frame(&self, now: f64) -> Option<(PixelBuf, Shown)> {
+    ///
+    /// The placement is that of the one scene drawn; a dissolve mixes two and
+    /// has none.
+    fn frame(&self, now: f64) -> Option<(PixelBuf, Shown, Option<Placement>)> {
         let progress = self.director.progress(now);
         match (self.director.transition_kind(), progress) {
             (Some(TransitionKind::Dissolve), Some(p)) => {
                 let (from, to) = self.director.cameras();
                 let (before, after) = self.transition_scenes(now);
-                let (old, old_shown) = self.scene_with(now, before, Aim::At(from))?;
-                let (new, new_shown) = self.scene_with(now, after, Aim::At(to))?;
+                let (old, old_shown, _) = self.scene_with(now, before, Aim::At(from))?;
+                let (new, new_shown, _) = self.scene_with(now, after, Aim::At(to))?;
                 let swapped = self.director.swapped_at().is_some_and(|at| now >= at);
                 let shown = if swapped { new_shown } else { old_shown };
                 // One pixel order for the whole dissolve, from the cut's start.
                 let seed = self.director.cut_at().map_or(0, |t| (t * 1000.0) as u32);
-                Some((dissolve(&old, &new, p, seed), shown))
+                Some((dissolve(&old, &new, p, seed), shown, None))
             }
             (Some(TransitionKind::Spin), Some(p)) => {
                 let (from, to) = self.director.cameras();
                 let scene = self.switcher.scene_at(now);
-                self.scene_with(now, scene, Aim::Between(from, to, p))
+                let (buf, shown, placed) =
+                    self.scene_with(now, scene, Aim::Between(from, to, p))?;
+                Some((buf, shown, Some(placed)))
             }
             _ => {
-                let (mut buf, shown) = self.scene_pixels(now)?;
+                let (mut buf, shown, placed) = self.scene_now(now)?;
                 if let Some(intensity) = self.director.chaos(now) {
                     // A new noise pattern 60 times a second, the same for a
                     // given now.
                     scramble(&mut buf, intensity, (now * 60.0) as u32);
                 }
-                Some((buf, shown))
+                Some((buf, shown, Some(placed)))
             }
         }
     }
@@ -421,15 +471,29 @@ impl Die3dView {
     /// The camera is `Director::camera_at(now)`: during a chaos or dissolve
     /// cut the old angle stays until the midpoint and the new one shows from
     /// there; during a spin the old angle stays until the end.
-    fn scene_pixels(&self, now: f64) -> Option<(PixelBuf, Shown)> {
+    fn scene_now(&self, now: f64) -> Option<(PixelBuf, Shown, Placement)> {
         let scene = self.switcher.scene_at(now);
         self.scene_with(now, scene, Aim::At(self.director.camera_at(now)))
     }
 
-    /// `scene` at `now`, projected as `aim` says. The super scene falls back
-    /// to the board shown last when it does not fit. A board index past the
-    /// end of the board list (it can shrink between updates) is clamped.
-    fn scene_with(&self, now: f64, scene: Scene, aim_by: Aim) -> Option<(PixelBuf, Shown)> {
+    /// [`scene_now`](Self::scene_now) without the placement: the bare scene
+    /// the tests compare frames against.
+    #[cfg(test)]
+    fn scene_pixels(&self, now: f64) -> Option<(PixelBuf, Shown)> {
+        let (buf, shown, _) = self.scene_now(now)?;
+        Some((buf, shown))
+    }
+
+    /// `scene` at `now`, projected as `aim` says, and where its dies landed.
+    /// The super scene falls back to the board shown last when it does not
+    /// fit. A board index past the end of the board list (it can shrink
+    /// between updates) is clamped.
+    fn scene_with(
+        &self,
+        now: f64,
+        scene: Scene,
+        aim_by: Aim,
+    ) -> Option<(PixelBuf, Shown, Placement)> {
         let scene_rows = self.rows.checked_sub(FOOTER_ROWS)?;
         // Braille cells hold 2 x 4 pixels, half-block cells 1 x 2.
         let (pw, ph) = if self.braille {
@@ -452,8 +516,24 @@ impl Die3dView {
             let (grid, _) = super_grid(&dies);
             match fit_pixels(pw as i32, ph as i32, grid) {
                 Some(fit) => {
-                    draw_super_scene(&mut buf, &self.chips, &aim(&fit, aim_by, grid), t);
-                    return Some((buf, Shown::All));
+                    let (_, row_rows) = super_grid(&dies);
+                    let fit = aim(&fit, aim_by, grid);
+                    draw_super_scene(&mut buf, &self.chips, &fit, t);
+                    let placed = Placement {
+                        iso: fit.iso,
+                        grid,
+                        dies: self
+                            .chips
+                            .iter()
+                            .enumerate()
+                            .flat_map(|(b, chips)| {
+                                chips.iter().enumerate().map(move |(d, chip)| {
+                                    (die_centre(band_origin(b, d, row_rows)), chip_label(chip))
+                                })
+                            })
+                            .collect(),
+                    };
+                    return Some((buf, Shown::All, placed));
                 }
                 None => fallback = true,
             }
@@ -465,14 +545,23 @@ impl Die3dView {
         .min(self.chips.len().checked_sub(1)?);
         let chips = &self.chips[board];
         let grid = board_grid(chips.len());
-        let fit = fit_pixels(pw as i32, ph as i32, grid)?;
-        draw_board_scene(&mut buf, chips, &aim(&fit, aim_by, grid), t, Detail::Full);
+        let fit = aim(&fit_pixels(pw as i32, ph as i32, grid)?, aim_by, grid);
+        draw_board_scene(&mut buf, chips, &fit, t, Detail::Full);
         let shown = if fallback {
             Shown::Fallback(board)
         } else {
             Shown::Board(board)
         };
-        Some((buf, shown))
+        let placed = Placement {
+            iso: fit.iso,
+            grid,
+            dies: chips
+                .iter()
+                .enumerate()
+                .map(|(d, chip)| (die_centre(board_band_origin(d)), chip_label(chip)))
+                .collect(),
+        };
+        Some((buf, shown, placed))
     }
 
     /// The two footer rows: what is shown and how, then the keys. A left bar
@@ -506,9 +595,19 @@ impl Die3dView {
             status.push(self.undrawn_note());
         }
         let width = self.cols.saturating_sub(BAR_WIDTH);
+        // The camera caption comes last and goes whole when the row is too
+        // narrow for it, so it never pushes the estimate label (or the note)
+        // into the cut.
+        let status = status.join(SEP);
+        let with_caption = format!("{status}{SEP}{}", self.caption(now));
+        let status = if with_caption.chars().count() <= width {
+            with_caption
+        } else {
+            status
+        };
         [
             Line::from(Span::styled(
-                format!("\u{2551} {}", fit_width(status.join(SEP), width)),
+                format!("\u{2551} {}", fit_width(status, width)),
                 Style::default().fg(FOOTER_FG),
             )),
             Line::from(Span::styled(
@@ -516,6 +615,55 @@ impl Die3dView {
                 Style::default().fg(KEYS_FG),
             )),
         ]
+    }
+
+    /// The footer's camera caption: `view: <side>`, naming the board edge
+    /// facing the viewer (see `Camera::side_name`), or `view: <from> -> <to>`
+    /// for the whole of a cut's transition.
+    fn caption(&self, now: f64) -> String {
+        if self.director.progress(now).is_some() {
+            let (from, to) = self.director.cameras();
+            format!("view: {} -> {}", from.side_name(), to.side_name())
+        } else {
+            format!("view: {}", self.director.camera_at(now).side_name())
+        }
+    }
+
+    /// The cell (column, row) and text of each die's label, for a frame drawn
+    /// as `placed` says. The die centre is projected with the frame's own
+    /// projection and turned into a cell: braille cells are 2 x 4 pixels,
+    /// half-block cells 1 x 2. A die whose centre lands outside the scene
+    /// area gets no label.
+    fn label_anchors(&self, placed: &Placement, scene_rows: usize) -> Vec<(usize, usize, String)> {
+        placed
+            .dies
+            .iter()
+            .filter_map(|((gx, gy), label)| {
+                let (x, y) = placed.iso.project(*gx, *gy, placed.grid);
+                let (col, row) = if self.braille {
+                    (x.div_euclid(2), y.div_euclid(4))
+                } else {
+                    (x, y.div_euclid(2))
+                };
+                let on_screen =
+                    (0..self.cols as i32).contains(&col) && (0..scene_rows as i32).contains(&row);
+                on_screen.then(|| (col as usize, row as usize, label.clone()))
+            })
+            .collect()
+    }
+
+    /// White bold text. The background stays the terminal's own in
+    /// transparent mode and is the black fill otherwise, as around the dies.
+    fn label_style(&self) -> Style {
+        let bg = if self.transparent {
+            Color::Reset
+        } else {
+            rgb(OPAQUE_BG)
+        };
+        Style::default()
+            .fg(rgb(GRAYSKULL.white))
+            .bg(bg)
+            .add_modifier(Modifier::BOLD)
     }
 
     /// The switches, in the order the footer shows them, with the scene as
@@ -566,13 +714,18 @@ impl Die3dView {
                     Scene::Board(_) => "board",
                 },
             },
+            Switch {
+                key: 'L',
+                label: "labels",
+                state: if self.show_labels { "on" } else { "off" },
+            },
         ]
     }
 
     /// The footer's second row after its bar, at most `width` characters.
     /// From most to least detailed, the first that fits wins:
     ///
-    /// 1. `B braille · T transparent · C auto-cuts on · X transition shuffle · m all boards · [ ] board · c cut · 3 leave`
+    /// 1. `B braille · T transparent · C auto-cuts on · X transition shuffle · m all boards · L labels on · [ ] board · c cut · 3 leave`
     /// 2. the same without the action keys
     /// 3. `<key> <state>` for each switch (`C on`)
     /// 4. the state words alone
@@ -632,6 +785,63 @@ fn no_fit_hint(braille: bool) -> &'static str {
         "This scene does not fit at this size. Enlarge the terminal."
     } else {
         "This scene does not fit at this size. Enlarge the terminal or press B for braille."
+    }
+}
+
+/// A die's label: its name and, when known, its power in whole watts
+/// (`BH0 44W`).
+fn chip_label(chip: &ChipInputs) -> String {
+    match chip.power_w {
+        Some(w) => format!("{} {:.0}W", chip.label, w),
+        None => chip.label.clone(),
+    }
+}
+
+/// Write each label over `lines`, centred on its anchor (column, row), in
+/// `style`. Each cell a label covers takes the label's character and style.
+///
+/// Only the first `scene_rows` lines are written: the footer rows below them
+/// are never touched, whatever the anchor. An anchor at or past column `cols`
+/// draws nothing, and a label is clipped to columns `0..cols` and to the
+/// line's own cells, so no line grows.
+fn draw_labels(
+    lines: &mut [Line<'static>],
+    scene_rows: usize,
+    cols: usize,
+    anchors: &[(usize, usize, String)],
+    style: Style,
+) {
+    for (col, row, label) in anchors {
+        if *row >= scene_rows || *col >= cols {
+            continue;
+        }
+        let Some(line) = lines.get_mut(*row) else {
+            continue;
+        };
+        // One (character, style) per cell; every cell is one character.
+        let mut cells: Vec<(char, Style)> = line
+            .spans
+            .iter()
+            .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
+            .collect();
+        let start = *col as i64 - label.chars().count() as i64 / 2;
+        for (i, ch) in label.chars().enumerate() {
+            let at = start + i as i64;
+            if (0..cols as i64).contains(&at) {
+                if let Some(cell) = cells.get_mut(at as usize) {
+                    *cell = (ch, style);
+                }
+            }
+        }
+        // Back to spans, one per run of a style.
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        for (ch, st) in cells {
+            match spans.last_mut() {
+                Some(last) if last.style == st => last.content.to_mut().push(ch),
+                _ => spans.push(Span::styled(ch.to_string(), st)),
+            }
+        }
+        line.spans = spans;
     }
 }
 
@@ -986,6 +1196,9 @@ mod tests {
         let b = Fake::boards(&["p150"], Some(TDP));
         let mut v = Die3dView::new(150, 42);
         v.update(&b, 0.0);
+        // Labels off: they are drawn over the cells after the transition,
+        // and the bare scene has none.
+        v.handle_key(Die3dKey::ToggleLabels, 0.0);
         v.director.set_transition_mode(TransitionMode::Chaos);
         v.handle_key(Die3dKey::CutNow, 10.0);
         let mid = v.director.swapped_at().unwrap();
@@ -1228,10 +1441,17 @@ mod tests {
         v.update(&b, 0.0);
         let state =
             |v: &Die3dView, k: char| v.switches().into_iter().find(|s| s.key == k).unwrap().state;
-        let before: Vec<_> = "BTCXm".chars().map(|k| state(&v, k)).collect();
+        let before: Vec<_> = "BTCXmL".chars().map(|k| state(&v, k)).collect();
         assert_eq!(
             before,
-            ["braille", "transparent", "on", "shuffle", "all boards"]
+            [
+                "braille",
+                "transparent",
+                "on",
+                "shuffle",
+                "all boards",
+                "on"
+            ]
         );
         for k in [
             Die3dKey::ToggleBraille,
@@ -1239,18 +1459,22 @@ mod tests {
             Die3dKey::ToggleAuto,
             Die3dKey::CycleTransition,
             Die3dKey::ToggleScene,
+            Die3dKey::ToggleLabels,
         ] {
             v.handle_key(k, 0.0);
         }
-        let after: Vec<_> = "BTCXm".chars().map(|k| state(&v, k)).collect();
-        assert_eq!(after, ["half-block", "opaque", "off", "chaos", "board"]);
+        let after: Vec<_> = "BTCXmL".chars().map(|k| state(&v, k)).collect();
+        assert_eq!(
+            after,
+            ["half-block", "opaque", "off", "chaos", "board", "off"]
+        );
     }
 
     #[test]
     fn the_switch_table_still_covers_every_toggle_key() {
         let v = Die3dView::new(150, 42);
         let keys: Vec<char> = v.switches().iter().map(|s| s.key).collect();
-        assert!(keys.contains(&'X'), "{keys:?}");
+        assert!(keys.contains(&'X') && keys.contains(&'L'), "{keys:?}");
         let mut toggling = 0;
         for &k in Die3dKey::ALL {
             if !k.toggles() {
@@ -1287,8 +1511,8 @@ mod tests {
 
     #[test]
     fn the_switch_strip_falls_back_to_keyed_then_bare_then_a_cut() {
-        // Lengths with the default switches: keyed is 59 characters and bare
-        // 49, so a 55-column terminal (52 after the bar) lands on bare.
+        // Lengths with the default switches: keyed is 66 characters and bare
+        // 54, so a 60-column terminal (57 after the bar) lands on bare.
         let v = wide_label_view(150);
         let sw = v.switches();
         let keyed = sw
@@ -1297,7 +1521,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(SEP);
         let bare = sw.iter().map(|s| s.state).collect::<Vec<_>>().join(SEP);
-        assert_eq!((keyed.chars().count(), bare.chars().count()), (59, 49));
+        assert_eq!((keyed.chars().count(), bare.chars().count()), (66, 54));
         let at = |cols: usize| {
             let v = wide_label_view(cols);
             let s = strip(&v);
@@ -1305,14 +1529,14 @@ mod tests {
             s.trim_start_matches("\u{255a}\u{2550} ").to_string()
         };
         // Exactly wide enough for the keyed form.
-        assert_eq!(at(59 + BAR_WIDTH), keyed);
-        // About 55 columns: the keyed form no longer fits, the bare one does.
-        assert_eq!(at(55), bare);
-        assert_eq!(at(49 + BAR_WIDTH), bare);
+        assert_eq!(at(66 + BAR_WIDTH), keyed);
+        // About 60 columns: the keyed form no longer fits, the bare one does.
+        assert_eq!(at(60), bare);
+        assert_eq!(at(54 + BAR_WIDTH), bare);
         // One column short of bare: the last resort cuts at a character and
         // marks the cut with an ellipsis.
-        let cut = at(48 + BAR_WIDTH);
-        assert_eq!(cut.chars().count(), 48);
+        let cut = at(53 + BAR_WIDTH);
+        assert_eq!(cut.chars().count(), 53);
         assert!(cut.ends_with('\u{2026}'), "{cut}");
         assert!(bare.starts_with(cut.trim_end_matches('\u{2026}')), "{cut}");
     }
@@ -1379,6 +1603,15 @@ mod tests {
         let frame = v.frame(mid).unwrap().0;
         assert_ne!(frame.rgb, old.rgb);
         assert_ne!(frame.rgb, new.rgb);
+        // Pinned to `lerp_view`: the frame is the scene projected part way
+        // between the two cameras, at the transition's progress.
+        let (from, to) = v.director.cameras();
+        let p = v.director.progress(mid).unwrap();
+        let between = v
+            .scene_with(mid, v.switcher.scene_at(mid), Aim::Between(from, to, p))
+            .unwrap()
+            .0;
+        assert_eq!(frame.rgb, between.rgb);
         // The frames along the way move: a spin is animated, not a cut. 15
         // frames a tenth of a second apart are mostly distinct.
         let mut frames: Vec<Vec<[u8; 3]>> = (1..16)
@@ -1490,6 +1723,416 @@ mod tests {
             v.frame(after).unwrap().0.rgb,
             v.scene_pixels(after).unwrap().0.rgb
         );
+    }
+
+    /// Row 1 of the footer: the line above the switch strip.
+    fn status_row(lines: &[Line<'static>]) -> String {
+        text(lines)[lines.len() - 2].clone()
+    }
+
+    /// A view in a fixed transition mode (cut by hand at `at`).
+    fn cut_view(b: &Fake, mode: TransitionMode, at: f64) -> Die3dView {
+        let mut v = Die3dView::new(150, 42);
+        v.update(b, 0.0);
+        v.director.set_transition_mode(mode);
+        v.handle_key(Die3dKey::CutNow, at);
+        v
+    }
+
+    #[test]
+    fn the_footer_shows_the_camera_caption() {
+        let b = two_boards();
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        // The first camera is preset 0: quarter turn 0 at Iso pitch.
+        let row = status_row(&v.render(0.0));
+        assert!(row.contains("view: front (PCIe edge)"), "{row}");
+        // After the scene name and the estimate label.
+        let scene = row.find("all boards").unwrap();
+        let est = row.find(ESTIMATE_LABEL).unwrap();
+        let cap = row.find("view: ").unwrap();
+        assert!(scene < est && est < cap, "{row}");
+        // After a cut has finished, it names the new camera.
+        v.director.set_transition_mode(TransitionMode::Chaos);
+        v.handle_key(Die3dKey::CutNow, 10.0);
+        let row = status_row(&v.render(11.0));
+        let want = format!("view: {}", v.director.camera().side_name());
+        assert!(row.contains(&want), "{want}: {row}");
+        assert!(!row.contains("->"), "{row}");
+    }
+
+    #[test]
+    fn the_caption_shows_from_and_to_during_a_transition() {
+        let b = two_boards();
+        for mode in [
+            TransitionMode::Chaos,
+            TransitionMode::Dissolve,
+            TransitionMode::Spin,
+        ] {
+            let v = cut_view(&b, mode, 10.0);
+            let (from, to) = v.director.cameras();
+            let want = format!("view: {} -> {}", from.side_name(), to.side_name());
+            // Before and after the swap alike: the whole transition.
+            for dt in [
+                0.05,
+                0.5,
+                v.director.transition_kind().unwrap().secs() - 0.05,
+            ] {
+                let row = status_row(&v.render(10.0 + dt));
+                assert!(row.contains(&want), "{mode:?} +{dt}: {row}");
+            }
+            let row = status_row(&v.render(12.0));
+            assert!(row.contains(&format!("view: {}", to.side_name())), "{row}");
+            assert!(!row.contains("->"), "{row}");
+        }
+    }
+
+    #[test]
+    fn the_caption_is_dropped_before_the_estimate_label_when_narrow() {
+        // A long caption: a transition between two turns.
+        let mut v = wide_label_view(150);
+        v.director.set_transition_mode(TransitionMode::Spin);
+        let mut at = 10.0;
+        v.handle_key(Die3dKey::CutNow, at);
+        while {
+            let (a, b) = v.director.cameras();
+            a.side_name() == "top-down" || b.side_name() == "top-down"
+        } {
+            at += 10.0;
+            v.handle_key(Die3dKey::CutNow, at);
+        }
+        let now = at + 0.1;
+        let (from, to) = v.director.cameras();
+        let caption = format!("view: {} -> {}", from.side_name(), to.side_name());
+        // Wide: the caption is there, whole.
+        let row = status_row(&v.render(now));
+        assert!(row.contains(&caption), "{row}");
+        // At 100 columns the estimate label stays and the caption, if it
+        // does not fit whole, goes whole: never a cut-off part of it.
+        for cols in [100, 90, 80] {
+            v.cols = cols;
+            let row = v.footer(now, Some(Shown::Board(0)))[0]
+                .spans
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<String>();
+            assert!(row.contains(ESTIMATE_LABEL), "{cols}: {row}");
+            assert!(row.chars().count() <= cols, "{cols}: {row}");
+            assert!(
+                row.contains(&caption) || !row.contains("view"),
+                "{cols}: {row}"
+            );
+        }
+        v.cols = 100;
+        let row: String = v.footer(now, Some(Shown::Board(0)))[0]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(!row.contains("view"), "100 is too narrow for it: {row}");
+    }
+
+    /// Every label in the first `rows` rows: (row, start column, text) for
+    /// each `BH<n>`, with its ` <w>W` power when one follows.
+    fn labels_in(lines: &[Line<'static>], rows: usize) -> Vec<(usize, usize, String)> {
+        let digits = |c: &[char], mut j: usize| {
+            while c.get(j).is_some_and(char::is_ascii_digit) {
+                j += 1;
+            }
+            j
+        };
+        let mut found = Vec::new();
+        for (r, row) in text(lines).iter().enumerate().take(rows) {
+            let c: Vec<char> = row.chars().collect();
+            let mut i = 0;
+            while i + 2 < c.len() {
+                if !(c[i] == 'B' && c[i + 1] == 'H' && c[i + 2].is_ascii_digit()) {
+                    i += 1;
+                    continue;
+                }
+                let mut end = digits(&c, i + 2);
+                if c.get(end) == Some(&' ') {
+                    let w = digits(&c, end + 1);
+                    if w > end + 1 && c.get(w) == Some(&'W') {
+                        end = w + 1;
+                    }
+                }
+                found.push((r, i, c[i..end].iter().collect()));
+                i = end;
+            }
+        }
+        found
+    }
+
+    /// The cell where the centre of die `d` of a lone board of `dies` dies
+    /// lands at preset 0, worked out here from the grid layout (the die's 17
+    /// x 12 tiles start after `MARGIN_X` columns and `MARGIN_Y` rows of its
+    /// band), independently of the view's own helpers.
+    fn expected_centre(v: &Die3dView, dies: usize, d: usize) -> (i64, i64) {
+        let scene_rows = v.rows - FOOTER_ROWS;
+        let (pw, ph) = if v.braille {
+            (v.cols * 2, scene_rows * 4)
+        } else {
+            (v.cols, scene_rows * 2)
+        };
+        let grid = board_grid(dies);
+        let fit = fit_pixels(pw as i32, ph as i32, grid).unwrap();
+        let iso = v.director.camera_at(0.0).apply(&fit.iso, grid);
+        let gx = scene::MARGIN_X as f32 + 8.0;
+        let gy = (d * scene::BOARD_BAND + scene::MARGIN_Y) as f32 + 5.5;
+        let (x, y) = iso.project(gx, gy, grid);
+        if v.braille {
+            ((x / 2) as i64, (y / 4) as i64)
+        } else {
+            (x as i64, (y / 2) as i64)
+        }
+    }
+
+    #[test]
+    fn each_die_gets_a_label_at_its_centre() {
+        // One p300 board: two dies.
+        let mut b = Fake::boards(&["p300"; 2], Some(TDP));
+        b.set_power(0, 44.0);
+        b.set_power(1, 51.6);
+        for braille in [true, false] {
+            let mut v = Die3dView::new(150, 42);
+            v.update(&b, 0.0);
+            if !braille {
+                v.handle_key(Die3dKey::ToggleBraille, 0.0);
+            }
+            let lines = v.render(0.0);
+            let found = labels_in(&lines, 40);
+            for (d, want) in [(0, "BH0 44W"), (1, "BH1 52W")] {
+                let (col, row) = expected_centre(&v, 2, d);
+                let hit = found.iter().find(|(_, _, t)| t == want);
+                let (r, c, _) =
+                    hit.unwrap_or_else(|| panic!("{want} in {found:?} (braille={braille})"));
+                let centre = *c as i64 + want.chars().count() as i64 / 2;
+                assert!(
+                    (*r as i64 - row).abs() <= 1 && (centre - col).abs() <= 1,
+                    "{want} at row {r} col {c}, centre {centre}; want {row},{col} (braille={braille})"
+                );
+            }
+        }
+        // Without a power reading the label is the name alone.
+        let mut b = Fake::boards(&["p150"], Some(TDP));
+        b.telem[0].power = None;
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        let found = labels_in(&v.render(0.0), 40);
+        assert_eq!(
+            found.iter().map(|f| f.2.as_str()).collect::<Vec<_>>(),
+            ["BH0"]
+        );
+    }
+
+    #[test]
+    fn labels_are_hidden_during_a_transition() {
+        let b = two_boards();
+        for mode in [
+            TransitionMode::Chaos,
+            TransitionMode::Dissolve,
+            TransitionMode::Spin,
+        ] {
+            let v = cut_view(&b, mode, 10.0);
+            assert!(!labels_in(&v.render(9.9), 40).is_empty(), "{mode:?} before");
+            let secs = v.director.transition_kind().unwrap().secs();
+            for dt in [0.0, 0.2, secs / 2.0, secs - 0.01] {
+                let found = labels_in(&v.render(10.0 + dt), 40);
+                assert!(found.is_empty(), "{mode:?} +{dt}: {found:?}");
+            }
+            assert!(
+                !labels_in(&v.render(10.0 + secs), 40).is_empty(),
+                "{mode:?} after"
+            );
+        }
+    }
+
+    #[test]
+    fn labels_never_overwrite_the_footer_rows_or_leave_the_view() {
+        // Through the view: every size from the minimum up, both cell modes,
+        // one board and four, after cuts to every preset. The footer rows are
+        // exactly the footer, every row is the view's width, and the labels
+        // found are all in the scene rows.
+        let one = Fake::boards(&["p300"; 2], Some(TDP));
+        let four = Fake::boards(&["p300"; 8], Some(TDP));
+        for (c, r) in [(100, 30), (101, 31), (120, 35), (150, 42), (220, 60)] {
+            for b in [&one, &four] {
+                for braille in [true, false] {
+                    let mut v = Die3dView::new(c, r);
+                    v.update(b, 0.0);
+                    v.director.set_auto(false);
+                    if !braille {
+                        v.handle_key(Die3dKey::ToggleBraille, 0.0);
+                    }
+                    let (mut labelled, mut drawn) = (0, 0);
+                    for k in 0..6 {
+                        let now = 10.0 * k as f64;
+                        if k > 0 {
+                            v.handle_key(Die3dKey::CutNow, now - 5.0);
+                        }
+                        let lines = v.render(now);
+                        assert_eq!(lines.len(), r);
+                        let t = text(&lines);
+                        let scene_rows = r - FOOTER_ROWS;
+                        // The footer rows are the footer's: its two bars.
+                        assert!(t[scene_rows].starts_with("\u{2551} "), "{}", t[scene_rows]);
+                        assert!(t[r - 1].starts_with("\u{255a}\u{2550} "), "{}", t[r - 1]);
+                        // A scene row is the view's width, or empty below
+                        // the no-fit hint (half-block at the smallest sizes).
+                        let hint_only = t[0] == no_fit_hint(braille);
+                        for (i, row) in t[..scene_rows].iter().enumerate() {
+                            let n = row.chars().count();
+                            let ok = n == c || (hint_only && (i == 0 || n == 0));
+                            assert!(ok, "{c} x {r} row {i}: {n}");
+                        }
+                        // Every label found anywhere is on a scene row.
+                        let all = labels_in(&lines, r);
+                        assert!(all.iter().all(|l| l.0 < scene_rows), "{c} x {r}: {all:?}");
+                        labelled += all.len();
+                        drawn += !hint_only as usize;
+                    }
+                    // Not vacuous: wherever a scene was drawn, labels were.
+                    assert!(
+                        drawn == 0 || labelled > 0,
+                        "{c} x {r}: no label drawn at all"
+                    );
+                }
+            }
+        }
+
+        // At the layer that writes: anchors on the footer rows, past the
+        // right edge and hanging off the left edge.
+        let width = 20;
+        let scene_rows = 3;
+        let mut lines: Vec<Line<'static>> = (0..scene_rows + FOOTER_ROWS)
+            .map(|i| Line::from(Span::raw(format!("{i}").repeat(width))))
+            .collect();
+        let before = text(&lines);
+        let style = Style::default().fg(Color::White);
+        let anchors = vec![
+            (5, scene_rows, "BH8 10W".to_string()),
+            (5, scene_rows + 1, "BH9 10W".to_string()),
+            (width + 3, 1, "BH7".to_string()),
+            (1, 0, "BH0 123W".to_string()),
+            (width - 1, 2, "BH2 99W".to_string()),
+        ];
+        draw_labels(&mut lines, scene_rows, width, &anchors, style);
+        let after = text(&lines);
+        assert_eq!(after[scene_rows..], before[scene_rows..], "footer rows");
+        assert_eq!(
+            after[1], before[1],
+            "an anchor past the right edge draws nothing"
+        );
+        // Clipped at both edges, never wider than the view.
+        // "BH0 123W" centred on column 1 starts at -3; "BH2 99W" on column
+        // 19 starts at 16.
+        assert!(after[0].starts_with(" 123W"), "{}", after[0]);
+        assert!(after[2].ends_with("BH2 "), "{}", after[2]);
+        for row in &after {
+            assert_eq!(row.chars().count(), width, "{row}");
+        }
+    }
+
+    #[test]
+    fn labels_stay_transparent_in_transparent_mode() {
+        let b = Fake::boards(&["p150"], Some(TDP));
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        let label_span = |lines: &[Line<'static>]| {
+            lines[..40]
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .find(|s| s.content.contains("BH0"))
+                .cloned()
+                .expect("a label span")
+        };
+        let s = label_span(&v.render(0.0));
+        assert_eq!(s.style.bg, Some(Color::Reset), "{s:?}");
+        assert_eq!(s.style.fg, Some(rgb(GRAYSKULL.white)), "{s:?}");
+        assert!(s.style.add_modifier.contains(Modifier::BOLD), "{s:?}");
+        // Opaque: the label stands on the black fill.
+        v.handle_key(Die3dKey::ToggleTransparent, 0.0);
+        let s = label_span(&v.render(0.0));
+        assert_eq!(s.style.bg, Some(rgb(OPAQUE_BG)), "{s:?}");
+    }
+
+    #[test]
+    fn the_l_key_toggles_labels_and_the_footer_says_which() {
+        assert_eq!(key_to_die3d('L'), Some(Die3dKey::ToggleLabels));
+        assert_eq!(key_to_die3d('l'), None, "l is the TUI's legend key");
+        assert!(Die3dKey::ToggleLabels.toggles());
+        let b = two_boards();
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        let lines = v.render(0.0);
+        assert!(footer(&lines).contains("L labels on"), "{}", footer(&lines));
+        assert!(!labels_in(&lines, 40).is_empty());
+        v.handle_key(Die3dKey::ToggleLabels, 0.0);
+        let lines = v.render(0.0);
+        assert!(
+            footer(&lines).contains("L labels off"),
+            "{}",
+            footer(&lines)
+        );
+        assert!(labels_in(&lines, 40).is_empty());
+        v.handle_key(Die3dKey::ToggleLabels, 0.0);
+        assert!(!labels_in(&v.render(0.0), 40).is_empty());
+    }
+
+    #[test]
+    fn a_hand_cut_while_a_scene_switch_is_pending_never_spins_or_jumps_mid_turn() {
+        // The load rise in the super scene cuts and schedules a switch to
+        // board 2 at that cut's midpoint. `c` before the midpoint starts a
+        // new cut; the switch is the new cut's to cover.
+        let (mut v, _) = switched_by_chip_2();
+        let first = v.director.swapped_at().unwrap();
+        assert_eq!(v.switcher.scene_at(first - 0.01), Scene::All);
+        // In spin mode a camera-only hand cut would spin.
+        v.director.set_transition_mode(TransitionMode::Spin);
+        let at = 1.1;
+        assert!(at < first);
+        v.handle_key(Die3dKey::CutNow, at);
+        assert_ne!(v.director.transition_kind(), Some(TransitionKind::Spin));
+        // The scene changes once, at the new cut's swap, and the transition
+        // knows both scenes for its whole length.
+        let swap = v.director.swapped_at().unwrap();
+        let secs = v.director.transition_kind().unwrap().secs();
+        for i in 0..=40 {
+            let now = at + secs * i as f64 / 40.0;
+            let want = if now < swap {
+                Scene::All
+            } else {
+                Scene::Board(1)
+            };
+            assert_eq!(v.switcher.scene_at(now), want, "+{}", now - at);
+            if now < at + secs {
+                assert_eq!(
+                    v.transition_scenes(now),
+                    (Scene::All, Scene::Board(1)),
+                    "+{}",
+                    now - at
+                );
+            }
+        }
+        // And in shuffle mode, over many hand cuts at that moment, never a spin.
+        for seed in 0..40u64 {
+            let mut b = two_boards();
+            let mut v = Die3dView::new(150, 42);
+            v.director = Director::new(seed);
+            v.update(&b, 0.0);
+            b.set_power(2, 90.0);
+            v.update(&b, 1.0);
+            // The load rise cut and scheduled the switch, still pending.
+            assert_eq!(v.switcher.scene_at(1.1), Scene::All, "seed {seed}");
+            assert_eq!(v.switcher.scene_at(5.0), Scene::Board(1), "seed {seed}");
+            v.handle_key(Die3dKey::CutNow, 1.1);
+            assert_ne!(
+                v.director.transition_kind(),
+                Some(TransitionKind::Spin),
+                "seed {seed}"
+            );
+        }
     }
 
     #[test]

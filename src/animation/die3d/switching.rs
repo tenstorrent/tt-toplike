@@ -162,6 +162,27 @@ impl Switcher {
         }
     }
 
+    /// True while a switch decided by a cut is still waiting for its time:
+    /// the scene will change after `now` without anyone asking again.
+    pub(super) fn pending_after(&self, now: f64) -> bool {
+        matches!(self.pending, Some((_, at)) if now < at)
+    }
+
+    /// Hand a pending switch to a new cut that started at `cut_at` and swaps
+    /// at `swap_at`: the switch now shows from `swap_at`, and the new cut's
+    /// transition is the one that draws both scenes. Without this a cut made
+    /// while a switch is pending would change scene at the old cut's midpoint,
+    /// part way through its own transition. Does nothing with no switch
+    /// pending.
+    pub(super) fn hand_pending_to(&mut self, cut_at: f64, swap_at: f64) {
+        let Some((scene, _)) = self.pending else {
+            return;
+        };
+        self.pending = Some((scene, swap_at));
+        let before = self.cut_switch.map_or(self.scene, |(_, before, _)| before);
+        self.cut_switch = Some((cut_at, before, scene));
+    }
+
     /// A scene the user chose: shown at once, with no automatic return and no
     /// pending switch left to override it.
     pub(super) fn choose(&mut self, scene: Scene) {

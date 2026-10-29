@@ -54,6 +54,12 @@ const MAX_PACKETS: usize = 6;
 #[derive(Debug, Clone)]
 pub struct ChipInputs {
     pub index: usize,
+    /// The chip's name in the scene: the architecture abbreviation and the
+    /// device index, as `BH0` (see `Device::short_label`).
+    pub label: String,
+    /// Power draw in watts; `None` when the chip reports none, or a value
+    /// that is not a finite number.
+    pub power_w: Option<f32>,
     pub arch: Architecture,
     /// Power over TDP, 0..1. `0.0` when either is unknown.
     pub load: f32,
@@ -97,6 +103,9 @@ pub fn chip_inputs(backend: &dyn TelemetryBackend, device: &Device) -> ChipInput
     let pcie = backend.pcie_bandwidth(idx);
     ChipInputs {
         index: idx,
+        // `short_label` is the architecture abbreviation and the index: BH0.
+        label: device.short_label(),
+        power_w: telem.and_then(|t| t.power).filter(|p| p.is_finite()),
         arch: device.architecture,
         load,
         pcie_in_bps: pcie.map(|p| p.rx_bytes_per_sec),
@@ -205,9 +214,14 @@ pub(super) fn fit_grid(cells_w: usize, cells_h: usize, grid: (usize, usize)) -> 
 
 /// Degrees between two camera angles sampled by [`fit_pixels`]. The spin
 /// transition passes through every angle; a corner's screen position is a
-/// sine of the angle, so between two samples 5 degrees apart it overshoots
-/// the larger by at most `1 - cos(2.5 deg)`, about 0.1% of its distance from
-/// the centre (a fraction of a pixel at these sizes).
+/// sine of the angle, so between two samples 5 degrees apart it can pass the
+/// larger by up to `1 - cos(2.5 deg)`, about 0.1% of its distance from the
+/// centre. That is a fraction of a pixel at these sizes, but rounding can
+/// still carry it one pixel further, so the sampling alone does not prove
+/// the bound. The margin comes from the allowance around each corner:
+/// [`lift`] reserves 13 units above a tile where the tallest block reaches
+/// 12.5. `fit_holds_every_degree_of_spin_without_drawing` checks the corners
+/// with that allowance at every whole degree for the sizes it lists.
 const FIT_STEP_DEG: usize = 5;
 
 /// The sizing of [`fit_grid`] for a buffer of `pw` x `ph` pixels, with no
@@ -355,6 +369,23 @@ pub(super) struct DieSlot<'a> {
     /// die's cage row.
     pub(super) origin: (usize, usize),
     pub(super) slot: usize,
+}
+
+/// The grid position of the middle of a die whose band starts at `origin`
+/// (the `DieSlot::origin` of its tiles): the centre of its 17 x 12 tiles,
+/// past the margin columns and the cage row. The view labels the die here.
+pub(super) fn die_centre(origin: (usize, usize)) -> (f32, f32) {
+    let layout = DieLayout::blackhole();
+    (
+        (origin.0 + MARGIN_X) as f32 + (layout.cols as f32 - 1.0) / 2.0,
+        (origin.1 + MARGIN_Y) as f32 + (layout.rows as f32 - 1.0) / 2.0,
+    )
+}
+
+/// Grid position of die `die`'s band on a lone board: dies stack along the
+/// grid y axis, one band each.
+pub(super) fn board_band_origin(die: usize) -> (usize, usize) {
+    (0, die * BOARD_BAND)
 }
 
 /// Harvested die columns of every chip, in chip order.
@@ -565,7 +596,7 @@ pub fn draw_board_scene(
         let slot = DieSlot {
             chip,
             harvested: &harvested[die],
-            origin: (0, die * BOARD_BAND),
+            origin: board_band_origin(die),
             slot: die,
         };
         draw_die_tile(
@@ -630,6 +661,8 @@ mod tests {
     fn chip(load: f32) -> ChipInputs {
         ChipInputs {
             index: 0,
+            label: "BH0".to_string(),
+            power_w: Some(load * 150.0),
             arch: Architecture::Blackhole,
             load,
             pcie_in_bps: None,
@@ -677,6 +710,72 @@ mod tests {
         assert_eq!(chip_inputs(&b, &b.devices[0]).load, 0.0);
         // Per-tile data is never filled at tier 0.
         assert!(chip_inputs(&b, &b.devices[0]).tile_flow.is_none());
+    }
+
+    #[test]
+    fn chip_inputs_carry_a_label_and_power() {
+        let b = Fake::new(44.0, Some("150"), None);
+        let c = chip_inputs(&b, &b.devices[0]);
+        assert_eq!(c.label, "BH0");
+        assert_eq!(c.power_w, Some(44.0));
+        // The index is the device's own: the fourth chip of two p300 boards.
+        let b = Fake::boards(&["p300"; 4], Some("150"));
+        let c = chip_inputs(&b, &b.devices[3]);
+        assert_eq!((c.label.as_str(), c.index), ("BH3", 3));
+        // No power reading, or one that is not a number: no power.
+        let mut b = Fake::new(44.0, Some("150"), None);
+        b.telem[0].power = None;
+        assert_eq!(chip_inputs(&b, &b.devices[0]).power_w, None);
+        b.telem[0].power = Some(f32::NAN);
+        assert_eq!(chip_inputs(&b, &b.devices[0]).power_w, None);
+    }
+
+    #[test]
+    fn fit_holds_every_degree_of_spin_without_drawing() {
+        // The cheap counterpart of the drawn sweep in `super_scene`: every
+        // degree, the four grid corners with the same allowance `fit_pixels`
+        // makes for a block (half a tile each side, `lift` above, `th` and a
+        // row below) must land inside the buffer the fit was made for. A fit
+        // that sampled only the quarter turns fails this for the two-die
+        // board.
+        let grids = [
+            ("1 die", board_grid(1)),
+            ("2 dies", board_grid(2)),
+            (
+                "4 x 2",
+                super::super::super_scene::super_grid(&[2, 2, 2, 2]).0,
+            ),
+        ];
+        for (pw, ph) in [(300, 160), (300, 168), (200, 112), (150, 112), (440, 232)] {
+            for (what, grid) in grids {
+                let Some(f) = fit_pixels(pw, ph, grid) else {
+                    continue;
+                };
+                let (tw, th) = (f.iso.tw, f.iso.th);
+                let corners = [
+                    (0.0, 0.0),
+                    ((grid.0 - 1) as f32, 0.0),
+                    (0.0, (grid.1 - 1) as f32),
+                    ((grid.0 - 1) as f32, (grid.1 - 1) as f32),
+                ];
+                for deg in 0..360 {
+                    let mut iso = f.iso;
+                    iso.quarter_turns = (deg / 90) as u8;
+                    iso.spin = ((deg % 90) as f32).to_radians();
+                    for &(gx, gy) in &corners {
+                        let (x, y) = iso.project(gx, gy, grid);
+                        let inside = x - tw / 2 >= 0
+                            && x + tw / 2 + 1 <= pw
+                            && y - lift(tw) >= 0
+                            && y + th + 1 <= ph;
+                        assert!(
+                            inside,
+                            "{what} in {pw} x {ph} at {deg} degrees: corner {gx},{gy} at {x},{y} (tw {tw})"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

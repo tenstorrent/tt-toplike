@@ -45,6 +45,17 @@ pub(super) fn super_grid(boards: &[usize]) -> ((usize, usize), usize) {
     ((cols, rows * row_rows), row_rows)
 }
 
+/// Grid position of the band of die `die` on board `board` in the super
+/// scene, whose board rows are `row_rows` tall (from [`super_grid`]): boards
+/// fill a row of [`BOARDS_PER_ROW`] along the grid x axis, then wrap, and a
+/// board's dies stack along the grid y axis as on a lone board.
+pub(super) fn band_origin(board: usize, die: usize, row_rows: usize) -> (usize, usize) {
+    (
+        board % BOARDS_PER_ROW * BOARD_COLS,
+        board / BOARDS_PER_ROW * row_rows + die * BOARD_BAND,
+    )
+}
+
 /// [`fit`](super::scene::fit) for the super scene: `boards` holds the number
 /// of dies on each board. One origin serves all four quarter turns. `None`
 /// below 100 x 30 cells, and when even the smallest tile (4 pixels wide) does
@@ -83,10 +94,7 @@ pub fn draw_super_scene(buf: &mut PixelBuf, boards: &[Vec<ChipInputs>], fit: &Sc
         let slot = DieSlot {
             chip,
             harvested: &harvested[idx][die],
-            origin: (
-                bx / BOARD_COLS * BOARD_COLS,
-                by / row_rows * row_rows + die * BOARD_BAND,
-            ),
+            origin: band_origin(idx, die, row_rows),
             // Dies are numbered across boards; no board has more than
             // `row_rows` bands, so this is unique.
             slot: idx * row_rows + die,
@@ -105,6 +113,8 @@ mod tests {
     fn chip(load: f32) -> ChipInputs {
         ChipInputs {
             index: 0,
+            label: "BH0".to_string(),
+            power_w: Some(load * 150.0),
             arch: Architecture::Blackhole,
             load,
             pcie_in_bps: Some(40.0e9),
@@ -265,12 +275,13 @@ mod tests {
                 "{what} at {deg} degrees: {x0},{y0}..{x1},{y1} in {pw} x {ph}"
             );
         };
-        // Boards are checked at every degree, the super scene every 15. A fit
-        // that samples only the four quarter turns overflows the two-die
-        // board by a pixel at 94 to 103 and 167 to 176 degrees (and the
-        // mirror angles), which 15-degree steps pass over; the super scene is
-        // the costly draw and has room to spare at this size.
-        for deg in 0..360 {
+        // Real pictures every 15 degrees. A fit that samples only the four
+        // quarter turns overflows the two-die board by a pixel at 94 to 103
+        // and 167 to 176 degrees (and the mirror angles), which these steps
+        // pass over; `scene::tests::fit_holds_every_degree_of_spin_without_drawing`
+        // checks every degree without drawing and catches that fit. Drawing
+        // every degree took about 4 s.
+        for deg in (0..360).step_by(15) {
             let spin = (deg as f32).to_radians();
             // One board of one and of two dies.
             for dies in [1usize, 2] {
@@ -283,9 +294,6 @@ mod tests {
                     deg,
                     painted_bbox_for(&chips, cells, &f),
                 );
-            }
-            if deg % 15 != 0 {
-                continue;
             }
             // The super scene of four boards of two dies each.
             let dies = [2usize, 2, 2, 2];

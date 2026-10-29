@@ -238,6 +238,30 @@ impl Camera {
         recentre(&mut iso, base, grid);
         iso
     }
+
+    /// The board edge on the viewer's side, for the footer caption: plain
+    /// text, `"top-down"` for the `Top` pitch.
+    ///
+    /// An isometric camera looks down a diagonal, so at every quarter turn two
+    /// board edges face the viewer, one at the lower left of the screen and
+    /// one at the lower right, equally near. The caption names the one at the
+    /// lower left. At turn 0 that is the PCIe edge (grid y high, die row 12),
+    /// and each quarter turn brings the next edge round: the right GDDR edge
+    /// (grid x high), the Ethernet edge, the left GDDR edge. The test
+    /// `side_names_match_the_edge_nearest_the_viewer` derives this order from
+    /// `Iso::project`. `Low` pitch only flattens the view, so it shares the
+    /// names.
+    pub fn side_name(&self) -> &'static str {
+        if self.pitch == Pitch::Top {
+            return "top-down";
+        }
+        match self.quarter_turns % 4 {
+            0 => "front (PCIe edge)",
+            1 => "right (GDDR edge)",
+            2 => "back (Ethernet edge)",
+            _ => "left (GDDR edge)",
+        }
+    }
 }
 
 /// Small xorshift64*: enough for picking a camera and noise, no crate needed.
@@ -346,11 +370,20 @@ impl Director {
         self.last_cut
     }
 
-    /// A cut asked for by the user: ignores the cooldown and the auto setting,
-    /// but starts the cooldown. Always returns true. It never changes the
-    /// scene, so any transition kind can be drawn.
+    /// A cut asked for by the user that changes the camera only: see
+    /// [`cut_by_hand_with_scene`](Self::cut_by_hand_with_scene).
     pub fn cut_by_hand(&mut self, now: f64) -> bool {
-        self.cut(now, false);
+        self.cut_by_hand_with_scene(now, false)
+    }
+
+    /// A cut asked for by the user: ignores the cooldown and the auto setting,
+    /// but starts the cooldown. Always returns true. `changes_scene` says the
+    /// scene will change at this cut's swap, as when the cut takes over a
+    /// scene switch still waiting for the midpoint of the cut it replaces;
+    /// then the transition must be one that can cover a scene change (not a
+    /// spin), as for [`on_trigger_with_scene`](Self::on_trigger_with_scene).
+    pub fn cut_by_hand_with_scene(&mut self, now: f64, changes_scene: bool) -> bool {
+        self.cut(now, changes_scene);
         true
     }
 
@@ -657,6 +690,8 @@ mod tests {
     fn chip() -> ChipInputs {
         ChipInputs {
             index: 0,
+            label: "BH0".to_string(),
+            power_w: Some(150.0),
             arch: Architecture::Blackhole,
             load: 1.0,
             pcie_in_bps: Some(40.0e9),
@@ -981,16 +1016,115 @@ mod tests {
     }
 
     #[test]
-    fn shuffle_weights_are_roughly_40_35_25() {
-        let kinds = shuffled_kinds(0x5EED, 1000, false);
-        let pct = |k: TransitionKind| kinds.iter().filter(|&&x| x == k).count() as f64 / 10.0;
-        let got = [
-            pct(TransitionKind::Chaos),
-            pct(TransitionKind::Dissolve),
-            pct(TransitionKind::Spin),
-        ];
-        for (g, want) in got.iter().zip([40.0, 35.0, 25.0]) {
-            assert!((g - want).abs() <= 8.0, "{got:?}");
+    fn shuffle_splits_follow_the_weights_after_each_kind() {
+        // The previous kind is left out, so after each kind the other two
+        // share the draw in the ratio of their weights (40, 35, 25):
+        //   after Chaos:    Dissolve 35/60, Spin 25/60
+        //   after Dissolve: Chaos 40/65,    Spin 25/65
+        //   after Spin:     Chaos 40/75,    Dissolve 35/75
+        // The closest split to an even one is after Spin, 53.3 / 46.7, so a
+        // uniform draw misses it by 3.3 points. The tolerance is 2 points,
+        // and each split here rests on well over 10 000 draws (a standard
+        // error under 0.5 points), so weights drawn uniformly fail.
+        use TransitionKind as K;
+        let kinds = shuffled_kinds(0x5EED, 60_000, false);
+        for (prev, first, w_first, w_second) in [
+            (K::Chaos, K::Dissolve, 35.0, 25.0),
+            (K::Dissolve, K::Chaos, 40.0, 25.0),
+            (K::Spin, K::Chaos, 40.0, 35.0),
+        ] {
+            let after: Vec<K> = kinds
+                .windows(2)
+                .filter(|w| w[0] == prev)
+                .map(|w| w[1])
+                .collect();
+            assert!(after.len() > 10_000, "{prev:?}: {} draws", after.len());
+            let got =
+                100.0 * after.iter().filter(|&&k| k == first).count() as f64 / after.len() as f64;
+            let want = 100.0 * w_first / (w_first + w_second);
+            assert!(
+                (got - want).abs() <= 2.0,
+                "after {prev:?}: {first:?} {got:.1}% (want {want:.1}%)"
+            );
+        }
+    }
+
+    /// The four board edges, by the name `side_name` gives them, at their
+    /// midpoints on a square grid of `n` tiles: the PCIe edge on the high
+    /// grid y side (die row 12), the Ethernet edge on the low side (the cage
+    /// row), the GDDR edges on the low and high grid x sides (gx -2 and 18).
+    fn edge_midpoints(n: usize) -> [(&'static str, (f32, f32)); 4] {
+        let m = (n - 1) as f32;
+        let c = m / 2.0;
+        [
+            ("front (PCIe edge)", (c, m)),
+            ("back (Ethernet edge)", (c, 0.0)),
+            ("left (GDDR edge)", (0.0, c)),
+            ("right (GDDR edge)", (m, c)),
+        ]
+    }
+
+    #[test]
+    fn side_names_match_the_edge_nearest_the_viewer() {
+        // The midpoints are taken on a square grid. On the real board grid
+        // (21 x 14 for one die, 21 x 28 for two) the longer sides' midpoints
+        // win on y whatever the turn, so one die would give right, right,
+        // left, left and two dies front, back, back, front: the aspect ratio
+        // decides, and two turns share each name. On a square two edges face
+        // the viewer at every quarter turn and tie on y (isometric looks down
+        // a diagonal); the caption names the one on the left of the screen.
+        use crate::animation::die3d::scene::fit_pixels;
+        let n = 21;
+        let grid = (n, n);
+        let base = fit_pixels(300, 160, grid).unwrap().iso;
+        let mut names = Vec::new();
+        for pitch in [Pitch::Iso, Pitch::Low] {
+            for q in 0..4 {
+                let cam = Camera {
+                    quarter_turns: q,
+                    pitch,
+                };
+                let iso = cam.apply(&base, grid);
+                let projected: Vec<(&str, (i32, i32))> = edge_midpoints(n)
+                    .iter()
+                    .map(|&(name, (x, y))| (name, iso.project(x, y, grid)))
+                    .collect();
+                let nearest_y = projected.iter().map(|e| e.1 .1).max().unwrap();
+                let facing: Vec<&(&str, (i32, i32))> =
+                    projected.iter().filter(|e| e.1 .1 == nearest_y).collect();
+                assert_eq!(facing.len(), 2, "{cam:?}: {projected:?}");
+                let named = facing.iter().min_by_key(|e| e.1 .0).unwrap().0;
+                assert_eq!(cam.side_name(), named, "{cam:?}: {projected:?}");
+                if pitch == Pitch::Iso {
+                    names.push(named);
+                }
+            }
+        }
+        // The order the projection gives, pinned once checked. The PCIe edge
+        // is the front at quarter turn 0.
+        assert_eq!(
+            names,
+            [
+                "front (PCIe edge)",
+                "right (GDDR edge)",
+                "back (Ethernet edge)",
+                "left (GDDR edge)"
+            ]
+        );
+    }
+
+    #[test]
+    fn top_pitch_is_named_top_down() {
+        for q in 0..4 {
+            let cam = Camera {
+                quarter_turns: q,
+                pitch: Pitch::Top,
+            };
+            assert_eq!(cam.side_name(), "top-down");
+        }
+        // Every preset has a plain-text name.
+        for cam in PRESETS {
+            assert!(cam.side_name().is_ascii() && !cam.side_name().is_empty());
         }
     }
 
@@ -1065,6 +1199,11 @@ mod tests {
                 assert!(p >= last && p < 1.0, "{mode:?} {i}: {p}");
                 last = p;
             }
+            // Not a constant: half way at the midpoint, nearly 1 at the end.
+            let half = d.progress(10.0 + secs / 2.0).unwrap();
+            assert!((half - 0.5).abs() < 1e-3, "{mode:?}: {half}");
+            let end = d.progress(10.0 + secs - 1e-6).unwrap();
+            assert!((end - 1.0).abs() < 1e-3, "{mode:?}: {end}");
             assert!(d.progress(10.0 + secs).is_none());
             assert!(d.progress(100.0).is_none());
             // Chaos intensity only for a chaos cut.

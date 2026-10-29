@@ -2100,11 +2100,12 @@ fn run_app(
                                 }
                                 force_redraw = true;
                             }
-                            // ── Die 3D keys ([ ] m c C B T X) ──────────────────
+                            // ── Die 3D keys ([ ] m c C B T X L) ────────────────
                             // Checked before the general character arms so the
                             // view consumes them. None of these letters has a
-                            // global meaning (`b` lowercase is the beta toggle;
-                            // `B`, `T` and `X` are free), and `die3d_key_for` is
+                            // global meaning (`b` lowercase is the beta toggle
+                            // and `l` the legend; `B`, `T`, `X` and `L` are
+                            // free), and `die3d_key_for` is
                             // `None` outside the mode, so nothing else is
                             // shadowed.
                             KeyCode::Char(c) if die3d_key_for(display_mode, c).is_some() => {
@@ -4221,6 +4222,9 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "transparent background (terminal shows through) on or off.",
                     "X sets how a cut looks: shuffle, chaos, dissolve or spin",
                     "(spin is used only when the board shown stays the same).",
+                    "L turns the chip labels (name and power) on or off.",
+                    "The footer names the board edge facing you, as",
+                    "'view: front (PCIe edge)', and both ends during a cut.",
                     "",
                     "Only Blackhole chips are drawn; other devices are",
                     "named in the footer. Needs a terminal of at least",
@@ -4796,12 +4800,15 @@ fn die3d_legend_lines(
         "              driver reports it, otherwise an estimate",
         "              from chip load, labelled in the footer)",
         "  camera cuts on activity: a load rise or PCIe burst",
-        "  footer      scene shown, cell mode, auto-cuts state",
+        "  labels      chip name and power at each die's centre",
+        "  footer      scene shown, the board edge facing you,",
+        "              then the switches and their states",
         "",
         "  [ ]  previous / next board     m  one board / all",
         "  c    cut the camera now        C  auto-cuts on/off",
         "  B    braille / half-block      T  transparent / opaque",
         "  X    transition: shuffle / chaos / dissolve / spin",
+        "  L    chip labels on / off",
         "  3    leave",
     ]
     .iter()
