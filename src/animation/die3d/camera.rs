@@ -239,32 +239,32 @@ impl Camera {
         iso
     }
 
-    /// The board edge on the viewer's side, for the footer caption: plain
-    /// text, `"top-down"` for the `Top` pitch.
+    /// The board corner nearest the viewer, for the footer caption: plain
+    /// text such as `"front-right"`, or `"top-down, front-right"` for the
+    /// `Top` pitch.
     ///
-    /// The rule is "the edge whose midpoint projects lowest on screen (largest
-    /// y)", but that rule alone cannot give four names. On the real board
-    /// grid (21 x 14 tiles for one die, 21 x 28 for two) the longer sides'
-    /// midpoints always win, so the aspect ratio decides: one die gives right,
-    /// right, left, left over the four turns and two dies front, back, back,
-    /// front. Measured on a square instead, an isometric camera looks down a
-    /// diagonal, so at every quarter turn two edges tie exactly: one at the
-    /// lower left of the screen and one at the lower right. By convention the
-    /// caption names the one at the lower left. At turn 0 that is the PCIe edge (grid y high, die row 12),
-    /// and each quarter turn brings the next edge round: the right GDDR edge
-    /// (grid x high), the Ethernet edge, the left GDDR edge. The test
-    /// `side_names_match_the_edge_nearest_the_viewer` derives this order from
-    /// `Iso::project`. `Low` pitch only flattens the view, so it shares the
-    /// names.
+    /// "Front" is the PCIe edge side of the board (grid y high, die row 12),
+    /// "back" the Ethernet edge side; "right" is the GDDR edge on the grid x
+    /// high side, "left" the one on the low side. The nearest corner is the
+    /// one that projects lowest on screen: the largest rotated `gx + gy`.
+    /// That corner is unique on any board shape, square or not, so the name
+    /// says where the viewer stands. At turn 0 it is front-right, and each
+    /// quarter turn brings the next corner round: back-right, back-left,
+    /// front-left. The test `side_names_name_the_corner_nearest_the_viewer`
+    /// derives this from `Iso::project` on three grid shapes. The pitch only
+    /// changes how steeply the camera looks down, so every pitch shares the
+    /// corner names.
     pub fn side_name(&self) -> &'static str {
-        if self.pitch == Pitch::Top {
-            return "top-down";
-        }
-        match self.quarter_turns % 4 {
-            0 => "front (PCIe edge)",
-            1 => "right (GDDR edge)",
-            2 => "back (Ethernet edge)",
-            _ => "left (GDDR edge)",
+        let corner = self.quarter_turns % 4;
+        match (self.pitch, corner) {
+            (Pitch::Top, 0) => "top-down, front-right",
+            (Pitch::Top, 1) => "top-down, back-right",
+            (Pitch::Top, 2) => "top-down, back-left",
+            (Pitch::Top, _) => "top-down, front-left",
+            (_, 0) => "front-right",
+            (_, 1) => "back-right",
+            (_, 2) => "back-left",
+            _ => "front-left",
         }
     }
 }
@@ -1054,78 +1054,73 @@ mod tests {
         }
     }
 
-    /// The four board edges, by the name `side_name` gives them, at their
-    /// midpoints on a square grid of `n` tiles: the PCIe edge on the high
-    /// grid y side (die row 12), the Ethernet edge on the low side (the cage
-    /// row), the GDDR edges on the low and high grid x sides (gx -2 and 18).
-    fn edge_midpoints(n: usize) -> [(&'static str, (f32, f32)); 4] {
-        let m = (n - 1) as f32;
-        let c = m / 2.0;
+    /// The four grid corners of a `grid`, by the corner name `side_name`
+    /// uses: front is grid y high (the PCIe edge side), right is grid x high.
+    fn corners(grid: (usize, usize)) -> [(&'static str, (f32, f32)); 4] {
+        let (x, y) = ((grid.0 - 1) as f32, (grid.1 - 1) as f32);
         [
-            ("front (PCIe edge)", (c, m)),
-            ("back (Ethernet edge)", (c, 0.0)),
-            ("left (GDDR edge)", (0.0, c)),
-            ("right (GDDR edge)", (m, c)),
+            ("front-right", (x, y)),
+            ("front-left", (0.0, y)),
+            ("back-left", (0.0, 0.0)),
+            ("back-right", (x, 0.0)),
         ]
     }
 
     #[test]
-    fn side_names_match_the_edge_nearest_the_viewer() {
-        // The midpoints are taken on a square grid. On the real board grid
-        // (21 x 14 for one die, 21 x 28 for two) the longer sides' midpoints
-        // win on y whatever the turn, so one die would give right, right,
-        // left, left and two dies front, back, back, front: the aspect ratio
-        // decides, and two turns share each name. On a square two edges face
-        // the viewer at every quarter turn and tie on y (isometric looks down
-        // a diagonal); the caption names the one on the left of the screen.
+    fn side_names_name_the_corner_nearest_the_viewer() {
+        // A wide, a deep and a square grid: the nearest corner must not
+        // depend on the board's shape.
         use crate::animation::die3d::scene::fit_pixels;
-        let n = 21;
-        let grid = (n, n);
-        let base = fit_pixels(300, 160, grid).unwrap().iso;
-        let mut names = Vec::new();
-        for pitch in [Pitch::Iso, Pitch::Low] {
-            for q in 0..4 {
-                let cam = Camera {
-                    quarter_turns: q,
-                    pitch,
-                };
-                let iso = cam.apply(&base, grid);
-                let projected: Vec<(&str, (i32, i32))> = edge_midpoints(n)
-                    .iter()
-                    .map(|&(name, (x, y))| (name, iso.project(x, y, grid)))
-                    .collect();
-                let nearest_y = projected.iter().map(|e| e.1 .1).max().unwrap();
-                let facing: Vec<&(&str, (i32, i32))> =
-                    projected.iter().filter(|e| e.1 .1 == nearest_y).collect();
-                assert_eq!(facing.len(), 2, "{cam:?}: {projected:?}");
-                let named = facing.iter().min_by_key(|e| e.1 .0).unwrap().0;
-                assert_eq!(cam.side_name(), named, "{cam:?}: {projected:?}");
-                if pitch == Pitch::Iso {
-                    names.push(named);
+        for grid in [(17usize, 12usize), (17, 26), (17, 17)] {
+            let base = fit_pixels(300, 160, grid).unwrap().iso;
+            let mut order = Vec::new();
+            for pitch in [Pitch::Iso, Pitch::Low, Pitch::Top] {
+                for q in 0..4 {
+                    let cam = Camera {
+                        quarter_turns: q,
+                        pitch,
+                    };
+                    let iso = cam.apply(&base, grid);
+                    let name = cam.side_name();
+                    let corner = name.trim_start_matches("top-down, ");
+                    assert_eq!(name.starts_with("top-down, "), pitch == Pitch::Top);
+                    let projected: Vec<(&str, i32)> = corners(grid)
+                        .iter()
+                        .map(|&(n, (x, y))| (n, iso.project(x, y, grid).1))
+                        .collect();
+                    let named = projected.iter().find(|p| p.0 == corner).unwrap().1;
+                    for other in projected.iter().filter(|p| p.0 != corner) {
+                        assert!(
+                            named > other.1,
+                            "{grid:?} {cam:?}: {name} at y {named}, {other:?}"
+                        );
+                    }
+                    if pitch == Pitch::Iso {
+                        order.push(corner);
+                    }
                 }
             }
+            // The order the projection gives, pinned once checked.
+            assert_eq!(
+                order,
+                ["front-right", "back-right", "back-left", "front-left"],
+                "{grid:?}"
+            );
         }
-        // The order the projection gives, pinned once checked. The PCIe edge
-        // is the front at quarter turn 0.
-        assert_eq!(
-            names,
-            [
-                "front (PCIe edge)",
-                "right (GDDR edge)",
-                "back (Ethernet edge)",
-                "left (GDDR edge)"
-            ]
-        );
     }
 
     #[test]
     fn top_pitch_is_named_top_down() {
         for q in 0..4 {
-            let cam = Camera {
+            let top = Camera {
                 quarter_turns: q,
                 pitch: Pitch::Top,
             };
-            assert_eq!(cam.side_name(), "top-down");
+            let iso = Camera {
+                quarter_turns: q,
+                pitch: Pitch::Iso,
+            };
+            assert_eq!(top.side_name(), format!("top-down, {}", iso.side_name()));
         }
         // Every preset has a plain-text name.
         for cam in PRESETS {

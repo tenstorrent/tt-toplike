@@ -605,7 +605,15 @@ impl Die3dView {
             status = with_caption;
         }
         if !self.undrawn.is_empty() {
-            status = format!("{status}{SEP}{}", self.undrawn_note());
+            // The note goes in whole, or cut after at least one of its own
+            // characters (separator, one character, the ellipsis), or not at
+            // all. Cut any shorter, `fit_width` would leave a bare ` ·…` or
+            // eat into the caption before it.
+            let room = width.saturating_sub(status.chars().count());
+            let note = self.undrawn_note();
+            if room >= SEP.chars().count() + note.chars().count().min(2) {
+                status = format!("{status}{SEP}{note}");
+            }
         }
         [
             Line::from(Span::styled(
@@ -619,8 +627,8 @@ impl Die3dView {
         ]
     }
 
-    /// The footer's camera caption: `view: <side>`, naming the board edge
-    /// facing the viewer (see `Camera::side_name`), or `view: <from> -> <to>`
+    /// The footer's camera caption: `view: <corner>`, naming the board corner
+    /// nearest the viewer (see `Camera::side_name`), or `view: <from> -> <to>`
     /// for the whole of a cut's transition.
     fn caption(&self, now: f64) -> String {
         if self.director.progress(now).is_some() {
@@ -1777,7 +1785,7 @@ mod tests {
         v.update(&b, 0.0);
         // The first camera is preset 0: quarter turn 0 at Iso pitch.
         let row = status_row(&v.render(0.0));
-        assert!(row.contains("view: front (PCIe edge)"), "{row}");
+        assert!(row.contains("view: front-right"), "{row}");
         // After the scene name and the estimate label.
         let scene = row.find("all boards").unwrap();
         let est = row.find(ESTIMATE_LABEL).unwrap();
@@ -1820,47 +1828,82 @@ mod tests {
 
     #[test]
     fn the_caption_is_dropped_before_the_estimate_label_when_narrow() {
-        // A long caption: a transition between two turns.
+        // A transition caption: `view: <from> -> <to>`.
         let mut v = wide_label_view(150);
         v.director.set_transition_mode(TransitionMode::Spin);
-        let mut at = 10.0;
-        v.handle_key(Die3dKey::CutNow, at);
-        while {
-            let (a, b) = v.director.cameras();
-            a.side_name() == "top-down" || b.side_name() == "top-down"
-        } {
-            at += 10.0;
-            v.handle_key(Die3dKey::CutNow, at);
-        }
-        let now = at + 0.1;
+        v.handle_key(Die3dKey::CutNow, 10.0);
+        let now = 10.1;
         let (from, to) = v.director.cameras();
         let caption = format!("view: {} -> {}", from.side_name(), to.side_name());
-        // Wide: the caption is there, whole.
-        let row = status_row(&v.render(now));
-        assert!(row.contains(&caption), "{row}");
-        // At 100 columns the estimate label stays and the caption, if it
-        // does not fit whole, goes whole: never a cut-off part of it.
-        for cols in [100, 90, 80] {
+        // At every width the estimate label stays, and the caption is either
+        // there whole or absent: never a cut-off part of it.
+        let (mut shown, mut dropped) = (0, 0);
+        for cols in 80..=150 {
             v.cols = cols;
-            let row = v.footer(now, Some(Shown::Board(0)))[0]
-                .spans
-                .iter()
-                .map(|s| s.content.to_string())
-                .collect::<String>();
+            let row = status_text(&v, now);
             assert!(row.contains(ESTIMATE_LABEL), "{cols}: {row}");
             assert!(row.chars().count() <= cols, "{cols}: {row}");
-            assert!(
-                row.contains(&caption) || !row.contains("view"),
-                "{cols}: {row}"
-            );
+            if row.contains(&caption) {
+                shown += 1;
+            } else {
+                assert!(!row.contains("view:"), "{cols}: {row}");
+                dropped += 1;
+            }
         }
-        v.cols = 100;
-        let row: String = v.footer(now, Some(Shown::Board(0)))[0]
+        // Not vacuous: the sweep crosses the width where it stops fitting.
+        assert!(shown > 0 && dropped > 0, "{shown} shown, {dropped} dropped");
+    }
+
+    /// Footer row 1 as text, for the shown board 0, at `now`.
+    fn status_text(v: &Die3dView, now: f64) -> String {
+        v.footer(now, Some(Shown::Board(0)))[0]
             .spans
             .iter()
             .map(|s| s.content.to_string())
-            .collect();
-        assert!(!row.contains("view"), "100 is too narrow for it: {row}");
+            .collect()
+    }
+
+    #[test]
+    fn the_caption_is_never_cut_and_the_note_never_left_as_a_stub() {
+        // The mock's devices: a Grayskull and a Wormhole not drawn, one
+        // Blackhole drawn. Cuts by hand collect resting and transition
+        // captions, short and long (`top-down, ...` is the longest name).
+        let b = Fake::boards(&["e150", "n150", "p150"], Some(TDP));
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        let note = v.undrawn_note();
+        let mut kinds = std::collections::HashSet::new();
+        for k in 0..12 {
+            let at = 10.0 * (k + 1) as f64;
+            v.handle_key(Die3dKey::CutNow, at);
+            for now in [at + 0.1, at + 5.0] {
+                let caption = v.caption(now);
+                kinds.insert((caption.contains("->"), caption.contains("top-down")));
+                // From the narrowest row the view allows (100 columns) up.
+                for cols in 100..=163 {
+                    v.cols = cols;
+                    let row = status_text(&v, now);
+                    let what = format!("{cols} cols, {caption:?}: {row:?}");
+                    assert!(row.chars().count() <= cols, "{what}");
+                    assert!(row.contains(ESTIMATE_LABEL), "{what}");
+                    assert!(row.contains(&caption) || !row.contains("view:"), "{what}");
+                    for stub in [" \u{b7}\u{2026}", " \u{b7} \u{2026}", " \u{b7}", " \u{b7} "] {
+                        assert!(!row.ends_with(stub), "stub {stub:?}: {what}");
+                    }
+                    // The note is whole, absent, or cut after at least one
+                    // of its own characters.
+                    if let Some(i) = row.find("chip 0") {
+                        let tail = &row[i..];
+                        assert!(tail == note || tail.ends_with('\u{2026}'), "{what}");
+                    }
+                }
+                v.cols = 150;
+            }
+        }
+        // Short and long, resting and transition captions were all seen.
+        for want in [(false, false), (false, true), (true, false), (true, true)] {
+            assert!(kinds.contains(&want), "{want:?} not seen: {kinds:?}");
+        }
     }
 
     /// Every label in the first `rows` rows: (row, start column, text) for
