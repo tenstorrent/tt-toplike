@@ -242,10 +242,15 @@ impl Camera {
     /// The board edge on the viewer's side, for the footer caption: plain
     /// text, `"top-down"` for the `Top` pitch.
     ///
-    /// An isometric camera looks down a diagonal, so at every quarter turn two
-    /// board edges face the viewer, one at the lower left of the screen and
-    /// one at the lower right, equally near. The caption names the one at the
-    /// lower left. At turn 0 that is the PCIe edge (grid y high, die row 12),
+    /// The rule is "the edge whose midpoint projects lowest on screen (largest
+    /// y)", but that rule alone cannot give four names. On the real board
+    /// grid (21 x 14 tiles for one die, 21 x 28 for two) the longer sides'
+    /// midpoints always win, so the aspect ratio decides: one die gives right,
+    /// right, left, left over the four turns and two dies front, back, back,
+    /// front. Measured on a square instead, an isometric camera looks down a
+    /// diagonal, so at every quarter turn two edges tie exactly: one at the
+    /// lower left of the screen and one at the lower right. By convention the
+    /// caption names the one at the lower left. At turn 0 that is the PCIe edge (grid y high, die row 12),
     /// and each quarter turn brings the next edge round: the right GDDR edge
     /// (grid x high), the Ethernet edge, the left GDDR edge. The test
     /// `side_names_match_the_edge_nearest_the_viewer` derives this order from

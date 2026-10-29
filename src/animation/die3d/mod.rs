@@ -591,20 +591,22 @@ impl Die3dView {
         if !self.chips.iter().any(|board| has_per_tile_data(board)) {
             status.push(ESTIMATE_LABEL.to_string());
         }
-        if !self.undrawn.is_empty() {
-            status.push(self.undrawn_note());
-        }
         let width = self.cols.saturating_sub(BAR_WIDTH);
-        // The camera caption comes last and goes whole when the row is too
-        // narrow for it, so it never pushes the estimate label (or the note)
-        // into the cut.
-        let status = status.join(SEP);
+        // Priority on a narrow row: the scene name, the estimate label, the
+        // camera caption, then the note on devices not drawn. The caption
+        // goes in whole only when it fits after the first two, so it never
+        // pushes the estimate label into the cut. The note comes last and is
+        // the part `fit_width` shortens: seeing which side the camera looks
+        // from during a cut matters more than the full list of chips the
+        // view cannot draw.
+        let mut status = status.join(SEP);
         let with_caption = format!("{status}{SEP}{}", self.caption(now));
-        let status = if with_caption.chars().count() <= width {
-            with_caption
-        } else {
-            status
-        };
+        if with_caption.chars().count() <= width {
+            status = with_caption;
+        }
+        if !self.undrawn.is_empty() {
+            status = format!("{status}{SEP}{}", self.undrawn_note());
+        }
         [
             Line::from(Span::styled(
                 format!("\u{2551} {}", fit_width(status, width)),
@@ -1624,8 +1626,41 @@ mod tests {
         // Every preset to every other, part way along, stays inside the
         // view's own buffer (300 x 160 pixels: 40 braille rows above the
         // footer) for a one- and a two-die board and four boards of two dies.
-        const PAD: i32 = 80;
+        //
+        // All 36 pairs at every eighth of the way are checked without
+        // drawing: the grid corners with the allowance `fit_pixels` makes for
+        // a block (`scene::corner_outside`). Drawing them all took about
+        // 19 s; real pictures are drawn for a few pairs below.
         let (pw, ph) = (300i32, 160i32);
+        let grids = [
+            ("1 die", board_grid(1)),
+            ("2 dies", board_grid(2)),
+            ("4 x 2", super_grid(&[2, 2, 2, 2]).0),
+        ];
+        for (what, grid) in grids {
+            let base = fit_pixels(pw, ph, grid).unwrap();
+            for from in camera::PRESETS {
+                for to in camera::PRESETS {
+                    for i in 0..=8 {
+                        let iso = Camera::lerp_view(&from, &to, i as f32 / 8.0, &base.iso, grid);
+                        let out = scene::corner_outside(&iso, grid, pw, ph);
+                        assert!(out.is_none(), "{what} {from:?} -> {to:?} at {i}/8: {out:?}");
+                    }
+                }
+            }
+        }
+        // Drawn: pairs that turn one quarter each way, turn a half, and
+        // change pitch while turning, at a quarter, half and three quarters.
+        let p = camera::PRESETS;
+        let pairs = [
+            (p[0], p[1]),
+            (p[3], p[0]),
+            (p[1], p[3]),
+            (p[4], p[2]),
+            (p[2], p[5]),
+            (p[5], p[4]),
+        ];
+        const PAD: i32 = 80;
         let one: Vec<ChipInputs> = v.chips[0].clone();
         let two = vec![one[0].clone(), one[0].clone()];
         let four: Vec<Vec<ChipInputs>> = (0..4).map(|_| two.clone()).collect();
@@ -1642,26 +1677,22 @@ mod tests {
         ];
         for (what, grid, draw) in draws {
             let base = fit_pixels(pw, ph, grid).unwrap();
-            for from in camera::PRESETS {
-                for to in camera::PRESETS {
-                    for i in 0..=8 {
-                        let mut iso =
-                            Camera::lerp_view(&from, &to, i as f32 / 8.0, &base.iso, grid);
-                        iso.ox += PAD;
-                        iso.oy += PAD;
-                        let f = SceneFit { iso, ..base };
-                        let mut buf =
-                            PixelBuf::new((pw + 2 * PAD) as usize, (ph + 2 * PAD) as usize);
-                        draw(&mut buf, &f);
-                        for y in 0..buf.h {
-                            for x in 0..buf.w {
-                                let (xi, yi) = (x as i32 - PAD, y as i32 - PAD);
-                                assert!(
-                                    !buf.covered(x, y)
-                                        || (0..pw).contains(&xi) && (0..ph).contains(&yi),
-                                    "{what} {from:?} -> {to:?} at {i}/8: pixel {xi},{yi}"
-                                );
-                            }
+            for (from, to) in pairs {
+                for i in [2, 4, 6] {
+                    let mut iso = Camera::lerp_view(&from, &to, i as f32 / 8.0, &base.iso, grid);
+                    iso.ox += PAD;
+                    iso.oy += PAD;
+                    let f = SceneFit { iso, ..base };
+                    let mut buf = PixelBuf::new((pw + 2 * PAD) as usize, (ph + 2 * PAD) as usize);
+                    draw(&mut buf, &f);
+                    for y in 0..buf.h {
+                        for x in 0..buf.w {
+                            let (xi, yi) = (x as i32 - PAD, y as i32 - PAD);
+                            assert!(
+                                !buf.covered(x, y)
+                                    || (0..pw).contains(&xi) && (0..ph).contains(&yi),
+                                "{what} {from:?} -> {to:?} at {i}/8: pixel {xi},{yi}"
+                            );
                         }
                     }
                 }
@@ -2133,6 +2164,38 @@ mod tests {
                 "seed {seed}"
             );
         }
+    }
+
+    #[test]
+    fn the_caption_outranks_the_not_drawn_note_during_a_cut() {
+        // As in the mock: a Grayskull and a Wormhole the view does not draw,
+        // and one Blackhole that it does.
+        let b = Fake::boards(&["e150", "n150", "p150"], Some(TDP));
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        let note = v.undrawn_note();
+        assert!(
+            note.contains("Grayskull") && note.contains("Wormhole"),
+            "{note}"
+        );
+        v.director.set_transition_mode(TransitionMode::Spin);
+        v.handle_key(Die3dKey::CutNow, 10.0);
+        let (from, to) = v.director.cameras();
+        let caption = format!("view: {} -> {}", from.side_name(), to.side_name());
+        let row = status_row(&v.render(10.3));
+        assert!(row.chars().count() <= 150, "{row}");
+        assert!(row.contains(&caption), "{row}");
+        assert!(row.contains("view:") && row.contains("->"), "{row}");
+        assert!(row.contains(ESTIMATE_LABEL), "{row}");
+        // The note is the part that shortens: it starts after the caption
+        // and is cut with an ellipsis.
+        assert!(!row.contains(&note), "the whole note fits: {row}");
+        assert!(row.ends_with('\u{2026}'), "{row}");
+        let at_note = row.find("chip 0: Grayskull").expect("the note's start");
+        assert!(row.find(&caption).unwrap() < at_note, "{row}");
+        // At rest the shorter caption and the whole note both fit.
+        let row = status_row(&v.render(20.0));
+        assert!(row.contains("view: ") && row.contains(&note), "{row}");
     }
 
     #[test]

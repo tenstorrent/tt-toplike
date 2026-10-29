@@ -651,6 +651,32 @@ pub(super) fn painted_bbox_for(
     (x0 - PAD, y0 - PAD, x1 - PAD, y1 - PAD)
 }
 
+/// The first corner of `grid` that lands outside a `pw` x `ph` buffer under
+/// `iso`, with the allowance [`fit_pixels`] makes for a block around it: half
+/// a tile each side, [`lift`] above, `th` and a row below. `None` when all
+/// four are inside. The projection is linear, so the corners are the
+/// extremes; this checks a camera angle without drawing it.
+#[cfg(test)]
+pub(super) fn corner_outside(
+    iso: &Iso,
+    grid: (usize, usize),
+    pw: i32,
+    ph: i32,
+) -> Option<((f32, f32), (i32, i32))> {
+    let (tw, th) = (iso.tw, iso.th);
+    [
+        (0.0, 0.0),
+        ((grid.0 - 1) as f32, 0.0),
+        (0.0, (grid.1 - 1) as f32),
+        ((grid.0 - 1) as f32, (grid.1 - 1) as f32),
+    ]
+    .into_iter()
+    .map(|(gx, gy)| ((gx, gy), iso.project(gx, gy, grid)))
+    .find(|&(_, (x, y))| {
+        !(x - tw / 2 >= 0 && x + tw / 2 + 1 <= pw && y - lift(tw) >= 0 && y + th + 1 <= ph)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,28 +777,16 @@ mod tests {
                 let Some(f) = fit_pixels(pw, ph, grid) else {
                     continue;
                 };
-                let (tw, th) = (f.iso.tw, f.iso.th);
-                let corners = [
-                    (0.0, 0.0),
-                    ((grid.0 - 1) as f32, 0.0),
-                    (0.0, (grid.1 - 1) as f32),
-                    ((grid.0 - 1) as f32, (grid.1 - 1) as f32),
-                ];
                 for deg in 0..360 {
                     let mut iso = f.iso;
                     iso.quarter_turns = (deg / 90) as u8;
                     iso.spin = ((deg % 90) as f32).to_radians();
-                    for &(gx, gy) in &corners {
-                        let (x, y) = iso.project(gx, gy, grid);
-                        let inside = x - tw / 2 >= 0
-                            && x + tw / 2 + 1 <= pw
-                            && y - lift(tw) >= 0
-                            && y + th + 1 <= ph;
-                        assert!(
-                            inside,
-                            "{what} in {pw} x {ph} at {deg} degrees: corner {gx},{gy} at {x},{y} (tw {tw})"
-                        );
-                    }
+                    let out = corner_outside(&iso, grid, pw, ph);
+                    assert!(
+                        out.is_none(),
+                        "{what} in {pw} x {ph} at {deg} degrees: {out:?} (tw {})",
+                        iso.tw
+                    );
                 }
             }
         }
