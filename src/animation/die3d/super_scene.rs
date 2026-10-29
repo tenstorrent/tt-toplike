@@ -38,7 +38,7 @@ pub(super) fn mean_heat(tiles: &[f32]) -> f32 {
 /// Grid size (columns, rows) of the super scene and the height in rows of one
 /// board row, for boards of the given die counts. Every board gets a cell as
 /// wide as a board and as tall as the tallest board, so the boards line up.
-fn super_grid(boards: &[usize]) -> ((usize, usize), usize) {
+pub(super) fn super_grid(boards: &[usize]) -> ((usize, usize), usize) {
     let row_rows = BOARD_BAND * boards.iter().copied().max().unwrap_or(1).max(1);
     let cols = boards.len().clamp(1, BOARDS_PER_ROW) * BOARD_COLS;
     let rows = boards.len().max(1).div_ceil(BOARDS_PER_ROW);

@@ -52,7 +52,7 @@ const ETH_CAGES: usize = 12;
 /// Rows of GDDR blocks (die rows) on each side, two rows per memory chip.
 const GDDR_ROWS: [i32; 4] = [0, 3, 6, 9];
 /// Smallest terminal the scene is drawn on, in cells.
-const MIN_CELLS: (usize, usize) = (100, 30);
+pub(super) const MIN_CELLS: (usize, usize) = (100, 30);
 /// Packets are drawn only above this rate (bytes per second); below it the
 /// counter is idle noise.
 const MIN_PACKET_BPS: f64 = 1000.0;
@@ -195,7 +195,13 @@ fn lift(tw: i32) -> i32 {
 /// `Iso` rotates about the grid centre, and the board grid is not square, so
 /// each turn has its own footprint. The sizing takes the union of all four.
 pub fn fit(cells_w: usize, cells_h: usize, dies: usize) -> Option<SceneFit> {
-    fit_grid(cells_w, cells_h, (BOARD_COLS, BOARD_BAND * dies.max(1)))
+    fit_grid(cells_w, cells_h, board_grid(dies))
+}
+
+/// The tile grid (columns, rows) of one board carrying `dies` dies; at least
+/// one band even for zero dies, so the grid is never empty.
+pub(super) fn board_grid(dies: usize) -> (usize, usize) {
+    (BOARD_COLS, BOARD_BAND * dies.max(1))
 }
 
 /// [`fit`] for any tile grid of `grid` (columns, rows), such as the several
@@ -204,7 +210,16 @@ pub(super) fn fit_grid(cells_w: usize, cells_h: usize, grid: (usize, usize)) -> 
     if cells_w < MIN_CELLS.0 || cells_h < MIN_CELLS.1 {
         return None;
     }
-    let (pw, ph) = ((cells_w * 2) as i32, (cells_h * 4) as i32);
+    fit_pixels((cells_w * 2) as i32, (cells_h * 4) as i32, grid)
+}
+
+/// The sizing of [`fit_grid`] for a buffer of `pw` x `ph` pixels, with no
+/// minimum terminal size. The view needs this: it keeps two rows for its
+/// footer, and half-block cells hold 1 x 2 pixels where `fit` assumes the
+/// 2 x 4 of braille, so neither case is a `cells_w` x `cells_h` braille area.
+/// The view applies the 100 x 30 minimum to the whole terminal itself. `None`
+/// when even a 4 pixel tile does not hold the grid.
+pub(super) fn fit_pixels(pw: i32, ph: i32, grid: (usize, usize)) -> Option<SceneFit> {
     let corners = [
         (0.0, 0.0),
         ((grid.0 - 1) as f32, 0.0),
@@ -529,7 +544,7 @@ pub fn draw_board_scene(
     detail: Detail,
 ) {
     let ctx = DrawCtx::new(fit, t, detail);
-    let grid = (BOARD_COLS, BOARD_BAND * chips.len().max(1));
+    let grid = board_grid(chips.len());
     buf.fill_vignette(BG);
     let harvested = harvested_columns(chips);
     let mut visits = HashMap::new();
@@ -601,66 +616,9 @@ pub(super) fn painted_bbox_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::animation::die3d::test_backend::Fake;
     use crate::backend::pcie_counters::PcieBandwidth;
-    use crate::backend::TelemetryBackend;
-    use crate::models::{Architecture, Device, SmbusTelemetry, Telemetry};
-
-    /// A backend whose power, TDP and PCIe rate are set directly, so the tests
-    /// do not depend on the mock backend's simulated load.
-    struct Fake {
-        devices: Vec<Device>,
-        telem: Telemetry,
-        smbus: SmbusTelemetry,
-        has_smbus: bool,
-        pcie: Option<PcieBandwidth>,
-    }
-
-    impl Fake {
-        fn new(power: f32, smbus_tdp: Option<&str>, limit_tdp: Option<f32>) -> Fake {
-            let mut d = Device::new(0, "p300".into(), "0000:01:00.0".into(), "(0,0)".into());
-            d.limits = limit_tdp.map(|t| crate::models::telemetry::DeviceLimits {
-                tdp_limit: Some(t),
-                tdc_limit: None,
-                asic_fmax: None,
-                thm_limit: None,
-            });
-            let mut telem = Telemetry::new();
-            telem.power = Some(power);
-            let mut smbus = SmbusTelemetry::new();
-            smbus.tdp = smbus_tdp.map(str::to_string);
-            Fake {
-                devices: vec![d],
-                telem,
-                smbus,
-                has_smbus: true,
-                pcie: None,
-            }
-        }
-    }
-
-    impl TelemetryBackend for Fake {
-        fn init(&mut self) -> crate::error::BackendResult<()> {
-            Ok(())
-        }
-        fn update(&mut self) -> crate::error::BackendResult<()> {
-            Ok(())
-        }
-        fn devices(&self) -> &[Device] {
-            &self.devices
-        }
-        fn telemetry(&self, _i: usize) -> Option<&Telemetry> {
-            Some(&self.telem)
-        }
-        fn smbus_telemetry(&self, _i: usize) -> Option<&SmbusTelemetry> {
-            self.has_smbus.then_some(&self.smbus)
-        }
-        fn backend_info(&self) -> String {
-            "fake".into()
-        }
-        fn pcie_bandwidth(&self, _i: usize) -> Option<PcieBandwidth> {
-            self.pcie
-        }
-    }
+    use crate::models::Architecture;
 
     fn chip(load: f32) -> ChipInputs {
         ChipInputs {

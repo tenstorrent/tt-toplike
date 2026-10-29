@@ -12,11 +12,11 @@ use std::collections::HashMap;
 
 /// Load (power over TDP, 0..1) at or above which a rise fires.
 pub const LOAD_ON: f32 = 0.5;
-/// Load below which the load detector is armed again.
+/// Load at or below which the load detector is armed again.
 pub const LOAD_REARM: f32 = 0.25;
 /// PCIe rx+tx rate (bytes/s) at or above which a burst fires.
 pub const PCIE_ON_BPS: f64 = 2.0e9;
-/// PCIe rate (bytes/s) below which the burst detector is armed again.
+/// PCIe rate (bytes/s) at or below which the burst detector is armed again.
 pub const PCIE_REARM_BPS: f64 = 0.5e9;
 
 /// Something interesting happened on a chip.

@@ -47,6 +47,7 @@ pub use arcade::ArcadeVisualization;
 pub use baseline::AdaptiveBaseline;
 pub use common::*;
 pub use defrag::DefragVis;
+pub use die3d::Die3dView;
 pub use duel::{duel_balance, DuelState};
 pub use inference_load::LoadSnake;
 pub use memory_castle::MemoryCastle;
