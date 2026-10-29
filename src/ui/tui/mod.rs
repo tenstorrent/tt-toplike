@@ -100,10 +100,16 @@ enum DisplayMode {
     /// `InferenceMonitor` and `HivemindSweeper`); `t` toggles back out to
     /// `prev_mode`, as does Esc.
     Training,
+    /// Die 3D view — isometric Blackhole boards drawn from live telemetry.
+    /// Entered via `3` only (excluded from the `v`-cycle rotation and from
+    /// `--rotate`, like `Training`); `3` toggles back out to `prev_mode`, as
+    /// does Esc. While active it also takes `[ ] m c C B` (see
+    /// `die3d_key_for`).
+    Die3d,
 }
 
-/// The `v` rotation. `InferenceMonitor`, `HivemindSweeper` and `Training`
-/// are entry-key-only modes and are never cycled into; a `v` pressed while
+/// The `v` rotation. `InferenceMonitor`, `HivemindSweeper`, `Training` and
+/// `Die3d` are entry-key-only modes and are never cycled into; a `v` pressed while
 /// one of them is active leaves to `Insights`.
 fn next_display_mode(m: DisplayMode) -> DisplayMode {
     match m {
@@ -124,6 +130,50 @@ fn next_display_mode(m: DisplayMode) -> DisplayMode {
         // still needs to leave cleanly.
         DisplayMode::HivemindSweeper => DisplayMode::Insights,
         DisplayMode::Training => DisplayMode::Insights,
+        // Die3d is entered with `3` only, so `v` from it leaves the same way.
+        DisplayMode::Die3d => DisplayMode::Insights,
+    }
+}
+
+/// The mode a `3` press leads to, and the `prev_mode` to keep: entering
+/// remembers where we came from, leaving goes back to it. Pulled out of the
+/// key handler so the toggle can be tested without a terminal.
+fn die3d_toggle(mode: DisplayMode, prev_mode: DisplayMode) -> (DisplayMode, DisplayMode) {
+    if mode == DisplayMode::Die3d {
+        (prev_mode, prev_mode)
+    } else {
+        (DisplayMode::Die3d, mode)
+    }
+}
+
+/// The Die 3D key `c` stands for in `mode`, if the view takes it. Outside
+/// `Die3d` it is always `None`, so these letters keep their meaning (or lack
+/// of one) everywhere else. The handler checks this before its general
+/// character arms.
+fn die3d_key_for(mode: DisplayMode, c: char) -> Option<crate::animation::die3d::Die3dKey> {
+    if mode == DisplayMode::Die3d {
+        crate::animation::die3d::key_to_die3d(c)
+    } else {
+        None
+    }
+}
+
+/// Short name of a mode for the global status bar. Shown there only for
+/// `Die3d` today, which is the one view whose own footer does not name the
+/// key that leaves it from the bottom row.
+fn statusbar_mode_name(mode: DisplayMode) -> &'static str {
+    match mode {
+        DisplayMode::Insights => "Insights",
+        DisplayMode::Grid => "Grid",
+        DisplayMode::Starfield => "Starfield",
+        DisplayMode::MemoryCastle => "Memory Castle",
+        DisplayMode::MemoryFlow => "Memory Flow",
+        DisplayMode::Arcade => "Arcade",
+        DisplayMode::Defrag => "Defrag",
+        DisplayMode::InferenceMonitor => "Inference Monitor",
+        DisplayMode::HivemindSweeper => "Hivemind Sweeper",
+        DisplayMode::Training => "Training",
+        DisplayMode::Die3d => "Die 3D",
     }
 }
 
@@ -472,6 +522,10 @@ fn run_app(
     let mut arcade: Option<ArcadeVisualization> = None;
     let mut defrag: Option<DefragVis> = None;
     let mut train_view: Option<TrainView> = None;
+    // Die 3D view and the clock it runs on: the view takes seconds since it
+    // was made, so one `Instant` lives beside it.
+    let mut die3d: Option<crate::animation::Die3dView> = None;
+    let mut die3d_started = Instant::now();
     let mut train_monitor: Option<TrainMonitor> = None;
     // Arcade's activity lanes. A training run is found by the background scan
     // worker (it reads `/proc/<pid>/maps`, which must not run on this thread);
@@ -753,6 +807,9 @@ fn run_app(
                 // comet crosses the sky. At the 10 FPS data rate all of that
                 // reads as stepping rather than moving.
                 | DisplayMode::Training
+                // Camera cuts, the chaos effect and the scene's own motion
+                // are timed in fractions of a second.
+                | DisplayMode::Die3d
         ) || (display_mode == DisplayMode::Defrag && defrag_is_animated);
         let render_interval = if is_anim_mode {
             throttle_state.effective_anim_interval(ui_poll_rate_anim)
@@ -1172,6 +1229,18 @@ fn run_app(
                         tv.update();
                     }
                 }
+                DisplayMode::Die3d => {
+                    // The scene is drawn above the global status bar, so the
+                    // view gets one row less than the terminal.
+                    let dv = die3d.get_or_insert_with(|| {
+                        die3d_started = Instant::now();
+                        crate::animation::Die3dView::new(
+                            size.width as usize,
+                            (size.height as usize).saturating_sub(1),
+                        )
+                    });
+                    dv.update(backend, die3d_started.elapsed().as_secs_f64());
+                }
             }
 
             // Unattended rotation: advance once this view has had its dwell.
@@ -1416,6 +1485,11 @@ fn run_app(
                                 );
                             }
                         }
+                        DisplayMode::Die3d => {
+                            if let Some(ref dv) = die3d {
+                                ui_die3d(f, dv, die3d_started.elapsed().as_secs_f64());
+                            }
+                        }
                         DisplayMode::Training => {
                             // Under `--mock` the state comes from the
                             // synthetic run rather than a /proc scan; the
@@ -1484,6 +1558,7 @@ fn run_app(
                     arcade = None;
                     defrag = None;
                     train_view = None;
+                    die3d = None;
                     terminal.clear().ok();
                 }
                 // ── Reset takeover intercepts all keystrokes while active ──────
@@ -2015,6 +2090,33 @@ fn run_app(
                                 }
                                 force_redraw = true;
                             }
+                            // ── Die 3D keys ([ ] m c C B) ──────────────────────
+                            // Checked before the general character arms so the
+                            // view consumes them. None of these letters has a
+                            // global meaning (`b` lowercase is the beta toggle,
+                            // `B` is free), and `die3d_key_for` is `None`
+                            // outside the mode, so nothing else is shadowed.
+                            KeyCode::Char(c) if die3d_key_for(display_mode, c).is_some() => {
+                                if let (Some(k), Some(dv)) =
+                                    (die3d_key_for(display_mode, c), die3d.as_mut())
+                                {
+                                    dv.handle_key(k, die3d_started.elapsed().as_secs_f64());
+                                }
+                                force_redraw = true;
+                            }
+                            KeyCode::Char('3') => {
+                                // Toggle the Die 3D view, like `t` for Training. The
+                                // view is dropped on leaving (see the draw arm's
+                                // lazy creation), so each entry starts on the
+                                // board scene with auto-cuts on.
+                                let (m, p) = die3d_toggle(display_mode, prev_mode);
+                                display_mode = m;
+                                prev_mode = p;
+                                if display_mode != DisplayMode::Die3d {
+                                    die3d = None;
+                                }
+                                force_redraw = true;
+                            }
                             KeyCode::Char('t') => {
                                 // Toggle the Training view — mirrors the `~` handler
                                 // above: entering remembers `prev_mode`, leaving (via
@@ -2095,6 +2197,10 @@ fn run_app(
                                     // Back out of the Training view to wherever the
                                     // user came from (see the `t` handler above).
                                     display_mode = prev_mode;
+                                } else if display_mode == DisplayMode::Die3d {
+                                    // Back out of Die 3D (see the `3` handler above).
+                                    display_mode = prev_mode;
+                                    die3d = None;
                                 } else {
                                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_some() {
@@ -2940,6 +3046,20 @@ fn ui_train(
     f.render_widget(widget, f.area());
 }
 
+/// Render the Die 3D view. It draws into the area above the global status
+/// bar's row (the view was sized for that, see the update arm), so its own
+/// footer is not covered.
+fn ui_die3d(f: &mut Frame, view: &crate::animation::Die3dView, now: f64) {
+    let full = f.area();
+    let area = Rect {
+        height: full.height.saturating_sub(1),
+        ..full
+    };
+    let lines = view.render(now);
+    let widget = Paragraph::new(lines).style(Style::default().bg(colors::rgb(0, 0, 0)));
+    f.render_widget(widget, area);
+}
+
 /// Render Arcade mode — uses the composite canvas so the hero `@` and trail
 /// actually appear.  The previous ratatui-Layout approach called sub-viz methods
 /// directly into separate Rects, bypassing ArcadeVisualization::render() and
@@ -3017,6 +3137,18 @@ fn render_global_statusbar(
         vec![key(" / "), lbl(" cmd")],
         vec![key(" q "), lbl(" quit")],
     ];
+
+    // Die 3D: name the view and the key out of it. The view's own footer is
+    // two rows above this bar.
+    if mode == DisplayMode::Die3d {
+        hotkeys.push(vec![
+            key(" 3 "),
+            Span::styled(
+                format!(" leave {}", statusbar_mode_name(mode)),
+                Style::default().fg(label_fg),
+            ),
+        ]);
+    }
 
     // Insights-specific nav appended when in that mode.
     if matches!(mode, DisplayMode::Insights) {
@@ -3717,6 +3849,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 DisplayMode::Grid => grid_legend_lines(bar, bg, dim),
                 DisplayMode::HivemindSweeper => hivemind_view::legend_lines(bar, bg, dim),
                 DisplayMode::Training => train_legend_lines(bar, bg, dim),
+                DisplayMode::Die3d => die3d_legend_lines(bar, bg, dim),
                 DisplayMode::Arcade => {
                     // All four combined.
                     let mut v = Vec::new();
@@ -4050,6 +4183,35 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
             DisplayMode::HivemindSweeper => {
                 explain_lines(bar, bg, dim, lbl, hivemind_view::EXPLAIN_TEXT, cols)
             }
+            DisplayMode::Die3d => explain_lines(
+                bar,
+                bg,
+                dim,
+                lbl,
+                &[
+                    "Die 3D",
+                    "",
+                    "Each Blackhole board is drawn as an isometric block",
+                    "per die, from live chip telemetry. Tile brightness",
+                    "follows activity: measured per tile where the driver",
+                    "reports it, otherwise an estimate from chip load.",
+                    "The footer says which, as 'estimate'.",
+                    "",
+                    "The camera cuts to a new angle when a chip's load",
+                    "rises or PCIe traffic bursts. With every board in",
+                    "view, a load rise also opens that chip's board.",
+                    "C turns the automatic cuts and switches off; c cuts",
+                    "by hand; [ ] m choose the board or all boards;",
+                    "B swaps braille for half-block cells.",
+                    "",
+                    "Only Blackhole chips are drawn; other devices are",
+                    "named in the footer. Needs a terminal of at least",
+                    "100 x 31 cells (the bottom row is the status bar).",
+                    "",
+                    "Press l for the key list · 3 to return.",
+                ],
+                cols,
+            ),
             DisplayMode::Training => explain_lines(
                 bar,
                 bg,
@@ -4601,6 +4763,35 @@ fn defrag_legend_lines(
             Span::styled("= channel temperature", Style::default().fg(dim))
         ]),
     ]
+}
+
+/// Legend for the Die 3D view: what the scene's colours and the footer mean,
+/// and the keys the view takes.
+fn die3d_legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    [
+        "Die 3D: each Blackhole die as a block of tiles.",
+        "  tile glow   activity (measured per tile when the",
+        "              driver reports it, otherwise an estimate",
+        "              from chip load, labelled in the footer)",
+        "  camera cuts on activity: a load rise or PCIe burst",
+        "  footer      scene shown, cell mode, auto-cuts state",
+        "",
+        "  [ ]  previous / next board     m  one board / all",
+        "  c    cut the camera now        C  auto-cuts on/off",
+        "  B    braille / half-block      3  leave",
+    ]
+    .iter()
+    .map(|s| {
+        Line::from(vec![
+            Span::styled("║ ", Style::default().fg(bar).bg(bg)),
+            Span::styled(*s, Style::default().fg(dim)),
+        ])
+    })
+    .collect()
 }
 
 /// Legend for the Training view: the nine colour channels, each of which
@@ -8203,7 +8394,8 @@ mod tests {
 #[cfg(test)]
 mod display_mode_tests {
     use super::{
-        display_mode_for, linger_for, next_display_mode, next_rotation_mode, DisplayMode, ROTATION,
+        die3d_key_for, die3d_toggle, display_mode_for, linger_for, next_display_mode,
+        next_rotation_mode, statusbar_mode_name, DisplayMode, ROTATE_LINGER, ROTATION,
     };
 
     #[test]
@@ -8216,6 +8408,73 @@ mod display_mode_tests {
         assert_eq!(mode, DisplayMode::Training);
         mode = prev;
         assert_eq!(mode, DisplayMode::Insights);
+    }
+
+    #[test]
+    fn die3d_is_not_in_the_v_rotation() {
+        // Neither the unattended rotation nor the `v` cycle may reach Die3d:
+        // it is entered with `3` only.
+        assert!(!ROTATION.contains(&DisplayMode::Die3d));
+        let mut m = DisplayMode::Insights;
+        for _ in 0..12 {
+            m = next_display_mode(m);
+            assert_ne!(m, DisplayMode::Die3d, "`v` must not cycle into Die3d");
+        }
+        // `next_rotation_mode` from Die3d (not listed) restarts the rotation.
+        assert_eq!(next_rotation_mode(DisplayMode::Die3d), ROTATION[0]);
+    }
+
+    #[test]
+    fn v_from_die3d_leaves_to_insights() {
+        assert_eq!(
+            next_display_mode(DisplayMode::Die3d),
+            DisplayMode::Insights
+        );
+    }
+
+    #[test]
+    fn die3d_has_a_status_bar_name() {
+        let name = statusbar_mode_name(DisplayMode::Die3d);
+        assert!(!name.is_empty());
+        assert!(name.contains("3D"), "{name}");
+    }
+
+    #[test]
+    fn die3d_dwells_for_the_default_linger() {
+        assert_eq!(linger_for(DisplayMode::Die3d, false), ROTATE_LINGER);
+        assert_eq!(linger_for(DisplayMode::Die3d, true), ROTATE_LINGER);
+    }
+
+    #[test]
+    fn key_3_enters_die3d_remembering_the_mode_and_leaves_to_it() {
+        // Entering from Grid remembers Grid; pressing `3` again goes back.
+        let (mode, prev) = die3d_toggle(DisplayMode::Grid, DisplayMode::Insights);
+        assert_eq!((mode, prev), (DisplayMode::Die3d, DisplayMode::Grid));
+        let (mode, prev) = die3d_toggle(mode, prev);
+        assert_eq!((mode, prev), (DisplayMode::Grid, DisplayMode::Grid));
+    }
+
+    #[test]
+    fn die3d_keys_are_routed_only_while_in_the_mode() {
+        use crate::animation::die3d::Die3dKey;
+        for (c, want) in [
+            (']', Die3dKey::NextBoard),
+            ('[', Die3dKey::PrevBoard),
+            ('m', Die3dKey::ToggleScene),
+            ('c', Die3dKey::CutNow),
+            ('C', Die3dKey::ToggleAuto),
+            ('B', Die3dKey::ToggleBraille),
+        ] {
+            assert_eq!(die3d_key_for(DisplayMode::Die3d, c), Some(want), "{c}");
+            // Out of the mode the same keys are not taken.
+            for m in [DisplayMode::Insights, DisplayMode::Training, DisplayMode::Grid] {
+                assert_eq!(die3d_key_for(m, c), None, "{c} in {m:?}");
+            }
+        }
+        // In the mode, keys with no Die 3D meaning fall through.
+        for c in ['3', 'v', 'q', 'l', 'b'] {
+            assert_eq!(die3d_key_for(DisplayMode::Die3d, c), None, "{c}");
+        }
     }
 
     #[test]

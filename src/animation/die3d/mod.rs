@@ -65,7 +65,8 @@ pub enum Die3dKey {
     ToggleScene,
     /// `c`: cut the camera now.
     CutNow,
-    /// `C`: automatic cuts on or off.
+    /// `C`: automatic cuts on or off. With them off the camera cuts only on
+    /// `c`, and the view also stops switching scenes on its own.
     ToggleAuto,
     /// `B`: braille or half-block cells.
     ToggleBraille,
@@ -242,9 +243,7 @@ impl Die3dView {
         let mut lines = match &frame {
             Some((buf, _)) if self.braille => cells::to_braille_lines(buf),
             Some((buf, _)) => cells::to_halfblock_lines(buf),
-            None => vec![hint(
-                "This scene does not fit at this size. Enlarge the terminal or press B.".into(),
-            )],
+            None => vec![hint(no_fit_hint(self.braille).into())],
         };
         lines.resize(scene_rows, Line::default());
         lines.extend(self.footer(now, frame.map(|(_, shown)| shown)));
@@ -331,8 +330,8 @@ impl Die3dView {
             },
         };
         let mut status = vec![scene];
-        let all: Vec<ChipInputs> = self.chips.concat();
-        if !has_per_tile_data(&all) {
+        // Per-tile data on any chip of any board lifts the estimate label.
+        if !self.chips.iter().any(|board| has_per_tile_data(board)) {
             status.push(ESTIMATE_LABEL.to_string());
         }
         status.push(
@@ -382,6 +381,16 @@ fn aim(fit: &SceneFit, camera: Camera, grid: (usize, usize)) -> SceneFit {
     SceneFit {
         iso: camera.apply(&fit.iso, grid),
         scale: fit.scale,
+    }
+}
+
+/// The line shown in place of a scene that does not fit. Braille has the most
+/// pixels per cell, so only in half-block mode can `B` give a better fit.
+fn no_fit_hint(braille: bool) -> &'static str {
+    if braille {
+        "This scene does not fit at this size. Enlarge the terminal."
+    } else {
+        "This scene does not fit at this size. Enlarge the terminal or press B for braille."
     }
 }
 
@@ -692,6 +701,33 @@ mod tests {
         );
         // Half-block rows are one cell per pixel column.
         assert_eq!(text(&lines)[10].chars().count(), 150);
+    }
+
+    #[test]
+    fn render_draws_the_frame_not_the_bare_scene() {
+        // Pins `render` to `frame`: a regression that drew `scene_pixels`
+        // would skip the chaos noise, and this would fail.
+        let b = Fake::boards(&["p150"], Some(TDP));
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        v.handle_key(Die3dKey::CutNow, 10.0);
+        let mid = v.director.swapped_at().unwrap();
+        let scene_rows = 42 - FOOTER_ROWS;
+        let rows = |lines: &[Line<'static>]| text(&lines[..scene_rows]);
+        let bare = |t: f64| text(&cells::to_braille_lines(&v.scene_pixels(t).unwrap().0));
+        // Mid-cut the rendered rows are scrambled, so they differ from the
+        // bare scene at the same instant.
+        assert_ne!(rows(&v.render(mid)), bare(mid));
+        // After the transition the chaos is gone and render is the scene.
+        let after = 10.0 + camera::CHAOS_SECS + 0.01;
+        assert_eq!(rows(&v.render(after)), bare(after));
+    }
+
+    #[test]
+    fn the_no_fit_hint_only_suggests_b_when_b_can_help() {
+        // Braille already has the most pixels, so pressing B cannot help.
+        assert!(!no_fit_hint(true).contains("press B"), "{}", no_fit_hint(true));
+        assert!(no_fit_hint(false).contains("press B"));
     }
 
     #[test]
