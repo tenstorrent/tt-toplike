@@ -2100,12 +2100,13 @@ fn run_app(
                                 }
                                 force_redraw = true;
                             }
-                            // ── Die 3D keys ([ ] m c C B) ──────────────────────
+                            // ── Die 3D keys ([ ] m c C B T X) ──────────────────
                             // Checked before the general character arms so the
                             // view consumes them. None of these letters has a
-                            // global meaning (`b` lowercase is the beta toggle,
-                            // `B` is free), and `die3d_key_for` is `None`
-                            // outside the mode, so nothing else is shadowed.
+                            // global meaning (`b` lowercase is the beta toggle;
+                            // `B`, `T` and `X` are free), and `die3d_key_for` is
+                            // `None` outside the mode, so nothing else is
+                            // shadowed.
                             KeyCode::Char(c) if die3d_key_for(display_mode, c).is_some() => {
                                 if let (Some(k), Some(dv)) =
                                     (die3d_key_for(display_mode, c), die3d.as_mut())
@@ -4218,6 +4219,8 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "by hand; [ ] m choose the board or all boards;",
                     "B swaps braille for half-block cells; T turns the",
                     "transparent background (terminal shows through) on or off.",
+                    "X sets how a cut looks: shuffle, chaos, dissolve or spin",
+                    "(spin is used only when the board shown stays the same).",
                     "",
                     "Only Blackhole chips are drawn; other devices are",
                     "named in the footer. Needs a terminal of at least",
@@ -4798,6 +4801,7 @@ fn die3d_legend_lines(
         "  [ ]  previous / next board     m  one board / all",
         "  c    cut the camera now        C  auto-cuts on/off",
         "  B    braille / half-block      T  transparent / opaque",
+        "  X    transition: shuffle / chaos / dissolve / spin",
         "  3    leave",
     ]
     .iter()
@@ -8495,6 +8499,8 @@ mod display_mode_tests {
             ('c', Die3dKey::CutNow),
             ('C', Die3dKey::ToggleAuto),
             ('B', Die3dKey::ToggleBraille),
+            ('T', Die3dKey::ToggleTransparent),
+            ('X', Die3dKey::CycleTransition),
         ] {
             assert_eq!(die3d_key_for(DisplayMode::Die3d, c), Some(want), "{c}");
             // Out of the mode the same keys are not taken.

@@ -178,11 +178,12 @@ fn lift(tw: i32) -> i32 {
 /// Choose the tile size and origin for a `cells_w` x `cells_h` terminal area
 /// drawn as braille (2 x 4 pixels per cell) with `dies` dies stacked on the
 /// board. The largest even tile width that keeps the whole scene in the buffer
-/// at every quarter turn wins, and one origin serves all four turns so the
-/// camera can rotate without re-fitting. `None` below 100 x 30 cells.
+/// at every camera angle wins, and one origin serves every angle so the camera
+/// can turn (and spin, see `Iso::spin`) without re-fitting. `None` below
+/// 100 x 30 cells.
 ///
 /// `Iso` rotates about the grid centre, and the board grid is not square, so
-/// each turn has its own footprint. The sizing takes the union of all four.
+/// each angle has its own footprint. The sizing takes the union of them all.
 pub fn fit(cells_w: usize, cells_h: usize, dies: usize) -> Option<SceneFit> {
     fit_grid(cells_w, cells_h, board_grid(dies))
 }
@@ -202,12 +203,24 @@ pub(super) fn fit_grid(cells_w: usize, cells_h: usize, grid: (usize, usize)) -> 
     fit_pixels((cells_w * 2) as i32, (cells_h * 4) as i32, grid)
 }
 
+/// Degrees between two camera angles sampled by [`fit_pixels`]. The spin
+/// transition passes through every angle; a corner's screen position is a
+/// sine of the angle, so between two samples 5 degrees apart it overshoots
+/// the larger by at most `1 - cos(2.5 deg)`, about 0.1% of its distance from
+/// the centre (a fraction of a pixel at these sizes).
+const FIT_STEP_DEG: usize = 5;
+
 /// The sizing of [`fit_grid`] for a buffer of `pw` x `ph` pixels, with no
 /// minimum terminal size. The view needs this: it keeps two rows for its
 /// footer, and half-block cells hold 1 x 2 pixels where `fit` assumes the
 /// 2 x 4 of braille, so neither case is a `cells_w` x `cells_h` braille area.
 /// The view applies the 100 x 30 minimum to the whole terminal itself. `None`
 /// when even a 4 pixel tile does not hold the grid.
+///
+/// The footprint is the union over every [`FIT_STEP_DEG`] angle from 0 to 355
+/// degrees of the four grid corners (the projection is linear, so the corners
+/// are the extremes). Whole quarter turns are among the samples and are
+/// computed exactly (`quarter_turns`, `spin` 0), so every preset still fits.
 pub(super) fn fit_pixels(pw: i32, ph: i32, grid: (usize, usize)) -> Option<SceneFit> {
     let corners = [
         (0.0, 0.0),
@@ -215,17 +228,20 @@ pub(super) fn fit_pixels(pw: i32, ph: i32, grid: (usize, usize)) -> Option<Scene
         (0.0, (grid.1 - 1) as f32),
         ((grid.0 - 1) as f32, (grid.1 - 1) as f32),
     ];
+    let per_turn = 90 / FIT_STEP_DEG;
     for tw in (4..=64).rev().filter(|w| w % 2 == 0) {
         let th = tw / 2;
-        // Union of the pixel extents over the four turns, with the origin at 0.
+        // Union of the pixel extents over every sampled angle, with the
+        // origin at 0.
         let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-        for q in 0..4 {
+        for k in 0..4 * per_turn {
             let iso = Iso {
                 tw,
                 th,
                 ox: 0,
                 oy: 0,
-                quarter_turns: q,
+                quarter_turns: (k / per_turn) as u8,
+                spin: ((k % per_turn) * FIT_STEP_DEG) as f32 * std::f32::consts::PI / 180.0,
             };
             for &(gx, gy) in &corners {
                 let (x, y) = iso.project(gx, gy, grid);
@@ -245,6 +261,7 @@ pub(super) fn fit_pixels(pw: i32, ph: i32, grid: (usize, usize)) -> Option<Scene
                     ox: (pw - (x1 - x0)) / 2 - x0,
                     oy: (ph - (y1 - y0)) / 2 - y0,
                     quarter_turns: 0,
+                    spin: 0.0,
                 },
                 scale: ((tw + 4) / 8).max(1),
             });
@@ -527,8 +544,8 @@ pub(super) fn draw_die_tile(
 /// wave. The picture is a pure function of its inputs and `t`.
 ///
 /// Only what stands in the scene is painted; the background is the caller's to
-/// choose. A fresh `PixelBuf` leaves it transparent, and `fill_vignette` first
-/// makes it opaque (the view does the latter with `T` off).
+/// choose. A fresh `PixelBuf` leaves it transparent, and `fill_solid` first
+/// makes it opaque (the view does the latter, in black, with `T` off).
 pub fn draw_board_scene(
     buf: &mut PixelBuf,
     chips: &[ChipInputs],
@@ -724,8 +741,11 @@ mod tests {
 
     #[test]
     fn fit_at_150_by_42_matches_the_mockup_scale() {
+        // The mockup's 16 x 8 tile fitted the four quarter turns. Fitting
+        // every spin angle as well (the diagonal of the board is longer than
+        // its sides) takes it one even step down, to 14 x 7.
         let f = fit(150, 42, 1).unwrap();
-        assert_eq!((f.iso.tw, f.iso.th, f.scale), (16, 8, 2));
+        assert_eq!((f.iso.tw, f.iso.th, f.scale), (14, 7, 2));
     }
 
     #[test]

@@ -180,9 +180,21 @@ mod tests {
         cells: (usize, usize),
         turn: u8,
     ) -> (usize, usize, usize, usize) {
+        painted_bbox_spun(b, dies, cells, turn, 0.0)
+    }
+
+    /// [`painted_bbox`] with `spin` radians on top of the quarter turns.
+    fn painted_bbox_spun(
+        b: &[Vec<ChipInputs>],
+        dies: &[usize],
+        cells: (usize, usize),
+        turn: u8,
+        spin: f32,
+    ) -> (usize, usize, usize, usize) {
         const PAD: usize = 80;
         let mut f = fit_super(cells.0, cells.1, dies).unwrap();
         f.iso.quarter_turns = turn;
+        f.iso.spin = spin;
         f.iso.ox += PAD as i32;
         f.iso.oy += PAD as i32;
         let (w, h) = (cells.0 * 2 + 2 * PAD, cells.1 * 4 + 2 * PAD);
@@ -199,6 +211,10 @@ mod tests {
                 }
             }
         }
+        assert!(
+            x0 >= PAD && y0 >= PAD,
+            "clipped on the left or top: {x0},{y0}"
+        );
         (x0 - PAD, y0 - PAD, x1 - PAD, y1 - PAD)
     }
 
@@ -236,5 +252,49 @@ mod tests {
         assert!(four.iso.tw < one.iso.tw);
         // Below the smallest terminal there is no fit, as for one board.
         assert!(fit_super(99, 42, &[2]).is_none());
+    }
+
+    #[test]
+    fn every_spin_angle_stays_inside_the_buffer() {
+        use crate::animation::die3d::scene::painted_bbox_for;
+        let cells = (150usize, 42usize);
+        let (pw, ph) = (cells.0 * 2, cells.1 * 4);
+        let inside = |what: &str, deg: i32, (x0, y0, x1, y1): (usize, usize, usize, usize)| {
+            assert!(
+                x1 <= pw && y1 <= ph,
+                "{what} at {deg} degrees: {x0},{y0}..{x1},{y1} in {pw} x {ph}"
+            );
+        };
+        // Boards are checked at every degree, the super scene every 15. A fit
+        // that samples only the four quarter turns overflows the two-die
+        // board by a pixel at 94 to 103 and 167 to 176 degrees (and the
+        // mirror angles), which 15-degree steps pass over; the super scene is
+        // the costly draw and has room to spare at this size.
+        for deg in 0..360 {
+            let spin = (deg as f32).to_radians();
+            // One board of one and of two dies.
+            for dies in [1usize, 2] {
+                let chips: Vec<ChipInputs> = (0..dies).map(|_| chip(1.0)).collect();
+                let mut f = fit(cells.0, cells.1, dies).unwrap();
+                f.iso.spin = spin;
+                // `painted_bbox_for` asserts the left and top edges itself.
+                inside(
+                    &format!("{dies} dies"),
+                    deg,
+                    painted_bbox_for(&chips, cells, &f),
+                );
+            }
+            if deg % 15 != 0 {
+                continue;
+            }
+            // The super scene of four boards of two dies each.
+            let dies = [2usize, 2, 2, 2];
+            let b = boards(&dies);
+            inside(
+                "4 x 2 super scene",
+                deg,
+                painted_bbox_spun(&b, &dies, cells, 0, spin),
+            );
+        }
     }
 }

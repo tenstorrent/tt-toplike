@@ -1,14 +1,92 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! Camera presets, the automatic director and the "chaos" cut transition.
+//! Camera presets, the automatic director and the cut transitions: chaos
+//! noise, a dissolve and an animated spin.
 
 use super::raster::{Iso, PixelBuf};
+use crate::animation::common::ease_in_out;
+use std::f32::consts::FRAC_PI_2;
 
 /// Minimum seconds between two automatic cuts.
 pub const COOLDOWN_SECS: f64 = 8.0;
 /// Length of the chaos transition: rising to the midpoint, falling after it.
 pub const CHAOS_SECS: f64 = 0.8;
+/// Length of the dissolve transition.
+pub const DISSOLVE_SECS: f64 = 0.9;
+/// Length of the spin transition. Longer than the others: the camera visibly
+/// turns, and a quick turn would look like a jump.
+pub const SPIN_SECS: f64 = 1.6;
+
+/// How a cut changes from the old camera to the new one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransitionKind {
+    /// Rows shift and colours flicker, rising to the midpoint, where the
+    /// camera swaps, and falling after it (see [`scramble`]).
+    Chaos,
+    /// The new picture replaces the old one pixel by pixel in a random
+    /// order (see [`dissolve`]).
+    Dissolve,
+    /// The camera turns from the old angle to the new one (see
+    /// [`Camera::lerp_view`]). Only for a cut that keeps the scene: there is
+    /// nothing to turn between two different scenes.
+    Spin,
+}
+
+impl TransitionKind {
+    /// How long the transition runs, in seconds.
+    pub fn secs(self) -> f64 {
+        match self {
+            TransitionKind::Chaos => CHAOS_SECS,
+            TransitionKind::Dissolve => DISSOLVE_SECS,
+            TransitionKind::Spin => SPIN_SECS,
+        }
+    }
+}
+
+/// Shuffle weights: how often each kind is drawn, out of their sum, before
+/// the kinds a cut cannot use are left out.
+const SHUFFLE_WEIGHTS: [(TransitionKind, u32); 3] = [
+    (TransitionKind::Chaos, 40),
+    (TransitionKind::Dissolve, 35),
+    (TransitionKind::Spin, 25),
+];
+
+/// Which transitions the director uses. The view's `X` key cycles it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransitionMode {
+    /// A weighted draw for each cut, never the same kind twice in a row.
+    #[default]
+    Shuffle,
+    /// Always chaos.
+    Chaos,
+    /// Always a dissolve.
+    Dissolve,
+    /// Always a spin, except that a cut that changes the scene dissolves.
+    Spin,
+}
+
+impl TransitionMode {
+    /// The mode after this one, in the order `X` steps through them.
+    pub fn next(self) -> TransitionMode {
+        match self {
+            TransitionMode::Shuffle => TransitionMode::Chaos,
+            TransitionMode::Chaos => TransitionMode::Dissolve,
+            TransitionMode::Dissolve => TransitionMode::Spin,
+            TransitionMode::Spin => TransitionMode::Shuffle,
+        }
+    }
+
+    /// The footer's word for the mode.
+    pub fn label(self) -> &'static str {
+        match self {
+            TransitionMode::Shuffle => "shuffle",
+            TransitionMode::Chaos => "chaos",
+            TransitionMode::Dissolve => "dissolve",
+            TransitionMode::Spin => "spin",
+        }
+    }
+}
 
 /// How steeply the camera looks down: the tile diamond's `th / tw`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +149,21 @@ fn even(v: f32) -> i32 {
     (((v / 2.0).round() as i32) * 2).max(2)
 }
 
+/// Move `iso`'s origin so the grid centre lands on the pixel `base` puts it.
+///
+/// The centre is a fixed point of the rotation (quarter turns and spin
+/// alike), so its offset from the origin is (cx - cy) tw/2 and (cx + cy) th/2
+/// whatever the angle; only `tw` and `th` move it.
+fn recentre(iso: &mut Iso, base: &Iso, grid: (usize, usize)) {
+    let cx = (grid.0 as f32 - 1.0) / 2.0;
+    let cy = (grid.1 as f32 - 1.0) / 2.0;
+    let centre = |i: &Iso| ((cx - cy) * i.tw as f32 / 2.0, (cx + cy) * i.th as f32 / 2.0);
+    let (bx, by) = centre(base);
+    let (nx, ny) = centre(iso);
+    iso.ox = base.ox + (bx - nx).round() as i32;
+    iso.oy = base.oy + (by - ny).round() as i32;
+}
+
 impl Camera {
     /// The projection for this camera, derived from `base` (the one `fit` or
     /// `fit_super` sized the buffer for).
@@ -103,15 +196,46 @@ impl Camera {
             quarter_turns: self.quarter_turns,
             ..*base
         };
-        // The centre is a fixed point of the rotation, so its offset from the
-        // origin is (cx - cy) tw/2 and (cx + cy) th/2 whatever the turn.
-        let cx = (grid.0 as f32 - 1.0) / 2.0;
-        let cy = (grid.1 as f32 - 1.0) / 2.0;
-        let centre = |i: &Iso| ((cx - cy) * i.tw as f32 / 2.0, (cx + cy) * i.th as f32 / 2.0);
-        let (bx, by) = centre(base);
-        let (nx, ny) = centre(&iso);
-        iso.ox = base.ox + (bx - nx).round() as i32;
-        iso.oy = base.oy + (by - ny).round() as i32;
+        recentre(&mut iso, base, grid);
+        iso
+    }
+
+    /// The projection part way from camera `from` to camera `to`, for the
+    /// spin transition. `t` runs 0..1 and is clamped, then eased with
+    /// [`ease_in_out`] so the turn starts and stops gently.
+    ///
+    /// The yaw goes the shortest way round: one quarter turn back from turn 0
+    /// to turn 3, not three forward; a half turn goes the positive way. It is
+    /// carried as `from`'s `quarter_turns` plus a `spin`. The tile width and
+    /// height (so the pitch ratio too) move linearly between `from.apply` and
+    /// `to.apply`; the origin is then placed so the projected grid centre
+    /// stays on the same pixel, which moves `ox` and `oy` linearly as well
+    /// (up to rounding). Both endpoints are at most the base size, so every
+    /// step between them is too (ruling 12b). At the ends the result is
+    /// exactly `from.apply` and `to.apply`, with no spin left over.
+    pub fn lerp_view(from: &Camera, to: &Camera, t: f32, base: &Iso, grid: (usize, usize)) -> Iso {
+        let a = from.apply(base, grid);
+        let b = to.apply(base, grid);
+        let e = ease_in_out(t);
+        if e <= 0.0 {
+            return a;
+        }
+        if e >= 1.0 {
+            return b;
+        }
+        let turns = match (to.quarter_turns as i32 - from.quarter_turns as i32).rem_euclid(4) {
+            3 => -1,
+            d => d,
+        };
+        let lerp = |x: i32, y: i32| (x as f32 + (y - x) as f32 * e).round() as i32;
+        let mut iso = Iso {
+            tw: lerp(a.tw, b.tw),
+            th: lerp(a.th, b.th),
+            quarter_turns: a.quarter_turns,
+            spin: turns as f32 * e * FRAC_PI_2,
+            ..a
+        };
+        recentre(&mut iso, base, grid);
         iso
     }
 }
@@ -134,12 +258,14 @@ impl Rng {
     }
 }
 
-/// Decides when the camera cuts to another preset.
+/// Decides when the camera cuts to another preset, and how the cut looks.
 ///
 /// Time is passed in (`now`, seconds since the view was created); the director
 /// never reads a clock, so tests and replays are exact. A cut chooses the next
-/// camera at once, but the caller keeps drawing the old one until
-/// [`Director::swapped_at`], while the chaos effect covers the change.
+/// camera and the transition kind at once, but the caller keeps drawing the
+/// old camera until [`Director::swapped_at`]: the midpoint for chaos and
+/// dissolve, the end for a spin (whose in-between angles the caller derives
+/// from [`Director::progress`] with [`Camera::lerp_view`]).
 #[derive(Debug, Clone)]
 pub struct Director {
     rng: Rng,
@@ -150,6 +276,9 @@ pub struct Director {
     auto: bool,
     /// Start of the latest cut; none yet means the first trigger is allowed.
     last_cut: Option<f64>,
+    mode: TransitionMode,
+    /// Transition of the latest cut; none before the first.
+    kind: Option<TransitionKind>,
 }
 
 impl Director {
@@ -160,6 +289,8 @@ impl Director {
             to: PRESETS[0],
             auto: true,
             last_cut: None,
+            mode: TransitionMode::Shuffle,
+            kind: None,
         }
     }
 
@@ -184,37 +315,130 @@ impl Director {
         self.auto = on;
     }
 
+    pub fn transition_mode(&self) -> TransitionMode {
+        self.mode
+    }
+
+    /// Choose the transitions of later cuts; a cut in progress keeps its own.
+    pub fn set_transition_mode(&mut self, m: TransitionMode) {
+        self.mode = m;
+    }
+
+    /// Step to the next mode: shuffle, chaos, dissolve, spin, shuffle.
+    pub fn cycle_transition_mode(&mut self) {
+        self.mode = self.mode.next();
+    }
+
+    /// The transition of the latest cut, which is the one in progress while
+    /// [`progress`](Self::progress) is `Some`. `None` before any cut.
+    pub fn transition_kind(&self) -> Option<TransitionKind> {
+        self.kind
+    }
+
+    /// The two cameras of the latest cut: the one shown before it and the one
+    /// shown after it.
+    pub fn cameras(&self) -> (Camera, Camera) {
+        (self.from, self.to)
+    }
+
+    /// When the latest cut started; `None` before any cut.
+    pub fn cut_at(&self) -> Option<f64> {
+        self.last_cut
+    }
+
     /// A cut asked for by the user: ignores the cooldown and the auto setting,
-    /// but starts the cooldown. Always returns true.
+    /// but starts the cooldown. Always returns true. It never changes the
+    /// scene, so any transition kind can be drawn.
     pub fn cut_by_hand(&mut self, now: f64) -> bool {
-        self.cut(now);
+        self.cut(now, false);
         true
     }
 
-    /// A cut asked for by an event: only when auto is on and at least
-    /// [`COOLDOWN_SECS`] have passed since the last cut.
+    /// A cut asked for by an event that changes the camera only: see
+    /// [`on_trigger_with_scene`](Self::on_trigger_with_scene).
     pub fn on_trigger(&mut self, now: f64) -> bool {
+        self.on_trigger_with_scene(now, false)
+    }
+
+    /// A cut asked for by an event: only when auto is on and at least
+    /// [`COOLDOWN_SECS`] have passed since the last cut. `changes_scene` says
+    /// the caller will switch scenes at the cut's swap if it goes through, so
+    /// the transition must be one that can cover a scene change (not a spin).
+    pub fn on_trigger_with_scene(&mut self, now: f64, changes_scene: bool) -> bool {
         let ready = self.last_cut.map_or(true, |t| now - t >= COOLDOWN_SECS);
         if self.auto && ready {
-            self.cut(now);
+            self.cut(now, changes_scene);
             true
         } else {
             false
         }
     }
 
-    fn cut(&mut self, now: f64) {
+    fn cut(&mut self, now: f64, changes_scene: bool) {
         // Pick among the other five presets, so the camera always changes.
         let here = PRESETS.iter().position(|c| *c == self.to).unwrap_or(0);
         let pick = self.rng.next() as usize % (PRESETS.len() - 1);
         self.from = self.to;
         self.to = PRESETS[(here + 1 + pick) % PRESETS.len()];
         self.last_cut = Some(now);
+        self.kind = Some(self.pick_kind(changes_scene));
+    }
+
+    /// The transition for a new cut. A spin turns one scene's camera, so a
+    /// cut that changes the scene never spins: the fixed `Spin` mode falls
+    /// back to a dissolve, and the shuffle leaves `Spin` out of the draw.
+    fn pick_kind(&mut self, changes_scene: bool) -> TransitionKind {
+        match self.mode {
+            TransitionMode::Chaos => TransitionKind::Chaos,
+            TransitionMode::Dissolve => TransitionKind::Dissolve,
+            TransitionMode::Spin if changes_scene => TransitionKind::Dissolve,
+            TransitionMode::Spin => TransitionKind::Spin,
+            TransitionMode::Shuffle => {
+                // Never the previous kind again. At most two kinds are left
+                // out (the previous one and Spin), so one is always left.
+                let options: Vec<(TransitionKind, u32)> = SHUFFLE_WEIGHTS
+                    .iter()
+                    .copied()
+                    .filter(|&(k, _)| Some(k) != self.kind)
+                    .filter(|&(k, _)| !(changes_scene && k == TransitionKind::Spin))
+                    .collect();
+                let total: u32 = options.iter().map(|&(_, w)| w).sum();
+                let mut r = self.rng.next() % total;
+                for &(k, w) in &options {
+                    if r < w {
+                        return k;
+                    }
+                    r -= w;
+                }
+                unreachable!("r < total, so some option takes it")
+            }
+        }
+    }
+
+    /// How far the latest cut's transition has run at `now`: 0 at its start,
+    /// rising to just under 1 at its end, whatever its kind. `None` before
+    /// the first cut and outside the transition.
+    pub fn progress(&self, now: f64) -> Option<f32> {
+        let (start, secs) = (self.last_cut?, self.kind?.secs());
+        // The end is tested as `now >= start + secs`, the same sum
+        // `swapped_at` gives a spin, so "progress has run out" and "the spin's
+        // camera has swapped" agree to the last bit of the float.
+        if now < start || now >= start + secs {
+            return None;
+        }
+        let p = (now - start) / secs;
+        // A p just under 1 can round up to 1.0 as an f32; keep it below 1 so
+        // "in progress" and "p < 1" stay the same thing.
+        Some((p as f32).min(1.0 - f32::EPSILON))
     }
 
     /// Chaos intensity 0..=1 at `now`: rising for the first half of
-    /// [`CHAOS_SECS`], falling for the second, `None` outside a transition.
+    /// [`CHAOS_SECS`], falling for the second. `None` outside a transition
+    /// and when the transition in progress is not chaos.
     pub fn chaos(&self, now: f64) -> Option<f32> {
+        if self.kind != Some(TransitionKind::Chaos) {
+            return None;
+        }
         let p = (now - self.last_cut?) / CHAOS_SECS;
         if !(0.0..1.0).contains(&p) {
             return None;
@@ -222,9 +446,15 @@ impl Director {
         Some((1.0 - (2.0 * p - 1.0).abs()) as f32)
     }
 
-    /// When the latest cut swaps cameras (its midpoint); none before any cut.
+    /// When the latest cut swaps cameras: its midpoint for chaos and
+    /// dissolve, its end for a spin (which turns the old camera all the way
+    /// to the new one first). `None` before any cut.
     pub fn swapped_at(&self) -> Option<f64> {
-        self.last_cut.map(|t| t + CHAOS_SECS / 2.0)
+        let (t, kind) = (self.last_cut?, self.kind?);
+        Some(match kind {
+            TransitionKind::Spin => t + kind.secs(),
+            _ => t + kind.secs() / 2.0,
+        })
     }
 }
 
@@ -262,6 +492,48 @@ pub fn scramble(buf: &mut PixelBuf, intensity: f32, seed: u32) {
             }
         }
     }
+}
+
+/// A per-pixel value in `[0, 1)` from `x`, `y` and `seed`: an integer hash
+/// (the murmur3 finaliser over a mix of the three), so the order in which a
+/// dissolve turns pixels looks random but is the same on every frame.
+fn pixel_rank(x: usize, y: usize, seed: u32) -> f32 {
+    let mut h = (x as u32).wrapping_mul(0x9E37_79B1)
+        ^ (y as u32).wrapping_mul(0x85EB_CA77)
+        ^ seed.wrapping_mul(0xC2B2_AE3D);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85EB_CA6B);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xC2B2_AE35);
+    h ^= h >> 16;
+    // The top 24 bits fit an f32 exactly, so the result is never 1.0.
+    (h >> 8) as f32 / (1u32 << 24) as f32
+}
+
+/// The dissolve: each pixel, colour and coverage alike, comes from `new`
+/// where its rank (see `pixel_rank`) is below `progress`, else from `old`. At
+/// 0 the result is `old`, at 1 it is `new`, and a pixel that has turned stays
+/// turned as `progress` grows. Deterministic for a `seed`.
+///
+/// Panics if the two buffers differ in size: the view draws both frames into
+/// one area, so they never do.
+pub fn dissolve(old: &PixelBuf, new: &PixelBuf, progress: f32, seed: u32) -> PixelBuf {
+    assert_eq!(
+        (old.w, old.h),
+        (new.w, new.h),
+        "dissolve needs two frames of one size"
+    );
+    let mut out = old.clone();
+    for y in 0..old.h {
+        for x in 0..old.w {
+            if pixel_rank(x, y, seed) < progress {
+                let i = y * old.w + x;
+                out.rgb[i] = new.rgb[i];
+                out.cover[i] = new.cover[i];
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -312,6 +584,7 @@ mod tests {
     #[test]
     fn chaos_peaks_at_the_midpoint_and_ends_at_none() {
         let mut d = Director::new(3);
+        d.set_transition_mode(TransitionMode::Chaos);
         assert!(d.chaos(0.0).is_none());
         d.cut_by_hand(10.0);
         let peak = d.chaos(10.0 + CHAOS_SECS / 2.0).unwrap();
@@ -326,6 +599,7 @@ mod tests {
     #[test]
     fn the_camera_swaps_at_the_midpoint() {
         let mut d = Director::new(4);
+        d.set_transition_mode(TransitionMode::Chaos);
         let old = d.camera_at(0.0);
         d.cut_by_hand(10.0);
         let at = d.swapped_at().unwrap();
@@ -467,6 +741,7 @@ mod tests {
             ox: 123,
             oy: 45,
             quarter_turns: 0,
+            spin: 0.0,
         };
         for q in 0..4 {
             let iso = Camera {
@@ -488,6 +763,7 @@ mod tests {
                 ox: 0,
                 oy: 0,
                 quarter_turns: 0,
+                spin: 0.0,
             };
             for cam in PRESETS.iter() {
                 let iso = cam.apply(&base, (19, 14));
@@ -509,6 +785,7 @@ mod tests {
                 ox: 150,
                 oy: 90,
                 quarter_turns: 0,
+                spin: 0.0,
             },
             scale: 2,
         };
@@ -560,5 +837,308 @@ mod tests {
             .iter()
             .zip(&b.cover)
             .any(|(p, &c)| c && *p != [100, 100, 200]));
+    }
+
+    /// Every ordered pair of presets, the same one twice included.
+    fn preset_pairs() -> impl Iterator<Item = (Camera, Camera)> {
+        PRESETS
+            .iter()
+            .flat_map(|a| PRESETS.iter().map(move |b| (*a, *b)))
+    }
+
+    fn same_iso(a: &Iso, b: &Iso) -> bool {
+        (a.tw, a.th, a.ox, a.oy, a.quarter_turns, a.spin)
+            == (b.tw, b.th, b.ox, b.oy, b.quarter_turns, b.spin)
+    }
+
+    #[test]
+    fn lerp_view_endpoints_equal_the_cameras() {
+        let base = fit(150, 42, 1).unwrap().iso;
+        let grid = (BOARD_COLS, BOARD_BAND);
+        for (from, to) in preset_pairs() {
+            let a = Camera::lerp_view(&from, &to, 0.0, &base, grid);
+            let b = Camera::lerp_view(&from, &to, 1.0, &base, grid);
+            assert!(same_iso(&a, &from.apply(&base, grid)), "{from:?}: {a:?}");
+            assert!(same_iso(&b, &to.apply(&base, grid)), "{to:?}: {b:?}");
+            // Out-of-range t is clamped to the endpoints.
+            let a = Camera::lerp_view(&from, &to, -3.0, &base, grid);
+            let b = Camera::lerp_view(&from, &to, 7.0, &base, grid);
+            assert!(same_iso(&a, &from.apply(&base, grid)));
+            assert!(same_iso(&b, &to.apply(&base, grid)));
+        }
+    }
+
+    #[test]
+    fn lerp_view_keeps_the_grid_centre_fixed() {
+        let base = fit(150, 42, 2).unwrap().iso;
+        let grid = (BOARD_COLS, 2 * BOARD_BAND);
+        let (cx, cy) = ((grid.0 as f32 - 1.0) / 2.0, (grid.1 as f32 - 1.0) / 2.0);
+        let want = base.project(cx, cy, grid);
+        for (from, to) in preset_pairs() {
+            for i in 0..=20 {
+                let iso = Camera::lerp_view(&from, &to, i as f32 / 20.0, &base, grid);
+                let got = iso.project(cx, cy, grid);
+                assert!(
+                    (got.0 - want.0).abs() <= 1 && (got.1 - want.1).abs() <= 1,
+                    "{from:?} -> {to:?} at {i}/20: {got:?} vs {want:?}"
+                );
+                // Never a tile larger than the fitted base (ruling 12b).
+                assert!(iso.tw <= base.tw && iso.th <= base.th, "{iso:?}");
+            }
+        }
+    }
+
+    /// Total yaw of an `Iso` in quarter turns.
+    fn yaw(iso: &Iso) -> f32 {
+        iso.quarter_turns as f32 + iso.spin / std::f32::consts::FRAC_PI_2
+    }
+
+    #[test]
+    fn lerp_view_takes_the_shortest_way_round() {
+        let base = fit(150, 42, 1).unwrap().iso;
+        let grid = (BOARD_COLS, BOARD_BAND);
+        let cam = |q| Camera {
+            quarter_turns: q,
+            pitch: Pitch::Iso,
+        };
+        // Turn 3 to turn 0 is one quarter turn forward (to 4, which is 0), not
+        // three back through 2 and 1.
+        let mut last = yaw(&Camera::lerp_view(&cam(3), &cam(0), 0.0, &base, grid));
+        assert!((last - 3.0).abs() < 1e-4);
+        for i in 1..20 {
+            let y = yaw(&Camera::lerp_view(
+                &cam(3),
+                &cam(0),
+                i as f32 / 20.0,
+                &base,
+                grid,
+            ));
+            assert!(y >= last - 1e-4 && y <= 4.0 + 1e-4, "step {i}: yaw {y}");
+            last = y;
+        }
+        // Turn 0 to turn 3 is one quarter turn back.
+        let mid = yaw(&Camera::lerp_view(&cam(0), &cam(3), 0.5, &base, grid));
+        assert!(
+            (mid + 0.5).abs() < 1e-3 || (mid - 3.5).abs() < 1e-3,
+            "{mid}"
+        );
+        // Two quarter turns go the positive way.
+        let mid = yaw(&Camera::lerp_view(&cam(1), &cam(3), 0.5, &base, grid));
+        assert!((mid - 2.0).abs() < 1e-3, "{mid}");
+    }
+
+    #[test]
+    fn transition_durations_are_0_8_0_9_and_1_6_seconds() {
+        assert_eq!(TransitionKind::Chaos.secs(), CHAOS_SECS);
+        assert_eq!(CHAOS_SECS, 0.8);
+        assert_eq!(TransitionKind::Dissolve.secs(), 0.9);
+        assert_eq!(TransitionKind::Spin.secs(), 1.6);
+        // And the director uses them: progress runs out at that length.
+        for (mode, secs) in [
+            (TransitionMode::Chaos, 0.8),
+            (TransitionMode::Dissolve, 0.9),
+            (TransitionMode::Spin, 1.6),
+        ] {
+            let mut d = Director::new(7);
+            d.set_transition_mode(mode);
+            d.cut_by_hand(10.0);
+            assert!(d.progress(10.0 + secs - 0.01).is_some(), "{mode:?}");
+            assert!(d.progress(10.0 + secs).is_none(), "{mode:?}");
+        }
+    }
+
+    /// The kind of each of `n` camera-only cuts of a shuffling director.
+    fn shuffled_kinds(seed: u64, n: usize, changes_scene: bool) -> Vec<TransitionKind> {
+        let mut d = Director::new(seed);
+        assert_eq!(d.transition_mode(), TransitionMode::Shuffle);
+        (0..n)
+            .map(|i| {
+                // 10 s apart: past the cooldown, so every trigger cuts.
+                assert!(d.on_trigger_with_scene(i as f64 * 10.0, changes_scene));
+                d.transition_kind().unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn shuffle_never_repeats_a_kind_twice_in_a_row() {
+        for seed in 0..10u64 {
+            for changes_scene in [false, true] {
+                let kinds = shuffled_kinds(seed, 300, changes_scene);
+                for w in kinds.windows(2) {
+                    assert_ne!(w[0], w[1], "seed {seed} scene={changes_scene}");
+                }
+            }
+        }
+        // Hand cuts follow the same rule.
+        let mut d = Director::new(1);
+        let mut last = None;
+        for i in 0..200 {
+            d.cut_by_hand(i as f64);
+            assert_ne!(d.transition_kind(), last, "cut {i}");
+            last = d.transition_kind();
+        }
+    }
+
+    #[test]
+    fn shuffle_weights_are_roughly_40_35_25() {
+        let kinds = shuffled_kinds(0x5EED, 1000, false);
+        let pct = |k: TransitionKind| kinds.iter().filter(|&&x| x == k).count() as f64 / 10.0;
+        let got = [
+            pct(TransitionKind::Chaos),
+            pct(TransitionKind::Dissolve),
+            pct(TransitionKind::Spin),
+        ];
+        for (g, want) in got.iter().zip([40.0, 35.0, 25.0]) {
+            assert!((g - want).abs() <= 8.0, "{got:?}");
+        }
+    }
+
+    #[test]
+    fn a_scene_change_never_draws_spin() {
+        for seed in 0..20u64 {
+            let kinds = shuffled_kinds(seed, 200, true);
+            assert!(!kinds.contains(&TransitionKind::Spin), "seed {seed}");
+            // Both of the others do come up.
+            assert!(kinds.contains(&TransitionKind::Chaos));
+            assert!(kinds.contains(&TransitionKind::Dissolve));
+        }
+        // Control: without a scene change Spin does come up.
+        assert!(shuffled_kinds(0, 200, false).contains(&TransitionKind::Spin));
+    }
+
+    #[test]
+    fn a_fixed_mode_forces_its_kind_and_spin_falls_back_to_dissolve_for_a_scene_change() {
+        use TransitionKind as K;
+        use TransitionMode as M;
+        for (mode, camera_only, scene_change) in [
+            (M::Chaos, K::Chaos, K::Chaos),
+            (M::Dissolve, K::Dissolve, K::Dissolve),
+            (M::Spin, K::Spin, K::Dissolve),
+        ] {
+            let mut d = Director::new(9);
+            d.set_transition_mode(mode);
+            assert_eq!(d.transition_mode(), mode);
+            for i in 0..20 {
+                let scene = i % 3 == 0;
+                assert!(d.on_trigger_with_scene(i as f64 * 10.0, scene));
+                let want = if scene { scene_change } else { camera_only };
+                assert_eq!(d.transition_kind(), Some(want), "{mode:?} cut {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn transition_mode_cycles_shuffle_chaos_dissolve_spin() {
+        let mut d = Director::new(1);
+        let mut seen = vec![d.transition_mode()];
+        for _ in 0..4 {
+            d.cycle_transition_mode();
+            seen.push(d.transition_mode());
+        }
+        use TransitionMode as M;
+        assert_eq!(
+            seen,
+            [M::Shuffle, M::Chaos, M::Dissolve, M::Spin, M::Shuffle]
+        );
+        assert_eq!(TransitionMode::default(), M::Shuffle);
+    }
+
+    #[test]
+    fn progress_is_monotonic_and_none_outside_the_transition() {
+        for mode in [
+            TransitionMode::Chaos,
+            TransitionMode::Dissolve,
+            TransitionMode::Spin,
+        ] {
+            let mut d = Director::new(5);
+            d.set_transition_mode(mode);
+            assert!(d.progress(0.0).is_none(), "before any cut");
+            assert!(d.transition_kind().is_none());
+            d.cut_by_hand(10.0);
+            let secs = d.transition_kind().unwrap().secs();
+            assert!(d.progress(9.99).is_none());
+            assert_eq!(d.progress(10.0), Some(0.0));
+            let mut last = 0.0;
+            for i in 1..100 {
+                let p = d.progress(10.0 + secs * i as f64 / 100.0).unwrap();
+                assert!(p >= last && p < 1.0, "{mode:?} {i}: {p}");
+                last = p;
+            }
+            assert!(d.progress(10.0 + secs).is_none());
+            assert!(d.progress(100.0).is_none());
+            // Chaos intensity only for a chaos cut.
+            let mid = 10.0 + secs / 2.0;
+            assert_eq!(
+                d.chaos(mid).is_some(),
+                mode == TransitionMode::Chaos,
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_spin_keeps_the_old_camera_until_it_ends() {
+        let mut d = Director::new(5);
+        d.set_transition_mode(TransitionMode::Spin);
+        let old = d.camera();
+        d.cut_by_hand(10.0);
+        assert_eq!(d.camera_at(10.0 + 1.59), old);
+        assert_eq!(d.camera_at(10.0 + 1.6), d.camera());
+        assert_eq!(d.swapped_at(), Some(10.0 + 1.6));
+        // Dissolve swaps at its midpoint, like chaos.
+        d.set_transition_mode(TransitionMode::Dissolve);
+        let old = d.camera();
+        d.cut_by_hand(20.0);
+        assert_eq!(d.camera_at(20.0 + 0.44), old);
+        assert_eq!(d.camera_at(20.0 + 0.45), d.camera());
+    }
+
+    /// A buffer covered with one colour.
+    fn solid(w: usize, h: usize, c: [u8; 3]) -> PixelBuf {
+        let mut b = PixelBuf::new(w, h);
+        b.fill_solid(c);
+        b
+    }
+
+    #[test]
+    fn dissolve_at_zero_is_old_and_at_one_is_new() {
+        let old = gradient();
+        let mut new = PixelBuf::new(64, 32);
+        // Half of the new frame is uncovered, so coverage must come along too.
+        for y in 0..16 {
+            for x in 0..64 {
+                new.put(x, y, [10, 200, 30]);
+            }
+        }
+        let a = dissolve(&old, &new, 0.0, 3);
+        assert_eq!((a.rgb, a.cover), (old.rgb.clone(), old.cover.clone()));
+        let b = dissolve(&old, &new, 1.0, 3);
+        assert_eq!((b.rgb, b.cover), (new.rgb.clone(), new.cover.clone()));
+    }
+
+    #[test]
+    fn dissolve_at_half_mixes_about_half_the_pixels() {
+        let (old, new) = (solid(64, 32, [1, 1, 1]), solid(64, 32, [2, 2, 2]));
+        let mix = dissolve(&old, &new, 0.5, 11);
+        let n = mix.rgb.iter().filter(|&&p| p == [2, 2, 2]).count();
+        let total = mix.rgb.len();
+        assert!(n * 10 > total * 4 && n * 10 < total * 6, "{n} of {total}");
+        assert!(mix.rgb.iter().all(|&p| p == [1, 1, 1] || p == [2, 2, 2]));
+        // A pixel that has turned stays turned as progress grows.
+        let later = dissolve(&old, &new, 0.7, 11);
+        for (a, b) in mix.rgb.iter().zip(&later.rgb) {
+            assert!(*a != [2, 2, 2] || *b == [2, 2, 2]);
+        }
+    }
+
+    #[test]
+    fn dissolve_is_deterministic_for_a_seed() {
+        let (old, new) = (solid(64, 32, [1, 1, 1]), solid(64, 32, [2, 2, 2]));
+        let a = dissolve(&old, &new, 0.5, 4);
+        let b = dissolve(&old, &new, 0.5, 4);
+        let c = dissolve(&old, &new, 0.5, 5);
+        assert_eq!(a.rgb, b.rgb);
+        assert_ne!(a.rgb, c.rgb);
     }
 }

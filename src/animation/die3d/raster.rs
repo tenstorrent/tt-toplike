@@ -55,18 +55,12 @@ impl PixelBuf {
         self.cover.fill(false);
     }
 
-    /// Fill with `base`, darkened toward the top and bottom edges.
-    ///
-    /// Same formula as the mockup: factor `1 - 0.25 * |y/h - 0.5|`, so the
-    /// middle row keeps the full colour and the edges drop to 87.5%.
-    /// Every pixel becomes covered (opaque).
-    pub fn fill_vignette(&mut self, base: [u8; 3]) {
-        for y in 0..self.h {
-            let v = 1.0 - 0.25 * ((y as f32 / self.h as f32) - 0.5).abs();
-            let row = shade(base, v);
-            self.rgb[y * self.w..(y + 1) * self.w].fill(row);
-            self.cover[y * self.w..(y + 1) * self.w].fill(true);
-        }
+    /// Paint every pixel `c` and mark it covered (opaque). The view's opaque
+    /// mode (`T` off) uses this with pure black, so the scene stands on a
+    /// plain dark background instead of the terminal's own.
+    pub fn fill_solid(&mut self, c: [u8; 3]) {
+        self.rgb.fill(c);
+        self.cover.fill(true);
     }
 
     /// Set one pixel; coordinates outside the buffer are ignored so callers can
@@ -88,7 +82,7 @@ impl PixelBuf {
 }
 
 /// Isometric projection of the tile grid onto the pixel buffer.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Iso {
     /// Tile diamond width in pixels.
     pub tw: i32,
@@ -100,20 +94,39 @@ pub struct Iso {
     pub oy: i32,
     /// Camera orientation, 0..=3 quarter turns about the grid centre.
     pub quarter_turns: u8,
+    /// Extra turn in radians on top of `quarter_turns`, same direction (a
+    /// spin of `PI / 2` lands where one more quarter turn does). `0.0` for
+    /// every still camera; the spin transition sweeps it between two presets.
+    ///
+    /// Only tile *positions* turn: each block is still drawn as an upright
+    /// isometric diamond, so mid-spin neighbouring blocks can leave small gaps
+    /// or overlap. `fit` sizes the scene so every angle stays in the buffer.
+    pub spin: f32,
 }
 
 impl Iso {
-    /// Rotate grid coordinates about the grid centre by `quarter_turns`.
+    /// Rotate grid coordinates about the grid centre by `quarter_turns` and
+    /// then by `spin` radians.
     ///
     /// The centre stays fixed, so a non-square grid is rotated in place and its
     /// rotated footprint may extend past the original bounds; the caller's
     /// `ox`/`oy` decide where that lands on screen.
+    ///
+    /// The quarter turns are done by swapping coordinates, not with `cos` and
+    /// `sin`: `cos(PI / 2)` in `f32` is not exactly 0, and the error would
+    /// move a point that sits on a rounding half by a pixel. With `spin` at
+    /// `0.0` the result is therefore exactly the pre-spin one.
     fn rotate(&self, gx: f32, gy: f32, grid: (usize, usize)) -> (f32, f32) {
         let cx = (grid.0 as f32 - 1.0) / 2.0;
         let cy = (grid.1 as f32 - 1.0) / 2.0;
         let (mut dx, mut dy) = (gx - cx, gy - cy);
         for _ in 0..(self.quarter_turns % 4) {
             (dx, dy) = (-dy, dx);
+        }
+        if self.spin != 0.0 {
+            // The same sense as a quarter turn: (1, 0) goes toward (0, 1).
+            let (s, c) = self.spin.sin_cos();
+            (dx, dy) = (dx * c - dy * s, dx * s + dy * c);
         }
         (cx + dx, cy + dy)
     }
@@ -128,8 +141,8 @@ impl Iso {
     }
 
     /// Every tile of a `grid` (cols, rows), ordered back to front for the
-    /// current turn: tiles with a smaller rotated `x + y` are farther away and
-    /// are painted first, so nearer blocks cover them.
+    /// current turn and spin: tiles with a smaller rotated `x + y` are farther
+    /// away and are painted first, so nearer blocks cover them.
     pub fn draw_order(&self, grid: (usize, usize)) -> Vec<(usize, usize)> {
         let mut tiles: Vec<(usize, usize)> = (0..grid.1)
             .flat_map(|y| (0..grid.0).map(move |x| (x, y)))
@@ -281,6 +294,7 @@ mod tests {
             ox: 50,
             oy: 10,
             quarter_turns: 0,
+            spin: 0.0,
         };
         let p0 = iso.project(0.0, 0.0, grid);
         iso.quarter_turns = 1;
@@ -300,6 +314,7 @@ mod tests {
             ox: 50,
             oy: 10,
             quarter_turns: 0,
+            spin: 0.0,
         };
         let order = iso.draw_order((5, 5));
         let pos = |t: (usize, usize)| order.iter().position(|&o| o == t).unwrap();
@@ -318,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn put_covers_a_pixel_and_vignette_covers_all() {
+    fn put_covers_a_pixel_and_fill_solid_covers_all() {
         let mut b = PixelBuf::new(6, 4);
         b.put(2, 1, [9, 9, 9]);
         assert!(b.covered(2, 1));
@@ -327,9 +342,101 @@ mod tests {
         b.put(-1, 0, [9, 9, 9]);
         b.put(6, 0, [9, 9, 9]);
         assert_eq!(b.cover.iter().filter(|&&c| c).count(), 1);
-        b.fill_vignette([20, 30, 40]);
+        b.fill_solid([20, 30, 40]);
         assert!((0..4).all(|y| (0..6).all(|x| b.covered(x, y))));
         b.clear_transparent();
         assert!((0..4).all(|y| (0..6).all(|x| !b.covered(x, y))));
+    }
+
+    #[test]
+    fn fill_solid_covers_every_pixel() {
+        let mut b = PixelBuf::new(7, 5);
+        b.put(3, 2, [9, 9, 9]);
+        b.fill_solid([0, 0, 0]);
+        // Black is a colour here, not "nothing painted": every pixel is covered.
+        assert!(b.cover.iter().all(|&c| c));
+        assert!(b.rgb.iter().all(|&p| p == [0, 0, 0]));
+        b.fill_solid([1, 2, 3]);
+        assert!(b.rgb.iter().all(|&p| p == [1, 2, 3]));
+    }
+
+    #[test]
+    fn project_at_a_whole_quarter_turn_matches_the_old_result() {
+        // Positions worked out by hand from the pre-spin formula (integer
+        // quarter turns about the grid centre (10, 6.5), then
+        // `OX + (x - y) * TW / 2`, `OY + (x + y) * TH / 2`, ties rounded up).
+        // The second case has an odd `th`, so two of its y values are exact
+        // halves and pin the rounding too.
+        let grid = (21usize, 14usize);
+        let cases: [(i32, i32, (f32, f32), [(i32, i32); 4]); 3] = [
+            (
+                16,
+                8,
+                (0.0, 0.0),
+                [(100, 20), (260, 72), (156, 152), (-4, 100)],
+            ),
+            (
+                16,
+                8,
+                (5.0, 3.0),
+                [(116, 52), (196, 80), (140, 120), (60, 92)],
+            ),
+            (
+                14,
+                7,
+                (1.0, 0.0),
+                [(107, 24), (233, 69), (142, 132), (16, 87)],
+            ),
+        ];
+        for (tw, th, (gx, gy), want) in cases {
+            for q in 0..4u8 {
+                let iso = Iso {
+                    tw,
+                    th,
+                    ox: 100,
+                    oy: 20,
+                    quarter_turns: q,
+                    spin: 0.0,
+                };
+                assert_eq!(
+                    iso.project(gx, gy, grid),
+                    want[q as usize],
+                    "tw={tw} ({gx},{gy}) turn {q}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn spin_adds_to_the_quarter_turns() {
+        // A quarter turn of spin lands where one more quarter turn does (to
+        // within rounding of cos/sin), and the centre never moves.
+        let grid = (21usize, 14usize);
+        let base = Iso {
+            tw: 16,
+            th: 8,
+            ox: 100,
+            oy: 20,
+            quarter_turns: 1,
+            spin: std::f32::consts::FRAC_PI_2,
+        };
+        let turned = Iso {
+            quarter_turns: 2,
+            spin: 0.0,
+            ..base
+        };
+        for (gx, gy) in [(0.0, 0.0), (5.0, 3.0), (20.0, 13.0)] {
+            let (a, b) = (base.project(gx, gy, grid), turned.project(gx, gy, grid));
+            assert!(
+                (a.0 - b.0).abs() <= 1 && (a.1 - b.1).abs() <= 1,
+                "{a:?} {b:?}"
+            );
+        }
+        let mid = Iso { spin: 0.3, ..base };
+        assert_eq!(
+            mid.project(10.0, 6.5, grid),
+            turned.project(10.0, 6.5, grid)
+        );
+        assert_eq!(mid.draw_order(grid).len(), 21 * 14);
     }
 }

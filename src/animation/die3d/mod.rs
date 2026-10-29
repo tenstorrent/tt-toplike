@@ -7,8 +7,9 @@
 //! Each frame is drawn into an RGB pixel buffer (`raster`, `scene`,
 //! `super_scene`) and converted to terminal cells as braille or half-block
 //! (`cells`). The camera (`camera`) cuts to another angle when a chip becomes
-//! busy or its PCIe traffic bursts (`triggers`), and the scene can switch from
-//! every board to the busy chip's board (`switching`). This file holds the
+//! busy or its PCIe traffic bursts (`triggers`), with a chaos, dissolve or
+//! spin transition, and the scene can switch from every board to the busy
+//! chip's board (`switching`). This file holds the
 //! view that ties them together: it reads the backend in `update`, answers
 //! keys in `handle_key` and draws in `render`.
 //!
@@ -31,7 +32,7 @@ pub mod triggers;
 use crate::animation::topology::BoardTopology;
 use crate::backend::TelemetryBackend;
 use crate::models::Architecture;
-use camera::{scramble, Camera, Director};
+use camera::{dissolve, scramble, Camera, Director, TransitionKind};
 use palette::GRAYSKULL;
 use raster::PixelBuf;
 use ratatui::style::{Color, Style};
@@ -58,9 +59,9 @@ const fn rgb(c: [u8; 3]) -> Color {
 const FOOTER_FG: Color = rgb(GRAYSKULL.eth);
 /// Footer key hints, dimmer than the status line.
 const KEYS_FG: Color = rgb(GRAYSKULL.mgmt);
-/// The slab colour times this is the opaque background (`T` off): the slab is
-/// the floor of the scene, so the surround is a darker shade of it.
-const OPAQUE_BG_SHADE: f32 = 0.55;
+/// The opaque background (`T` off): plain black. A tinted fill drew the eye
+/// away from the scene; black lets the blocks stand out.
+const OPAQUE_BG: [u8; 3] = [0, 0, 0];
 /// The action keys the footer lists after the switches. `3` (leave) is
 /// handled by the TUI, not here. Keys that flip a state are not listed here:
 /// they come from `Die3dView::switches`.
@@ -73,9 +74,10 @@ const BAR_WIDTH: usize = 3;
 /// One switch of the view, as the footer shows it: the key that flips it and
 /// what it is set to now.
 ///
-/// To add a switch: add an entry to `Die3dView::switches`, a `Die3dKey`
-/// variant (with its `toggles`, `ALL` and `key_to_die3d` lines) and an arm in
-/// `handle_key`. The footer builds itself from the table.
+/// To add a switch: add an entry to `Die3dView::switches_at`, a `Die3dKey`
+/// variant (with its `toggles` and `key_to_die3d` lines; `ALL` follows from
+/// the variant list) and an arm in `handle_key`. The footer builds itself
+/// from the table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Switch {
     /// The key that flips it.
@@ -88,9 +90,26 @@ pub struct Switch {
     pub state: &'static str,
 }
 
-/// What a key asks the Die 3D view to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Die3dKey {
+/// Declares `Die3dKey` and, for the tests, `Die3dKey::ALL` from one list of
+/// variants, so a variant cannot exist without being in `ALL` and so without
+/// being visited by the tests that walk every key.
+macro_rules! die3d_keys {
+    ($($(#[$doc:meta])* $variant:ident,)+) => {
+        /// What a key asks the Die 3D view to do.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum Die3dKey {
+            $($(#[$doc])* $variant,)+
+        }
+
+        impl Die3dKey {
+            /// Every key, in declaration order. Generated with the enum.
+            #[cfg(test)]
+            const ALL: &'static [Die3dKey] = &[$(Die3dKey::$variant,)+];
+        }
+    };
+}
+
+die3d_keys! {
     /// `]`: the next board.
     NextBoard,
     /// `[`: the previous board.
@@ -105,25 +124,14 @@ pub enum Die3dKey {
     /// `B`: braille or half-block cells.
     ToggleBraille,
     /// `T`: a transparent background, so the terminal's own shows through, or
-    /// an opaque dark one.
+    /// an opaque black one.
     ToggleTransparent,
+    /// `X`: how cuts change the picture: a shuffle of the kinds, or always
+    /// chaos, always a dissolve, or always a spin.
+    CycleTransition,
 }
 
 impl Die3dKey {
-    /// Every key, for tests that must visit them all. `all_keys_are_listed`
-    /// (an exhaustive match) fails to compile when a variant is added, which
-    /// is the reminder to extend this array.
-    #[cfg(test)]
-    const ALL: [Die3dKey; 7] = [
-        Die3dKey::NextBoard,
-        Die3dKey::PrevBoard,
-        Die3dKey::ToggleScene,
-        Die3dKey::CutNow,
-        Die3dKey::ToggleAuto,
-        Die3dKey::ToggleBraille,
-        Die3dKey::ToggleTransparent,
-    ];
-
     /// Whether the key flips a state the view keeps, and so needs an entry in
     /// `Die3dView::switches`. The match is exhaustive on purpose: a new
     /// variant does not compile until it is classified here.
@@ -132,24 +140,9 @@ impl Die3dKey {
             Die3dKey::ToggleScene
             | Die3dKey::ToggleAuto
             | Die3dKey::ToggleBraille
-            | Die3dKey::ToggleTransparent => true,
+            | Die3dKey::ToggleTransparent
+            | Die3dKey::CycleTransition => true,
             Die3dKey::NextBoard | Die3dKey::PrevBoard | Die3dKey::CutNow => false,
-        }
-    }
-
-    /// Compile-time guard for `ALL`: names every variant, so adding one
-    /// breaks the build here and not silently in the tests.
-    #[cfg(test)]
-    #[allow(dead_code)]
-    fn all_keys_are_listed(self) {
-        match self {
-            Die3dKey::NextBoard
-            | Die3dKey::PrevBoard
-            | Die3dKey::ToggleScene
-            | Die3dKey::CutNow
-            | Die3dKey::ToggleAuto
-            | Die3dKey::ToggleBraille
-            | Die3dKey::ToggleTransparent => {}
         }
     }
 }
@@ -164,8 +157,19 @@ pub fn key_to_die3d(c: char) -> Option<Die3dKey> {
         'C' => Some(Die3dKey::ToggleAuto),
         'B' => Some(Die3dKey::ToggleBraille),
         'T' => Some(Die3dKey::ToggleTransparent),
+        'X' => Some(Die3dKey::CycleTransition),
         _ => None,
     }
+}
+
+/// How a frame's projection comes from the director's cameras.
+#[derive(Debug, Clone, Copy)]
+enum Aim {
+    /// One camera, as it is.
+    At(Camera),
+    /// Part way (0..1) through a spin from the first camera to the second,
+    /// through `Camera::lerp_view`.
+    Between(Camera, Camera, f32),
 }
 
 /// What a frame actually shows, which can differ from the chosen scene.
@@ -193,7 +197,7 @@ pub struct Die3dView {
     reserved_rows: usize,
     braille: bool,
     /// Leave the background unpainted so the terminal's own colour (and any
-    /// translucency) shows through. Off paints an opaque dark vignette.
+    /// translucency) shows through. Off paints it opaque black.
     transparent: bool,
     director: Director,
     detector: TriggerDetector,
@@ -314,6 +318,7 @@ impl Die3dView {
             Die3dKey::ToggleAuto => self.director.set_auto(!self.director.auto()),
             Die3dKey::ToggleBraille => self.braille = !self.braille,
             Die3dKey::ToggleTransparent => self.transparent = !self.transparent,
+            Die3dKey::CycleTransition => self.director.cycle_transition_mode(),
         }
     }
 
@@ -359,24 +364,72 @@ impl Die3dView {
         )
     }
 
-    /// The scene at `now` with the chaos effect applied during a cut.
+    /// The picture at `now`: the scene with the transition of a cut in
+    /// progress applied.
+    ///
+    /// - Chaos: the scene at the director's camera, scrambled.
+    /// - Dissolve: the old camera's picture (and, for a cut that switched
+    ///   scenes, the old scene) and the new one, both drawn at `now` so the
+    ///   tiles keep moving, mixed by `dissolve`. The footer names the old
+    ///   scene until the swap at the midpoint, the new one after it.
+    /// - Spin: the scene drawn from the angle part way between the two
+    ///   cameras. The scene and the footer do not change.
     fn frame(&self, now: f64) -> Option<(PixelBuf, Shown)> {
-        let (mut buf, shown) = self.scene_pixels(now)?;
-        if let Some(intensity) = self.director.chaos(now) {
-            // A new noise pattern 60 times a second, the same for a given now.
-            scramble(&mut buf, intensity, (now * 60.0) as u32);
+        let progress = self.director.progress(now);
+        match (self.director.transition_kind(), progress) {
+            (Some(TransitionKind::Dissolve), Some(p)) => {
+                let (from, to) = self.director.cameras();
+                let (before, after) = self.transition_scenes(now);
+                let (old, old_shown) = self.scene_with(now, before, Aim::At(from))?;
+                let (new, new_shown) = self.scene_with(now, after, Aim::At(to))?;
+                let swapped = self.director.swapped_at().is_some_and(|at| now >= at);
+                let shown = if swapped { new_shown } else { old_shown };
+                // One pixel order for the whole dissolve, from the cut's start.
+                let seed = self.director.cut_at().map_or(0, |t| (t * 1000.0) as u32);
+                Some((dissolve(&old, &new, p, seed), shown))
+            }
+            (Some(TransitionKind::Spin), Some(p)) => {
+                let (from, to) = self.director.cameras();
+                let scene = self.switcher.scene_at(now);
+                self.scene_with(now, scene, Aim::Between(from, to, p))
+            }
+            _ => {
+                let (mut buf, shown) = self.scene_pixels(now)?;
+                if let Some(intensity) = self.director.chaos(now) {
+                    // A new noise pattern 60 times a second, the same for a
+                    // given now.
+                    scramble(&mut buf, intensity, (now * 60.0) as u32);
+                }
+                Some((buf, shown))
+            }
         }
-        Some((buf, shown))
     }
 
-    /// The scene at `now`, before any chaos, in a buffer the size of the
-    /// terminal area above the footer. `None` with no chip to draw or when
-    /// even the board scene does not fit.
+    /// The scenes before and after the latest cut (see
+    /// `Switcher::transition_scenes`); both the scene at `now` before any cut.
+    fn transition_scenes(&self, now: f64) -> (Scene, Scene) {
+        match self.director.cut_at() {
+            Some(at) => self.switcher.transition_scenes(at, now),
+            None => (self.switcher.scene_at(now), self.switcher.scene_at(now)),
+        }
+    }
+
+    /// The scene at `now`, before any transition effect, in a buffer the size
+    /// of the terminal area above the footer. `None` with no chip to draw or
+    /// when even the board scene does not fit.
     ///
-    /// The camera is `Director::camera_at(now)`: during a cut the old angle
-    /// stays until the midpoint, under the chaos noise, and the new one shows
-    /// from there.
+    /// The camera is `Director::camera_at(now)`: during a chaos or dissolve
+    /// cut the old angle stays until the midpoint and the new one shows from
+    /// there; during a spin the old angle stays until the end.
     fn scene_pixels(&self, now: f64) -> Option<(PixelBuf, Shown)> {
+        let scene = self.switcher.scene_at(now);
+        self.scene_with(now, scene, Aim::At(self.director.camera_at(now)))
+    }
+
+    /// `scene` at `now`, projected as `aim` says. The super scene falls back
+    /// to the board shown last when it does not fit. A board index past the
+    /// end of the board list (it can shrink between updates) is clamped.
+    fn scene_with(&self, now: f64, scene: Scene, aim_by: Aim) -> Option<(PixelBuf, Shown)> {
         let scene_rows = self.rows.checked_sub(FOOTER_ROWS)?;
         // Braille cells hold 2 x 4 pixels, half-block cells 1 x 2.
         let (pw, ph) = if self.braille {
@@ -384,39 +437,36 @@ impl Die3dView {
         } else {
             (self.cols, scene_rows * 2)
         };
-        let camera = self.director.camera_at(now);
         let t = now as f32;
         let mut buf = PixelBuf::new(pw, ph);
         // The scenes paint only what stands in them. Transparent is the fresh,
         // all-uncovered buffer, so it needs nothing; opaque fills the
         // background first.
         if !self.transparent {
-            let bg = GRAYSKULL
-                .slab
-                .map(|v| (v as f32 * OPAQUE_BG_SHADE).round() as u8);
-            buf.fill_vignette(bg);
+            buf.fill_solid(OPAQUE_BG);
         }
         let mut fallback = false;
         // With one board the super scene is that board's scene.
-        if self.switcher.scene_at(now) == Scene::All && self.chips.len() > 1 {
+        if scene == Scene::All && self.chips.len() > 1 {
             let dies: Vec<usize> = self.chips.iter().map(Vec::len).collect();
             let (grid, _) = super_grid(&dies);
             match fit_pixels(pw as i32, ph as i32, grid) {
                 Some(fit) => {
-                    draw_super_scene(&mut buf, &self.chips, &aim(&fit, camera, grid), t);
+                    draw_super_scene(&mut buf, &self.chips, &aim(&fit, aim_by, grid), t);
                     return Some((buf, Shown::All));
                 }
                 None => fallback = true,
             }
         }
-        let board = self
-            .switcher
-            .board_at(now)
-            .min(self.chips.len().checked_sub(1)?);
+        let board = match scene {
+            Scene::Board(b) => b,
+            Scene::All => self.switcher.board_at(now),
+        }
+        .min(self.chips.len().checked_sub(1)?);
         let chips = &self.chips[board];
         let grid = board_grid(chips.len());
         let fit = fit_pixels(pw as i32, ph as i32, grid)?;
-        draw_board_scene(&mut buf, chips, &aim(&fit, camera, grid), t, Detail::Full);
+        draw_board_scene(&mut buf, chips, &aim(&fit, aim_by, grid), t, Detail::Full);
         let shown = if fallback {
             Shown::Fallback(board)
         } else {
@@ -504,6 +554,11 @@ impl Die3dView {
                 state: if self.director.auto() { "on" } else { "off" },
             },
             Switch {
+                key: 'X',
+                label: "transition",
+                state: self.director.transition_mode().label(),
+            },
+            Switch {
                 key: 'm',
                 label: "",
                 state: match self.switcher.scene_at(now) {
@@ -517,13 +572,14 @@ impl Die3dView {
     /// The footer's second row after its bar, at most `width` characters.
     /// From most to least detailed, the first that fits wins:
     ///
-    /// 1. `B braille · T transparent · C auto-cuts on · m all boards · [ ] board · c cut · 3 leave`
+    /// 1. `B braille · T transparent · C auto-cuts on · X transition shuffle · m all boards · [ ] board · c cut · 3 leave`
     /// 2. the same without the action keys
     /// 3. `<key> <state>` for each switch (`C on`)
     /// 4. the state words alone
     ///
-    /// A state word is never cut: if even the last form is too wide the row
-    /// is cut at its end, which loses the last words, not part of one.
+    /// The first four forms keep every state word whole. When even the last
+    /// is too wide, the state words are cut at a character with an ellipsis
+    /// (`fit_width`), so the last word shown may be partial.
     fn switch_strip(&self, now: f64, width: usize) -> String {
         let switches = self.switches_at(now);
         let join = |each: &dyn Fn(&Switch) -> String| {
@@ -539,10 +595,11 @@ impl Die3dView {
         let with_actions = format!("{full}{SEP}{ACTION_KEYS}");
         let keyed = join(&|s| format!("{} {}", s.key, s.state));
         let bare = join(&|s| s.state.to_string());
-        [with_actions, full, keyed, bare]
+        let fits = [&with_actions, &full, &keyed, &bare]
             .into_iter()
             .find(|row| row.chars().count() <= width)
-            .unwrap_or_else(|| fit_width(join(&|s| s.state.to_string()), width))
+            .cloned();
+        fits.unwrap_or_else(|| fit_width(bare, width))
     }
 
     /// `chip 3: Wormhole (not drawn)` for each device the view does not draw.
@@ -555,11 +612,15 @@ impl Die3dView {
     }
 }
 
-/// `fit` turned to `camera`. `grid` must be the grid `fit` was sized for, so
-/// the camera keeps the grid centre where `fit` put it.
-fn aim(fit: &SceneFit, camera: Camera, grid: (usize, usize)) -> SceneFit {
+/// `fit` turned as `aim_by` says. `grid` must be the grid `fit` was sized
+/// for, so the camera keeps the grid centre where `fit` put it.
+fn aim(fit: &SceneFit, aim_by: Aim, grid: (usize, usize)) -> SceneFit {
+    let iso = match aim_by {
+        Aim::At(camera) => camera.apply(&fit.iso, grid),
+        Aim::Between(from, to, t) => Camera::lerp_view(&from, &to, t, &fit.iso, grid),
+    };
     SceneFit {
-        iso: camera.apply(&fit.iso, grid),
+        iso,
         scale: fit.scale,
     }
 }
@@ -593,6 +654,7 @@ fn note(text: String) -> Line<'static> {
 
 #[cfg(test)]
 mod tests {
+    use super::camera::TransitionMode;
     use super::scene::{has_per_tile_data, ESTIMATE_LABEL};
     use super::test_backend::Fake;
     use super::*;
@@ -662,6 +724,7 @@ mod tests {
             Die3dKey::ToggleScene,
             Die3dKey::CutNow,
             Die3dKey::ToggleBraille,
+            Die3dKey::CycleTransition,
         ] {
             v.handle_key(k, 0.5);
         }
@@ -718,7 +781,10 @@ mod tests {
             .director
             .swapped_at()
             .expect("the load rise cut the camera");
-        assert!((at - (1.0 + camera::CHAOS_SECS / 2.0)).abs() < 1e-9);
+        // A scene change is a chaos or a dissolve; both swap at their midpoint.
+        let kind = v.director.transition_kind().unwrap();
+        assert_ne!(kind, TransitionKind::Spin);
+        assert!((at - (1.0 + kind.secs() / 2.0)).abs() < 1e-9);
         // Still the super scene up to the midpoint, board 2 from it.
         assert_eq!(v.switcher.scene_at(at - 0.01), Scene::All);
         assert_eq!(v.switcher.scene_at(at), Scene::Board(1));
@@ -826,19 +892,34 @@ mod tests {
         let b = two_boards();
         let mut v = Die3dView::new(150, 42);
         v.update(&b, 0.0);
+        v.director.set_transition_mode(TransitionMode::Chaos);
         v.handle_key(Die3dKey::CutNow, 5.0);
         assert!(v.director.chaos(5.3).is_some(), "mid-chaos");
         assert_eq!(v.render(5.3).len(), 42);
-        // The TUI rebuilds the view on resize; every size must render.
+        // The TUI rebuilds the view on resize; every size must render, in
+        // every transition, at several points of it.
         for (c, r) in [(120, 35), (100, 30), (220, 60), (101, 31)] {
             for braille in [true, false] {
-                let mut v = Die3dView::new(c, r);
-                v.update(&b, 5.0);
-                if !braille {
-                    v.handle_key(Die3dKey::ToggleBraille, 5.0);
+                for mode in [
+                    TransitionMode::Chaos,
+                    TransitionMode::Dissolve,
+                    TransitionMode::Spin,
+                ] {
+                    let mut v = Die3dView::new(c, r);
+                    v.update(&b, 5.0);
+                    v.director.set_transition_mode(mode);
+                    if !braille {
+                        v.handle_key(Die3dKey::ToggleBraille, 5.0);
+                    }
+                    v.handle_key(Die3dKey::CutNow, 5.0);
+                    for dt in [0.0, 0.3, 0.7, 1.2, 1.7] {
+                        assert_eq!(
+                            v.render(5.0 + dt).len(),
+                            r,
+                            "{c} x {r} braille={braille} {mode:?} +{dt}"
+                        );
+                    }
                 }
-                v.handle_key(Die3dKey::CutNow, 5.0);
-                assert_eq!(v.render(5.3).len(), r, "{c} x {r} braille={braille}");
             }
         }
     }
@@ -905,6 +986,7 @@ mod tests {
         let b = Fake::boards(&["p150"], Some(TDP));
         let mut v = Die3dView::new(150, 42);
         v.update(&b, 0.0);
+        v.director.set_transition_mode(TransitionMode::Chaos);
         v.handle_key(Die3dKey::CutNow, 10.0);
         let mid = v.director.swapped_at().unwrap();
         let scene_rows = 42 - FOOTER_ROWS;
@@ -984,6 +1066,7 @@ mod tests {
         still.update(&b, 0.0);
         let mut cut = Die3dView::new(150, 42);
         cut.update(&b, 0.0);
+        cut.director.set_transition_mode(TransitionMode::Chaos);
         cut.handle_key(Die3dKey::CutNow, 10.0);
         let at = cut.director.swapped_at().unwrap();
         // Before the swap the old camera is drawn, so the scene (before the
@@ -1011,6 +1094,7 @@ mod tests {
             v.frame(3.0).unwrap().0.rgb,
             v.scene_pixels(3.0).unwrap().0.rgb
         );
+        v.director.set_transition_mode(TransitionMode::Chaos);
         v.handle_key(Die3dKey::CutNow, 10.0);
         let mid = v.director.swapped_at().unwrap();
         assert_ne!(
@@ -1144,26 +1228,31 @@ mod tests {
         v.update(&b, 0.0);
         let state =
             |v: &Die3dView, k: char| v.switches().into_iter().find(|s| s.key == k).unwrap().state;
-        let before: Vec<_> = "BTCm".chars().map(|k| state(&v, k)).collect();
-        assert_eq!(before, ["braille", "transparent", "on", "all boards"]);
+        let before: Vec<_> = "BTCXm".chars().map(|k| state(&v, k)).collect();
+        assert_eq!(
+            before,
+            ["braille", "transparent", "on", "shuffle", "all boards"]
+        );
         for k in [
             Die3dKey::ToggleBraille,
             Die3dKey::ToggleTransparent,
             Die3dKey::ToggleAuto,
+            Die3dKey::CycleTransition,
             Die3dKey::ToggleScene,
         ] {
             v.handle_key(k, 0.0);
         }
-        let after: Vec<_> = "BTCm".chars().map(|k| state(&v, k)).collect();
-        assert_eq!(after, ["half-block", "opaque", "off", "board"]);
+        let after: Vec<_> = "BTCXm".chars().map(|k| state(&v, k)).collect();
+        assert_eq!(after, ["half-block", "opaque", "off", "chaos", "board"]);
     }
 
     #[test]
-    fn the_switch_table_covers_every_toggle_key() {
+    fn the_switch_table_still_covers_every_toggle_key() {
         let v = Die3dView::new(150, 42);
         let keys: Vec<char> = v.switches().iter().map(|s| s.key).collect();
+        assert!(keys.contains(&'X'), "{keys:?}");
         let mut toggling = 0;
-        for k in Die3dKey::ALL {
+        for &k in Die3dKey::ALL {
             if !k.toggles() {
                 continue;
             }
@@ -1175,5 +1264,252 @@ mod tests {
             assert!(keys.contains(&c), "{k:?} ({c}) toggles but has no switch");
         }
         assert_eq!(toggling, keys.len(), "a switch with no toggling key");
+    }
+
+    #[test]
+    fn all_lists_every_key_once_and_each_has_a_character() {
+        // `ALL` is generated from the enum's own declaration, so it cannot
+        // miss a variant; this checks the other direction: no duplicates, and
+        // a character for each (so `the_switch_table_still_covers_every_toggle_key`
+        // can find it).
+        for (i, k) in Die3dKey::ALL.iter().enumerate() {
+            assert!(!Die3dKey::ALL[..i].contains(k), "{k:?} twice");
+            assert!(
+                (0u8..128).any(|c| key_to_die3d(char::from(c)) == Some(*k)),
+                "{k:?} has no character"
+            );
+        }
+        let mapped = (0u8..128)
+            .filter(|&c| key_to_die3d(char::from(c)).is_some())
+            .count();
+        assert_eq!(mapped, Die3dKey::ALL.len());
+    }
+
+    #[test]
+    fn the_switch_strip_falls_back_to_keyed_then_bare_then_a_cut() {
+        // Lengths with the default switches: keyed is 59 characters and bare
+        // 49, so a 55-column terminal (52 after the bar) lands on bare.
+        let v = wide_label_view(150);
+        let sw = v.switches();
+        let keyed = sw
+            .iter()
+            .map(|s| format!("{} {}", s.key, s.state))
+            .collect::<Vec<_>>()
+            .join(SEP);
+        let bare = sw.iter().map(|s| s.state).collect::<Vec<_>>().join(SEP);
+        assert_eq!((keyed.chars().count(), bare.chars().count()), (59, 49));
+        let at = |cols: usize| {
+            let v = wide_label_view(cols);
+            let s = strip(&v);
+            assert!(s.chars().count() <= cols, "{cols}: {s}");
+            s.trim_start_matches("\u{255a}\u{2550} ").to_string()
+        };
+        // Exactly wide enough for the keyed form.
+        assert_eq!(at(59 + BAR_WIDTH), keyed);
+        // About 55 columns: the keyed form no longer fits, the bare one does.
+        assert_eq!(at(55), bare);
+        assert_eq!(at(49 + BAR_WIDTH), bare);
+        // One column short of bare: the last resort cuts at a character and
+        // marks the cut with an ellipsis.
+        let cut = at(48 + BAR_WIDTH);
+        assert_eq!(cut.chars().count(), 48);
+        assert!(cut.ends_with('\u{2026}'), "{cut}");
+        assert!(bare.starts_with(cut.trim_end_matches('\u{2026}')), "{cut}");
+    }
+
+    #[test]
+    fn opaque_mode_fills_pure_black() {
+        let b = two_boards();
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        v.handle_key(Die3dKey::ToggleTransparent, 0.0);
+        let lines = v.render(0.0);
+        let black = Some(Color::Rgb(0, 0, 0));
+        // The scene corners are empty floor: a flat cell on pure black.
+        let scene_rows = 42 - FOOTER_ROWS;
+        for row in [0, scene_rows - 1] {
+            let spans = &lines[row].spans;
+            for span in [spans.first().unwrap(), spans.last().unwrap()] {
+                assert_eq!(span.style.bg, black, "row {row}: {span:?}");
+            }
+        }
+        // In pixels: every uncovered-by-the-scene pixel is (0, 0, 0).
+        let (buf, _) = v.scene_pixels(0.0).unwrap();
+        assert_eq!(buf.get(0, 0), [0, 0, 0]);
+        assert!(buf.covered(0, 0));
+        // Half-block too.
+        v.handle_key(Die3dKey::ToggleBraille, 0.0);
+        let lines = v.render(0.0);
+        assert_eq!(lines[0].spans[0].style.bg, black, "{:?}", lines[0].spans[0]);
+    }
+
+    /// The two frames a transition at `now` mixes: the scene from the old
+    /// camera and the scene from the new one, each at the same `now`.
+    fn endpoints(v: &Die3dView, now: f64) -> (PixelBuf, PixelBuf) {
+        let (from, to) = v.director.cameras();
+        let (s0, s1) = v.transition_scenes(now);
+        (
+            v.scene_with(now, s0, Aim::At(from)).unwrap().0,
+            v.scene_with(now, s1, Aim::At(to)).unwrap().0,
+        )
+    }
+
+    #[test]
+    fn a_spin_frame_midway_differs_from_both_endpoints_and_stays_inside() {
+        let b = Fake::boards(&["p150"], Some(TDP));
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        v.handle_key(Die3dKey::CycleTransition, 0.0);
+        v.handle_key(Die3dKey::CycleTransition, 0.0);
+        v.handle_key(Die3dKey::CycleTransition, 0.0);
+        assert_eq!(v.director.transition_mode(), TransitionMode::Spin);
+        // Cut until the camera turns (a cut can also change only the pitch).
+        let mut start = 10.0;
+        v.handle_key(Die3dKey::CutNow, start);
+        while {
+            let (from, to) = v.director.cameras();
+            from.quarter_turns == to.quarter_turns
+        } {
+            start += 10.0;
+            v.handle_key(Die3dKey::CutNow, start);
+        }
+        assert_eq!(v.director.transition_kind(), Some(TransitionKind::Spin));
+        let mid = start + TransitionKind::Spin.secs() / 2.0;
+        let (old, new) = endpoints(&v, mid);
+        let frame = v.frame(mid).unwrap().0;
+        assert_ne!(frame.rgb, old.rgb);
+        assert_ne!(frame.rgb, new.rgb);
+        // The frames along the way move: a spin is animated, not a cut. 15
+        // frames a tenth of a second apart are mostly distinct.
+        let mut frames: Vec<Vec<[u8; 3]>> = (1..16)
+            .map(|k| v.frame(start + k as f64 * 0.1).unwrap().0.rgb)
+            .collect();
+        frames.dedup();
+        assert!(frames.len() >= 10, "{} distinct of 15", frames.len());
+        assert_eq!(v.render(mid).len(), 42);
+
+        // Every preset to every other, part way along, stays inside the
+        // view's own buffer (300 x 160 pixels: 40 braille rows above the
+        // footer) for a one- and a two-die board and four boards of two dies.
+        const PAD: i32 = 80;
+        let (pw, ph) = (300i32, 160i32);
+        let one: Vec<ChipInputs> = v.chips[0].clone();
+        let two = vec![one[0].clone(), one[0].clone()];
+        let four: Vec<Vec<ChipInputs>> = (0..4).map(|_| two.clone()).collect();
+        let draws: [(&str, (usize, usize), &dyn Fn(&mut PixelBuf, &SceneFit)); 3] = [
+            ("1 die", board_grid(1), &|buf, f| {
+                draw_board_scene(buf, &one, f, 1.3, Detail::Full)
+            }),
+            ("2 dies", board_grid(2), &|buf, f| {
+                draw_board_scene(buf, &two, f, 1.3, Detail::Full)
+            }),
+            ("4 x 2", super_grid(&[2, 2, 2, 2]).0, &|buf, f| {
+                draw_super_scene(buf, &four, f, 1.3)
+            }),
+        ];
+        for (what, grid, draw) in draws {
+            let base = fit_pixels(pw, ph, grid).unwrap();
+            for from in camera::PRESETS {
+                for to in camera::PRESETS {
+                    for i in 0..=8 {
+                        let mut iso =
+                            Camera::lerp_view(&from, &to, i as f32 / 8.0, &base.iso, grid);
+                        iso.ox += PAD;
+                        iso.oy += PAD;
+                        let f = SceneFit { iso, ..base };
+                        let mut buf =
+                            PixelBuf::new((pw + 2 * PAD) as usize, (ph + 2 * PAD) as usize);
+                        draw(&mut buf, &f);
+                        for y in 0..buf.h {
+                            for x in 0..buf.w {
+                                let (xi, yi) = (x as i32 - PAD, y as i32 - PAD);
+                                assert!(
+                                    !buf.covered(x, y)
+                                        || (0..pw).contains(&xi) && (0..ph).contains(&yi),
+                                    "{what} {from:?} -> {to:?} at {i}/8: pixel {xi},{yi}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Pixels where `frame` matches `a` and not `b`.
+    fn only_from(frame: &PixelBuf, a: &PixelBuf, b: &PixelBuf) -> usize {
+        (0..frame.rgb.len())
+            .filter(|&i| {
+                let px = |p: &PixelBuf| (p.rgb[i], p.cover[i]);
+                px(frame) == px(a) && px(frame) != px(b)
+            })
+            .count()
+    }
+
+    #[test]
+    fn a_dissolve_frame_midway_contains_pixels_of_both_frames() {
+        // A camera-only cut.
+        let b = Fake::boards(&["p150"], Some(TDP));
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        v.director.set_transition_mode(TransitionMode::Dissolve);
+        v.handle_key(Die3dKey::CutNow, 10.0);
+        let mid = 10.0 + TransitionKind::Dissolve.secs() / 2.0;
+        let (old, new) = endpoints(&v, mid);
+        let frame = v.frame(mid).unwrap().0;
+        assert!(only_from(&frame, &old, &new) > 500, "old pixels");
+        assert!(only_from(&frame, &new, &old) > 500, "new pixels");
+        assert_eq!(v.render(mid).len(), 42);
+
+        // A scene change: the old frame is every board, the new one board 2.
+        let mut b = two_boards();
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        v.director.set_transition_mode(TransitionMode::Dissolve);
+        b.set_power(2, 90.0);
+        v.update(&b, 1.0);
+        assert_eq!(v.director.transition_kind(), Some(TransitionKind::Dissolve));
+        // Past the midpoint, after the switch has been committed.
+        let late = 1.0 + 0.7;
+        v.update(&b, late);
+        assert_eq!(v.switcher.scene_at(late), Scene::Board(1));
+        assert_eq!(v.transition_scenes(late), (Scene::All, Scene::Board(1)));
+        let (old, new) = endpoints(&v, late);
+        assert_eq!(
+            v.scene_with(late, Scene::All, Aim::At(v.director.cameras().0))
+                .unwrap()
+                .1,
+            Shown::All
+        );
+        let frame = v.frame(late).unwrap().0;
+        assert!(only_from(&frame, &old, &new) > 200, "old scene pixels");
+        assert!(only_from(&frame, &new, &old) > 200, "new scene pixels");
+        // Once it ends only the new scene is left.
+        let after = 1.0 + TransitionKind::Dissolve.secs() + 0.01;
+        assert_eq!(
+            v.frame(after).unwrap().0.rgb,
+            v.scene_pixels(after).unwrap().0.rgb
+        );
+    }
+
+    #[test]
+    fn the_x_key_cycles_the_transition_mode_and_the_footer_says_which() {
+        assert_eq!(key_to_die3d('X'), Some(Die3dKey::CycleTransition));
+        assert!(Die3dKey::CycleTransition.toggles());
+        let b = two_boards();
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        for (want_state, want_mode) in [
+            ("shuffle", TransitionMode::Shuffle),
+            ("chaos", TransitionMode::Chaos),
+            ("dissolve", TransitionMode::Dissolve),
+            ("spin", TransitionMode::Spin),
+            ("shuffle", TransitionMode::Shuffle),
+        ] {
+            assert_eq!(v.director.transition_mode(), want_mode);
+            let f = footer(&v.render(0.0));
+            assert!(f.contains(&format!("X transition {want_state}")), "{f}");
+            v.handle_key(Die3dKey::CycleTransition, 0.0);
+        }
     }
 }

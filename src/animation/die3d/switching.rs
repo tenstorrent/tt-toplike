@@ -9,7 +9,8 @@
 //!   camera, and the cut changes the angle only.
 //! - In the super scene ("all boards"), a `LoadRise` that wins a cut also
 //!   switches to that chip's board. The switch shows from the cut's midpoint
-//!   (`Director::swapped_at`), so the chaos transition covers it. A
+//!   (`Director::swapped_at`), so the transition covers it: chaos or a
+//!   dissolve, never a spin (the director is told the cut changes scene). A
 //!   `PcieBurst` in the super scene changes the angle only.
 //! - After [`RETURN_SECS`] with no `LoadRise` on any chip, the view goes back
 //!   to the super scene, but only when the view made the switch.
@@ -44,6 +45,11 @@ pub(super) struct Switcher {
     last_load_rise: Option<f64>,
     /// The board shown last, so `m` returns to it and the fallback draws it.
     board: usize,
+    /// The latest switch made by a cut: the cut's start time, the scene
+    /// before it and the scene after it. A dissolve draws both scenes for
+    /// the whole transition, past the midpoint where `pending` is committed
+    /// and forgotten. Cleared by a scene the user chooses.
+    cut_switch: Option<(f64, Scene, Scene)>,
 }
 
 impl Switcher {
@@ -55,6 +61,17 @@ impl Switcher {
             auto_return: false,
             last_load_rise: None,
             board: 0,
+            cut_switch: None,
+        }
+    }
+
+    /// The scenes on either side of the cut that started at `cut_at`: (before,
+    /// after). For a cut that switched scenes these are the two scenes; for
+    /// any other cut both are the scene on show at `now`.
+    pub(super) fn transition_scenes(&self, cut_at: f64, now: f64) -> (Scene, Scene) {
+        match self.cut_switch {
+            Some((at, before, after)) if at == cut_at => (before, after),
+            _ => (self.scene_at(now), self.scene_at(now)),
         }
     }
 
@@ -124,9 +141,11 @@ impl Switcher {
             Scene::All => {
                 // With one board the super scene is that board's scene, so a
                 // switch would change nothing on screen.
-                if director.on_trigger(now) && load_rise && boards > 1 {
+                let switches = load_rise && boards > 1;
+                if director.on_trigger_with_scene(now, switches) && switches {
                     let at = director.swapped_at().unwrap_or(now);
                     self.pending = Some((Scene::Board(board), at));
+                    self.cut_switch = Some((now, Scene::All, Scene::Board(board)));
                     self.auto_return = true;
                 }
             }
@@ -147,6 +166,7 @@ impl Switcher {
     /// pending switch left to override it.
     pub(super) fn choose(&mut self, scene: Scene) {
         self.pending = None;
+        self.cut_switch = None;
         self.auto_return = false;
         self.set(scene);
     }
