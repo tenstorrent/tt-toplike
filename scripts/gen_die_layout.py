@@ -81,20 +81,24 @@ def smi_masks():
     return [int(dev["smbus_telem"]["ENABLED_TENSIX_COL"], 16) for dev in snap["device_info"]]
 
 
+# Tensix lives in die columns 1..=14 (the mask has 14 bits); column 0 and
+# 15..=16 are DRAM and Ethernet-side edges.
+TENSIX_COLS = range(1, 15)
+
+
 def report_harvest(dumps):
     """Print, per chip, the Tensix mask and the die columns with no Tensix tile.
 
-    "Missing" is measured against every die column that has a Tensix tile on
-    at least one chip. Columns harvested on every chip are listed separately,
-    since no tile list contains them.
+    "Missing" is measured against the full Tensix span, die columns 1..=14,
+    so a column harvested on every dumped chip is still listed for each chip.
+    Columns missing on every chip are also printed on a final line.
     """
     chips = [(d["label"], c, m) for d in dumps for c, m in zip(d["chips"], d["masks"])]
     per_chip = [{t[0] for t in c["tiles"] if t[4] == 0} for _, c, _ in chips]
-    seen = set().union(*per_chip)
     print("board                              chip  enabled_tensix_col  missing die columns")
     for (label, c, mask), have in zip(chips, per_chip):
-        print(f"{label:<34} {c['index']:>4}  {mask:#018x}  {sorted(seen - have)}")
-    print(f"Tensix die columns seen on some chip: {sorted(seen)}")
+        print(f"{label:<34} {c['index']:>4}  {mask:#018x}  {[x for x in TENSIX_COLS if x not in have]}")
+    print(f"Missing on every chip: {[x for x in TENSIX_COLS if all(x not in h for h in per_chip)]}")
 
 
 def fold(d, n):
