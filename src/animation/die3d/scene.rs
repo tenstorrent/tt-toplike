@@ -377,7 +377,7 @@ pub(super) fn draw_slab(
 /// Tensix tile are not drawn one by one: when the group's last tile comes up in
 /// back to front order the group is drawn as a single block, so everything in
 /// front of it still paints over it. `visits` counts the tiles of each group
-/// seen so far. A group with no live Tensix tile (Ethernet, P.dram, management
+/// seen so far. A group with no live Tensix tile (Ethernet, DRAM, management
 /// and harvested tiles) keeps its tiles.
 pub(super) fn draw_die_tile(
     buf: &mut PixelBuf,
