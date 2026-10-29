@@ -15,6 +15,7 @@
 
 use super::layout::{tensix_mask_to_die_cols, DieLayout, Tile, TileKind};
 use super::raster::{draw_block, Iso, PixelBuf};
+use super::super_scene::mean_heat;
 use crate::backend::TelemetryBackend;
 use crate::models::{Architecture, Device};
 use std::collections::HashMap;
@@ -30,7 +31,7 @@ const DRAM: [u8; 3] = [111, 171, 160];
 const ETH: [u8; 3] = [143, 149, 224];
 const MGMT: [u8; 3] = [122, 127, 154];
 const N1: [u8; 3] = [116, 197, 223];
-const BG: [u8; 3] = [7, 25, 26];
+pub(super) const BG: [u8; 3] = [7, 25, 26];
 const SLAB: [u8; 3] = [13, 38, 36];
 const WHITE: [u8; 3] = [255, 255, 255];
 /// Packets leaving the chip: the warm accent, so they differ from the blue
@@ -42,10 +43,10 @@ const PACKET_OUT: [u8; 3] = WARM;
 // 12). The cages of one die and the connector of the next therefore sit side
 // by side in the 2-row gap between the two dies' tiles. Columns carry two
 // extra tile columns each side for the GDDR blocks.
-const MARGIN_X: usize = 2;
-const MARGIN_Y: usize = 1;
-const BOARD_COLS: usize = 17 + 2 * MARGIN_X;
-const BOARD_BAND: usize = 12 + 2;
+pub(super) const MARGIN_X: usize = 2;
+pub(super) const MARGIN_Y: usize = 1;
+pub(super) const BOARD_COLS: usize = 17 + 2 * MARGIN_X;
+pub(super) const BOARD_BAND: usize = 12 + 2;
 /// Ethernet cages along the back edge, one per `eth_live` bit.
 const ETH_CAGES: usize = 12;
 /// Rows of GDDR blocks (die rows) on each side, two rows per memory chip.
@@ -139,11 +140,17 @@ pub fn tile_heat(load: f32, tile: &Tile, t: f32) -> f32 {
 
 /// The heat the scene draws for a tile. Measured data wins when the chip has
 /// it (the busier of the two NoCs, 0.0 for a tile the data does not mention);
-/// otherwise it is the load estimate.
+/// otherwise it is the load estimate. A NaN or infinite input gives 0.0: the
+/// callers turn the value into a height and a colour, and `f32::max` would
+/// otherwise let a NaN in one NoC slip through as the other's value.
 pub fn tile_value(chip: &ChipInputs, tile: &Tile, t: f32) -> f32 {
     match &chip.tile_flow {
-        Some(flow) => flow.get(&tile.noc0).map_or(0.0, |v| v[0].max(v[1])),
-        None => tile_heat(chip.load, tile, t),
+        Some(flow) => flow
+            .get(&tile.noc0)
+            .filter(|v| v.iter().all(|x| x.is_finite()))
+            .map_or(0.0, |v| v[0].max(v[1])),
+        None if chip.load.is_finite() => tile_heat(chip.load, tile, t),
+        None => 0.0,
     }
 }
 
@@ -155,8 +162,10 @@ pub fn has_per_tile_data(chips: &[ChipInputs]) -> bool {
 
 /// How much detail to draw.
 ///
-/// `Blocks` is for coarser pixel grids. Task 6 gives it its own look; until
-/// then `draw_board_scene` draws it exactly like `Full`.
+/// `Blocks(n)` is for coarser pixel grids: each n x n group of tiles that holds
+/// a live Tensix tile is drawn as one block, lit by the mean heat of the
+/// group's live Tensix tiles (see `super_scene::block_heat`). `Blocks(0)` and
+/// `Blocks(1)` are the same as `Full`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Detail {
     Full,
@@ -186,11 +195,16 @@ fn lift(tw: i32) -> i32 {
 /// `Iso` rotates about the grid centre, and the board grid is not square, so
 /// each turn has its own footprint. The sizing takes the union of all four.
 pub fn fit(cells_w: usize, cells_h: usize, dies: usize) -> Option<SceneFit> {
+    fit_grid(cells_w, cells_h, (BOARD_COLS, BOARD_BAND * dies.max(1)))
+}
+
+/// [`fit`] for any tile grid of `grid` (columns, rows), such as the several
+/// boards of the super scene.
+pub(super) fn fit_grid(cells_w: usize, cells_h: usize, grid: (usize, usize)) -> Option<SceneFit> {
     if cells_w < MIN_CELLS.0 || cells_h < MIN_CELLS.1 {
         return None;
     }
     let (pw, ph) = ((cells_w * 2) as i32, (cells_h * 4) as i32);
-    let grid = (BOARD_COLS, BOARD_BAND * dies.max(1));
     let corners = [
         (0.0, 0.0),
         ((grid.0 - 1) as f32, 0.0),
@@ -275,71 +289,168 @@ fn blob(buf: &mut PixelBuf, x: i32, y: i32, c: [u8; 3], n: i32) {
     }
 }
 
-/// Draw the board: a slab, one die per chip stacked along the grid y axis, the
-/// GDDR blocks beside each die, the PCIe connector at the front edge and the
-/// Ethernet cages at the back.
-///
-/// `fit` must come from `fit(.., chips.len())`. Harvested Tensix columns stay
-/// flat. Blocks and packets that depend on data (GDDR, Ethernet, PCIe) are
-/// drawn only from the chip's own numbers; nothing animates without a reason,
-/// so an idle chip with no counters is a still picture apart from the load
-/// wave. The picture is a pure function of its inputs and `t`.
-///
-/// `Detail::Blocks` is drawn like `Full` for now; Task 6 replaces that.
-pub fn draw_board_scene(
-    buf: &mut PixelBuf,
-    chips: &[ChipInputs],
-    fit: &SceneFit,
+/// What every tile of one drawing shares: the projection, the sizes derived
+/// from it, the time and the detail level.
+pub(super) struct DrawCtx {
+    pub(super) iso: Iso,
+    /// Tile width over 8: the unit the block heights are measured in.
+    s: f32,
+    /// Height unit for the raised blocks (faces are smooth, 15% taller).
+    hs: f32,
+    /// Pixels a slab is raised.
+    up: i32,
+    /// Packet blob size in pixels.
+    n: i32,
     t: f32,
     detail: Detail,
-) {
-    let smooth = match detail {
-        Detail::Full | Detail::Blocks(_) => true,
-    };
-    let layout = DieLayout::blackhole();
-    let iso = fit.iso;
-    let grid = (BOARD_COLS, BOARD_BAND * chips.len().max(1));
-    let s = iso.tw as f32 / 8.0;
-    // `hs` is the height unit for the raised blocks; smooth faces get 15% more.
-    let hs = s * if smooth { 1.15 } else { 1.0 };
-    let up = s.round() as i32;
-    let blocks = |h: f32| (h * hs).round() as i32;
-    let n = fit.scale;
+}
 
-    buf.fill_vignette(BG);
-    let harvested: Vec<Vec<u8>> = chips
+impl DrawCtx {
+    pub(super) fn new(fit: &SceneFit, t: f32, detail: Detail) -> DrawCtx {
+        let s = fit.iso.tw as f32 / 8.0;
+        DrawCtx {
+            iso: fit.iso,
+            s,
+            hs: s * 1.15,
+            up: s.round() as i32,
+            n: fit.scale,
+            t,
+            detail,
+        }
+    }
+
+    fn blocks(&self, h: f32) -> i32 {
+        (h * self.hs).round() as i32
+    }
+}
+
+/// One die on a board grid: its inputs, where its band starts on the grid and
+/// a number that is unique among the dies of one drawing.
+pub(super) struct DieSlot<'a> {
+    pub(super) chip: &'a ChipInputs,
+    /// Harvested die columns (see `tensix_mask_to_die_cols`).
+    pub(super) harvested: &'a [u8],
+    /// Grid position of the band's tile (0, 0): the first margin column of the
+    /// die's cage row.
+    pub(super) origin: (usize, usize),
+    pub(super) slot: usize,
+}
+
+/// Harvested die columns of every chip, in chip order.
+pub(super) fn harvested_columns(chips: &[ChipInputs]) -> Vec<Vec<u8>> {
+    chips
         .iter()
         .map(|c| {
             c.enabled_tensix_col
                 .map(tensix_mask_to_die_cols)
                 .unwrap_or_default()
         })
-        .collect();
+        .collect()
+}
 
-    for (bx, by) in iso.draw_order(grid) {
-        let (cx, cy) = iso.project(bx as f32, by as f32, grid);
-        // Checkerboard slab, lighter on odd (gx + gy) as in the mockup.
-        let slab = if (bx + by) % 2 == 0 {
-            SLAB.map(|v| (v as f32 * 1.1).round() as u8)
-        } else {
-            SLAB
-        };
-        draw_block(buf, cx, cy, iso.tw, iso.th, up, slab, smooth);
+/// Paint the checkerboard slab tile at grid position (`bx`, `by`), lighter on
+/// odd (gx + gy) as in the mockup.
+pub(super) fn draw_slab(
+    buf: &mut PixelBuf,
+    ctx: &DrawCtx,
+    (bx, by): (usize, usize),
+    at: (i32, i32),
+) {
+    let slab = if (bx + by) % 2 == 0 {
+        SLAB.map(|v| (v as f32 * 1.1).round() as u8)
+    } else {
+        SLAB
+    };
+    draw_block(buf, at.0, at.1, ctx.iso.tw, ctx.iso.th, ctx.up, slab, true);
+}
 
-        let die = by / BOARD_BAND;
-        let Some(chip) = chips.get(die) else { continue };
-        let gx = bx as i32 - MARGIN_X as i32;
-        let gy = (by % BOARD_BAND) as i32 - MARGIN_Y as i32;
-        let (cy_top, th, tw) = (cy - up, iso.th, iso.tw);
-        let cube = |buf: &mut PixelBuf, h: i32, c: [u8; 3]| {
-            draw_block(buf, cx, cy_top, tw, th, h, c, smooth)
-        };
+/// Everything that stands on one grid tile of a die band: the die tile, the
+/// GDDR, PCIe and Ethernet blocks and the packets passing through. `local` is
+/// the tile's position in the band (margins included), `at` its projected
+/// centre and `grid` the whole grid the scene is projected on.
+///
+/// With `Detail::Blocks(n)` the tiles of an n x n group that holds a live
+/// Tensix tile are not drawn one by one: when the group's last tile comes up in
+/// back to front order the group is drawn as a single block, so everything in
+/// front of it still paints over it. `visits` counts the tiles of each group
+/// seen so far. A group with no live Tensix tile (Ethernet, DRAM, management
+/// and harvested tiles) keeps its tiles.
+pub(super) fn draw_die_tile(
+    buf: &mut PixelBuf,
+    ctx: &DrawCtx,
+    die: &DieSlot,
+    grid: (usize, usize),
+    local: (usize, usize),
+    at: (i32, i32),
+    visits: &mut HashMap<(usize, i32, i32), usize>,
+) {
+    let layout = DieLayout::blackhole();
+    let (cx, cy) = at;
+    let (s, n, t, chip) = (ctx.s, ctx.n, ctx.t, die.chip);
+    let blocks = |h: f32| ctx.blocks(h);
+    let gx = local.0 as i32 - MARGIN_X as i32;
+    let gy = local.1 as i32 - MARGIN_Y as i32;
+    let (cy_top, th, tw) = (cy - ctx.up, ctx.iso.th, ctx.iso.tw);
+    let cube =
+        |buf: &mut PixelBuf, h: i32, c: [u8; 3]| draw_block(buf, cx, cy_top, tw, th, h, c, true);
+    let live = |tile: &Tile| tile.kind == TileKind::Tensix && !die.harvested.contains(&tile.die.0);
 
-        // The die itself.
-        if (0..layout.cols as i32).contains(&gx) && (0..layout.rows as i32).contains(&gy) {
-            if let Some(tile) = layout.tile_at((gx as u8, gy as u8)) {
+    // The die itself.
+    if (0..layout.cols as i32).contains(&gx) && (0..layout.rows as i32).contains(&gy) {
+        if let Some(tile) = layout.tile_at((gx as u8, gy as u8)) {
+            // Coarse detail: a group holding a live Tensix tile is drawn once,
+            // from its last tile. Its other tiles (a stray Ethernet or
+            // management tile at the die edge) are folded into the block.
+            let (x0, y0, x1, y1, members) = match ctx.detail {
+                Detail::Blocks(g) if g >= 2 => {
+                    let g = g as i32;
+                    let (x0, y0) = (gx / g * g, gy / g * g);
+                    let (x1, y1) = (
+                        (x0 + g).min(layout.cols as i32),
+                        (y0 + g).min(layout.rows as i32),
+                    );
+                    let members: Vec<&Tile> = (y0..y1)
+                        .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+                        .filter_map(|(x, y)| layout.tile_at((x as u8, y as u8)))
+                        .collect();
+                    (x0, y0, x1, y1, members)
+                }
+                _ => (0, 0, 0, 0, Vec::new()),
+            };
+            if members.iter().any(|m| live(m)) {
+                let seen = visits.entry((die.slot, x0, y0)).or_insert(0);
+                *seen += 1;
+                if *seen == members.len() {
+                    let heats: Vec<f32> = members
+                        .iter()
+                        .filter(|m| live(m))
+                        .map(|m| tile_value(chip, m, t).clamp(0.0, 1.0))
+                        .collect();
+                    let h = mean_heat(&heats);
+                    // The block stands over the middle of its group. A group cut
+                    // short by the die edge is narrower or shallower, and its
+                    // footprint is the average of its two sides.
+                    let (k, m) = ((x1 - x0) as f32, (y1 - y0) as f32);
+                    let (mx, my) = (
+                        die.origin.0 as f32 + MARGIN_X as f32 + x0 as f32 + (k - 1.0) / 2.0,
+                        die.origin.1 as f32 + MARGIN_Y as f32 + y0 as f32 + (m - 1.0) / 2.0,
+                    );
+                    let (bx, by) = ctx.iso.project(mx, my, grid);
+                    let side = (k + m) / 2.0;
+                    draw_block(
+                        buf,
+                        bx,
+                        by - ctx.up,
+                        (tw as f32 * side).round() as i32,
+                        (th as f32 * side).round() as i32,
+                        blocks(1.0 + h * 9.0),
+                        heat_rgb(h),
+                        true,
+                    );
+                }
+            } else {
                 match tile.kind {
-                    TileKind::Tensix if harvested[die].contains(&tile.die.0) => {
+                    TileKind::Tensix if die.harvested.contains(&tile.die.0) => {
                         cube(buf, blocks(1.0), TILE)
                     }
                     TileKind::Tensix => {
@@ -356,48 +467,92 @@ pub fn draw_board_scene(
                 }
             }
         }
-        // GDDR blocks, taller and brighter as the memory warms.
-        let side = gx == -(MARGIN_X as i32) || gx == layout.cols as i32 + 1;
-        if side && GDDR_ROWS.iter().any(|&r| gy >= r && gy < r + 2) {
-            let heat = chip.gddr_heat.unwrap_or(0.0);
-            cube(
-                buf,
-                blocks(2.0 + 2.0 * heat),
-                lerp_rgb(TILE, DRAM, 0.35 + 0.55 * heat),
-            );
+    }
+    // GDDR blocks, taller and brighter as the memory warms.
+    let side = gx == -(MARGIN_X as i32) || gx == layout.cols as i32 + 1;
+    if side && GDDR_ROWS.iter().any(|&r| gy >= r && gy < r + 2) {
+        let heat = chip.gddr_heat.unwrap_or(0.0);
+        cube(
+            buf,
+            blocks(2.0 + 2.0 * heat),
+            lerp_rgb(TILE, DRAM, 0.35 + 0.55 * heat),
+        );
+    }
+    // PCIe connector on the front edge.
+    let front = gy == layout.rows as i32;
+    if front && (6..=10).contains(&gx) {
+        cube(buf, blocks(2.5), lerp_rgb(TILE, N1, 0.7));
+    }
+    // Ethernet cages on the back edge, lit by the live-link bits.
+    if gy == -1 && (1..=ETH_CAGES as i32).contains(&gx) {
+        if chip.eth_live >> (gx - 1) & 1 == 1 {
+            cube(buf, blocks(2.5), lerp_rgb(TILE, ETH, 0.7));
+        } else {
+            cube(buf, blocks(1.0), lerp_rgb(TILE, ETH, 0.15));
         }
-        // PCIe connector on the front edge.
-        let front = gy == layout.rows as i32;
-        if front && (6..=10).contains(&gx) {
-            cube(buf, blocks(2.5), lerp_rgb(TILE, N1, 0.7));
+    }
+    // Packet streams along the middle of the die, in from the connector
+    // (column 8) and out toward it (column 9). Only for a real rate.
+    let near = |a: f32, b: f32| (a - gx as f32).abs() < 0.5 && (b - gy as f32).abs() < 0.5;
+    let dz = (4.0 * s).round() as i32;
+    let span = layout.rows as f32 + 1.0;
+    for k in 0..packet_count(chip.pcie_in_bps) {
+        let p = layout.rows as f32 - (t * 5.0 + k as f32 * 2.3).rem_euclid(span);
+        if near(8.0, p) {
+            blob(buf, cx, cy - dz, WHITE, n);
+            blob(buf, cx, cy - dz - n, N1, n);
         }
-        // Ethernet cages on the back edge, lit by the live-link bits.
-        if gy == -1 && (1..=ETH_CAGES as i32).contains(&gx) {
-            if chip.eth_live >> (gx - 1) & 1 == 1 {
-                cube(buf, blocks(2.5), lerp_rgb(TILE, ETH, 0.7));
-            } else {
-                cube(buf, blocks(1.0), lerp_rgb(TILE, ETH, 0.15));
-            }
+    }
+    for k in 0..packet_count(chip.pcie_out_bps) {
+        let p = (t * 5.0 + k as f32 * 2.3 + 1.1).rem_euclid(span) - 1.0;
+        if near(9.0, p) {
+            blob(buf, cx, cy - dz, WHITE, n);
+            blob(buf, cx, cy - dz - n, PACKET_OUT, n);
         }
-        // Packet streams along the middle of the die, in from the connector
-        // (column 8) and out toward it (column 9). Only for a real rate.
-        let near = |a: f32, b: f32| (a - gx as f32).abs() < 0.5 && (b - gy as f32).abs() < 0.5;
-        let dz = (4.0 * s).round() as i32;
-        let span = layout.rows as f32 + 1.0;
-        for k in 0..packet_count(chip.pcie_in_bps) {
-            let p = layout.rows as f32 - (t * 5.0 + k as f32 * 2.3).rem_euclid(span);
-            if near(8.0, p) {
-                blob(buf, cx, cy - dz, WHITE, n);
-                blob(buf, cx, cy - dz - n, N1, n);
-            }
-        }
-        for k in 0..packet_count(chip.pcie_out_bps) {
-            let p = (t * 5.0 + k as f32 * 2.3 + 1.1).rem_euclid(span) - 1.0;
-            if near(9.0, p) {
-                blob(buf, cx, cy - dz, WHITE, n);
-                blob(buf, cx, cy - dz - n, PACKET_OUT, n);
-            }
-        }
+    }
+}
+
+/// Draw the board: a slab, one die per chip stacked along the grid y axis, the
+/// GDDR blocks beside each die, the PCIe connector at the front edge and the
+/// Ethernet cages at the back.
+///
+/// `fit` must come from `fit(.., chips.len())`. Harvested Tensix columns stay
+/// flat. Blocks and packets that depend on data (GDDR, Ethernet, PCIe) are
+/// drawn only from the chip's own numbers; nothing animates without a reason,
+/// so an idle chip with no counters is a still picture apart from the load
+/// wave. The picture is a pure function of its inputs and `t`.
+pub fn draw_board_scene(
+    buf: &mut PixelBuf,
+    chips: &[ChipInputs],
+    fit: &SceneFit,
+    t: f32,
+    detail: Detail,
+) {
+    let ctx = DrawCtx::new(fit, t, detail);
+    let grid = (BOARD_COLS, BOARD_BAND * chips.len().max(1));
+    buf.fill_vignette(BG);
+    let harvested = harvested_columns(chips);
+    let mut visits = HashMap::new();
+    for (bx, by) in ctx.iso.draw_order(grid) {
+        let at = ctx.iso.project(bx as f32, by as f32, grid);
+        draw_slab(buf, &ctx, (bx, by), at);
+        let die = by / BOARD_BAND;
+        let Some(chip) = chips.get(die) else { continue };
+        let slot = DieSlot {
+            chip,
+            harvested: &harvested[die],
+            origin: (0, die * BOARD_BAND),
+            slot: die,
+        };
+        draw_die_tile(
+            buf,
+            &ctx,
+            &slot,
+            grid,
+            (bx, by % BOARD_BAND),
+            at,
+            &mut visits,
+        );
     }
 }
 
@@ -765,5 +920,69 @@ mod tests {
         assert!(!has_per_tile_data(&[]));
         b.tile_flow = Some(HashMap::new());
         assert!(has_per_tile_data(&[a, b]));
+    }
+
+    #[test]
+    fn tile_value_is_zero_for_non_finite_inputs() {
+        let tiles = tensix_tiles();
+        let tile = *tiles.iter().find(|t| t.die == (2, 5)).unwrap();
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            // The estimate: a bad load is no load.
+            assert_eq!(tile_value(&chip(bad), &tile, 1.0), 0.0, "load {bad}");
+            // Measured: a bad value on either NoC voids the tile, even when the
+            // other NoC is fine (`f32::max` alone would return that one).
+            for v in [[bad, 0.25], [0.25, bad], [bad, bad]] {
+                let mut c = chip(0.5);
+                c.tile_flow = Some(HashMap::from([(tile.noc0, v)]));
+                assert_eq!(tile_value(&c, &tile, 1.0), 0.0, "flow {v:?}");
+            }
+        }
+        // Control: finite inputs still give their value.
+        let mut c = chip(0.5);
+        c.tile_flow = Some(HashMap::from([(tile.noc0, [0.25f32, 0.5])]));
+        assert_eq!(tile_value(&c, &tile, 1.0), 0.5);
+        assert!(tile_value(&chip(1.0), &tile, 1.0) > 0.0);
+    }
+
+    #[test]
+    fn blocks_detail_draws_a_group_as_one_block_lit_by_its_mean() {
+        let layout = DieLayout::blackhole();
+        // Die tiles (2,4) (3,4) (2,5) (3,5): one group of four live Tensix tiles.
+        let group: Vec<Tile> = [(2u8, 4u8), (3, 4), (2, 5), (3, 5)]
+            .iter()
+            .map(|&d| *layout.tile_at(d).unwrap())
+            .collect();
+        assert!(group.iter().all(|t| t.kind == TileKind::Tensix));
+        // Only one of the four is hot: the block is lit at the mean, 0.25.
+        let mut c = chip(0.0);
+        c.tile_flow = Some(HashMap::from([(group[0].noc0, [1.0f32, 0.0])]));
+        let f = fit(150, 42, 1).unwrap();
+        let grid = (BOARD_COLS, BOARD_BAND);
+        let mut blocks = PixelBuf::new(300, 168);
+        draw_board_scene(&mut blocks, &[c.clone()], &f, 1.0, Detail::Blocks(2));
+        let mut full = PixelBuf::new(300, 168);
+        draw_board_scene(&mut full, &[c], &f, 1.0, Detail::Full);
+        assert_ne!(blocks.rgb, full.rgb);
+
+        let s = f.iso.tw as f32 / 8.0;
+        let up = s.round() as i32;
+        let height = ((1.0 + 0.25 * 9.0) * s * 1.15).round() as i32;
+        let (cx, cy) = f.iso.project(
+            (2 + MARGIN_X) as f32 + 0.5,
+            (4 + MARGIN_Y) as f32 + 0.5,
+            grid,
+        );
+        let top = (cy - up - height + f.iso.th) as usize;
+        // The middle of the block's top face is the mean colour ...
+        assert_eq!(blocks.get(cx as usize, top), heat_rgb(0.25));
+        // ... where tile by tile there is the seam between four tiles, which
+        // the hot tile's own colour does not fill.
+        assert_ne!(full.get(cx as usize, top), heat_rgb(0.25));
+        // Blocks(1) is Full.
+        let mut one = PixelBuf::new(300, 168);
+        let mut c = chip(0.0);
+        c.tile_flow = Some(HashMap::from([(group[0].noc0, [1.0f32, 0.0])]));
+        draw_board_scene(&mut one, &[c], &f, 1.0, Detail::Blocks(1));
+        assert_eq!(one.rgb, full.rgb);
     }
 }
