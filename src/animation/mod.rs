@@ -24,6 +24,7 @@ pub mod atmosphere;
 pub mod baseline;
 pub mod common;
 pub mod defrag;
+pub mod die3d;
 pub mod duel;
 pub mod inference_load;
 pub mod memory_castle;
