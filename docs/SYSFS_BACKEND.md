@@ -192,18 +192,29 @@ a complete snapshot.
 
 ### PCIe Bandwidth
 
-`<class-dir>/pcie_perf_counters/` holds twelve monotonically-increasing counters of 32-bit data words
-crossing the PCIe link, split by direction and initiator. They are folded into two totals:
+`<class-dir>/pcie_perf_counters/` holds twelve monotonically-increasing 32-bit counters. They are the
+NoC interface unit (NIU) counters of the chip's PCIe tile (`NIU_*` in tt-isa-documentation's
+`BlackholeA0/NoC/Counters.md`), so one **word is one 512-bit NoC flit: 64 bytes**. The names are from the
+NoC side of that tile: `slv_*` means a NoC request was aimed at the PCIe tile (the chip reaching host
+memory) and `mst_*` means the PCIe tile issued the request (the host reaching into the chip). They are
+folded into two totals:
 
-- **Into the chip** — `slv_{posted,nonposted}_wr_data_word_received*` (host writes to the device) plus
-  `mst_rd_data_word_received*` (device reading host memory).
-- **Out of the chip** — `slv_rd_data_word_sent*` (host reads from the device) plus
-  `mst_{posted,nonposted}_wr_data_word_sent*` (device writing host memory).
+- **Into the chip** — `slv_rd_data_word_sent*` (the chip reading host memory) plus
+  `mst_{posted,nonposted}_wr_data_word_sent*` (host writes through a BAR window).
+- **Out of the chip** — `slv_{posted,nonposted}_wr_data_word_received*` (the chip writing host
+  memory) plus `mst_rd_data_word_received*` (host reads through a BAR window).
 
-Each name has a `0` and `1` suffix (two PCIe controllers); both are summed. Bandwidth is
-`Δwords × 4 bytes ÷ Δt` between successive **slow-lane samples** (~1 Hz) — so the first sample after
-startup primes the tracker and reports nothing, and a counter that goes backwards (device reset) clamps
-its delta to zero rather than spiking. If the counter directory exists but not one file in it can be
+The unit and the `slv_*` directions were measured on 2026-10-29 (Blackhole p300c, tt-kmd 2.9) by
+copying 256 MiB and 1 GiB between host and device through ttnn: the words moved were exactly 1/64 of
+the bytes, host-to-device raised `slv_rd_data_word_sent0` and device-to-host raised
+`slv_nonposted_wr_data_word_received0`. The `mst_*` directions are inferred from that naming. ttnn's
+bulk path never used them, so they stayed near zero.
+
+Each name has a `0` and `1` suffix (the NoC0 and NoC1 counters); both are summed. Bandwidth is
+`Δwords × 64 bytes ÷ Δt` between successive **slow-lane samples** (~1 Hz) — so the first sample after
+startup primes the tracker and reports nothing. The difference is taken per counter with 32-bit wrapping
+arithmetic (a counter wraps after about 275 GB), and a step over half the range counts as a device
+reset and reports zero rather than spiking. If the counter directory exists but not one file in it can be
 read, the sample is reported as unavailable rather than as a confident zero. Reading these files is
 passive: no device open, no ARC message.
 

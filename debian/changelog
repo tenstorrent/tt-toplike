@@ -1,3 +1,18 @@
+tt-toplike (0.13.18) noble; urgency=medium
+
+  * PCIe bandwidth was 16 times too low. A tt-kmd counter word is one 64-byte
+    NoC flit, not a 4-byte word. Measured on a Blackhole p300c: a 268,378,112-byte
+    host-to-device copy moved the counter by 4,193,421 words.
+  * The into-chip and out-of-chip directions were swapped. The counters are on
+    the NoC side of the PCIe tile: the chip reading host memory is data into the
+    chip, and the chip writing host memory is data out of it. The directions for
+    the host-initiated counters (mst_*) follow from that and were not measured.
+  * A 32-bit counter that wraps between two samples no longer drops that sample.
+    The step is taken per counter, and a step over half the range counts as a
+    device reset and reads as zero.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 29 Oct 2026 12:00:00 +0000
+
 tt-toplike (0.13.17) noble; urgency=medium
 
   * Arcade and the Inference atmosphere no longer flare for events that did

@@ -17,6 +17,13 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.13.18
+- **Fix**: PCIe bandwidth was 16x too low. A counter word is a 64-byte NoC flit, not
+  4 bytes (measured with a 256 MiB and a 1 GiB transfer on a Blackhole p300c).
+- **Fix**: the into-chip and out-of-chip directions were swapped. The counters sit on
+  the NoC side of the PCIe tile. The `mst_*` directions are inferred, not measured.
+- **Fix**: a 32-bit counter wrapping between samples no longer drops the sample.
+
 ### 0.13.17
 - **Fix**: review findings on the lanes and atmosphere. No false flares when stats drop
   out or lanes reorder, a fresh load clock after a reload, a forge that starts over

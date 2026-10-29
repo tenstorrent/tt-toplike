@@ -1407,3 +1407,25 @@ Tests: `a_new_featured_service_restarts_the_smoothed_gauges`,
 `start_time`. The first three were seen to fail with the fix disabled (a leftover
 tide of 0.76; the replacement process taken for the trainer; the old run kept).
 No version bump: these are fixes inside an unmerged PR.
+
+### PCIe counter units and direction (Oct 29, 2026, v0.13.18)
+
+Prompt: "what could we learn from dtsunami/tt-baremetal's bhtop and apply to our
+tt-toplike?" Reading bhtop showed that tt-kmd's `pcie_perf_counters` files are the PCIe
+tile's NIU counters (same indices as `NIU_*` in tt-isa-documentation), where a data word is
+a 64-byte flit. We had assumed 4 bytes per word since #23.
+
+Calibrated on chip 2 of a p300c under a gozer lease: ttnn host-to-device and device-to-host
+copies of 256 MiB and 1 GiB, with the sysfs counters read around each. Words moved were
+1/64 of the bytes (0.015625). Host-to-device raised `slv_rd_data_word_sent0` and
+device-to-host raised `slv_nonposted_wr_data_word_received0`, the reverse of what the module
+comments said. Fixed the unit, the direction, and the wrap (the files were summed as u64, so
+a wrapping counter dropped that sample).
+
+The `mst_*` directions are inferred and marked so in the code, docs and tests. ttnn never used
+the BAR path, so a calibration through an MMIO write and read would settle them.
+
+Decisions: the snapshot keeps the 12 raw u32 values so the wrap is handled per counter. A step
+over half the counter range reads as a device reset (a wrap of nearly the full range is
+indistinguishable from a small step backwards). More than one wrap between samples cannot be
+detected; at 1 Hz it would need over 275 GB/s.
