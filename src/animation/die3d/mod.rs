@@ -8,6 +8,7 @@
 //! tasks of the plan in `docs/superpowers/plans/2026-10-29-die-3d-view.md`.
 
 pub mod bh_layout_data;
+pub mod camera;
 pub mod cells;
 pub mod layout;
 pub mod raster;

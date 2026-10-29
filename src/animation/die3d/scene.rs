@@ -556,6 +556,40 @@ pub fn draw_board_scene(
     }
 }
 
+/// The bounding box `(x0, y0, x1, y1)` (exclusive end) of everything the board
+/// scene painted with `f` in a `cells` terminal area, found by drawing into a
+/// buffer with `PAD` spare pixels on every side. `PixelBuf::put` drops
+/// out-of-range pixels silently, so only a larger buffer can show what a scene
+/// would have clipped. Shared with the camera tests.
+#[cfg(test)]
+pub(super) fn painted_bbox_for(
+    chips: &[ChipInputs],
+    cells: (usize, usize),
+    f: &SceneFit,
+) -> (usize, usize, usize, usize) {
+    const PAD: usize = 80;
+    let mut f = *f;
+    f.iso.ox += PAD as i32;
+    f.iso.oy += PAD as i32;
+    let (w, h) = (cells.0 * 2 + 2 * PAD, cells.1 * 4 + 2 * PAD);
+    let mut drawn = PixelBuf::new(w, h);
+    draw_board_scene(&mut drawn, chips, &f, 1.3, Detail::Full);
+    let mut blank = PixelBuf::new(w, h);
+    blank.fill_vignette(BG);
+    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+    for y in 0..h {
+        for x in 0..w {
+            if drawn.get(x, y) != blank.get(x, y) {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x + 1);
+                y1 = y1.max(y + 1);
+            }
+        }
+    }
+    (x0 - PAD, y0 - PAD, x1 - PAD, y1 - PAD)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -745,37 +779,15 @@ mod tests {
         assert!(two.iso.tw < one.iso.tw);
     }
 
-    /// The bounding box `(x0, y0, x1, y1)` (exclusive end) of everything the
-    /// scene painted, found by drawing into a buffer with `PAD` spare pixels on
-    /// every side. `PixelBuf::put` drops out-of-range pixels silently, so only
-    /// a larger buffer can show what a scene would have clipped.
+    /// [`painted_bbox_for`] with the fit chosen for `cells`, at quarter turn `turn`.
     fn painted_bbox(
         chips: &[ChipInputs],
         cells: (usize, usize),
         turn: u8,
     ) -> (usize, usize, usize, usize) {
-        const PAD: usize = 80;
         let mut f = fit(cells.0, cells.1, chips.len()).unwrap();
         f.iso.quarter_turns = turn;
-        f.iso.ox += PAD as i32;
-        f.iso.oy += PAD as i32;
-        let (w, h) = (cells.0 * 2 + 2 * PAD, cells.1 * 4 + 2 * PAD);
-        let mut drawn = PixelBuf::new(w, h);
-        draw_board_scene(&mut drawn, chips, &f, 1.3, Detail::Full);
-        let mut blank = PixelBuf::new(w, h);
-        blank.fill_vignette(BG);
-        let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
-        for y in 0..h {
-            for x in 0..w {
-                if drawn.get(x, y) != blank.get(x, y) {
-                    x0 = x0.min(x);
-                    y0 = y0.min(y);
-                    x1 = x1.max(x + 1);
-                    y1 = y1.max(y + 1);
-                }
-            }
-        }
-        (x0 - PAD, y0 - PAD, x1 - PAD, y1 - PAD)
+        painted_bbox_for(chips, cells, &f)
     }
 
     fn busy_chip() -> ChipInputs {
