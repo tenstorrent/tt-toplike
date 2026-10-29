@@ -135,6 +135,10 @@ fn next_display_mode(m: DisplayMode) -> DisplayMode {
     }
 }
 
+/// Rows at the bottom of the terminal that the global status bar draws over.
+/// Views that draw their own footer are sized to the terminal minus this.
+const STATUS_BAR_ROWS: usize = 1;
+
 /// The mode a `3` press leads to, and the `prev_mode` to keep: entering
 /// remembers where we came from, leaving goes back to it. Pulled out of the
 /// key handler so the toggle can be tested without a terminal.
@@ -158,23 +162,22 @@ fn die3d_key_for(mode: DisplayMode, c: char) -> Option<crate::animation::die3d::
     }
 }
 
-/// Short name of a mode for the global status bar. Shown there only for
-/// `Die3d` today, which is the one view whose own footer does not name the
-/// key that leaves it from the bottom row.
+/// Name shown in the global status bar for a mode that adds a hint there.
+/// Only `Die3d` does today (the view's own footer lists the keys too, so the
+/// status bar repeats `3 leave` next to the view's name); every other mode
+/// has none.
 fn statusbar_mode_name(mode: DisplayMode) -> &'static str {
     match mode {
-        DisplayMode::Insights => "Insights",
-        DisplayMode::Grid => "Grid",
-        DisplayMode::Starfield => "Starfield",
-        DisplayMode::MemoryCastle => "Memory Castle",
-        DisplayMode::MemoryFlow => "Memory Flow",
-        DisplayMode::Arcade => "Arcade",
-        DisplayMode::Defrag => "Defrag",
-        DisplayMode::InferenceMonitor => "Inference Monitor",
-        DisplayMode::HivemindSweeper => "Hivemind Sweeper",
-        DisplayMode::Training => "Training",
         DisplayMode::Die3d => "Die 3D",
+        _ => "",
     }
+}
+
+/// True when moving from `prev` to `next` leaves the Die 3D view. The loop's
+/// mode-transition choke point drops the view on this, so every exit (`3`,
+/// Esc, `v`, `g`, `i`, the rotation, `/mode`) starts the next entry afresh.
+fn leaves_die3d(prev: DisplayMode, next: DisplayMode) -> bool {
+    prev == DisplayMode::Die3d && next != DisplayMode::Die3d
 }
 
 /// How long `--rotate`/`R` dwells on a view before advancing.
@@ -1234,9 +1237,10 @@ fn run_app(
                     // view gets one row less than the terminal.
                     let dv = die3d.get_or_insert_with(|| {
                         die3d_started = Instant::now();
-                        crate::animation::Die3dView::new(
+                        crate::animation::Die3dView::with_reserved_rows(
                             size.width as usize,
-                            (size.height as usize).saturating_sub(1),
+                            (size.height as usize).saturating_sub(STATUS_BAR_ROWS),
+                            STATUS_BAR_ROWS,
                         )
                     });
                     dv.update(backend, die3d_started.elapsed().as_secs_f64());
@@ -1295,6 +1299,12 @@ fn run_app(
                 hivemind
                     .get_or_insert_with(crate::workload::hivemind::Hivemind::new)
                     .start();
+            }
+            // Die 3D's view is dropped on any exit, whichever key or command
+            // caused it, so the next entry starts on the board scene with
+            // auto-cuts on (the update arm re-creates it and its clock).
+            if leaves_die3d(prev_display_mode, display_mode) {
+                die3d = None;
             }
             // Any arrival at a new view — rotated to or navigated to — starts
             // its dwell fresh, so pressing a mode key never lands you on a
@@ -2106,15 +2116,12 @@ fn run_app(
                             }
                             KeyCode::Char('3') => {
                                 // Toggle the Die 3D view, like `t` for Training. The
-                                // view is dropped on leaving (see the draw arm's
-                                // lazy creation), so each entry starts on the
-                                // board scene with auto-cuts on.
+                                // view is dropped at the mode-transition choke point
+                                // on any exit, so each entry starts on the board
+                                // scene with auto-cuts on.
                                 let (m, p) = die3d_toggle(display_mode, prev_mode);
                                 display_mode = m;
                                 prev_mode = p;
-                                if display_mode != DisplayMode::Die3d {
-                                    die3d = None;
-                                }
                                 force_redraw = true;
                             }
                             KeyCode::Char('t') => {
@@ -2200,7 +2207,6 @@ fn run_app(
                                 } else if display_mode == DisplayMode::Die3d {
                                     // Back out of Die 3D (see the `3` handler above).
                                     display_mode = prev_mode;
-                                    die3d = None;
                                 } else {
                                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_some() {
@@ -3052,7 +3058,7 @@ fn ui_train(
 fn ui_die3d(f: &mut Frame, view: &crate::animation::Die3dView, now: f64) {
     let full = f.area();
     let area = Rect {
-        height: full.height.saturating_sub(1),
+        height: full.height.saturating_sub(STATUS_BAR_ROWS as u16),
         ..full
     };
     let lines = view.render(now);
@@ -3763,6 +3769,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 row!(" i  I", "Inference Servers monitor", key),
                 row!(" ~", "HivemindSweeper activity sniffer", key),
                 row!(" t", "Training view (live tt-train run)", key),
+                row!(" 3", "Die 3D view (isometric boards)", key),
                 row!(" R", "rotate every view unattended (kiosk)", key),
                 row!(" b", "cycle backend", key),
                 ln!(vec![Span::styled(
@@ -4206,7 +4213,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "",
                     "Only Blackhole chips are drawn; other devices are",
                     "named in the footer. Needs a terminal of at least",
-                    "100 x 31 cells (the bottom row is the status bar).",
+                    "100 x 31 cells (the status bar takes the bottom row).",
                     "",
                     "Press l for the key list · 3 to return.",
                 ],
@@ -8394,7 +8401,7 @@ mod tests {
 #[cfg(test)]
 mod display_mode_tests {
     use super::{
-        die3d_key_for, die3d_toggle, display_mode_for, linger_for, next_display_mode,
+        die3d_key_for, die3d_toggle, display_mode_for, leaves_die3d, linger_for, next_display_mode,
         next_rotation_mode, statusbar_mode_name, DisplayMode, ROTATE_LINGER, ROTATION,
     };
 
@@ -8437,6 +8444,21 @@ mod display_mode_tests {
         let name = statusbar_mode_name(DisplayMode::Die3d);
         assert!(!name.is_empty());
         assert!(name.contains("3D"), "{name}");
+    }
+
+    #[test]
+    fn every_exit_from_die3d_drops_the_view_and_nothing_else_does() {
+        for m in [
+            DisplayMode::Insights,
+            DisplayMode::Grid,
+            DisplayMode::Training,
+            DisplayMode::Arcade,
+        ] {
+            assert!(leaves_die3d(DisplayMode::Die3d, m), "{m:?}");
+            assert!(!leaves_die3d(m, DisplayMode::Die3d), "entering {m:?}");
+            assert!(!leaves_die3d(m, DisplayMode::Insights), "{m:?}");
+        }
+        assert!(!leaves_die3d(DisplayMode::Die3d, DisplayMode::Die3d));
     }
 
     #[test]
@@ -9493,6 +9515,12 @@ mod host_default_screen_tests {
         for needle in ["⟳ tt-smi -r", "✓ tt-smi -r", "--tt-smi-reset-behavior"] {
             assert!(help.contains(needle), "Help lacks {needle:?}:\n{help}");
         }
+    }
+
+    #[test]
+    fn the_help_card_lists_key_3() {
+        let help = overlay_text(super::OverlayPanel::Help, super::DisplayMode::Insights);
+        assert!(help.contains("Die 3D view"), "{help}");
     }
 
     /// A Help row's label must never run into its description: every row that

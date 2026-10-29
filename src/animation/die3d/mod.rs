@@ -105,6 +105,9 @@ enum Shown {
 pub struct Die3dView {
     cols: usize,
     rows: usize,
+    /// Terminal rows below the view's area that the host draws over (the
+    /// TUI's status bar). Only used to word the size hint in terminal terms.
+    reserved_rows: usize,
     braille: bool,
     director: Director,
     detector: TriggerDetector,
@@ -121,9 +124,18 @@ impl Die3dView {
     /// A view for a terminal of `cols` x `rows` cells, in braille, showing
     /// every board, with automatic cuts on. It shows nothing until `update`.
     pub fn new(cols: usize, rows: usize) -> Die3dView {
+        Die3dView::with_reserved_rows(cols, rows, 0)
+    }
+
+    /// Like `new`, for a view whose `rows` are the terminal's minus
+    /// `reserved_rows` that the host draws elsewhere. The view still needs
+    /// `MIN_CELLS` in its own area; the size hint adds the reserved rows back
+    /// so it names the terminal size the user has to reach.
+    pub fn with_reserved_rows(cols: usize, rows: usize, reserved_rows: usize) -> Die3dView {
         Die3dView {
             cols,
             rows,
+            reserved_rows,
             braille: true,
             director: Director::new(CAMERA_SEED),
             detector: TriggerDetector::new(),
@@ -224,10 +236,7 @@ impl Die3dView {
     /// them.
     pub fn render(&self, now: f64) -> Vec<Line<'static>> {
         if self.cols < MIN_CELLS.0 || self.rows < MIN_CELLS.1 {
-            return vec![hint(format!(
-                "Die 3D needs a terminal of at least {} x {} cells (this one is {} x {}). Press 3 to leave.",
-                MIN_CELLS.0, MIN_CELLS.1, self.cols, self.rows
-            ))];
+            return vec![hint(self.too_small_hint())];
         }
         if self.chips.is_empty() {
             if self.undrawn.is_empty() {
@@ -248,6 +257,18 @@ impl Die3dView {
         lines.resize(scene_rows, Line::default());
         lines.extend(self.footer(now, frame.map(|(_, shown)| shown)));
         lines
+    }
+
+    /// The "terminal too small" line, in terminal cells: the view's own
+    /// minimum plus the rows the host keeps, against the terminal's size.
+    fn too_small_hint(&self) -> String {
+        format!(
+            "Die 3D needs a terminal of at least {} x {} cells (this one is {} x {}). Press 3 to leave.",
+            MIN_CELLS.0,
+            MIN_CELLS.1 + self.reserved_rows,
+            self.cols,
+            self.rows + self.reserved_rows
+        )
     }
 
     /// The scene at `now` with the chaos effect applied during a cut.
@@ -721,6 +742,23 @@ mod tests {
         // After the transition the chaos is gone and render is the scene.
         let after = 10.0 + camera::CHAOS_SECS + 0.01;
         assert_eq!(rows(&v.render(after)), bare(after));
+    }
+
+    #[test]
+    fn the_size_hint_names_terminal_cells_including_the_reserved_row() {
+        let b = two_boards();
+        // A 100 x 30 terminal under a one-row status bar: a 100 x 29 area.
+        let mut v = Die3dView::with_reserved_rows(100, 29, 1);
+        v.update(&b, 0.0);
+        let t = text(&v.render(0.0));
+        assert_eq!(t.len(), 1);
+        assert!(t[0].contains("at least 100 x 31"), "{}", t[0]);
+        assert!(t[0].contains("this one is 100 x 30"), "{}", t[0]);
+        assert!(!t[0].contains("29"), "{}", t[0]);
+        // One more row and the scene is drawn.
+        let mut v = Die3dView::with_reserved_rows(100, 30, 1);
+        v.update(&b, 0.0);
+        assert_eq!(v.render(0.0).len(), 30);
     }
 
     #[test]
