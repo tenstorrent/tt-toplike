@@ -587,6 +587,14 @@ pub(super) fn painted_bbox_for(
             }
         }
     }
+    assert!(x0 != usize::MAX, "nothing was painted");
+    assert!(
+        x0 >= PAD && y0 >= PAD,
+        "scene clipped on the {}: bbox starts at {},{} in the padded buffer",
+        if x0 < PAD { "left" } else { "top" },
+        x0 as i64 - PAD as i64,
+        y0 as i64 - PAD as i64
+    );
     (x0 - PAD, y0 - PAD, x1 - PAD, y1 - PAD)
 }
 

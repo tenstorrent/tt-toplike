@@ -75,16 +75,25 @@ impl Camera {
     /// The projection for this camera, derived from `base` (the one `fit` or
     /// `fit_super` sized the buffer for).
     ///
-    /// A pitch up to 0.5 keeps the tile width and flattens `th`; a steeper
-    /// pitch keeps `th` and narrows `tw`. Either way no tile is wider or
-    /// taller than in `base`, so the scene stays inside the fitted buffer
-    /// (a taller `th` at the same `tw` would clip). The origin is moved so the
-    /// grid centre lands on the same pixel as under `base`; `Iso::project`
-    /// rotates about that centre, so this holds for every quarter turn.
+    /// `Iso` pitch is the base geometry as it is: same `tw`, `th`, `ox`, `oy`,
+    /// only the turn changes. `fit` may produce an odd `th` (tw 14 gives 7), so
+    /// rounding it to an even number would make the tiles taller than the
+    /// buffer was sized for. `Low` keeps `tw` and takes a flatter `th`, never
+    /// above `base.th`. `Top` keeps `th` and narrows `tw`. So no preset has a
+    /// taller or wider tile than `base`, and the scene stays inside the fitted
+    /// buffer. Where the geometry changes the origin is moved so the grid
+    /// centre lands on the same pixel as under `base`; `Iso::project` rotates
+    /// about that centre, so this holds for every quarter turn.
     pub fn apply(&self, base: &Iso, grid: (usize, usize)) -> Iso {
         let ratio = self.pitch.ratio();
-        let (tw, th) = if ratio <= 0.5 {
-            (base.tw, even(base.tw as f32 * ratio))
+        if ratio == 0.5 {
+            return Iso {
+                quarter_turns: self.quarter_turns,
+                ..*base
+            };
+        }
+        let (tw, th) = if ratio < 0.5 {
+            (base.tw, even(base.tw as f32 * ratio).min(base.th).max(2))
         } else {
             (even(base.th as f32 / ratio), base.th)
         };
@@ -249,7 +258,9 @@ pub fn scramble(buf: &mut PixelBuf, intensity: f32, seed: u32) {
 mod tests {
     use super::*;
     use crate::animation::die3d::raster::PixelBuf;
-    use crate::animation::die3d::scene::{fit, painted_bbox_for, ChipInputs};
+    use crate::animation::die3d::scene::{
+        fit, painted_bbox_for, ChipInputs, SceneFit, BOARD_BAND, BOARD_COLS,
+    };
     use crate::models::Architecture;
 
     #[test]
@@ -380,10 +391,7 @@ mod tests {
         for dies in [1usize, 2] {
             let chips: Vec<ChipInputs> = (0..dies).map(|_| chip()).collect();
             let base = fit(cells.0, cells.1, dies).unwrap();
-            let grid = (
-                crate::animation::die3d::scene::BOARD_COLS,
-                crate::animation::die3d::scene::BOARD_BAND * dies,
-            );
+            let grid = (BOARD_COLS, BOARD_BAND * dies);
             for (i, cam) in PRESETS.iter().enumerate() {
                 let mut f = base;
                 f.iso = cam.apply(&base.iso, grid);
@@ -412,7 +420,7 @@ mod tests {
                 (got.0 - want.0).abs() <= 1 && (got.1 - want.1).abs() <= 1,
                 "{got:?} vs {want:?}"
             );
-            assert!(iso.tw >= 2 && iso.th >= 2 && iso.tw % 2 == 0 && iso.th % 2 == 0);
+            assert!(iso.tw >= 2 && iso.th >= 2);
         }
     }
 
@@ -439,5 +447,76 @@ mod tests {
         assert!(low.th < iso.th && iso.th <= top.th);
         assert_eq!(top.th, base.th);
         assert!(top.tw < base.tw);
+    }
+
+    #[test]
+    fn iso_pitch_is_an_identity_for_an_odd_base_th() {
+        let base = Iso {
+            tw: 14,
+            th: 7,
+            ox: 123,
+            oy: 45,
+            quarter_turns: 0,
+        };
+        for q in 0..4 {
+            let iso = Camera {
+                quarter_turns: q,
+                pitch: Pitch::Iso,
+            }
+            .apply(&base, (19, 28));
+            assert_eq!((iso.tw, iso.th, iso.ox, iso.oy), (14, 7, 123, 45));
+            assert_eq!(iso.quarter_turns, q);
+        }
+    }
+
+    #[test]
+    fn no_preset_is_taller_than_the_base() {
+        for tw in [8, 10, 12, 14, 18, 22, 30] {
+            let base = Iso {
+                tw,
+                th: tw / 2,
+                ox: 0,
+                oy: 0,
+                quarter_turns: 0,
+            };
+            for cam in PRESETS.iter() {
+                let iso = cam.apply(&base, (19, 14));
+                assert!(iso.th <= base.th, "tw={tw} {cam:?}: th {}", iso.th);
+                assert!(iso.tw <= base.tw, "tw={tw} {cam:?}: tw {}", iso.tw);
+            }
+        }
+    }
+
+    #[test]
+    fn every_preset_fits_a_base_with_tw_two_mod_four() {
+        let cells = (150usize, 42usize);
+        let chips = [chip()];
+        let grid = (BOARD_COLS, BOARD_BAND);
+        // A base like `fit` could pick on a tightly packed terminal: odd th.
+        let mut base = SceneFit {
+            iso: Iso {
+                tw: 14,
+                th: 7,
+                ox: 150,
+                oy: 90,
+                quarter_turns: 0,
+            },
+            scale: 2,
+        };
+        // Centre the base scene in the buffer, then check it really fits.
+        let (x0, y0, x1, y1) = painted_bbox_for(&chips, cells, &base);
+        base.iso.ox += (cells.0 as i32 * 2 - (x1 - x0) as i32) / 2 - x0 as i32;
+        base.iso.oy += (cells.1 as i32 * 4 - (y1 - y0) as i32) / 2 - y0 as i32;
+        let (_, _, x1, y1) = painted_bbox_for(&chips, cells, &base);
+        assert!(x1 <= cells.0 * 2 && y1 <= cells.1 * 4, "base: {x1},{y1}");
+        for (i, cam) in PRESETS.iter().enumerate() {
+            let mut f = base;
+            f.iso = cam.apply(&base.iso, grid);
+            let (_, _, x1, y1) = painted_bbox_for(&chips, cells, &f);
+            assert!(
+                x1 <= cells.0 * 2 && y1 <= cells.1 * 4,
+                "preset {i}: {x1},{y1}"
+            );
+        }
     }
 }
