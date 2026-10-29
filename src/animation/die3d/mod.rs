@@ -19,6 +19,7 @@ pub mod bh_layout_data;
 pub mod camera;
 pub mod cells;
 pub mod layout;
+pub mod palette;
 pub mod raster;
 pub mod scene;
 pub mod super_scene;
@@ -31,6 +32,7 @@ use crate::animation::topology::BoardTopology;
 use crate::backend::TelemetryBackend;
 use crate::models::Architecture;
 use camera::{scramble, Camera, Director};
+use palette::GRAYSKULL;
 use raster::PixelBuf;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -47,12 +49,20 @@ const FOOTER_ROWS: usize = 2;
 /// Seed of the camera director. Fixed, so a run with the same telemetry and
 /// times cuts to the same angles; tests depend on that.
 const CAMERA_SEED: u64 = 0x3D;
-/// Footer text colour: the teal accent of the scene palette.
-const FOOTER_FG: Color = Color::Rgb(116, 197, 223);
+/// An RGB triple as a ratatui colour (`const`, so the footer colours can come
+/// straight from the palette).
+const fn rgb(c: [u8; 3]) -> Color {
+    Color::Rgb(c[0], c[1], c[2])
+}
+/// Footer text colour: the palette's lavender.
+const FOOTER_FG: Color = rgb(GRAYSKULL.eth);
 /// Footer key hints, dimmer than the status line.
-const KEYS_FG: Color = Color::Rgb(122, 127, 154);
+const KEYS_FG: Color = rgb(GRAYSKULL.mgmt);
+/// The slab colour times this is the opaque background (`T` off): the slab is
+/// the floor of the scene, so the surround is a darker shade of it.
+const OPAQUE_BG_SHADE: f32 = 0.55;
 /// The keys the footer lists. `3` (leave) is handled by the TUI, not here.
-const KEYS: &str = "3 leave  [ ] board  m scene  c cut  C auto-cuts  B braille";
+const KEYS: &str = "3 leave  [ ] board  m scene  c cut  C auto-cuts  B braille  T transparent";
 
 /// What a key asks the Die 3D view to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +80,9 @@ pub enum Die3dKey {
     ToggleAuto,
     /// `B`: braille or half-block cells.
     ToggleBraille,
+    /// `T`: a transparent background, so the terminal's own shows through, or
+    /// an opaque dark one.
+    ToggleTransparent,
 }
 
 /// The Die 3D key bound to a character, if any.
@@ -81,6 +94,7 @@ pub fn key_to_die3d(c: char) -> Option<Die3dKey> {
         'c' => Some(Die3dKey::CutNow),
         'C' => Some(Die3dKey::ToggleAuto),
         'B' => Some(Die3dKey::ToggleBraille),
+        'T' => Some(Die3dKey::ToggleTransparent),
         _ => None,
     }
 }
@@ -109,6 +123,9 @@ pub struct Die3dView {
     /// TUI's status bar). Only used to word the size hint in terminal terms.
     reserved_rows: usize,
     braille: bool,
+    /// Leave the background unpainted so the terminal's own colour (and any
+    /// translucency) shows through. Off paints an opaque dark vignette.
+    transparent: bool,
     director: Director,
     detector: TriggerDetector,
     switcher: Switcher,
@@ -137,6 +154,7 @@ impl Die3dView {
             rows,
             reserved_rows,
             braille: true,
+            transparent: true,
             director: Director::new(CAMERA_SEED),
             detector: TriggerDetector::new(),
             switcher: Switcher::new(),
@@ -226,6 +244,7 @@ impl Die3dView {
             }
             Die3dKey::ToggleAuto => self.director.set_auto(!self.director.auto()),
             Die3dKey::ToggleBraille => self.braille = !self.braille,
+            Die3dKey::ToggleTransparent => self.transparent = !self.transparent,
         }
     }
 
@@ -299,6 +318,16 @@ impl Die3dView {
         let camera = self.director.camera_at(now);
         let t = now as f32;
         let mut buf = PixelBuf::new(pw, ph);
+        // The scenes paint only what stands in them. Transparent is the fresh,
+        // all-uncovered buffer; opaque fills the background first.
+        if self.transparent {
+            buf.clear_transparent();
+        } else {
+            let bg = GRAYSKULL
+                .slab
+                .map(|v| (v as f32 * OPAQUE_BG_SHADE).round() as u8);
+            buf.fill_vignette(bg);
+        }
         let mut fallback = false;
         // With one board the super scene is that board's scene.
         if self.switcher.scene_at(now) == Scene::All && self.chips.len() > 1 {
@@ -360,6 +389,14 @@ impl Die3dView {
                 "braille"
             } else {
                 "half-block"
+            }
+            .to_string(),
+        );
+        status.push(
+            if self.transparent {
+                "transparent"
+            } else {
+                "opaque"
             }
             .to_string(),
         );
@@ -845,5 +882,41 @@ mod tests {
             v.frame(after).unwrap().0.rgb,
             v.scene_pixels(after).unwrap().0.rgb
         );
+    }
+
+    #[test]
+    fn opaque_mode_covers_every_pixel() {
+        let b = two_boards();
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        // Transparent (the default): the corner pixel is not covered.
+        let (buf, _) = v.scene_pixels(0.0).unwrap();
+        assert!(!buf.covered(0, 0));
+        v.handle_key(Die3dKey::ToggleTransparent, 0.1);
+        let (buf, _) = v.scene_pixels(0.2).unwrap();
+        assert!((0..buf.h).all(|y| (0..buf.w).all(|x| buf.covered(x, y))));
+    }
+
+    #[test]
+    fn t_toggles_transparency_and_the_footer_says_which() {
+        let b = two_boards();
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        assert!(v.transparent);
+        let f = footer(&v.render(0.0));
+        assert!(f.contains("transparent") && !f.contains("opaque"), "{f}");
+        assert!(f.contains("T transparent"), "key list: {f}");
+        v.handle_key(Die3dKey::ToggleTransparent, 0.1);
+        assert!(!v.transparent);
+        let f = footer(&v.render(0.2));
+        assert!(f.contains("opaque"), "{f}");
+        v.handle_key(Die3dKey::ToggleTransparent, 0.3);
+        assert!(v.transparent);
+    }
+
+    #[test]
+    fn key_to_die3d_maps_t_to_toggle_transparent() {
+        assert_eq!(key_to_die3d('T'), Some(Die3dKey::ToggleTransparent));
+        assert_eq!(key_to_die3d('t'), None);
     }
 }

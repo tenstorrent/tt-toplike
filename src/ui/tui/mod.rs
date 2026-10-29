@@ -3062,7 +3062,14 @@ fn ui_die3d(f: &mut Frame, view: &crate::animation::Die3dView, now: f64) {
         ..full
     };
     let lines = view.render(now);
-    let widget = Paragraph::new(lines).style(Style::default().bg(colors::rgb(0, 0, 0)));
+    // Reset, not black: the view leaves its background unpainted by default so
+    // the terminal's own colour (and any translucency) shows through, and a
+    // black base style here would paint over that in every unspanned cell.
+    let widget = Paragraph::new(lines).style(
+        Style::default()
+            .fg(ratatui::style::Color::Reset)
+            .bg(ratatui::style::Color::Reset),
+    );
     f.render_widget(widget, area);
 }
 
@@ -4209,7 +4216,8 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "view, a load rise also opens that chip's board.",
                     "C turns the automatic cuts and switches off; c cuts",
                     "by hand; [ ] m choose the board or all boards;",
-                    "B swaps braille for half-block cells.",
+                    "B swaps braille for half-block cells; T turns the",
+                    "transparent background (terminal shows through) on or off.",
                     "",
                     "Only Blackhole chips are drawn; other devices are",
                     "named in the footer. Needs a terminal of at least",
@@ -4789,7 +4797,8 @@ fn die3d_legend_lines(
         "",
         "  [ ]  previous / next board     m  one board / all",
         "  c    cut the camera now        C  auto-cuts on/off",
-        "  B    braille / half-block      3  leave",
+        "  B    braille / half-block      T  transparent / opaque",
+        "  3    leave",
     ]
     .iter()
     .map(|s| {

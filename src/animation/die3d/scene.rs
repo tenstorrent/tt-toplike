@@ -14,6 +14,7 @@
 //! reads its heat from it (see [`tile_value`]).
 
 use super::layout::{tensix_mask_to_die_cols, DieLayout, Tile, TileKind};
+use super::palette;
 use super::raster::{draw_block, Iso, PixelBuf};
 use super::super_scene::mean_heat;
 use crate::backend::TelemetryBackend;
@@ -23,20 +24,8 @@ use std::collections::HashMap;
 /// Shown next to the view whenever the tile glow is not measured per tile.
 pub const ESTIMATE_LABEL: &str = "per-tile glow: estimate from chip load";
 
-// Palette from the mockup.
-const TILE: [u8; 3] = [30, 82, 78];
-const WARM: [u8; 3] = [246, 188, 66];
-const HOT: [u8; 3] = [250, 81, 46];
-const DRAM: [u8; 3] = [111, 171, 160];
-const ETH: [u8; 3] = [143, 149, 224];
-const MGMT: [u8; 3] = [122, 127, 154];
-const N1: [u8; 3] = [116, 197, 223];
-pub(super) const BG: [u8; 3] = [7, 25, 26];
-const SLAB: [u8; 3] = [13, 38, 36];
-const WHITE: [u8; 3] = [255, 255, 255];
-/// Packets leaving the chip: the warm accent, so they differ from the blue
-/// packets arriving.
-const PACKET_OUT: [u8; 3] = WARM;
+// Colours come from `palette::GRAYSKULL`.
+const P: palette::Palette = palette::GRAYSKULL;
 
 // Board grid. Each die sits in a band of `BOARD_BAND` rows: one row of Ethernet
 // cages (die row -1), the 12 die rows, then the PCIe connector row (die row
@@ -274,12 +263,12 @@ fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
     [f(0), f(1), f(2)]
 }
 
-/// Tile colour for a heat value: cold teal to warm yellow to hot orange.
+/// Tile colour for a heat value: idle indigo grey to lilac to hot pink.
 fn heat_rgb(h: f32) -> [u8; 3] {
     if h < 0.5 {
-        lerp_rgb(TILE, WARM, h * 2.0)
+        lerp_rgb(P.tile, P.warm, h * 2.0)
     } else {
-        lerp_rgb(WARM, HOT, (h - 0.5) * 2.0)
+        lerp_rgb(P.warm, P.hot, (h - 0.5) * 2.0)
     }
 }
 
@@ -372,9 +361,9 @@ pub(super) fn draw_slab(
     at: (i32, i32),
 ) {
     let slab = if (bx + by) % 2 == 0 {
-        SLAB.map(|v| (v as f32 * 1.1).round() as u8)
+        P.slab.map(|v| (v as f32 * 1.1).round() as u8)
     } else {
-        SLAB
+        P.slab
     };
     draw_block(buf, at.0, at.1, ctx.iso.tw, ctx.iso.th, ctx.up, slab, true);
 }
@@ -388,7 +377,7 @@ pub(super) fn draw_slab(
 /// Tensix tile are not drawn one by one: when the group's last tile comes up in
 /// back to front order the group is drawn as a single block, so everything in
 /// front of it still paints over it. `visits` counts the tiles of each group
-/// seen so far. A group with no live Tensix tile (Ethernet, DRAM, management
+/// seen so far. A group with no live Tensix tile (Ethernet, P.dram, management
 /// and harvested tiles) keeps its tiles.
 pub(super) fn draw_die_tile(
     buf: &mut PixelBuf,
@@ -466,7 +455,7 @@ pub(super) fn draw_die_tile(
             } else {
                 match tile.kind {
                     TileKind::Tensix if die.harvested.contains(&tile.die.0) => {
-                        cube(buf, blocks(1.0), TILE)
+                        cube(buf, blocks(1.0), P.tile)
                     }
                     TileKind::Tensix => {
                         let h = tile_value(chip, tile, t).clamp(0.0, 1.0);
@@ -474,11 +463,11 @@ pub(super) fn draw_die_tile(
                     }
                     TileKind::Dram => {
                         let h = tile_value(chip, tile, t).clamp(0.0, 1.0);
-                        cube(buf, blocks(2.0), lerp_rgb(TILE, DRAM, 0.35 + 0.4 * h));
+                        cube(buf, blocks(2.0), lerp_rgb(P.tile, P.dram, 0.35 + 0.4 * h));
                     }
                     // A still tint: with no per-tile data there is no activity to show.
-                    TileKind::Eth => cube(buf, blocks(1.5), lerp_rgb(TILE, ETH, 0.45)),
-                    TileKind::Mgmt => cube(buf, blocks(1.0), lerp_rgb(TILE, MGMT, 0.3)),
+                    TileKind::Eth => cube(buf, blocks(1.5), lerp_rgb(P.tile, P.eth, 0.45)),
+                    TileKind::Mgmt => cube(buf, blocks(1.0), lerp_rgb(P.tile, P.mgmt, 0.3)),
                 }
             }
         }
@@ -490,20 +479,20 @@ pub(super) fn draw_die_tile(
         cube(
             buf,
             blocks(2.0 + 2.0 * heat),
-            lerp_rgb(TILE, DRAM, 0.35 + 0.55 * heat),
+            lerp_rgb(P.tile, P.dram, 0.35 + 0.55 * heat),
         );
     }
     // PCIe connector on the front edge.
     let front = gy == layout.rows as i32;
     if front && (6..=10).contains(&gx) {
-        cube(buf, blocks(2.5), lerp_rgb(TILE, N1, 0.7));
+        cube(buf, blocks(2.5), lerp_rgb(P.tile, P.noc1, 0.7));
     }
     // Ethernet cages on the back edge, lit by the live-link bits.
     if gy == -1 && (1..=ETH_CAGES as i32).contains(&gx) {
         if chip.eth_live >> (gx - 1) & 1 == 1 {
-            cube(buf, blocks(2.5), lerp_rgb(TILE, ETH, 0.7));
+            cube(buf, blocks(2.5), lerp_rgb(P.tile, P.eth, 0.7));
         } else {
-            cube(buf, blocks(1.0), lerp_rgb(TILE, ETH, 0.15));
+            cube(buf, blocks(1.0), lerp_rgb(P.tile, P.eth, 0.15));
         }
     }
     // Packet streams along the middle of the die, in from the connector
@@ -514,15 +503,15 @@ pub(super) fn draw_die_tile(
     for k in 0..packet_count(chip.pcie_in_bps) {
         let p = layout.rows as f32 - (t * 5.0 + k as f32 * 2.3).rem_euclid(span);
         if near(8.0, p) {
-            blob(buf, cx, cy - dz, WHITE, n);
-            blob(buf, cx, cy - dz - n, N1, n);
+            blob(buf, cx, cy - dz, P.white, n);
+            blob(buf, cx, cy - dz - n, P.packet_in, n);
         }
     }
     for k in 0..packet_count(chip.pcie_out_bps) {
         let p = (t * 5.0 + k as f32 * 2.3 + 1.1).rem_euclid(span) - 1.0;
         if near(9.0, p) {
-            blob(buf, cx, cy - dz, WHITE, n);
-            blob(buf, cx, cy - dz - n, PACKET_OUT, n);
+            blob(buf, cx, cy - dz, P.white, n);
+            blob(buf, cx, cy - dz - n, P.packet_out, n);
         }
     }
 }
@@ -536,6 +525,10 @@ pub(super) fn draw_die_tile(
 /// drawn only from the chip's own numbers; nothing animates without a reason,
 /// so an idle chip with no counters is a still picture apart from the load
 /// wave. The picture is a pure function of its inputs and `t`.
+///
+/// Only what stands in the scene is painted; the background is the caller's to
+/// choose. A fresh `PixelBuf` leaves it transparent, and `fill_vignette` first
+/// makes it opaque (the view does the latter with `T` off).
 pub fn draw_board_scene(
     buf: &mut PixelBuf,
     chips: &[ChipInputs],
@@ -545,7 +538,6 @@ pub fn draw_board_scene(
 ) {
     let ctx = DrawCtx::new(fit, t, detail);
     let grid = board_grid(chips.len());
-    buf.fill_vignette(BG);
     let harvested = harvested_columns(chips);
     let mut visits = HashMap::new();
     for (bx, by) in ctx.iso.draw_order(grid) {
@@ -589,12 +581,10 @@ pub(super) fn painted_bbox_for(
     let (w, h) = (cells.0 * 2 + 2 * PAD, cells.1 * 4 + 2 * PAD);
     let mut drawn = PixelBuf::new(w, h);
     draw_board_scene(&mut drawn, chips, &f, 1.3, Detail::Full);
-    let mut blank = PixelBuf::new(w, h);
-    blank.fill_vignette(BG);
     let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
     for y in 0..h {
         for x in 0..w {
-            if drawn.get(x, y) != blank.get(x, y) {
+            if drawn.covered(x, y) {
                 x0 = x0.min(x);
                 y0 = y0.min(y);
                 x1 = x1.max(x + 1);
@@ -882,8 +872,8 @@ mod tests {
             )
         };
         let hs = s * 1.15;
-        assert_eq!(probe(&hot, hs + 9.0 * hs), HOT);
-        assert_eq!(probe(&flat, hs), TILE);
+        assert_eq!(probe(&hot, hs + 9.0 * hs), P.hot);
+        assert_eq!(probe(&flat, hs), P.tile);
         // Without the flow the same load 0.0 chip draws no hot tile at all.
         c.tile_flow = None;
         let cold = render(&[c], 0, 1.0);
@@ -962,5 +952,36 @@ mod tests {
         c.tile_flow = Some(HashMap::from([(group[0].noc0, [1.0f32, 0.0])]));
         draw_board_scene(&mut one, &[c], &f, 1.0, Detail::Blocks(1));
         assert_eq!(one.rgb, full.rgb);
+    }
+
+    #[test]
+    fn grayskull_hot_is_pink_and_idle_tile_is_low_saturation() {
+        let hot = palette::GRAYSKULL.hot;
+        assert!(hot[0] > hot[2] && hot[2] > hot[1], "{hot:?}");
+        let t = palette::GRAYSKULL.tile;
+        let spread = t.iter().max().unwrap() - t.iter().min().unwrap();
+        assert!(spread < 40, "{t:?}");
+    }
+
+    #[test]
+    fn heat_ramp_never_goes_through_orange_or_green() {
+        for i in 0..=20 {
+            let c = heat_rgb(i as f32 / 20.0);
+            let (r, g, b) = (c[0] as i32, c[1] as i32, c[2] as i32);
+            assert!(!(g > r && g > b), "step {i}: {c:?} is green");
+            assert!(r - g <= 140 || b > g, "step {i}: {c:?} is orange");
+        }
+    }
+
+    #[test]
+    fn the_transparent_scene_leaves_its_corners_uncovered() {
+        let buf = render(&[chip(1.0)], 0, 1.0);
+        for (x, y) in [(0, 0), (299, 0), (0, 167), (299, 167)] {
+            assert!(!buf.covered(x, y), "corner {x},{y}");
+        }
+        // The die interior is painted: the middle of the buffer is covered.
+        assert!(buf.covered(150, 84));
+        let covered = buf.cover.iter().filter(|&&c| c).count();
+        assert!(covered > 0 && covered < buf.cover.len());
     }
 }

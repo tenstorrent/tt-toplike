@@ -13,7 +13,7 @@
 use super::raster::PixelBuf;
 use super::scene::{
     draw_die_tile, draw_slab, fit_grid, harvested_columns, ChipInputs, Detail, DieSlot, DrawCtx,
-    SceneFit, BG, BOARD_BAND, BOARD_COLS,
+    SceneFit, BOARD_BAND, BOARD_COLS,
 };
 use std::collections::HashMap;
 
@@ -68,7 +68,6 @@ pub fn draw_super_scene(buf: &mut PixelBuf, boards: &[Vec<ChipInputs>], fit: &Sc
         Detail::Blocks(2)
     };
     let ctx = DrawCtx::new(fit, t, detail);
-    buf.fill_vignette(BG);
     let harvested: Vec<Vec<Vec<u8>>> = boards.iter().map(|b| harvested_columns(b)).collect();
     let mut visits = HashMap::new();
     for (bx, by) in ctx.iso.draw_order(grid) {
@@ -189,12 +188,10 @@ mod tests {
         let (w, h) = (cells.0 * 2 + 2 * PAD, cells.1 * 4 + 2 * PAD);
         let mut drawn = PixelBuf::new(w, h);
         draw_super_scene(&mut drawn, b, &f, 1.3);
-        let mut blank = PixelBuf::new(w, h);
-        blank.fill_vignette(BG);
         let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
         for y in 0..h {
             for x in 0..w {
-                if drawn.get(x, y) != blank.get(x, y) {
+                if drawn.covered(x, y) {
                     x0 = x0.min(x);
                     y0 = y0.min(y);
                     x1 = x1.max(x + 1);

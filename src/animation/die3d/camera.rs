@@ -240,12 +240,22 @@ pub fn scramble(buf: &mut PixelBuf, intensity: f32, seed: u32) {
     let max_shift = (k * buf.w as f32 / 6.0) as i64;
     let amp = 80.0 * k;
     for y in 0..buf.h {
-        let row = &mut buf.rgb[y * buf.w..(y + 1) * buf.w];
+        let span = y * buf.w..(y + 1) * buf.w;
+        let row = &mut buf.rgb[span.clone()];
+        let cover = &mut buf.cover[span];
         if max_shift > 0 {
             let shift = (rng.next() as i64 % (2 * max_shift + 1)) - max_shift;
-            row.rotate_left(shift.rem_euclid(buf.w as i64) as usize);
+            let by = shift.rem_euclid(buf.w as i64) as usize;
+            // The mask moves with the pixels it describes.
+            row.rotate_left(by);
+            cover.rotate_left(by);
         }
-        for px in row.iter_mut() {
+        for (px, &covered) in row.iter_mut().zip(cover.iter()) {
+            // Noise colours painted pixels only; an uncovered one stays
+            // transparent and black.
+            if !covered {
+                continue;
+            }
             for c in px.iter_mut() {
                 let noise = ((rng.next() % 161) as f32 - 80.0) / 80.0 * amp;
                 *c = (*c as f32 + noise).round().clamp(0.0, 255.0) as u8;
@@ -521,5 +531,34 @@ mod tests {
                 "preset {i}: {x1},{y1}"
             );
         }
+    }
+
+    #[test]
+    fn scramble_moves_coverage_with_the_pixels_and_never_colours_an_uncovered_one() {
+        // Cover only the left third of each row; mark covered pixels by blue 200.
+        let mut b = PixelBuf::new(64, 32);
+        for y in 0..32 {
+            for x in 0..21 {
+                b.put(x, y, [100, 100, 200]);
+            }
+        }
+        let uncovered_rgb = [0u8; 3];
+        let before = b.cover.iter().filter(|&&c| c).count();
+        scramble(&mut b, 1.0, 11);
+        // Row shifts only permute a row, so the covered count is unchanged ...
+        assert_eq!(b.cover.iter().filter(|&&c| c).count(), before);
+        // ... the mask actually moved in some row ...
+        assert!((0..32).any(|y| !(0..21).all(|x| b.covered(x, y))));
+        // ... and noise reached covered pixels only.
+        for i in 0..b.rgb.len() {
+            if !b.cover[i] {
+                assert_eq!(b.rgb[i], uncovered_rgb, "pixel {i}");
+            }
+        }
+        assert!(b
+            .rgb
+            .iter()
+            .zip(&b.cover)
+            .any(|(p, &c)| c && *p != [100, 100, 200]));
     }
 }

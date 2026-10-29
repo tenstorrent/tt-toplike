@@ -19,42 +19,66 @@ fn shade(c: [u8; 3], k: f32) -> [u8; 3] {
 ///
 /// The Die 3D scene is drawn here first and converted to terminal cells later,
 /// so the rasteriser never depends on ratatui.
+///
+/// A coverage mask (`cover`, one flag per pixel) records which pixels were
+/// painted. An uncovered pixel is transparent: the cell converters leave it to
+/// the terminal's own background instead of drawing a colour there. `rgb` of an
+/// uncovered pixel is meaningless (black by construction).
 #[derive(Debug, Clone)]
 pub struct PixelBuf {
     pub w: usize,
     pub h: usize,
     pub rgb: Vec<[u8; 3]>,
+    /// `true` where a pixel was painted. Same layout as `rgb`.
+    pub cover: Vec<bool>,
 }
 
 impl PixelBuf {
-    /// A black buffer of `w` x `h` pixels.
+    /// A `w` x `h` buffer with nothing painted: black, fully transparent.
     pub fn new(w: usize, h: usize) -> Self {
         Self {
             w,
             h,
             rgb: vec![[0; 3]; w * h],
+            cover: vec![false; w * h],
         }
+    }
+
+    /// Whether the pixel at (`x`, `y`) was painted. Panics if out of range.
+    pub fn covered(&self, x: usize, y: usize) -> bool {
+        self.cover[y * self.w + x]
+    }
+
+    /// Make every pixel transparent again, keeping the allocations.
+    pub fn clear_transparent(&mut self) {
+        self.rgb.fill([0; 3]);
+        self.cover.fill(false);
     }
 
     /// Fill with `base`, darkened toward the top and bottom edges.
     ///
     /// Same formula as the mockup: factor `1 - 0.25 * |y/h - 0.5|`, so the
     /// middle row keeps the full colour and the edges drop to 87.5%.
+    /// Every pixel becomes covered (opaque).
     pub fn fill_vignette(&mut self, base: [u8; 3]) {
         for y in 0..self.h {
             let v = 1.0 - 0.25 * ((y as f32 / self.h as f32) - 0.5).abs();
             let row = shade(base, v);
             self.rgb[y * self.w..(y + 1) * self.w].fill(row);
+            self.cover[y * self.w..(y + 1) * self.w].fill(true);
         }
     }
 
     /// Set one pixel; coordinates outside the buffer are ignored so callers can
-    /// draw blocks that hang off the edge without clipping first.
+    /// draw blocks that hang off the edge without clipping first. The pixel
+    /// becomes covered.
     pub fn put(&mut self, x: i32, y: i32, c: [u8; 3]) {
         if x < 0 || y < 0 || x as usize >= self.w || y as usize >= self.h {
             return;
         }
-        self.rgb[y as usize * self.w + x as usize] = c;
+        let i = y as usize * self.w + x as usize;
+        self.rgb[i] = c;
+        self.cover[i] = true;
     }
 
     /// Read one pixel. Panics if out of range, like slice indexing.
@@ -281,5 +305,31 @@ mod tests {
         let pos = |t: (usize, usize)| order.iter().position(|&o| o == t).unwrap();
         assert!(pos((2, 2)) < pos((3, 2)));
         assert!(pos((2, 2)) < pos((2, 3)));
+    }
+
+    #[test]
+    fn a_new_pixel_buffer_is_fully_transparent() {
+        let b = PixelBuf::new(6, 4);
+        for y in 0..4 {
+            for x in 0..6 {
+                assert!(!b.covered(x, y), "{x},{y}");
+            }
+        }
+    }
+
+    #[test]
+    fn put_covers_a_pixel_and_vignette_covers_all() {
+        let mut b = PixelBuf::new(6, 4);
+        b.put(2, 1, [9, 9, 9]);
+        assert!(b.covered(2, 1));
+        assert!(!b.covered(3, 1));
+        // An off-buffer put covers nothing.
+        b.put(-1, 0, [9, 9, 9]);
+        b.put(6, 0, [9, 9, 9]);
+        assert_eq!(b.cover.iter().filter(|&&c| c).count(), 1);
+        b.fill_vignette([20, 30, 40]);
+        assert!((0..4).all(|y| (0..6).all(|x| b.covered(x, y))));
+        b.clear_transparent();
+        assert!((0..4).all(|y| (0..6).all(|x| !b.covered(x, y))));
     }
 }
