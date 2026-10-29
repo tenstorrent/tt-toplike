@@ -489,7 +489,6 @@ mod tests {
 
     #[test]
     fn every_preset_fits_a_base_with_tw_two_mod_four() {
-        let cells = (150usize, 42usize);
         let chips = [chip()];
         let grid = (BOARD_COLS, BOARD_BAND);
         // A base like `fit` could pick on a tightly packed terminal: odd th.
@@ -503,8 +502,12 @@ mod tests {
             },
             scale: 2,
         };
-        // Centre the base scene in the buffer, then check it really fits.
-        let (x0, y0, x1, y1) = painted_bbox_for(&chips, cells, &base);
+        // Measure the base scene in a roomy buffer, then size the terminal
+        // area to just hold it (cells are 2 x 4 pixels, so slack is at most
+        // 1 and 3 pixels). A taller `th` would then clip; a roomy buffer
+        // would hide that.
+        let (x0, y0, x1, y1) = painted_bbox_for(&chips, (150, 42), &base);
+        let cells = ((x1 - x0).div_ceil(2), (y1 - y0).div_ceil(4));
         base.iso.ox += (cells.0 as i32 * 2 - (x1 - x0) as i32) / 2 - x0 as i32;
         base.iso.oy += (cells.1 as i32 * 4 - (y1 - y0) as i32) / 2 - y0 as i32;
         let (_, _, x1, y1) = painted_bbox_for(&chips, cells, &base);
