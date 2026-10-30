@@ -36,6 +36,8 @@ pub mod super_scene;
 mod switching;
 #[cfg(test)]
 mod test_backend;
+#[allow(dead_code)] // Task 2 of the small-sizes plan wires this in.
+mod tiers;
 pub mod triggers;
 
 use crate::animation::topology::BoardTopology;
