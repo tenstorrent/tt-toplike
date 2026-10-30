@@ -20,6 +20,7 @@ pub mod bh_layout_data;
 pub mod camera;
 pub mod cells;
 pub mod layout;
+pub mod load;
 pub mod palette;
 pub mod raster;
 pub mod scene;
@@ -33,6 +34,7 @@ use crate::animation::topology::BoardTopology;
 use crate::backend::TelemetryBackend;
 use crate::models::Architecture;
 use camera::{dissolve, scramble, Camera, Director, TransitionKind};
+use load::LoadScale;
 use palette::GRAYSKULL;
 use raster::{Iso, PixelBuf};
 use ratatui::style::{Color, Modifier, Style};
@@ -41,6 +43,7 @@ use scene::{
     board_band_origin, board_grid, chip_inputs, die_centre, draw_board_scene, fit_pixels,
     has_per_tile_data, ChipInputs, Detail, SceneFit, ESTIMATE_LABEL, MIN_CELLS,
 };
+use std::collections::HashMap;
 use super_scene::{band_origin, draw_super_scene, super_grid};
 use switching::{Scene, Switcher};
 use triggers::TriggerDetector;
@@ -225,6 +228,11 @@ pub struct Die3dView {
     chips: Vec<Vec<ChipInputs>>,
     /// Devices the view does not draw (not Blackhole): index and architecture.
     undrawn: Vec<(usize, Architecture)>,
+    /// Each drawn chip's power over the last ten minutes, by device index (a
+    /// map: indices can be sparse). Its relative load replaces the
+    /// power-over-limit load from `chip_inputs` once it has enough samples;
+    /// see `load` for why.
+    scales: HashMap<usize, LoadScale>,
 }
 
 impl Die3dView {
@@ -252,6 +260,7 @@ impl Die3dView {
             labels: Vec::new(),
             chips: Vec::new(),
             undrawn: Vec::new(),
+            scales: HashMap::new(),
         }
     }
 
@@ -284,6 +293,7 @@ impl Die3dView {
                 self.chips.push(chips);
             }
         }
+        self.calibrate_loads(now);
 
         let boards = self.chips.len();
         // Commit a switch whose midpoint has passed before judging new
@@ -302,6 +312,24 @@ impl Die3dView {
             }
         }
         self.switcher.expire(now);
+    }
+
+    /// Replace each chip's power-over-limit load with its load relative to
+    /// its own idle over the last ten minutes (`load::LoadScale`), once that
+    /// chip's scale has enough samples. Runs before the trigger detector and
+    /// the scene read `load`, so both see the relative value. A chip with no
+    /// power reading never gets a sample and keeps the fallback, which is
+    /// 0.0 without a reading. Scales of chips no longer present are dropped.
+    fn calibrate_loads(&mut self, now: f64) {
+        let present: Vec<usize> = self.chips.iter().flatten().map(|c| c.index).collect();
+        self.scales.retain(|i, _| present.contains(i));
+        for chip in self.chips.iter_mut().flatten() {
+            let scale = self.scales.entry(chip.index).or_default();
+            let relative = scale.observe(now, chip.power_w);
+            if scale.ready() {
+                chip.load = relative;
+            }
+        }
     }
 
     /// Act on a key. A scene chosen here (`[`, `]`, `m`) is the user's: the
@@ -881,7 +909,12 @@ mod tests {
     use crate::backend::pcie_counters::PcieBandwidth;
     use std::collections::HashMap;
 
-    /// TDP the fakes report, so `power` watts is a load of `power / 100`.
+    /// TDP the fakes report, so `power` watts is a load of `power / 100`
+    /// while a chip's `LoadScale` has fewer than 5 samples (the first 4
+    /// seconds of view time). The tests that cut on a rise from 0 W to 90 W
+    /// within those seconds use that fallback; after it, the load is
+    /// relative to the chip's own idle (see
+    /// `the_view_feeds_relative_load_to_the_scene_and_the_triggers`).
     const TDP: &str = "100";
 
     /// The text of each line, spans joined.
@@ -1050,6 +1083,82 @@ mod tests {
         v.update(&b, 2.0);
         assert!(v.director.swapped_at().is_some());
         assert_eq!(v.switcher.scene_at(5.0), Scene::Board(1));
+    }
+
+    /// The highest heat any Tensix tile of `chip` shows over a few seconds of
+    /// the estimate's wave. Taken over many `t` so the wave's position does
+    /// not decide the comparison.
+    fn peak_tile_heat(chip: &ChipInputs) -> f32 {
+        let layout = super::layout::DieLayout::blackhole();
+        let mut best = 0.0f32;
+        for step in 0..200 {
+            let t = step as f32 * 0.1;
+            for tile in &layout.tiles {
+                best = best.max(super::scene::tile_value(chip, tile, t));
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn the_view_feeds_relative_load_to_the_scene_and_the_triggers() {
+        // Measured on real hardware: a 125 W power limit, 37 W idle, 68 W
+        // under serving. As power over the limit that is 0.30 then 0.54, and
+        // 0.30 is above LOAD_REARM (0.25), so the rise could never fire.
+        let mut b = Fake::boards(&["p150"], Some("125"));
+        b.set_power(0, 37.0);
+        let mut v = Die3dView::new(150, 42);
+        // 30 s of idle, ticked four times a second like the TUI might.
+        let mut now = 0.0;
+        while now < 30.0 {
+            v.update(&b, now);
+            now += 0.25;
+        }
+        assert!(v.director.swapped_at().is_none(), "idle must not cut");
+        let rest = v.chips[0][0].clone();
+        assert_eq!(rest.load, 0.0, "idle is zero load against its own idle");
+        // The rise to 68 W.
+        b.set_power(0, 68.0);
+        v.update(&b, now);
+        let busy = v.chips[0][0].clone();
+        assert_eq!(busy.load, 1.0, "68 W is full load against a 37 W idle");
+        assert!(
+            v.director.swapped_at().is_some(),
+            "LoadRise fired and cut the camera"
+        );
+        // The scene reads the same load: the tiles glow brighter than at rest.
+        let (cold, hot) = (peak_tile_heat(&rest), peak_tile_heat(&busy));
+        assert!(hot > cold + 0.5, "tile heat {cold} at rest, {hot} busy");
+    }
+
+    #[test]
+    fn a_chip_with_no_power_reading_stays_at_zero_load_and_never_fires() {
+        // Its scale never gets a sample, so the view keeps the fallback,
+        // which is 0.0 without a power reading.
+        let mut b = Fake::boards(&["p150"], Some("125"));
+        b.telem[0].power = None;
+        let mut v = Die3dView::new(150, 42);
+        for i in 0..120 {
+            v.update(&b, i as f64 * 0.5);
+            assert_eq!(v.chips[0][0].load, 0.0);
+        }
+        assert!(v.director.swapped_at().is_none());
+    }
+
+    #[test]
+    fn a_chip_that_disappears_loses_its_scale() {
+        let mut b = two_boards();
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        let mut keys: Vec<usize> = v.scales.keys().copied().collect();
+        keys.sort_unstable();
+        assert_eq!(keys, [0, 1, 2, 3]);
+        // Board 1 (chips 2 and 3) goes away.
+        b.devices.truncate(2);
+        v.update(&b, 1.0);
+        let mut keys: Vec<usize> = v.scales.keys().copied().collect();
+        keys.sort_unstable();
+        assert_eq!(keys, [0, 1]);
     }
 
     #[test]

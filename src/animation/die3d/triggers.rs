@@ -10,14 +10,27 @@
 
 use std::collections::HashMap;
 
-/// Load (power over TDP, 0..1) at or above which a rise fires.
+/// Load (0..1) at or above which a rise fires. The view passes load relative
+/// to the chip's own idle (`load::LoadScale`), so 0.5 is half way from idle
+/// to the chip's recent peak. As power over the 125 W limit it could never
+/// fire: idle chips measured 36 to 47 W, which is 0.30 and above
+/// [`LOAD_REARM`], so the detector never armed.
 pub const LOAD_ON: f32 = 0.5;
 /// Load at or below which the load detector is armed again.
 pub const LOAD_REARM: f32 = 0.25;
-/// PCIe rx+tx rate (bytes/s) at or above which a burst fires.
-pub const PCIE_ON_BPS: f64 = 2.0e9;
-/// PCIe rate (bytes/s) at or below which the burst detector is armed again.
-pub const PCIE_REARM_BPS: f64 = 0.5e9;
+/// PCIe rx+tx rate (bytes/s) at or above which a burst fires: 50 MB/s.
+///
+/// Measured from the tt-kmd counters while 8 chat clients drove a coder
+/// model at 213 tokens per second: the two busy chips moved a mean of
+/// 23 MB/s into the chip (95th percentile 115 MB/s, maximum 131 MB/s) and
+/// 13 MB/s out (maximum 53 MB/s); idle chips were near 0. The earlier
+/// 2 GB/s was about 15 times above anything token serving moves. 50 MB/s is
+/// above the serving mean and below its bursts.
+pub const PCIE_ON_BPS: f64 = 50.0e6;
+/// PCIe rate (bytes/s) at or below which the burst detector is armed again:
+/// 10 MB/s, below the serving mean, so a burst fires again only after the
+/// traffic has dropped back towards idle.
+pub const PCIE_REARM_BPS: f64 = 10.0e6;
 
 /// Something interesting happened on a chip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,19 +166,25 @@ mod tests {
     }
 
     #[test]
-    fn pcie_burst_fires_on_a_two_gb_per_second_crossing() {
+    fn pcie_burst_fires_at_50_mb_per_second_after_idle() {
+        // Rates from real token serving: idle near 0, a mean of 23 MB/s in
+        // and 13 MB/s out, a 95th percentile of 115 MB/s and a maximum of
+        // 131 MB/s in.
         let mut d = TriggerDetector::new();
         let burst = Trigger::PcieBurst { chip: 0 };
-        assert!(d.observe(0, 0.0, Some(0.1e9)).is_empty());
-        assert!(d.observe(0, 0.0, Some(1.9e9)).is_empty());
-        assert_eq!(d.observe(0, 0.0, Some(PCIE_ON_BPS)), vec![burst]);
-        // Held high, then a dip that stays above re-arm: silent.
-        assert!(d.observe(0, 0.0, Some(3.0e9)).is_empty());
-        assert!(d.observe(0, 0.0, Some(1.0e9)).is_empty());
-        assert!(d.observe(0, 0.0, Some(3.0e9)).is_empty());
+        assert!(d.observe(0, 0.0, Some(0.0)).is_empty()); // idle: armed
+        assert!(d.observe(0, 0.0, Some(49.0e6)).is_empty());
+        assert_eq!(d.observe(0, 0.0, Some(50.0e6)), vec![burst]);
+        // Held high, then the serving mean (36 MB/s in and out), which stays
+        // above re-arm: silent.
+        assert!(d.observe(0, 0.0, Some(131.0e6)).is_empty());
+        assert!(d.observe(0, 0.0, Some(36.0e6)).is_empty());
+        assert!(d.observe(0, 0.0, Some(115.0e6)).is_empty());
         // At the re-arm level, then up again: fires.
         assert!(d.observe(0, 0.0, Some(PCIE_REARM_BPS)).is_empty());
-        assert_eq!(d.observe(0, 0.0, Some(3.0e9)), vec![burst]);
+        assert_eq!(d.observe(0, 0.0, Some(115.0e6)), vec![burst]);
+        // The constants are the measured ones.
+        assert_eq!((PCIE_ON_BPS, PCIE_REARM_BPS), (50.0e6, 10.0e6));
         // PCIe and load are independent edges.
         let mut d = TriggerDetector::new();
         d.observe(0, 0.0, Some(0.0));

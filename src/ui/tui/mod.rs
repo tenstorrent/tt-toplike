@@ -4199,42 +4199,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
             DisplayMode::HivemindSweeper => {
                 explain_lines(bar, bg, dim, lbl, hivemind_view::EXPLAIN_TEXT, cols)
             }
-            DisplayMode::Die3d => explain_lines(
-                bar,
-                bg,
-                dim,
-                lbl,
-                &[
-                    "Die 3D",
-                    "",
-                    "Each Blackhole board is drawn as an isometric block",
-                    "per die, from live chip telemetry. Tile brightness",
-                    "follows activity: measured per tile where the driver",
-                    "reports it, otherwise an estimate from chip load.",
-                    "The footer says which, as 'estimate'.",
-                    "",
-                    "The camera cuts to a new angle when a chip's load",
-                    "rises or PCIe traffic bursts. With every board in",
-                    "view, a load rise also opens that chip's board.",
-                    "C turns the automatic cuts and switches off; c cuts",
-                    "by hand; [ ] m choose the board or all boards;",
-                    "B swaps braille for half-block cells; T turns the",
-                    "transparent background (terminal shows through) on or off.",
-                    "X sets how a cut looks: shuffle, chaos, dissolve or spin",
-                    "(spin is used only when the board shown stays the same).",
-                    "L turns the chip labels (name and power) on or off.",
-                    "The footer names the board corner nearest you, as",
-                    "'view: front-right' (front is the PCIe edge, right the",
-                    "GDDR side), and both ends during a cut.",
-                    "",
-                    "Only Blackhole chips are drawn; other devices are",
-                    "named in the footer. Needs a terminal of at least",
-                    "100 x 31 cells (the status bar takes the bottom row).",
-                    "",
-                    "Press l for the key list · 3 to return.",
-                ],
-                cols,
-            ),
+            DisplayMode::Die3d => explain_lines(bar, bg, dim, lbl, DIE3D_EXPLAIN_TEXT, cols),
             DisplayMode::Training => explain_lines(
                 bar,
                 bg,
@@ -4788,6 +4753,77 @@ fn defrag_legend_lines(
     ]
 }
 
+/// The Die 3D view's `i` explanation, wrapped to the overlay's width by
+/// `explain_lines`. A constant so a test can check what it says.
+const DIE3D_EXPLAIN_TEXT: &[&str] = &[
+    "Die 3D",
+    "",
+    "Each Blackhole board is drawn as an isometric block",
+    "per die, from live chip telemetry. Tile brightness",
+    "follows activity: measured per tile where the driver",
+    "reports it, otherwise an estimate from chip load.",
+    "The footer says which, as 'estimate'.",
+    "",
+    "Activity is relative to each chip's own idle over the",
+    "last ten minutes: the lowest power the chip drew in that",
+    "time is zero, the highest (or idle plus 25 W, if that is",
+    "more) is full. An idle chip draws about a third of its",
+    "power limit, so power over the limit would barely move.",
+    "",
+    "The camera cuts to a new angle when a chip's load",
+    "rises or PCIe traffic bursts. With every board in",
+    "view, a load rise also opens that chip's board.",
+    "C turns the automatic cuts and switches off; c cuts",
+    "by hand; [ ] m choose the board or all boards;",
+    "B swaps braille for half-block cells; T turns the",
+    "transparent background (terminal shows through) on or off.",
+    "X sets how a cut looks: shuffle, chaos, dissolve or spin",
+    "(spin is used only when the board shown stays the same).",
+    "L turns the chip labels (name and power) on or off.",
+    "The footer names the board corner nearest you, as",
+    "'view: front-right' (front is the PCIe edge, right the",
+    "GDDR side), and both ends during a cut.",
+    "",
+    "Only Blackhole chips are drawn; other devices are",
+    "named in the footer. Needs a terminal of at least",
+    "100 x 31 cells (the status bar takes the bottom row).",
+    "",
+    "Press l for the key list · 3 to return.",
+];
+
+#[cfg(test)]
+mod die3d_text_tests {
+    use super::{die3d_legend_lines, DIE3D_EXPLAIN_TEXT};
+    use ratatui::style::Color;
+
+    /// Lines of text as one string, whitespace collapsed, so a phrase split
+    /// across two lines still matches.
+    fn flat<'a>(lines: impl Iterator<Item = String>) -> String {
+        lines
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn the_legend_says_activity_is_relative_to_each_chips_own_idle() {
+        let legend = flat(
+            die3d_legend_lines(Color::Reset, Color::Reset, Color::Reset)
+                .iter()
+                // The first span of each line is the `║ ` bar.
+                .map(|l| l.spans.iter().skip(1).map(|s| s.content.as_ref()).collect()),
+        );
+        let explain = flat(DIE3D_EXPLAIN_TEXT.iter().map(|s| s.to_string()));
+        for (what, text) in [("legend", &legend), ("explain", &explain)] {
+            for phrase in ["own idle", "last ten minutes"] {
+                assert!(text.contains(phrase), "{what} lacks {phrase:?}: {text}");
+            }
+        }
+    }
+}
+
 /// Legend for the Die 3D view: what the scene's colours and the footer mean,
 /// and the keys the view takes.
 fn die3d_legend_lines(
@@ -4800,6 +4836,8 @@ fn die3d_legend_lines(
         "  tile glow   activity (measured per tile when the",
         "              driver reports it, otherwise an estimate",
         "              from chip load, labelled in the footer)",
+        "              Activity is relative to each chip's own",
+        "              idle over the last ten minutes.",
         "  camera cuts on activity: a load rise or PCIe burst",
         "  labels      chip name and power at each die's centre",
         "  footer      scene shown, the board corner nearest you,",

@@ -61,7 +61,11 @@ pub struct ChipInputs {
     /// that is not a finite number.
     pub power_w: Option<f32>,
     pub arch: Architecture,
-    /// Power over TDP, 0..1. `0.0` when either is unknown.
+    /// Activity, 0..1. [`chip_inputs`] fills it with power over TDP (`0.0`
+    /// when either is unknown). `Die3dView` replaces that with the chip's
+    /// power relative to its own idle over the last ten minutes once it has
+    /// a few seconds of samples (see `load`): idle chips draw about 0.30 of
+    /// TDP, so power over TDP alone barely moves.
     pub load: f32,
     /// Bytes per second into the chip, `None` without PCIe counters.
     pub pcie_in_bps: Option<f64>,
