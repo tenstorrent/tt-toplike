@@ -251,8 +251,9 @@ struct Placement {
 /// The Die 3D view.
 ///
 /// Keeps its pixel buffers, sizing results and last frame between frames
-/// (see [`RenderCache`]). The TUI rebuilds the view on a resize, so `new`
-/// must stay cheap and nothing may outlive the size it was made for.
+/// (see [`RenderCache`]). On a terminal resize the TUI calls
+/// [`resize`](Die3dView::resize), which drops that cache and keeps the
+/// rest of the view's state.
 pub struct Die3dView {
     cols: usize,
     rows: usize,
@@ -305,8 +306,8 @@ pub struct Die3dView {
 }
 
 /// What the view keeps between frames so that a frame costs less to make
-/// and to send. It lives and dies with the view: the TUI makes a new view on
-/// every terminal resize, so nothing here outlives the size it was made for.
+/// and to send. [`Die3dView::resize`] replaces it with an empty one, so
+/// nothing here outlives the size it was made for.
 #[derive(Default)]
 struct RenderCache {
     /// `fit_pixels` results by (pixel width, pixel height, grid).
@@ -381,6 +382,24 @@ impl Die3dView {
             revision: 0,
             cache: RefCell::new(RenderCache::default()),
         }
+    }
+
+    /// The terminal changed size: draw at `cols` x `rows` from now on, with
+    /// `reserved_rows` as in [`with_reserved_rows`](Self::with_reserved_rows).
+    ///
+    /// Only what depends on the size is dropped: the [`RenderCache`] (scene
+    /// fits, spare pixel buffers and the last frame). Everything else stays:
+    /// every switch, the scene on show and a switch still pending, the
+    /// history, each chip's load calibration, the cloud clock, the camera
+    /// director and the trigger detector. The revision moves, so the next
+    /// `render` draws a fresh frame at the new size. A size below the
+    /// minimum needs nothing special: `render` shows its size hint.
+    pub fn resize(&mut self, cols: usize, rows: usize, reserved_rows: usize) {
+        self.cols = cols;
+        self.rows = rows;
+        self.reserved_rows = reserved_rows;
+        *self.cache.get_mut() = RenderCache::default();
+        self.revision += 1;
     }
 
     /// Read every chip from the backend, group the chips into boards and feed
@@ -1635,6 +1654,80 @@ mod tests {
     }
 
     #[test]
+    fn resize_keeps_switches_history_and_load_calibration() {
+        let mut b = two_boards();
+        let mut v = Die3dView::with_reserved_rows(150, 42, 1);
+        for t in 0..8 {
+            b.set_power(2, 30.0 + t as f32);
+            v.update(&b, t as f64);
+        }
+        // Every switch away from its default, a board chosen by hand.
+        for k in [
+            Die3dKey::ToggleBraille,
+            Die3dKey::ToggleTransparent,
+            Die3dKey::ToggleClouds,
+            Die3dKey::ToggleHistory,
+            Die3dKey::ToggleLabels,
+            Die3dKey::CycleTransition,
+            Die3dKey::ToggleAuto,
+            Die3dKey::NextBoard,
+            Die3dKey::NextBoard,
+        ] {
+            v.handle_key(k, 8.0);
+        }
+        let switches = v.switches_at(8.0);
+        let scene = v.switcher.scene_at(8.0);
+        let mode = v.director.transition_mode();
+        let samples = v.history.power(2).map(<[_]>::len);
+        assert_eq!(samples, Some(8));
+        assert!(v.scales[&2].ready());
+        let cloud_offset = v.cloud_clock.get().offset_px();
+        let revision = v.revision;
+        v.resize(200, 55, 1);
+        assert_eq!((v.cols, v.rows, v.reserved_rows), (200, 55, 1));
+        assert_eq!(v.switches_at(8.0), switches);
+        assert_eq!(v.switcher.scene_at(8.0), scene);
+        assert_eq!(v.director.transition_mode(), mode);
+        assert!(!v.director.auto());
+        assert_eq!(v.history.power(2).map(<[_]>::len), samples);
+        assert!(v.scales[&2].ready());
+        assert_eq!(v.scales[&2].len(), 8);
+        assert_eq!(v.cloud_clock.get().offset_px(), cloud_offset);
+        assert_eq!(v.chips.len(), 2, "the boards read before the resize stay");
+        assert!(v.revision > revision, "a resize is a change to show");
+    }
+
+    #[test]
+    fn resize_drops_the_fit_cache_and_redraws_at_once() {
+        let b = two_boards();
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        assert_eq!(v.render(1.0).len(), 42);
+        assert!(!v.cache.borrow().fits.is_empty());
+        assert!(v.cache.borrow().last.is_some());
+        v.resize(120, 36, 0);
+        {
+            let cache = v.cache.borrow();
+            assert!(cache.fits.is_empty(), "fits of the old size dropped");
+            assert!(cache.spare.is_empty(), "buffers of the old size dropped");
+            assert!(cache.last.is_none(), "the old frame dropped");
+        }
+        // 0.01 s later, well inside the frame interval: a fresh frame at the
+        // new size, never the old one again.
+        let lines = v.render(1.01);
+        assert_eq!(lines.len(), 36);
+        assert!(lines[0].width() <= 120);
+        // Below the minimum the view's own hint shows, and growing again
+        // draws the scene.
+        v.resize(80, 20, 1);
+        let hint = text(&v.render(1.02));
+        assert_eq!(hint.len(), 1);
+        assert!(hint[0].contains("this one is 80 x 21"), "{hint:?}");
+        v.resize(150, 42, 0);
+        assert_eq!(v.render(1.03).len(), 42);
+    }
+
+    #[test]
     fn render_during_a_cut_then_new_at_another_size_does_not_panic() {
         let b = two_boards();
         let mut v = Die3dView::new(150, 42);
@@ -1643,8 +1736,9 @@ mod tests {
         v.handle_key(Die3dKey::CutNow, 5.0);
         assert!(v.director.chaos(5.3).is_some(), "mid-chaos");
         assert_eq!(v.render(5.3).len(), 42);
-        // The TUI rebuilds the view on resize; every size must render, in
-        // every transition, at several points of it.
+        // Every size must render, in every transition, at several points of
+        // it: for a view made at that size, and for one resized to it in
+        // the middle of the cut (as the TUI does on a terminal resize).
         for (c, r) in [(120, 35), (100, 30), (220, 60), (101, 31)] {
             for braille in [true, false] {
                 for mode in [
@@ -1664,6 +1758,22 @@ mod tests {
                             v.render(5.0 + dt).len(),
                             r,
                             "{c} x {r} braille={braille} {mode:?} +{dt}"
+                        );
+                    }
+                    let mut w = Die3dView::new(150, 42);
+                    w.update(&b, 5.0);
+                    w.director.set_transition_mode(mode);
+                    if !braille {
+                        w.handle_key(Die3dKey::ToggleBraille, 5.0);
+                    }
+                    w.handle_key(Die3dKey::CutNow, 5.0);
+                    w.render(5.3);
+                    w.resize(c, r, 0);
+                    for dt in [0.31, 0.7, 1.2, 1.7] {
+                        assert_eq!(
+                            w.render(5.0 + dt).len(),
+                            r,
+                            "resized to {c} x {r} braille={braille} {mode:?} +{dt}"
                         );
                     }
                 }

@@ -789,19 +789,28 @@ fn a_resize_rebuilds_the_fit_cache() {
     };
     // Braille at 150 x 42: 300 x 160 pixels above the two footer rows.
     assert_eq!(keys(&v), [(300, 160, grid)]);
-    // The TUI makes a new view on a resize: its cache starts empty and fills
-    // for the new size only.
+    // A view made at the new size: its cache starts empty and fills for
+    // that size only.
     let mut w = Die3dView::new(200, 56);
     assert!(keys(&w).is_empty());
     w.update(&b, 0.0);
     let want = text(&w.render(2.0));
     assert_eq!(keys(&w), [(400, 216, grid)]);
-    // A size change in place is keyed by size too, so it can never pick up
-    // the old size's fit: the frame is the new view's.
-    v.cols = 200;
-    v.rows = 56;
+    // A size change without `resize` is keyed by size too, so it can never
+    // pick up the old size's fit: the frame is the new view's.
+    let mut u = Die3dView::new(150, 42);
+    u.update(&b, 0.0);
+    u.render(1.0);
+    u.cols = 200;
+    u.rows = 56;
+    assert_eq!(text(&u.render(2.0)), want);
+    assert_eq!(keys(&u), [(300, 160, grid), (400, 216, grid)]);
+    // `resize`, as the TUI calls it, drops the old size's fit, and the frame
+    // is again the new view's.
+    v.resize(200, 56, 0);
+    assert!(keys(&v).is_empty());
     assert_eq!(text(&v.render(2.0)), want);
-    assert_eq!(keys(&v), [(300, 160, grid), (400, 216, grid)]);
+    assert_eq!(keys(&v), [(400, 216, grid)]);
 }
 
 /// A one-board view with moving packets, so every fresh frame differs.

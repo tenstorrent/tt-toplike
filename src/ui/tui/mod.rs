@@ -139,6 +139,30 @@ fn next_display_mode(m: DisplayMode) -> DisplayMode {
 /// Views that draw their own footer are sized to the terminal minus this.
 const STATUS_BAR_ROWS: usize = 1;
 
+/// The Die 3D view's area for a terminal of `width` x `height` cells, and
+/// the rows kept for the global status bar: (columns, rows, reserved rows).
+/// The scene is drawn above the status bar, so the view gets one row less
+/// than the terminal.
+fn die3d_area(width: u16, height: u16) -> (usize, usize, usize) {
+    (
+        width as usize,
+        (height as usize).saturating_sub(STATUS_BAR_ROWS),
+        STATUS_BAR_ROWS,
+    )
+}
+
+/// On a terminal resize, resize the Die 3D view in place when it is open.
+/// It keeps its switches, history, load calibration, clouds and camera; only
+/// its size and its size-dependent caches change (`Die3dView::resize`). With
+/// no view open there is nothing to do: the next entry makes one at the
+/// size of the moment.
+fn resize_die3d(die3d: &mut Option<crate::animation::Die3dView>, width: u16, height: u16) {
+    if let Some(view) = die3d.as_mut() {
+        let (cols, rows, reserved) = die3d_area(width, height);
+        view.resize(cols, rows, reserved);
+    }
+}
+
 /// The mode a `3` press leads to, and the `prev_mode` to keep: entering
 /// remembers where we came from, leaving goes back to it. Pulled out of the
 /// key handler so the toggle can be tested without a terminal.
@@ -1234,14 +1258,11 @@ fn run_app(
                 }
                 DisplayMode::Die3d => {
                     // The scene is drawn above the global status bar, so the
-                    // view gets one row less than the terminal.
+                    // view gets one row less than the terminal (`die3d_area`).
                     let dv = die3d.get_or_insert_with(|| {
                         die3d_started = Instant::now();
-                        crate::animation::Die3dView::with_reserved_rows(
-                            size.width as usize,
-                            (size.height as usize).saturating_sub(STATUS_BAR_ROWS),
-                            STATUS_BAR_ROWS,
-                        )
+                        let (cols, rows, reserved) = die3d_area(size.width, size.height);
+                        crate::animation::Die3dView::with_reserved_rows(cols, rows, reserved)
                     });
                     dv.update(backend, die3d_started.elapsed().as_secs_f64());
                 }
@@ -1559,7 +1580,7 @@ fn run_app(
                 Event::FocusLost => {
                     throttle_state.focused = false;
                 }
-                Event::Resize(_, _) => {
+                Event::Resize(width, height) => {
                     // Drop all size-dependent visualizations so they reinitialize
                     // at the new dimensions on the next loop iteration.
                     starfield = None;
@@ -1568,7 +1589,10 @@ fn run_app(
                     arcade = None;
                     defrag = None;
                     train_view = None;
-                    die3d = None;
+                    // Die 3D keeps its state (switches, history, load
+                    // calibration, camera) and its clock across a resize;
+                    // only its size and size-dependent caches change.
+                    resize_die3d(&mut die3d, width, height);
                     terminal.clear().ok();
                 }
                 // ── Reset takeover intercepts all keystrokes while active ──────
@@ -8551,8 +8575,9 @@ mod tests {
 #[cfg(test)]
 mod display_mode_tests {
     use super::{
-        die3d_key_for, die3d_toggle, display_mode_for, leaves_die3d, linger_for, next_display_mode,
-        next_rotation_mode, statusbar_mode_name, DisplayMode, ROTATE_LINGER, ROTATION,
+        die3d_area, die3d_key_for, die3d_toggle, display_mode_for, leaves_die3d, linger_for,
+        next_display_mode, next_rotation_mode, resize_die3d, statusbar_mode_name, DisplayMode,
+        ROTATE_LINGER, ROTATION,
     };
 
     #[test]
@@ -8624,6 +8649,36 @@ mod display_mode_tests {
         assert_eq!((mode, prev), (DisplayMode::Die3d, DisplayMode::Grid));
         let (mode, prev) = die3d_toggle(mode, prev);
         assert_eq!((mode, prev), (DisplayMode::Grid, DisplayMode::Grid));
+    }
+
+    #[test]
+    fn a_terminal_resize_keeps_the_die3d_view_and_its_switches() {
+        use crate::animation::die3d::Die3dKey;
+        use crate::animation::Die3dView;
+        let (c, r, reserved) = die3d_area(150, 43);
+        assert_eq!((c, r, reserved), (150, 42, 1));
+        let mut die3d = Some(Die3dView::with_reserved_rows(c, r, reserved));
+        let view = die3d.as_mut().unwrap();
+        view.handle_key(Die3dKey::ToggleBraille, 0.0);
+        view.handle_key(Die3dKey::ToggleClouds, 0.0);
+        let switches = view.switches();
+        resize_die3d(&mut die3d, 120, 40);
+        let view = die3d.as_ref().expect("the view survives a resize");
+        assert_eq!(view.switches(), switches);
+        // Drawn at the new size: the hint (no device was read) is one line,
+        // so check the size through a too-small resize, whose hint names the
+        // terminal size including the status bar's row.
+        resize_die3d(&mut die3d, 90, 25);
+        let hint: String = die3d.as_ref().unwrap().render(0.0)[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(hint.contains("this one is 90 x 25"), "{hint}");
+        // No view (Die 3D not open): nothing is made.
+        let mut none: Option<Die3dView> = None;
+        resize_die3d(&mut none, 120, 40);
+        assert!(none.is_none());
     }
 
     #[test]
