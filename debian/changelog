@@ -1,3 +1,15 @@
+tt-toplike (0.13.24) noble; urgency=medium
+
+  * Every screen now shows the terminal's own background. The home screen, the
+    full-screen visualizations and the Die 3D view used to fill the whole
+    terminal with solid black in a truecolor terminal such as Konsole, which
+    covered the user's color scheme. Under tmux they already used the
+    terminal's background, so the app looked different in the two. Set
+    TT_TOPLIKE_OPAQUE=1 for the old black fill. The status bar keeps its dark
+    navy background.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 15:00:00 -0700
+
 tt-toplike (0.13.23) noble; urgency=medium
 
   * Die 3D view: a narrow window no longer loses the scene. Below the four pixel

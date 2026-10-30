@@ -143,6 +143,44 @@ pub fn grayskull_rgb(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
     }
 }
 
+/// Environment variable that asks for the old solid black canvas. Any value
+/// except empty, `0` and `false` turns it on.
+pub const OPAQUE_ENV: &str = "TT_TOPLIKE_OPAQUE";
+
+/// Whether `value` (the content of [`OPAQUE_ENV`]) asks for an opaque canvas.
+fn opaque_requested(value: Option<&str>) -> bool {
+    match value {
+        None => false,
+        Some(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false"),
+    }
+}
+
+/// The background of the canvas every view draws on.
+///
+/// By default this is the terminal's own background (`Color::Reset`), so the
+/// user's colour scheme, and any transparency or blur they set, shows through
+/// instead of a black fill. Set [`OPAQUE_ENV`] for solid black.
+///
+/// This used to be `rgb(0, 0, 0)`, which is solid black in a truecolor
+/// terminal and the terminal default only where truecolor is off (tmux, see
+/// [`supports_true_color`]). So the app looked different in a plain Konsole than
+/// in the same terminal under tmux. Both now follow the terminal.
+pub fn canvas_bg() -> Color {
+    static OPAQUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let opaque = *OPAQUE.get_or_init(|| opaque_requested(std::env::var(OPAQUE_ENV).ok().as_deref()));
+    canvas_bg_for(opaque)
+}
+
+/// [`canvas_bg`] for a given choice, so the rule is tested without touching the
+/// process environment.
+fn canvas_bg_for(opaque: bool) -> Color {
+    if opaque {
+        rgb(0, 0, 0)
+    } else {
+        Color::Reset
+    }
+}
+
 pub fn rgb(r: u8, g: u8, b: u8) -> Color {
     // App-wide theme remap first (identity under the Default theme).
     let (r, g, b) = if current_theme() == Theme::Grayskull {
@@ -425,5 +463,50 @@ mod tests {
         assert_eq!(current_theme(), Theme::Grayskull);
         set_theme(Theme::Default);
         assert_eq!(current_theme(), Theme::Default);
+    }
+
+    #[test]
+    fn the_canvas_follows_the_terminal_unless_opaque_is_asked_for() {
+        assert_eq!(canvas_bg_for(false), Color::Reset);
+        assert_ne!(canvas_bg_for(true), Color::Reset, "opaque is a real fill");
+        for v in ["1", "true", "yes", " 1 "] {
+            assert!(opaque_requested(Some(v)), "{v:?}");
+        }
+        for v in ["", "0", "false", "FALSE", " 0 "] {
+            assert!(!opaque_requested(Some(v)), "{v:?}");
+        }
+        assert!(!opaque_requested(None));
+    }
+
+    /// Guards the wiring: no view may fill its background with a
+    /// literal black again, or the terminal's own colour is covered whatever
+    /// `canvas_bg` returns. A test of `canvas_bg` alone passes with every view
+    /// still painting black.
+    #[test]
+    fn no_view_paints_a_literal_black_background() {
+        fn walk(dir: &std::path::Path, hits: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, hits);
+                } else if path.extension().is_some_and(|e| e == "rs")
+                    // This file holds the patterns below as string literals.
+                    && !path.ends_with("ui/colors.rs")
+                {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    for (n, line) in text.lines().enumerate() {
+                        let paints_black = line.contains(".bg(colors::rgb(0, 0, 0))")
+                            || line.contains(".bg(Color::Black)")
+                            || line.contains(".bg(ratatui::style::Color::Black)");
+                        if paints_black {
+                            hits.push(format!("{}:{}", path.display(), n + 1));
+                        }
+                    }
+                }
+            }
+        }
+        let mut hits = Vec::new();
+        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut hits);
+        assert!(hits.is_empty(), "use colors::canvas_bg(): {hits:#?}");
     }
 }

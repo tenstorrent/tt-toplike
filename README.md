@@ -35,6 +35,13 @@ Most of that arrives without shelling out to anything. The safe default backend 
 
 There's also an **adaptive baseline**: for the first ~20 samples the tool learns your chip's idle state. After that, everything is shown as *relative change* from baseline rather than absolute values. A chip drawing 20W shows the same visual intensity as a chip drawing 80W at the same fraction above its idle state. This makes the tool work equally well across hardware generations.
 
+### Background
+
+Every screen draws on the terminal's own background, so your color scheme (and any transparency
+or blur you set) shows through. Set `TT_TOPLIKE_OPAQUE=1` for a solid black background. The
+status bar has its own dark navy background in both cases. Before 0.13.24 the app filled the
+terminal with black in a truecolor terminal and used the terminal's background under tmux.
+
 ### How colors are chosen
 
 Every color is computed from a single function: `hsv_to_rgb(hue, saturation, value)`.

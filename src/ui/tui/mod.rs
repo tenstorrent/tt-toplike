@@ -1566,7 +1566,7 @@ fn run_app(
                 .draw(|f| {
                     // Clear frame with explicit black background for tmux compatibility
                     f.render_widget(
-                        Block::default().style(Style::default().bg(colors::rgb(0, 0, 0))),
+                        Block::default().style(Style::default().bg(colors::canvas_bg())),
                         f.area(),
                     );
 
@@ -2945,7 +2945,7 @@ fn ui_visualization(f: &mut Frame, starfield: &HardwareStarfield, backend: &dyn 
     let starfield_lines = starfield.render();
 
     let starfield_widget = Paragraph::new(starfield_lines)
-        .style(Style::default().bg(colors::rgb(0, 0, 0)))
+        .style(Style::default().bg(colors::canvas_bg()))
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -2962,7 +2962,7 @@ fn ui_visualization(f: &mut Frame, starfield: &HardwareStarfield, backend: &dyn 
                         .fg(colors::rgb(150, 220, 255))
                         .add_modifier(Modifier::BOLD),
                 )
-                .style(Style::default().bg(colors::rgb(0, 0, 0))),
+                .style(Style::default().bg(colors::canvas_bg())),
         );
 
     f.render_widget(starfield_widget, chunks[1]);
@@ -3041,7 +3041,7 @@ fn ui_memory_castle(f: &mut Frame, memory_castle: &MemoryCastle, backend: &dyn T
     let castle_lines = memory_castle.render(backend);
 
     let castle_widget = Paragraph::new(castle_lines)
-        .style(Style::default().bg(colors::rgb(0, 0, 0)))
+        .style(Style::default().bg(colors::canvas_bg()))
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -3058,7 +3058,7 @@ fn ui_memory_castle(f: &mut Frame, memory_castle: &MemoryCastle, backend: &dyn T
                         .fg(colors::rgb(255, 180, 220))
                         .add_modifier(Modifier::BOLD),
                 )
-                .style(Style::default().bg(colors::rgb(0, 0, 0))),
+                .style(Style::default().bg(colors::canvas_bg())),
         );
 
     f.render_widget(castle_widget, chunks[1]);
@@ -3079,7 +3079,7 @@ fn ui_memory_flow(f: &mut Frame, memory_flow: &MemoryFlowVis, backend: &dyn Tele
     let flow_lines = memory_flow.render(backend);
 
     let flow_widget = Paragraph::new(flow_lines)
-        .style(Style::default().bg(colors::rgb(0, 0, 0)))
+        .style(Style::default().bg(colors::canvas_bg()))
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -3096,7 +3096,7 @@ fn ui_memory_flow(f: &mut Frame, memory_flow: &MemoryFlowVis, backend: &dyn Tele
                         .fg(colors::rgb(180, 255, 180))
                         .add_modifier(Modifier::BOLD),
                 )
-                .style(Style::default().bg(colors::rgb(0, 0, 0))),
+                .style(Style::default().bg(colors::canvas_bg())),
         );
 
     f.render_widget(flow_widget, chunks[1]);
@@ -3201,7 +3201,7 @@ fn render_memory_flow_header(f: &mut Frame, area: Rect, backend: &dyn TelemetryB
 /// from observable signals: power ramp, aiclk transition, and GDDR temperature delta.
 fn ui_defrag(f: &mut Frame, dv: &DefragVis, backend: &dyn TelemetryBackend) {
     let lines = dv.render(backend);
-    let widget = Paragraph::new(lines).style(Style::default().bg(colors::rgb(0, 0, 0)));
+    let widget = Paragraph::new(lines).style(Style::default().bg(colors::canvas_bg()));
     f.render_widget(widget, f.area());
 }
 
@@ -3214,7 +3214,7 @@ fn ui_train(
     backend: &dyn TelemetryBackend,
 ) {
     let lines = tv.render(st, backend);
-    let widget = Paragraph::new(lines).style(Style::default().bg(colors::rgb(0, 0, 0)));
+    let widget = Paragraph::new(lines).style(Style::default().bg(colors::canvas_bg()));
     f.render_widget(widget, f.area());
 }
 
@@ -3249,7 +3249,7 @@ fn ui_die3d(f: &mut Frame, view: &crate::animation::Die3dView, now: f64) {
 /// the inline separators from render_separator() provide visual structure.
 fn ui_arcade(f: &mut Frame, arcade: &ArcadeVisualization, backend: &dyn TelemetryBackend) {
     let lines = arcade.render(backend);
-    let widget = Paragraph::new(lines).style(Style::default().bg(colors::rgb(0, 0, 0)));
+    let widget = Paragraph::new(lines).style(Style::default().bg(colors::canvas_bg()));
     f.render_widget(widget, f.area());
 }
 
@@ -6339,7 +6339,7 @@ fn render_snake_view(
 ) {
     let area = f.area();
     f.render_widget(
-        Block::default().style(Style::default().bg(colors::rgb(0, 0, 0))),
+        Block::default().style(Style::default().bg(colors::canvas_bg())),
         area,
     );
     // Layout, top to bottom: the multi-model roster (0 rows when <2 services),

@@ -17,6 +17,13 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.13.24
+- Every screen shows the terminal's own background. The home screen, the full-screen
+  visualizations and the Die 3D view used to fill the terminal with solid black in a truecolor
+  terminal such as Konsole, which covered the color scheme. Under tmux they already used the
+  terminal's background. `TT_TOPLIKE_OPAQUE=1` brings the black fill back. The status bar keeps
+  its dark navy background.
+
 ### 0.13.23
 - The Die 3D view keeps drawing the scene in a narrow window. Where the four pixel tile does not
   fit (a two-die board needs 51 columns), the scene shrinks to a two pixel tile; a two-die board
