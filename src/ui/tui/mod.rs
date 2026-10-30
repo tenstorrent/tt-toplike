@@ -1479,6 +1479,9 @@ fn run_app(
                                 host_mem_total,
                                 tt_filtered,
                                 remote_note,
+                                // The host loop does not make an inset yet.
+                                None,
+                                0.0,
                                 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                 &serving_metrics,
                             );
@@ -6042,6 +6045,84 @@ fn device_panels_height(devices: &[crate::models::Device], area_width: u16) -> u
     (row_count as u16) * (DEVICE_PANEL_H + 1) // panel + inter-row gap(1)
 }
 
+/// Width of the Die 3D inset drawn beside the process table, in columns.
+const INSET_W: u16 = 42;
+/// The least height the process panel needs before an inset is shown.
+const INSET_MIN_H: u16 = 14;
+/// The least width the process table keeps when an inset is shown. The
+/// inset appears only where the panel is at least `TABLE_MIN_W + INSET_W`
+/// (112) columns wide.
+const TABLE_MIN_W: u16 = 70;
+
+/// The devices whose chip panels the Insights screen draws: all of them, or
+/// the `FLEET_PAGE_SIZE` page that starts at `fleet_zoom_start` when zoomed.
+///
+/// The renderer and the host loop both size things from this slice (the
+/// panel height here, the inset's size in the loop), so the logic lives in
+/// one place.
+fn insights_panel_devices(
+    devices: &[crate::models::Device],
+    fleet_zoom_start: Option<usize>,
+) -> &[crate::models::Device] {
+    if let Some(start) = fleet_zoom_start {
+        // Clamp start: the device count can shrink beneath a stale zoom offset
+        // (backend swap via `b`/`/remote`, or a remote fleet losing a device),
+        // which would otherwise make `start > end` and panic on the slice.
+        let start = start.min(devices.len());
+        let end = (start + FLEET_PAGE_SIZE).min(devices.len());
+        &devices[start..end]
+    } else {
+        devices
+    }
+}
+
+/// The Insights screen's vertical split: header(3) | cards(exact height) |
+/// process panel (remainder).
+///
+/// Cards use Constraint::Length so they always get the exact height needed to
+/// show all chip panels (including a 2x2 grid when 4 chips don't fit in one row).
+/// The process panel takes whatever remains; it may be zero on very short
+/// terminals but the chip panels are never truncated.
+///
+/// The old toggle-able `[i]` Inference Servers strip that used to live here
+/// has been retired in favor of the dedicated full-screen
+/// `DisplayMode::InferenceMonitor` view (the unified serving snake - see
+/// `render_snake_view`), entered via `i`/`I`.
+fn insights_chunks(area: Rect, panel_devices: &[crate::models::Device]) -> [Rect; 3] {
+    let cards_h = device_panels_height(panel_devices, area.width);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(cards_h),
+            Constraint::Min(0),
+        ])
+        .split(area);
+    [chunks[0], chunks[1], chunks[2]]
+}
+
+/// Where the Die 3D inset goes on the Insights screen, or `None` when there
+/// is no room for it.
+///
+/// It takes the right `INSET_W` columns of the process panel, full height.
+/// The global status bar is drawn over the screen's last row, so that row is
+/// not counted. The panel (less the status row) must be at least
+/// `TABLE_MIN_W + INSET_W` wide, so the table keeps `TABLE_MIN_W` columns,
+/// and at least `INSET_MIN_H` tall.
+fn insights_inset_rect(area: Rect, panel_devices: &[crate::models::Device]) -> Option<Rect> {
+    let panel = insights_chunks(area, panel_devices)[2];
+    let height = panel.height.saturating_sub(STATUS_BAR_ROWS as u16);
+    if panel.width < TABLE_MIN_W + INSET_W || height < INSET_MIN_H {
+        return None;
+    }
+    Some(Rect {
+        x: panel.x + panel.width - INSET_W,
+        y: panel.y,
+        width: INSET_W,
+        height,
+    })
+}
+
 /// Render Insights screen (full layout: chip portraits + process panel).
 ///
 /// `portrait_particles` maps device index → live particle list, threaded through
@@ -6070,6 +6151,12 @@ fn render_insights(
     // See `remote_local_fallback_note`: `Some` under `--remote` while the
     // panel is still showing LOCAL processes rather than the remote box's.
     remote_note: Option<&'static str>,
+    // The Die 3D inset to draw beside the process table, with the clock
+    // (`inset_now`, seconds) its `render` takes. `render_insights` has no
+    // clock of its own. `None`, or too little room (see
+    // `insights_inset_rect`), leaves the screen as it was.
+    inset: Option<&crate::animation::Die3dView>,
+    inset_now: f64,
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
 ) {
@@ -6077,37 +6164,9 @@ fn render_insights(
     let devices = backend.devices();
 
     // When zoomed in, the panel height is based on the slice, not the full list.
-    let panel_devices: &[crate::models::Device] = if let Some(start) = fleet_zoom_start {
-        // Clamp start: the device count can shrink beneath a stale zoom offset
-        // (backend swap via `b`/`/remote`, or a remote fleet losing a device),
-        // which would otherwise make `start > end` and panic on the slice.
-        let start = start.min(devices.len());
-        let end = (start + FLEET_PAGE_SIZE).min(devices.len());
-        &devices[start..end]
-    } else {
-        devices
-    };
+    let panel_devices = insights_panel_devices(devices, fleet_zoom_start);
 
-    // Layout: header(3) | cards(exact height) | process panel (remainder)
-    //
-    // Cards use Constraint::Length so they always get the exact height needed to
-    // show all chip panels (including a 2×2 grid when 4 chips don't fit in one row).
-    // The process panel takes whatever remains; it may be zero on very short
-    // terminals but the chip panels are never truncated.
-    //
-    // The old toggle-able `[i]` Inference Servers strip that used to live here
-    // has been retired in favor of the dedicated full-screen
-    // `DisplayMode::InferenceMonitor` view (the unified serving snake — see
-    // `render_snake_view`), entered via `i`/`I`.
-    let cards_h = device_panels_height(panel_devices, area.width);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(cards_h),
-            Constraint::Min(0),
-        ])
-        .split(area);
+    let chunks = insights_chunks(area, panel_devices);
 
     render_header(f, chunks[0], backend);
     render_device_panels(
@@ -6119,9 +6178,15 @@ fn render_insights(
         fleet_cursor,
         fleet_zoom_start,
     );
+    // With an inset and room for it, the table gives up the rect's columns.
+    let inset_rect = inset.and_then(|_| insights_inset_rect(area, panel_devices));
+    let table_area = Rect {
+        width: chunks[2].width - inset_rect.map_or(0, |r| r.width),
+        ..chunks[2]
+    };
     render_process_panel(
         f,
-        chunks[2],
+        table_area,
         rows,
         cursor,
         kill_confirm,
@@ -6133,6 +6198,16 @@ fn render_insights(
         #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
         serving_metrics,
     );
+    if let (Some(view), Some(rect)) = (inset, inset_rect) {
+        // Reset, not black, as in `ui_die3d`: the view leaves unpainted
+        // cells to the terminal's own colour.
+        let widget = Paragraph::new(view.render(inset_now)).style(
+            Style::default()
+                .fg(ratatui::style::Color::Reset)
+                .bg(ratatui::style::Color::Reset),
+        );
+        f.render_widget(widget, rect);
+    }
     // Kill modal overlays the full screen when active
     if let Some(ref kc) = kill_confirm {
         render_kill_dialog(f, area, kc);
@@ -10237,6 +10312,8 @@ pub fn run_render_bench(
                     0,
                     false,
                     None,
+                    None,
+                    0.0,
                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                     &std::collections::HashMap::new(),
                 );
@@ -11574,5 +11651,276 @@ mod reset_statusbar_tests {
                 draw_bar(&b, w, None, hints);
             }
         }
+    }
+}
+
+/// Tests for the Insights layout helpers and the inset drawn beside the
+/// process table.
+#[cfg(test)]
+mod insights_inset_tests {
+    use super::*;
+    use crate::models::{Device, SmbusTelemetry, Telemetry};
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::widgets::Widget;
+    use ratatui::Terminal;
+    use std::hash::{Hash, Hasher};
+
+    /// A backend with fixed values. The mock backend draws OS-seeded noise,
+    /// which would change a pinned buffer hash from run to run.
+    struct Fixed {
+        devices: Vec<Device>,
+        telem: Vec<Telemetry>,
+        smbus: SmbusTelemetry,
+    }
+
+    impl Fixed {
+        /// `n` p300 boards at a steady 80 W.
+        fn new(n: usize) -> Fixed {
+            let devices: Vec<Device> = (0..n)
+                .map(|i| {
+                    Device::new(
+                        i,
+                        "p300".to_string(),
+                        format!("0000:{:02x}:00.0", i + 1),
+                        format!("(0,{i})"),
+                    )
+                })
+                .collect();
+            let telem = devices
+                .iter()
+                .map(|_| {
+                    let mut t = Telemetry::new();
+                    t.power = Some(80.0);
+                    t
+                })
+                .collect();
+            Fixed {
+                devices,
+                telem,
+                smbus: SmbusTelemetry::new(),
+            }
+        }
+    }
+
+    impl TelemetryBackend for Fixed {
+        fn init(&mut self) -> crate::error::BackendResult<()> {
+            Ok(())
+        }
+        fn update(&mut self) -> crate::error::BackendResult<()> {
+            Ok(())
+        }
+        fn devices(&self) -> &[Device] {
+            &self.devices
+        }
+        fn telemetry(&self, i: usize) -> Option<&Telemetry> {
+            self.telem.get(i)
+        }
+        fn smbus_telemetry(&self, _i: usize) -> Option<&SmbusTelemetry> {
+            Some(&self.smbus)
+        }
+        fn backend_info(&self) -> String {
+            "fixed".into()
+        }
+    }
+
+    /// A few fixed process rows.
+    fn proc_rows() -> Vec<crate::workload::ProcRow> {
+        (0..4)
+            .map(|i| crate::workload::ProcRow {
+                pid: 1000 + i,
+                name: format!("proc-{i}"),
+                cpu_pct: 10.0 * i as f32,
+                mem_bytes: 1 << 28,
+                inference: None,
+                active: false,
+                tt: None,
+            })
+            .collect()
+    }
+
+    /// Hash of every cell's symbol and style.
+    fn buffer_hash(buf: &Buffer) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for c in buf.content() {
+            c.symbol().hash(&mut h);
+            format!("{:?}{:?}{:?}", c.fg, c.bg, c.modifier).hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Draw Insights for `n` devices into a `w` x `h` terminal, zoomed to
+    /// the page at `zoom`, with `inset` beside the process table when given.
+    fn draw(
+        w: u16,
+        h: u16,
+        n: usize,
+        zoom: Option<usize>,
+        inset: Option<&crate::animation::Die3dView>,
+    ) -> Buffer {
+        let backend = Fixed::new(n);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let rows = proc_rows();
+        let cli = crate::cli::Cli::bench_default();
+        let particles = std::collections::HashMap::new();
+        let baseline = crate::animation::baseline::AdaptiveBaseline::new();
+        term.draw(|f| {
+            render_insights(
+                f,
+                &backend,
+                &rows,
+                0,
+                None,
+                &cli,
+                &particles,
+                &baseline,
+                0,
+                zoom,
+                12.5,
+                1 << 30,
+                1 << 33,
+                false,
+                None,
+                inset,
+                0.0,
+                #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+                &std::collections::HashMap::new(),
+            );
+        })
+        .unwrap();
+        term.backend().buffer().clone()
+    }
+
+    /// The inset rect for `n` devices at `w` x `h`, as the helper gives it.
+    fn rect_for(w: u16, h: u16, n: usize, zoom: Option<usize>) -> Option<Rect> {
+        let backend = Fixed::new(n);
+        let panel = insights_panel_devices(&backend.devices, zoom);
+        insights_inset_rect(Rect::new(0, 0, w, h), panel)
+    }
+
+    /// The row of `buf` at `y` as text, over columns `x0..x1`.
+    fn row_text(buf: &Buffer, y: u16, x0: u16, x1: u16) -> String {
+        (x0..x1).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn the_inset_rect_needs_112_by_14() {
+        let r = rect_for(150, 42, 2, None).expect("two chips at 150 x 42 fit an inset");
+        assert_eq!(r.width, INSET_W);
+        assert_eq!(r.x + r.width, 150, "the rect sits on the right edge");
+        assert!(r.height >= INSET_MIN_H);
+        assert!(
+            rect_for(150, 42, 4, None).is_none(),
+            "four chips leave the table under 14 rows"
+        );
+        assert!(
+            rect_for(111, 42, 2, None).is_none(),
+            "111 columns leave the table under 70"
+        );
+        assert!(rect_for(112, 42, 2, None).is_some());
+    }
+
+    #[test]
+    fn the_process_table_keeps_70_columns() {
+        let backend = Fixed::new(2);
+        for w in 112..=200u16 {
+            let area = Rect::new(0, 0, w, 42);
+            let chunks = insights_chunks(area, &backend.devices);
+            let inset = insights_inset_rect(area, &backend.devices)
+                .unwrap_or_else(|| panic!("no inset at width {w}"));
+            assert!(
+                chunks[2].width - inset.width >= TABLE_MIN_W,
+                "table is {} wide at width {w}",
+                chunks[2].width - inset.width
+            );
+        }
+    }
+
+    /// Check one state: the inset's glyphs lie in the helper's rect, and the
+    /// process table's text does not.
+    fn check_rect_matches(w: u16, h: u16, n: usize, zoom: Option<usize>) {
+        let backend = Fixed::new(n);
+        let r = rect_for(w, h, n, zoom).expect("this state has an inset");
+        let mut view = crate::animation::Die3dView::inset(r.width as usize, r.height as usize);
+        view.update(&backend, 0.0);
+        let with = draw(w, h, n, zoom, Some(&view));
+        let without = draw(w, h, n, zoom, None);
+
+        // The cards and header above the process panel are unchanged.
+        for y in 0..r.y {
+            assert_eq!(
+                row_text(&with, y, 0, w),
+                row_text(&without, y, 0, w),
+                "row {y} above the panel"
+            );
+        }
+        // Inside the rect, every cell is what the inset's lines draw there.
+        let mut expect = Buffer::empty(Rect::new(0, 0, r.width, r.height));
+        Paragraph::new(view.render(0.0)).render(expect.area, &mut expect);
+        let mut any_glyph = false;
+        for dy in 0..r.height {
+            for dx in 0..r.width {
+                let got = with[(r.x + dx, r.y + dy)].symbol();
+                assert_eq!(got, expect[(dx, dy)].symbol(), "inset cell ({dx},{dy})");
+                any_glyph |= got != " ";
+            }
+        }
+        assert!(any_glyph, "the inset drew something");
+        // The process table is left of the rect and its text stays there.
+        let mut found = false;
+        for y in r.y..r.y + r.height {
+            let left = row_text(&with, y, 0, r.x);
+            let right = row_text(&with, y, r.x, w);
+            found |= left.contains("proc-0");
+            assert!(!right.contains("proc-") && !right.contains("Processes"));
+        }
+        assert!(found, "process rows draw left of the rect");
+    }
+
+    #[test]
+    fn the_rect_matches_the_renderer() {
+        check_rect_matches(150, 42, 2, None);
+        check_rect_matches(112, 42, 2, None);
+        check_rect_matches(200, 50, 1, None);
+    }
+
+    #[test]
+    fn a_zoomed_slice_uses_the_slice_for_the_rect() {
+        // 40 devices zoomed to the last page of 2: the slice, not the fleet,
+        // sets the card height.
+        assert!(rect_for(150, 42, 40, Some(38)).is_some());
+        check_rect_matches(150, 42, 40, Some(38));
+        let backend = Fixed::new(40);
+        assert_eq!(insights_panel_devices(&backend.devices, Some(38)).len(), 2);
+        assert_eq!(insights_panel_devices(&backend.devices, Some(99)).len(), 0);
+        assert_eq!(insights_panel_devices(&backend.devices, None).len(), 40);
+    }
+
+    #[test]
+    fn the_fleet_view_gets_the_rect_the_renderer_uses() {
+        // 40 devices unzoomed draw the heat map, which is short, so the
+        // panel has room and the renderer must use the helper's rect.
+        assert!(rect_for(150, 42, 40, None).is_some());
+        check_rect_matches(150, 42, 40, None);
+        // Where the helper says there is no room, a view changes nothing.
+        assert!(rect_for(150, 42, 4, None).is_none());
+        let view = crate::animation::Die3dView::inset(42, 14);
+        assert_eq!(
+            buffer_hash(&draw(150, 42, 4, None, Some(&view))),
+            buffer_hash(&draw(150, 42, 4, None, None))
+        );
+    }
+
+    /// Buffer hashes taken on the code before `render_insights` was changed.
+    #[test]
+    fn no_inset_view_means_the_old_layout() {
+        assert_eq!(
+            buffer_hash(&draw(150, 42, 2, None, None)),
+            363425789546536760
+        );
+        assert_eq!(
+            buffer_hash(&draw(120, 40, 4, None, None)),
+            12509307249848498318
+        );
     }
 }
