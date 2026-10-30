@@ -556,22 +556,28 @@ fn pixel_rank(x: usize, y: usize, seed: u32) -> f32 {
 /// Panics if the two buffers differ in size: the view draws both frames into
 /// one area, so they never do.
 pub fn dissolve(old: &PixelBuf, new: &PixelBuf, progress: f32, seed: u32) -> PixelBuf {
+    let mut out = old.clone();
+    dissolve_into(&mut out, new, progress, seed);
+    out
+}
+
+/// [`dissolve`] written over `old` itself, for the view, which has no further
+/// use for the old frame and so saves copying it.
+pub fn dissolve_into(old: &mut PixelBuf, new: &PixelBuf, progress: f32, seed: u32) {
     assert_eq!(
         (old.w, old.h),
         (new.w, new.h),
         "dissolve needs two frames of one size"
     );
-    let mut out = old.clone();
     for y in 0..old.h {
         for x in 0..old.w {
             if pixel_rank(x, y, seed) < progress {
                 let i = y * old.w + x;
-                out.rgb[i] = new.rgb[i];
-                out.cover[i] = new.cover[i];
+                old.rgb[i] = new.rgb[i];
+                old.cover[i] = new.cover[i];
             }
         }
     }
-    out
 }
 
 #[cfg(test)]

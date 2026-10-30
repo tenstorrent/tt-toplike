@@ -24,6 +24,28 @@ pub fn braille_char(mask: u8) -> char {
     char::from_u32(0x2800 + mask as u32).expect("braille block is valid unicode")
 }
 
+/// The UTF-8 bytes of all 256 braille characters, three bytes each, built at
+/// compile time. U+2800..=U+28FF all encode as `E2 A0..A3 80..BF`.
+static BRAILLE_UTF8: [u8; 256 * 3] = {
+    let mut out = [0u8; 256 * 3];
+    let mut m = 0;
+    while m < 256 {
+        let cp = 0x2800 + m as u32;
+        out[3 * m] = 0xE0 | (cp >> 12) as u8;
+        out[3 * m + 1] = 0x80 | ((cp >> 6) & 0x3F) as u8;
+        out[3 * m + 2] = 0x80 | (cp & 0x3F) as u8;
+        m += 1;
+    }
+    out
+};
+
+/// [`braille_char`] as a `&'static str`, so a cell's span can borrow its
+/// text instead of allocating a `String` for one character.
+pub fn braille_str(mask: u8) -> &'static str {
+    let i = mask as usize * 3;
+    std::str::from_utf8(&BRAILLE_UTF8[i..i + 3]).expect("the table holds valid UTF-8")
+}
+
 /// Perceptual brightness, same weights as the mockup.
 fn luma(c: [u8; 3]) -> f32 {
     0.3 * c[0] as f32 + 0.59 * c[1] as f32 + 0.11 * c[2] as f32
@@ -42,14 +64,17 @@ fn mean_rgb(px: &[[u8; 3]]) -> [u8; 3] {
 
 /// Append a cell, extending the previous span when the style is identical so a
 /// flat region becomes one span rather than one per cell.
-fn push_cell(spans: &mut Vec<Span<'static>>, text: char, style: Style) {
+///
+/// A new span borrows `text` (no allocation). Only a run of two or more cells
+/// of one style gets an owned `String`, once, when its second cell arrives.
+fn push_cell(spans: &mut Vec<Span<'static>>, text: &'static str, style: Style) {
     if let Some(last) = spans.last_mut() {
         if last.style == style {
-            last.content.to_mut().push(text);
+            last.content.to_mut().push_str(text);
             return;
         }
     }
-    spans.push(Span::styled(text.to_string(), style));
+    spans.push(Span::styled(text, style));
 }
 
 /// The transparent cell: a space on the terminal's own background, with no
@@ -71,69 +96,82 @@ fn transparent_style() -> Style {
 /// pixel is uncovered, and the mean of the covered non-dot pixels otherwise.
 /// A partly covered block always takes the dot form, because a flat fill would
 /// paint its uncovered pixels.
+///
+/// A cell's pixels are gathered into fixed arrays, so the conversion
+/// allocates per line (the span list), never per cell.
 pub fn to_braille_lines(buf: &PixelBuf) -> Vec<Line<'static>> {
-    debug_assert!(buf.w % 2 == 0 && buf.h % 4 == 0, "braille needs w%2==0, h%4==0");
+    debug_assert!(
+        buf.w % 2 == 0 && buf.h % 4 == 0,
+        "braille needs w%2==0, h%4==0"
+    );
     let mut lines = Vec::with_capacity(buf.h / 4);
     for cy in 0..buf.h / 4 {
-        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(buf.w / 2);
         for cx in 0..buf.w / 2 {
-            // Gather the block as (row, col, pixel, luma, covered).
-            let mut cell = [(0usize, 0usize, [0u8; 3], 0f32, false); 8];
+            // The block's pixels in dot order (row, then column): colour,
+            // luma (0 when uncovered) and coverage.
+            let mut px = [[0u8; 3]; 8];
+            let mut lum = [0f32; 8];
+            let mut cov = [false; 8];
             let mut n_covered = 0;
             for r in 0..4 {
+                let row = (cy * 4 + r) * buf.w + cx * 2;
                 for c in 0..2 {
-                    let (x, y) = (cx * 2 + c, cy * 4 + r);
-                    let covered = buf.covered(x, y);
-                    let p = buf.get(x, y);
-                    n_covered += covered as usize;
-                    cell[r * 2 + c] = (r, c, p, if covered { luma(p) } else { 0.0 }, covered);
+                    let i = r * 2 + c;
+                    px[i] = buf.rgb[row + c];
+                    cov[i] = buf.cover[row + c];
+                    n_covered += cov[i] as usize;
+                    lum[i] = if cov[i] { luma(px[i]) } else { 0.0 };
                 }
             }
             if n_covered == 0 {
-                push_cell(&mut spans, ' ', transparent_style());
+                push_cell(&mut spans, " ", transparent_style());
                 continue;
             }
-            let mean = cell.iter().map(|t| t.3).sum::<f32>() / 8.0;
-            let min = cell.iter().map(|t| t.3).fold(f32::MAX, f32::min);
-            let max = cell.iter().map(|t| t.3).fold(f32::MIN, f32::max);
+            let mean = lum.iter().sum::<f32>() / 8.0;
+            let min = lum.iter().copied().fold(f32::MAX, f32::min);
+            let max = lum.iter().copied().fold(f32::MIN, f32::max);
 
             if n_covered == 8 && max - min <= UNIFORM_LUMA_SPREAD {
-                let all: Vec<[u8; 3]> = cell.iter().map(|t| t.2).collect();
-                push_cell(&mut spans, ' ', Style::default().bg(color(mean_rgb(&all))));
+                push_cell(&mut spans, " ", Style::default().bg(color(mean_rgb(&px))));
                 continue;
             }
-            let (mut lit, mut dark) = (Vec::new(), Vec::new());
+            let (mut lit, mut n_lit) = ([[0u8; 3]; 8], 0);
+            let (mut dark, mut n_dark) = ([[0u8; 3]; 8], 0);
             let mut mask = 0u8;
-            for &(r, c, p, l, covered) in &cell {
-                if covered && l > mean {
-                    lit.push(p);
-                    mask |= DOT_BIT[r][c];
-                } else if covered {
-                    dark.push(p);
+            for i in 0..8 {
+                if cov[i] && lum[i] > mean {
+                    lit[n_lit] = px[i];
+                    n_lit += 1;
+                    mask |= DOT_BIT[i / 2][i % 2];
+                } else if cov[i] {
+                    dark[n_dark] = px[i];
+                    n_dark += 1;
                 }
             }
-            if lit.is_empty() {
+            if n_lit == 0 {
                 // Only reachable when the covered pixels are all pure black
                 // beside uncovered ones: nothing is above the mean. Draw them
                 // all as dots rather than fabricate a split.
-                for &(r, c, p, _, covered) in &cell {
-                    if covered {
-                        lit.push(p);
-                        mask |= DOT_BIT[r][c];
+                for i in 0..8 {
+                    if cov[i] {
+                        lit[n_lit] = px[i];
+                        n_lit += 1;
+                        mask |= DOT_BIT[i / 2][i % 2];
                     }
                 }
-                dark.clear();
+                n_dark = 0;
             }
             // Fully covered: the spread exceeds 14, so some pixel is above the
             // mean and some is not, and `dark` is non-empty. Partly covered:
             // `dark` is empty exactly when every non-dot pixel is uncovered.
-            let bg = if dark.is_empty() {
+            let bg = if n_dark == 0 {
                 Color::Reset
             } else {
-                color(mean_rgb(&dark))
+                color(mean_rgb(&dark[..n_dark]))
             };
-            let style = Style::default().fg(color(mean_rgb(&lit))).bg(bg);
-            push_cell(&mut spans, braille_char(mask), style);
+            let style = Style::default().fg(color(mean_rgb(&lit[..n_lit]))).bg(bg);
+            push_cell(&mut spans, braille_str(mask), style);
         }
         lines.push(Line::from(spans));
     }
@@ -152,7 +190,7 @@ pub fn to_halfblock_lines(buf: &PixelBuf) -> Vec<Line<'static>> {
     debug_assert!(buf.h % 2 == 0, "half-block needs h%2==0");
     let mut lines = Vec::with_capacity(buf.h / 2);
     for cy in 0..buf.h / 2 {
-        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(buf.w);
         for x in 0..buf.w {
             let (up, down) = (cy * 2, cy * 2 + 1);
             match (buf.covered(x, up), buf.covered(x, down)) {
@@ -160,21 +198,21 @@ pub fn to_halfblock_lines(buf: &PixelBuf) -> Vec<Line<'static>> {
                     let style = Style::default()
                         .fg(color(buf.get(x, up)))
                         .bg(color(buf.get(x, down)));
-                    push_cell(&mut spans, '▀', style);
+                    push_cell(&mut spans, "▀", style);
                 }
                 (true, false) => push_cell(
                     &mut spans,
-                    '▀',
+                    "▀",
                     Style::default().fg(color(buf.get(x, up))).bg(Color::Reset),
                 ),
                 (false, true) => push_cell(
                     &mut spans,
-                    '▄',
+                    "▄",
                     Style::default()
                         .fg(color(buf.get(x, down)))
                         .bg(Color::Reset),
                 ),
-                (false, false) => push_cell(&mut spans, ' ', transparent_style()),
+                (false, false) => push_cell(&mut spans, " ", transparent_style()),
             }
         }
         lines.push(Line::from(spans));
@@ -194,6 +232,13 @@ mod tests {
     fn braille_char_covers_the_empty_and_full_patterns() {
         assert_eq!(braille_char(0x00), '\u{2800}');
         assert_eq!(braille_char(0xFF), '⣿');
+    }
+
+    #[test]
+    fn braille_str_is_braille_char_for_every_mask() {
+        for m in 0..=255u8 {
+            assert_eq!(braille_str(m), braille_char(m).to_string(), "{m:#x}");
+        }
     }
 
     #[test]

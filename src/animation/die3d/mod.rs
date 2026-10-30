@@ -22,6 +22,8 @@ pub mod cells;
 pub mod layout;
 pub mod load;
 pub mod palette;
+#[cfg(test)]
+mod perf_tests;
 pub mod raster;
 pub mod scene;
 pub mod super_scene;
@@ -33,7 +35,7 @@ pub mod triggers;
 use crate::animation::topology::BoardTopology;
 use crate::backend::TelemetryBackend;
 use crate::models::Architecture;
-use camera::{dissolve, scramble, Camera, Director, TransitionKind};
+use camera::{dissolve_into, scramble, Camera, Director, TransitionKind};
 use load::LoadScale;
 use palette::GRAYSKULL;
 use raster::{Iso, PixelBuf};
@@ -43,6 +45,7 @@ use scene::{
     board_band_origin, board_grid, chip_inputs, die_centre, draw_board_scene, fit_pixels,
     has_per_tile_data, ChipInputs, Detail, SceneFit, ESTIMATE_LABEL, MIN_CELLS,
 };
+use std::cell::RefCell;
 use std::collections::HashMap;
 use super_scene::{band_origin, draw_super_scene, super_grid};
 use switching::{Scene, Switcher};
@@ -73,6 +76,20 @@ const ACTION_KEYS: &str = "[ ] board \u{b7} c cut \u{b7} 3 leave";
 const SEP: &str = " \u{b7} ";
 /// Characters the footer's left bar takes (`╚═ ` and `║ `).
 const BAR_WIDTH: usize = 3;
+/// Least view time between two frames `render` draws while no transition
+/// runs: 20 frames a second. The scene's own motion (the heat wave, the
+/// packets) reads as smooth at that rate, and every frame drawn changes
+/// hundreds of truecolour cells that a slow terminal must repaint.
+const STEADY_FRAME_SECS: f64 = 1.0 / 20.0;
+/// The same during a cut's transition: 30 frames a second, so a spin or a
+/// dissolve stays smooth.
+const TRANSITION_FRAME_SECS: f64 = 1.0 / 30.0;
+/// How early a frame may come. The TUI asks for a frame every 16 ms or a
+/// little more, so a frame due after exactly 1/30 s (two of its ticks) or
+/// 1/20 s (three) would, with a tick a fraction of a millisecond short,
+/// slip to the tick after and run at 21 or 16 frames a second instead. With
+/// this allowance a frame is drawn once the interval less 5 ms has passed.
+const FRAME_EARLY_SECS: f64 = 0.005;
 
 /// One switch of the view, as the footer shows it: the key that flips it and
 /// what it is set to now.
@@ -204,9 +221,9 @@ struct Placement {
 
 /// The Die 3D view.
 ///
-/// Holds no pixel buffers between frames: `render` allocates one sized to the
-/// terminal each time. The TUI rebuilds the view on a resize, so `new` must
-/// stay cheap and nothing may outlive the size it was made for.
+/// Keeps its pixel buffers, sizing results and last frame between frames
+/// (see [`RenderCache`]). The TUI rebuilds the view on a resize, so `new`
+/// must stay cheap and nothing may outlive the size it was made for.
 pub struct Die3dView {
     cols: usize,
     rows: usize,
@@ -233,7 +250,41 @@ pub struct Die3dView {
     /// power-over-limit load from `chip_inputs` once it has enough samples;
     /// see `load` for why.
     scales: HashMap<usize, LoadScale>,
+    /// Counts changes `render` must show at once: every key, and every
+    /// update that changes which boards, chips or other devices there are.
+    /// A frame drawn under another revision is never reused.
+    revision: u64,
+    /// What `render` keeps from one frame to the next; see [`RenderCache`].
+    cache: RefCell<RenderCache>,
 }
+
+/// What the view keeps between frames so that a frame costs less to make
+/// and to send. It lives and dies with the view: the TUI makes a new view on
+/// every terminal resize, so nothing here outlives the size it was made for.
+#[derive(Default)]
+struct RenderCache {
+    /// `fit_pixels` results by (pixel width, pixel height, grid).
+    fits: HashMap<(i32, i32, (usize, usize)), Option<SceneFit>>,
+    /// Pixel buffers kept for the next frame.
+    spare: Vec<PixelBuf>,
+    /// The last frame `render` drew, returned again until it is due for
+    /// another (see `render`).
+    last: Option<LastFrame>,
+}
+
+/// A frame `render` drew, with the view time it was drawn for and what it
+/// was drawn from.
+struct LastFrame {
+    at: f64,
+    key: FrameKey,
+    lines: Vec<Line<'static>>,
+}
+
+/// What a frame was drawn from besides the time: the view's revision, the
+/// start of the latest cut, whether its transition is running and the scene
+/// shown. A frame is reused only while all four are unchanged, so a key, a
+/// cut starting or ending or a scene switch shows in the very next frame.
+type FrameKey = (u64, Option<f64>, bool, Scene);
 
 impl Die3dView {
     /// A view for a terminal of `cols` x `rows` cells, in braille, showing
@@ -261,6 +312,8 @@ impl Die3dView {
             chips: Vec::new(),
             undrawn: Vec::new(),
             scales: HashMap::new(),
+            revision: 0,
+            cache: RefCell::new(RenderCache::default()),
         }
     }
 
@@ -271,6 +324,7 @@ impl Die3dView {
     /// Only Blackhole chips are drawn, so only they can trigger a cut; other
     /// devices are listed in the footer instead.
     pub fn update(&mut self, backend: &dyn TelemetryBackend, now: f64) {
+        let before = self.layout_signature();
         let devices = backend.devices();
         let topology = BoardTopology::from_devices(devices);
         self.undrawn = devices
@@ -294,6 +348,12 @@ impl Die3dView {
             }
         }
         self.calibrate_loads(now);
+        // A board, chip or device that came or went shows in the next frame.
+        // Readings that only change (power, PCIe rates) wait for the next
+        // frame that is due anyway.
+        if self.layout_signature() != before {
+            self.revision += 1;
+        }
 
         let boards = self.chips.len();
         // Commit a switch whose midpoint has passed before judging new
@@ -312,6 +372,19 @@ impl Die3dView {
             }
         }
         self.switcher.expire(now);
+    }
+
+    /// What is drawn where: the board labels, the device index of every
+    /// drawn chip by board, and the devices not drawn.
+    fn layout_signature(&self) -> (Vec<String>, Vec<Vec<usize>>, Vec<(usize, Architecture)>) {
+        (
+            self.labels.clone(),
+            self.chips
+                .iter()
+                .map(|b| b.iter().map(|c| c.index).collect())
+                .collect(),
+            self.undrawn.clone(),
+        )
     }
 
     /// Replace each chip's power-over-limit load with its load relative to
@@ -335,6 +408,8 @@ impl Die3dView {
     /// Act on a key. A scene chosen here (`[`, `]`, `m`) is the user's: the
     /// view will not switch back from it on its own.
     pub fn handle_key(&mut self, key: Die3dKey, now: f64) {
+        // Whatever the key does shows in the next frame.
+        self.revision += 1;
         let boards = self.chips.len();
         match key {
             Die3dKey::NextBoard | Die3dKey::PrevBoard => {
@@ -384,7 +459,43 @@ impl Die3dView {
     /// Below 100 x 30 cells this is a single hint line. With no Blackhole chip
     /// it is a hint line plus, when there are other devices, a line naming
     /// them.
+    ///
+    /// About 20 frames a second of view time are drawn, 30 during a cut's
+    /// transition ([`STEADY_FRAME_SECS`], [`TRANSITION_FRAME_SECS`], each
+    /// less [`FRAME_EARLY_SECS`]): called again sooner, `render` returns the
+    /// frame it drew last, unchanged, so the terminal has nothing to repaint.
+    /// The TUI calls it about 60 times a second. A key, a cut starting or
+    /// ending, a scene switch or a change in the boards drawn always gets a
+    /// fresh frame, and so does a `now` earlier than the last frame's.
     pub fn render(&self, now: f64) -> Vec<Line<'static>> {
+        let in_transition = self.director.progress(now).is_some();
+        let key = (
+            self.revision,
+            self.director.cut_at(),
+            in_transition,
+            self.switcher.scene_at(now),
+        );
+        let interval = if in_transition {
+            TRANSITION_FRAME_SECS
+        } else {
+            STEADY_FRAME_SECS
+        };
+        if let Some(last) = &self.cache.borrow().last {
+            if last.key == key && now >= last.at && now - last.at < interval - FRAME_EARLY_SECS {
+                return last.lines.clone();
+            }
+        }
+        let lines = self.draw(now);
+        self.cache.borrow_mut().last = Some(LastFrame {
+            at: now,
+            key,
+            lines: lines.clone(),
+        });
+        lines
+    }
+
+    /// A fresh frame at `now`, as [`render`](Self::render) describes it.
+    fn draw(&self, now: f64) -> Vec<Line<'static>> {
         if self.cols < MIN_CELLS.0 || self.rows < MIN_CELLS.1 {
             return vec![hint(self.too_small_hint())];
         }
@@ -398,19 +509,25 @@ impl Die3dView {
             ];
         }
         let scene_rows = self.rows - FOOTER_ROWS;
-        let frame = self.frame(now);
-        let mut lines = match &frame {
-            Some((buf, ..)) if self.braille => cells::to_braille_lines(buf),
-            Some((buf, ..)) => cells::to_halfblock_lines(buf),
-            None => vec![hint(no_fit_hint(self.braille).into())],
+        let (mut lines, frame) = match self.frame(now) {
+            Some((buf, shown, placed)) => {
+                let lines = if self.braille {
+                    cells::to_braille_lines(&buf)
+                } else {
+                    cells::to_halfblock_lines(&buf)
+                };
+                self.give_back(buf);
+                (lines, Some((shown, placed)))
+            }
+            None => (vec![hint(no_fit_hint(self.braille).into())], None),
         };
         lines.resize(scene_rows, Line::default());
-        lines.extend(self.footer(now, frame.as_ref().map(|f| f.1)));
+        lines.extend(self.footer(now, frame.as_ref().map(|f| f.0)));
         // The labels go over the converted cells, placed with the projection
         // the frame was drawn with. While a transition runs the picture is
         // noise, a mix of two frames or turning, so no label could stay on
         // its die: they wait for it to end.
-        if let Some((_, _, Some(placed))) = &frame {
+        if let Some((_, Some(placed))) = &frame {
             if self.show_labels && self.director.progress(now).is_none() {
                 let anchors = self.label_anchors(placed, scene_rows);
                 draw_labels(
@@ -462,7 +579,11 @@ impl Die3dView {
                 let shown = if swapped { new_shown } else { old_shown };
                 // One pixel order for the whole dissolve, from the cut's start.
                 let seed = self.director.cut_at().map_or(0, |t| (t * 1000.0) as u32);
-                Some((dissolve(&old, &new, p, seed), shown, None))
+                // Mixed into `old` in place; `new` goes back for reuse.
+                let mut mixed = old;
+                dissolve_into(&mut mixed, &new, p, seed);
+                self.give_back(new);
+                Some((mixed, shown, None))
             }
             (Some(TransitionKind::Spin), Some(p)) => {
                 let (from, to) = self.director.cameras();
@@ -530,11 +651,12 @@ impl Die3dView {
             (self.cols, scene_rows * 2)
         };
         let t = now as f32;
-        let mut buf = PixelBuf::new(pw, ph);
-        // The scenes paint only what stands in them. Transparent is the fresh,
-        // all-uncovered buffer, so it needs nothing; opaque fills the
-        // background first.
-        if !self.transparent {
+        // The scenes paint only what stands in them, so the buffer starts
+        // clear: all uncovered for transparent, filled black for opaque.
+        let mut buf = self.take_buf(pw, ph);
+        if self.transparent {
+            buf.clear_transparent();
+        } else {
             buf.fill_solid(OPAQUE_BG);
         }
         let mut fallback = false;
@@ -542,7 +664,7 @@ impl Die3dView {
         if scene == Scene::All && self.chips.len() > 1 {
             let dies: Vec<usize> = self.chips.iter().map(Vec::len).collect();
             let (grid, _) = super_grid(&dies);
-            match fit_pixels(pw as i32, ph as i32, grid) {
+            match self.fit_for(pw, ph, grid) {
                 Some(fit) => {
                     let (_, row_rows) = super_grid(&dies);
                     let fit = aim(&fit, aim_by, grid);
@@ -573,7 +695,7 @@ impl Die3dView {
         .min(self.chips.len().checked_sub(1)?);
         let chips = &self.chips[board];
         let grid = board_grid(chips.len());
-        let fit = aim(&fit_pixels(pw as i32, ph as i32, grid)?, aim_by, grid);
+        let fit = aim(&self.fit_for(pw, ph, grid)?, aim_by, grid);
         draw_board_scene(&mut buf, chips, &fit, t, Detail::Full);
         let shown = if fallback {
             Shown::Fallback(board)
@@ -590,6 +712,43 @@ impl Die3dView {
                 .collect(),
         };
         Some((buf, shown, placed))
+    }
+
+    /// A `pw` x `ph` pixel buffer for a scene: one kept from an earlier frame
+    /// when there is one of that size, else a new one. Its contents are
+    /// whatever was drawn last; the caller clears or fills it. Reuse saves
+    /// allocating (and the kernel zeroing) 190 kB or more each frame.
+    fn take_buf(&self, pw: usize, ph: usize) -> PixelBuf {
+        let mut cache = self.cache.borrow_mut();
+        match cache.spare.pop() {
+            Some(buf) if buf.w == pw && buf.h == ph => buf,
+            // Another size (`B` changes the pixel grid): let it go.
+            _ => PixelBuf::new(pw, ph),
+        }
+    }
+
+    /// Keep `buf` for a later frame. A dissolve uses two buffers at once and
+    /// every other frame one, so two are kept at most.
+    fn give_back(&self, buf: PixelBuf) {
+        let mut cache = self.cache.borrow_mut();
+        if cache.spare.len() < 2 {
+            cache.spare.push(buf);
+        }
+    }
+
+    /// [`fit_pixels`] for a `pw` x `ph` pixel buffer and `grid`, worked out
+    /// once per view and key. It samples 72 camera angles for each candidate
+    /// tile width, which cost about a tenth of a millisecond a frame when it
+    /// ran every frame. The result depends only on the key, so the cached
+    /// value is the one a fresh call returns.
+    fn fit_for(&self, pw: usize, ph: usize, grid: (usize, usize)) -> Option<SceneFit> {
+        let key = (pw as i32, ph as i32, grid);
+        *self
+            .cache
+            .borrow_mut()
+            .fits
+            .entry(key)
+            .or_insert_with(|| fit_pixels(key.0, key.1, grid))
     }
 
     /// The two footer rows: what is shown and how, then the keys. A left bar
@@ -1274,10 +1433,12 @@ mod tests {
         let all: Vec<ChipInputs> = v.chips.concat();
         assert!(!has_per_tile_data(&all));
         assert!(footer(&v.render(0.0)).contains(ESTIMATE_LABEL));
-        // Measured data on one chip: the label goes.
+        // Measured data on one chip: the label goes. At 0.1, past the 1/20 s
+        // for which `render` would return the frame it drew at 0.0: the data
+        // is set here directly, not through a key or a change of boards.
         v.chips[1][0].tile_flow = Some(HashMap::new());
         assert!(has_per_tile_data(&v.chips.concat()));
-        assert!(!footer(&v.render(0.0)).contains(ESTIMATE_LABEL));
+        assert!(!footer(&v.render(0.1)).contains(ESTIMATE_LABEL));
     }
 
     #[test]
