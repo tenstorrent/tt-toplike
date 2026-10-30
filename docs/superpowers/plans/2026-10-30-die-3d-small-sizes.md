@@ -170,3 +170,19 @@ Inputs the spec implies and no task's happy path exercises, most likely first:
 - [ ] **Step 3:** Bump to 0.13.22 in the five places (`Cargo.toml`, `Cargo.lock`, `QUICK_START.md`, `site/index.html`, `debian/changelog`) and write the CHANGELOG, README (sizes, the ladder, the inset) and AGENTS.md entries. Sweep the prose for `, not `, `rather than`, `instead of`, `reads as`, `honest`, `the one`, `which is why`, `This is what`.
 - [ ] **Step 4:** Run `cargo fmt --all`, the CI-form clippy, and `cargo test --locked --lib --features tui`; all green, goldens unchanged (`git diff` shows no `GOLDEN_` or `OUTSIDE_PANEL_` line).
 - [ ] **Step 5:** Commit `feat(die3d): small sizes and an Insights inset (0.13.22)`.
+
+### Task 9: Widen the inset so a two-die board draws a scene
+
+Added during execution (ledger Ruling 10). The Task 8 measurements show a two-die board (`["p300"; 2]` in the test fake; p300 hardware has two dies per board) needs an inset of at least 51 x 16, and the inset was 42 wide, so p300 boards got the text summary at any height.
+
+**Files:** Modify `src/ui/tui/mod.rs` (the constants and their tests), `src/animation/die3d/perf_tests.rs` (sizes in the inset budget test and benchmark), the spec, README.md, CHANGELOG.md, `debian/changelog`, AGENTS.md.
+
+**Interfaces:**
+- `INSET_W: u16 = 52`, `INSET_MIN_H: u16 = 16`, `TABLE_MIN_W: u16 = 70` (so the inset shows only when the process area is at least 122 wide and 16 tall). Nothing else about `insights_inset_rect` changes.
+
+- [ ] **Step 1: Write failing tests.** Update `the_inset_rect_needs_112_by_14` to the new numbers under a new name `the_inset_rect_needs_122_by_16` (two chips at 150 x 42 gives `Some` with width 52; 121 wide gives `None`; a process area of 15 rows gives `None`); `the_process_table_keeps_70_columns` runs over widths 122 to 200. Add `a_two_die_board_draws_a_scene_in_the_inset` (die3d test): `Die3dView::inset(52, 16)` with boards `["p300"; 2]` renders braille scene glyphs and no summary line (the exact summary text for those chips is absent).
+- [ ] **Step 2:** Run them; confirm they fail (the rect tests fail on the old constants; the scene test passes or fails on what the code does today, and say which).
+- [ ] **Step 3:** Change the constants. Update the inset budget test and `inset_render_cost_report` to size the one-board p150 case and the new p300 two-die case at 52 x 16 (keep the 42 x 14 p150 row as a reference), re-measure, set the changed-cells ceilings at 1.25 times the measured values, and confirm the mean cost per frame is at most 0.3 ms.
+- [ ] **Step 4:** Run the lib tests and `backend_isolation`. Break check: put `INSET_W` back to 42 and watch `a_two_die_board_draws_a_scene_in_the_inset` or the rect test fail; restore.
+- [ ] **Step 5:** Update the spec (112 x 14 to 122 x 16, 42 to 52 columns, the 40 x 12 summary threshold unchanged), README, CHANGELOG, `debian/changelog`, AGENTS.md. State in the AGENTS.md entry that the width was chosen so a two-die board draws, with the measured 51 x 16. Plain-English sweep as before.
+- [ ] **Step 6:** Commit `feat(tui): widen the Insights inset so two-die boards draw a scene`.
