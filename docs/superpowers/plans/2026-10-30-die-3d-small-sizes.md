@@ -4,7 +4,7 @@
 
 **Goal:** The Die 3D view draws a useful picture below 100 x 30, and a small live scene sits beside the process table on the Insights screen.
 
-**Architecture:** A pure function maps the view's area to a `Tier` (footer rows, clouds, flags). `Die3dView::draw` uses it in place of the single 100 x 30 gate, and falls back to a text summary when no scene fits. The inset is a second `Die3dView` built with an inset layout (one caption row instead of the footer, clouds, history and flags off, scene fixed to "all boards that fit, else the busiest board"). The host loop owns it and `render_insights` splits the process panel's area to draw it.
+**Architecture:** A pure function maps the view's area to a `Tier` (footer rows, clouds, flags). `Die3dView::draw` uses it in place of the single 100 x 30 gate, and falls back to a text summary when no scene fits. The inset is a second `Die3dView` built with an inset layout (one caption row in place of the footer, with clouds, history and flags off, scene fixed to "all boards that fit, else the busiest board"). The host loop owns it and `render_insights` splits the process panel's area to draw it.
 
 **Tech Stack:** Rust, ratatui 0.30, the `die3d` module (`mod.rs`, `scene.rs`, `super_scene.rs`, `switching.rs`) and `src/ui/tui/mod.rs`.
 
@@ -71,7 +71,7 @@ Inputs the spec implies and no task's happy path exercises, most likely first:
 - Produces: `Die3dView::tier(&self) -> Tier` (private), and `footer` returning `Vec<Line<'static>>` of `tier.footer_rows` lines.
 
 - [ ] **Step 1: Write failing tests** in `mod.rs` tests:
-  - `below_100_by_30_a_scene_is_drawn`: a view at 80 x 24 (one `p150`, `Fake` backend, `update` once) renders lines whose scene rows contain a braille glyph, not the "needs a terminal" hint.
+  - `below_100_by_30_a_scene_is_drawn`: a view at 80 x 24 (one `p150`, `Fake` backend, `update` once) renders lines whose scene rows contain a braille glyph, and none is the "needs a terminal" hint.
   - `clouds_are_off_below_100_by_30`: with `show_clouds` on, the frame at 99 x 40 equals the frame with `ToggleClouds` pressed.
   - `the_footer_is_one_row_then_none`: line counts equal `rows` at 99 x 40 (last line is the status line), 59 x 40 (last line is scene).
   - `flags_are_off_below_60_by_16`: at 59 x 40 no cell holds `●`.
