@@ -6152,12 +6152,12 @@ fn device_panels_height(devices: &[crate::models::Device], area_width: u16) -> u
 }
 
 /// Width of the Die 3D inset drawn beside the process table, in columns.
-const INSET_W: u16 = 42;
+const INSET_W: u16 = 52;
 /// The least height the process panel needs before an inset is shown.
-const INSET_MIN_H: u16 = 14;
+const INSET_MIN_H: u16 = 16;
 /// The least width the process table keeps when an inset is shown. The
 /// inset appears only where the panel is at least `TABLE_MIN_W + INSET_W`
-/// (112) columns wide.
+/// (122) columns wide.
 const TABLE_MIN_W: u16 = 70;
 
 /// The devices whose chip panels the Insights screen draws: all of them, or
@@ -11910,26 +11910,38 @@ mod insights_inset_tests {
     }
 
     #[test]
-    fn the_inset_rect_needs_112_by_14() {
+    fn the_inset_rect_needs_122_by_16() {
         let r = rect_for(150, 42, 2, None).expect("two chips at 150 x 42 fit an inset");
+        assert_eq!(r.width, 52);
         assert_eq!(r.width, INSET_W);
         assert_eq!(r.x + r.width, 150, "the rect sits on the right edge");
         assert!(r.height >= INSET_MIN_H);
         assert!(
             rect_for(150, 42, 4, None).is_none(),
-            "four chips leave the table under 14 rows"
+            "four chips leave the table under 16 rows"
         );
         assert!(
-            rect_for(111, 42, 2, None).is_none(),
-            "111 columns leave the table under 70"
+            rect_for(121, 42, 2, None).is_none(),
+            "121 columns leave the table under 70"
         );
-        assert!(rect_for(112, 42, 2, None).is_some());
+        assert!(rect_for(122, 42, 2, None).is_some());
+        // Height: find the shortest screen that has an inset for two chips;
+        // the process area there is exactly 16 rows (after the status row).
+        let min_h = (10..=60u16)
+            .find(|&h| rect_for(150, h, 2, None).is_some())
+            .expect("some height has an inset");
+        let r = rect_for(150, min_h, 2, None).unwrap();
+        assert_eq!(r.height, 16, "the least inset height is 16");
+        assert!(
+            rect_for(150, min_h - 1, 2, None).is_none(),
+            "15 rows give no inset"
+        );
     }
 
     #[test]
     fn the_process_table_keeps_70_columns() {
         let backend = Fixed::new(2);
-        for w in 112..=200u16 {
+        for w in 122..=200u16 {
             let area = Rect::new(0, 0, w, 42);
             let chunks = insights_chunks(area, &backend.devices);
             let inset = insights_inset_rect(area, &backend.devices)
@@ -11986,7 +11998,7 @@ mod insights_inset_tests {
     #[test]
     fn the_rect_matches_the_renderer() {
         check_rect_matches(150, 42, 2, None);
-        check_rect_matches(112, 42, 2, None);
+        check_rect_matches(122, 42, 2, None);
         check_rect_matches(200, 50, 1, None);
     }
 
@@ -12010,7 +12022,7 @@ mod insights_inset_tests {
         check_rect_matches(150, 42, 40, None);
         // Where the helper says there is no room, a view changes nothing.
         assert!(rect_for(150, 42, 4, None).is_none());
-        let view = crate::animation::Die3dView::inset(42, 14);
+        let view = crate::animation::Die3dView::inset(52, 16);
         assert_eq!(
             buffer_hash(&draw(150, 42, 4, None, Some(&view))),
             buffer_hash(&draw(150, 42, 4, None, None))
@@ -12105,7 +12117,7 @@ mod insights_inset_tests {
             DisplayMode::Insights
         ));
         // The loop's hook, as written there.
-        let mut inset = Some(crate::animation::Die3dView::inset(42, 20));
+        let mut inset = Some(crate::animation::Die3dView::inset(52, 20));
         if leaves_insights(DisplayMode::Insights, DisplayMode::Grid) {
             inset = None;
         }
@@ -12123,7 +12135,7 @@ mod insights_inset_tests {
         assert!(!sync_inset(&mut none, rect, false));
         assert!(none.is_none());
         // An existing view is dropped when the chips go (backend swap).
-        let mut inset = Some(crate::animation::Die3dView::inset(42, 20));
+        let mut inset = Some(crate::animation::Die3dView::inset(52, 20));
         assert!(!sync_inset(&mut inset, rect, false));
         assert!(inset.is_none());
     }

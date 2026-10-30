@@ -6,11 +6,11 @@ tt-toplike (0.13.22) noble; urgency=medium
     to about 40 x 12. Below that the view shows a text summary with one line
     per chip.
   * Insights screen: a small Die 3D inset beside the process table when the
-    process area is at least 112 x 14. It shows one board, or every board
+    process area is at least 122 x 16 (the inset is 52 columns wide). It shows one board, or every board
     when they fit, or the busiest chip's board (held for 10 s) otherwise.
-    Key 3 opens the full view. It costs about 0.06 ms a frame at 42 x 14 for
-    p150 boards. A two-die board (p300) needs an inset 51 x 16 for its scene,
-    so in the 42-wide inset it shows the text summary.
+    Key 3 opens the full view. It costs about 0.06 ms a frame at 52 x 16 for
+    p150 boards and 0.11 ms for a two-die board (p300). A two-die board needs
+    an inset 51 x 16 for its scene, so the 52 x 16 inset draws it.
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 12:00:00 -0500
 

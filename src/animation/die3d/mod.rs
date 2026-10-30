@@ -4095,6 +4095,33 @@ mod tests {
         assert_eq!(t[..rows - 1], braille_text(&want)[..]);
     }
 
+    /// The Insights inset is 52 x 16. A two-die board (a p300; the fake's
+    /// "p300" is one die, so two of them) needs at least 51 x 16 for its
+    /// scene, so that inset draws the scene and not the text summary.
+    #[test]
+    fn a_two_die_board_draws_a_scene_in_the_inset() {
+        let b = Fake::boards(&["p300"; 2], Some(TDP));
+        assert!(inset_fits_all(52, 16, &[2]), "a 52 x 16 inset holds it");
+        let v = inset_over(&b, 52, 16, 3);
+        let (_, shown) = v.scene_pixels(3.0).expect("the scene fits");
+        // One board: its own scene (no fallback from a bigger one).
+        assert_eq!(shown, Shown::Board(0));
+        let t = text(&v.render(3.0));
+        assert_eq!(t.len(), 16);
+        let braille = t[..15]
+            .iter()
+            .flat_map(|r| r.chars())
+            .filter(|&c| ('\u{2801}'..='\u{28FF}').contains(&c))
+            .count();
+        assert!(braille > 0, "the scene draws braille glyphs");
+        // The summary draws a line per chip ("BH0  in .. out .."). Above the
+        // caption row, the scene rows hold no such text.
+        let scene = t[..15].concat();
+        assert!(!scene.contains("in ") && !scene.contains("out"), "{t:#?}");
+        // The last row is the caption, one line for the board.
+        assert!(t[15].starts_with("BH0+BH1"), "{t:#?}");
+    }
+
     #[test]
     fn the_inset_shows_the_busiest_board_when_all_do_not_fit() {
         let mut b = Fake::boards(&["p150"; 8], Some(TDP));

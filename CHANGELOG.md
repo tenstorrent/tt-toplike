@@ -22,12 +22,13 @@ list is a summary and is not kept for every release.
   footer drops to one row, then the flags go, and the scene shrinks down to about 40 x 12. Below
   that the view shows a text summary with one line per chip.
 - The Insights screen shows a small Die 3D inset beside the process table when the process
-  area is at least 112 wide and 14 tall. It shows one board's scene, or all boards when they
+  area is at least 122 wide and 16 tall. The inset is 52 columns wide. It shows one board's scene, or all boards when they
   fit, or the board of the busiest chip (by mean load, held for 10 s) otherwise. `3` opens the
-  full view. Measured in a release build: 0.056 ms a frame at 42 x 14 for one p150 board and 0.063 ms
-  for eight p150 boards (budget 0.3 ms); 0.083 ms and 0.059 ms at 42 x 22. About 27 cells change per
-  frame. A two-die board (p300) needs an inset at least 51 x 16 for its scene (0.108 ms a frame);
-  the inset is 42 wide, so with p300 boards it shows the text summary. A full Insights frame at 200 x 50 went from 0.18 ms to 0.27 ms with the inset.
+  full view. Measured in a release build at 52 x 16: 0.058 ms a frame for one p150 board and 0.058 ms
+  for eight p150 boards, and 0.110 ms for one two-die board (p300); the budget is 0.3 ms. About
+  27 cells change per frame for a p150 board and 53 for a two-die board. A two-die board needs an
+  inset at least 51 x 16 for its scene, so the 52 x 16 inset draws it. A full Insights frame at
+  200 x 50 went from 0.18 ms to 0.27 ms with the earlier 42-column inset; it was not re-measured.
 
 ### 0.13.21
 - The tile wave in the Die 3D view follows the direction of PCIe traffic. The connector is on

@@ -1660,14 +1660,28 @@ fn inset_changed_cells(cols: usize, rows: usize, boards: &[&str]) -> usize {
 
 #[test]
 fn inset_changed_cells_stay_within_budget() {
-    // Measured: 1578 changed cells over the 59 frame pairs of the two
-    // seconds (42 x 14 = 588 cells, so about 27 cells a frame).
-    // Ceiling: 1.25 x 1578 = 1972.5, rounded up to 1973.
-    const CEILING: usize = 1973;
-    let n = inset_changed_cells(42, 14, &["p150"]);
+    // The Insights inset is 52 x 16 (832 cells).
+    // One board (p150), measured: 1578 changed cells over the 59 frame pairs
+    // of the two seconds (about 27 cells a frame). It is also 1578 at the old
+    // 42 x 14. Ceiling: 1.25 x 1578 = 1972.5, rounded up to 1973.
+    const CEILING_ONE: usize = 1973;
+    let n = inset_changed_cells(52, 16, &["p150"]);
     assert!(
-        n <= CEILING,
-        "the one-board inset changed {n} cells in two seconds, ceiling {CEILING}"
+        n <= CEILING_ONE,
+        "the one-board inset changed {n} cells in two seconds, ceiling {CEILING_ONE}"
+    );
+    // One two-die board (the fake's "p300" is one die, so two), measured:
+    // 3128 changed cells over the same 59 frame pairs (about 53 a frame).
+    // Ceiling: 1.25 x 3128 = 3910.
+    const CEILING_TWO_DIE: usize = 3910;
+    let n = inset_changed_cells(52, 16, &["p300"; 2]);
+    assert!(
+        n > 0,
+        "the two-die board draws a scene, so something changes"
+    );
+    assert!(
+        n <= CEILING_TWO_DIE,
+        "the two-die inset changed {n} cells in two seconds, ceiling {CEILING_TWO_DIE}"
     );
 }
 
@@ -1676,23 +1690,30 @@ fn inset_changed_cells_stay_within_budget() {
 ///
 /// `cargo test --release --locked --lib --features tui inset_render_cost_report -- --ignored --nocapture`
 ///
-/// The spec's budget is 0.3 ms a frame or less at 42 x 14 for one board.
+/// The spec's budget is 0.3 ms a frame or less at 52 x 16 for one board and
+/// for one two-die board.
 #[test]
 #[ignore = "benchmark: run by hand in release"]
 fn inset_render_cost_report() {
     println!();
     println!("| boards | size | mean ms per frame | changed cells in 2 s |");
     println!("|---|---|---|---|");
-    // The fake's "p300" is one chip, so a p300 board is two of them. A p300 board needs an inset at least 51 x 16 for its scene
-    // (measured with `fit_pixels` over `board_grid(2)`); the Insights inset
-    // is 42 wide, so there it shows the text summary. Both are timed.
+    // The fake's "p300" is one chip, so a p300 board is two of them. A p300
+    // board needs an inset at least 51 x 16 for its scene (measured with
+    // `fit_pixels` over `board_grid(2)`). The Insights inset is 52 x 16, so
+    // it draws that scene. The 42 x 14 rows are the old inset size, kept as a
+    // reference (there a two-die board shows the text summary).
     for (label, boards, sizes) in [
-        ("1 (p150)", vec!["p150"], vec![(42usize, 14usize), (42, 22)]),
-        ("8 (p150 x 8)", vec!["p150"; 8], vec![(42, 14), (42, 22)]),
+        (
+            "1 (p150)",
+            vec!["p150"],
+            vec![(42usize, 14usize), (52, 16), (52, 22)],
+        ),
+        ("8 (p150 x 8)", vec!["p150"; 8], vec![(52, 16), (52, 22)]),
         (
             "1 board, 2 dies (p300 x 2)",
             vec!["p300"; 2],
-            vec![(42, 14), (51, 16)],
+            vec![(42, 14), (52, 16)],
         ),
     ] {
         let b = busy_fake(&boards);

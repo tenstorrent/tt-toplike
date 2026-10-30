@@ -75,7 +75,8 @@ used only in step 6, which shows less of the system.
 ## The inset
 
 - **Where.** The right part of the Insights process panel's area. It is shown only when the
-  area is at least 112 columns wide (a 70-column table plus a 42-column inset) and 14 rows high.
+  area is at least 122 columns wide (a 70-column table plus a 52-column inset) and 16 rows high.
+  The width and height are the least that draw a two-die board (51 x 16 measured), plus one column.
   Otherwise it is hidden and the process panel has the whole area, as today.
 - **What.** One board's scene, no footer, no clouds, no history, no flags. One caption row under
   the picture: the chip name and PCIe rates (`BH0 in 2.0G out 1.0M`) and the hint `3 = full view`.
@@ -91,16 +92,16 @@ used only in step 6, which shows less of the system.
   second `Die3dView` with a compact layout (no footer rows, the switches above fixed off).
 - **Rate.** Its own 20 frames a second cap, however often the host redraws. It reads the backend
   on the host's update tick, as the full view does.
-- **Budget.** At 42 x 14 cells the inset costs 0.3 ms per frame or less in a release build, and the
+- **Budget.** At 52 x 16 cells the inset costs 0.3 ms per frame or less in a release build, and the
   Insights screen's frame time rises by no more than that.
 - **Plumbing.** The host loop owns a second `Option<Die3dView>`, beside the full view's. It is
   created the first time the inset has room, and updated on the host's tick in the Insights arm
   only while the inset has room. `render_insights` receives it as an optional `&Die3dView`.
   `Die3dView::render` already caches its last frame and redraws no more often than
   `STEADY_FRAME_SECS`, so the 20 frames a second cap needs no cache of its own.
-- **Space.** The 112 x 14 threshold is the size of the process panel's area (the third chunk of
-  the Insights layout). The inset takes the right 42 columns of that area.
-  Its scene gets 13 rows and the caption 1. The process table keeps its own header and rows in
+- **Space.** The 122 x 16 threshold is the size of the process panel's area (the third chunk of
+  the Insights layout). The inset takes the right 52 columns of that area.
+  Its scene gets 15 rows and the caption 1. The process table keeps its own header and rows in
   the left part. The scene fits at 4 px tiles from 40 x 12.
 - **Board changes.** The view is kept when the board changes: camera, loads and calibration stay.
   The change uses the full view's board selection, and its transition plays.
@@ -147,5 +148,5 @@ represented inside `Die3dView`, and the wording of the caption.
 - Shrink the scene to fit, and crop only in step 6.
 - The text summary as the last step, where today there is a refusal line.
 - The inset shows every board when they fit and the busiest chip's board (10 s hold) when not, and has no keys of its own.
-- The 112 x 14 threshold for showing the inset.
+- The 122 x 16 threshold for showing the inset.
 - No flags in the inset, and none in the full view below about 60 x 16.

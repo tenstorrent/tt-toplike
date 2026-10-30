@@ -1447,7 +1447,8 @@ Decisions:
   its scene never changes on a trigger. When every board does not fit, it draws the busiest
   chip's board. Busiest is by mean load, and a new board must stay busiest for 10 s
   (`BUSIEST_HOLD_SECS`) before the inset changes to it.
-- The inset appears when the process area is at least 112 x 14 (`TABLE_MIN_W` 70 + `INSET_W` 42).
+- The inset appears when the process area is at least 122 x 16 (`TABLE_MIN_W` 70 + `INSET_W` 52, `INSET_MIN_H` 16).
+  The width was chosen so a two-die board draws a scene: it needs at least 51 x 16.
   It does not appear on the mock at 150 x 42: several rows of chip cards leave the process area
   too short. This is a limit, listed in the README.
 - `every_size_draws_without_overflow` and `flags_never_cover_a_drawn_cell_at_any_size` sweep
@@ -1455,16 +1456,18 @@ Decisions:
   kept under 30 s in a debug build.
 - An inset board change redraws at once with no cut transition.
 
-Costs (release build, `inset_render_cost_report`): 0.056 ms a frame at 42 x 14 for one p150 board,
-0.063 ms for eight p150 boards (the busiest board's scene); 0.083 ms and 0.059 ms at 42 x 22. The
-spec's budget was 0.3 ms. About 27 cells change per frame (1578 in two seconds; the test
-ceiling is 1973). A full Insights frame at 200 x 50 went from 0.18 ms to 0.27 ms with the inset,
-and from 0.13 ms to 0.21 ms at 150 x 42. The fake's "p300" is one chip, so a p300 board is two of them.
-A two-die board needs an inset at least 51 x 16 (measured with `fit_pixels` over `board_grid(2)`:
-50 x 16 and 51 x 15 do not fit); a single die fits at 42 x 14. The Insights inset is 42 wide, so
-with p300 boards it shows the text summary and no scene at any height (42 x 14 and 42 x 22
-measured). A scene at 51 x 16 costs 0.108 ms a frame, under the 0.3 ms budget. Widening the
-inset for two-die boards is a decision for later; the thresholds were not changed.
+Costs (release build, `inset_render_cost_report`) at the 52 x 16 inset: 0.058 ms a frame for one
+p150 board, 0.058 ms for eight p150 boards (the busiest board's scene), 0.110 ms for one two-die
+board (p300 x 2 in the fake). At 52 x 22: 0.060 ms and 0.061 ms. The spec's budget was 0.3 ms.
+About 27 cells change per frame for a p150 board (1578 in two seconds; the test ceiling is 1973)
+and 53 for a two-die board (3128; ceiling 3910, 1.25 times the measurement). A full Insights
+frame at 200 x 50 went from 0.18 ms to 0.27 ms with the earlier 42-column inset, and from 0.13 ms
+to 0.21 ms at 150 x 42; those were not re-measured at 52 columns.
+The fake's "p300" is one chip, so a p300 board is two of them. A two-die board needs an inset at
+least 51 x 16 (measured with `fit_pixels` over `board_grid(2)`: 50 x 16 and 51 x 15 do not fit),
+so the 52 x 16 inset draws its scene. The 40 x 12 threshold for the text summary in the full
+view is unchanged. The inset first shipped 42 wide, where p300 boards got the text summary; Task 9
+widened it (ledger Ruling 10).
 
 ### Die 3D traffic fronts (Oct 30 2026, v0.13.21)
 
