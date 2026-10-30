@@ -74,6 +74,14 @@ fn frame_hash(lines: &[Line<'static>]) -> u64 {
     h.0
 }
 
+/// The lines above the footer: the scene, the labels and the history panel.
+/// The golden hashes pin these. The footer is pinned by its own tests, so
+/// changing its words (which happens whenever a switch is renamed) does not
+/// move a hash that is about the picture.
+fn above_the_footer<'a>(lines: &'a [Line<'static>]) -> &'a [Line<'static>] {
+    &lines[..lines.len() - super::FOOTER_ROWS]
+}
+
 /// TDP the fakes report: 100 W, so a chip's load is its watts over 100 for
 /// the first seconds of view time.
 const TDP: &str = "100";
@@ -102,12 +110,9 @@ fn busy_fake(boards: &[&str]) -> Fake {
 /// itself, so these frames are the same with and without that quantisation
 /// and pin only what must not change at all: caching, reuse and throttling.
 ///
-/// With `clouds` off, the `W clouds off` entry is taken out of the footer's
-/// switch row before hashing: it is the one change to these frames since the
-/// pre-Task-16 hashes were taken, and without it they pin everything else
-/// exactly as before.
+/// Only the rows above the footer are hashed ([`above_the_footer`]).
 ///
-/// The history panel is off in all of them (see [`without_the_h_switch`]).
+/// The history panel is off in all of them.
 fn golden_frames(braille: bool, clouds: bool) -> Vec<(f64, u64)> {
     let b = busy_fake(&["p300"; 4]);
     let mut v = Die3dView::new(150, 42);
@@ -123,12 +128,8 @@ fn golden_frames(braille: bool, clouds: bool) -> Vec<(f64, u64)> {
     v.handle_key(Die3dKey::ToggleHistory, 0.0);
     let mut out = Vec::new();
     let mut shot = |v: &Die3dView, t: f64| {
-        let mut lines = v.render(t);
-        without_the_h_switch(&mut lines);
-        if !clouds {
-            without_the_w_switch(&mut lines);
-        }
-        out.push((t, frame_hash(&lines)))
+        let lines = v.render(t);
+        out.push((t, frame_hash(above_the_footer(&lines))))
     };
     shot(&v, 0.0);
     shot(&v, 2.75);
@@ -145,76 +146,44 @@ fn golden_frames(braille: bool, clouds: bool) -> Vec<(f64, u64)> {
     out
 }
 
-/// Remove `W clouds off` from the footer's switch row (the last line), which
-/// must hold it in its full form.
-fn without_the_w_switch(lines: &mut [Line<'static>]) {
-    let entry = format!("{SEP}W clouds off");
-    let row = lines.last_mut().expect("a footer");
-    let found = row
-        .spans
-        .iter_mut()
-        .find(|s| s.content.contains(&entry))
-        .expect("the switch row lists W clouds off");
-    found.content = found.content.replacen(&entry, "", 1).into();
-}
-
-/// Undo the `H history off` entry in the footer's switch row (the last
-/// line). At 150 columns that entry makes the full switch row with the
-/// action keys too wide, so the row falls back to the switches alone (the
-/// strip's designed first fallback). Without the entry the action keys fit
-/// again, so this puts them back in its place: the row is then exactly the
-/// one the older hashes were taken with. It asserts the row has that form,
-/// so it never edits a row it does not expect.
-fn without_the_h_switch(lines: &mut [Line<'static>]) {
-    let entry = format!("{SEP}H history off");
-    let row = lines.last_mut().expect("a footer");
-    assert_eq!(row.spans.len(), 1, "the switch row is one span");
-    let span = &mut row.spans[0];
-    assert!(
-        span.content.ends_with(&entry) && !span.content.contains(ACTION_KEYS),
-        "the switch row ends with H history off and has no action keys: {}",
-        span.content
-    );
-    let kept = &span.content[..span.content.len() - entry.len()];
-    span.content = format!("{kept}{SEP}{ACTION_KEYS}").into();
-}
-
-/// The hashes of `golden_frames` with the clouds off, taken from the view as
-/// committed before Task 16 (03cd98e5), with this same code.
+/// The hashes of `golden_frames` with the clouds off: the rows above the footer.
+/// Re-pinned when the footer's keys became slash commands (0.14.0): the same
+/// code at the commit before it hashes these rows to exactly these values, so
+/// the picture is unchanged and only footer words moved.
 const GOLDEN_BRAILLE: [u64; 6] = [
-    0x2986518cca24febf,
-    0xf31bd5353d149293,
-    0x7374dc6b8f6454cb,
-    0x78790cc5c7ea94ce,
-    0x77214920d02c103f,
-    0x5068456b0541e0f0,
+    0x7f9e92b285d8102f,
+    0x11d74e1d2ff91d53,
+    0xf9a1db02097eab3a,
+    0x70ec88f7187bd71c,
+    0x506aec3a3f1d396,
+    0x3d1ca8055460e258,
 ];
 const GOLDEN_HALFBLOCK: [u64; 6] = [
-    0xb3aa9a6ab9e78526,
-    0xa240806610ec0248,
-    0x700aa9051effa7ef,
-    0xe0f796d0499f3332,
-    0x5d0efbebb7fab01a,
-    0xa055648a1a0d290b,
+    0x1b4459921526dfff,
+    0x65466bbf22e9d2fd,
+    0x24876e6a612337bf,
+    0xf843a854483bcf35,
+    0x4723f11356c43bae,
+    0xbf184e03ee61ae96,
 ];
 
 /// The hashes of `golden_frames` with the clouds on, pinned when the clouds
 /// were added (Task 17), so a later change to how they look or move is seen.
 const GOLDEN_BRAILLE_CLOUDS: [u64; 6] = [
-    0x7c817dbce932f0ad,
-    0x3488c748a56c238c,
-    0x9820ddb83e6fd6dd,
-    0x38f04d1f24351b47,
-    0x92a00c8381ecb5c9,
-    0x7f0036837d468ce8,
+    0xc31af091308c6fa0,
+    0x22f742c80118716b,
+    0x14cc4759170b425d,
+    0x846810b6e897308e,
+    0xffd6108066016f89,
+    0x2027587d5198890b,
 ];
 const GOLDEN_HALFBLOCK_CLOUDS: [u64; 6] = [
-    0x6206447a29d8e8bb,
-    0x4381544251d63367,
-    0x1599aac9e1ebaf68,
-    0x4f5446a72b4a4d3a,
-    0x05d17f0eb50e8088,
-    0x120b01c1a19af934,
+    0x9d30ed4974d9594d,
+    0xf0f98d73da1d8039,
+    0x9dbfede0db94db57,
+    0x816a9dff914207b0,
+    0xcff60baaced68495,
+    0x39af948fadcb1bee,
 ];
 
 #[test]
@@ -253,8 +222,8 @@ fn frames_with_clouds_are_pinned() {
 /// PCIe rates change, so the sparklines have shape. Shots at rest after 3 and
 /// 8 s, and 0.25 s into a dissolve, which the panel stays on through.
 ///
-/// Each entry is (view time, hash of the whole frame, hash of every cell
-/// outside the panel's rectangle; see [`outside_panel_hash`]).
+/// Each entry is (view time, hash of the rows above the footer, hash of every
+/// cell of them outside the panel's rectangle; see [`outside_panel_hash`]).
 fn history_frames(braille: bool) -> Vec<(f64, u64, u64)> {
     let mut b = busy_fake(&["p300"; 4]);
     let mut v = Die3dView::new(150, 42);
@@ -284,11 +253,8 @@ fn history_frames(braille: bool) -> Vec<(f64, u64, u64)> {
                 "{at}"
             );
             let panel_rows = v.history.panel_rows().len();
-            out.push((
-                at,
-                frame_hash(&lines),
-                outside_panel_hash(&lines, panel_rows),
-            ));
+            let scene = above_the_footer(&lines);
+            out.push((at, frame_hash(scene), outside_panel_hash(scene, panel_rows)));
         };
         if t == 3 || t == 8 {
             shot(&v, now);
@@ -306,9 +272,9 @@ fn history_frames(braille: bool) -> Vec<(f64, u64, u64)> {
 /// The hashes of `history_frames`, pinned when the panel was added (Task
 /// 18), so a later change to what it shows or where is seen.
 const GOLDEN_BRAILLE_HISTORY: [u64; 3] =
-    [0x1ccd449df8740a96, 0x064720d7a54c737f, 0x8f39da284f9456c7];
+    [0xbf9eacba0fc0a9a9, 0xcaaeec540f1777d9, 0x1d7f5ad91752241c];
 const GOLDEN_HALFBLOCK_HISTORY: [u64; 3] =
-    [0x447402ce16e9ba83, 0x06f8c284af13998d, 0xba88c15711169b8f];
+    [0x40938d280ee795df, 0xc99251abe51f5302, 0x40d9617671216e5b];
 
 #[test]
 fn frames_with_the_history_panel_are_pinned() {
@@ -363,9 +329,9 @@ fn outside_panel_hash(lines: &[Line<'static>], panel_rows: usize) -> u64 {
 /// the panel's sparklines were bucketed and given a minimum scale span, and
 /// unchanged by that work: only the panel's own cells changed.
 const OUTSIDE_PANEL_BRAILLE_HISTORY: [u64; 3] =
-    [0xaf4edbe502809865, 0xfdccf65c0f7c7098, 0x450b797c96ff2a57];
+    [0xd72c8e9ebfd35696, 0xeb832fee19200f06, 0xbb2edd143afc674c];
 const OUTSIDE_PANEL_HALFBLOCK_HISTORY: [u64; 3] =
-    [0x9412952a90c618c5, 0x8f75caf2ad507387, 0xd34539fc515e5e38];
+    [0x5f73de8e811d2f11, 0x2f52c2354b80fcf0, 0xd5ab2d44f5ba73ee];
 
 #[test]
 fn the_history_panel_changes_nothing_outside_its_rectangle() {

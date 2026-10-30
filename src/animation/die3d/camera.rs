@@ -52,7 +52,7 @@ const SHUFFLE_WEIGHTS: [(TransitionKind, u32); 3] = [
     (TransitionKind::Spin, 25),
 ];
 
-/// Which transitions the director uses. The view's `X` key cycles it.
+/// Which transitions the director uses. `/transition` sets it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TransitionMode {
     /// A weighted draw for each cut, never the same kind twice in a row.
@@ -75,6 +75,18 @@ impl TransitionMode {
             TransitionMode::Dissolve => TransitionMode::Spin,
             TransitionMode::Spin => TransitionMode::Shuffle,
         }
+    }
+
+    /// The mode a command argument names (`chaos`, `dissolve`, ...), or `None`.
+    pub fn parse(word: &str) -> Option<TransitionMode> {
+        [
+            TransitionMode::Shuffle,
+            TransitionMode::Chaos,
+            TransitionMode::Dissolve,
+            TransitionMode::Spin,
+        ]
+        .into_iter()
+        .find(|m| m.label() == word)
     }
 
     /// The footer's word for the mode.

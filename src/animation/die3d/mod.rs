@@ -24,6 +24,7 @@ mod busiest;
 pub mod camera;
 pub mod cells;
 pub mod clouds;
+pub mod commands;
 mod flags;
 pub mod history;
 pub mod layout;
@@ -55,9 +56,8 @@ use raster::{Iso, PixelBuf};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use scene::{
-    fit_last_resort,
-    board_band_origin, board_grid, chip_inputs, die_centre, draw_board_scene, fit_pixels,
-    has_per_tile_data, lift, ChipInputs, Detail, SceneFit, ESTIMATE_LABEL,
+    board_band_origin, board_grid, chip_inputs, die_centre, draw_board_scene, fit_last_resort,
+    fit_pixels, has_per_tile_data, lift, ChipInputs, Detail, SceneFit, ESTIMATE_LABEL,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -91,7 +91,7 @@ const OPAQUE_BG: [u8; 3] = [0, 0, 0];
 /// The action keys the footer lists after the switches. `3` (leave) is
 /// handled by the TUI, not here. Keys that flip a state are not listed here:
 /// they come from `Die3dView::switches`.
-const ACTION_KEYS: &str = "[ ] board \u{b7} c cut \u{b7} 3 leave";
+const ACTION_KEYS: &str = "[ ] board \u{b7} space cut \u{b7} 3 leave";
 /// Separator between footer items.
 const SEP: &str = " \u{b7} ";
 /// The hint at the end of an inset's caption row: the key that opens the
@@ -137,21 +137,16 @@ const PANEL_LEFT: usize = 2;
 /// dimmer than the white chip labels.
 const PANEL_FG: [u8; 3] = [170, 160, 205];
 
-/// One switch of the view, as the footer shows it: the key that flips it and
-/// what it is set to now.
+/// One switch of the view, as the footer shows it: the command that sets it
+/// and what it is set to now.
 ///
-/// To add a switch: add an entry to `Die3dView::switches_at`, a `Die3dKey`
-/// variant (with its `toggles` and `key_to_die3d` lines; `ALL` follows from
-/// the variant list) and an arm in `handle_key`. The footer builds itself
-/// from the table.
+/// To add a switch: add an entry to `Die3dView::switches_at` and a command in
+/// `commands::COMMANDS` with its arm in `Die3dView::command`. The footer
+/// builds itself from the table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Switch {
-    /// The key that flips it.
-    pub key: char,
-    /// What it controls, written between the key and the state in the full
-    /// footer (`C auto-cuts on`). Empty when the state word already says it
-    /// (`B braille`, `T transparent`, `m all boards`).
-    pub label: &'static str,
+    /// The command that sets it, with its slash: `/clouds`.
+    pub cmd: &'static str,
     /// The current setting, one short phrase. The footer never cuts it.
     pub state: &'static str,
 }
@@ -180,26 +175,26 @@ die3d_keys! {
     NextBoard,
     /// `[`: the previous board.
     PrevBoard,
-    /// `m`: between the board scene and the scene of every board.
+    /// `/scene`: between the board scene and the scene of every board.
     ToggleScene,
-    /// `c`: cut the camera now.
+    /// Space or `/cut`: cut the camera now.
     CutNow,
-    /// `C`: automatic cuts on or off. With them off the camera cuts only on
+    /// `/autocut`: automatic cuts on or off. With them off the camera cuts only on
     /// `c`, and the view also stops switching scenes on its own.
     ToggleAuto,
-    /// `B`: braille or half-block cells.
+    /// `/cells`: braille or half-block cells.
     ToggleBraille,
-    /// `T`: a transparent background, so the terminal's own shows through, or
+    /// `/bg`: a transparent background, so the terminal's own shows through, or
     /// an opaque black one.
     ToggleTransparent,
-    /// `X`: how cuts change the picture: a shuffle of the kinds, or always
+    /// `/transition`: how cuts change the picture: a shuffle of the kinds, or always
     /// chaos, always a dissolve, or always a spin.
     CycleTransition,
-    /// `L`: chip labels on the dies on or off.
+    /// `/labels`: chip labels on the dies on or off.
     ToggleLabels,
-    /// `W`: the clouds behind the die on or off.
+    /// `/clouds`: the clouds behind the die on or off.
     ToggleClouds,
-    /// `H`: the history panel on or off.
+    /// `/history`: the history panel on or off.
     ToggleHistory,
 }
 
@@ -222,20 +217,15 @@ impl Die3dKey {
     }
 }
 
-/// The Die 3D key bound to a character, if any.
+/// The Die 3D key bound to a character, if any. Only the keys that mean the
+/// same thing in every view are keys: `[` and `]` change board and Space cuts
+/// (a nudge, whatever the view does with one). Every other setting is a slash
+/// command (`commands`).
 pub fn key_to_die3d(c: char) -> Option<Die3dKey> {
     match c {
         ']' => Some(Die3dKey::NextBoard),
         '[' => Some(Die3dKey::PrevBoard),
-        'm' => Some(Die3dKey::ToggleScene),
-        'c' => Some(Die3dKey::CutNow),
-        'C' => Some(Die3dKey::ToggleAuto),
-        'B' => Some(Die3dKey::ToggleBraille),
-        'T' => Some(Die3dKey::ToggleTransparent),
-        'X' => Some(Die3dKey::CycleTransition),
-        'L' => Some(Die3dKey::ToggleLabels),
-        'W' => Some(Die3dKey::ToggleClouds),
-        'H' => Some(Die3dKey::ToggleHistory),
+        ' ' => Some(Die3dKey::CutNow),
         _ => None,
     }
 }
@@ -701,7 +691,7 @@ impl Die3dView {
         self.panel_shown().then(|| self.history.revision())
     }
 
-    /// Act on a key. A scene chosen here (`[`, `]`, `m`) is the user's: the
+    /// Act on a key. A scene chosen here (`[`, `]`) is the user's: the
     /// view will not switch back from it on its own.
     pub fn handle_key(&mut self, key: Die3dKey, now: f64) {
         // Whatever the key does shows in the next frame.
@@ -1108,7 +1098,10 @@ impl Die3dView {
         let found = self.fit_for(pw, ph, grid);
         let base = match found {
             Some(fit) => fit,
-            None if !self.inset && self.cols >= SCENE_MIN_CELLS.0 && self.rows >= SCENE_MIN_CELLS.1 => {
+            None if !self.inset
+                && self.cols >= SCENE_MIN_CELLS.0
+                && self.rows >= SCENE_MIN_CELLS.1 =>
+            {
                 self.fit_small(pw, ph, grid)
             }
             None => return None,
@@ -1442,8 +1435,7 @@ impl Die3dView {
     fn switches_at(&self, now: f64) -> Vec<Switch> {
         vec![
             Switch {
-                key: 'B',
-                label: "",
+                cmd: "/cells",
                 state: if self.braille {
                     "braille"
                 } else {
@@ -1451,45 +1443,38 @@ impl Die3dView {
                 },
             },
             Switch {
-                key: 'T',
-                label: "",
+                cmd: "/bg",
                 state: if self.transparent {
                     "transparent"
                 } else {
-                    "opaque"
+                    "black"
                 },
             },
             Switch {
-                key: 'C',
-                label: "auto-cuts",
+                cmd: "/autocut",
                 state: if self.director.auto() { "on" } else { "off" },
             },
             Switch {
-                key: 'X',
-                label: "transition",
+                cmd: "/transition",
                 state: self.director.transition_mode().label(),
             },
             Switch {
-                key: 'm',
-                label: "",
+                cmd: "/scene",
                 state: match self.scene_at(now) {
                     Scene::All => "all boards",
                     Scene::Board(_) => "board",
                 },
             },
             Switch {
-                key: 'L',
-                label: "labels",
+                cmd: "/labels",
                 state: if self.show_labels { "on" } else { "off" },
             },
             Switch {
-                key: 'W',
-                label: "clouds",
+                cmd: "/clouds",
                 state: if self.show_clouds { "on" } else { "off" },
             },
             Switch {
-                key: 'H',
-                label: "history",
+                cmd: "/history",
                 state: if self.show_history { "on" } else { "off" },
             },
         ]
@@ -1498,31 +1483,22 @@ impl Die3dView {
     /// The footer's second row after its bar, at most `width` characters.
     /// From most to least detailed, the first that fits wins:
     ///
-    /// 1. `B braille · T transparent · C auto-cuts on · X transition shuffle · m all boards · L labels on · W clouds on · H history on · [ ] board · c cut · 3 leave`
-    ///    (153 characters: it needs a view of 156 columns)
+    /// 1. `/cells braille · /bg black · /autocut on · /transition rotate · /scene all boards · /labels on · /clouds on · /history on · [ ] board · space cut · 3 leave`
     /// 2. the same without the action keys
-    /// 3. `<key> <state>` for each switch (`C on`)
-    /// 4. the state words alone
+    /// 3. the state words alone
     ///
-    /// The first four forms keep every state word whole. When even the last
-    /// is too wide, the state words are cut at a character with an ellipsis
+    /// The first two forms keep every state word whole. When even the last is too
+    /// wide, the state words are cut at a character with an ellipsis
     /// (`fit_width`), so the last word shown may be partial.
     fn switch_strip(&self, now: f64, width: usize) -> String {
         let switches = self.switches_at(now);
         let join = |each: &dyn Fn(&Switch) -> String| {
             switches.iter().map(each).collect::<Vec<_>>().join(SEP)
         };
-        let full = join(&|s| {
-            if s.label.is_empty() {
-                format!("{} {}", s.key, s.state)
-            } else {
-                format!("{} {} {}", s.key, s.label, s.state)
-            }
-        });
+        let full = join(&|s| format!("{} {}", s.cmd, s.state));
         let with_actions = format!("{full}{SEP}{ACTION_KEYS}");
-        let keyed = join(&|s| format!("{} {}", s.key, s.state));
         let bare = join(&|s| s.state.to_string());
-        let fits = [&with_actions, &full, &keyed, &bare]
+        let fits = [&with_actions, &full, &bare]
             .into_iter()
             .find(|row| row.chars().count() <= width)
             .cloned();
@@ -1858,7 +1834,13 @@ mod tests {
         let whole_fit = aim(&whole_fit, Aim::At(cam), grid);
         let mut whole = PixelBuf::new(vw as usize, vh as usize);
         whole.clear_transparent();
-        draw_board_scene(&mut whole, &v.chips[0], &whole_fit, now as f32, Detail::Full);
+        draw_board_scene(
+            &mut whole,
+            &v.chips[0],
+            &whole_fit,
+            now as f32,
+            Detail::Full,
+        );
         // The window drawn directly, as the view does.
         let mut direct = PixelBuf::new(pw as usize, ph as usize);
         direct.clear_transparent();
@@ -1874,7 +1856,10 @@ mod tests {
                     [0; 3]
                 };
                 let have = got.rgb[y as usize * pw as usize + x as usize];
-                assert_eq!(have, want, "pixel ({x}, {y}) differs from the whole picture");
+                assert_eq!(
+                    have, want,
+                    "pixel ({x}, {y}) differs from the whole picture"
+                );
                 painted += (have != [0; 3]) as usize;
             }
         }
@@ -2520,15 +2505,13 @@ mod tests {
     }
 
     #[test]
-    fn key_to_die3d_maps_the_six_keys() {
+    fn key_to_die3d_maps_only_the_keys_that_mean_the_same_everywhere() {
         assert_eq!(key_to_die3d(']'), Some(Die3dKey::NextBoard));
         assert_eq!(key_to_die3d('['), Some(Die3dKey::PrevBoard));
-        assert_eq!(key_to_die3d('m'), Some(Die3dKey::ToggleScene));
-        assert_eq!(key_to_die3d('c'), Some(Die3dKey::CutNow));
-        assert_eq!(key_to_die3d('C'), Some(Die3dKey::ToggleAuto));
-        assert_eq!(key_to_die3d('B'), Some(Die3dKey::ToggleBraille));
-        for other in ['b', 'M', '3', 'x', ' '] {
-            assert_eq!(key_to_die3d(other), None, "{other:?}");
+        assert_eq!(key_to_die3d(' '), Some(Die3dKey::CutNow));
+        // The letters that used to be this view's keys are slash commands now.
+        for old in "mcCBTXLWH".chars().chain(['b', 'M', '3', 'x']) {
+            assert_eq!(key_to_die3d(old), None, "{old:?}");
         }
     }
 
@@ -2551,17 +2534,16 @@ mod tests {
     #[test]
     fn the_footer_names_the_mode_and_auto_cuts() {
         let b = two_boards();
-        // 160 columns: since `H` joined the switches, the action keys fit
-        // after them only from 156 columns.
-        let mut v = Die3dView::new(160, 42);
+        // 180 columns: the action keys fit after the switches from 172.
+        let mut v = Die3dView::new(180, 42);
         v.update(&b, 0.0);
         let f = footer(&v.render(0.0));
         for want in [
             "braille",
-            "auto-cuts on",
+            "/autocut on",
             "[ ] board",
-            "m all boards",
-            "c cut",
+            "/scene all boards",
+            "space cut",
         ] {
             assert!(f.contains(want), "{want}: {f}");
         }
@@ -2571,11 +2553,11 @@ mod tests {
         assert_eq!(lines.len(), 42);
         let f = footer(&lines);
         assert!(
-            f.contains("half-block") && f.contains("auto-cuts off"),
+            f.contains("half-block") && f.contains("/autocut off"),
             "{f}"
         );
         // Half-block rows are one cell per pixel column.
-        assert_eq!(text(&lines)[10].chars().count(), 160);
+        assert_eq!(text(&lines)[10].chars().count(), 180);
     }
 
     #[test]
@@ -2724,20 +2706,14 @@ mod tests {
         v.update(&b, 0.0);
         assert!(v.transparent);
         let f = footer(&v.render(0.0));
-        assert!(f.contains("transparent") && !f.contains("opaque"), "{f}");
-        assert!(f.contains("T transparent"), "key list: {f}");
+        assert!(f.contains("transparent") && !f.contains("black"), "{f}");
+        assert!(f.contains("/bg transparent"), "key list: {f}");
         v.handle_key(Die3dKey::ToggleTransparent, 0.1);
         assert!(!v.transparent);
         let f = footer(&v.render(0.2));
-        assert!(f.contains("opaque"), "{f}");
+        assert!(f.contains("/bg black"), "{f}");
         v.handle_key(Die3dKey::ToggleTransparent, 0.3);
         assert!(v.transparent);
-    }
-
-    #[test]
-    fn key_to_die3d_maps_t_to_toggle_transparent() {
-        assert_eq!(key_to_die3d('T'), Some(Die3dKey::ToggleTransparent));
-        assert_eq!(key_to_die3d('t'), None);
     }
 
     /// The switch strip as the footer's second row shows it at the view's
@@ -2763,21 +2739,16 @@ mod tests {
     #[test]
     fn the_footer_names_every_switch_and_its_state() {
         let b = two_boards();
-        // Wide enough for the action keys after every switch (156 columns
-        // since `H`).
-        let mut v = Die3dView::new(160, 42);
+        // Wide enough for the action keys after every switch.
+        let mut v = Die3dView::new(190, 42);
         v.update(&b, 0.0);
         let f = footer(&v.render(0.0));
         for s in v.switches() {
-            let triple = [s.key.to_string(), s.label.to_string(), s.state.to_string()]
-                .into_iter()
-                .filter(|p| !p.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ");
-            assert!(f.contains(&triple), "{triple}: {f}");
+            let pair = format!("{} {}", s.cmd, s.state);
+            assert!(f.contains(&pair), "{pair}: {f}");
         }
         assert!(
-            f.contains("[ ] board") && f.contains("c cut") && f.contains("3 leave"),
+            f.contains("[ ] board") && f.contains("space cut") && f.contains("3 leave"),
             "{f}"
         );
     }
@@ -2814,15 +2785,15 @@ mod tests {
 
     #[test]
     fn action_keys_are_dropped_before_switch_states() {
-        let v = wide_label_view(160);
+        let v = wide_label_view(180);
         let full = strip(&v);
-        assert!(full.contains("c cut"), "{full}");
+        assert!(full.contains("space cut"), "{full}");
         // Just wide enough for the switches and nothing after them.
         let switches_only = full.split(" · [ ]").next().unwrap().chars().count();
         let mut v = v;
         v.cols = switches_only;
         let s = strip(&v);
-        assert!(!s.contains("c cut") && !s.contains("leave"), "{s}");
+        assert!(!s.contains("space cut") && !s.contains("leave"), "{s}");
         for sw in v.switches() {
             assert!(s.contains(sw.state), "{}: {s}", sw.state);
         }
@@ -2833,9 +2804,19 @@ mod tests {
         let b = two_boards();
         let mut v = Die3dView::new(150, 42);
         v.update(&b, 0.0);
+        const CMDS: [&str; 8] = [
+            "/cells",
+            "/bg",
+            "/autocut",
+            "/transition",
+            "/scene",
+            "/labels",
+            "/clouds",
+            "/history",
+        ];
         let state =
-            |v: &Die3dView, k: char| v.switches().into_iter().find(|s| s.key == k).unwrap().state;
-        let before: Vec<_> = "BTCXmLWH".chars().map(|k| state(&v, k)).collect();
+            |v: &Die3dView, c: &str| v.switches().into_iter().find(|s| s.cmd == c).unwrap().state;
+        let before: Vec<_> = CMDS.iter().map(|c| state(&v, c)).collect();
         assert_eq!(
             before,
             [
@@ -2861,12 +2842,12 @@ mod tests {
         ] {
             v.handle_key(k, 0.0);
         }
-        let after: Vec<_> = "BTCXmLWH".chars().map(|k| state(&v, k)).collect();
+        let after: Vec<_> = CMDS.iter().map(|c| state(&v, c)).collect();
         assert_eq!(
             after,
             [
                 "half-block",
-                "opaque",
+                "black",
                 "off",
                 "chaos",
                 "board",
@@ -2878,74 +2859,59 @@ mod tests {
     }
 
     #[test]
-    fn the_switch_table_still_covers_every_toggle_key() {
+    fn every_switch_is_a_listed_command_and_every_toggle_has_a_switch() {
         let v = Die3dView::new(150, 42);
-        let keys: Vec<char> = v.switches().iter().map(|s| s.key).collect();
-        for k in ['X', 'L', 'W', 'H'] {
-            assert!(keys.contains(&k), "{k}: {keys:?}");
+        let switches = v.switches();
+        for sw in &switches {
+            let verb = sw.cmd.trim_start_matches('/');
+            assert!(commands::is_command(verb), "{} is not in COMMANDS", sw.cmd);
         }
-        let mut toggling = 0;
-        for &k in Die3dKey::ALL {
-            if !k.toggles() {
-                continue;
-            }
-            toggling += 1;
-            let c = (0u8..128)
-                .map(char::from)
-                .find(|&c| key_to_die3d(c) == Some(k))
-                .expect("every key has a character");
-            assert!(keys.contains(&c), "{k:?} ({c}) toggles but has no switch");
-        }
-        assert_eq!(toggling, keys.len(), "a switch with no toggling key");
+        let toggling = Die3dKey::ALL.iter().filter(|k| k.toggles()).count();
+        assert_eq!(
+            toggling,
+            switches.len(),
+            "a toggle with no switch, or the reverse"
+        );
     }
 
+    /// A key is for what means the same in every view. A key that flips one of
+    /// this view's own settings would use up a letter; those are commands.
     #[test]
-    fn all_lists_every_key_once_and_each_has_a_character() {
-        // `ALL` is generated from the enum's own declaration, so it cannot
-        // miss a variant; this checks the other direction: no duplicates, and
-        // a character for each (so `the_switch_table_still_covers_every_toggle_key`
-        // can find it).
+    fn only_the_keys_that_do_not_toggle_have_a_character() {
         for (i, k) in Die3dKey::ALL.iter().enumerate() {
             assert!(!Die3dKey::ALL[..i].contains(k), "{k:?} twice");
-            assert!(
-                (0u8..128).any(|c| key_to_die3d(char::from(c)) == Some(*k)),
-                "{k:?} has no character"
-            );
+            let has_char = (0u8..128).any(|c| key_to_die3d(char::from(c)) == Some(*k));
+            assert_eq!(has_char, !k.toggles(), "{k:?}");
         }
-        let mapped = (0u8..128)
-            .filter(|&c| key_to_die3d(char::from(c)).is_some())
-            .count();
-        assert_eq!(mapped, Die3dKey::ALL.len());
     }
 
     #[test]
-    fn the_switch_strip_falls_back_to_keyed_then_bare_then_a_cut() {
-        // Lengths with the default switches: keyed is 80 characters and bare
-        // 64, so a 70-column terminal (67 after the bar) lands on bare.
+    fn the_switch_strip_falls_back_to_bare_then_a_cut() {
         let v = wide_label_view(150);
         let sw = v.switches();
-        let keyed = sw
+        let full = sw
             .iter()
-            .map(|s| format!("{} {}", s.key, s.state))
+            .map(|s| format!("{} {}", s.cmd, s.state))
             .collect::<Vec<_>>()
             .join(SEP);
         let bare = sw.iter().map(|s| s.state).collect::<Vec<_>>().join(SEP);
-        assert_eq!((keyed.chars().count(), bare.chars().count()), (80, 64));
+        let (full_len, bare_len) = (full.chars().count(), bare.chars().count());
+        assert!(bare_len < full_len);
         let at = |cols: usize| {
             let v = wide_label_view(cols);
             let s = strip(&v);
             assert!(s.chars().count() <= cols, "{cols}: {s}");
             s.trim_start_matches("\u{255a}\u{2550} ").to_string()
         };
-        // Exactly wide enough for the keyed form.
-        assert_eq!(at(80 + BAR_WIDTH), keyed);
-        // About 70 columns: the keyed form no longer fits, the bare one does.
-        assert_eq!(at(70), bare);
-        assert_eq!(at(64 + BAR_WIDTH), bare);
+        // Exactly wide enough for every command with its state.
+        assert_eq!(at(full_len + BAR_WIDTH), full);
+        // One column short: the commands go, the state words stay whole.
+        assert_eq!(at(full_len - 1 + BAR_WIDTH), bare);
+        assert_eq!(at(bare_len + BAR_WIDTH), bare);
         // One column short of bare: the last resort cuts at a character and
         // marks the cut with an ellipsis.
-        let cut = at(63 + BAR_WIDTH);
-        assert_eq!(cut.chars().count(), 63);
+        let cut = at(bare_len - 1 + BAR_WIDTH);
+        assert_eq!(cut.chars().count(), bare_len - 1);
         assert!(cut.ends_with('\u{2026}'), "{cut}");
         assert!(bare.starts_with(cut.trim_end_matches('\u{2026}')), "{cut}");
     }
@@ -3594,8 +3560,9 @@ mod tests {
     }
 
     #[test]
-    fn the_l_key_toggles_labels_and_the_footer_says_which() {
-        assert_eq!(key_to_die3d('L'), Some(Die3dKey::ToggleLabels));
+    fn the_labels_command_toggles_labels_and_the_footer_says_which() {
+        // Not a key: `L` and `l` are free for the app, and the setting is a command.
+        assert_eq!(key_to_die3d('L'), None);
         assert_eq!(key_to_die3d('l'), None, "l is the TUI's legend key");
         assert!(Die3dKey::ToggleLabels.toggles());
         let b = two_boards();
@@ -3603,19 +3570,15 @@ mod tests {
         v.update(&b, 0.0);
         // The history panel lists the chip names too: off, so only the
         // labels are found.
-        v.handle_key(Die3dKey::ToggleHistory, 0.0);
+        v.command("history", "off", 0.0);
         let lines = v.render(0.0);
-        assert!(footer(&lines).contains("L labels on"), "{}", footer(&lines));
+        assert!(footer(&lines).contains("/labels on"), "{}", footer(&lines));
         assert!(!labels_in(&lines, 40).is_empty());
-        v.handle_key(Die3dKey::ToggleLabels, 0.0);
+        v.command("labels", "", 0.0);
         let lines = v.render(0.0);
-        assert!(
-            footer(&lines).contains("L labels off"),
-            "{}",
-            footer(&lines)
-        );
+        assert!(footer(&lines).contains("/labels off"), "{}", footer(&lines));
         assert!(labels_in(&lines, 40).is_empty());
-        v.handle_key(Die3dKey::ToggleLabels, 0.0);
+        v.command("labels", "", 0.0);
         assert!(!labels_in(&v.render(0.0), 40).is_empty());
     }
 
@@ -3707,8 +3670,8 @@ mod tests {
     }
 
     #[test]
-    fn the_x_key_cycles_the_transition_mode_and_the_footer_says_which() {
-        assert_eq!(key_to_die3d('X'), Some(Die3dKey::CycleTransition));
+    fn the_transition_command_cycles_the_mode_and_the_footer_says_which() {
+        assert_eq!(key_to_die3d('X'), None);
         assert!(Die3dKey::CycleTransition.toggles());
         let b = two_boards();
         let mut v = Die3dView::new(150, 42);
@@ -3722,8 +3685,8 @@ mod tests {
         ] {
             assert_eq!(v.director.transition_mode(), want_mode);
             let f = footer(&v.render(0.0));
-            assert!(f.contains(&format!("X transition {want_state}")), "{f}");
-            v.handle_key(Die3dKey::CycleTransition, 0.0);
+            assert!(f.contains(&format!("/transition {want_state}")), "{f}");
+            v.command("transition", "", 0.0);
         }
     }
 
@@ -3822,24 +3785,24 @@ mod tests {
     }
 
     #[test]
-    fn the_w_key_toggles_clouds_and_the_footer_says_which() {
-        assert_eq!(key_to_die3d('W'), Some(Die3dKey::ToggleClouds));
+    fn the_clouds_command_toggles_clouds_and_the_footer_says_which() {
+        assert_eq!(key_to_die3d('W'), None);
         assert_eq!(key_to_die3d('w'), None);
         assert!(Die3dKey::ToggleClouds.toggles());
         let b = two_boards();
         let mut v = cloud_view(&b);
         assert!(v.show_clouds, "on by default");
         let f = footer(&v.render(0.0));
-        assert!(f.contains("W clouds on"), "{f}");
+        assert!(f.contains("/clouds on"), "{f}");
         let with = v.scene_pixels(0.0).unwrap().0;
-        v.handle_key(Die3dKey::ToggleClouds, 0.1);
+        v.command("clouds", "", 0.1);
         let f = footer(&v.render(0.1));
-        assert!(f.contains("W clouds off"), "{f}");
+        assert!(f.contains("/clouds off"), "{f}");
         let without = v.scene_pixels(0.1).unwrap().0;
         let covered = |b: &PixelBuf| b.cover.iter().filter(|c| **c).count();
         assert!(covered(&with) > covered(&without) + 1000);
-        v.handle_key(Die3dKey::ToggleClouds, 0.2);
-        assert!(footer(&v.render(0.2)).contains("W clouds on"));
+        v.command("clouds", "", 0.2);
+        assert!(footer(&v.render(0.2)).contains("/clouds on"));
     }
 
     #[test]
@@ -4214,8 +4177,8 @@ mod tests {
     }
 
     #[test]
-    fn the_h_key_toggles_history_and_the_footer_says_which() {
-        assert_eq!(key_to_die3d('H'), Some(Die3dKey::ToggleHistory));
+    fn the_history_command_toggles_history_and_the_footer_says_which() {
+        assert_eq!(key_to_die3d('H'), None);
         assert_eq!(key_to_die3d('h'), None, "h is the TUI's");
         assert!(Die3dKey::ToggleHistory.toggles());
         let b = Fake::boards(&["p150"], Some(TDP));
@@ -4223,21 +4186,17 @@ mod tests {
         v.update(&b, 0.0);
         assert!(v.show_history, "on by default");
         let lines = v.render(0.0);
-        assert!(
-            footer(&lines).contains("H history on"),
-            "{}",
-            footer(&lines)
-        );
+        assert!(footer(&lines).contains("/history on"), "{}", footer(&lines));
         assert!(has_panel(&lines));
-        v.handle_key(Die3dKey::ToggleHistory, 0.0);
+        v.command("history", "", 0.0);
         let lines = v.render(0.0);
         assert!(
-            footer(&lines).contains("H history off"),
+            footer(&lines).contains("/history off"),
             "{}",
             footer(&lines)
         );
         assert!(!has_panel(&lines));
-        v.handle_key(Die3dKey::ToggleHistory, 0.0);
+        v.command("history", "", 0.0);
         assert!(has_panel(&v.render(0.0)));
     }
 

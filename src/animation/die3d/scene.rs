@@ -1296,7 +1296,10 @@ mod tests {
         // window is the middle of it: the window's origin is the picture's
         // moved by the floored half of the size difference.
         let whole = fit_last_resort(vw, vh, grid);
-        assert_eq!(whole.virtual_px, None, "a buffer of the picture's size holds it");
+        assert_eq!(
+            whole.virtual_px, None,
+            "a buffer of the picture's size holds it"
+        );
         assert_eq!(whole.iso.tw, f.iso.tw, "the same tile");
         let (dx, dy) = ((vw - pw).div_euclid(2), (vh - ph).div_euclid(2));
         assert_eq!((f.iso.ox, f.iso.oy), (whole.iso.ox - dx, whole.iso.oy - dy));

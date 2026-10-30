@@ -160,9 +160,8 @@ fn transparent_requested(value: Option<&str>) -> bool {
 /// every screen is solid black. Read once from [`TRANSPARENT_ENV`].
 pub fn canvas_transparent() -> bool {
     static TRANSPARENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *TRANSPARENT.get_or_init(|| {
-        transparent_requested(std::env::var(TRANSPARENT_ENV).ok().as_deref())
-    })
+    *TRANSPARENT
+        .get_or_init(|| transparent_requested(std::env::var(TRANSPARENT_ENV).ok().as_deref()))
 }
 
 /// The background of the canvas every view draws on: solid black, or with
@@ -512,7 +511,10 @@ mod tests {
             }
         }
         let mut hits = Vec::new();
-        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut hits);
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut hits,
+        );
         assert!(hits.is_empty(), "use colors::canvas_bg(): {hits:#?}");
     }
 }

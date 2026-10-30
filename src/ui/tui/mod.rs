@@ -2103,6 +2103,32 @@ fn run_app(
                                             )
                                         }
                                     }
+                                } else if crate::animation::die3d::commands::is_command(&verb) {
+                                    // A Die 3D setting. It belongs to the open view, so it
+                                    // is dispatched here, where the view is, and not in
+                                    // `execute_command`, which has no view.
+                                    let arg = cmd_buf
+                                        .trim()
+                                        .trim_start_matches('/')
+                                        .split_once(char::is_whitespace)
+                                        .map(|(_, rest)| rest)
+                                        .unwrap_or("")
+                                        .trim()
+                                        .to_string();
+                                    cmd_message = Some(match (display_mode, die3d.as_mut()) {
+                                        (DisplayMode::Die3d, Some(dv)) => dv.command(
+                                            &verb,
+                                            &arg,
+                                            die3d_started.elapsed().as_secs_f64(),
+                                        ),
+                                        _ => (
+                                            format!(
+                                                "/{verb} is a Die 3D command (press 3 to open the view)"
+                                            ),
+                                            true,
+                                        ),
+                                    });
+                                    force_redraw = true;
                                 } else {
                                     let (msg, is_err, should_quit) = execute_command(
                                         &cmd_buf,
@@ -2273,12 +2299,11 @@ fn run_app(
                                 }
                                 force_redraw = true;
                             }
-                            // ── Die 3D keys ([ ] m c C B T X L W H) ────────────
+                            // ── Die 3D keys ([ ] and Space) ────────────────────
                             // Checked before the general character arms so the
-                            // view consumes them. None of these letters has a
-                            // global meaning (`b` lowercase is the beta toggle,
-                            // `l` the legend and `h` moves left; `B`, `T`, `X`, `L`,
-                            // `W` and `H` are free), and `die3d_key_for` is
+                            // view consumes them. They are the keys that mean the
+                            // same in every view (change board, nudge); the view's
+                            // own settings are slash commands. `die3d_key_for` is
                             // `None` outside the mode, so nothing else is
                             // shadowed.
                             KeyCode::Char(c) if die3d_key_for(display_mode, c).is_some() => {
@@ -3937,7 +3962,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
 
     match kind {
         OverlayPanel::Help => {
-            vec![
+            let mut help = vec![
                 sep!("Keys"),
                 row!(" v", "cycle views", key),
                 row!(" l", "toggle legend", key),
@@ -3953,6 +3978,8 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 row!(" ~", "HivemindSweeper activity sniffer", key),
                 row!(" t", "Training view (live tt-train run)", key),
                 row!(" 3", "Die 3D view (isometric boards)", key),
+                row!(" [  ]", "previous / next board (Die 3D)", key),
+                row!(" Space", "nudge: cut the camera (Die 3D)", key),
                 row!(" R", "rotate every view unattended (kiosk)", key),
                 row!(" b", "cycle backend", key),
                 ln!(vec![Span::styled(
@@ -4024,7 +4051,35 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "ignore · inform · dazzle · demo",
                     lbl
                 ),
-            ]
+            ];
+            // The Die 3D commands come from the view's own table, so a command
+            // cannot exist without being listed here. They belong to that
+            // view: in it they are listed one by one, elsewhere as one line so
+            // the panel stays short.
+            let at = help
+                .iter()
+                .position(|l| l.spans.iter().any(|s| s.content.contains("/wrap")))
+                .map_or(help.len(), |i| i + 1);
+            let die3d: Vec<Line<'static>> = if mode == DisplayMode::Die3d {
+                crate::animation::die3d::commands::COMMANDS
+                    .iter()
+                    .map(|c| {
+                        row!(
+                            format!(" {}", crate::animation::die3d::commands::usage(c)),
+                            c.help,
+                            lbl
+                        )
+                    })
+                    .collect()
+            } else {
+                vec![row!(
+                    " /board /scene /cells …",
+                    "Die 3D settings (press 3, then /help)",
+                    lbl
+                )]
+            };
+            help.splice(at..at, die3d);
+            help
         }
 
         OverlayPanel::Legend => {
@@ -4946,23 +5001,37 @@ const DIE3D_EXPLAIN_TEXT: &[&str] = &[
     "idle chip drew about a third of the 125 W limit, so",
     "power over the limit would barely move.",
     "",
-    "The camera cuts to a new angle when a chip's load",
-    "rises or PCIe traffic bursts. With every board in",
-    "view, a load rise also opens that chip's board; a",
-    "load rise on another board, or 20 s with none, goes",
-    "back to all boards. A board you choose stays.",
-    "C turns the automatic cuts and switches off; c cuts",
-    "by hand; [ ] m choose the board or all boards;",
-    "B swaps braille for half-block cells; T turns the",
-    "transparent background (terminal shows through) on or off.",
-    "X sets how a cut looks: shuffle, chaos, dissolve or spin",
-    "(spin is used only when the board shown stays the same).",
-    "L turns the chip flags (name and power) on or off.",
-    "W turns the clouds behind the board on or off. The",
+    "The camera turns to a new angle now and then (a spin).",
+    "When something happens it cuts instead, and the cut says",
+    "what happened: chaos for a chip (load rise, temperature",
+    "rise, PCIe burst), a dissolve for memory (GDDR heat), the",
+    "board (an Ethernet link comes or goes) or a process that",
+    "opens or closes a device. With every board in view, an",
+    "event on a chip also opens that chip's board; an event",
+    "on another board, or 20 s with none, goes back to all",
+    "boards. A board you choose stays.",
+    "",
+    "Keys: [ ] choose the board, Space cuts by hand.",
+    "Commands, from the / bar (/help lists them):",
+    "/autocut turns the automatic cuts and switches off.",
+    "/scene one board or all boards; /board picks one.",
+    "/transition sets how a cut looks: rotate (the default),",
+    "chaos, dissolve or spin. Rotate spins when nothing",
+    "happened and uses the reasoned cut for an event.",
+    "/cells sets how the picture is drawn: braille dots,",
+    "quarter blocks or half blocks. The default, auto, changes",
+    "between them now and then as the hardware does something,",
+    "and does not start in the same one each time. 'blocks'",
+    "changes only between the two block forms.",
+    "/bg is a black background or the terminal's own.",
+    "/theme (the whole app) sets the colours here too: grayskull",
+    "is greys with one hot pink; the default is full colour.",
+    "/labels turns the chip flags (name and power) on or off.",
+    "/clouds turns the clouds behind the board on or off. The",
     "clouds are decoration: their drift follows the total",
     "PCIe traffic (slow but never still with none) and their",
     "brightness follows chip load (the busiest chip).",
-    "H turns the history panel at the top left on or off.",
+    "/history turns the history panel at the top left on or off.",
     "It plots power and PCIe traffic over the last minute of",
     "measured readings, as sparklines: power for each chip",
     "(up to six), PCIe traffic in and out. Each chip's row",
@@ -4974,10 +5043,11 @@ const DIE3D_EXPLAIN_TEXT: &[&str] = &[
     "GDDR side), and both ends during a cut.",
     "",
     "Only Blackhole chips are drawn; other devices are",
-    "named in the footer. Needs a terminal of at least",
-    "100 x 31 cells (the status bar takes the bottom row).",
+    "named in the footer. In a window too small for the whole",
+    "board you see its middle, and the footer says what size",
+    "shows all of it.",
     "",
-    "Press l for the key list · 3 to return.",
+    "Press l for the legend · 3 to return.",
 ];
 
 #[cfg(test)]
@@ -5031,7 +5101,7 @@ mod die3d_text_tests {
                 "drift follows",
                 "PCIe traffic",
                 "brightness follows chip load",
-                "W ",
+                "/clouds",
             ] {
                 assert!(text.contains(phrase), "{what} lacks {phrase:?}: {text}");
             }
@@ -5053,7 +5123,7 @@ mod die3d_text_tests {
                 "temperature",
                 "PCIe traffic",
                 "real readings",
-                "H ",
+                "/history",
             ] {
                 assert!(text.contains(phrase), "{what} lacks {phrase:?}: {text}");
             }
@@ -5125,13 +5195,10 @@ fn die3d_legend_lines(
         "  footer      scene shown, the board corner nearest you,",
         "              then the switches and their states",
         "",
-        "  [ ]  previous / next board     m  one board / all",
-        "  c    cut the camera now        C  auto-cuts on/off",
-        "  B    braille / half-block      T  transparent / opaque",
-        "  X    transition: shuffle / chaos / dissolve / spin",
-        "  L    chip labels on / off      W  clouds on / off",
-        "  H    history panel on / off",
-        "  3    leave",
+        "  keys      [ ] board · Space cut · 3 leave",
+        "  commands  /board /scene /cut /autocut /transition",
+        "            /cells /bg /labels /clouds /history",
+        "            (/help describes each one)",
     ]
     .iter()
     .map(|s| {
@@ -8969,8 +9036,16 @@ mod display_mode_tests {
     #[test]
     fn the_die3d_views_the_app_makes_follow_the_canvas_background() {
         let want = crate::ui::colors::canvas_transparent();
-        assert_eq!(super::new_die3d_view(100, 30, 0).is_transparent(), want, "full view");
-        assert_eq!(super::new_inset_view(52, 16).is_transparent(), want, "inset");
+        assert_eq!(
+            super::new_die3d_view(100, 30, 0).is_transparent(),
+            want,
+            "full view"
+        );
+        assert_eq!(
+            super::new_inset_view(52, 16).is_transparent(),
+            want,
+            "inset"
+        );
     }
 
     #[test]
@@ -8979,15 +9054,7 @@ mod display_mode_tests {
         for (c, want) in [
             (']', Die3dKey::NextBoard),
             ('[', Die3dKey::PrevBoard),
-            ('m', Die3dKey::ToggleScene),
-            ('c', Die3dKey::CutNow),
-            ('C', Die3dKey::ToggleAuto),
-            ('B', Die3dKey::ToggleBraille),
-            ('T', Die3dKey::ToggleTransparent),
-            ('X', Die3dKey::CycleTransition),
-            ('L', Die3dKey::ToggleLabels),
-            ('W', Die3dKey::ToggleClouds),
-            ('H', Die3dKey::ToggleHistory),
+            (' ', Die3dKey::CutNow),
         ] {
             assert_eq!(die3d_key_for(DisplayMode::Die3d, c), Some(want), "{c}");
             // Out of the mode the same keys are not taken.
@@ -8999,8 +9066,12 @@ mod display_mode_tests {
                 assert_eq!(die3d_key_for(m, c), None, "{c} in {m:?}");
             }
         }
-        // In the mode, keys with no Die 3D meaning fall through.
-        for c in ['3', 'v', 'q', 'l', 'b', 'h'] {
+        // In the mode, keys with no Die 3D meaning fall through. The letters
+        // that used to be this view's keys are slash commands now, so they
+        // reach the app's own meaning for them (or none).
+        for c in [
+            '3', 'v', 'q', 'l', 'b', 'h', 'm', 'c', 'C', 'B', 'T', 'X', 'L', 'W', 'H',
+        ] {
             assert_eq!(die3d_key_for(DisplayMode::Die3d, c), None, "{c}");
         }
     }
@@ -10272,6 +10343,36 @@ mod host_default_screen_tests {
     /// — e.g. the `/serve` help line lost "(plaintext, trusted-LAN)". The panel
     /// now sizes itself to the widest content line. Render each overlay on a
     /// roomy terminal and assert the full text of the widest line survives.
+    /// `/help` in the Die 3D view lists every one of its commands, from the
+    /// view's own table, so a command cannot be added without being listed.
+    #[test]
+    fn help_in_the_die3d_view_lists_every_die3d_command() {
+        use super::{overlay_lines, DisplayMode, OverlayPanel};
+        let text = |mode| -> String {
+            overlay_lines(OverlayPanel::Help, mode, 56)
+                .iter()
+                .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let in_view = text(DisplayMode::Die3d);
+        for c in crate::animation::die3d::commands::COMMANDS {
+            let usage = crate::animation::die3d::commands::usage(c);
+            assert!(
+                in_view.contains(&usage),
+                "{usage} missing from /help in Die 3D"
+            );
+        }
+        assert!(in_view.contains("Space"), "the nudge key is listed");
+        // Elsewhere the panel stays short: one pointer line, not the list.
+        let elsewhere = text(DisplayMode::Insights);
+        assert!(elsewhere.contains("Die 3D settings"), "{elsewhere}");
+        assert!(
+            !elsewhere.contains("/clouds [on|off]"),
+            "the list is the view's own"
+        );
+    }
+
     #[test]
     fn overlay_panel_does_not_truncate_wide_content() {
         use super::{line_cols, overlay_lines, render_overlay_panel, DisplayMode, OverlayPanel};
