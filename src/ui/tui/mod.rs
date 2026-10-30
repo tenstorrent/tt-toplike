@@ -8646,10 +8646,7 @@ mod display_mode_tests {
 
     #[test]
     fn v_from_die3d_leaves_to_insights() {
-        assert_eq!(
-            next_display_mode(DisplayMode::Die3d),
-            DisplayMode::Insights
-        );
+        assert_eq!(next_display_mode(DisplayMode::Die3d), DisplayMode::Insights);
     }
 
     #[test]
@@ -8779,7 +8776,11 @@ mod display_mode_tests {
         ] {
             assert_eq!(die3d_key_for(DisplayMode::Die3d, c), Some(want), "{c}");
             // Out of the mode the same keys are not taken.
-            for m in [DisplayMode::Insights, DisplayMode::Training, DisplayMode::Grid] {
+            for m in [
+                DisplayMode::Insights,
+                DisplayMode::Training,
+                DisplayMode::Grid,
+            ] {
                 assert_eq!(die3d_key_for(m, c), None, "{c} in {m:?}");
             }
         }

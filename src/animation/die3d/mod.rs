@@ -527,7 +527,10 @@ impl Die3dView {
             .flatten()
             .filter(|b| b.is_finite())
             .fold(None, |sum: Option<f64>, b| Some(sum.unwrap_or(0.0) + b));
-        let load = chips.map(|c| c.load).filter(|l| !l.is_nan()).fold(0.0, f32::max);
+        let load = chips
+            .map(|c| c.load)
+            .filter(|l| !l.is_nan())
+            .fold(0.0, f32::max);
         self.cloud_speed = Clouds::drift_px_per_s(pcie);
         self.cloud_intensity = Clouds::intensity(load);
     }

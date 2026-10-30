@@ -65,8 +65,16 @@ impl DieLayout {
                     kind: TileKind::from_code(k),
                 })
                 .collect();
-            let cols = tiles.iter().map(|t| t.die.0 as usize + 1).max().unwrap_or(0);
-            let rows = tiles.iter().map(|t| t.die.1 as usize + 1).max().unwrap_or(0);
+            let cols = tiles
+                .iter()
+                .map(|t| t.die.0 as usize + 1)
+                .max()
+                .unwrap_or(0);
+            let rows = tiles
+                .iter()
+                .map(|t| t.die.1 as usize + 1)
+                .max()
+                .unwrap_or(0);
             DieLayout { cols, rows, tiles }
         })
     }
@@ -106,7 +114,10 @@ pub fn torus_hops(a: (u8, u8), b: (u8, u8), cols: usize, rows: usize) -> usize {
 /// 0x3edf gave missing die columns [6, 9] and 0x3fdd gave [2, 6], which
 /// exercises bits 1, 5 and 8. The other bits follow by assumption.
 pub fn tensix_mask_to_die_cols(mask: u32) -> Vec<u8> {
-    (0..14u8).filter(|bit| mask & (1 << bit) == 0).map(|bit| bit + 1).collect()
+    (0..14u8)
+        .filter(|bit| mask & (1 << bit) == 0)
+        .map(|bit| bit + 1)
+        .collect()
 }
 
 #[cfg(test)]
@@ -156,8 +167,16 @@ mod tests {
     fn every_tile_noc0_equals_fold_of_its_die_coordinate() {
         let l = DieLayout::blackhole();
         for t in &l.tiles {
-            assert_eq!(t.noc0.0 as usize, fold(t.die.0 as usize, l.cols), "x of {t:?}");
-            assert_eq!(t.noc0.1 as usize, fold(t.die.1 as usize, l.rows), "y of {t:?}");
+            assert_eq!(
+                t.noc0.0 as usize,
+                fold(t.die.0 as usize, l.cols),
+                "x of {t:?}"
+            );
+            assert_eq!(
+                t.noc0.1 as usize,
+                fold(t.die.1 as usize, l.rows),
+                "y of {t:?}"
+            );
         }
     }
 
@@ -174,7 +193,10 @@ mod tests {
         // fills it from its neighbours. It must have Tensix wherever column 5
         // and column 7 both do.
         let l = DieLayout::blackhole();
-        let is_tensix = |x: u8, y: u8| l.tile_at((x, y)).map_or(false, |t| t.kind == TileKind::Tensix);
+        let is_tensix = |x: u8, y: u8| {
+            l.tile_at((x, y))
+                .map_or(false, |t| t.kind == TileKind::Tensix)
+        };
         let mut checked = 0;
         for y in 0..l.rows as u8 {
             if is_tensix(5, y) && is_tensix(7, y) {

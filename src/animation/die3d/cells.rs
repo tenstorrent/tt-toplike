@@ -252,7 +252,15 @@ mod tests {
         // Luma spread of 10 (<= 14), so the cell counts as uniform.
         for y in 0..4 {
             for x in 0..2 {
-                b.put(x, y, if (x + y) % 2 == 0 { [100, 100, 100] } else { [110, 110, 110] });
+                b.put(
+                    x,
+                    y,
+                    if (x + y) % 2 == 0 {
+                        [100, 100, 100]
+                    } else {
+                        [110, 110, 110]
+                    },
+                );
             }
         }
         let lines = to_braille_lines(&b);
