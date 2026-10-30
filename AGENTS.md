@@ -1438,7 +1438,7 @@ inset beside the process table), then: "yes, and let's make the viz shrinkable s
 we provide the best version we can, whether that's clipped, or smaller, or without flags, etc".
 
 Decisions:
-- The scene shrinks. It is not cropped, so a small view still shows the whole board.
+- The scene shrinks so the whole board stays visible.
 - The ladder is in `die3d/tiers.rs`: clouds off below 100 x 30 (`CLOUDS_MIN`), footer two rows
   at 100 x 30 (`FOOTER_TWO`), one row from 60 x 16 (`FOOTER_ONE`), flags from 60 x 16
   (`FLAGS_MIN`), history panel from 120 x 37. The scene shrinks down to about 40 x 12.
@@ -1455,12 +1455,16 @@ Decisions:
   kept under 30 s in a debug build.
 - An inset board change redraws at once with no cut transition.
 
-Costs (release build, `inset_render_cost_report`): 0.059 ms a frame at 42 x 14 for one board,
-0.079 ms for eight boards (the busiest board's scene); 0.069 ms and 0.063 ms at 42 x 22. The
+Costs (release build, `inset_render_cost_report`): 0.056 ms a frame at 42 x 14 for one p150 board,
+0.063 ms for eight p150 boards (the busiest board's scene); 0.083 ms and 0.059 ms at 42 x 22. The
 spec's budget was 0.3 ms. About 27 cells change per frame (1578 in two seconds; the test
 ceiling is 1973). A full Insights frame at 200 x 50 went from 0.18 ms to 0.27 ms with the inset,
-and from 0.13 ms to 0.21 ms at 150 x 42. In the test fake, an inset over eight p300 boards at
-42 x 14 showed the text summary (no busiest-board scene fitted), so the benchmark uses p150 boards.
+and from 0.13 ms to 0.21 ms at 150 x 42. The fake's "p300" is one chip, so a p300 board is two of them.
+A two-die board needs an inset at least 51 x 16 (measured with `fit_pixels` over `board_grid(2)`:
+50 x 16 and 51 x 15 do not fit); a single die fits at 42 x 14. The Insights inset is 42 wide, so
+with p300 boards it shows the text summary and no scene at any height (42 x 14 and 42 x 22
+measured). A scene at 51 x 16 costs 0.108 ms a frame, under the 0.3 ms budget. Widening the
+inset for two-die boards is a decision for later; the thresholds were not changed.
 
 ### Die 3D traffic fronts (Oct 30 2026, v0.13.21)
 

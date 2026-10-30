@@ -1683,12 +1683,20 @@ fn inset_render_cost_report() {
     println!();
     println!("| boards | size | mean ms per frame | changed cells in 2 s |");
     println!("|---|---|---|---|");
-    for (label, boards) in [
-        ("1 (p150)", vec!["p150"]),
-        ("8 (p150 x 8)", vec!["p150"; 8]),
+    // The fake's "p300" is one chip, so a p300 board is two of them. A p300 board needs an inset at least 51 x 16 for its scene
+    // (measured with `fit_pixels` over `board_grid(2)`); the Insights inset
+    // is 42 wide, so there it shows the text summary. Both are timed.
+    for (label, boards, sizes) in [
+        ("1 (p150)", vec!["p150"], vec![(42usize, 14usize), (42, 22)]),
+        ("8 (p150 x 8)", vec!["p150"; 8], vec![(42, 14), (42, 22)]),
+        (
+            "1 board, 2 dies (p300 x 2)",
+            vec!["p300"; 2],
+            vec![(42, 14), (51, 16)],
+        ),
     ] {
         let b = busy_fake(&boards);
-        for (cols, rows) in [(42usize, 14usize), (42, 22)] {
+        for (cols, rows) in sizes {
             let mut v = Die3dView::inset(cols, rows);
             for s in 0..=6 {
                 v.update(&b, s as f64);
