@@ -1476,9 +1476,19 @@ mod tests {
         v.update(&b, 0.0);
         let t = text(&v.render(0.0));
         assert_eq!(t.len(), 10);
-        assert!(t.iter().any(|l| l.contains("BH0")), "{t:?}");
-        assert!(t.iter().any(|l| l.contains("BH1")), "{t:?}");
-        assert!(t.iter().all(|l| l.chars().count() <= 30), "{t:?}");
+        // The Fake backend's four chips (two boards) report 0 W and no PCIe
+        // counters: the exact summary lines, then empty rows.
+        for (i, name) in ["BH0", "BH1", "BH2", "BH3"].iter().enumerate() {
+            assert_eq!(t[i], format!("{name} 0W  in -  out -"), "{t:?}");
+        }
+        assert!(t[4..].iter().all(|l| l.is_empty()), "{t:?}");
+        // No scene glyph: no braille cell and no half-block.
+        assert!(
+            !t.iter()
+                .any(|l| l.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)
+                    || matches!(c, '\u{2580}' | '\u{2584}' | '\u{2588}'))),
+            "{t:?}"
+        );
     }
 
     /// A `cols` x `rows` view over one p150 that has read the backend once,
