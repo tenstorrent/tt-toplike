@@ -55,13 +55,17 @@ use palette::GRAYSKULL;
 use raster::{Iso, PixelBuf};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+#[cfg(test)]
+use scene::draw_board_scene;
 use scene::{
-    board_band_origin, board_grid, chip_inputs, die_centre, draw_board_scene, fit_last_resort,
+    board_band_origin, board_grid, chip_inputs, die_centre, draw_board_scene_in, fit_last_resort,
     fit_pixels, has_per_tile_data, lift, ChipInputs, Detail, SceneFit, ESTIMATE_LABEL,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use super_scene::{band_origin, draw_super_scene, super_grid};
+#[cfg(test)]
+use super_scene::draw_super_scene;
+use super_scene::{band_origin, draw_super_scene_in, super_grid};
 use switching::{Scene, Switcher};
 use tiers::{tier_for, Tier};
 use triggers::TriggerDetector;
@@ -298,6 +302,9 @@ pub struct Die3dView {
     /// Leave the background unpainted so the terminal's own colour (and any
     /// translucency) shows through. Off paints it opaque black.
     transparent: bool,
+    /// Which palette the scene is painted in (`/theme`). Grayskull until the app
+    /// says otherwise, so a view made outside the app is the same every time.
+    theme: crate::ui::colors::Theme,
     /// Draw each die's name and power over it (`L`).
     show_labels: bool,
     /// Draw the clouds behind the die (`W`).
@@ -406,6 +413,27 @@ impl Die3dView {
         self
     }
 
+    /// This view painted in the palette of `theme`: greys for Grayskull, full
+    /// colour for the default theme. The app sets it from `/theme`.
+    pub fn with_theme(mut self, theme: crate::ui::colors::Theme) -> Die3dView {
+        self.theme = theme;
+        self
+    }
+
+    /// Change the palette while the view is open (`/theme` while it is on
+    /// screen). The next frame is drawn afresh.
+    pub fn set_theme(&mut self, theme: crate::ui::colors::Theme) {
+        if self.theme != theme {
+            self.theme = theme;
+            self.revision += 1;
+        }
+    }
+
+    /// The theme this view paints in.
+    pub fn theme(&self) -> crate::ui::colors::Theme {
+        self.theme
+    }
+
     /// Whether the background is transparent now.
     pub fn is_transparent(&self) -> bool {
         self.transparent
@@ -444,6 +472,7 @@ impl Die3dView {
             reserved_rows,
             braille: true,
             transparent: true,
+            theme: crate::ui::colors::Theme::Grayskull,
             show_labels: true,
             show_clouds: true,
             show_history: true,
@@ -1039,6 +1068,7 @@ impl Die3dView {
         // have periods that do not divide it, so they jump once a day, at
         // the wrap.
         let t = now.rem_euclid(SCENE_TIME_WRAP_S) as f32;
+        let pal = *palette::for_theme(self.theme);
         // The scenes paint only what stands in them, so the buffer starts
         // clear: all uncovered for transparent, filled black for opaque.
         let mut buf = self.take_buf(pw, ph);
@@ -1053,7 +1083,7 @@ impl Die3dView {
         if self.clouds_shown() {
             let clock = self.cloud_clock.get();
             self.clouds
-                .draw(&mut buf, clock.offset_px(), clock.intensity());
+                .draw_in(&pal, &mut buf, clock.offset_px(), clock.intensity());
         }
         let mut fallback = false;
         // With one board the super scene is that board's scene.
@@ -1064,7 +1094,7 @@ impl Die3dView {
                 Some(fit) => {
                     let (_, row_rows) = super_grid(&dies);
                     let fit = aim(&fit, aim_by, grid);
-                    draw_super_scene(&mut buf, &self.chips, &fit, t);
+                    draw_super_scene_in(pal, &mut buf, &self.chips, &fit, t);
                     let placed = Placement {
                         iso: fit.iso,
                         grid,
@@ -1107,7 +1137,7 @@ impl Die3dView {
             None => return None,
         };
         let fit = aim(&base, aim_by, grid);
-        draw_board_scene(&mut buf, chips, &fit, t, Detail::Full);
+        draw_board_scene_in(pal, &mut buf, chips, &fit, t, Detail::Full);
         let shown = match base.virtual_px {
             Some((vw, vh)) => {
                 // Cells of the whole picture, and the footer rows a window
@@ -1735,6 +1765,43 @@ mod tests {
                     || matches!(c, '\u{2580}' | '\u{2584}' | '\u{2588}'))),
             "{t:?}"
         );
+    }
+
+    /// `/theme` reaches the scene: the same view drawn in the default theme is
+    /// full colour, in Grayskull it is greys, and the change shows in the very
+    /// next frame even though the frame cache would otherwise return the last one.
+    #[test]
+    fn the_theme_changes_the_scene_palette_and_is_not_served_from_the_cache() {
+        use crate::ui::colors::Theme;
+        let mut v = two_die_view(150, 42).with_theme(Theme::Grayskull);
+        let spread = |c: [u8; 3]| c.iter().max().unwrap() - c.iter().min().unwrap();
+        let most_colourful = |v: &Die3dView, now: f64| -> u8 {
+            let (buf, _) = v.scene_pixels(now).expect("a scene");
+            (0..buf.w * buf.h)
+                .filter(|&i| buf.cover[i])
+                .map(|i| spread(buf.rgb[i]))
+                .max()
+                .unwrap()
+        };
+        let grey = most_colourful(&v, 1.0);
+        let first = text(&v.render(1.0));
+        v.set_theme(Theme::Default);
+        // Same view time, so only the revision tells the cache the frame is stale.
+        let second = text(&v.render(1.0));
+        let rainbow = most_colourful(&v, 1.0);
+        assert!(rainbow >= 150, "the default theme is colourful: {rainbow}");
+        assert!(
+            grey < rainbow,
+            "grayskull ({grey}) is less colourful than rainbow ({rainbow})"
+        );
+        assert_ne!(
+            first, second,
+            "the theme change was served from the frame cache"
+        );
+        // Setting the same theme again changes nothing and costs no new frame.
+        let rev = v.revision;
+        v.set_theme(Theme::Default);
+        assert_eq!(v.revision, rev);
     }
 
     /// A `cols` x `rows` view over one two-die board (the fake's p300 is one

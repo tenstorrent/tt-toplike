@@ -10,6 +10,7 @@
 //! group of Tensix tiles is one block (see [`block_heat`]). A lone board has
 //! the room for full detail and is drawn exactly like `draw_board_scene`.
 
+use super::palette;
 use super::raster::PixelBuf;
 use super::scene::{
     draw_die_tile, draw_slab, fit_grid, harvested_columns, ChipInputs, Detail, DieSlot, DrawCtx,
@@ -70,7 +71,19 @@ pub fn fit_super(cells_w: usize, cells_h: usize, boards: &[usize]) -> Option<Sce
 /// board is drawn at full detail, exactly as `draw_board_scene` would; more
 /// boards use `Detail::Blocks(2)`. The whole grid is projected and ordered
 /// together, so a board in front covers the one behind it.
+#[cfg(test)]
 pub fn draw_super_scene(buf: &mut PixelBuf, boards: &[Vec<ChipInputs>], fit: &SceneFit, t: f32) {
+    draw_super_scene_in(palette::GRAYSKULL, buf, boards, fit, t)
+}
+
+/// [`draw_super_scene`] painted in `pal`.
+pub fn draw_super_scene_in(
+    pal: palette::Palette,
+    buf: &mut PixelBuf,
+    boards: &[Vec<ChipInputs>],
+    fit: &SceneFit,
+    t: f32,
+) {
     let dies: Vec<usize> = boards.iter().map(Vec::len).collect();
     let (grid, row_rows) = super_grid(&dies);
     let detail = if boards.len() <= 1 {
@@ -78,7 +91,7 @@ pub fn draw_super_scene(buf: &mut PixelBuf, boards: &[Vec<ChipInputs>], fit: &Sc
     } else {
         Detail::Blocks(2)
     };
-    let ctx = DrawCtx::new(fit, t, detail);
+    let ctx = DrawCtx::in_palette(fit, t, detail, pal);
     let harvested: Vec<Vec<Vec<u8>>> = boards.iter().map(|b| harvested_columns(b)).collect();
     let mut visits = HashMap::new();
     for (bx, by) in ctx.iso.draw_order(grid) {

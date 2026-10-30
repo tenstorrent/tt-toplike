@@ -38,6 +38,8 @@
 //!
 //! Pure logic: no clock, no I/O. The caller passes time in seconds.
 
+use super::palette::Palette;
+#[cfg(test)]
 use super::palette::GRAYSKULL;
 use super::raster::PixelBuf;
 
@@ -180,7 +182,13 @@ impl Clouds {
     /// of the block's top-left pixel (`2 * bx + 0.5`, `2 * by + 0.5`), and
     /// each value covers its block: a block takes the value its first pixel
     /// would have on its own.
+    #[cfg(test)]
     pub fn draw(&self, buf: &mut PixelBuf, offset_px: f64, intensity: f32) {
+        self.draw_in(&GRAYSKULL, buf, offset_px, intensity)
+    }
+
+    /// [`draw`](Self::draw) with the cloud colour of `pal`.
+    pub fn draw_in(&self, pal: &Palette, buf: &mut PixelBuf, offset_px: f64, intensity: f32) {
         let intensity = if intensity.is_nan() {
             INTENSITY_MIN
         } else {
@@ -189,7 +197,7 @@ impl Clouds {
         // One colour per band: the cloud colour times the band's share times
         // the intensity. The thickest band at the top intensity (0.75) is
         // about as bright as an idle tile.
-        let colours = BANDS.map(|(_, share)| scale(GRAYSKULL.cloud, share * intensity));
+        let colours = BANDS.map(|(_, share)| scale(pal.cloud, share * intensity));
         let half_w = buf.w.div_ceil(2);
         // The band of each block in one row of blocks: 0 for clear sky, else
         // the band number plus one. A few hundred bytes per frame.

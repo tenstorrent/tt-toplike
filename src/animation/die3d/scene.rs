@@ -24,8 +24,8 @@ use std::collections::HashMap;
 /// Shown next to the view whenever the tile glow is not measured per tile.
 pub const ESTIMATE_LABEL: &str = "per-tile glow: estimate from chip load";
 
-// Colours come from `palette::GRAYSKULL`.
-const P: palette::Palette = palette::GRAYSKULL;
+// Colours come from the `Palette` in the `DrawCtx`: `palette::GRAYSKULL` unless a
+// caller (the view, under `/theme`) passes another.
 
 // Board grid. Each die sits in a band of `BOARD_BAND` rows: one row of Ethernet
 // cages (die row -1), the 12 die rows, then the PCIe connector row (die row
@@ -491,11 +491,11 @@ fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
 }
 
 /// Tile colour for a heat value: idle indigo grey to lilac to hot pink.
-fn heat_rgb(h: f32) -> [u8; 3] {
+fn heat_rgb(p: &palette::Palette, h: f32) -> [u8; 3] {
     if h < 0.5 {
-        lerp_rgb(P.tile, P.warm, h * 2.0)
+        lerp_rgb(p.tile, p.warm, h * 2.0)
     } else {
-        lerp_rgb(P.warm, P.hot, (h - 0.5) * 2.0)
+        lerp_rgb(p.warm, p.hot, (h - 0.5) * 2.0)
     }
 }
 
@@ -534,10 +534,23 @@ pub(super) struct DrawCtx {
     n: i32,
     t: f32,
     detail: Detail,
+    /// The colours this drawing paints with.
+    pal: palette::Palette,
 }
 
 impl DrawCtx {
+    /// A drawing context in the Grayskull palette.
+    #[cfg(test)]
     pub(super) fn new(fit: &SceneFit, t: f32, detail: Detail) -> DrawCtx {
+        DrawCtx::in_palette(fit, t, detail, palette::GRAYSKULL)
+    }
+
+    pub(super) fn in_palette(
+        fit: &SceneFit,
+        t: f32,
+        detail: Detail,
+        pal: palette::Palette,
+    ) -> DrawCtx {
         let s = fit.iso.tw as f32 / 8.0;
         DrawCtx {
             iso: fit.iso,
@@ -547,6 +560,7 @@ impl DrawCtx {
             n: fit.scale,
             t,
             detail,
+            pal,
         }
     }
 
@@ -605,9 +619,9 @@ pub(super) fn draw_slab(
     at: (i32, i32),
 ) {
     let slab = if (bx + by) % 2 == 0 {
-        P.slab.map(|v| (v as f32 * 1.1).round() as u8)
+        ctx.pal.slab.map(|v| (v as f32 * 1.1).round() as u8)
     } else {
-        P.slab
+        ctx.pal.slab
     };
     draw_block(buf, at.0, at.1, ctx.iso.tw, ctx.iso.th, ctx.up, slab, true);
 }
@@ -692,26 +706,34 @@ pub(super) fn draw_die_tile(
                         (tw as f32 * side).round() as i32,
                         (th as f32 * side).round() as i32,
                         blocks(1.0 + h * 9.0),
-                        heat_rgb(h),
+                        heat_rgb(&ctx.pal, h),
                         true,
                     );
                 }
             } else {
                 match tile.kind {
                     TileKind::Tensix if die.harvested.contains(&tile.die.0) => {
-                        cube(buf, blocks(1.0), P.tile)
+                        cube(buf, blocks(1.0), ctx.pal.tile)
                     }
                     TileKind::Tensix => {
                         let h = tile_value(chip, tile, t).clamp(0.0, 1.0);
-                        cube(buf, blocks(1.0 + h * 9.0), heat_rgb(h));
+                        cube(buf, blocks(1.0 + h * 9.0), heat_rgb(&ctx.pal, h));
                     }
                     TileKind::Dram => {
                         let h = tile_value(chip, tile, t).clamp(0.0, 1.0);
-                        cube(buf, blocks(2.0), lerp_rgb(P.tile, P.dram, 0.35 + 0.4 * h));
+                        cube(
+                            buf,
+                            blocks(2.0),
+                            lerp_rgb(ctx.pal.tile, ctx.pal.dram, 0.35 + 0.4 * h),
+                        );
                     }
                     // A still tint: with no per-tile data there is no activity to show.
-                    TileKind::Eth => cube(buf, blocks(1.5), lerp_rgb(P.tile, P.eth, 0.45)),
-                    TileKind::Mgmt => cube(buf, blocks(1.0), lerp_rgb(P.tile, P.mgmt, 0.3)),
+                    TileKind::Eth => {
+                        cube(buf, blocks(1.5), lerp_rgb(ctx.pal.tile, ctx.pal.eth, 0.45))
+                    }
+                    TileKind::Mgmt => {
+                        cube(buf, blocks(1.0), lerp_rgb(ctx.pal.tile, ctx.pal.mgmt, 0.3))
+                    }
                 }
             }
         }
@@ -723,20 +745,20 @@ pub(super) fn draw_die_tile(
         cube(
             buf,
             blocks(2.0 + 2.0 * heat),
-            lerp_rgb(P.tile, P.dram, 0.35 + 0.55 * heat),
+            lerp_rgb(ctx.pal.tile, ctx.pal.dram, 0.35 + 0.55 * heat),
         );
     }
     // PCIe connector on the front edge.
     let front = gy == layout.rows as i32;
     if front && (6..=10).contains(&gx) {
-        cube(buf, blocks(2.5), lerp_rgb(P.tile, P.noc1, 0.7));
+        cube(buf, blocks(2.5), lerp_rgb(ctx.pal.tile, ctx.pal.noc1, 0.7));
     }
     // Ethernet cages on the back edge, lit by the live-link bits.
     if gy == -1 && (1..=ETH_CAGES as i32).contains(&gx) {
         if chip.eth_live >> (gx - 1) & 1 == 1 {
-            cube(buf, blocks(2.5), lerp_rgb(P.tile, P.eth, 0.7));
+            cube(buf, blocks(2.5), lerp_rgb(ctx.pal.tile, ctx.pal.eth, 0.7));
         } else {
-            cube(buf, blocks(1.0), lerp_rgb(P.tile, P.eth, 0.15));
+            cube(buf, blocks(1.0), lerp_rgb(ctx.pal.tile, ctx.pal.eth, 0.15));
         }
     }
     // Packet streams along the middle of the die, in from the connector
@@ -747,15 +769,15 @@ pub(super) fn draw_die_tile(
     for k in 0..packet_count(chip.pcie_in_bps) {
         let p = layout.rows as f32 - (t * 5.0 + k as f32 * 2.3).rem_euclid(span);
         if near(8.0, p) {
-            blob(buf, cx, cy - dz, P.white, n);
-            blob(buf, cx, cy - dz - n, P.packet_in, n);
+            blob(buf, cx, cy - dz, ctx.pal.white, n);
+            blob(buf, cx, cy - dz - n, ctx.pal.packet_in, n);
         }
     }
     for k in 0..packet_count(chip.pcie_out_bps) {
         let p = (t * 5.0 + k as f32 * 2.3 + 1.1).rem_euclid(span) - 1.0;
         if near(9.0, p) {
-            blob(buf, cx, cy - dz, P.white, n);
-            blob(buf, cx, cy - dz - n, P.packet_out, n);
+            blob(buf, cx, cy - dz, ctx.pal.white, n);
+            blob(buf, cx, cy - dz - n, ctx.pal.packet_out, n);
         }
     }
 }
@@ -773,6 +795,7 @@ pub(super) fn draw_die_tile(
 /// Only what stands in the scene is painted; the background is the caller's to
 /// choose. A fresh `PixelBuf` leaves it transparent, and `fill_solid` first
 /// makes it opaque (the view does the latter, in black, with `T` off).
+#[cfg(test)]
 pub fn draw_board_scene(
     buf: &mut PixelBuf,
     chips: &[ChipInputs],
@@ -780,7 +803,19 @@ pub fn draw_board_scene(
     t: f32,
     detail: Detail,
 ) {
-    let ctx = DrawCtx::new(fit, t, detail);
+    draw_board_scene_in(palette::GRAYSKULL, buf, chips, fit, t, detail)
+}
+
+/// [`draw_board_scene`] painted in `pal`.
+pub fn draw_board_scene_in(
+    pal: palette::Palette,
+    buf: &mut PixelBuf,
+    chips: &[ChipInputs],
+    fit: &SceneFit,
+    t: f32,
+    detail: Detail,
+) {
+    let ctx = DrawCtx::in_palette(fit, t, detail, pal);
     let grid = board_grid(chips.len());
     let harvested = harvested_columns(chips);
     let mut visits = HashMap::new();
@@ -1449,8 +1484,8 @@ mod tests {
             )
         };
         let hs = s * 1.15;
-        assert_eq!(probe(&hot, hs + 9.0 * hs), P.hot);
-        assert_eq!(probe(&flat, hs), P.tile);
+        assert_eq!(probe(&hot, hs + 9.0 * hs), palette::GRAYSKULL.hot);
+        assert_eq!(probe(&flat, hs), palette::GRAYSKULL.tile);
         // Without the flow the same load 0.0 chip draws only the quiet idle
         // wave, so the picture differs.
         c.tile_flow = None;
@@ -1520,10 +1555,16 @@ mod tests {
         );
         let top = (cy - up - height + f.iso.th) as usize;
         // The middle of the block's top face is the mean colour ...
-        assert_eq!(blocks.get(cx as usize, top), heat_rgb(0.25));
+        assert_eq!(
+            blocks.get(cx as usize, top),
+            heat_rgb(&palette::GRAYSKULL, 0.25)
+        );
         // ... where tile by tile there is the seam between four tiles, which
         // the hot tile's own colour does not fill.
-        assert_ne!(full.get(cx as usize, top), heat_rgb(0.25));
+        assert_ne!(
+            full.get(cx as usize, top),
+            heat_rgb(&palette::GRAYSKULL, 0.25)
+        );
         // Blocks(1) is Full.
         let mut one = PixelBuf::new(300, 168);
         let mut c = chip(0.0);
@@ -1544,7 +1585,7 @@ mod tests {
     #[test]
     fn heat_ramp_never_goes_through_orange_or_green() {
         for i in 0..=20 {
-            let c = heat_rgb(i as f32 / 20.0);
+            let c = heat_rgb(&palette::GRAYSKULL, i as f32 / 20.0);
             let (r, g, b) = (c[0] as i32, c[1] as i32, c[2] as i32);
             assert!(!(g > r && g > b), "step {i}: {c:?} is green");
             assert!(r - g <= 140 || b > g, "step {i}: {c:?} is orange");

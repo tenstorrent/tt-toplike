@@ -174,11 +174,14 @@ fn die3d_area(width: u16, height: u16) -> (usize, usize, usize) {
 fn new_die3d_view(cols: usize, rows: usize, reserved: usize) -> crate::animation::Die3dView {
     crate::animation::Die3dView::with_reserved_rows(cols, rows, reserved)
         .with_transparent(colors::canvas_transparent())
+        .with_theme(colors::current_theme())
 }
 
 /// The Insights inset, with the same background rule as [`new_die3d_view`].
 fn new_inset_view(cols: usize, rows: usize) -> crate::animation::Die3dView {
-    crate::animation::Die3dView::inset(cols, rows).with_transparent(colors::canvas_transparent())
+    crate::animation::Die3dView::inset(cols, rows)
+        .with_transparent(colors::canvas_transparent())
+        .with_theme(colors::current_theme())
 }
 
 /// On a terminal resize, resize the Die 3D view in place when it is open.
@@ -1189,6 +1192,8 @@ fn run_app(
                         has_blackhole_chip(backend.devices()),
                     ) {
                         if let Some(view) = insights_inset.as_mut() {
+                            // `/theme` may have changed since the last tick.
+                            view.set_theme(colors::current_theme());
                             view.update(backend, insights_inset_started.elapsed().as_secs_f64());
                         }
                     }
@@ -1398,6 +1403,7 @@ fn run_app(
                         let (cols, rows, reserved) = die3d_area(size.width, size.height);
                         new_die3d_view(cols, rows, reserved)
                     });
+                    dv.set_theme(colors::current_theme());
                     dv.update(backend, die3d_started.elapsed().as_secs_f64());
                 }
             }
@@ -3991,6 +3997,11 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 row!(" /fps <n>", "animation FPS  1–120", lbl),
                 row!(" /datafps <n>", "data refresh FPS  1–30", lbl),
                 row!(" /rotate", "rotate all views; on|off to force", lbl),
+                row!(
+                    " /theme [grayskull|rainbow]",
+                    "colours for every view (bare flips)",
+                    lbl
+                ),
                 row!(" /legend", "toggle legend panel", lbl),
                 row!(" /explain", "toggle explain panel", lbl),
                 row!(" /help", "toggle this panel", lbl),
@@ -5638,6 +5649,7 @@ fn explain_lines(
 /// /fps <n>          set animation FPS (1–120)
 /// /datafps <n>      set data-mode FPS (1–30)
 /// /mode <name>      switch display mode (insights|grid|starfield|castle|flow|arcade|defrag|hivemind)
+/// /theme [name]     grayskull | rainbow, every view (bare flips)
 /// /legend           toggle legend overlay      (hotkey: l)
 /// /explain          toggle explain overlay     (hotkey: !)
 /// /help             list commands              (hotkey: ?)
@@ -5771,7 +5783,7 @@ fn execute_command(
                 }
             },
             _ => (
-                "theme: grayskull | default  (or /theme to toggle)".to_string(),
+                "theme: grayskull | rainbow  (or /theme to toggle)".to_string(),
                 true,
                 false,
             ),
@@ -9046,6 +9058,23 @@ mod display_mode_tests {
             want,
             "inset"
         );
+    }
+
+    /// The views the app makes carry the theme in force, so `/theme` reaches
+    /// Die 3D. The theme is process-wide and other tests change it, so this
+    /// reads it before and after and accepts either.
+    #[test]
+    fn the_die3d_views_the_app_makes_carry_the_current_theme() {
+        use crate::ui::colors::current_theme;
+        let before = current_theme();
+        let (full, inset) = (
+            super::new_die3d_view(100, 30, 0).theme(),
+            super::new_inset_view(52, 16).theme(),
+        );
+        let after = current_theme();
+        for (what, got) in [("full view", full), ("inset", inset)] {
+            assert!(got == before || got == after, "{what}: {got:?}");
+        }
     }
 
     #[test]
