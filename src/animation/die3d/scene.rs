@@ -130,8 +130,33 @@ pub fn chip_inputs(backend: &dyn TelemetryBackend, device: &Device) -> ChipInput
 /// amplitude in every recording. This floor keeps that look at idle.
 pub const IDLE_WAVE_AMPLITUDE: f32 = 0.30;
 
-/// Estimated heat of a tile at time `t`: a wave sweeping across the Tensix
-/// columns over a 0.06 floor. Its amplitude is [`IDLE_WAVE_AMPLITUDE`] at load
+/// Steps per second of the clock the tile wave runs on. Every Tensix tile's
+/// glow moves with the wave, so each wave step repaints hundreds of cells;
+/// stepping the wave 12 times a second, while the view draws 20 frames a
+/// second, leaves a third or more of those frames with only the packets
+/// moving. The wave front advances 0.075 of a tile per step.
+pub const WAVE_STEPS_PER_SEC: f32 = 12.0;
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook: run the wave on the unquantised clock, to measure what the
+    /// quantisation saves. Per thread, so it never leaks into another test.
+    pub(super) static SMOOTH_WAVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The wave's time for view time `t`: `t` rounded down to a whole
+/// [`WAVE_STEPS_PER_SEC`] step. Exact on the step points themselves.
+pub(super) fn wave_time(t: f32) -> f32 {
+    #[cfg(test)]
+    if SMOOTH_WAVE.with(std::cell::Cell::get) {
+        return t;
+    }
+    (t * WAVE_STEPS_PER_SEC).floor() / WAVE_STEPS_PER_SEC
+}
+
+/// Estimated heat of a tile at time `t` (on the wave's stepped clock, see
+/// [`wave_time`]): a wave sweeping across the Tensix columns over a 0.06
+/// floor. Its amplitude is [`IDLE_WAVE_AMPLITUDE`] at load
 /// 0 and rises linearly to 1.0 at load 1, so an idle die keeps a quiet wave
 /// and activity brightens it. A NaN load counts as 0. This is invented motion
 /// shaped by real chip-wide load, not a measurement of the tile. Other kinds
@@ -141,6 +166,7 @@ pub fn tile_heat(load: f32, tile: &Tile, t: f32) -> f32 {
         return 0.0;
     }
     let cols = DieLayout::blackhole().cols as f32;
+    let t = wave_time(t);
     let (x, y) = (tile.die.0 as f32, tile.die.1 as f32);
     let front = (t * 0.9).rem_euclid(cols + 6.0) - 3.0;
     let wave = (1.0 - (x - front).abs() / 4.0).max(0.0);

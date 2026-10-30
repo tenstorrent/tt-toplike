@@ -418,6 +418,8 @@ fn render_cost_report() {
         );
     }
     println!();
+    wave_report();
+    println!();
     println!("Per stage, one braille transparent frame at 150 x 42 (mean ms):");
     println!("| scene | fit | raster (less fit) | cells | labels | footer | whole render |");
     println!("|---|---|---|---|---|---|---|");
@@ -645,4 +647,123 @@ fn braille_cells_are_converted_without_per_cell_allocation() {
     assert_eq!(first.len(), 1, "one buffer for a steady frame");
     v.render(2.0);
     assert_eq!(ptr(&v), first);
+}
+
+/// Run `f` with the tile wave on the unquantised clock when `smooth`.
+fn with_wave<R>(smooth: bool, f: impl FnOnce() -> R) -> R {
+    scene::SMOOTH_WAVE.with(|c| c.set(smooth));
+    let r = f();
+    scene::SMOOTH_WAVE.with(|c| c.set(false));
+    r
+}
+
+/// Cells changed between consecutive frames over one second of a steady
+/// one-board view drawn 20 times a second, as the view draws it.
+fn changed_over_a_second(smooth: bool) -> usize {
+    with_wave(smooth, || {
+        let v = steady_view();
+        let mut prev: Option<Buffer> = None;
+        let mut n = 0;
+        for i in 0..=20 {
+            let buf = to_buffer(v.render(1.0 + i as f64 * 0.05), 150, 42);
+            if let Some(p) = &prev {
+                n += p.diff(&buf).len();
+            }
+            prev = Some(buf);
+        }
+        n
+    })
+}
+
+#[test]
+fn quantised_wave_changes_fewer_cells_than_the_unquantised_one() {
+    let (smooth, stepped) = (changed_over_a_second(true), changed_over_a_second(false));
+    assert!(
+        stepped * 4 <= smooth * 3,
+        "{stepped} cells changed with the stepped wave, {smooth} without"
+    );
+    // The look of a frame is unchanged: with nothing else moving (no PCIe
+    // packets), the frame at `t` is exactly the unquantised frame at the
+    // wave's own time, at most 1/12 s earlier.
+    for t in [1.0, 1.04, 1.07, 2.333, 7.9] {
+        let quiet = || {
+            let b = Fake::boards(&["p150"], Some(TDP));
+            let mut v = Die3dView::new(150, 42);
+            v.update(&b, 0.0);
+            v
+        };
+        let stepped = frame_hash(&quiet().render(t));
+        let wave_t = scene::wave_time(t as f32) as f64;
+        assert!(t - wave_t < 1.0 / 12.0 + 1e-6, "{t} -> {wave_t}");
+        let smooth = with_wave(true, || frame_hash(&quiet().render(wave_t)));
+        assert_eq!(stepped, smooth, "at {t}");
+    }
+}
+
+/// The largest difference in any colour channel between two cells, 0 when
+/// both colours match; 255 when one side has no RGB colour where the other
+/// does (a cell that is drawn in one frame and not the other).
+fn colour_gap(a: &ratatui::buffer::Cell, b: &ratatui::buffer::Cell) -> u8 {
+    let gap = |x: Color, y: Color| match (x, y) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
+            r1.abs_diff(r2).max(g1.abs_diff(g2)).max(b1.abs_diff(b2))
+        }
+        (x, y) if x == y => 0,
+        _ => 255,
+    };
+    gap(a.fg, b.fg).max(gap(a.bg, b.bg))
+}
+
+/// What stepping the wave's clock does, braille transparent 150 x 42, one
+/// board, 10 s of frames 1/20 s apart: cells changed per drawn frame with and
+/// without it, and how far each stepped frame is from the unstepped frame at
+/// the same time (cells that differ, the largest colour gap among them, and
+/// the share of those that differ by a glyph or by 255 in a channel, which
+/// is a block edge moved by a pixel row).
+fn wave_report() {
+    let frames = |smooth: bool| {
+        with_wave(smooth, || {
+            let v = steady_view();
+            (0..200)
+                .map(|i| to_buffer(v.render(1.0 + i as f64 * 0.05), 150, 42))
+                .collect::<Vec<_>>()
+        })
+    };
+    let (smooth, stepped) = (frames(true), frames(false));
+    let per_frame = |f: &[Buffer]| {
+        f.windows(2).map(|w| w[0].diff(&w[1]).len()).sum::<usize>() as f64 / (f.len() - 1) as f64
+    };
+    let (mut differing, mut gap_max, mut edge) = (0usize, 0u8, 0usize);
+    let mut gaps: Vec<u8> = Vec::new();
+    for (a, b) in smooth.iter().zip(&stepped) {
+        for (ca, cb) in a.content.iter().zip(&b.content) {
+            if ca != cb {
+                differing += 1;
+                let g = colour_gap(ca, cb);
+                gap_max = gap_max.max(g);
+                if g == 255 || ca.symbol() != cb.symbol() {
+                    edge += 1;
+                } else {
+                    gaps.push(g);
+                }
+            }
+        }
+    }
+    gaps.sort_unstable();
+    let median = gaps.get(gaps.len() / 2).copied().unwrap_or(0);
+    let p95 = gaps.get(gaps.len() * 95 / 100).copied().unwrap_or(0);
+    println!(
+        "Wave clock stepped at {} steps/s, braille 150 x 42 one board, 20 frames/s:",
+        scene::WAVE_STEPS_PER_SEC
+    );
+    println!("| wave | changed cells per drawn frame |");
+    println!("|---|---|");
+    println!("| smooth | {:.0} |", per_frame(&smooth));
+    println!("| stepped | {:.0} |", per_frame(&stepped));
+    println!(
+        "Stepped against smooth at the same time: {:.0} of 6000 cells differ per frame; {:.0} of those by glyph or coverage (largest colour gap {gap_max}); colour gap of the rest median {median}, 95th percentile {p95}, max {} (of 255).",
+        differing as f64 / 200.0,
+        edge as f64 / 200.0,
+        gaps.last().copied().unwrap_or(0),
+    );
 }
