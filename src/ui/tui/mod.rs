@@ -139,6 +139,22 @@ fn next_display_mode(m: DisplayMode) -> DisplayMode {
 /// Views that draw their own footer are sized to the terminal minus this.
 const STATUS_BAR_ROWS: usize = 1;
 
+/// Where Esc (or the entry key pressed again) leaves `mode` for: the saved
+/// `prev_mode`, unless that is `mode` itself, and then `Insights`.
+///
+/// `prev_mode` can equal the mode on show after a detour: in Die 3D, `i`
+/// opens the inference monitor and saves Die3d as the previous mode, and Esc
+/// from the monitor goes back to Die 3D with that saved mode unchanged.
+/// Going "back" to Die3d from Die3d would leave nothing, so the key would
+/// do nothing while the footer says `3 leave`.
+fn back_target(mode: DisplayMode, prev_mode: DisplayMode) -> DisplayMode {
+    if prev_mode == mode {
+        DisplayMode::Insights
+    } else {
+        prev_mode
+    }
+}
+
 /// The Die 3D view's area for a terminal of `width` x `height` cells, and
 /// the rows kept for the global status bar: (columns, rows, reserved rows).
 /// The scene is drawn above the status bar, so the view gets one row less
@@ -164,11 +180,13 @@ fn resize_die3d(die3d: &mut Option<crate::animation::Die3dView>, width: u16, hei
 }
 
 /// The mode a `3` press leads to, and the `prev_mode` to keep: entering
-/// remembers where we came from, leaving goes back to it. Pulled out of the
-/// key handler so the toggle can be tested without a terminal.
+/// remembers where we came from, leaving goes back to it (to `Insights` when
+/// the saved mode is Die3d itself; see `back_target`). Pulled out of the key
+/// handler so the toggle can be tested without a terminal.
 fn die3d_toggle(mode: DisplayMode, prev_mode: DisplayMode) -> (DisplayMode, DisplayMode) {
     if mode == DisplayMode::Die3d {
-        (prev_mode, prev_mode)
+        let back = back_target(mode, prev_mode);
+        (back, back)
     } else {
         (DisplayMode::Die3d, mode)
     }
@@ -2120,7 +2138,7 @@ fn run_app(
                                         )
                                         .start();
                                 } else {
-                                    display_mode = prev_mode;
+                                    display_mode = back_target(display_mode, prev_mode);
                                 }
                                 force_redraw = true;
                             }
@@ -2158,7 +2176,7 @@ fn run_app(
                                 // so unlike HivemindSweeper there is nothing for the
                                 // mode-transition choke point to tear down.
                                 if display_mode == DisplayMode::Training {
-                                    display_mode = prev_mode;
+                                    display_mode = back_target(display_mode, prev_mode);
                                 } else {
                                     prev_mode = display_mode;
                                     display_mode = DisplayMode::Training;
@@ -2220,19 +2238,20 @@ fn run_app(
                                     // Back out of the sniffer view to wherever the user
                                     // came from; the mode-transition choke point above
                                     // stops the engine's collector threads.
-                                    display_mode = prev_mode;
+                                    display_mode = back_target(display_mode, prev_mode);
                                 } else if display_mode == DisplayMode::InferenceMonitor {
                                     // Back out of the dedicated Inference Server Monitor
                                     // view to wherever the user came from (see the
                                     // `i`/`I` handler above) rather than quitting.
-                                    display_mode = prev_mode;
+                                    display_mode = back_target(display_mode, prev_mode);
                                 } else if display_mode == DisplayMode::Training {
                                     // Back out of the Training view to wherever the
                                     // user came from (see the `t` handler above).
-                                    display_mode = prev_mode;
+                                    display_mode = back_target(display_mode, prev_mode);
                                 } else if display_mode == DisplayMode::Die3d {
-                                    // Back out of Die 3D (see the `3` handler above).
-                                    display_mode = prev_mode;
+                                    // Back out of Die 3D (see the `3` handler above);
+                                    // `back_target` makes sure Esc always leaves.
+                                    display_mode = back_target(display_mode, prev_mode);
                                 } else {
                                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_some() {
@@ -8575,9 +8594,9 @@ mod tests {
 #[cfg(test)]
 mod display_mode_tests {
     use super::{
-        die3d_area, die3d_key_for, die3d_toggle, display_mode_for, leaves_die3d, linger_for,
-        next_display_mode, next_rotation_mode, resize_die3d, statusbar_mode_name, DisplayMode,
-        ROTATE_LINGER, ROTATION,
+        back_target, die3d_area, die3d_key_for, die3d_toggle, display_mode_for, leaves_die3d,
+        linger_for, next_display_mode, next_rotation_mode, resize_die3d, statusbar_mode_name,
+        DisplayMode, ROTATE_LINGER, ROTATION,
     };
 
     #[test]
@@ -8649,6 +8668,48 @@ mod display_mode_tests {
         assert_eq!((mode, prev), (DisplayMode::Die3d, DisplayMode::Grid));
         let (mode, prev) = die3d_toggle(mode, prev);
         assert_eq!((mode, prev), (DisplayMode::Grid, DisplayMode::Grid));
+    }
+
+    #[test]
+    fn three_esc_and_v_leave_die3d_after_a_detour_through_another_view() {
+        // Grid, `3` into Die 3D, `i` into the inference monitor (which saves
+        // Die3d as the previous mode), Esc back into Die 3D. The previous
+        // mode is now Die3d itself.
+        let (mode, _) = die3d_toggle(DisplayMode::Grid, DisplayMode::Insights);
+        assert_eq!(mode, DisplayMode::Die3d);
+        // `i`: the handler saves the mode it leaves as the previous one.
+        let (mode, prev) = (DisplayMode::InferenceMonitor, mode);
+        // Esc: back to Die 3D; the previous mode stays Die3d.
+        let mode = back_target(mode, prev);
+        assert_eq!(mode, DisplayMode::Die3d);
+        // `3`, Esc and `v` must each still leave, to Insights.
+        let (m, p) = die3d_toggle(mode, prev);
+        assert_eq!((m, p), (DisplayMode::Insights, DisplayMode::Insights), "3");
+        assert_eq!(back_target(mode, prev), DisplayMode::Insights, "Esc");
+        assert_eq!(next_display_mode(mode), DisplayMode::Insights, "v");
+    }
+
+    #[test]
+    fn esc_goes_back_to_the_previous_mode_unless_that_is_the_mode_itself() {
+        // The usual case: back to where the user came from.
+        assert_eq!(
+            back_target(DisplayMode::Die3d, DisplayMode::Grid),
+            DisplayMode::Grid
+        );
+        assert_eq!(
+            back_target(DisplayMode::Training, DisplayMode::Starfield),
+            DisplayMode::Starfield
+        );
+        // A previous mode equal to the current one would go nowhere: every
+        // entry-key view leaves to Insights then.
+        for m in [
+            DisplayMode::Die3d,
+            DisplayMode::Training,
+            DisplayMode::InferenceMonitor,
+            DisplayMode::HivemindSweeper,
+        ] {
+            assert_eq!(back_target(m, m), DisplayMode::Insights, "{m:?}");
+        }
     }
 
     #[test]
