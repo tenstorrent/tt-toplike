@@ -408,6 +408,19 @@ impl Die3dView {
         Die3dView::with_reserved_rows(cols, rows, 0)
     }
 
+    /// This view with a transparent background (the terminal's own shows
+    /// through) or an opaque black one. The app sets it from
+    /// `colors::canvas_transparent`; the `T` key flips it afterwards.
+    pub fn with_transparent(mut self, transparent: bool) -> Die3dView {
+        self.transparent = transparent;
+        self
+    }
+
+    /// Whether the background is transparent now.
+    pub fn is_transparent(&self) -> bool {
+        self.transparent
+    }
+
     /// A compact view of `cols` x `rows` cells for the Insights screen's
     /// inset. `rows` includes one caption row at the bottom; the scene gets
     /// the rest.

@@ -1430,28 +1430,33 @@ over half the counter range reads as a device reset (a wrap of nearly the full r
 indistinguishable from a small step backwards). More than one wrap between samples cannot be
 detected; at 1 Hz it would need over 275 GB/s.
 
-### Terminal background by default (Oct 30 2026, v0.13.24)
+### Background: transparent tried, black kept (Oct 30 2026, v0.13.25)
 
-Prompt: "take away the dimmed background by default too both in full screen and the home screen".
-There was no screenshot of it, so "dimmed background" is my reading of it. A pty run with
-`COLORTERM=truecolor` (what Konsole sets) showed the app emitting
-`48;2;0;0;0` (solid black) 23,000 times on the home screen and 50,000 to 190,000 times on the
-full-screen modes. Under tmux it emitted none, because `colors::rgb(0, 0, 0)` returns
-`Color::Reset` when `supports_true_color()` is false, and that is false in tmux. So the same
-app covered the user's Konsole color and respected it under tmux.
+Prompt: "take away the dimmed background by default too both in full screen and the home
+screen". There was no screenshot of it, so "dimmed background" was my reading of it. A pty run
+with `COLORTERM=truecolor` (what Konsole sets) showed the app emitting `48;2;0;0;0` (solid
+black) 23,000 times on the home screen and 50,000 to 190,000 times on the full-screen modes. Under
+tmux it emitted none, because `colors::rgb(0, 0, 0)` returns `Color::Reset` when
+`supports_true_color()` is false, and that is false in tmux. I made every screen use the
+terminal's own background (a 0.13.24 build, never installed). The user tried it: "i don't like
+the haze at all. old black back for everything please."
 
-Decisions:
-- `colors::canvas_bg()` is `Color::Reset` unless `TT_TOPLIKE_OPAQUE` is set (read once). All 68
-  `.bg(colors::rgb(0, 0, 0))` fills (the per-frame clear, the full-screen views, memory castle
-  and memory flow) use it. The Die 3D view already defaulted to transparent; its black is `T`.
-- The guard is `no_view_paints_a_literal_black_background`, which scans `src/` for the literal
-  fill. A test of `canvas_bg` alone passes with every view still painting black. It was seen
-  red (75 listed lines) before the replacement.
-- Verified with the same pty count: black backgrounds went to 0 on home, starfield, castle,
-  flow, arcade and Die 3D full screen. `TT_TOPLIKE_OPAQUE=1` brings them back (2,087 in 3 s).
-- Not changed: the status bar (`10,14,22`, about 200 cells a screen) and the overlay panel
-  (`8,14,22`). They are chrome with their own background. If the "dimmed" look meant the status
-  bar, that is the next change. The `DIM` text attribute is also untouched.
+What stayed:
+- `colors::canvas_bg()` is the one place the background is chosen, now solid
+  `Color::Rgb(0, 0, 0)` by default and `Color::Reset` with `TT_TOPLIKE_TRANSPARENT=1`. It is black in
+  tmux too, where the old `rgb(0, 0, 0)` literal resolved to the terminal's colour.
+- All 68 literal black fills use it, and `no_view_paints_a_literal_black_background` scans
+  `src/` so a view cannot go back to the literal.
+- The Die 3D view defaulted to a transparent background (`T` flips it), which is the likeliest
+  source of the haze: scene cells showed the terminal's colour. The app now sets it from the
+  canvas setting where it makes the full view and the inset (`new_die3d_view`, `new_inset_view`).
+  The view's own default is still transparent so its pinned test frames do not change; the test
+  `the_die3d_views_the_app_makes_follow_the_canvas_background` fails if a creation site skips
+  the helper (seen red by removing it).
+- The status bar (`10,14,22`) and the overlay panel (`8,14,22`) keep their dark backgrounds.
+  The `DIM` text attribute is untouched.
+- Open: what the user first meant by "dimmed" is not settled. If something still looks dimmed on
+  black, it is the status bar, the `DIM` attribute, or the dim colours in a view.
 
 ### Die 3D narrow windows (Oct 30 2026, v0.13.23)
 

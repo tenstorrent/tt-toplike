@@ -168,6 +168,19 @@ fn die3d_area(width: u16, height: u16) -> (usize, usize, usize) {
     )
 }
 
+/// A full Die 3D view with the app's canvas background (black unless
+/// `TT_TOPLIKE_TRANSPARENT` is set). Every place the app makes one goes through
+/// here, so the views agree with the rest of the screen.
+fn new_die3d_view(cols: usize, rows: usize, reserved: usize) -> crate::animation::Die3dView {
+    crate::animation::Die3dView::with_reserved_rows(cols, rows, reserved)
+        .with_transparent(colors::canvas_transparent())
+}
+
+/// The Insights inset, with the same background rule as [`new_die3d_view`].
+fn new_inset_view(cols: usize, rows: usize) -> crate::animation::Die3dView {
+    crate::animation::Die3dView::inset(cols, rows).with_transparent(colors::canvas_transparent())
+}
+
 /// On a terminal resize, resize the Die 3D view in place when it is open.
 /// It keeps its switches, history, load calibration, clouds and camera; only
 /// its size and its size-dependent caches change (`Die3dView::resize`). With
@@ -281,10 +294,7 @@ fn sync_inset(
         return false;
     };
     if inset.is_none() {
-        *inset = Some(crate::animation::Die3dView::inset(
-            rect.width as usize,
-            rect.height as usize,
-        ));
+        *inset = Some(new_inset_view(rect.width as usize, rect.height as usize));
     }
     resize_inset(inset, Some(rect));
     true
@@ -1386,7 +1396,7 @@ fn run_app(
                     let dv = die3d.get_or_insert_with(|| {
                         die3d_started = Instant::now();
                         let (cols, rows, reserved) = die3d_area(size.width, size.height);
-                        crate::animation::Die3dView::with_reserved_rows(cols, rows, reserved)
+                        new_die3d_view(cols, rows, reserved)
                     });
                     dv.update(backend, die3d_started.elapsed().as_secs_f64());
                 }
@@ -8950,6 +8960,17 @@ mod display_mode_tests {
         let mut none: Option<Die3dView> = None;
         resize_die3d(&mut none, 120, 40);
         assert!(none.is_none());
+    }
+
+    /// The views the app makes take their background from the canvas setting.
+    /// The view's own default is transparent, so a creation site that skips
+    /// the helper leaves a view that shows the terminal's colour on an
+    /// otherwise black screen.
+    #[test]
+    fn the_die3d_views_the_app_makes_follow_the_canvas_background() {
+        let want = crate::ui::colors::canvas_transparent();
+        assert_eq!(super::new_die3d_view(100, 30, 0).is_transparent(), want, "full view");
+        assert_eq!(super::new_inset_view(52, 16).is_transparent(), want, "inset");
     }
 
     #[test]

@@ -143,41 +143,47 @@ pub fn grayskull_rgb(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
     }
 }
 
-/// Environment variable that asks for the old solid black canvas. Any value
-/// except empty, `0` and `false` turns it on.
-pub const OPAQUE_ENV: &str = "TT_TOPLIKE_OPAQUE";
+/// Environment variable that asks for the terminal's own background instead of
+/// solid black. Any value except empty, `0` and `false` turns it on.
+pub const TRANSPARENT_ENV: &str = "TT_TOPLIKE_TRANSPARENT";
 
-/// Whether `value` (the content of [`OPAQUE_ENV`]) asks for an opaque canvas.
-fn opaque_requested(value: Option<&str>) -> bool {
+/// Whether `value` (the content of [`TRANSPARENT_ENV`]) asks for the terminal's
+/// own background.
+fn transparent_requested(value: Option<&str>) -> bool {
     match value {
         None => false,
         Some(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false"),
     }
 }
 
-/// The background of the canvas every view draws on.
+/// Whether the canvas shows the terminal's own background. Off by default:
+/// every screen is solid black. Read once from [`TRANSPARENT_ENV`].
+pub fn canvas_transparent() -> bool {
+    static TRANSPARENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRANSPARENT.get_or_init(|| {
+        transparent_requested(std::env::var(TRANSPARENT_ENV).ok().as_deref())
+    })
+}
+
+/// The background of the canvas every view draws on: solid black, or with
+/// [`TRANSPARENT_ENV`] set the terminal's own (`Color::Reset`).
 ///
-/// By default this is the terminal's own background (`Color::Reset`), so the
-/// user's colour scheme, and any transparency or blur they set, shows through
-/// instead of a black fill. Set [`OPAQUE_ENV`] for solid black.
-///
-/// This used to be `rgb(0, 0, 0)`, which is solid black in a truecolor
-/// terminal and the terminal default only where truecolor is off (tmux, see
-/// [`supports_true_color`]). So the app looked different in a plain Konsole than
-/// in the same terminal under tmux. Both now follow the terminal.
+/// This is the one place the choice is made, so a view never writes a literal
+/// black. In a truecolor terminal `rgb(0, 0, 0)` is solid black and where
+/// truecolor is off (tmux, see [`supports_true_color`]) it is the terminal's own
+/// colour, so spelling the fill as a literal made the app look different in
+/// the two. Here black is `Color::Rgb(0, 0, 0)` in both.
 pub fn canvas_bg() -> Color {
-    static OPAQUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let opaque = *OPAQUE.get_or_init(|| opaque_requested(std::env::var(OPAQUE_ENV).ok().as_deref()));
-    canvas_bg_for(opaque)
+    canvas_bg_for(canvas_transparent())
 }
 
 /// [`canvas_bg`] for a given choice, so the rule is tested without touching the
 /// process environment.
-fn canvas_bg_for(opaque: bool) -> Color {
-    if opaque {
-        rgb(0, 0, 0)
-    } else {
+fn canvas_bg_for(transparent: bool) -> Color {
+    if transparent {
         Color::Reset
+    } else {
+        Color::Rgb(0, 0, 0)
     }
 }
 
@@ -466,16 +472,16 @@ mod tests {
     }
 
     #[test]
-    fn the_canvas_follows_the_terminal_unless_opaque_is_asked_for() {
-        assert_eq!(canvas_bg_for(false), Color::Reset);
-        assert_ne!(canvas_bg_for(true), Color::Reset, "opaque is a real fill");
+    fn the_canvas_is_black_unless_the_terminal_background_is_asked_for() {
+        assert_eq!(canvas_bg_for(false), Color::Rgb(0, 0, 0));
+        assert_eq!(canvas_bg_for(true), Color::Reset);
         for v in ["1", "true", "yes", " 1 "] {
-            assert!(opaque_requested(Some(v)), "{v:?}");
+            assert!(transparent_requested(Some(v)), "{v:?}");
         }
         for v in ["", "0", "false", "FALSE", " 0 "] {
-            assert!(!opaque_requested(Some(v)), "{v:?}");
+            assert!(!transparent_requested(Some(v)), "{v:?}");
         }
-        assert!(!opaque_requested(None));
+        assert!(!transparent_requested(None));
     }
 
     /// Guards the wiring: no view may fill its background with a

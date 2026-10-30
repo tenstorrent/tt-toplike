@@ -37,10 +37,10 @@ There's also an **adaptive baseline**: for the first ~20 samples the tool learns
 
 ### Background
 
-Every screen draws on the terminal's own background, so your color scheme (and any transparency
-or blur you set) shows through. Set `TT_TOPLIKE_OPAQUE=1` for a solid black background. The
-status bar has its own dark navy background in both cases. Before 0.13.24 the app filled the
-terminal with black in a truecolor terminal and used the terminal's background under tmux.
+Every screen has a solid black background. That includes the Die 3D view and its inset on the
+Insights screen. Set `TT_TOPLIKE_TRANSPARENT=1` to draw on your terminal's own background
+instead; the `T` key in the Die 3D view flips it for that view. The status bar has its own dark
+navy background either way.
 
 ### How colors are chosen
 
