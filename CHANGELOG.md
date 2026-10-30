@@ -17,6 +17,24 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.13.19
+- **New**: the Die 3D view (key `3`). Each Blackhole board is drawn in isometric
+  perspective with braille characters (`B` for half-block), in a Grayskull-style
+  palette. One board or all boards (`m`), `[` `]` to choose. Not part of the `v`
+  rotation; `3` or `Esc` leaves.
+- The per-tile glow is an estimate from chip load, and the footer says so. Per-tile NoC
+  counters are not read; they are a separate, experimental plan.
+- The camera cuts on a chip's activity rise (relative to its own idle over ten minutes)
+  or a PCIe burst (50 MB/s, re-arm at 10 MB/s). Cuts shuffle chaos, dissolve and spin
+  (`X`). The footer names the corner nearest the viewer.
+- Clouds (`W`) drift with PCIe traffic and brighten with chip load. They are decoration.
+  The history panel (`H`) plots the last 60 s of power, temperature and PCIe traffic.
+- Switches: `B` braille or half-block, `T` transparent or black, `C` auto-cuts, `X`
+  transition, `m` scene, `L` labels, `W` clouds, `H` history. `c` cuts by hand.
+- At most 20 redraws a second at rest, 30 in a cut; changed cells per frame cut by more
+  than half.
+- Needs a 100 x 31 terminal (100 x 30 view area); the history panel needs 120 x 37.
+
 ### 0.13.18
 - **Fix**: PCIe bandwidth was 16x too low. A counter word is a 64-byte NoC flit, not
   4 bytes (measured with a 256 MiB and a 1 GiB transfer on a Blackhole p300c).

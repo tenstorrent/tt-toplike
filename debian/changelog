@@ -1,3 +1,40 @@
+tt-toplike (0.13.19) noble; urgency=medium
+
+  * New Die 3D view, opened with the 3 key. It draws each Blackhole board in
+    isometric perspective with braille characters (B switches to half-block
+    cells), in a Grayskull-style palette. It shows one board or every board
+    (m), and [ and ] choose the board. Chips that are not Blackhole are named
+    in the footer and not drawn. The view is not in the v rotation; 3 or Esc
+    leaves it.
+  * The glow on each tile is an estimate from chip activity and the footer
+    says so ("per-tile glow: estimate from chip load"). Per-tile NoC counters
+    are not read. They are a separate, experimental plan.
+  * The camera cuts to another angle (four corners, top-down, low) when a
+    chip's activity rises or PCIe traffic bursts. Activity is measured against
+    each chip's own idle over the last ten minutes, because an idle chip
+    already draws 0.30 of its 125 W limit on the test box. A burst is 50 MB/s
+    of PCIe traffic, and the detector re-arms at 10 MB/s. Cuts use chaos,
+    dissolve or a spin, shuffled (X sets one). The footer names the corner
+    nearest the viewer, and both ends during a cut. Each die carries a label
+    such as BH0 44W.
+  * Clouds drift behind the dies (W). They are decoration: their drift follows
+    PCIe traffic and their brightness follows chip load. A history panel (H)
+    plots the last 60 seconds of each chip's power and temperature and the
+    box's PCIe traffic as sparklines. Those are measured values.
+  * T switches between the terminal's own background and pure black, C turns
+    automatic cuts off, L turns the chip labels off. The footer's second row
+    lists every switch with its state. The legend (l), explain (!) and help (?)
+    overlays describe the view.
+  * Faster: at most 20 redraws a second at rest and 30 during a cut, and the
+    tile wave steps 12 times a second. Changed cells per frame fell by more
+    than half (one board 347 to 157, four boards 358 to 174, braille at
+    150 x 42, release benchmark).
+  * The view area needs 100 x 30 cells. In the TUI the status bar takes a row,
+    so the smallest terminal is 100 x 31. The history panel needs 120 x 37.
+    150 x 42 or larger looks best.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 29 Oct 2026 15:00:00 +0000
+
 tt-toplike (0.13.18) noble; urgency=medium
 
   * PCIe bandwidth was 16 times too low. A tt-kmd counter word is one 64-byte

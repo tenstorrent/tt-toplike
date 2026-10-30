@@ -1429,3 +1429,70 @@ Decisions: the snapshot keeps the 12 raw u32 values so the wrap is handled per c
 over half the counter range reads as a device reset (a wrap of nearly the full range is
 indistinguishable from a small step backwards). More than one wrap between samples cannot be
 detected; at 1 Hz it would need over 275 GB/s.
+
+### Die 3D view (Oct 29 2026, v0.13.19)
+
+Prompt: "what could we learn from dtsunami/tt-baremetal's bhtop and apply to our
+tt-toplike?" The answer became a new view on the `3` key: an isometric picture of each
+Blackhole board, drawn with braille or half-block cells. The design is in
+`docs/superpowers/specs/2026-10-29-die-3d-view-design.md`, the plan in
+`docs/superpowers/plans/2026-10-29-die-3d-view.md` (Tasks 1 to 19), and the later per-tile
+counter idea in `docs/superpowers/plans/2026-10-29-die-3d-tier1-counters.md`.
+
+What we learned from bhtop. It was read and not run. Its code showed that the tt-kmd
+`pcie_perf_counters` files are the PCIe tile's NIU counters, and that a counter word is a
+64-byte flit. That led to the v0.13.18 fix: we had counted 4 bytes per word, had the
+directions swapped, and dropped a sample when a 32-bit counter wrapped.
+
+Findings from hardware (Blackhole p300c, leased through gozer):
+- A 62-word burst read of the NIU counter array returns one register's value repeated across
+  chunks, so posted equals non-posted. Single-word reads work. exalens 0.4.2 still has it. By
+  its code, bhtop's poller uses the burst.
+- A second process can read tile counters while a workload runs. Polling 156 tiles x 2 NoCs
+  x 6 counters, at up to 161 sweeps a second, changed nothing in the workload's throughput
+  (one synthetic matmul loop, 60 s). It was not tested against a real model server. This is
+  why tier 1 is a separate, experimental plan and not part of this release.
+- The braille dots are small in a real terminal font. Half-block is crisper. Taylor chose to
+  keep both and switch with `B`.
+- Idle chips already draw 0.30 of the 125 W limit, so a load trigger on power over the limit
+  could never arm. Activity must be relative to each chip's own idle over ten minutes.
+  Measured during token serving (8 clients, 213 tokens a second, 96 requests): the busy chips
+  drew a mean of 54 and 45 W, peak 68 W; PCIe into the chip averaged 23 MB/s (maximum
+  131 MB/s). The PCIe burst threshold is 50 MB/s, re-arm 10 MB/s, where the first guess was
+  2 GB/s.
+
+Recording lessons. tmux makes the view look cheaper than it is (its status bar and its colour
+downgrade). VHS gave stale frames. A pty harness feeding asciinema, converted with agg,
+
+Audience. People who will see this use Konsole and GNOME Terminal. Their fonts, and their
+translucent or tinted backgrounds, shaped the palette, the transparent default and the
+half-block option.
+
+Product owner feedback that shaped it, in order: a more Grayskull palette (purples, pinks,
+greys) and a little transparency; both display types, switchable ("we might have a few
+switches for this view"); a black background (the purple in one clip came from the terminal colour
+used in the simulation; the app did not paint it); shuffled transitions with an attempt at an animated rotate;
+a caption saying which side the camera looks at (and labels, because four dies read as one
+field); a faster view, clouds moving behind it and a small panel of the monitored data over
+time; and traffic sent to the coder model to see whether the camera fires (it did not, which
+found the relative-load problem above).
+
+Decisions worth keeping:
+- Every moving thing is real data, a labelled estimate, or named decoration. The per-tile
+  glow carries "per-tile glow: estimate from chip load". The clouds are decoration (drift from
+  PCIe traffic, brightness from chip load). The history panel is measured data.
+- The footer is built from one table of switches. A new switch is one entry and one key.
+- The caption names the nearest corner, because on a square board two edges tie at every
+  quarter turn.
+- The view area minimum is 100 x 30. The TUI's status bar takes a row, so the terminal
+  minimum is 100 x 31. The history panel needs 120 x 37.
+- Speed: at most 20 redraws a second at rest and 30 in a cut; the tile wave steps 12 times a
+  second; changed cells per frame fell by more than half (release benchmark, 150 x 42
+  braille: 347 to 157 for one board, 358 to 174 for four).
+- Not built: the tier 1 per-tile counters, triggers for a reset, a model load and a GDDR ECC
+  event, a close-view preset, and an automatic half-block switch on wide terminals.
+
+Process. Subagent-driven: one implementer per task, a separate review per task, and a ledger
+of numbered rulings by the controller for every gap between the plan and the code (Rulings
+1 to 31). Tasks 12 to 19 were added after the plan, one per round of Taylor's feedback. The
+12 Hz wave step has been judged in recordings only; Taylor is to look at it in Konsole.
