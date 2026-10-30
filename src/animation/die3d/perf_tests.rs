@@ -1429,8 +1429,8 @@ fn v_series(boards: &[&str]) -> usize {
 /// Sorted, without repeats.
 fn sweep_values(thresholds: &[usize], max: usize) -> Vec<usize> {
     let mut vals: Vec<usize> = (1..=4).collect();
-    // About 10 values spread over 1..=max. (Twenty, and a window of three
-    // around each threshold, took 84 s in a debug build; 30 s is the budget.)
+    // About 10 values spread over 1..=max, which keeps the sweep within the
+    // 30 s budget in a debug build.
     vals.extend((1..=10).map(|i| i * max / 10));
     for &t in thresholds {
         vals.extend(t.saturating_sub(2).max(1)..=t + 2);
@@ -1606,7 +1606,7 @@ fn flags_never_cover_a_drawn_cell_at_any_size() {
 fn sizes_at_and_above_100_by_30_use_the_full_layout() {
     // The footer's two lines (keys, then status) are the last two rows. A
     // size one short in either dimension has one footer line, so the row
-    // above the last is scene or blank, not the keys line.
+    // above the last is scene or blank and holds no keys line.
     let b = busy_fake(&["p300"; 2]);
     for (c, r) in [(100, 30), (120, 36), (150, 42)] {
         let mut v = sized_view(&b, c, r, true);
@@ -1627,5 +1627,86 @@ fn sizes_at_and_above_100_by_30_use_the_full_layout() {
     // One short in either dimension drops to one footer line.
     for (c, r) in [(99, 30), (100, 29)] {
         assert_eq!(tiers::tier_for(c, r).footer_rows, 1, "{c}x{r}");
+    }
+}
+
+// ---- The Insights inset --------------------------------------------------
+
+/// Cells changed between consecutive frames of a one-board inset, summed over
+/// 60 frames `DT` apart (two seconds of the view's draw rate). The view is
+/// built as the host builds it (`Die3dView::inset`) and left as it is: the
+/// inset has no clouds and no history panel of its own, so there is nothing
+/// to switch off first. Deterministic: no clock is read.
+fn inset_changed_cells(cols: usize, rows: usize, boards: &[&str]) -> usize {
+    let b = busy_fake(boards);
+    let mut v = Die3dView::inset(cols, rows);
+    // A read each second until 6 s, so that the busiest-board choice of a
+    // many-board inset has settled (it needs five samples).
+    for s in 0..=6 {
+        v.update(&b, s as f64);
+    }
+    v.director.set_auto(false);
+    let mut prev: Option<Buffer> = None;
+    let mut n = 0;
+    for i in 0..60 {
+        let buf = to_buffer(v.render(7.0 + i as f64 * DT), cols, rows);
+        if let Some(p) = &prev {
+            n += p.diff(&buf).len();
+        }
+        prev = Some(buf);
+    }
+    n
+}
+
+#[test]
+fn inset_changed_cells_stay_within_budget() {
+    // Measured: 1578 changed cells over the 59 frame pairs of the two
+    // seconds (42 x 14 = 588 cells, so about 27 cells a frame).
+    // Ceiling: 1.25 x 1578 = 1972.5, rounded up to 1973.
+    const CEILING: usize = 1973;
+    let n = inset_changed_cells(42, 14, &["p150"]);
+    assert!(
+        n <= CEILING,
+        "the one-board inset changed {n} cells in two seconds, ceiling {CEILING}"
+    );
+}
+
+/// The benchmark for the inset. Prints; asserts nothing about time. Run in
+/// release:
+///
+/// `cargo test --release --locked --lib --features tui inset_render_cost_report -- --ignored --nocapture`
+///
+/// The spec's budget is 0.3 ms a frame or less at 42 x 14 for one board.
+#[test]
+#[ignore = "benchmark: run by hand in release"]
+fn inset_render_cost_report() {
+    println!();
+    println!("| boards | size | mean ms per frame | changed cells in 2 s |");
+    println!("|---|---|---|---|");
+    for (label, boards) in [
+        ("1 (p150)", vec!["p150"]),
+        ("8 (p150 x 8)", vec!["p150"; 8]),
+    ] {
+        let b = busy_fake(&boards);
+        for (cols, rows) in [(42usize, 14usize), (42, 22)] {
+            let mut v = Die3dView::inset(cols, rows);
+            for s in 0..=6 {
+                v.update(&b, s as f64);
+            }
+            v.director.set_auto(false);
+            // Warm the fit caches, then time frames DT apart.
+            for i in 0..30 {
+                v.render(7.0 + i as f64 * DT);
+            }
+            let mut i = 0;
+            let ms = mean_ms(600, || {
+                std::hint::black_box(v.render(8.0 + i as f64 * DT));
+                i += 1;
+            });
+            println!(
+                "| {label} | {cols} x {rows} | {ms:.3} | {} |",
+                inset_changed_cells(cols, rows, &boards)
+            );
+        }
     }
 }

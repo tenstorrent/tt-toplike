@@ -1430,6 +1430,38 @@ over half the counter range reads as a device reset (a wrap of nearly the full r
 indistinguishable from a small step backwards). More than one wrap between samples cannot be
 detected; at 1 Hz it would need over 275 GB/s.
 
+### Die 3D small sizes and the Insights inset (Oct 30 2026, v0.13.22)
+
+Prompts: "what will i expect to see in a smaller terminal? how much extra CPU activity would it
+add to have a smaller version of this on the main info screen?" The user chose mock B (the
+inset beside the process table), then: "yes, and let's make the viz shrinkable so below 100 x 30
+we provide the best version we can, whether that's clipped, or smaller, or without flags, etc".
+
+Decisions:
+- The scene shrinks. It is not cropped, so a small view still shows the whole board.
+- The ladder is in `die3d/tiers.rs`: clouds off below 100 x 30 (`CLOUDS_MIN`), footer two rows
+  at 100 x 30 (`FOOTER_TWO`), one row from 60 x 16 (`FOOTER_ONE`), flags from 60 x 16
+  (`FLAGS_MIN`), history panel from 120 x 37. The scene shrinks down to about 40 x 12.
+- The text summary comes last, only where no scene fits. One line per chip.
+- The inset is `Die3dView::inset(cols, rows)`: one caption row, no keys, no clouds, no panel, and
+  its scene never changes on a trigger. When every board does not fit, it draws the busiest
+  chip's board. Busiest is by mean load, and a new board must stay busiest for 10 s
+  (`BUSIEST_HOLD_SECS`) before the inset changes to it.
+- The inset appears when the process area is at least 112 x 14 (`TABLE_MIN_W` 70 + `INSET_W` 42).
+  It does not appear on the mock at 150 x 42: several rows of chip cards leave the process area
+  too short. This is a limit, listed in the README.
+- `every_size_draws_without_overflow` and `flags_never_cover_a_drawn_cell_at_any_size` sweep
+  sizes around each threshold. The sweep is a coarse grid plus a window around each threshold,
+  kept under 30 s in a debug build.
+- An inset board change redraws at once with no cut transition.
+
+Costs (release build, `inset_render_cost_report`): 0.059 ms a frame at 42 x 14 for one board,
+0.079 ms for eight boards (the busiest board's scene); 0.069 ms and 0.063 ms at 42 x 22. The
+spec's budget was 0.3 ms. About 27 cells change per frame (1578 in two seconds; the test
+ceiling is 1973). A full Insights frame at 200 x 50 went from 0.18 ms to 0.27 ms with the inset,
+and from 0.13 ms to 0.21 ms at 150 x 42. In the test fake, an inset over eight p300 boards at
+42 x 14 showed the text summary (no busiest-board scene fitted), so the benchmark uses p150 boards.
+
 ### Die 3D traffic fronts (Oct 30 2026, v0.13.21)
 
 Prompt: "the braille view is almost uninterpretable as it stands right now... What else can we

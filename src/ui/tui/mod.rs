@@ -241,7 +241,7 @@ fn has_blackhole_chip(devices: &[crate::models::Device]) -> bool {
 /// Resize the Insights inset in place to `rect`, when it exists and the rect
 /// differs from its size. It keeps its camera, load calibration and history
 /// (`Die3dView::resize`). With no rect (the terminal is below the inset's
-/// threshold) the view is left as it was: it is hidden, not dropped, so a
+/// threshold) the view is left as it was: it is hidden and the view is kept, so a
 /// drag-resize that dips below the threshold and back does not lose its state.
 fn resize_inset(inset: &mut Option<crate::animation::Die3dView>, rect: Option<Rect>) {
     if let (Some(view), Some(rect)) = (inset.as_mut(), rect) {

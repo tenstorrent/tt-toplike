@@ -1,3 +1,17 @@
+tt-toplike (0.13.22) noble; urgency=medium
+
+  * Die 3D view: it now draws below 100 x 30, where it used to refuse. As the view
+    area shrinks, the clouds and the history panel go first, then the footer
+    shrinks to one row, then the flags go, and the scene itself shrinks down
+    to about 40 x 12. Below that the view shows a text summary with one line
+    per chip.
+  * Insights screen: a small Die 3D inset beside the process table when the
+    process area is at least 112 x 14. It shows one board, or every board
+    when they fit, or the busiest chip's board (held for 10 s) otherwise.
+    Key 3 opens the full view. It costs about 0.06 ms a frame at 42 x 14.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 12:00:00 -0500
+
 tt-toplike (0.13.21) noble; urgency=medium
 
   * Die 3D view: the tile wave follows the direction of PCIe traffic. Inbound

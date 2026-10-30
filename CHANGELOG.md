@@ -17,6 +17,17 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.13.22
+- The Die 3D view draws below 100 x 30. The clouds and the history panel go first, then the
+  footer drops to one row, then the flags go, and the scene shrinks down to about 40 x 12. Below
+  that the view shows a text summary with one line per chip.
+- The Insights screen shows a small Die 3D inset beside the process table when the process
+  area is at least 112 wide and 14 tall. It shows one board's scene, or all boards when they
+  fit, or the board of the busiest chip (by mean load, held for 10 s) otherwise. `3` opens the
+  full view. Measured in a release build: 0.059 ms a frame at 42 x 14 for one board and 0.079 ms
+  for eight boards (budget 0.3 ms); 0.069 ms and 0.063 ms at 42 x 22. About 27 cells change per
+  frame. A full Insights frame at 200 x 50 went from 0.18 ms to 0.27 ms with the inset.
+
 ### 0.13.21
 - The tile wave in the Die 3D view follows the direction of PCIe traffic. The connector is on
   the front edge of the die. Inbound data sends fronts from that edge toward the back, and
