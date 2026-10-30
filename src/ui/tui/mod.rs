@@ -4759,9 +4759,10 @@ const DIE3D_EXPLAIN_TEXT: &[&str] = &[
     "Die 3D",
     "",
     "Each Blackhole board is drawn as an isometric block",
-    "per die, from live chip telemetry. Tile brightness",
-    "follows activity: measured per tile where the driver",
-    "reports it, otherwise an estimate from chip load.",
+    "per die, from live chip telemetry. Tiles brighten",
+    "with activity above a quiet baseline wave: measured",
+    "per tile where the driver reports it, otherwise an",
+    "estimate from chip load.",
     "The footer says which, as 'estimate'.",
     "",
     "Activity is relative to each chip's own idle over the",
@@ -4833,7 +4834,8 @@ fn die3d_legend_lines(
 ) -> Vec<Line<'static>> {
     [
         "Die 3D: each Blackhole die as a block of tiles.",
-        "  tile glow   activity (measured per tile when the",
+        "  tile glow   brightens with activity above a quiet",
+        "              baseline wave (measured per tile when the",
         "              driver reports it, otherwise an estimate",
         "              from chip load, labelled in the footer)",
         "              Activity is relative to each chip's own",

@@ -124,10 +124,18 @@ pub fn chip_inputs(backend: &dyn TelemetryBackend, device: &Device) -> ChipInput
     }
 }
 
+/// Wave amplitude at load 0. The view measures load against each chip's own
+/// idle, so an idle chip reads 0.0. When load was power over the limit, an
+/// idle chip read about 0.30 and its die showed a quiet wave at that
+/// amplitude in every recording. This floor keeps that look at idle.
+pub const IDLE_WAVE_AMPLITUDE: f32 = 0.30;
+
 /// Estimated heat of a tile at time `t`: a wave sweeping across the Tensix
-/// columns, scaled by the chip load, over a small floor so an idle die is
-/// still visible. This is invented motion shaped by real chip-wide load, not a
-/// measurement of the tile. Other kinds of tile have no wave.
+/// columns over a 0.06 floor. Its amplitude is [`IDLE_WAVE_AMPLITUDE`] at load
+/// 0 and rises linearly to 1.0 at load 1, so an idle die keeps a quiet wave
+/// and activity brightens it. A NaN load counts as 0. This is invented motion
+/// shaped by real chip-wide load, not a measurement of the tile. Other kinds
+/// of tile have no wave.
 pub fn tile_heat(load: f32, tile: &Tile, t: f32) -> f32 {
     if tile.kind != TileKind::Tensix {
         return 0.0;
@@ -137,7 +145,14 @@ pub fn tile_heat(load: f32, tile: &Tile, t: f32) -> f32 {
     let front = (t * 0.9).rem_euclid(cols + 6.0) - 3.0;
     let wave = (1.0 - (x - front).abs() / 4.0).max(0.0);
     let shimmer = 0.15 * (0.5 + 0.5 * (t * 5.0 + x * 1.7 + y * 2.3).sin());
-    ((wave * 0.9 + shimmer * wave) * load + 0.06).min(1.0)
+    // `clamp` passes NaN through, so NaN is mapped to 0 first.
+    let load = if load.is_nan() {
+        0.0
+    } else {
+        load.clamp(0.0, 1.0)
+    };
+    let amplitude = IDLE_WAVE_AMPLITUDE + (1.0 - IDLE_WAVE_AMPLITUDE) * load;
+    ((wave * 0.9 + shimmer * wave) * amplitude + 0.06).min(1.0)
 }
 
 /// The heat the scene draws for a tile. Measured data wins when the chip has
@@ -826,16 +841,83 @@ mod tests {
 
     #[test]
     fn heat_scales_with_load() {
+        // Load 0 is the quiet baseline: the wave at 0.30 amplitude over the
+        // 0.06 floor, so at most (0.9 + 0.15) * 0.30 + 0.06 = 0.375. It must
+        // stay well below the hot end that load 1 reaches.
         let tiles = tensix_tiles();
         let mut best = 0.0f32;
         for step in 0..400 {
             let t = step as f32 * 0.05;
             for tile in &tiles {
-                assert!(tile_heat(0.0, tile, t) <= 0.1, "load 0 must stay cold");
+                let idle = tile_heat(0.0, tile, t);
+                assert!(idle <= 0.38, "load 0 must stay quiet, got {idle}");
                 best = best.max(tile_heat(1.0, tile, t));
             }
         }
         assert!(best >= 0.8, "load 1 peaked at {best}");
+    }
+
+    /// The highest heat any Tensix tile reaches at `load` over a 10 s sweep.
+    fn peak_heat(load: f32) -> f32 {
+        let tiles = tensix_tiles();
+        let mut best = 0.0f32;
+        for step in 0..200 {
+            let t = step as f32 * 0.05;
+            for tile in &tiles {
+                best = best.max(tile_heat(load, tile, t));
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn idle_die_keeps_a_visible_wave() {
+        // With load measured against the chip's own idle, an idle chip reads
+        // 0.0. The die must still show the quiet wave it showed when idle
+        // read about 0.30 of the power limit.
+        let p = peak_heat(0.0);
+        assert!(p > 0.2, "idle peaked at {p}");
+    }
+
+    #[test]
+    fn full_load_still_reaches_the_hot_end() {
+        let p = peak_heat(1.0);
+        assert!(p >= 0.8, "full load peaked at {p}");
+    }
+
+    #[test]
+    fn heat_is_monotonic_in_load() {
+        let tiles = tensix_tiles();
+        for step in 0..100 {
+            let t = step as f32 * 0.1;
+            for tile in &tiles {
+                let mut prev = f32::NEG_INFINITY;
+                for i in 0..=10 {
+                    let load = i as f32 / 10.0;
+                    let h = tile_heat(load, tile, t);
+                    assert!(
+                        h >= prev,
+                        "{:?} at {t}: {h} at load {load} < {prev}",
+                        tile.die
+                    );
+                    prev = h;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nan_load_gives_the_floor() {
+        // A NaN load is treated as load 0: the quiet wave, never NaN.
+        let tiles = tensix_tiles();
+        for step in 0..100 {
+            let t = step as f32 * 0.1;
+            for tile in &tiles {
+                let h = tile_heat(f32::NAN, tile, t);
+                assert_eq!(h, tile_heat(0.0, tile, t), "{:?} at {t}", tile.die);
+            }
+        }
+        assert!(peak_heat(f32::NAN) > 0.2);
     }
 
     #[test]
@@ -1011,7 +1093,8 @@ mod tests {
         let hs = s * 1.15;
         assert_eq!(probe(&hot, hs + 9.0 * hs), P.hot);
         assert_eq!(probe(&flat, hs), P.tile);
-        // Without the flow the same load 0.0 chip draws no hot tile at all.
+        // Without the flow the same load 0.0 chip draws only the quiet idle
+        // wave, so the picture differs.
         c.tile_flow = None;
         let cold = render(&[c], 0, 1.0);
         assert_ne!(cold.rgb, buf.rgb);
