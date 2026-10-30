@@ -17,6 +17,21 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.14.0
+- Die 3D settings are slash commands. `[` and `]` change board and Space cuts the camera; the
+  letter keys `m c C B T X L W H` are `/scene /cut /autocut /cells /bg /transition /labels /clouds
+  /history`, plus `/board`. `/help` lists them, in full inside the view.
+- `/theme` works in Die 3D: grayskull keeps the greys, the default theme is a new full-colour
+  palette.
+- Cuts are reasoned by what happened. The default, rotate, spins when nothing happened (Space, or
+  45 s with no cut). Chaos is for the chip (activity, PCIe burst, temperature rising 4 C above its
+  own level) and for a process opening or closing a device; a dissolve is for memory (GDDR at 65 C)
+  and the board (an Ethernet link changing). Shuffle is gone.
+- The cell style follows the hardware. `/cells auto` (the default) starts in braille, quarter
+  blocks or half blocks picked from what the hardware reports, and changes at a camera cut after
+  something happens, never within two minutes of the last change. `/cells blocks` changes between
+  the block forms only. Quarter blocks are new.
+
 ### 0.13.25
 - Every screen has a solid black background by default, including the Die 3D view and its inset
   on the Insights screen. The Die 3D view used to default to a transparent background, which

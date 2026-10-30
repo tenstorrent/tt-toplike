@@ -175,6 +175,9 @@ fn new_die3d_view(cols: usize, rows: usize, reserved: usize) -> crate::animation
     crate::animation::Die3dView::with_reserved_rows(cols, rows, reserved)
         .with_transparent(colors::canvas_transparent())
         .with_theme(colors::current_theme())
+        // The cell style follows the hardware (`/cells` changes it). The
+        // Insights inset below keeps braille: it only fits a board that way.
+        .with_cell_mode(crate::animation::die3d::cellmode::CellMode::Auto)
 }
 
 /// The Insights inset, with the same background rule as [`new_die3d_view`].
@@ -9058,6 +9061,21 @@ mod display_mode_tests {
             want,
             "inset"
         );
+    }
+
+    /// The full view follows the hardware for its cell style. The inset holds
+    /// braille: half blocks halve its pixel width and a two-die board would no
+    /// longer fit it.
+    #[test]
+    fn the_app_makes_the_full_view_auto_and_the_inset_braille() {
+        use crate::animation::die3d::cellmode::CellMode;
+        use crate::animation::die3d::cells::CellStyle;
+        assert_eq!(
+            super::new_die3d_view(100, 30, 0).cell_mode(),
+            CellMode::Auto
+        );
+        let inset = super::new_inset_view(52, 16);
+        assert_eq!(inset.cell_mode(), CellMode::Fixed(CellStyle::Braille));
     }
 
     /// The views the app makes carry the theme in force, so `/theme` reaches

@@ -1430,6 +1430,46 @@ over half the counter range reads as a device reset (a wrap of nearly the full r
 indistinguishable from a small step backwards). More than one wrap between samples cannot be
 detected; at 1 Hz it would need over 275 GB/s.
 
+### Die 3D: commands, theme, reasoned cuts, cell styles (Oct 30 2026, v0.14.0)
+
+Prompt: "we've added too many hotkeys. let's make those slash commands and have help help with
+them. 1) make braille versus blocks a HW-derived selection, not too frequent, and what you start
+with first won't necessarily be the same as the last. are there only block forms we could switch
+between too? 2) /theme could do both greyskull and rainbow for this view too. 3) the cut style
+shouldn't be shuffled so much as reasoned by something happening. the default should be to
+rotate. the other types should happen because something happened on a chip or the memory or the
+board or a related process". Then, answering the questions I asked: "our hot keys should all be
+global ... `[` and `]` ... space ... in this view it would cut ... the slash commands can be local
+to the current view or global". Rotate = the spin (chosen), Die 3D follows /theme (chosen).
+
+Decisions:
+- Keys: `[` `]` (board) and Space (cut) only; `die3d_key_for` still gates them to the view.
+  Every setting is `commands::COMMANDS` (one table: the parser, `/help` and the footer read it;
+  a test runs every entry). `/help` lists them in full inside Die 3D and as one line elsewhere.
+  `execute_command` has no view, so the Enter handler dispatches them (`is_command`).
+- Theme: `Die3dView` carries a `Theme` (default Grayskull so tests and library users are
+  stable); the app sets it from `colors::current_theme()` at creation and each tick, and
+  `set_theme` bumps the revision so the frame cache cannot serve old colours. The palette rides
+  in `DrawCtx`; `RAINBOW` is new. Only the scene changes; footer and flag text stay lavender.
+- Cuts: `Trigger` gained `ThermalRise`, `MemoryHeat`, `EthLink`, `Process`, each with a `Reason`.
+  `observe` (load, PCIe) is unchanged; `observe_extras` and `observe_processes` are new. Rotate
+  maps Chip and Process to chaos, Memory and Board to dissolve, and no reason to a spin (a
+  dissolve if the scene changes). Forced modes override. The mapping of process to chaos is my
+  choice. Idle turn: `IDLE_ROTATE_SECS` 45, `Director::on_idle`, off-switchable for tests.
+- Cell styles: `CellStyle` Braille, Quadrant, HalfBlock. Quadrant uses the braille 2 x 4 pixel
+  buffer and merges row pairs, because a 2 x 2 grid makes pixels twice as tall as wide. So the
+  answer to "only block forms?" is yes: quarter and half blocks, and `/cells blocks` moves between
+  just those. `cellmode.rs` is the pure logic: `hardware_seed` (FNV of every chip's power,
+  temperature, memory heat and links) picks the start; an event cut after `MIN_DWELL_SECS` (120)
+  schedules the next style at the cut's swap. Auto leaves half blocks out under 100 x 30 (their
+  pixels are half as wide). The app makes the full view Auto; the inset stays braille.
+- Pinned frames: the golden hashes now cover the rows above the footer. The same code at the
+  previous commit hashes those rows identically, so the picture did not change.
+- Checked in a truecolor terminal through tmux, asciinema and agg: both palettes, all three
+  styles and the commands.
+- Not done: panning a clipped scene, a `/theme` row in Die 3D's own footer, and process events
+  for the inset's board choice beyond the busiest board.
+
 ### Background: transparent tried, black kept (Oct 30 2026, v0.13.25)
 
 Prompt: "take away the dimmed background by default too both in full screen and the home

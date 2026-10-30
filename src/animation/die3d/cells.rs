@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! Convert a `PixelBuf` into terminal cells: braille (2x4 pixels per cell) or
-//! half-block (1x2 pixels per cell). Both emit truecolour ratatui spans.
+//! Convert a `PixelBuf` into terminal cells: braille (2x4 pixels per cell),
+//! quarter blocks (the same 2x4 pixels, merged to 2x2) or half blocks (1x2
+//! pixels per cell). All three emit truecolour ratatui spans.
 
 use super::raster::PixelBuf;
 use ratatui::style::{Color, Style};
@@ -220,6 +221,154 @@ pub fn to_halfblock_lines(buf: &PixelBuf) -> Vec<Line<'static>> {
     lines
 }
 
+/// How the picture is turned into terminal cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CellStyle {
+    /// Braille dots: 2 x 4 pixels a cell, the finest.
+    Braille,
+    /// Quarter blocks (`▘▝▀▖▌▞▛▗▚▐▜▄▙▟█`): the same 2 x 4 pixels, each pair of
+    /// rows merged, so a cell shows 2 x 2. The picture is the same size and
+    /// shape as braille, only chunkier. A block form, so it draws in any font
+    /// that has the block elements, which braille needs more of.
+    Quadrant,
+    /// Half blocks (`▀▄`): 1 x 2 pixels a cell.
+    HalfBlock,
+}
+
+impl CellStyle {
+    /// The pixels a cell covers in the buffer the scene is drawn into: (wide,
+    /// tall). Quarter blocks use the braille grid so the picture keeps its
+    /// proportions (a 2 x 2 grid would make the pixels twice as tall as wide).
+    pub fn px_per_cell(self) -> (usize, usize) {
+        match self {
+            CellStyle::Braille | CellStyle::Quadrant => (2, 4),
+            CellStyle::HalfBlock => (1, 2),
+        }
+    }
+
+    /// Whether this is one of the block forms (not braille).
+    pub fn is_block(self) -> bool {
+        !matches!(self, CellStyle::Braille)
+    }
+
+    /// The word the footer and `/cells` use.
+    pub fn label(self) -> &'static str {
+        match self {
+            CellStyle::Braille => "braille",
+            CellStyle::Quadrant => "quarter",
+            CellStyle::HalfBlock => "half-block",
+        }
+    }
+
+    /// `buf` as terminal lines in this style.
+    pub fn lines(self, buf: &PixelBuf) -> Vec<Line<'static>> {
+        match self {
+            CellStyle::Braille => to_braille_lines(buf),
+            CellStyle::Quadrant => to_quadrant_lines(buf),
+            CellStyle::HalfBlock => to_halfblock_lines(buf),
+        }
+    }
+}
+
+/// The quarter-block character for a mask of lit quarters: 1 upper left, 2
+/// upper right, 4 lower left, 8 lower right.
+const QUADRANT: [&str; 16] = [
+    " ", "\u{2598}", "\u{259D}", "\u{2580}", "\u{2596}", "\u{258C}", "\u{259E}", "\u{259B}",
+    "\u{2597}", "\u{259A}", "\u{2590}", "\u{259C}", "\u{2584}", "\u{2599}", "\u{259F}", "\u{2588}",
+];
+
+/// Quarter-block lines, one per 4 pixel rows. Needs `w % 2 == 0` and
+/// `h % 4 == 0`: the buffer is the braille grid, and each cell's four quarters
+/// are the 1 x 2 pixel groups of its 2 x 4 block.
+///
+/// The rule is the braille one on four values instead of eight: quarters
+/// brighter than the cell's mean become the foreground block glyph, the rest
+/// the background; a flat, fully covered cell is a space on the mean colour;
+/// uncovered quarters are transparent (a cell with none covered is a space on
+/// `Color::Reset`, and a partly covered one takes the glyph form so its
+/// uncovered quarters are not painted). A quarter is covered when either of its
+/// pixels is, and is the mean of the covered ones.
+pub fn to_quadrant_lines(buf: &PixelBuf) -> Vec<Line<'static>> {
+    debug_assert!(
+        buf.w % 2 == 0 && buf.h % 4 == 0,
+        "quarter blocks need w%2==0, h%4==0"
+    );
+    let mut lines = Vec::with_capacity(buf.h / 4);
+    for cy in 0..buf.h / 4 {
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(buf.w / 2);
+        for cx in 0..buf.w / 2 {
+            // Quarters in mask order: UL, UR, LL, LR.
+            let mut px = [[0u8; 3]; 4];
+            let mut lum = [0f32; 4];
+            let mut cov = [false; 4];
+            let mut n_covered = 0;
+            for q in 0..4 {
+                let (qx, qy) = (q % 2, q / 2);
+                let mut group = [[0u8; 3]; 2];
+                let mut n = 0;
+                for r in 0..2 {
+                    let (x, y) = (cx * 2 + qx, cy * 4 + qy * 2 + r);
+                    if buf.covered(x, y) {
+                        group[n] = buf.get(x, y);
+                        n += 1;
+                    }
+                }
+                if n > 0 {
+                    cov[q] = true;
+                    n_covered += 1;
+                    px[q] = mean_rgb(&group[..n]);
+                    lum[q] = luma(px[q]);
+                }
+            }
+            if n_covered == 0 {
+                push_cell(&mut spans, " ", transparent_style());
+                continue;
+            }
+            let mean = lum.iter().sum::<f32>() / 4.0;
+            let min = lum.iter().copied().fold(f32::MAX, f32::min);
+            let max = lum.iter().copied().fold(f32::MIN, f32::max);
+            if n_covered == 4 && max - min <= UNIFORM_LUMA_SPREAD {
+                push_cell(&mut spans, " ", Style::default().bg(color(mean_rgb(&px))));
+                continue;
+            }
+            let (mut lit, mut n_lit) = ([[0u8; 3]; 4], 0);
+            let (mut dark, mut n_dark) = ([[0u8; 3]; 4], 0);
+            let mut mask = 0usize;
+            for q in 0..4 {
+                if cov[q] && lum[q] > mean {
+                    lit[n_lit] = px[q];
+                    n_lit += 1;
+                    mask |= 1 << q;
+                } else if cov[q] {
+                    dark[n_dark] = px[q];
+                    n_dark += 1;
+                }
+            }
+            if n_lit == 0 {
+                // Only reachable when the covered quarters are all pure black
+                // beside uncovered ones: draw them all as the glyph; there is no split to make.
+                for q in 0..4 {
+                    if cov[q] {
+                        lit[n_lit] = px[q];
+                        n_lit += 1;
+                        mask |= 1 << q;
+                    }
+                }
+                n_dark = 0;
+            }
+            let bg = if n_dark == 0 {
+                Color::Reset
+            } else {
+                color(mean_rgb(&dark[..n_dark]))
+            };
+            let style = Style::default().fg(color(mean_rgb(&lit[..n_lit]))).bg(bg);
+            push_cell(&mut spans, QUADRANT[mask], style);
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,5 +534,116 @@ mod tests {
         assert_eq!(s.content.as_ref(), "▄");
         assert_eq!(s.style.fg, Some(rgb([4, 5, 6])));
         assert_eq!(s.style.bg, Some(Color::Reset));
+    }
+
+    /// A 2 x 4 buffer with the given quarters lit white (UL, UR, LL, LR order
+    /// = mask bits 1, 2, 4, 8) on black, every pixel covered.
+    fn quarters(mask: usize) -> PixelBuf {
+        let mut b = PixelBuf::new(2, 4);
+        for q in 0..4 {
+            let on = mask >> q & 1 == 1;
+            for r in 0..2 {
+                b.put(
+                    (q % 2) as i32,
+                    ((q / 2) * 2 + r) as i32,
+                    if on { [250, 250, 250] } else { [0, 0, 0] },
+                );
+            }
+        }
+        b
+    }
+
+    fn glyph(buf: &PixelBuf) -> String {
+        to_quadrant_lines(buf)[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn each_of_the_sixteen_quarter_patterns_draws_its_block_glyph() {
+        // 0 is all black and flat: a space on black. 15 is all white and flat:
+        // a space on white. The other fourteen are real glyphs.
+        let want = [
+            " ", "▘", "▝", "▀", "▖", "▌", "▞", "▛", "▗", "▚", "▐", "▜", "▄", "▙", "▟", " ",
+        ];
+        for (mask, w) in want.iter().enumerate() {
+            assert_eq!(glyph(&quarters(mask)), *w, "mask {mask:#06b}");
+        }
+        // The flat cells differ by their background.
+        let bg = |m| to_quadrant_lines(&quarters(m))[0].spans[0].style.bg;
+        assert_eq!(bg(0), Some(rgb([0, 0, 0])));
+        assert_eq!(bg(15), Some(rgb([250, 250, 250])));
+        // And a lit quarter is the foreground over the dark background.
+        let s = &to_quadrant_lines(&quarters(0b0011))[0].spans[0];
+        assert_eq!(
+            (s.content.as_ref(), s.style.fg, s.style.bg),
+            ("▀", Some(rgb([250, 250, 250])), Some(rgb([0, 0, 0])))
+        );
+    }
+
+    #[test]
+    fn a_quarter_is_the_mean_of_its_two_pixel_rows() {
+        let mut b = PixelBuf::new(2, 4);
+        // Upper left: 200 and 100 average to 150; the other quarters are dark.
+        b.put(0, 0, [200, 200, 200]);
+        b.put(0, 1, [100, 100, 100]);
+        for (x, y) in [(1, 0), (1, 1), (0, 2), (0, 3), (1, 2), (1, 3)] {
+            b.put(x, y, [0, 0, 0]);
+        }
+        let s = &to_quadrant_lines(&b)[0].spans[0];
+        assert_eq!(s.content.as_ref(), "▘");
+        assert_eq!(s.style.fg, Some(rgb([150, 150, 150])));
+    }
+
+    #[test]
+    fn uncovered_quarters_are_transparent() {
+        // Nothing covered: a space on the terminal's own background.
+        let s = &to_quadrant_lines(&PixelBuf::new(2, 4))[0].spans[0];
+        assert_eq!((s.content.as_ref(), s.style.bg), (" ", Some(Color::Reset)));
+        // Only the lower right covered: that block, background left to the
+        // terminal, never painted black.
+        let mut b = PixelBuf::new(2, 4);
+        b.put(1, 2, [90, 120, 200]);
+        let s = &to_quadrant_lines(&b)[0].spans[0];
+        assert_eq!(s.content.as_ref(), "▗");
+        assert_eq!(s.style.fg, Some(rgb([90, 120, 200])));
+        assert_eq!(s.style.bg, Some(Color::Reset));
+        // One covered pixel of a pair is enough to cover that quarter.
+        let mut b = PixelBuf::new(2, 4);
+        b.put(0, 1, [40, 40, 40]);
+        assert_eq!(glyph(&b), "▘");
+    }
+
+    #[test]
+    fn quarter_lines_have_w_over_2_by_h_over_4_cells_and_the_style_table_agrees() {
+        let b = PixelBuf::new(8, 12);
+        let lines = to_quadrant_lines(&b);
+        assert_eq!(lines.len(), 3);
+        for l in &lines {
+            assert_eq!(
+                l.spans
+                    .iter()
+                    .map(|s| s.content.chars().count())
+                    .sum::<usize>(),
+                4
+            );
+        }
+        for style in [
+            CellStyle::Braille,
+            CellStyle::Quadrant,
+            CellStyle::HalfBlock,
+        ] {
+            let (pw, ph) = style.px_per_cell();
+            let buf = PixelBuf::new(pw * 5, ph * 3);
+            let lines = style.lines(&buf);
+            assert_eq!(lines.len(), 3, "{style:?}");
+            assert_eq!(style.is_block(), style != CellStyle::Braille);
+        }
+        assert_eq!(
+            CellStyle::Quadrant.px_per_cell(),
+            CellStyle::Braille.px_per_cell()
+        );
     }
 }

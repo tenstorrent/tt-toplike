@@ -22,6 +22,7 @@
 pub mod bh_layout_data;
 mod busiest;
 pub mod camera;
+pub mod cellmode;
 pub mod cells;
 pub mod clouds;
 pub mod commands;
@@ -47,6 +48,8 @@ use crate::backend::TelemetryBackend;
 use crate::models::Architecture;
 use busiest::BusiestBoard;
 use camera::{dissolve_into, scramble, Camera, Director, TransitionKind};
+use cellmode::{CellMode, CellState};
+use cells::CellStyle;
 use clouds::{CloudClock, Clouds};
 use flags::{DieFlag, Flag, Hull};
 use history::History;
@@ -128,6 +131,10 @@ const SCENE_TIME_WRAP_S: f64 = 86_400.0;
 /// even that does not (see `scene::fit_last_resort`). A window smaller than
 /// this shows too little of a clipped scene to be worth drawing.
 const SCENE_MIN_CELLS: (usize, usize) = (16, 6);
+
+/// Smallest view (columns, rows) in which an automatic cell mode uses half
+/// blocks: the size where the whole scene of one board fits in them.
+const HALF_BLOCK_MIN_CELLS: (usize, usize) = (100, 30);
 
 /// The history panel is drawn only in a view at least this wide and tall
 /// (columns, rows). Below it the panel would cover too much of the scene.
@@ -280,6 +287,9 @@ struct Placement {
     iso: Iso,
     grid: (usize, usize),
     dies: Vec<((f32, f32), String)>,
+    /// The pixels a terminal cell covers in this frame's buffer (wide, tall),
+    /// which the labels are placed with.
+    cell: (usize, usize),
 }
 
 /// The Die 3D view.
@@ -298,7 +308,8 @@ pub struct Die3dView {
     /// calls (`with_reserved_rows`, `resize`) stay as they are.
     #[allow(dead_code)]
     reserved_rows: usize,
-    braille: bool,
+    /// How the picture is drawn in cells, and when that changes (`/cells`).
+    cells: CellState,
     /// Leave the background unpainted so the terminal's own colour (and any
     /// translucency) shows through. Off paints it opaque black.
     transparent: bool,
@@ -382,8 +393,9 @@ struct LastFrame {
 /// What a frame was drawn from besides the time: the view's revision, the
 /// start of the latest cut, whether its transition is running, the scene
 /// shown, the clouds' whole-pixel offset and intensity (`cloud_key`) and the
-/// history panel's sample count while the panel is shown (`history_key`). A
-/// frame is reused only while all six are unchanged, so a key, a cut
+/// history panel's sample count while the panel is shown (`history_key`) and
+/// the cell style (a pending change counts from its time). A
+/// frame is reused only while all seven are unchanged, so a key, a cut
 /// starting or ending, a scene switch, a cloud step or a new sample on the
 /// panel shows in the very next frame. A cloud clock step that leaves the
 /// offset and intensity as they were forces nothing, and neither does a
@@ -395,6 +407,7 @@ type FrameKey = (
     Scene,
     Option<(i64, u32)>,
     Option<u64>,
+    CellStyle,
 );
 
 impl Die3dView {
@@ -434,6 +447,37 @@ impl Die3dView {
         self.theme
     }
 
+    /// This view drawing its cells in `mode`. The app sets `CellMode::Auto`, so
+    /// the style follows the hardware; a view made without it holds braille.
+    pub fn with_cell_mode(mut self, mode: CellMode) -> Die3dView {
+        self.cells = CellState::new(mode);
+        self
+    }
+
+    /// How the cells are chosen: held, or following the hardware.
+    pub fn cell_mode(&self) -> CellMode {
+        self.cells.mode()
+    }
+
+    /// The cell style drawn at `now`: the one the mode has chosen, except that
+    /// an automatic mode does not use half blocks in a view under
+    /// [`HALF_BLOCK_MIN_CELLS`] (their pixels are half as wide, so the board
+    /// would not fit) and uses quarter blocks there. A style chosen by hand is
+    /// always honoured.
+    pub fn cell_style(&self, now: f64) -> CellStyle {
+        self.style_at(now)
+    }
+
+    fn style_at(&self, now: f64) -> CellStyle {
+        let style = self.cells.style_at(now);
+        let small = self.cols < HALF_BLOCK_MIN_CELLS.0 || self.rows < HALF_BLOCK_MIN_CELLS.1;
+        if style == CellStyle::HalfBlock && self.cells.mode().is_automatic() && small {
+            CellStyle::Quadrant
+        } else {
+            style
+        }
+    }
+
     /// Whether the background is transparent now.
     pub fn is_transparent(&self) -> bool {
         self.transparent
@@ -470,7 +514,7 @@ impl Die3dView {
             cols,
             rows,
             reserved_rows,
-            braille: true,
+            cells: CellState::new(CellMode::Fixed(CellStyle::Braille)),
             transparent: true,
             theme: crate::ui::colors::Theme::Grayskull,
             show_labels: true,
@@ -574,6 +618,16 @@ impl Die3dView {
             }
         }
         self.calibrate_loads(now);
+        // A style change decided by an earlier event shows from its time.
+        self.cells.settle(now);
+        // The first reading of the hardware picks the starting cell style.
+        if !self.chips.is_empty()
+            && self
+                .cells
+                .seed_once(now, cellmode::hardware_seed(&self.chips))
+        {
+            self.revision += 1;
+        }
         self.read_cloud_drivers();
         // One sample a second for the history panel, taken whether or not the
         // panel is shown, so turning it on shows the last minute at once.
@@ -611,6 +665,7 @@ impl Die3dView {
         // Everything that happened this tick, with the board it happened on:
         // the load and PCIe edges, the temperature, memory and Ethernet
         // readings, and processes opening or closing a device.
+        let cut_before = self.director.cut_at();
         let mut events: Vec<(usize, Trigger)> = Vec::new();
         for (board, chips) in self.chips.iter().enumerate() {
             for chip in chips {
@@ -660,6 +715,14 @@ impl Die3dView {
             } else {
                 self.switcher
                     .on_trigger(trigger, board, boards, &mut self.director, now);
+            }
+        }
+        // Something on the hardware that cut the camera may also change the cell
+        // style, at the cut's midpoint where the transition hides it.
+        if self.director.cut_at() != cut_before {
+            let swap = self.director.swapped_at().unwrap_or(now);
+            if self.cells.on_event_cut(now, swap) {
+                self.revision += 1;
             }
         }
         // A quiet view still turns now and then. A cut for an event or by hand
@@ -794,7 +857,14 @@ impl Die3dView {
                 }
             }
             Die3dKey::ToggleAuto => self.director.set_auto(!self.director.auto()),
-            Die3dKey::ToggleBraille => self.braille = !self.braille,
+            Die3dKey::ToggleBraille => {
+                // Braille and half blocks, held: the two the old key flipped.
+                let held = match self.cells.style_at(now) {
+                    CellStyle::Braille => CellStyle::HalfBlock,
+                    _ => CellStyle::Braille,
+                };
+                self.cells.set_mode(CellMode::Fixed(held), now);
+            }
             Die3dKey::ToggleTransparent => self.transparent = !self.transparent,
             Die3dKey::CycleTransition => self.director.cycle_transition_mode(),
             Die3dKey::ToggleLabels => self.show_labels = !self.show_labels,
@@ -829,6 +899,7 @@ impl Die3dView {
             self.scene_at(now),
             self.cloud_key(),
             self.history_key(),
+            self.style_at(now),
         );
         let interval = if in_transition {
             TRANSITION_FRAME_SECS
@@ -866,11 +937,7 @@ impl Die3dView {
         let scene_rows = self.rows.saturating_sub(tier.footer_rows);
         let (mut lines, frame) = match self.frame(now) {
             Some((buf, shown, placed)) => {
-                let lines = if self.braille {
-                    cells::to_braille_lines(&buf)
-                } else {
-                    cells::to_halfblock_lines(&buf)
-                };
+                let lines = self.style_at(now).lines(&buf);
                 self.give_back(buf);
                 (lines, Some((shown, placed)))
             }
@@ -1086,11 +1153,8 @@ impl Die3dView {
     ) -> Option<(PixelBuf, Shown, Placement)> {
         let scene_rows = self.rows.checked_sub(self.tier().footer_rows)?;
         // Braille cells hold 2 x 4 pixels, half-block cells 1 x 2.
-        let (pw, ph) = if self.braille {
-            (self.cols * 2, scene_rows * 4)
-        } else {
-            (self.cols, scene_rows * 2)
-        };
+        let cell = self.style_at(now).px_per_cell();
+        let (pw, ph) = (self.cols * cell.0, scene_rows * cell.1);
         // The scenes animate in f32 time (the wave, the packets). f32 has 24
         // bits of mantissa, so past about a month of view time (2.6e6 s) it
         // steps by 0.25 s and the motion would stutter at 4 Hz. The time
@@ -1130,6 +1194,7 @@ impl Die3dView {
                     let placed = Placement {
                         iso: fit.iso,
                         grid,
+                        cell,
                         dies: self
                             .chips
                             .iter()
@@ -1174,7 +1239,7 @@ impl Die3dView {
             Some((vw, vh)) => {
                 // Cells of the whole picture, and the footer rows a window
                 // needs on top of them.
-                let (cw, ch) = if self.braille { (2, 4) } else { (1, 2) };
+                let (cw, ch) = cell;
                 Shown::Clipped(
                     board,
                     (vw as usize).div_ceil(cw),
@@ -1187,6 +1252,7 @@ impl Die3dView {
         let placed = Placement {
             iso: fit.iso,
             grid,
+            cell,
             dies: chips
                 .iter()
                 .enumerate()
@@ -1406,7 +1472,7 @@ impl Die3dView {
     /// hull is what the scene covers. A pin stands on the top or bottom
     /// corner of its die's top face.
     fn flag_layout(&self, placed: &Placement, scene_rows: usize) -> Vec<Option<Flag>> {
-        let (sx, sy) = if self.braille { (2.0, 4.0) } else { (1.0, 2.0) };
+        let (sx, sy) = (placed.cell.0 as f32, placed.cell.1 as f32);
         let iso = &placed.iso;
         let at = |gx: f32, gy: f32| {
             let (x, y) = iso.project(gx, gy, placed.grid);
@@ -1498,11 +1564,7 @@ impl Die3dView {
         vec![
             Switch {
                 cmd: "/cells",
-                state: if self.braille {
-                    "braille"
-                } else {
-                    "half-block"
-                },
+                state: self.cells.mode().state(self.style_at(now)),
             },
             Switch {
                 cmd: "/bg",
@@ -2524,6 +2586,206 @@ mod tests {
         });
         v.update(&b, 20.0);
         assert_eq!(v.director.transition_kind(), Some(Spin));
+    }
+
+    /// A view made outside the app holds braille, so every test and library user
+    /// gets the same picture each time.
+    #[test]
+    fn a_new_view_holds_braille_and_the_footer_says_so() {
+        let v = two_die_view(150, 42);
+        assert_eq!(v.cell_style(0.0), CellStyle::Braille);
+        assert!(footer(&v.render(0.0)).contains("/cells braille"));
+    }
+
+    /// In auto the hardware picks the starting style, and a different hardware
+    /// state can pick a different one.
+    #[test]
+    fn auto_starts_in_a_style_the_hardware_picks() {
+        let start = |watts: f32| {
+            let mut b = two_boards();
+            for i in 0..4 {
+                b.set_power(i, watts + i as f32);
+            }
+            let mut v = Die3dView::new(150, 42).with_cell_mode(CellMode::Auto);
+            v.update(&b, 0.0);
+            v.cell_style(0.0)
+        };
+        assert_eq!(start(40.0), start(40.0), "same hardware, same start");
+        let styles: std::collections::HashSet<_> =
+            (0..60).map(|i| start(30.0 + i as f32 * 0.7)).collect();
+        assert_eq!(
+            styles.len(),
+            3,
+            "the start varies with the hardware: {styles:?}"
+        );
+    }
+
+    /// An event that cuts the camera changes the style, but only after the dwell,
+    /// and at the cut's swap, a moment after the event.
+    #[test]
+    fn an_event_changes_the_cell_style_after_the_dwell_at_the_cut_swap() {
+        let mut b = two_boards();
+        b.pcie = Some(PcieBandwidth {
+            rx_bytes_per_sec: 0.0,
+            tx_bytes_per_sec: 0.0,
+        });
+        let mut v = Die3dView::new(150, 42).with_cell_mode(CellMode::Auto);
+        v.director.set_idle_turn(false);
+        v.update(&b, 0.0);
+        let start = v.cell_style(0.0);
+        // An event inside the dwell cuts the camera but keeps the style.
+        b.open_device(1, 0);
+        v.update(&b, 10.0);
+        assert!(v.director.cut_at() == Some(10.0));
+        assert_eq!(v.cell_style(20.0), start, "too soon after the start");
+        // After the dwell, a second event changes it from the cut's swap.
+        let at = cellmode::MIN_DWELL_SECS + 20.0;
+        b.close_device(1, 0);
+        v.update(&b, at);
+        assert_eq!(v.director.cut_at(), Some(at));
+        let swap = v.director.swapped_at().unwrap();
+        assert_ne!(
+            v.cell_style(swap - 0.01),
+            cellmode::next_style(CellMode::Auto, start)
+        );
+        assert_eq!(
+            v.cell_style(swap),
+            cellmode::next_style(CellMode::Auto, start)
+        );
+        assert!(swap > at, "the change waits for the swap");
+    }
+
+    /// Half blocks halve the pixel width, so in a small view an automatic mode
+    /// uses quarter blocks instead, and a style chosen by hand is kept.
+    #[test]
+    fn auto_never_picks_half_blocks_in_a_small_view_but_a_choice_is_kept() {
+        let start_in = |cols: usize, rows: usize, watts: f32| {
+            let mut b = two_boards();
+            for i in 0..4 {
+                b.set_power(i, watts + i as f32);
+            }
+            let mut v = Die3dView::new(cols, rows).with_cell_mode(CellMode::Auto);
+            v.update(&b, 0.0);
+            v.cell_style(0.0)
+        };
+        let big: std::collections::HashSet<_> = (0..60)
+            .map(|i| start_in(150, 42, 30.0 + i as f32 * 0.7))
+            .collect();
+        assert!(
+            big.contains(&CellStyle::HalfBlock),
+            "control: it is used when it fits"
+        );
+        for i in 0..60 {
+            let s = start_in(80, 24, 30.0 + i as f32 * 0.7);
+            assert_ne!(s, CellStyle::HalfBlock, "watts {i}");
+        }
+        // By hand it is kept at any size.
+        let mut v = two_die_view(80, 24);
+        v.command("cells", "half", 0.0);
+        assert_eq!(v.cell_style(0.0), CellStyle::HalfBlock);
+    }
+
+    /// The picture is drawn in the chosen style: the frame has the glyphs of
+    /// that style and the label flags still land on the dies in each.
+    #[test]
+    fn every_cell_style_draws_its_glyphs_and_keeps_the_flags() {
+        for (mode, glyphs) in [
+            (CellMode::Fixed(CellStyle::Braille), ('\u{2801}'..='\u{28ff}').collect::<Vec<_>>()),
+            (
+                CellMode::Fixed(CellStyle::Quadrant),
+                "\u{2598}\u{259D}\u{2580}\u{2596}\u{258C}\u{259E}\u{259B}\u{2597}\u{259A}\u{2590}\u{259C}\u{2584}\u{2599}\u{259F}"
+                    .chars()
+                    .collect(),
+            ),
+            (CellMode::Fixed(CellStyle::HalfBlock), vec!['\u{2580}', '\u{2584}']),
+        ] {
+            let mut v = two_die_view(150, 42);
+            v.command("cells", mode.state(CellStyle::Braille).split(": ").last().unwrap(), 0.0);
+            let lines = v.render(0.0);
+            let t = text(&lines);
+            assert_eq!(t.len(), 42);
+            assert!(
+                t[..40].iter().any(|l| l.chars().any(|c| glyphs.contains(&c))),
+                "{mode:?}: no glyph of its own in the scene"
+            );
+            // The same two chips are labelled whatever the cells.
+            let labels = labels_in(&lines, 40);
+            assert!(!labels.is_empty(), "{mode:?}: no labels");
+            for (row, col, _) in labels {
+                assert!(row < 40 && col < 150, "{mode:?}: a label off the scene");
+            }
+        }
+    }
+
+    /// Quarter blocks use the braille grid, so the picture is the same size and
+    /// shape as braille: the same cells are covered or empty.
+    #[test]
+    fn quarter_blocks_cover_the_cells_braille_covers() {
+        // A cell is covered unless it is the transparent one: a space on the
+        // terminal's own background with no colour of its own. Judged by the
+        // style (the character cannot tell): a flat covered cell is a space in both.
+        let covered = |style: &str| -> Vec<Vec<bool>> {
+            let mut v = two_die_view(150, 42);
+            v.command("clouds", "off", 0.0);
+            v.command("labels", "off", 0.0);
+            v.command("history", "off", 0.0);
+            v.command("cells", style, 0.0);
+            v.render(0.0)[..40]
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .flat_map(|sp| {
+                            let transparent = sp.style.fg.is_none()
+                                && sp.style.bg == Some(Color::Reset)
+                                && sp.content.chars().all(|c| c == ' ');
+                            sp.content.chars().map(move |_| !transparent)
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        let (braille, quarter) = (covered("braille"), covered("quarter"));
+        let differing: usize = braille
+            .iter()
+            .zip(&quarter)
+            .map(|(a, b)| a.iter().zip(b).filter(|(x, y)| x != y).count())
+            .sum();
+        let total: usize = braille
+            .iter()
+            .map(|r| r.iter().filter(|c| **c).count())
+            .sum();
+        // The same grid, so the same cells are covered; a quarter can miss a
+        // lone pixel braille shows, so allow a few percent.
+        assert!(total > 500, "the scene is drawn: {total}");
+        assert!(
+            differing * 20 < total,
+            "{differing} of {total} cells differ"
+        );
+    }
+
+    /// The blocks command never reaches braille, however the style changes.
+    #[test]
+    fn blocks_mode_stays_in_the_block_forms_through_many_events() {
+        let mut b = two_boards();
+        b.pcie = Some(PcieBandwidth {
+            rx_bytes_per_sec: 0.0,
+            tx_bytes_per_sec: 0.0,
+        });
+        let mut v = Die3dView::new(150, 42).with_cell_mode(CellMode::Blocks);
+        v.director.set_idle_turn(false);
+        v.update(&b, 0.0);
+        let mut t = 0.0;
+        let mut seen = std::collections::HashSet::new();
+        for pid in 0..8 {
+            t += cellmode::MIN_DWELL_SECS + 10.0;
+            b.open_device(pid, 0);
+            v.update(&b, t);
+            b.close_device(pid, 0);
+            seen.insert(v.cell_style(t + 2.0));
+            assert!(v.cell_style(t + 2.0).is_block(), "braille at {t}");
+        }
+        assert_eq!(seen.len(), 2, "both block forms come up: {seen:?}");
     }
 
     /// A view nobody touches and nothing happens to still turns, once, after

@@ -1,3 +1,26 @@
+tt-toplike (0.14.0) noble; urgency=medium
+
+  * Die 3D: the view's settings are slash commands now, and the keys are the ones
+    that mean the same everywhere. [ and ] change board, Space cuts the camera
+    (it is the nudge key). /board /scene /cut /autocut /transition /cells /bg
+    /labels /clouds /history replace the letter keys m c C B T X L W H, and
+    /help lists them (in full inside the view).
+  * Die 3D: /theme works here. Grayskull keeps the greys with one hot pink, and
+    the default theme is a new full-colour palette.
+  * Die 3D: cuts are reasoned by what happened. The default transition, rotate,
+    spins when nothing happened (Space, or after 45 s with no cut) and cuts an
+    event by its reason: chaos for a chip (load rise, PCIe burst, temperature
+    rising 4 C above its own level) or a process opening or closing a device, a
+    dissolve for memory (GDDR at 65 C) or the board (an Ethernet link changing).
+    Shuffle is gone. /transition chaos, dissolve or spin still pins one.
+  * Die 3D: the cell style follows the hardware. /cells auto (the default) starts
+    in braille, quarter blocks or half blocks, picked from what the hardware
+    reports, and changes at a camera cut after something happens, never within
+    two minutes of the last change. /cells blocks changes between the two block
+    forms only. /cells braille, quarter and half hold one. Quarter blocks are new.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 16:00:00 -0700
+
 tt-toplike (0.13.25) noble; urgency=medium
 
   * Every screen has a solid black background by default, including the Die 3D

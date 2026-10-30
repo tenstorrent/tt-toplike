@@ -14,6 +14,7 @@
 //! To add a command: add an entry, then a match arm in `Die3dView::command`.
 
 use super::camera::TransitionMode;
+use super::cellmode::CellMode;
 use super::switching::Scene;
 use super::Die3dView;
 
@@ -57,8 +58,9 @@ pub const COMMANDS: &[CommandInfo] = &[
     },
     CommandInfo {
         name: "cells",
-        args: "[braille|half]",
-        help: "braille dots or half blocks; bare flips",
+        args: "[auto|braille|blocks|quarter|half]",
+        help:
+            "how the picture is drawn; auto follows the hardware, blocks skips braille; bare steps",
     },
     CommandInfo {
         name: "bg",
@@ -196,17 +198,23 @@ impl Die3dView {
                 (format!("transition: {}", mode.label()), false)
             }
             "cells" => {
-                let braille = match arg {
-                    "" => !self.braille,
-                    "braille" => true,
-                    "half" | "half-block" | "blocks" => false,
-                    _ => return bad(),
+                let mode = match arg {
+                    "" => self.cells.mode().next(),
+                    a => match CellMode::parse(a) {
+                        Some(m) => m,
+                        None => return bad(),
+                    },
                 };
-                self.braille = braille;
-                (
-                    format!("cells: {}", if braille { "braille" } else { "half-block" }),
-                    false,
-                )
+                self.cells.set_mode(mode, now);
+                let style = self.cell_style(now);
+                // A held style is its own name; an automatic mode says which
+                // style it is in for now.
+                let msg = match mode {
+                    CellMode::Fixed(_) => format!("cells: {}", style.label()),
+                    CellMode::Auto => format!("cells: auto (in {} for now)", style.label()),
+                    CellMode::Blocks => format!("cells: blocks (in {} for now)", style.label()),
+                };
+                (msg, false)
             }
             "bg" => {
                 let transparent = match arg {
@@ -299,6 +307,29 @@ mod tests {
     }
 
     #[test]
+    fn cells_says_the_mode_and_the_style_it_is_in() {
+        let mut v = view();
+        assert_eq!(v.command("cells", "braille", 1.0).0, "cells: braille");
+        assert_eq!(v.command("cells", "half", 1.0).0, "cells: half-block");
+        let (msg, err) = v.command("cells", "auto", 1.0);
+        assert!(
+            !err && msg.starts_with("cells: auto (in half-block"),
+            "{msg}"
+        );
+        let (msg, _) = v.command("cells", "blocks", 1.0);
+        assert!(msg.starts_with("cells: blocks (in "), "{msg}");
+        assert!(!msg.contains("braille"), "blocks never says braille: {msg}");
+        let (msg, err) = v.command("cells", "dots", 1.0);
+        assert!(err && msg.contains("usage: /cells"), "{msg}");
+        // Bare steps through the five modes.
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..5 {
+            seen.insert(v.command("cells", "", 2.0 + i as f64).0);
+        }
+        assert_eq!(seen.len(), 5, "{seen:?}");
+    }
+
+    #[test]
     fn board_takes_next_prev_and_a_number() {
         let mut v = view();
         // 4 p300 chips are two boards.
@@ -318,9 +349,9 @@ mod tests {
         // The same state change as the key it replaces, so the two cannot drift.
         let mut by_cmd = view();
         let mut by_key = view();
-        by_cmd.command("cells", "", 1.0);
+        by_cmd.command("cells", "half", 1.0);
         by_key.handle_key(super::super::Die3dKey::ToggleBraille, 1.0);
-        assert_eq!(by_cmd.braille, by_key.braille);
+        assert_eq!(by_cmd.cell_style(2.0), by_key.cell_style(2.0));
         by_cmd.command("bg", "", 1.0);
         by_key.handle_key(super::super::Die3dKey::ToggleTransparent, 1.0);
         assert_eq!(by_cmd.transparent, by_key.transparent);
