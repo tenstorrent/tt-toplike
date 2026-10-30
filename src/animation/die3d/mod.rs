@@ -1610,18 +1610,109 @@ mod tests {
         v.update(&b, 21.0);
         assert_eq!(v.switcher.scene_at(21.0), Scene::All);
 
-        // A load rise on any chip restarts the 20 s, even one on another
-        // board that does not cut the camera.
-        let (mut v, _) = switched_by_chip_2();
-        b = two_boards();
-        b.set_power(2, 90.0);
-        v.update(&b, 1.5);
+        // A load rise on the board on show restarts the 20 s (see
+        // `a_rise_on_the_board_on_show_does_not_return`); one on another
+        // board does not (see `the_return_timer_ignores_rises_on_other_boards`).
+    }
+
+    /// `switched_by_chip_2` settled on board 1: the switch's cut (at 1.0)
+    /// has passed its midpoint and chip 2 still draws 90 W.
+    fn on_board_1_chosen_by_the_view() -> (Die3dView, Fake) {
+        let (mut v, b) = switched_by_chip_2();
+        v.update(&b, 4.0);
+        assert_eq!(v.switcher.scene_at(4.0), Scene::Board(1));
+        assert_eq!(v.director.cut_at(), Some(1.0));
+        (v, b)
+    }
+
+    #[test]
+    fn a_rise_on_another_board_returns_to_all_boards_when_on_an_auto_chosen_board() {
+        let (mut v, mut b) = on_board_1_chosen_by_the_view();
+        // Chip 0, on board 0, rises 9 s after the last cut (past the 8 s
+        // cooldown): a cut that goes back to every board at its midpoint.
         b.set_power(0, 90.0);
         v.update(&b, 10.0);
-        v.update(&b, 21.0);
-        assert_eq!(v.switcher.scene_at(21.0), Scene::Board(1));
+        assert_eq!(v.director.cut_at(), Some(10.0), "the rise cut the camera");
+        let kind = v.director.transition_kind().unwrap();
+        assert_ne!(kind, TransitionKind::Spin, "a scene change is never a spin");
+        let at = v.director.swapped_at().unwrap();
+        assert_eq!(v.switcher.scene_at(at - 0.01), Scene::Board(1));
+        assert_eq!(v.switcher.scene_at(at), Scene::All);
+        assert_eq!(v.transition_scenes(10.1), (Scene::Board(1), Scene::All));
+        v.update(&b, at + 0.1);
+        assert!(footer(&v.render(at + 0.1)).contains("all boards"));
+        // Back on every board, the view stays there: no return pending.
+        v.update(&b, 60.0);
+        assert_eq!(v.switcher.scene_at(60.0), Scene::All);
+
+        // Inside the cooldown the rise is ignored: no cut, no switch, and
+        // nothing kept for later. The 20 s return still comes, at 21 s.
+        let (mut v, mut b) = on_board_1_chosen_by_the_view();
+        b.set_power(0, 90.0);
+        v.update(&b, 5.0);
+        assert_eq!(v.director.cut_at(), Some(1.0));
+        assert_eq!(v.switcher.scene_at(5.0), Scene::Board(1));
+        v.update(&b, 12.0);
+        assert_eq!(v.director.cut_at(), Some(1.0));
+        assert_eq!(v.switcher.scene_at(12.0), Scene::Board(1));
+    }
+
+    #[test]
+    fn a_rise_on_the_board_on_show_does_not_return() {
+        let (mut v, mut b) = on_board_1_chosen_by_the_view();
+        // Chip 3, on board 1, rises at 10 s (chip 2 dropped back first, so
+        // the detector re-armed): the camera cuts, the board stays, and the
+        // 20 s return now counts from 10 s.
+        b.set_power(2, 0.0);
+        v.update(&b, 6.0);
+        b.set_power(3, 90.0);
+        v.update(&b, 10.0);
+        assert_eq!(v.director.cut_at(), Some(10.0));
+        for now in [10.5, 15.0, 21.0, 29.9] {
+            v.update(&b, now);
+            assert_eq!(v.switcher.scene_at(now), Scene::Board(1), "{now}");
+        }
         v.update(&b, 30.0);
         assert_eq!(v.switcher.scene_at(30.0), Scene::All);
+    }
+
+    #[test]
+    fn the_return_timer_ignores_rises_on_other_boards() {
+        // A rise on board 0 inside the cooldown neither cuts nor moves the
+        // return: the view goes back to every board 20 s after the rise
+        // that chose board 1 (at 1 s).
+        let (mut v, mut b) = on_board_1_chosen_by_the_view();
+        b.set_power(0, 90.0);
+        v.update(&b, 5.0);
+        v.update(&b, 20.9);
+        assert_eq!(v.switcher.scene_at(20.9), Scene::Board(1));
+        v.update(&b, 21.0);
+        assert_eq!(v.switcher.scene_at(21.0), Scene::All);
+    }
+
+    #[test]
+    fn a_hand_chosen_board_is_never_changed_by_activity() {
+        let mut b = two_boards();
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        // Board 1 by hand: `]` opens the board shown last (0), `]` again 1.
+        v.handle_key(Die3dKey::NextBoard, 0.0);
+        v.handle_key(Die3dKey::NextBoard, 0.0);
+        assert_eq!(v.switcher.scene_at(0.0), Scene::Board(1));
+        // Rises on board 0, again and again, well apart: no cut, no switch.
+        for (on, off) in [(1.0, 5.0), (20.0, 25.0), (40.0, 45.0)] {
+            b.set_power(0, 90.0);
+            v.update(&b, on);
+            b.set_power(0, 0.0);
+            v.update(&b, off);
+        }
+        assert!(v.director.cut_at().is_none());
+        // A rise on board 1 cuts the angle only.
+        b.set_power(3, 90.0);
+        v.update(&b, 50.0);
+        assert_eq!(v.director.cut_at(), Some(50.0));
+        v.update(&b, 120.0);
+        assert_eq!(v.switcher.scene_at(120.0), Scene::Board(1));
     }
 
     #[test]

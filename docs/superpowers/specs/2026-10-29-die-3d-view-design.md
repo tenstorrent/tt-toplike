@@ -96,10 +96,13 @@ angle. The transition does not need to be smooth.
 - **Cooldown.** 8 seconds between automatic cuts. `c` cuts by hand at any time, and `C`
   turns automatic cuts off. With them off the view also stops switching scenes on its own.
 - **Scene changes.** In the all-boards scene a load rise also switches to that chip's
-  board scene at the middle of the cut. The view returns to the all-boards scene after 20
-  seconds with no load rise, only if the view made the switch. Choosing a scene by hand
-  (`m`, `[`, `]`) cancels the return. In a board scene only that board's chips cut the
-  camera, and only the angle changes.
+  board scene at the middle of the cut. On a board the view chose, a load rise on another
+  board returns the view to the all-boards scene through a cut (a rise the cooldown
+  refuses is ignored), so activity on another board is shown. The view also returns after
+  20 seconds with no load rise on the board shown. Both returns happen only if the view
+  made the switch. Choosing a scene by hand (`m`, `[`, `]`) cancels the return, and
+  activity never changes a scene chosen by hand. In a board scene only that board's chips
+  cut the camera, and only the angle changes.
 - **Transitions.** Three kinds, chosen by a shuffle with weights 40 (chaos), 35 (dissolve)
   and 25 (spin), never the same kind twice in a row. Chaos (0.8 s) shifts rows and flickers
   colours until the camera swaps, then settles. Dissolve (0.9 s) replaces the old picture
