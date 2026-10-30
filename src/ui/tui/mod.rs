@@ -223,6 +223,77 @@ fn leaves_die3d(prev: DisplayMode, next: DisplayMode) -> bool {
     prev == DisplayMode::Die3d && next != DisplayMode::Die3d
 }
 
+/// True when moving from `prev` to `next` leaves the Insights screen. The
+/// mode-transition choke point drops the Die 3D inset on this, so each return
+/// to Insights starts a fresh inset.
+fn leaves_insights(prev: DisplayMode, next: DisplayMode) -> bool {
+    prev == DisplayMode::Insights && next != DisplayMode::Insights
+}
+
+/// True when any device is a Blackhole chip, the only kind the Die 3D scene
+/// draws. Without one the inset has nothing to show, so none is made.
+fn has_blackhole_chip(devices: &[crate::models::Device]) -> bool {
+    devices
+        .iter()
+        .any(|d| d.architecture == crate::models::Architecture::Blackhole)
+}
+
+/// Resize the Insights inset in place to `rect`, when it exists and the rect
+/// differs from its size. It keeps its camera, load calibration and history
+/// (`Die3dView::resize`). With no rect (the terminal is below the inset's
+/// threshold) the view is left as it was: it is hidden, not dropped, so a
+/// drag-resize that dips below the threshold and back does not lose its state.
+fn resize_inset(inset: &mut Option<crate::animation::Die3dView>, rect: Option<Rect>) {
+    if let (Some(view), Some(rect)) = (inset.as_mut(), rect) {
+        if view.size() != (rect.width as usize, rect.height as usize) {
+            view.resize(rect.width as usize, rect.height as usize, 0);
+        }
+    }
+}
+
+/// Bring the Insights inset in line with where it would go now, and say
+/// whether it should be updated this tick.
+///
+/// - No Blackhole chip: the view is dropped and nothing is updated.
+/// - No rect (too small): the view is kept but hidden; not updated.
+/// - A rect: the view is made if missing, resized if the rect changed, and
+///   updated.
+fn sync_inset(
+    inset: &mut Option<crate::animation::Die3dView>,
+    rect: Option<Rect>,
+    blackhole: bool,
+) -> bool {
+    if !blackhole {
+        *inset = None;
+        return false;
+    }
+    let Some(rect) = rect else {
+        return false;
+    };
+    if inset.is_none() {
+        *inset = Some(crate::animation::Die3dView::inset(
+            rect.width as usize,
+            rect.height as usize,
+        ));
+    }
+    resize_inset(inset, Some(rect));
+    true
+}
+
+/// The inset's rect on a terminal of `width` x `height` showing `devices`
+/// (zoomed to the page at `fleet_zoom_start`, if any).
+fn inset_rect_for(
+    width: u16,
+    height: u16,
+    devices: &[crate::models::Device],
+    fleet_zoom_start: Option<usize>,
+) -> Option<Rect> {
+    insights_inset_rect(
+        Rect::new(0, 0, width, height),
+        insights_panel_devices(devices, fleet_zoom_start),
+    )
+}
+
 /// How long `--rotate`/`R` dwells on a view before advancing.
 const ROTATE_LINGER: Duration = Duration::from_secs(30);
 /// Arcade packs three visualizations into one screen, so it gets longer.
@@ -572,6 +643,12 @@ fn run_app(
     // was made, so one `Instant` lives beside it.
     let mut die3d: Option<crate::animation::Die3dView> = None;
     let mut die3d_started = Instant::now();
+    // The Die 3D inset beside the Insights process table (see
+    // `insights_inset_rect`), with its own clock. It exists only on Insights,
+    // once there is room and a Blackhole chip; it is hidden but kept while
+    // the terminal is too small, and dropped on leaving Insights.
+    let mut insights_inset: Option<crate::animation::Die3dView> = None;
+    let mut insights_inset_started = Instant::now();
     let mut train_monitor: Option<TrainMonitor> = None;
     // Arcade's activity lanes. A training run is found by the background scan
     // worker (it reads `/proc/<pid>/maps`, which must not run on this thread);
@@ -1076,7 +1153,25 @@ fn run_app(
                 }
                 DisplayMode::Insights => {
                     // Ingestion now happens in the backend update block (runs at ~10 Hz,
-                    // not 60 FPS), so nothing to do here.
+                    // not 60 FPS). Only the Die 3D inset is fed here.
+                    let rect = inset_rect_for(
+                        size.width,
+                        size.height,
+                        backend.devices(),
+                        fleet_zoom_start,
+                    );
+                    if insights_inset.is_none() {
+                        insights_inset_started = Instant::now();
+                    }
+                    if sync_inset(
+                        &mut insights_inset,
+                        rect,
+                        has_blackhole_chip(backend.devices()),
+                    ) {
+                        if let Some(view) = insights_inset.as_mut() {
+                            view.update(backend, insights_inset_started.elapsed().as_secs_f64());
+                        }
+                    }
                 }
                 DisplayMode::Grid => {
                     // Grid mode doesn't need special init
@@ -1347,6 +1442,10 @@ fn run_app(
             if leaves_die3d(prev_display_mode, display_mode) {
                 die3d = None;
             }
+            // The Insights inset is dropped the same way.
+            if leaves_insights(prev_display_mode, display_mode) {
+                insights_inset = None;
+            }
             // Any arrival at a new view — rotated to or navigated to — starts
             // its dwell fresh, so pressing a mode key never lands you on a
             // view that's about to rotate away.
@@ -1479,9 +1578,10 @@ fn run_app(
                                 host_mem_total,
                                 tt_filtered,
                                 remote_note,
-                                // The host loop does not make an inset yet.
-                                None,
-                                0.0,
+                                // The inset, only while its rect exists (the
+                                // renderer checks again).
+                                insights_inset.as_ref(),
+                                insights_inset_started.elapsed().as_secs_f64(),
                                 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                 &serving_metrics,
                             );
@@ -1616,6 +1716,12 @@ fn run_app(
                     // calibration, camera) and its clock across a resize;
                     // only its size and size-dependent caches change.
                     resize_die3d(&mut die3d, width, height);
+                    // The inset follows too, so a redraw before the next tick
+                    // never draws a stale size.
+                    resize_inset(
+                        &mut insights_inset,
+                        inset_rect_for(width, height, backend.devices(), fleet_zoom_start),
+                    );
                     terminal.clear().ok();
                 }
                 // ── Reset takeover intercepts all keystrokes while active ──────
@@ -11922,5 +12028,103 @@ mod insights_inset_tests {
             buffer_hash(&draw(120, 40, 4, None, None)),
             12509307249848498318
         );
+    }
+
+    /// Chips of a Wormhole board (no Blackhole among them).
+    fn wormhole_devices(n: usize) -> Vec<Device> {
+        (0..n)
+            .map(|i| {
+                Device::new(
+                    i,
+                    "n150".to_string(),
+                    format!("0000:{:02x}:00.0", i + 1),
+                    format!("(0,{i})"),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_inset_is_created_when_there_is_room_and_a_blackhole_chip() {
+        let backend = Fixed::new(2);
+        let rect = inset_rect_for(150, 42, &backend.devices, None);
+        assert!(rect.is_some());
+        let mut inset = None;
+        assert!(sync_inset(
+            &mut inset,
+            rect,
+            has_blackhole_chip(&backend.devices)
+        ));
+        let r = rect.unwrap();
+        assert_eq!(
+            inset.as_ref().expect("made").size(),
+            (r.width as usize, r.height as usize)
+        );
+        // Not made where there is no room.
+        let mut none = None;
+        let small = inset_rect_for(100, 42, &backend.devices, None);
+        assert!(!sync_inset(&mut none, small, true));
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn a_resize_below_the_threshold_hides_it_and_keeps_the_view() {
+        let mut backend = Fixed::new(2);
+        backend.telem[0].power = Some(120.0);
+        let blackhole = has_blackhole_chip(&backend.devices);
+        let mut inset = None;
+        let rect = inset_rect_for(150, 42, &backend.devices, None);
+        assert!(sync_inset(&mut inset, rect, blackhole));
+        // Feed it so it has load calibration and a camera worth keeping.
+        for k in 0..20 {
+            inset.as_mut().unwrap().update(&backend, k as f64 * 0.1);
+        }
+        let before = inset.as_ref().unwrap().kept_state();
+        // Too narrow: hidden (not updated) but kept.
+        let small = inset_rect_for(100, 42, &backend.devices, None);
+        assert!(small.is_none());
+        assert!(!sync_inset(&mut inset, small, blackhole));
+        resize_inset(&mut inset, small);
+        assert!(inset.is_some(), "the view survives being hidden");
+        // Back above the threshold, at another size: resized, state intact.
+        let big = inset_rect_for(160, 44, &backend.devices, None);
+        assert!(sync_inset(&mut inset, big, blackhole));
+        let view = inset.as_ref().unwrap();
+        let b = big.unwrap();
+        assert_eq!(view.size(), (b.width as usize, b.height as usize));
+        assert_eq!(view.kept_state(), before);
+    }
+
+    #[test]
+    fn leaving_insights_drops_the_inset() {
+        assert!(leaves_insights(DisplayMode::Insights, DisplayMode::Grid));
+        assert!(leaves_insights(DisplayMode::Insights, DisplayMode::Die3d));
+        assert!(!leaves_insights(DisplayMode::Grid, DisplayMode::Insights));
+        assert!(!leaves_insights(
+            DisplayMode::Insights,
+            DisplayMode::Insights
+        ));
+        // The loop's hook, as written there.
+        let mut inset = Some(crate::animation::Die3dView::inset(42, 20));
+        if leaves_insights(DisplayMode::Insights, DisplayMode::Grid) {
+            inset = None;
+        }
+        assert!(inset.is_none());
+    }
+
+    #[test]
+    fn no_blackhole_chip_means_no_inset() {
+        let devices = wormhole_devices(2);
+        assert!(!has_blackhole_chip(&devices));
+        assert!(has_blackhole_chip(&Fixed::new(1).devices));
+        let rect = inset_rect_for(150, 42, &devices, None);
+        assert!(rect.is_some(), "there is room; only the chip is missing");
+        let mut none = None;
+        assert!(!sync_inset(&mut none, rect, false));
+        assert!(none.is_none());
+        // An existing view is dropped when the chips go (backend swap).
+        let mut inset = Some(crate::animation::Die3dView::inset(42, 20));
+        assert!(!sync_inset(&mut inset, rect, false));
+        assert!(inset.is_none());
     }
 }

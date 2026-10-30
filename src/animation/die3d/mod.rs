@@ -460,6 +460,26 @@ impl Die3dView {
         self.revision += 1;
     }
 
+    /// The size the view draws at, as (columns, rows). The Insights host
+    /// loop compares it with the inset's rect to tell whether a resize is due.
+    pub fn size(&self) -> (usize, usize) {
+        (self.cols, self.rows)
+    }
+
+    /// A text snapshot of the state a resize must keep: the camera the
+    /// director holds and each chip's load calibration (chip index, samples
+    /// seen, ready). Tests compare it before and after a resize.
+    #[cfg(test)]
+    pub fn kept_state(&self) -> String {
+        let mut scales: Vec<(usize, usize, bool)> = self
+            .scales
+            .iter()
+            .map(|(i, s)| (*i, s.len(), s.ready()))
+            .collect();
+        scales.sort();
+        format!("{:?} {:?}", self.director.camera_at(f64::INFINITY), scales)
+    }
+
     /// Read every chip from the backend, group the chips into boards and feed
     /// the trigger detector. A trigger may cut the camera and, in the super
     /// scene, switch to the busy chip's board (see `switching`).
