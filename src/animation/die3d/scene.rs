@@ -63,9 +63,9 @@ pub struct ChipInputs {
     pub arch: Architecture,
     /// Activity, 0..1. [`chip_inputs`] fills it with power over TDP (`0.0`
     /// when either is unknown). `Die3dView` replaces that with the chip's
-    /// power relative to its own idle over the last ten minutes once it has
-    /// a few seconds of samples (see `load`): idle chips draw about 0.30 of
-    /// TDP, so power over TDP alone barely moves.
+    /// power relative to its own idle over the last day once it has a few
+    /// seconds of samples (see `load`): on the test box idle chips drew
+    /// about 0.30 of TDP, so power over TDP alone barely moved.
     pub load: f32,
     /// Bytes per second into the chip, `None` without PCIe counters.
     pub pcie_in_bps: Option<f64>,

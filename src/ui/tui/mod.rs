@@ -4766,10 +4766,11 @@ const DIE3D_EXPLAIN_TEXT: &[&str] = &[
     "The footer says which, as 'estimate'.",
     "",
     "Activity is relative to each chip's own idle over the",
-    "last ten minutes: the lowest power the chip drew in that",
-    "time is zero, the highest (or idle plus 25 W, if that is",
-    "more) is full. An idle chip draws about a third of its",
-    "power limit, so power over the limit would barely move.",
+    "last day: the lowest power the chip drew in that time is",
+    "zero, and the highest in the most recent ten minutes (or idle",
+    "plus 25 W, if that is more) is full. On the test box an",
+    "idle chip drew about a third of the 125 W limit, so",
+    "power over the limit would barely move.",
     "",
     "The camera cuts to a new angle when a chip's load",
     "rises or PCIe traffic bursts. With every board in",
@@ -4829,8 +4830,13 @@ mod die3d_text_tests {
         );
         let explain = flat(DIE3D_EXPLAIN_TEXT.iter().map(|s| s.to_string()));
         for (what, text) in [("legend", &legend), ("explain", &explain)] {
-            for phrase in ["own idle", "last ten minutes"] {
+            for phrase in ["own idle", "over the last day"] {
                 assert!(text.contains(phrase), "{what} lacks {phrase:?}: {text}");
+            }
+            // The idle is remembered for a day, and the share of the power
+            // limit an idle chip draws was measured on one box only.
+            for wrong in ["last ten minutes", "An idle chip draws about a third"] {
+                assert!(!text.contains(wrong), "{what} says {wrong:?}: {text}");
             }
         }
     }
@@ -4914,7 +4920,7 @@ fn die3d_legend_lines(
         "              driver reports it, otherwise an estimate",
         "              from chip load, labelled in the footer)",
         "              Activity is relative to each chip's own",
-        "              idle over the last ten minutes.",
+        "              idle over the last day.",
         "  camera cuts on activity: a load rise or PCIe burst",
         "  labels      chip name and power at each die's centre",
         "  clouds      decoration behind the board: their drift",

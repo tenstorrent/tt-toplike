@@ -11,8 +11,8 @@ tt-toplike (0.13.19) noble; urgency=medium
     are not read. They are a separate, experimental plan.
   * The camera cuts to another angle (four corners, top-down, low) when a
     chip's activity rises or PCIe traffic bursts. Activity is measured against
-    each chip's own idle over the last ten minutes, because an idle chip
-    already draws 0.30 of its 125 W limit on the test box. A burst is 50 MB/s
+    each chip's own idle over the last day, because an idle chip already
+    draws 0.30 of its 125 W limit on the test box. A burst is 50 MB/s
     of PCIe traffic, and the detector re-arms at 10 MB/s. Cuts use chaos,
     dissolve or a spin, shuffled (X sets one). The footer names the corner
     nearest the viewer, and both ends during a cut. Each die carries a label

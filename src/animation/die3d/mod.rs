@@ -291,8 +291,8 @@ pub struct Die3dView {
     chips: Vec<Vec<ChipInputs>>,
     /// Devices the view does not draw (not Blackhole): index and architecture.
     undrawn: Vec<(usize, Architecture)>,
-    /// Each drawn chip's power over the last ten minutes, by device index (a
-    /// map: indices can be sparse). Its relative load replaces the
+    /// Each drawn chip's power over the last ten minutes and its idle over
+    /// the last day, by device index (a map: indices can be sparse). Its relative load replaces the
     /// power-over-limit load from `chip_inputs` once it has enough samples;
     /// see `load` for why.
     scales: HashMap<usize, LoadScale>,
@@ -466,18 +466,26 @@ impl Die3dView {
     }
 
     /// Replace each chip's power-over-limit load with its load relative to
-    /// its own idle over the last ten minutes (`load::LoadScale`), once that
-    /// chip's scale has enough samples. Runs before the trigger detector and
-    /// the scene read `load`, so both see the relative value. A chip with no
-    /// power reading never gets a sample and keeps the fallback, which is
-    /// 0.0 without a reading. Scales of chips no longer present are dropped.
+    /// its own idle (`load::LoadScale`), once that chip's scale has enough
+    /// samples. Runs before the trigger detector and the scene read `load`,
+    /// so both see the relative value.
+    ///
+    /// The relative value is used only on a tick where the chip has a power
+    /// reading (`chip_inputs` already turns NaN and infinity into none).
+    /// Without one, `LoadScale::observe` returns its last result, a load
+    /// measured when the chip still had a reading; showing it would keep a
+    /// chip that was busy glowing, brighten the clouds and hold the triggers
+    /// high with nothing read from the hardware. Such a chip keeps the
+    /// fallback from `chip_inputs`, which is 0.0 without a power reading,
+    /// and its scale keeps its window for when the reading comes back.
+    /// Scales of chips no longer present are dropped.
     fn calibrate_loads(&mut self, now: f64) {
         let present: Vec<usize> = self.chips.iter().flatten().map(|c| c.index).collect();
         self.scales.retain(|i, _| present.contains(i));
         for chip in self.chips.iter_mut().flatten() {
             let scale = self.scales.entry(chip.index).or_default();
             let relative = scale.observe(now, chip.power_w);
-            if scale.ready() {
+            if scale.ready() && chip.power_w.is_some() {
                 chip.load = relative;
             }
         }
@@ -1519,6 +1527,40 @@ mod tests {
             assert_eq!(v.chips[0][0].load, 0.0);
         }
         assert!(v.director.swapped_at().is_none());
+    }
+
+    #[test]
+    fn a_busy_chip_that_loses_its_power_reading_reads_zero_load_at_once() {
+        // 30 s idle at 37 W, then busy at 68 W: full load.
+        let mut b = Fake::boards(&["p150"], Some("125"));
+        b.set_power(0, 37.0);
+        let mut v = Die3dView::new(150, 42);
+        for i in 0..30 {
+            v.update(&b, i as f64);
+        }
+        b.set_power(0, 68.0);
+        v.update(&b, 30.0);
+        assert_eq!(v.chips[0][0].load, 1.0);
+        let cut = v.director.cut_at();
+        assert!(cut.is_some(), "the rise cut the camera");
+        // The reading goes away. Nothing was read, so the chip is not shown
+        // as busy: load 0.0 on the very next update, at a tick inside the
+        // same second as well as a second later, and no cut.
+        b.telem[0].power = None;
+        for now in [30.5, 31.0, 32.0, 40.0] {
+            v.update(&b, now);
+            assert_eq!(v.chips[0][0].load, 0.0, "at {now}");
+            assert_eq!(v.director.cut_at(), cut, "at {now}");
+        }
+        // The clouds, which follow the busiest chip, dim with it.
+        assert_eq!(v.cloud_intensity, Clouds::intensity(0.0));
+        // A NaN reading is no reading either.
+        b.set_power(0, 68.0);
+        v.update(&b, 41.0);
+        assert_eq!(v.chips[0][0].load, 1.0);
+        b.telem[0].power = Some(f32::NAN);
+        v.update(&b, 42.0);
+        assert_eq!(v.chips[0][0].load, 0.0);
     }
 
     #[test]

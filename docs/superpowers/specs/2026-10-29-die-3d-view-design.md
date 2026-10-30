@@ -157,8 +157,15 @@ per second against a Qwen3-Coder-Next server, 96 requests, no errors) the two bu
 drew a mean of 54 and 45 W with a peak of 68 W, which is 0.54 of the limit.
 
 The view now measures each chip against its own history (`load.rs`): it keeps the last ten
-minutes of that chip's power, one sample per second, and reports where the present draw
-sits between the lowest and the highest draw in that window. The span has a floor of 25 W
+minutes of that chip's power, one sample per second, and the lowest draw of each minute of
+the last day (1440 values). It reports where the present draw sits between the idle, the
+lowest draw in the ten minutes and the day, and the peak, the highest draw in the ten
+minutes. With the ten minutes alone, a job at a steady 110 W became its own idle after ten
+minutes and read as idle while the label said 110 W; with the day, a chip that idled at
+37 W earlier keeps 37 W as its idle for 24 hours. A view opened during a steady job has no
+idle sample, so the chip reads 0.0 until its power changes. A chip with no power reading
+on a tick reads the fallback, 0.0, and keeps its history for when the reading returns.
+The span has a floor of 25 W
 so that a few watts of wobble at idle stay small; a real burst (37 W idle to a 68 W peak
 under serving) still reaches full load. Until a chip has five samples the view uses power
 over the limit.

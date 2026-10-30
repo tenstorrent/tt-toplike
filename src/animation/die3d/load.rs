@@ -12,9 +12,22 @@
 //! second against the Qwen3-Coder-Next server) the two busy chips drew a mean
 //! of 54 and 45 W with a peak of 68 W, only 0.54 of the limit.
 //!
-//! [`LoadScale`] instead remembers the last ten minutes of one chip's power,
-//! one sample per second of view time, and reports where the present draw
-//! sits between the lowest (idle) and highest (peak) draw of that window.
+//! [`LoadScale`] instead reports where the present draw sits between the
+//! chip's own idle and its recent peak:
+//!
+//! - The peak is the highest draw of the last ten minutes, one sample per
+//!   second of view time.
+//! - The idle is the lowest draw of those ten minutes and of the last day.
+//!   For the day the scale keeps the lowest draw of each completed minute,
+//!   1440 of them. With the ten-minute window alone, a job at a steady
+//!   110 W became its own idle after ten minutes, and the chip read as idle
+//!   (load about 0.08) while its label said 110 W. With the day, a chip
+//!   that idled at 37 W earlier keeps 37 W as its idle for 24 hours.
+//!
+//! A limit: a view opened while a job is already running has no idle sample
+//! to measure against, so a chip at a constant draw reads 0.0 until its
+//! power changes (see the test
+//! `a_view_that_opens_during_a_steady_job_reads_zero_until_power_changes`).
 //!
 //! Pure logic: no clock, no I/O. The caller passes `now` in seconds.
 
@@ -33,8 +46,13 @@ pub const MIN_SAMPLES: usize = 5;
 /// peak), so a real burst still reaches full load, and a 3 W wobble stays
 /// under 0.13.
 pub const MIN_SPAN_W: f32 = 25.0;
+/// Per-minute minima kept for the idle: one day.
+pub const DAY_MINUTES: usize = 1440;
+/// Seconds of view time in one minute of the idle's memory.
+const MINUTE_S: f64 = 60.0;
 
-/// One chip's power over the last ten minutes, and its load relative to that.
+/// One chip's power over the last ten minutes and its idle over the last
+/// day, and its load relative to those.
 #[derive(Debug, Clone)]
 pub struct LoadScale {
     /// The window, oldest first, in watts. Never holds a non-finite value.
@@ -43,6 +61,15 @@ pub struct LoadScale {
     last_at: Option<f64>,
     /// What the last call returned; returned again when a call adds no sample.
     last_load: f32,
+    /// The lowest draw of each completed minute of view time that had a
+    /// sample, oldest first, as (minute number, watts), where minute `m`
+    /// covers view time `60 m .. 60 (m + 1)`. Only the last [`DAY_MINUTES`]
+    /// minutes are kept, so it never holds more than that many entries.
+    minutes: VecDeque<(i64, f32)>,
+    /// The minute in progress and its lowest draw so far, `None` before the
+    /// first sample. It joins `minutes` when a sample lands in a later
+    /// minute.
+    open_minute: Option<(i64, f32)>,
 }
 
 impl Default for LoadScale {
@@ -58,6 +85,8 @@ impl LoadScale {
             samples: VecDeque::with_capacity(WINDOW_SAMPLES),
             last_at: None,
             last_load: 0.0,
+            minutes: VecDeque::with_capacity(DAY_MINUTES),
+            open_minute: None,
         }
     }
 
@@ -77,10 +106,42 @@ impl LoadScale {
         self.samples.len() >= MIN_SAMPLES
     }
 
-    /// The window's lowest draw in watts (the chip's idle), `None` while the
-    /// window is empty.
+    /// The chip's idle in watts: the lowest draw in the ten-minute window
+    /// and in the per-minute minima of the last day, `None` before the first
+    /// sample. (The minute in progress is inside the window.)
     pub fn idle(&self) -> Option<f32> {
-        self.samples.iter().copied().reduce(f32::min)
+        self.samples
+            .iter()
+            .copied()
+            .chain(self.minutes.iter().map(|&(_, w)| w))
+            .reduce(f32::min)
+    }
+
+    /// Fold a sample at `now` into the per-minute minima. A sample in a
+    /// later minute closes the open one, which joins the ring, and minutes
+    /// more than a day older than the new one leave it.
+    fn remember_minute(&mut self, now: f64, power: f32) {
+        let minute = (now / MINUTE_S).floor() as i64;
+        match self.open_minute {
+            Some((m, low)) if m == minute => self.open_minute = Some((m, low.min(power))),
+            open => {
+                if let Some(closed) = open {
+                    self.minutes.push_back(closed);
+                }
+                self.open_minute = Some((minute, power));
+                // Keep the minutes `minute - DAY_MINUTES .. minute`: a day of
+                // completed minutes before the open one. Minute numbers only
+                // grow (time never goes backwards here), so this also bounds
+                // the ring at DAY_MINUTES entries.
+                while self
+                    .minutes
+                    .front()
+                    .is_some_and(|&(m, _)| minute - m > DAY_MINUTES as i64)
+                {
+                    self.minutes.pop_front();
+                }
+            }
+        }
     }
 
     /// Feed the chip's power at view time `now` and return its load, 0..1.
@@ -108,25 +169,32 @@ impl LoadScale {
             self.samples.pop_front();
         }
         self.samples.push_back(power);
+        self.remember_minute(now, power);
         self.last_at = Some(now);
         self.last_load = if self.ready() {
-            relative_load(&self.samples, power)
+            self.relative_load(power)
         } else {
             0.0
         };
         self.last_load
     }
-}
 
-/// Where `power` sits between the window's lowest and highest draw, with the
-/// span floored at [`MIN_SPAN_W`]. The window is never empty here (the caller
-/// has just pushed `power`), and the floor keeps the divisor at 25 W or more,
-/// so there is no division by zero.
-fn relative_load(window: &VecDeque<f32>, power: f32) -> f32 {
-    let idle = window.iter().copied().fold(f32::INFINITY, f32::min);
-    let peak = window.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let span = (peak - idle).max(MIN_SPAN_W);
-    ((power - idle) / span).clamp(0.0, 1.0)
+    /// Where `power` sits between the idle ([`idle`](Self::idle)) and the
+    /// window's highest draw, with the span floored at [`MIN_SPAN_W`]. The
+    /// window is never empty here (the caller has just pushed `power`), and
+    /// the floor keeps the divisor at 25 W or more, so there is no division
+    /// by zero. An idle from earlier in the day can sit below the whole
+    /// window; the floor and the clamp keep the result in 0..1.
+    fn relative_load(&self, power: f32) -> f32 {
+        let idle = self.idle().unwrap_or(power);
+        let peak = self
+            .samples
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let span = (peak - idle).max(MIN_SPAN_W);
+        ((power - idle) / span).clamp(0.0, 1.0)
+    }
 }
 
 #[cfg(test)]
@@ -262,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn a_long_burst_does_not_re_baseline_within_ten_minutes() {
+    fn a_long_burst_does_not_re_baseline() {
         let mut s = LoadScale::new();
         let (_, t) = feed(&mut s, 0.0, &[37.0; 60]);
         // A 300 s burst at 68 W: the 37 W idle from before it is still the
@@ -271,10 +339,80 @@ mod tests {
         assert_eq!(load, 1.0);
         assert_eq!(s.idle(), Some(37.0));
         // The window holds 600 samples at most. After another 300 s of burst
-        // the idle samples have left it, and 68 W becomes the new idle.
+        // the idle samples have left it, but the per-minute minima still
+        // hold 37 W, so the burst is still full load. (Before the minima,
+        // 68 W became the new idle here and the burst read 0.0.)
         let (load, _) = feed(&mut s, t, &[68.0; 300]);
         assert_eq!(s.len(), WINDOW_SAMPLES);
-        assert_eq!(s.idle(), Some(68.0));
+        assert!(s.samples.iter().all(|&w| w == 68.0));
+        assert_eq!(s.idle(), Some(37.0));
+        assert_eq!(load, 1.0);
+    }
+
+    #[test]
+    fn a_steady_job_longer_than_ten_minutes_stays_busy() {
+        // 37 W idle for five minutes, then a job at a steady 110 W for half
+        // an hour. The 600-sample window loses the idle samples after ten
+        // minutes of the job; the per-minute minima keep 37 W as the idle,
+        // so the job reads full load the whole time.
+        let mut s = LoadScale::new();
+        let (_, t) = feed(&mut s, 0.0, &[37.0; 300]);
+        let mut t = t;
+        for i in 0..1800 {
+            let load = s.observe(t, Some(110.0));
+            assert_eq!(load, 1.0, "{i} s into the job");
+            t += 1.0;
+        }
+        assert_eq!(s.idle(), Some(37.0));
+        assert_eq!(s.len(), WINDOW_SAMPLES);
+    }
+
+    #[test]
+    fn idle_is_remembered_for_a_day_and_then_forgotten() {
+        // One sample a minute (half a minute in, so each lands in its own
+        // minute) for a day and two minutes, the floor rising by 0.01 W a
+        // minute: minute k draws 30 + 0.01 k watts.
+        let watts = |k: i64| 30.0 + 0.01 * k as f32;
+        let mut s = LoadScale::new();
+        for k in 0..=1441i64 {
+            s.observe(k as f64 * 60.0 + 30.0, Some(watts(k)));
+            if k == 1439 {
+                // A day in (minute 1439 is the newest, still open): every
+                // completed minute is remembered, minute 0's 30 W included.
+                assert_eq!(s.idle(), Some(watts(0)));
+            }
+        }
+        // Minute 1441 is open, so the day of completed minutes is 1 to 1440:
+        // minute 0 has dropped out and minute 1 is the idle.
+        assert_eq!(s.idle(), Some(watts(1)));
+        s.observe(1442.0 * 60.0 + 30.0, Some(watts(1442)));
+        assert_eq!(s.idle(), Some(watts(2)));
+    }
+
+    #[test]
+    fn the_minute_ring_is_bounded() {
+        let mut s = LoadScale::new();
+        // Three days of one sample every 20 s.
+        let mut t = 0.0;
+        while t < 3.0 * 86_400.0 {
+            s.observe(t, Some(40.0 + (t / 60.0) as f32 % 7.0));
+            assert!(s.minutes.len() <= DAY_MINUTES, "{} at {t}", s.minutes.len());
+            t += 20.0;
+        }
+        assert_eq!(s.minutes.len(), DAY_MINUTES);
+    }
+
+    #[test]
+    fn a_view_that_opens_during_a_steady_job_reads_zero_until_power_changes() {
+        // A documented limit: with no earlier idle to measure against, a
+        // chip that has drawn 110 W since the view opened is its own idle.
+        let mut s = LoadScale::new();
+        let (load, t) = feed(&mut s, 0.0, &[110.0; 120]);
         assert_eq!(load, 0.0);
+        // Once the job ends the chip shows its real idle, and from then on
+        // the next job reads as busy.
+        let (load, t) = feed(&mut s, t, &[37.0; 30]);
+        assert_eq!(load, 0.0);
+        assert_eq!(s.observe(t, Some(110.0)), 1.0);
     }
 }

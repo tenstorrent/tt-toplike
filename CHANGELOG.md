@@ -24,7 +24,7 @@ list is a summary and is not kept for every release.
   rotation; `3` or `Esc` leaves.
 - The per-tile glow is an estimate from chip load, and the footer says so. Per-tile NoC
   counters are not read; they are a separate, experimental plan.
-- The camera cuts on a chip's activity rise (relative to its own idle over ten minutes)
+- The camera cuts on a chip's activity rise (relative to its own idle over the last day)
   or a PCIe burst (50 MB/s, re-arm at 10 MB/s). Cuts shuffle chaos, dissolve and spin
   (`X`). The footer names the corner nearest the viewer.
 - Clouds (`W`) drift with PCIe traffic and brighten with chip load. They are decoration.
