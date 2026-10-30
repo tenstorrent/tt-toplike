@@ -1445,7 +1445,7 @@ Decisions:
 - The text summary comes last, only where no scene fits. One line per chip.
 - The inset is `Die3dView::inset(cols, rows)`: one caption row, no keys, no clouds, no panel, and
   its scene never changes on a trigger. When every board does not fit, it draws the busiest
-  chip's board. Busiest is by mean load, and a new board must stay busiest for 10 s
+  board. Busiest is by the mean load of its chips, and a new board must stay busiest for 10 s
   (`BUSIEST_HOLD_SECS`) before the inset changes to it.
 - The inset appears when the process area is at least 122 x 16 (`TABLE_MIN_W` 70 + `INSET_W` 52, `INSET_MIN_H` 16).
   The width was chosen so a two-die board draws a scene: it needs at least 51 x 16.

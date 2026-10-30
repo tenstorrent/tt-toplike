@@ -466,6 +466,13 @@ impl Die3dView {
         (self.cols, self.rows)
     }
 
+    /// Forget a board that is waiting out its hold to become the busiest.
+    /// The host calls this while the inset is hidden, so the hold starts
+    /// again when the inset shows.
+    pub fn clear_pending_board(&mut self) {
+        self.busiest.clear_candidate();
+    }
+
     /// A text snapshot of the state a resize must keep: the camera the
     /// director holds and each chip's load calibration (chip index, samples
     /// seen, ready). Tests compare it before and after a resize.
@@ -557,8 +564,15 @@ impl Die3dView {
                 for trigger in self.detector.observe(chip.index, chip.load, pcie) {
                     if self.inset {
                         // The inset's scene never changes: a trigger only
-                        // asks for a camera cut, which may spin.
-                        self.director.on_trigger(now);
+                        // asks for a camera cut, which may spin. It cuts for
+                        // a trigger on the board it shows. With one board
+                        // that is every trigger. This does not check whether
+                        // the super scene fits, which would show every
+                        // board; it cuts for the busiest board's triggers
+                        // only, the board the fallback shows.
+                        if boards == 1 || board == self.busiest.board() {
+                            self.director.on_trigger(now);
+                        }
                     } else {
                         self.switcher
                             .on_trigger(trigger, board, boards, &mut self.director, now);
@@ -4131,17 +4145,25 @@ mod tests {
         for s in 0..5 {
             v.update(&b, s as f64);
         }
-        // Chip 3 (board 3) is busy from 5 s on.
+        // Chip 0 (board 0) is busy first, so board 0 is the first strictly
+        // busiest board and is shown at once.
+        b.set_power(0, 90.0);
+        for s in 5..=6 {
+            v.update(&b, s as f64);
+        }
+        assert_eq!(v.scene_pixels(6.0).unwrap().1, Shown::Fallback(0));
+        // Chip 3 (board 3) is busy from 7 s on.
+        b.set_power(0, 0.0);
         b.set_power(3, 90.0);
-        for s in 5..=14 {
+        for s in 7..=16 {
             v.update(&b, s as f64);
         }
         // Busiest for 9 s: the board shown is still board 0.
-        assert_eq!(v.scene_pixels(14.0).unwrap().1, Shown::Fallback(0));
-        for s in 15..=17 {
+        assert_eq!(v.scene_pixels(16.0).unwrap().1, Shown::Fallback(0));
+        for s in 17..=18 {
             v.update(&b, s as f64);
         }
-        let now = 17.0;
+        let now = 18.0;
         let (got, shown) = v.scene_pixels(now).unwrap();
         assert_eq!(shown, Shown::Fallback(3));
         let camera = Aim::At(v.director.camera_at(now));
@@ -4181,15 +4203,54 @@ mod tests {
             let (_, shown, _) = v.frame(at + 0.2).unwrap();
             assert_eq!(shown, Shown::All, "{mode:?}");
         }
-        // Eight boards that do not fit: the board shown stays board 0 when
-        // board 3's chip rises, until the hold has passed.
+        // Eight boards that do not fit: board 3's chip rises, so board 3 is
+        // the first strictly busiest board and is shown at once.
         let mut b = Fake::boards(&["p150"; 8], Some(TDP));
         let mut v = inset_over(&b, 42, 14, 0);
         b.set_power(3, 90.0);
         v.update(&b, 1.0);
         assert_eq!(v.director.cut_at(), Some(1.0), "the rise cut the camera");
         assert_eq!(v.switcher.scene_at(10.0), Scene::All);
+        assert_eq!(v.scene_now(5.0).unwrap().1, Shown::Fallback(3));
+    }
+
+    #[test]
+    fn a_hidden_inset_does_not_promote_a_stale_board_when_it_shows_again() {
+        let mut b = Fake::boards(&["p150"; 8], Some(TDP));
+        let mut v = inset_over(&b, 42, 14, 4);
+        b.set_power(0, 90.0);
+        v.update(&b, 5.0);
         assert_eq!(v.scene_now(5.0).unwrap().1, Shown::Fallback(0));
+        // Board 3 leads for 9 s while the inset is shown, then it is hidden.
+        b.set_power(0, 0.0);
+        b.set_power(3, 90.0);
+        for s in 6..=14 {
+            v.update(&b, s as f64);
+        }
+        v.clear_pending_board();
+        // The first reading after it shows again starts the hold afresh.
+        v.update(&b, 40.0);
+        assert_eq!(v.scene_now(40.0).unwrap().1, Shown::Fallback(0));
+        v.update(&b, 50.0);
+        assert_eq!(v.scene_now(50.0).unwrap().1, Shown::Fallback(3));
+    }
+
+    #[test]
+    fn an_inset_showing_one_board_cuts_only_for_triggers_on_that_board() {
+        // Eight boards that do not fit: chip 0 (board 0) rises first, so
+        // board 0 is the busiest board shown.
+        let mut b = Fake::boards(&["p150"; 8], Some(TDP));
+        let mut v = inset_over(&b, 42, 14, 0);
+        b.set_power(0, 90.0);
+        v.update(&b, 1.0);
+        assert_eq!(v.scene_now(1.0).unwrap().1, Shown::Fallback(0));
+        assert_eq!(v.director.cut_at(), Some(1.0), "board 0 is on show");
+        // Chip 3 rises on board 3, which is not shown, after the cut's
+        // cooldown (`COOLDOWN_SECS`): no new cut.
+        b.set_power(3, 90.0);
+        v.update(&b, 10.0);
+        assert_eq!(v.scene_now(10.0).unwrap().1, Shown::Fallback(0));
+        assert_eq!(v.director.cut_at(), Some(1.0), "board 3 is not on show");
     }
 
     #[test]

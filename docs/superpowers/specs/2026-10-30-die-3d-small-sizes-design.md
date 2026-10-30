@@ -104,7 +104,7 @@ used only in step 6, which shows less of the system.
   Its scene gets 15 rows and the caption 1. The process table keeps its own header and rows in
   the left part. The scene fits at 4 px tiles from 40 x 12.
 - **Board changes.** The view is kept when the board changes: camera, loads and calibration stay.
-  The change uses the full view's board selection, and its transition plays.
+  The inset redraws at once on a board change, with no cut.
 - **Lifecycle.** A resize below the threshold hides the inset and stops its updates. The view is
   kept, so a drag-resize does not lose the camera or load calibration. The view is dropped on
   leaving Insights, and when no Blackhole chip is present.

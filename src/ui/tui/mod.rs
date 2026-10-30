@@ -241,13 +241,21 @@ fn has_blackhole_chip(devices: &[crate::models::Device]) -> bool {
 /// Resize the Insights inset in place to `rect`, when it exists and the rect
 /// differs from its size. It keeps its camera, load calibration and history
 /// (`Die3dView::resize`). With no rect (the terminal is below the inset's
-/// threshold) the view is left as it was: it is hidden and the view is kept, so a
-/// drag-resize that dips below the threshold and back does not lose its state.
+/// threshold) the view is hidden and kept, so a drag-resize that dips below
+/// the threshold and back does not lose its state. Only the board waiting to
+/// become the busiest is forgotten, so it cannot take over on the first frame
+/// that shows again.
 fn resize_inset(inset: &mut Option<crate::animation::Die3dView>, rect: Option<Rect>) {
-    if let (Some(view), Some(rect)) = (inset.as_mut(), rect) {
-        if view.size() != (rect.width as usize, rect.height as usize) {
-            view.resize(rect.width as usize, rect.height as usize, 0);
+    let Some(view) = inset.as_mut() else {
+        return;
+    };
+    match rect {
+        Some(rect) => {
+            if view.size() != (rect.width as usize, rect.height as usize) {
+                view.resize(rect.width as usize, rect.height as usize, 0);
+            }
         }
+        None => view.clear_pending_board(),
     }
 }
 
@@ -255,7 +263,8 @@ fn resize_inset(inset: &mut Option<crate::animation::Die3dView>, rect: Option<Re
 /// whether it should be updated this tick.
 ///
 /// - No Blackhole chip: the view is dropped and nothing is updated.
-/// - No rect (too small): the view is kept but hidden; not updated.
+/// - No rect (too small): the view is kept but hidden; not updated. Its
+///   pending busiest-board candidate is cleared.
 /// - A rect: the view is made if missing, resized if the rect changed, and
 ///   updated.
 fn sync_inset(
@@ -268,6 +277,7 @@ fn sync_inset(
         return false;
     }
     let Some(rect) = rect else {
+        resize_inset(inset, None);
         return false;
     };
     if inset.is_none() {
@@ -6305,8 +6315,8 @@ fn render_insights(
         serving_metrics,
     );
     if let (Some(view), Some(rect)) = (inset, inset_rect) {
-        // Reset, not black, as in `ui_die3d`: the view leaves unpainted
-        // cells to the terminal's own colour.
+        // The fg and bg are Reset, as in `ui_die3d`, so the terminal's own
+        // colour shows in the cells the view leaves unpainted.
         let widget = Paragraph::new(view.render(inset_now)).style(
             Style::default()
                 .fg(ratatui::style::Color::Reset)
@@ -11980,10 +11990,10 @@ mod insights_inset_tests {
             for dx in 0..r.width {
                 let got = with[(r.x + dx, r.y + dy)].symbol();
                 assert_eq!(got, expect[(dx, dy)].symbol(), "inset cell ({dx},{dy})");
-                any_glyph |= got != " ";
+                any_glyph |= got.chars().any(|c| ('\u{2800}'..='\u{28FF}').contains(&c));
             }
         }
-        assert!(any_glyph, "the inset drew something");
+        assert!(any_glyph, "the inset drew a braille scene");
         // The process table is left of the rect and its text stays there.
         let mut found = false;
         for y in r.y..r.y + r.height {
@@ -11995,6 +12005,26 @@ mod insights_inset_tests {
         assert!(found, "process rows draw left of the rect");
     }
 
+    /// The inset's width and minimum height are the size a two-die board
+    /// needs for its scene: the rows above the caption hold braille glyphs,
+    /// and the text summary does not take their place.
+    #[test]
+    fn the_inset_size_draws_a_two_die_board_scene() {
+        let backend = Fixed::new(2);
+        let mut view = crate::animation::Die3dView::inset(INSET_W as usize, INSET_MIN_H as usize);
+        view.update(&backend, 0.0);
+        let rows = view.render(0.0);
+        assert_eq!(rows.len(), INSET_MIN_H as usize);
+        let scene_rows = &rows[..rows.len() - 1];
+        let braille = scene_rows
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .flat_map(|span| span.content.chars())
+            .filter(|c| ('\u{2800}'..='\u{28FF}').contains(c))
+            .count();
+        assert!(braille > 0, "the scene rows hold braille glyphs");
+    }
+
     #[test]
     fn the_rect_matches_the_renderer() {
         check_rect_matches(150, 42, 2, None);
@@ -12004,8 +12034,8 @@ mod insights_inset_tests {
 
     #[test]
     fn a_zoomed_slice_uses_the_slice_for_the_rect() {
-        // 40 devices zoomed to the last page of 2: the slice, not the fleet,
-        // sets the card height.
+        // 40 devices zoomed to the last page of 2: the card height comes from
+        // the slice of devices shown.
         assert!(rect_for(150, 42, 40, Some(38)).is_some());
         check_rect_matches(150, 42, 40, Some(38));
         let backend = Fixed::new(40);
