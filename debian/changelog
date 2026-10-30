@@ -1,3 +1,12 @@
+tt-toplike (0.13.20) noble; urgency=medium
+
+  * Die 3D view: the chip labels are now flags. Each die has a pin on its
+    rim and a one-cell pole to the name and power (BH0 44W), which sit on open
+    space outside the board and never over the picture. A pole may cross a
+    board to reach open space. L turns the flags on and off.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 09:00:00 -0500
+
 tt-toplike (0.13.19) noble; urgency=medium
 
   * New Die 3D view, opened with the 3 key. It draws each Blackhole board in

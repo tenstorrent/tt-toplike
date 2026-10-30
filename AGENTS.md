@@ -1430,6 +1430,17 @@ over half the counter range reads as a device reset (a wrap of nearly the full r
 indistinguishable from a small step backwards). More than one wrap between samples cannot be
 detected; at 1 Hz it would need over 275 GB/s.
 
+### Die 3D flags (Oct 30 2026, v0.13.20)
+
+Prompt: "let's avoid overlaying labels directly over the chip displays in the 3d viz. can we
+pin and flag instead?" The label at each die's centre became a flag: a pin on the die's top
+or bottom corner, a one-cell pole, and the text on open space. `die3d/flags.rs` holds the
+placement. The slab fills the whole board grid, so the text is kept outside the convex hull
+of the grid's corner blocks. Per-die outlines were too small and the first test run showed it. A pole may cross a board to reach open
+space. The test `flags_never_cover_a_drawn_cell_but_the_pin` compares a frame with flags on and
+off and fails if any text lands on a drawn cell. The changed-cell budgets rose a little
+(super scene 0.51 of the old count, up from 0.49).
+
 ### Die 3D view (Oct 29 2026, v0.13.19)
 
 Prompt: "what could we learn from dtsunami/tt-baremetal's bhtop and apply to our

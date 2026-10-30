@@ -17,6 +17,12 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.13.20
+- Chip labels in the Die 3D view are now flags. Each die gets a pin on its rim, a one-cell
+  pole, and the name and power (`BH0 44W`) at the far end, on open space outside the board.
+  Text no longer lies over the picture. In a crowded scene a pole may cross a board to
+  reach open space. `L` turns the flags on and off.
+
 ### 0.13.19
 - **New**: the Die 3D view (key `3`). Each Blackhole board is drawn in isometric
   perspective with braille characters (`B` for half-block), in a Grayskull-style

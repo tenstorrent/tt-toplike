@@ -23,6 +23,7 @@ pub mod bh_layout_data;
 pub mod camera;
 pub mod cells;
 pub mod clouds;
+mod flags;
 pub mod history;
 pub mod layout;
 pub mod load;
@@ -42,6 +43,7 @@ use crate::backend::TelemetryBackend;
 use crate::models::Architecture;
 use camera::{dissolve_into, scramble, Camera, Director, TransitionKind};
 use clouds::{CloudClock, Clouds};
+use flags::{DieFlag, Flag, Hull};
 use history::History;
 use load::LoadScale;
 use palette::GRAYSKULL;
@@ -50,7 +52,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use scene::{
     board_band_origin, board_grid, chip_inputs, die_centre, draw_board_scene, fit_pixels,
-    has_per_tile_data, ChipInputs, Detail, SceneFit, ESTIMATE_LABEL, MIN_CELLS,
+    has_per_tile_data, lift, ChipInputs, Detail, SceneFit, ESTIMATE_LABEL, MIN_CELLS,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -240,6 +242,10 @@ enum Shown {
     /// board's scene is drawn instead.
     Fallback(usize),
 }
+
+/// Half the size, in grid tiles, of a die's top face: its 17 x 12 tiles,
+/// edge to edge. A flag's pin stands on a corner of it.
+const DIE_HALF: (f32, f32) = (8.5, 6.0);
 
 /// Where the dies of a drawn scene are: the projection it was drawn with
 /// (spin included), the grid that projection is for, and each die's centre on
@@ -689,7 +695,7 @@ impl Die3dView {
         if let Some((_, placed)) = &frame {
             let anchors = match placed {
                 Some(placed) if self.show_labels && self.director.progress(now).is_none() => {
-                    self.label_anchors(placed, scene_rows)
+                    self.flag_layout(placed, scene_rows)
                 }
                 _ => Vec::new(),
             };
@@ -705,12 +711,7 @@ impl Die3dView {
     ///
     /// The panel does not depend on the picture, so it is drawn during a
     /// transition too, when `anchors` is empty.
-    fn overlay(
-        &self,
-        lines: &mut [Line<'static>],
-        scene_rows: usize,
-        anchors: &[(usize, usize, String)],
-    ) {
+    fn overlay(&self, lines: &mut [Line<'static>], scene_rows: usize, anchors: &[Option<Flag>]) {
         if self.panel_shown() {
             draw_panel(
                 lines,
@@ -720,7 +721,14 @@ impl Die3dView {
                 self.panel_style(),
             );
         }
-        draw_labels(lines, scene_rows, self.cols, anchors, self.label_style());
+        draw_flags(
+            lines,
+            scene_rows,
+            self.cols,
+            anchors,
+            self.label_style(),
+            self.pole_style(),
+        );
     }
 
     /// Whether the history panel is drawn: switched on (`H`) and the view at
@@ -1036,31 +1044,78 @@ impl Die3dView {
         }
     }
 
-    /// The cell (column, row) and text of each die's label, for a frame drawn
-    /// as `placed` says. The die centre is projected with the frame's own
-    /// projection and turned into a cell: braille cells are 2 x 4 pixels,
-    /// half-block cells 1 x 2. A die whose centre lands outside the scene
-    /// area gets no label.
-    fn label_anchors(&self, placed: &Placement, scene_rows: usize) -> Vec<(usize, usize, String)> {
-        placed
+    /// The flag of each die, for a frame drawn as `placed` says, in die order
+    /// (`None` where no place was found).
+    ///
+    /// Everything is worked out in cells with the frame's own projection:
+    /// braille cells are 2 x 4 pixels, half-block cells 1 x 2. The text stays
+    /// outside the hull of the board grid's four corner blocks, each grown by
+    /// the size of a block (half a tile each side, [`lift`] above, a row
+    /// below) and a cell of margin; the slab fills the whole grid, so that
+    /// hull is what the scene covers. A pin stands on the top or bottom
+    /// corner of its die's top face.
+    fn flag_layout(&self, placed: &Placement, scene_rows: usize) -> Vec<Option<Flag>> {
+        let (sx, sy) = if self.braille { (2.0, 4.0) } else { (1.0, 2.0) };
+        let iso = &placed.iso;
+        let at = |gx: f32, gy: f32| {
+            let (x, y) = iso.project(gx, gy, placed.grid);
+            (x as f32, y as f32)
+        };
+        let (hw, up, down) = (
+            iso.tw as f32 / 2.0 + sx,
+            lift(iso.tw) as f32 + sy,
+            (iso.th + 1) as f32 + sy,
+        );
+        let (gw, gh) = (placed.grid.0 as f32 - 1.0, placed.grid.1 as f32 - 1.0);
+        let outline: Vec<(f32, f32)> = [(0.0, 0.0), (gw, 0.0), (gw, gh), (0.0, gh)]
+            .into_iter()
+            .flat_map(|(gx, gy)| {
+                let (x, y) = at(gx, gy);
+                [(-hw, -up), (hw, -up), (-hw, down), (hw, down)]
+                    .map(|(dx, dy)| ((x + dx) / sx, (y + dy) / sy))
+            })
+            .collect();
+        let hull = Hull::of(&outline);
+        let cell = |(x, y): (f32, f32)| ((x / sx).floor() as i32, (y / sy).floor() as i32);
+        let dies: Vec<DieFlag> = placed
             .dies
             .iter()
-            .filter_map(|((gx, gy), label)| {
-                let (x, y) = placed.iso.project(*gx, *gy, placed.grid);
-                let (col, row) = if self.braille {
-                    (x.div_euclid(2), y.div_euclid(4))
-                } else {
-                    (x, y.div_euclid(2))
-                };
-                let on_screen =
-                    (0..self.cols as i32).contains(&col) && (0..scene_rows as i32).contains(&row);
-                on_screen.then(|| (col as usize, row as usize, label.clone()))
+            .map(|((gx, gy), label)| {
+                let corners = [
+                    at(gx - DIE_HALF.0, gy - DIE_HALF.1),
+                    at(gx + DIE_HALF.0, gy - DIE_HALF.1),
+                    at(gx + DIE_HALF.0, gy + DIE_HALF.1),
+                    at(gx - DIE_HALF.0, gy + DIE_HALF.1),
+                ];
+                let by_y = |a: &&(f32, f32), b: &&(f32, f32)| a.1.total_cmp(&b.1);
+                let top = *corners.iter().min_by(by_y).unwrap();
+                let bottom = *corners.iter().max_by(by_y).unwrap();
+                // The full label first, then the name alone.
+                let mut texts = vec![label.clone()];
+                if let Some((name, _)) = label.split_once(' ') {
+                    texts.push(name.to_string());
+                }
+                DieFlag {
+                    texts,
+                    top: cell(top),
+                    bottom: cell(bottom),
+                }
             })
-            .collect()
+            .collect();
+        flags::place(&dies, &hull, self.cols, scene_rows)
     }
 
-    /// White bold text. The background stays the terminal's own in
-    /// transparent mode and is the black fill otherwise, as around the dies.
+    /// The pin, pole and corner of a flag: pale lavender, the Ethernet
+    /// colour, on the same background as the text.
+    fn pole_style(&self) -> Style {
+        Style::default()
+            .fg(rgb(GRAYSKULL.eth))
+            .bg(self.background())
+    }
+
+    /// A flag's text: white and bold. The background stays the terminal's own
+    /// in transparent mode and is the black fill otherwise, as around the
+    /// dies.
     fn label_style(&self) -> Style {
         Style::default()
             .fg(rgb(GRAYSKULL.white))
@@ -1220,29 +1275,36 @@ fn chip_label(chip: &ChipInputs) -> String {
     }
 }
 
-/// Write each label over `lines`, centred on its anchor (column, row), in
-/// `style`. Each cell a label covers takes the label's character and style.
+/// Write each flag over `lines`: the text in `style`, the pin, the pole and
+/// the corner in `pole_style`.
 ///
 /// Only the first `scene_rows` lines are written: the footer rows below them
-/// are never touched, whatever the anchor. An anchor at or past column `cols`
-/// draws nothing, and a label is clipped to columns `0..cols` and to the
-/// line's own cells, so no line grows.
-fn draw_labels(
+/// are never touched, whatever a flag's cells. A cell outside columns
+/// `0..cols` or outside the line's own cells is dropped, so no line grows.
+fn draw_flags(
     lines: &mut [Line<'static>],
     scene_rows: usize,
     cols: usize,
-    anchors: &[(usize, usize, String)],
+    flags: &[Option<Flag>],
     style: Style,
+    pole_style: Style,
 ) {
-    for (col, row, label) in anchors {
-        if *row >= scene_rows || *col >= cols {
-            continue;
+    for flag in flags.iter().flatten() {
+        let text_row = flag.pin.1 - flag.rise;
+        for ((col, row), ch) in flag.cells() {
+            if row < 0 || row as usize >= scene_rows || col < 0 {
+                continue;
+            }
+            let Some(line) = lines.get_mut(row as usize) else {
+                continue;
+            };
+            let st = if row == text_row && !matches!(ch, '┌' | '┐' | '└' | '┘') {
+                style
+            } else {
+                pole_style
+            };
+            write_over(line, col as i64, &ch.to_string(), cols, st);
         }
-        let Some(line) = lines.get_mut(*row) else {
-            continue;
-        };
-        let start = *col as i64 - label.chars().count() as i64 / 2;
-        write_over(line, start, label, cols, style);
     }
 }
 
@@ -2733,32 +2795,8 @@ mod tests {
         found
     }
 
-    /// The cell where the centre of die `d` of a lone board of `dies` dies
-    /// lands at preset 0, worked out here from the grid layout (the die's 17
-    /// x 12 tiles start after `MARGIN_X` columns and `MARGIN_Y` rows of its
-    /// band), independently of the view's own helpers.
-    fn expected_centre(v: &Die3dView, dies: usize, d: usize) -> (i64, i64) {
-        let scene_rows = v.rows - FOOTER_ROWS;
-        let (pw, ph) = if v.braille {
-            (v.cols * 2, scene_rows * 4)
-        } else {
-            (v.cols, scene_rows * 2)
-        };
-        let grid = board_grid(dies);
-        let fit = fit_pixels(pw as i32, ph as i32, grid).unwrap();
-        let iso = v.director.camera_at(0.0).apply(&fit.iso, grid);
-        let gx = scene::MARGIN_X as f32 + 8.0;
-        let gy = (d * scene::BOARD_BAND + scene::MARGIN_Y) as f32 + 5.5;
-        let (x, y) = iso.project(gx, gy, grid);
-        if v.braille {
-            ((x / 2) as i64, (y / 4) as i64)
-        } else {
-            (x as i64, (y / 2) as i64)
-        }
-    }
-
     #[test]
-    fn each_die_gets_a_label_at_its_centre() {
+    fn each_die_gets_a_flag_with_its_name_and_power() {
         // One p300 board: two dies.
         let mut b = Fake::boards(&["p300"; 2], Some(TDP));
         b.set_power(0, 44.0);
@@ -2767,22 +2805,32 @@ mod tests {
             let mut v = Die3dView::new(150, 42);
             v.update(&b, 0.0);
             // The history panel lists the chip names too: off, so only the
-            // labels are found.
+            // flags are found.
             v.handle_key(Die3dKey::ToggleHistory, 0.0);
             if !braille {
                 v.handle_key(Die3dKey::ToggleBraille, 0.0);
             }
             let lines = v.render(0.0);
             let found = labels_in(&lines, 40);
-            for (d, want) in [(0, "BH0 44W"), (1, "BH1 52W")] {
-                let (col, row) = expected_centre(&v, 2, d);
-                let hit = found.iter().find(|(_, _, t)| t == want);
-                let (r, c, _) =
-                    hit.unwrap_or_else(|| panic!("{want} in {found:?} (braille={braille})"));
-                let centre = *c as i64 + want.chars().count() as i64 / 2;
+            let texts: Vec<&str> = found.iter().map(|f| f.2.as_str()).collect();
+            assert_eq!(texts, ["BH0 44W", "BH1 52W"], "braille={braille}");
+            // Each text is on a flag: the cell before it is the pole's corner
+            // (or the padding after it) and a pin `●` stands on its pole.
+            let rows = text(&lines);
+            let all: String = rows.concat();
+            assert_eq!(
+                all.matches('●').count(),
+                2,
+                "one pin each (braille={braille})"
+            );
+            for (r, c, _) in &found {
+                let row: Vec<char> = rows[*r].chars().collect();
+                let corner = row[c.saturating_sub(2)];
                 assert!(
-                    (*r as i64 - row).abs() <= 1 && (centre - col).abs() <= 1,
-                    "{want} at row {r} col {c}, centre {centre}; want {row},{col} (braille={braille})"
+                    matches!(corner, '┌' | '└')
+                        || row.get(c + 7 + 1) == Some(&'┐')
+                        || row.get(c + 7 + 1) == Some(&'┘'),
+                    "{r},{c}: {corner} (braille={braille})"
                 );
             }
         }
@@ -2877,8 +2925,8 @@ mod tests {
             }
         }
 
-        // At the layer that writes: anchors on the footer rows, past the
-        // right edge and hanging off the left edge.
+        // At the layer that writes: flags whose cells are on the footer rows,
+        // past the right edge and hanging off the left edge.
         let width = 20;
         let scene_rows = 3;
         let mut lines: Vec<Line<'static>> = (0..scene_rows + FOOTER_ROWS)
@@ -2886,28 +2934,92 @@ mod tests {
             .collect();
         let before = text(&lines);
         let style = Style::default().fg(Color::White);
-        let anchors = vec![
-            (5, scene_rows, "BH8 10W".to_string()),
-            (5, scene_rows + 1, "BH9 10W".to_string()),
-            (width + 3, 1, "BH7".to_string()),
-            (1, 0, "BH0 123W".to_string()),
-            (width - 1, 2, "BH2 99W".to_string()),
+        let flag = |pin: (i32, i32), rise: i32, left: bool, t: &str| {
+            Some(Flag {
+                pin,
+                rise,
+                left,
+                text: t.to_string(),
+            })
+        };
+        let flags = vec![
+            // A pole standing on the footer rows.
+            flag((5, scene_rows as i32 + 1), 3, false, "BH8 10W"),
+            // A flag wholly past the right edge.
+            flag((width as i32 + 3, 2), 1, false, "BH7"),
+            // A flag flying left off the left edge.
+            flag((3, 2), 1, true, "BH0 123W"),
+            None,
         ];
-        draw_labels(&mut lines, scene_rows, width, &anchors, style);
+        draw_flags(&mut lines, scene_rows, width, &flags, style, style);
         let after = text(&lines);
         assert_eq!(after[scene_rows..], before[scene_rows..], "footer rows");
-        assert_eq!(
-            after[1], before[1],
-            "an anchor past the right edge draws nothing"
+        assert!(
+            after.iter().all(|r| !r.contains("BH7")),
+            "past the edge: {after:?}"
         );
-        // Clipped at both edges, never wider than the view.
-        // "BH0 123W" centred on column 1 starts at -3; "BH2 99W" on column
-        // 19 starts at 16.
-        assert!(after[0].starts_with(" 123W"), "{}", after[0]);
-        assert!(after[2].ends_with("BH2 "), "{}", after[2]);
+        // The left-flying text is cut at column 0 (its last two characters
+        // show), the pole's corner and padding follow, then the other flag.
+        assert!(
+            after[1].starts_with("3W \u{2510}1\u{250c} BH8 10W"),
+            "{}",
+            after[1]
+        );
+        // The pin and the pole's last cell above the footer.
+        assert!(after[2].starts_with("222\u{25cf}2\u{2502}"), "{}", after[2]);
         for row in &after {
             assert_eq!(row.chars().count(), width, "{row}");
         }
+    }
+
+    #[test]
+    fn flags_never_cover_a_drawn_cell_but_the_pin() {
+        // Flags are written only on cells the scene left empty. Without the
+        // clouds, the cells a flag changes were blank before it was written,
+        // whatever the board count, cell mode, size or camera.
+        let one = Fake::boards(&["p300"; 2], Some(TDP));
+        let four = Fake::boards(&["p300", "p300", "p150", "p300"], Some(TDP));
+        let mut flagged = 0;
+        for (c, r) in [(100, 31), (120, 37), (150, 42), (220, 60)] {
+            for b in [&one, &four] {
+                for braille in [true, false] {
+                    let mut v = Die3dView::new(c, r);
+                    v.update(b, 0.0);
+                    v.director.set_auto(false);
+                    v.handle_key(Die3dKey::ToggleClouds, 0.0);
+                    v.handle_key(Die3dKey::ToggleHistory, 0.0);
+                    if !braille {
+                        v.handle_key(Die3dKey::ToggleBraille, 0.0);
+                    }
+                    for k in 0..6 {
+                        let now = 10.0 * k as f64;
+                        if k > 0 {
+                            v.handle_key(Die3dKey::CutNow, now - 5.0);
+                        }
+                        v.handle_key(Die3dKey::ToggleLabels, now);
+                        let off = text(&v.render(now));
+                        v.handle_key(Die3dKey::ToggleLabels, now);
+                        let on = text(&v.render(now));
+                        for (row, (a, b)) in off.iter().zip(&on).enumerate().take(r - FOOTER_ROWS) {
+                            for (col, (x, y)) in a.chars().zip(b.chars()).enumerate() {
+                                if x == y {
+                                    continue;
+                                }
+                                flagged += 1;
+                                let blank = x == ' ' || x == '\u{2800}';
+                                // The pin and the pole stand on the board;
+                                // only they may cover a drawn cell.
+                                assert!(
+                                    blank || y == '●' || y == '│',
+                                    "{c}x{r} braille={braille} cut {k}: {y:?} over {x:?} at {row},{col}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(flagged > 0, "no flag was ever drawn");
     }
 
     #[test]
@@ -3195,25 +3307,27 @@ mod tests {
             let now = 12.0;
             let lines = v.render(now);
             let placed = v.frame(now).unwrap().2.unwrap();
-            let anchors = v.label_anchors(&placed, v.rows - FOOTER_ROWS);
-            assert_eq!(anchors.len(), 4);
-            for (col, row, label) in anchors {
-                let cells: Vec<(char, Style)> = lines[row]
-                    .spans
-                    .iter()
-                    .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
-                    .collect();
-                let start = col - label.chars().count() / 2;
-                for (i, ch) in label.chars().enumerate() {
-                    let (got, style) = cells[start + i];
-                    assert_eq!(got, ch, "{label}");
-                    assert_eq!(style.fg, Some(rgb(GRAYSKULL.white)), "{label}");
-                    let want = if transparent {
-                        Color::Reset
-                    } else {
-                        rgb(OPAQUE_BG)
-                    };
-                    assert_eq!(style.bg, Some(want), "{label}");
+            let flags = v.flag_layout(&placed, v.rows - FOOTER_ROWS);
+            assert_eq!(flags.iter().flatten().count(), 4);
+            let want = if transparent {
+                Color::Reset
+            } else {
+                rgb(OPAQUE_BG)
+            };
+            for flag in flags.iter().flatten() {
+                let text_row = flag.pin.1 - flag.rise;
+                for ((col, row), ch) in flag.cells() {
+                    let cells: Vec<(char, Style)> = lines[row as usize]
+                        .spans
+                        .iter()
+                        .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
+                        .collect();
+                    let (got, style) = cells[col as usize];
+                    assert_eq!(got, ch, "{}", flag.text);
+                    assert_eq!(style.bg, Some(want), "{}", flag.text);
+                    if row == text_row && flag.text.contains(ch) && ch != ' ' {
+                        assert_eq!(style.fg, Some(rgb(GRAYSKULL.white)), "{}", flag.text);
+                    }
                 }
             }
         }
@@ -3480,7 +3594,7 @@ mod tests {
     }
 
     #[test]
-    fn labels_win_over_the_panel_where_they_overlap() {
+    fn flags_win_over_the_panel_where_they_overlap() {
         let b = Fake::boards(&["p150"], Some(TDP));
         let mut v = Die3dView::new(150, 42);
         v.update(&b, 0.0);
@@ -3488,25 +3602,31 @@ mod tests {
         let mut lines: Vec<Line<'static>> = (0..42)
             .map(|_| Line::from(Span::raw(" ".repeat(150))))
             .collect();
-        // A label centred four cells into the title row: it covers title
-        // characters 1 to 7 ("istory ").
+        // A flag whose text row is the panel's title row, its pole four cells
+        // in: the corner is at +4, one space, then the text from +6.
         let label = "BH9 99W";
-        let anchor = (PANEL_LEFT + 4, PANEL_TOP, label.to_string());
-        v.overlay(&mut lines, scene_rows, &[anchor]);
+        let flag = Flag {
+            pin: (PANEL_LEFT as i32 + 4, PANEL_TOP as i32 + 3),
+            rise: 3,
+            left: false,
+            text: label.to_string(),
+        };
+        v.overlay(&mut lines, scene_rows, &[Some(flag)]);
         let row: Vec<(char, Style)> = lines[PANEL_TOP]
             .spans
             .iter()
             .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
             .collect();
-        let shown: String = row[PANEL_LEFT..PANEL_LEFT + 12]
+        let shown: String = row[PANEL_LEFT..PANEL_LEFT + 14]
             .iter()
             .map(|c| c.0)
             .collect();
-        assert_eq!(shown, "hBH9 99W60 s");
-        for (i, (_, style)) in row[PANEL_LEFT + 1..PANEL_LEFT + 8].iter().enumerate() {
-            assert_eq!(style.fg, Some(rgb(GRAYSKULL.white)), "label cell {i}");
+        assert!(shown.starts_with("hist\u{250c} BH9 99W"), "{shown}");
+        for (i, (_, style)) in row[PANEL_LEFT + 6..PANEL_LEFT + 13].iter().enumerate() {
+            assert_eq!(style.fg, Some(rgb(GRAYSKULL.white)), "text cell {i}");
         }
-        for at in [PANEL_LEFT, PANEL_LEFT + 8] {
+        assert_eq!(row[PANEL_LEFT + 4].1.fg, Some(rgb(GRAYSKULL.eth)), "corner");
+        for at in [PANEL_LEFT, PANEL_LEFT + 1, PANEL_LEFT + 2] {
             assert_eq!(row[at].1.fg, Some(rgb(PANEL_FG)), "panel cell {at}");
         }
     }

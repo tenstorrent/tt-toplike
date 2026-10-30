@@ -225,7 +225,7 @@ pub struct SceneFit {
 
 /// Pixels the tallest block rises above its tile centre at tile width `tw`:
 /// 13 scale units (a hot Tensix tile is 11.5 plus its 1 unit lift).
-fn lift(tw: i32) -> i32 {
+pub(super) fn lift(tw: i32) -> i32 {
     (13.0 * tw as f32 / 8.0).ceil() as i32
 }
 
