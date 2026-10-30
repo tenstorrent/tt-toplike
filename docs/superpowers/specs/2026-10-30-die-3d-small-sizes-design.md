@@ -66,11 +66,14 @@ numbers above, and the builder tunes them against the size sweep test.
 6. The super scene falls back to the selected board when the super scene does not fit at 4 px
    tiles.
 7. Below the size where one board fits at 4 px tiles (about 40 x 12 plus the footer rows the host
-   keeps): a text summary, one line per chip (`BH0 44W  in 2.0G  out 1.0M`), in place of the
+   keeps; 51 columns for a two-die board), the scene shrinks to a 2 px tile (0.13.23). If even
+   that is too big, the whole scene is drawn at 2 px and the window shows its middle, with a note
+   that says what size shows all of it. Below 16 x 6: a text summary, one line per chip (`BH0 44W  in 2.0G  out 1.0M`), in place of the
    current "does not fit" line. Rows that do not fit are cut, with a final `+N more`.
 
-On shrinking, the scene is made smaller (down to the 4 px tile). It is not cropped. Cropping is
-used only in step 6, which shows less of the system.
+On shrinking, the scene is made smaller (down to the 4 px tile, and in 0.13.23 to 2 px for one
+board). 0.13.23 also crops, as the last step before the text summary: it shows the middle of the
+whole scene. Cropping is also used in step 6, which shows less of the system.
 
 ## The inset
 
@@ -145,7 +148,7 @@ represented inside `Die3dView`, and the wording of the caption.
 
 ## Calls I made that need checking
 
-- Shrink the scene to fit, and crop only in step 6.
+- Shrink the scene to fit, and crop only in step 6. (Changed in 0.13.23: one board also shrinks to 2 px and then crops.)
 - The text summary as the last step, where today there is a refusal line.
 - The inset shows every board when they fit and the busiest chip's board (10 s hold) when not, and has no keys of its own.
 - The 122 x 16 threshold for showing the inset.

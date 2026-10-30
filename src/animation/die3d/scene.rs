@@ -306,6 +306,11 @@ pub struct SceneFit {
     pub iso: Iso,
     /// Whole-pixel unit (`tw / 8`, at least 1): the packet blob size.
     pub scale: i32,
+    /// `Some((width, height))` in pixels when the scene is bigger than its
+    /// buffer even at the smallest tile ([`fit_last_resort`]): the buffer then
+    /// shows the middle of that whole picture, and `iso` places it so. `None`
+    /// when the whole scene is in the buffer.
+    pub virtual_px: Option<(i32, i32)>,
 }
 
 /// Pixels the tallest block rises above its tile centre at tile width `tw`:
@@ -367,52 +372,112 @@ const FIT_STEP_DEG: usize = 5;
 /// are the extremes). Whole quarter turns are among the samples and are
 /// computed exactly (`quarter_turns`, `spin` 0), so every preset still fits.
 pub(super) fn fit_pixels(pw: i32, ph: i32, grid: (usize, usize)) -> Option<SceneFit> {
+    fit_pixels_min(pw, ph, grid, FIT_MIN_TW)
+}
+
+/// Tile width below which [`fit_pixels`] gives up. The view's choice between
+/// the scene of every board and one board's scene rests on it, so it stays at
+/// 4; only the last resort for one board goes lower ([`SMALL_MIN_TW`]).
+const FIT_MIN_TW: i32 = 4;
+
+/// The smallest tile the scene of one board shrinks to before it is clipped
+/// ([`fit_last_resort`]). A two pixel tile is a dot per tile: the board's shape,
+/// its heat and its packets still read, which a text summary cannot show.
+pub(super) const SMALL_MIN_TW: i32 = 2;
+
+/// The pixel extent `(x0, y0, x1, y1)` of `grid` at tile width `tw`, with the
+/// origin at 0: the union over every [`FIT_STEP_DEG`] angle from 0 to 355
+/// degrees of the four grid corners, each grown to the block that stands on it.
+fn extent(tw: i32, grid: (usize, usize)) -> (i32, i32, i32, i32) {
     let corners = [
         (0.0, 0.0),
         ((grid.0 - 1) as f32, 0.0),
         (0.0, (grid.1 - 1) as f32),
         ((grid.0 - 1) as f32, (grid.1 - 1) as f32),
     ];
+    let th = tw / 2;
     let per_turn = 90 / FIT_STEP_DEG;
-    for tw in (4..=64).rev().filter(|w| w % 2 == 0) {
-        let th = tw / 2;
-        // Union of the pixel extents over every sampled angle, with the
-        // origin at 0.
-        let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-        for k in 0..4 * per_turn {
-            let iso = Iso {
-                tw,
-                th,
-                ox: 0,
-                oy: 0,
-                quarter_turns: (k / per_turn) as u8,
-                spin: ((k % per_turn) * FIT_STEP_DEG) as f32 * std::f32::consts::PI / 180.0,
-            };
-            for &(gx, gy) in &corners {
-                let (x, y) = iso.project(gx, gy, grid);
-                // A block spans cx - tw/2 ..= cx + tw/2, from `lift` above to
-                // one row below its tile's base.
-                x0 = x0.min(x - tw / 2);
-                x1 = x1.max(x + tw / 2 + 1);
-                y0 = y0.min(y - lift(tw));
-                y1 = y1.max(y + th + 1);
-            }
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for k in 0..4 * per_turn {
+        let iso = Iso {
+            tw,
+            th,
+            ox: 0,
+            oy: 0,
+            quarter_turns: (k / per_turn) as u8,
+            spin: ((k % per_turn) * FIT_STEP_DEG) as f32 * std::f32::consts::PI / 180.0,
+        };
+        for &(gx, gy) in &corners {
+            let (x, y) = iso.project(gx, gy, grid);
+            // A block spans cx - tw/2 ..= cx + tw/2, from `lift` above to
+            // one row below its tile's base.
+            x0 = x0.min(x - tw / 2);
+            x1 = x1.max(x + tw / 2 + 1);
+            y0 = y0.min(y - lift(tw));
+            y1 = y1.max(y + th + 1);
         }
+    }
+    (x0, y0, x1, y1)
+}
+
+/// [`fit_pixels`] with the smallest tile width as a parameter (even, at
+/// least 2).
+pub(super) fn fit_pixels_min(
+    pw: i32,
+    ph: i32,
+    grid: (usize, usize),
+    min_tw: i32,
+) -> Option<SceneFit> {
+    for tw in (min_tw..=64).rev().filter(|w| w % 2 == 0) {
+        let (x0, y0, x1, y1) = extent(tw, grid);
         if x1 - x0 <= pw && y1 - y0 <= ph {
             return Some(SceneFit {
                 iso: Iso {
                     tw,
-                    th,
+                    th: tw / 2,
                     ox: (pw - (x1 - x0)) / 2 - x0,
                     oy: (ph - (y1 - y0)) / 2 - y0,
                     quarter_turns: 0,
                     spin: 0.0,
                 },
                 scale: ((tw + 4) / 8).max(1),
+                virtual_px: None,
             });
         }
     }
     None
+}
+
+/// The fit for one board's scene when [`fit_pixels`] found none: the largest
+/// tile down to [`SMALL_MIN_TW`] that holds the whole scene, and when even that
+/// is too big, the scene at [`SMALL_MIN_TW`] placed so that the buffer shows
+/// the middle of it (`virtual_px` says how big the whole picture is).
+///
+/// Drawing outside the buffer is harmless (`PixelBuf::put` ignores it), so the
+/// crop is only a negative origin: the whole scene is "drawn" and the buffer
+/// is the window onto it. The origin keeps the grid centre at the buffer
+/// centre, so one origin still serves every camera angle.
+pub(super) fn fit_last_resort(pw: i32, ph: i32, grid: (usize, usize)) -> SceneFit {
+    if let Some(fit) = fit_pixels_min(pw, ph, grid, SMALL_MIN_TW) {
+        return fit;
+    }
+    let tw = SMALL_MIN_TW;
+    let (x0, y0, x1, y1) = extent(tw, grid);
+    let (vw, vh) = (x1 - x0, y1 - y0);
+    SceneFit {
+        iso: Iso {
+            tw,
+            th: tw / 2,
+            // Floor division so a negative offset (a crop) and a positive one
+            // (padding on the axis that does fit) are the same formula.
+            ox: (pw - vw).div_euclid(2) - x0,
+            oy: (ph - vh).div_euclid(2) - y0,
+            quarter_turns: 0,
+            spin: 0.0,
+        },
+        scale: 1,
+        virtual_px: Some((vw, vh)),
+    }
 }
 
 /// Linear blend of two colours, rounded like the mockup's clamped byte array.
@@ -1189,6 +1254,52 @@ mod tests {
         // its sides) takes it one even step down, to 14 x 7.
         let f = fit(150, 42, 1).unwrap();
         assert_eq!((f.iso.tw, f.iso.th, f.scale), (14, 7, 2));
+    }
+
+    /// The slim window of the bug report: 50 columns is 100 pixels, too narrow
+    /// for the four pixel tile of a two-die board but not for a two pixel one.
+    #[test]
+    fn a_two_pixel_tile_fits_where_a_four_pixel_one_does_not() {
+        let grid = board_grid(2);
+        assert!(fit_pixels(100, 212, grid).is_none(), "4 px should not fit");
+        let f = fit_pixels_min(100, 212, grid, SMALL_MIN_TW).expect("2 px fits");
+        assert_eq!(f.iso.tw, 2);
+        assert_eq!(f.virtual_px, None);
+        // The ordinary fit is the same function with a floor of 4.
+        assert_eq!(
+            fit_pixels(300, 200, grid).map(|f| f.iso.tw),
+            fit_pixels_min(300, 200, grid, FIT_MIN_TW).map(|f| f.iso.tw)
+        );
+    }
+
+    #[test]
+    fn the_last_resort_is_the_ordinary_fit_when_the_scene_fits() {
+        let grid = board_grid(2);
+        let f = fit_last_resort(100, 212, grid);
+        assert_eq!(f.virtual_px, None, "nothing to clip at 100 x 212");
+        assert_eq!(f.iso.tw, 2);
+        // And where the four pixel tile fits it is chosen, as `fit_pixels` does.
+        let big = fit_last_resort(300, 200, grid);
+        assert_eq!(big.iso.tw, fit_pixels(300, 200, grid).unwrap().iso.tw);
+        assert_eq!(big.virtual_px, None);
+    }
+
+    #[test]
+    fn the_last_resort_clips_around_the_middle_of_the_scene() {
+        let grid = board_grid(2);
+        let (pw, ph) = (30, 20);
+        let f = fit_last_resort(pw, ph, grid);
+        assert_eq!(f.iso.tw, SMALL_MIN_TW);
+        let (vw, vh) = f.virtual_px.expect("30 x 20 px cannot hold the scene");
+        assert!(vw > pw && vh > ph, "{vw} x {vh}");
+        // The whole picture is what a buffer of exactly its size shows. The
+        // window is the middle of it: the window's origin is the picture's
+        // moved by the floored half of the size difference.
+        let whole = fit_last_resort(vw, vh, grid);
+        assert_eq!(whole.virtual_px, None, "a buffer of the picture's size holds it");
+        assert_eq!(whole.iso.tw, f.iso.tw, "the same tile");
+        let (dx, dy) = ((vw - pw).div_euclid(2), (vh - ph).div_euclid(2));
+        assert_eq!((f.iso.ox, f.iso.oy), (whole.iso.ox - dx, whole.iso.oy - dy));
     }
 
     #[test]

@@ -1,3 +1,15 @@
+tt-toplike (0.13.23) noble; urgency=medium
+
+  * Die 3D view: a narrow window no longer loses the scene. Below the four pixel
+    tile (a two-die board needs 51 columns for it) the scene shrinks to a two
+    pixel tile, which a two-die board fits whole in 25 x 8 cells. A window
+    smaller than that shows the middle of the whole scene, and the last row
+    (or the footer) says "clipped, needs 25x8". The text summary now starts
+    below 16 x 6. The scene of every board still falls back to one board at the
+    four pixel tile, and the Insights inset is unchanged.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 14:00:00 -0700
+
 tt-toplike (0.13.22) noble; urgency=medium
 
   * Die 3D view: it now draws below 100 x 30, where it used to refuse. As the view

@@ -17,6 +17,13 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.13.23
+- The Die 3D view keeps drawing the scene in a narrow window. Where the four pixel tile does not
+  fit (a two-die board needs 51 columns), the scene shrinks to a two pixel tile; a two-die board
+  fits whole in 25 x 8 cells. A smaller window shows the middle of the whole scene, and the last
+  row or the footer says `clipped, needs 25x8`. The text summary now starts below 16 x 6. The
+  Insights inset and the choice between every board and one board are unchanged.
+
 ### 0.13.22
 - The Die 3D view draws below 100 x 30. The clouds and the history panel go first, then the
   footer drops to one row, then the flags go, and the scene shrinks down to about 40 x 12. Below

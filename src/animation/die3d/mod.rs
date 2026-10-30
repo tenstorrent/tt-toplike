@@ -55,6 +55,7 @@ use raster::{Iso, PixelBuf};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use scene::{
+    fit_last_resort,
     board_band_origin, board_grid, chip_inputs, die_centre, draw_board_scene, fit_pixels,
     has_per_tile_data, lift, ChipInputs, Detail, SceneFit, ESTIMATE_LABEL,
 };
@@ -116,6 +117,13 @@ const FRAME_EARLY_SECS: f64 = 0.005;
 /// The period, in seconds of view time, at which the scenes' animation time
 /// wraps (see `scene_with`): one day.
 const SCENE_TIME_WRAP_S: f64 = 86_400.0;
+
+/// Below this size (columns, rows) the view shows the text summary instead of
+/// a scene. Above it a scene is always drawn: shrunk to a two pixel tile
+/// when the four pixel one does not fit, and clipped around its middle when
+/// even that does not (see `scene::fit_last_resort`). A window smaller than
+/// this shows too little of a clipped scene to be worth drawing.
+const SCENE_MIN_CELLS: (usize, usize) = (16, 6);
 
 /// The history panel is drawn only in a view at least this wide and tall
 /// (columns, rows). Below it the panel would cover too much of the scene.
@@ -252,6 +260,17 @@ enum Shown {
     /// The super scene was chosen but does not fit at this size, so this
     /// board's scene is drawn instead.
     Fallback(usize),
+    /// This board's scene (by index), drawn at the smallest tile and still
+    /// bigger than the window, so the window shows its middle. The two
+    /// numbers are the columns and rows (footer included) a window needs to
+    /// show all of it.
+    Clipped(usize, usize, usize),
+}
+
+/// The note that a scene is clipped and what size shows all of it, as
+/// `clipped, needs 26x14`.
+fn clip_note(cols: usize, rows: usize) -> String {
+    format!("clipped, needs {cols}x{rows}")
 }
 
 /// Half the size, in grid tiles, of a die's top face: its 17 x 12 tiles,
@@ -346,6 +365,8 @@ pub struct Die3dView {
 struct RenderCache {
     /// `fit_pixels` results by (pixel width, pixel height, grid).
     fits: HashMap<(i32, i32, (usize, usize)), Option<SceneFit>>,
+    /// `fit_last_resort` results, by the same key.
+    small_fits: HashMap<(i32, i32, (usize, usize)), SceneFit>,
     /// Pixel buffers kept for the next frame.
     spare: Vec<PixelBuf>,
     /// The last frame `render` drew, returned again until it is due for
@@ -796,6 +817,14 @@ impl Die3dView {
         };
         lines.resize(scene_rows, Line::default());
         lines.extend(self.footer(now, frame.as_ref().map(|f| f.0)));
+        // A clipped scene must say so. With a footer the note is in it; a view
+        // too short for a footer (under 16 rows) puts it over the scene's last
+        // row instead.
+        if let Some((Shown::Clipped(_, c, r), _)) = &frame {
+            if tier.footer_rows == 0 && scene_rows > 0 {
+                lines[scene_rows - 1] = hint(fit_width(clip_note(*c, *r), self.cols));
+            }
+        }
         // The history panel and the labels go over the converted cells, the
         // labels placed with the projection the frame was drawn with. While
         // a transition runs the picture is noise, a mix of two frames or
@@ -803,7 +832,10 @@ impl Die3dView {
         // end. The panel stays. Below the tier's flag size there are no
         // labels whatever `L` says.
         if let Some((_, placed)) = &frame {
-            let labels = self.show_labels && tier.flags;
+            // A clipped scene has dies outside the window, so no flag could
+            // be anchored; clipping only happens below the flags' size anyway.
+            let clipped = matches!(frame, Some((Shown::Clipped(..), _)));
+            let labels = self.show_labels && tier.flags && !clipped;
             let anchors = match placed {
                 Some(placed) if labels && self.director.progress(now).is_none() => {
                     self.flag_layout(placed, scene_rows)
@@ -1057,12 +1089,32 @@ impl Die3dView {
         .min(self.chips.len().checked_sub(1)?);
         let chips = &self.chips[board];
         let grid = board_grid(chips.len());
-        let fit = aim(&self.fit_for(pw, ph, grid)?, aim_by, grid);
+        // One board's scene is the last resort, so it goes below the four
+        // pixel tile and then clips (an inset keeps its size rules and the
+        // summary below them).
+        let found = self.fit_for(pw, ph, grid);
+        let base = match found {
+            Some(fit) => fit,
+            None if !self.inset && self.cols >= SCENE_MIN_CELLS.0 && self.rows >= SCENE_MIN_CELLS.1 => {
+                self.fit_small(pw, ph, grid)
+            }
+            None => return None,
+        };
+        let fit = aim(&base, aim_by, grid);
         draw_board_scene(&mut buf, chips, &fit, t, Detail::Full);
-        let shown = if fallback {
-            Shown::Fallback(board)
-        } else {
-            Shown::Board(board)
+        let shown = match base.virtual_px {
+            Some((vw, vh)) => {
+                // Cells of the whole picture, and the footer rows a window
+                // needs on top of them.
+                let (cw, ch) = if self.braille { (2, 4) } else { (1, 2) };
+                Shown::Clipped(
+                    board,
+                    (vw as usize).div_ceil(cw),
+                    (vh as usize).div_ceil(ch) + self.tier().footer_rows,
+                )
+            }
+            None if fallback => Shown::Fallback(board),
+            None => Shown::Board(board),
         };
         let placed = Placement {
             iso: fit.iso,
@@ -1113,6 +1165,18 @@ impl Die3dView {
             .or_insert_with(|| fit_pixels(key.0, key.1, grid))
     }
 
+    /// [`fit_last_resort`] for a `pw` x `ph` pixel buffer and `grid`, cached
+    /// like [`fit_for`](Self::fit_for).
+    fn fit_small(&self, pw: usize, ph: usize, grid: (usize, usize)) -> SceneFit {
+        let key = (pw as i32, ph as i32, grid);
+        *self
+            .cache
+            .borrow_mut()
+            .small_fits
+            .entry(key)
+            .or_insert_with(|| fit_last_resort(key.0, key.1, grid))
+    }
+
     /// The footer, one line per footer row of the size tier: with two rows,
     /// what is shown and how, then the keys; with one, the first of those
     /// (the status line) alone; with none, nothing. A left bar and a bottom
@@ -1141,6 +1205,11 @@ impl Die3dView {
                 board_name(b),
                 boards
             ),
+            // The clip note leads, so a narrow row (which is cut from the
+            // right) still shows it.
+            Some(Shown::Clipped(b, c, r)) => {
+                format!("{}{SEP}{}", clip_note(c, r), board_name(b))
+            }
             // Nothing drawn: name the scene that was chosen.
             None => match self.scene_at(now) {
                 Scene::All if boards > 1 => "all boards".to_string(),
@@ -1202,7 +1271,7 @@ impl Die3dView {
     /// ellipsis. There is no border on either side.
     fn inset_caption(&self, shown: Option<Shown>) -> String {
         let (name, chips): (String, Vec<&ChipInputs>) = match shown {
-            Some(Shown::Board(b)) | Some(Shown::Fallback(b)) => {
+            Some(Shown::Board(b)) | Some(Shown::Fallback(b)) | Some(Shown::Clipped(b, ..)) => {
                 let chips: Vec<&ChipInputs> = self.chips.get(b).into_iter().flatten().collect();
                 let name = chips
                     .iter()
@@ -1467,6 +1536,7 @@ fn aim(fit: &SceneFit, aim_by: Aim, grid: (usize, usize)) -> SceneFit {
     SceneFit {
         iso,
         scale: fit.scale,
+        virtual_px: fit.virtual_px,
     }
 }
 
@@ -1657,10 +1727,12 @@ mod tests {
     #[test]
     fn a_tiny_view_shows_the_summary() {
         let b = two_boards();
-        let mut v = Die3dView::new(30, 10);
+        // Below SCENE_MIN_CELLS in rows: a scene clipped to four rows would
+        // show too little to be worth drawing.
+        let mut v = Die3dView::new(30, SCENE_MIN_CELLS.1 - 2);
         v.update(&b, 0.0);
         let t = text(&v.render(0.0));
-        assert_eq!(t.len(), 10);
+        assert_eq!(t.len(), SCENE_MIN_CELLS.1 - 2);
         // The Fake backend's four chips (two boards) report 0 W and no PCIe
         // counters: the exact summary lines, then empty rows.
         for (i, name) in ["BH0", "BH1", "BH2", "BH3"].iter().enumerate() {
@@ -1673,6 +1745,147 @@ mod tests {
                 .any(|l| l.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)
                     || matches!(c, '\u{2580}' | '\u{2584}' | '\u{2588}'))),
             "{t:?}"
+        );
+    }
+
+    /// A `cols` x `rows` view over one two-die board (the fake's p300 is one
+    /// die, so two of them) that has read the backend once, at 0.0.
+    fn two_die_view(cols: usize, rows: usize) -> Die3dView {
+        let b = Fake::boards(&["p300"; 2], Some(TDP));
+        let mut v = Die3dView::new(cols, rows);
+        v.update(&b, 0.0);
+        v
+    }
+
+    /// A window 50 columns wide and 54 tall (a slim Konsole window) is too
+    /// narrow for a four pixel tile, which used to leave the chip summary
+    /// where the scene should be. The scene shrinks to a two pixel tile
+    /// instead, and is not clipped.
+    #[test]
+    fn a_narrow_tall_window_draws_the_scene_not_the_summary() {
+        let v = two_die_view(50, 54);
+        let t = text(&v.render(0.0));
+        assert_eq!(t.len(), 54);
+        assert!(
+            t.iter().any(|l| has_braille_dots(l)),
+            "no scene in a 50 x 54 view: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|l| l.contains("0W  in")),
+            "the summary is drawn instead of the scene: {t:?}"
+        );
+        assert_eq!(v.scene_pixels(0.0).expect("a scene").1, Shown::Board(0));
+    }
+
+    /// A window too small for even the two pixel tile shows the scene at that
+    /// tile, clipped to its middle, and says what size shows all of it.
+    #[test]
+    fn a_window_too_small_for_the_scene_shows_its_middle_and_says_so() {
+        // 20 x 10 cells: 40 x 40 pixels, under the two pixel scene's width.
+        let v = two_die_view(20, 10);
+        let (_, shown) = v.scene_pixels(0.0).expect("a clipped scene");
+        let Shown::Clipped(board, need_cols, need_rows) = shown else {
+            panic!("expected a clipped scene, got {shown:?}");
+        };
+        assert_eq!(board, 0);
+        assert!(
+            need_cols > 20 || need_rows > 10,
+            "needs {need_cols}x{need_rows} but 20 x 10 was clipped"
+        );
+        let t = text(&v.render(0.0));
+        assert_eq!(t.len(), 10);
+        assert!(t.iter().any(|l| has_braille_dots(l)), "no scene: {t:?}");
+        // Under 16 rows there is no footer, so the note is over the last row.
+        assert_eq!(
+            t[9],
+            clip_note(need_cols, need_rows),
+            "the note is on the last row: {t:?}"
+        );
+    }
+
+    /// With a footer (16 rows or more), the note leads the status line, so a
+    /// narrow row that cuts from the right keeps it.
+    #[test]
+    fn a_clipped_view_with_a_footer_leads_with_the_note() {
+        let v = two_die_view(24, 17);
+        let (_, shown) = v.scene_pixels(0.0).expect("a scene");
+        let Shown::Clipped(_, c, r) = shown else {
+            panic!("expected a clipped scene at 24 x 17, got {shown:?}");
+        };
+        let t = text(&v.render(0.0));
+        assert_eq!(t.len(), 17);
+        let note = clip_note(c, r);
+        assert!(
+            t[16].contains(&note) || t[16].contains(&note[..note.len().min(20)]),
+            "footer row {:?} lacks the note {note:?}",
+            t[16]
+        );
+    }
+
+    /// The clipped window is a crop of the same picture: the whole scene
+    /// drawn at the same tile on a buffer big enough for it has, at the
+    /// window's offset, exactly the pixels the window shows.
+    #[test]
+    fn the_clipped_window_is_a_crop_of_the_whole_picture() {
+        let v = two_die_view(20, 10);
+        let now = 0.0;
+        let (got, shown) = v.scene_pixels(now).expect("a scene");
+        assert!(matches!(shown, Shown::Clipped(..)), "{shown:?}");
+        let grid = board_grid(2);
+        let (pw, ph) = (got.w as i32, got.h as i32);
+        let small = scene::fit_last_resort(pw, ph, grid);
+        let (vw, vh) = small.virtual_px.expect("clipped");
+        // The whole picture is what a buffer of exactly its size shows, drawn
+        // independently of the clipped fit; the window is its middle, offset
+        // by the floored half of the size difference.
+        let whole_fit = scene::fit_last_resort(vw, vh, grid);
+        let (dx, dy) = ((vw - pw).div_euclid(2), (vh - ph).div_euclid(2));
+        let cam = v.director.camera_at(now);
+        let window = aim(&small, Aim::At(cam), grid);
+        let whole_fit = aim(&whole_fit, Aim::At(cam), grid);
+        let mut whole = PixelBuf::new(vw as usize, vh as usize);
+        whole.clear_transparent();
+        draw_board_scene(&mut whole, &v.chips[0], &whole_fit, now as f32, Detail::Full);
+        // The window drawn directly, as the view does.
+        let mut direct = PixelBuf::new(pw as usize, ph as usize);
+        direct.clear_transparent();
+        draw_board_scene(&mut direct, &v.chips[0], &window, now as f32, Detail::Full);
+        assert_eq!(got.rgb, direct.rgb, "the view draws the clipped fit");
+        let mut painted = 0;
+        for y in 0..ph {
+            for x in 0..pw {
+                let (wx, wy) = (x + dx, y + dy);
+                let want = if wx >= 0 && wy >= 0 && wx < vw && wy < vh {
+                    whole.rgb[wy as usize * vw as usize + wx as usize]
+                } else {
+                    [0; 3]
+                };
+                let have = got.rgb[y as usize * pw as usize + x as usize];
+                assert_eq!(have, want, "pixel ({x}, {y}) differs from the whole picture");
+                painted += (have != [0; 3]) as usize;
+            }
+        }
+        assert!(painted > 100, "the window shows almost nothing: {painted}");
+        // And it really is a crop: the whole picture has painted pixels
+        // outside the window, or it would not have needed clipping.
+        let outside = (0..vh)
+            .flat_map(|y| (0..vw).map(move |x| (x, y)))
+            .filter(|&(x, y)| x < dx || y < dy || x >= dx + pw || y >= dy + ph)
+            .filter(|&(x, y)| whole.rgb[y as usize * vw as usize + x as usize] != [0; 3])
+            .count();
+        assert!(outside > 0, "nothing was cut off");
+    }
+
+    /// Insets keep their own size rules: a scene that does not fit them is
+    /// not clipped into them.
+    #[test]
+    fn an_inset_is_never_clipped() {
+        let b = Fake::boards(&["p300"; 2], Some(TDP));
+        let mut v = Die3dView::inset(20, 8);
+        v.update(&b, 0.0);
+        assert!(
+            v.scene_pixels(0.0).is_none(),
+            "a 20 x 8 inset cannot hold the scene and must not clip it"
         );
     }
 

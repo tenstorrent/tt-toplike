@@ -1430,6 +1430,40 @@ over half the counter range reads as a device reset (a wrap of nearly the full r
 indistinguishable from a small step backwards). More than one wrap between samples cannot be
 detected; at 1 Hz it would need over 275 GB/s.
 
+### Die 3D narrow windows (Oct 30 2026, v0.13.23)
+
+Prompt: a slim Konsole window (about 50 x 54) showed only the text summary where the cube
+should be ("the cube goes blank at 80x40 or 80x25 ... this is slimmer"). Then, after the options
+(smaller tile, a message, or clipping): "1 plus 3, but I think we still can do 'clip' where you
+show the whole display 'virtually' and the smaller window can only reveal what it has room for".
+
+Findings, measured on the real box (two p300c boards) with `tmux capture-pane`: the scene drew
+from 51 columns up and was blank at 50 and below, at every height. It drew at 80 x 25 and 80 x 40
+(also with 3 to 32 mock chips, where it falls back to one board), so those two sizes were not the
+cause. Cause: `fit_pixels` stops at a 4 pixel tile, and a two-die board at that tile is just
+over 100 pixels (50 columns of braille) wide at its widest camera angle.
+
+Decisions:
+- `fit_pixels` keeps its four pixel floor, because the choice between every board and one board
+  rests on it (the existing fallback tests). Only one board's scene goes lower:
+  `fit_last_resort` tries a 2 pixel tile (`SMALL_MIN_TW`), and if that is still too big, draws the
+  whole scene at 2 pixels with a centred origin. `PixelBuf::put` ignores out-of-range pixels, so
+  the crop is only a negative origin and nothing else in the drawing changed.
+  The two-die scene is 50 x 30 pixels at that tile, so it fits whole from 25 x 8 cells.
+- `SceneFit.virtual_px` is `Some` when it is clipped. `Shown::Clipped(board, cols, rows)` carries
+  the size that shows all of it; the footer leads with `clipped, needs 25x8`, and a view with no
+  footer (under 60 x 16) puts the same text over the scene's last row.
+- Insets are never clipped. Flags are off while clipped (clipping only happens below the flags'
+  size anyway). The text summary now starts below `SCENE_MIN_CELLS` (16 x 6).
+- Not built: panning with keys. The crop is always the middle. Keys are routed by character in
+  `ui/tui/mod.rs` (`die3d_key_for`), so pan keys need a binding that does not collide with the
+  global ones.
+- The test that the clipped window is a crop compares it with the whole picture drawn
+  independently (`fit_last_resort` for a buffer of the picture's own size). A first version
+  derived the whole picture by shifting the clipped fit, which passed for any offset; a mutation
+  (dropping the centring) showed that, and the final tests fail under both axes' mutations.
+- The spec's call "shrink to fit, and crop only in step 6" is reversed by this change.
+
 ### Die 3D small sizes and the Insights inset (Oct 30 2026, v0.13.22)
 
 Prompts: "what will i expect to see in a smaller terminal? how much extra CPU activity would it
@@ -1441,7 +1475,8 @@ Decisions:
 - The scene shrinks so the whole board stays visible.
 - The ladder is in `die3d/tiers.rs`: clouds off below 100 x 30 (`CLOUDS_MIN`), footer two rows
   at 100 x 30 (`FOOTER_TWO`), one row from 60 x 16 (`FOOTER_ONE`), flags from 60 x 16
-  (`FLAGS_MIN`), history panel from 120 x 37. The scene shrinks down to about 40 x 12.
+  (`FLAGS_MIN`), history panel from 120 x 37. The scene shrinks down to about 40 x 12
+  (superseded in 0.13.23: see "Die 3D narrow windows").
 - The text summary comes last, only where no scene fits. One line per chip.
 - The inset is `Die3dView::inset(cols, rows)`: one caption row, no keys, no clouds, no panel, and
   its scene never changes on a trigger. When every board does not fit, it draws the busiest

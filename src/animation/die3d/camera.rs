@@ -836,6 +836,7 @@ mod tests {
                 spin: 0.0,
             },
             scale: 2,
+            virtual_px: None,
         };
         // Measure the base scene in a roomy buffer, then size the terminal
         // area to just hold it (cells are 2 x 4 pixels, so slack is at most
