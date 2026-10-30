@@ -40,7 +40,9 @@ pub(super) const BOARD_BAND: usize = 12 + 2;
 const ETH_CAGES: usize = 12;
 /// Rows of GDDR blocks (die rows) on each side, two rows per memory chip.
 const GDDR_ROWS: [i32; 4] = [0, 3, 6, 9];
-/// Smallest terminal the scene is drawn on, in cells.
+/// Size, in cells, at which the view's full layout starts (two footer rows,
+/// clouds and flags). [`fit`] draws nothing below it; the view itself draws
+/// smaller layouts below it (see `tiers`).
 pub(super) const MIN_CELLS: (usize, usize) = (100, 30);
 /// Packets are drawn only above this rate (bytes per second); below it the
 /// counter is idle noise.
@@ -356,8 +358,9 @@ const FIT_STEP_DEG: usize = 5;
 /// minimum terminal size. The view needs this: it keeps two rows for its
 /// footer, and half-block cells hold 1 x 2 pixels where `fit` assumes the
 /// 2 x 4 of braille, so neither case is a `cells_w` x `cells_h` braille area.
-/// The view applies the 100 x 30 minimum to the whole terminal itself. `None`
-/// when even a 4 pixel tile does not hold the grid.
+/// The view draws at any size where this finds a fit, with fewer parts below
+/// 100 x 30 cells (see `tiers`). `None` when even a 4 pixel tile does not
+/// hold the grid.
 ///
 /// The footprint is the union over every [`FIT_STEP_DEG`] angle from 0 to 355
 /// degrees of the four grid corners (the projection is linear, so the corners

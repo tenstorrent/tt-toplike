@@ -8733,6 +8733,7 @@ mod display_mode_tests {
     fn a_terminal_resize_keeps_the_die3d_view_and_its_switches() {
         use crate::animation::die3d::Die3dKey;
         use crate::animation::Die3dView;
+        use crate::backend::TelemetryBackend;
         let (c, r, reserved) = die3d_area(150, 43);
         assert_eq!((c, r, reserved), (150, 42, 1));
         let mut die3d = Some(Die3dView::with_reserved_rows(c, r, reserved));
@@ -8743,16 +8744,17 @@ mod display_mode_tests {
         resize_die3d(&mut die3d, 120, 40);
         let view = die3d.as_ref().expect("the view survives a resize");
         assert_eq!(view.switches(), switches);
-        // Drawn at the new size: the hint (no device was read) is one line,
-        // so check the size through a too-small resize, whose hint names the
-        // terminal size including the status bar's row.
+        // Drawn at the new size: once a Blackhole chip has been read (the
+        // mock's third device), the view gives one line per row of its area,
+        // the terminal less the status bar's row. 90 x 25 is below the full
+        // layout, so this also shows the smaller layout follows a resize.
+        let mut mock = crate::backend::mock::MockBackend::new(3);
+        mock.init().expect("mock init");
+        mock.update().expect("mock update");
+        die3d.as_mut().unwrap().update(&mock, 0.0);
+        assert_eq!(die3d.as_ref().unwrap().render(0.0).len(), 39);
         resize_die3d(&mut die3d, 90, 25);
-        let hint: String = die3d.as_ref().unwrap().render(0.0)[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(hint.contains("this one is 90 x 25"), "{hint}");
+        assert_eq!(die3d.as_ref().unwrap().render(0.1).len(), 24);
         // No view (Die 3D not open): nothing is made.
         let mut none: Option<Die3dView> = None;
         resize_die3d(&mut none, 120, 40);

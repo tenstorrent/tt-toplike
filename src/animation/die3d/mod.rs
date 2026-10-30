@@ -36,7 +36,6 @@ pub mod super_scene;
 mod switching;
 #[cfg(test)]
 mod test_backend;
-#[allow(dead_code)] // Task 2 of the small-sizes plan wires this in.
 mod tiers;
 pub mod triggers;
 
@@ -54,15 +53,19 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use scene::{
     board_band_origin, board_grid, chip_inputs, die_centre, draw_board_scene, fit_pixels,
-    has_per_tile_data, lift, ChipInputs, Detail, SceneFit, ESTIMATE_LABEL, MIN_CELLS,
+    has_per_tile_data, lift, ChipInputs, Detail, SceneFit, ESTIMATE_LABEL,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use super_scene::{band_origin, draw_super_scene, super_grid};
 use switching::{Scene, Switcher};
+use tiers::{tier_for, Tier};
 use triggers::TriggerDetector;
 
-/// Terminal rows kept below the scene for the footer.
+/// Terminal rows the footer takes in the full layout (100 x 30 cells and
+/// up). The view itself reads the footer's rows from its [`Tier`]; the tests
+/// at those sizes use this.
+#[cfg(test)]
 const FOOTER_ROWS: usize = 2;
 /// Seed of the camera director. Fixed, so a run with the same telemetry and
 /// times cuts to the same angles; tests depend on that.
@@ -270,7 +273,11 @@ pub struct Die3dView {
     cols: usize,
     rows: usize,
     /// Terminal rows below the view's area that the host draws over (the
-    /// TUI's status bar). Only used to word the size hint in terminal terms.
+    /// TUI's status bar). The size hint that named the terminal size went
+    /// when the view learnt to draw at any size (the size tiers measure the
+    /// view's own area), so nothing reads this now; it is kept so the host's
+    /// calls (`with_reserved_rows`, `resize`) stay as they are.
+    #[allow(dead_code)]
     reserved_rows: usize,
     braille: bool,
     /// Leave the background unpainted so the terminal's own colour (and any
@@ -366,9 +373,8 @@ impl Die3dView {
     }
 
     /// Like `new`, for a view whose `rows` are the terminal's minus
-    /// `reserved_rows` that the host draws elsewhere. The view still needs
-    /// `MIN_CELLS` in its own area; the size hint adds the reserved rows back
-    /// so it names the terminal size the user has to reach.
+    /// `reserved_rows` that the host draws elsewhere. The size tiers (see
+    /// `tiers`) are measured on the view's own `cols` x `rows`.
     pub fn with_reserved_rows(cols: usize, rows: usize, reserved_rows: usize) -> Die3dView {
         Die3dView {
             cols,
@@ -404,8 +410,8 @@ impl Die3dView {
     /// every switch, the scene on show and a switch still pending, the
     /// history, each chip's load calibration, the cloud clock, the camera
     /// director and the trigger detector. The revision moves, so the next
-    /// `render` draws a fresh frame at the new size. A size below the
-    /// minimum needs nothing special: `render` shows its size hint.
+    /// `render` draws a fresh frame at the new size. A small size needs
+    /// nothing special: `render` picks the layout for the size each frame.
     pub fn resize(&mut self, cols: usize, rows: usize, reserved_rows: usize) {
         self.cols = cols;
         self.rows = rows;
@@ -553,10 +559,11 @@ impl Die3dView {
     }
 
     /// What makes one frame's clouds differ from another's: the whole-pixel
-    /// offset and the intensity shown, or nothing while they are off.
+    /// offset and the intensity shown, or nothing while they are not drawn
+    /// (switched off, or the view too small for them).
     fn cloud_key(&self) -> Option<(i64, u32)> {
         let clock = self.cloud_clock.get();
-        self.show_clouds
+        self.clouds_shown()
             .then(|| (clock.offset_px() as i64, clock.intensity().to_bits()))
     }
 
@@ -617,11 +624,14 @@ impl Die3dView {
         }
     }
 
-    /// The view at `now`: the scene, then a two-row footer.
+    /// The view at `now`: the scene, then the footer.
     ///
-    /// Below 100 x 30 cells this is a single hint line. With no Blackhole chip
-    /// it is a hint line plus, when there are other devices, a line naming
-    /// them.
+    /// What is drawn depends on the size (see `tiers`). At 100 x 30 cells and
+    /// up: the full layout, with a two-row footer. Below that the clouds go
+    /// and the footer is the status line alone; below 60 x 16 the flags and
+    /// the footer go too. Where no scene fits, a hint line takes its place.
+    /// With no Blackhole chip it is a hint line plus, when there are other
+    /// devices, a line naming them.
     ///
     /// About 20 frames a second of view time are drawn, 30 during a cut's
     /// transition ([`STEADY_FRAME_SECS`], [`TRANSITION_FRAME_SECS`], each
@@ -662,9 +672,6 @@ impl Die3dView {
 
     /// A fresh frame at `now`, as [`render`](Self::render) describes it.
     fn draw(&self, now: f64) -> Vec<Line<'static>> {
-        if self.cols < MIN_CELLS.0 || self.rows < MIN_CELLS.1 {
-            return vec![hint(self.too_small_hint())];
-        }
         if self.chips.is_empty() {
             if self.undrawn.is_empty() {
                 return vec![hint("Die 3D: no Tenstorrent device found.".into())];
@@ -674,7 +681,10 @@ impl Die3dView {
                 note(self.undrawn_note()),
             ];
         }
-        let scene_rows = self.rows - FOOTER_ROWS;
+        let tier = self.tier();
+        // The tier has no footer rows below 16 rows, so this never goes
+        // below zero; the saturating subtraction guards it anyway.
+        let scene_rows = self.rows.saturating_sub(tier.footer_rows);
         let (mut lines, frame) = match self.frame(now) {
             Some((buf, shown, placed)) => {
                 let lines = if self.braille {
@@ -693,10 +703,12 @@ impl Die3dView {
         // labels placed with the projection the frame was drawn with. While
         // a transition runs the picture is noise, a mix of two frames or
         // turning, so no label could stay on its die: they wait for it to
-        // end. The panel stays.
+        // end. The panel stays. Below the tier's flag size there are no
+        // labels whatever `L` says.
         if let Some((_, placed)) = &frame {
+            let labels = self.show_labels && tier.flags;
             let anchors = match placed {
-                Some(placed) if self.show_labels && self.director.progress(now).is_none() => {
+                Some(placed) if labels && self.director.progress(now).is_none() => {
                     self.flag_layout(placed, scene_rows)
                 }
                 _ => Vec::new(),
@@ -746,16 +758,20 @@ impl Die3dView {
         Style::default().fg(rgb(PANEL_FG)).bg(self.background())
     }
 
-    /// The "terminal too small" line, in terminal cells: the view's own
-    /// minimum plus the rows the host keeps, against the terminal's size.
-    fn too_small_hint(&self) -> String {
-        format!(
-            "Die 3D needs a terminal of at least {} x {} cells (this one is {} x {}). Press 3 to leave.",
-            MIN_CELLS.0,
-            MIN_CELLS.1 + self.reserved_rows,
-            self.cols,
-            self.rows + self.reserved_rows
-        )
+    /// What the view draws at its current size: the footer's rows, and
+    /// whether the clouds and the flags are drawn (see [`tiers`]).
+    ///
+    /// The footer, the clouds and the flags read the size through here (the
+    /// history panel keeps its own gate, `panel_shown`), so a layout that
+    /// overrides the size tiers changes only this method.
+    fn tier(&self) -> Tier {
+        tier_for(self.cols, self.rows)
+    }
+
+    /// Whether the cloud layer is drawn: switched on (`W`) and the view large
+    /// enough for its tier to keep clouds.
+    fn clouds_shown(&self) -> bool {
+        self.show_clouds && self.tier().clouds
     }
 
     /// The picture at `now`: the scene with the transition of a cut in
@@ -847,7 +863,7 @@ impl Die3dView {
         scene: Scene,
         aim_by: Aim,
     ) -> Option<(PixelBuf, Shown, Placement)> {
-        let scene_rows = self.rows.checked_sub(FOOTER_ROWS)?;
+        let scene_rows = self.rows.checked_sub(self.tier().footer_rows)?;
         // Braille cells hold 2 x 4 pixels, half-block cells 1 x 2.
         let (pw, ph) = if self.braille {
             (self.cols * 2, scene_rows * 4)
@@ -874,7 +890,7 @@ impl Die3dView {
         // The clouds go first, so the slab and the dies are drawn over them
         // and are never covered. Clear sky is left as it is: uncovered in
         // transparent mode, black in opaque.
-        if self.show_clouds {
+        if self.clouds_shown() {
             let clock = self.cloud_clock.get();
             self.clouds
                 .draw(&mut buf, clock.offset_px(), clock.intensity());
@@ -971,9 +987,15 @@ impl Die3dView {
             .or_insert_with(|| fit_pixels(key.0, key.1, grid))
     }
 
-    /// The two footer rows: what is shown and how, then the keys. A left bar
-    /// and a bottom bar only, no right-side border.
-    fn footer(&self, now: f64, shown: Option<Shown>) -> [Line<'static>; 2] {
+    /// The footer, one line per footer row of the size tier: with two rows,
+    /// what is shown and how, then the keys; with one, the first of those
+    /// (the status line) alone; with none, nothing. A left bar and a bottom
+    /// bar only, no right-side border.
+    fn footer(&self, now: f64, shown: Option<Shown>) -> Vec<Line<'static>> {
+        let rows = self.tier().footer_rows;
+        if rows == 0 {
+            return Vec::new();
+        }
         let boards = self.chips.len();
         let board_name = |b: usize| {
             let label = self.labels.get(b).map_or("?", String::as_str);
@@ -1022,16 +1044,17 @@ impl Die3dView {
                 status = format!("{status}{SEP}{note}");
             }
         }
-        [
-            Line::from(Span::styled(
-                format!("\u{2551} {}", fit_width(status, width)),
-                Style::default().fg(FOOTER_FG),
-            )),
-            Line::from(Span::styled(
+        let mut lines = vec![Line::from(Span::styled(
+            format!("\u{2551} {}", fit_width(status, width)),
+            Style::default().fg(FOOTER_FG),
+        ))];
+        if rows >= 2 {
+            lines.push(Line::from(Span::styled(
                 format!("\u{255a}\u{2550} {}", self.switch_strip(now, width)),
                 Style::default().fg(KEYS_FG),
-            )),
-        ]
+            )));
+        }
+        lines
     }
 
     /// The footer's camera caption: `view: <corner>`, naming the board corner
@@ -1431,19 +1454,108 @@ mod tests {
     }
 
     #[test]
-    fn render_returns_a_hint_below_the_minimum_size() {
+    fn render_gives_one_line_per_row_at_any_size() {
         let b = two_boards();
-        for (c, r) in [(99, 40), (150, 29), (10, 3), (0, 0)] {
+        // Below 100 x 30 a smaller layout is drawn (see `tiers`); at the
+        // tiniest sizes, and at none at all, nothing panics. Every size,
+        // the minimum of the full layout included, gives one line per row.
+        for (c, r) in [
+            (99, 40),
+            (150, 29),
+            (10, 3),
+            (0, 0),
+            (0, 5),
+            (5, 0),
+            (100, 30),
+        ] {
             let mut v = Die3dView::new(c, r);
             v.update(&b, 0.0);
             let lines = v.render(0.0);
-            assert_eq!(lines.len(), 1, "{c} x {r}");
-            assert!(text(&lines)[0].contains("100 x 30"), "{:?}", text(&lines));
+            assert_eq!(lines.len(), r, "{c} x {r}: {:?}", text(&lines));
         }
-        // At the minimum the scene is drawn: one line per terminal row.
-        let mut v = Die3dView::new(100, 30);
+    }
+
+    /// A `cols` x `rows` view over one p150 that has read the backend once,
+    /// at 0.0.
+    fn p150_view(cols: usize, rows: usize) -> Die3dView {
+        let b = Fake::boards(&["p150"], Some(TDP));
+        let mut v = Die3dView::new(cols, rows);
         v.update(&b, 0.0);
-        assert_eq!(v.render(0.0).len(), 30);
+        v
+    }
+
+    /// True when `line` holds a braille glyph with at least one dot set
+    /// (U+2801 to U+28FF; U+2800 is the empty cell).
+    fn has_braille_dots(line: &str) -> bool {
+        line.chars()
+            .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch))
+    }
+
+    #[test]
+    fn below_100_by_30_a_scene_is_drawn() {
+        let v = p150_view(80, 24);
+        let t = text(&v.render(0.0));
+        // One line per row: the scene and a one-row footer.
+        assert_eq!(t.len(), 24, "{t:?}");
+        assert!(
+            t[..23].iter().any(|l| has_braille_dots(l)),
+            "no braille in the scene rows: {t:?}"
+        );
+        assert!(t.iter().all(|l| !l.contains("needs a terminal")), "{t:?}");
+    }
+
+    #[test]
+    fn clouds_are_off_below_100_by_30() {
+        // The control: at exactly 100 x 30 the clouds are drawn, so pressing
+        // W changes the scene rows. Without it the check below could pass on
+        // a scene with no clouds at any size.
+        let mut v = p150_view(100, 30);
+        let on = text(&v.render(0.0));
+        v.handle_key(Die3dKey::ToggleClouds, 0.0);
+        let off = text(&v.render(0.0));
+        assert_ne!(on[..28], off[..28], "clouds not visible at 100 x 30");
+        // One column narrower the tier turns them off: W on and W off draw
+        // the same frame. The one-row footer has no switch strip, so the
+        // footer is the same too.
+        let mut v = p150_view(99, 40);
+        let on = text(&v.render(0.0));
+        assert_eq!(on.len(), 40, "a scene is drawn: {on:?}");
+        v.handle_key(Die3dKey::ToggleClouds, 0.0);
+        assert_eq!(text(&v.render(0.0)), on);
+    }
+
+    #[test]
+    fn the_footer_is_one_row_then_none() {
+        // 99 x 40: one footer row, the status line, naming the scene.
+        let t = text(&p150_view(99, 40).render(0.0));
+        assert_eq!(t.len(), 40, "{t:?}");
+        let last = &t[39];
+        assert!(last.starts_with("\u{2551} "), "{last}");
+        assert!(last.contains("board 1/1"), "{last}");
+        assert!(!t[38].starts_with("\u{2551} "), "{}", t[38]);
+        // 59 x 40: no footer. The last line is a scene row.
+        let t = text(&p150_view(59, 40).render(0.0));
+        assert_eq!(t.len(), 40, "{t:?}");
+        assert!(
+            t.iter()
+                .all(|l| !l.starts_with('\u{2551}') && !l.starts_with('\u{255a}')),
+            "{t:?}"
+        );
+        assert!(t.iter().any(|l| has_braille_dots(l)), "{t:?}");
+    }
+
+    #[test]
+    fn flags_are_off_below_60_by_16() {
+        // The control: at 60 x 40 a flag finds room, so its pin shows.
+        let t = text(&p150_view(60, 40).render(0.0));
+        assert!(
+            t.iter().any(|l| l.contains('●')),
+            "no flag at 60 x 40: {t:?}"
+        );
+        // One column narrower: no flags at all.
+        let t = text(&p150_view(59, 40).render(0.0));
+        assert_eq!(t.len(), 40, "a scene is drawn: {t:?}");
+        assert!(t.iter().all(|l| !l.contains('●')), "{t:?}");
     }
 
     #[test]
@@ -1915,12 +2027,13 @@ mod tests {
         let lines = v.render(1.01);
         assert_eq!(lines.len(), 36);
         assert!(lines[0].width() <= 120);
-        // Below the minimum the view's own hint shows, and growing again
-        // draws the scene.
+        // Below 100 x 30 the smaller layout is drawn at once: one line per
+        // row, the last the one-row footer. Growing again draws the full
+        // layout.
         v.resize(80, 20, 1);
-        let hint = text(&v.render(1.02));
-        assert_eq!(hint.len(), 1);
-        assert!(hint[0].contains("this one is 80 x 21"), "{hint:?}");
+        let small = text(&v.render(1.02));
+        assert_eq!(small.len(), 20, "{small:?}");
+        assert!(small[19].starts_with("\u{2551} "), "{small:?}");
         v.resize(150, 42, 0);
         assert_eq!(v.render(1.03).len(), 42);
     }
@@ -2064,20 +2177,23 @@ mod tests {
     }
 
     #[test]
-    fn the_size_hint_names_terminal_cells_including_the_reserved_row() {
+    fn the_tiers_are_measured_on_the_views_own_area() {
         let b = two_boards();
-        // A 100 x 30 terminal under a one-row status bar: a 100 x 29 area.
+        // A 100 x 30 terminal under a one-row status bar: a 100 x 29 area,
+        // which is below the full layout. The footer is one row.
         let mut v = Die3dView::with_reserved_rows(100, 29, 1);
         v.update(&b, 0.0);
         let t = text(&v.render(0.0));
-        assert_eq!(t.len(), 1);
-        assert!(t[0].contains("at least 100 x 31"), "{}", t[0]);
-        assert!(t[0].contains("this one is 100 x 30"), "{}", t[0]);
-        assert!(!t[0].contains("29"), "{}", t[0]);
-        // One more row and the scene is drawn.
+        assert_eq!(t.len(), 29, "{t:?}");
+        assert!(t[28].starts_with("\u{2551} "), "{}", t[28]);
+        assert!(!t[27].starts_with("\u{2551} "), "{}", t[27]);
+        // One more row and the full layout's two-row footer is drawn.
         let mut v = Die3dView::with_reserved_rows(100, 30, 1);
         v.update(&b, 0.0);
-        assert_eq!(v.render(0.0).len(), 30);
+        let t = text(&v.render(0.0));
+        assert_eq!(t.len(), 30);
+        assert!(t[28].starts_with("\u{2551} "), "{}", t[28]);
+        assert!(t[29].starts_with("\u{255a}"), "{}", t[29]);
     }
 
     #[test]
@@ -2208,13 +2324,14 @@ mod tests {
         assert_eq!(key_to_die3d('t'), None);
     }
 
-    /// The switch strip as the footer's second row shows it.
+    /// The switch strip as the footer's second row shows it at the view's
+    /// width. Built from `switch_strip` directly, so the fallbacks can be
+    /// checked at widths where the size tier leaves no second row.
     fn strip(v: &Die3dView) -> String {
-        v.footer(0.0, None)[1]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect()
+        format!(
+            "\u{255a}\u{2550} {}",
+            v.switch_strip(0.0, v.cols.saturating_sub(BAR_WIDTH))
+        )
     }
 
     /// A view over two boards whose first board label is 12 characters.
@@ -2251,23 +2368,32 @@ mod tests {
 
     #[test]
     fn the_footer_keeps_every_switch_state_at_100_columns() {
-        for cols in [100, 80] {
-            let v = wide_label_view(cols);
-            let f = v.footer(0.0, Some(Shown::All)).map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.to_string())
-                    .collect::<String>()
-            });
-            let f = f.join("\n");
-            for s in v.switches() {
-                assert!(f.contains(s.state), "{cols}: {} in {f}", s.state);
-            }
-            assert!(f.contains(ESTIMATE_LABEL), "{cols}: {f}");
-            for line in f.lines() {
-                assert!(line.chars().count() <= cols, "{cols}: {line}");
-            }
+        // 100 columns: the full layout's two rows hold every switch state
+        // and the estimate label, each row within the width.
+        let v = wide_label_view(100);
+        let f = text(&v.footer(0.0, Some(Shown::All)));
+        assert_eq!(f.len(), 2, "{f:?}");
+        let joined = f.join("\n");
+        for s in v.switches() {
+            assert!(joined.contains(s.state), "{} in {joined}", s.state);
         }
+        assert!(joined.contains(ESTIMATE_LABEL), "{joined}");
+        for line in &f {
+            assert!(line.chars().count() <= 100, "{line}");
+        }
+        // 80 columns: the size tier keeps the status line alone, with the
+        // estimate label. The switch strip at that width still keeps every
+        // state; the view does not draw it there.
+        let v = wide_label_view(80);
+        let f = text(&v.footer(0.0, Some(Shown::All)));
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].contains(ESTIMATE_LABEL), "{f:?}");
+        assert!(f[0].chars().count() <= 80, "{f:?}");
+        let s = strip(&v);
+        for sw in v.switches() {
+            assert!(s.contains(sw.state), "{} in {s}", sw.state);
+        }
+        assert!(s.chars().count() <= 80, "{s}");
     }
 
     #[test]
