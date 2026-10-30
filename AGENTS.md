@@ -1430,6 +1430,21 @@ over half the counter range reads as a device reset (a wrap of nearly the full r
 indistinguishable from a small step backwards). More than one wrap between samples cannot be
 detected; at 1 Hz it would need over 275 GB/s.
 
+### Die 3D traffic fronts (Oct 30 2026, v0.13.21)
+
+Prompt: "the braille view is almost uninterpretable as it stands right now... What else can we
+try to make it feel as dimensional as the other view?" The user named height and a sense of
+purpose to the movement as what was missing, and chose to tie the movement to the direction of
+traffic. This version does the movement only. The face shading, edge and shadow ideas for
+height are not built. `tile_heat_flow` in `die3d/scene.rs` sends a front from the PCIe edge
+(the highest die row) inward for inbound traffic and the other way for outbound, half a period
+apart when both flow. With no traffic it is the old `tile_heat` sweep. The redraw tests had
+measured the old sweep in a window where it sits at the die's edge and is cheapest, so they now
+hold the sweep fixed (`SidewaysSweep`), and `traffic_fronts_cost_little_more_than_the_sideways_sweep`
+prices the fronts over the whole cycle. Fronts 4 tiles wide each side cost 1.7 times the sweep
+and failed that test; 2 tiles each side costs 1.23 times. Data for real DRAM-to-core paths
+needs the per-tile counters (separate plan).
+
 ### Die 3D flags (Oct 30 2026, v0.13.20)
 
 Prompt: "let's avoid overlaying labels directly over the chip displays in the 3d viz. can we

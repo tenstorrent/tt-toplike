@@ -182,39 +182,39 @@ fn without_the_h_switch(lines: &mut [Line<'static>]) {
 /// The hashes of `golden_frames` with the clouds off, taken from the view as
 /// committed before Task 16 (03cd98e5), with this same code.
 const GOLDEN_BRAILLE: [u64; 6] = [
-    0x0947c45232585224,
-    0xcb2fcd560acd0032,
-    0x181a000add5181cf,
-    0xe4e56a8f4c342d0a,
-    0x5e9919585daf1ae4,
-    0xf4dce9130300a83a,
+    0x2986518cca24febf,
+    0xf31bd5353d149293,
+    0x7374dc6b8f6454cb,
+    0x78790cc5c7ea94ce,
+    0x77214920d02c103f,
+    0x5068456b0541e0f0,
 ];
 const GOLDEN_HALFBLOCK: [u64; 6] = [
-    0xd09b75732aecbb1d,
-    0xd8bce6153e0bbe3e,
-    0xbe55d5d16bd8fb5a,
-    0x360c4f8696a0a5d5,
-    0x61f21e853bf68cde,
-    0xfede552780570b4b,
+    0xb3aa9a6ab9e78526,
+    0xa240806610ec0248,
+    0x700aa9051effa7ef,
+    0xe0f796d0499f3332,
+    0x5d0efbebb7fab01a,
+    0xa055648a1a0d290b,
 ];
 
 /// The hashes of `golden_frames` with the clouds on, pinned when the clouds
 /// were added (Task 17), so a later change to how they look or move is seen.
 const GOLDEN_BRAILLE_CLOUDS: [u64; 6] = [
-    0x99ab78d50c4129ac,
-    0x0fe874ede7e6cf9d,
-    0xd4fa0cea345ed5bd,
-    0x8491cdb3c8554e86,
-    0xbbaeb46410e23e72,
-    0xb5df3cace31df86c,
+    0x7c817dbce932f0ad,
+    0x3488c748a56c238c,
+    0x9820ddb83e6fd6dd,
+    0x38f04d1f24351b47,
+    0x92a00c8381ecb5c9,
+    0x7f0036837d468ce8,
 ];
 const GOLDEN_HALFBLOCK_CLOUDS: [u64; 6] = [
-    0xe5695174eea7359c,
-    0x2270fb059e4fe79d,
-    0xa3eac5c653405d75,
-    0x2b5d79a9e9c31f91,
-    0x48f0d83ee28448fc,
-    0xc0f85bf59fd15bb0,
+    0x6206447a29d8e8bb,
+    0x4381544251d63367,
+    0x1599aac9e1ebaf68,
+    0x4f5446a72b4a4d3a,
+    0x05d17f0eb50e8088,
+    0x120b01c1a19af934,
 ];
 
 #[test]
@@ -306,9 +306,9 @@ fn history_frames(braille: bool) -> Vec<(f64, u64, u64)> {
 /// The hashes of `history_frames`, pinned when the panel was added (Task
 /// 18), so a later change to what it shows or where is seen.
 const GOLDEN_BRAILLE_HISTORY: [u64; 3] =
-    [0xe9446004bee8fae1, 0x7e7e36f9ec760f7c, 0x02694e91073ba4b9];
+    [0x1ccd449df8740a96, 0x064720d7a54c737f, 0x8f39da284f9456c7];
 const GOLDEN_HALFBLOCK_HISTORY: [u64; 3] =
-    [0x6ad9d65644dfabcc, 0xf39a9cc25892f405, 0x89c03faa55a7de79];
+    [0x447402ce16e9ba83, 0x06f8c284af13998d, 0xba88c15711169b8f];
 
 #[test]
 fn frames_with_the_history_panel_are_pinned() {
@@ -363,9 +363,9 @@ fn outside_panel_hash(lines: &[Line<'static>], panel_rows: usize) -> u64 {
 /// the panel's sparklines were bucketed and given a minimum scale span, and
 /// unchanged by that work: only the panel's own cells changed.
 const OUTSIDE_PANEL_BRAILLE_HISTORY: [u64; 3] =
-    [0xfbf00f6c65e281ba, 0x7ac6f419f7898f57, 0x8807555bf65d8a29];
+    [0xaf4edbe502809865, 0xfdccf65c0f7c7098, 0x450b797c96ff2a57];
 const OUTSIDE_PANEL_HALFBLOCK_HISTORY: [u64; 3] =
-    [0x1b7d0e58cf607570, 0x7b07225b58e68777, 0x3dc7f71906f9b634];
+    [0x9412952a90c618c5, 0x8f75caf2ad507387, 0xd34539fc515e5e38];
 
 #[test]
 fn the_history_panel_changes_nothing_outside_its_rectangle() {
@@ -1225,6 +1225,79 @@ fn fill_worst_case(v: &mut Die3dView) {
     }
 }
 
+/// Cells changed over two seconds starting at view time `t0`, clouds and
+/// panel off. The fixed window of [`changed_in_two_seconds`] starts at 1 s,
+/// where the sideways sweep is at the die's edge and cheap; this one can be
+/// started anywhere in the wave's cycle.
+fn changed_from(boards: &[&str], t0: f64) -> usize {
+    let b = busy_fake(boards);
+    let mut v = Die3dView::new(150, 42);
+    v.update(&b, 0.0);
+    v.director.set_auto(false);
+    v.handle_key(Die3dKey::ToggleClouds, 0.0);
+    v.handle_key(Die3dKey::ToggleHistory, 0.0);
+    let mut prev: Option<Buffer> = None;
+    let mut n = 0;
+    for i in 0..60 {
+        let buf = to_buffer(v.render(t0 + i as f64 * DT), 150, 42);
+        if let Some(p) = &prev {
+            n += p.diff(&buf).len();
+        }
+        prev = Some(buf);
+    }
+    n
+}
+
+/// While alive, the wave ignores PCIe traffic and is the sideways sweep it was
+/// before it followed traffic. The Task 16 and 17 budgets measure the scene's
+/// redraw work against a baseline taken with that sweep, so they hold it
+/// fixed; [`traffic_fronts_cost_little_more_than_the_sideways_sweep`] prices
+/// the fronts.
+struct SidewaysSweep;
+
+impl SidewaysSweep {
+    fn on() -> SidewaysSweep {
+        scene::NO_FLOW.with(|f| f.set(true));
+        SidewaysSweep
+    }
+}
+
+impl Drop for SidewaysSweep {
+    fn drop(&mut self) {
+        scene::NO_FLOW.with(|f| f.set(false));
+    }
+}
+
+/// Mean cells changed over two seconds, for windows starting every 3 s over
+/// 24 s: the wave's whole cycle. The fixed window of
+/// [`changed_in_two_seconds`] starts where the sideways sweep is at the die's
+/// edge and cheapest (5652 cells; its cycle mean is 9464), so it cannot price
+/// a change of wave.
+fn cycle_mean(boards: &[&str]) -> usize {
+    let counts: Vec<usize> = (0..8)
+        .map(|k| changed_from(boards, 1.0 + k as f64 * 3.0))
+        .collect();
+    counts.iter().sum::<usize>() / counts.len()
+}
+
+#[test]
+fn traffic_fronts_cost_little_more_than_the_sideways_sweep() {
+    // One board with traffic in both directions: two fronts at once, the
+    // costliest case. Measured over the cycle: the fronts repaint 1.23 times
+    // the cells of the sideways sweep (11633 against 9464). Fronts reaching 4 tiles to each side, like the sweep,
+    // would repaint far more, and this bound catches that.
+    let fronts = cycle_mean(&["p150"]);
+    let sweep = {
+        let _guard = SidewaysSweep::on();
+        cycle_mean(&["p150"])
+    };
+    println!("one board, mean over the cycle: fronts {fronts}, sweep {sweep}");
+    assert!(
+        fronts as f64 <= sweep as f64 * 1.3,
+        "fronts {fronts}, sideways sweep {sweep}"
+    );
+}
+
 /// `changed_in_two_seconds` of the view as committed before Task 16
 /// (03cd98e5), computed with this same function.
 const CHANGED_BEFORE_ONE_BOARD: usize = 12464;
@@ -1237,6 +1310,7 @@ fn changed_cells_per_frame_are_at_most_half_of_before() {
     // Measured with the clouds off: the clouds (Task 17) came after it and
     // change cells of their own, so with them on this test would fail by
     // design. Their own budget is the next test.
+    let _sweep = SidewaysSweep::on();
     for (what, boards, before) in [
         ("one board", &["p150"][..], CHANGED_BEFORE_ONE_BOARD),
         ("super 4 x 2", &["p300"; 8][..], CHANGED_BEFORE_SUPER),
@@ -1274,6 +1348,7 @@ fn changed_cells_with_clouds_stay_within_their_budget() {
     // The busy fake moves 2.5 GB/s per chip, so the clouds drift fast: 7.4
     // px/s over one p150, the 8 px/s maximum over eight chips. This is the
     // worst case for them.
+    let _sweep = SidewaysSweep::on();
     for (what, boards, before) in [
         ("one board", &["p150"][..], CHANGED_BEFORE_ONE_BOARD),
         ("super 4 x 2", &["p300"; 8][..], CHANGED_BEFORE_SUPER),
@@ -1301,6 +1376,7 @@ const CHANGED_WITH_PANEL_MAX_SHARE: f64 = 0.70;
 
 #[test]
 fn changed_cells_with_clouds_and_the_panel_stay_within_the_cap() {
+    let _sweep = SidewaysSweep::on();
     for (what, boards, before) in [
         ("one board", &["p150"][..], CHANGED_BEFORE_ONE_BOARD),
         ("super 4 x 2", &["p300"; 8][..], CHANGED_BEFORE_SUPER),

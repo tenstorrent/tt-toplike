@@ -144,6 +144,13 @@ thread_local! {
     pub(super) static SMOOTH_WAVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test hook: ignore PCIe traffic, so the wave is the sideways sweep it
+    /// was before it followed traffic. Per thread, like `SMOOTH_WAVE`.
+    pub(super) static NO_FLOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// The wave's time for view time `t`: `t` rounded down to a whole
 /// [`WAVE_STEPS_PER_SEC`] step. Exact on the step points themselves.
 pub(super) fn wave_time(t: f32) -> f32 {
@@ -167,9 +174,17 @@ pub fn tile_heat(load: f32, tile: &Tile, t: f32) -> f32 {
     }
     let cols = DieLayout::blackhole().cols as f32;
     let t = wave_time(t);
-    let (x, y) = (tile.die.0 as f32, tile.die.1 as f32);
+    let x = tile.die.0 as f32;
     let front = (t * 0.9).rem_euclid(cols + 6.0) - 3.0;
     let wave = (1.0 - (x - front).abs() / 4.0).max(0.0);
+    glow(load, wave, tile, t)
+}
+
+/// Turn a wave strength (0..1 at the tile) into the tile's heat: the shimmer
+/// on top of the wave, scaled by an amplitude that is [`IDLE_WAVE_AMPLITUDE`]
+/// at load 0 and 1.0 at load 1, over a 0.06 floor. A NaN load counts as 0.
+fn glow(load: f32, wave: f32, tile: &Tile, t: f32) -> f32 {
+    let (x, y) = (tile.die.0 as f32, tile.die.1 as f32);
     let shimmer = 0.15 * (0.5 + 0.5 * (t * 5.0 + x * 1.7 + y * 2.3).sin());
     // `clamp` passes NaN through, so NaN is mapped to 0 first.
     let load = if load.is_nan() {
@@ -179,6 +194,63 @@ pub fn tile_heat(load: f32, tile: &Tile, t: f32) -> f32 {
     };
     let amplitude = IDLE_WAVE_AMPLITUDE + (1.0 - IDLE_WAVE_AMPLITUDE) * load;
     ((wave * 0.9 + shimmer * wave) * amplitude + 0.06).min(1.0)
+}
+
+/// Tiles per second the traffic fronts travel along the die: the speed of the
+/// idle sweep. A faster front repaints more cells per wave step (see
+/// [`WAVE_STEPS_PER_SEC`]), and the redraw budget in `perf_tests` is set for
+/// this speed.
+const FLOW_TILES_PER_SEC: f32 = 0.9;
+
+/// How far a front's glow reaches to each side of its centre, in tiles. The
+/// idle sweep reaches 4. Every tile under a front changes height on each wave
+/// step, so this sets how many cells the traffic waves repaint.
+const FRONT_HALF_WIDTH: f32 = 2.0;
+
+/// How strongly one direction of PCIe traffic drives the wave, 0..1. Zero for
+/// a missing, non-finite, negative or idle rate (at or below
+/// [`MIN_PACKET_BPS`]). Above that it runs from 0.3 to 1.0 on the same log
+/// scale as the packet count, reaching 1.0 at [`FULL_PACKET_BPS`].
+fn flow_weight(rate: Option<f64>) -> f32 {
+    match rate {
+        Some(r) if r.is_finite() && r > MIN_PACKET_BPS => {
+            let frac = (r / MIN_PACKET_BPS).log10() / (FULL_PACKET_BPS / MIN_PACKET_BPS).log10();
+            0.3 + 0.7 * frac.clamp(0.0, 1.0) as f32
+        }
+        _ => 0.0,
+    }
+}
+
+/// [`tile_heat`] with the wave tied to the direction of PCIe traffic.
+/// `flow` is the weight of inbound and outbound traffic (see [`flow_weight`]).
+///
+/// The PCIe connector is on the front edge of the die, the highest row.
+/// Inbound traffic sends fronts from that edge toward the back; outbound
+/// traffic sends them from the back toward the connector. With both, the two
+/// fronts run half a period apart and each tile takes the stronger one. A
+/// heavier rate makes its front brighter. With no traffic in either direction
+/// the wave is the sideways sweep of [`tile_heat`]. Like that sweep, this is
+/// invented motion that follows a real measurement, not a measurement of the
+/// tile.
+pub fn tile_heat_flow(load: f32, flow: (f32, f32), tile: &Tile, t: f32) -> f32 {
+    let (inbound, outbound) = flow;
+    if !(inbound > 0.0 || outbound > 0.0) {
+        return tile_heat(load, tile, t);
+    }
+    if tile.kind != TileKind::Tensix {
+        return 0.0;
+    }
+    let rows = DieLayout::blackhole().rows as f32;
+    let t = wave_time(t);
+    // Distance from the connector's edge: 0 on the front row.
+    let dist = rows - 1.0 - tile.die.1 as f32;
+    let period = rows + 6.0;
+    let travelled = t * FLOW_TILES_PER_SEC;
+    let front_in = travelled.rem_euclid(period) - 3.0;
+    let front_out = rows + 3.0 - (travelled + period / 2.0).rem_euclid(period);
+    let near = |front: f32| (1.0 - (dist - front).abs() / FRONT_HALF_WIDTH).max(0.0);
+    let wave = (inbound.max(0.0) * near(front_in)).max(outbound.max(0.0) * near(front_out));
+    glow(load, wave, tile, t)
 }
 
 /// The heat the scene draws for a tile. Measured data wins when the chip has
@@ -192,7 +264,18 @@ pub fn tile_value(chip: &ChipInputs, tile: &Tile, t: f32) -> f32 {
             .get(&tile.noc0)
             .filter(|v| v.iter().all(|x| x.is_finite()))
             .map_or(0.0, |v| v[0].max(v[1])),
-        None if chip.load.is_finite() => tile_heat(chip.load, tile, t),
+        None if chip.load.is_finite() => {
+            #[allow(unused_mut)]
+            let mut flow = (
+                flow_weight(chip.pcie_in_bps),
+                flow_weight(chip.pcie_out_bps),
+            );
+            #[cfg(test)]
+            if NO_FLOW.with(std::cell::Cell::get) {
+                flow = (0.0, 0.0);
+            }
+            tile_heat_flow(chip.load, flow, tile, t)
+        }
         None => 0.0,
     }
 }
@@ -863,6 +946,138 @@ mod tests {
             (c.eth_live, c.gddr_heat, c.enabled_tensix_col),
             (0, None, None)
         );
+    }
+
+    /// The die row where the wave is strongest at time `t`: the mean heat of
+    /// each row's Tensix tiles, so the per-tile shimmer does not pick the row.
+    fn peak_row(load: f32, flow: (f32, f32), t: f32) -> u8 {
+        let tiles = tensix_tiles();
+        let mut best = (f32::MIN, 0u8);
+        for y in 0..DieLayout::blackhole().rows as u8 {
+            let row: Vec<f32> = tiles
+                .iter()
+                .filter(|tile| tile.die.1 == y)
+                .map(|tile| tile_heat_flow(load, flow, tile, t))
+                .collect();
+            if row.is_empty() {
+                continue;
+            }
+            let mean = row.iter().sum::<f32>() / row.len() as f32;
+            if mean > best.0 {
+                best = (mean, y);
+            }
+        }
+        best.1
+    }
+
+    #[test]
+    fn inbound_traffic_sweeps_the_wave_away_from_the_pcie_edge() {
+        // PCIe sits on the front edge (the highest die row). Inbound data
+        // enters there, so the strongest row moves to lower row numbers.
+        let flow = (1.0, 0.0);
+        // The front is 0.9t - 3 tiles from the edge, so at these times it is
+        // 0.6, 2.4, 4.2 and 6.0 tiles in.
+        let rows: Vec<u8> = [4.0, 6.0, 8.0, 10.0]
+            .iter()
+            .map(|&t| peak_row(1.0, flow, t))
+            .collect();
+        assert!(
+            rows.windows(2).all(|w| w[1] < w[0]),
+            "inbound peak rows over time: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn outbound_traffic_sweeps_the_wave_toward_the_pcie_edge() {
+        let flow = (0.0, 1.0);
+        // The outbound front starts half a period (9 tiles of travel) behind,
+        // so at these times it is 6.0, 4.2, 2.4 and 0.6 tiles from the edge.
+        let rows: Vec<u8> = [0.0, 2.0, 4.0, 6.0]
+            .iter()
+            .map(|&t| peak_row(1.0, flow, t))
+            .collect();
+        assert!(
+            rows.windows(2).all(|w| w[1] > w[0]),
+            "outbound peak rows over time: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn without_traffic_the_wave_is_the_sideways_sweep() {
+        for tile in &tensix_tiles() {
+            for step in 0..40 {
+                let t = step as f32 * 0.37;
+                assert_eq!(
+                    tile_heat_flow(0.6, (0.0, 0.0), tile, t),
+                    tile_heat(0.6, tile, t),
+                    "{:?} at {t}",
+                    tile.die
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn both_directions_show_both_fronts() {
+        // Each tile shows the stronger of the two fronts.
+        for tile in &tensix_tiles() {
+            for step in 0..40 {
+                let t = step as f32 * 0.37;
+                let both = tile_heat_flow(0.8, (0.7, 0.9), tile, t);
+                let one = tile_heat_flow(0.8, (0.7, 0.0), tile, t);
+                let other = tile_heat_flow(0.8, (0.0, 0.9), tile, t);
+                assert_eq!(both, one.max(other), "{:?} at {t}", tile.die);
+            }
+        }
+    }
+
+    #[test]
+    fn flow_weight_follows_the_log_of_the_rate() {
+        assert_eq!(flow_weight(None), 0.0);
+        assert_eq!(flow_weight(Some(0.0)), 0.0);
+        assert_eq!(flow_weight(Some(MIN_PACKET_BPS)), 0.0);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -5.0e9] {
+            assert_eq!(flow_weight(Some(bad)), 0.0, "{bad}");
+        }
+        let (low, mid, full) = (
+            flow_weight(Some(1.0e5)),
+            flow_weight(Some(1.0e8)),
+            flow_weight(Some(FULL_PACKET_BPS)),
+        );
+        assert!(0.2 < low && low < mid && mid < full, "{low} {mid} {full}");
+        assert_eq!(full, 1.0);
+        assert_eq!(flow_weight(Some(1.0e15)), 1.0);
+    }
+
+    #[test]
+    fn heavier_traffic_lights_the_wave_brighter() {
+        let tiles = tensix_tiles();
+        let peak = |w: f32| {
+            let mut best = 0.0f32;
+            for step in 0..200 {
+                for tile in &tiles {
+                    best = best.max(tile_heat_flow(1.0, (w, 0.0), tile, step as f32 * 0.05));
+                }
+            }
+            best
+        };
+        assert!(peak(1.0) > peak(0.3) + 0.1, "{} {}", peak(1.0), peak(0.3));
+    }
+
+    #[test]
+    fn the_scene_wave_follows_the_chips_pcie_rates() {
+        let tile = tensix_tiles()[40];
+        let mut quiet = chip(0.7);
+        let mut busy = chip(0.7);
+        busy.pcie_in_bps = Some(2.0e9);
+        quiet.pcie_in_bps = Some(0.0);
+        let differs = (0..60).any(|s| {
+            let t = s as f32 * 0.31;
+            tile_value(&busy, &tile, t) != tile_value(&quiet, &tile, t)
+        });
+        assert!(differs, "inbound traffic never changed the wave");
+        // Zero traffic is the old sweep.
+        assert_eq!(tile_value(&quiet, &tile, 2.0), tile_heat(0.7, &tile, 2.0));
     }
 
     #[test]

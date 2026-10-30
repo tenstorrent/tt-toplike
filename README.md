@@ -486,7 +486,7 @@ Press `3` for the **Die 3D view**. It draws each Blackhole board in isometric pe
 
 **Size.** The view area needs 100 x 30 cells. The status bar takes a row, so the smallest terminal is 100 x 31. The history panel needs 120 x 37. 150 x 42 or larger looks best.
 
-**Limits.** It is an isometric illusion; there is no 3D scene behind it. Only Blackhole chips are drawn; other chips are named in the footer. The view redraws at most 20 times a second at rest and 30 during a cut, and the tile wave steps 12 times a second.
+**Limits.** It is an isometric illusion; there is no 3D scene behind it. Only Blackhole chips are drawn; other chips are named in the footer. The view redraws at most 20 times a second at rest and 30 during a cut, and the tile wave steps 12 times a second. With PCIe counters the wave follows the traffic: inbound data sends fronts from the connector edge toward the back of the die, outbound data sends them toward the connector, and a chip with no traffic keeps a sideways sweep.
 
 ### Gallery — recorded sessions
 

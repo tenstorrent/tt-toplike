@@ -17,6 +17,14 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.13.21
+- The tile wave in the Die 3D view follows the direction of PCIe traffic. The connector is on
+  the front edge of the die. Inbound data sends fronts from that edge toward the back, and
+  outbound data sends them from the back toward the connector. With both, the two fronts run
+  half a period apart. A heavier rate lights its front brighter. A chip with no traffic keeps
+  the old sideways sweep. Over a whole wave cycle the fronts repaint about 1.23 times the
+  cells the sweep did.
+
 ### 0.13.20
 - Chip labels in the Die 3D view are now flags. Each die gets a pin on its rim, a one-cell
   pole, and the name and power (`BH0 44W`) at the far end, on open space outside the board.
