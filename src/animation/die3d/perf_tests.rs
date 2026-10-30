@@ -252,7 +252,10 @@ fn frames_with_clouds_are_pinned() {
 /// update every second for eight seconds while every chip's power and the
 /// PCIe rates change, so the sparklines have shape. Shots at rest after 3 and
 /// 8 s, and 0.25 s into a dissolve, which the panel stays on through.
-fn history_frames(braille: bool) -> Vec<(f64, u64)> {
+///
+/// Each entry is (view time, hash of the whole frame, hash of every cell
+/// outside the panel's rectangle; see [`outside_panel_hash`]).
+fn history_frames(braille: bool) -> Vec<(f64, u64, u64)> {
     let mut b = busy_fake(&["p300"; 4]);
     let mut v = Die3dView::new(150, 42);
     v.update(&b, 0.0);
@@ -280,7 +283,12 @@ fn history_frames(braille: bool) -> Vec<(f64, u64)> {
                 text(&lines).iter().any(|r| r.contains(history::TITLE)),
                 "{at}"
             );
-            out.push((at, frame_hash(&lines)));
+            let panel_rows = v.history.panel_rows().len();
+            out.push((
+                at,
+                frame_hash(&lines),
+                outside_panel_hash(&lines, panel_rows),
+            ));
         };
         if t == 3 || t == 8 {
             shot(&v, now);
@@ -316,6 +324,57 @@ fn frames_with_the_history_panel_are_pinned() {
             "braille={braille}: frames at {:?}; got {hashes:#x?}",
             got.iter().map(|g| g.0).collect::<Vec<_>>()
         );
+    }
+}
+
+/// [`frame_hash`] of every cell outside the history panel's rectangle (the
+/// first `panel_rows` rows from `PANEL_TOP`, `history::PANEL_WIDTH` cells
+/// from `PANEL_LEFT`), with each skipped cell hashed as one marker byte. A
+/// change to what the panel draws leaves it as it was; a change anywhere
+/// else in the frame moves it. Every character the view draws is one cell
+/// wide, so a character's index in its line is its column.
+fn outside_panel_hash(lines: &[Line<'static>], panel_rows: usize) -> u64 {
+    let rows = PANEL_TOP..PANEL_TOP + panel_rows;
+    let cols = PANEL_LEFT..PANEL_LEFT + history::PANEL_WIDTH;
+    let mut h = Fnv::new();
+    for (y, line) in lines.iter().enumerate() {
+        let mut x = 0;
+        for span in &line.spans {
+            let style = line.style.patch(span.style);
+            for ch in span.content.chars() {
+                if rows.contains(&y) && cols.contains(&x) {
+                    h.bytes(&[0xaa]);
+                } else {
+                    h.bytes(&(ch as u32).to_le_bytes());
+                    h.color(style.fg);
+                    h.color(style.bg);
+                    h.bytes(&style.add_modifier.bits().to_le_bytes());
+                    h.bytes(&style.sub_modifier.bits().to_le_bytes());
+                }
+                x += 1;
+            }
+        }
+        h.bytes(&[0xff, 0xfe]);
+    }
+    h.0
+}
+
+/// The [`outside_panel_hash`] of each `history_frames` frame. Pinned before
+/// the panel's sparklines were bucketed and given a minimum scale span, and
+/// unchanged by that work: only the panel's own cells changed.
+const OUTSIDE_PANEL_BRAILLE_HISTORY: [u64; 3] =
+    [0xde6aa9e702081781, 0x7ac6f419f7898f57, 0x5586b7a8ff1bfd29];
+const OUTSIDE_PANEL_HALFBLOCK_HISTORY: [u64; 3] =
+    [0xa710dc1bf904220e, 0x7b07225b58e68777, 0xbcdde91e98f1ca24];
+
+#[test]
+fn the_history_panel_changes_nothing_outside_its_rectangle() {
+    for (braille, want) in [
+        (true, OUTSIDE_PANEL_BRAILLE_HISTORY),
+        (false, OUTSIDE_PANEL_HALFBLOCK_HISTORY),
+    ] {
+        let got: Vec<u64> = history_frames(braille).iter().map(|g| g.2).collect();
+        assert_eq!(got, want, "braille={braille}: got {got:#x?}");
     }
 }
 
@@ -369,7 +428,7 @@ struct Case {
     clouds: bool,
     /// The history panel (`H`): `None` for off with the view updated once,
     /// at 0.0, as before the panel. `Some(on)` for on or off with an update
-    /// every second over a history filled as `fill_alternating` does, so the
+    /// every second over a history filled as `fill_worst_case` does, so the
     /// panel scrolls as it would at worst and the two cases differ only by
     /// the panel. (The updates change the scene too once the load scales
     /// fill, after 4.5 s, which is why the older rows do without them.)
@@ -411,7 +470,7 @@ fn measure_at(case: Case, dt: f64) -> Cost {
         v.handle_key(Die3dKey::ToggleHistory, 0.0);
     }
     if case.history.is_some() {
-        fill_alternating(&mut v);
+        fill_worst_case(&mut v);
     }
     let start = 1.0;
     let mut next_update = start + 0.5;
@@ -506,8 +565,8 @@ fn stage_report(scene: &str, boards: &[&str]) {
         std::hint::black_box(v.footer(now, Some(shown)));
     });
     // The history panel: its rows built and written over a frame's lines,
-    // over a worst-case (alternating) history.
-    fill_alternating(&mut v);
+    // over a worst-case history.
+    fill_worst_case(&mut v);
     let copies: Vec<Vec<Line<'static>>> = (0..n).map(|_| lines.clone()).collect();
     let mut copies = copies.into_iter();
     let panel = mean_ms(n, || {
@@ -594,7 +653,7 @@ fn render_cost_report() {
     }
     println!();
     println!("History panel off and on, braille transparent, clouds on, an update every");
-    println!("second over a worst-case (alternating) history:");
+    println!("second over a worst-case history:");
     println!("| scene | size | panel | mean ms | p95 ms | changed cells/frame | bytes/frame |");
     println!("|---|---|---|---|---|---|---|");
     for size in [(150, 42), (200, 56)] {
@@ -1073,10 +1132,9 @@ fn changed_in_two_seconds(boards: &[&str], clouds: bool) -> usize {
 /// or off (`Some(false)`). With `None` the view sees one update, at 0.0, and
 /// the panel is off.
 ///
-/// With `panel` set, the history is first filled with a minute of samples
-/// that alternate between two levels in every series. Each new sample then
-/// moves every column of every sparkline from one level to the other: the
-/// most cells a scroll can change. The updates read the same telemetry as at
+/// With `panel` set, the history is first filled by [`fill_worst_case`], so
+/// that each new sample moves every cell of every sparkline: the most cells
+/// a scroll can change. The updates read the same telemetry as at
 /// 0.0, so they change nothing in the scene itself (the load scales hold
 /// three samples, short of the five they need to take over).
 ///
@@ -1094,7 +1152,7 @@ fn changed_with_samples(boards: &[&str], clouds: bool, panel: Option<bool>) -> (
         v.handle_key(Die3dKey::ToggleHistory, 0.0);
     }
     if panel.is_some() {
-        fill_alternating(&mut v);
+        fill_worst_case(&mut v);
     }
     let rows = (PANEL_TOP..PANEL_TOP + v.history.panel_rows().len()) as std::ops::Range<usize>;
     let cols = PANEL_LEFT..PANEL_LEFT + history::PANEL_WIDTH;
@@ -1123,13 +1181,24 @@ fn changed_with_samples(boards: &[&str], clouds: bool, panel: Option<bool>) -> (
 }
 
 /// Replace `v`'s history with a minute of samples (at view times -60 to -1)
-/// that alternate between two levels in every series: power, temperature
-/// and both PCIe directions.
-fn fill_alternating(v: &mut Die3dView) {
+/// that move between two levels in every series (power, temperature and
+/// both PCIe directions) in the repeating pattern high, low, low, high, low.
+///
+/// The sparkline buckets 60 samples into 24 cells, two and three samples in
+/// turn (five samples per pair of cells), so a pattern that repeats every
+/// five samples puts the same pair of means in every pair of cells. From
+/// this fill, each of the two scrolls `changed_with_samples` makes changes
+/// the level of every cell: the power means of a pair of cells go from 45
+/// and 40 W to 30 and 50 W, then back to 45 and 40 W. That is every cell
+/// of every sparkline, the most a scroll can change (a search over every
+/// two-level pattern of up to eight samples found none that changes more).
+/// Plain alternation (high, low, ...) changes only the three-sample cells,
+/// half of them, as the two-sample cells always average to the middle.
+fn fill_worst_case(v: &mut Die3dView) {
     let mut chips: Vec<ChipInputs> = v.chips.iter().flatten().cloned().collect();
     v.history = History::new();
     for k in 0..history::SAMPLES {
-        let high = k % 2 == 1;
+        let high = matches!(k % 5, 0 | 3);
         for c in chips.iter_mut() {
             c.power_w = Some(if high { 60.0 } else { 30.0 });
             c.temp_c = Some(if high { 70.0 } else { 50.0 });
@@ -1226,9 +1295,9 @@ fn changed_cells_with_clouds_and_the_panel_stay_within_the_cap() {
             "{what}: {on} cells changed with clouds and the panel, {off} with the panel off ({:+}); in the panel's rectangle {on_panel} on, {off_panel} off; {before} before: {share:.3}",
             on as i64 - off as i64
         );
-        // The panel did scroll, twice: each scroll moves every column of
-        // every sparkline (the history alternates) but the newest, which
-        // can land on either level. The panel can still lower the total, by
+        // The panel did scroll, twice: each scroll moves every cell of every
+        // sparkline (see `fill_worst_case`) but the newest, which holds the
+        // telemetry the update read and can land on any level. The panel can still lower the total, by
         // covering scene and cloud cells that would have changed.
         let series = v_series(boards);
         assert!(

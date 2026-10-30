@@ -3006,9 +3006,11 @@ mod tests {
             tx_bytes_per_sec: 3.1e8,
         });
         let mut v = Die3dView::new(150, 42);
-        // Five samples, one a second: power 40..44 W, 52..56 C.
+        // Five samples, one a second: power 40..50 W, 52..56 C. The ramp
+        // spans 10 W, more than the power sparkline's 5 W minimum span, so
+        // it fills the sparkline's full height.
         for t in 0..5 {
-            b.set_power(0, 40.0 + t as f32);
+            b.set_power(0, 40.0 + 2.5 * t as f32);
             b.telem[0].asic_temperature = Some(52.0 + t as f32);
             v.update(&b, t as f64);
         }
@@ -3021,7 +3023,7 @@ mod tests {
             rows[1].contains("\u{2581}\u{2583}\u{2585}\u{2586}\u{2588}"),
             "{rows:#?}"
         );
-        assert!(rows[1].ends_with("44W  56\u{b0}"), "{rows:#?}");
+        assert!(rows[1].ends_with("50W  56\u{b0}"), "{rows:#?}");
         // The box's PCIe, in then out.
         assert!(rows[2].starts_with("PCIe \u{25bc}"), "{rows:#?}");
         assert!(rows[2].ends_with("1.23 GB/s"), "{rows:#?}");

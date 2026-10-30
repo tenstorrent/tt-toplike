@@ -189,9 +189,19 @@ moves in whole pixels and the colour comes in three flat density bands.
 ## History panel
 
 A small panel at the top left (`history.rs`, `H` switches it) plots the last 60 seconds as
-sparklines: power and temperature of each Blackhole chip (up to six) and the box's PCIe in
-and out summed over the chips drawn, each with its latest value. Every value is a reading,
-one sample per second. It needs a view of 120 x 36 cells (a terminal of 120 x 37) and is
+sparklines: the power of each Blackhole chip (up to six) and the box's PCIe in and out
+summed over the chips drawn. Each row ends with its latest value; a chip's row also shows
+the chip's latest temperature, which is not plotted. Every value is a reading, one sample
+per second.
+
+Each sparkline is 24 cells wide and covers all 60 samples: cell `i` is the mean of samples
+`i * n / 24` to `(i + 1) * n / 24`, two or three samples each, and a cell with no finite
+sample is a gap. A series with fewer than 24 samples draws one cell per sample, padded on
+the left. The scale runs from the lowest cell to the highest, or to the lowest plus a
+minimum span when that is higher: 5 W for power and 10 MB/s for PCIe. A chip that wobbles
+between 13 and 16 W was drawn as full-height bars when each line was scaled to its own
+range; against 5 W it stays in the lower blocks, and a constant reading sits on the lowest
+block. It needs a view of 120 x 36 cells (a terminal of 120 x 37) and is
 hidden below that.
 
 ## Footer and switches

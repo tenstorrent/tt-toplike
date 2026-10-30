@@ -28,7 +28,8 @@ list is a summary and is not kept for every release.
   or a PCIe burst (50 MB/s, re-arm at 10 MB/s). Cuts shuffle chaos, dissolve and spin
   (`X`). The footer names the corner nearest the viewer.
 - Clouds (`W`) drift with PCIe traffic and brighten with chip load. They are decoration.
-  The history panel (`H`) plots the last 60 s of power, temperature and PCIe traffic.
+  The history panel (`H`) plots the last 60 s of each chip's power and the PCIe traffic,
+  and shows each chip's latest temperature.
 - Switches: `B` braille or half-block, `T` transparent or black, `C` auto-cuts, `X`
   transition, `m` scene, `L` labels, `W` clouds, `H` history. `c` cuts by hand.
 - At most 20 redraws a second at rest, 30 in a cut; changed cells per frame cut by more

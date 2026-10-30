@@ -19,8 +19,9 @@ tt-toplike (0.13.19) noble; urgency=medium
     such as BH0 44W.
   * Clouds drift behind the dies (W). They are decoration: their drift follows
     PCIe traffic and their brightness follows chip load. A history panel (H)
-    plots the last 60 seconds of each chip's power and temperature and the
-    box's PCIe traffic as sparklines. Those are measured values.
+    plots the last 60 seconds of each chip's power and the box's PCIe
+    traffic as sparklines, and shows each chip's latest temperature. Those
+    are measured values.
   * T switches between the terminal's own background and pure black, C turns
     automatic cuts off, L turns the chip labels off. The footer's second row
     lists every switch with its state. The legend (l), explain (!) and help (?)

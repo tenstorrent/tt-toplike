@@ -4786,11 +4786,12 @@ const DIE3D_EXPLAIN_TEXT: &[&str] = &[
     "PCIe traffic (slow but never still with none) and their",
     "brightness follows chip load (the busiest chip).",
     "H turns the history panel at the top left on or off.",
-    "It shows the last minute of measured power and",
-    "temperature for each chip (up to six) and the PCIe",
-    "traffic in and out, as sparklines with the latest",
-    "values. These are real readings, one a second, not an",
-    "estimate. It needs a terminal of at least 120 x 37.",
+    "It plots power and PCIe traffic over the last minute of",
+    "measured readings, as sparklines: power for each chip",
+    "(up to six), PCIe traffic in and out. Each chip's row",
+    "ends with its latest power and latest temperature.",
+    "These are real readings, taken once a second. It needs",
+    "a terminal of at least 120 x 37.",
     "The footer names the board corner nearest you, as",
     "'view: front-right' (front is the PCIe edge, right the",
     "GDDR side), and both ends during a cut.",
@@ -4876,6 +4877,27 @@ mod die3d_text_tests {
             }
         }
     }
+
+    #[test]
+    fn the_panel_text_says_power_and_pcie_and_latest_temperature() {
+        // The panel plots power and PCIe traffic; temperature is only the
+        // latest value printed beside each chip's sparkline. Neither text
+        // may say the panel plots temperature.
+        let legend = flat(
+            die3d_legend_lines(Color::Reset, Color::Reset, Color::Reset)
+                .iter()
+                .map(|l| l.spans.iter().skip(1).map(|s| s.content.as_ref()).collect()),
+        );
+        let explain = flat(DIE3D_EXPLAIN_TEXT.iter().map(|s| s.to_string()));
+        for (what, text) in [("legend", &legend), ("explain", &explain)] {
+            for phrase in ["plots power and PCIe traffic", "latest temperature"] {
+                assert!(text.contains(phrase), "{what} lacks {phrase:?}: {text}");
+            }
+            for wrong in ["power, temperature", "power and temperature"] {
+                assert!(!text.contains(wrong), "{what} says {wrong:?}: {text}");
+            }
+        }
+    }
 }
 
 /// Legend for the Die 3D view: what the scene's colours and the footer mean,
@@ -4898,9 +4920,10 @@ fn die3d_legend_lines(
         "  clouds      decoration behind the board: their drift",
         "              follows PCIe traffic, their brightness",
         "              follows chip load",
-        "  history     top left: the last minute of measured",
-        "              power, temperature and PCIe traffic",
-        "              (real readings, one a second)",
+        "  history     top left: plots power and PCIe traffic",
+        "              over the last minute of measured data",
+        "              (real readings, one a second); each chip's",
+        "              row ends with its latest temperature",
         "  footer      scene shown, the board corner nearest you,",
         "              then the switches and their states",
         "",
