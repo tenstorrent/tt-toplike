@@ -176,8 +176,10 @@ impl Clouds {
     /// `intensity` (see [`Clouds::intensity`]). Pixels of clear sky are not
     /// touched. The caller draws the scene over the result.
     ///
-    /// The noise is evaluated once per 2 x 2 block of pixels, at the block's
-    /// centre, and each value covers its block.
+    /// The noise is evaluated once per 2 x 2 block of pixels, at the centre
+    /// of the block's top-left pixel (`2 * bx + 0.5`, `2 * by + 0.5`), and
+    /// each value covers its block: a block takes the value its first pixel
+    /// would have on its own.
     pub fn draw(&self, buf: &mut PixelBuf, offset_px: f64, intensity: f32) {
         let intensity = if intensity.is_nan() {
             INTENSITY_MIN
@@ -287,6 +289,14 @@ impl CloudClock {
     /// restarts from there, so the clouds neither jump back nor wait for the
     /// old time to come round again. A `now` that is not finite, or too large
     /// to count in steps, is ignored.
+    ///
+    /// The restart has a cost when time only jitters: a `now` that steps
+    /// back across a step boundary and then forward again counts that step
+    /// twice, moving the clouds one step's drift (at most 2 px at the 8 px/s
+    /// top speed) further than the time passed. The view's callers read one
+    /// monotonic clock, so this does not happen in the TUI; it is left
+    /// unguarded because guarding it would mean waiting out an old clock
+    /// after a real restart.
     pub fn advance(&mut self, now: f64, speed_px_per_s: f32, intensity: f32) {
         let steps = now * CLOCK_STEPS_PER_SEC;
         if !steps.is_finite() || steps.abs() >= i64::MAX as f64 / 2.0 {

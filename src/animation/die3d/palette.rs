@@ -44,9 +44,10 @@ pub struct Palette {
     /// Packet heads.
     pub white: [u8; 3],
     /// The clouds drifting behind the die (`clouds`): a lilac grey. The
-    /// clouds scale it by density and by chip load (at most 0.75), so the
-    /// brightest cloud is about as bright as an idle tile and the sky never
-    /// competes with the dies.
+    /// clouds scale it by one of three flat density bands (0.6, 0.8 or 1.0
+    /// of it, see `clouds::BANDS`) and by an intensity that follows chip
+    /// load (at most 0.75), so the brightest cloud is about as bright as an
+    /// idle tile and the sky never competes with the dies.
     pub cloud: [u8; 3],
 }
 

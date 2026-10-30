@@ -11,7 +11,8 @@
 //! spin transition, and the scene can switch from every board to the busy
 //! chip's board (`switching`). Clouds drift behind the dies (`clouds`), as
 //! decoration whose drift follows PCIe traffic and whose brightness follows
-//! chip load. This file holds the
+//! chip load. A small panel at the top left (`history`) plots the last
+//! minute of measured power, temperature and PCIe traffic. This file holds the
 //! view that ties them together: it reads the backend in `update`, answers
 //! keys in `handle_key` and draws in `render`.
 //!
@@ -22,6 +23,7 @@ pub mod bh_layout_data;
 pub mod camera;
 pub mod cells;
 pub mod clouds;
+pub mod history;
 pub mod layout;
 pub mod load;
 pub mod palette;
@@ -40,6 +42,7 @@ use crate::backend::TelemetryBackend;
 use crate::models::Architecture;
 use camera::{dissolve_into, scramble, Camera, Director, TransitionKind};
 use clouds::{CloudClock, Clouds};
+use history::History;
 use load::LoadScale;
 use palette::GRAYSKULL;
 use raster::{Iso, PixelBuf};
@@ -96,6 +99,18 @@ const TRANSITION_FRAME_SECS: f64 = 1.0 / 30.0;
 /// slip to the tick after and run at 21 or 16 frames a second instead. With
 /// this allowance a frame is drawn once the interval less 5 ms has passed.
 const FRAME_EARLY_SECS: f64 = 0.005;
+
+/// The history panel is drawn only in a view at least this wide and tall
+/// (columns, rows). Below it the panel would cover too much of the scene.
+const PANEL_MIN_CELLS: (usize, usize) = (120, 36);
+/// The panel's first row: one row below the top of the scene area.
+const PANEL_TOP: usize = 1;
+/// The panel's left margin, in cells.
+const PANEL_LEFT: usize = 2;
+/// The panel's text colour: the palette's `tile` indigo grey lightened until
+/// it reads on both a black and a translucent purple background, and
+/// dimmer than the white chip labels.
+const PANEL_FG: [u8; 3] = [170, 160, 205];
 
 /// One switch of the view, as the footer shows it: the key that flips it and
 /// what it is set to now.
@@ -159,6 +174,8 @@ die3d_keys! {
     ToggleLabels,
     /// `W`: the clouds behind the die on or off.
     ToggleClouds,
+    /// `H`: the history panel on or off.
+    ToggleHistory,
 }
 
 impl Die3dKey {
@@ -173,7 +190,8 @@ impl Die3dKey {
             | Die3dKey::ToggleTransparent
             | Die3dKey::CycleTransition
             | Die3dKey::ToggleLabels
-            | Die3dKey::ToggleClouds => true,
+            | Die3dKey::ToggleClouds
+            | Die3dKey::ToggleHistory => true,
             Die3dKey::NextBoard | Die3dKey::PrevBoard | Die3dKey::CutNow => false,
         }
     }
@@ -192,6 +210,7 @@ pub fn key_to_die3d(c: char) -> Option<Die3dKey> {
         'X' => Some(Die3dKey::CycleTransition),
         'L' => Some(Die3dKey::ToggleLabels),
         'W' => Some(Die3dKey::ToggleClouds),
+        'H' => Some(Die3dKey::ToggleHistory),
         _ => None,
     }
 }
@@ -254,6 +273,11 @@ pub struct Die3dView {
     /// are shown at. Advanced by `update` and by `render` (hence the `Cell`:
     /// `render` takes `&self`).
     cloud_clock: Cell<CloudClock>,
+    /// Draw the history panel (`H`).
+    show_history: bool,
+    /// The last minute of measured power, temperature and PCIe traffic,
+    /// sampled by `update` once a second of view time.
+    history: History,
     /// Drift speed from the last `update`'s PCIe readings, px/s.
     cloud_speed: f32,
     /// Cloud intensity from the last `update`'s chip loads.
@@ -304,16 +328,26 @@ struct LastFrame {
 
 /// What a frame was drawn from besides the time: the view's revision, the
 /// start of the latest cut, whether its transition is running, the scene
-/// shown and the clouds' whole-pixel offset and intensity (`cloud_key`). A
-/// frame is reused only while all five are unchanged, so a key, a cut
-/// starting or ending, a scene switch or a cloud step shows in the very next
-/// frame. A cloud clock step that leaves the offset and intensity as they
-/// were forces nothing.
-type FrameKey = (u64, Option<f64>, bool, Scene, Option<(i64, u32)>);
+/// shown, the clouds' whole-pixel offset and intensity (`cloud_key`) and the
+/// history panel's sample count while the panel is shown (`history_key`). A
+/// frame is reused only while all six are unchanged, so a key, a cut
+/// starting or ending, a scene switch, a cloud step or a new sample on the
+/// panel shows in the very next frame. A cloud clock step that leaves the
+/// offset and intensity as they were forces nothing, and neither does a
+/// sample taken while the panel is hidden.
+type FrameKey = (
+    u64,
+    Option<f64>,
+    bool,
+    Scene,
+    Option<(i64, u32)>,
+    Option<u64>,
+);
 
 impl Die3dView {
     /// A view for a terminal of `cols` x `rows` cells, in braille, showing
-    /// every board, with automatic cuts and chip labels on. It shows nothing until `update`.
+    /// every board, with automatic cuts, chip labels, clouds and the history
+    /// panel on. It shows nothing until `update`.
     pub fn new(cols: usize, rows: usize) -> Die3dView {
         Die3dView::with_reserved_rows(cols, rows, 0)
     }
@@ -331,6 +365,8 @@ impl Die3dView {
             transparent: true,
             show_labels: true,
             show_clouds: true,
+            show_history: true,
+            history: History::new(),
             clouds: Clouds::new(CLOUD_SEED),
             cloud_clock: Cell::new(CloudClock::default()),
             cloud_speed: Clouds::drift_px_per_s(None),
@@ -382,9 +418,17 @@ impl Die3dView {
         }
         self.calibrate_loads(now);
         self.read_cloud_drivers();
+        // One sample a second for the history panel, taken whether or not the
+        // panel is shown, so turning it on shows the last minute at once.
+        // The chips are copied only when a sample is due.
+        if self.history.due(now) {
+            let chips: Vec<ChipInputs> = self.chips.iter().flatten().cloned().collect();
+            self.history.sample(now, &chips);
+        }
         // A board, chip or device that came or went shows in the next frame.
         // Readings that only change (power, PCIe rates) wait for the next
-        // frame that is due anyway.
+        // frame that is due anyway, except on the history panel, whose new
+        // sample `render` shows at once (`history_key`).
         if self.layout_signature() != before {
             self.revision += 1;
         }
@@ -474,6 +518,12 @@ impl Die3dView {
             .then(|| (clock.offset_px() as i64, clock.intensity().to_bits()))
     }
 
+    /// What makes one frame's history panel differ from another's: the
+    /// samples taken, or nothing while the panel is not shown.
+    fn history_key(&self) -> Option<u64> {
+        self.panel_shown().then(|| self.history.revision())
+    }
+
     /// Act on a key. A scene chosen here (`[`, `]`, `m`) is the user's: the
     /// view will not switch back from it on its own.
     pub fn handle_key(&mut self, key: Die3dKey, now: f64) {
@@ -521,6 +571,7 @@ impl Die3dView {
             Die3dKey::CycleTransition => self.director.cycle_transition_mode(),
             Die3dKey::ToggleLabels => self.show_labels = !self.show_labels,
             Die3dKey::ToggleClouds => self.show_clouds = !self.show_clouds,
+            Die3dKey::ToggleHistory => self.show_history = !self.show_history,
         }
     }
 
@@ -546,6 +597,7 @@ impl Die3dView {
             in_transition,
             self.switcher.scene_at(now),
             self.cloud_key(),
+            self.history_key(),
         );
         let interval = if in_transition {
             TRANSITION_FRAME_SECS
@@ -595,23 +647,59 @@ impl Die3dView {
         };
         lines.resize(scene_rows, Line::default());
         lines.extend(self.footer(now, frame.as_ref().map(|f| f.0)));
-        // The labels go over the converted cells, placed with the projection
-        // the frame was drawn with. While a transition runs the picture is
-        // noise, a mix of two frames or turning, so no label could stay on
-        // its die: they wait for it to end.
-        if let Some((_, Some(placed))) = &frame {
-            if self.show_labels && self.director.progress(now).is_none() {
-                let anchors = self.label_anchors(placed, scene_rows);
-                draw_labels(
-                    &mut lines,
-                    scene_rows,
-                    self.cols,
-                    &anchors,
-                    self.label_style(),
-                );
-            }
+        // The history panel and the labels go over the converted cells, the
+        // labels placed with the projection the frame was drawn with. While
+        // a transition runs the picture is noise, a mix of two frames or
+        // turning, so no label could stay on its die: they wait for it to
+        // end. The panel stays.
+        if let Some((_, placed)) = &frame {
+            let anchors = match placed {
+                Some(placed) if self.show_labels && self.director.progress(now).is_none() => {
+                    self.label_anchors(placed, scene_rows)
+                }
+                _ => Vec::new(),
+            };
+            self.overlay(&mut lines, scene_rows, &anchors);
         }
         lines
+    }
+
+    /// Write the text that goes over a drawn scene: the history panel, then
+    /// the chip labels at `anchors`. The labels go last so that where one
+    /// lands on the panel, the label is what shows: it names the die under
+    /// it, and the panel's rows are still readable around it.
+    ///
+    /// The panel does not depend on the picture, so it is drawn during a
+    /// transition too, when `anchors` is empty.
+    fn overlay(
+        &self,
+        lines: &mut [Line<'static>],
+        scene_rows: usize,
+        anchors: &[(usize, usize, String)],
+    ) {
+        if self.panel_shown() {
+            draw_panel(
+                lines,
+                scene_rows,
+                self.cols,
+                &self.history.panel_rows(),
+                self.panel_style(),
+            );
+        }
+        draw_labels(lines, scene_rows, self.cols, anchors, self.label_style());
+    }
+
+    /// Whether the history panel is drawn: switched on (`H`) and the view at
+    /// least [`PANEL_MIN_CELLS`].
+    fn panel_shown(&self) -> bool {
+        self.show_history && self.cols >= PANEL_MIN_CELLS.0 && self.rows >= PANEL_MIN_CELLS.1
+    }
+
+    /// The panel's text style: [`PANEL_FG`], not bold, on the same background
+    /// as the labels (the terminal's own in transparent mode, black
+    /// otherwise).
+    fn panel_style(&self) -> Style {
+        Style::default().fg(rgb(PANEL_FG)).bg(self.background())
     }
 
     /// The "terminal too small" line, in terminal cells: the view's own
@@ -932,15 +1020,20 @@ impl Die3dView {
     /// White bold text. The background stays the terminal's own in
     /// transparent mode and is the black fill otherwise, as around the dies.
     fn label_style(&self) -> Style {
-        let bg = if self.transparent {
+        Style::default()
+            .fg(rgb(GRAYSKULL.white))
+            .bg(self.background())
+            .add_modifier(Modifier::BOLD)
+    }
+
+    /// The background of text written over the scene: `Reset` (the
+    /// terminal's own) in transparent mode, the black fill otherwise.
+    fn background(&self) -> Color {
+        if self.transparent {
             Color::Reset
         } else {
             rgb(OPAQUE_BG)
-        };
-        Style::default()
-            .fg(rgb(GRAYSKULL.white))
-            .bg(bg)
-            .add_modifier(Modifier::BOLD)
+        }
     }
 
     /// The switches, in the order the footer shows them, with the scene as
@@ -1001,13 +1094,19 @@ impl Die3dView {
                 label: "clouds",
                 state: if self.show_clouds { "on" } else { "off" },
             },
+            Switch {
+                key: 'H',
+                label: "history",
+                state: if self.show_history { "on" } else { "off" },
+            },
         ]
     }
 
     /// The footer's second row after its bar, at most `width` characters.
     /// From most to least detailed, the first that fits wins:
     ///
-    /// 1. `B braille · T transparent · C auto-cuts on · X transition shuffle · m all boards · L labels on · W clouds on · [ ] board · c cut · 3 leave`
+    /// 1. `B braille · T transparent · C auto-cuts on · X transition shuffle · m all boards · L labels on · W clouds on · H history on · [ ] board · c cut · 3 leave`
+    ///    (153 characters: it needs a view of 156 columns)
     /// 2. the same without the action keys
     /// 3. `<key> <state>` for each switch (`C on`)
     /// 4. the state words alone
@@ -1100,31 +1199,64 @@ fn draw_labels(
         let Some(line) = lines.get_mut(*row) else {
             continue;
         };
-        // One (character, style) per cell; every cell is one character.
-        let mut cells: Vec<(char, Style)> = line
-            .spans
-            .iter()
-            .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
-            .collect();
         let start = *col as i64 - label.chars().count() as i64 / 2;
-        for (i, ch) in label.chars().enumerate() {
-            let at = start + i as i64;
-            if (0..cols as i64).contains(&at) {
-                if let Some(cell) = cells.get_mut(at as usize) {
-                    *cell = (ch, style);
-                }
-            }
-        }
-        // Back to spans, one per run of a style.
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        for (ch, st) in cells {
-            match spans.last_mut() {
-                Some(last) if last.style == st => last.content.to_mut().push(ch),
-                _ => spans.push(Span::styled(ch.to_string(), st)),
-            }
-        }
-        line.spans = spans;
+        write_over(line, start, label, cols, style);
     }
+}
+
+/// Write the history panel's `rows` over `lines`, the first at row
+/// [`PANEL_TOP`] and every one from column [`PANEL_LEFT`], in `style`.
+///
+/// As with the labels, only the first `scene_rows` lines are written, so the
+/// footer rows are never touched, and each row is clipped to columns
+/// `0..cols` and to the line's own cells.
+fn draw_panel(
+    lines: &mut [Line<'static>],
+    scene_rows: usize,
+    cols: usize,
+    rows: &[String],
+    style: Style,
+) {
+    for (i, text) in rows.iter().enumerate() {
+        let row = PANEL_TOP + i;
+        if row >= scene_rows {
+            break;
+        }
+        if let Some(line) = lines.get_mut(row) {
+            write_over(line, PANEL_LEFT as i64, text, cols, style);
+        }
+    }
+}
+
+/// Write `text` over `line` from cell `start` (which may be negative: the
+/// characters left of cell 0 are dropped), in `style`. Each cell written
+/// takes the text's character and the style. Only cells in `0..cols` that
+/// the line already has are written, so the line never grows. Works per
+/// character, never per byte: a braille cell is three bytes.
+fn write_over(line: &mut Line<'static>, start: i64, text: &str, cols: usize, style: Style) {
+    // One (character, style) per cell; every cell is one character.
+    let mut cells: Vec<(char, Style)> = line
+        .spans
+        .iter()
+        .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
+        .collect();
+    for (i, ch) in text.chars().enumerate() {
+        let at = start + i as i64;
+        if (0..cols as i64).contains(&at) {
+            if let Some(cell) = cells.get_mut(at as usize) {
+                *cell = (ch, style);
+            }
+        }
+    }
+    // Back to spans, one per run of a style.
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (ch, st) in cells {
+        match spans.last_mut() {
+            Some(last) if last.style == st => last.content.to_mut().push(ch),
+            _ => spans.push(Span::styled(ch.to_string(), st)),
+        }
+    }
+    line.spans = spans;
 }
 
 /// `text` cut to `width` characters, with an ellipsis where it was cut.
@@ -1529,7 +1661,9 @@ mod tests {
     #[test]
     fn the_footer_names_the_mode_and_auto_cuts() {
         let b = two_boards();
-        let mut v = Die3dView::new(150, 42);
+        // 160 columns: since `H` joined the switches, the action keys fit
+        // after them only from 156 columns.
+        let mut v = Die3dView::new(160, 42);
         v.update(&b, 0.0);
         let f = footer(&v.render(0.0));
         for want in [
@@ -1551,7 +1685,7 @@ mod tests {
             "{f}"
         );
         // Half-block rows are one cell per pixel column.
-        assert_eq!(text(&lines)[10].chars().count(), 150);
+        assert_eq!(text(&lines)[10].chars().count(), 160);
     }
 
     #[test]
@@ -1561,9 +1695,10 @@ mod tests {
         let b = Fake::boards(&["p150"], Some(TDP));
         let mut v = Die3dView::new(150, 42);
         v.update(&b, 0.0);
-        // Labels off: they are drawn over the cells after the transition,
-        // and the bare scene has none.
+        // Labels and the history panel off: they are drawn over the cells,
+        // and the bare scene has neither.
         v.handle_key(Die3dKey::ToggleLabels, 0.0);
+        v.handle_key(Die3dKey::ToggleHistory, 0.0);
         v.director.set_transition_mode(TransitionMode::Chaos);
         v.handle_key(Die3dKey::CutNow, 10.0);
         let mid = v.director.swapped_at().unwrap();
@@ -1745,7 +1880,9 @@ mod tests {
     #[test]
     fn the_footer_names_every_switch_and_its_state() {
         let b = two_boards();
-        let mut v = Die3dView::new(150, 42);
+        // Wide enough for the action keys after every switch (156 columns
+        // since `H`).
+        let mut v = Die3dView::new(160, 42);
         v.update(&b, 0.0);
         let f = footer(&v.render(0.0));
         for s in v.switches() {
@@ -1785,7 +1922,7 @@ mod tests {
 
     #[test]
     fn action_keys_are_dropped_before_switch_states() {
-        let v = wide_label_view(150);
+        let v = wide_label_view(160);
         let full = strip(&v);
         assert!(full.contains("c cut"), "{full}");
         // Just wide enough for the switches and nothing after them.
@@ -1806,7 +1943,7 @@ mod tests {
         v.update(&b, 0.0);
         let state =
             |v: &Die3dView, k: char| v.switches().into_iter().find(|s| s.key == k).unwrap().state;
-        let before: Vec<_> = "BTCXmL".chars().map(|k| state(&v, k)).collect();
+        let before: Vec<_> = "BTCXmLWH".chars().map(|k| state(&v, k)).collect();
         assert_eq!(
             before,
             [
@@ -1815,6 +1952,8 @@ mod tests {
                 "on",
                 "shuffle",
                 "all boards",
+                "on",
+                "on",
                 "on"
             ]
         );
@@ -1825,13 +1964,24 @@ mod tests {
             Die3dKey::CycleTransition,
             Die3dKey::ToggleScene,
             Die3dKey::ToggleLabels,
+            Die3dKey::ToggleClouds,
+            Die3dKey::ToggleHistory,
         ] {
             v.handle_key(k, 0.0);
         }
-        let after: Vec<_> = "BTCXmL".chars().map(|k| state(&v, k)).collect();
+        let after: Vec<_> = "BTCXmLWH".chars().map(|k| state(&v, k)).collect();
         assert_eq!(
             after,
-            ["half-block", "opaque", "off", "chaos", "board", "off"]
+            [
+                "half-block",
+                "opaque",
+                "off",
+                "chaos",
+                "board",
+                "off",
+                "off",
+                "off"
+            ]
         );
     }
 
@@ -1839,7 +1989,9 @@ mod tests {
     fn the_switch_table_still_covers_every_toggle_key() {
         let v = Die3dView::new(150, 42);
         let keys: Vec<char> = v.switches().iter().map(|s| s.key).collect();
-        assert!(keys.contains(&'X') && keys.contains(&'L'), "{keys:?}");
+        for k in ['X', 'L', 'W', 'H'] {
+            assert!(keys.contains(&k), "{k}: {keys:?}");
+        }
         let mut toggling = 0;
         for &k in Die3dKey::ALL {
             if !k.toggles() {
@@ -1876,8 +2028,8 @@ mod tests {
 
     #[test]
     fn the_switch_strip_falls_back_to_keyed_then_bare_then_a_cut() {
-        // Lengths with the default switches: keyed is 73 characters and bare
-        // 59, so a 65-column terminal (62 after the bar) lands on bare.
+        // Lengths with the default switches: keyed is 80 characters and bare
+        // 64, so a 70-column terminal (67 after the bar) lands on bare.
         let v = wide_label_view(150);
         let sw = v.switches();
         let keyed = sw
@@ -1886,7 +2038,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(SEP);
         let bare = sw.iter().map(|s| s.state).collect::<Vec<_>>().join(SEP);
-        assert_eq!((keyed.chars().count(), bare.chars().count()), (73, 59));
+        assert_eq!((keyed.chars().count(), bare.chars().count()), (80, 64));
         let at = |cols: usize| {
             let v = wide_label_view(cols);
             let s = strip(&v);
@@ -1894,14 +2046,14 @@ mod tests {
             s.trim_start_matches("\u{255a}\u{2550} ").to_string()
         };
         // Exactly wide enough for the keyed form.
-        assert_eq!(at(73 + BAR_WIDTH), keyed);
-        // About 65 columns: the keyed form no longer fits, the bare one does.
-        assert_eq!(at(65), bare);
-        assert_eq!(at(59 + BAR_WIDTH), bare);
+        assert_eq!(at(80 + BAR_WIDTH), keyed);
+        // About 70 columns: the keyed form no longer fits, the bare one does.
+        assert_eq!(at(70), bare);
+        assert_eq!(at(64 + BAR_WIDTH), bare);
         // One column short of bare: the last resort cuts at a character and
         // marks the cut with an ellipsis.
-        let cut = at(58 + BAR_WIDTH);
-        assert_eq!(cut.chars().count(), 58);
+        let cut = at(63 + BAR_WIDTH);
+        assert_eq!(cut.chars().count(), 63);
         assert!(cut.ends_with('\u{2026}'), "{cut}");
         assert!(bare.starts_with(cut.trim_end_matches('\u{2026}')), "{cut}");
     }
@@ -2328,6 +2480,9 @@ mod tests {
         for braille in [true, false] {
             let mut v = Die3dView::new(150, 42);
             v.update(&b, 0.0);
+            // The history panel lists the chip names too: off, so only the
+            // labels are found.
+            v.handle_key(Die3dKey::ToggleHistory, 0.0);
             if !braille {
                 v.handle_key(Die3dKey::ToggleBraille, 0.0);
             }
@@ -2350,6 +2505,7 @@ mod tests {
         b.telem[0].power = None;
         let mut v = Die3dView::new(150, 42);
         v.update(&b, 0.0);
+        v.handle_key(Die3dKey::ToggleHistory, 0.0);
         let found = labels_in(&v.render(0.0), 40);
         assert_eq!(
             found.iter().map(|f| f.2.as_str()).collect::<Vec<_>>(),
@@ -2365,7 +2521,10 @@ mod tests {
             TransitionMode::Dissolve,
             TransitionMode::Spin,
         ] {
-            let v = cut_view(&b, mode, 10.0);
+            let mut v = cut_view(&b, mode, 10.0);
+            // The history panel stays through a transition and lists the
+            // chip names: off, so only the labels are found.
+            v.handle_key(Die3dKey::ToggleHistory, 0.0);
             assert!(!labels_in(&v.render(9.9), 40).is_empty(), "{mode:?} before");
             let secs = v.director.transition_kind().unwrap().secs();
             for dt in [0.0, 0.2, secs / 2.0, secs - 0.01] {
@@ -2470,6 +2629,8 @@ mod tests {
         let b = Fake::boards(&["p150"], Some(TDP));
         let mut v = Die3dView::new(150, 42);
         v.update(&b, 0.0);
+        // The history panel's rows name the chip too, in its own style.
+        v.handle_key(Die3dKey::ToggleHistory, 0.0);
         let label_span = |lines: &[Line<'static>]| {
             lines[..40]
                 .iter()
@@ -2496,6 +2657,9 @@ mod tests {
         let b = two_boards();
         let mut v = Die3dView::new(150, 42);
         v.update(&b, 0.0);
+        // The history panel lists the chip names too: off, so only the
+        // labels are found.
+        v.handle_key(Die3dKey::ToggleHistory, 0.0);
         let lines = v.render(0.0);
         assert!(footer(&lines).contains("L labels on"), "{}", footer(&lines));
         assert!(!labels_in(&lines, 40).is_empty());
@@ -2802,6 +2966,359 @@ mod tests {
             drawn += (drawn_at(&v) != last) as usize;
             last = drawn_at(&v);
         }
-        assert!((19..=21).contains(&drawn), "{drawn} frames drawn in a second");
+        assert!(
+            (19..=21).contains(&drawn),
+            "{drawn} frames drawn in a second"
+        );
+    }
+
+    /// The text of the history panel's rows in `lines`: `n` rows from
+    /// [`PANEL_TOP`], each the [`history::PANEL_WIDTH`] cells from column
+    /// [`PANEL_LEFT`], trailing spaces cut.
+    fn panel_text(lines: &[Line<'static>], n: usize) -> Vec<String> {
+        text(lines)
+            .iter()
+            .skip(PANEL_TOP)
+            .take(n)
+            .map(|row| {
+                let cells: String = row
+                    .chars()
+                    .skip(PANEL_LEFT)
+                    .take(history::PANEL_WIDTH)
+                    .collect();
+                cells.trim_end().to_string()
+            })
+            .collect()
+    }
+
+    /// Whether the panel's title is anywhere in `lines`.
+    fn has_panel(lines: &[Line<'static>]) -> bool {
+        text(lines).iter().any(|row| row.contains(history::TITLE))
+    }
+
+    #[test]
+    fn the_panel_lists_each_blackhole_chip_with_its_latest_values() {
+        // A p150 (drawn) and an n150 (not drawn). The PCIe rates are per
+        // device in the fake; the box's total counts the drawn chip only.
+        let mut b = Fake::boards(&["p150", "n150"], Some(TDP));
+        b.pcie = Some(PcieBandwidth {
+            rx_bytes_per_sec: 1.23e9,
+            tx_bytes_per_sec: 3.1e8,
+        });
+        let mut v = Die3dView::new(150, 42);
+        // Five samples, one a second: power 40..44 W, 52..56 C.
+        for t in 0..5 {
+            b.set_power(0, 40.0 + t as f32);
+            b.telem[0].asic_temperature = Some(52.0 + t as f32);
+            v.update(&b, t as f64);
+        }
+        let rows = panel_text(&v.render(4.0), 5);
+        assert_eq!(rows[0], history::TITLE, "{rows:#?}");
+        // The chip: its name, the rising power as a sparkline whose newest
+        // sample is the highest block, then the latest watts and degrees.
+        assert!(rows[1].starts_with("BH0"), "{rows:#?}");
+        assert!(
+            rows[1].contains("\u{2581}\u{2583}\u{2585}\u{2586}\u{2588}"),
+            "{rows:#?}"
+        );
+        assert!(rows[1].ends_with("44W  56\u{b0}"), "{rows:#?}");
+        // The box's PCIe, in then out.
+        assert!(rows[2].starts_with("PCIe \u{25bc}"), "{rows:#?}");
+        assert!(rows[2].ends_with("1.23 GB/s"), "{rows:#?}");
+        assert!(rows[3].trim_start().starts_with('\u{25b2}'), "{rows:#?}");
+        assert!(rows[3].ends_with("310 MB/s"), "{rows:#?}");
+        // Nothing for the chip the view does not draw, and nothing more.
+        assert!(rows.iter().all(|r| !r.contains("WH")), "{rows:#?}");
+        assert_eq!(rows[4], "", "{rows:#?}");
+        // At most six chips: eight p300 chips list BH0 to BH5.
+        let b = Fake::boards(&["p300"; 8], Some(TDP));
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        let rows = v.history.panel_rows();
+        assert_eq!(rows.len(), 1 + 6 + 2, "{rows:#?}");
+        for (i, row) in rows[1..7].iter().enumerate() {
+            assert!(row.starts_with(&format!("BH{i} ")), "{rows:#?}");
+        }
+    }
+
+    #[test]
+    fn the_panel_is_hidden_below_120_columns_or_36_rows_and_when_off() {
+        let b = Fake::boards(&["p150"], Some(TDP));
+        for (c, r, shown) in [
+            (100, 30, false),
+            (119, 42, false),
+            (150, 35, false),
+            (120, 36, true),
+            (150, 42, true),
+        ] {
+            let mut v = Die3dView::new(c, r);
+            v.update(&b, 0.0);
+            assert_eq!(has_panel(&v.render(0.0)), shown, "{c} x {r}");
+            if shown {
+                v.handle_key(Die3dKey::ToggleHistory, 0.0);
+                assert!(!has_panel(&v.render(0.0)), "{c} x {r} with H off");
+            }
+        }
+    }
+
+    #[test]
+    fn the_panel_never_touches_the_footer_rows_or_leaves_the_scene_area() {
+        // Through the view: two views alike but for `H`, rendered at the same
+        // times, at rest and through each kind of cut. Every cell that
+        // differs is in the panel's rectangle on a scene row, or in the
+        // footer's switch row, which names the H state.
+        let mut one = Fake::boards(&["p300"; 2], Some(TDP));
+        let mut four = Fake::boards(&["p300"; 8], Some(TDP));
+        for b in [&mut one, &mut four] {
+            b.pcie = Some(PcieBandwidth {
+                rx_bytes_per_sec: 2.0e7,
+                tx_bytes_per_sec: 1.3e7,
+            });
+        }
+        let cells = |lines: &[Line<'static>]| -> Vec<Vec<(char, Style)>> {
+            lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
+                        .collect()
+                })
+                .collect()
+        };
+        for (c, r) in [(120, 36), (121, 37), (150, 42), (220, 60)] {
+            for b in [&one, &four] {
+                for braille in [true, false] {
+                    let mut views: Vec<Die3dView> = [true, false]
+                        .into_iter()
+                        .map(|on| {
+                            let mut v = Die3dView::new(c, r);
+                            v.update(b, 0.0);
+                            v.update(b, 1.0);
+                            v.director.set_auto(false);
+                            if !braille {
+                                v.handle_key(Die3dKey::ToggleBraille, 1.0);
+                            }
+                            if !on {
+                                v.handle_key(Die3dKey::ToggleHistory, 1.0);
+                            }
+                            v
+                        })
+                        .collect();
+                    let panel = views[0].history.panel_rows();
+                    let width = panel.iter().map(|p| p.chars().count()).max().unwrap();
+                    let scene_rows = r - FOOTER_ROWS;
+                    let mut in_panel = 0;
+                    for (k, mode) in [
+                        TransitionMode::Chaos,
+                        TransitionMode::Dissolve,
+                        TransitionMode::Spin,
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        // At rest half a second before the cut, then 0.3 s
+                        // into it.
+                        let cut = 2.0 + 3.0 * k as f64;
+                        let mut times = vec![cut - 0.5];
+                        times.push(cut + 0.3);
+                        for (i, now) in times.into_iter().enumerate() {
+                            if i == 1 {
+                                for v in views.iter_mut() {
+                                    v.director.set_transition_mode(mode);
+                                    v.handle_key(Die3dKey::CutNow, cut);
+                                }
+                                assert!(views[0].director.progress(now).is_some());
+                            }
+                            let frames: Vec<_> = views.iter().map(|v| v.render(now)).collect();
+                            let (on, off) = (cells(&frames[0]), cells(&frames[1]));
+                            assert_eq!(on.len(), r);
+                            for (row, (a, z)) in on.iter().zip(&off).enumerate() {
+                                // Scene rows are the view's width; the
+                                // footer rows are their text, never wider.
+                                for n in [a.len(), z.len()] {
+                                    let ok = if row < scene_rows { n == c } else { n <= c };
+                                    assert!(ok, "{c} x {r} row {row} at {now}: {n}");
+                                }
+                                for (col, (x, y)) in a.iter().zip(z).enumerate() {
+                                    if x == y {
+                                        continue;
+                                    }
+                                    let inside = (PANEL_TOP..PANEL_TOP + panel.len())
+                                        .contains(&row)
+                                        && (PANEL_LEFT..PANEL_LEFT + width).contains(&col)
+                                        && row < scene_rows;
+                                    assert!(
+                                        inside || row == r - 1,
+                                        "{c} x {r} at {now}: cell {row},{col} changed by the panel"
+                                    );
+                                    in_panel += inside as usize;
+                                }
+                            }
+                            // The footer's status row is the same with or
+                            // without the panel; its switch row starts with
+                            // the bar either way.
+                            let (t_on, t_off) = (text(&frames[0]), text(&frames[1]));
+                            assert_eq!(t_on[scene_rows], t_off[scene_rows]);
+                            assert!(t_on[r - 1].starts_with("\u{255a}\u{2550} "));
+                        }
+                    }
+                    assert!(in_panel > 0, "{c} x {r}: the panel drew nothing");
+                }
+            }
+        }
+
+        // At the layer that writes: a panel taller than the scene rows and
+        // wider than the view.
+        let width = 20;
+        let scene_rows = 3;
+        let mut lines: Vec<Line<'static>> = (0..scene_rows + FOOTER_ROWS)
+            .map(|i| Line::from(Span::raw(format!("{i}").repeat(width))))
+            .collect();
+        let before = text(&lines);
+        let rows: Vec<String> = (0..9)
+            .map(|i| format!("panel row {i} \u{2581}\u{2588}").repeat(3))
+            .collect();
+        draw_panel(&mut lines, scene_rows, width, &rows, Style::default());
+        let after = text(&lines);
+        assert_eq!(after[scene_rows..], before[scene_rows..], "footer rows");
+        assert_eq!(after[0], before[0], "the row above the panel");
+        for row in &after {
+            assert_eq!(row.chars().count(), width, "{row}");
+        }
+        // Clipped at the right edge, after the left margin.
+        let want: String = rows[0].chars().take(width - PANEL_LEFT).collect();
+        assert_eq!(after[1], format!("11{want}"));
+    }
+
+    #[test]
+    fn labels_win_over_the_panel_where_they_overlap() {
+        let b = Fake::boards(&["p150"], Some(TDP));
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        let scene_rows = 40;
+        let mut lines: Vec<Line<'static>> = (0..42)
+            .map(|_| Line::from(Span::raw(" ".repeat(150))))
+            .collect();
+        // A label centred four cells into the title row: it covers title
+        // characters 1 to 7 ("istory ").
+        let label = "BH9 99W";
+        let anchor = (PANEL_LEFT + 4, PANEL_TOP, label.to_string());
+        v.overlay(&mut lines, scene_rows, &[anchor]);
+        let row: Vec<(char, Style)> = lines[PANEL_TOP]
+            .spans
+            .iter()
+            .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
+            .collect();
+        let shown: String = row[PANEL_LEFT..PANEL_LEFT + 12]
+            .iter()
+            .map(|c| c.0)
+            .collect();
+        assert_eq!(shown, "hBH9 99W60 s");
+        for (i, (_, style)) in row[PANEL_LEFT + 1..PANEL_LEFT + 8].iter().enumerate() {
+            assert_eq!(style.fg, Some(rgb(GRAYSKULL.white)), "label cell {i}");
+        }
+        for at in [PANEL_LEFT, PANEL_LEFT + 8] {
+            assert_eq!(row[at].1.fg, Some(rgb(PANEL_FG)), "panel cell {at}");
+        }
+    }
+
+    #[test]
+    fn the_panel_background_is_reset_when_transparent_and_black_when_opaque() {
+        let mut b = Fake::boards(&["p150"], Some(TDP));
+        b.pcie = Some(PcieBandwidth {
+            rx_bytes_per_sec: 2.3e7,
+            tx_bytes_per_sec: 1.3e7,
+        });
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        v.update(&b, 1.0);
+        let rows = v.history.panel_rows();
+        for (transparent, bg) in [(true, Color::Reset), (false, rgb(OPAQUE_BG))] {
+            if !transparent {
+                v.handle_key(Die3dKey::ToggleTransparent, 1.0);
+            }
+            let lines = v.render(1.0);
+            for (i, want) in rows.iter().enumerate() {
+                let row: Vec<(char, Style)> = lines[PANEL_TOP + i]
+                    .spans
+                    .iter()
+                    .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
+                    .collect();
+                for (j, ch) in want.chars().enumerate() {
+                    let (got, style) = row[PANEL_LEFT + j];
+                    assert_eq!(got, ch, "row {i} col {j}");
+                    assert_eq!(style.fg, Some(rgb(PANEL_FG)), "row {i} col {j}");
+                    assert_eq!(style.bg, Some(bg), "row {i} col {j}");
+                    assert!(
+                        !style.add_modifier.contains(Modifier::BOLD),
+                        "row {i} col {j}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_h_key_toggles_history_and_the_footer_says_which() {
+        assert_eq!(key_to_die3d('H'), Some(Die3dKey::ToggleHistory));
+        assert_eq!(key_to_die3d('h'), None, "h is the TUI's");
+        assert!(Die3dKey::ToggleHistory.toggles());
+        let b = Fake::boards(&["p150"], Some(TDP));
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        assert!(v.show_history, "on by default");
+        let lines = v.render(0.0);
+        assert!(
+            footer(&lines).contains("H history on"),
+            "{}",
+            footer(&lines)
+        );
+        assert!(has_panel(&lines));
+        v.handle_key(Die3dKey::ToggleHistory, 0.0);
+        let lines = v.render(0.0);
+        assert!(
+            footer(&lines).contains("H history off"),
+            "{}",
+            footer(&lines)
+        );
+        assert!(!has_panel(&lines));
+        v.handle_key(Die3dKey::ToggleHistory, 0.0);
+        assert!(has_panel(&v.render(0.0)));
+    }
+
+    #[test]
+    fn a_new_sample_is_drawn_at_once_and_a_hidden_panel_forces_no_frame() {
+        let rate = |rx: f64| {
+            Some(PcieBandwidth {
+                rx_bytes_per_sec: rx,
+                tx_bytes_per_sec: 1.0e7,
+            })
+        };
+        let mut b = Fake::boards(&["p150"], Some(TDP));
+        b.pcie = rate(1.0e8);
+        // Clouds off: their steps also force frames, and would blur this.
+        let mut v = cloud_view(&b);
+        v.handle_key(Die3dKey::ToggleClouds, 0.0);
+        v.update(&b, 1.0);
+        let before = v.render(1.98);
+        assert!(panel_text(&before, 3)[2].ends_with("100 MB/s"));
+        // A new sample 0.02 s after the last frame, well inside the 1/20 s
+        // the throttle would otherwise hold that frame for.
+        b.pcie = rate(1.2e8);
+        v.update(&b, 2.0);
+        let after = v.render(2.0);
+        let rows = panel_text(&after, 3);
+        assert!(rows[2].ends_with("120 MB/s"), "{rows:#?}");
+        // An unchanged panel forces nothing: the same frame inside 1/20 s.
+        assert_eq!(text(&v.render(2.03)), text(&after));
+        // With the panel off a sample is taken but forces no frame.
+        v.handle_key(Die3dKey::ToggleHistory, 2.5);
+        let hidden = text(&v.render(2.97));
+        let revision = v.history.revision();
+        b.pcie = rate(1.4e8);
+        v.update(&b, 3.0);
+        assert_eq!(v.history.revision(), revision + 1, "the sample was taken");
+        assert_eq!(text(&v.render(3.0)), hidden);
     }
 }

@@ -12,6 +12,9 @@
 //!
 //! Task 17 added the clouds (`W`). The old hashes still pin the frames with
 //! the clouds off; frames with the clouds on have hashes of their own.
+//!
+//! Task 18 added the history panel (`H`). Both sets of hashes above pin the
+//! frames with the panel off; frames with it on have hashes of their own.
 
 use super::camera::TransitionMode;
 use super::test_backend::Fake;
@@ -103,6 +106,8 @@ fn busy_fake(boards: &[&str]) -> Fake {
 /// switch row before hashing: it is the one change to these frames since the
 /// pre-Task-16 hashes were taken, and without it they pin everything else
 /// exactly as before.
+///
+/// The history panel is off in all of them (see [`without_the_h_switch`]).
 fn golden_frames(braille: bool, clouds: bool) -> Vec<(f64, u64)> {
     let b = busy_fake(&["p300"; 4]);
     let mut v = Die3dView::new(150, 42);
@@ -115,9 +120,11 @@ fn golden_frames(braille: bool, clouds: bool) -> Vec<(f64, u64)> {
     if !clouds {
         v.handle_key(Die3dKey::ToggleClouds, 0.0);
     }
+    v.handle_key(Die3dKey::ToggleHistory, 0.0);
     let mut out = Vec::new();
     let mut shot = |v: &Die3dView, t: f64| {
         let mut lines = v.render(t);
+        without_the_h_switch(&mut lines);
         if !clouds {
             without_the_w_switch(&mut lines);
         }
@@ -149,6 +156,27 @@ fn without_the_w_switch(lines: &mut [Line<'static>]) {
         .find(|s| s.content.contains(&entry))
         .expect("the switch row lists W clouds off");
     found.content = found.content.replacen(&entry, "", 1).into();
+}
+
+/// Undo the `H history off` entry in the footer's switch row (the last
+/// line). At 150 columns that entry makes the full switch row with the
+/// action keys too wide, so the row falls back to the switches alone (the
+/// strip's designed first fallback). Without the entry the action keys fit
+/// again, so this puts them back in its place: the row is then exactly the
+/// one the older hashes were taken with. It asserts the row has that form,
+/// so it never edits a row it does not expect.
+fn without_the_h_switch(lines: &mut [Line<'static>]) {
+    let entry = format!("{SEP}H history off");
+    let row = lines.last_mut().expect("a footer");
+    assert_eq!(row.spans.len(), 1, "the switch row is one span");
+    let span = &mut row.spans[0];
+    assert!(
+        span.content.ends_with(&entry) && !span.content.contains(ACTION_KEYS),
+        "the switch row ends with H history off and has no action keys: {}",
+        span.content
+    );
+    let kept = &span.content[..span.content.len() - entry.len()];
+    span.content = format!("{kept}{SEP}{ACTION_KEYS}").into();
 }
 
 /// The hashes of `golden_frames` with the clouds off, taken from the view as
@@ -218,6 +246,79 @@ fn frames_with_clouds_are_pinned() {
     }
 }
 
+/// The frames the history-panel hashes pin, for one cell mode: the view of
+/// `golden_frames` (two p300 boards, the super scene, auto-cuts off, clouds
+/// on, braille transparent or half-block opaque) with the panel on, fed an
+/// update every second for eight seconds while every chip's power and the
+/// PCIe rates change, so the sparklines have shape. Shots at rest after 3 and
+/// 8 s, and 0.25 s into a dissolve, which the panel stays on through.
+fn history_frames(braille: bool) -> Vec<(f64, u64)> {
+    let mut b = busy_fake(&["p300"; 4]);
+    let mut v = Die3dView::new(150, 42);
+    v.update(&b, 0.0);
+    v.director.set_auto(false);
+    if !braille {
+        v.handle_key(Die3dKey::ToggleBraille, 0.0);
+        v.handle_key(Die3dKey::ToggleTransparent, 0.0);
+    }
+    let mut out = Vec::new();
+    for t in 1..=8 {
+        let now = t as f64;
+        for i in 0..4 {
+            b.set_power(i, 30.0 + 7.0 * i as f32 + (t * (i + 1) % 5) as f32 * 3.0);
+            b.telem[i].asic_temperature = Some(50.0 + (t % 4) as f32);
+        }
+        b.pcie = Some(PcieBandwidth {
+            rx_bytes_per_sec: 2.0e7 * (1 + t % 3) as f64,
+            tx_bytes_per_sec: 1.3e7,
+        });
+        v.update(&b, now);
+        let mut shot = |v: &Die3dView, at: f64| {
+            let lines = v.render(at);
+            // Not vacuous: the panel is in every pinned frame.
+            assert!(
+                text(&lines).iter().any(|r| r.contains(history::TITLE)),
+                "{at}"
+            );
+            out.push((at, frame_hash(&lines)));
+        };
+        if t == 3 || t == 8 {
+            shot(&v, now);
+        }
+        if t == 6 {
+            v.director.set_transition_mode(TransitionMode::Dissolve);
+            v.handle_key(Die3dKey::CutNow, now);
+            assert!(v.director.progress(now + 0.25).is_some(), "mid-dissolve");
+            shot(&v, now + 0.25);
+        }
+    }
+    out
+}
+
+/// The hashes of `history_frames`, pinned when the panel was added (Task
+/// 18), so a later change to what it shows or where is seen.
+const GOLDEN_BRAILLE_HISTORY: [u64; 3] =
+    [0xb43ae2dfe536bdf4, 0x7e7e36f9ec760f7c, 0xe47dd4e27f84d2b9];
+const GOLDEN_HALFBLOCK_HISTORY: [u64; 3] =
+    [0xba78f2ceb437ac84, 0xf39a9cc25892f405, 0xb3c4683b45d666cb];
+
+#[test]
+fn frames_with_the_history_panel_are_pinned() {
+    for (braille, want) in [
+        (true, GOLDEN_BRAILLE_HISTORY),
+        (false, GOLDEN_HALFBLOCK_HISTORY),
+    ] {
+        let got = history_frames(braille);
+        let hashes: Vec<u64> = got.iter().map(|g| g.1).collect();
+        assert_eq!(
+            hashes,
+            want,
+            "braille={braille}: frames at {:?}; got {hashes:#x?}",
+            got.iter().map(|g| g.0).collect::<Vec<_>>()
+        );
+    }
+}
+
 /// Draw `lines` into a terminal buffer as `ui_die3d` does, so two frames can
 /// be compared the way ratatui decides what to send to the terminal.
 fn to_buffer(lines: Vec<Line<'static>>, cols: usize, rows: usize) -> Buffer {
@@ -266,6 +367,13 @@ struct Case {
     cuts: Option<(TransitionMode, f64)>,
     /// The clouds (`W`) on.
     clouds: bool,
+    /// The history panel (`H`): `None` for off with the view updated once,
+    /// at 0.0, as before the panel. `Some(on)` for on or off with an update
+    /// every second over a history filled as `fill_alternating` does, so the
+    /// panel scrolls as it would at worst and the two cases differ only by
+    /// the panel. (The updates change the scene too once the load scales
+    /// fill, after 4.5 s, which is why the older rows do without them.)
+    history: Option<bool>,
 }
 
 /// Frames per case and the view time between them.
@@ -299,7 +407,14 @@ fn measure_at(case: Case, dt: f64) -> Cost {
     if !case.clouds {
         v.handle_key(Die3dKey::ToggleClouds, 0.0);
     }
+    if case.history != Some(true) {
+        v.handle_key(Die3dKey::ToggleHistory, 0.0);
+    }
+    if case.history.is_some() {
+        fill_alternating(&mut v);
+    }
     let start = 1.0;
+    let mut next_update = start + 0.5;
     let mut next_cut = start;
     let mut times = Vec::with_capacity(FRAMES);
     let mut prev: Option<Buffer> = None;
@@ -311,6 +426,11 @@ fn measure_at(case: Case, dt: f64) -> Cost {
                 v.handle_key(Die3dKey::CutNow, next_cut);
                 next_cut += every;
             }
+        }
+        // Outside the timed part: `update` is not `render`'s cost.
+        if case.history.is_some() && now >= next_update {
+            v.update(&b, next_update);
+            next_update += 1.0;
         }
         let t0 = Instant::now();
         let lines = v.render(now);
@@ -385,6 +505,22 @@ fn stage_report(scene: &str, boards: &[&str]) {
     let footer = mean_ms(n, || {
         std::hint::black_box(v.footer(now, Some(shown)));
     });
+    // The history panel: its rows built and written over a frame's lines,
+    // over a worst-case (alternating) history.
+    fill_alternating(&mut v);
+    let copies: Vec<Vec<Line<'static>>> = (0..n).map(|_| lines.clone()).collect();
+    let mut copies = copies.into_iter();
+    let panel = mean_ms(n, || {
+        let mut l = copies.next().unwrap();
+        draw_panel(
+            &mut l,
+            scene_rows,
+            v.cols,
+            &v.history.panel_rows(),
+            v.panel_style(),
+        );
+        std::hint::black_box(l);
+    });
     // The clouds alone, into a cleared buffer of the scene's size.
     let mut sky = PixelBuf::new(pw, ph);
     let mut k = 0;
@@ -401,7 +537,7 @@ fn stage_report(scene: &str, boards: &[&str]) {
         std::hint::black_box(v.render(now + k as f64 * 0.06));
     });
     println!(
-        "| {scene} | {fit:.3} | {:.3} | {clouds:.3} | {cells:.3} | {labels:.3} | {footer:.3} | {total:.3} |",
+        "| {scene} | {fit:.3} | {:.3} | {clouds:.3} | {cells:.3} | {labels:.3} | {panel:.3} | {footer:.3} | {total:.3} |",
         raster - fit
     );
 }
@@ -423,6 +559,8 @@ fn render_cost_report() {
         "| scene | cells | bg | size | clouds | mean ms | p95 ms | changed cells/frame | bytes/frame |"
     );
     println!("|---|---|---|---|---|---|---|---|---|");
+    // The history panel off here, so these rows compare with earlier runs;
+    // its cost is the next table.
     for size in [(150, 42), (200, 56)] {
         for (scene, boards) in scenes {
             for braille in [true, false] {
@@ -435,6 +573,7 @@ fn render_cost_report() {
                             size,
                             cuts: None,
                             clouds,
+                            history: None,
                         });
                         println!(
                             "| {scene} | {} | {} | {} x {} | {} | {:.2} | {:.2} | {:.0} | {:.0} |",
@@ -450,6 +589,36 @@ fn render_cost_report() {
                         );
                     }
                 }
+            }
+        }
+    }
+    println!();
+    println!("History panel off and on, braille transparent, clouds on, an update every");
+    println!("second over a worst-case (alternating) history:");
+    println!("| scene | size | panel | mean ms | p95 ms | changed cells/frame | bytes/frame |");
+    println!("|---|---|---|---|---|---|---|");
+    for size in [(150, 42), (200, 56)] {
+        for (scene, boards) in scenes {
+            for history in [false, true] {
+                let c = measure(Case {
+                    boards,
+                    braille: true,
+                    transparent: true,
+                    size,
+                    cuts: None,
+                    clouds: true,
+                    history: Some(history),
+                });
+                println!(
+                    "| {scene} | {} x {} | {} | {:.3} | {:.3} | {:.0} | {:.0} |",
+                    size.0,
+                    size.1,
+                    if history { "on" } else { "off" },
+                    c.mean_ms,
+                    c.p95_ms,
+                    c.changed,
+                    c.bytes
+                );
             }
         }
     }
@@ -470,6 +639,7 @@ fn render_cost_report() {
                 size: (150, 42),
                 cuts: Some((mode, every)),
                 clouds: true,
+                history: None,
             });
             println!(
                 "| {scene} | {mode:?} every {every} s | {:.2} | {:.2} | {:.0} | {:.0} |",
@@ -491,6 +661,7 @@ fn render_cost_report() {
                 size: (150, 42),
                 cuts: None,
                 clouds: true,
+                history: None,
             },
             1.0 / 60.0,
         );
@@ -504,12 +675,12 @@ fn render_cost_report() {
     println!();
     wave_report();
     println!();
-    println!("Per stage, one braille transparent frame at 150 x 42, clouds on (mean ms;");
+    println!("Per stage, one braille transparent frame at 150 x 42, clouds and panel on (mean ms;");
     println!("the raster includes the clouds, which are also timed alone):");
     println!(
-        "| scene | fit | raster (less fit) | clouds | cells | labels | footer | whole render |"
+        "| scene | fit | raster (less fit) | clouds | cells | labels | panel | footer | whole render |"
     );
-    println!("|---|---|---|---|---|---|---|---|");
+    println!("|---|---|---|---|---|---|---|---|---|");
     stage_report("one board (p150)", &["p150"]);
     stage_report("super 4 x 2", &["p300"; 8]);
 }
@@ -890,9 +1061,28 @@ fn wave_report() {
 
 /// Cells changed between consecutive frames, summed over 60 frames 1/30 s
 /// apart (two seconds), braille transparent 150 x 42, for one board (p150)
-/// or the four-board super scene, with the clouds on or off.
+/// or the four-board super scene, with the clouds on or off. The history
+/// panel is off: these counts pin the scene, whose budget predates the panel.
 /// Deterministic: no clock is read.
 fn changed_in_two_seconds(boards: &[&str], clouds: bool) -> usize {
+    changed_with_samples(boards, clouds, None).0
+}
+
+/// [`changed_in_two_seconds`], and with `panel` set, an `update` once a
+/// second of the run (at 1.5 and 2.5) with the history panel on (`Some(true)`)
+/// or off (`Some(false)`). With `None` the view sees one update, at 0.0, and
+/// the panel is off.
+///
+/// With `panel` set, the history is first filled with a minute of samples
+/// that alternate between two levels in every series. Each new sample then
+/// moves every column of every sparkline from one level to the other: the
+/// most cells a scroll can change. The updates read the same telemetry as at
+/// 0.0, so they change nothing in the scene itself (the load scales hold
+/// three samples, short of the five they need to take over).
+///
+/// Returns the cells changed in the whole frame and, of those, the cells in
+/// the panel's rectangle (counted whether the panel is on or off).
+fn changed_with_samples(boards: &[&str], clouds: bool, panel: Option<bool>) -> (usize, usize) {
     let b = busy_fake(boards);
     let mut v = Die3dView::new(150, 42);
     v.update(&b, 0.0);
@@ -900,16 +1090,54 @@ fn changed_in_two_seconds(boards: &[&str], clouds: bool) -> usize {
     if !clouds {
         v.handle_key(Die3dKey::ToggleClouds, 0.0);
     }
+    if panel != Some(true) {
+        v.handle_key(Die3dKey::ToggleHistory, 0.0);
+    }
+    if panel.is_some() {
+        fill_alternating(&mut v);
+    }
+    let rows = (PANEL_TOP..PANEL_TOP + v.history.panel_rows().len()) as std::ops::Range<usize>;
+    let cols = PANEL_LEFT..PANEL_LEFT + history::PANEL_WIDTH;
     let mut prev: Option<Buffer> = None;
-    let mut n = 0;
+    let (mut n, mut in_panel) = (0, 0);
     for i in 0..60 {
-        let buf = to_buffer(v.render(1.0 + i as f64 * DT), 150, 42);
+        let now = 1.0 + i as f64 * DT;
+        // Updates half a second into each second of the run, so both
+        // scrolls fall between two frames that are counted (one on the very
+        // first frame would not be).
+        if panel.is_some() && i % 30 == 15 {
+            v.update(&b, now);
+        }
+        let buf = to_buffer(v.render(now), 150, 42);
         if let Some(p) = &prev {
-            n += p.diff(&buf).len();
+            let diff = p.diff(&buf);
+            n += diff.len();
+            in_panel += diff
+                .iter()
+                .filter(|(x, y, _)| rows.contains(&(*y as usize)) && cols.contains(&(*x as usize)))
+                .count();
         }
         prev = Some(buf);
     }
-    n
+    (n, in_panel)
+}
+
+/// Replace `v`'s history with a minute of samples (at view times -60 to -1)
+/// that alternate between two levels in every series: power, temperature
+/// and both PCIe directions.
+fn fill_alternating(v: &mut Die3dView) {
+    let mut chips: Vec<ChipInputs> = v.chips.iter().flatten().cloned().collect();
+    v.history = History::new();
+    for k in 0..history::SAMPLES {
+        let high = k % 2 == 1;
+        for c in chips.iter_mut() {
+            c.power_w = Some(if high { 60.0 } else { 30.0 });
+            c.temp_c = Some(if high { 70.0 } else { 50.0 });
+            c.pcie_in_bps = Some(if high { 1.0e9 } else { 1.0e7 });
+            c.pcie_out_bps = Some(if high { 5.0e8 } else { 1.0e7 });
+        }
+        assert!(v.history.sample(k as f64 - 60.0, &chips));
+    }
 }
 
 /// `changed_in_two_seconds` of the view as committed before Task 16
@@ -948,6 +1176,8 @@ const CHANGED_WITH_CLOUDS_MAX_SHARE: f64 = 0.66;
 
 #[test]
 fn changed_cells_with_clouds_stay_within_their_budget() {
+    // Pinned to the history panel off (`changed_in_two_seconds` turns it
+    // off): the panel's own budget is the next test.
     // The busy fake moves 2.5 GB/s per chip, so the clouds drift fast: 7.4
     // px/s over one p150, the 8 px/s maximum over eight chips. This is the
     // worst case for them.
@@ -969,4 +1199,56 @@ fn changed_cells_with_clouds_stay_within_their_budget() {
             "{what}: {on} cells changed with clouds, {before} before ({share:.3})"
         );
     }
+}
+
+/// The hard cap on `changed_with_samples` with the clouds and the history
+/// panel on, as a share of the pre-Task-16 count. The panel's sparklines
+/// scroll once a second and every scroll repaints them.
+const CHANGED_WITH_PANEL_MAX_SHARE: f64 = 0.70;
+
+#[test]
+fn changed_cells_with_clouds_and_the_panel_stay_within_the_cap() {
+    for (what, boards, before) in [
+        ("one board", &["p150"][..], CHANGED_BEFORE_ONE_BOARD),
+        ("super 4 x 2", &["p300"; 8][..], CHANGED_BEFORE_SUPER),
+    ] {
+        let (on, on_panel) = changed_with_samples(boards, true, Some(true));
+        let (off, off_panel) = changed_with_samples(boards, true, Some(false));
+        // The instrument: the updates of the run change nothing on screen by
+        // themselves, so the panel-off count is the clouds-only count, as
+        // measured in `changed_cells_with_clouds_stay_within_their_budget`
+        // (Task 17: 8030 and 10713).
+        let clouds_only = [("one board", 8030), ("super 4 x 2", 10713)];
+        let want = clouds_only.iter().find(|c| c.0 == what).unwrap().1;
+        assert_eq!(off, want, "{what}");
+        let share = on as f64 / before as f64;
+        println!(
+            "{what}: {on} cells changed with clouds and the panel, {off} with the panel off ({:+}); in the panel's rectangle {on_panel} on, {off_panel} off; {before} before: {share:.3}",
+            on as i64 - off as i64
+        );
+        // The panel did scroll, twice: each scroll moves every column of
+        // every sparkline (the history alternates) but the newest, which
+        // can land on either level. The panel can still lower the total, by
+        // covering scene and cloud cells that would have changed.
+        let series = v_series(boards);
+        assert!(
+            on_panel >= 2 * (SPARK - 1) * series,
+            "{what}: the panel changed {on_panel} cells, {series} sparklines"
+        );
+        assert!(
+            share <= CHANGED_WITH_PANEL_MAX_SHARE,
+            "{what}: {on} cells changed with clouds and the panel, {before} before ({share:.3})"
+        );
+    }
+}
+
+/// Cells of a sparkline (see `history::SPARK_WIDTH`).
+const SPARK: usize = history::SPARK_WIDTH;
+
+/// Sparklines the panel shows for `boards`: one per chip, at most
+/// `history::MAX_CHIPS`, and two for PCIe.
+fn v_series(boards: &[&str]) -> usize {
+    let mut v = Die3dView::new(150, 42);
+    v.update(&busy_fake(boards), 0.0);
+    v.chips.iter().flatten().count().min(history::MAX_CHIPS) + 2
 }

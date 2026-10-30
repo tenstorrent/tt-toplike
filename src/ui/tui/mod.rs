@@ -2100,12 +2100,12 @@ fn run_app(
                                 }
                                 force_redraw = true;
                             }
-                            // ── Die 3D keys ([ ] m c C B T X L W) ──────────────
+                            // ── Die 3D keys ([ ] m c C B T X L W H) ────────────
                             // Checked before the general character arms so the
                             // view consumes them. None of these letters has a
-                            // global meaning (`b` lowercase is the beta toggle
-                            // and `l` the legend; `B`, `T`, `X`, `L` and `W`
-                            // are free), and `die3d_key_for` is
+                            // global meaning (`b` lowercase is the beta toggle,
+                            // `l` the legend and `h` moves left; `B`, `T`, `X`, `L`,
+                            // `W` and `H` are free), and `die3d_key_for` is
                             // `None` outside the mode, so nothing else is
                             // shadowed.
                             KeyCode::Char(c) if die3d_key_for(display_mode, c).is_some() => {
@@ -4785,6 +4785,12 @@ const DIE3D_EXPLAIN_TEXT: &[&str] = &[
     "clouds are decoration: their drift follows the total",
     "PCIe traffic (slow but never still with none) and their",
     "brightness follows chip load (the busiest chip).",
+    "H turns the history panel at the top left on or off.",
+    "It shows the last minute of measured power and",
+    "temperature for each chip (up to six) and the PCIe",
+    "traffic in and out, as sparklines with the latest",
+    "values. These are real readings, one a second, not an",
+    "estimate. It needs a terminal of at least 120 x 37.",
     "The footer names the board corner nearest you, as",
     "'view: front-right' (front is the PCIe edge, right the",
     "GDDR side), and both ends during a cut.",
@@ -4848,6 +4854,28 @@ mod die3d_text_tests {
             }
         }
     }
+
+    #[test]
+    fn the_legend_says_what_the_history_panel_shows() {
+        let legend = flat(
+            die3d_legend_lines(Color::Reset, Color::Reset, Color::Reset)
+                .iter()
+                .map(|l| l.spans.iter().skip(1).map(|s| s.content.as_ref()).collect()),
+        );
+        let explain = flat(DIE3D_EXPLAIN_TEXT.iter().map(|s| s.to_string()));
+        for (what, text) in [("legend", &legend), ("explain", &explain)] {
+            for phrase in [
+                "history",
+                "last minute of measured",
+                "temperature",
+                "PCIe traffic",
+                "real readings",
+                "H ",
+            ] {
+                assert!(text.contains(phrase), "{what} lacks {phrase:?}: {text}");
+            }
+        }
+    }
 }
 
 /// Legend for the Die 3D view: what the scene's colours and the footer mean,
@@ -4870,6 +4898,9 @@ fn die3d_legend_lines(
         "  clouds      decoration behind the board: their drift",
         "              follows PCIe traffic, their brightness",
         "              follows chip load",
+        "  history     top left: the last minute of measured",
+        "              power, temperature and PCIe traffic",
+        "              (real readings, one a second)",
         "  footer      scene shown, the board corner nearest you,",
         "              then the switches and their states",
         "",
@@ -4878,6 +4909,7 @@ fn die3d_legend_lines(
         "  B    braille / half-block      T  transparent / opaque",
         "  X    transition: shuffle / chaos / dissolve / spin",
         "  L    chip labels on / off      W  clouds on / off",
+        "  H    history panel on / off",
         "  3    leave",
     ]
     .iter()
@@ -8577,6 +8609,9 @@ mod display_mode_tests {
             ('B', Die3dKey::ToggleBraille),
             ('T', Die3dKey::ToggleTransparent),
             ('X', Die3dKey::CycleTransition),
+            ('L', Die3dKey::ToggleLabels),
+            ('W', Die3dKey::ToggleClouds),
+            ('H', Die3dKey::ToggleHistory),
         ] {
             assert_eq!(die3d_key_for(DisplayMode::Die3d, c), Some(want), "{c}");
             // Out of the mode the same keys are not taken.
@@ -8585,7 +8620,7 @@ mod display_mode_tests {
             }
         }
         // In the mode, keys with no Die 3D meaning fall through.
-        for c in ['3', 'v', 'q', 'l', 'b'] {
+        for c in ['3', 'v', 'q', 'l', 'b', 'h'] {
             assert_eq!(die3d_key_for(DisplayMode::Die3d, c), None, "{c}");
         }
     }
