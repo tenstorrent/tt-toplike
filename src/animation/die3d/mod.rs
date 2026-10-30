@@ -20,6 +20,7 @@
 //! from one clock. Nothing here reads a clock, so the tests set time exactly.
 
 pub mod bh_layout_data;
+mod busiest;
 pub mod camera;
 pub mod cells;
 pub mod clouds;
@@ -43,6 +44,7 @@ pub mod triggers;
 use crate::animation::topology::BoardTopology;
 use crate::backend::TelemetryBackend;
 use crate::models::Architecture;
+use busiest::BusiestBoard;
 use camera::{dissolve_into, scramble, Camera, Director, TransitionKind};
 use clouds::{CloudClock, Clouds};
 use flags::{DieFlag, Flag, Hull};
@@ -91,6 +93,9 @@ const OPAQUE_BG: [u8; 3] = [0, 0, 0];
 const ACTION_KEYS: &str = "[ ] board \u{b7} c cut \u{b7} 3 leave";
 /// Separator between footer items.
 const SEP: &str = " \u{b7} ";
+/// The hint at the end of an inset's caption row: the key that opens the
+/// full Die 3D view (handled by the TUI, as `3` is in the full view).
+const INSET_HINT: &str = "3 = full view";
 /// Characters the footer's left bar takes (`╚═ ` and `║ `).
 const BAR_WIDTH: usize = 3;
 /// Least view time between two frames `render` draws while no transition
@@ -323,6 +328,15 @@ pub struct Die3dView {
     revision: u64,
     /// What `render` keeps from one frame to the next; see [`RenderCache`].
     cache: RefCell<RenderCache>,
+    /// True for the compact layout of the Insights screen's inset (see
+    /// [`inset`](Die3dView::inset)): every board when they fit, else the
+    /// busiest board, a caption row in place of the footer, and no clouds,
+    /// flags or history panel. Fixed when the view is made.
+    inset: bool,
+    /// The busiest board by mean chip load, held for
+    /// [`busiest::BUSIEST_HOLD_SECS`] before it changes. Fed by every
+    /// `update`; only an inset draws from it.
+    busiest: BusiestBoard,
 }
 
 /// What the view keeps between frames so that a frame costs less to make
@@ -373,6 +387,29 @@ impl Die3dView {
         Die3dView::with_reserved_rows(cols, rows, 0)
     }
 
+    /// A compact view of `cols` x `rows` cells for the Insights screen's
+    /// inset. `rows` includes one caption row at the bottom; the scene gets
+    /// the rest.
+    ///
+    /// The inset differs from the full view in these ways:
+    ///
+    /// - Its scene is always every board (`Scene::All`). Where the super
+    ///   scene does not fit, it draws the busiest board instead, by mean chip
+    ///   load, changing board only after another has been the busiest for
+    ///   [`busiest::BUSIEST_HOLD_SECS`] (see `BusiestBoard`).
+    /// - A trigger cuts the camera but never switches the scene, so a cut
+    ///   may spin.
+    /// - The footer is one caption row: the boards or chips drawn, their
+    ///   PCIe rates and the hint `3 = full view`.
+    /// - No clouds, no chip flags and no history panel, at any size.
+    ///
+    /// Automatic cuts are on. The inset takes no keys.
+    pub fn inset(cols: usize, rows: usize) -> Die3dView {
+        let mut v = Die3dView::with_reserved_rows(cols, rows, 0);
+        v.inset = true;
+        v
+    }
+
     /// Like `new`, for a view whose `rows` are the terminal's minus
     /// `reserved_rows` that the host draws elsewhere. The size tiers (see
     /// `tiers`) are measured on the view's own `cols` x `rows`.
@@ -400,6 +437,8 @@ impl Die3dView {
             scales: HashMap::new(),
             revision: 0,
             cache: RefCell::new(RenderCache::default()),
+            inset: false,
+            busiest: BusiestBoard::new(),
         }
     }
 
@@ -471,6 +510,20 @@ impl Die3dView {
             self.revision += 1;
         }
 
+        // Each board's mean load, relative to idle as `calibrate_loads` left
+        // it, for the inset's busiest board. A board the inset changes to
+        // shows in the next frame.
+        let board_loads: Vec<f32> = self
+            .chips
+            .iter()
+            .map(|chips| chips.iter().map(|c| c.load).sum::<f32>() / chips.len() as f32)
+            .collect();
+        let busiest_before = self.busiest.board();
+        self.busiest.observe(now, &board_loads);
+        if self.inset && self.busiest.board() != busiest_before {
+            self.revision += 1;
+        }
+
         let boards = self.chips.len();
         // Commit a switch whose midpoint has passed before judging new
         // triggers, so they are judged against the scene on screen.
@@ -482,8 +535,14 @@ impl Die3dView {
                     .zip(chip.pcie_out_bps)
                     .map(|(rx, tx)| rx + tx);
                 for trigger in self.detector.observe(chip.index, chip.load, pcie) {
-                    self.switcher
-                        .on_trigger(trigger, board, boards, &mut self.director, now);
+                    if self.inset {
+                        // The inset's scene never changes: a trigger only
+                        // asks for a camera cut, which may spin.
+                        self.director.on_trigger(now);
+                    } else {
+                        self.switcher
+                            .on_trigger(trigger, board, boards, &mut self.director, now);
+                    }
                 }
             }
         }
@@ -648,7 +707,7 @@ impl Die3dView {
             self.revision,
             self.director.cut_at(),
             in_transition,
-            self.switcher.scene_at(now),
+            self.scene_at(now),
             self.cloud_key(),
             self.history_key(),
         );
@@ -749,10 +808,13 @@ impl Die3dView {
         );
     }
 
-    /// Whether the history panel is drawn: switched on (`H`) and the view at
-    /// least [`PANEL_MIN_CELLS`].
+    /// Whether the history panel is drawn: switched on (`H`), the view at
+    /// least [`PANEL_MIN_CELLS`], and not an inset (which never has one).
     fn panel_shown(&self) -> bool {
-        self.show_history && self.cols >= PANEL_MIN_CELLS.0 && self.rows >= PANEL_MIN_CELLS.1
+        !self.inset
+            && self.show_history
+            && self.cols >= PANEL_MIN_CELLS.0
+            && self.rows >= PANEL_MIN_CELLS.1
     }
 
     /// The panel's text style: [`PANEL_FG`], not bold, on the same background
@@ -768,8 +830,30 @@ impl Die3dView {
     /// The footer, the clouds and the flags read the size through here (the
     /// history panel keeps its own gate, `panel_shown`), so a layout that
     /// overrides the size tiers changes only this method.
+    ///
+    /// An inset overrides the size tiers: whatever its size, its last row is
+    /// the caption (none when it has no rows), and it has no clouds and no
+    /// flags.
     fn tier(&self) -> Tier {
+        if self.inset {
+            return Tier {
+                footer_rows: self.rows.min(1),
+                clouds: false,
+                flags: false,
+            };
+        }
         tier_for(self.cols, self.rows)
+    }
+
+    /// The scene to draw at `now`: every board for an inset, else the
+    /// switcher's scene (see `Switcher::scene_at`). Every place that draws
+    /// or names the scene reads it through here.
+    fn scene_at(&self, now: f64) -> Scene {
+        if self.inset {
+            Scene::All
+        } else {
+            self.switcher.scene_at(now)
+        }
     }
 
     /// Whether the cloud layer is drawn: switched on (`W`) and the view large
@@ -811,7 +895,7 @@ impl Die3dView {
             }
             (Some(TransitionKind::Spin), Some(p)) => {
                 let (from, to) = self.director.cameras();
-                let scene = self.switcher.scene_at(now);
+                let scene = self.scene_at(now);
                 let (buf, shown, placed) =
                     self.scene_with(now, scene, Aim::Between(from, to, p))?;
                 Some((buf, shown, Some(placed)))
@@ -830,10 +914,12 @@ impl Die3dView {
 
     /// The scenes before and after the latest cut (see
     /// `Switcher::transition_scenes`); both the scene at `now` before any cut.
+    /// An inset's scene never changes, so for it both are every board.
     fn transition_scenes(&self, now: f64) -> (Scene, Scene) {
         match self.director.cut_at() {
+            Some(_) if self.inset => (Scene::All, Scene::All),
             Some(at) => self.switcher.transition_scenes(at, now),
-            None => (self.switcher.scene_at(now), self.switcher.scene_at(now)),
+            None => (self.scene_at(now), self.scene_at(now)),
         }
     }
 
@@ -845,7 +931,7 @@ impl Die3dView {
     /// cut the old angle stays until the midpoint and the new one shows from
     /// there; during a spin the old angle stays until the end.
     fn scene_now(&self, now: f64) -> Option<(PixelBuf, Shown, Placement)> {
-        let scene = self.switcher.scene_at(now);
+        let scene = self.scene_at(now);
         self.scene_with(now, scene, Aim::At(self.director.camera_at(now)))
     }
 
@@ -859,8 +945,9 @@ impl Die3dView {
 
     /// `scene` at `now`, projected as `aim` says, and where its dies landed.
     /// The super scene falls back to the board shown last when it does not
-    /// fit. A board index past the end of the board list (it can shrink
-    /// between updates) is clamped.
+    /// fit, or in an inset to the busiest board (`BusiestBoard`). A board
+    /// index past the end of the board list (it can shrink between updates)
+    /// is clamped.
     fn scene_with(
         &self,
         now: f64,
@@ -930,6 +1017,7 @@ impl Die3dView {
         }
         let board = match scene {
             Scene::Board(b) => b,
+            Scene::All if self.inset => self.busiest.board(),
             Scene::All => self.switcher.board_at(now),
         }
         .min(self.chips.len().checked_sub(1)?);
@@ -995,10 +1083,16 @@ impl Die3dView {
     /// what is shown and how, then the keys; with one, the first of those
     /// (the status line) alone; with none, nothing. A left bar and a bottom
     /// bar only, no right-side border.
+    ///
+    /// An inset has the caption row of [`inset_caption`](Self::inset_caption)
+    /// in its place.
     fn footer(&self, now: f64, shown: Option<Shown>) -> Vec<Line<'static>> {
         let rows = self.tier().footer_rows;
         if rows == 0 {
             return Vec::new();
+        }
+        if self.inset {
+            return vec![hint(self.inset_caption(shown))];
         }
         let boards = self.chips.len();
         let board_name = |b: usize| {
@@ -1014,7 +1108,7 @@ impl Die3dView {
                 boards
             ),
             // Nothing drawn: name the scene that was chosen.
-            None => match self.switcher.scene_at(now) {
+            None => match self.scene_at(now) {
                 Scene::All if boards > 1 => "all boards".to_string(),
                 _ => board_name(self.switcher.board_at(now).min(boards.saturating_sub(1))),
             },
@@ -1059,6 +1153,63 @@ impl Die3dView {
             )));
         }
         lines
+    }
+
+    /// An inset's caption row, at most `cols` characters: what is drawn,
+    /// its PCIe rates and the key that opens the full view, as
+    /// `BH0  in 2.0G  out 1.0M · 3 = full view`.
+    ///
+    /// What is drawn is named by its chips (`BH0+BH1` for a board of two),
+    /// or as `N boards` when the super scene shows more than one. With no
+    /// scene drawn (the text summary), it names every chip or board. The
+    /// rates are the sums over the chips named, in the summary's compact
+    /// form, `-` when none of them has a reading. When the whole caption is
+    /// too wide the rates go first; what is left is cut at `cols` with an
+    /// ellipsis. There is no border on either side.
+    fn inset_caption(&self, shown: Option<Shown>) -> String {
+        let (name, chips): (String, Vec<&ChipInputs>) = match shown {
+            Some(Shown::Board(b)) | Some(Shown::Fallback(b)) => {
+                let chips: Vec<&ChipInputs> = self.chips.get(b).into_iter().flatten().collect();
+                let name = chips
+                    .iter()
+                    .map(|c| c.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join("+");
+                (name, chips)
+            }
+            _ => {
+                let chips: Vec<&ChipInputs> = self.chips.iter().flatten().collect();
+                let name = if self.chips.len() > 1 {
+                    format!("{} boards", self.chips.len())
+                } else {
+                    chips
+                        .iter()
+                        .map(|c| c.label.as_str())
+                        .collect::<Vec<_>>()
+                        .join("+")
+                };
+                (name, chips)
+            }
+        };
+        // A direction's total over the chips that have a finite reading;
+        // `None` when none does.
+        let total = |rate: fn(&ChipInputs) -> Option<f64>| {
+            chips
+                .iter()
+                .filter_map(|c| rate(c))
+                .filter(|b| b.is_finite())
+                .fold(None, |sum: Option<f64>, b| Some(sum.unwrap_or(0.0) + b))
+        };
+        let rates = format!(
+            "in {}  out {}",
+            summary::compact_rate(total(|c| c.pcie_in_bps)),
+            summary::compact_rate(total(|c| c.pcie_out_bps))
+        );
+        let full = format!("{name}  {rates}{SEP}{INSET_HINT}");
+        if full.chars().count() <= self.cols {
+            return full;
+        }
+        fit_width(format!("{name}{SEP}{INSET_HINT}"), self.cols)
     }
 
     /// The footer's camera caption: `view: <corner>`, naming the board corner
@@ -1205,7 +1356,7 @@ impl Die3dView {
             Switch {
                 key: 'm',
                 label: "",
-                state: match self.switcher.scene_at(now) {
+                state: match self.scene_at(now) {
                     Scene::All => "all boards",
                     Scene::Board(_) => "board",
                 },
@@ -3863,5 +4014,160 @@ mod tests {
         v.update(&b, 3.0);
         assert_eq!(v.history.revision(), revision + 1, "the sample was taken");
         assert_eq!(text(&v.render(3.0)), hidden);
+    }
+
+    /// An inset over `b` that has read it once a second from 0 to `secs`.
+    fn inset_over(b: &Fake, cols: usize, rows: usize, secs: u32) -> Die3dView {
+        let mut v = Die3dView::inset(cols, rows);
+        for s in 0..=secs {
+            v.update(b, s as f64);
+        }
+        v
+    }
+
+    /// True when an inset of `cols` x `rows` (one row of it the caption) has
+    /// room for the super scene of boards with `dies` dies each. This is the
+    /// sizing the view itself does: braille cells of 2 x 4 pixels and no
+    /// minimum size. (`fit_super` adds the full layout's 100 x 30 minimum,
+    /// which no inset reaches.)
+    fn inset_fits_all(cols: usize, rows: usize, dies: &[usize]) -> bool {
+        let grid = super_grid(dies).0;
+        rows >= 1 && fit_pixels((cols * 2) as i32, ((rows - 1) * 4) as i32, grid).is_some()
+    }
+
+    /// The smallest inset, from 42 x 14 up, with the same 3 : 1 shape as the
+    /// Insights inset, where the super scene of `dies` fits.
+    fn smallest_inset_for_all(dies: &[usize]) -> (usize, usize) {
+        (14..=60)
+            .map(|rows| (rows * 3, rows))
+            .find(|&(c, r)| inset_fits_all(c, r, dies))
+            .expect("some inset up to 180 x 60 holds the boards")
+    }
+
+    /// The text of `buf` as braille lines, as the view draws it.
+    fn braille_text(buf: &PixelBuf) -> Vec<String> {
+        text(&cells::to_braille_lines(buf))
+    }
+
+    #[test]
+    fn the_inset_draws_all_boards_when_they_fit() {
+        let b = two_boards();
+        let dies = [2, 2];
+        let (cols, rows) = smallest_inset_for_all(&dies);
+        let v = inset_over(&b, cols, rows, 3);
+        let now = 3.0;
+        // The super scene drawn directly at the inset's scene area: no
+        // clouds, transparent, the director's camera.
+        let grid = super_grid(&dies).0;
+        let (pw, ph) = (cols * 2, (rows - 1) * 4);
+        let fit = fit_pixels(pw as i32, ph as i32, grid).unwrap();
+        let fit = aim(&fit, Aim::At(v.director.camera_at(now)), grid);
+        let mut want = PixelBuf::new(pw, ph);
+        want.clear_transparent();
+        draw_super_scene(&mut want, &v.chips, &fit, now as f32);
+        let (got, shown) = v.scene_pixels(now).expect("the super scene fits");
+        assert_eq!(shown, Shown::All, "{cols} x {rows}");
+        assert_eq!(got.rgb, want.rgb);
+        assert_eq!(got.cover, want.cover);
+        // The frame is that scene, row for row, then the caption.
+        let t = text(&v.render(now));
+        assert_eq!(t.len(), rows);
+        assert_eq!(t[..rows - 1], braille_text(&want)[..]);
+    }
+
+    #[test]
+    fn the_inset_shows_the_busiest_board_when_all_do_not_fit() {
+        let mut b = Fake::boards(&["p150"; 8], Some(TDP));
+        assert!(!inset_fits_all(42, 14, &[1; 8]), "8 boards fit at 42 x 14");
+        let mut v = Die3dView::inset(42, 14);
+        // Five idle seconds calibrate every chip's idle at 0 W.
+        for s in 0..5 {
+            v.update(&b, s as f64);
+        }
+        // Chip 3 (board 3) is busy from 5 s on.
+        b.set_power(3, 90.0);
+        for s in 5..=14 {
+            v.update(&b, s as f64);
+        }
+        // Busiest for 9 s: the board shown is still board 0.
+        assert_eq!(v.scene_pixels(14.0).unwrap().1, Shown::Fallback(0));
+        for s in 15..=17 {
+            v.update(&b, s as f64);
+        }
+        let now = 17.0;
+        let (got, shown) = v.scene_pixels(now).unwrap();
+        assert_eq!(shown, Shown::Fallback(3));
+        let camera = Aim::At(v.director.camera_at(now));
+        let (want, _, _) = v.scene_with(now, Scene::Board(3), camera).unwrap();
+        assert_eq!(got.rgb, want.rgb);
+        let t = text(&v.render(now));
+        assert_eq!(t[..13], braille_text(&want)[..]);
+    }
+
+    #[test]
+    fn the_inset_never_changes_scene_on_a_trigger() {
+        // Two boards in an inset with room for both: a load rise on board 1
+        // cuts the camera, and every board stays on show.
+        let mut b = two_boards();
+        let (cols, rows) = smallest_inset_for_all(&[2, 2]);
+        let mut v = inset_over(&b, cols, rows, 0);
+        b.set_power(2, 90.0);
+        v.update(&b, 1.0);
+        assert_eq!(v.director.cut_at(), Some(1.0), "the rise cut the camera");
+        assert_eq!(v.switcher.scene_at(10.0), Scene::All);
+        for now in [1.0, 1.5, 2.0, 5.0] {
+            assert_eq!(v.scene_now(now).unwrap().1, Shown::All, "at {now}");
+        }
+        // The inset reads its scene through `scene_at`, never from the
+        // switcher. Nothing in an inset moves the switcher; moved here by
+        // hand, it still leaves every board on show, still, mid-spin and
+        // mid-dissolve.
+        v.switcher.choose(Scene::Board(1));
+        assert_eq!(v.scene_now(6.0).unwrap().1, Shown::All);
+        for (mode, at) in [
+            (TransitionMode::Spin, 10.0),
+            (TransitionMode::Dissolve, 20.0),
+        ] {
+            v.director.set_transition_mode(mode);
+            v.director.cut_by_hand(at);
+            assert!(v.director.progress(at + 0.2).is_some());
+            let (_, shown, _) = v.frame(at + 0.2).unwrap();
+            assert_eq!(shown, Shown::All, "{mode:?}");
+        }
+        // Eight boards that do not fit: the board shown stays board 0 when
+        // board 3's chip rises, until the hold has passed.
+        let mut b = Fake::boards(&["p150"; 8], Some(TDP));
+        let mut v = inset_over(&b, 42, 14, 0);
+        b.set_power(3, 90.0);
+        v.update(&b, 1.0);
+        assert_eq!(v.director.cut_at(), Some(1.0), "the rise cut the camera");
+        assert_eq!(v.switcher.scene_at(10.0), Scene::All);
+        assert_eq!(v.scene_now(5.0).unwrap().1, Shown::Fallback(0));
+    }
+
+    #[test]
+    fn the_inset_has_a_caption_row_and_no_footer() {
+        let mut b = Fake::boards(&["p150"], Some(TDP));
+        b.pcie = Some(PcieBandwidth {
+            rx_bytes_per_sec: 2.0e9,
+            tx_bytes_per_sec: 1.0e6,
+        });
+        let v = inset_over(&b, 42, 14, 1);
+        let t = text(&v.render(1.0));
+        assert_eq!(t.len(), 14, "{t:?}");
+        let last = &t[13];
+        assert!(last.contains("BH0"), "{last}");
+        assert!(last.contains("in 2.0G  out 1.0M"), "{last}");
+        assert!(last.contains("3 = full view"), "{last}");
+        assert!(t.iter().all(|l| !l.contains("board 1/")), "{t:?}");
+        assert!(t.iter().all(|l| l.chars().count() <= 42), "{t:?}");
+        // A scene is drawn above it, with no flag.
+        assert!(t[..13].iter().any(|l| has_braille_dots(l)), "{t:?}");
+        assert!(t.iter().all(|l| !l.contains('●')), "{t:?}");
+        // One row: the caption alone. No rows: nothing.
+        let t = text(&inset_over(&b, 42, 1, 1).render(1.0));
+        assert_eq!(t.len(), 1, "{t:?}");
+        assert!(t[0].contains("BH0"), "{t:?}");
+        assert!(inset_over(&b, 42, 0, 1).render(1.0).is_empty());
     }
 }

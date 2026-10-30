@@ -20,8 +20,9 @@ use ratatui::text::Line;
 /// Units are decimal (1 K = 1000 bytes), as in
 /// `backend::pcie_counters::format_bandwidth`. That function adds a unit
 /// suffix and spaces, which is too wide for a line in a view this small, so
-/// the summary keeps its own shorter form.
-fn compact_rate(bps: Option<f64>) -> String {
+/// the summary keeps its own shorter form. The inset's caption row uses it
+/// too.
+pub(super) fn compact_rate(bps: Option<f64>) -> String {
     let b = match bps {
         Some(b) if b.is_finite() && b >= 0.0 => b,
         _ => return "-".to_string(),
