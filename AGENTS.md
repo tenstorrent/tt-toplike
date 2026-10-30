@@ -1430,6 +1430,24 @@ over half the counter range reads as a device reset (a wrap of nearly the full r
 indistinguishable from a small step backwards). More than one wrap between samples cannot be
 detected; at 1 Hz it would need over 275 GB/s.
 
+### Rotation skips idle workload views (Oct 30 2026, v0.14.2)
+
+Prompt: "is 3d mode setup in the 'rotate' system? (can we take training and llms out of rotation
+unless a model is starting, running, and/or training?)". Die 3D is not in `ROTATION` and is not
+meant to be: a test pins it (`die3d_is_not_in_the_v_rotation`), it is entered with `3`. Asked
+whether to add it; not done without an answer.
+
+- `rotation_visits` / `next_rotation_mode_for`: Training and the Inference Monitor are stops only
+  while `RotationActivity` says something is going. Insights is always a stop, so a lap ends.
+- The old flags (`train_active`, `inference_active`) are only kept while their own view is on
+  screen, and are reset to true on every arrival, so they cannot say whether to go there. The
+  rotation now looks every `ROTATE_PROBE_EVERY` (3 s): inference from the background monitor's
+  snapshot (a cheap read; the remote box's rows under `--remote`; the mock roster under
+  `--mock`), training from `TrainMonitor::poll()` (a rate-limited `/proc` walk), created on first
+  use. Mock training counts as going, so `--mock --rotate` still demos it.
+- A run that ends while its view is on screen still gets `ROTATE_LINGER_IDLE`.
+- "Starting" is covered by the inference side: a loading container is a row in the snapshot.
+
 ### Die 3D: commands, theme, reasoned cuts, cell styles (Oct 30 2026, v0.14.0)
 
 Prompt: "we've added too many hotkeys. let's make those slash commands and have help help with

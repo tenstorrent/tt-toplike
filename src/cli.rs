@@ -181,10 +181,12 @@ pub struct Cli {
     /// Rotate through every view unattended (kiosk / wall-display mode)
     ///
     /// Cycles all views — including the ones normally reachable only by their
-    /// own key (`i`, `~`, `t`) — dwelling 30s on each, 45s on arcade, and
-    /// only 10s on training or the inference monitor when there is no run or
-    /// server for them to show. Toggle in-app with `R`. Combines with
-    /// `--mode` to choose where the rotation starts.
+    /// own key (`i`, `~`, `t`) — dwelling 30s on each and 45s on arcade.
+    /// Training and the inference monitor are visited only while a training
+    /// run exists or a model server is starting or running; with none they
+    /// are skipped. The Die 3D view (`3`) is not part of the rotation. Toggle
+    /// in-app with `R`. Combines with `--mode` to choose where the rotation
+    /// starts.
     #[arg(long)]
     pub rotate: bool,
 

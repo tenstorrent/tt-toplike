@@ -324,9 +324,10 @@ fn inset_rect_for(
 const ROTATE_LINGER: Duration = Duration::from_secs(30);
 /// Arcade packs three visualizations into one screen, so it gets longer.
 const ROTATE_LINGER_ARCADE: Duration = Duration::from_secs(45);
-/// Training and the Inference Monitor are *about* a workload. With no run
-/// and no server to show, they are near-empty screens, so the rotation
-/// glances at them and moves on rather than parking on nothing.
+/// Training and the Inference Monitor are *about* a workload, and the rotation
+/// skips them while there is none (`rotation_visits`). This is for the case
+/// that is left: a run or server that ends while the view is on screen leaves
+/// a near-empty screen, so the rotation glances at it and moves on.
 const ROTATE_LINGER_IDLE: Duration = Duration::from_secs(10);
 
 /// The unattended rotation (`--rotate`, or `R` in-app).
@@ -360,6 +361,89 @@ fn next_rotation_mode(m: DisplayMode) -> DisplayMode {
     match ROTATION.iter().position(|&x| x == m) {
         Some(i) => ROTATION[(i + 1) % ROTATION.len()],
         None => ROTATION[0],
+    }
+}
+
+/// How often the rotation looks at the workload views it is not on.
+const ROTATE_PROBE_EVERY: Duration = Duration::from_secs(3);
+
+/// Whether the rotation stops at `mode`. Training and the Inference Monitor are
+/// about a workload, so they are visited only while one exists: a model
+/// starting or serving, or a training run. Every other view draws live
+/// telemetry and is always visited.
+fn rotation_visits(mode: DisplayMode, training: bool, inference: bool) -> bool {
+    match mode {
+        DisplayMode::Training => training,
+        DisplayMode::InferenceMonitor => inference,
+        _ => true,
+    }
+}
+
+/// The next view in the rotation that [`rotation_visits`] accepts. Insights is
+/// always accepted, so this ends within one lap. A view that is not in
+/// `ROTATION` starts the rotation again, as `next_rotation_mode` does.
+fn next_rotation_mode_for(m: DisplayMode, training: bool, inference: bool) -> DisplayMode {
+    let mut next = next_rotation_mode(m);
+    for _ in 0..ROTATION.len() {
+        if rotation_visits(next, training, inference) {
+            return next;
+        }
+        next = next_rotation_mode(next);
+    }
+    // Unreachable while Insights is in ROTATION and always visited; the first
+    // view is a safe place to land if that ever changes.
+    ROTATION[0]
+}
+
+/// What the rotation knows about the workload views, refreshed while it is on
+/// another view. The views' own flags (`train_active`, `inference_active`) are
+/// only kept while their view is on screen, which is too late to decide
+/// whether to go there.
+#[derive(Debug, Default)]
+struct RotationActivity {
+    training: bool,
+    inference: bool,
+    probed: Option<Instant>,
+}
+
+impl RotationActivity {
+    /// Whether it is time to look again (the first time, immediately).
+    fn due(&self) -> bool {
+        self.probed
+            .map_or(true, |t| t.elapsed() >= ROTATE_PROBE_EVERY)
+    }
+}
+
+/// Whether anything is starting or serving a model, read without leaving the
+/// current view: the background monitor's snapshot (a cheap read), the remote
+/// box's rows, or the mock roster.
+fn peek_inference_active(
+    backend: &dyn crate::backend::TelemetryBackend,
+    backend_type: BackendType,
+    monitor: &crate::workload::InferenceServerMonitor,
+    mock_started: Instant,
+) -> bool {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (backend, backend_type, monitor, mock_started);
+        false
+    }
+    #[cfg(target_os = "linux")]
+    {
+        #[cfg(feature = "remote")]
+        if backend_type == BackendType::Remote {
+            if let Some(list) = backend.remote_inference() {
+                return !list.is_empty();
+            }
+        }
+        let _ = backend;
+        if backend_type == BackendType::Mock {
+            return !crate::workload::inference_server::mock::mock_services(
+                mock_started.elapsed().as_secs_f32(),
+            )
+            .is_empty();
+        }
+        !monitor.snapshot().is_empty()
     }
 }
 
@@ -659,6 +743,7 @@ fn run_app(
     let mut rotate_since = Instant::now();
     let mut train_active = false;
     let mut inference_active = false;
+    let mut rotation_activity = RotationActivity::default();
     let mut starfield: Option<HardwareStarfield> = None;
     let mut memory_castle: Option<MemoryCastle> = None;
     let mut memory_flow: Option<MemoryFlowVis> = None;
@@ -1312,9 +1397,10 @@ fn run_app(
                         );
                     }
                     let roster_h = inference_roster.len();
-                    // Drives the rotation's dwell (see `train_active`): with
-                    // no service detected the snake is just roaming an empty
-                    // catalog, so `--rotate` gives it the short glance.
+                    // Drives the rotation's dwell (see `train_active`): a
+                    // server that goes away while this view is on screen
+                    // leaves the snake roaming an empty catalog, so `--rotate`
+                    // gives it the short glance and moves on.
                     inference_active = !rows.is_empty();
                     // Education band: describe the featured *loading* service.
                     band_rotation = band_rotation.wrapping_add(1);
@@ -1387,9 +1473,9 @@ fn run_app(
                     }
                     if let Some(ref mut tm) = train_monitor {
                         tm.poll();
-                        // Drives the rotation's dwell: with no run attached
-                        // this screen is an empty-state card, so `--rotate`
-                        // glances and moves on. Re-read every tick, so a run
+                        // Drives the rotation's dwell: a run that ends while
+                        // this view is on screen leaves an empty-state card, so
+                        // `--rotate` glances and moves on. Re-read every tick, so a run
                         // that the (≤2s) rescan only just found extends the
                         // dwell instead of being cut short.
                         train_active = tm.state().proc.is_some();
@@ -1417,6 +1503,36 @@ fn run_app(
             // decision is made at the data rate rather than the (much faster)
             // animation rate.
             if rotate_enabled {
+                // Keep what the rotation knows about the workload views: the
+                // one on screen from its own flag, the other from a peek every
+                // few seconds, so a view with nothing to show is skipped
+                // instead of visited.
+                match display_mode {
+                    DisplayMode::Training => rotation_activity.training = train_active,
+                    DisplayMode::InferenceMonitor => rotation_activity.inference = inference_active,
+                    _ => {}
+                }
+                if rotation_activity.due() {
+                    rotation_activity.probed = Some(Instant::now());
+                    if display_mode != DisplayMode::Training {
+                        rotation_activity.training = if backend_type == BackendType::Mock {
+                            // The mock backend drives a synthetic run.
+                            true
+                        } else {
+                            let tm = train_monitor.get_or_insert_with(TrainMonitor::new);
+                            tm.poll();
+                            tm.state().proc.is_some()
+                        };
+                    }
+                    if display_mode != DisplayMode::InferenceMonitor {
+                        rotation_activity.inference = peek_inference_active(
+                            &*backend,
+                            backend_type,
+                            &inference_monitor,
+                            mock_started,
+                        );
+                    }
+                }
                 let active = match display_mode {
                     DisplayMode::Training => train_active,
                     DisplayMode::InferenceMonitor => inference_active,
@@ -1425,7 +1541,11 @@ fn run_app(
                     _ => true,
                 };
                 if rotate_since.elapsed() >= linger_for(display_mode, active) {
-                    display_mode = next_rotation_mode(display_mode);
+                    display_mode = next_rotation_mode_for(
+                        display_mode,
+                        rotation_activity.training,
+                        rotation_activity.inference,
+                    );
                     force_redraw = true;
                 }
             }
@@ -9179,6 +9299,78 @@ mod display_mode_tests {
             );
         }
         assert_eq!(m, DisplayMode::Insights, "the rotation must wrap around");
+    }
+
+    /// Training and the Inference Monitor are visited only while a workload
+    /// exists. With neither, a lap visits every other view and never lands on
+    /// them; with one, only that one comes back.
+    #[test]
+    fn the_rotation_skips_the_workload_views_unless_one_is_going() {
+        use super::next_rotation_mode_for;
+        let lap = |training: bool, inference: bool| -> Vec<DisplayMode> {
+            // One lap: from Insights until the rotation comes back to it.
+            let mut seen = vec![DisplayMode::Insights];
+            let mut m = next_rotation_mode_for(DisplayMode::Insights, training, inference);
+            while m != DisplayMode::Insights {
+                seen.push(m);
+                assert!(seen.len() <= ROTATION.len(), "a lap never ends: {seen:?}");
+                m = next_rotation_mode_for(m, training, inference);
+            }
+            seen
+        };
+        let idle = lap(false, false);
+        assert!(!idle.contains(&DisplayMode::Training), "{idle:?}");
+        assert!(!idle.contains(&DisplayMode::InferenceMonitor), "{idle:?}");
+        // Everything else still comes up exactly once.
+        for want in [
+            DisplayMode::Insights,
+            DisplayMode::MemoryFlow,
+            DisplayMode::Starfield,
+            DisplayMode::MemoryCastle,
+            DisplayMode::Arcade,
+            DisplayMode::Defrag,
+            DisplayMode::HivemindSweeper,
+        ] {
+            assert_eq!(idle.iter().filter(|&&m| m == want).count(), 1, "{want:?}");
+        }
+        let training_only = lap(true, false);
+        assert!(training_only.contains(&DisplayMode::Training));
+        assert!(!training_only.contains(&DisplayMode::InferenceMonitor));
+        let inference_only = lap(false, true);
+        assert!(inference_only.contains(&DisplayMode::InferenceMonitor));
+        assert!(!inference_only.contains(&DisplayMode::Training));
+        // With both going, the whole rotation is visited.
+        assert_eq!(lap(true, true).len(), ROTATION.len());
+    }
+
+    /// Landing positions never wedge: from the workload views themselves (a run
+    /// that ended while it was on screen), from an unlisted view, and from the
+    /// view just before a skipped one.
+    #[test]
+    fn skipping_never_leaves_the_rotation_on_a_view_or_stuck() {
+        use super::{next_rotation_mode_for, rotation_visits};
+        for m in [
+            DisplayMode::Training,
+            DisplayMode::InferenceMonitor,
+            DisplayMode::Die3d,
+            DisplayMode::Grid,
+            DisplayMode::Defrag,
+            DisplayMode::HivemindSweeper,
+        ] {
+            let next = next_rotation_mode_for(m, false, false);
+            assert_ne!(next, m, "{m:?} must advance");
+            assert!(rotation_visits(next, false, false), "{m:?} -> {next:?}");
+            assert!(
+                ROTATION.contains(&next),
+                "{m:?} -> {next:?} is in the rotation"
+            );
+        }
+        // Every other view is always visited, whatever is going on.
+        for &m in ROTATION {
+            if !matches!(m, DisplayMode::Training | DisplayMode::InferenceMonitor) {
+                assert!(rotation_visits(m, false, false), "{m:?}");
+            }
+        }
     }
 
     /// A view missing from `ROTATION` must restart the cycle, never wedge.

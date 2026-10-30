@@ -1,3 +1,14 @@
+tt-toplike (0.14.2) noble; urgency=medium
+
+  * The unattended rotation (--rotate, R) skips Training and the Inference
+    Monitor unless something is going: a training run, or a model server that is
+    starting or running. It used to visit them for 10 s each even when they were
+    empty. It looks at both every 3 s while it is on another view. A run that
+    ends while its view is on screen still gets the 10 s glance. Die 3D is not
+    in the rotation (it is entered with 3).
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 17:00:00 -0700
+
 tt-toplike (0.14.1) noble; urgency=medium
 
   * Die 3D: the camera turns by itself after 15 s with no cut (it was 45 s, which

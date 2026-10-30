@@ -17,6 +17,11 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.14.2
+- The unattended rotation (`--rotate`, `R`) skips Training and the Inference Monitor unless
+  something is going: a training run, or a model server that is starting or running. It used to
+  visit them for 10 s each even when empty. Die 3D is not in the rotation.
+
 ### 0.14.1
 - The Die 3D camera turns by itself after 15 s with no cut. It was 45 s, too long to ever see.
 - `/blocks` and `/braille` are shortcuts for `/cells blocks` and `/cells braille`; `/cells block`
