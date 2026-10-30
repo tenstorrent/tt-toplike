@@ -1507,9 +1507,11 @@ terminal's own background (a 0.13.24 build, never installed). The user tried it:
 the haze at all. old black back for everything please."
 
 What stayed:
-- `colors::canvas_bg()` is the one place the background is chosen, now solid
-  `Color::Rgb(0, 0, 0)` by default and `Color::Reset` with `TT_TOPLIKE_TRANSPARENT=1`. It is black in
-  tmux too, where the old `rgb(0, 0, 0)` literal resolved to the terminal's colour.
+- `colors::canvas_bg()` is the one place the background is chosen: black through `colors::rgb`
+  by default and `Color::Reset` with `TT_TOPLIKE_TRANSPARENT=1`. (0.14.3 corrects this entry:
+  0.13.25 first wrote a literal `Color::Rgb(0, 0, 0)`, which sent truecolor black to terminals
+  without truecolor. Through `rgb` black is the terminal's own background there, as it always
+  was, because truecolor fills show as grey under tmux and in macOS Terminal.app over SSH.)
 - All 68 literal black fills use it, and `no_view_paints_a_literal_black_background` scans
   `src/` so a view cannot go back to the literal.
 - The Die 3D view defaulted to a transparent background (`T` flips it), which is the likeliest

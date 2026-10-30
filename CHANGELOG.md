@@ -17,6 +17,13 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.14.3
+- Fix the Windows build (the rotation's inference peek used values that only exist on Linux).
+- The black background goes through the colour-support check again: a terminal without truecolor
+  (tmux, macOS Terminal.app over SSH) gets its own default background, not a truecolor fill.
+  0.13.25 to 0.14.2 sent a literal truecolor black everywhere.
+- One test pinned hashes taken in a truecolor terminal and failed without `COLORTERM`.
+
 ### 0.14.2
 - The unattended rotation (`--rotate`, `R`) skips Training and the Inference Monitor unless
   something is going: a training run, or a model server that is starting or running. It used to

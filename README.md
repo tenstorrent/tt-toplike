@@ -38,9 +38,10 @@ There's also an **adaptive baseline**: for the first ~20 samples the tool learns
 ### Background
 
 Every screen has a solid black background. That includes the Die 3D view and its inset on the
-Insights screen. Set `TT_TOPLIKE_TRANSPARENT=1` to draw on your terminal's own background
-instead; the `T` key in the Die 3D view flips it for that view. The status bar has its own dark
-navy background either way.
+Insights screen. In a terminal without truecolor (tmux, macOS Terminal.app over SSH) black is the
+terminal's own default background, which those terminals need. Set `TT_TOPLIKE_TRANSPARENT=1` to
+draw on your terminal's own background in a truecolor terminal too; `/bg` in the Die 3D view
+flips it for that view. The status bar has its own dark navy background either way.
 
 ### How colors are chosen
 

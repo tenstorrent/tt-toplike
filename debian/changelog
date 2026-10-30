@@ -1,3 +1,16 @@
+tt-toplike (0.14.3) noble; urgency=medium
+
+  * Fix the Windows build: the rotation's inference peek used values that only
+    exist on Linux.
+  * The black background goes through the colour-support check again, so a
+    terminal without truecolor (tmux, macOS Terminal.app over SSH) gets its own
+    default background and not a truecolor fill. 0.13.25 to 0.14.2 sent a literal
+    truecolor black everywhere.
+  * One test pinned buffer hashes taken in a truecolor terminal and failed
+    without COLORTERM; it fixes the colour mode itself now.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 17:30:00 -0700
+
 tt-toplike (0.14.2) noble; urgency=medium
 
   * The unattended rotation (--rotate, R) skips Training and the Inference

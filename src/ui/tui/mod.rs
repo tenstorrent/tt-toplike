@@ -416,35 +416,29 @@ impl RotationActivity {
 
 /// Whether anything is starting or serving a model, read without leaving the
 /// current view: the background monitor's snapshot (a cheap read), the remote
-/// box's rows, or the mock roster.
+/// box's rows, or the mock roster. Linux only, as the monitor is: elsewhere
+/// there is nothing to look at, and the rotation treats it as idle.
+#[cfg(target_os = "linux")]
 fn peek_inference_active(
     backend: &dyn crate::backend::TelemetryBackend,
     backend_type: BackendType,
     monitor: &crate::workload::InferenceServerMonitor,
     mock_started: Instant,
 ) -> bool {
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (backend, backend_type, monitor, mock_started);
-        false
-    }
-    #[cfg(target_os = "linux")]
-    {
-        #[cfg(feature = "remote")]
-        if backend_type == BackendType::Remote {
-            if let Some(list) = backend.remote_inference() {
-                return !list.is_empty();
-            }
+    #[cfg(feature = "remote")]
+    if backend_type == BackendType::Remote {
+        if let Some(list) = backend.remote_inference() {
+            return !list.is_empty();
         }
-        let _ = backend;
-        if backend_type == BackendType::Mock {
-            return !crate::workload::inference_server::mock::mock_services(
-                mock_started.elapsed().as_secs_f32(),
-            )
-            .is_empty();
-        }
-        !monitor.snapshot().is_empty()
     }
+    let _ = backend;
+    if backend_type == BackendType::Mock {
+        return !crate::workload::inference_server::mock::mock_services(
+            mock_started.elapsed().as_secs_f32(),
+        )
+        .is_empty();
+    }
+    !monitor.snapshot().is_empty()
 }
 
 /// How long to dwell on `mode`.
@@ -1525,12 +1519,20 @@ fn run_app(
                         };
                     }
                     if display_mode != DisplayMode::InferenceMonitor {
-                        rotation_activity.inference = peek_inference_active(
-                            &*backend,
-                            backend_type,
-                            &inference_monitor,
-                            mock_started,
-                        );
+                        #[cfg(target_os = "linux")]
+                        {
+                            rotation_activity.inference = peek_inference_active(
+                                &*backend,
+                                backend_type,
+                                &inference_monitor,
+                                mock_started,
+                            );
+                        }
+                        // No inference monitor off Linux, so nothing to show.
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            rotation_activity.inference = false;
+                        }
                     }
                 }
                 let active = match display_mode {
@@ -12424,16 +12426,23 @@ mod insights_inset_tests {
     }
 
     /// Buffer hashes taken on the code before `render_insights` was changed.
+    ///
+    /// The hashes were taken in a truecolor terminal, and colours are written
+    /// differently without truecolor (`colors::rgb`), so the test says so
+    /// instead of inheriting `COLORTERM` from whoever runs it. Without this it
+    /// passed on a machine with `COLORTERM=truecolor` and failed on CI.
     #[test]
     fn no_inset_view_means_the_old_layout() {
-        assert_eq!(
-            buffer_hash(&draw(150, 42, 2, None, None)),
-            363425789546536760
-        );
-        assert_eq!(
-            buffer_hash(&draw(120, 40, 4, None, None)),
-            12509307249848498318
-        );
+        colors::with_truecolor(true, || {
+            assert_eq!(
+                buffer_hash(&draw(150, 42, 2, None, None)),
+                363425789546536760
+            );
+            assert_eq!(
+                buffer_hash(&draw(120, 40, 4, None, None)),
+                12509307249848498318
+            );
+        });
     }
 
     /// Chips of a Wormhole board (no Blackhole among them).
