@@ -9,7 +9,9 @@
 //! (`cells`). The camera (`camera`) cuts to another angle when a chip becomes
 //! busy or its PCIe traffic bursts (`triggers`), with a chaos, dissolve or
 //! spin transition, and the scene can switch from every board to the busy
-//! chip's board (`switching`). This file holds the
+//! chip's board (`switching`). Clouds drift behind the dies (`clouds`), as
+//! decoration whose drift follows PCIe traffic and whose brightness follows
+//! chip load. This file holds the
 //! view that ties them together: it reads the backend in `update`, answers
 //! keys in `handle_key` and draws in `render`.
 //!
@@ -19,6 +21,7 @@
 pub mod bh_layout_data;
 pub mod camera;
 pub mod cells;
+pub mod clouds;
 pub mod layout;
 pub mod load;
 pub mod palette;
@@ -36,6 +39,7 @@ use crate::animation::topology::BoardTopology;
 use crate::backend::TelemetryBackend;
 use crate::models::Architecture;
 use camera::{dissolve_into, scramble, Camera, Director, TransitionKind};
+use clouds::{CloudClock, Clouds};
 use load::LoadScale;
 use palette::GRAYSKULL;
 use raster::{Iso, PixelBuf};
@@ -45,7 +49,7 @@ use scene::{
     board_band_origin, board_grid, chip_inputs, die_centre, draw_board_scene, fit_pixels,
     has_per_tile_data, ChipInputs, Detail, SceneFit, ESTIMATE_LABEL, MIN_CELLS,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use super_scene::{band_origin, draw_super_scene, super_grid};
 use switching::{Scene, Switcher};
@@ -56,6 +60,8 @@ const FOOTER_ROWS: usize = 2;
 /// Seed of the camera director. Fixed, so a run with the same telemetry and
 /// times cuts to the same angles; tests depend on that.
 const CAMERA_SEED: u64 = 0x3D;
+/// Seed of the cloud field. Fixed, so the sky is the same on every run.
+const CLOUD_SEED: u64 = 0xC10D;
 /// An RGB triple as a ratatui colour (`const`, so the footer colours can come
 /// straight from the palette).
 const fn rgb(c: [u8; 3]) -> Color {
@@ -151,6 +157,8 @@ die3d_keys! {
     CycleTransition,
     /// `L`: chip labels on the dies on or off.
     ToggleLabels,
+    /// `W`: the clouds behind the die on or off.
+    ToggleClouds,
 }
 
 impl Die3dKey {
@@ -164,7 +172,8 @@ impl Die3dKey {
             | Die3dKey::ToggleBraille
             | Die3dKey::ToggleTransparent
             | Die3dKey::CycleTransition
-            | Die3dKey::ToggleLabels => true,
+            | Die3dKey::ToggleLabels
+            | Die3dKey::ToggleClouds => true,
             Die3dKey::NextBoard | Die3dKey::PrevBoard | Die3dKey::CutNow => false,
         }
     }
@@ -182,6 +191,7 @@ pub fn key_to_die3d(c: char) -> Option<Die3dKey> {
         'T' => Some(Die3dKey::ToggleTransparent),
         'X' => Some(Die3dKey::CycleTransition),
         'L' => Some(Die3dKey::ToggleLabels),
+        'W' => Some(Die3dKey::ToggleClouds),
         _ => None,
     }
 }
@@ -236,6 +246,18 @@ pub struct Die3dView {
     transparent: bool,
     /// Draw each die's name and power over it (`L`).
     show_labels: bool,
+    /// Draw the clouds behind the die (`W`).
+    show_clouds: bool,
+    /// The cloud field, from a fixed seed.
+    clouds: Clouds,
+    /// The clouds' drift integrated over view time, and the intensity they
+    /// are shown at. Advanced by `update` and by `render` (hence the `Cell`:
+    /// `render` takes `&self`).
+    cloud_clock: Cell<CloudClock>,
+    /// Drift speed from the last `update`'s PCIe readings, px/s.
+    cloud_speed: f32,
+    /// Cloud intensity from the last `update`'s chip loads.
+    cloud_intensity: f32,
     director: Director,
     detector: TriggerDetector,
     switcher: Switcher,
@@ -281,10 +303,13 @@ struct LastFrame {
 }
 
 /// What a frame was drawn from besides the time: the view's revision, the
-/// start of the latest cut, whether its transition is running and the scene
-/// shown. A frame is reused only while all four are unchanged, so a key, a
-/// cut starting or ending or a scene switch shows in the very next frame.
-type FrameKey = (u64, Option<f64>, bool, Scene);
+/// start of the latest cut, whether its transition is running, the scene
+/// shown and the clouds' whole-pixel offset and intensity (`cloud_key`). A
+/// frame is reused only while all five are unchanged, so a key, a cut
+/// starting or ending, a scene switch or a cloud step shows in the very next
+/// frame. A cloud clock step that leaves the offset and intensity as they
+/// were forces nothing.
+type FrameKey = (u64, Option<f64>, bool, Scene, Option<(i64, u32)>);
 
 impl Die3dView {
     /// A view for a terminal of `cols` x `rows` cells, in braille, showing
@@ -305,6 +330,11 @@ impl Die3dView {
             braille: true,
             transparent: true,
             show_labels: true,
+            show_clouds: true,
+            clouds: Clouds::new(CLOUD_SEED),
+            cloud_clock: Cell::new(CloudClock::default()),
+            cloud_speed: Clouds::drift_px_per_s(None),
+            cloud_intensity: Clouds::intensity(0.0),
             director: Director::new(CAMERA_SEED),
             detector: TriggerDetector::new(),
             switcher: Switcher::new(),
@@ -324,6 +354,9 @@ impl Die3dView {
     /// Only Blackhole chips are drawn, so only they can trigger a cut; other
     /// devices are listed in the footer instead.
     pub fn update(&mut self, backend: &dyn TelemetryBackend, now: f64) {
+        // Integrate the drift up to now at the speed read last time, before
+        // this update's readings replace it.
+        self.advance_clouds(now);
         let before = self.layout_signature();
         let devices = backend.devices();
         let topology = BoardTopology::from_devices(devices);
@@ -348,6 +381,7 @@ impl Die3dView {
             }
         }
         self.calibrate_loads(now);
+        self.read_cloud_drivers();
         // A board, chip or device that came or went shows in the next frame.
         // Readings that only change (power, PCIe rates) wait for the next
         // frame that is due anyway.
@@ -405,6 +439,41 @@ impl Die3dView {
         }
     }
 
+    /// Set the clouds' drift speed from the total PCIe traffic of every
+    /// chip drawn (both directions; `None` when no chip has a reading) and
+    /// their intensity from the busiest chip's load, relative to its idle
+    /// as `calibrate_loads` left it. The busiest chip sets it, so one
+    /// busy chip among eight still shows.
+    fn read_cloud_drivers(&mut self) {
+        let chips = self.chips.iter().flatten();
+        let pcie = chips
+            .clone()
+            .flat_map(|c| [c.pcie_in_bps, c.pcie_out_bps])
+            .flatten()
+            .filter(|b| b.is_finite())
+            .fold(None, |sum: Option<f64>, b| Some(sum.unwrap_or(0.0) + b));
+        let load = chips.map(|c| c.load).filter(|l| !l.is_nan()).fold(0.0, f32::max);
+        self.cloud_speed = Clouds::drift_px_per_s(pcie);
+        self.cloud_intensity = Clouds::intensity(load);
+    }
+
+    /// Move the cloud clock to `now` at the speed and intensity of the last
+    /// update. Runs whether or not the clouds are shown, so turning them on
+    /// shows them where they would be.
+    fn advance_clouds(&self, now: f64) {
+        let mut clock = self.cloud_clock.get();
+        clock.advance(now, self.cloud_speed, self.cloud_intensity);
+        self.cloud_clock.set(clock);
+    }
+
+    /// What makes one frame's clouds differ from another's: the whole-pixel
+    /// offset and the intensity shown, or nothing while they are off.
+    fn cloud_key(&self) -> Option<(i64, u32)> {
+        let clock = self.cloud_clock.get();
+        self.show_clouds
+            .then(|| (clock.offset_px() as i64, clock.intensity().to_bits()))
+    }
+
     /// Act on a key. A scene chosen here (`[`, `]`, `m`) is the user's: the
     /// view will not switch back from it on its own.
     pub fn handle_key(&mut self, key: Die3dKey, now: f64) {
@@ -451,6 +520,7 @@ impl Die3dView {
             Die3dKey::ToggleTransparent => self.transparent = !self.transparent,
             Die3dKey::CycleTransition => self.director.cycle_transition_mode(),
             Die3dKey::ToggleLabels => self.show_labels = !self.show_labels,
+            Die3dKey::ToggleClouds => self.show_clouds = !self.show_clouds,
         }
     }
 
@@ -468,12 +538,14 @@ impl Die3dView {
     /// ending, a scene switch or a change in the boards drawn always gets a
     /// fresh frame, and so does a `now` earlier than the last frame's.
     pub fn render(&self, now: f64) -> Vec<Line<'static>> {
+        self.advance_clouds(now);
         let in_transition = self.director.progress(now).is_some();
         let key = (
             self.revision,
             self.director.cut_at(),
             in_transition,
             self.switcher.scene_at(now),
+            self.cloud_key(),
         );
         let interval = if in_transition {
             TRANSITION_FRAME_SECS
@@ -658,6 +730,14 @@ impl Die3dView {
             buf.clear_transparent();
         } else {
             buf.fill_solid(OPAQUE_BG);
+        }
+        // The clouds go first, so the slab and the dies are drawn over them
+        // and are never covered. Clear sky is left as it is: uncovered in
+        // transparent mode, black in opaque.
+        if self.show_clouds {
+            let clock = self.cloud_clock.get();
+            self.clouds
+                .draw(&mut buf, clock.offset_px(), clock.intensity());
         }
         let mut fallback = false;
         // With one board the super scene is that board's scene.
@@ -916,13 +996,18 @@ impl Die3dView {
                 label: "labels",
                 state: if self.show_labels { "on" } else { "off" },
             },
+            Switch {
+                key: 'W',
+                label: "clouds",
+                state: if self.show_clouds { "on" } else { "off" },
+            },
         ]
     }
 
     /// The footer's second row after its bar, at most `width` characters.
     /// From most to least detailed, the first that fits wins:
     ///
-    /// 1. `B braille · T transparent · C auto-cuts on · X transition shuffle · m all boards · L labels on · [ ] board · c cut · 3 leave`
+    /// 1. `B braille · T transparent · C auto-cuts on · X transition shuffle · m all boards · L labels on · W clouds on · [ ] board · c cut · 3 leave`
     /// 2. the same without the action keys
     /// 3. `<key> <state>` for each switch (`C on`)
     /// 4. the state words alone
@@ -1791,8 +1876,8 @@ mod tests {
 
     #[test]
     fn the_switch_strip_falls_back_to_keyed_then_bare_then_a_cut() {
-        // Lengths with the default switches: keyed is 66 characters and bare
-        // 54, so a 60-column terminal (57 after the bar) lands on bare.
+        // Lengths with the default switches: keyed is 73 characters and bare
+        // 59, so a 65-column terminal (62 after the bar) lands on bare.
         let v = wide_label_view(150);
         let sw = v.switches();
         let keyed = sw
@@ -1801,7 +1886,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(SEP);
         let bare = sw.iter().map(|s| s.state).collect::<Vec<_>>().join(SEP);
-        assert_eq!((keyed.chars().count(), bare.chars().count()), (66, 54));
+        assert_eq!((keyed.chars().count(), bare.chars().count()), (73, 59));
         let at = |cols: usize| {
             let v = wide_label_view(cols);
             let s = strip(&v);
@@ -1809,14 +1894,14 @@ mod tests {
             s.trim_start_matches("\u{255a}\u{2550} ").to_string()
         };
         // Exactly wide enough for the keyed form.
-        assert_eq!(at(66 + BAR_WIDTH), keyed);
-        // About 60 columns: the keyed form no longer fits, the bare one does.
-        assert_eq!(at(60), bare);
-        assert_eq!(at(54 + BAR_WIDTH), bare);
+        assert_eq!(at(73 + BAR_WIDTH), keyed);
+        // About 65 columns: the keyed form no longer fits, the bare one does.
+        assert_eq!(at(65), bare);
+        assert_eq!(at(59 + BAR_WIDTH), bare);
         // One column short of bare: the last resort cuts at a character and
         // marks the cut with an ellipsis.
-        let cut = at(53 + BAR_WIDTH);
-        assert_eq!(cut.chars().count(), 53);
+        let cut = at(58 + BAR_WIDTH);
+        assert_eq!(cut.chars().count(), 58);
         assert!(cut.ends_with('\u{2026}'), "{cut}");
         assert!(bare.starts_with(cut.trim_end_matches('\u{2026}')), "{cut}");
     }
@@ -1827,6 +1912,8 @@ mod tests {
         let mut v = Die3dView::new(150, 42);
         v.update(&b, 0.0);
         v.handle_key(Die3dKey::ToggleTransparent, 0.0);
+        // Clouds off: they sit on the black fill and would cover corners.
+        v.handle_key(Die3dKey::ToggleClouds, 0.0);
         let lines = v.render(0.0);
         let black = Some(Color::Rgb(0, 0, 0));
         // The scene corners are empty floor: a flat cell on pure black.
@@ -2530,5 +2617,191 @@ mod tests {
             assert!(f.contains(&format!("X transition {want_state}")), "{f}");
             v.handle_key(Die3dKey::CycleTransition, 0.0);
         }
+    }
+
+    /// A one-board (p150) view over `b`, auto-cuts off, so nothing but the
+    /// test moves the camera.
+    fn cloud_view(b: &Fake) -> Die3dView {
+        let mut v = Die3dView::new(150, 42);
+        v.update(b, 0.0);
+        v.director.set_auto(false);
+        v
+    }
+
+    #[test]
+    fn the_offset_integrates_speed_so_a_speed_change_never_jumps() {
+        let mut b = Fake::boards(&["p150"], Some(TDP));
+        let mut v = cloud_view(&b);
+        let mut offsets = Vec::new();
+        // 20 s, ticks 1/10 s apart, an update and a frame each tick. No PCIe
+        // reading for the first 10 s (the 0.8 px/s floor), then 5 GB/s.
+        for i in 0..=200 {
+            let now = i as f64 * 0.1;
+            if i == 100 {
+                b.pcie = Some(PcieBandwidth {
+                    rx_bytes_per_sec: 4.0e9,
+                    tx_bytes_per_sec: 1.0e9,
+                });
+            }
+            v.update(&b, now);
+            v.render(now);
+            offsets.push((now, v.cloud_clock.get().offset_px()));
+        }
+        // Continuous: no tick moves the clouds more than one clock step at
+        // the fastest drift (8 px/s for 0.25 s) and a pixel of rounding, and
+        // none moves them back.
+        for w in offsets.windows(2) {
+            let step = w[1].1 - w[0].1;
+            assert!(
+                (0.0..=3.0).contains(&step),
+                "jump of {step} px at {} s",
+                w[1].0
+            );
+        }
+        // The floor for the first 10 s: 8 px, less a pixel of rounding.
+        let at = |t: f64| offsets.iter().find(|o| (o.0 - t).abs() < 1e-9).unwrap().1;
+        assert!((7.0..=8.0).contains(&at(10.0)), "{}", at(10.0));
+        // Then the speed for 5 GB/s, about 7.7 px/s, from where it was.
+        let fast = Clouds::drift_px_per_s(Some(5.0e9)) as f64;
+        let gained = at(20.0) - at(10.0);
+        assert!((gained - fast * 10.0).abs() <= 2.0, "{gained} px in 10 s");
+    }
+
+    #[test]
+    fn the_view_brightens_the_clouds_with_chip_load() {
+        let mut b = Fake::boards(&["p300"; 2], Some(TDP));
+        let mut v = cloud_view(&b);
+        assert_eq!(v.cloud_clock.get().intensity(), 0.25);
+        // The busiest chip sets the brightness: 90 W of 100 W is a load of
+        // 0.9 while the load scale is still filling, so an intensity of 0.7.
+        b.set_power(1, 90.0);
+        v.update(&b, 0.5);
+        // Taken up at the clock's next step, a quarter second on.
+        v.render(0.6);
+        assert_eq!(v.cloud_clock.get().intensity(), 0.25);
+        v.render(0.75);
+        let shown = v.cloud_clock.get().intensity();
+        assert!((shown - 0.7).abs() < 1e-6, "{shown}");
+    }
+
+    #[test]
+    fn clouds_never_paint_over_the_die() {
+        for transparent in [true, false] {
+            let b = two_boards();
+            let mut v = cloud_view(&b);
+            if !transparent {
+                v.handle_key(Die3dKey::ToggleTransparent, 0.0);
+            }
+            v.render(0.0);
+            v.render(30.0);
+            assert!(v.cloud_clock.get().offset_px() > 0.0);
+            let (on, _) = v.scene_pixels(30.0).unwrap();
+            v.handle_key(Die3dKey::ToggleClouds, 30.0);
+            let (off, _) = v.scene_pixels(30.0).unwrap();
+            let mut sky = 0;
+            for i in 0..on.rgb.len() {
+                if transparent && off.cover[i] || !transparent && off.rgb[i] != OPAQUE_BG {
+                    // Die, slab, packet: the same pixel with clouds on.
+                    assert_eq!((on.rgb[i], on.cover[i]), (off.rgb[i], true), "pixel {i}");
+                } else if on.cover[i] && on.rgb[i] != off.rgb[i] {
+                    sky += 1;
+                }
+            }
+            // The clouds were drawn somewhere, so the check above is not
+            // vacuous.
+            assert!(sky > 1000, "transparent={transparent}: {sky} cloud pixels");
+        }
+    }
+
+    #[test]
+    fn the_w_key_toggles_clouds_and_the_footer_says_which() {
+        assert_eq!(key_to_die3d('W'), Some(Die3dKey::ToggleClouds));
+        assert_eq!(key_to_die3d('w'), None);
+        assert!(Die3dKey::ToggleClouds.toggles());
+        let b = two_boards();
+        let mut v = cloud_view(&b);
+        assert!(v.show_clouds, "on by default");
+        let f = footer(&v.render(0.0));
+        assert!(f.contains("W clouds on"), "{f}");
+        let with = v.scene_pixels(0.0).unwrap().0;
+        v.handle_key(Die3dKey::ToggleClouds, 0.1);
+        let f = footer(&v.render(0.1));
+        assert!(f.contains("W clouds off"), "{f}");
+        let without = v.scene_pixels(0.1).unwrap().0;
+        let covered = |b: &PixelBuf| b.cover.iter().filter(|c| **c).count();
+        assert!(covered(&with) > covered(&without) + 1000);
+        v.handle_key(Die3dKey::ToggleClouds, 0.2);
+        assert!(footer(&v.render(0.2)).contains("W clouds on"));
+    }
+
+    #[test]
+    fn chip_labels_stay_readable_over_clouds() {
+        for transparent in [true, false] {
+            let b = two_boards();
+            let mut v = cloud_view(&b);
+            if !transparent {
+                v.handle_key(Die3dKey::ToggleTransparent, 0.0);
+            }
+            let now = 12.0;
+            let lines = v.render(now);
+            let placed = v.frame(now).unwrap().2.unwrap();
+            let anchors = v.label_anchors(&placed, v.rows - FOOTER_ROWS);
+            assert_eq!(anchors.len(), 4);
+            for (col, row, label) in anchors {
+                let cells: Vec<(char, Style)> = lines[row]
+                    .spans
+                    .iter()
+                    .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
+                    .collect();
+                let start = col - label.chars().count() / 2;
+                for (i, ch) in label.chars().enumerate() {
+                    let (got, style) = cells[start + i];
+                    assert_eq!(got, ch, "{label}");
+                    assert_eq!(style.fg, Some(rgb(GRAYSKULL.white)), "{label}");
+                    let want = if transparent {
+                        Color::Reset
+                    } else {
+                        rgb(OPAQUE_BG)
+                    };
+                    assert_eq!(style.bg, Some(want), "{label}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_cloud_step_redraws_at_once_and_a_still_sky_does_not() {
+        // No PCIe reading: the sky moves at the floor, a pixel per 1.25 s,
+        // and no packet moves. Frames 1/120 s apart for 5 s.
+        let b = Fake::boards(&["p150"], Some(TDP));
+        let v = cloud_view(&b);
+        let mut prev = (v.cloud_clock.get().offset_px(), text(&v.render(1.0)));
+        let mut steps = 0;
+        for i in 1..600 {
+            let now = 1.0 + i as f64 / 120.0;
+            let lines = text(&v.render(now));
+            let offset = v.cloud_clock.get().offset_px();
+            if offset != prev.0 {
+                // A step is shown in the very frame it happens, even when
+                // the last frame is less than 1/20 s old.
+                assert_ne!(lines, prev.1, "the step at {now} s was not drawn");
+                steps += 1;
+            }
+            prev = (offset, lines);
+        }
+        assert!((3..=5).contains(&steps), "{steps} steps in 5 s at 0.8 px/s");
+        // Between steps the throttle is as it was: 20 frames drawn a second
+        // (counted by the time of the last frame drawn, since a frame drawn
+        // can equal the one before it). One step falls in this second, on a
+        // frame that was due anyway.
+        let drawn_at = |v: &Die3dView| v.cache.borrow().last.as_ref().unwrap().at;
+        let mut drawn = 0;
+        let mut last = drawn_at(&v);
+        for i in 0..120 {
+            v.render(10.0 + i as f64 / 120.0);
+            drawn += (drawn_at(&v) != last) as usize;
+            last = drawn_at(&v);
+        }
+        assert!((19..=21).contains(&drawn), "{drawn} frames drawn in a second");
     }
 }

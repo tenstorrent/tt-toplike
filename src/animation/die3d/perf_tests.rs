@@ -9,6 +9,9 @@
 //! any optimisation. Every cache, buffer reuse and throttle added since must
 //! leave those frames identical, character for character and style for
 //! style. A later task that changes the look on purpose re-pins them.
+//!
+//! Task 17 added the clouds (`W`). The old hashes still pin the frames with
+//! the clouds off; frames with the clouds on have hashes of their own.
 
 use super::camera::TransitionMode;
 use super::test_backend::Fake;
@@ -95,7 +98,12 @@ fn busy_fake(boards: &[&str]) -> Fake {
 /// wave's quantised time (`scene::WAVE_STEPS_PER_SEC`) equals the time
 /// itself, so these frames are the same with and without that quantisation
 /// and pin only what must not change at all: caching, reuse and throttling.
-fn golden_frames(braille: bool) -> Vec<(f64, u64)> {
+///
+/// With `clouds` off, the `W clouds off` entry is taken out of the footer's
+/// switch row before hashing: it is the one change to these frames since the
+/// pre-Task-16 hashes were taken, and without it they pin everything else
+/// exactly as before.
+fn golden_frames(braille: bool, clouds: bool) -> Vec<(f64, u64)> {
     let b = busy_fake(&["p300"; 4]);
     let mut v = Die3dView::new(150, 42);
     v.update(&b, 0.0);
@@ -104,8 +112,17 @@ fn golden_frames(braille: bool) -> Vec<(f64, u64)> {
         v.handle_key(Die3dKey::ToggleBraille, 0.0);
         v.handle_key(Die3dKey::ToggleTransparent, 0.0);
     }
+    if !clouds {
+        v.handle_key(Die3dKey::ToggleClouds, 0.0);
+    }
     let mut out = Vec::new();
-    let mut shot = |v: &Die3dView, t: f64| out.push((t, frame_hash(&v.render(t))));
+    let mut shot = |v: &Die3dView, t: f64| {
+        let mut lines = v.render(t);
+        if !clouds {
+            without_the_w_switch(&mut lines);
+        }
+        out.push((t, frame_hash(&lines)))
+    };
     shot(&v, 0.0);
     shot(&v, 2.75);
     v.director.set_transition_mode(TransitionMode::Dissolve);
@@ -121,8 +138,21 @@ fn golden_frames(braille: bool) -> Vec<(f64, u64)> {
     out
 }
 
-/// The hashes of `golden_frames`, taken from the view as committed before
-/// Task 16 (03cd98e5), with this same code.
+/// Remove `W clouds off` from the footer's switch row (the last line), which
+/// must hold it in its full form.
+fn without_the_w_switch(lines: &mut [Line<'static>]) {
+    let entry = format!("{SEP}W clouds off");
+    let row = lines.last_mut().expect("a footer");
+    let found = row
+        .spans
+        .iter_mut()
+        .find(|s| s.content.contains(&entry))
+        .expect("the switch row lists W clouds off");
+    found.content = found.content.replacen(&entry, "", 1).into();
+}
+
+/// The hashes of `golden_frames` with the clouds off, taken from the view as
+/// committed before Task 16 (03cd98e5), with this same code.
 const GOLDEN_BRAILLE: [u64; 6] = [
     0x553e37addb11cf7c,
     0xa94976c09fabf489,
@@ -140,10 +170,29 @@ const GOLDEN_HALFBLOCK: [u64; 6] = [
     0x06dbdddaec5ebb99,
 ];
 
+/// The hashes of `golden_frames` with the clouds on, pinned when the clouds
+/// were added (Task 17), so a later change to how they look or move is seen.
+const GOLDEN_BRAILLE_CLOUDS: [u64; 6] = [
+    0x332846661f740fbf,
+    0x309e4c7a841b6360,
+    0xd4fa0cea345ed5bd,
+    0x8491cdb3c8554e86,
+    0xbbaeb46410e23e72,
+    0x04eeb512ce7af35d,
+];
+const GOLDEN_HALFBLOCK_CLOUDS: [u64; 6] = [
+    0xc69e6aba8fcb8817,
+    0x00fba34d8360e189,
+    0xa3eac5c653405d75,
+    0x2b5d79a9e9c31f91,
+    0x48f0d83ee28448fc,
+    0x3007182842722456,
+];
+
 #[test]
 fn cached_fit_gives_identical_frames() {
     for (braille, want) in [(true, GOLDEN_BRAILLE), (false, GOLDEN_HALFBLOCK)] {
-        let got = golden_frames(braille);
+        let got = golden_frames(braille, false);
         let hashes: Vec<u64> = got.iter().map(|g| g.1).collect();
         assert_eq!(
             hashes,
@@ -151,6 +200,21 @@ fn cached_fit_gives_identical_frames() {
             "braille={braille}: frames at {:?} changed; got {hashes:#x?}",
             got.iter().map(|g| g.0).collect::<Vec<_>>()
         );
+    }
+}
+
+#[test]
+fn frames_with_clouds_are_pinned() {
+    for (braille, want) in [
+        (true, GOLDEN_BRAILLE_CLOUDS),
+        (false, GOLDEN_HALFBLOCK_CLOUDS),
+    ] {
+        let got = golden_frames(braille, true);
+        let hashes: Vec<u64> = got.iter().map(|g| g.1).collect();
+        assert_eq!(hashes, want, "braille={braille}: got {hashes:#x?}");
+        // Not the clouds-off frames under another footer: the scene differs.
+        let off = golden_frames(braille, false);
+        assert_ne!(hashes[0], off[0].1);
     }
 }
 
@@ -200,6 +264,8 @@ struct Case {
     size: (usize, usize),
     /// A transition to cut into at every `every` seconds, if any.
     cuts: Option<(TransitionMode, f64)>,
+    /// The clouds (`W`) on.
+    clouds: bool,
 }
 
 /// Frames per case and the view time between them.
@@ -229,6 +295,9 @@ fn measure_at(case: Case, dt: f64) -> Cost {
     }
     if let Some((mode, _)) = case.cuts {
         v.director.set_transition_mode(mode);
+    }
+    if !case.clouds {
+        v.handle_key(Die3dKey::ToggleClouds, 0.0);
     }
     let start = 1.0;
     let mut next_cut = start;
@@ -316,6 +385,15 @@ fn stage_report(scene: &str, boards: &[&str]) {
     let footer = mean_ms(n, || {
         std::hint::black_box(v.footer(now, Some(shown)));
     });
+    // The clouds alone, into a cleared buffer of the scene's size.
+    let mut sky = PixelBuf::new(pw, ph);
+    let mut k = 0;
+    let clouds = mean_ms(n, || {
+        k += 1;
+        sky.clear_transparent();
+        v.clouds.draw(&mut sky, k as f64, 0.5);
+        std::hint::black_box(&sky);
+    });
     // Each call a fresh frame: more than 1/20 s of view time apart.
     let mut k = 0;
     let total = mean_ms(n, || {
@@ -323,7 +401,7 @@ fn stage_report(scene: &str, boards: &[&str]) {
         std::hint::black_box(v.render(now + k as f64 * 0.06));
     });
     println!(
-        "| {scene} | {fit:.3} | {:.3} | {cells:.3} | {labels:.3} | {footer:.3} | {total:.3} |",
+        "| {scene} | {fit:.3} | {:.3} | {clouds:.3} | {cells:.3} | {labels:.3} | {footer:.3} | {total:.3} |",
         raster - fit
     );
 }
@@ -342,37 +420,41 @@ fn render_cost_report() {
     ];
     println!();
     println!(
-        "| scene | cells | bg | size | mean ms | p95 ms | changed cells/frame | bytes/frame |"
+        "| scene | cells | bg | size | clouds | mean ms | p95 ms | changed cells/frame | bytes/frame |"
     );
-    println!("|---|---|---|---|---|---|---|---|");
+    println!("|---|---|---|---|---|---|---|---|---|");
     for size in [(150, 42), (200, 56)] {
         for (scene, boards) in scenes {
             for braille in [true, false] {
                 for transparent in [true, false] {
-                    let c = measure(Case {
-                        boards,
-                        braille,
-                        transparent,
-                        size,
-                        cuts: None,
-                    });
-                    println!(
-                        "| {scene} | {} | {} | {} x {} | {:.2} | {:.2} | {:.0} | {:.0} |",
-                        if braille { "braille" } else { "half-block" },
-                        if transparent { "transparent" } else { "opaque" },
-                        size.0,
-                        size.1,
-                        c.mean_ms,
-                        c.p95_ms,
-                        c.changed,
-                        c.bytes
-                    );
+                    for clouds in [false, true] {
+                        let c = measure(Case {
+                            boards,
+                            braille,
+                            transparent,
+                            size,
+                            cuts: None,
+                            clouds,
+                        });
+                        println!(
+                            "| {scene} | {} | {} | {} x {} | {} | {:.2} | {:.2} | {:.0} | {:.0} |",
+                            if braille { "braille" } else { "half-block" },
+                            if transparent { "transparent" } else { "opaque" },
+                            size.0,
+                            size.1,
+                            if clouds { "on" } else { "off" },
+                            c.mean_ms,
+                            c.p95_ms,
+                            c.changed,
+                            c.bytes
+                        );
+                    }
                 }
             }
         }
     }
     println!();
-    println!("Transitions, braille transparent 150 x 42, a cut by hand every period:");
+    println!("Transitions, braille transparent 150 x 42, clouds on, a cut by hand every period:");
     println!("| scene | transition | mean ms | p95 ms | changed cells/frame | bytes/frame |");
     println!("|---|---|---|---|---|---|");
     for (scene, boards) in [scenes[0], scenes[2]] {
@@ -387,6 +469,7 @@ fn render_cost_report() {
                 transparent: true,
                 size: (150, 42),
                 cuts: Some((mode, every)),
+                clouds: true,
             });
             println!(
                 "| {scene} | {mode:?} every {every} s | {:.2} | {:.2} | {:.0} | {:.0} |",
@@ -396,7 +479,7 @@ fn render_cost_report() {
     }
     println!();
     println!("What the terminal receives per second when the TUI draws 60 times a");
-    println!("second (its default; frames 1/60 s apart), braille transparent 150 x 42:");
+    println!("second (its default; frames 1/60 s apart), braille transparent 150 x 42, clouds on:");
     println!("| scene | mean ms | changed cells/s | KB/s |");
     println!("|---|---|---|---|");
     for (scene, boards) in [scenes[0], scenes[2]] {
@@ -407,6 +490,7 @@ fn render_cost_report() {
                 transparent: true,
                 size: (150, 42),
                 cuts: None,
+                clouds: true,
             },
             1.0 / 60.0,
         );
@@ -420,9 +504,12 @@ fn render_cost_report() {
     println!();
     wave_report();
     println!();
-    println!("Per stage, one braille transparent frame at 150 x 42 (mean ms):");
-    println!("| scene | fit | raster (less fit) | cells | labels | footer | whole render |");
-    println!("|---|---|---|---|---|---|---|");
+    println!("Per stage, one braille transparent frame at 150 x 42, clouds on (mean ms;");
+    println!("the raster includes the clouds, which are also timed alone):");
+    println!(
+        "| scene | fit | raster (less fit) | clouds | cells | labels | footer | whole render |"
+    );
+    println!("|---|---|---|---|---|---|---|---|");
     stage_report("one board (p150)", &["p150"]);
     stage_report("super 4 x 2", &["p300"; 8]);
 }
@@ -513,9 +600,16 @@ fn render_within_one_twentieth_of_a_second_returns_the_same_lines() {
     v.handle_key(Die3dKey::ToggleLabels, 1.044);
     assert_ne!(text(&v.render(1.044)), first);
     // Time going backwards (a new clock) is never served from the cache.
-    let w = steady_view();
+    // Clouds off for this part: a view that has seen 5.0 has drifted its
+    // clouds a step further than a fresh one, and they never drift back.
+    let clear = || {
+        let mut v = steady_view();
+        v.handle_key(Die3dKey::ToggleClouds, 0.0);
+        v
+    };
+    let w = clear();
     w.render(5.0);
-    assert_eq!(text(&w.render(4.99)), text(&steady_view().render(4.99)));
+    assert_eq!(text(&w.render(4.99)), text(&clear().render(4.99)));
 }
 
 #[test]
@@ -543,17 +637,35 @@ fn redraws(v: &Die3dView, start: f64, secs: f64) -> usize {
 
 #[test]
 fn transitions_render_at_thirty_frames_per_second() {
-    // At rest: 20 frames in a second.
-    let steady = redraws(&steady_view(), 1.0, 1.0);
-    assert!((19..=21).contains(&steady), "{steady} frames at rest");
-    // In a spin (1.6 s long): 30 frames in a second. (Sampled 120 times a
-    // second, a frame is due every fourth sample in a transition and every
-    // sixth at rest, with or without the 5 ms early allowance.)
-    let mut v = steady_view();
-    v.director.set_transition_mode(TransitionMode::Spin);
-    v.handle_key(Die3dKey::CutNow, 2.0);
-    let spin = redraws(&v, 2.1, 1.0);
-    assert!((29..=31).contains(&spin), "{spin} frames in a spin");
+    // The throttle's own rates are counted with the clouds off: a cloud step
+    // (at most 4 a second) is drawn at once and can add a frame between two
+    // that were due anyway. With them on, at most those 4 more.
+    let view = |clouds: bool| {
+        let mut v = steady_view();
+        if !clouds {
+            v.handle_key(Die3dKey::ToggleClouds, 0.0);
+        }
+        v
+    };
+    for (clouds, extra) in [(false, 0), (true, 4)] {
+        // At rest: 20 frames in a second.
+        let steady = redraws(&view(clouds), 1.0, 1.0);
+        assert!(
+            (19..=21 + extra).contains(&steady),
+            "clouds {clouds}: {steady} frames at rest"
+        );
+        // In a spin (1.6 s long): 30 frames in a second. (Sampled 120 times
+        // a second, a frame is due every fourth sample in a transition and
+        // every sixth at rest, with or without the 5 ms early allowance.)
+        let mut v = view(clouds);
+        v.director.set_transition_mode(TransitionMode::Spin);
+        v.handle_key(Die3dKey::CutNow, 2.0);
+        let spin = redraws(&v, 2.1, 1.0);
+        assert!(
+            (29..=31 + extra).contains(&spin),
+            "clouds {clouds}: {spin} frames in a spin"
+        );
+    }
     // A cut started by the director, not a key, also switches to 30 at once.
     let mut v = steady_view();
     v.render(3.0);
@@ -658,10 +770,13 @@ fn with_wave<R>(smooth: bool, f: impl FnOnce() -> R) -> R {
 }
 
 /// Cells changed between consecutive frames over one second of a steady
-/// one-board view drawn 20 times a second, as the view draws it.
+/// one-board view drawn 20 times a second, as the view draws it, clouds off.
 fn changed_over_a_second(smooth: bool) -> usize {
     with_wave(smooth, || {
-        let v = steady_view();
+        // Clouds off: their cells would count the same in both and blur the
+        // comparison of the two wave clocks.
+        let mut v = steady_view();
+        v.handle_key(Die3dKey::ToggleClouds, 0.0);
         let mut prev: Option<Buffer> = None;
         let mut n = 0;
         for i in 0..=20 {
@@ -690,6 +805,9 @@ fn quantised_wave_changes_fewer_cells_than_the_unquantised_one() {
             let b = Fake::boards(&["p150"], Some(TDP));
             let mut v = Die3dView::new(150, 42);
             v.update(&b, 0.0);
+            // Clouds off: the two times compared can fall in different
+            // cloud clock steps.
+            v.handle_key(Die3dKey::ToggleClouds, 0.0);
             v
         };
         let stepped = frame_hash(&quiet().render(t));
@@ -715,15 +833,17 @@ fn colour_gap(a: &ratatui::buffer::Cell, b: &ratatui::buffer::Cell) -> u8 {
 }
 
 /// What stepping the wave's clock does, braille transparent 150 x 42, one
-/// board, 10 s of frames 1/20 s apart: cells changed per drawn frame with and
-/// without it, and how far each stepped frame is from the unstepped frame at
-/// the same time (cells that differ, the largest colour gap among them, and
+/// board, clouds off, 10 s of frames 1/20 s apart: cells changed per drawn
+/// frame with and without it, and how far each stepped frame is from the
+/// unstepped frame at the same time (cells that differ, the largest colour gap among them, and
 /// the share of those that differ by a glyph or by 255 in a channel, which
 /// is a block edge moved by a pixel row).
 fn wave_report() {
     let frames = |smooth: bool| {
         with_wave(smooth, || {
-            let v = steady_view();
+            // Clouds off, as in `changed_over_a_second`.
+            let mut v = steady_view();
+            v.handle_key(Die3dKey::ToggleClouds, 0.0);
             (0..200)
                 .map(|i| to_buffer(v.render(1.0 + i as f64 * 0.05), 150, 42))
                 .collect::<Vec<_>>()
@@ -770,12 +890,16 @@ fn wave_report() {
 
 /// Cells changed between consecutive frames, summed over 60 frames 1/30 s
 /// apart (two seconds), braille transparent 150 x 42, for one board (p150)
-/// or the four-board super scene. Deterministic: no clock is read.
-fn changed_in_two_seconds(boards: &[&str]) -> usize {
+/// or the four-board super scene, with the clouds on or off.
+/// Deterministic: no clock is read.
+fn changed_in_two_seconds(boards: &[&str], clouds: bool) -> usize {
     let b = busy_fake(boards);
     let mut v = Die3dView::new(150, 42);
     v.update(&b, 0.0);
     v.director.set_auto(false);
+    if !clouds {
+        v.handle_key(Die3dKey::ToggleClouds, 0.0);
+    }
     let mut prev: Option<Buffer> = None;
     let mut n = 0;
     for i in 0..60 {
@@ -797,15 +921,52 @@ const CHANGED_BEFORE_SUPER: usize = 16424;
 fn changed_cells_per_frame_are_at_most_half_of_before() {
     // The Task 16 target on terminal traffic, asserted because the count is
     // deterministic (the time targets are machine-dependent and are not).
+    // Measured with the clouds off: the clouds (Task 17) came after it and
+    // change cells of their own, so with them on this test would fail by
+    // design. Their own budget is the next test.
     for (what, boards, before) in [
         ("one board", &["p150"][..], CHANGED_BEFORE_ONE_BOARD),
         ("super 4 x 2", &["p300"; 8][..], CHANGED_BEFORE_SUPER),
     ] {
-        let after = changed_in_two_seconds(boards);
+        let after = changed_in_two_seconds(boards, false);
         println!("{what}: {after} cells changed, {before} before");
         assert!(
             2 * after <= before,
             "{what}: {after} cells changed, {before} before"
+        );
+    }
+}
+
+/// The most `changed_in_two_seconds` with the clouds on may be, as a share of
+/// the pre-Task-16 count. Task 16 brought it to at most half; the clouds may
+/// take back part of that, and the controller's ceiling is 0.70. Measured
+/// when the clouds were added (Task 17): 8030 of 12464 (0.644) for one
+/// board, 10713 of 16424 (0.652) for the super scene, against 5631 and 8023
+/// with the clouds off. The limit sits just above the larger share, so a
+/// change that makes the clouds repaint more cells is caught.
+const CHANGED_WITH_CLOUDS_MAX_SHARE: f64 = 0.66;
+
+#[test]
+fn changed_cells_with_clouds_stay_within_their_budget() {
+    // The busy fake moves 2.5 GB/s per chip, so the clouds drift fast: 7.4
+    // px/s over one p150, the 8 px/s maximum over eight chips. This is the
+    // worst case for them.
+    for (what, boards, before) in [
+        ("one board", &["p150"][..], CHANGED_BEFORE_ONE_BOARD),
+        ("super 4 x 2", &["p300"; 8][..], CHANGED_BEFORE_SUPER),
+    ] {
+        let (on, off) = (
+            changed_in_two_seconds(boards, true),
+            changed_in_two_seconds(boards, false),
+        );
+        let share = on as f64 / before as f64;
+        println!(
+            "{what}: {on} cells changed with clouds, {off} without, {before} before: {share:.3}"
+        );
+        assert!(on > off, "{what}: the clouds moved nothing");
+        assert!(
+            share <= CHANGED_WITH_CLOUDS_MAX_SHARE,
+            "{what}: {on} cells changed with clouds, {before} before ({share:.3})"
         );
     }
 }

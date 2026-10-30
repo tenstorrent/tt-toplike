@@ -43,6 +43,11 @@ pub struct Palette {
     pub packet_out: [u8; 3],
     /// Packet heads.
     pub white: [u8; 3],
+    /// The clouds drifting behind the die (`clouds`): a lilac grey. The
+    /// clouds scale it by density and by chip load (at most 0.75), so the
+    /// brightest cloud is about as bright as an idle tile and the sky never
+    /// competes with the dies.
+    pub cloud: [u8; 3],
 }
 
 /// The Grayskull-style palette.
@@ -59,4 +64,5 @@ pub const GRAYSKULL: Palette = Palette {
     packet_in: [120, 205, 225],
     packet_out: [255, 200, 225],
     white: [255, 255, 255],
+    cloud: [74, 62, 104],
 };

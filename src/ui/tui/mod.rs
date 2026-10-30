@@ -2100,12 +2100,12 @@ fn run_app(
                                 }
                                 force_redraw = true;
                             }
-                            // ── Die 3D keys ([ ] m c C B T X L) ────────────────
+                            // ── Die 3D keys ([ ] m c C B T X L W) ──────────────
                             // Checked before the general character arms so the
                             // view consumes them. None of these letters has a
                             // global meaning (`b` lowercase is the beta toggle
-                            // and `l` the legend; `B`, `T`, `X` and `L` are
-                            // free), and `die3d_key_for` is
+                            // and `l` the legend; `B`, `T`, `X`, `L` and `W`
+                            // are free), and `die3d_key_for` is
                             // `None` outside the mode, so nothing else is
                             // shadowed.
                             KeyCode::Char(c) if die3d_key_for(display_mode, c).is_some() => {
@@ -4781,6 +4781,10 @@ const DIE3D_EXPLAIN_TEXT: &[&str] = &[
     "X sets how a cut looks: shuffle, chaos, dissolve or spin",
     "(spin is used only when the board shown stays the same).",
     "L turns the chip labels (name and power) on or off.",
+    "W turns the clouds behind the board on or off. The",
+    "clouds are decoration: their drift follows the total",
+    "PCIe traffic (slow but never still with none) and their",
+    "brightness follows chip load (the busiest chip).",
     "The footer names the board corner nearest you, as",
     "'view: front-right' (front is the PCIe edge, right the",
     "GDDR side), and both ends during a cut.",
@@ -4823,6 +4827,27 @@ mod die3d_text_tests {
             }
         }
     }
+
+    #[test]
+    fn the_legend_says_what_drives_the_clouds() {
+        let legend = flat(
+            die3d_legend_lines(Color::Reset, Color::Reset, Color::Reset)
+                .iter()
+                .map(|l| l.spans.iter().skip(1).map(|s| s.content.as_ref()).collect()),
+        );
+        let explain = flat(DIE3D_EXPLAIN_TEXT.iter().map(|s| s.to_string()));
+        for (what, text) in [("legend", &legend), ("explain", &explain)] {
+            for phrase in [
+                "decoration",
+                "drift follows",
+                "PCIe traffic",
+                "brightness follows chip load",
+                "W ",
+            ] {
+                assert!(text.contains(phrase), "{what} lacks {phrase:?}: {text}");
+            }
+        }
+    }
 }
 
 /// Legend for the Die 3D view: what the scene's colours and the footer mean,
@@ -4842,6 +4867,9 @@ fn die3d_legend_lines(
         "              idle over the last ten minutes.",
         "  camera cuts on activity: a load rise or PCIe burst",
         "  labels      chip name and power at each die's centre",
+        "  clouds      decoration behind the board: their drift",
+        "              follows PCIe traffic, their brightness",
+        "              follows chip load",
         "  footer      scene shown, the board corner nearest you,",
         "              then the switches and their states",
         "",
@@ -4849,7 +4877,7 @@ fn die3d_legend_lines(
         "  c    cut the camera now        C  auto-cuts on/off",
         "  B    braille / half-block      T  transparent / opaque",
         "  X    transition: shuffle / chaos / dissolve / spin",
-        "  L    chip labels on / off",
+        "  L    chip labels on / off      W  clouds on / off",
         "  3    leave",
     ]
     .iter()
