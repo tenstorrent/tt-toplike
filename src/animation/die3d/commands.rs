@@ -63,6 +63,16 @@ pub const COMMANDS: &[CommandInfo] = &[
             "how the picture is drawn; auto follows the hardware, blocks skips braille; bare steps",
     },
     CommandInfo {
+        name: "blocks",
+        args: "",
+        help: "block cells only (quarter and half), changing with the hardware; /cells blocks",
+    },
+    CommandInfo {
+        name: "braille",
+        args: "",
+        help: "braille dots, held; /cells braille",
+    },
+    CommandInfo {
         name: "bg",
         args: "[black|transparent]",
         help: "black or the terminal's own background; bare flips",
@@ -197,6 +207,9 @@ impl Die3dView {
                 self.director.set_transition_mode(mode);
                 (format!("transition: {}", mode.label()), false)
             }
+            // Shortcuts for the two choices made most often.
+            "blocks" => self.command("cells", "blocks", now),
+            "braille" => self.command("cells", "braille", now),
             "cells" => {
                 let mode = match arg {
                     "" => self.cells.mode().next(),
@@ -304,6 +317,28 @@ mod tests {
         assert!(v.show_clouds, "a refused argument changes nothing");
         // Case and spacing do not matter.
         assert_eq!(v.command("labels", "  OFF ", 1.0).0, "labels: off");
+    }
+
+    /// `/blocks` and `/braille` are the same as the `/cells` they stand for, and
+    /// `/cells block` is `/cells blocks`.
+    #[test]
+    fn blocks_and_braille_are_shortcuts_for_cells() {
+        use crate::animation::die3d::cellmode::CellMode;
+        use crate::animation::die3d::cells::CellStyle;
+        let mut v = view();
+        let by_cells = v.command("cells", "blocks", 1.0);
+        assert_eq!(v.cells.mode(), CellMode::Blocks);
+        let mut w = view();
+        assert_eq!(w.command("blocks", "", 1.0), by_cells);
+        assert_eq!(w.cells.mode(), CellMode::Blocks);
+        assert!(w.cell_style(1.0).is_block(), "braille is left");
+        assert_eq!(w.command("cells", "block", 2.0).0, by_cells.0);
+        assert_eq!(
+            w.command("braille", "", 3.0),
+            ("cells: braille".into(), false)
+        );
+        assert_eq!(w.cells.mode(), CellMode::Fixed(CellStyle::Braille));
+        assert_eq!(w.cell_style(3.0), CellStyle::Braille);
     }
 
     #[test]

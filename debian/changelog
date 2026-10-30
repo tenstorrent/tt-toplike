@@ -1,3 +1,12 @@
+tt-toplike (0.14.1) noble; urgency=medium
+
+  * Die 3D: the camera turns by itself after 15 s with no cut (it was 45 s, which
+    was too long to ever see).
+  * Die 3D: /blocks and /braille are shortcuts for /cells blocks and /cells
+    braille, and /cells block works as well as /cells blocks.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 16:30:00 -0700
+
 tt-toplike (0.14.0) noble; urgency=medium
 
   * Die 3D: the view's settings are slash commands now, and the keys are the ones

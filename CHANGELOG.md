@@ -17,6 +17,11 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.14.1
+- The Die 3D camera turns by itself after 15 s with no cut. It was 45 s, too long to ever see.
+- `/blocks` and `/braille` are shortcuts for `/cells blocks` and `/cells braille`; `/cells block`
+  works as well as `/cells blocks`.
+
 ### 0.14.0
 - Die 3D settings are slash commands. `[` and `]` change board and Space cuts the camera; the
   letter keys `m c C B T X L W H` are `/scene /cut /autocut /cells /bg /transition /labels /clouds

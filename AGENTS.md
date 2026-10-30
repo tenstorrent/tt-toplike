@@ -1467,6 +1467,13 @@ Decisions:
   previous commit hashes those rows identically, so the picture did not change.
 - Checked in a truecolor terminal through tmux, asciinema and agg: both palettes, all three
   styles and the commands.
+- 0.14.1, after trying it ("i never see rotate happen on its own ... i'd like to see the faster
+  version. /cells block or /cells blocks should just map to something easy. /blocks and /braille
+  local to viz would work too"): `IDLE_ROTATE_SECS` 45 -> 15 (above the 8 s cooldown and the 1.6 s
+  spin). Checked on the real box by watching the footer caption: a cut at 18.5 s, then a 1.6 s
+  spin at 33.4 s. An event cut restarts the wait, so on a box that keeps having events the spin
+  is rare; that is by design. `/blocks` and `/braille` are `COMMANDS` entries that call
+  `/cells`; `block` parses as `blocks`.
 - Not done: panning a clipped scene, a `/theme` row in Die 3D's own footer, and process events
   for the inset's board choice beyond the busiest board.
 

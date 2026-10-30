@@ -13,7 +13,7 @@ use std::f32::consts::FRAC_PI_2;
 pub const COOLDOWN_SECS: f64 = 8.0;
 /// Seconds with no cut at all after which the camera turns to a new angle by
 /// itself (a spin), so a quiet board still moves.
-pub const IDLE_ROTATE_SECS: f64 = 45.0;
+pub const IDLE_ROTATE_SECS: f64 = 15.0;
 /// Length of the chaos transition: rising to the midpoint, falling after it.
 pub const CHAOS_SECS: f64 = 0.8;
 /// Length of the dissolve transition.

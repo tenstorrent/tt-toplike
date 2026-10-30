@@ -61,7 +61,7 @@ impl CellMode {
     pub fn parse(word: &str) -> Option<CellMode> {
         Some(match word {
             "auto" => CellMode::Auto,
-            "blocks" => CellMode::Blocks,
+            "blocks" | "block" => CellMode::Blocks,
             "braille" => CellMode::Fixed(CellStyle::Braille),
             "quarter" | "quadrant" => CellMode::Fixed(CellStyle::Quadrant),
             "half" | "half-block" => CellMode::Fixed(CellStyle::HalfBlock),
@@ -281,6 +281,7 @@ mod tests {
         for (word, mode) in [
             ("auto", CellMode::Auto),
             ("blocks", CellMode::Blocks),
+            ("block", CellMode::Blocks),
             ("braille", CellMode::Fixed(Braille)),
             ("quarter", CellMode::Fixed(Quadrant)),
             ("quadrant", CellMode::Fixed(Quadrant)),

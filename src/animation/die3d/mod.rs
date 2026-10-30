@@ -2275,6 +2275,9 @@ mod tests {
         let mut b = Fake::boards(&["p150"], Some("125"));
         b.set_power(0, 37.0);
         let mut v = Die3dView::new(150, 42);
+        // Steady load is not an event; the idle turn (a spin when nothing has
+        // cut for a while) is tested on its own.
+        v.director.set_idle_turn(false);
         // 30 s of idle, ticked four times a second like the TUI might.
         let mut now = 0.0;
         while now < 30.0 {
