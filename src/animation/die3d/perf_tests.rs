@@ -1421,3 +1421,211 @@ fn v_series(boards: &[&str]) -> usize {
     v.update(&busy_fake(boards), 0.0);
     v.chips.iter().flatten().count().min(history::MAX_CHIPS) + 2
 }
+
+// ---- Size sweep ----------------------------------------------------------
+
+/// The values to try for one dimension: every value within two of each
+/// threshold, plus a coarse grid from 1 up to `max` that always has 1 to 4.
+/// Sorted, without repeats.
+fn sweep_values(thresholds: &[usize], max: usize) -> Vec<usize> {
+    let mut vals: Vec<usize> = (1..=4).collect();
+    // About 10 values spread over 1..=max. (Twenty, and a window of three
+    // around each threshold, took 84 s in a debug build; 30 s is the budget.)
+    vals.extend((1..=10).map(|i| i * max / 10));
+    for &t in thresholds {
+        vals.extend(t.saturating_sub(2).max(1)..=t + 2);
+    }
+    vals.sort_unstable();
+    vals.dedup();
+    vals
+}
+
+/// Display width of a line in cells. Every glyph the view draws, braille and
+/// block ones included, is one cell wide, so counting chars is exact.
+fn line_width(line: &Line<'static>) -> usize {
+    line.spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
+/// A view over `boards` at `cols` x `rows` with the director off, in the
+/// given cell mode (the `B` key), ready to render.
+fn sized_view(boards: &Fake, cols: usize, rows: usize, braille: bool) -> Die3dView {
+    let mut v = Die3dView::new(cols, rows);
+    v.update(boards, 0.0);
+    v.director.set_auto(false);
+    if !braille {
+        v.handle_key(Die3dKey::ToggleBraille, 0.0);
+    }
+    v
+}
+
+#[test]
+fn every_size_draws_without_overflow() {
+    let started = Instant::now();
+    let cols_at = sweep_values(
+        &[
+            tiers::FOOTER_TWO.0,
+            tiers::FOOTER_ONE.0,
+            tiers::FLAGS_MIN.0,
+            tiers::CLOUDS_MIN.0,
+            scene::MIN_CELLS.0,
+            PANEL_MIN_CELLS.0,
+        ],
+        200,
+    );
+    let rows_at = sweep_values(
+        &[
+            tiers::FOOTER_TWO.1,
+            tiers::FOOTER_ONE.1,
+            tiers::FLAGS_MIN.1,
+            tiers::CLOUDS_MIN.1,
+            scene::MIN_CELLS.1,
+            PANEL_MIN_CELLS.1,
+        ],
+        60,
+    );
+    let one = busy_fake(&["p150"]);
+    let eight = busy_fake(&["p300"; 8]);
+    let mut renders = 0;
+    for &c in &cols_at {
+        for &r in &rows_at {
+            for b in [&one, &eight] {
+                for braille in [true, false] {
+                    let mut v = sized_view(b, c, r, braille);
+                    // `render` trims the summary to the scene's rows, which
+                    // would hide a summary that is too long, so check the
+                    // summary on its own too.
+                    if braille {
+                        let summary = summary::summary_lines(&v.chips, c, r);
+                        assert!(
+                            summary.len() <= r,
+                            "{c}x{r}: summary {} lines",
+                            summary.len()
+                        );
+                        assert!(
+                            summary.iter().all(|l| line_width(l) <= c),
+                            "{c}x{r}: summary line too wide"
+                        );
+                    }
+                    for k in 0..3 {
+                        let now = 10.0 * k as f64;
+                        if k > 0 {
+                            v.handle_key(Die3dKey::CutNow, now - 5.0);
+                        }
+                        let lines = v.render(now);
+                        renders += 1;
+                        assert!(
+                            lines.len() <= r,
+                            "{c}x{r} braille={braille} cut {k}: {} lines",
+                            lines.len()
+                        );
+                        for (i, l) in lines.iter().enumerate() {
+                            assert!(
+                                line_width(l) <= c,
+                                "{c}x{r} braille={braille} cut {k}: line {i} is {} wide",
+                                line_width(l)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // A view with no cells at all draws nothing and must not panic.
+    for (c, r) in [(0, 0), (0, 30), (100, 0), (0, 1), (1, 0)] {
+        for braille in [true, false] {
+            let mut v = sized_view(&eight, c, r, braille);
+            let lines = v.render(0.0);
+            assert!(lines.len() <= r, "{c}x{r}: {} lines", lines.len());
+            assert!(lines.iter().all(|l| line_width(l) <= c), "{c}x{r}");
+            v.handle_key(Die3dKey::CutNow, 5.0);
+            let _ = v.render(10.0);
+        }
+    }
+    println!(
+        "size sweep: {renders} renders over {} x {} sizes in {:.1?}",
+        cols_at.len(),
+        rows_at.len(),
+        started.elapsed()
+    );
+}
+
+#[test]
+fn flags_never_cover_a_drawn_cell_at_any_size() {
+    // The same comparison as `flags_never_cover_a_drawn_cell_but_the_pin` in
+    // mod.rs (flags on against off, clouds off): every cell a flag changes
+    // was blank, or is now the pin or its pole. This one runs it over sizes
+    // from 40 x 12 to 150 x 42 around the tier thresholds, where the footer
+    // height and the flags switch on and off.
+    let boards = [
+        busy_fake(&["p300"; 2]),
+        busy_fake(&["p300", "p300", "p150", "p300"]),
+    ];
+    let cols_at = sweep_values(&[tiers::FLAGS_MIN.0, tiers::FOOTER_TWO.0], 150);
+    let rows_at = sweep_values(&[tiers::FLAGS_MIN.1, tiers::FOOTER_TWO.1], 42);
+    let mut flagged = 0;
+    for &c in cols_at.iter().filter(|&&c| (40..=150).contains(&c)) {
+        for &r in rows_at.iter().filter(|&&r| (12..=42).contains(&r)) {
+            // The footer's rows are not scene rows; the tier says how many.
+            let scene_rows = r - tiers::tier_for(c, r).footer_rows;
+            for b in &boards {
+                for braille in [true, false] {
+                    let mut v = sized_view(b, c, r, braille);
+                    v.handle_key(Die3dKey::ToggleClouds, 0.0);
+                    v.handle_key(Die3dKey::ToggleHistory, 0.0);
+                    for k in 0..3 {
+                        let now = 10.0 * k as f64;
+                        if k > 0 {
+                            v.handle_key(Die3dKey::CutNow, now - 5.0);
+                        }
+                        v.handle_key(Die3dKey::ToggleLabels, now);
+                        let off = text(&v.render(now));
+                        v.handle_key(Die3dKey::ToggleLabels, now);
+                        let on = text(&v.render(now));
+                        for (row, (a, b)) in off.iter().zip(&on).enumerate().take(scene_rows) {
+                            for (col, (x, y)) in a.chars().zip(b.chars()).enumerate() {
+                                if x == y {
+                                    continue;
+                                }
+                                flagged += 1;
+                                let blank = x == ' ' || x == '\u{2800}';
+                                assert!(
+                                    blank || y == '●' || y == '│',
+                                    "{c}x{r} braille={braille} cut {k}: {y:?} over {x:?} at {row},{col}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(flagged > 0, "no flag was ever drawn");
+}
+
+#[test]
+fn sizes_at_and_above_100_by_30_use_the_full_layout() {
+    // The footer's two lines (keys, then status) are the last two rows. A
+    // size one short in either dimension has one footer line, so the row
+    // above the last is scene or blank, not the keys line.
+    let b = busy_fake(&["p300"; 2]);
+    for (c, r) in [(100, 30), (120, 36), (150, 42)] {
+        let mut v = sized_view(&b, c, r, true);
+        let lines = v.render(0.0);
+        assert_eq!(lines.len(), r, "{c}x{r}");
+        assert_eq!(tiers::tier_for(c, r).footer_rows, 2, "{c}x{r}");
+        // The footer is the last tier.footer_rows lines: the two lines hold
+        // text, and the third from last is scene (no footer text).
+        let rows_text = text(&lines);
+        let footer = &rows_text[r - 2..];
+        assert!(
+            footer
+                .iter()
+                .all(|l| l.chars().any(|ch| ch.is_alphanumeric())),
+            "{c}x{r}: footer {footer:?}"
+        );
+    }
+    // One short in either dimension drops to one footer line.
+    for (c, r) in [(99, 30), (100, 29)] {
+        assert_eq!(tiers::tier_for(c, r).footer_rows, 1, "{c}x{r}");
+    }
+}
