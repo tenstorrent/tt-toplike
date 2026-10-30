@@ -215,7 +215,7 @@ Each name has a `0` and `1` suffix (the NoC0 and NoC1 counters); both are summed
 startup primes the tracker and reports nothing. The difference is taken per counter with 32-bit wrapping
 arithmetic (a counter wraps after about 275 GB), and a step over half the range counts as a device
 reset and reports zero rather than spiking. If the counter directory exists but not one file in it can be
-read, the sample is reported as unavailable rather than as a confident zero. A single counter file
+read, the sample is reported as unavailable, and nothing shows a zero for it. A single counter file
 that cannot be read adds nothing for that step, and when it returns its first reading primes it
 again; before, its return counted its whole value as one step, up to 137 GB. Reading these files is
 passive: no device open, no ARC message.

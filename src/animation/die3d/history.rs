@@ -569,9 +569,9 @@ mod tests {
 
     #[test]
     fn the_panel_draws_each_row_against_its_minimum_span() {
-        // The wiring, not just `spark_scaled`: a minute of a chip at 13 W
-        // give or take a watt and PCIe wobbling by 3 MB/s draws low rows in
-        // the panel itself.
+        // The panel's own rows, so the wiring is checked as well as
+        // `spark_scaled`: a minute of a chip at 13 W give or take a watt
+        // and of PCIe wobbling by 3 MB/s draws low rows.
         let noise = [0.0f32, 1.0, 0.0, -1.0];
         let mut h = History::new();
         for k in 0..SAMPLES {

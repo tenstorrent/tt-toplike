@@ -605,10 +605,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(bw.rx_bytes_per_sec, 6_400.0);
-        assert_eq!(
-            bw.tx_bytes_per_sec, 0.0,
-            "a new counter is primed, not a step"
-        );
+        assert_eq!(bw.tx_bytes_per_sec, 0.0, "a new counter is primed: no step");
     }
 
     #[test]

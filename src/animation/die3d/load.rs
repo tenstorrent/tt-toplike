@@ -410,7 +410,7 @@ mod tests {
         let (load, t) = feed(&mut s, 0.0, &[110.0; 120]);
         assert_eq!(load, 0.0);
         // Once the job ends the chip shows its real idle, and from then on
-        // the next job reads as busy.
+        // the next job shows full load.
         let (load, t) = feed(&mut s, t, &[37.0; 30]);
         assert_eq!(load, 0.0);
         assert_eq!(s.observe(t, Some(110.0)), 1.0);
