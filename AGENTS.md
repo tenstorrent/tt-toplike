@@ -1461,8 +1461,13 @@ Findings from hardware (Blackhole p300c, leased through gozer):
   131 MB/s). The PCIe burst threshold is 50 MB/s, re-arm 10 MB/s, where the first guess was
   2 GB/s.
 
-Recording lessons. tmux makes the view look cheaper than it is (its status bar and its colour
-downgrade). VHS gave stale frames. A pty harness feeding asciinema, converted with agg,
+Recording lessons. Recording the TUI inside tmux made it look cheaper than it is: tmux adds
+its own green status bar and re-encodes colours and cell updates. VHS (browser-based terminal
+capture) gave mostly stale frames at this redraw rate (about 0.5 MB/s of terminal output), so
+its clip was discarded. What worked: a small Python harness that runs the app on its own
+150 x 42 pty and injects keystrokes on a timer, recorded with asciinema (the cast header's
+size patched to 150 x 42), rendered with agg on a black theme, and converted to MP4 and a
+smaller GIF with ffmpeg. Hold each state about 12 seconds so a viewer can take the view in.
 
 Audience. People who will see this use Konsole and GNOME Terminal. Their fonts, and their
 translucent or tinted backgrounds, shaped the palette, the transparent default and the
@@ -1470,12 +1475,13 @@ half-block option.
 
 Product owner feedback that shaped it, in order: a more Grayskull palette (purples, pinks,
 greys) and a little transparency; both display types, switchable ("we might have a few
-switches for this view"); a black background (the purple in one clip came from the terminal colour
-used in the simulation; the app did not paint it); shuffled transitions with an attempt at an animated rotate;
-a caption saying which side the camera looks at (and labels, because four dies read as one
-field); a faster view, clouds moving behind it and a small panel of the monitored data over
-time; and traffic sent to the coder model to see whether the camera fires (it did not, which
-found the relative-load problem above).
+switches for this view"); a black background; shuffled transitions with an attempt at an
+animated rotate; a caption saying which side the camera looks at, and labels, because four
+dies read as one field; a faster view, clouds moving behind it and a small panel of the
+monitored data over time; and traffic sent to the coder model to see whether the camera
+fires (it did not, which found the relative-load problem above). The purple background in
+one shared clip was the terminal colour used in the recording simulation. The app does not
+paint it.
 
 Decisions worth keeping:
 - Every moving thing is real data, a labelled estimate, or named decoration. The per-tile
@@ -1493,6 +1499,5 @@ Decisions worth keeping:
   event, a close-view preset, and an automatic half-block switch on wide terminals.
 
 Process. Subagent-driven: one implementer per task, a separate review per task, and a ledger
-of numbered rulings by the controller for every gap between the plan and the code (Rulings
-1 to 31). Tasks 12 to 19 were added after the plan, one per round of Taylor's feedback. The
+of decisions, kept outside the repo, for every gap between the plan and the code. Tasks 12 to 19 were added after the plan, one per round of Taylor's feedback. The
 12 Hz wave step has been judged in recordings only; Taylor is to look at it in Konsole.

@@ -27,8 +27,8 @@ tt-toplike (0.13.19) noble; urgency=medium
     overlays describe the view.
   * Faster: at most 20 redraws a second at rest and 30 during a cut, and the
     tile wave steps 12 times a second. Changed cells per frame fell by more
-    than half (one board 347 to 157, four boards 358 to 174, braille at
-    150 x 42, release benchmark).
+    than half (about 347 to 157 for one board and 358 to 174 for four,
+    braille at 150 x 42; one release-build run on a shared machine).
   * The view area needs 100 x 30 cells. In the TUI the status bar takes a row,
     so the smallest terminal is 100 x 31. The history panel needs 120 x 37.
     150 x 42 or larger looks best.

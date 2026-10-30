@@ -3,14 +3,14 @@
 Date: 2026-10-29. Branch: `what-if`. Status: built and shipped in v0.13.19 as tier 0
 (sysfs, hwmon, smbus telemetry, PCIe counters). Tier 1 per-tile counters are not built; see
 `docs/superpowers/plans/2026-10-29-die-3d-tier1-counters.md`. The first design was agreed in
-conversation and then changed as Taylor judged recordings; the section "What changed from the
+conversation and then changed as the product owner judged recordings; the section "What changed from the
 first design" at the end lists the differences. The mockups are in
 `docs/superpowers/specs/assets/2026-10-29-die-3d/` (open in a browser; they animate). They
 use the first design's teal palette.
 
 ## Why
 
-Taylor wants a view that looks into the physical device: the board and the die, with
+The product owner wants a view that looks into the physical device: the board and the die, with
 the insides lighting up and connecting while a model thinks or runs. The wish, in
 their words: "the more we can derive from hardware the better", and "I want to blow
 people's minds". The existing Chip Portrait (`src/ui/tui/chip_portrait.rs`) draws a
@@ -32,7 +32,7 @@ NIU counter set.
   named as decoration in the legend and the explain text. No decoration passes as telemetry.
 - Per-tile NoC traffic as an opt-in data source (see Data tiers). It lights individual
   tiles and the NoC wires between them.
-- Two scene types (Taylor's decision). A **board scene** shows one board, with all of its
+- Two scene types (the product owner's decision). A **board scene** shows one board, with all of its
   dies on the card (a p300c has two), and keys switch between boards. A **super scene**
   shows every board in one view. On a one-board machine the super scene is the board
   scene.
@@ -42,7 +42,7 @@ NIU counter set.
 
 ## Non-goals
 
-- A real 3D window. The egui mockup in `die-3d.html` was made for Taylor to judge. It is
+- A real 3D window. The egui mockup in `die-3d.html` was made for the product owner to judge. It is
   not part of this work. It may become a later project.
 - Per-tile data in the default configuration. The default stays passive.
 - Wormhole and Grayskull layouts in the first version. Blackhole first. Other chips are named
@@ -73,14 +73,14 @@ It is a separate, later and experimental plan:
 `docs/superpowers/plans/2026-10-29-die-3d-tier1-counters.md`. Release 0.13.19 reads no
 per-tile counters.
 
-**Warning rule (Taylor's decision).** People own their hardware and can take the risk.
+**Warning rule (the product owner's decision).** People own their hardware and can take the risk.
 If nothing is running on the chip, start. If something is running, show a warning
 that names what is running and the possible effect, then let the user continue. What
 happens next is up to the other software. No hard block.
 
 ## Camera
 
-Taylor's idea. A signal such as a chip becoming more active moves the view to a new
+The product owner's idea. A signal such as a chip becoming more active moves the view to a new
 angle. The transition does not need to be smooth.
 
 - **Presets (six).** The four corners at isometric pitch, a top-down view and a low view
@@ -126,13 +126,13 @@ angle. The transition does not need to be smooth.
   block's brightness and sets the dots for the foreground pixels.
 - **Braille and half-block, both kept.** Braille is the default. The half-block render
   (`▀`, 1x2 pixels per cell) is crisper in some real fonts, because braille dots are small
-  at a real font size. Taylor saw both in Konsole and GNOME-style fonts, liked both, and
+  at a real font size. The product owner saw both in Konsole and GNOME-style fonts, liked both, and
   asked for a switch (`B`). A two-die board in half-block needs about 120 x 35 cells; below
   that the view shows a "press B" hint. The automatic switch to half-block at about 220
   columns is not built.
 - **Palette.** A Grayskull-style palette from `src/animation/die3d/palette.rs`, the same
   family as the project's Grayskull theme. The first design's teal was replaced after
-  Taylor asked for more Grayskull colour. Values (RGB): idle tile `58,52,78` (indigo grey),
+  the product owner asked for more Grayskull colour. Values (RGB): idle tile `58,52,78` (indigo grey),
   warm `168,120,210` (lilac), hot `255,92,170` (hot pink), GDDR `150,168,190`, Ethernet
   `196,170,230` (pale lavender), management `112,110,128`, slab `26,24,38`, NoC 0
   `190,120,235` (orchid), NoC 1 and packets in `120,205,225` (pale cyan), packets out
@@ -141,7 +141,7 @@ angle. The transition does not need to be smooth.
 - **Background.** Transparent by default: cells with no scene content use the terminal's own
   background (`Color::Reset`), so a translucent or tinted terminal shows through. A terminal
   cannot blend, so there are no soft halos. `T` switches to opaque pure black. Opaque mode
-  is flat black; the first design's tinted vignette was dropped when Taylor asked for black.
+  is flat black; the first design's tinted vignette was dropped when the product owner asked for black.
 - Faces carry a shading gradient and tiles carry darker edges. These removed more of
   the blocky look than raising the resolution did.
 - Truecolour. Left side and bottom bars only, no right-side borders (global CLAUDE.md
@@ -205,7 +205,7 @@ action keys `[ ] board · c cut · 3 leave`, is 153 characters and needs a view 
 wide. Narrower, the action keys drop first, then each switch shrinks to its key and state
 (`C on`), then to its state word alone, and the last step cuts words with an ellipsis. The
 legend (`l`) lists every key. With eight switches the action keys are already
-gone at 150 columns. That is the trade-off for having the switches in the footer.
+gone below 156 columns. That is the trade-off for having the switches in the footer.
 
 ## Speed
 
@@ -290,11 +290,11 @@ own venv, `~/.venvs/tt-exalens-latest`, and the tests above passed on it.
 
 ## Decisions and who made them
 
-Taylor decided: braille for the terminal; board frame (C) and die (A) as the two
+The product owner decided: braille for the terminal; board frame (C) and die (A) as the two
 layers; both a one-board scene and an every-board super scene; derive from hardware wherever possible; per-tile counters are in scope as an
 opt-in; warn then allow when a workload is running; camera cuts on signals, with a
-chaotic transition allowed; fix the PCIe counters first (done). During the build Taylor,
-as product owner, asked for: more Grayskull colour (purples, pinks, greys), transparency, a
+chaotic transition allowed; fix the PCIe counters first (done). During the build, the product owner
+asked for: more Grayskull colour (purples, pinks, greys), transparency, a
 black background, braille and half-block both switchable ("we might have a few switches for
 this view"), shuffled transitions "with an attempt at an animated rotate", a caption that
 says which side the camera looks at, a faster view, clouds moving behind, and a small panel
@@ -388,7 +388,7 @@ Blackhole first; the 3D view is an extra mode and not a replacement; the exalens
 - Braille dot size depends on the terminal font.
 - Blackhole only. Other chips are named in the footer.
 - The glow is an estimate. The clouds are decoration.
-- With eight switches the footer's action keys drop at 150 columns.
+- With eight switches the footer's action keys drop below 156 columns.
 - The 12 Hz wave step has been judged in recordings only.
 - The spin is an attempt and can show gaps or overlaps mid-spin.
 - The die layout table was measured on two Blackhole chips of one p300c. The filled Tensix
