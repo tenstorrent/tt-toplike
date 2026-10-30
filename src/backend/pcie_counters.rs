@@ -11,7 +11,8 @@
 //! **Unit.** One counter "word" is one NoC data flit: 512 bits, **64 bytes**.
 //! It is not a 4-byte PCIe word. Measured on a Blackhole p300c (2026-10-29): a
 //! 268,378,112-byte host→device copy moved `slv_rd_data_word_sent0` by
-//! 4,193,421 words, a ratio of exactly 1/64.
+//! 4,193,421 words. 268,378,112 / 64 is 4,193,408, so the measured count is
+//! within 0.01% of 1/64 word per byte.
 //!
 //! **Direction.** The names are from the NoC side of the PCIe tile, so
 //! "slave" means a NoC request was aimed at the PCIe tile (the chip reaching
@@ -40,6 +41,12 @@
 //! the range is treated as a reset and reported as zero. At one sample per
 //! second a real step is far smaller than that. More than one wrap between two
 //! samples cannot be detected.
+//!
+//! **Unreadable counters.** Each counter in a snapshot is `None` when its file
+//! could not be read. A counter that is `None` on either side of a step adds
+//! nothing for that step, and the next step starts from its first reading
+//! again. Reading a missing file as 0 made its return a step of its whole
+//! value, up to 2^31 words (137 GB) in one sample.
 
 use std::fs;
 use std::path::Path;
@@ -69,25 +76,28 @@ const OUT_COUNTERS: [&str; 6] = [
 ];
 
 /// Raw cumulative counter values, one slot per file in [`IN_COUNTERS`] and
-/// [`OUT_COUNTERS`]. They stay separate because the 32-bit wrap has to be
-/// handled per counter; a sum of wrapped counters can go down.
+/// [`OUT_COUNTERS`], `None` where the file could not be read. They stay
+/// separate because the 32-bit wrap has to be handled per counter; a sum of
+/// wrapped counters can go down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PcieCounterSnapshot {
     /// Counters for data that entered the chip, in [`IN_COUNTERS`] order.
-    in_words: [u32; 6],
+    in_words: [Option<u32>; 6],
     /// Counters for data that left the chip, in [`OUT_COUNTERS`] order.
-    out_words: [u32; 6],
+    out_words: [Option<u32>; 6],
 }
 
 impl PcieCounterSnapshot {
-    /// Words that entered the chip, summed over the counters (not wrap-aware).
+    /// Words that entered the chip, summed over the readable counters (not
+    /// wrap-aware).
     pub fn words_in(&self) -> u64 {
-        self.in_words.iter().map(|&w| u64::from(w)).sum()
+        self.in_words.iter().flatten().map(|&w| u64::from(w)).sum()
     }
 
-    /// Words that left the chip, summed over the counters (not wrap-aware).
+    /// Words that left the chip, summed over the readable counters (not
+    /// wrap-aware).
     pub fn words_out(&self) -> u64 {
-        self.out_words.iter().map(|&w| u64::from(w)).sum()
+        self.out_words.iter().flatten().map(|&w| u64::from(w)).sum()
     }
 }
 
@@ -101,22 +111,19 @@ pub struct PcieBandwidth {
 }
 
 /// Read each named counter, reporting how many actually parsed. A missing or
-/// unparsable file reads as 0.
+/// unparsable file is `None`.
 ///
 /// Parsed as `u32`: the driver prints these with `%u`, so a larger value is a
-/// corrupted read and counts as unreadable rather than being truncated.
-fn read_each(dir: &Path, names: &[&str; 6]) -> ([u32; 6], usize) {
-    let mut values = [0u32; 6];
-    let mut parsed = 0usize;
+/// corrupted read and counts as unreadable. Truncating it would make up a
+/// value.
+fn read_each(dir: &Path, names: &[&str; 6]) -> ([Option<u32>; 6], usize) {
+    let mut values = [None; 6];
     for (slot, name) in values.iter_mut().zip(names) {
-        if let Some(v) = fs::read_to_string(dir.join(name))
+        *slot = fs::read_to_string(dir.join(name))
             .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-        {
-            *slot = v;
-            parsed += 1;
-        }
+            .and_then(|s| s.trim().parse::<u32>().ok());
     }
+    let parsed = values.iter().flatten().count();
     (values, parsed)
 }
 
@@ -126,8 +133,9 @@ fn read_each(dir: &Path, names: &[&str; 6]) -> ([u32; 6], usize) {
 /// when not a single counter file in it could be read** — an unreadable set is
 /// "not measured", and reporting it as a snapshot made the UI render a confident
 /// `▼0 B/s ▲0 B/s` for a link nobody had actually sampled. Individual missing
-/// files still count as 0, so a partial set (a kernel that grew a counter, a
-/// permissions oddity on one file) reports the partial values rather than nothing.
+/// files are `None` in the snapshot, so a partial set (a kernel that grew a
+/// counter, a permissions oddity on one file) still reports the counters it
+/// could read.
 pub fn read_counters(dir: &Path) -> Option<PcieCounterSnapshot> {
     if !dir.is_dir() {
         return None;
@@ -161,13 +169,25 @@ fn forward_delta(now: u32, prev: u32) -> u64 {
     }
 }
 
-fn total_delta(now: &[u32; 6], prev: &[u32; 6]) -> u64 {
-    now.iter().zip(prev).map(|(&n, &p)| forward_delta(n, p)).sum()
+/// Sum of the counters' forward steps. A counter unreadable on either side
+/// adds nothing: with no value to step from (or to), its step is unknown.
+/// Since the tracker keeps the newer snapshot, a counter that comes back is
+/// primed by its first reading and counts again from the step after.
+fn total_delta(now: &[Option<u32>; 6], prev: &[Option<u32>; 6]) -> u64 {
+    now.iter()
+        .zip(prev)
+        .map(|(n, p)| match (n, p) {
+            (Some(n), Some(p)) => forward_delta(*n, *p),
+            _ => 0,
+        })
+        .sum()
 }
 
 /// Turns successive snapshots into bytes/sec. The first sample primes the
 /// tracker and yields `None`. Each counter's step is wrap-aware and a counter
 /// that went backwards (device reset) contributes 0; see [`forward_delta`].
+/// A counter unreadable on either side of a step contributes 0; see
+/// [`total_delta`].
 #[derive(Debug, Default)]
 pub struct PcieRateTracker {
     prev: Option<(PcieCounterSnapshot, Instant)>,
@@ -512,6 +532,83 @@ mod tests {
         );
         assert_eq!(bw.rx_bytes_per_sec, 0.0);
         assert_eq!(bw.tx_bytes_per_sec, 0.0);
+    }
+
+    /// A counter file that cannot be read for a sample, then comes back.
+    ///
+    /// Regression: a missing file read as 0, so the step out of the gap was
+    /// the counter's whole value. Below 2^31 words that passes the reset
+    /// check, so a counter at a billion words came back as a 64 GB step in
+    /// one second, spiking every PCIe display, the Die 3D clouds and its
+    /// burst trigger.
+    #[test]
+    fn a_counter_file_that_drops_out_and_returns_adds_no_spike() {
+        let td = tempfile::tempdir().unwrap();
+        let mut tracker = PcieRateTracker::new();
+        let t0 = Instant::now();
+        let at = |k: u64| t0 + Duration::from_secs(k);
+        // slv_rd_data_word_sent0 sits at a billion words; sent1 moves 10
+        // words a second throughout and must be reported every time.
+        let rates: Vec<Option<PcieBandwidth>> = [
+            Some(1_000_000_000u64),
+            None,
+            Some(1_000_000_000 + 1_000),
+            Some(1_000_000_000 + 3_000),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(k, sent0)| {
+            let mut set = vec![("slv_rd_data_word_sent1", 10 * k as u64)];
+            if let Some(v) = sent0 {
+                set.push(("slv_rd_data_word_sent0", v));
+            }
+            write_files(td.path(), &set);
+            if sent0.is_none() {
+                fs::remove_file(td.path().join("slv_rd_data_word_sent0")).unwrap();
+            }
+            tracker.sample(read_counters(td.path()).unwrap(), at(k as u64))
+        })
+        .collect();
+        assert!(rates[0].is_none(), "the first sample primes");
+        // The gap and the sample after it: only sent1's 10 words a second.
+        for k in [1, 2] {
+            assert_eq!(rates[k].unwrap().rx_bytes_per_sec, 640.0, "sample {k}");
+        }
+        // Re-primed: sent0's 2000 words count again, with sent1's 10.
+        assert_eq!(rates[3].unwrap().rx_bytes_per_sec, 2_010.0 * 64.0);
+    }
+
+    /// A set of which only some counters can be read reports those, and a
+    /// counter that becomes readable later starts from its first reading,
+    /// not from 0.
+    #[test]
+    fn a_partial_set_still_reports_the_readable_counters() {
+        let td = tempfile::tempdir().unwrap();
+        let mut tracker = PcieRateTracker::new();
+        let t0 = Instant::now();
+        fs::write(td.path().join("slv_rd_data_word_sent0"), "5000").unwrap();
+        let first = read_counters(td.path()).unwrap();
+        assert_eq!(first.words_in(), 5000);
+        assert!(tracker.sample(first, t0).is_none());
+        // One second on: sent0 moved 100 words, and an out counter that was
+        // missing now reads 1,500,000,000.
+        fs::write(td.path().join("slv_rd_data_word_sent0"), "5100").unwrap();
+        fs::write(
+            td.path().join("slv_posted_wr_data_word_received0"),
+            "1500000000",
+        )
+        .unwrap();
+        let bw = tracker
+            .sample(
+                read_counters(td.path()).unwrap(),
+                t0 + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(bw.rx_bytes_per_sec, 6_400.0);
+        assert_eq!(
+            bw.tx_bytes_per_sec, 0.0,
+            "a new counter is primed, not a step"
+        );
     }
 
     #[test]

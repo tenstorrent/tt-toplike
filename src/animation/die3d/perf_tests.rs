@@ -1245,8 +1245,9 @@ fn changed_cells_per_frame_are_at_most_half_of_before() {
 
 /// The most `changed_in_two_seconds` with the clouds on may be, as a share of
 /// the pre-Task-16 count. Task 16 brought it to at most half; the clouds may
-/// take back part of that, and the controller's ceiling is 0.70. Measured
-/// when the clouds were added (Task 17): 8030 of 12464 (0.644) for one
+/// take back part of that, up to the hard cap of 0.70 (see
+/// `CHANGED_WITH_PANEL_MAX_SHARE`). Measured when the clouds were added
+/// (Task 17): 8030 of 12464 (0.644) for one
 /// board, 10713 of 16424 (0.652) for the super scene, against 5631 and 8023
 /// with the clouds off. The limit sits just above the larger share, so a
 /// change that makes the clouds repaint more cells is caught.

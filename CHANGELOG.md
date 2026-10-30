@@ -35,6 +35,9 @@ list is a summary and is not kept for every release.
 - At most 20 redraws a second at rest, 30 in a cut; changed cells per frame cut by more
   than half.
 - Needs a 100 x 31 terminal (100 x 30 view area); the history panel needs 120 x 37.
+- **Fix**: a PCIe counter file that could not be read for one sample made the rate spike
+  when it came back (its whole value counted as one step). It now adds nothing until it
+  has been read twice in a row.
 
 ### 0.13.18
 - **Fix**: PCIe bandwidth was 16x too low. A counter word is a 64-byte NoC flit, not

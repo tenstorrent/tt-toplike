@@ -205,8 +205,8 @@ folded into two totals:
   memory) plus `mst_rd_data_word_received*` (host reads through a BAR window).
 
 The unit and the `slv_*` directions were measured on 2026-10-29 (Blackhole p300c, tt-kmd 2.9) by
-copying 256 MiB and 1 GiB between host and device through ttnn: the words moved were exactly 1/64 of
-the bytes, host-to-device raised `slv_rd_data_word_sent0` and device-to-host raised
+copying 256 MiB and 1 GiB between host and device through ttnn: the words moved were within 0.01% of
+1/64 of the bytes (4,193,421 words for 268,378,112 bytes, against 4,193,408), host-to-device raised `slv_rd_data_word_sent0` and device-to-host raised
 `slv_nonposted_wr_data_word_received0`. The `mst_*` directions are inferred from that naming. ttnn's
 bulk path never used them, so they stayed near zero.
 
@@ -215,7 +215,9 @@ Each name has a `0` and `1` suffix (the NoC0 and NoC1 counters); both are summed
 startup primes the tracker and reports nothing. The difference is taken per counter with 32-bit wrapping
 arithmetic (a counter wraps after about 275 GB), and a step over half the range counts as a device
 reset and reports zero rather than spiking. If the counter directory exists but not one file in it can be
-read, the sample is reported as unavailable rather than as a confident zero. Reading these files is
+read, the sample is reported as unavailable rather than as a confident zero. A single counter file
+that cannot be read adds nothing for that step, and when it returns its first reading primes it
+again; before, its return counted its whole value as one step, up to 137 GB. Reading these files is
 passive: no device open, no ARC message.
 
 This is surfaced through `TelemetryBackend::pcie_bandwidth()`, which defaults to `None` and is

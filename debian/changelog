@@ -33,6 +33,9 @@ tt-toplike (0.13.19) noble; urgency=medium
   * The view area needs 100 x 30 cells. In the TUI the status bar takes a row,
     so the smallest terminal is 100 x 31. The history panel needs 120 x 37.
     150 x 42 or larger looks best.
+  * A PCIe counter file that could not be read for one sample made the rate
+    spike when it came back, because its whole value counted as one step.
+    It now adds nothing until it has been read twice in a row.
 
  -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 29 Oct 2026 15:00:00 +0000
 

@@ -103,7 +103,8 @@ enum DisplayMode {
     /// Die 3D view — isometric Blackhole boards drawn from live telemetry.
     /// Entered via `3` only (excluded from the `v`-cycle rotation and from
     /// `--rotate`, like `Training`); `3` toggles back out to `prev_mode`, as
-    /// does Esc. While active it also takes `[ ] m c C B` (see
+    /// does Esc (to `Insights` when that is Die3d itself; see `back_target`).
+    /// While active it also takes `[ ] m c C B T X W H L` (see
     /// `die3d_key_for`).
     Die3d,
 }
@@ -1340,8 +1341,9 @@ fn run_app(
                     .start();
             }
             // Die 3D's view is dropped on any exit, whichever key or command
-            // caused it, so the next entry starts on the board scene with
-            // auto-cuts on (the update arm re-creates it and its clock).
+            // caused it, so the next entry starts afresh: all boards, every
+            // switch at its default (auto-cuts on), an empty history (the
+            // update arm re-creates the view and its clock).
             if leaves_die3d(prev_display_mode, display_mode) {
                 die3d = None;
             }
@@ -2161,8 +2163,8 @@ fn run_app(
                             KeyCode::Char('3') => {
                                 // Toggle the Die 3D view, like `t` for Training. The
                                 // view is dropped at the mode-transition choke point
-                                // on any exit, so each entry starts on the board
-                                // scene with auto-cuts on.
+                                // on any exit, so each entry starts afresh on all
+                                // boards with every switch at its default.
                                 let (m, p) = die3d_toggle(display_mode, prev_mode);
                                 display_mode = m;
                                 prev_mode = p;
@@ -4930,6 +4932,18 @@ mod die3d_text_tests {
     }
 
     #[test]
+    fn the_legend_says_what_the_pcie_packets_are() {
+        let legend = flat(
+            die3d_legend_lines(Color::Reset, Color::Reset, Color::Reset)
+                .iter()
+                .map(|l| l.spans.iter().skip(1).map(|s| s.content.as_ref()).collect()),
+        );
+        for phrase in ["packets", "PCIe edge", "measured PCIe rate", "log scale"] {
+            assert!(legend.contains(phrase), "legend lacks {phrase:?}: {legend}");
+        }
+    }
+
+    #[test]
     fn the_panel_text_says_power_and_pcie_and_latest_temperature() {
         // The panel plots power and PCIe traffic; temperature is only the
         // latest value printed beside each chip's sparkline. Neither text
@@ -4966,6 +4980,9 @@ fn die3d_legend_lines(
         "              from chip load, labelled in the footer)",
         "              Activity is relative to each chip's own",
         "              idle over the last day.",
+        "  packets     dots moving in from and out to the PCIe edge;",
+        "              their count follows the measured PCIe rate",
+        "              on a log scale (none below 1 kB/s)",
         "  camera cuts on activity: a load rise or PCIe burst",
         "  labels      chip name and power at each die's centre",
         "  clouds      decoration behind the board: their drift",

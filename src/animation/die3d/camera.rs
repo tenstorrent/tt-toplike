@@ -211,8 +211,10 @@ impl Camera {
     /// `to.apply`; the origin is then placed so the projected grid centre
     /// stays on the same pixel, which moves `ox` and `oy` linearly as well
     /// (up to rounding). Both endpoints are at most the base size, so every
-    /// step between them is too (ruling 12b). At the ends the result is
-    /// exactly `from.apply` and `to.apply`, with no spin left over.
+    /// step between them is too: the base is the size the scene was fitted
+    /// to the view at, so no frame of the turn can outgrow the view. At the
+    /// ends the result is exactly `from.apply` and `to.apply`, with no spin
+    /// left over.
     pub fn lerp_view(from: &Camera, to: &Camera, t: f32, base: &Iso, grid: (usize, usize)) -> Iso {
         let a = from.apply(base, grid);
         let b = to.apply(base, grid);
@@ -928,7 +930,8 @@ mod tests {
                     (got.0 - want.0).abs() <= 1 && (got.1 - want.1).abs() <= 1,
                     "{from:?} -> {to:?} at {i}/20: {got:?} vs {want:?}"
                 );
-                // Never a tile larger than the fitted base (ruling 12b).
+                // Never a tile larger than the fitted base, so the turn
+                // stays inside the area the scene was fitted to.
                 assert!(iso.tw <= base.tw && iso.th <= base.th, "{iso:?}");
             }
         }

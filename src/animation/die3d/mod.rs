@@ -100,6 +100,10 @@ const TRANSITION_FRAME_SECS: f64 = 1.0 / 30.0;
 /// this allowance a frame is drawn once the interval less 5 ms has passed.
 const FRAME_EARLY_SECS: f64 = 0.005;
 
+/// The period, in seconds of view time, at which the scenes' animation time
+/// wraps (see `scene_with`): one day.
+const SCENE_TIME_WRAP_S: f64 = 86_400.0;
+
 /// The history panel is drawn only in a view at least this wide and tall
 /// (columns, rows). Below it the panel would cover too much of the scene.
 const PANEL_MIN_CELLS: (usize, usize) = (120, 36);
@@ -837,7 +841,15 @@ impl Die3dView {
         } else {
             (self.cols, scene_rows * 2)
         };
-        let t = now as f32;
+        // The scenes animate in f32 time (the wave, the packets). f32 has 24
+        // bits of mantissa, so past about a month of view time (2.6e6 s) it
+        // steps by 0.25 s and the motion would stutter at 4 Hz. The time
+        // wraps once a day in f64 first: identical for the first day, full
+        // resolution after any uptime. A day is a whole number of the
+        // wave's 1/12 s steps; the wave front, the shimmer and the packets
+        // have periods that do not divide it, so they jump once a day, at
+        // the wrap.
+        let t = now.rem_euclid(SCENE_TIME_WRAP_S) as f32;
         // The scenes paint only what stands in them, so the buffer starts
         // clear: all uncovered for transparent, filled black for opaque.
         let mut buf = self.take_buf(pw, ph);
@@ -1742,6 +1754,34 @@ mod tests {
         assert_eq!(v.switcher.scene_at(1.5), Scene::Board(0));
         v.update(&b, 60.0);
         assert_eq!(v.switcher.scene_at(60.0), Scene::Board(0));
+    }
+
+    #[test]
+    fn frames_a_whole_number_of_days_apart_are_identical() {
+        // After a month of uptime, f32 view time steps by 0.25 s, so the
+        // wave and the packets would move at 4 Hz. The scene's time wraps
+        // once a day in f64 first, so a frame 30 days on is the frame of
+        // the same time of day.
+        let mut b = two_boards();
+        b.set_power(0, 60.0);
+        b.pcie = Some(PcieBandwidth {
+            rx_bytes_per_sec: 2.0e9,
+            tx_bytes_per_sec: 5.0e8,
+        });
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        let month = 86_400.0 * 30.0;
+        for t0 in [1.3, 7.6, 1234.5678, 86_399.9] {
+            let (now, _) = v.scene_pixels(t0).unwrap();
+            let (later, _) = v.scene_pixels(t0 + month).unwrap();
+            assert!(
+                now.rgb == later.rgb && now.cover == later.cover,
+                "at {t0} s and 30 days on"
+            );
+            // The instrument: half a second later the frame does differ.
+            let (moved, _) = v.scene_pixels(t0 + 0.5).unwrap();
+            assert!(now.rgb != moved.rgb, "nothing moved at {t0}");
+        }
     }
 
     #[test]
