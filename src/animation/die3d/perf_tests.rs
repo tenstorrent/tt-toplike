@@ -767,3 +767,45 @@ fn wave_report() {
         gaps.last().copied().unwrap_or(0),
     );
 }
+
+/// Cells changed between consecutive frames, summed over 60 frames 1/30 s
+/// apart (two seconds), braille transparent 150 x 42, for one board (p150)
+/// or the four-board super scene. Deterministic: no clock is read.
+fn changed_in_two_seconds(boards: &[&str]) -> usize {
+    let b = busy_fake(boards);
+    let mut v = Die3dView::new(150, 42);
+    v.update(&b, 0.0);
+    v.director.set_auto(false);
+    let mut prev: Option<Buffer> = None;
+    let mut n = 0;
+    for i in 0..60 {
+        let buf = to_buffer(v.render(1.0 + i as f64 * DT), 150, 42);
+        if let Some(p) = &prev {
+            n += p.diff(&buf).len();
+        }
+        prev = Some(buf);
+    }
+    n
+}
+
+/// `changed_in_two_seconds` of the view as committed before Task 16
+/// (03cd98e5), computed with this same function.
+const CHANGED_BEFORE_ONE_BOARD: usize = 12464;
+const CHANGED_BEFORE_SUPER: usize = 16424;
+
+#[test]
+fn changed_cells_per_frame_are_at_most_half_of_before() {
+    // The Task 16 target on terminal traffic, asserted because the count is
+    // deterministic (the time targets are machine-dependent and are not).
+    for (what, boards, before) in [
+        ("one board", &["p150"][..], CHANGED_BEFORE_ONE_BOARD),
+        ("super 4 x 2", &["p300"; 8][..], CHANGED_BEFORE_SUPER),
+    ] {
+        let after = changed_in_two_seconds(boards);
+        println!("{what}: {after} cells changed, {before} before");
+        assert!(
+            2 * after <= before,
+            "{what}: {after} cells changed, {before} before"
+        );
+    }
+}
