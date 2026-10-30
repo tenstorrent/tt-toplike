@@ -77,6 +77,9 @@ pub struct ChipInputs {
     pub gddr_heat: Option<f32>,
     /// Bit `i` set when Ethernet port `i` has a live link.
     pub eth_live: u64,
+    /// Whether `eth_live` is a reading: without one it is 0, which would
+    /// otherwise look like every link going down.
+    pub eth_known: bool,
     pub temp_c: Option<f32>,
     /// `enabled_tensix_col` mask: a clear bit is a harvested column.
     pub enabled_tensix_col: Option<u32>,
@@ -120,6 +123,7 @@ pub fn chip_inputs(backend: &dyn TelemetryBackend, device: &Device) -> ChipInput
             .and_then(|s| s.max_gddr_temp_computed())
             .map(|c| ((c - 40.0) / 50.0).clamp(0.0, 1.0)),
         eth_live: smbus.and_then(|s| s.eth_live_status).unwrap_or(0),
+        eth_known: smbus.and_then(|s| s.eth_live_status).is_some(),
         temp_c: telem.and_then(|t| t.asic_temperature),
         enabled_tensix_col: smbus.and_then(|s| s.enabled_tensix_col),
         tile_flow: None,
@@ -926,6 +930,7 @@ mod tests {
             pcie_out_bps: None,
             gddr_heat: Some(0.0),
             eth_live: 0,
+            eth_known: false,
             temp_c: None,
             enabled_tensix_col: None,
             tile_flow: None,

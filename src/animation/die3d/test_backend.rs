@@ -10,7 +10,7 @@
 
 use crate::backend::pcie_counters::PcieBandwidth;
 use crate::backend::TelemetryBackend;
-use crate::models::{Device, SmbusTelemetry, Telemetry};
+use crate::models::{Device, DeviceProcess, SmbusTelemetry, Telemetry};
 
 pub(super) struct Fake {
     pub(super) devices: Vec<Device>,
@@ -21,6 +21,8 @@ pub(super) struct Fake {
     pub(super) has_smbus: bool,
     /// Shared by every device.
     pub(super) pcie: Option<PcieBandwidth>,
+    /// Which processes have which devices open.
+    pub(super) procs: Vec<DeviceProcess>,
 }
 
 impl Fake {
@@ -69,7 +71,29 @@ impl Fake {
             smbus,
             has_smbus: true,
             pcie: None,
+            procs: Vec::new(),
         }
+    }
+
+    /// Process `pid` opens (or, with [`close`](Self::close_device), loses) device `device`.
+    pub(super) fn open_device(&mut self, pid: i64, device: usize) {
+        self.procs.push(DeviceProcess {
+            pid: Some(pid),
+            device: Some(device),
+            ..DeviceProcess::default()
+        });
+    }
+
+    /// Process `pid` closes `device`.
+    pub(super) fn close_device(&mut self, pid: i64, device: usize) {
+        self.procs
+            .retain(|p| !(p.pid == Some(pid) && p.device == Some(device)));
+    }
+
+    /// Every GDDR channel at `celsius` (all four register pairs, shared by
+    /// every device).
+    pub(super) fn set_gddr_temp(&mut self, celsius: f32) {
+        self.smbus.gddr_temps = [Some(crate::models::telemetry::GddrTempPair([celsius; 4])); 4];
     }
 
     /// Set device `i`'s power draw in watts.
@@ -99,5 +123,8 @@ impl TelemetryBackend for Fake {
     }
     fn pcie_bandwidth(&self, _i: usize) -> Option<PcieBandwidth> {
         self.pcie
+    }
+    fn device_processes(&self) -> &[DeviceProcess] {
+        &self.procs
     }
 }

@@ -353,6 +353,7 @@ mod tests {
             pcie_out_bps: None,
             gddr_heat: None,
             eth_live: 0,
+            eth_known: false,
             temp_c: temp,
             enabled_tensix_col: None,
             tile_flow: None,

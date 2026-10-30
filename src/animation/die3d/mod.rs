@@ -68,7 +68,7 @@ use super_scene::draw_super_scene;
 use super_scene::{band_origin, draw_super_scene_in, super_grid};
 use switching::{Scene, Switcher};
 use tiers::{tier_for, Tier};
-use triggers::TriggerDetector;
+use triggers::{ChipExtras, Trigger, TriggerDetector};
 
 /// Terminal rows the footer takes in the full layout (100 x 30 cells and
 /// up). The view itself reads the footer's rows from its [`Tier`]; the tests
@@ -191,7 +191,7 @@ die3d_keys! {
     /// `/bg`: a transparent background, so the terminal's own shows through, or
     /// an opaque black one.
     ToggleTransparent,
-    /// `/transition`: how cuts change the picture: a shuffle of the kinds, or always
+    /// `/transition`: how cuts change the picture: rotate (a spin, or by reason), or always
     /// chaos, always a dissolve, or always a spin.
     CycleTransition,
     /// `/labels`: chip labels on the dies on or off.
@@ -608,31 +608,63 @@ impl Die3dView {
         // Commit a switch whose midpoint has passed before judging new
         // triggers, so they are judged against the scene on screen.
         self.switcher.settle(now, boards);
+        // Everything that happened this tick, with the board it happened on:
+        // the load and PCIe edges, the temperature, memory and Ethernet
+        // readings, and processes opening or closing a device.
+        let mut events: Vec<(usize, Trigger)> = Vec::new();
         for (board, chips) in self.chips.iter().enumerate() {
             for chip in chips {
                 let pcie = chip
                     .pcie_in_bps
                     .zip(chip.pcie_out_bps)
                     .map(|(rx, tx)| rx + tx);
-                for trigger in self.detector.observe(chip.index, chip.load, pcie) {
-                    if self.inset {
-                        // The inset's scene never changes: a trigger only
-                        // asks for a camera cut, which may spin. It cuts for
-                        // a trigger on the board it shows. With one board
-                        // that is every trigger. This does not check whether
-                        // the super scene fits, which would show every
-                        // board; it cuts for the busiest board's triggers
-                        // only, the board the fallback shows.
-                        if boards == 1 || board == self.busiest.board() {
-                            self.director.on_trigger(now);
-                        }
-                    } else {
-                        self.switcher
-                            .on_trigger(trigger, board, boards, &mut self.director, now);
-                    }
-                }
+                let extras = ChipExtras {
+                    temp_c: chip.temp_c,
+                    gddr_heat: chip.gddr_heat,
+                    eth_live: chip.eth_known.then_some(chip.eth_live),
+                };
+                let found = self
+                    .detector
+                    .observe(chip.index, chip.load, pcie)
+                    .into_iter()
+                    .chain(self.detector.observe_extras(now, chip.index, &extras));
+                events.extend(found.map(|t| (board, t)));
             }
         }
+        let opened: Vec<(i64, usize)> = backend
+            .device_processes()
+            .iter()
+            .filter_map(|p| p.pid.zip(p.device))
+            .collect();
+        for trigger in self.detector.observe_processes(&opened) {
+            // A device the view does not draw has no board here.
+            if let Some(board) = self
+                .chips
+                .iter()
+                .position(|chips| chips.iter().any(|c| c.index == trigger.chip()))
+            {
+                events.push((board, trigger));
+            }
+        }
+        for (board, trigger) in events {
+            if self.inset {
+                // The inset's scene never changes: a trigger only asks for a
+                // camera cut, which may spin. It cuts for a trigger on the
+                // board it shows. With one board that is every trigger. This
+                // does not check whether the super scene fits, which would
+                // show every board; it cuts for the busiest board's triggers
+                // only, the board the fallback shows.
+                if boards == 1 || board == self.busiest.board() {
+                    self.director.on_event(now, false, Some(trigger.reason()));
+                }
+            } else {
+                self.switcher
+                    .on_trigger(trigger, board, boards, &mut self.director, now);
+            }
+        }
+        // A quiet view still turns now and then. A cut for an event or by hand
+        // restarts the wait.
+        self.director.on_idle(now);
         self.switcher.expire(now);
     }
 
@@ -2211,6 +2243,8 @@ mod tests {
         let mut b = Fake::boards(&["p150"], Some("125"));
         b.telem[0].power = None;
         let mut v = Die3dView::new(150, 42);
+        // A minute of quiet is not a cut: only an event is under test.
+        v.director.set_idle_turn(false);
         for i in 0..120 {
             v.update(&b, i as f64 * 0.5);
             assert_eq!(v.chips[0][0].load, 0.0);
@@ -2360,10 +2394,170 @@ mod tests {
         assert_eq!(v.switcher.scene_at(21.0), Scene::All);
     }
 
+    /// A 150 x 42 view over two boards (chips 0 and 1, then 2 and 3) with the
+    /// idle turn off, that has seen one quiet tick at 0.0. The next event is
+    /// the first cut.
+    fn quiet_two_boards(b: &Fake) -> Die3dView {
+        let mut v = Die3dView::new(150, 42);
+        v.director.set_idle_turn(false);
+        v.update(b, 0.0);
+        assert!(v.director.cut_at().is_none(), "a quiet start cuts nothing");
+        v
+    }
+
+    /// What an event did: the cut's kind, and where the view was going to look.
+    fn cut_by_event(v: &Die3dView, at: f64) -> (Option<camera::TransitionKind>, Scene) {
+        assert_eq!(v.director.cut_at(), Some(at), "the event cut the camera");
+        (v.director.transition_kind(), v.switcher.scene_at(at + 5.0))
+    }
+
+    #[test]
+    fn a_process_opening_a_device_cuts_with_chaos_and_opens_that_board() {
+        use camera::TransitionKind::Chaos;
+        let mut b = two_boards();
+        let mut v = quiet_two_boards(&b);
+        b.open_device(4242, 2); // chip 2 is on board 1
+        v.update(&b, 1.0);
+        assert_eq!(cut_by_event(&v, 1.0), (Some(Chaos), Scene::Board(1)));
+        // The same process closing it is an event too, after the cooldown.
+        b.close_device(4242, 2);
+        v.update(&b, 20.0);
+        assert_eq!(v.director.cut_at(), Some(20.0));
+        assert_eq!(v.director.transition_kind(), Some(Chaos));
+    }
+
+    #[test]
+    fn a_process_already_there_at_the_start_is_not_an_event() {
+        let mut b = two_boards();
+        b.open_device(1, 0);
+        let mut v = quiet_two_boards(&b);
+        v.update(&b, 1.0);
+        v.update(&b, 2.0);
+        assert!(v.director.cut_at().is_none());
+    }
+
+    #[test]
+    fn a_temperature_rise_cuts_with_chaos() {
+        use camera::TransitionKind::Chaos;
+        let mut b = two_boards();
+        b.telem[2].asic_temperature = Some(45.0);
+        let mut v = quiet_two_boards(&b);
+        b.telem[2].asic_temperature = Some(46.0);
+        v.update(&b, 1.0);
+        assert!(v.director.cut_at().is_none(), "a degree is not a rise");
+        b.telem[2].asic_temperature = Some(52.0);
+        v.update(&b, 2.0);
+        assert_eq!(cut_by_event(&v, 2.0), (Some(Chaos), Scene::Board(1)));
+    }
+
+    #[test]
+    fn hot_memory_cuts_with_a_dissolve() {
+        use camera::TransitionKind::Dissolve;
+        let mut b = two_boards();
+        b.set_gddr_temp(45.0);
+        let mut v = quiet_two_boards(&b);
+        b.set_gddr_temp(70.0);
+        v.update(&b, 1.0);
+        let (kind, _) = cut_by_event(&v, 1.0);
+        assert_eq!(kind, Some(Dissolve));
+    }
+
+    #[test]
+    fn an_ethernet_link_change_cuts_with_a_dissolve() {
+        use camera::TransitionKind::Dissolve;
+        let mut b = two_boards();
+        b.smbus.eth_live_status = Some(0b0011);
+        let mut v = quiet_two_boards(&b);
+        v.update(&b, 1.0);
+        assert!(
+            v.director.cut_at().is_none(),
+            "the same links are not a change"
+        );
+        b.smbus.eth_live_status = Some(0b0111);
+        v.update(&b, 2.0);
+        let (kind, _) = cut_by_event(&v, 2.0);
+        assert_eq!(kind, Some(Dissolve));
+    }
+
+    /// A load rise is chaos, a PCIe burst alone is chaos too but opens no board:
+    /// it says something happened, not where to look.
+    #[test]
+    fn a_pcie_burst_cuts_with_chaos_and_keeps_the_scene() {
+        use camera::TransitionKind::Chaos;
+        let mut b = two_boards();
+        // The burst detector arms on a quiet reading, so start with one.
+        b.pcie = Some(PcieBandwidth {
+            rx_bytes_per_sec: 0.0,
+            tx_bytes_per_sec: 0.0,
+        });
+        let mut v = quiet_two_boards(&b);
+        b.pcie = Some(PcieBandwidth {
+            rx_bytes_per_sec: 2.0e9,
+            tx_bytes_per_sec: 0.0,
+        });
+        v.update(&b, 1.0);
+        assert_eq!(cut_by_event(&v, 1.0), (Some(Chaos), Scene::All));
+    }
+
+    /// With the forced mode the reasons no longer pick the kind.
+    #[test]
+    fn a_forced_transition_mode_beats_the_reason_in_the_view() {
+        use camera::TransitionKind::Spin;
+        let mut b = two_boards();
+        b.pcie = Some(PcieBandwidth {
+            rx_bytes_per_sec: 0.0,
+            tx_bytes_per_sec: 0.0,
+        });
+        let mut v = quiet_two_boards(&b);
+        v.command("transition", "spin", 0.5);
+        b.open_device(7, 0);
+        v.update(&b, 1.0);
+        // A scene change cannot spin, so a forced spin dissolves it...
+        assert_eq!(
+            v.director.transition_kind(),
+            Some(camera::TransitionKind::Dissolve)
+        );
+        // ...and a camera-only event spins.
+        b.pcie = Some(PcieBandwidth {
+            rx_bytes_per_sec: 2.0e9,
+            tx_bytes_per_sec: 0.0,
+        });
+        v.update(&b, 20.0);
+        assert_eq!(v.director.transition_kind(), Some(Spin));
+    }
+
+    /// A view nobody touches and nothing happens to still turns, once, after
+    /// the idle time: a spin with no board switch.
+    #[test]
+    fn a_quiet_view_spins_once_after_the_idle_time() {
+        let b = two_boards();
+        let mut v = Die3dView::new(150, 42);
+        v.update(&b, 0.0);
+        v.update(&b, camera::IDLE_ROTATE_SECS - 1.0);
+        assert!(v.director.cut_at().is_none(), "not yet");
+        let at = camera::IDLE_ROTATE_SECS + 1.0;
+        v.update(&b, at);
+        assert_eq!(v.director.cut_at(), Some(at));
+        assert_eq!(
+            v.director.transition_kind(),
+            Some(camera::TransitionKind::Spin)
+        );
+        assert_eq!(
+            v.switcher.scene_at(at + 5.0),
+            Scene::All,
+            "the scene did not change"
+        );
+        // Not again at once.
+        v.update(&b, at + 2.0);
+        assert_eq!(v.director.cut_at(), Some(at));
+    }
+
     #[test]
     fn a_hand_chosen_board_is_never_changed_by_activity() {
         let mut b = two_boards();
         let mut v = Die3dView::new(150, 42);
+        // Over 40 s of quiet and events: only the events are under test.
+        v.director.set_idle_turn(false);
         v.update(&b, 0.0);
         // Board 1 by hand: `]` opens the board shown last (0), `]` again 1.
         v.handle_key(Die3dKey::NextBoard, 0.0);
@@ -2890,7 +3084,7 @@ mod tests {
                 "braille",
                 "transparent",
                 "on",
-                "shuffle",
+                "rotate",
                 "all boards",
                 "on",
                 "on",
@@ -3684,7 +3878,7 @@ mod tests {
                 );
             }
         }
-        // And in shuffle mode, over many hand cuts at that moment, never a spin.
+        // And in the default mode, over many hand cuts at that moment, never a spin.
         for seed in 0..40u64 {
             let mut b = two_boards();
             let mut v = Die3dView::new(150, 42);
@@ -3744,11 +3938,11 @@ mod tests {
         let mut v = Die3dView::new(150, 42);
         v.update(&b, 0.0);
         for (want_state, want_mode) in [
-            ("shuffle", TransitionMode::Shuffle),
+            ("rotate", TransitionMode::Rotate),
             ("chaos", TransitionMode::Chaos),
             ("dissolve", TransitionMode::Dissolve),
             ("spin", TransitionMode::Spin),
-            ("shuffle", TransitionMode::Shuffle),
+            ("rotate", TransitionMode::Rotate),
         ] {
             assert_eq!(v.director.transition_mode(), want_mode);
             let f = footer(&v.render(0.0));

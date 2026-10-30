@@ -134,6 +134,7 @@ mod tests {
             pcie_out_bps: Some(40.0e9),
             gddr_heat: Some(1.0),
             eth_live: u64::MAX,
+            eth_known: false,
             temp_c: None,
             enabled_tensix_col: None,
             tile_flow: None,

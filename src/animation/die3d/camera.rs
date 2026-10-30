@@ -5,11 +5,15 @@
 //! noise, a dissolve and an animated spin.
 
 use super::raster::{Iso, PixelBuf};
+use super::triggers::Reason;
 use crate::animation::common::ease_in_out;
 use std::f32::consts::FRAC_PI_2;
 
 /// Minimum seconds between two automatic cuts.
 pub const COOLDOWN_SECS: f64 = 8.0;
+/// Seconds with no cut at all after which the camera turns to a new angle by
+/// itself (a spin), so a quiet board still moves.
+pub const IDLE_ROTATE_SECS: f64 = 45.0;
 /// Length of the chaos transition: rising to the midpoint, falling after it.
 pub const CHAOS_SECS: f64 = 0.8;
 /// Length of the dissolve transition.
@@ -44,20 +48,14 @@ impl TransitionKind {
     }
 }
 
-/// Shuffle weights: how often each kind is drawn, out of their sum, before
-/// the kinds a cut cannot use are left out.
-const SHUFFLE_WEIGHTS: [(TransitionKind, u32); 3] = [
-    (TransitionKind::Chaos, 40),
-    (TransitionKind::Dissolve, 35),
-    (TransitionKind::Spin, 25),
-];
-
 /// Which transitions the director uses. `/transition` sets it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TransitionMode {
-    /// A weighted draw for each cut, never the same kind twice in a row.
+    /// A cut with no reason (the idle turn, or Space) is a spin; a cut for an
+    /// event is the kind that event calls for ([`Director::pick_kind`]):
+    /// chaos for a chip or a process, a dissolve for memory or the board.
     #[default]
-    Shuffle,
+    Rotate,
     /// Always chaos.
     Chaos,
     /// Always a dissolve.
@@ -67,20 +65,20 @@ pub enum TransitionMode {
 }
 
 impl TransitionMode {
-    /// The mode after this one, in the order `X` steps through them.
+    /// The mode after this one, in the order `/transition` steps through them.
     pub fn next(self) -> TransitionMode {
         match self {
-            TransitionMode::Shuffle => TransitionMode::Chaos,
+            TransitionMode::Rotate => TransitionMode::Chaos,
             TransitionMode::Chaos => TransitionMode::Dissolve,
             TransitionMode::Dissolve => TransitionMode::Spin,
-            TransitionMode::Spin => TransitionMode::Shuffle,
+            TransitionMode::Spin => TransitionMode::Rotate,
         }
     }
 
     /// The mode a command argument names (`chaos`, `dissolve`, ...), or `None`.
     pub fn parse(word: &str) -> Option<TransitionMode> {
         [
-            TransitionMode::Shuffle,
+            TransitionMode::Rotate,
             TransitionMode::Chaos,
             TransitionMode::Dissolve,
             TransitionMode::Spin,
@@ -92,7 +90,7 @@ impl TransitionMode {
     /// The footer's word for the mode.
     pub fn label(self) -> &'static str {
         match self {
-            TransitionMode::Shuffle => "shuffle",
+            TransitionMode::Rotate => "rotate",
             TransitionMode::Chaos => "chaos",
             TransitionMode::Dissolve => "dissolve",
             TransitionMode::Spin => "spin",
@@ -322,6 +320,11 @@ pub struct Director {
     mode: TransitionMode,
     /// Transition of the latest cut; none before the first.
     kind: Option<TransitionKind>,
+    /// When `on_idle` was first called with no cut yet: the quiet period
+    /// counts from here.
+    idle_since: Option<f64>,
+    /// Whether the idle turn happens at all.
+    idle_turn: bool,
 }
 
 impl Director {
@@ -332,8 +335,10 @@ impl Director {
             to: PRESETS[0],
             auto: true,
             last_cut: None,
-            mode: TransitionMode::Shuffle,
+            mode: TransitionMode::Rotate,
             kind: None,
+            idle_since: None,
+            idle_turn: true,
         }
     }
 
@@ -358,6 +363,13 @@ impl Director {
         self.auto = on;
     }
 
+    /// Turn the idle turn ([`on_idle`](Self::on_idle)) on or off. On by default.
+    /// Tests of what events do switch it off so a long stretch of quiet is not
+    /// itself a cut.
+    pub fn set_idle_turn(&mut self, on: bool) {
+        self.idle_turn = on;
+    }
+
     pub fn transition_mode(&self) -> TransitionMode {
         self.mode
     }
@@ -367,7 +379,7 @@ impl Director {
         self.mode = m;
     }
 
-    /// Step to the next mode: shuffle, chaos, dissolve, spin, shuffle.
+    /// Step to the next mode: rotate, chaos, dissolve, spin, rotate.
     pub fn cycle_transition_mode(&mut self) {
         self.mode = self.mode.next();
     }
@@ -402,68 +414,82 @@ impl Director {
     /// then the transition must be one that can cover a scene change (not a
     /// spin), as for [`on_trigger_with_scene`](Self::on_trigger_with_scene).
     pub fn cut_by_hand_with_scene(&mut self, now: f64, changes_scene: bool) -> bool {
-        self.cut(now, changes_scene);
+        self.cut(now, changes_scene, None);
         true
     }
 
     /// A cut asked for by an event that changes the camera only: see
-    /// [`on_trigger_with_scene`](Self::on_trigger_with_scene).
+    /// [`on_event`](Self::on_event). It has no reason, so it is a plain cut.
     pub fn on_trigger(&mut self, now: f64) -> bool {
-        self.on_trigger_with_scene(now, false)
+        self.on_event(now, false, None)
+    }
+
+    /// [`on_event`](Self::on_event) with no reason.
+    pub fn on_trigger_with_scene(&mut self, now: f64, changes_scene: bool) -> bool {
+        self.on_event(now, changes_scene, None)
     }
 
     /// A cut asked for by an event: only when auto is on and at least
     /// [`COOLDOWN_SECS`] have passed since the last cut. `changes_scene` says
     /// the caller will switch scenes at the cut's swap if it goes through, so
     /// the transition must be one that can cover a scene change (not a spin).
-    pub fn on_trigger_with_scene(&mut self, now: f64, changes_scene: bool) -> bool {
+    /// `reason` is what happened, which picks the transition in `Rotate` mode.
+    pub fn on_event(&mut self, now: f64, changes_scene: bool, reason: Option<Reason>) -> bool {
         let ready = self.last_cut.map_or(true, |t| now - t >= COOLDOWN_SECS);
         if self.auto && ready {
-            self.cut(now, changes_scene);
+            self.cut(now, changes_scene, reason);
             true
         } else {
             false
         }
     }
 
-    fn cut(&mut self, now: f64, changes_scene: bool) {
+    /// The idle turn: when auto is on and [`IDLE_ROTATE_SECS`] have passed with
+    /// no cut (counted from the first call when there has been none), cut with
+    /// no reason, which in `Rotate` mode is a spin. Call it every tick.
+    pub fn on_idle(&mut self, now: f64) -> bool {
+        let since = match self.last_cut {
+            Some(t) => t,
+            None => *self.idle_since.get_or_insert(now),
+        };
+        if self.auto && self.idle_turn && now - since >= IDLE_ROTATE_SECS {
+            self.cut(now, false, None);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn cut(&mut self, now: f64, changes_scene: bool, reason: Option<Reason>) {
         // Pick among the other five presets, so the camera always changes.
         let here = PRESETS.iter().position(|c| *c == self.to).unwrap_or(0);
         let pick = self.rng.next() as usize % (PRESETS.len() - 1);
         self.from = self.to;
         self.to = PRESETS[(here + 1 + pick) % PRESETS.len()];
         self.last_cut = Some(now);
-        self.kind = Some(self.pick_kind(changes_scene));
+        self.kind = Some(self.pick_kind(changes_scene, reason));
     }
 
     /// The transition for a new cut. A spin turns one scene's camera, so a
     /// cut that changes the scene never spins: the fixed `Spin` mode falls
-    /// back to a dissolve, and the shuffle leaves `Spin` out of the draw.
-    fn pick_kind(&mut self, changes_scene: bool) -> TransitionKind {
+    /// back to a dissolve.
+    ///
+    /// In `Rotate` mode the reason decides: something on a chip or a process
+    /// opening or closing a device is chaos; memory heating or a board's links
+    /// changing is a dissolve; no reason (the idle turn, a hand cut) is a spin,
+    /// or a dissolve when the scene changes with it.
+    fn pick_kind(&mut self, changes_scene: bool, reason: Option<Reason>) -> TransitionKind {
         match self.mode {
             TransitionMode::Chaos => TransitionKind::Chaos,
             TransitionMode::Dissolve => TransitionKind::Dissolve,
             TransitionMode::Spin if changes_scene => TransitionKind::Dissolve,
             TransitionMode::Spin => TransitionKind::Spin,
-            TransitionMode::Shuffle => {
-                // Never the previous kind again. At most two kinds are left
-                // out (the previous one and Spin), so one is always left.
-                let options: Vec<(TransitionKind, u32)> = SHUFFLE_WEIGHTS
-                    .iter()
-                    .copied()
-                    .filter(|&(k, _)| Some(k) != self.kind)
-                    .filter(|&(k, _)| !(changes_scene && k == TransitionKind::Spin))
-                    .collect();
-                let total: u32 = options.iter().map(|&(_, w)| w).sum();
-                let mut r = self.rng.next() % total;
-                for &(k, w) in &options {
-                    if r < w {
-                        return k;
-                    }
-                    r -= w;
-                }
-                unreachable!("r < total, so some option takes it")
-            }
+            TransitionMode::Rotate => match reason {
+                Some(Reason::Chip) | Some(Reason::Process) => TransitionKind::Chaos,
+                Some(Reason::Memory) | Some(Reason::Board) => TransitionKind::Dissolve,
+                None if changes_scene => TransitionKind::Dissolve,
+                None => TransitionKind::Spin,
+            },
         }
     }
 
@@ -723,6 +749,7 @@ mod tests {
             pcie_out_bps: Some(40.0e9),
             gddr_heat: Some(1.0),
             eth_live: u64::MAX,
+            eth_known: false,
             temp_c: None,
             enabled_tensix_col: None,
             tile_flow: None,
@@ -1009,71 +1036,120 @@ mod tests {
         }
     }
 
-    /// The kind of each of `n` camera-only cuts of a shuffling director.
-    fn shuffled_kinds(seed: u64, n: usize, changes_scene: bool) -> Vec<TransitionKind> {
-        let mut d = Director::new(seed);
-        assert_eq!(d.transition_mode(), TransitionMode::Shuffle);
-        (0..n)
-            .map(|i| {
-                // 10 s apart: past the cooldown, so every trigger cuts.
-                assert!(d.on_trigger_with_scene(i as f64 * 10.0, changes_scene));
-                d.transition_kind().unwrap()
-            })
-            .collect()
+    /// The kind of a cut made for `reason` (or for none) by a director in `mode`.
+    fn kind_of(
+        mode: TransitionMode,
+        changes_scene: bool,
+        reason: Option<Reason>,
+    ) -> TransitionKind {
+        let mut d = Director::new(3);
+        d.set_transition_mode(mode);
+        assert!(d.on_event(100.0, changes_scene, reason));
+        d.transition_kind().unwrap()
     }
 
+    /// The default: a plain cut spins, and an event cuts the way its reason
+    /// calls for. Chaos for the chip and for a process, a dissolve for memory
+    /// and for the board.
     #[test]
-    fn shuffle_never_repeats_a_kind_twice_in_a_row() {
-        for seed in 0..10u64 {
+    fn rotate_spins_a_plain_cut_and_cuts_an_event_by_its_reason() {
+        use TransitionKind as K;
+        let rotate = TransitionMode::Rotate;
+        assert_eq!(TransitionMode::default(), rotate);
+        assert_eq!(kind_of(rotate, false, None), K::Spin, "no reason: rotate");
+        for (reason, want) in [
+            (Reason::Chip, K::Chaos),
+            (Reason::Process, K::Chaos),
+            (Reason::Memory, K::Dissolve),
+            (Reason::Board, K::Dissolve),
+        ] {
+            // The reason picks the kind whether or not the scene changes with
+            // it: chaos and a dissolve can both cover a scene change.
             for changes_scene in [false, true] {
-                let kinds = shuffled_kinds(seed, 300, changes_scene);
-                for w in kinds.windows(2) {
-                    assert_ne!(w[0], w[1], "seed {seed} scene={changes_scene}");
-                }
+                assert_eq!(
+                    kind_of(rotate, changes_scene, Some(reason)),
+                    want,
+                    "{reason:?} scene={changes_scene}"
+                );
             }
         }
-        // Hand cuts follow the same rule.
-        let mut d = Director::new(1);
-        let mut last = None;
-        for i in 0..200 {
-            d.cut_by_hand(i as f64);
-            assert_ne!(d.transition_kind(), last, "cut {i}");
-            last = d.transition_kind();
+        // A plain cut that changes the scene cannot spin.
+        assert_eq!(kind_of(rotate, true, None), K::Dissolve);
+    }
+
+    /// The same cuts, so the table above is not just what any mode does.
+    #[test]
+    fn a_forced_mode_overrides_the_reason() {
+        use TransitionKind as K;
+        for reason in [
+            None,
+            Some(Reason::Chip),
+            Some(Reason::Memory),
+            Some(Reason::Board),
+            Some(Reason::Process),
+        ] {
+            assert_eq!(
+                kind_of(TransitionMode::Chaos, false, reason),
+                K::Chaos,
+                "{reason:?}"
+            );
+            assert_eq!(
+                kind_of(TransitionMode::Dissolve, false, reason),
+                K::Dissolve,
+                "{reason:?}"
+            );
+            assert_eq!(
+                kind_of(TransitionMode::Spin, false, reason),
+                K::Spin,
+                "{reason:?}"
+            );
+            assert_eq!(
+                kind_of(TransitionMode::Spin, true, reason),
+                K::Dissolve,
+                "{reason:?}"
+            );
         }
     }
 
+    /// A hand cut (Space) has no reason, so in the default mode it spins.
     #[test]
-    fn shuffle_splits_follow_the_weights_after_each_kind() {
-        // The previous kind is left out, so after each kind the other two
-        // share the draw in the ratio of their weights (40, 35, 25):
-        //   after Chaos:    Dissolve 35/60, Spin 25/60
-        //   after Dissolve: Chaos 40/65,    Spin 25/65
-        //   after Spin:     Chaos 40/75,    Dissolve 35/75
-        // The closest split to an even one is after Spin, 53.3 / 46.7, so a
-        // uniform draw misses it by 3.3 points. The tolerance is 2 points,
-        // and each split here rests on well over 10 000 draws (a standard
-        // error under 0.5 points), so weights drawn uniformly fail.
-        use TransitionKind as K;
-        let kinds = shuffled_kinds(0x5EED, 60_000, false);
-        for (prev, first, w_first, w_second) in [
-            (K::Chaos, K::Dissolve, 35.0, 25.0),
-            (K::Dissolve, K::Chaos, 40.0, 25.0),
-            (K::Spin, K::Chaos, 40.0, 35.0),
-        ] {
-            let after: Vec<K> = kinds
-                .windows(2)
-                .filter(|w| w[0] == prev)
-                .map(|w| w[1])
-                .collect();
-            assert!(after.len() > 10_000, "{prev:?}: {} draws", after.len());
-            let got =
-                100.0 * after.iter().filter(|&&k| k == first).count() as f64 / after.len() as f64;
-            let want = 100.0 * w_first / (w_first + w_second);
-            assert!(
-                (got - want).abs() <= 2.0,
-                "after {prev:?}: {first:?} {got:.1}% (want {want:.1}%)"
-            );
-        }
+    fn a_hand_cut_has_no_reason_and_spins() {
+        let mut d = Director::new(1);
+        d.cut_by_hand(10.0);
+        assert_eq!(d.transition_kind(), Some(TransitionKind::Spin));
+        d.cut_by_hand_with_scene(30.0, true);
+        assert_eq!(d.transition_kind(), Some(TransitionKind::Dissolve));
+    }
+
+    #[test]
+    fn a_quiet_camera_turns_by_itself_after_the_idle_time() {
+        let mut d = Director::new(2);
+        // The first call starts the wait.
+        assert!(!d.on_idle(100.0));
+        assert!(!d.on_idle(100.0 + IDLE_ROTATE_SECS - 0.1));
+        assert!(d.on_idle(100.0 + IDLE_ROTATE_SECS));
+        assert_eq!(d.transition_kind(), Some(TransitionKind::Spin));
+        let first = d.camera();
+        // Then the wait restarts from that cut.
+        assert!(!d.on_idle(100.0 + IDLE_ROTATE_SECS + 1.0));
+        assert!(d.on_idle(100.0 + 2.0 * IDLE_ROTATE_SECS));
+        assert_ne!(d.camera(), first, "the camera moved");
+    }
+
+    #[test]
+    fn an_event_cut_restarts_the_idle_wait_and_auto_off_stops_it() {
+        let mut d = Director::new(2);
+        d.on_idle(0.0);
+        // An event at 40 s means nothing is idle until 85 s.
+        assert!(d.on_event(40.0, false, Some(Reason::Chip)));
+        assert!(!d.on_idle(40.0 + IDLE_ROTATE_SECS - 1.0));
+        assert!(d.on_idle(40.0 + IDLE_ROTATE_SECS));
+        // With auto-cuts off the camera stays where it is, as for events.
+        let mut d = Director::new(2);
+        d.set_auto(false);
+        d.on_idle(0.0);
+        assert!(!d.on_idle(1000.0));
+        assert!(d.transition_kind().is_none());
     }
 
     /// The four grid corners of a `grid`, by the corner name `side_name`
@@ -1152,15 +1228,31 @@ mod tests {
 
     #[test]
     fn a_scene_change_never_draws_spin() {
-        for seed in 0..20u64 {
-            let kinds = shuffled_kinds(seed, 200, true);
-            assert!(!kinds.contains(&TransitionKind::Spin), "seed {seed}");
-            // Both of the others do come up.
-            assert!(kinds.contains(&TransitionKind::Chaos));
-            assert!(kinds.contains(&TransitionKind::Dissolve));
+        for mode in [
+            TransitionMode::Rotate,
+            TransitionMode::Chaos,
+            TransitionMode::Dissolve,
+            TransitionMode::Spin,
+        ] {
+            for reason in [
+                None,
+                Some(Reason::Chip),
+                Some(Reason::Memory),
+                Some(Reason::Board),
+                Some(Reason::Process),
+            ] {
+                assert_ne!(
+                    kind_of(mode, true, reason),
+                    TransitionKind::Spin,
+                    "{mode:?} {reason:?}"
+                );
+            }
         }
-        // Control: without a scene change Spin does come up.
-        assert!(shuffled_kinds(0, 200, false).contains(&TransitionKind::Spin));
+        // Control: without a scene change a spin does come up.
+        assert_eq!(
+            kind_of(TransitionMode::Rotate, false, None),
+            TransitionKind::Spin
+        );
     }
 
     #[test]
@@ -1185,7 +1277,7 @@ mod tests {
     }
 
     #[test]
-    fn transition_mode_cycles_shuffle_chaos_dissolve_spin() {
+    fn transition_mode_cycles_rotate_chaos_dissolve_spin() {
         let mut d = Director::new(1);
         let mut seen = vec![d.transition_mode()];
         for _ in 0..4 {
@@ -1193,11 +1285,12 @@ mod tests {
             seen.push(d.transition_mode());
         }
         use TransitionMode as M;
-        assert_eq!(
-            seen,
-            [M::Shuffle, M::Chaos, M::Dissolve, M::Spin, M::Shuffle]
-        );
-        assert_eq!(TransitionMode::default(), M::Shuffle);
+        assert_eq!(seen, [M::Rotate, M::Chaos, M::Dissolve, M::Spin, M::Rotate]);
+        assert_eq!(TransitionMode::default(), M::Rotate);
+        for m in [M::Rotate, M::Chaos, M::Dissolve, M::Spin] {
+            assert_eq!(TransitionMode::parse(m.label()), Some(m));
+        }
+        assert_eq!(TransitionMode::parse("shuffle"), None, "shuffle is gone");
     }
 
     #[test]

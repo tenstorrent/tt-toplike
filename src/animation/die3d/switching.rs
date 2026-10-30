@@ -7,27 +7,29 @@
 //!
 //! - In a board scene, only a trigger from one of that board's chips cuts the
 //!   camera, and the cut changes the angle only.
-//! - In the super scene ("all boards"), a `LoadRise` that wins a cut also
-//!   switches to that chip's board. The switch shows from the cut's midpoint
-//!   (`Director::swapped_at`), so the transition covers it: chaos or a
-//!   dissolve, never a spin (the director is told the cut changes scene). A
-//!   `PcieBurst` in the super scene changes the angle only.
-//! - On a board the view chose itself, a `LoadRise` on another board goes
+//! - In the super scene ("all boards"), an event that wins a cut also
+//!   switches to that chip's board: a load rise, a temperature rise, memory
+//!   heat, an Ethernet link change or a process opening a device. The switch
+//!   shows from the cut's midpoint (`Director::swapped_at`), so the
+//!   transition covers it: chaos or a dissolve, never a spin (the director is
+//!   told the cut changes scene). A `PcieBurst` in the super scene changes the
+//!   angle only.
+//! - On a board the view chose itself, such an event on another board goes
 //!   back to the super scene through a cut, so activity anywhere is shown.
-//!   The director's cooldown applies; a rise it refuses is ignored. (Before,
-//!   such a rise did nothing on screen and only postponed the return.)
-//! - After [`RETURN_SECS`] with no `LoadRise` on the board on show, the view
+//!   The director's cooldown applies; an event it refuses is ignored.
+//! - After [`RETURN_SECS`] with no such event on the board on show, the view
 //!   goes back to the super scene, but only when the view made the switch.
-//! - A scene chosen by the user (`m`, `[`, `]`) cancels that return, and any
-//!   switch still waiting for its midpoint, and activity never changes it.
+//! - A scene chosen by the user (`/scene`, `/board`, `[`, `]`) cancels that
+//!   return, and any switch still waiting for its midpoint, and activity never
+//!   changes it.
 //!
 //! Nothing here reads a clock: `now` is passed in, as for `Director`.
 
 use super::camera::Director;
 use super::triggers::Trigger;
 
-/// Seconds without a `LoadRise` on the board on show before an automatic
-/// board switch is undone.
+/// Seconds without an event that opens a board (see `opens_board`) on the
+/// board on show before an automatic board switch is undone.
 pub(super) const RETURN_SECS: f64 = 20.0;
 
 /// The scene on show.
@@ -46,10 +48,10 @@ pub(super) struct Switcher {
     pending: Option<(Scene, f64)>,
     /// True while the board scene on show (or pending) was chosen by the view.
     auto_return: bool,
-    /// Time of the latest `LoadRise` on the board the view chose (or of the
-    /// rise that chose it). Rises on other boards do not count: they either
-    /// return the view to every board or are ignored.
-    last_load_rise: Option<f64>,
+    /// Time of the latest board-opening event on the board the view chose (or
+    /// of the one that chose it). Events on other boards do not count: they
+    /// either return the view to every board or are ignored.
+    last_event: Option<f64>,
     /// The board shown last, so `m` returns to it and the fallback draws it.
     board: usize,
     /// The latest switch made by a cut: the cut's start time, the scene
@@ -66,7 +68,7 @@ impl Switcher {
             scene: Scene::All,
             pending: None,
             auto_return: false,
-            last_load_rise: None,
+            last_event: None,
             board: 0,
             cut_switch: None,
         }
@@ -136,19 +138,22 @@ impl Switcher {
         director: &mut Director,
         now: f64,
     ) {
-        let load_rise = matches!(trigger, Trigger::LoadRise { .. });
+        // A burst of PCIe traffic alone does not say which board to look at;
+        // everything else does.
+        let opens_board = !matches!(trigger, Trigger::PcieBurst { .. });
+        let reason = Some(trigger.reason());
         match self.scene {
             Scene::Board(b) if b != board => {
                 // Another board's chip. On a board the user chose, nothing
-                // happens. On one the view chose, a load rise means activity
+                // happens. On one the view chose, an event means activity
                 // the screen does not show: go back to every board, through
-                // a cut that is told the scene changes. A rise the cooldown
+                // a cut that is told the scene changes. An event the cooldown
                 // refuses is ignored, and a switch already pending is left
                 // to finish.
-                if load_rise
+                if opens_board
                     && self.auto_return
                     && self.pending.is_none()
-                    && director.on_trigger_with_scene(now, true)
+                    && director.on_event(now, true, reason)
                 {
                     let at = director.swapped_at().unwrap_or(now);
                     self.pending = Some((Scene::All, at));
@@ -157,22 +162,22 @@ impl Switcher {
                 }
             }
             Scene::Board(_) => {
-                if load_rise {
-                    self.last_load_rise = Some(now);
+                if opens_board {
+                    self.last_event = Some(now);
                 }
-                director.on_trigger(now);
+                director.on_event(now, false, reason);
             }
             Scene::All => {
                 // With one board the super scene is that board's scene, so a
                 // switch would change nothing on screen.
-                let switches = load_rise && boards > 1;
-                if director.on_trigger_with_scene(now, switches) && switches {
+                let switches = opens_board && boards > 1;
+                if director.on_event(now, switches, reason) && switches {
                     let at = director.swapped_at().unwrap_or(now);
                     self.pending = Some((Scene::Board(board), at));
                     self.cut_switch = Some((now, Scene::All, Scene::Board(board)));
                     self.auto_return = true;
-                    // The rise that chose the board starts its 20 s.
-                    self.last_load_rise = Some(now);
+                    // The event that chose the board starts its 20 s.
+                    self.last_event = Some(now);
                 }
             }
         }
@@ -181,7 +186,7 @@ impl Switcher {
     /// Go back to the super scene once [`RETURN_SECS`] have passed with no
     /// `LoadRise` on the board shown, if the view made the switch to it.
     pub(super) fn expire(&mut self, now: f64) {
-        let quiet = self.last_load_rise.map_or(true, |t| now - t >= RETURN_SECS);
+        let quiet = self.last_event.map_or(true, |t| now - t >= RETURN_SECS);
         if self.auto_return && self.pending.is_none() && quiet {
             self.scene = Scene::All;
             self.auto_return = false;

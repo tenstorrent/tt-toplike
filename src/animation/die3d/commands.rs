@@ -52,8 +52,8 @@ pub const COMMANDS: &[CommandInfo] = &[
     },
     CommandInfo {
         name: "transition",
-        args: "[shuffle|chaos|dissolve|spin]",
-        help: "how cuts change the picture; bare steps to the next",
+        args: "[rotate|chaos|dissolve|spin]",
+        help: "rotate spins, and cuts for an event by its reason; bare steps to the next",
     },
     CommandInfo {
         name: "cells",

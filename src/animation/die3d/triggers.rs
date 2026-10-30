@@ -7,8 +7,12 @@
 //! [`TriggerDetector::observe`] once per chip per tick and the returned
 //! [`Trigger`]s become camera cuts. Reset, model-load and ECC triggers are
 //! deliberately not detected here.
+//!
+//! Each trigger has a [`Reason`]: something on a chip, in its memory, on its
+//! board or in a process that uses it. The reason decides how the camera cuts
+//! (`camera::Director`).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// Load (0..1) at or above which a rise fires. The view passes load relative
 /// to the chip's own idle (`load::LoadScale`), so 0.5 is half way from idle
@@ -32,6 +36,35 @@ pub const PCIE_ON_BPS: f64 = 50.0e6;
 /// traffic has dropped back towards idle.
 pub const PCIE_REARM_BPS: f64 = 10.0e6;
 
+/// GDDR heat (0..1, the hottest memory temperature mapped from 40 to 90 C) at
+/// or above which a memory trigger fires: 0.5 is 65 C.
+pub const MEMORY_ON: f32 = 0.5;
+/// GDDR heat at or below which the memory detector is armed again: 57.5 C.
+pub const MEMORY_REARM: f32 = 0.35;
+/// Degrees above the chip's own recent temperature at which a thermal trigger
+/// fires. Idle Blackhole chips sit at 40 to 50 C and a loaded one a few degrees
+/// above its idle, so a fixed limit would be wrong on a cool box and a hot one.
+pub const THERMAL_RISE_C: f32 = 4.0;
+/// Degrees above the baseline at or below which the thermal detector is armed
+/// again.
+pub const THERMAL_REARM_C: f32 = 1.5;
+/// Time constant, in seconds, of the temperature baseline: a rise slower than
+/// this becomes the new normal and does not fire.
+pub const THERMAL_BASELINE_SECS: f64 = 60.0;
+
+/// What a trigger is about. It chooses the cut: see `Director::on_event`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reason {
+    /// The chip itself: its load, its PCIe traffic or its temperature.
+    Chip,
+    /// Its memory: the GDDR heating up.
+    Memory,
+    /// The board: an Ethernet link came up or went down.
+    Board,
+    /// A process opened or closed the chip's device.
+    Process,
+}
+
 /// Something interesting happened on a chip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
@@ -39,6 +72,51 @@ pub enum Trigger {
     LoadRise { chip: usize },
     /// PCIe traffic crossed up through [`PCIE_ON_BPS`].
     PcieBurst { chip: usize },
+    /// The ASIC temperature rose [`THERMAL_RISE_C`] above its recent level.
+    ThermalRise { chip: usize },
+    /// GDDR heat crossed up through [`MEMORY_ON`].
+    MemoryHeat { chip: usize },
+    /// The set of live Ethernet links changed.
+    EthLink { chip: usize },
+    /// A process opened or closed this chip's device.
+    Process { chip: usize },
+}
+
+impl Trigger {
+    /// The chip it happened on (the device index).
+    pub fn chip(self) -> usize {
+        match self {
+            Trigger::LoadRise { chip }
+            | Trigger::PcieBurst { chip }
+            | Trigger::ThermalRise { chip }
+            | Trigger::MemoryHeat { chip }
+            | Trigger::EthLink { chip }
+            | Trigger::Process { chip } => chip,
+        }
+    }
+
+    /// What it is about.
+    pub fn reason(self) -> Reason {
+        match self {
+            Trigger::LoadRise { .. } | Trigger::PcieBurst { .. } | Trigger::ThermalRise { .. } => {
+                Reason::Chip
+            }
+            Trigger::MemoryHeat { .. } => Reason::Memory,
+            Trigger::EthLink { .. } => Reason::Board,
+            Trigger::Process { .. } => Reason::Process,
+        }
+    }
+}
+
+/// Readings beyond load and PCIe that can trigger a cut; each may be missing.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChipExtras {
+    /// ASIC temperature, degrees C.
+    pub temp_c: Option<f32>,
+    /// Hottest GDDR temperature mapped from 40..90 C onto 0..1.
+    pub gddr_heat: Option<f32>,
+    /// Bit `i` set when Ethernet port `i` has a live link.
+    pub eth_live: Option<u64>,
 }
 
 /// Schmitt-trigger style edge detector.
@@ -70,17 +148,62 @@ impl Edge {
     }
 }
 
+/// A temperature trigger against a slowly following baseline of the chip's own
+/// temperature. Armed while the temperature is within [`THERMAL_REARM_C`] of the
+/// baseline; fires once when it gets [`THERMAL_RISE_C`] above it.
+#[derive(Debug, Default, Clone, Copy)]
+struct Thermal {
+    /// (baseline, time of the last sample); none before the first sample.
+    baseline: Option<(f32, f64)>,
+    armed: bool,
+}
+
+impl Thermal {
+    fn step(&mut self, now: f64, temp: f32) -> bool {
+        if !temp.is_finite() {
+            return false;
+        }
+        let Some((base, at)) = self.baseline else {
+            // No history: the first reading is the baseline, whatever it is.
+            self.baseline = Some((temp, now));
+            self.armed = true;
+            return false;
+        };
+        let over = temp - base;
+        let mut fired = false;
+        if over <= THERMAL_REARM_C {
+            self.armed = true;
+        } else if over >= THERMAL_RISE_C && self.armed {
+            self.armed = false;
+            fired = true;
+        }
+        // The baseline follows with a time constant, so it takes the same
+        // number of seconds whatever the tick rate. A clock that goes back
+        // leaves it as it was.
+        let dt = (now - at).max(0.0);
+        let k = 1.0 - (-dt / THERMAL_BASELINE_SECS).exp();
+        self.baseline = Some((base + over * k as f32, now));
+        fired
+    }
+}
+
 /// Per-chip detector state.
 #[derive(Debug, Default, Clone, Copy)]
 struct ChipState {
     load: Edge,
     pcie: Edge,
+    thermal: Thermal,
+    memory: Edge,
+    /// The Ethernet link mask seen last.
+    eth: Option<u64>,
 }
 
 /// Detects [`Trigger`]s from a stream of per-chip samples.
 #[derive(Debug, Default)]
 pub struct TriggerDetector {
     chips: HashMap<usize, ChipState>,
+    /// The (pid, device) pairs seen last; none before the first sample.
+    procs: Option<BTreeSet<(i64, usize)>>,
 }
 
 impl TriggerDetector {
@@ -106,6 +229,52 @@ impl TriggerDetector {
             }
         }
         out
+    }
+
+    /// Observe a chip's temperature, memory heat and Ethernet links at `now`
+    /// seconds. Separate from [`observe`](Self::observe) so a source that has
+    /// only load and PCIe needs nothing more.
+    pub fn observe_extras(&mut self, now: f64, chip: usize, x: &ChipExtras) -> Vec<Trigger> {
+        let state = self.chips.entry(chip).or_default();
+        let mut out = Vec::new();
+        if let Some(t) = x.temp_c {
+            if state.thermal.step(now, t) {
+                out.push(Trigger::ThermalRise { chip });
+            }
+        }
+        if let Some(h) = x.gddr_heat {
+            if state
+                .memory
+                .step(f64::from(h), f64::from(MEMORY_ON), f64::from(MEMORY_REARM))
+            {
+                out.push(Trigger::MemoryHeat { chip });
+            }
+        }
+        if let Some(mask) = x.eth_live {
+            // The first mask is the starting point, not a change.
+            if state.eth.is_some_and(|prev| prev != mask) {
+                out.push(Trigger::EthLink { chip });
+            }
+            state.eth = Some(mask);
+        }
+        out
+    }
+
+    /// Observe which processes have which devices open: `(pid, device)` pairs.
+    /// A trigger for each device where one opened or closed since the last
+    /// call. The first call only records the starting set.
+    pub fn observe_processes(&mut self, procs: &[(i64, usize)]) -> Vec<Trigger> {
+        let now: BTreeSet<(i64, usize)> = procs.iter().copied().collect();
+        let Some(before) = self.procs.replace(now.clone()) else {
+            return Vec::new();
+        };
+        before
+            .symmetric_difference(&now)
+            .map(|&(_, device)| device)
+            .collect::<BTreeSet<usize>>()
+            .into_iter()
+            .map(|chip| Trigger::Process { chip })
+            .collect()
     }
 }
 
@@ -243,5 +412,164 @@ mod tests {
         d.observe(1, 0.0, None);
         assert!(d.observe(0, 0.9, None).is_empty());
         assert_eq!(d.observe(1, 0.9, None), vec![Trigger::LoadRise { chip: 1 }]);
+    }
+
+    fn extras(temp: f32) -> ChipExtras {
+        ChipExtras {
+            temp_c: Some(temp),
+            ..ChipExtras::default()
+        }
+    }
+
+    #[test]
+    fn every_trigger_has_a_chip_and_a_reason() {
+        for (t, reason) in [
+            (Trigger::LoadRise { chip: 3 }, Reason::Chip),
+            (Trigger::PcieBurst { chip: 3 }, Reason::Chip),
+            (Trigger::ThermalRise { chip: 3 }, Reason::Chip),
+            (Trigger::MemoryHeat { chip: 3 }, Reason::Memory),
+            (Trigger::EthLink { chip: 3 }, Reason::Board),
+            (Trigger::Process { chip: 3 }, Reason::Process),
+        ] {
+            assert_eq!((t.chip(), t.reason()), (3, reason), "{t:?}");
+        }
+    }
+
+    #[test]
+    fn a_temperature_rise_fires_once_and_rearms_below_the_band() {
+        let mut d = TriggerDetector::new();
+        let rise = vec![Trigger::ThermalRise { chip: 0 }];
+        assert!(d.observe_extras(0.0, 0, &extras(45.0)).is_empty()); // baseline
+        assert!(d.observe_extras(1.0, 0, &extras(48.0)).is_empty()); // +3: under 4
+        assert_eq!(d.observe_extras(2.0, 0, &extras(50.0)), rise);
+        assert!(
+            d.observe_extras(3.0, 0, &extras(55.0)).is_empty(),
+            "held high: once"
+        );
+        // Back to the baseline, then a new rise: fires again.
+        assert!(d.observe_extras(4.0, 0, &extras(45.5)).is_empty());
+        assert_eq!(d.observe_extras(5.0, 0, &extras(52.0)), rise);
+    }
+
+    #[test]
+    fn a_slow_warm_up_becomes_the_baseline_and_does_not_fire() {
+        let mut d = TriggerDetector::new();
+        d.observe_extras(0.0, 0, &extras(45.0));
+        // 0.05 C a second for ten minutes: 30 C in all, never 4 C above the
+        // baseline that follows it.
+        let mut fired = 0;
+        for i in 1..=600 {
+            fired += d
+                .observe_extras(i as f64, 0, &extras(45.0 + 0.05 * i as f32))
+                .len();
+        }
+        assert_eq!(fired, 0, "a slow rise is not an event");
+    }
+
+    #[test]
+    fn missing_or_non_finite_temperature_never_fires_or_disarms() {
+        let mut d = TriggerDetector::new();
+        d.observe_extras(0.0, 0, &extras(45.0));
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(d.observe_extras(1.0, 0, &extras(bad)).is_empty(), "{bad}");
+        }
+        assert!(d.observe_extras(1.5, 0, &ChipExtras::default()).is_empty());
+        assert_eq!(
+            d.observe_extras(2.0, 0, &extras(51.0)).len(),
+            1,
+            "still armed"
+        );
+        // A first reading that is already high is the baseline, not a rise.
+        let mut d = TriggerDetector::new();
+        assert!(d.observe_extras(0.0, 7, &extras(85.0)).is_empty());
+        assert!(d.observe_extras(1.0, 7, &extras(85.5)).is_empty());
+    }
+
+    #[test]
+    fn memory_heat_fires_at_65_c_after_cooling() {
+        let mut d = TriggerDetector::new();
+        let heat = |h: f32| ChipExtras {
+            gddr_heat: Some(h),
+            ..ChipExtras::default()
+        };
+        let fire = vec![Trigger::MemoryHeat { chip: 1 }];
+        assert!(d.observe_extras(0.0, 1, &heat(0.2)).is_empty()); // armed
+        assert!(d.observe_extras(1.0, 1, &heat(0.49)).is_empty());
+        assert_eq!(d.observe_extras(2.0, 1, &heat(MEMORY_ON)), fire);
+        assert!(d.observe_extras(3.0, 1, &heat(0.9)).is_empty());
+        assert!(
+            d.observe_extras(4.0, 1, &heat(0.4)).is_empty(),
+            "between the levels"
+        );
+        assert!(
+            d.observe_extras(5.0, 1, &heat(0.8)).is_empty(),
+            "not re-armed yet"
+        );
+        d.observe_extras(6.0, 1, &heat(MEMORY_REARM));
+        assert_eq!(d.observe_extras(7.0, 1, &heat(0.8)), fire);
+        // The first reading is never a rise.
+        let mut d = TriggerDetector::new();
+        assert!(d.observe_extras(0.0, 2, &heat(0.9)).is_empty());
+    }
+
+    #[test]
+    fn an_ethernet_link_change_fires_but_the_first_mask_does_not() {
+        let mut d = TriggerDetector::new();
+        let eth = |m: u64| ChipExtras {
+            eth_live: Some(m),
+            ..ChipExtras::default()
+        };
+        let fire = vec![Trigger::EthLink { chip: 0 }];
+        assert!(d.observe_extras(0.0, 0, &eth(0b0011)).is_empty());
+        assert!(
+            d.observe_extras(1.0, 0, &eth(0b0011)).is_empty(),
+            "unchanged"
+        );
+        assert_eq!(
+            d.observe_extras(2.0, 0, &eth(0b0111)),
+            fire,
+            "a link came up"
+        );
+        assert_eq!(
+            d.observe_extras(3.0, 0, &eth(0b0101)),
+            fire,
+            "one went down"
+        );
+        assert!(d.observe_extras(4.0, 0, &ChipExtras::default()).is_empty());
+        assert!(
+            d.observe_extras(5.0, 0, &eth(0b0101)).is_empty(),
+            "a missing reading changed nothing"
+        );
+    }
+
+    #[test]
+    fn a_process_opening_or_closing_a_device_fires_for_that_device() {
+        let mut d = TriggerDetector::new();
+        // The first set is the starting point, however many are open.
+        assert!(d.observe_processes(&[(100, 0), (101, 1)]).is_empty());
+        assert!(
+            d.observe_processes(&[(100, 0), (101, 1)]).is_empty(),
+            "unchanged"
+        );
+        // Pid 102 opens device 1: one trigger, for device 1.
+        assert_eq!(
+            d.observe_processes(&[(100, 0), (101, 1), (102, 1)]),
+            vec![Trigger::Process { chip: 1 }]
+        );
+        // Pid 100 closes device 0 while 103 opens device 1: both devices fire.
+        assert_eq!(
+            d.observe_processes(&[(101, 1), (102, 1), (103, 1), (104, 2)]),
+            vec![
+                Trigger::Process { chip: 0 },
+                Trigger::Process { chip: 1 },
+                Trigger::Process { chip: 2 },
+            ]
+        );
+        // Two processes changing the same device fire once.
+        assert_eq!(d.observe_processes(&[(101, 1)]).len(), 2, "devices 1 and 2");
+        assert_eq!(
+            d.observe_processes(&[(200, 1), (201, 1)]),
+            vec![Trigger::Process { chip: 1 }]
+        );
     }
 }
