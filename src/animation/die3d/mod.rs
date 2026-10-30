@@ -32,6 +32,7 @@ pub mod palette;
 mod perf_tests;
 pub mod raster;
 pub mod scene;
+mod summary;
 pub mod super_scene;
 mod switching;
 #[cfg(test)]
@@ -695,7 +696,10 @@ impl Die3dView {
                 self.give_back(buf);
                 (lines, Some((shown, placed)))
             }
-            None => (vec![hint(no_fit_hint(self.braille).into())], None),
+            None => (
+                summary::summary_lines(&self.chips, self.cols, scene_rows),
+                None,
+            ),
         };
         lines.resize(scene_rows, Line::default());
         lines.extend(self.footer(now, frame.as_ref().map(|f| f.0)));
@@ -1281,16 +1285,6 @@ fn aim(fit: &SceneFit, aim_by: Aim, grid: (usize, usize)) -> SceneFit {
     }
 }
 
-/// The line shown in place of a scene that does not fit. Braille has the most
-/// pixels per cell, so only in half-block mode can `B` give a better fit.
-fn no_fit_hint(braille: bool) -> &'static str {
-    if braille {
-        "This scene does not fit at this size. Enlarge the terminal."
-    } else {
-        "This scene does not fit at this size. Enlarge the terminal or press B for braille."
-    }
-}
-
 /// A die's label: its name and, when known, its power in whole watts
 /// (`BH0 44W`).
 fn chip_label(chip: &ChipInputs) -> String {
@@ -1473,6 +1467,18 @@ mod tests {
             let lines = v.render(0.0);
             assert_eq!(lines.len(), r, "{c} x {r}: {:?}", text(&lines));
         }
+    }
+
+    #[test]
+    fn a_tiny_view_shows_the_summary() {
+        let b = two_boards();
+        let mut v = Die3dView::new(30, 10);
+        v.update(&b, 0.0);
+        let t = text(&v.render(0.0));
+        assert_eq!(t.len(), 10);
+        assert!(t.iter().any(|l| l.contains("BH0")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("BH1")), "{t:?}");
+        assert!(t.iter().all(|l| l.chars().count() <= 30), "{t:?}");
     }
 
     /// A `cols` x `rows` view over one p150 that has read the backend once,
@@ -2194,17 +2200,6 @@ mod tests {
         assert_eq!(t.len(), 30);
         assert!(t[28].starts_with("\u{2551} "), "{}", t[28]);
         assert!(t[29].starts_with("\u{255a}"), "{}", t[29]);
-    }
-
-    #[test]
-    fn the_no_fit_hint_only_suggests_b_when_b_can_help() {
-        // Braille already has the most pixels, so pressing B cannot help.
-        assert!(
-            !no_fit_hint(true).contains("press B"),
-            "{}",
-            no_fit_hint(true)
-        );
-        assert!(no_fit_hint(false).contains("press B"));
     }
 
     #[test]
@@ -3030,12 +3025,14 @@ mod tests {
                         // The footer rows are the footer's: its two bars.
                         assert!(t[scene_rows].starts_with("\u{2551} "), "{}", t[scene_rows]);
                         assert!(t[r - 1].starts_with("\u{255a}\u{2550} "), "{}", t[r - 1]);
-                        // A scene row is the view's width, or empty below
-                        // the no-fit hint (half-block at the smallest sizes).
-                        let hint_only = t[0] == no_fit_hint(braille);
+                        // A scene row is the view's width. Where no scene
+                        // fits (half-block at the smallest sizes) the rows
+                        // hold the chip summary instead: lines at most the
+                        // view's width, then empty rows.
+                        let hint_only = t[0].starts_with("BH0");
                         for (i, row) in t[..scene_rows].iter().enumerate() {
                             let n = row.chars().count();
-                            let ok = n == c || (hint_only && (i == 0 || n == 0));
+                            let ok = n == c || (hint_only && n <= c);
                             assert!(ok, "{c} x {r} row {i}: {n}");
                         }
                         // Every label found anywhere is on a scene row.
