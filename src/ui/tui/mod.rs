@@ -399,6 +399,10 @@ fn next_rotation_mode_for(m: DisplayMode, training: bool, inference: bool) -> Di
 /// another view. The views' own flags (`train_active`, `inference_active`) are
 /// only kept while their view is on screen, which is too late to decide
 /// whether to go there.
+///
+/// Training comes from the background scan worker (`note_trainer`), whose
+/// `/proc` walk stays off the render thread. Inference is a cheap read of the
+/// background monitor's snapshot, taken every [`ROTATE_PROBE_EVERY`].
 #[derive(Debug, Default)]
 struct RotationActivity {
     training: bool,
@@ -407,11 +411,41 @@ struct RotationActivity {
 }
 
 impl RotationActivity {
-    /// Whether it is time to look again (the first time, immediately).
+    /// Whether it is time to look at inference again (the first time,
+    /// immediately).
     fn due(&self) -> bool {
         self.probed
             .map_or(true, |t| t.elapsed() >= ROTATE_PROBE_EVERY)
     }
+
+    /// The scan worker's trainer search: a trainer found means training is
+    /// going, a search that found none means it is not, and a scan that did not
+    /// search (`None`) says nothing.
+    fn note_trainer(&mut self, found: &Option<Option<crate::workload::train::TrainProcess>>) {
+        if let Some(result) = found {
+            self.training = result.is_some();
+        }
+    }
+}
+
+/// Whether the background scan should look for a trainer: Arcade follows a run
+/// (not under mock or remote, which build their lanes elsewhere), and so does
+/// the rotation, to know whether Training is worth a visit (not under mock,
+/// whose synthetic run always counts).
+fn scan_wants_trainer(mode: DisplayMode, rotating: bool, backend_type: BackendType) -> bool {
+    let arcade = mode == DisplayMode::Arcade
+        && backend_type != BackendType::Mock
+        && backend_type != BackendType::Remote;
+    arcade || (rotating && backend_type != BackendType::Mock)
+}
+
+/// Whether any service is starting or running: a row whose phase is not `Down`.
+/// A `Down` service (the container is there but its process or readiness is
+/// gone) is not a workload to look at, so a dead server does not earn the
+/// Inference Monitor a visit.
+fn inference_rows_active(rows: &[crate::workload::inference_server::ServiceState]) -> bool {
+    use crate::workload::inference_server::Phase;
+    rows.iter().any(|s| s.phase != Phase::Down)
 }
 
 /// Whether anything is starting or serving a model, read without leaving the
@@ -428,17 +462,17 @@ fn peek_inference_active(
     #[cfg(feature = "remote")]
     if backend_type == BackendType::Remote {
         if let Some(list) = backend.remote_inference() {
-            return !list.is_empty();
+            let rows: Vec<_> = list.iter().map(remote_inference_to_service_state).collect();
+            return inference_rows_active(&rows);
         }
     }
     let _ = backend;
     if backend_type == BackendType::Mock {
-        return !crate::workload::inference_server::mock::mock_services(
+        return inference_rows_active(&crate::workload::inference_server::mock::mock_services(
             mock_started.elapsed().as_secs_f32(),
-        )
-        .is_empty();
+        ));
     }
-    !monitor.snapshot().is_empty()
+    inference_rows_active(&monitor.snapshot())
 }
 
 /// How long to dwell on `mode`.
@@ -1395,7 +1429,7 @@ fn run_app(
                     // server that goes away while this view is on screen
                     // leaves the snake roaming an empty catalog, so `--rotate`
                     // gives it the short glance and moves on.
-                    inference_active = !rows.is_empty();
+                    inference_active = inference_rows_active(&rows);
                     // Education band: describe the featured *loading* service.
                     band_rotation = band_rotation.wrapping_add(1);
                     inference_band = {
@@ -1506,18 +1540,12 @@ fn run_app(
                     DisplayMode::InferenceMonitor => rotation_activity.inference = inference_active,
                     _ => {}
                 }
+                if backend_type == BackendType::Mock {
+                    // The mock backend drives a synthetic run.
+                    rotation_activity.training = true;
+                }
                 if rotation_activity.due() {
                     rotation_activity.probed = Some(Instant::now());
-                    if display_mode != DisplayMode::Training {
-                        rotation_activity.training = if backend_type == BackendType::Mock {
-                            // The mock backend drives a synthetic run.
-                            true
-                        } else {
-                            let tm = train_monitor.get_or_insert_with(TrainMonitor::new);
-                            tm.poll();
-                            tm.state().proc.is_some()
-                        };
-                    }
                     if display_mode != DisplayMode::InferenceMonitor {
                         #[cfg(target_os = "linux")]
                         {
@@ -2919,7 +2947,9 @@ fn run_app(
                 &mut serving_metrics,
             );
             let scanned_processes = applied.processes;
-            // The worker's trainer search result, for Arcade's lane.
+            // The worker's trainer search result: for Arcade's lane, and for the
+            // rotation's idea of whether Training has anything to show.
+            rotation_activity.note_trainer(&applied.trainer);
             if applied.trainer.is_some() {
                 latest_trainer = applied.trainer;
             }
@@ -3031,12 +3061,10 @@ fn run_app(
                 only_tt: crate::cli::backend_shows_only_tt(backend_type),
                 verdicts: liveness_prober.fresh_verdicts(),
                 want_processes: reset_behavior.detects(),
-                // Arcade follows a training run. The worker finds it (the
-                // `maps` reads must stay off this thread). Mock and remote
-                // build their lanes from elsewhere.
-                want_trainer: display_mode == DisplayMode::Arcade
-                    && backend_type != BackendType::Mock
-                    && backend_type != BackendType::Remote,
+                // Arcade follows a training run, and the rotation needs to know
+                // if one exists. The worker finds it (the `maps` reads must
+                // stay off this thread).
+                want_trainer: scan_wants_trainer(display_mode, rotate_enabled, backend_type),
             });
 
             sys_monitor.refresh_cpu_usage();
@@ -5133,9 +5161,10 @@ const DIE3D_EXPLAIN_TEXT: &[&str] = &[
     "Activity is relative to each chip's own idle over the",
     "last day: the lowest power the chip drew in that time is",
     "zero, and the highest in the most recent ten minutes (or idle",
-    "plus 25 W, if that is more) is full. On the test box an",
-    "idle chip drew about a third of the 125 W limit, so",
-    "power over the limit would barely move.",
+    "plus 25 W, if that is more) is full. A reading of a watt",
+    "or less is a glitch and is ignored. An idle chip draws a",
+    "good part of its limit, so power over the limit would",
+    "barely move.",
     "",
     "The camera turns to a new angle by itself every 15 s or so",
     "when nothing has cut it (a spin).",
@@ -9343,6 +9372,85 @@ mod display_mode_tests {
         assert!(!inference_only.contains(&DisplayMode::Training));
         // With both going, the whole rotation is visited.
         assert_eq!(lap(true, true).len(), ROTATION.len());
+    }
+
+    /// The rotation learns about training from the background scan, and asks
+    /// for that search only when it is going to use it.
+    #[test]
+    fn the_rotation_reads_training_from_the_scan_and_asks_for_the_search() {
+        use super::{scan_wants_trainer, RotationActivity};
+        use crate::cli::BackendType as B;
+        use crate::workload::train::TrainProcess;
+        let run = TrainProcess {
+            pid: 1,
+            binary: "nano_gpt".into(),
+            config_path: Some("train.yaml".into()),
+            start_time: None,
+        };
+        let mut a = RotationActivity::default();
+        assert!(!a.training);
+        a.note_trainer(&None);
+        assert!(!a.training, "a scan that did not search says nothing");
+        a.note_trainer(&Some(Some(run)));
+        assert!(a.training, "a trainer was found");
+        a.note_trainer(&None);
+        assert!(a.training, "and a scan that did not search leaves it");
+        a.note_trainer(&Some(None));
+        assert!(!a.training, "a search that found none: the run ended");
+
+        // Arcade asks on a real local box; the rotation asks on any real
+        // backend (the Training view scans locally whatever the backend); a
+        // mock backend never asks; nothing else asks.
+        for (mode, rotating, backend, want) in [
+            (DisplayMode::Arcade, false, B::Json, true),
+            (DisplayMode::Arcade, false, B::Mock, false),
+            (DisplayMode::Arcade, false, B::Remote, false),
+            (DisplayMode::Insights, true, B::Json, true),
+            (DisplayMode::Insights, true, B::Remote, true),
+            (DisplayMode::Insights, true, B::Mock, false),
+            (DisplayMode::Insights, false, B::Json, false),
+            (DisplayMode::Training, false, B::Json, false),
+        ] {
+            assert_eq!(
+                scan_wants_trainer(mode, rotating, backend),
+                want,
+                "{mode:?} rotating={rotating} {backend:?}"
+            );
+        }
+    }
+
+    /// A service that is `Down` is not something to look at: only a row that is
+    /// compiling, loading, ready or in alarm earns the Inference Monitor a visit.
+    #[test]
+    fn a_down_service_is_not_an_active_inference_workload() {
+        use super::inference_rows_active;
+        use crate::workload::inference_server::mock::mock_services;
+        use crate::workload::inference_server::Phase;
+        let template = mock_services(0.0).remove(0);
+        let with = |phases: &[Phase]| -> Vec<_> {
+            phases
+                .iter()
+                .map(|&p| {
+                    let mut s = template.clone();
+                    s.phase = p;
+                    s
+                })
+                .collect()
+        };
+        assert!(!inference_rows_active(&[]), "no service, nothing to see");
+        assert!(
+            !inference_rows_active(&with(&[Phase::Down])),
+            "one down service"
+        );
+        assert!(!inference_rows_active(&with(&[Phase::Down, Phase::Down])));
+        for live in [Phase::Compiling, Phase::Loading, Phase::Ready, Phase::Alarm] {
+            assert!(inference_rows_active(&with(&[live])), "{live:?}");
+            // One live service among dead ones is enough.
+            assert!(
+                inference_rows_active(&with(&[Phase::Down, live])),
+                "{live:?}"
+            );
+        }
     }
 
     /// Landing positions never wedge: from the workload views themselves (a run

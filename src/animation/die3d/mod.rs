@@ -12,7 +12,8 @@
 //! chip's board (`switching`). Clouds drift behind the dies (`clouds`), as
 //! decoration whose drift follows PCIe traffic and whose brightness follows
 //! chip load. A small panel at the top left (`history`) plots the last
-//! minute of measured power, temperature and PCIe traffic. This file holds the
+//! minute of measured power and PCIe traffic and shows each chip's latest
+//! temperature. This file holds the
 //! view that ties them together: it reads the backend in `update`, answers
 //! keys in `handle_key` and draws in `render`.
 //!
@@ -1783,6 +1784,9 @@ mod tests {
     /// relative to the chip's own idle (see
     /// `the_view_feeds_relative_load_to_the_scene_and_the_triggers`).
     const TDP: &str = "100";
+    /// A powered chip's idle draw in watts. Zero is not an idle: a reading under
+    /// a watt is a sensor glitch and `LoadScale` ignores it.
+    const IDLE_W: f32 = 37.0;
 
     /// The text of each line, spans joined.
     fn text(lines: &[Line<'static>]) -> Vec<String> {
@@ -4850,9 +4854,14 @@ mod tests {
     #[test]
     fn the_inset_shows_the_busiest_board_when_all_do_not_fit() {
         let mut b = Fake::boards(&["p150"; 8], Some(TDP));
+        // A powered chip idles near 37 W; a reading under a watt is a glitch
+        // the load scale ignores.
+        for i in 0..8 {
+            b.set_power(i, IDLE_W);
+        }
         assert!(!inset_fits_all(42, 14, &[1; 8]), "8 boards fit at 42 x 14");
         let mut v = Die3dView::inset(42, 14);
-        // Five idle seconds calibrate every chip's idle at 0 W.
+        // Five idle seconds calibrate every chip's idle at 37 W.
         for s in 0..5 {
             v.update(&b, s as f64);
         }
@@ -4864,7 +4873,7 @@ mod tests {
         }
         assert_eq!(v.scene_pixels(6.0).unwrap().1, Shown::Fallback(0));
         // Chip 3 (board 3) is busy from 7 s on.
-        b.set_power(0, 0.0);
+        b.set_power(0, IDLE_W);
         b.set_power(3, 90.0);
         for s in 7..=16 {
             v.update(&b, s as f64);
@@ -4928,12 +4937,15 @@ mod tests {
     #[test]
     fn a_hidden_inset_does_not_promote_a_stale_board_when_it_shows_again() {
         let mut b = Fake::boards(&["p150"; 8], Some(TDP));
+        for i in 0..8 {
+            b.set_power(i, IDLE_W);
+        }
         let mut v = inset_over(&b, 42, 14, 4);
         b.set_power(0, 90.0);
         v.update(&b, 5.0);
         assert_eq!(v.scene_now(5.0).unwrap().1, Shown::Fallback(0));
         // Board 3 leads for 9 s while the inset is shown, then it is hidden.
-        b.set_power(0, 0.0);
+        b.set_power(0, IDLE_W);
         b.set_power(3, 90.0);
         for s in 6..=14 {
             v.update(&b, s as f64);

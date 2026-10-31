@@ -17,6 +17,15 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.14.4
+- Review fixes. The rotation does not count a `Down` service as running, and learns about a
+  training run from the background scan instead of walking `/proc` on the render thread.
+- A cut that starts while another is running starts from the camera on screen.
+- A chip's idle is the 10th percentile of each minute, and a reading of a watt or less is ignored,
+  so one glitch no longer sets the idle for a day.
+- Docs: the rotation text names Grid and Die 3D as left out, and the history panel text and the
+  spec status are current.
+
 ### 0.14.3
 - Fix the Windows build (the rotation's inference peek used values that only exist on Linux).
 - The black background goes through the colour-support check again: a terminal without truecolor

@@ -1077,7 +1077,8 @@ impl HardwareStarfield {
             return self.render_fleet_heatmap();
         }
 
-        // Create blank canvas with explicit black background
+        // Blank canvas of (char, foreground colour). A blank cell is a space, so its
+        // colour is never seen; the background is the frame's (`colors::canvas_bg`).
         let mut canvas: Vec<Vec<(char, Color)>> =
             vec![vec![(' ', colors::rgb(0, 0, 0)); self.width]; self.height];
 

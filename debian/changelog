@@ -1,3 +1,17 @@
+tt-toplike (0.14.4) noble; urgency=medium
+
+  * Review fixes. The unattended rotation no longer counts a Down service as a
+    model that is starting or running, and it learns about a training run from
+    the background scan instead of walking /proc on the render thread.
+  * A cut that starts while another is running starts from the camera on screen
+    (it jumped to the earlier cut's destination).
+  * A chip's idle is the 10th percentile of each minute, and a reading of a watt
+    or less is ignored, so one glitch no longer sets the idle for a day.
+  * Docs: the rotation text names Grid and Die 3D as left out, the history panel
+    text says what it plots, and the design spec's status is current.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 18:30:00 -0700
+
 tt-toplike (0.14.3) noble; urgency=medium
 
   * Fix the Windows build: the rotation's inference peek used values that only

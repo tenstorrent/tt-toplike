@@ -1430,6 +1430,30 @@ over half the counter range reads as a device reset (a wrap of nearly the full r
 indistinguishable from a small step backwards). More than one wrap between samples cannot be
 detected; at 1 Hz it would need over 275 GB/s.
 
+### Copilot review of PR 37 and CI (Oct 30 2026, v0.14.3 and v0.14.4)
+
+The first push to the PR found three CI failures the local runs had hidden. Lesson: run tests
+as CI does (`env -u COLORTERM -u TMUX TERM=dumb`), and `cargo check --target
+x86_64-pc-windows-gnu` / `aarch64-apple-darwin` (installed) for anything behind
+`cfg(target_os)`. 0.14.3: Windows did not compile (the inference peek used Linux-only values); a
+literal truecolor black went to terminals without truecolor; one test pinned hashes taken with
+`COLORTERM=truecolor` (it failed from the commit that added it; `colors::with_truecolor` pins the
+mode per thread now). `Test (macOS)` fails in one second with no steps: a GitHub brownout of the
+macos-14 image (retired 2 Nov 2026), not the code. The workflow needs a newer image.
+
+Copilot's review, each claim checked against the code before acting:
+- Fixed: a `Down` service counted as running (`inference_rows_active`); the training probe walked
+  `/proc` on the render thread, against `proc_scan.rs`'s own guard (the rotation now asks the
+  scan worker, `scan_wants_trainer` and `RotationActivity::note_trainer`); a cut during a
+  transition started from the earlier cut's destination (`Director::shown_camera`); one glitch
+  reading set a chip's idle for a day (floor at 1 W, per-minute 10th percentile).
+- Not a bug, replied with evidence: "`chip_line` omits chip power" (it starts with `chip_label`,
+  which has it, and `each_chip_gets_one_line` asserts it); "canvases still paint black" (four
+  files hold a *foreground* colour for space cells and never call `.bg(`; comments reworded);
+  "the Die 3D opaque path bypasses the capability check" (its scene pixels are truecolor by design).
+- Docs: the PR title said 0.14.2 while the code said 0.14.3 (release metadata is the version).
+- Tests that used 0 W as a chip's idle now use 37 W: no powered chip reads under a watt.
+
 ### Rotation skips idle workload views (Oct 30 2026, v0.14.2)
 
 Prompt: "is 3d mode setup in the 'rotate' system? (can we take training and llms out of rotation

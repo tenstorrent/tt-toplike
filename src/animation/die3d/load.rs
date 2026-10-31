@@ -46,8 +46,19 @@ pub const MIN_SAMPLES: usize = 5;
 /// peak), so a real burst still reaches full load, and a 3 W wobble stays
 /// under 0.13.
 pub const MIN_SPAN_W: f32 = 25.0;
-/// Per-minute minima kept for the idle: one day.
+/// A reading at or below this many watts is not a draw: a powered Blackhole
+/// never idles that low, so it is a sensor glitch or a chip reset, and it is
+/// ignored like a missing reading.
+pub const GLITCH_W: f32 = 1.0;
+/// Which draw of a minute stands for it in the idle's memory: the 10th
+/// percentile (the sixth lowest of sixty). Its lowest draw would let a single
+/// low reading set the idle for a day; a tenth of a minute of low readings is a
+/// real low.
+const IDLE_QUANTILE: f32 = 0.10;
+/// Per-minute idle floors kept for the idle: one day.
 pub const DAY_MINUTES: usize = 1440;
+/// Most draws kept for the minute in progress, whatever the sample rate.
+const MINUTE_SAMPLES_MAX: usize = 120;
 /// Seconds of view time in one minute of the idle's memory.
 const MINUTE_S: f64 = 60.0;
 
@@ -61,15 +72,24 @@ pub struct LoadScale {
     last_at: Option<f64>,
     /// What the last call returned; returned again when a call adds no sample.
     last_load: f32,
-    /// The lowest draw of each completed minute of view time that had a
-    /// sample, oldest first, as (minute number, watts), where minute `m`
-    /// covers view time `60 m .. 60 (m + 1)`. Only the last [`DAY_MINUTES`]
-    /// minutes are kept, so it never holds more than that many entries.
+    /// The idle floor of each completed minute of view time that had a sample
+    /// (the [`IDLE_QUANTILE`] draw of that minute), oldest first, as (minute
+    /// number, watts), where minute `m` covers view time `60 m .. 60 (m + 1)`.
+    /// Only the last [`DAY_MINUTES`] minutes are kept, so it never holds more
+    /// than that many entries.
     minutes: VecDeque<(i64, f32)>,
-    /// The minute in progress and its lowest draw so far, `None` before the
-    /// first sample. It joins `minutes` when a sample lands in a later
-    /// minute.
-    open_minute: Option<(i64, f32)>,
+    /// The minute in progress and its draws so far, `None` before the first
+    /// sample. Its floor joins `minutes` when a sample lands in a later minute.
+    open_minute: Option<(i64, Vec<f32>)>,
+}
+
+/// The [`IDLE_QUANTILE`] draw of `draws`: the lowest when there are fewer than
+/// ten, since one low reading among so few is all there is to go on. Never
+/// called with none.
+fn floor_of(draws: &[f32]) -> f32 {
+    let mut sorted = draws.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    sorted[((sorted.len() - 1) as f32 * IDLE_QUANTILE) as usize]
 }
 
 impl Default for LoadScale {
@@ -106,29 +126,34 @@ impl LoadScale {
         self.samples.len() >= MIN_SAMPLES
     }
 
-    /// The chip's idle in watts: the lowest draw in the ten-minute window
-    /// and in the per-minute minima of the last day, `None` before the first
-    /// sample. (The minute in progress is inside the window.)
+    /// The chip's idle in watts: the lowest idle floor of the last day's
+    /// minutes, the minute in progress included, `None` before the first sample.
+    /// A minute's floor is its [`IDLE_QUANTILE`] draw, so one low reading does not
+    /// move it (see [`GLITCH_W`] for the readings that are ignored outright).
     pub fn idle(&self) -> Option<f32> {
-        self.samples
+        self.open_minute
             .iter()
-            .copied()
+            .map(|(_, draws)| floor_of(draws))
             .chain(self.minutes.iter().map(|&(_, w)| w))
             .reduce(f32::min)
     }
 
-    /// Fold a sample at `now` into the per-minute minima. A sample in a
-    /// later minute closes the open one, which joins the ring, and minutes
+    /// Fold a sample at `now` into the per-minute floors. A sample in a later
+    /// minute closes the open one, whose floor joins the ring, and minutes
     /// more than a day older than the new one leave it.
     fn remember_minute(&mut self, now: f64, power: f32) {
         let minute = (now / MINUTE_S).floor() as i64;
-        match self.open_minute {
-            Some((m, low)) if m == minute => self.open_minute = Some((m, low.min(power))),
-            open => {
-                if let Some(closed) = open {
-                    self.minutes.push_back(closed);
+        match self.open_minute.as_mut() {
+            Some((m, draws)) if *m == minute => {
+                if draws.len() < MINUTE_SAMPLES_MAX {
+                    draws.push(power);
                 }
-                self.open_minute = Some((minute, power));
+            }
+            _ => {
+                if let Some((closed, draws)) = self.open_minute.take() {
+                    self.minutes.push_back((closed, floor_of(&draws)));
+                }
+                self.open_minute = Some((minute, vec![power]));
                 // Keep the minutes `minute - DAY_MINUTES .. minute`: a day of
                 // completed minutes before the open one. Minute numbers only
                 // grow (time never goes backwards here), so this also bounds
@@ -149,10 +174,10 @@ impl LoadScale {
     /// The view calls this every tick, which may be faster than once a
     /// second. A call less than [`SAMPLE_INTERVAL_S`] after the last sample,
     /// a `now` that is not finite or goes backwards, and a power that is
-    /// `None`, NaN or infinite all leave the window alone and return the
-    /// previous result.
+    /// `None`, NaN, infinite or at most [`GLITCH_W`] all leave the window alone
+    /// and return the previous result.
     pub fn observe(&mut self, now: f64, power_w: Option<f32>) -> f32 {
-        let Some(power) = power_w.filter(|p| p.is_finite()) else {
+        let Some(power) = power_w.filter(|p| p.is_finite() && *p > GLITCH_W) else {
             return self.last_load;
         };
         if !now.is_finite() {
@@ -269,14 +294,70 @@ mod tests {
     fn fewer_than_five_samples_give_zero() {
         let mut s = LoadScale::new();
         // Four samples spanning idle to far above it: still nothing to say.
-        for (i, w) in [0.0, 100.0, 0.0, 100.0].into_iter().enumerate() {
+        for (i, w) in [20.0, 100.0, 20.0, 100.0].into_iter().enumerate() {
             assert_eq!(s.observe(i as f64, Some(w)), 0.0);
             assert!(!s.ready());
         }
-        // The fifth makes it ready: 100 W against a 0 to 100 W window.
+        // The fifth makes it ready: 100 W against a 20 to 100 W window.
         assert_eq!(s.observe(4.0, Some(100.0)), 1.0);
         assert!(s.ready());
         assert_eq!(s.len(), 5);
+    }
+
+    /// A reading at or below a watt is a sensor glitch or a reset, not a draw: it
+    /// changes nothing, like a missing reading, and the load stays as it was.
+    #[test]
+    fn a_glitch_reading_is_ignored_like_a_missing_one() {
+        let mut s = LoadScale::new();
+        let (_, t) = feed(&mut s, 0.0, &[37.0; 10]);
+        let before = s.observe(t, Some(52.5));
+        let len = s.len();
+        let mut at = t + 1.0;
+        for glitch in [0.0, 0.5, GLITCH_W, -3.0] {
+            assert_eq!(s.observe(at, Some(glitch)), before, "{glitch} W");
+            assert_eq!(s.len(), len, "{glitch} W was kept");
+            at += 1.0;
+        }
+        assert_eq!(s.idle(), Some(37.0), "the idle did not move");
+        // Just above the glitch level is a draw.
+        s.observe(at, Some(GLITCH_W + 0.5));
+        assert_eq!(s.len(), len + 1);
+    }
+
+    /// The idle is a minute's 10th percentile, not its lowest draw: one low
+    /// reading among a minute of steady ones leaves the idle where it was, which
+    /// is what stopped a single bad sample becoming a chip's idle for a day.
+    #[test]
+    fn one_low_reading_does_not_set_the_idle_but_a_real_low_does() {
+        // 59 steady seconds at 37 W with one 5 W reading in them, then the next
+        // minute opens so the first is closed into the day's memory.
+        let mut s = LoadScale::new();
+        let mut watts = vec![37.0; 60];
+        watts[30] = 5.0;
+        let (_, t) = feed(&mut s, 0.0, &watts);
+        s.observe(t, Some(37.0));
+        assert_eq!(s.idle(), Some(37.0), "one low reading among sixty");
+        // A load against that idle is still measured from 37 W.
+        let load = s.observe(t + 1.0, Some(62.0));
+        assert!(
+            (load - 1.0).abs() < 1e-6,
+            "62 W is the full 25 W span above 37 W: {load}"
+        );
+
+        // Ten low readings in a minute (a sixth of it) are a real low.
+        let mut real = LoadScale::new();
+        let mut watts = vec![37.0; 60];
+        for w in watts.iter_mut().take(10) {
+            *w = 20.0;
+        }
+        let (_, t) = feed(&mut real, 0.0, &watts);
+        real.observe(t, Some(37.0));
+        assert_eq!(real.idle(), Some(20.0));
+
+        // The minute in progress counts too, so a real low shows at once.
+        let mut open = LoadScale::new();
+        feed(&mut open, 0.0, &[37.0; 5]);
+        assert_eq!(open.idle(), Some(37.0));
     }
 
     #[test]

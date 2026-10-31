@@ -1,7 +1,8 @@
 # Die 3D at small sizes, and an inset on the Insights screen
 
-Date: 2026-10-30. Branch: `what-if`. Status: design only, nothing built. Builds on
-`2026-10-29-die-3d-view-design.md` (the view shipped in v0.13.19 to v0.13.21).
+Date: 2026-10-30. Status: built (v0.13.22 for the small sizes and the inset; v0.13.23 added
+clipping, see "On shrinking"). Builds on `2026-10-29-die-3d-view-design.md` (the view shipped in
+v0.13.19 to v0.13.21).
 
 ## Why
 

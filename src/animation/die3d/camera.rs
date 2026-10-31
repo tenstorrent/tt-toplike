@@ -460,11 +460,29 @@ impl Director {
         }
     }
 
+    /// The preset whose picture is on screen at `now`, which is where a cut
+    /// that starts now must start from. Before a chaos or dissolve swaps it is
+    /// the old camera and after it the new one. A spin turns the picture
+    /// between the two, so the nearer one counts: the old camera in its first
+    /// half and the new one in its second.
+    fn shown_camera(&self, now: f64) -> Camera {
+        match (self.kind, self.progress(now)) {
+            (Some(TransitionKind::Spin), Some(p)) if p >= 0.5 => self.to,
+            (Some(TransitionKind::Spin), Some(_)) => self.from,
+            _ => self.camera_at(now),
+        }
+    }
+
     fn cut(&mut self, now: f64, changes_scene: bool, reason: Option<Reason>) {
+        // A cut can start while an earlier one is still running (a hand cut
+        // ignores the cooldown). It must start from what is on screen, not from
+        // the earlier cut's destination, which may not have appeared yet and
+        // would show as a jump.
+        let shown = self.shown_camera(now);
         // Pick among the other five presets, so the camera always changes.
-        let here = PRESETS.iter().position(|c| *c == self.to).unwrap_or(0);
+        let here = PRESETS.iter().position(|c| *c == shown).unwrap_or(0);
         let pick = self.rng.next() as usize % (PRESETS.len() - 1);
-        self.from = self.to;
+        self.from = shown;
         self.to = PRESETS[(here + 1 + pick) % PRESETS.len()];
         self.last_cut = Some(now);
         self.kind = Some(self.pick_kind(changes_scene, reason));
@@ -1119,6 +1137,48 @@ mod tests {
         assert_eq!(d.transition_kind(), Some(TransitionKind::Spin));
         d.cut_by_hand_with_scene(30.0, true);
         assert_eq!(d.transition_kind(), Some(TransitionKind::Dissolve));
+    }
+
+    /// A hand cut during a transition starts from the camera on screen, not from
+    /// the destination of the cut still running, which would show as a jump.
+    #[test]
+    fn a_cut_during_a_transition_starts_from_the_camera_on_screen() {
+        for (mode, early, late) in [
+            // (mode, a time before the swap, a time after it), for a cut at 10.
+            (TransitionMode::Dissolve, 10.2, 10.6),
+            (TransitionMode::Chaos, 10.2, 10.6),
+            (TransitionMode::Spin, 10.4, 11.2),
+        ] {
+            let mut d = Director::new(11);
+            d.set_transition_mode(mode);
+            d.cut_by_hand(10.0);
+            let (first_from, first_to) = d.cameras();
+            assert_ne!(first_from, first_to);
+            // Before the swap: the old camera is what is shown.
+            let mut e = d.clone();
+            e.cut_by_hand(early);
+            let (from, to) = e.cameras();
+            assert_eq!(
+                from, first_from,
+                "{mode:?} early: starts from the camera on screen"
+            );
+            assert_ne!(to, from, "{mode:?} early: still changes the camera");
+            // After the swap (the end, for a spin): the new camera is.
+            let mut l = d.clone();
+            l.cut_by_hand(late);
+            assert_eq!(l.cameras().0, first_to, "{mode:?} late");
+            assert_ne!(
+                l.cameras().1,
+                l.cameras().0,
+                "{mode:?} late: still changes the camera"
+            );
+        }
+        // With nothing running it is the camera in force, as before.
+        let mut d = Director::new(11);
+        d.cut_by_hand(10.0);
+        let landed = d.camera();
+        d.cut_by_hand(30.0);
+        assert_eq!(d.cameras().0, landed);
     }
 
     #[test]

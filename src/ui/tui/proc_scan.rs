@@ -805,9 +805,12 @@ mod tests {
         assert!(body.contains("scan_handle.try_result()"));
         assert!(body.contains("scan_handle.request("));
         // The scan asks for the process list when a reset is watched, and for
-        // the trainer search when Arcade is on screen.
+        // the trainer search when Arcade is on screen or the rotation runs
+        // (`scan_wants_trainer` holds the rule and has its own test).
         assert!(body.contains("want_processes: reset_behavior.detects(),"));
-        assert!(body.contains("want_trainer: display_mode == DisplayMode::Arcade"));
+        assert!(body.contains(
+            "want_trainer: scan_wants_trainer(display_mode, rotate_enabled, backend_type)"
+        ));
     }
 
     /// Arcade follows a training run through `TrainWatch`, which is handed the
