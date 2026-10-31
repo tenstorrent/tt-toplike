@@ -17,6 +17,16 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.14.5
+- Die 3D: the arrow keys move the window over a clipped scene, stop at its edge, and do nothing
+  when the whole scene fits. The footer says "arrows pan" beside the clipped note.
+- Die 3D footer: the action keys stay with the state words down to about 107 columns. They used
+  to drop together with the `/command` names, at 172 columns.
+- The explain text said a process opening or closing a device dissolves; it cuts with chaos. It
+  now names the tt-smi 6.0 or later that supplies the processes.
+- `die3d/mod.rs` keeps its code (1,770 lines); its tests are in `die3d/tests.rs`.
+- CI and the release build use the `macos-15` runner (`macos-14` retires on 2 November 2026).
+
 ### 0.14.4
 - Review fixes. The rotation does not count a `Down` service as running, and learns about a
   training run from the background scan instead of walking `/proc` on the render thread.

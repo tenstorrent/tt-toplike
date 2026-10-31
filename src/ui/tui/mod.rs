@@ -224,6 +224,22 @@ fn die3d_key_for(mode: DisplayMode, c: char) -> Option<crate::animation::die3d::
     }
 }
 
+/// The Die 3D pan key `code` stands for in `mode`: an arrow key in the Die 3D
+/// view, `None` anywhere else so the arrows keep their other uses.
+fn die3d_pan_for(mode: DisplayMode, code: KeyCode) -> Option<crate::animation::die3d::Die3dKey> {
+    use crate::animation::die3d::Die3dKey;
+    if mode != DisplayMode::Die3d {
+        return None;
+    }
+    match code {
+        KeyCode::Left => Some(Die3dKey::PanLeft),
+        KeyCode::Right => Some(Die3dKey::PanRight),
+        KeyCode::Up => Some(Die3dKey::PanUp),
+        KeyCode::Down => Some(Die3dKey::PanDown),
+        _ => None,
+    }
+}
+
 /// Name shown in the global status bar for a mode that adds a hint there.
 /// Only `Die3d` does today (the view's own footer lists the keys too, so the
 /// status bar repeats `3 leave` next to the view's name); every other mode
@@ -2473,6 +2489,17 @@ fn run_app(
                                 }
                                 force_redraw = true;
                             }
+                            // The arrows move the window over a scene too big
+                            // for the terminal (`die3d_pan_for` is `None` outside
+                            // the mode and for any other key).
+                            code if die3d_pan_for(display_mode, code).is_some() => {
+                                if let (Some(k), Some(dv)) =
+                                    (die3d_pan_for(display_mode, code), die3d.as_mut())
+                                {
+                                    dv.handle_key(k, die3d_started.elapsed().as_secs_f64());
+                                }
+                                force_redraw = true;
+                            }
                             KeyCode::Char('3') => {
                                 // Toggle the Die 3D view, like `t` for Training. The
                                 // view is dropped at the mode-transition choke point
@@ -4139,6 +4166,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 row!(" 3", "Die 3D view (isometric boards)", key),
                 row!(" [  ]", "previous / next board (Die 3D)", key),
                 row!(" Space", "nudge: cut the camera (Die 3D)", key),
+                row!(" Arrows", "move a clipped scene (Die 3D)", key),
                 row!(" R", "rotate every view unattended (kiosk)", key),
                 row!(" b", "cycle backend", key),
                 ln!(vec![Span::styled(
@@ -5170,14 +5198,16 @@ const DIE3D_EXPLAIN_TEXT: &[&str] = &[
     "when nothing has cut it (a spin).",
     "When something happens it cuts instead, and the cut says",
     "what happened: chaos for a chip (load rise, temperature",
-    "rise, PCIe burst), a dissolve for memory (GDDR heat), the",
-    "board (an Ethernet link comes or goes) or a process that",
-    "opens or closes a device. With every board in view, an",
-    "event on a chip also opens that chip's board; an event",
-    "on another board, or 20 s with none, goes back to all",
-    "boards. A board you choose stays.",
+    "rise, PCIe burst) or a process that opens or closes a",
+    "device (that one needs tt-smi 6.0 or later, which lists",
+    "the processes), a dissolve for memory (GDDR heat) or the",
+    "board (an Ethernet link comes or goes). With every board",
+    "in view, an event on a chip also opens that chip's board;",
+    "an event on another board, or 20 s with none, goes back",
+    "to all boards. A board you choose stays.",
     "",
     "Keys: [ ] choose the board, Space cuts by hand.",
+    "Arrows move the window when the scene is clipped.",
     "Commands, from the / bar (/help lists them):",
     "/autocut turns the automatic cuts and switches off.",
     "/scene one board or all boards; /board picks one.",
@@ -5363,6 +5393,7 @@ fn die3d_legend_lines(
         "              then the switches and their states",
         "",
         "  keys      [ ] board · Space cut · 3 leave",
+        "            arrows move a clipped scene",
         "  commands  /board /scene /cut /autocut /transition",
         "            /cells /blocks /braille /bg /labels /clouds",
         "            /history",
@@ -9051,9 +9082,9 @@ mod tests {
 #[cfg(test)]
 mod display_mode_tests {
     use super::{
-        back_target, die3d_area, die3d_key_for, die3d_toggle, display_mode_for, leaves_die3d,
-        linger_for, next_display_mode, next_rotation_mode, resize_die3d, statusbar_mode_name,
-        DisplayMode, ROTATE_LINGER, ROTATION,
+        back_target, die3d_area, die3d_key_for, die3d_pan_for, die3d_toggle, display_mode_for,
+        leaves_die3d, linger_for, next_display_mode, next_rotation_mode, resize_die3d,
+        statusbar_mode_name, DisplayMode, ROTATE_LINGER, ROTATION,
     };
 
     #[test]
@@ -9275,6 +9306,29 @@ mod display_mode_tests {
         ] {
             assert_eq!(die3d_key_for(DisplayMode::Die3d, c), None, "{c}");
         }
+    }
+
+    #[test]
+    fn the_arrows_pan_the_die3d_view_and_nothing_else() {
+        use crate::animation::die3d::Die3dKey;
+        use crossterm::event::KeyCode;
+        for (code, want) in [
+            (KeyCode::Left, Die3dKey::PanLeft),
+            (KeyCode::Right, Die3dKey::PanRight),
+            (KeyCode::Up, Die3dKey::PanUp),
+            (KeyCode::Down, Die3dKey::PanDown),
+        ] {
+            assert_eq!(die3d_pan_for(DisplayMode::Die3d, code), Some(want));
+            for m in [
+                DisplayMode::Insights,
+                DisplayMode::HivemindSweeper,
+                DisplayMode::Grid,
+            ] {
+                assert_eq!(die3d_pan_for(m, code), None, "{code:?} in {m:?}");
+            }
+        }
+        assert_eq!(die3d_pan_for(DisplayMode::Die3d, KeyCode::Enter), None);
+        assert_eq!(die3d_pan_for(DisplayMode::Die3d, KeyCode::Char('j')), None);
     }
 
     #[test]

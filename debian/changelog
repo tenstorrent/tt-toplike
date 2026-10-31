@@ -1,3 +1,23 @@
+tt-toplike (0.14.5) noble; urgency=medium
+
+  * Die 3D: the arrow keys move the window over a scene that is clipped (too
+    big for the terminal). They stop at the scene's edge, and a key back moves
+    at once. They do nothing when the whole scene fits. The footer says
+    "arrows pan" next to the clipped note.
+  * Die 3D footer: below 172 columns the action keys ([ ] board, space cut,
+    3 leave) now stay with the state words once those fit (about 107 columns).
+    They used to drop together with the /command names, at 172 columns.
+  * The explain text said a process opening or closing a device dissolves. It
+    cuts with chaos, as the README says, and the text now names the tt-smi 6.0
+    or later that supplies the processes.
+  * The 0.13.x entry above no longer gives one test box's idle power (0.30 of a
+    125 W limit) as if every chip had it.
+  * die3d/mod.rs: its tests moved to die3d/tests.rs (5,000 lines to 1,770).
+  * CI and the release build use the macos-15 runner; macos-14 retires on
+    2 November 2026.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sat, 31 Oct 2026 14:50:45 -0700
+
 tt-toplike (0.14.4) noble; urgency=medium
 
   * Review fixes. The unattended rotation no longer counts a Down service as a
@@ -140,7 +160,7 @@ tt-toplike (0.13.19) noble; urgency=medium
   * The camera cuts to another angle (four corners, top-down, low) when a
     chip's activity rises or PCIe traffic bursts. Activity is measured against
     each chip's own idle over the last day, because an idle chip already
-    draws 0.30 of its 125 W limit on the test box. A burst is 50 MB/s
+    draws a fixed share of its power limit. A burst is 50 MB/s
     of PCIe traffic, and the detector re-arms at 10 MB/s. Cuts use chaos,
     dissolve or a spin, shuffled (X sets one). The footer names the corner
     nearest the viewer, and both ends during a cut. Each die carries a label

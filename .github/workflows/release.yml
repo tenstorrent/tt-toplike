@@ -110,7 +110,7 @@ jobs:
   # macOS can't be cross-compiled from the Linux runners above: the host
   # backend links the private IOReport framework (src/backend/ane_macos.rs) and
   # CoreFoundation, and shells out to `ioreg`, so it needs the real macOS SDK
-  # and linker. We build natively on a macos-14 (Apple Silicon) runner instead.
+  # and linker. We build natively on a macos-15 (Apple Silicon) runner instead.
   #
   # A single runner produces a UNIVERSAL binary: we build both arches (the SDK
   # carries both framework slices, so cross-arch linking within macOS works)
@@ -119,7 +119,7 @@ jobs:
   # prompt (right-click → Open, or `xattr -dr com.apple.quarantine <bin>`).
   build-macos:
     name: Build macOS (universal)
-    runs-on: macos-14
+    runs-on: macos-15
     # Only spend costly macOS-runner minutes for real tagged releases, or when a
     # manual dispatch explicitly opts in (build_macos=true). A bare workflow_dispatch
     # no longer builds this by default.

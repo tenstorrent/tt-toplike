@@ -1454,6 +1454,23 @@ Copilot's review, each claim checked against the code before acting:
 - Docs: the PR title said 0.14.2 while the code said 0.14.3 (release metadata is the version).
 - Tests that used 0 W as a chip's idle now use 37 W: no powered chip reads under a watt.
 
+### Open items closed before the human review (Oct 31 2026, v0.14.5)
+
+Prompt: "hit all these open issues before we ask for a human review" (the PR body's list).
+- Panning: arrow keys in the Die 3D view (`Die3dKey::Pan*`, `die3d_pan_for` in the TUI).
+  `Die3dView::panned` shifts the clipped fit's origin and records how far the window can move
+  (`RenderCache::pan_room`), so a key at an edge is a no-op and the key back moves at once. The
+  origin shift is the only change: the whole scene is still drawn and the buffer is the window.
+  The test compares the window to a crop of the whole picture at the panned offset.
+- Footer: a tier of state words plus action keys sits between the full form and the bare words.
+- The explain text said a process event dissolves; `pick_kind` gives it chaos. Text fixed.
+- `die3d/mod.rs` tests moved to `tests.rs` (a mechanical move; `mod tests;`).
+- CI and release use `macos-15`.
+- Not changed: the process-event trigger reads `Backend::device_processes`, which only the
+  tt-smi 6.0+ JSON backend fills. A `/proc` fallback needs the scan worker to report which
+  device each process holds; the help text names the requirement for now. The 12 Hz wave step
+  still needs a look by eye in Konsole or GNOME Terminal.
+
 ### Rotation skips idle workload views (Oct 30 2026, v0.14.2)
 
 Prompt: "is 3d mode setup in the 'rotate' system? (can we take training and llms out of rotation
