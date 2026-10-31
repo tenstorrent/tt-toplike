@@ -34,6 +34,12 @@ use ratatui::style::Color;
 /// - In tmux (often has RGB rendering issues, especially via macOS Terminal.app)
 /// - COLORTERM is not set to truecolor/24bit
 pub fn supports_true_color() -> bool {
+    // A test can pin the answer for its own thread (`with_truecolor`), so a test
+    // that pins output does not depend on the COLORTERM of the machine.
+    #[cfg(test)]
+    if let Some(forced) = FORCED_TRUECOLOR.with(std::cell::Cell::get) {
+        return forced;
+    }
     // Disable RGB in tmux - use 256-color mode instead
     // This fixes rendering issues with Terminal.app on macOS via SSH
     let in_tmux = std::env::var("TMUX").is_ok()
@@ -47,6 +53,26 @@ pub fn supports_true_color() -> bool {
     std::env::var("COLORTERM")
         .map(|v| v == "truecolor" || v == "24bit")
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCED_TRUECOLOR: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `f` as if the terminal did (`on`) or did not support truecolor, on this
+/// thread only (other tests run in parallel and are not affected). The
+/// previous setting comes back when `f` returns or panics.
+#[cfg(test)]
+pub fn with_truecolor<R>(on: bool, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FORCED_TRUECOLOR.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(FORCED_TRUECOLOR.with(|c| c.replace(Some(on))));
+    f()
 }
 
 /// Smart color wrapper that uses RGB when supported, falls back to 256-color in tmux
@@ -140,6 +166,51 @@ pub fn grayskull_rgb(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
     } else {
         // Green / yellow / orange / blue → plain grey.
         (grey, grey, grey)
+    }
+}
+
+/// Environment variable that asks for the terminal's own background instead of
+/// solid black. Any value except empty, `0` and `false` turns it on.
+pub const TRANSPARENT_ENV: &str = "TT_TOPLIKE_TRANSPARENT";
+
+/// Whether `value` (the content of [`TRANSPARENT_ENV`]) asks for the terminal's
+/// own background.
+fn transparent_requested(value: Option<&str>) -> bool {
+    match value {
+        None => false,
+        Some(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false"),
+    }
+}
+
+/// Whether the canvas shows the terminal's own background. Off by default:
+/// every screen is solid black. Read once from [`TRANSPARENT_ENV`].
+pub fn canvas_transparent() -> bool {
+    static TRANSPARENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRANSPARENT
+        .get_or_init(|| transparent_requested(std::env::var(TRANSPARENT_ENV).ok().as_deref()))
+}
+
+/// The background of the canvas every view draws on: solid black, or with
+/// [`TRANSPARENT_ENV`] set the terminal's own (`Color::Reset`).
+///
+/// This is the one place the choice is made, so a view never writes a literal
+/// black. Black goes through [`rgb`], so it is solid black in a truecolor
+/// terminal and, where truecolor is off (tmux, macOS Terminal.app over SSH, see
+/// [`supports_true_color`]), the terminal's own default background, which is what
+/// those terminals need: a truecolor fill there shows as grey or garbage. The
+/// app has always drawn this way; the transparent setting is the one that
+/// asks for the terminal's own colour in a truecolor terminal too.
+pub fn canvas_bg() -> Color {
+    canvas_bg_for(canvas_transparent())
+}
+
+/// [`canvas_bg`] for a given choice, so the rule is tested without touching the
+/// process environment.
+fn canvas_bg_for(transparent: bool) -> Color {
+    if transparent {
+        Color::Reset
+    } else {
+        rgb(0, 0, 0)
     }
 }
 
@@ -425,5 +496,88 @@ mod tests {
         assert_eq!(current_theme(), Theme::Grayskull);
         set_theme(Theme::Default);
         assert_eq!(current_theme(), Theme::Default);
+    }
+
+    #[test]
+    fn the_canvas_is_black_unless_the_terminal_background_is_asked_for() {
+        // Black follows the terminal's colour support, as every black fill did
+        // before `canvas_bg`: a truecolor fill is wrong where truecolor is off
+        // (tmux, macOS Terminal.app). The expectation is computed for the
+        // environment the test runs in, so it holds on a machine with
+        // COLORTERM=truecolor and on CI without it.
+        let black = if supports_true_color() {
+            Color::Rgb(0, 0, 0)
+        } else {
+            Color::Reset
+        };
+        assert_eq!(canvas_bg_for(false), black);
+        assert_eq!(canvas_bg_for(false), rgb(0, 0, 0));
+        assert_eq!(canvas_bg_for(true), Color::Reset);
+        for v in ["1", "true", "yes", " 1 "] {
+            assert!(transparent_requested(Some(v)), "{v:?}");
+        }
+        for v in ["", "0", "false", "FALSE", " 0 "] {
+            assert!(!transparent_requested(Some(v)), "{v:?}");
+        }
+        assert!(!transparent_requested(None));
+    }
+
+    /// Guards the wiring: no view may fill its background with a
+    /// literal black again, or the terminal's own colour is covered whatever
+    /// `canvas_bg` returns. A test of `canvas_bg` alone passes with every view
+    /// still painting black.
+    #[test]
+    fn no_view_paints_a_literal_black_background() {
+        fn walk(dir: &std::path::Path, hits: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, hits);
+                } else if path.extension().is_some_and(|e| e == "rs")
+                    // This file holds the patterns below as string literals.
+                    && !path.ends_with("ui/colors.rs")
+                {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    for (n, line) in text.lines().enumerate() {
+                        let paints_black = line.contains(".bg(colors::rgb(0, 0, 0))")
+                            || line.contains(".bg(Color::Black)")
+                            || line.contains(".bg(ratatui::style::Color::Black)");
+                        if paints_black {
+                            hits.push(format!("{}:{}", path.display(), n + 1));
+                        }
+                    }
+                }
+            }
+        }
+        let mut hits = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut hits,
+        );
+        assert!(hits.is_empty(), "use colors::canvas_bg(): {hits:#?}");
+    }
+
+    /// A test can fix the colour mode for its own thread, and the setting goes
+    /// away afterwards, including when the closure panics.
+    #[test]
+    fn with_truecolor_pins_the_mode_for_the_closure_only() {
+        let outside = supports_true_color();
+        assert_eq!(with_truecolor(true, || rgb(1, 2, 3)), Color::Rgb(1, 2, 3));
+        // Without truecolor a colour is a 256-colour index and black is the
+        // terminal's own background.
+        assert!(matches!(
+            with_truecolor(false, || rgb(1, 2, 3)),
+            Color::Indexed(_)
+        ));
+        assert_eq!(with_truecolor(false, || rgb(0, 0, 0)), Color::Reset);
+        assert_eq!(with_truecolor(true, || rgb(0, 0, 0)), Color::Rgb(0, 0, 0));
+        // Nested, the inner setting wins and the outer comes back.
+        with_truecolor(true, || {
+            with_truecolor(false, || assert!(!supports_true_color()));
+            assert!(supports_true_color());
+        });
+        let r = std::panic::catch_unwind(|| with_truecolor(true, || panic!("boom")));
+        assert!(r.is_err());
+        assert_eq!(supports_true_color(), outside, "restored after a panic");
     }
 }

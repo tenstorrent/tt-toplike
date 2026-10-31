@@ -1,3 +1,207 @@
+tt-toplike (0.14.5) noble; urgency=medium
+
+  * Die 3D: the arrow keys move the window over a scene that is clipped (too
+    big for the terminal). They stop at the scene's edge, and a key back moves
+    at once. They do nothing when the whole scene fits. The footer says
+    "arrows pan" next to the clipped note.
+  * Die 3D footer: below 172 columns the action keys ([ ] board, space cut,
+    3 leave) now stay with the state words once those fit (about 107 columns).
+    They used to drop together with the /command names, at 172 columns.
+  * The explain text said a process opening or closing a device dissolves. It
+    cuts with chaos, as the README says, and the text now names the tt-smi 6.0
+    or later that supplies the processes.
+  * The 0.13.x entry above no longer gives one test box's idle power (0.30 of a
+    125 W limit) as if every chip had it.
+  * die3d/mod.rs: its tests moved to die3d/tests.rs (5,000 lines to 1,770).
+  * CI and the release build use the macos-15 runner; macos-14 retires on
+    2 November 2026.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sat, 31 Oct 2026 14:50:45 -0700
+
+tt-toplike (0.14.4) noble; urgency=medium
+
+  * Review fixes. The unattended rotation no longer counts a Down service as a
+    model that is starting or running, and it learns about a training run from
+    the background scan instead of walking /proc on the render thread.
+  * A cut that starts while another is running starts from the camera on screen
+    (it jumped to the earlier cut's destination).
+  * A chip's idle is the 10th percentile of each minute, and a reading of a watt
+    or less is ignored, so one glitch no longer sets the idle for a day.
+  * Docs: the rotation text names Grid and Die 3D as left out, the history panel
+    text says what it plots, and the design spec's status is current.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 18:30:00 -0700
+
+tt-toplike (0.14.3) noble; urgency=medium
+
+  * Fix the Windows build: the rotation's inference peek used values that only
+    exist on Linux.
+  * The black background goes through the colour-support check again, so a
+    terminal without truecolor (tmux, macOS Terminal.app over SSH) gets its own
+    default background and not a truecolor fill. 0.13.25 to 0.14.2 sent a literal
+    truecolor black everywhere.
+  * One test pinned buffer hashes taken in a truecolor terminal and failed
+    without COLORTERM; it fixes the colour mode itself now.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 17:30:00 -0700
+
+tt-toplike (0.14.2) noble; urgency=medium
+
+  * The unattended rotation (--rotate, R) skips Training and the Inference
+    Monitor unless something is going: a training run, or a model server that is
+    starting or running. It used to visit them for 10 s each even when they were
+    empty. It looks at both every 3 s while it is on another view. A run that
+    ends while its view is on screen still gets the 10 s glance. Die 3D is not
+    in the rotation (it is entered with 3).
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 17:00:00 -0700
+
+tt-toplike (0.14.1) noble; urgency=medium
+
+  * Die 3D: the camera turns by itself after 15 s with no cut (it was 45 s, which
+    was too long to ever see).
+  * Die 3D: /blocks and /braille are shortcuts for /cells blocks and /cells
+    braille, and /cells block works as well as /cells blocks.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 16:30:00 -0700
+
+tt-toplike (0.14.0) noble; urgency=medium
+
+  * Die 3D: the view's settings are slash commands now, and the keys are the ones
+    that mean the same everywhere. [ and ] change board, Space cuts the camera
+    (it is the nudge key). /board /scene /cut /autocut /transition /cells /bg
+    /labels /clouds /history replace the letter keys m c C B T X L W H, and
+    /help lists them (in full inside the view).
+  * Die 3D: /theme works here. Grayskull keeps the greys with one hot pink, and
+    the default theme is a new full-colour palette.
+  * Die 3D: cuts are reasoned by what happened. The default transition, rotate,
+    spins when nothing happened (Space, or after 45 s with no cut) and cuts an
+    event by its reason: chaos for a chip (load rise, PCIe burst, temperature
+    rising 4 C above its own level) or a process opening or closing a device, a
+    dissolve for memory (GDDR at 65 C) or the board (an Ethernet link changing).
+    Shuffle is gone. /transition chaos, dissolve or spin still pins one.
+  * Die 3D: the cell style follows the hardware. /cells auto (the default) starts
+    in braille, quarter blocks or half blocks, picked from what the hardware
+    reports, and changes at a camera cut after something happens, never within
+    two minutes of the last change. /cells blocks changes between the two block
+    forms only. /cells braille, quarter and half hold one. Quarter blocks are new.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 16:00:00 -0700
+
+tt-toplike (0.13.25) noble; urgency=medium
+
+  * Every screen has a solid black background by default, including the Die 3D
+    view and its inset on the Insights screen. The Die 3D view used to default to
+    a transparent background, which showed the terminal's own colour behind the
+    scene. The background is chosen in one place now (colors::canvas_bg), and no
+    view paints a literal black any more. Set TT_TOPLIKE_TRANSPARENT=1 to draw on
+    the terminal's own background instead. The T key in the Die 3D view still
+    flips it.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 15:30:00 -0700
+
+tt-toplike (0.13.23) noble; urgency=medium
+
+  * Die 3D view: a narrow window no longer loses the scene. Below the four pixel
+    tile (a two-die board needs 51 columns for it) the scene shrinks to a two
+    pixel tile, which a two-die board fits whole in 25 x 8 cells. A window
+    smaller than that shows the middle of the whole scene, and the last row
+    (or the footer) says "clipped, needs 25x8". The text summary now starts
+    below 16 x 6. The scene of every board still falls back to one board at the
+    four pixel tile, and the Insights inset is unchanged.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 14:00:00 -0700
+
+tt-toplike (0.13.22) noble; urgency=medium
+
+  * Die 3D view: it now draws below 100 x 30, where it used to refuse. As the view
+    area shrinks, the clouds and the history panel go first, then the footer
+    shrinks to one row, then the flags go, and the scene itself shrinks down
+    to about 40 x 12. Below that the view shows a text summary with one line
+    per chip.
+  * Insights screen: a small Die 3D inset beside the process table when the
+    process area is at least 122 x 16 (the inset is 52 columns wide). It shows one board, or every board
+    when they fit, or the busiest chip's board (held for 10 s) otherwise.
+    Key 3 opens the full view. It costs about 0.06 ms a frame at 52 x 16 for
+    p150 boards and 0.11 ms for a two-die board (p300). A two-die board needs
+    an inset 51 x 16 for its scene, so the 52 x 16 inset draws it.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 12:00:00 -0500
+
+tt-toplike (0.13.21) noble; urgency=medium
+
+  * Die 3D view: the tile wave follows the direction of PCIe traffic. Inbound
+    data sends fronts from the connector edge toward the back of the die,
+    outbound data sends them toward the connector, and a heavier rate lights
+    its front brighter. A chip with no traffic keeps the sideways sweep.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 11:00:00 -0500
+
+tt-toplike (0.13.20) noble; urgency=medium
+
+  * Die 3D view: the chip labels are now flags. Each die has a pin on its
+    rim and a one-cell pole to the name and power (BH0 44W), which sit on open
+    space outside the board and never over the picture. A pole may cross a
+    board to reach open space. L turns the flags on and off.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 09:00:00 -0500
+
+tt-toplike (0.13.19) noble; urgency=medium
+
+  * New Die 3D view, opened with the 3 key. It draws each Blackhole board in
+    isometric perspective with braille characters (B switches to half-block
+    cells), in a Grayskull-style palette. It shows one board or every board
+    (m), and [ and ] choose the board. Chips that are not Blackhole are named
+    in the footer and not drawn. The view is not in the v rotation; 3 or Esc
+    leaves it.
+  * The glow on each tile is an estimate from chip activity and the footer
+    says so ("per-tile glow: estimate from chip load"). Per-tile NoC counters
+    are not read. They are a separate, experimental plan.
+  * The camera cuts to another angle (four corners, top-down, low) when a
+    chip's activity rises or PCIe traffic bursts. Activity is measured against
+    each chip's own idle over the last day, because an idle chip already
+    draws a fixed share of its power limit. A burst is 50 MB/s
+    of PCIe traffic, and the detector re-arms at 10 MB/s. Cuts use chaos,
+    dissolve or a spin, shuffled (X sets one). The footer names the corner
+    nearest the viewer, and both ends during a cut. Each die carries a label
+    such as BH0 44W.
+  * Clouds drift behind the dies (W). They are decoration: their drift follows
+    PCIe traffic and their brightness follows chip load. A history panel (H)
+    plots the last 60 seconds of each chip's power and the box's PCIe
+    traffic as sparklines, and shows each chip's latest temperature. Those
+    are measured values.
+  * T switches between the terminal's own background and pure black, C turns
+    automatic cuts off, L turns the chip labels off. The footer's second row
+    lists every switch with its state. The legend (l), explain (!) and help (?)
+    overlays describe the view.
+  * Faster: at most 20 redraws a second at rest and 30 during a cut, and the
+    tile wave steps 12 times a second. Changed cells per frame fell by more
+    than half (about 347 to 157 for one board and 358 to 174 for four,
+    braille at 150 x 42; one release-build run on a shared machine).
+  * The view area needs 100 x 30 cells. In the TUI the status bar takes a row,
+    so the smallest terminal is 100 x 31. The history panel needs 120 x 37.
+    150 x 42 or larger looks best.
+  * A PCIe counter file that could not be read for one sample made the rate
+    spike when it came back, because its whole value counted as one step.
+    It now adds nothing until it has been read twice in a row.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 29 Oct 2026 15:00:00 +0000
+
+tt-toplike (0.13.18) noble; urgency=medium
+
+  * PCIe bandwidth was 16 times too low. A tt-kmd counter word is one 64-byte
+    NoC flit, not a 4-byte word. Measured on a Blackhole p300c: a 268,378,112-byte
+    host-to-device copy moved the counter by 4,193,421 words.
+  * The into-chip and out-of-chip directions were swapped. The counters are on
+    the NoC side of the PCIe tile: the chip reading host memory is data into the
+    chip, and the chip writing host memory is data out of it. The directions for
+    the host-initiated counters (mst_*) follow from that and were not measured.
+  * A 32-bit counter that wraps between two samples no longer drops that sample.
+    The step is taken per counter, and a step over half the range counts as a
+    device reset and reads as zero.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 29 Oct 2026 12:00:00 +0000
+
 tt-toplike (0.13.17) noble; urgency=medium
 
   * Arcade and the Inference atmosphere no longer flare for events that did

@@ -1,0 +1,217 @@
+<h2>The board and the die, in 3D</h2>
+<p class="subtitle">Top: what the terminal UI could really do. Each character cell is a half-block (▀) with a foreground and a background colour, which gives 2 pixels per cell in truecolour. Bottom: the egui version with real perspective. Drag it to rotate. Layout and heat are illustrative.</p>
+
+<div class="mockup">
+  <div class="mockup-header">Terminal (ratatui): isometric board + die, 150 × 42 cells, truecolour half-blocks</div>
+  <div class="mockup-body" style="padding:0;background:#07191a">
+    <canvas id="t3d" width="900" height="504" style="width:100%;display:block"></canvas>
+  </div>
+</div>
+
+<div class="mockup">
+  <div class="mockup-header">egui window: real 3D. Drag to rotate. <label style="margin-left:12px"><input type="checkbox" id="ex3"> explode layers</label></div>
+  <div class="mockup-body" style="padding:0;background:#07191a">
+    <canvas id="e3d" width="900" height="520" style="width:100%;display:block;cursor:grab"></canvas>
+  </div>
+</div>
+
+<div class="section">
+  <h3>What moves in both views</h3>
+  <ul>
+    <li><b>Tile height and colour</b>: per-tile traffic. Real only with per-tile NoC counters. Until then it follows chip-wide load.</li>
+    <li><b>Blue stream from the PCIe edge</b>: host traffic. Real now, once the counter fix lands.</li>
+    <li><b>Green blocks and streams at the sides</b>: GDDR6 activity. Real now from the smbus telemetry.</li>
+    <li><b>Purple and cyan wires</b>: NoC0 and NoC1. The two directions are real counters on a real card.</li>
+  </ul>
+</div>
+
+<script>
+(function () {
+  const COLS = 17, ROWS = 12;
+  function kind(x, y) {
+    if (x === 0 || x === COLS - 1) return (y >= 1 && y <= ROWS - 2) ? 'dram' : 'mgmt';
+    if (y === 0) return 'eth';
+    if (y === ROWS - 1) return 'mgmt';
+    return 'tensix';
+  }
+  const lerp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  const TILE = [30, 82, 78], WARM = [246, 188, 66], HOT = [250, 81, 46], DRAM = [111, 171, 160], ETH = [143, 149, 224],
+        MGMT = [122, 127, 154], N0 = [176, 123, 224], N1 = [116, 197, 223], BG = [7, 25, 26], SLAB = [13, 38, 36];
+  const heatRGB = h => h < .5 ? lerp(TILE, WARM, h * 2) : lerp(WARM, HOT, (h - .5) * 2);
+  function heat(x, y, t) {
+    const front = ((t * 0.9) % (COLS + 6)) - 3;
+    const wave = Math.max(0, 1 - Math.abs(x - front) / 4);
+    const sh = 0.15 * (0.5 + 0.5 * Math.sin(t * 5 + x * 1.7 + y * 2.3));
+    return Math.min(1, wave * 0.9 + sh * wave + 0.06);
+  }
+  const rgb = c => 'rgb(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ')';
+  const sh = (c, k) => [c[0] * k, c[1] * k, c[2] * k];
+
+  // =============== TERMINAL: software-rasterised isometric scene -> half-block cells ===============
+  const T = document.getElementById('t3d'), tg = T.getContext('2d');
+  const W = 150, H = 84, CW = 6, CH = 12;
+  const buf = new Uint8ClampedArray(W * H * 3);
+  function put(x, y, c) { x = x | 0; y = y | 0; if (x < 0 || y < 0 || x >= W || y >= H) return; const i = (y * W + x) * 3; buf[i] = c[0]; buf[i + 1] = c[1]; buf[i + 2] = c[2]; }
+  const TW = 8, TH = 4, OX = 65, OY = 18;
+  function cube(cx, cy, h, col, tw, th) {
+    tw = tw || TW; th = th || TH;
+    const hw = tw / 2, hh = th / 2;
+    for (let i = 0; i < hw; i++) {                       // left face
+      const yg = cy + i * hh / hw;
+      for (let y = Math.round(yg - h); y <= Math.round(yg + hh * 0); y++) put(cx - hw + i, y + hh, sh(col, .62));
+    }
+    for (let i = 0; i < hw; i++) {                       // right face
+      const yg = cy + hh - i * hh / hw;
+      for (let y = Math.round(yg - h - hh); y <= Math.round(yg - hh); y++) put(cx + i, y + hh, sh(col, .42));
+    }
+    for (let r = 0; r < th; r++) {                       // top diamond
+      const t = (r + .5) / th, w = (1 - Math.abs(2 * t - 1)) * hw, y = cy - h - hh + r + hh;
+      for (let x = Math.round(cx - w); x <= Math.round(cx + w); x++) put(x, y, col);
+    }
+  }
+  const gx2 = (gx, gy) => OX + (gx - gy) * TW / 2, gy2 = (gx, gy) => OY + (gx + gy) * TH / 2;
+  const GD = [0, 3, 6, 9];  // GDDR block rows
+
+  function drawTerm(t) {
+    for (let i = 0; i < W * H; i++) { const y = (i / W) | 0, v = 1 - 0.25 * Math.abs(y / H - .5); buf[i * 3] = BG[0] * v; buf[i * 3 + 1] = BG[1] * v; buf[i * 3 + 2] = BG[2] * v; }
+    for (let gy = -1; gy <= 12; gy++) for (let gx = -2; gx <= 18; gx++) {
+      const cx = gx2(gx, gy), cy = gy2(gx, gy);
+      cube(cx, cy, 1, ((gx + gy) & 1) ? sh(SLAB, 1.1) : SLAB);                      // PCB slab
+      const onDie = gx >= 0 && gx < COLS && gy >= 0 && gy < ROWS;
+      if (onDie) {
+        const k = kind(gx, gy);
+        if (k === 'tensix') { const h = heat(gx, gy, t); cube(cx, cy - 1, 1 + h * 9, heatRGB(h)); }
+        else if (k === 'dram') cube(cx, cy - 1, 2, lerp(TILE, DRAM, .35 + .4 * heat(gx === 0 ? 0 : COLS, gy, t)));
+        else if (k === 'eth') cube(cx, cy - 1, 1.5, lerp(TILE, ETH, .35 + .25 * Math.sin(t * 3 + gx)));
+        else cube(cx, cy - 1, 1, lerp(TILE, MGMT, .3));
+      }
+      // GDDR6 packages beside the die
+      if ((gx === -2 || gx === 18) && GD.some(r => gy >= r && gy < r + 2)) {
+        const a = .5 + .5 * Math.sin(t * 3 + gy * .9 + (gx > 0 ? 2 : 0));
+        cube(cx, cy - 1, 3.5, lerp(TILE, DRAM, .35 + .55 * a));
+      }
+      // PCIe edge connector (front) and a Ethernet cage (back-left)
+      if (gy === 12 && gx >= 6 && gx <= 10) cube(cx, cy - 1, 2.5, lerp(TILE, N1, .55 + .4 * Math.sin(t * 4)));
+      if (gy === -1 && gx >= 1 && gx <= 12 && gx % 4 !== 0) cube(cx, cy - 1, 2.5, lerp(TILE, ETH, .4 + .3 * Math.sin(t * 2 + gx)));
+      // data packets drawn on the correct depth slice
+      const px = (a, b, c) => { const dx = (a - gx), dy = (b - gy); return Math.abs(dx) < .5 && Math.abs(dy) < .5; };
+      for (let k = 0; k < 6; k++) {   // PCIe -> die (blue), flowing back toward the back of the board
+        const p = 12 - ((t * 5 + k * 2.3) % 13);
+        if (px(8, p, 0)) { put(cx, cy - 4, [255, 255, 255]); put(cx, cy - 5, N1); }
+      }
+      for (const r of [2, 5, 8, 11]) for (const side of [0, 1]) {  // GDDR <-> die (green)
+        const q = ((t * 4 + r * 1.7 + side * 3) % 3);
+        const xx = side ? 17 + q : -1 - q + 0;
+        if (px(xx, r, 0) || px(xx, r + 1, 0)) { put(cx, cy - 4, [255, 255, 255]); put(cx, cy - 5, DRAM); }
+      }
+      for (const r of [3, 6, 9]) {      // NoC0 east (purple) / NoC1 west (cyan) packets riding the mesh
+        const p0 = (t * 7 + r * 2) % COLS, p1 = COLS - 1 - ((t * 6 + r * 3) % COLS);
+        if (heat(p0, r, t) > .2 && px(p0, r, 0)) put(cx, cy - 9, N0);
+        if (heat(p1, r + 1, t) > .2 && px(p1, r + 1, 0)) put(cx, cy - 9, N1);
+      }
+    }
+    // ---- blit to cells
+    tg.fillStyle = '#07191a'; tg.fillRect(0, 0, T.width, T.height);
+    for (let cy = 0; cy < H / 2; cy++) for (let cx = 0; cx < W; cx++) {
+      const a = ((cy * 2) * W + cx) * 3, b = ((cy * 2 + 1) * W + cx) * 3;
+      tg.fillStyle = 'rgb(' + buf[b] + ',' + buf[b + 1] + ',' + buf[b + 2] + ')'; tg.fillRect(cx * CW, cy * CH, CW, CH);
+      tg.fillStyle = 'rgb(' + buf[a] + ',' + buf[a + 1] + ',' + buf[a + 2] + ')'; tg.fillRect(cx * CW, cy * CH, CW, CH / 2);
+    }
+    tg.font = '13px monospace'; tg.textBaseline = 'top';
+    tg.fillStyle = '#74C5DF'; tg.fillText('BLACKHOLE p300c · Dev 2 · 64°C · 62 W', 8, 6);
+    tg.fillStyle = '#6FABA0'; tg.fillText('GDDR6 ▮▮▮▮', 8, 24);
+    tg.fillStyle = '#b07be0'; tg.fillText('NoC0 ▸', 8, 42); tg.fillStyle = '#74C5DF'; tg.fillText('NoC1 ◂', 62, 42);
+    tg.fillStyle = '#7fa9a6'; tg.fillText('PCIe ▲ 18.2 GB/s   ▼ 3.1 GB/s', 8, T.height - 22);
+    tg.fillText('[3] view  [←→] rotate 90°  [z] zoom to die', T.width - 330, T.height - 22);
+  }
+
+  // =============== EGUI: perspective 3D with face painter's algorithm ===============
+  const E = document.getElementById('e3d'), eg = E.getContext('2d'), EW = E.width, EH = E.height;
+  let yaw = 0.6, pitch = 0.85, drag = false, lx = 0, ly = 0, explode = 0, exTarget = 0, spin = true;
+  E.addEventListener('mousedown', e => { drag = true; spin = false; lx = e.clientX; ly = e.clientY; E.style.cursor = 'grabbing'; });
+  window.addEventListener('mouseup', () => { drag = false; E.style.cursor = 'grab'; });
+  window.addEventListener('mousemove', e => { if (!drag) return; yaw += (e.clientX - lx) * .008; pitch = Math.max(.25, Math.min(1.45, pitch + (e.clientY - ly) * .006)); lx = e.clientX; ly = e.clientY; });
+  document.getElementById('ex3').addEventListener('change', e => { exTarget = e.target.checked ? 1 : 0; });
+
+  function P(x, y, z) {
+    x -= 8.5; z -= 6;
+    const c = Math.cos(yaw), s = Math.sin(yaw), x1 = c * x - s * z, z1 = s * x + c * z;
+    const cp = Math.cos(pitch), sp = Math.sin(pitch), y2 = cp * y + sp * z1, z2 = -sp * y + cp * z1;
+    const f = 960 / (36 + z2);
+    return [EW / 2 + x1 * f, EH * .6 - y2 * f, z2];
+  }
+  const SIDE = [.55, .8, .45, .7];
+  function box(list, x, z, w, d, y0, y1, col) {
+    const c = [P(x, y0, z), P(x + w, y0, z), P(x + w, y0, z + d), P(x, y0, z + d), P(x, y1, z), P(x + w, y1, z), P(x + w, y1, z + d), P(x, y1, z + d)];
+    const faces = [
+      { q: [4, 5, 6, 7], k: 1.0 }, { q: [0, 1, 5, 4], k: SIDE[2] }, { q: [1, 2, 6, 5], k: SIDE[1] },
+      { q: [2, 3, 7, 6], k: SIDE[3] }, { q: [3, 0, 4, 7], k: SIDE[0] }];
+    list.push({ z: (c[0][2] + c[2][2]) / 2, c, faces, col, top: c.slice(4) });
+  }
+  function drawEgui(t) {
+    explode += (exTarget - explode) * .08;
+    if (spin) yaw += .004;
+    eg.globalCompositeOperation = 'source-over';
+    const g = eg.createRadialGradient(EW / 2, EH / 2, 40, EW / 2, EH / 2, EW * .6); g.addColorStop(0, '#0c2b2a'); g.addColorStop(1, '#041010');
+    eg.fillStyle = g; eg.fillRect(0, 0, EW, EH);
+    const ex = explode, boxes = [], dieY = .15 + ex * 2.6, wireY = dieY + 3.1 + ex * 1.6;
+    box(boxes, -3.5, -3.5, 24, 19, -.7, 0, SLAB);
+    for (let i = 0; i < 4; i++) for (const sx of [-3.0, 17.4]) {
+      const a = .5 + .5 * Math.sin(t * 3 + i * 1.3 + (sx > 0 ? 2 : 0));
+      box(boxes, sx, .4 + i * 2.9, 2.2, 2.3, ex * .8, ex * .8 + 1.8, lerp(TILE, DRAM, .35 + .55 * a));
+    }
+    box(boxes, -.4, -.4, 17.8, 12.8, dieY - .35, dieY, [20, 60, 58]);
+    for (let z = 0; z < ROWS; z++) for (let x = 0; x < COLS; x++) {
+      const k = kind(x, z); let h, col;
+      if (k === 'tensix') { const hh = heat(x, z, t); h = .3 + hh * 3.6; col = heatRGB(hh); }
+      else if (k === 'dram') { h = .5; col = lerp(TILE, DRAM, .35 + .4 * heat(x === 0 ? 0 : COLS, z, t)); }
+      else if (k === 'eth') { h = .4; col = lerp(TILE, ETH, .35 + .25 * Math.sin(t * 3 + x)); }
+      else { h = .25; col = lerp(TILE, MGMT, .3); }
+      box(boxes, x + .06, z + .06, .88, .88, dieY, dieY + h, col);
+    }
+    box(boxes, 6.5, 12.9, 4, 1.8, 0, .9 + ex * .4, lerp(TILE, N1, .55 + .4 * Math.sin(t * 4)));   // PCIe
+    for (let i = 0; i < 3; i++) box(boxes, 2 + i * 4.5, -3.0, 2.6, 1.8, 0, .9, lerp(TILE, ETH, .4 + .3 * Math.sin(t * 2 + i)));
+    boxes.sort((a, b) => b.z - a.z);
+    for (const b of boxes) {
+      const fs = b.faces.map(f => ({ f, z: f.q.reduce((s, i) => s + b.c[i][2], 0) / 4 })).sort((a, c) => c.z - a.z);
+      for (const { f } of fs) {
+        eg.beginPath(); f.q.forEach((i, n) => n ? eg.lineTo(b.c[i][0], b.c[i][1]) : eg.moveTo(b.c[i][0], b.c[i][1])); eg.closePath();
+        eg.fillStyle = rgb(sh(b.col, f.k)); eg.fill(); eg.strokeStyle = 'rgba(0,0,0,.28)'; eg.stroke();
+      }
+    }
+    // glow, wires and packets on top (additive)
+    eg.globalCompositeOperation = 'lighter';
+    for (const b of boxes) {
+      const lum = (b.col[0] * .6 + b.col[1] * .3) / 255;
+      if (lum > .62) { const m = [(b.top[0][0] + b.top[2][0]) / 2, (b.top[0][1] + b.top[2][1]) / 2], r = 20 * (lum - .4) * 1.4;
+        const rg = eg.createRadialGradient(m[0], m[1], 0, m[0], m[1], r); rg.addColorStop(0, 'rgba(250,120,60,.35)'); rg.addColorStop(1, 'rgba(250,120,60,0)');
+        eg.fillStyle = rg; eg.fillRect(m[0] - r, m[1] - r, r * 2, r * 2); }
+    }
+    function line(a, b, col, w) { const p = P(a[0], a[1], a[2]), q = P(b[0], b[1], b[2]); eg.strokeStyle = col; eg.lineWidth = w; eg.beginPath(); eg.moveTo(p[0], p[1]); eg.lineTo(q[0], q[1]); eg.stroke(); return [p, q]; }
+    function dot(a, col, r) { const p = P(a[0], a[1], a[2]); const rg = eg.createRadialGradient(p[0], p[1], 0, p[0], p[1], r * 3); rg.addColorStop(0, col); rg.addColorStop(1, 'rgba(0,0,0,0)'); eg.fillStyle = rg; eg.fillRect(p[0] - r * 3, p[1] - r * 3, r * 6, r * 6); }
+    for (let z = 1; z < ROWS - 1; z++) {
+      const on = heat(8, z, t) > .25, a = on ? .55 : .12;
+      line([.5, wireY, z + .35], [16.5, wireY, z + .35], 'rgba(176,123,224,' + a + ')', 1.2);
+      line([.5, wireY, z + .65], [16.5, wireY, z + .65], 'rgba(116,197,223,' + a + ')', 1.2);
+      if (on) { dot([.5 + ((t * 7 + z * 2) % 16), wireY, z + .35], 'rgba(220,170,255,.9)', 3); dot([16.5 - ((t * 6 + z * 3) % 16), wireY, z + .65], 'rgba(160,235,255,.9)', 3); }
+    }
+    for (let k = 0; k < 6; k++) { const p = 13.2 - ((t * 5 + k * 2.3) % 14); dot([8.5, wireY, p], 'rgba(116,197,223,.95)', 4); }   // host stream
+    line([8.5, wireY, 13.2], [8.5, wireY, -.2], 'rgba(116,197,223,.25)', 1.5);
+    for (let i = 0; i < 4; i++) for (const s of [0, 1]) {                                                                 // GDDR streams
+      const z = 1.5 + i * 2.9, q = ((t * 4 + i * 1.7 + s * 3) % 3) / 3;
+      const xa = s ? 16.9 : .1, xb = s ? 17.4 : -.4, xs = s ? xa + (xb - xa) * q : xa + (xb - xa) * q;
+      dot([xs + (s ? 0 : 0) + (s ? q * 1.4 : -q * 1.4), wireY - 1.5 - ex * .8, z], 'rgba(130,230,190,.9)', 3);
+    }
+    eg.globalCompositeOperation = 'source-over';
+    eg.font = '12px monospace'; eg.fillStyle = '#9fd3cf';
+    const L = (s, x, y, z, col) => { const p = P(x, y, z); eg.fillStyle = col || '#9fd3cf'; eg.fillText(s, p[0], p[1]); };
+    L('GDDR6', -3, 2.2 + ex * .8, -.4, '#6FABA0'); L('GDDR6', 17.4, 2.2 + ex * .8, -.4, '#6FABA0');
+    L('PCIe  host  ▼', 6.4, 1.6 + ex * .4, 15.2, '#74C5DF'); L('ETH', 2, 1.4, -3.4, '#8f95e0');
+    L('Tensix mesh', 8, wireY + .6, -1.2, '#F6BC42');
+    eg.fillStyle = '#9fd3cf'; eg.fillText('drag: rotate   ·   Blackhole p300c · Dev 2 · 64°C · 62 W', 12, EH - 12);
+  }
+
+  const t0 = performance.now();
+  (function frame(now) { const t = (now - t0) / 1000 + 3.2; drawTerm(t); drawEgui(t); requestAnimationFrame(frame); })(t0);
+})();
+</script>

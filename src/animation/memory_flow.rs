@@ -557,7 +557,7 @@ impl MemoryFlowVis {
                     };
                     spans.push(Span::styled(
                         "═".repeat(filled),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                        Style::default().bg(colors::canvas_bg()).fg(color),
                     ));
                     spans.push(Span::styled(
                         "·".repeat(empty),
@@ -666,7 +666,7 @@ impl MemoryFlowVis {
 
                     spans.push(Span::styled(
                         core_char.to_string(),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                        Style::default().bg(colors::canvas_bg()).fg(color),
                     ));
                 } else {
                     // Outside core area - empty space
@@ -717,7 +717,7 @@ impl MemoryFlowVis {
                     };
                     spans.push(Span::styled(
                         "═".repeat(filled),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                        Style::default().bg(colors::canvas_bg()).fg(color),
                     ));
                     spans.push(Span::styled(
                         "·".repeat(empty),

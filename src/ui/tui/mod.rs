@@ -100,10 +100,17 @@ enum DisplayMode {
     /// `InferenceMonitor` and `HivemindSweeper`); `t` toggles back out to
     /// `prev_mode`, as does Esc.
     Training,
+    /// Die 3D view — isometric Blackhole boards drawn from live telemetry.
+    /// Entered via `3` only (excluded from the `v`-cycle rotation and from
+    /// `--rotate`, like `Training`); `3` toggles back out to `prev_mode`, as
+    /// does Esc (to `Insights` when that is Die3d itself; see `back_target`).
+    /// While active it also takes `[ ] m c C B T X W H L` (see
+    /// `die3d_key_for`).
+    Die3d,
 }
 
-/// The `v` rotation. `InferenceMonitor`, `HivemindSweeper` and `Training`
-/// are entry-key-only modes and are never cycled into; a `v` pressed while
+/// The `v` rotation. `InferenceMonitor`, `HivemindSweeper`, `Training` and
+/// `Die3d` are entry-key-only modes and are never cycled into; a `v` pressed while
 /// one of them is active leaves to `Insights`.
 fn next_display_mode(m: DisplayMode) -> DisplayMode {
     match m {
@@ -124,16 +131,219 @@ fn next_display_mode(m: DisplayMode) -> DisplayMode {
         // still needs to leave cleanly.
         DisplayMode::HivemindSweeper => DisplayMode::Insights,
         DisplayMode::Training => DisplayMode::Insights,
+        // Die3d is entered with `3` only, so `v` from it leaves the same way.
+        DisplayMode::Die3d => DisplayMode::Insights,
     }
+}
+
+/// Rows at the bottom of the terminal that the global status bar draws over.
+/// Views that draw their own footer are sized to the terminal minus this.
+const STATUS_BAR_ROWS: usize = 1;
+
+/// Where Esc (or the entry key pressed again) leaves `mode` for: the saved
+/// `prev_mode`, unless that is `mode` itself, and then `Insights`.
+///
+/// `prev_mode` can equal the mode on show after a detour: in Die 3D, `i`
+/// opens the inference monitor and saves Die3d as the previous mode, and Esc
+/// from the monitor goes back to Die 3D with that saved mode unchanged.
+/// Going "back" to Die3d from Die3d would leave nothing, so the key would
+/// do nothing while the footer says `3 leave`.
+fn back_target(mode: DisplayMode, prev_mode: DisplayMode) -> DisplayMode {
+    if prev_mode == mode {
+        DisplayMode::Insights
+    } else {
+        prev_mode
+    }
+}
+
+/// The Die 3D view's area for a terminal of `width` x `height` cells, and
+/// the rows kept for the global status bar: (columns, rows, reserved rows).
+/// The scene is drawn above the status bar, so the view gets one row less
+/// than the terminal.
+fn die3d_area(width: u16, height: u16) -> (usize, usize, usize) {
+    (
+        width as usize,
+        (height as usize).saturating_sub(STATUS_BAR_ROWS),
+        STATUS_BAR_ROWS,
+    )
+}
+
+/// A full Die 3D view with the app's canvas background (black unless
+/// `TT_TOPLIKE_TRANSPARENT` is set). Every place the app makes one goes through
+/// here, so the views agree with the rest of the screen.
+fn new_die3d_view(cols: usize, rows: usize, reserved: usize) -> crate::animation::Die3dView {
+    crate::animation::Die3dView::with_reserved_rows(cols, rows, reserved)
+        .with_transparent(colors::canvas_transparent())
+        .with_theme(colors::current_theme())
+        // The cell style follows the hardware (`/cells` changes it). The
+        // Insights inset below keeps braille: it only fits a board that way.
+        .with_cell_mode(crate::animation::die3d::cellmode::CellMode::Auto)
+}
+
+/// The Insights inset, with the same background rule as [`new_die3d_view`].
+fn new_inset_view(cols: usize, rows: usize) -> crate::animation::Die3dView {
+    crate::animation::Die3dView::inset(cols, rows)
+        .with_transparent(colors::canvas_transparent())
+        .with_theme(colors::current_theme())
+}
+
+/// On a terminal resize, resize the Die 3D view in place when it is open.
+/// It keeps its switches, history, load calibration, clouds and camera; only
+/// its size and its size-dependent caches change (`Die3dView::resize`). With
+/// no view open there is nothing to do: the next entry makes one at the
+/// size of the moment.
+fn resize_die3d(die3d: &mut Option<crate::animation::Die3dView>, width: u16, height: u16) {
+    if let Some(view) = die3d.as_mut() {
+        let (cols, rows, reserved) = die3d_area(width, height);
+        view.resize(cols, rows, reserved);
+    }
+}
+
+/// The mode a `3` press leads to, and the `prev_mode` to keep: entering
+/// remembers where we came from, leaving goes back to it (to `Insights` when
+/// the saved mode is Die3d itself; see `back_target`). Pulled out of the key
+/// handler so the toggle can be tested without a terminal.
+fn die3d_toggle(mode: DisplayMode, prev_mode: DisplayMode) -> (DisplayMode, DisplayMode) {
+    if mode == DisplayMode::Die3d {
+        let back = back_target(mode, prev_mode);
+        (back, back)
+    } else {
+        (DisplayMode::Die3d, mode)
+    }
+}
+
+/// The Die 3D key `c` stands for in `mode`, if the view takes it. Outside
+/// `Die3d` it is always `None`, so these letters keep their meaning (or lack
+/// of one) everywhere else. The handler checks this before its general
+/// character arms.
+fn die3d_key_for(mode: DisplayMode, c: char) -> Option<crate::animation::die3d::Die3dKey> {
+    if mode == DisplayMode::Die3d {
+        crate::animation::die3d::key_to_die3d(c)
+    } else {
+        None
+    }
+}
+
+/// The Die 3D pan key `code` stands for in `mode`: an arrow key in the Die 3D
+/// view, `None` anywhere else so the arrows keep their other uses.
+fn die3d_pan_for(mode: DisplayMode, code: KeyCode) -> Option<crate::animation::die3d::Die3dKey> {
+    use crate::animation::die3d::Die3dKey;
+    if mode != DisplayMode::Die3d {
+        return None;
+    }
+    match code {
+        KeyCode::Left => Some(Die3dKey::PanLeft),
+        KeyCode::Right => Some(Die3dKey::PanRight),
+        KeyCode::Up => Some(Die3dKey::PanUp),
+        KeyCode::Down => Some(Die3dKey::PanDown),
+        _ => None,
+    }
+}
+
+/// Name shown in the global status bar for a mode that adds a hint there.
+/// Only `Die3d` does today (the view's own footer lists the keys too, so the
+/// status bar repeats `3 leave` next to the view's name); every other mode
+/// has none.
+fn statusbar_mode_name(mode: DisplayMode) -> &'static str {
+    match mode {
+        DisplayMode::Die3d => "Die 3D",
+        _ => "",
+    }
+}
+
+/// True when moving from `prev` to `next` leaves the Die 3D view. The loop's
+/// mode-transition choke point drops the view on this, so every exit (`3`,
+/// Esc, `v`, `g`, `i`, the rotation, `/mode`) starts the next entry afresh.
+fn leaves_die3d(prev: DisplayMode, next: DisplayMode) -> bool {
+    prev == DisplayMode::Die3d && next != DisplayMode::Die3d
+}
+
+/// True when moving from `prev` to `next` leaves the Insights screen. The
+/// mode-transition choke point drops the Die 3D inset on this, so each return
+/// to Insights starts a fresh inset.
+fn leaves_insights(prev: DisplayMode, next: DisplayMode) -> bool {
+    prev == DisplayMode::Insights && next != DisplayMode::Insights
+}
+
+/// True when any device is a Blackhole chip, the only kind the Die 3D scene
+/// draws. Without one the inset has nothing to show, so none is made.
+fn has_blackhole_chip(devices: &[crate::models::Device]) -> bool {
+    devices
+        .iter()
+        .any(|d| d.architecture == crate::models::Architecture::Blackhole)
+}
+
+/// Resize the Insights inset in place to `rect`, when it exists and the rect
+/// differs from its size. It keeps its camera, load calibration and history
+/// (`Die3dView::resize`). With no rect (the terminal is below the inset's
+/// threshold) the view is hidden and kept, so a drag-resize that dips below
+/// the threshold and back does not lose its state. Only the board waiting to
+/// become the busiest is forgotten, so it cannot take over on the first frame
+/// that shows again.
+fn resize_inset(inset: &mut Option<crate::animation::Die3dView>, rect: Option<Rect>) {
+    let Some(view) = inset.as_mut() else {
+        return;
+    };
+    match rect {
+        Some(rect) => {
+            if view.size() != (rect.width as usize, rect.height as usize) {
+                view.resize(rect.width as usize, rect.height as usize, 0);
+            }
+        }
+        None => view.clear_pending_board(),
+    }
+}
+
+/// Bring the Insights inset in line with where it would go now, and say
+/// whether it should be updated this tick.
+///
+/// - No Blackhole chip: the view is dropped and nothing is updated.
+/// - No rect (too small): the view is kept but hidden; not updated. Its
+///   pending busiest-board candidate is cleared.
+/// - A rect: the view is made if missing, resized if the rect changed, and
+///   updated.
+fn sync_inset(
+    inset: &mut Option<crate::animation::Die3dView>,
+    rect: Option<Rect>,
+    blackhole: bool,
+) -> bool {
+    if !blackhole {
+        *inset = None;
+        return false;
+    }
+    let Some(rect) = rect else {
+        resize_inset(inset, None);
+        return false;
+    };
+    if inset.is_none() {
+        *inset = Some(new_inset_view(rect.width as usize, rect.height as usize));
+    }
+    resize_inset(inset, Some(rect));
+    true
+}
+
+/// The inset's rect on a terminal of `width` x `height` showing `devices`
+/// (zoomed to the page at `fleet_zoom_start`, if any).
+fn inset_rect_for(
+    width: u16,
+    height: u16,
+    devices: &[crate::models::Device],
+    fleet_zoom_start: Option<usize>,
+) -> Option<Rect> {
+    insights_inset_rect(
+        Rect::new(0, 0, width, height),
+        insights_panel_devices(devices, fleet_zoom_start),
+    )
 }
 
 /// How long `--rotate`/`R` dwells on a view before advancing.
 const ROTATE_LINGER: Duration = Duration::from_secs(30);
 /// Arcade packs three visualizations into one screen, so it gets longer.
 const ROTATE_LINGER_ARCADE: Duration = Duration::from_secs(45);
-/// Training and the Inference Monitor are *about* a workload. With no run
-/// and no server to show, they are near-empty screens, so the rotation
-/// glances at them and moves on rather than parking on nothing.
+/// Training and the Inference Monitor are *about* a workload, and the rotation
+/// skips them while there is none (`rotation_visits`). This is for the case
+/// that is left: a run or server that ends while the view is on screen leaves
+/// a near-empty screen, so the rotation glances at it and moves on.
 const ROTATE_LINGER_IDLE: Duration = Duration::from_secs(10);
 
 /// The unattended rotation (`--rotate`, or `R` in-app).
@@ -168,6 +378,117 @@ fn next_rotation_mode(m: DisplayMode) -> DisplayMode {
         Some(i) => ROTATION[(i + 1) % ROTATION.len()],
         None => ROTATION[0],
     }
+}
+
+/// How often the rotation looks at the workload views it is not on.
+const ROTATE_PROBE_EVERY: Duration = Duration::from_secs(3);
+
+/// Whether the rotation stops at `mode`. Training and the Inference Monitor are
+/// about a workload, so they are visited only while one exists: a model
+/// starting or serving, or a training run. Every other view draws live
+/// telemetry and is always visited.
+fn rotation_visits(mode: DisplayMode, training: bool, inference: bool) -> bool {
+    match mode {
+        DisplayMode::Training => training,
+        DisplayMode::InferenceMonitor => inference,
+        _ => true,
+    }
+}
+
+/// The next view in the rotation that [`rotation_visits`] accepts. Insights is
+/// always accepted, so this ends within one lap. A view that is not in
+/// `ROTATION` starts the rotation again, as `next_rotation_mode` does.
+fn next_rotation_mode_for(m: DisplayMode, training: bool, inference: bool) -> DisplayMode {
+    let mut next = next_rotation_mode(m);
+    for _ in 0..ROTATION.len() {
+        if rotation_visits(next, training, inference) {
+            return next;
+        }
+        next = next_rotation_mode(next);
+    }
+    // Unreachable while Insights is in ROTATION and always visited; the first
+    // view is a safe place to land if that ever changes.
+    ROTATION[0]
+}
+
+/// What the rotation knows about the workload views, refreshed while it is on
+/// another view. The views' own flags (`train_active`, `inference_active`) are
+/// only kept while their view is on screen, which is too late to decide
+/// whether to go there.
+///
+/// Training comes from the background scan worker (`note_trainer`), whose
+/// `/proc` walk stays off the render thread. Inference is a cheap read of the
+/// background monitor's snapshot, taken every [`ROTATE_PROBE_EVERY`].
+#[derive(Debug, Default)]
+struct RotationActivity {
+    training: bool,
+    inference: bool,
+    probed: Option<Instant>,
+}
+
+impl RotationActivity {
+    /// Whether it is time to look at inference again (the first time,
+    /// immediately).
+    fn due(&self) -> bool {
+        self.probed
+            .map_or(true, |t| t.elapsed() >= ROTATE_PROBE_EVERY)
+    }
+
+    /// The scan worker's trainer search: a trainer found means training is
+    /// going, a search that found none means it is not, and a scan that did not
+    /// search (`None`) says nothing.
+    fn note_trainer(&mut self, found: &Option<Option<crate::workload::train::TrainProcess>>) {
+        if let Some(result) = found {
+            self.training = result.is_some();
+        }
+    }
+}
+
+/// Whether the background scan should look for a trainer: Arcade follows a run
+/// (not under mock or remote, which build their lanes elsewhere), and so does
+/// the rotation, to know whether Training is worth a visit (not under mock,
+/// whose synthetic run always counts).
+fn scan_wants_trainer(mode: DisplayMode, rotating: bool, backend_type: BackendType) -> bool {
+    let arcade = mode == DisplayMode::Arcade
+        && backend_type != BackendType::Mock
+        && backend_type != BackendType::Remote;
+    arcade || (rotating && backend_type != BackendType::Mock)
+}
+
+/// Whether any service is starting or running: a row whose phase is not `Down`.
+/// A `Down` service (the container is there but its process or readiness is
+/// gone) is not a workload to look at, so a dead server does not earn the
+/// Inference Monitor a visit.
+fn inference_rows_active(rows: &[crate::workload::inference_server::ServiceState]) -> bool {
+    use crate::workload::inference_server::Phase;
+    rows.iter().any(|s| s.phase != Phase::Down)
+}
+
+/// Whether anything is starting or serving a model, read without leaving the
+/// current view: the background monitor's snapshot (a cheap read), the remote
+/// box's rows, or the mock roster. Linux only, as the monitor is: elsewhere
+/// there is nothing to look at, and the rotation treats it as idle.
+#[cfg(target_os = "linux")]
+fn peek_inference_active(
+    backend: &dyn crate::backend::TelemetryBackend,
+    backend_type: BackendType,
+    monitor: &crate::workload::InferenceServerMonitor,
+    mock_started: Instant,
+) -> bool {
+    #[cfg(feature = "remote")]
+    if backend_type == BackendType::Remote {
+        if let Some(list) = backend.remote_inference() {
+            let rows: Vec<_> = list.iter().map(remote_inference_to_service_state).collect();
+            return inference_rows_active(&rows);
+        }
+    }
+    let _ = backend;
+    if backend_type == BackendType::Mock {
+        return inference_rows_active(&crate::workload::inference_server::mock::mock_services(
+            mock_started.elapsed().as_secs_f32(),
+        ));
+    }
+    inference_rows_active(&monitor.snapshot())
 }
 
 /// How long to dwell on `mode`.
@@ -466,12 +787,23 @@ fn run_app(
     let mut rotate_since = Instant::now();
     let mut train_active = false;
     let mut inference_active = false;
+    let mut rotation_activity = RotationActivity::default();
     let mut starfield: Option<HardwareStarfield> = None;
     let mut memory_castle: Option<MemoryCastle> = None;
     let mut memory_flow: Option<MemoryFlowVis> = None;
     let mut arcade: Option<ArcadeVisualization> = None;
     let mut defrag: Option<DefragVis> = None;
     let mut train_view: Option<TrainView> = None;
+    // Die 3D view and the clock it runs on: the view takes seconds since it
+    // was made, so one `Instant` lives beside it.
+    let mut die3d: Option<crate::animation::Die3dView> = None;
+    let mut die3d_started = Instant::now();
+    // The Die 3D inset beside the Insights process table (see
+    // `insights_inset_rect`), with its own clock. It exists only on Insights,
+    // once there is room and a Blackhole chip; it is hidden but kept while
+    // the terminal is too small, and dropped on leaving Insights.
+    let mut insights_inset: Option<crate::animation::Die3dView> = None;
+    let mut insights_inset_started = Instant::now();
     let mut train_monitor: Option<TrainMonitor> = None;
     // Arcade's activity lanes. A training run is found by the background scan
     // worker (it reads `/proc/<pid>/maps`, which must not run on this thread);
@@ -753,6 +1085,9 @@ fn run_app(
                 // comet crosses the sky. At the 10 FPS data rate all of that
                 // reads as stepping rather than moving.
                 | DisplayMode::Training
+                // Camera cuts, the chaos effect and the scene's own motion
+                // are timed in fractions of a second.
+                | DisplayMode::Die3d
         ) || (display_mode == DisplayMode::Defrag && defrag_is_animated);
         let render_interval = if is_anim_mode {
             throttle_state.effective_anim_interval(ui_poll_rate_anim)
@@ -973,7 +1308,27 @@ fn run_app(
                 }
                 DisplayMode::Insights => {
                     // Ingestion now happens in the backend update block (runs at ~10 Hz,
-                    // not 60 FPS), so nothing to do here.
+                    // not 60 FPS). Only the Die 3D inset is fed here.
+                    let rect = inset_rect_for(
+                        size.width,
+                        size.height,
+                        backend.devices(),
+                        fleet_zoom_start,
+                    );
+                    if insights_inset.is_none() {
+                        insights_inset_started = Instant::now();
+                    }
+                    if sync_inset(
+                        &mut insights_inset,
+                        rect,
+                        has_blackhole_chip(backend.devices()),
+                    ) {
+                        if let Some(view) = insights_inset.as_mut() {
+                            // `/theme` may have changed since the last tick.
+                            view.set_theme(colors::current_theme());
+                            view.update(backend, insights_inset_started.elapsed().as_secs_f64());
+                        }
+                    }
                 }
                 DisplayMode::Grid => {
                     // Grid mode doesn't need special init
@@ -1086,10 +1441,11 @@ fn run_app(
                         );
                     }
                     let roster_h = inference_roster.len();
-                    // Drives the rotation's dwell (see `train_active`): with
-                    // no service detected the snake is just roaming an empty
-                    // catalog, so `--rotate` gives it the short glance.
-                    inference_active = !rows.is_empty();
+                    // Drives the rotation's dwell (see `train_active`): a
+                    // server that goes away while this view is on screen
+                    // leaves the snake roaming an empty catalog, so `--rotate`
+                    // gives it the short glance and moves on.
+                    inference_active = inference_rows_active(&rows);
                     // Education band: describe the featured *loading* service.
                     band_rotation = band_rotation.wrapping_add(1);
                     inference_band = {
@@ -1161,9 +1517,9 @@ fn run_app(
                     }
                     if let Some(ref mut tm) = train_monitor {
                         tm.poll();
-                        // Drives the rotation's dwell: with no run attached
-                        // this screen is an empty-state card, so `--rotate`
-                        // glances and moves on. Re-read every tick, so a run
+                        // Drives the rotation's dwell: a run that ends while
+                        // this view is on screen leaves an empty-state card, so
+                        // `--rotate` glances and moves on. Re-read every tick, so a run
                         // that the (≤2s) rescan only just found extends the
                         // dwell instead of being cut short.
                         train_active = tm.state().proc.is_some();
@@ -1171,6 +1527,17 @@ fn run_app(
                     if let Some(ref mut tv) = train_view {
                         tv.update();
                     }
+                }
+                DisplayMode::Die3d => {
+                    // The scene is drawn above the global status bar, so the
+                    // view gets one row less than the terminal (`die3d_area`).
+                    let dv = die3d.get_or_insert_with(|| {
+                        die3d_started = Instant::now();
+                        let (cols, rows, reserved) = die3d_area(size.width, size.height);
+                        new_die3d_view(cols, rows, reserved)
+                    });
+                    dv.set_theme(colors::current_theme());
+                    dv.update(backend, die3d_started.elapsed().as_secs_f64());
                 }
             }
 
@@ -1180,6 +1547,38 @@ fn run_app(
             // decision is made at the data rate rather than the (much faster)
             // animation rate.
             if rotate_enabled {
+                // Keep what the rotation knows about the workload views: the
+                // one on screen from its own flag, the other from a peek every
+                // few seconds, so a view with nothing to show is skipped
+                // instead of visited.
+                match display_mode {
+                    DisplayMode::Training => rotation_activity.training = train_active,
+                    DisplayMode::InferenceMonitor => rotation_activity.inference = inference_active,
+                    _ => {}
+                }
+                if backend_type == BackendType::Mock {
+                    // The mock backend drives a synthetic run.
+                    rotation_activity.training = true;
+                }
+                if rotation_activity.due() {
+                    rotation_activity.probed = Some(Instant::now());
+                    if display_mode != DisplayMode::InferenceMonitor {
+                        #[cfg(target_os = "linux")]
+                        {
+                            rotation_activity.inference = peek_inference_active(
+                                &*backend,
+                                backend_type,
+                                &inference_monitor,
+                                mock_started,
+                            );
+                        }
+                        // No inference monitor off Linux, so nothing to show.
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            rotation_activity.inference = false;
+                        }
+                    }
+                }
                 let active = match display_mode {
                     DisplayMode::Training => train_active,
                     DisplayMode::InferenceMonitor => inference_active,
@@ -1188,7 +1587,11 @@ fn run_app(
                     _ => true,
                 };
                 if rotate_since.elapsed() >= linger_for(display_mode, active) {
-                    display_mode = next_rotation_mode(display_mode);
+                    display_mode = next_rotation_mode_for(
+                        display_mode,
+                        rotation_activity.training,
+                        rotation_activity.inference,
+                    );
                     force_redraw = true;
                 }
             }
@@ -1226,6 +1629,17 @@ fn run_app(
                 hivemind
                     .get_or_insert_with(crate::workload::hivemind::Hivemind::new)
                     .start();
+            }
+            // Die 3D's view is dropped on any exit, whichever key or command
+            // caused it, so the next entry starts afresh: all boards, every
+            // switch at its default (auto-cuts on), an empty history (the
+            // update arm re-creates the view and its clock).
+            if leaves_die3d(prev_display_mode, display_mode) {
+                die3d = None;
+            }
+            // The Insights inset is dropped the same way.
+            if leaves_insights(prev_display_mode, display_mode) {
+                insights_inset = None;
             }
             // Any arrival at a new view — rotated to or navigated to — starts
             // its dwell fresh, so pressing a mode key never lands you on a
@@ -1337,7 +1751,7 @@ fn run_app(
                 .draw(|f| {
                     // Clear frame with explicit black background for tmux compatibility
                     f.render_widget(
-                        Block::default().style(Style::default().bg(colors::rgb(0, 0, 0))),
+                        Block::default().style(Style::default().bg(colors::canvas_bg())),
                         f.area(),
                     );
 
@@ -1359,6 +1773,10 @@ fn run_app(
                                 host_mem_total,
                                 tt_filtered,
                                 remote_note,
+                                // The inset, only while its rect exists (the
+                                // renderer checks again).
+                                insights_inset.as_ref(),
+                                insights_inset_started.elapsed().as_secs_f64(),
                                 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                 &serving_metrics,
                             );
@@ -1414,6 +1832,11 @@ fn run_app(
                                     hm_sev,
                                     &kitt,
                                 );
+                            }
+                        }
+                        DisplayMode::Die3d => {
+                            if let Some(ref dv) = die3d {
+                                ui_die3d(f, dv, die3d_started.elapsed().as_secs_f64());
                             }
                         }
                         DisplayMode::Training => {
@@ -1475,7 +1898,7 @@ fn run_app(
                 Event::FocusLost => {
                     throttle_state.focused = false;
                 }
-                Event::Resize(_, _) => {
+                Event::Resize(width, height) => {
                     // Drop all size-dependent visualizations so they reinitialize
                     // at the new dimensions on the next loop iteration.
                     starfield = None;
@@ -1484,6 +1907,16 @@ fn run_app(
                     arcade = None;
                     defrag = None;
                     train_view = None;
+                    // Die 3D keeps its state (switches, history, load
+                    // calibration, camera) and its clock across a resize;
+                    // only its size and size-dependent caches change.
+                    resize_die3d(&mut die3d, width, height);
+                    // The inset follows too, so a redraw before the next tick
+                    // never draws a stale size.
+                    resize_inset(
+                        &mut insights_inset,
+                        inset_rect_for(width, height, backend.devices(), fleet_zoom_start),
+                    );
                     terminal.clear().ok();
                 }
                 // ── Reset takeover intercepts all keystrokes while active ──────
@@ -1845,6 +2278,32 @@ fn run_app(
                                             )
                                         }
                                     }
+                                } else if crate::animation::die3d::commands::is_command(&verb) {
+                                    // A Die 3D setting. It belongs to the open view, so it
+                                    // is dispatched here, where the view is, and not in
+                                    // `execute_command`, which has no view.
+                                    let arg = cmd_buf
+                                        .trim()
+                                        .trim_start_matches('/')
+                                        .split_once(char::is_whitespace)
+                                        .map(|(_, rest)| rest)
+                                        .unwrap_or("")
+                                        .trim()
+                                        .to_string();
+                                    cmd_message = Some(match (display_mode, die3d.as_mut()) {
+                                        (DisplayMode::Die3d, Some(dv)) => dv.command(
+                                            &verb,
+                                            &arg,
+                                            die3d_started.elapsed().as_secs_f64(),
+                                        ),
+                                        _ => (
+                                            format!(
+                                                "/{verb} is a Die 3D command (press 3 to open the view)"
+                                            ),
+                                            true,
+                                        ),
+                                    });
+                                    force_redraw = true;
                                 } else {
                                     let (msg, is_err, should_quit) = execute_command(
                                         &cmd_buf,
@@ -2011,8 +2470,44 @@ fn run_app(
                                         )
                                         .start();
                                 } else {
-                                    display_mode = prev_mode;
+                                    display_mode = back_target(display_mode, prev_mode);
                                 }
+                                force_redraw = true;
+                            }
+                            // ── Die 3D keys ([ ] and Space) ────────────────────
+                            // Checked before the general character arms so the
+                            // view consumes them. They are the keys that mean the
+                            // same in every view (change board, nudge); the view's
+                            // own settings are slash commands. `die3d_key_for` is
+                            // `None` outside the mode, so nothing else is
+                            // shadowed.
+                            KeyCode::Char(c) if die3d_key_for(display_mode, c).is_some() => {
+                                if let (Some(k), Some(dv)) =
+                                    (die3d_key_for(display_mode, c), die3d.as_mut())
+                                {
+                                    dv.handle_key(k, die3d_started.elapsed().as_secs_f64());
+                                }
+                                force_redraw = true;
+                            }
+                            // The arrows move the window over a scene too big
+                            // for the terminal (`die3d_pan_for` is `None` outside
+                            // the mode and for any other key).
+                            code if die3d_pan_for(display_mode, code).is_some() => {
+                                if let (Some(k), Some(dv)) =
+                                    (die3d_pan_for(display_mode, code), die3d.as_mut())
+                                {
+                                    dv.handle_key(k, die3d_started.elapsed().as_secs_f64());
+                                }
+                                force_redraw = true;
+                            }
+                            KeyCode::Char('3') => {
+                                // Toggle the Die 3D view, like `t` for Training. The
+                                // view is dropped at the mode-transition choke point
+                                // on any exit, so each entry starts afresh on all
+                                // boards with every switch at its default.
+                                let (m, p) = die3d_toggle(display_mode, prev_mode);
+                                display_mode = m;
+                                prev_mode = p;
                                 force_redraw = true;
                             }
                             KeyCode::Char('t') => {
@@ -2023,7 +2518,7 @@ fn run_app(
                                 // so unlike HivemindSweeper there is nothing for the
                                 // mode-transition choke point to tear down.
                                 if display_mode == DisplayMode::Training {
-                                    display_mode = prev_mode;
+                                    display_mode = back_target(display_mode, prev_mode);
                                 } else {
                                     prev_mode = display_mode;
                                     display_mode = DisplayMode::Training;
@@ -2085,16 +2580,20 @@ fn run_app(
                                     // Back out of the sniffer view to wherever the user
                                     // came from; the mode-transition choke point above
                                     // stops the engine's collector threads.
-                                    display_mode = prev_mode;
+                                    display_mode = back_target(display_mode, prev_mode);
                                 } else if display_mode == DisplayMode::InferenceMonitor {
                                     // Back out of the dedicated Inference Server Monitor
                                     // view to wherever the user came from (see the
                                     // `i`/`I` handler above) rather than quitting.
-                                    display_mode = prev_mode;
+                                    display_mode = back_target(display_mode, prev_mode);
                                 } else if display_mode == DisplayMode::Training {
                                     // Back out of the Training view to wherever the
                                     // user came from (see the `t` handler above).
-                                    display_mode = prev_mode;
+                                    display_mode = back_target(display_mode, prev_mode);
+                                } else if display_mode == DisplayMode::Die3d {
+                                    // Back out of Die 3D (see the `3` handler above);
+                                    // `back_target` makes sure Esc always leaves.
+                                    display_mode = back_target(display_mode, prev_mode);
                                 } else {
                                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_some() {
@@ -2475,7 +2974,9 @@ fn run_app(
                 &mut serving_metrics,
             );
             let scanned_processes = applied.processes;
-            // The worker's trainer search result, for Arcade's lane.
+            // The worker's trainer search result: for Arcade's lane, and for the
+            // rotation's idea of whether Training has anything to show.
+            rotation_activity.note_trainer(&applied.trainer);
             if applied.trainer.is_some() {
                 latest_trainer = applied.trainer;
             }
@@ -2587,12 +3088,10 @@ fn run_app(
                 only_tt: crate::cli::backend_shows_only_tt(backend_type),
                 verdicts: liveness_prober.fresh_verdicts(),
                 want_processes: reset_behavior.detects(),
-                // Arcade follows a training run. The worker finds it (the
-                // `maps` reads must stay off this thread). Mock and remote
-                // build their lanes from elsewhere.
-                want_trainer: display_mode == DisplayMode::Arcade
-                    && backend_type != BackendType::Mock
-                    && backend_type != BackendType::Remote,
+                // Arcade follows a training run, and the rotation needs to know
+                // if one exists. The worker finds it (the `maps` reads must
+                // stay off this thread).
+                want_trainer: scan_wants_trainer(display_mode, rotate_enabled, backend_type),
             });
 
             sys_monitor.refresh_cpu_usage();
@@ -2667,7 +3166,7 @@ fn ui_visualization(f: &mut Frame, starfield: &HardwareStarfield, backend: &dyn 
     let starfield_lines = starfield.render();
 
     let starfield_widget = Paragraph::new(starfield_lines)
-        .style(Style::default().bg(colors::rgb(0, 0, 0)))
+        .style(Style::default().bg(colors::canvas_bg()))
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -2684,7 +3183,7 @@ fn ui_visualization(f: &mut Frame, starfield: &HardwareStarfield, backend: &dyn 
                         .fg(colors::rgb(150, 220, 255))
                         .add_modifier(Modifier::BOLD),
                 )
-                .style(Style::default().bg(colors::rgb(0, 0, 0))),
+                .style(Style::default().bg(colors::canvas_bg())),
         );
 
     f.render_widget(starfield_widget, chunks[1]);
@@ -2763,7 +3262,7 @@ fn ui_memory_castle(f: &mut Frame, memory_castle: &MemoryCastle, backend: &dyn T
     let castle_lines = memory_castle.render(backend);
 
     let castle_widget = Paragraph::new(castle_lines)
-        .style(Style::default().bg(colors::rgb(0, 0, 0)))
+        .style(Style::default().bg(colors::canvas_bg()))
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -2780,7 +3279,7 @@ fn ui_memory_castle(f: &mut Frame, memory_castle: &MemoryCastle, backend: &dyn T
                         .fg(colors::rgb(255, 180, 220))
                         .add_modifier(Modifier::BOLD),
                 )
-                .style(Style::default().bg(colors::rgb(0, 0, 0))),
+                .style(Style::default().bg(colors::canvas_bg())),
         );
 
     f.render_widget(castle_widget, chunks[1]);
@@ -2801,7 +3300,7 @@ fn ui_memory_flow(f: &mut Frame, memory_flow: &MemoryFlowVis, backend: &dyn Tele
     let flow_lines = memory_flow.render(backend);
 
     let flow_widget = Paragraph::new(flow_lines)
-        .style(Style::default().bg(colors::rgb(0, 0, 0)))
+        .style(Style::default().bg(colors::canvas_bg()))
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -2818,7 +3317,7 @@ fn ui_memory_flow(f: &mut Frame, memory_flow: &MemoryFlowVis, backend: &dyn Tele
                         .fg(colors::rgb(180, 255, 180))
                         .add_modifier(Modifier::BOLD),
                 )
-                .style(Style::default().bg(colors::rgb(0, 0, 0))),
+                .style(Style::default().bg(colors::canvas_bg())),
         );
 
     f.render_widget(flow_widget, chunks[1]);
@@ -2923,7 +3422,7 @@ fn render_memory_flow_header(f: &mut Frame, area: Rect, backend: &dyn TelemetryB
 /// from observable signals: power ramp, aiclk transition, and GDDR temperature delta.
 fn ui_defrag(f: &mut Frame, dv: &DefragVis, backend: &dyn TelemetryBackend) {
     let lines = dv.render(backend);
-    let widget = Paragraph::new(lines).style(Style::default().bg(colors::rgb(0, 0, 0)));
+    let widget = Paragraph::new(lines).style(Style::default().bg(colors::canvas_bg()));
     f.render_widget(widget, f.area());
 }
 
@@ -2936,8 +3435,29 @@ fn ui_train(
     backend: &dyn TelemetryBackend,
 ) {
     let lines = tv.render(st, backend);
-    let widget = Paragraph::new(lines).style(Style::default().bg(colors::rgb(0, 0, 0)));
+    let widget = Paragraph::new(lines).style(Style::default().bg(colors::canvas_bg()));
     f.render_widget(widget, f.area());
+}
+
+/// Render the Die 3D view. It draws into the area above the global status
+/// bar's row (the view was sized for that, see the update arm), so its own
+/// footer is not covered.
+fn ui_die3d(f: &mut Frame, view: &crate::animation::Die3dView, now: f64) {
+    let full = f.area();
+    let area = Rect {
+        height: full.height.saturating_sub(STATUS_BAR_ROWS as u16),
+        ..full
+    };
+    let lines = view.render(now);
+    // Reset, not black: the view leaves its background unpainted by default so
+    // the terminal's own colour (and any translucency) shows through, and a
+    // black base style here would paint over that in every unspanned cell.
+    let widget = Paragraph::new(lines).style(
+        Style::default()
+            .fg(ratatui::style::Color::Reset)
+            .bg(ratatui::style::Color::Reset),
+    );
+    f.render_widget(widget, area);
 }
 
 /// Render Arcade mode — uses the composite canvas so the hero `@` and trail
@@ -2950,7 +3470,7 @@ fn ui_train(
 /// the inline separators from render_separator() provide visual structure.
 fn ui_arcade(f: &mut Frame, arcade: &ArcadeVisualization, backend: &dyn TelemetryBackend) {
     let lines = arcade.render(backend);
-    let widget = Paragraph::new(lines).style(Style::default().bg(colors::rgb(0, 0, 0)));
+    let widget = Paragraph::new(lines).style(Style::default().bg(colors::canvas_bg()));
     f.render_widget(widget, f.area());
 }
 
@@ -3017,6 +3537,18 @@ fn render_global_statusbar(
         vec![key(" / "), lbl(" cmd")],
         vec![key(" q "), lbl(" quit")],
     ];
+
+    // Die 3D: name the view and the key out of it. The view's own footer is
+    // two rows above this bar.
+    if mode == DisplayMode::Die3d {
+        hotkeys.push(vec![
+            key(" 3 "),
+            Span::styled(
+                format!(" leave {}", statusbar_mode_name(mode)),
+                Style::default().fg(label_fg),
+            ),
+        ]);
+    }
 
     // Insights-specific nav appended when in that mode.
     if matches!(mode, DisplayMode::Insights) {
@@ -3616,7 +4148,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
 
     match kind {
         OverlayPanel::Help => {
-            vec![
+            let mut help = vec![
                 sep!("Keys"),
                 row!(" v", "cycle views", key),
                 row!(" l", "toggle legend", key),
@@ -3631,6 +4163,10 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 row!(" i  I", "Inference Servers monitor", key),
                 row!(" ~", "HivemindSweeper activity sniffer", key),
                 row!(" t", "Training view (live tt-train run)", key),
+                row!(" 3", "Die 3D view (isometric boards)", key),
+                row!(" [  ]", "previous / next board (Die 3D)", key),
+                row!(" Space", "nudge: cut the camera (Die 3D)", key),
+                row!(" Arrows", "move a clipped scene (Die 3D)", key),
                 row!(" R", "rotate every view unattended (kiosk)", key),
                 row!(" b", "cycle backend", key),
                 ln!(vec![Span::styled(
@@ -3642,6 +4178,11 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 row!(" /fps <n>", "animation FPS  1–120", lbl),
                 row!(" /datafps <n>", "data refresh FPS  1–30", lbl),
                 row!(" /rotate", "rotate all views; on|off to force", lbl),
+                row!(
+                    " /theme [grayskull|rainbow]",
+                    "colours for every view (bare flips)",
+                    lbl
+                ),
                 row!(" /legend", "toggle legend panel", lbl),
                 row!(" /explain", "toggle explain panel", lbl),
                 row!(" /help", "toggle this panel", lbl),
@@ -3702,7 +4243,35 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "ignore · inform · dazzle · demo",
                     lbl
                 ),
-            ]
+            ];
+            // The Die 3D commands come from the view's own table, so a command
+            // cannot exist without being listed here. They belong to that
+            // view: in it they are listed one by one, elsewhere as one line so
+            // the panel stays short.
+            let at = help
+                .iter()
+                .position(|l| l.spans.iter().any(|s| s.content.contains("/wrap")))
+                .map_or(help.len(), |i| i + 1);
+            let die3d: Vec<Line<'static>> = if mode == DisplayMode::Die3d {
+                crate::animation::die3d::commands::COMMANDS
+                    .iter()
+                    .map(|c| {
+                        row!(
+                            format!(" {}", crate::animation::die3d::commands::usage(c)),
+                            c.help,
+                            lbl
+                        )
+                    })
+                    .collect()
+            } else {
+                vec![row!(
+                    " /board /scene /cells …",
+                    "Die 3D settings (press 3, then /help)",
+                    lbl
+                )]
+            };
+            help.splice(at..at, die3d);
+            help
         }
 
         OverlayPanel::Legend => {
@@ -3717,6 +4286,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 DisplayMode::Grid => grid_legend_lines(bar, bg, dim),
                 DisplayMode::HivemindSweeper => hivemind_view::legend_lines(bar, bg, dim),
                 DisplayMode::Training => train_legend_lines(bar, bg, dim),
+                DisplayMode::Die3d => die3d_legend_lines(bar, bg, dim),
                 DisplayMode::Arcade => {
                     // All four combined.
                     let mut v = Vec::new();
@@ -4050,6 +4620,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
             DisplayMode::HivemindSweeper => {
                 explain_lines(bar, bg, dim, lbl, hivemind_view::EXPLAIN_TEXT, cols)
             }
+            DisplayMode::Die3d => explain_lines(bar, bg, dim, lbl, DIE3D_EXPLAIN_TEXT, cols),
             DisplayMode::Training => explain_lines(
                 bar,
                 bg,
@@ -4603,6 +5174,241 @@ fn defrag_legend_lines(
     ]
 }
 
+/// The Die 3D view's `i` explanation, wrapped to the overlay's width by
+/// `explain_lines`. A constant so a test can check what it says.
+const DIE3D_EXPLAIN_TEXT: &[&str] = &[
+    "Die 3D",
+    "",
+    "Each Blackhole board is drawn as an isometric block",
+    "per die, from live chip telemetry. Tiles brighten",
+    "with activity above a quiet baseline wave: measured",
+    "per tile where the driver reports it, otherwise an",
+    "estimate from chip load.",
+    "The footer says which, as 'estimate'.",
+    "",
+    "Activity is relative to each chip's own idle over the",
+    "last day: the lowest power the chip drew in that time is",
+    "zero, and the highest in the most recent ten minutes (or idle",
+    "plus 25 W, if that is more) is full. A reading of a watt",
+    "or less is a glitch and is ignored. An idle chip draws a",
+    "good part of its limit, so power over the limit would",
+    "barely move.",
+    "",
+    "The camera turns to a new angle by itself every 15 s or so",
+    "when nothing has cut it (a spin).",
+    "When something happens it cuts instead, and the cut says",
+    "what happened: chaos for a chip (load rise, temperature",
+    "rise, PCIe burst) or a process that opens or closes a",
+    "device (that one needs tt-smi 6.0 or later, which lists",
+    "the processes), a dissolve for memory (GDDR heat) or the",
+    "board (an Ethernet link comes or goes). With every board",
+    "in view, an event on a chip also opens that chip's board;",
+    "an event on another board, or 20 s with none, goes back",
+    "to all boards. A board you choose stays.",
+    "",
+    "Keys: [ ] choose the board, Space cuts by hand.",
+    "Arrows move the window when the scene is clipped.",
+    "Commands, from the / bar (/help lists them):",
+    "/autocut turns the automatic cuts and switches off.",
+    "/scene one board or all boards; /board picks one.",
+    "/transition sets how a cut looks: rotate (the default),",
+    "chaos, dissolve or spin. Rotate spins when nothing",
+    "happened and uses the reasoned cut for an event.",
+    "/cells sets how the picture is drawn: braille dots,",
+    "quarter blocks or half blocks. The default, auto, changes",
+    "between them now and then as the hardware does something,",
+    "and does not start in the same one each time. /blocks",
+    "(or /cells blocks) changes only between the two block",
+    "forms; /braille holds braille.",
+    "/bg is a black background or the terminal's own.",
+    "/theme (the whole app) sets the colours here too: grayskull",
+    "is greys with one hot pink; the default is full colour.",
+    "/labels turns the chip flags (name and power) on or off.",
+    "/clouds turns the clouds behind the board on or off. The",
+    "clouds are decoration: their drift follows the total",
+    "PCIe traffic (slow but never still with none) and their",
+    "brightness follows chip load (the busiest chip).",
+    "/history turns the history panel at the top left on or off.",
+    "It plots power and PCIe traffic over the last minute of",
+    "measured readings, as sparklines: power for each chip",
+    "(up to six), PCIe traffic in and out. Each chip's row",
+    "ends with its latest power and latest temperature.",
+    "These are real readings, taken once a second. It needs",
+    "a terminal of at least 120 x 37.",
+    "The footer names the board corner nearest you, as",
+    "'view: front-right' (front is the PCIe edge, right the",
+    "GDDR side), and both ends during a cut.",
+    "",
+    "Only Blackhole chips are drawn; other devices are",
+    "named in the footer. In a window too small for the whole",
+    "board you see its middle, and the footer says what size",
+    "shows all of it.",
+    "",
+    "Press l for the legend · 3 to return.",
+];
+
+#[cfg(test)]
+mod die3d_text_tests {
+    use super::{die3d_legend_lines, DIE3D_EXPLAIN_TEXT};
+    use ratatui::style::Color;
+
+    /// Lines of text as one string, whitespace collapsed, so a phrase split
+    /// across two lines still matches.
+    fn flat<'a>(lines: impl Iterator<Item = String>) -> String {
+        lines
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn the_legend_says_activity_is_relative_to_each_chips_own_idle() {
+        let legend = flat(
+            die3d_legend_lines(Color::Reset, Color::Reset, Color::Reset)
+                .iter()
+                // The first span of each line is the `║ ` bar.
+                .map(|l| l.spans.iter().skip(1).map(|s| s.content.as_ref()).collect()),
+        );
+        let explain = flat(DIE3D_EXPLAIN_TEXT.iter().map(|s| s.to_string()));
+        for (what, text) in [("legend", &legend), ("explain", &explain)] {
+            for phrase in ["own idle", "over the last day"] {
+                assert!(text.contains(phrase), "{what} lacks {phrase:?}: {text}");
+            }
+            // The idle is remembered for a day, and the share of the power
+            // limit an idle chip draws was measured on one box only.
+            for wrong in ["last ten minutes", "An idle chip draws about a third"] {
+                assert!(!text.contains(wrong), "{what} says {wrong:?}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_legend_says_what_drives_the_clouds() {
+        let legend = flat(
+            die3d_legend_lines(Color::Reset, Color::Reset, Color::Reset)
+                .iter()
+                .map(|l| l.spans.iter().skip(1).map(|s| s.content.as_ref()).collect()),
+        );
+        let explain = flat(DIE3D_EXPLAIN_TEXT.iter().map(|s| s.to_string()));
+        for (what, text) in [("legend", &legend), ("explain", &explain)] {
+            for phrase in [
+                "decoration",
+                "drift follows",
+                "PCIe traffic",
+                "brightness follows chip load",
+                "/clouds",
+            ] {
+                assert!(text.contains(phrase), "{what} lacks {phrase:?}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_legend_says_what_the_history_panel_shows() {
+        let legend = flat(
+            die3d_legend_lines(Color::Reset, Color::Reset, Color::Reset)
+                .iter()
+                .map(|l| l.spans.iter().skip(1).map(|s| s.content.as_ref()).collect()),
+        );
+        let explain = flat(DIE3D_EXPLAIN_TEXT.iter().map(|s| s.to_string()));
+        for (what, text) in [("legend", &legend), ("explain", &explain)] {
+            for phrase in [
+                "history",
+                "last minute of measured",
+                "temperature",
+                "PCIe traffic",
+                "real readings",
+                "/history",
+            ] {
+                assert!(text.contains(phrase), "{what} lacks {phrase:?}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_legend_says_what_the_pcie_packets_are() {
+        let legend = flat(
+            die3d_legend_lines(Color::Reset, Color::Reset, Color::Reset)
+                .iter()
+                .map(|l| l.spans.iter().skip(1).map(|s| s.content.as_ref()).collect()),
+        );
+        for phrase in ["packets", "PCIe edge", "measured PCIe rate", "log scale"] {
+            assert!(legend.contains(phrase), "legend lacks {phrase:?}: {legend}");
+        }
+    }
+
+    #[test]
+    fn the_panel_text_says_power_and_pcie_and_latest_temperature() {
+        // The panel plots power and PCIe traffic; temperature is only the
+        // latest value printed beside each chip's sparkline. Neither text
+        // may say the panel plots temperature.
+        let legend = flat(
+            die3d_legend_lines(Color::Reset, Color::Reset, Color::Reset)
+                .iter()
+                .map(|l| l.spans.iter().skip(1).map(|s| s.content.as_ref()).collect()),
+        );
+        let explain = flat(DIE3D_EXPLAIN_TEXT.iter().map(|s| s.to_string()));
+        for (what, text) in [("legend", &legend), ("explain", &explain)] {
+            for phrase in ["plots power and PCIe traffic", "latest temperature"] {
+                assert!(text.contains(phrase), "{what} lacks {phrase:?}: {text}");
+            }
+            for wrong in ["power, temperature", "power and temperature"] {
+                assert!(!text.contains(wrong), "{what} says {wrong:?}: {text}");
+            }
+        }
+    }
+}
+
+/// Legend for the Die 3D view: what the scene's colours and the footer mean,
+/// and the keys the view takes.
+fn die3d_legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    [
+        "Die 3D: each Blackhole die as a block of tiles.",
+        "  tile glow   brightens with activity above a quiet",
+        "              baseline wave (measured per tile when the",
+        "              driver reports it, otherwise an estimate",
+        "              from chip load, labelled in the footer)",
+        "              Activity is relative to each chip's own",
+        "              idle over the last day.",
+        "  packets     dots moving in from and out to the PCIe edge;",
+        "              their count follows the measured PCIe rate",
+        "              on a log scale (none below 1 kB/s)",
+        "  camera cuts on activity: a load rise or PCIe burst",
+        "  labels      a flag per chip (name and power): a pin on the",
+        "              die, a pole, and the text on open space",
+        "  clouds      decoration behind the board: their drift",
+        "              follows PCIe traffic, their brightness",
+        "              follows chip load",
+        "  history     top left: plots power and PCIe traffic",
+        "              over the last minute of measured data",
+        "              (real readings, one a second); each chip's",
+        "              row ends with its latest temperature",
+        "  footer      scene shown, the board corner nearest you,",
+        "              then the switches and their states",
+        "",
+        "  keys      [ ] board · Space cut · 3 leave",
+        "            arrows move a clipped scene",
+        "  commands  /board /scene /cut /autocut /transition",
+        "            /cells /blocks /braille /bg /labels /clouds",
+        "            /history",
+        "            (/help describes each one)",
+    ]
+    .iter()
+    .map(|s| {
+        Line::from(vec![
+            Span::styled("║ ", Style::default().fg(bar).bg(bg)),
+            Span::styled(*s, Style::default().fg(dim)),
+        ])
+    })
+    .collect()
+}
+
 /// Legend for the Training view: the nine colour channels, each of which
 /// carries a different live signal.
 fn train_legend_lines(
@@ -5031,6 +5837,7 @@ fn explain_lines(
 /// /fps <n>          set animation FPS (1–120)
 /// /datafps <n>      set data-mode FPS (1–30)
 /// /mode <name>      switch display mode (insights|grid|starfield|castle|flow|arcade|defrag|hivemind)
+/// /theme [name]     grayskull | rainbow, every view (bare flips)
 /// /legend           toggle legend overlay      (hotkey: l)
 /// /explain          toggle explain overlay     (hotkey: !)
 /// /help             list commands              (hotkey: ?)
@@ -5164,7 +5971,7 @@ fn execute_command(
                 }
             },
             _ => (
-                "theme: grayskull | default  (or /theme to toggle)".to_string(),
+                "theme: grayskull | rainbow  (or /theme to toggle)".to_string(),
                 true,
                 false,
             ),
@@ -5631,6 +6438,84 @@ fn device_panels_height(devices: &[crate::models::Device], area_width: u16) -> u
     (row_count as u16) * (DEVICE_PANEL_H + 1) // panel + inter-row gap(1)
 }
 
+/// Width of the Die 3D inset drawn beside the process table, in columns.
+const INSET_W: u16 = 52;
+/// The least height the process panel needs before an inset is shown.
+const INSET_MIN_H: u16 = 16;
+/// The least width the process table keeps when an inset is shown. The
+/// inset appears only where the panel is at least `TABLE_MIN_W + INSET_W`
+/// (122) columns wide.
+const TABLE_MIN_W: u16 = 70;
+
+/// The devices whose chip panels the Insights screen draws: all of them, or
+/// the `FLEET_PAGE_SIZE` page that starts at `fleet_zoom_start` when zoomed.
+///
+/// The renderer and the host loop both size things from this slice (the
+/// panel height here, the inset's size in the loop), so the logic lives in
+/// one place.
+fn insights_panel_devices(
+    devices: &[crate::models::Device],
+    fleet_zoom_start: Option<usize>,
+) -> &[crate::models::Device] {
+    if let Some(start) = fleet_zoom_start {
+        // Clamp start: the device count can shrink beneath a stale zoom offset
+        // (backend swap via `b`/`/remote`, or a remote fleet losing a device),
+        // which would otherwise make `start > end` and panic on the slice.
+        let start = start.min(devices.len());
+        let end = (start + FLEET_PAGE_SIZE).min(devices.len());
+        &devices[start..end]
+    } else {
+        devices
+    }
+}
+
+/// The Insights screen's vertical split: header(3) | cards(exact height) |
+/// process panel (remainder).
+///
+/// Cards use Constraint::Length so they always get the exact height needed to
+/// show all chip panels (including a 2x2 grid when 4 chips don't fit in one row).
+/// The process panel takes whatever remains; it may be zero on very short
+/// terminals but the chip panels are never truncated.
+///
+/// The old toggle-able `[i]` Inference Servers strip that used to live here
+/// has been retired in favor of the dedicated full-screen
+/// `DisplayMode::InferenceMonitor` view (the unified serving snake - see
+/// `render_snake_view`), entered via `i`/`I`.
+fn insights_chunks(area: Rect, panel_devices: &[crate::models::Device]) -> [Rect; 3] {
+    let cards_h = device_panels_height(panel_devices, area.width);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(cards_h),
+            Constraint::Min(0),
+        ])
+        .split(area);
+    [chunks[0], chunks[1], chunks[2]]
+}
+
+/// Where the Die 3D inset goes on the Insights screen, or `None` when there
+/// is no room for it.
+///
+/// It takes the right `INSET_W` columns of the process panel, full height.
+/// The global status bar is drawn over the screen's last row, so that row is
+/// not counted. The panel (less the status row) must be at least
+/// `TABLE_MIN_W + INSET_W` wide, so the table keeps `TABLE_MIN_W` columns,
+/// and at least `INSET_MIN_H` tall.
+fn insights_inset_rect(area: Rect, panel_devices: &[crate::models::Device]) -> Option<Rect> {
+    let panel = insights_chunks(area, panel_devices)[2];
+    let height = panel.height.saturating_sub(STATUS_BAR_ROWS as u16);
+    if panel.width < TABLE_MIN_W + INSET_W || height < INSET_MIN_H {
+        return None;
+    }
+    Some(Rect {
+        x: panel.x + panel.width - INSET_W,
+        y: panel.y,
+        width: INSET_W,
+        height,
+    })
+}
+
 /// Render Insights screen (full layout: chip portraits + process panel).
 ///
 /// `portrait_particles` maps device index → live particle list, threaded through
@@ -5659,6 +6544,12 @@ fn render_insights(
     // See `remote_local_fallback_note`: `Some` under `--remote` while the
     // panel is still showing LOCAL processes rather than the remote box's.
     remote_note: Option<&'static str>,
+    // The Die 3D inset to draw beside the process table, with the clock
+    // (`inset_now`, seconds) its `render` takes. `render_insights` has no
+    // clock of its own. `None`, or too little room (see
+    // `insights_inset_rect`), leaves the screen as it was.
+    inset: Option<&crate::animation::Die3dView>,
+    inset_now: f64,
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
 ) {
@@ -5666,37 +6557,9 @@ fn render_insights(
     let devices = backend.devices();
 
     // When zoomed in, the panel height is based on the slice, not the full list.
-    let panel_devices: &[crate::models::Device] = if let Some(start) = fleet_zoom_start {
-        // Clamp start: the device count can shrink beneath a stale zoom offset
-        // (backend swap via `b`/`/remote`, or a remote fleet losing a device),
-        // which would otherwise make `start > end` and panic on the slice.
-        let start = start.min(devices.len());
-        let end = (start + FLEET_PAGE_SIZE).min(devices.len());
-        &devices[start..end]
-    } else {
-        devices
-    };
+    let panel_devices = insights_panel_devices(devices, fleet_zoom_start);
 
-    // Layout: header(3) | cards(exact height) | process panel (remainder)
-    //
-    // Cards use Constraint::Length so they always get the exact height needed to
-    // show all chip panels (including a 2×2 grid when 4 chips don't fit in one row).
-    // The process panel takes whatever remains; it may be zero on very short
-    // terminals but the chip panels are never truncated.
-    //
-    // The old toggle-able `[i]` Inference Servers strip that used to live here
-    // has been retired in favor of the dedicated full-screen
-    // `DisplayMode::InferenceMonitor` view (the unified serving snake — see
-    // `render_snake_view`), entered via `i`/`I`.
-    let cards_h = device_panels_height(panel_devices, area.width);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(cards_h),
-            Constraint::Min(0),
-        ])
-        .split(area);
+    let chunks = insights_chunks(area, panel_devices);
 
     render_header(f, chunks[0], backend);
     render_device_panels(
@@ -5708,9 +6571,15 @@ fn render_insights(
         fleet_cursor,
         fleet_zoom_start,
     );
+    // With an inset and room for it, the table gives up the rect's columns.
+    let inset_rect = inset.and_then(|_| insights_inset_rect(area, panel_devices));
+    let table_area = Rect {
+        width: chunks[2].width - inset_rect.map_or(0, |r| r.width),
+        ..chunks[2]
+    };
     render_process_panel(
         f,
-        chunks[2],
+        table_area,
         rows,
         cursor,
         kill_confirm,
@@ -5722,6 +6591,16 @@ fn render_insights(
         #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
         serving_metrics,
     );
+    if let (Some(view), Some(rect)) = (inset, inset_rect) {
+        // The fg and bg are Reset, as in `ui_die3d`, so the terminal's own
+        // colour shows in the cells the view leaves unpainted.
+        let widget = Paragraph::new(view.render(inset_now)).style(
+            Style::default()
+                .fg(ratatui::style::Color::Reset)
+                .bg(ratatui::style::Color::Reset),
+        );
+        f.render_widget(widget, rect);
+    }
     // Kill modal overlays the full screen when active
     if let Some(ref kc) = kill_confirm {
         render_kill_dialog(f, area, kc);
@@ -5737,7 +6616,7 @@ fn render_snake_view(
 ) {
     let area = f.area();
     f.render_widget(
-        Block::default().style(Style::default().bg(colors::rgb(0, 0, 0))),
+        Block::default().style(Style::default().bg(colors::canvas_bg())),
         area,
     );
     // Layout, top to bottom: the multi-model roster (0 rows when <2 services),
@@ -8203,7 +9082,9 @@ mod tests {
 #[cfg(test)]
 mod display_mode_tests {
     use super::{
-        display_mode_for, linger_for, next_display_mode, next_rotation_mode, DisplayMode, ROTATION,
+        back_target, die3d_area, die3d_key_for, die3d_pan_for, die3d_toggle, display_mode_for,
+        leaves_die3d, linger_for, next_display_mode, next_rotation_mode, resize_die3d,
+        statusbar_mode_name, DisplayMode, ROTATE_LINGER, ROTATION,
     };
 
     #[test]
@@ -8216,6 +9097,238 @@ mod display_mode_tests {
         assert_eq!(mode, DisplayMode::Training);
         mode = prev;
         assert_eq!(mode, DisplayMode::Insights);
+    }
+
+    #[test]
+    fn die3d_is_not_in_the_v_rotation() {
+        // Neither the unattended rotation nor the `v` cycle may reach Die3d:
+        // it is entered with `3` only.
+        assert!(!ROTATION.contains(&DisplayMode::Die3d));
+        let mut m = DisplayMode::Insights;
+        for _ in 0..12 {
+            m = next_display_mode(m);
+            assert_ne!(m, DisplayMode::Die3d, "`v` must not cycle into Die3d");
+        }
+        // `next_rotation_mode` from Die3d (not listed) restarts the rotation.
+        assert_eq!(next_rotation_mode(DisplayMode::Die3d), ROTATION[0]);
+    }
+
+    #[test]
+    fn v_from_die3d_leaves_to_insights() {
+        assert_eq!(next_display_mode(DisplayMode::Die3d), DisplayMode::Insights);
+    }
+
+    #[test]
+    fn die3d_has_a_status_bar_name() {
+        let name = statusbar_mode_name(DisplayMode::Die3d);
+        assert!(!name.is_empty());
+        assert!(name.contains("3D"), "{name}");
+    }
+
+    #[test]
+    fn every_exit_from_die3d_drops_the_view_and_nothing_else_does() {
+        for m in [
+            DisplayMode::Insights,
+            DisplayMode::Grid,
+            DisplayMode::Training,
+            DisplayMode::Arcade,
+        ] {
+            assert!(leaves_die3d(DisplayMode::Die3d, m), "{m:?}");
+            assert!(!leaves_die3d(m, DisplayMode::Die3d), "entering {m:?}");
+            assert!(!leaves_die3d(m, DisplayMode::Insights), "{m:?}");
+        }
+        assert!(!leaves_die3d(DisplayMode::Die3d, DisplayMode::Die3d));
+    }
+
+    #[test]
+    fn die3d_dwells_for_the_default_linger() {
+        assert_eq!(linger_for(DisplayMode::Die3d, false), ROTATE_LINGER);
+        assert_eq!(linger_for(DisplayMode::Die3d, true), ROTATE_LINGER);
+    }
+
+    #[test]
+    fn key_3_enters_die3d_remembering_the_mode_and_leaves_to_it() {
+        // Entering from Grid remembers Grid; pressing `3` again goes back.
+        let (mode, prev) = die3d_toggle(DisplayMode::Grid, DisplayMode::Insights);
+        assert_eq!((mode, prev), (DisplayMode::Die3d, DisplayMode::Grid));
+        let (mode, prev) = die3d_toggle(mode, prev);
+        assert_eq!((mode, prev), (DisplayMode::Grid, DisplayMode::Grid));
+    }
+
+    #[test]
+    fn three_esc_and_v_leave_die3d_after_a_detour_through_another_view() {
+        // Grid, `3` into Die 3D, `i` into the inference monitor (which saves
+        // Die3d as the previous mode), Esc back into Die 3D. The previous
+        // mode is now Die3d itself.
+        let (mode, _) = die3d_toggle(DisplayMode::Grid, DisplayMode::Insights);
+        assert_eq!(mode, DisplayMode::Die3d);
+        // `i`: the handler saves the mode it leaves as the previous one.
+        let (mode, prev) = (DisplayMode::InferenceMonitor, mode);
+        // Esc: back to Die 3D; the previous mode stays Die3d.
+        let mode = back_target(mode, prev);
+        assert_eq!(mode, DisplayMode::Die3d);
+        // `3`, Esc and `v` must each still leave, to Insights.
+        let (m, p) = die3d_toggle(mode, prev);
+        assert_eq!((m, p), (DisplayMode::Insights, DisplayMode::Insights), "3");
+        assert_eq!(back_target(mode, prev), DisplayMode::Insights, "Esc");
+        assert_eq!(next_display_mode(mode), DisplayMode::Insights, "v");
+    }
+
+    #[test]
+    fn esc_goes_back_to_the_previous_mode_unless_that_is_the_mode_itself() {
+        // The usual case: back to where the user came from.
+        assert_eq!(
+            back_target(DisplayMode::Die3d, DisplayMode::Grid),
+            DisplayMode::Grid
+        );
+        assert_eq!(
+            back_target(DisplayMode::Training, DisplayMode::Starfield),
+            DisplayMode::Starfield
+        );
+        // A previous mode equal to the current one would go nowhere: every
+        // entry-key view leaves to Insights then.
+        for m in [
+            DisplayMode::Die3d,
+            DisplayMode::Training,
+            DisplayMode::InferenceMonitor,
+            DisplayMode::HivemindSweeper,
+        ] {
+            assert_eq!(back_target(m, m), DisplayMode::Insights, "{m:?}");
+        }
+    }
+
+    #[test]
+    fn a_terminal_resize_keeps_the_die3d_view_and_its_switches() {
+        use crate::animation::die3d::Die3dKey;
+        use crate::animation::Die3dView;
+        use crate::backend::TelemetryBackend;
+        let (c, r, reserved) = die3d_area(150, 43);
+        assert_eq!((c, r, reserved), (150, 42, 1));
+        let mut die3d = Some(Die3dView::with_reserved_rows(c, r, reserved));
+        let view = die3d.as_mut().unwrap();
+        view.handle_key(Die3dKey::ToggleBraille, 0.0);
+        view.handle_key(Die3dKey::ToggleClouds, 0.0);
+        let switches = view.switches();
+        resize_die3d(&mut die3d, 120, 40);
+        let view = die3d.as_ref().expect("the view survives a resize");
+        assert_eq!(view.switches(), switches);
+        // Drawn at the new size: once a Blackhole chip has been read (the
+        // mock's third device), the view gives one line per row of its area,
+        // the terminal less the status bar's row. 90 x 25 is below the full
+        // layout, so this also shows the smaller layout follows a resize.
+        let mut mock = crate::backend::mock::MockBackend::new(3);
+        mock.init().expect("mock init");
+        mock.update().expect("mock update");
+        die3d.as_mut().unwrap().update(&mock, 0.0);
+        assert_eq!(die3d.as_ref().unwrap().render(0.0).len(), 39);
+        resize_die3d(&mut die3d, 90, 25);
+        assert_eq!(die3d.as_ref().unwrap().render(0.1).len(), 24);
+        // No view (Die 3D not open): nothing is made.
+        let mut none: Option<Die3dView> = None;
+        resize_die3d(&mut none, 120, 40);
+        assert!(none.is_none());
+    }
+
+    /// The views the app makes take their background from the canvas setting.
+    /// The view's own default is transparent, so a creation site that skips
+    /// the helper leaves a view that shows the terminal's colour on an
+    /// otherwise black screen.
+    #[test]
+    fn the_die3d_views_the_app_makes_follow_the_canvas_background() {
+        let want = crate::ui::colors::canvas_transparent();
+        assert_eq!(
+            super::new_die3d_view(100, 30, 0).is_transparent(),
+            want,
+            "full view"
+        );
+        assert_eq!(
+            super::new_inset_view(52, 16).is_transparent(),
+            want,
+            "inset"
+        );
+    }
+
+    /// The full view follows the hardware for its cell style. The inset holds
+    /// braille: half blocks halve its pixel width and a two-die board would no
+    /// longer fit it.
+    #[test]
+    fn the_app_makes_the_full_view_auto_and_the_inset_braille() {
+        use crate::animation::die3d::cellmode::CellMode;
+        use crate::animation::die3d::cells::CellStyle;
+        assert_eq!(
+            super::new_die3d_view(100, 30, 0).cell_mode(),
+            CellMode::Auto
+        );
+        let inset = super::new_inset_view(52, 16);
+        assert_eq!(inset.cell_mode(), CellMode::Fixed(CellStyle::Braille));
+    }
+
+    /// The views the app makes carry the theme in force, so `/theme` reaches
+    /// Die 3D. The theme is process-wide and other tests change it, so this
+    /// reads it before and after and accepts either.
+    #[test]
+    fn the_die3d_views_the_app_makes_carry_the_current_theme() {
+        use crate::ui::colors::current_theme;
+        let before = current_theme();
+        let (full, inset) = (
+            super::new_die3d_view(100, 30, 0).theme(),
+            super::new_inset_view(52, 16).theme(),
+        );
+        let after = current_theme();
+        for (what, got) in [("full view", full), ("inset", inset)] {
+            assert!(got == before || got == after, "{what}: {got:?}");
+        }
+    }
+
+    #[test]
+    fn die3d_keys_are_routed_only_while_in_the_mode() {
+        use crate::animation::die3d::Die3dKey;
+        for (c, want) in [
+            (']', Die3dKey::NextBoard),
+            ('[', Die3dKey::PrevBoard),
+            (' ', Die3dKey::CutNow),
+        ] {
+            assert_eq!(die3d_key_for(DisplayMode::Die3d, c), Some(want), "{c}");
+            // Out of the mode the same keys are not taken.
+            for m in [
+                DisplayMode::Insights,
+                DisplayMode::Training,
+                DisplayMode::Grid,
+            ] {
+                assert_eq!(die3d_key_for(m, c), None, "{c} in {m:?}");
+            }
+        }
+        // In the mode, keys with no Die 3D meaning fall through. The letters
+        // that used to be this view's keys are slash commands now, so they
+        // reach the app's own meaning for them (or none).
+        for c in [
+            '3', 'v', 'q', 'l', 'b', 'h', 'm', 'c', 'C', 'B', 'T', 'X', 'L', 'W', 'H',
+        ] {
+            assert_eq!(die3d_key_for(DisplayMode::Die3d, c), None, "{c}");
+        }
+    }
+
+    #[test]
+    fn the_arrows_pan_the_die3d_view_and_nothing_else() {
+        use crate::animation::die3d::Die3dKey;
+        use crossterm::event::KeyCode;
+        for (code, want) in [
+            (KeyCode::Left, Die3dKey::PanLeft),
+            (KeyCode::Right, Die3dKey::PanRight),
+            (KeyCode::Up, Die3dKey::PanUp),
+            (KeyCode::Down, Die3dKey::PanDown),
+        ] {
+            assert_eq!(die3d_pan_for(DisplayMode::Die3d, code), Some(want));
+            for m in [
+                DisplayMode::Insights,
+                DisplayMode::HivemindSweeper,
+                DisplayMode::Grid,
+            ] {
+                assert_eq!(die3d_pan_for(m, code), None, "{code:?} in {m:?}");
+            }
+        }
+        assert_eq!(die3d_pan_for(DisplayMode::Die3d, KeyCode::Enter), None);
+        assert_eq!(die3d_pan_for(DisplayMode::Die3d, KeyCode::Char('j')), None);
     }
 
     #[test]
@@ -8271,6 +9384,157 @@ mod display_mode_tests {
             );
         }
         assert_eq!(m, DisplayMode::Insights, "the rotation must wrap around");
+    }
+
+    /// Training and the Inference Monitor are visited only while a workload
+    /// exists. With neither, a lap visits every other view and never lands on
+    /// them; with one, only that one comes back.
+    #[test]
+    fn the_rotation_skips_the_workload_views_unless_one_is_going() {
+        use super::next_rotation_mode_for;
+        let lap = |training: bool, inference: bool| -> Vec<DisplayMode> {
+            // One lap: from Insights until the rotation comes back to it.
+            let mut seen = vec![DisplayMode::Insights];
+            let mut m = next_rotation_mode_for(DisplayMode::Insights, training, inference);
+            while m != DisplayMode::Insights {
+                seen.push(m);
+                assert!(seen.len() <= ROTATION.len(), "a lap never ends: {seen:?}");
+                m = next_rotation_mode_for(m, training, inference);
+            }
+            seen
+        };
+        let idle = lap(false, false);
+        assert!(!idle.contains(&DisplayMode::Training), "{idle:?}");
+        assert!(!idle.contains(&DisplayMode::InferenceMonitor), "{idle:?}");
+        // Everything else still comes up exactly once.
+        for want in [
+            DisplayMode::Insights,
+            DisplayMode::MemoryFlow,
+            DisplayMode::Starfield,
+            DisplayMode::MemoryCastle,
+            DisplayMode::Arcade,
+            DisplayMode::Defrag,
+            DisplayMode::HivemindSweeper,
+        ] {
+            assert_eq!(idle.iter().filter(|&&m| m == want).count(), 1, "{want:?}");
+        }
+        let training_only = lap(true, false);
+        assert!(training_only.contains(&DisplayMode::Training));
+        assert!(!training_only.contains(&DisplayMode::InferenceMonitor));
+        let inference_only = lap(false, true);
+        assert!(inference_only.contains(&DisplayMode::InferenceMonitor));
+        assert!(!inference_only.contains(&DisplayMode::Training));
+        // With both going, the whole rotation is visited.
+        assert_eq!(lap(true, true).len(), ROTATION.len());
+    }
+
+    /// The rotation learns about training from the background scan, and asks
+    /// for that search only when it is going to use it.
+    #[test]
+    fn the_rotation_reads_training_from_the_scan_and_asks_for_the_search() {
+        use super::{scan_wants_trainer, RotationActivity};
+        use crate::cli::BackendType as B;
+        use crate::workload::train::TrainProcess;
+        let run = TrainProcess {
+            pid: 1,
+            binary: "nano_gpt".into(),
+            config_path: Some("train.yaml".into()),
+            start_time: None,
+        };
+        let mut a = RotationActivity::default();
+        assert!(!a.training);
+        a.note_trainer(&None);
+        assert!(!a.training, "a scan that did not search says nothing");
+        a.note_trainer(&Some(Some(run)));
+        assert!(a.training, "a trainer was found");
+        a.note_trainer(&None);
+        assert!(a.training, "and a scan that did not search leaves it");
+        a.note_trainer(&Some(None));
+        assert!(!a.training, "a search that found none: the run ended");
+
+        // Arcade asks on a real local box; the rotation asks on any real
+        // backend (the Training view scans locally whatever the backend); a
+        // mock backend never asks; nothing else asks.
+        for (mode, rotating, backend, want) in [
+            (DisplayMode::Arcade, false, B::Json, true),
+            (DisplayMode::Arcade, false, B::Mock, false),
+            (DisplayMode::Arcade, false, B::Remote, false),
+            (DisplayMode::Insights, true, B::Json, true),
+            (DisplayMode::Insights, true, B::Remote, true),
+            (DisplayMode::Insights, true, B::Mock, false),
+            (DisplayMode::Insights, false, B::Json, false),
+            (DisplayMode::Training, false, B::Json, false),
+        ] {
+            assert_eq!(
+                scan_wants_trainer(mode, rotating, backend),
+                want,
+                "{mode:?} rotating={rotating} {backend:?}"
+            );
+        }
+    }
+
+    /// A service that is `Down` is not something to look at: only a row that is
+    /// compiling, loading, ready or in alarm earns the Inference Monitor a visit.
+    #[test]
+    fn a_down_service_is_not_an_active_inference_workload() {
+        use super::inference_rows_active;
+        use crate::workload::inference_server::mock::mock_services;
+        use crate::workload::inference_server::Phase;
+        let template = mock_services(0.0).remove(0);
+        let with = |phases: &[Phase]| -> Vec<_> {
+            phases
+                .iter()
+                .map(|&p| {
+                    let mut s = template.clone();
+                    s.phase = p;
+                    s
+                })
+                .collect()
+        };
+        assert!(!inference_rows_active(&[]), "no service, nothing to see");
+        assert!(
+            !inference_rows_active(&with(&[Phase::Down])),
+            "one down service"
+        );
+        assert!(!inference_rows_active(&with(&[Phase::Down, Phase::Down])));
+        for live in [Phase::Compiling, Phase::Loading, Phase::Ready, Phase::Alarm] {
+            assert!(inference_rows_active(&with(&[live])), "{live:?}");
+            // One live service among dead ones is enough.
+            assert!(
+                inference_rows_active(&with(&[Phase::Down, live])),
+                "{live:?}"
+            );
+        }
+    }
+
+    /// Landing positions never wedge: from the workload views themselves (a run
+    /// that ended while it was on screen), from an unlisted view, and from the
+    /// view just before a skipped one.
+    #[test]
+    fn skipping_never_leaves_the_rotation_on_a_view_or_stuck() {
+        use super::{next_rotation_mode_for, rotation_visits};
+        for m in [
+            DisplayMode::Training,
+            DisplayMode::InferenceMonitor,
+            DisplayMode::Die3d,
+            DisplayMode::Grid,
+            DisplayMode::Defrag,
+            DisplayMode::HivemindSweeper,
+        ] {
+            let next = next_rotation_mode_for(m, false, false);
+            assert_ne!(next, m, "{m:?} must advance");
+            assert!(rotation_visits(next, false, false), "{m:?} -> {next:?}");
+            assert!(
+                ROTATION.contains(&next),
+                "{m:?} -> {next:?} is in the rotation"
+            );
+        }
+        // Every other view is always visited, whatever is going on.
+        for &m in ROTATION {
+            if !matches!(m, DisplayMode::Training | DisplayMode::InferenceMonitor) {
+                assert!(rotation_visits(m, false, false), "{m:?}");
+            }
+        }
     }
 
     /// A view missing from `ROTATION` must restart the cycle, never wedge.
@@ -9236,6 +10500,12 @@ mod host_default_screen_tests {
         }
     }
 
+    #[test]
+    fn the_help_card_lists_key_3() {
+        let help = overlay_text(super::OverlayPanel::Help, super::DisplayMode::Insights);
+        assert!(help.contains("Die 3D view"), "{help}");
+    }
+
     /// A Help row's label must never run into its description: every row that
     /// has a description has at least one space between them.
     #[test]
@@ -9479,6 +10749,36 @@ mod host_default_screen_tests {
     /// — e.g. the `/serve` help line lost "(plaintext, trusted-LAN)". The panel
     /// now sizes itself to the widest content line. Render each overlay on a
     /// roomy terminal and assert the full text of the widest line survives.
+    /// `/help` in the Die 3D view lists every one of its commands, from the
+    /// view's own table, so a command cannot be added without being listed.
+    #[test]
+    fn help_in_the_die3d_view_lists_every_die3d_command() {
+        use super::{overlay_lines, DisplayMode, OverlayPanel};
+        let text = |mode| -> String {
+            overlay_lines(OverlayPanel::Help, mode, 56)
+                .iter()
+                .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let in_view = text(DisplayMode::Die3d);
+        for c in crate::animation::die3d::commands::COMMANDS {
+            let usage = crate::animation::die3d::commands::usage(c);
+            assert!(
+                in_view.contains(&usage),
+                "{usage} missing from /help in Die 3D"
+            );
+        }
+        assert!(in_view.contains("Space"), "the nudge key is listed");
+        // Elsewhere the panel stays short: one pointer line, not the list.
+        let elsewhere = text(DisplayMode::Insights);
+        assert!(elsewhere.contains("Die 3D settings"), "{elsewhere}");
+        assert!(
+            !elsewhere.contains("/clouds [on|off]"),
+            "the list is the view's own"
+        );
+    }
+
     #[test]
     fn overlay_panel_does_not_truncate_wide_content() {
         use super::{line_cols, overlay_lines, render_overlay_panel, DisplayMode, OverlayPanel};
@@ -9656,6 +10956,8 @@ pub fn run_render_bench(
                     0,
                     false,
                     None,
+                    None,
+                    0.0,
                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                     &std::collections::HashMap::new(),
                 );
@@ -10993,5 +12295,413 @@ mod reset_statusbar_tests {
                 draw_bar(&b, w, None, hints);
             }
         }
+    }
+}
+
+/// Tests for the Insights layout helpers and the inset drawn beside the
+/// process table.
+#[cfg(test)]
+mod insights_inset_tests {
+    use super::*;
+    use crate::models::{Device, SmbusTelemetry, Telemetry};
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::widgets::Widget;
+    use ratatui::Terminal;
+    use std::hash::{Hash, Hasher};
+
+    /// A backend with fixed values. The mock backend draws OS-seeded noise,
+    /// which would change a pinned buffer hash from run to run.
+    struct Fixed {
+        devices: Vec<Device>,
+        telem: Vec<Telemetry>,
+        smbus: SmbusTelemetry,
+    }
+
+    impl Fixed {
+        /// `n` p300 boards at a steady 80 W.
+        fn new(n: usize) -> Fixed {
+            let devices: Vec<Device> = (0..n)
+                .map(|i| {
+                    Device::new(
+                        i,
+                        "p300".to_string(),
+                        format!("0000:{:02x}:00.0", i + 1),
+                        format!("(0,{i})"),
+                    )
+                })
+                .collect();
+            let telem = devices
+                .iter()
+                .map(|_| {
+                    let mut t = Telemetry::new();
+                    t.power = Some(80.0);
+                    t
+                })
+                .collect();
+            Fixed {
+                devices,
+                telem,
+                smbus: SmbusTelemetry::new(),
+            }
+        }
+    }
+
+    impl TelemetryBackend for Fixed {
+        fn init(&mut self) -> crate::error::BackendResult<()> {
+            Ok(())
+        }
+        fn update(&mut self) -> crate::error::BackendResult<()> {
+            Ok(())
+        }
+        fn devices(&self) -> &[Device] {
+            &self.devices
+        }
+        fn telemetry(&self, i: usize) -> Option<&Telemetry> {
+            self.telem.get(i)
+        }
+        fn smbus_telemetry(&self, _i: usize) -> Option<&SmbusTelemetry> {
+            Some(&self.smbus)
+        }
+        fn backend_info(&self) -> String {
+            "fixed".into()
+        }
+    }
+
+    /// A few fixed process rows.
+    fn proc_rows() -> Vec<crate::workload::ProcRow> {
+        (0..4)
+            .map(|i| crate::workload::ProcRow {
+                pid: 1000 + i,
+                name: format!("proc-{i}"),
+                cpu_pct: 10.0 * i as f32,
+                mem_bytes: 1 << 28,
+                inference: None,
+                active: false,
+                tt: None,
+            })
+            .collect()
+    }
+
+    /// Hash of every cell's symbol and style.
+    fn buffer_hash(buf: &Buffer) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for c in buf.content() {
+            c.symbol().hash(&mut h);
+            format!("{:?}{:?}{:?}", c.fg, c.bg, c.modifier).hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Draw Insights for `n` devices into a `w` x `h` terminal, zoomed to
+    /// the page at `zoom`, with `inset` beside the process table when given.
+    fn draw(
+        w: u16,
+        h: u16,
+        n: usize,
+        zoom: Option<usize>,
+        inset: Option<&crate::animation::Die3dView>,
+    ) -> Buffer {
+        let backend = Fixed::new(n);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let rows = proc_rows();
+        let cli = crate::cli::Cli::bench_default();
+        let particles = std::collections::HashMap::new();
+        let baseline = crate::animation::baseline::AdaptiveBaseline::new();
+        term.draw(|f| {
+            render_insights(
+                f,
+                &backend,
+                &rows,
+                0,
+                None,
+                &cli,
+                &particles,
+                &baseline,
+                0,
+                zoom,
+                12.5,
+                1 << 30,
+                1 << 33,
+                false,
+                None,
+                inset,
+                0.0,
+                #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+                &std::collections::HashMap::new(),
+            );
+        })
+        .unwrap();
+        term.backend().buffer().clone()
+    }
+
+    /// The inset rect for `n` devices at `w` x `h`, as the helper gives it.
+    fn rect_for(w: u16, h: u16, n: usize, zoom: Option<usize>) -> Option<Rect> {
+        let backend = Fixed::new(n);
+        let panel = insights_panel_devices(&backend.devices, zoom);
+        insights_inset_rect(Rect::new(0, 0, w, h), panel)
+    }
+
+    /// The row of `buf` at `y` as text, over columns `x0..x1`.
+    fn row_text(buf: &Buffer, y: u16, x0: u16, x1: u16) -> String {
+        (x0..x1).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn the_inset_rect_needs_122_by_16() {
+        let r = rect_for(150, 42, 2, None).expect("two chips at 150 x 42 fit an inset");
+        assert_eq!(r.width, 52);
+        assert_eq!(r.width, INSET_W);
+        assert_eq!(r.x + r.width, 150, "the rect sits on the right edge");
+        assert!(r.height >= INSET_MIN_H);
+        assert!(
+            rect_for(150, 42, 4, None).is_none(),
+            "four chips leave the table under 16 rows"
+        );
+        assert!(
+            rect_for(121, 42, 2, None).is_none(),
+            "121 columns leave the table under 70"
+        );
+        assert!(rect_for(122, 42, 2, None).is_some());
+        // Height: find the shortest screen that has an inset for two chips;
+        // the process area there is exactly 16 rows (after the status row).
+        let min_h = (10..=60u16)
+            .find(|&h| rect_for(150, h, 2, None).is_some())
+            .expect("some height has an inset");
+        let r = rect_for(150, min_h, 2, None).unwrap();
+        assert_eq!(r.height, 16, "the least inset height is 16");
+        assert!(
+            rect_for(150, min_h - 1, 2, None).is_none(),
+            "15 rows give no inset"
+        );
+    }
+
+    #[test]
+    fn the_process_table_keeps_70_columns() {
+        let backend = Fixed::new(2);
+        for w in 122..=200u16 {
+            let area = Rect::new(0, 0, w, 42);
+            let chunks = insights_chunks(area, &backend.devices);
+            let inset = insights_inset_rect(area, &backend.devices)
+                .unwrap_or_else(|| panic!("no inset at width {w}"));
+            assert!(
+                chunks[2].width - inset.width >= TABLE_MIN_W,
+                "table is {} wide at width {w}",
+                chunks[2].width - inset.width
+            );
+        }
+    }
+
+    /// Check one state: the inset's glyphs lie in the helper's rect, and the
+    /// process table's text does not.
+    fn check_rect_matches(w: u16, h: u16, n: usize, zoom: Option<usize>) {
+        let backend = Fixed::new(n);
+        let r = rect_for(w, h, n, zoom).expect("this state has an inset");
+        let mut view = crate::animation::Die3dView::inset(r.width as usize, r.height as usize);
+        view.update(&backend, 0.0);
+        let with = draw(w, h, n, zoom, Some(&view));
+        let without = draw(w, h, n, zoom, None);
+
+        // The cards and header above the process panel are unchanged.
+        for y in 0..r.y {
+            assert_eq!(
+                row_text(&with, y, 0, w),
+                row_text(&without, y, 0, w),
+                "row {y} above the panel"
+            );
+        }
+        // Inside the rect, every cell is what the inset's lines draw there.
+        let mut expect = Buffer::empty(Rect::new(0, 0, r.width, r.height));
+        Paragraph::new(view.render(0.0)).render(expect.area, &mut expect);
+        let mut any_glyph = false;
+        for dy in 0..r.height {
+            for dx in 0..r.width {
+                let got = with[(r.x + dx, r.y + dy)].symbol();
+                assert_eq!(got, expect[(dx, dy)].symbol(), "inset cell ({dx},{dy})");
+                any_glyph |= got.chars().any(|c| ('\u{2800}'..='\u{28FF}').contains(&c));
+            }
+        }
+        assert!(any_glyph, "the inset drew a braille scene");
+        // The process table is left of the rect and its text stays there.
+        let mut found = false;
+        for y in r.y..r.y + r.height {
+            let left = row_text(&with, y, 0, r.x);
+            let right = row_text(&with, y, r.x, w);
+            found |= left.contains("proc-0");
+            assert!(!right.contains("proc-") && !right.contains("Processes"));
+        }
+        assert!(found, "process rows draw left of the rect");
+    }
+
+    /// The inset's width and minimum height are the size a two-die board
+    /// needs for its scene: the rows above the caption hold braille glyphs,
+    /// and the text summary does not take their place.
+    #[test]
+    fn the_inset_size_draws_a_two_die_board_scene() {
+        let backend = Fixed::new(2);
+        let mut view = crate::animation::Die3dView::inset(INSET_W as usize, INSET_MIN_H as usize);
+        view.update(&backend, 0.0);
+        let rows = view.render(0.0);
+        assert_eq!(rows.len(), INSET_MIN_H as usize);
+        let scene_rows = &rows[..rows.len() - 1];
+        let braille = scene_rows
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .flat_map(|span| span.content.chars())
+            .filter(|c| ('\u{2800}'..='\u{28FF}').contains(c))
+            .count();
+        assert!(braille > 0, "the scene rows hold braille glyphs");
+    }
+
+    #[test]
+    fn the_rect_matches_the_renderer() {
+        check_rect_matches(150, 42, 2, None);
+        check_rect_matches(122, 42, 2, None);
+        check_rect_matches(200, 50, 1, None);
+    }
+
+    #[test]
+    fn a_zoomed_slice_uses_the_slice_for_the_rect() {
+        // 40 devices zoomed to the last page of 2: the card height comes from
+        // the slice of devices shown.
+        assert!(rect_for(150, 42, 40, Some(38)).is_some());
+        check_rect_matches(150, 42, 40, Some(38));
+        let backend = Fixed::new(40);
+        assert_eq!(insights_panel_devices(&backend.devices, Some(38)).len(), 2);
+        assert_eq!(insights_panel_devices(&backend.devices, Some(99)).len(), 0);
+        assert_eq!(insights_panel_devices(&backend.devices, None).len(), 40);
+    }
+
+    #[test]
+    fn the_fleet_view_gets_the_rect_the_renderer_uses() {
+        // 40 devices unzoomed draw the heat map, which is short, so the
+        // panel has room and the renderer must use the helper's rect.
+        assert!(rect_for(150, 42, 40, None).is_some());
+        check_rect_matches(150, 42, 40, None);
+        // Where the helper says there is no room, a view changes nothing.
+        assert!(rect_for(150, 42, 4, None).is_none());
+        let view = crate::animation::Die3dView::inset(52, 16);
+        assert_eq!(
+            buffer_hash(&draw(150, 42, 4, None, Some(&view))),
+            buffer_hash(&draw(150, 42, 4, None, None))
+        );
+    }
+
+    /// Buffer hashes taken on the code before `render_insights` was changed.
+    ///
+    /// The hashes were taken in a truecolor terminal, and colours are written
+    /// differently without truecolor (`colors::rgb`), so the test says so
+    /// instead of inheriting `COLORTERM` from whoever runs it. Without this it
+    /// passed on a machine with `COLORTERM=truecolor` and failed on CI.
+    #[test]
+    fn no_inset_view_means_the_old_layout() {
+        colors::with_truecolor(true, || {
+            assert_eq!(
+                buffer_hash(&draw(150, 42, 2, None, None)),
+                363425789546536760
+            );
+            assert_eq!(
+                buffer_hash(&draw(120, 40, 4, None, None)),
+                12509307249848498318
+            );
+        });
+    }
+
+    /// Chips of a Wormhole board (no Blackhole among them).
+    fn wormhole_devices(n: usize) -> Vec<Device> {
+        (0..n)
+            .map(|i| {
+                Device::new(
+                    i,
+                    "n150".to_string(),
+                    format!("0000:{:02x}:00.0", i + 1),
+                    format!("(0,{i})"),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_inset_is_created_when_there_is_room_and_a_blackhole_chip() {
+        let backend = Fixed::new(2);
+        let rect = inset_rect_for(150, 42, &backend.devices, None);
+        assert!(rect.is_some());
+        let mut inset = None;
+        assert!(sync_inset(
+            &mut inset,
+            rect,
+            has_blackhole_chip(&backend.devices)
+        ));
+        let r = rect.unwrap();
+        assert_eq!(
+            inset.as_ref().expect("made").size(),
+            (r.width as usize, r.height as usize)
+        );
+        // Not made where there is no room.
+        let mut none = None;
+        let small = inset_rect_for(100, 42, &backend.devices, None);
+        assert!(!sync_inset(&mut none, small, true));
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn a_resize_below_the_threshold_hides_it_and_keeps_the_view() {
+        let mut backend = Fixed::new(2);
+        backend.telem[0].power = Some(120.0);
+        let blackhole = has_blackhole_chip(&backend.devices);
+        let mut inset = None;
+        let rect = inset_rect_for(150, 42, &backend.devices, None);
+        assert!(sync_inset(&mut inset, rect, blackhole));
+        // Feed it so it has load calibration and a camera worth keeping.
+        for k in 0..20 {
+            inset.as_mut().unwrap().update(&backend, k as f64 * 0.1);
+        }
+        let before = inset.as_ref().unwrap().kept_state();
+        // Too narrow: hidden (not updated) but kept.
+        let small = inset_rect_for(100, 42, &backend.devices, None);
+        assert!(small.is_none());
+        assert!(!sync_inset(&mut inset, small, blackhole));
+        resize_inset(&mut inset, small);
+        assert!(inset.is_some(), "the view survives being hidden");
+        // Back above the threshold, at another size: resized, state intact.
+        let big = inset_rect_for(160, 44, &backend.devices, None);
+        assert!(sync_inset(&mut inset, big, blackhole));
+        let view = inset.as_ref().unwrap();
+        let b = big.unwrap();
+        assert_eq!(view.size(), (b.width as usize, b.height as usize));
+        assert_eq!(view.kept_state(), before);
+    }
+
+    #[test]
+    fn leaving_insights_drops_the_inset() {
+        assert!(leaves_insights(DisplayMode::Insights, DisplayMode::Grid));
+        assert!(leaves_insights(DisplayMode::Insights, DisplayMode::Die3d));
+        assert!(!leaves_insights(DisplayMode::Grid, DisplayMode::Insights));
+        assert!(!leaves_insights(
+            DisplayMode::Insights,
+            DisplayMode::Insights
+        ));
+        // The loop's hook, as written there.
+        let mut inset = Some(crate::animation::Die3dView::inset(52, 20));
+        if leaves_insights(DisplayMode::Insights, DisplayMode::Grid) {
+            inset = None;
+        }
+        assert!(inset.is_none());
+    }
+
+    #[test]
+    fn no_blackhole_chip_means_no_inset() {
+        let devices = wormhole_devices(2);
+        assert!(!has_blackhole_chip(&devices));
+        assert!(has_blackhole_chip(&Fixed::new(1).devices));
+        let rect = inset_rect_for(150, 42, &devices, None);
+        assert!(rect.is_some(), "there is room; only the chip is missing");
+        let mut none = None;
+        assert!(!sync_inset(&mut none, rect, false));
+        assert!(none.is_none());
+        // An existing view is dropped when the chips go (backend swap).
+        let mut inset = Some(crate::animation::Die3dView::inset(52, 20));
+        assert!(!sync_inset(&mut inset, rect, false));
+        assert!(inset.is_none());
     }
 }

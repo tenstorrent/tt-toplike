@@ -111,10 +111,10 @@ jobs:
   # ── macOS smoke (Apple-silicon host path) ───────────────────────────────────
   # Cheap PR insurance for the macOS-only code (the ANE power sampler via the
   # private IOReport framework, core-foundation interop). Runs the safe
-  # tui + json-backend feature set on Apple-silicon macos-14.
+  # tui + json-backend feature set on Apple-silicon macos-15.
   test-macos:
     name: Test (macOS)
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v4

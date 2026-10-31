@@ -1407,3 +1407,333 @@ Tests: `a_new_featured_service_restarts_the_smoothed_gauges`,
 `start_time`. The first three were seen to fail with the fix disabled (a leftover
 tide of 0.76; the replacement process taken for the trainer; the old run kept).
 No version bump: these are fixes inside an unmerged PR.
+
+### PCIe counter units and direction (Oct 29, 2026, v0.13.18)
+
+Prompt: "what could we learn from dtsunami/tt-baremetal's bhtop and apply to our
+tt-toplike?" Reading bhtop showed that tt-kmd's `pcie_perf_counters` files are the PCIe
+tile's NIU counters (same indices as `NIU_*` in tt-isa-documentation), where a data word is
+a 64-byte flit. We had assumed 4 bytes per word since #23.
+
+Calibrated on chip 2 of a p300c under a gozer lease: ttnn host-to-device and device-to-host
+copies of 256 MiB and 1 GiB, with the sysfs counters read around each. Words moved were
+1/64 of the bytes (0.015625). Host-to-device raised `slv_rd_data_word_sent0` and
+device-to-host raised `slv_nonposted_wr_data_word_received0`, the reverse of what the module
+comments said. Fixed the unit, the direction, and the wrap (the files were summed as u64, so
+a wrapping counter dropped that sample).
+
+The `mst_*` directions are inferred and marked so in the code, docs and tests. ttnn never used
+the BAR path, so a calibration through an MMIO write and read would settle them.
+
+Decisions: the snapshot keeps the 12 raw u32 values so the wrap is handled per counter. A step
+over half the counter range reads as a device reset (a wrap of nearly the full range is
+indistinguishable from a small step backwards). More than one wrap between samples cannot be
+detected; at 1 Hz it would need over 275 GB/s.
+
+### Copilot review of PR 37 and CI (Oct 30 2026, v0.14.3 and v0.14.4)
+
+The first push to the PR found three CI failures the local runs had hidden. Lesson: run tests
+as CI does (`env -u COLORTERM -u TMUX TERM=dumb`), and `cargo check --target
+x86_64-pc-windows-gnu` / `aarch64-apple-darwin` (installed) for anything behind
+`cfg(target_os)`. 0.14.3: Windows did not compile (the inference peek used Linux-only values); a
+literal truecolor black went to terminals without truecolor; one test pinned hashes taken with
+`COLORTERM=truecolor` (it failed from the commit that added it; `colors::with_truecolor` pins the
+mode per thread now). `Test (macOS)` fails in one second with no steps: a GitHub brownout of the
+macos-14 image (retired 2 Nov 2026), not the code. The workflow needs a newer image.
+
+Copilot's review, each claim checked against the code before acting:
+- Fixed: a `Down` service counted as running (`inference_rows_active`); the training probe walked
+  `/proc` on the render thread, against `proc_scan.rs`'s own guard (the rotation now asks the
+  scan worker, `scan_wants_trainer` and `RotationActivity::note_trainer`); a cut during a
+  transition started from the earlier cut's destination (`Director::shown_camera`); one glitch
+  reading set a chip's idle for a day (floor at 1 W, per-minute 10th percentile).
+- Not a bug, replied with evidence: "`chip_line` omits chip power" (it starts with `chip_label`,
+  which has it, and `each_chip_gets_one_line` asserts it); "canvases still paint black" (four
+  files hold a *foreground* colour for space cells and never call `.bg(`; comments reworded);
+  "the Die 3D opaque path bypasses the capability check" (its scene pixels are truecolor by design).
+- Docs: the PR title said 0.14.2 while the code said 0.14.3 (release metadata is the version).
+- Tests that used 0 W as a chip's idle now use 37 W: no powered chip reads under a watt.
+
+### Open items closed before the human review (Oct 31 2026, v0.14.5)
+
+Prompt: "hit all these open issues before we ask for a human review" (the PR body's list).
+- Panning: arrow keys in the Die 3D view (`Die3dKey::Pan*`, `die3d_pan_for` in the TUI).
+  `Die3dView::panned` shifts the clipped fit's origin and records how far the window can move
+  (`RenderCache::pan_room`), so a key at an edge is a no-op and the key back moves at once. The
+  origin shift is the only change: the whole scene is still drawn and the buffer is the window.
+  The test compares the window to a crop of the whole picture at the panned offset.
+- Footer: a tier of state words plus action keys sits between the full form and the bare words.
+- The explain text said a process event dissolves; `pick_kind` gives it chaos. Text fixed.
+- `die3d/mod.rs` tests moved to `tests.rs` (a mechanical move; `mod tests;`).
+- CI and release use `macos-15`.
+- Not changed: the process-event trigger reads `Backend::device_processes`, which only the
+  tt-smi 6.0+ JSON backend fills. A `/proc` fallback needs the scan worker to report which
+  device each process holds; the help text names the requirement for now. The 12 Hz wave step
+  still needs a look by eye in Konsole or GNOME Terminal.
+
+### Rotation skips idle workload views (Oct 30 2026, v0.14.2)
+
+Prompt: "is 3d mode setup in the 'rotate' system? (can we take training and llms out of rotation
+unless a model is starting, running, and/or training?)". Die 3D is not in `ROTATION` and is not
+meant to be: a test pins it (`die3d_is_not_in_the_v_rotation`), it is entered with `3`. Asked
+whether to add it; not done without an answer.
+
+- `rotation_visits` / `next_rotation_mode_for`: Training and the Inference Monitor are stops only
+  while `RotationActivity` says something is going. Insights is always a stop, so a lap ends.
+- The old flags (`train_active`, `inference_active`) are only kept while their own view is on
+  screen, and are reset to true on every arrival, so they cannot say whether to go there. The
+  rotation now looks every `ROTATE_PROBE_EVERY` (3 s): inference from the background monitor's
+  snapshot (a cheap read; the remote box's rows under `--remote`; the mock roster under
+  `--mock`), training from `TrainMonitor::poll()` (a rate-limited `/proc` walk), created on first
+  use. Mock training counts as going, so `--mock --rotate` still demos it.
+- A run that ends while its view is on screen still gets `ROTATE_LINGER_IDLE`.
+- "Starting" is covered by the inference side: a loading container is a row in the snapshot.
+
+### Die 3D: commands, theme, reasoned cuts, cell styles (Oct 30 2026, v0.14.0)
+
+Prompt: "we've added too many hotkeys. let's make those slash commands and have help help with
+them. 1) make braille versus blocks a HW-derived selection, not too frequent, and what you start
+with first won't necessarily be the same as the last. are there only block forms we could switch
+between too? 2) /theme could do both greyskull and rainbow for this view too. 3) the cut style
+shouldn't be shuffled so much as reasoned by something happening. the default should be to
+rotate. the other types should happen because something happened on a chip or the memory or the
+board or a related process". Then, answering the questions I asked: "our hot keys should all be
+global ... `[` and `]` ... space ... in this view it would cut ... the slash commands can be local
+to the current view or global". Rotate = the spin (chosen), Die 3D follows /theme (chosen).
+
+Decisions:
+- Keys: `[` `]` (board) and Space (cut) only; `die3d_key_for` still gates them to the view.
+  Every setting is `commands::COMMANDS` (one table: the parser, `/help` and the footer read it;
+  a test runs every entry). `/help` lists them in full inside Die 3D and as one line elsewhere.
+  `execute_command` has no view, so the Enter handler dispatches them (`is_command`).
+- Theme: `Die3dView` carries a `Theme` (default Grayskull so tests and library users are
+  stable); the app sets it from `colors::current_theme()` at creation and each tick, and
+  `set_theme` bumps the revision so the frame cache cannot serve old colours. The palette rides
+  in `DrawCtx`; `RAINBOW` is new. Only the scene changes; footer and flag text stay lavender.
+- Cuts: `Trigger` gained `ThermalRise`, `MemoryHeat`, `EthLink`, `Process`, each with a `Reason`.
+  `observe` (load, PCIe) is unchanged; `observe_extras` and `observe_processes` are new. Rotate
+  maps Chip and Process to chaos, Memory and Board to dissolve, and no reason to a spin (a
+  dissolve if the scene changes). Forced modes override. The mapping of process to chaos is my
+  choice. Idle turn: `IDLE_ROTATE_SECS` 45, `Director::on_idle`, off-switchable for tests.
+- Cell styles: `CellStyle` Braille, Quadrant, HalfBlock. Quadrant uses the braille 2 x 4 pixel
+  buffer and merges row pairs, because a 2 x 2 grid makes pixels twice as tall as wide. So the
+  answer to "only block forms?" is yes: quarter and half blocks, and `/cells blocks` moves between
+  just those. `cellmode.rs` is the pure logic: `hardware_seed` (FNV of every chip's power,
+  temperature, memory heat and links) picks the start; an event cut after `MIN_DWELL_SECS` (120)
+  schedules the next style at the cut's swap. Auto leaves half blocks out under 100 x 30 (their
+  pixels are half as wide). The app makes the full view Auto; the inset stays braille.
+- Pinned frames: the golden hashes now cover the rows above the footer. The same code at the
+  previous commit hashes those rows identically, so the picture did not change.
+- Checked in a truecolor terminal through tmux, asciinema and agg: both palettes, all three
+  styles and the commands.
+- 0.14.1, after trying it ("i never see rotate happen on its own ... i'd like to see the faster
+  version. /cells block or /cells blocks should just map to something easy. /blocks and /braille
+  local to viz would work too"): `IDLE_ROTATE_SECS` 45 -> 15 (above the 8 s cooldown and the 1.6 s
+  spin). Checked on the real box by watching the footer caption: a cut at 18.5 s, then a 1.6 s
+  spin at 33.4 s. An event cut restarts the wait, so on a box that keeps having events the spin
+  is rare; that is by design. `/blocks` and `/braille` are `COMMANDS` entries that call
+  `/cells`; `block` parses as `blocks`.
+- Not done: panning a clipped scene, a `/theme` row in Die 3D's own footer, and process events
+  for the inset's board choice beyond the busiest board.
+
+### Background: transparent tried, black kept (Oct 30 2026, v0.13.25)
+
+Prompt: "take away the dimmed background by default too both in full screen and the home
+screen". There was no screenshot of it, so "dimmed background" was my reading of it. A pty run
+with `COLORTERM=truecolor` (what Konsole sets) showed the app emitting `48;2;0;0;0` (solid
+black) 23,000 times on the home screen and 50,000 to 190,000 times on the full-screen modes. Under
+tmux it emitted none, because `colors::rgb(0, 0, 0)` returns `Color::Reset` when
+`supports_true_color()` is false, and that is false in tmux. I made every screen use the
+terminal's own background (a 0.13.24 build, never installed). The user tried it: "i don't like
+the haze at all. old black back for everything please."
+
+What stayed:
+- `colors::canvas_bg()` is the one place the background is chosen: black through `colors::rgb`
+  by default and `Color::Reset` with `TT_TOPLIKE_TRANSPARENT=1`. (0.14.3 corrects this entry:
+  0.13.25 first wrote a literal `Color::Rgb(0, 0, 0)`, which sent truecolor black to terminals
+  without truecolor. Through `rgb` black is the terminal's own background there, as it always
+  was, because truecolor fills show as grey under tmux and in macOS Terminal.app over SSH.)
+- All 68 literal black fills use it, and `no_view_paints_a_literal_black_background` scans
+  `src/` so a view cannot go back to the literal.
+- The Die 3D view defaulted to a transparent background (`T` flips it), which is the likeliest
+  source of the haze: scene cells showed the terminal's colour. The app now sets it from the
+  canvas setting where it makes the full view and the inset (`new_die3d_view`, `new_inset_view`).
+  The view's own default is still transparent so its pinned test frames do not change; the test
+  `the_die3d_views_the_app_makes_follow_the_canvas_background` fails if a creation site skips
+  the helper (seen red by removing it).
+- The status bar (`10,14,22`) and the overlay panel (`8,14,22`) keep their dark backgrounds.
+  The `DIM` text attribute is untouched.
+- Open: what the user first meant by "dimmed" is not settled. If something still looks dimmed on
+  black, it is the status bar, the `DIM` attribute, or the dim colours in a view.
+
+### Die 3D narrow windows (Oct 30 2026, v0.13.23)
+
+Prompt: a slim Konsole window (about 50 x 54) showed only the text summary where the cube
+should be ("the cube goes blank at 80x40 or 80x25 ... this is slimmer"). Then, after the options
+(smaller tile, a message, or clipping): "1 plus 3, but I think we still can do 'clip' where you
+show the whole display 'virtually' and the smaller window can only reveal what it has room for".
+
+Findings, measured on the real box (two p300c boards) with `tmux capture-pane`: the scene drew
+from 51 columns up and was blank at 50 and below, at every height. It drew at 80 x 25 and 80 x 40
+(also with 3 to 32 mock chips, where it falls back to one board), so those two sizes were not the
+cause. Cause: `fit_pixels` stops at a 4 pixel tile, and a two-die board at that tile is just
+over 100 pixels (50 columns of braille) wide at its widest camera angle.
+
+Decisions:
+- `fit_pixels` keeps its four pixel floor, because the choice between every board and one board
+  rests on it (the existing fallback tests). Only one board's scene goes lower:
+  `fit_last_resort` tries a 2 pixel tile (`SMALL_MIN_TW`), and if that is still too big, draws the
+  whole scene at 2 pixels with a centred origin. `PixelBuf::put` ignores out-of-range pixels, so
+  the crop is only a negative origin and nothing else in the drawing changed.
+  The two-die scene is 50 x 30 pixels at that tile, so it fits whole from 25 x 8 cells.
+- `SceneFit.virtual_px` is `Some` when it is clipped. `Shown::Clipped(board, cols, rows)` carries
+  the size that shows all of it; the footer leads with `clipped, needs 25x8`, and a view with no
+  footer (under 60 x 16) puts the same text over the scene's last row.
+- Insets are never clipped. Flags are off while clipped (clipping only happens below the flags'
+  size anyway). The text summary now starts below `SCENE_MIN_CELLS` (16 x 6).
+- Not built: panning with keys. The crop is always the middle. Keys are routed by character in
+  `ui/tui/mod.rs` (`die3d_key_for`), so pan keys need a binding that does not collide with the
+  global ones.
+- The test that the clipped window is a crop compares it with the whole picture drawn
+  independently (`fit_last_resort` for a buffer of the picture's own size). A first version
+  derived the whole picture by shifting the clipped fit, which passed for any offset; a mutation
+  (dropping the centring) showed that, and the final tests fail under both axes' mutations.
+- The spec's call "shrink to fit, and crop only in step 6" is reversed by this change.
+
+### Die 3D small sizes and the Insights inset (Oct 30 2026, v0.13.22)
+
+Prompts: "what will i expect to see in a smaller terminal? how much extra CPU activity would it
+add to have a smaller version of this on the main info screen?" The user chose mock B (the
+inset beside the process table), then: "yes, and let's make the viz shrinkable so below 100 x 30
+we provide the best version we can, whether that's clipped, or smaller, or without flags, etc".
+
+Decisions:
+- The scene shrinks so the whole board stays visible.
+- The ladder is in `die3d/tiers.rs`: clouds off below 100 x 30 (`CLOUDS_MIN`), footer two rows
+  at 100 x 30 (`FOOTER_TWO`), one row from 60 x 16 (`FOOTER_ONE`), flags from 60 x 16
+  (`FLAGS_MIN`), history panel from 120 x 37. The scene shrinks down to about 40 x 12
+  (superseded in 0.13.23: see "Die 3D narrow windows").
+- The text summary comes last, only where no scene fits. One line per chip.
+- The inset is `Die3dView::inset(cols, rows)`: one caption row, no keys, no clouds, no panel, and
+  its scene never changes on a trigger. When every board does not fit, it draws the busiest
+  board. Busiest is by the mean load of its chips, and a new board must stay busiest for 10 s
+  (`BUSIEST_HOLD_SECS`) before the inset changes to it.
+- The inset appears when the process area is at least 122 x 16 (`TABLE_MIN_W` 70 + `INSET_W` 52, `INSET_MIN_H` 16).
+  The width was chosen so a two-die board draws a scene: it needs at least 51 x 16.
+  It does not appear on the mock at 150 x 42: several rows of chip cards leave the process area
+  too short. This is a limit, listed in the README.
+- `every_size_draws_without_overflow` and `flags_never_cover_a_drawn_cell_at_any_size` sweep
+  sizes around each threshold. The sweep is a coarse grid plus a window around each threshold,
+  kept under 30 s in a debug build.
+- An inset board change redraws at once with no cut transition.
+
+Costs (release build, `inset_render_cost_report`) at the 52 x 16 inset: 0.058 ms a frame for one
+p150 board, 0.058 ms for eight p150 boards (the busiest board's scene), 0.110 ms for one two-die
+board (p300 x 2 in the fake). At 52 x 22: 0.060 ms and 0.061 ms. The spec's budget was 0.3 ms.
+About 27 cells change per frame for a p150 board (1578 in two seconds; the test ceiling is 1973)
+and 53 for a two-die board (3128; ceiling 3910, 1.25 times the measurement). A full Insights
+frame at 200 x 50 went from 0.18 ms to 0.27 ms with the earlier 42-column inset, and from 0.13 ms
+to 0.21 ms at 150 x 42; those were not re-measured at 52 columns.
+The fake's "p300" is one chip, so a p300 board is two of them. A two-die board needs an inset at
+least 51 x 16 (measured with `fit_pixels` over `board_grid(2)`: 50 x 16 and 51 x 15 do not fit),
+so the 52 x 16 inset draws its scene. The 40 x 12 threshold for the text summary in the full
+view is unchanged. The inset first shipped 42 wide, where p300 boards got the text summary; Task 9
+widened it (ledger Ruling 10).
+
+### Die 3D traffic fronts (Oct 30 2026, v0.13.21)
+
+Prompt: "the braille view is almost uninterpretable as it stands right now... What else can we
+try to make it feel as dimensional as the other view?" The user named height and a sense of
+purpose to the movement as what was missing, and chose to tie the movement to the direction of
+traffic. This version does the movement only. The face shading, edge and shadow ideas for
+height are not built. `tile_heat_flow` in `die3d/scene.rs` sends a front from the PCIe edge
+(the highest die row) inward for inbound traffic and the other way for outbound, half a period
+apart when both flow. With no traffic it is the old `tile_heat` sweep. The redraw tests had
+measured the old sweep in a window where it sits at the die's edge and is cheapest, so they now
+hold the sweep fixed (`SidewaysSweep`), and `traffic_fronts_cost_little_more_than_the_sideways_sweep`
+prices the fronts over the whole cycle. Fronts 4 tiles wide each side cost 1.7 times the sweep
+and failed that test; 2 tiles each side costs 1.23 times. Data for real DRAM-to-core paths
+needs the per-tile counters (separate plan).
+
+### Die 3D flags (Oct 30 2026, v0.13.20)
+
+Prompt: "let's avoid overlaying labels directly over the chip displays in the 3d viz. can we
+pin and flag instead?" The label at each die's centre became a flag: a pin on the die's top
+or bottom corner, a one-cell pole, and the text on open space. `die3d/flags.rs` holds the
+placement. The slab fills the whole board grid, so the text is kept outside the convex hull
+of the grid's corner blocks. Per-die outlines were too small and the first test run showed it. A pole may cross a board to reach open
+space. The test `flags_never_cover_a_drawn_cell_but_the_pin` compares a frame with flags on and
+off and fails if any text lands on a drawn cell. The changed-cell budgets rose a little
+(super scene 0.51 of the old count, up from 0.49).
+
+### Die 3D view (Oct 29 2026, v0.13.19)
+
+Prompt: "what could we learn from dtsunami/tt-baremetal's bhtop and apply to our
+tt-toplike?" The answer became a new view on the `3` key: an isometric picture of each
+Blackhole board, drawn with braille or half-block cells. The design is in
+`docs/superpowers/specs/2026-10-29-die-3d-view-design.md`, the plan in
+`docs/superpowers/plans/2026-10-29-die-3d-view.md` (Tasks 1 to 19), and the later per-tile
+counter idea in `docs/superpowers/plans/2026-10-29-die-3d-tier1-counters.md`.
+
+What we learned from bhtop. It was read and not run. Its code showed that the tt-kmd
+`pcie_perf_counters` files are the PCIe tile's NIU counters, and that a counter word is a
+64-byte flit. That led to the v0.13.18 fix: we had counted 4 bytes per word, had the
+directions swapped, and dropped a sample when a 32-bit counter wrapped.
+
+Findings from hardware (Blackhole p300c, leased through gozer):
+- A 62-word burst read of the NIU counter array returns one register's value repeated across
+  chunks, so posted equals non-posted. Single-word reads work. exalens 0.4.2 still has it. By
+  its code, bhtop's poller uses the burst.
+- A second process can read tile counters while a workload runs. Polling 156 tiles x 2 NoCs
+  x 6 counters, at up to 161 sweeps a second, changed nothing in the workload's throughput
+  (one synthetic matmul loop, 60 s). It was not tested against a real model server. This is
+  why tier 1 is a separate, experimental plan and not part of this release.
+- The braille dots are small in a real terminal font. Half-block is crisper. Taylor chose to
+  keep both and switch with `B`.
+- Idle chips already draw 0.30 of the 125 W limit, so a load trigger on power over the limit
+  could never arm. Activity must be relative to each chip's own idle over ten minutes.
+  Measured during token serving (8 clients, 213 tokens a second, 96 requests): the busy chips
+  drew a mean of 54 and 45 W, peak 68 W; PCIe into the chip averaged 23 MB/s (maximum
+  131 MB/s). The PCIe burst threshold is 50 MB/s, re-arm 10 MB/s, where the first guess was
+  2 GB/s.
+
+Recording lessons. Recording the TUI inside tmux made it look cheaper than it is: tmux adds
+its own green status bar and re-encodes colours and cell updates. VHS (browser-based terminal
+capture) gave mostly stale frames at this redraw rate (about 0.5 MB/s of terminal output), so
+its clip was discarded. What worked: a small Python harness that runs the app on its own
+150 x 42 pty and injects keystrokes on a timer, recorded with asciinema (the cast header's
+size patched to 150 x 42), rendered with agg on a black theme, and converted to MP4 and a
+smaller GIF with ffmpeg. Hold each state about 12 seconds so a viewer can take the view in.
+
+Audience. People who will see this use Konsole and GNOME Terminal. Their fonts, and their
+translucent or tinted backgrounds, shaped the palette, the transparent default and the
+half-block option.
+
+Product owner feedback that shaped it, in order: a more Grayskull palette (purples, pinks,
+greys) and a little transparency; both display types, switchable ("we might have a few
+switches for this view"); a black background; shuffled transitions with an attempt at an
+animated rotate; a caption saying which side the camera looks at, and labels, because four
+dies read as one field; a faster view, clouds moving behind it and a small panel of the
+monitored data over time; and traffic sent to the coder model to see whether the camera
+fires (it did not, which found the relative-load problem above). The purple background in
+one shared clip was the terminal colour used in the recording simulation. The app does not
+paint it.
+
+Decisions worth keeping:
+- Every moving thing is real data, a labelled estimate, or named decoration. The per-tile
+  glow carries "per-tile glow: estimate from chip load". The clouds are decoration (drift from
+  PCIe traffic, brightness from chip load). The history panel is measured data.
+- The footer is built from one table of switches. A new switch is one entry and one key.
+- The caption names the nearest corner, because on a square board two edges tie at every
+  quarter turn.
+- The view area minimum is 100 x 30. The TUI's status bar takes a row, so the terminal
+  minimum is 100 x 31. The history panel needs 120 x 37.
+- Speed: at most 20 redraws a second at rest and 30 in a cut; the tile wave steps 12 times a
+  second; changed cells per frame fell by more than half (release benchmark, 150 x 42
+  braille: 347 to 157 for one board, 358 to 174 for four).
+- Not built: the tier 1 per-tile counters, triggers for a reset, a model load and a GDDR ECC
+  event, a close-view preset, and an automatic half-block switch on wide terminals.
+
+Process. Subagent-driven: one implementer per task, a separate review per task, and a ledger
+of decisions, kept outside the repo, for every gap between the plan and the code. Tasks 12 to 19 were added after the plan, one per round of Taylor's feedback. The
+12 Hz wave step has been judged in recordings only; Taylor is to look at it in Konsole.
