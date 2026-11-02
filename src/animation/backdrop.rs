@@ -139,6 +139,16 @@ pub fn canonical_view(name: &str) -> Option<&'static str> {
     }
 }
 
+/// The name a person reads for `view` in a message: the view's config key,
+/// except `die3d`, which is shown by its display name.
+pub fn view_label(view: &str) -> &str {
+    if view == "die3d" {
+        crate::animation::DIE3D_DISPLAY_NAME
+    } else {
+        view
+    }
+}
+
 /// The backdrop a view draws with its own painter when nothing is set:
 /// the scene in the Inference view, the sky in Training, the clouds in Die
 /// 3D, and none elsewhere.
@@ -273,7 +283,8 @@ pub fn command(arg: &str, view: &str, settings: &mut BackdropSettings) -> (Strin
         let c = settings.choice(view);
         return (
             format!(
-                "backdrop ({view}): {}. {}",
+                "backdrop ({}): {}. {}",
+                view_label(view),
                 choice_name(c),
                 legend_line(c, false)
             ),
@@ -283,7 +294,10 @@ pub fn command(arg: &str, view: &str, settings: &mut BackdropSettings) -> (Strin
     match parse_choice(arg) {
         None => (format!("/backdrop: expected {CHOICES}, got {arg:?}"), true),
         Some(c) => match settings.set(view, c) {
-            Ok(()) => (format!("backdrop ({view}): {}", choice_name(c)), false),
+            Ok(()) => (
+                format!("backdrop ({}): {}", view_label(view), choice_name(c)),
+                false,
+            ),
             Err(e) => (e, true),
         },
     }

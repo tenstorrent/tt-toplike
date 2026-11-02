@@ -323,6 +323,63 @@ fn arcade_switch(
     Some((message, error))
 }
 
+/// How long an informational message that belongs to a view stays on the
+/// status line, in seconds of animation time.
+const VIEW_MESSAGE_SECS: f64 = 4.0;
+
+/// A status-line message that belongs to one view: a layout switch, the
+/// arcade's `c`, the `w` key, a `/backdrop` or `/arcade` reply. It goes
+/// away when that view is left, and an informational one after
+/// [`VIEW_MESSAGE_SECS`]. A global message (rotation, config problems,
+/// `/mode` errors) has no `ViewMessage` and stays as before.
+#[derive(Debug, Clone, PartialEq)]
+struct ViewMessage {
+    /// The message's text, to tell whether `cmd_message` still holds it.
+    text: String,
+    view: DisplayMode,
+    /// The animation time it was shown at.
+    at_s: f64,
+}
+
+impl ViewMessage {
+    /// Tag the message now in `msg` as belonging to `view`.
+    fn tag(msg: &Option<(String, bool)>, view: DisplayMode, now_s: f64) -> Option<ViewMessage> {
+        msg.as_ref().map(|(text, _)| ViewMessage {
+            text: text.clone(),
+            view,
+            at_s: now_s,
+        })
+    }
+}
+
+/// Clear `msg` when it belongs to a view (`tag`) and that view is no
+/// longer `mode`, or when it is informational and older than
+/// [`VIEW_MESSAGE_SECS`] of animation time. An error stays until the next
+/// command. A message the tag does not describe (another message has
+/// replaced it) is left alone and the tag dropped. Called every loop turn,
+/// at the mode-transition choke point.
+fn tidy_view_message(
+    msg: &mut Option<(String, bool)>,
+    tag: &mut Option<ViewMessage>,
+    mode: DisplayMode,
+    now_s: f64,
+) {
+    let Some(t) = tag.as_ref() else {
+        return;
+    };
+    match msg.as_ref() {
+        Some((text, error)) if *text == t.text => {
+            let left = t.view != mode;
+            let old = !*error && now_s - t.at_s >= VIEW_MESSAGE_SECS;
+            if left || old {
+                *msg = None;
+                *tag = None;
+            }
+        }
+        _ => *tag = None,
+    }
+}
+
 /// The Die 3D pan key `code` stands for in `mode`: an arrow key in the Die 3D
 /// view, `None` anywhere else so the arrows keep their other uses.
 fn die3d_pan_for(mode: DisplayMode, code: KeyCode) -> Option<crate::animation::die3d::Die3dKey> {
@@ -1145,6 +1202,11 @@ fn run_app(
     let mut cmd_mode = false;
     let mut cmd_buf = String::new();
     let mut cmd_message: Option<(String, bool)> = crate::config::status_message(loaded_config); // (text, is_error)
+                                                                                                // The view `cmd_message` belongs to, if it belongs to one, and the
+                                                                                                // animation clock its lifetime runs on: the nominal frame time of each
+                                                                                                // tick, so a stalled loop does not age it.
+    let mut cmd_message_view: Option<ViewMessage> = None;
+    let mut message_clock_s = 0.0f64;
 
     // `/remote` discovery picker: boxes from the most recent `/remote` (no-arg)
     // discovery, retained so `/remote <n>` can select by list position. Empty
@@ -1358,6 +1420,7 @@ fn run_app(
             } else {
                 last_data_render = Instant::now();
             }
+            message_clock_s += render_interval.as_secs_f64();
         }
 
         // Whether to redraw this iteration: on the mode's FPS tick, or once
@@ -1979,6 +2042,14 @@ fn run_app(
             }
         } // end if should_tick
 
+        // A message that belongs to a view goes when the view is left, and
+        // an informational one after a few seconds.
+        tidy_view_message(
+            &mut cmd_message,
+            &mut cmd_message_view,
+            display_mode,
+            message_clock_s,
+        );
         // Clear terminal when switching modes to remove artifacts
         if display_mode != prev_display_mode {
             // Single choke point for tearing down the HivemindSweeper engine:
@@ -2735,6 +2806,11 @@ fn run_app(
                                         },
                                         backend.as_ref(),
                                     );
+                                    cmd_message_view = ViewMessage::tag(
+                                        &cmd_message,
+                                        display_mode,
+                                        message_clock_s,
+                                    );
                                     force_redraw = true;
                                 } else if verb == "backdrop" {
                                     // `/backdrop [off|scene|sky|clouds]` for the view
@@ -2750,6 +2826,11 @@ fn run_app(
                                         view_name(display_mode),
                                         &mut backdrop_settings,
                                     ));
+                                    cmd_message_view = ViewMessage::tag(
+                                        &cmd_message,
+                                        display_mode,
+                                        message_clock_s,
+                                    );
                                     force_redraw = true;
                                 } else if crate::animation::die3d::commands::is_command(&verb) {
                                     // A Die 3D setting. It belongs to the open view, so it
@@ -3147,6 +3228,8 @@ fn run_app(
                                     ),
                                     false,
                                 ));
+                                cmd_message_view =
+                                    ViewMessage::tag(&cmd_message, display_mode, message_clock_s);
                             }
                             KeyCode::Char(crate::animation::backdrop::KEY) => {
                                 // The next backdrop for the view on screen, in
@@ -3159,11 +3242,14 @@ fn run_app(
                                 let _ = backdrop_settings.set(view, next);
                                 cmd_message = Some((
                                     format!(
-                                        "backdrop ({view}): {}",
+                                        "backdrop ({}): {}",
+                                        crate::animation::backdrop::view_label(view),
                                         crate::animation::backdrop::choice_name(next)
                                     ),
                                     false,
                                 ));
+                                cmd_message_view =
+                                    ViewMessage::tag(&cmd_message, display_mode, message_clock_s);
                             }
                             // `}` and `{`: the next and previous arcade layout,
                             // in Arcade only (`arcade_step_for` is `None`
@@ -3182,6 +3268,8 @@ fn run_app(
                                     },
                                     backend.as_ref(),
                                 );
+                                cmd_message_view =
+                                    ViewMessage::tag(&cmd_message, display_mode, message_clock_s);
                                 force_redraw = true;
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
@@ -10162,6 +10250,188 @@ mod display_mode_tests {
         ] {
             assert_eq!(die3d_key_for(DisplayMode::Die3d, c), None, "{c}");
         }
+    }
+
+    /// The `{` `}` key arm and `/arcade` both run `arcade_switch`. A switch
+    /// applies the layout's backdrop, lays the arcade out from the new rows,
+    /// and updates it once, so the first frame after it shows the devices
+    /// and services (review S1 and S4). Outside Arcade the keys change
+    /// nothing.
+    #[test]
+    fn a_layout_switch_updates_the_new_arcade_before_it_is_drawn() {
+        use super::{arcade_switch, ArcadeInput, ArcadeSwitch};
+        use crate::animation::arcade_layout::ArcadeConfig;
+        use crate::animation::arcade_presets::{preset, LayoutCycle};
+        use crate::animation::backdrop::{BackdropKind, BackdropSettings};
+        use crate::animation::bus_test_support::Fixed;
+        use crate::animation::ArcadeVisualization;
+        use crate::backend::TelemetryBackend;
+        let b = Fixed::new(2);
+        let mut cycle = LayoutCycle::new(&[], None);
+        let mut settings = BackdropSettings::default();
+        let mut config = ArcadeConfig::default();
+        let mut a = ArcadeVisualization::with_config(120, 40, &config);
+        a.initialize_from_devices(b.devices());
+        a.initialize_topology(&b);
+        for i in 0..3 {
+            a.set_services(crate::workload::inference_server::mock::mock_services(
+                100.0 + i as f32,
+            ));
+            a.update(&b);
+        }
+        let mut arcade = Some(a);
+        let text = |a: &ArcadeVisualization| {
+            a.render(&b)
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                // The clouds fill the blanks between a label's words.
+                .replace(['░', '▒', '▓'], " ")
+        };
+        // Outside Arcade: no change.
+        let none = arcade_switch(
+            ArcadeInput::Key('}'),
+            DisplayMode::Grid,
+            ArcadeSwitch {
+                arcade: &mut arcade,
+                config: &mut config,
+                cycle: &mut cycle,
+                settings: &mut settings,
+            },
+            &b,
+        );
+        assert_eq!(none, None);
+        assert_eq!(cycle.current().name, "classic");
+        // `}` in Arcade: now-serving, its clouds, its rows, a real frame.
+        let (msg, err) = arcade_switch(
+            ArcadeInput::Key('}'),
+            DisplayMode::Arcade,
+            ArcadeSwitch {
+                arcade: &mut arcade,
+                config: &mut config,
+                cycle: &mut cycle,
+                settings: &mut settings,
+            },
+            &b,
+        )
+        .expect("a layout key");
+        assert!(
+            !err && msg.starts_with("layout: now-serving (2/8)"),
+            "{msg}"
+        );
+        assert_eq!(settings.choice("arcade"), Some(BackdropKind::Clouds));
+        let ns = preset("now-serving").unwrap();
+        let a = arcade.as_ref().unwrap();
+        assert_eq!(config.rows, ns.rows);
+        assert_eq!(a.config().rows, ns.rows);
+        assert_eq!(a.backdrop().kind(), Some(BackdropKind::Clouds));
+        let t = text(a);
+        assert!(!t.contains("no Tenstorrent device found"), "{t}");
+        assert!(!t.contains("0 of 0 models"), "{t}");
+        // `/arcade layout classic` goes back; the backdrop stays (classic
+        // sets none).
+        let (msg, err) = arcade_switch(
+            ArcadeInput::Command("layout classic"),
+            DisplayMode::Arcade,
+            ArcadeSwitch {
+                arcade: &mut arcade,
+                config: &mut config,
+                cycle: &mut cycle,
+                settings: &mut settings,
+            },
+            &b,
+        )
+        .unwrap();
+        assert!(!err && msg.starts_with("layout: classic (1/8)"), "{msg}");
+        assert_eq!(arcade.as_ref().unwrap().config().rows, cycle.current().rows);
+        assert_eq!(
+            arcade.as_ref().unwrap().backdrop().kind(),
+            Some(BackdropKind::Clouds)
+        );
+    }
+
+    /// A layout message belongs to the arcade: it goes when the arcade is
+    /// left and after its lifetime; a global message stays; an error in its
+    /// own view stays until the next command. The clock is a number, so no
+    /// wall time is read.
+    #[test]
+    fn a_view_message_goes_with_its_view_and_its_lifetime() {
+        use super::{
+            arcade_switch, tidy_view_message, ArcadeInput, ArcadeSwitch, ViewMessage,
+            VIEW_MESSAGE_SECS,
+        };
+        use crate::animation::arcade_layout::ArcadeConfig;
+        use crate::animation::arcade_presets::LayoutCycle;
+        use crate::animation::backdrop::BackdropSettings;
+        use crate::animation::bus_test_support::Fixed;
+        let b = Fixed::new(2);
+        let mut cycle = LayoutCycle::new(&[], None);
+        let mut settings = BackdropSettings::default();
+        let mut config = ArcadeConfig::default();
+        let mut arcade = None;
+        let mut msg = arcade_switch(
+            ArcadeInput::Key('}'),
+            DisplayMode::Arcade,
+            ArcadeSwitch {
+                arcade: &mut arcade,
+                config: &mut config,
+                cycle: &mut cycle,
+                settings: &mut settings,
+            },
+            &b,
+        );
+        let mut tag = ViewMessage::tag(&msg, DisplayMode::Arcade, 10.0);
+        // Still in the arcade, inside the lifetime: it stays.
+        tidy_view_message(&mut msg, &mut tag, DisplayMode::Arcade, 11.0);
+        assert!(msg.as_ref().unwrap().0.starts_with("layout: now-serving"));
+        // Another view: it goes.
+        tidy_view_message(&mut msg, &mut tag, DisplayMode::Grid, 11.0);
+        assert_eq!(msg, None);
+        // A global message (no tag) survives a view change.
+        let mut global = Some(("rotation: on".to_string(), false));
+        let mut none = None;
+        tidy_view_message(&mut global, &mut none, DisplayMode::Grid, 99.0);
+        assert!(global.is_some());
+        // A tag left by an older message does not clear a newer global one.
+        let mut stale = ViewMessage::tag(
+            &Some(("backdrop (grid): sky".to_string(), false)),
+            DisplayMode::Grid,
+            0.0,
+        );
+        tidy_view_message(&mut global, &mut stale, DisplayMode::Arcade, 99.0);
+        assert!(global.is_some() && stale.is_none());
+        // The lifetime clears an informational message and keeps an error.
+        let mut info = Some(("backdrop (grid): sky".to_string(), false));
+        let mut t = ViewMessage::tag(&info, DisplayMode::Grid, 1.0);
+        tidy_view_message(
+            &mut info,
+            &mut t,
+            DisplayMode::Grid,
+            1.0 + VIEW_MESSAGE_SECS - 0.1,
+        );
+        assert!(info.is_some());
+        tidy_view_message(
+            &mut info,
+            &mut t,
+            DisplayMode::Grid,
+            1.0 + VIEW_MESSAGE_SECS,
+        );
+        assert_eq!(info, None);
+        let mut err = Some((
+            "/backdrop: expected off, scene, sky or clouds".to_string(),
+            true,
+        ));
+        let mut t = ViewMessage::tag(&err, DisplayMode::Grid, 1.0);
+        tidy_view_message(&mut err, &mut t, DisplayMode::Grid, 1000.0);
+        assert!(err.is_some(), "an error stays in its view");
+        tidy_view_message(&mut err, &mut t, DisplayMode::Starfield, 1000.0);
+        assert_eq!(err, None, "and goes with it");
     }
 
     /// `}` and `{` step the arcade's layout in Arcade and do nothing in any
