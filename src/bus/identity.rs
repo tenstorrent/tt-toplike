@@ -20,10 +20,14 @@
 //!   not, it is dropped and counted in [`IdentityMap::dropped`].
 
 use crate::models::device::{Architecture, Device};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tt_toplike_bus::{EntityKey, Payload};
+
+/// Most payloads kept in `held`, and separately in `ready`. When a list is
+/// full the oldest entry is dropped and counted in `dropped()`.
+pub const MAX_PENDING: usize = 1024;
 
 /// What the map remembers about one chip, for later use by sources.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,14 +47,26 @@ pub struct PendingResolved {
     pub payload: Payload,
 }
 
+/// Push onto a list capped at [`MAX_PENDING`], dropping the oldest entry when
+/// full. Returns how many entries were dropped (0 or 1).
+fn push_bounded<T>(list: &mut VecDeque<T>, item: T) -> u64 {
+    let mut dropped = 0;
+    if list.len() >= MAX_PENDING {
+        list.pop_front();
+        dropped = 1;
+    }
+    list.push_back(item);
+    dropped
+}
+
 #[derive(Default)]
 struct State {
     by_index: HashMap<usize, EntityKey>,
     info: HashMap<EntityKey, ChipInfo>,
     /// Payloads waiting for their index to appear, held for one `refresh`.
-    held: Vec<(usize, Payload)>,
+    held: VecDeque<(usize, Payload)>,
     /// Payloads that resolved at the last `refresh`, waiting for pickup.
-    ready: Vec<PendingResolved>,
+    ready: VecDeque<PendingResolved>,
 }
 
 /// Shared map from device index to chip key. Safe to share as
@@ -117,10 +133,15 @@ impl IdentityMap {
         let mut dropped = 0u64;
         for (index, payload) in held {
             match by_index.get(&index) {
-                Some(key) => st.ready.push(PendingResolved {
-                    key: key.clone(),
-                    payload,
-                }),
+                Some(key) => {
+                    dropped += push_bounded(
+                        &mut st.ready,
+                        PendingResolved {
+                            key: key.clone(),
+                            payload,
+                        },
+                    )
+                }
                 None => dropped += 1,
             }
         }
@@ -143,13 +164,27 @@ impl IdentityMap {
     }
 
     /// Keep a payload whose index does not resolve yet, for one `refresh`.
+    ///
+    /// The index is checked again under the write lock. A source can look up
+    /// an index, miss, lose a race to `refresh`, and only then call this; if
+    /// the index resolves by now the payload goes straight to the pickup list.
+    /// Both lists are capped at [`MAX_PENDING`]; the oldest entry is dropped
+    /// and counted when one is full.
     pub fn hold_unresolved(&self, index: usize, payload: Payload) {
-        self.write().held.push((index, payload));
+        let mut st = self.write();
+        let dropped = match st.by_index.get(&index).cloned() {
+            Some(key) => push_bounded(&mut st.ready, PendingResolved { key, payload }),
+            None => push_bounded(&mut st.held, (index, payload)),
+        };
+        drop(st);
+        if dropped > 0 {
+            self.dropped.fetch_add(dropped, Ordering::Relaxed);
+        }
     }
 
     /// Take the payloads that resolved at the last `refresh`.
     pub fn resolve_pending(&self) -> Vec<PendingResolved> {
-        std::mem::take(&mut self.write().ready)
+        std::mem::take(&mut self.write().ready).into()
     }
 
     /// Held payloads dropped because their index never resolved
@@ -257,6 +292,54 @@ mod tests {
     }
 
     #[test]
+    fn held_list_is_bounded_and_keeps_the_newest() {
+        let m = IdentityMap::new();
+        for i in 0..5000 {
+            m.hold_unresolved(9, gap(&i.to_string()));
+        }
+        let st = m.read();
+        assert!(st.held.len() <= MAX_PENDING);
+        assert_eq!(m.dropped(), (5000 - MAX_PENDING) as u64);
+        assert_eq!(
+            st.held.front().unwrap().1,
+            gap(&(5000 - MAX_PENDING).to_string())
+        );
+        assert_eq!(st.held.back().unwrap().1, gap("4999"));
+    }
+
+    #[test]
+    fn ready_list_is_bounded_and_keeps_the_newest() {
+        let m = IdentityMap::new();
+        m.refresh(&[dev(0, "n150", A)]);
+        // Each hold resolves at once, and nobody calls resolve_pending.
+        for i in 0..5000 {
+            m.hold_unresolved(0, gap(&i.to_string()));
+        }
+        assert_eq!(m.dropped(), (5000 - MAX_PENDING) as u64);
+        let got = m.resolve_pending();
+        assert_eq!(got.len(), MAX_PENDING);
+        assert_eq!(got[0].payload, gap(&(5000 - MAX_PENDING).to_string()));
+        assert_eq!(got.last().unwrap().payload, gap("4999"));
+    }
+
+    #[test]
+    fn hold_after_the_index_resolved_goes_straight_to_ready() {
+        let m = IdentityMap::new();
+        m.refresh(&[dev(0, "n150", A)]);
+        assert_eq!(m.key_for_index(1), None); // the source's lookup
+        m.refresh(&[dev(0, "n150", A), dev(1, "n150", B)]); // refresh races in
+        m.hold_unresolved(1, gap("late")); // the source's hold
+        assert_eq!(
+            m.resolve_pending(),
+            vec![PendingResolved {
+                key: EntityKey::chip(B),
+                payload: gap("late")
+            }]
+        );
+        assert_eq!(m.dropped(), 0);
+    }
+
+    #[test]
     fn concurrent_refresh_and_lookup_never_return_a_wrong_key() {
         let m = Arc::new(IdentityMap::new());
         let (ca, cb, cc) = ("0000:0a:00.0", "0000:0b:00.0", "0000:0c:00.0");
@@ -281,6 +364,9 @@ mod tests {
                     // Index 0 is always one of the swapping pair.
                     let k0 = m.key_for_index(0).expect("index 0 always listed");
                     assert!(k0 == EntityKey::chip(ca) || k0 == EntityKey::chip(cb));
+                    // The info for that key names the same chip.
+                    let info = m.info_for(&k0).expect("info for a listed key");
+                    assert_eq!(EntityKey::chip(&info.bus_id), k0);
                     // Index 2 never moves and must never vanish mid-refresh.
                     assert_eq!(m.key_for_index(2), Some(EntityKey::chip(cc)));
                     // Index 9 is never listed.
