@@ -45,7 +45,8 @@ fn main() {
     // --check-config: print every problem in the config files and exit,
     // non-zero when there is one. Needs no backend and no TTY.
     if cli.check_config {
-        let loaded = tt_toplike::config::load_config();
+        let mut loaded = tt_toplike::config::load_config();
+        tt_toplike::config::choose_layout(&mut loaded, cli.arcade_layout.as_deref());
         let mut out = std::io::stdout().lock();
         let code = tt_toplike::config::write_check_report(&loaded, &mut out);
         std::process::exit(code);

@@ -364,6 +364,7 @@ mod tests {
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             check_config: false,
+            arcade_layout: None,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,

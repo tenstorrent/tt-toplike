@@ -283,7 +283,7 @@ impl ArcadeVisualization {
     /// up a new arcade (devices, sensitivity, topology). Everything that
     /// does not depend on the layout is kept: the hero's place, target and
     /// trail (scaled to the new size), its expression flags and speed, the
-    /// cloudfield setting, the frame count and the clock, the power baseline
+    /// backdrop (kind, clock and signals), the frame count and the clock, the power baseline
     /// and peak, the duel, the activity lanes and their pulse counts, the
     /// service rows and training run of the last tick, and the bus state.
     /// Keeping the bus state means events already seen before the switch
@@ -334,7 +334,10 @@ impl ArcadeVisualization {
         next.hero_undervolt = self.hero_undervolt;
         next.hero_harvested = self.hero_harvested;
         next.hero_gddr_temp = self.hero_gddr_temp;
-        next.cloudfield = self.cloudfield;
+        // The backdrop moves over whole: its kind, its clock and the
+        // signals it last read, so a switch does not restart it.
+        next.backdrop = self.backdrop;
+        next.backdrop_signals = self.backdrop_signals;
         next.frame = self.frame;
         next.clock_s = self.clock_s;
         next.baseline = self.baseline;

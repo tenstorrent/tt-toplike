@@ -155,6 +155,16 @@ pub struct LoadedConfig {
     pub notes: Vec<ConfigProblem>,
     /// The files that were read (none, or the shared config file).
     pub files: Vec<PathBuf>,
+    /// The file's named arcade layouts, in the order `}` steps through
+    /// them: `config` (the `[[arcade.row]]` tables) when the file has them
+    /// and `[arcade]` has no problem, then each `[[arcade.layouts]]` with no
+    /// problem, in file order. The presets follow them in the cycle
+    /// (`arcade_presets::LayoutCycle`); they are not listed here.
+    pub layouts: Vec<crate::animation::arcade_presets::NamedLayout>,
+    /// The layout to start with: `[arcade] layout = "name"`, or the
+    /// `--arcade-layout` flag through [`choose_layout`]. Always a known
+    /// name; `None` starts with the first layout of the cycle.
+    pub start_layout: Option<String>,
 }
 
 /// The status line's text for `problems`: the first problem, and how many
@@ -217,19 +227,43 @@ pub fn write_check_report(loaded: &LoadedConfig, out: &mut dyn std::io::Write) -
             if a.rows.len() == 1 { "" } else { "s" },
             if a.cloudfield { "on" } else { "off" }
         )?;
-        for (i, r) in a.rows.iter().enumerate() {
-            let panels: Vec<String> = r
-                .panels
-                .iter()
-                .map(|p| format!("{} x{}", p.view.key(), p.width))
-                .collect();
-            writeln!(
-                out,
-                "  row {} (height {}): {}",
-                i + 1,
-                r.height,
-                panels.join(", ")
-            )?;
+        // Every layout `{` and `}` step through, with its rows.
+        let cycle = crate::animation::arcade_presets::LayoutCycle::new(
+            &loaded.layouts,
+            loaded.start_layout.as_deref(),
+        );
+        writeln!(
+            out,
+            "layouts, in the order }} steps through them (* starts):"
+        )?;
+        for (n, l) in cycle.layouts().iter().enumerate() {
+            let mark = if n == cycle.index() { '*' } else { ' ' };
+            if l.description.is_empty() {
+                writeln!(out, "{mark} {}", l.name)?;
+            } else {
+                writeln!(out, "{mark} {}  {}", l.name, l.description)?;
+            }
+            if let Some(on) = l.cloudfield {
+                writeln!(
+                    out,
+                    "    cloudfield {} when selected",
+                    if on { "on" } else { "off" }
+                )?;
+            }
+            for (i, r) in l.rows.iter().enumerate() {
+                let panels: Vec<String> = r
+                    .panels
+                    .iter()
+                    .map(|p| format!("{} x{}", p.view.key(), p.width))
+                    .collect();
+                writeln!(
+                    out,
+                    "    row {} (height {}): {}",
+                    i + 1,
+                    r.height,
+                    panels.join(", ")
+                )?;
+            }
         }
         // The backdrops: the default, each view set, and the views that
         // have one of their own.
@@ -434,6 +468,8 @@ pub fn load_from(sources: &[(PathBuf, String)]) -> LoadedConfig {
     let mut backdrop = crate::animation::backdrop::BackdropConfig::default();
     let mut rows: Option<Vec<crate::animation::arcade_layout::RowSpec>> = None;
     let mut arcade_bad = false;
+    let mut layouts: Option<Vec<crate::animation::arcade_presets::NamedLayout>> = None;
+    let mut start: Option<String> = None;
     for (path, text) in sources {
         out.files.push(path.clone());
         let first_problem = out.problems.len();
@@ -490,7 +526,6 @@ pub fn load_from(sources: &[(PathBuf, String)]) -> LoadedConfig {
             Err(e) => report(e.span(), one_line(e.message())),
         }
         if let Some(item) = top.get("arcade") {
-            let before = out.problems.len();
             let mut arcade_report = |span: Option<std::ops::Range<usize>>, message: String| {
                 out.problems.push(ConfigProblem {
                     file: path.clone(),
@@ -499,10 +534,14 @@ pub fn load_from(sources: &[(PathBuf, String)]) -> LoadedConfig {
                 });
             };
             let parsed = parse_arcade(item, &mut arcade_report);
-            if out.problems.len() > before {
+            // The old rule holds for everything in `[arcade]` but the named
+            // layouts and the start name: a problem there gives the whole
+            // default arcade. A problem in one `[[arcade.layouts]]` drops
+            // only that layout (it is left out of `parsed.layouts`).
+            if parsed.core_bad {
                 arcade_bad = true;
             }
-            if let Some(c) = parsed.0 {
+            if let Some(c) = parsed.cloudfield {
                 cloudfield = Some(c);
                 let line = item
                     .as_table_like()
@@ -511,8 +550,34 @@ pub fn load_from(sources: &[(PathBuf, String)]) -> LoadedConfig {
                     .map(|sp| line_of(text, sp.start));
                 cloudfield_at = Some((path.clone(), line));
             }
-            if let Some(r) = parsed.1 {
+            let has_rows = parsed.rows.is_some();
+            if let Some(r) = parsed.rows {
                 rows = Some(r);
+            }
+            if let Some(l) = parsed.layouts {
+                layouts = Some(l);
+            }
+            if let Some((name, span)) = parsed.start {
+                // Checked against the layouts this file gives.
+                let mut file = Vec::new();
+                if has_rows && !arcade_bad {
+                    file.push(config_layout(Vec::new()));
+                }
+                file.extend(layouts.iter().flatten().cloned());
+                let cycle = crate::animation::arcade_presets::LayoutCycle::new(&file, None);
+                if cycle.find(&name).is_some() {
+                    start = Some(name);
+                } else {
+                    start = None;
+                    arcade_report(
+                        span,
+                        format!(
+                            "{}; the arcade starts with `{}`",
+                            cycle.unknown(&name),
+                            cycle.current().name
+                        ),
+                    );
+                }
             }
         }
         if let Some(item) = top.get("backdrop") {
@@ -551,11 +616,59 @@ pub fn load_from(sources: &[(PathBuf, String)]) -> LoadedConfig {
             arcade.cloudfield = c;
         }
         if let Some(r) = rows {
+            out.layouts.push(config_layout(r.clone()));
             arcade.rows = r;
         }
     }
     out.arcade = arcade;
+    out.layouts.extend(layouts.unwrap_or_default());
+    // A start name that was valid for its file is still valid here, unless
+    // a later problem took the `config` layout away.
+    out.start_layout = start.filter(|n| {
+        crate::animation::arcade_presets::LayoutCycle::new(&out.layouts, None)
+            .find(n)
+            .is_some()
+    });
     out
+}
+
+/// The `[[arcade.row]]` tables as the layout named `config`.
+fn config_layout(
+    rows: Vec<crate::animation::arcade_layout::RowSpec>,
+) -> crate::animation::arcade_presets::NamedLayout {
+    crate::animation::arcade_presets::NamedLayout {
+        name: crate::animation::arcade_presets::CONFIG_LAYOUT.into(),
+        description: "the [[arcade.row]] tables in config.toml".into(),
+        rows,
+        // The file's `[arcade] cloudfield` is the session's starting
+        // setting already.
+        cloudfield: None,
+    }
+}
+
+/// Start with the layout `name` from `--arcade-layout`, which wins over
+/// `[arcade] layout`. An unknown name is a problem (with `--arcade-layout`
+/// in place of a file) and the arcade starts with the first layout of the
+/// cycle. `None` leaves `loaded` as it is.
+pub fn choose_layout(loaded: &mut LoadedConfig, name: Option<&str>) {
+    let Some(name) = name else {
+        return;
+    };
+    let cycle = crate::animation::arcade_presets::LayoutCycle::new(&loaded.layouts, None);
+    if cycle.find(name).is_some() {
+        loaded.start_layout = Some(name.to_string());
+    } else {
+        loaded.start_layout = None;
+        loaded.problems.push(ConfigProblem {
+            file: PathBuf::from("--arcade-layout"),
+            line: None,
+            message: format!(
+                "{}; the arcade starts with `{}`",
+                cycle.unknown(name),
+                cycle.current().name
+            ),
+        });
+    }
 }
 
 /// The 1-based line of byte `offset` in `text`.
@@ -570,71 +683,297 @@ fn line_of(text: &str, offset: usize) -> usize {
 /// A problem's place and message.
 type Report<'a> = dyn FnMut(Option<std::ops::Range<usize>>, String) + 'a;
 
-/// The `[arcade]` table: its `cloudfield` and its rows, each `None` when not
-/// set or not valid. Every problem goes to `report`.
-fn parse_arcade(
+/// What the `[arcade]` table holds. Each part is `None` when not set or
+/// not valid.
+#[derive(Default)]
+struct ArcadeParsed {
+    cloudfield: Option<bool>,
+    /// The `[[arcade.row]]` tables.
+    rows: Option<Vec<crate::animation::arcade_layout::RowSpec>>,
+    /// The `[[arcade.layouts]]` with no problem, in file order; `Some` when
+    /// the key is there.
+    layouts: Option<Vec<crate::animation::arcade_presets::NamedLayout>>,
+    /// `layout = "name"` and where it is, not yet checked against the
+    /// layouts.
+    start: Option<(String, Option<std::ops::Range<usize>>)>,
+    /// A problem outside the named layouts and the start name.
+    core_bad: bool,
+}
+
+/// The `[arcade]` table. Every problem goes to `report`.
+fn parse_arcade(item: &toml_edit::Item, report: &mut Report<'_>) -> ArcadeParsed {
+    let mut out = ArcadeParsed::default();
+    // Problems are collected here first, so the core ones can be told from
+    // the per-layout ones, then all go to `report` at the end.
+    let mut probs: Vec<(Option<std::ops::Range<usize>>, String)> = Vec::new();
+    out.core_bad = parse_arcade_into(item, &mut out, &mut probs);
+    for (span, m) in probs {
+        report(span, m);
+    }
+    out
+}
+
+/// The body of [`parse_arcade`]. Returns whether there is a core problem.
+fn parse_arcade_into(
     item: &toml_edit::Item,
-    report: &mut Report<'_>,
-) -> (
-    Option<bool>,
-    Option<Vec<crate::animation::arcade_layout::RowSpec>>,
-) {
-    use crate::animation::arcade_layout::{PanelSpec, RowSpec, View};
+    out: &mut ArcadeParsed,
+    probs: &mut Vec<(Option<std::ops::Range<usize>>, String)>,
+) -> bool {
     let Some(table) = item.as_table_like() else {
-        report(item.span(), "`arcade` must be a table: [arcade]".into());
-        return (None, None);
+        probs.push((item.span(), "`arcade` must be a table: [arcade]".into()));
+        return true;
     };
+    let mut core = 0usize;
     for (k, _) in table.iter() {
-        if !["cloudfield", "row"].contains(&k) {
+        if !["cloudfield", "row", "layout", "layouts"].contains(&k) {
             let span = table.get_key_value(k).and_then(|(key, _)| key.span());
-            report(
+            probs.push((
                 span,
-                format!("unknown key `arcade.{k}` (expected cloudfield or row)"),
-            );
+                format!("unknown key `arcade.{k}` (expected cloudfield, row, layout or layouts)"),
+            ));
+            core += 1;
         }
     }
-    let cloudfield = match table.get("cloudfield") {
+    out.cloudfield = match table.get("cloudfield") {
         None => None,
         Some(v) => match v.as_bool() {
             Some(b) => Some(b),
             None => {
-                report(v.span(), "`arcade.cloudfield` must be true or false".into());
+                probs.push((v.span(), "`arcade.cloudfield` must be true or false".into()));
+                core += 1;
                 None
             }
         },
     };
-    let Some(row_item) = table.get("row") else {
-        return (cloudfield, None);
+    if let Some(row_item) = table.get("row") {
+        let before = probs.len();
+        out.rows = parse_rows(row_item, "arcade.row", &mut |s, m| probs.push((s, m)));
+        core += probs.len() - before;
+    }
+    // The start choice. `[[arcade.layout]]` (singular) is a likely slip for
+    // `[[arcade.layouts]]`, so it gets its own message.
+    if let Some(v) = table.get("layout") {
+        match v.as_str() {
+            Some(name) => out.start = Some((name.to_string(), v.span())),
+            None if v.is_array_of_tables() => probs.push((
+                v.as_array_of_tables()
+                    .and_then(|a| a.iter().next())
+                    .and_then(|t| t.span())
+                    .or(v.span()),
+                "`arcade.layout` names the layout to start with, such as layout = \"deck\"; write your own layouts as [[arcade.layouts]]".into(),
+            )),
+            None => probs.push((
+                v.span(),
+                "`arcade.layout` must be a layout name, such as layout = \"deck\"".into(),
+            )),
+        }
+    }
+    if let Some(v) = table.get("layouts") {
+        out.layouts = Some(parse_layouts(v, probs));
+    }
+    core > 0
+}
+
+/// The `[[arcade.layouts]]` tables that have no problem, in file order.
+/// Every problem goes to `probs`; a layout with one is left out.
+fn parse_layouts(
+    item: &toml_edit::Item,
+    probs: &mut Vec<(Option<std::ops::Range<usize>>, String)>,
+) -> Vec<crate::animation::arcade_presets::NamedLayout> {
+    use crate::animation::arcade_presets::{
+        is_reserved, name_problem, preset, NamedLayout, CONFIG_LAYOUT, MAX_DESCRIPTION,
     };
-    let row_tables: Vec<(&dyn toml_edit::TableLike, Option<std::ops::Range<usize>>)> =
-        match row_item {
-            toml_edit::Item::ArrayOfTables(a) => a
-                .iter()
-                .map(|t| (t as &dyn toml_edit::TableLike, t.span()))
-                .collect(),
-            _ => match row_item.as_array() {
-                Some(arr) => {
-                    let mut v = Vec::new();
-                    for e in arr.iter() {
-                        match e.as_inline_table() {
-                            Some(t) => v.push((t as &dyn toml_edit::TableLike, e.span())),
-                            None => report(e.span(), "each `arcade.row` must be a table".into()),
-                        }
-                    }
-                    v
-                }
+    let Some(tables) = tables_of(item) else {
+        probs.push((
+            item.span(),
+            "`arcade.layouts` must be a list of layouts: [[arcade.layouts]]".into(),
+        ));
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    // Every name given, valid or not, so a second one is reported.
+    let mut names: Vec<String> = Vec::new();
+    for (i, (t, span)) in tables.into_iter().enumerate() {
+        let n = i + 1;
+        let before = probs.len();
+        for (k, _) in t.iter() {
+            if !["name", "description", "row", "cloudfield"].contains(&k) {
+                let ks = t.get_key_value(k).and_then(|(key, _)| key.span());
+                probs.push((
+                    ks,
+                    format!(
+                        "unknown key `{k}` in layout {n} (expected name, description, cloudfield or row)"
+                    ),
+                ));
+            }
+        }
+        let name = match t.get("name") {
+            None => {
+                probs.push((span.clone(), format!("layout {n} has no `name`")));
+                None
+            }
+            Some(v) => match v.as_str() {
                 None => {
-                    report(
-                        row_item.span(),
-                        "`arcade.row` must be a list of rows: [[arcade.row]]".into(),
-                    );
-                    return (cloudfield, None);
+                    probs.push((v.span(), format!("layout {n}: `name` must be a string")));
+                    None
+                }
+                Some(name) => {
+                    let problem = if let Some(p) = name_problem(name) {
+                        Some(p)
+                    } else if name.eq_ignore_ascii_case(CONFIG_LAYOUT) {
+                        Some("is kept for the [[arcade.row]] tables".to_string())
+                    } else if is_reserved(name) {
+                        Some("is a word of /arcade layout; choose another".to_string())
+                    } else if preset(name).is_some() {
+                        Some("is a built-in layout; choose another".to_string())
+                    } else if names.iter().any(|m| m.eq_ignore_ascii_case(name)) {
+                        Some("is used twice; each layout needs its own name".to_string())
+                    } else {
+                        None
+                    };
+                    names.push(name.to_string());
+                    match problem {
+                        Some(p) => {
+                            probs.push((v.span(), format!("layout {n}: the name `{name}` {p}")));
+                            None
+                        }
+                        None => Some(name.to_string()),
+                    }
                 }
             },
         };
+        // Messages about the rest name the layout when its name is good.
+        let ctx = match &name {
+            Some(name) => format!("layout `{name}`"),
+            None => format!("layout {n}"),
+        };
+        let description = match t.get("description") {
+            None => String::new(),
+            Some(v) => match v.as_str() {
+                None => {
+                    probs.push((v.span(), format!("{ctx}: `description` must be a string")));
+                    String::new()
+                }
+                Some(d) => {
+                    if d.chars().count() > MAX_DESCRIPTION {
+                        probs.push((
+                            v.span(),
+                            format!(
+                                "{ctx}: the description is longer than {MAX_DESCRIPTION} characters"
+                            ),
+                        ));
+                    } else if d.chars().any(char::is_control) {
+                        probs.push((
+                            v.span(),
+                            format!("{ctx}: the description has a control character"),
+                        ));
+                    }
+                    d.to_string()
+                }
+            },
+        };
+        // The cloudfield this layout sets when selected; none leaves the
+        // current setting alone (`NamedLayout::cloudfield`).
+        let cloudfield = match t.get("cloudfield") {
+            None => None,
+            Some(v) => match v.as_bool() {
+                Some(b) => Some(b),
+                None => {
+                    probs.push((
+                        v.span(),
+                        format!("{ctx}: `cloudfield` must be true or false"),
+                    ));
+                    None
+                }
+            },
+        };
+        let rows = match t.get("row") {
+            None => {
+                probs.push((
+                    span.clone(),
+                    format!("{ctx} has no rows: give it at least one [[arcade.layouts.row]]"),
+                ));
+                None
+            }
+            Some(r) => parse_rows(r, "arcade.layouts.row", &mut |s, m| {
+                probs.push((s, format!("{ctx}: {m}")))
+            }),
+        };
+        if probs.len() == before {
+            if let (Some(name), Some(rows)) = (name, rows) {
+                out.push(NamedLayout {
+                    name,
+                    description,
+                    rows,
+                    cloudfield,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// A table and where it is.
+type Spanned<'a> = (&'a dyn toml_edit::TableLike, Option<std::ops::Range<usize>>);
+
+/// The tables of an array of tables (`[[x]]`) or of an array of inline
+/// tables (`x = [{ ... }]`). `None` when `item` is neither kind of array.
+/// An array entry that is not a table is left out; [`parse_rows`] reports it.
+fn tables_of(item: &toml_edit::Item) -> Option<Vec<Spanned<'_>>> {
+    match item {
+        toml_edit::Item::ArrayOfTables(a) => Some(
+            a.iter()
+                .map(|t| (t as &dyn toml_edit::TableLike, t.span()))
+                .collect(),
+        ),
+        _ => item.as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    e.as_inline_table()
+                        .map(|t| (t as &dyn toml_edit::TableLike, e.span()))
+                })
+                .collect()
+        }),
+    }
+}
+
+/// The rows of a `[[<key>]]` list (`arcade.row`, or `arcade.layouts.row`
+/// inside a layout). `None` when the list is not a list or has no rows.
+/// Every problem goes to `report`; a row or panel with one is left out.
+fn parse_rows(
+    row_item: &toml_edit::Item,
+    key: &str,
+    report: &mut Report<'_>,
+) -> Option<Vec<crate::animation::arcade_layout::RowSpec>> {
+    use crate::animation::arcade_layout::{PanelSpec, RowSpec, View};
+    let row_tables: Vec<Spanned<'_>> = match row_item {
+        toml_edit::Item::ArrayOfTables(a) => a
+            .iter()
+            .map(|t| (t as &dyn toml_edit::TableLike, t.span()))
+            .collect(),
+        _ => match row_item.as_array() {
+            Some(arr) => {
+                let mut v = Vec::new();
+                for e in arr.iter() {
+                    match e.as_inline_table() {
+                        Some(t) => v.push((t as &dyn toml_edit::TableLike, e.span())),
+                        None => report(e.span(), format!("each `{key}` must be a table")),
+                    }
+                }
+                v
+            }
+            None => {
+                report(
+                    row_item.span(),
+                    format!("`{key}` must be a list of rows: [[{key}]]"),
+                );
+                return None;
+            }
+        },
+    };
     if row_tables.is_empty() {
-        report(row_item.span(), "`arcade.row` has no rows".into());
-        return (cloudfield, None);
+        report(row_item.span(), format!("`{key}` has no rows"));
+        return None;
     }
     let mut rows = Vec::new();
     let mut seen: Vec<View> = Vec::new();
@@ -754,7 +1093,7 @@ fn parse_arcade(
             rows.push(RowSpec { height, panels });
         }
     }
-    (cloudfield, Some(rows))
+    Some(rows)
 }
 
 /// The `[backdrop]` table: `default` and `[backdrop.views]`, into `cfg`. A
@@ -1158,7 +1497,7 @@ panels = [{ view = "flow" }, { view = "training" }, { view = "inference" }]
             p,
             vec![
                 "c.toml:1: unknown key `colour`",
-                "c.toml:3: unknown key `arcade.clouds` (expected cloudfield or row)",
+                "c.toml:3: unknown key `arcade.clouds` (expected cloudfield, row, layout or layouts)",
                 "c.toml:5: unknown key `heigth` in row 1 (expected height or panels)",
                 "c.toml:6: unknown key `wide` in row 1 panel 1 (expected view or width)",
             ]
@@ -1247,7 +1586,7 @@ panels = [{ view = "flow" }, { view = "training" }, { view = "inference" }]
         let p = problems(&[("/x/config.toml", "[arcade]\nnope = 1\n")]);
         assert_eq!(
             p,
-            vec!["/x/config.toml:2: unknown key `arcade.nope` (expected cloudfield or row)"]
+            vec!["/x/config.toml:2: unknown key `arcade.nope` (expected cloudfield, row, layout or layouts)"]
         );
     }
 
@@ -1654,5 +1993,336 @@ panels = [{ view = "flow" }, { view = "training" }, { view = "inference" }]
             "a problem first"
         );
         assert_eq!(status_message(&load(&[])), None);
+    }
+
+    // ---- Named layouts ---------------------------------------------------
+
+    use crate::animation::arcade_presets::{presets, LayoutCycle};
+
+    const LAYOUTS: &str = r#"
+[arcade]
+layout = "tall"
+
+[[arcade.layouts]]
+name = "tall"
+description = "the castle over the flow"
+
+[[arcade.layouts.row]]
+height = 3
+panels = [{ view = "castle" }]
+
+[[arcade.layouts.row]]
+panels = [{ view = "flow" }]
+
+[[arcade.layouts]]
+name = "solo"
+
+[[arcade.layouts.row]]
+panels = [{ view = "starfield" }]
+"#;
+
+    fn layout_names(l: &LoadedConfig) -> Vec<String> {
+        l.layouts.iter().map(|x| x.name.clone()).collect()
+    }
+
+    #[test]
+    fn user_layouts_load_in_file_order_with_the_start_choice() {
+        let l = load(&[("c.toml", LAYOUTS)]);
+        assert!(l.problems.is_empty(), "{:?}", l.problems);
+        assert_eq!(layout_names(&l), vec!["tall", "solo"]);
+        assert_eq!(l.layouts[0].description, "the castle over the flow");
+        assert_eq!(l.layouts[1].description, "", "a description is optional");
+        assert_eq!(l.layouts[0].rows.len(), 2);
+        assert_eq!(l.layouts[0].rows[0].height, 3);
+        assert_eq!(l.start_layout.as_deref(), Some("tall"));
+        assert_eq!(l.layouts[0].cloudfield, None);
+        assert_eq!(
+            l.arcade.rows,
+            default_rows(),
+            "no [[arcade.row]], default rows"
+        );
+        let l = load(&[(
+            "c.toml",
+            &LAYOUTS.replace("name = \"solo\"", "name = \"solo\"\ncloudfield = true"),
+        )]);
+        assert!(l.problems.is_empty(), "{:?}", l.problems);
+        assert_eq!(l.layouts[1].cloudfield, Some(true));
+        let c = LayoutCycle::new(&l.layouts, l.start_layout.as_deref());
+        assert_eq!(c.current().name, "tall");
+        assert_eq!(c.len(), 2 + presets().len());
+    }
+
+    #[test]
+    fn the_row_tables_are_the_config_layout_and_come_first() {
+        let text = format!(
+            "{BRIEF}{}",
+            LAYOUTS.replace("[arcade]\nlayout = \"tall\"\n", "")
+        );
+        let l = load(&[("c.toml", &text)]);
+        assert!(l.problems.is_empty(), "{:?}", l.problems);
+        assert_eq!(layout_names(&l), vec!["config", "tall", "solo"]);
+        assert_eq!(l.layouts[0].rows, l.arcade.rows);
+        assert!(l.arcade.cloudfield);
+        let c = LayoutCycle::new(&l.layouts, l.start_layout.as_deref());
+        assert_eq!(c.current().name, "config", "the config layout starts");
+        // With no config file at all, classic starts.
+        let l = load(&[]);
+        assert!(l.layouts.is_empty() && l.start_layout.is_none());
+        assert_eq!(LayoutCycle::new(&l.layouts, None).current().name, "classic");
+    }
+
+    #[test]
+    fn a_problem_in_one_layout_drops_only_that_layout() {
+        let text = LAYOUTS.replace(
+            "panels = [{ view = \"starfield\" }]",
+            "panels = [{ view = \"starfeld\" }]",
+        );
+        let l = load(&[("c.toml", &text)]);
+        let p: Vec<String> = l.problems.iter().map(|p| p.to_string()).collect();
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(
+            p[0].starts_with("c.toml:20: layout `solo`: unknown view `starfeld` (expected one of "),
+            "{p:?}"
+        );
+        assert_eq!(
+            layout_names(&l),
+            vec!["tall"],
+            "solo is dropped, tall stays"
+        );
+        assert_eq!(l.start_layout.as_deref(), Some("tall"));
+        // A problem in a layout leaves the cloudfield and the row tables be.
+        let text = format!(
+            "{BRIEF}{}",
+            text.replace("[arcade]\nlayout = \"tall\"\n", "")
+        );
+        let l = load(&[("c.toml", &text)]);
+        assert!(l.arcade.cloudfield);
+        assert_eq!(layout_names(&l), vec!["config", "tall"]);
+    }
+
+    #[test]
+    fn a_problem_in_the_row_tables_keeps_the_old_rule_and_the_layouts() {
+        let text = format!(
+            "[arcade]\ncloudfield = true\n[[arcade.row]]\npanels = [{{ view = \"castel\" }}]\n{}",
+            LAYOUTS.replace("[arcade]\nlayout = \"tall\"\n", "")
+        );
+        let l = load(&[("c.toml", &text)]);
+        assert_eq!(l.problems.len(), 1, "{:?}", l.problems);
+        assert_eq!(l.arcade.rows, default_rows());
+        assert!(
+            !l.arcade.cloudfield,
+            "the whole [arcade] default, as before"
+        );
+        assert_eq!(layout_names(&l), vec!["tall", "solo"], "no config layout");
+    }
+
+    /// Each problem a user layout can have, with its message and line.
+    #[test]
+    fn every_layout_problem_is_reported_with_its_line() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "[[arcade.layouts]]\ndescription = \"x\"\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
+                "c.toml:1: layout 1 has no `name`",
+            ),
+            (
+                "[[arcade.layouts]]\nname = \"\"\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
+                "c.toml:2: layout 1: the name `` is empty",
+            ),
+            (
+                "[[arcade.layouts]]\nname = \"my layout\"\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
+                "c.toml:2: layout 1: the name `my layout` may hold only letters, digits, `-` and `_`",
+            ),
+            (
+                "[[arcade.layouts]]\nname = 7\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
+                "c.toml:2: layout 1: `name` must be a string",
+            ),
+            (
+                "[[arcade.layouts]]\nname = \"deck\"\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
+                "c.toml:2: layout 1: the name `deck` is a built-in layout; choose another",
+            ),
+            (
+                "[[arcade.layouts]]\nname = \"Config\"\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
+                "c.toml:2: layout 1: the name `Config` is kept for the [[arcade.row]] tables",
+            ),
+            (
+                "[[arcade.layouts]]\nname = \"next\"\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
+                "c.toml:2: layout 1: the name `next` is a word of /arcade layout; choose another",
+            ),
+            (
+                "[[arcade.layouts]]\nname = \"a\"\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n[[arcade.layouts]]\nname = \"A\"\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
+                "c.toml:6: layout 2: the name `A` is used twice; each layout needs its own name",
+            ),
+            (
+                "[[arcade.layouts]]\nname = \"a\"\n",
+                "c.toml:1: layout `a` has no rows: give it at least one [[arcade.layouts.row]]",
+            ),
+            (
+                "[[arcade.layouts]]\nname = \"a\"\nrows = 2\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
+                "c.toml:3: unknown key `rows` in layout 1 (expected name, description, cloudfield or row)",
+            ),
+            (
+                "[[arcade.layouts]]\nname = \"a\"\ndescription = 3\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
+                "c.toml:3: layout `a`: `description` must be a string",
+            ),
+            (
+                "[[arcade.layouts]]\nname = \"a\"\ndescription = \"bell\\u0007\"\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
+                "c.toml:3: layout `a`: the description has a control character",
+            ),
+            (
+                "[[arcade.layouts]]\nname = \"a\"\n[[arcade.layouts.row]]\nheight = 0\npanels = [{ view = \"flow\" }]\n",
+                "c.toml:4: layout `a`: row 1 height must be a whole number from 1 to 1000, got 0",
+            ),
+            (
+                "[[arcade.layouts]]\nname = \"a\"\n[[arcade.layouts.row]]\npanels = []\n",
+                "c.toml:4: layout `a`: row 1 is empty: give it at least one panel",
+            ),
+            (
+                "[[arcade.layouts]]\nname = \"a\"\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }, { view = \"flow\" }]\n",
+                "c.toml:4: layout `a`: view `flow` appears twice; each view can be shown once",
+            ),
+            (
+                "[[arcade.layouts]]\nname = \"a\"\ncloudfield = \"yes\"\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
+                "c.toml:3: layout `a`: `cloudfield` must be true or false",
+            ),
+            (
+                "[arcade]\nlayouts = 3\n",
+                "c.toml:2: `arcade.layouts` must be a list of layouts: [[arcade.layouts]]",
+            ),
+            (
+                "[[arcade.layout]]\nname = \"a\"\n",
+                "c.toml:1: `arcade.layout` names the layout to start with, such as layout = \"deck\"; write your own layouts as [[arcade.layouts]]",
+            ),
+            (
+                "[arcade]\nlayout = \"nope\"\n",
+                "c.toml:2: unknown arcade layout `nope` (expected one of classic, defrag-wide, waffler, workload, deck, skyline, memory-lane, now-serving); the arcade starts with `classic`",
+            ),
+        ];
+        for (text, want) in cases {
+            let p = problems(&[("c.toml", text)]);
+            assert_eq!(p, vec![want.to_string()], "{text}");
+        }
+        // A long name and a long description.
+        let long = format!(
+            "[[arcade.layouts]]\nname = \"{}\"\ndescription = \"{}\"\n[[arcade.layouts.row]]\npanels = [{{ view = \"flow\" }}]\n",
+            "n".repeat(33),
+            "d".repeat(81)
+        );
+        let p = problems(&[("c.toml", &long)]);
+        assert_eq!(
+            p,
+            vec![
+                format!(
+                    "c.toml:2: layout 1: the name `{}` is longer than 32 characters",
+                    "n".repeat(33)
+                ),
+                "c.toml:3: layout 1: the description is longer than 80 characters".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unknown_start_layout_falls_back_to_the_first() {
+        let l = load(&[("c.toml", "[arcade]\nlayout = \"nope\"\ncloudfield = true\n")]);
+        assert_eq!(l.start_layout, None);
+        assert!(
+            l.arcade.cloudfield,
+            "a bad start name is not a problem of [arcade]"
+        );
+        let l = load(&[("c.toml", "[arcade]\nlayout = \"Skyline\"\n")]);
+        assert!(l.problems.is_empty(), "{:?}", l.problems);
+        assert_eq!(l.start_layout.as_deref(), Some("Skyline"));
+        let l = load(&[("c.toml", "[arcade]\nlayout = 3\n")]);
+        assert_eq!(
+            l.problems[0].to_string(),
+            "c.toml:2: `arcade.layout` must be a layout name, such as layout = \"deck\""
+        );
+    }
+
+    #[test]
+    fn the_command_line_layout_wins_and_an_unknown_one_is_a_problem() {
+        let mut l = load(&[("c.toml", LAYOUTS)]);
+        choose_layout(&mut l, Some("solo"));
+        assert!(l.problems.is_empty(), "{:?}", l.problems);
+        assert_eq!(l.start_layout.as_deref(), Some("solo"));
+        choose_layout(&mut l, None);
+        assert_eq!(
+            l.start_layout.as_deref(),
+            Some("solo"),
+            "no flag changes nothing"
+        );
+        choose_layout(&mut l, Some("nope"));
+        assert_eq!(l.start_layout, None, "the first layout starts");
+        assert_eq!(
+            l.problems.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+            vec![format!(
+                "--arcade-layout: unknown arcade layout `nope` (expected one of tall, solo, {}); the arcade starts with `tall`",
+                presets().iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+            )]
+        );
+    }
+
+    #[test]
+    fn check_config_lists_every_layout_and_its_panels() {
+        let mut l = load(&[("c.toml", LAYOUTS)]);
+        choose_layout(&mut l, None);
+        let mut out = Vec::new();
+        assert_eq!(write_check_report(&l, &mut out), 0);
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("layouts, in the order } steps through them (* starts):"),
+            "{out}"
+        );
+        assert!(out.contains("* tall  the castle over the flow\n"), "{out}");
+        assert!(out.contains("    row 1 (height 3): castle x1\n"), "{out}");
+        assert!(out.contains("\n  solo\n"), "{out}");
+        for p in presets() {
+            assert!(
+                out.contains(&format!("  {}  {}\n", p.name, p.description)),
+                "{out}"
+            );
+        }
+        assert!(
+            out.contains("    row 2 (height 4): castle x1, defrag x1, die3d x1\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("now-serving  ")
+                && out.contains(
+                    "    cloudfield on when selected\n    row 1 (height 3): inference x1\n"
+                ),
+            "{out}"
+        );
+        assert!(out.ends_with("ok\n"), "{out}");
+    }
+
+    /// Every TOML example in docs/arcade-layout.md parses with the real
+    /// loader and has no problem.
+    #[test]
+    fn the_docs_examples_load_without_a_problem() {
+        let doc = include_str!("../docs/arcade-layout.md");
+        let mut blocks = Vec::new();
+        let mut cur: Option<String> = None;
+        for line in doc.lines() {
+            match (&mut cur, line.trim_start()) {
+                (None, "```toml") => cur = Some(String::new()),
+                (Some(_), "```") => blocks.push(cur.take().unwrap()),
+                (Some(b), _) => {
+                    b.push_str(line);
+                    b.push('\n');
+                }
+                _ => {}
+            }
+        }
+        assert!(blocks.len() >= 2, "the doc has its examples");
+        let mut with_layouts = 0;
+        for b in &blocks {
+            let l = load(&[("doc.toml", b)]);
+            assert!(l.problems.is_empty(), "{b}\n{:?}", l.problems);
+            if b.contains("[[arcade.layouts]]") {
+                with_layouts += 1;
+                assert!(!l.layouts.is_empty(), "{b}");
+            }
+        }
+        assert!(with_layouts >= 1, "a user-layout example is there");
     }
 }
