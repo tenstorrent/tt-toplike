@@ -366,6 +366,12 @@ mod tests {
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
+            record: None,
+            replay: None,
+            speed: None,
+            bus_inspect: None,
+            entity: None,
+            signal: None,
         };
 
         let result = create_backend(BackendType::Mock, config, &cli);

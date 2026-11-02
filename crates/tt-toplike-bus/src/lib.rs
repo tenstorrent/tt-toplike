@@ -9,12 +9,15 @@
 //! * [`log`] defines [`Bus`]: publish, read by sequence number, subscribe.
 //! * [`world`] defines [`World`], the reducer that holds the current state.
 //! * [`signals`] names the signals sources and the world agree on.
+//! * [`replay`] reads a recorded log back and republishes it.
 //! * [`segment`] reads and writes the segment files on disk.
 
 pub mod config;
 pub mod entity;
+pub mod inspect;
 pub mod log;
 pub mod record;
+pub mod replay;
 pub mod segment;
 pub mod signals;
 #[cfg(test)]
@@ -28,4 +31,5 @@ pub use record::{
     DecodeError, Event, Gap, Header, HeaderKind, Payload, Provenance, RawFrame, Record, Sample,
     Sweep, Value, SCHEMA_VERSION,
 };
+pub use replay::{ManualPlayClock, PlayClock, RealClock, Replay};
 pub use world::{ModelPhase, ModelView, Reading, Snapshot, World};

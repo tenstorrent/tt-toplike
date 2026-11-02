@@ -55,7 +55,7 @@
 //! sequence number. Records are never silently skipped.
 
 use crate::config::{BusConfig, Clock};
-use crate::record::{Gap, Payload, Record};
+use crate::record::{Gap, Header, HeaderKind, Payload, Record, SCHEMA_VERSION};
 use crate::segment;
 use std::any::Any;
 use std::collections::VecDeque;
@@ -179,6 +179,8 @@ struct Disk {
     gap_pending: AtomicBool,
     reason: Mutex<String>,
     dropped: AtomicU64,
+    /// Written into the header line of every new segment.
+    kind: HeaderKind,
     #[cfg(test)]
     hooks: TestHooks,
 }
@@ -226,6 +228,7 @@ struct Inner {
     window_records: usize,
     clock: Arc<dyn Clock>,
     disk: Option<Arc<Disk>>,
+    header_kind: HeaderKind,
 }
 
 /// How long dropping the last `Bus` handle waits for the writer to finish.
@@ -313,6 +316,7 @@ impl Bus {
                 gap_pending: AtomicBool::new(false),
                 reason: Mutex::new(String::new()),
                 dropped: AtomicU64::new(0),
+                kind: cfg.header_kind,
                 #[cfg(test)]
                 hooks: TestHooks::default(),
             });
@@ -321,7 +325,7 @@ impl Bus {
                 Ok((closed, last)) => {
                     head = last;
                     lock(&d.table).closed = closed;
-                    match open_segment(&dir, head + 1) {
+                    match open_segment(&dir, head + 1, cfg.header_kind) {
                         Ok(seg) => first = Some(seg),
                         Err(e) => startup_failure = Some(format!("cannot open log segment: {e}")),
                     }
@@ -380,6 +384,7 @@ impl Bus {
             window_records,
             clock: cfg.clock,
             disk,
+            header_kind: cfg.header_kind,
         });
         let bus = Bus {
             _writer: Arc::new(WriterGuard {
@@ -420,6 +425,18 @@ impl Bus {
         drop(st);
         inner.cond.notify_all();
         seq
+    }
+
+    /// The header this bus writes at the top of its segments: `Live`, or
+    /// `Replay` when [`BusConfig::header_kind`] says the bus republishes a
+    /// recorded log. Consumers (the TUI status line, `bus inspect`) read it
+    /// to label what they show.
+    pub fn header(&self) -> Header {
+        Header {
+            schema: SCHEMA_VERSION,
+            kind: self.inner.header_kind,
+            tool_versions: segment::tool_versions(),
+        }
     }
 
     /// The newest assigned sequence number, 0 before the first publish.
@@ -695,12 +712,12 @@ struct OpenSeg {
 }
 
 /// Create segment `first_seq` with its header line.
-fn open_segment(dir: &Path, first_seq: u64) -> io::Result<OpenSeg> {
+fn open_segment(dir: &Path, first_seq: u64, kind: HeaderKind) -> io::Result<OpenSeg> {
     segment::create_dir_secure(dir)?;
     let mut file = BufWriter::new(segment::create_file_secure(&segment::path(
         dir, first_seq, false,
     ))?);
-    let bytes = segment::write_header(&mut file)?;
+    let bytes = segment::write_header(&mut file, kind)?;
     file.flush()?;
     Ok(OpenSeg {
         first_seq,
@@ -805,7 +822,7 @@ impl Writer {
             self.rotate(now)?;
         }
         if self.open.is_none() {
-            let mut seg = open_segment(&self.disk.dir, rec.seq)?;
+            let mut seg = open_segment(&self.disk.dir, rec.seq, self.disk.kind)?;
             seg.start_ms = now;
             lock(&self.disk.table).open = Some(SegInfo {
                 first_seq: seg.first_seq,

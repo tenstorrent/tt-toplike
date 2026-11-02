@@ -43,6 +43,36 @@ fn main() {
         std::process::exit(1);
     }
 
+    // --bus-inspect: print a summary of a recorded signal-bus log and exit.
+    // Needs no backend and no TTY, and prints no banner, so the output can be
+    // piped. Exit 1 when the log cannot be read.
+    if let Some(path) = &cli.bus_inspect {
+        let filter = tt_toplike_bus::inspect::Filter {
+            entity: cli.entity.clone(),
+            signal: cli.signal.clone(),
+        };
+        let stdout = std::io::stdout();
+        let mut out = std::io::BufWriter::new(stdout.lock());
+        let result = tt_toplike_bus::inspect::inspect(path, &filter, &mut out);
+        let result = result.and_then(|()| std::io::Write::flush(&mut out));
+        if let Err(e) = result {
+            eprintln!("bus-inspect: cannot read {}: {e}", path.display());
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // --record / --replay are parsed and validated (see `Cli::validate`), but
+    // the TUI and headless loops are not connected to the bus yet. Stop with a
+    // clear error. Running live would look like a replay and is not one.
+    if cli.record.is_some() || cli.replay.is_some() {
+        eprintln!(
+            "Error: --record and --replay are not connected to the TUI in this build yet. \
+             Use --bus-inspect PATH to read a recorded log."
+        );
+        std::process::exit(2);
+    }
+
     // Initialize logging with appropriate level
     init_logging(cli.log_level());
 

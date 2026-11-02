@@ -243,6 +243,46 @@ pub struct Cli {
     /// ~/.config/tt-toplike/config.toml. The flag wins over the file.
     #[arg(long, value_enum, value_name = "BEHAVIOR")]
     pub tt_smi_reset_behavior: Option<ResetBehavior>,
+
+    /// Record everything the signal bus sees into segment files in DIR.
+    ///
+    /// The log is a directory of `bus-<n>.jsonl[.gz]` files, kept for 24 hours
+    /// or 5 GB. Read it back with `--replay DIR` or `--bus-inspect DIR`.
+    /// (Parsed and validated here; the live loops start recording in the
+    /// bus wiring task.)
+    #[arg(long, value_name = "DIR")]
+    pub record: Option<PathBuf>,
+
+    /// Play a recorded log. No hardware is read.
+    ///
+    /// PATH is a segment file (plain or `.gz`) or a directory of segments.
+    /// The records are republished on the bus with their original spacing
+    /// divided by `--speed`, and the bus is marked as a replay. Cannot be
+    /// combined with the live-only flags `--serve` and `--remote`.
+    #[arg(long, value_name = "PATH")]
+    pub replay: Option<PathBuf>,
+
+    /// Replay speed: 1 is real time, 4 is four times faster, 0.5 is half speed.
+    /// Only valid with `--replay`. Must be a number above zero.
+    #[arg(long, value_name = "N", requires = "replay")]
+    pub speed: Option<f64>,
+
+    /// Print a summary of a recorded log and exit (no TUI).
+    ///
+    /// Shows the header, record counts by kind, the time span, the entities,
+    /// the events and each signal's sample count, min, max and last value.
+    /// PATH is a segment file (plain or `.gz`) or a directory of segments.
+    /// Narrow the output with `--entity` and `--signal`.
+    #[arg(long, value_name = "PATH")]
+    pub bus_inspect: Option<PathBuf>,
+
+    /// With `--bus-inspect`: show only this entity, for example `chip:0000:01:00.0`.
+    #[arg(long, value_name = "KEY", requires = "bus_inspect")]
+    pub entity: Option<String>,
+
+    /// With `--bus-inspect`: show only this signal, for example `chip.temp_c`.
+    #[arg(long, value_name = "NAME", requires = "bus_inspect")]
+    pub signal: Option<String>,
 }
 
 /// What toplike does when it sees a `tt-smi -r` reset (`--tt-smi-reset-behavior`).
@@ -594,6 +634,12 @@ impl Cli {
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
+            record: None,
+            replay: None,
+            speed: None,
+            bus_inspect: None,
+            entity: None,
+            signal: None,
         }
     }
 
@@ -630,6 +676,58 @@ impl Cli {
             eprintln!("Warning: --mock-devices ignored when not using mock backend");
         }
 
+        self.validate_bus()
+    }
+
+    /// The replay speed: `--speed`, or 1 (real time) when it was not given.
+    pub fn effective_speed(&self) -> f64 {
+        self.speed.unwrap_or(1.0)
+    }
+
+    /// Checks for the signal-bus flags (`--record`, `--replay`, `--speed`,
+    /// `--bus-inspect`). The messages say which flags clash and why.
+    fn validate_bus(&self) -> Result<(), String> {
+        if let Some(speed) = self.speed {
+            if !(speed.is_finite() && speed > 0.0) {
+                return Err(format!(
+                    "--speed must be a number above zero (1 is real time), got {speed}"
+                ));
+            }
+        }
+        if self.replay.is_some() {
+            if self.serve.is_some() {
+                return Err(
+                    "--replay cannot be combined with --serve: a replay is recorded data, \
+                     not live telemetry, so there is nothing to publish to other instances"
+                        .to_string(),
+                );
+            }
+            if self.remote.is_some() {
+                return Err(
+                    "--replay cannot be combined with --remote: a replay is read from a \
+                     file and a remote box is a second source. Use one or the other"
+                        .to_string(),
+                );
+            }
+        }
+        if self.bus_inspect.is_some() {
+            let other = [
+                ("--replay", self.replay.is_some()),
+                ("--record", self.record.is_some()),
+                ("--serve", self.serve.is_some()),
+                ("--remote", self.remote.is_some()),
+                ("--print", self.print),
+                ("--bench", self.bench),
+            ]
+            .into_iter()
+            .find_map(|(name, set)| set.then_some(name));
+            if let Some(name) = other {
+                return Err(format!(
+                    "--bus-inspect prints a summary and exits, so it cannot be combined \
+                     with {name}. Only --entity and --signal go with it"
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -666,6 +764,12 @@ mod tests {
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
+            record: None,
+            replay: None,
+            speed: None,
+            bus_inspect: None,
+            entity: None,
+            signal: None,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Auto);
@@ -703,6 +807,12 @@ mod tests {
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
+            record: None,
+            replay: None,
+            speed: None,
+            bus_inspect: None,
+            entity: None,
+            signal: None,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Mock);
@@ -735,6 +845,12 @@ mod tests {
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
+            record: None,
+            replay: None,
+            speed: None,
+            bus_inspect: None,
+            entity: None,
+            signal: None,
         };
 
         assert_eq!(cli.effective_backend(), BackendType::Json);
@@ -767,6 +883,12 @@ mod tests {
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
+            record: None,
+            replay: None,
+            speed: None,
+            bus_inspect: None,
+            entity: None,
+            signal: None,
         };
 
         assert!(cli.should_monitor_device(0));
@@ -803,6 +925,12 @@ mod tests {
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
+            record: None,
+            replay: None,
+            speed: None,
+            bus_inspect: None,
+            entity: None,
+            signal: None,
         };
 
         assert_eq!(verbose_cli.log_level(), log::LevelFilter::Debug);
@@ -832,6 +960,12 @@ mod tests {
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
+            record: None,
+            replay: None,
+            speed: None,
+            bus_inspect: None,
+            entity: None,
+            signal: None,
         };
 
         assert_eq!(quiet_cli.log_level(), log::LevelFilter::Off);
@@ -864,6 +998,12 @@ mod tests {
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
+            record: None,
+            replay: None,
+            speed: None,
+            bus_inspect: None,
+            entity: None,
+            signal: None,
         };
 
         // `validate()` only rejects `--backend luwen` when the crate was built
@@ -905,6 +1045,12 @@ mod tests {
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
+            record: None,
+            replay: None,
+            speed: None,
+            bus_inspect: None,
+            entity: None,
+            signal: None,
         };
 
         assert_eq!(auto_cli.backend_name(), "Auto-detect");
@@ -934,6 +1080,12 @@ mod tests {
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
+            record: None,
+            replay: None,
+            speed: None,
+            bus_inspect: None,
+            entity: None,
+            signal: None,
         };
 
         assert_eq!(mock_cli.backend_name(), "Mock");
@@ -965,6 +1117,12 @@ mod tests {
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
+            record: None,
+            replay: None,
+            speed: None,
+            bus_inspect: None,
+            entity: None,
+            signal: None,
         }
     }
 
@@ -1193,5 +1351,91 @@ mod tests {
         assert!(inform.contains("This is the default"), "{inform}");
         let demo = block.lines().find(|l| l.contains("- demo:")).unwrap();
         assert!(demo.contains("Esc, q or Q ends the demo"), "{demo}");
+    }
+
+    // ---- signal bus flags ---------------------------------------------------
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut v = vec!["tt-toplike"];
+        v.extend_from_slice(args);
+        Cli::try_parse_from(v)
+    }
+
+    #[test]
+    fn bus_flags_default_to_off() {
+        let cli = parse(&[]).unwrap();
+        assert_eq!(cli.record, None);
+        assert_eq!(cli.replay, None);
+        assert_eq!(cli.speed, None);
+        assert_eq!(cli.effective_speed(), 1.0);
+        assert_eq!(cli.bus_inspect, None);
+        assert!(cli.validate().is_ok());
+    }
+
+    #[test]
+    fn record_replay_and_speed_parse() {
+        let cli = parse(&["--record", "/tmp/rec"]).unwrap();
+        assert_eq!(cli.record, Some(PathBuf::from("/tmp/rec")));
+        assert!(cli.validate().is_ok());
+
+        let cli = parse(&["--replay", "/tmp/rec", "--speed", "4"]).unwrap();
+        assert_eq!(cli.replay, Some(PathBuf::from("/tmp/rec")));
+        assert_eq!(cli.effective_speed(), 4.0);
+        assert!(cli.validate().is_ok());
+
+        let cli = parse(&["--replay", "x.jsonl.gz", "--speed", "0.5"]).unwrap();
+        assert_eq!(cli.effective_speed(), 0.5);
+    }
+
+    #[test]
+    fn speed_needs_replay_and_must_be_positive() {
+        assert!(parse(&["--speed", "2"]).is_err(), "--speed alone");
+        for bad in ["0", "-1", "nan", "inf"] {
+            let cli = parse(&["--replay", "x", "--speed", bad]);
+            // "-1" is read by clap as a flag, which is also a rejection.
+            if let Ok(cli) = cli {
+                let e = cli.validate().unwrap_err();
+                assert!(e.contains("above zero"), "{bad}: {e}");
+            }
+        }
+        let cli = parse(&["--replay", "x", "--speed", "0"]).unwrap();
+        assert!(cli.validate().unwrap_err().contains("--speed"));
+    }
+
+    #[test]
+    fn replay_is_rejected_with_serve_or_remote() {
+        let cli = parse(&["--replay", "x", "--serve"]).unwrap();
+        let e = cli.validate().unwrap_err();
+        assert!(e.contains("--replay") && e.contains("--serve"), "{e}");
+        assert!(e.contains("live telemetry"), "{e}");
+
+        let cli = parse(&["--replay", "x", "--remote", "10.0.0.5:8000"]).unwrap();
+        let e = cli.validate().unwrap_err();
+        assert!(e.contains("--replay") && e.contains("--remote"), "{e}");
+        assert!(e.contains("second source"), "{e}");
+    }
+
+    #[test]
+    fn bus_inspect_parses_with_filters_and_stands_alone() {
+        let cli = parse(&[
+            "--bus-inspect",
+            "/tmp/rec",
+            "--entity",
+            "model:llama-8b",
+            "--signal",
+            "model.progress",
+        ])
+        .unwrap();
+        assert_eq!(cli.bus_inspect, Some(PathBuf::from("/tmp/rec")));
+        assert_eq!(cli.entity.as_deref(), Some("model:llama-8b"));
+        assert_eq!(cli.signal.as_deref(), Some("model.progress"));
+        assert!(cli.validate().is_ok());
+
+        assert!(parse(&["--entity", "chip:x"]).is_err(), "--entity alone");
+        assert!(parse(&["--signal", "s"]).is_err(), "--signal alone");
+
+        let cli = parse(&["--bus-inspect", "x", "--replay", "y"]).unwrap();
+        let e = cli.validate().unwrap_err();
+        assert!(e.contains("--bus-inspect") && e.contains("--replay"), "{e}");
     }
 }

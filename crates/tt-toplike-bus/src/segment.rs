@@ -143,17 +143,23 @@ pub(crate) fn parse_name(name: &str) -> Option<(u64, bool)> {
     Some((num.parse().ok()?, compressed))
 }
 
-/// The header line written at the top of every live segment.
-pub(crate) fn header_line() -> String {
-    let mut tool_versions = BTreeMap::new();
-    tool_versions.insert(
+/// The tool versions recorded in a header: this crate's name and version.
+pub(crate) fn tool_versions() -> BTreeMap<String, String> {
+    let mut v = BTreeMap::new();
+    v.insert(
         env!("CARGO_PKG_NAME").to_string(),
         env!("CARGO_PKG_VERSION").to_string(),
     );
+    v
+}
+
+/// The header line written at the top of every segment. `kind` is `Live`
+/// for a normal run and `Replay` for a bus that republishes a recorded log.
+pub(crate) fn header_line(kind: HeaderKind) -> String {
     let h = Header {
         schema: SCHEMA_VERSION,
-        kind: HeaderKind::Live,
-        tool_versions,
+        kind,
+        tool_versions: tool_versions(),
     };
     serde_json::to_string(&h).expect("header encodes as JSON")
 }
@@ -272,8 +278,8 @@ pub(crate) fn list(dir: &Path) -> io::Result<Vec<Found>> {
 }
 
 /// Write the header line to a freshly created segment file.
-pub(crate) fn write_header(w: &mut impl Write) -> io::Result<u64> {
-    let h = header_line();
+pub(crate) fn write_header(w: &mut impl Write, kind: HeaderKind) -> io::Result<u64> {
+    let h = header_line(kind);
     w.write_all(h.as_bytes())?;
     w.write_all(b"\n")?;
     Ok(h.len() as u64 + 1)
@@ -309,7 +315,7 @@ mod tests {
     /// off half way with no trailing newline.
     fn damaged_body() -> Vec<u8> {
         let mut s = String::new();
-        s.push_str(&header_line());
+        s.push_str(&header_line(HeaderKind::Live));
         s.push('\n');
         for q in [1, 2] {
             s.push_str(&rec(q).to_line());

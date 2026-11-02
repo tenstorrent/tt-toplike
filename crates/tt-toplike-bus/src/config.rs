@@ -7,6 +7,7 @@
 //! Segment rotation and retention use the timestamps the clock gives, so a
 //! [`ManualClock`] makes both deterministic.
 
+use crate::record::HeaderKind;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -103,6 +104,9 @@ pub struct BusConfig {
     pub writer_queue: usize,
     /// Source of timestamps. Tests use a [`ManualClock`].
     pub clock: Arc<dyn Clock>,
+    /// Written into each segment header and returned by [`crate::Bus::header`].
+    /// `Live` by default. [`crate::Replay::bus_config`] sets `Replay`.
+    pub header_kind: HeaderKind,
 }
 
 impl Default for BusConfig {
@@ -117,6 +121,7 @@ impl Default for BusConfig {
             retain_bytes: 5 * 1000 * 1000 * 1000,
             writer_queue: 16_384,
             clock: Arc::new(SystemClock),
+            header_kind: HeaderKind::Live,
         }
     }
 }
@@ -130,6 +135,7 @@ impl fmt::Debug for BusConfig {
             .field("retain_secs", &self.retain_secs)
             .field("retain_bytes", &self.retain_bytes)
             .field("writer_queue", &self.writer_queue)
+            .field("header_kind", &self.header_kind)
             .finish_non_exhaustive()
     }
 }
