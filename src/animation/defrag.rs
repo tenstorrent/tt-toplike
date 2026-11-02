@@ -1325,8 +1325,8 @@ impl DefragVis {
                     Phase::Deconstructing => {
                         let dist_from_edge = resident_cells.saturating_sub(1 + col);
                         let flicker = (self.frame as u8)
-                            .wrapping_add(col as u8 * 17)
-                            .wrapping_add(ch_idx as u8 * 31);
+                            .wrapping_add((col as u8).wrapping_mul(17))
+                            .wrapping_add((ch_idx as u8).wrapping_mul(31));
                         if dist_from_edge == 0 {
                             // Eviction edge: dark red, no white flash
                             let v = if flicker % 3 == 0 { 0.60 } else { 0.38 };
@@ -1376,8 +1376,8 @@ impl DefragVis {
             for col in resident_cells..(resident_cells + frontier_w).min(cells) {
                 let dist = col - resident_cells;
                 let phase_val = (self.frame as u8)
-                    .wrapping_add(col as u8 * 13)
-                    .wrapping_add(ch_idx as u8 * 41);
+                    .wrapping_add((col as u8).wrapping_mul(13))
+                    .wrapping_add((ch_idx as u8).wrapping_mul(41));
                 // dist 0 = write head (darkest), dist 1 = just behind (slightly more settled)
                 let v = if dist == 0 {
                     if phase_val % 4 < 2 {
