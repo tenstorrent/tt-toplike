@@ -1629,3 +1629,7 @@ mod tests {
         assert_eq!(a.starfield.live_flares(), 0);
     }
 }
+
+#[cfg(test)]
+#[path = "arcade_bus_tests.rs"]
+mod bus_tests;
