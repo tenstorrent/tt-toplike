@@ -168,7 +168,7 @@ pub struct ArcadeVisualization {
 }
 
 impl ArcadeVisualization {
-    /// An arcade with the default layout (the one it has always had).
+    /// An arcade with the default layout, which is the layout it has always had.
     pub fn new(width: usize, height: usize) -> Self {
         Self::with_config(width, height, &ArcadeConfig::default())
     }

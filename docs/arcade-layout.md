@@ -53,7 +53,7 @@ This example is `arcade_layout::example_rows()`; the bench draws it as `arcade-p
   as `[[arcade.row.panels]]` tables.
 * `height` and `width` are weights: whole numbers from 1 to 1000, 1 when left out. A row of
   height 2 gets twice the rows of a row of height 1. A panel of width 3 gets three times the
-  columns of a panel of width 1 in the same row, less the one column the divider takes.
+  columns of a panel of width 1 in the same row, less a column for the divider.
 * Each view can be shown once.
 
 ## Views
@@ -120,7 +120,7 @@ are drawn around the hero.
 
 ## The cloudfield
 
-`cloudfield = true` lays the atmosphere backdrop (`src/animation/atmosphere.rs`, the one behind
+`cloudfield = true` lays the atmosphere backdrop (`src/animation/atmosphere.rs`, also drawn behind
 the `i` view's snake) behind the whole arcade. It follows the featured inference service: a forge
 while a model compiles or loads, a storm while requests wait for their first token, an aurora
 while tokens flow, a dream while a model is ready and idle. It fills blank cells only, so no

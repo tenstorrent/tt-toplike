@@ -269,7 +269,7 @@ impl LaidRow {
     }
 }
 
-/// The one-line note a hidden panel leaves on its row's rule. The label's
+/// The note, one line long, that a hidden panel leaves on its row's rule. The label's
 /// symbol is replaced by `◌`.
 pub fn hidden_note(view: View, w: usize, h: usize) -> String {
     let name = view

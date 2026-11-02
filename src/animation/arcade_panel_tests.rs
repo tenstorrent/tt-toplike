@@ -345,7 +345,7 @@ fn every_panel_kind_at_several_sizes_fits_its_row() {
             for (y, line) in lines.iter().enumerate() {
                 let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
                 let width = unicode_width::UnicodeWidthStr::width(text.as_str());
-                // A rule is cut by characters, not columns (`bbs_rule`), so
+                // `bbs_rule` cuts a rule by characters and ignores display width, so
                 // a label with a wide emoji runs one column per emoji past
                 // the edge, as it always has; ratatui clips it. The new
                 // labels have no wide characters.
