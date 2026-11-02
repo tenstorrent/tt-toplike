@@ -1431,10 +1431,25 @@ fn grid_cell_hash(lines: Vec<Line<'static>>, w: usize, h: usize) -> u64 {
     f.0
 }
 
+/// An arcade laid out by the `classic` preset, so the grid pins it to the
+/// base frames. `classic_is_the_default_layout` checks that its rows are
+/// the default rows `ArcadeVisualization::new` uses.
+fn classic_arcade(w: usize, h: usize) -> ArcadeVisualization {
+    let classic = crate::animation::arcade_presets::preset("classic").expect("classic");
+    ArcadeVisualization::with_config(
+        w,
+        h,
+        &ArcadeConfig {
+            cloudfield: false,
+            rows: classic.rows.clone(),
+        },
+    )
+}
+
 /// An idle arcade at `w` x `h` after three updates, as [`grid_cell_hash`].
 fn grid_idle(w: usize, h: usize) -> u64 {
     let backend = Fixed::new(2);
-    let mut a = ArcadeVisualization::new(w, h);
+    let mut a = classic_arcade(w, h);
     a.initialize_from_devices(backend.devices());
     a.initialize_topology(&backend);
     for _ in 0..3 {
@@ -1447,7 +1462,7 @@ fn grid_idle(w: usize, h: usize) -> u64 {
 /// updates, as [`grid_cell_hash`].
 fn grid_busy(w: usize, h: usize) -> u64 {
     let backend = Fixed::new(2);
-    let mut a = ArcadeVisualization::new(w, h);
+    let mut a = classic_arcade(w, h);
     a.initialize_from_devices(backend.devices());
     a.initialize_topology(&backend);
     let lane = |id: &str, kind| crate::animation::Activity {

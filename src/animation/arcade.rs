@@ -170,6 +170,10 @@ pub struct ArcadeVisualization {
     bus_state: ArcadeBusState,
     /// The bus time of the last `set_bus`: the time the frames are drawn at.
     bus_now: u64,
+
+    /// The sensitivity multiplier last set with `set_sensitivity`, kept so
+    /// [`ArcadeVisualization::relayout`] can hand it to the new panels.
+    sensitivity: f32,
 }
 
 impl ArcadeVisualization {
@@ -267,7 +271,87 @@ impl ArcadeVisualization {
             bus_fx: ArcadeFx::default(),
             bus_state: ArcadeBusState::default(),
             bus_now: 0,
+            sensitivity: 1.0,
         }
+    }
+
+    /// This arcade laid out again from `config` at `width` x `height`: a
+    /// switch to another named layout (`arcade_presets`), or the same
+    /// layout at a new size.
+    ///
+    /// The panels are built new at their new sizes, set up as the TUI sets
+    /// up a new arcade (devices, sensitivity, topology). Everything that
+    /// does not depend on the layout is kept: the hero's place, target and
+    /// trail (scaled to the new size), its expression flags and speed, the
+    /// cloudfield setting, the frame count and the clock, the power baseline
+    /// and peak, the duel, the activity lanes and their pulse counts, the
+    /// service rows and training run of the last tick, and the bus state.
+    /// Keeping the bus state means events already seen before the switch
+    /// make no new pulse after it (port contract rule 3).
+    ///
+    /// The result draws without an update first, so the TUI can draw it on
+    /// the same keypress.
+    pub fn relayout(
+        self,
+        width: usize,
+        height: usize,
+        config: &ArcadeConfig,
+        backend: &dyn TelemetryBackend,
+    ) -> Self {
+        let mut next = Self::with_config(width, height, config);
+        next.initialize_from_devices(backend.devices());
+        next.set_sensitivity(self.sensitivity);
+        next.initialize_topology(backend);
+        // Scale a position from the old size to the new one.
+        let sx = if self.width == 0 {
+            1.0
+        } else {
+            width as f32 / self.width as f32
+        };
+        let sy = if self.height == 0 {
+            1.0
+        } else {
+            height as f32 / self.height as f32
+        };
+        next.hero_x = self.hero_x * sx;
+        next.hero_y = self.hero_y * sy;
+        next.hero_target_x = self.hero_target_x * sx;
+        next.hero_target_y = self.hero_target_y * sy;
+        next.hero_trail = self
+            .hero_trail
+            .into_iter()
+            .map(|t| TrailPosition {
+                x: t.x * sx,
+                y: t.y * sy,
+                ..t
+            })
+            .collect();
+        next.hero_lerp_speed = self.hero_lerp_speed;
+        next.hero_trail_length = self.hero_trail_length;
+        next.hero_throttled = self.hero_throttled;
+        next.hero_faulted = self.hero_faulted;
+        next.hero_arc_stalled = self.hero_arc_stalled;
+        next.hero_undervolt = self.hero_undervolt;
+        next.hero_harvested = self.hero_harvested;
+        next.hero_gddr_temp = self.hero_gddr_temp;
+        next.cloudfield = self.cloudfield;
+        next.frame = self.frame;
+        next.clock_s = self.clock_s;
+        next.baseline = self.baseline;
+        next.power_peak = self.power_peak;
+        next.serving = self.serving;
+        next.duel = self.duel;
+        next.activities = self.activities;
+        next.last_pulse = self.last_pulse;
+        next.services = self.services;
+        next.train_state = self.train_state;
+        next.bus_fx = self.bus_fx;
+        next.bus_state = self.bus_state;
+        next.bus_now = self.bus_now;
+        // The Die 3D panel, if the new layout has one, draws its overlay at
+        // the last bus time until the next `set_bus` feeds it.
+        next.die3d_bus_now = self.die3d_bus_now.filter(|_| next.die3d.is_some());
+        next
     }
 
     /// Row `i` of the layout as the old region fields gave it: its rule and
@@ -507,6 +591,7 @@ impl ArcadeVisualization {
     }
 
     pub fn set_sensitivity(&mut self, s: f32) {
+        self.sensitivity = s;
         if let Some(v) = self.starfield.as_mut() {
             v.set_sensitivity(s);
         }
@@ -962,8 +1047,11 @@ impl ArcadeVisualization {
         // Row 1 carries the single shared telemetry strip (the embedded sections
         // no longer print their own W/°C).  The topology diagram shares the row
         // when both fit; otherwise the strip wins.
-        lines.push(self.render_header(backend));
-        lines.push(self.render_row1(backend));
+        // On a terminal narrower than either, it is cut at the edge, so no
+        // row of any layout runs past the terminal. (Only rows that are too
+        // wide change, which is below about 30 columns.)
+        lines.push(fit_width(self.render_header(backend), self.width));
+        lines.push(fit_width(self.render_row1(backend), self.width));
 
         // Each configured row: its rule, then its panels side by side.
         for row in &self.layout.rows {
@@ -1596,6 +1684,10 @@ impl ArcadeVisualization {
         for pos in &self.hero_trail {
             let row = pos.y as usize;
             let col = pos.x as usize;
+            // Nothing is drawn past the right edge (a 0-column arcade).
+            if col >= self.width {
+                continue;
+            }
 
             let fade = 1.0 - (pos.age as f32 / max_age);
             let fade_exp = fade * fade; // exponential: rapid initial fade, lingering tail
@@ -1661,7 +1753,9 @@ impl ArcadeVisualization {
         let hero_color = hsv_to_rgb(hero_hue, 1.0, value);
         let hero_style = Style::default().fg(hero_color).add_modifier(Modifier::BOLD);
 
-        Self::splice_char(&mut lines, row, col, hero_char, hero_style);
+        if col < self.width {
+            Self::splice_char(&mut lines, row, col, hero_char, hero_style);
+        }
 
         lines
     }
@@ -1669,6 +1763,19 @@ impl ArcadeVisualization {
 
 /// Write `spans` over the columns `x .. x + w` of `line`, keeping what is
 /// left and right of them. The spans are clamped to `w` and padded to it.
+/// `line` cut to `w` display columns when it is wider; unchanged otherwise.
+fn fit_width(mut line: Line<'static>, w: usize) -> Line<'static> {
+    let cols: usize = line
+        .spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    if cols > w {
+        line.spans = clamp_spans_to_width(std::mem::take(&mut line.spans), w);
+    }
+    line
+}
+
 fn put_spans(line: &mut Line<'static>, x: usize, w: usize, spans: Vec<Span<'static>>) {
     let old = std::mem::take(&mut line.spans);
     let mut out = clamp_spans_to_width(old.clone(), x);
@@ -2222,3 +2329,7 @@ mod bus_tests;
 #[cfg(test)]
 #[path = "arcade_panel_tests.rs"]
 mod panel_tests;
+
+#[cfg(test)]
+#[path = "arcade_preset_frame_tests.rs"]
+mod preset_frame_tests;
