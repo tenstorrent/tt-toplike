@@ -5,5 +5,9 @@
 //! library crate. This module holds what needs the main crate's own types.
 //!
 //! * [`identity`] maps `/dev/tenstorrent/N` indexes to chip keys.
+//! * [`signals`] names the signals the backend source writes.
+//! * [`source`] defines the `Source` trait and `BackendSource`.
 
 pub mod identity;
+pub mod signals;
+pub mod source;
