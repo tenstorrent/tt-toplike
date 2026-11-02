@@ -12,6 +12,8 @@
 //! * [`replay`] reads a recorded log back and republishes it.
 //! * [`segment`] reads and writes the segment files on disk.
 //! * [`summary`] defines [`WorldSummary`], the serialisable part of the world.
+//! * [`read`] defines [`WorldRead`], the read interface a view uses on a
+//!   local world ([`LocalView`]) or a remote one (`RemoteView`).
 //! * `socket` (Unix only) serves the bus on a Unix socket; `client` (Unix
 //!   only) reads it, and its `RemoteWorld` keeps a remote world current.
 
@@ -21,6 +23,7 @@ pub mod config;
 pub mod entity;
 pub mod inspect;
 pub mod log;
+pub mod read;
 pub mod record;
 pub mod replay;
 pub mod segment;
@@ -37,6 +40,7 @@ pub use client::{ClientError, RemoteSubscription, RemoteView, RemoteWorld, Socke
 pub use config::{BusConfig, Clock, ManualClock, SystemClock};
 pub use entity::{EntityKey, EntityKind};
 pub use log::{install_quiet_reducer_hook, Bus, BusStats, ReadError, Reducer, Subscription};
+pub use read::{LocalView, WorldRead};
 pub use record::{
     DecodeError, Event, Gap, Header, HeaderKind, Payload, Provenance, RawFrame, Record, Sample,
     Sweep, Value, SCHEMA_VERSION,

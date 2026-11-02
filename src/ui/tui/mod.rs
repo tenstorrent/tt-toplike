@@ -9,6 +9,26 @@
 //! Supports two display modes:
 //! - Normal mode: Traditional table view with real-time telemetry
 //! - Visualization mode: Hardware-responsive starfield animation
+//!
+//! # The signal bus
+//!
+//! The TUI hosts the signal bus in this process ([`crate::bus::tui_bus`]),
+//! memory only unless `--record DIR`/`--bus-dir DIR` is given (then it
+//! records there, with `--bus-retain`), and serves it on `--bus-socket PATH`
+//! when given. At start-up it tries the default socket path once with a
+//! short timeout; when a `--headless` host answers there, the TUI attaches
+//! to it and hosts no bus of its own (chip telemetry still comes from its
+//! own backend). `--no-bus-attach` skips that probe; `--bus-attach PATH`
+//! attaches to PATH or fails. `--replay` stays a `--headless` mode: run
+//! `tt-toplike-tui --headless --replay PATH --bus-socket S` and then the TUI
+//! with `--bus-attach S`.
+//!
+//! The bus is driven on the loop's data tick (the same pass that calls
+//! `backend.update()`), never per render frame. Every display-mode change
+//! publishes `ViewChanged` once (`view_name` gives the names). An attached
+//! or replay bus is named in the status bar (`bus: <path>`, `bus: replay`);
+//! a local bus adds nothing there. Views read the world with
+//! [`crate::bus::tui_bus::TuiBus::read`].
 
 pub mod bench;
 pub use bench::BenchResult;
@@ -238,6 +258,31 @@ fn die3d_pan_for(mode: DisplayMode, code: KeyCode) -> Option<crate::animation::d
         KeyCode::Down => Some(Die3dKey::PanDown),
         _ => None,
     }
+}
+
+/// The stable lowercase name a mode is published under in `ViewChanged`.
+fn view_name(mode: DisplayMode) -> &'static str {
+    match mode {
+        DisplayMode::Insights => "insights",
+        DisplayMode::Grid => "grid",
+        DisplayMode::Starfield => "starfield",
+        DisplayMode::MemoryCastle => "castle",
+        DisplayMode::MemoryFlow => "flow",
+        DisplayMode::Arcade => "arcade",
+        DisplayMode::Defrag => "defrag",
+        DisplayMode::InferenceMonitor => "inference",
+        DisplayMode::HivemindSweeper => "hivemind",
+        DisplayMode::Training => "training",
+        DisplayMode::Die3d => "die3d",
+    }
+}
+
+/// The status-bar hint for the bus: shown only when the bus is not this
+/// process's own live bus (attached to a headless host, or a replay), so a
+/// default run's status bar is unchanged.
+fn bus_status_hint(bus: &crate::bus::tui_bus::TuiBus) -> Option<String> {
+    let label = bus.bus_label();
+    (label != "bus: local").then_some(label)
 }
 
 /// Name shown in the global status bar for a mode that adds a hint there.
@@ -545,6 +590,46 @@ enum OverlayPanel {
 /// always kept; the rest are the busiest processes filling remaining slots).
 const PROC_PANEL_MAX_ROWS: usize = 12;
 
+/// Install the TUI's panic hook: it restores the terminal BEFORE the panic
+/// prints. Without it, a panic anywhere in the render/event loop unwinds
+/// straight past the normal cleanup, leaving the terminal in raw mode and the
+/// alternate screen, which makes every later shell command "staircase" until
+/// the user runs `reset`. Restoring first also lets the panic message print
+/// in cooked mode so the failure is visible.
+pub fn install_panic_hook() {
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // The process-scan worker catches its own panics and keeps
+        // serving (see `proc_scan`), so the UI stays up. Log it and
+        // leave the terminal alone; restoring it here would drop the
+        // live UI out of the alternate screen.
+        if proc_scan::is_scan_thread() {
+            log::warn!("process scan thread panicked: {info}");
+            return;
+        }
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableFocusChange);
+        crate::logging::enable_stderr();
+        original_hook(info);
+    }));
+}
+
+/// Install the TUI's panic hook, then start the signal bus.
+///
+/// The order matters. A hosted bus installs the quiet reducer hook
+/// (`tt_toplike_bus::install_quiet_reducer_hook`), which runs once per
+/// process and wraps whatever hook is current then. Installed after the TUI
+/// hook, it keeps a reducer panic (which the bus catches and survives) from
+/// reaching the TUI hook, which would drop the screen out of raw mode and
+/// print over the UI. Installed before, the TUI hook would replace it.
+pub fn start_bus_after_panic_hook(
+    opts: &crate::bus::tui_bus::TuiBusOptions,
+    backend: &dyn TelemetryBackend,
+) -> Result<crate::bus::tui_bus::TuiBus, String> {
+    install_panic_hook();
+    crate::bus::tui_bus::TuiBus::start(opts, backend)
+}
+
 pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     // Check if we have a TTY available
     if !std::io::stdout().is_terminal() {
@@ -580,29 +665,19 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     // message buffer (shown in the Insights panel); stderr is re-enabled on exit.
     crate::logging::disable_stderr();
 
-    // Install a panic hook that restores the terminal BEFORE the panic prints.
-    // Without this, a panic anywhere in the render/event loop unwinds straight
-    // past the normal cleanup below, leaving the terminal in raw mode + the
-    // alternate screen — which makes every subsequent shell command "staircase"
-    // until the user runs `reset`. Restoring here also lets the panic message
-    // print in cooked mode so the failure is actually visible.
-    {
-        let original_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            // The process-scan worker catches its own panics and keeps
-            // serving (see `proc_scan`), so the UI stays up. Log it and
-            // leave the terminal alone; restoring it here would drop the
-            // live UI out of the alternate screen.
-            if proc_scan::is_scan_thread() {
-                log::warn!("process scan thread panicked: {info}");
-                return;
-            }
-            let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableFocusChange);
+    // The panic hook, then the signal bus, in that order (see
+    // `start_bus_after_panic_hook`). Both before raw mode, so a bus that
+    // cannot start (a log directory another process holds, `--bus-attach`
+    // to a dead socket) reports on a normal terminal.
+    let bus_opts =
+        crate::bus::tui_bus::TuiBusOptions::from_cli(cli, backend_type, &backend.backend_info());
+    let mut tui_bus = match start_bus_after_panic_hook(&bus_opts, backend.as_ref()) {
+        Ok(b) => b,
+        Err(e) => {
             crate::logging::enable_stderr();
-            original_hook(info);
-        }));
-    }
+            return Err(TTTopError::Config(e));
+        }
+    };
 
     // Setup terminal
     enable_raw_mode().map_err(|e| {
@@ -628,7 +703,17 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
         .map_err(|e| TTTopError::Terminal(e.to_string()))?;
 
     // Create app state and run
-    let res = run_app(&mut terminal, &mut backend, backend_type, config, cli);
+    let res = run_app(
+        &mut terminal,
+        &mut backend,
+        backend_type,
+        config,
+        cli,
+        &mut tui_bus,
+    );
+    // Drop the bus before the terminal is restored: a recording flushes, and
+    // a served socket file is removed.
+    drop(tui_bus);
 
     // Re-enable stderr output before exiting
     crate::logging::enable_stderr();
@@ -655,6 +740,7 @@ fn run_app(
     mut backend_type: BackendType,
     config: BackendConfig,
     cli: &Cli,
+    tui_bus: &mut crate::bus::tui_bus::TuiBus,
 ) -> Result<(), TTTopError> {
     let update_interval = Duration::from_millis(cli.interval);
     let mut last_update = Instant::now();
@@ -828,6 +914,9 @@ fn run_app(
     let mut mock_train: Option<MockTrainRun> = None;
     let mut mock_train_state: Option<crate::workload::train::TrainState> = None;
     let mut prev_display_mode = display_mode;
+    // The starting view goes on the bus; every change after it is published
+    // at the mode-transition choke point below.
+    tui_bus.note_view(view_name(display_mode));
     // The mode to return to when `i`/`I`/`Esc` exits the dedicated
     // `DisplayMode::InferenceMonitor` view — captured at entry so `i` (or
     // `Esc`) always lands back wherever the user came from, not a hardcoded
@@ -1650,6 +1739,8 @@ fn run_app(
             // on a stale flag left by the previous one.
             train_active = true;
             inference_active = true;
+            // Once per change, never on a redraw.
+            tui_bus.note_view(view_name(display_mode));
             terminal.clear().ok();
             prev_display_mode = display_mode;
         }
@@ -1716,6 +1807,10 @@ fn run_app(
             let serve_hint = serve_status.as_deref();
             #[cfg(not(feature = "remote"))]
             let serve_hint: Option<&str> = None;
+            // `bus: <path>` / `bus: replay` when the bus is not this
+            // process's own live bus; nothing otherwise.
+            let bus_status = bus_status_hint(tui_bus);
+            let bus_hint = bus_status.as_deref();
             // Whether `proc_rows` above was actually built via the TT-filtered
             // path this cycle — only possible on Linux/procfs builds (see the
             // proc_rows assignments). Drives the process panel's empty-state
@@ -1862,6 +1957,7 @@ fn run_app(
                         perf_arg,
                         throttle_hint,
                         serve_hint,
+                        bus_hint,
                         reset_seg.as_ref(),
                     );
 
@@ -2926,13 +3022,22 @@ fn run_app(
             }
         }
 
-        // Update backend data
-        if last_update.elapsed() >= update_interval {
-            if let Err(e) = backend.update() {
-                log::warn!("Update failed: {}", e);
-            }
-            last_update = Instant::now();
+        // Hivemind events go on the bus while its collector runs (it runs
+        // only on the sweeper view; the bus never starts it). Cheap when
+        // nothing is new.
+        if let Some(h) = hivemind.as_ref().filter(|h| h.is_running()) {
+            tui_bus.feed_hivemind(h);
+        }
 
+        // Update backend data, then tick the bus: the data tick. The bus
+        // never ticks per render frame (`run_data_tick`).
+        if crate::bus::tui_bus::run_data_tick(
+            &mut last_update,
+            update_interval,
+            Instant::now(),
+            backend.as_mut(),
+            Some(&mut *tui_bus),
+        ) {
             // Ingest fresh telemetry into InferenceEngine — runs at backend rate (~10 Hz),
             // not at the UI render rate (60 FPS), so ARC stall counters don't oversaturate.
             #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
@@ -3037,6 +3142,31 @@ fn run_app(
                 prev_inference_snapshot = cur_inf;
             }
 
+            // The workload monitors' results go on the bus once per applied
+            // scan. What the views show: under `--mock` the synthetic
+            // roster and run; under `--remote` nothing local (the remote
+            // frame's extension is fed on the data tick).
+            if backend_type != BackendType::Remote {
+                #[cfg(target_os = "linux")]
+                let bus_inference = Some(if backend_type == BackendType::Mock {
+                    crate::workload::inference_server::mock::mock_services(
+                        mock_started.elapsed().as_secs_f32(),
+                    )
+                } else {
+                    inference_monitor.snapshot()
+                });
+                #[cfg(not(target_os = "linux"))]
+                let bus_inference: Option<
+                    Vec<crate::workload::inference_server::ServiceState>,
+                > = None;
+                let bus_training = if backend_type == BackendType::Mock {
+                    mock_train_state.clone()
+                } else {
+                    train_monitor.as_ref().map(|tm| tm.state().clone())
+                };
+                tui_bus.feed_workloads(&proc_rows, bus_inference.as_deref(), bus_training.as_ref());
+            }
+
             // `/serve` per-tick broadcast. It runs once per applied scan
             // result, so once per 2 s refresh. Clients get one fresh frame
             // per refresh; the 60fps render loop would re-send the same
@@ -3047,20 +3177,28 @@ fn run_app(
             // the `#[cfg(target_os = "linux")]` block above, since that block
             // computes it only to detect the model-unload edge and doesn't
             // otherwise need to survive past that check.
+            //
+            // The frame is built from the bus (`serve_frame`): the newest
+            // raw `tt-smi` record in the world, which the data tick
+            // published from this same backend, so the bytes match the old
+            // `inject_extension(snapshot_json(), ext)` frame.
+            //
+            // Relay (`--remote`): re-broadcast the origin's frame verbatim so
+            // downstream viewers see the WATCHED box's processes/inference,
+            // not this relay host's. That frame may carry the origin's own
+            // `tt_toplike`; injecting our local `build_extension` here would
+            // overwrite that key with our laptop's scan, misattributing it
+            // to the box being watched (see I1 in the final review). So the
+            // relay branch uses `compat::relay_frame` and never builds the
+            // local extension.
             #[cfg(feature = "remote")]
             if let Some(pub_handle) = publisher.as_ref() {
-                if let Some(frame) = backend.snapshot_json() {
-                    if backend_type == BackendType::Remote {
-                        // Relay: re-broadcast the origin's frame verbatim so
-                        // downstream viewers see the WATCHED box's processes/
-                        // inference, not this relay host's. `snapshot_json()`
-                        // already IS the origin peer's raw frame (which may
-                        // carry the origin's own `tt_toplike`); injecting our
-                        // local `build_extension` here would overwrite that
-                        // key with our laptop's scan, misattributing it to
-                        // the box being watched (see I1 in the final review).
-                        pub_handle.broadcast(frame);
-                    } else {
+                let relay = backend_type == BackendType::Remote;
+                let frame = crate::bus::tui_bus::serve_frame(
+                    Some(&*tui_bus),
+                    backend.snapshot_json(),
+                    relay,
+                    || {
                         // Local source of truth: enrich our own telemetry
                         // with our own process/inference monitors.
                         #[cfg(target_os = "linux")]
@@ -3069,12 +3207,14 @@ fn run_app(
                         let inference_snapshot_for_broadcast: Vec<
                             crate::workload::inference_server::ServiceState,
                         > = Vec::new();
-                        let ext = crate::backend::build_extension(
+                        crate::backend::build_extension(
                             &proc_rows,
                             &inference_snapshot_for_broadcast,
-                        );
-                        pub_handle.broadcast(crate::backend::inject_extension(&frame, &ext));
-                    }
+                        )
+                    },
+                );
+                if let Some(frame) = frame {
+                    pub_handle.broadcast(frame);
                 }
             }
         }
@@ -3497,6 +3637,7 @@ fn render_global_statusbar(
     perf: Option<&str>,
     throttle_hint: Option<&str>,
     serve_hint: Option<&str>,
+    bus_hint: Option<&str>,
     reset_seg: Option<&reset_status::ResetSegment>,
 ) {
     use crate::models::telemetry::parse_hex_or_dec;
@@ -3699,6 +3840,13 @@ fn render_global_statusbar(
             Style::default()
                 .fg(colors::rgb(120, 220, 140))
                 .add_modifier(Modifier::BOLD),
+        )]);
+    }
+    // The bus, when it is another process's (`bus: <path>`) or a replay.
+    if let Some(hint) = bus_hint {
+        hints.push(vec![Span::styled(
+            hint.to_string(),
+            Style::default().fg(colors::rgb(0x74, 0xC5, 0xDF)),
         )]);
     }
 
@@ -12137,6 +12285,7 @@ mod reset_statusbar_tests {
                 hints.then_some("12.0fps"),
                 hints.then_some("⏷30"),
                 hints.then_some("◉ serving :8080 · 2 clients"),
+                None,
                 seg,
             )
         })
@@ -12703,5 +12852,92 @@ mod insights_inset_tests {
         let mut inset = Some(crate::animation::Die3dView::inset(52, 20));
         assert!(!sync_inset(&mut inset, rect, false));
         assert!(inset.is_none());
+    }
+}
+
+/// The bus wiring that lives in this module: the view names and the
+/// status-bar hint.
+#[cfg(test)]
+mod bus_wiring_tests {
+    use super::*;
+    use crate::backend::mock::MockBackend;
+    use crate::bus::tui_bus::{Attach, TuiBus, TuiBusOptions};
+    use ratatui::backend::TestBackend;
+
+    /// Every mode has its stable lowercase name, and no two share one.
+    #[test]
+    fn every_mode_has_a_stable_view_name() {
+        let all = [
+            (DisplayMode::Insights, "insights"),
+            (DisplayMode::Grid, "grid"),
+            (DisplayMode::Starfield, "starfield"),
+            (DisplayMode::MemoryCastle, "castle"),
+            (DisplayMode::MemoryFlow, "flow"),
+            (DisplayMode::Arcade, "arcade"),
+            (DisplayMode::Defrag, "defrag"),
+            (DisplayMode::InferenceMonitor, "inference"),
+            (DisplayMode::HivemindSweeper, "hivemind"),
+            (DisplayMode::Training, "training"),
+            (DisplayMode::Die3d, "die3d"),
+        ];
+        for (m, name) in all {
+            assert_eq!(view_name(m), name);
+        }
+        // The `v` cycle visits only modes named above.
+        let mut m = DisplayMode::Insights;
+        for _ in 0..20 {
+            assert!(all.iter().any(|(k, _)| *k == m));
+            m = next_display_mode(m);
+        }
+    }
+
+    fn mock() -> MockBackend {
+        let mut b = MockBackend::new(2);
+        b.init().unwrap();
+        b.update().unwrap();
+        b
+    }
+
+    fn bar(b: &MockBackend, bus_hint: Option<&str>) -> String {
+        let mut term = Terminal::new(TestBackend::new(400, 3)).unwrap();
+        term.draw(|f| {
+            render_global_statusbar(f, b, DisplayMode::Grid, None, None, None, bus_hint, None)
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        (0..buf.area.width).map(|x| buf[(x, 2)].symbol()).collect()
+    }
+
+    /// A local bus adds nothing to the status bar, so a default run's bar is
+    /// unchanged; an attached one names its socket.
+    #[cfg(unix)]
+    #[test]
+    fn the_status_bar_names_an_attached_bus_and_not_a_local_one() {
+        let b = mock();
+        let opts = TuiBusOptions::from_cli(
+            &<Cli as clap::Parser>::try_parse_from(["t", "--mock", "2"]).unwrap(),
+            BackendType::Mock,
+            "Mock",
+        );
+        let local = TuiBus::start(&opts, &b).unwrap();
+        assert_eq!(bus_status_hint(&local), None);
+        assert_eq!(bar(&b, bus_status_hint(&local).as_deref()), bar(&b, None));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("run").join("bus.sock");
+        let _server =
+            tt_toplike_bus::SocketServer::spawn(local.host().unwrap().bus().clone(), &sock)
+                .unwrap();
+        let attached = TuiBus::start(
+            &TuiBusOptions {
+                attach: Attach::Required(sock.clone()),
+                ..opts
+            },
+            &b,
+        )
+        .unwrap();
+        let hint = bus_status_hint(&attached).unwrap();
+        assert_eq!(hint, format!("bus: {}", sock.display()));
+        assert!(bar(&b, Some(&hint)).contains(&hint));
     }
 }

@@ -373,6 +373,8 @@ mod tests {
             headless: false,
             bus_dir: None,
             bus_socket: None,
+            no_bus_attach: false,
+            bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
             entity: None,

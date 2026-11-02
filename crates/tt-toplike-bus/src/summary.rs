@@ -16,6 +16,7 @@
 //! ```text
 //! {"seq":N,                         // the snapshot is current to record N
 //!  "instance":I,                    // the server bus's random id (Bus::instance)
+//!  "kind":"Live",                   // the server bus's header kind: Live or Replay
 //!  "world":{
 //!    "now_mono_ns":T,               // server monotonic time the ages are taken at
 //!    "entities":["chip:0000:03:00.0", ...],        // every entity seen, key order
@@ -38,6 +39,9 @@
 //! * `events` holds the last [`SUMMARY_EVENTS`] events, oldest first.
 //! * `raw` lists the newest raw frame of each source by size only. The
 //!   socket's `raw` op returns a body.
+//! * `kind` says whether the server's bus is live or a replay
+//!   ([`crate::Bus::header`]). A server that predates the field sends none,
+//!   and a reader takes it as `Live`.
 //!
 //! # What `apply` does not copy from `World`
 //!
@@ -47,7 +51,7 @@
 //! example after a reconnect) does reflect the pruning.
 
 use crate::entity::EntityKey;
-use crate::record::{Event, Payload, Provenance, Record, Value};
+use crate::record::{Event, HeaderKind, Payload, Provenance, Record, Value};
 use crate::world::{update_view, ModelPhase, ModelView, World};
 use serde::{Deserialize, Serialize};
 
@@ -111,7 +115,17 @@ pub struct RemoteSnapshot {
     pub seq: u64,
     /// The server bus's [`crate::Bus::instance`].
     pub instance: u64,
+    /// The server bus's header kind: `Live`, or `Replay` for a bus that
+    /// republishes a recorded log. Absent from older servers; read as
+    /// `Live` then.
+    #[serde(default = "live")]
+    pub kind: HeaderKind,
     pub world: WorldSummary,
+}
+
+/// The header kind a snapshot without a `kind` field is read as.
+fn live() -> HeaderKind {
+    HeaderKind::Live
 }
 
 impl WorldSummary {
@@ -438,11 +452,21 @@ mod tests {
         let s = RemoteSnapshot {
             seq: snap.seq,
             instance: bus.instance(),
+            kind: HeaderKind::Replay,
             world: WorldSummary::from_world(&snap.world, bus.now_mono_ns()),
         };
         let line = serde_json::to_string(&s).unwrap();
         assert!(line.contains("\"phase\":\"ready\""), "{line}");
         assert_eq!(serde_json::from_str::<RemoteSnapshot>(&line).unwrap(), s);
+        assert!(line.contains("\"kind\":\"Replay\""), "{line}");
+    }
+
+    /// A snapshot line from a server that sends no `kind` is read as live.
+    #[test]
+    fn a_snapshot_without_a_kind_is_live() {
+        let line = r#"{"seq":0,"instance":1,"world":{"now_mono_ns":0,"entities":[],"readings":[],"models":[],"events":[],"resets":[],"raw":[]}}"#;
+        let s: RemoteSnapshot = serde_json::from_str(line).unwrap();
+        assert_eq!(s.kind, HeaderKind::Live);
     }
 
     #[test]

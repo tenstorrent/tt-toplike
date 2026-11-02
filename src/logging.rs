@@ -233,6 +233,12 @@ pub fn enable_stderr() {
     STDERR_DISABLED.store(false, Ordering::Relaxed);
 }
 
+/// Whether log lines currently reach stderr (false between
+/// [`disable_stderr`] and [`enable_stderr`]).
+pub fn stderr_enabled() -> bool {
+    !STDERR_DISABLED.load(Ordering::Relaxed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

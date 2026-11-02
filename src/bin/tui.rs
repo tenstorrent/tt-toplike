@@ -61,18 +61,12 @@ fn main() {
         return;
     }
 
-    // The bus host runs headless only in this build. `Cli::validate` already
-    // refused `--replay` without `--headless`. The TUI refuses the other bus
-    // flags too: ignoring them would let someone believe the TUI is
-    // recording when it is not.
-    if let Some(flag) = cli.bus_flag_needing_headless() {
-        eprintln!(
-            "Error: {flag} takes effect with --headless in this build: the TUI does not \
-             host the signal bus yet. Run `tt-toplike-tui --headless {flag} ...` to record \
-             and serve the bus with no screen."
-        );
-        std::process::exit(2);
-    }
+    // The TUI hosts the signal bus itself (`--record`, `--bus-dir`,
+    // `--bus-retain`, `--bus-socket`) or attaches to a headless host's
+    // (`--bus-attach`, or the start-up probe of the default socket); see
+    // `tt_toplike::bus::tui_bus`. `Cli::validate` already refused `--replay`
+    // without `--headless`: a replay is served by a headless host and read
+    // with `--bus-attach`.
 
     // Initialize logging with appropriate level
     init_logging(cli.log_level());

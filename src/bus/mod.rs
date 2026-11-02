@@ -19,6 +19,11 @@
 //!   them on the host's tick.
 //! * [`headless`] runs a host with no screen (`--headless`): recording, the
 //!   socket, and the `/telemetry` broadcast.
+//! * [`view`] is what a view reads the bus through: a local host or an
+//!   attached remote world, with a per-frame read that copies the world
+//!   only when it changed.
+//! * [`tui_bus`] is the TUI's side: host or attach at start-up, the data
+//!   tick, `ViewChanged`, and the `/serve` frame.
 
 #[cfg(feature = "remote")]
 pub mod compat;
@@ -30,4 +35,6 @@ pub mod proc_argv;
 pub mod redact;
 pub mod signals;
 pub mod source;
+pub mod tui_bus;
+pub mod view;
 pub mod workload_sources;

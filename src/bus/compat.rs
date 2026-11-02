@@ -6,9 +6,9 @@
 //! [`crate::bus::signals::RAW_SOURCE_TT_SMI`] (`"tt-smi"`, published by
 //! `BackendSource`). These helpers rebuild the same frame from a [`World`].
 //!
-//! Nothing calls them yet. The two broadcast sites (the `/serve` block in
-//! `ui/tui/mod.rs` and the headless loop in `bin/tui.rs`) switch over in
-//! Task 10, once a host owns a `World`.
+//! Both broadcast sites use them: the headless loop
+//! (`crate::bus::headless`) and the TUI's `/serve` block, through
+//! `crate::bus::tui_bus::serve_frame`.
 //!
 //! Both helpers need the `remote` feature, because the extension types live
 //! behind it.
@@ -24,7 +24,7 @@ use tt_toplike_bus::World;
 /// A body that `inject_extension` cannot parse or that is not a JSON object
 /// comes back unchanged, as it does there.
 ///
-/// Relay rule that the Task 10 call site must keep: a `--remote` box
+/// Relay rule that every call site keeps: a `--remote` box
 /// (`backend_type == BackendType::Remote`) re-broadcasts the origin's frame
 /// verbatim and never adds its own extension. That call site must use
 /// [`relay_frame`] and must not call this function.

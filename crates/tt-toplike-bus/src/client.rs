@@ -32,7 +32,7 @@
 //! * The view does not prune quiet churning entities the way `World` does
 //!   (see [`crate::summary`]); a reconnect with a snapshot does.
 
-use crate::record::Record;
+use crate::record::{HeaderKind, Record};
 use crate::socket::{ErrorLine, RawReply, SubscribedLine};
 use crate::summary::{EventSummary, ReadingSummary, RemoteSnapshot, WorldSummary};
 use crate::world::ModelView;
@@ -189,7 +189,12 @@ impl Lines {
 
     /// The next line, waiting at most [`REPLY_TIMEOUT`].
     fn reply(&mut self) -> Result<Vec<u8>, ClientError> {
-        self.next_line(REPLY_TIMEOUT)?.ok_or_else(|| {
+        self.reply_within(REPLY_TIMEOUT)
+    }
+
+    /// The next line, waiting at most `timeout`.
+    fn reply_within(&mut self, timeout: Duration) -> Result<Vec<u8>, ClientError> {
+        self.next_line(timeout)?.ok_or_else(|| {
             ClientError::Io(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "no reply from the bus socket",
@@ -253,8 +258,15 @@ impl SocketClient {
 
     /// The server's world summary and the sequence number it is current to.
     pub fn snapshot(&mut self) -> io::Result<RemoteSnapshot> {
+        self.snapshot_within(REPLY_TIMEOUT)
+    }
+
+    /// [`SocketClient::snapshot`], waiting at most `timeout` for the reply.
+    /// A server that accepts the connection but does not answer in time
+    /// gives `TimedOut`.
+    pub fn snapshot_within(&mut self, timeout: Duration) -> io::Result<RemoteSnapshot> {
         self.send(&serde_json::json!({"op": "snapshot"}))?;
-        let line = self.lines()?.reply()?;
+        let line = self.lines()?.reply_within(timeout)?;
         Ok(decode::<RemoteSnapshot>(&line)?)
     }
 
@@ -330,12 +342,37 @@ impl RemoteSubscription {
 
 /// A copy of a remote world: the summary and the sequence number it is
 /// current to.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RemoteView {
     pub seq: u64,
     /// The server bus's instance id (see [`crate::Bus::instance`]).
     pub instance: u64,
+    /// The server bus's header kind: `Replay` when it republishes a
+    /// recorded log.
+    pub header_kind: HeaderKind,
     pub world: WorldSummary,
+}
+
+impl Default for RemoteView {
+    fn default() -> Self {
+        RemoteView {
+            seq: 0,
+            instance: 0,
+            header_kind: HeaderKind::Live,
+            world: WorldSummary::default(),
+        }
+    }
+}
+
+impl From<RemoteSnapshot> for RemoteView {
+    fn from(s: RemoteSnapshot) -> Self {
+        RemoteView {
+            seq: s.seq,
+            instance: s.instance,
+            header_kind: s.kind,
+            world: s.world,
+        }
+    }
 }
 
 impl RemoteView {
@@ -407,10 +444,11 @@ impl fmt::Debug for RemoteWorld {
     }
 }
 
-/// Connect, take a snapshot, and subscribe from it on the same connection.
-fn open(path: &Path) -> io::Result<(RemoteSnapshot, RemoteSubscription)> {
+/// Connect, take a snapshot (waiting at most `timeout` for it), and
+/// subscribe from it on the same connection.
+fn open(path: &Path, timeout: Duration) -> io::Result<(RemoteSnapshot, RemoteSubscription)> {
     let mut c = SocketClient::connect(path)?;
-    let snap = c.snapshot()?;
+    let snap = c.snapshot_within(timeout)?;
     let sub = c.subscribe_from(snap.seq)?;
     Ok((snap, sub))
 }
@@ -419,15 +457,19 @@ impl RemoteWorld {
     /// Connect to the server at `path` and take the first snapshot. Fails
     /// when no server answers, so the caller can host its own bus instead.
     pub fn connect(path: &Path) -> io::Result<RemoteWorld> {
-        let (snap, sub) = open(path)?;
+        RemoteWorld::connect_within(path, REPLY_TIMEOUT)
+    }
+
+    /// [`RemoteWorld::connect`], waiting at most `timeout` for the first
+    /// snapshot. For a probe at start-up: a server that accepts but does
+    /// not answer in time fails with `TimedOut`. Reconnects later use the
+    /// normal reply timeout.
+    pub fn connect_within(path: &Path, timeout: Duration) -> io::Result<RemoteWorld> {
+        let (snap, sub) = open(path, timeout)?;
         let shared = Arc::new(RemoteShared {
             path: path.to_path_buf(),
             state: Mutex::new(ViewState {
-                view: RemoteView {
-                    seq: snap.seq,
-                    instance: snap.instance,
-                    world: snap.world,
-                },
+                view: RemoteView::from(snap),
                 learned: Instant::now(),
             }),
             connected: AtomicBool::new(true),
@@ -457,6 +499,38 @@ impl RemoteWorld {
     /// True while a subscription to the server is open.
     pub fn connected(&self) -> bool {
         self.shared.connected.load(Ordering::SeqCst)
+    }
+
+    /// The sequence number the view is current to. One lock and no copy, so
+    /// a caller can check it every frame and call [`RemoteWorld::latest`]
+    /// only when it moved.
+    pub fn seq(&self) -> u64 {
+        self.shared.state().view.seq
+    }
+
+    /// The server's bus instance id the view belongs to. A reconnect to a
+    /// restarted server changes it, possibly with the same `seq`.
+    pub fn instance(&self) -> u64 {
+        self.shared.state().view.instance
+    }
+
+    /// The server's monotonic time now, estimated from the last time it was
+    /// learned plus the local time since. The scale reading ages are on.
+    pub fn now_mono_ns(&self) -> u64 {
+        let st = self.shared.state();
+        let elapsed = u64::try_from(st.learned.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        st.view.world.now_mono_ns.saturating_add(elapsed)
+    }
+
+    /// The server bus's header kind: `Replay` when it republishes a
+    /// recorded log.
+    pub fn header_kind(&self) -> HeaderKind {
+        self.shared.state().view.header_kind
+    }
+
+    /// The socket path this world reads.
+    pub fn path(&self) -> &Path {
+        &self.shared.path
     }
 }
 
@@ -561,13 +635,9 @@ fn drain(shared: &RemoteShared, s: &mut RemoteSubscription) -> Option<bool> {
 /// Connect, take a fresh snapshot that replaces the view, and subscribe
 /// from it.
 fn resnapshot(shared: &RemoteShared) -> io::Result<RemoteSubscription> {
-    let (snap, sub) = open(&shared.path)?;
+    let (snap, sub) = open(&shared.path, REPLY_TIMEOUT)?;
     let mut st = shared.state();
-    st.view = RemoteView {
-        seq: snap.seq,
-        instance: snap.instance,
-        world: snap.world,
-    };
+    st.view = RemoteView::from(snap);
     st.learned = Instant::now();
     Ok(sub)
 }

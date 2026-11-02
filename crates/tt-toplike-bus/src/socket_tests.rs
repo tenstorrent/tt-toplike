@@ -960,6 +960,7 @@ fn snap_line(seq: u64, instance: u64, sig: &str) -> String {
     serde_json::to_string(&RemoteSnapshot {
         seq,
         instance,
+        kind: crate::HeaderKind::Live,
         world: w,
     })
     .unwrap()

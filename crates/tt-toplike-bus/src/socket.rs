@@ -24,7 +24,8 @@
 //!                                           {"done":COUNT}, then the server closes
 //! ```
 //!
-//! * `snapshot`: the reply is `{"seq":N,"instance":I,"world":{...}}`.
+//! * `snapshot`: the reply is `{"seq":N,"instance":I,"kind":K,"world":{...}}`,
+//!   where `K` is the bus's header kind (`Live` or `Replay`).
 //!   `world` is a [`WorldSummary`]; its fields are documented in
 //!   [`crate::summary`]. `seq` and `world` are taken under one lock, so the
 //!   world holds every record up to `seq` and none after it. `instance` is
@@ -782,6 +783,7 @@ fn snapshot_line(bus: &Bus) -> Option<String> {
     let reply = RemoteSnapshot {
         seq: snap.seq,
         instance: bus.instance(),
+        kind: bus.header().kind,
         world: WorldSummary::from_world(&snap.world, bus.now_mono_ns()),
     };
     Some(serde_json::to_string(&reply).expect("snapshot encodes"))

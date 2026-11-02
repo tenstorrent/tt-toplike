@@ -248,8 +248,8 @@ pub struct Cli {
     ///
     /// The log is a directory of `bus-<n>.jsonl[.gz]` files, kept for 24 hours
     /// or 5 GB (see `--bus-retain`). Read it back with `--replay DIR` or
-    /// `--bus-inspect DIR`. The same as `--bus-dir DIR`. In this build only
-    /// `--headless` records; the TUI does not host the bus yet.
+    /// `--bus-inspect DIR`. The same as `--bus-dir DIR`. Works in the TUI
+    /// and with `--headless`. Without it the TUI keeps its bus in memory.
     #[arg(long, value_name = "DIR")]
     pub record: Option<PathBuf>,
 
@@ -259,8 +259,8 @@ pub struct Cli {
     /// The records are republished on the bus with their original spacing
     /// divided by `--speed`, and the bus is marked as a replay. Needs
     /// `--headless` in this release: run
-    /// `tt-toplike-tui --headless --replay PATH` and read it on its socket
-    /// (`--bus-socket`). Cannot be combined with a backend or live flag
+    /// `tt-toplike-tui --headless --replay PATH --bus-socket SOCKET` and read
+    /// it in a TUI with `--bus-attach SOCKET`. Cannot be combined with a backend or live flag
     /// (`--mock`, `--json`, `--host`, `--backend`, `--serve`, `--remote`).
     #[arg(long, value_name = "PATH")]
     pub replay: Option<PathBuf>,
@@ -297,8 +297,9 @@ pub struct Cli {
     pub headless: bool,
 
     /// Directory for the signal-bus log. Default with `--headless`:
-    /// `~/.local/state/tt-toplike/bus`. One process at a time may write a
-    /// directory; a second is refused.
+    /// `~/.local/state/tt-toplike/bus`. The TUI keeps its bus in memory
+    /// unless this (or `--record`) is given. One process at a time may write
+    /// a directory; a second is refused.
     #[arg(long, value_name = "DIR")]
     pub bus_dir: Option<PathBuf>,
 
@@ -307,8 +308,30 @@ pub struct Cli {
     /// `/tmp/tt-toplike-<uid>/bus.sock`. Its directory must belong to you
     /// and not be writable by group or others, so a path directly in `/tmp`
     /// is refused.
+    ///
+    /// `--headless` always serves the socket. The TUI serves it only when
+    /// this flag is given, and then hosts its own bus.
     #[arg(long, value_name = "PATH")]
     pub bus_socket: Option<PathBuf>,
+
+    /// TUI: do not look for a headless bus host at start-up.
+    ///
+    /// By default the TUI tries the default socket path once, with a short
+    /// timeout. When a headless host (`--headless`) answers there, the TUI
+    /// reads that host's bus and does not host its own; chip telemetry
+    /// still comes from the TUI's own backend. The probe is skipped with
+    /// `--bus-socket`, `--record`/`--bus-dir`, `--mock` and `--remote`.
+    #[arg(long, conflicts_with_all = ["headless", "bus_attach"])]
+    pub no_bus_attach: bool,
+
+    /// TUI: read the bus of the headless host serving the socket at PATH,
+    /// and fail at start-up if it does not answer.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["headless", "bus_socket", "record", "bus_dir"]
+    )]
+    pub bus_attach: Option<PathBuf>,
 
     /// How long to keep the signal-bus log: HOURS, or HOURS,GB for a size
     /// limit too (whichever is reached first). Default 24,5.
@@ -766,6 +789,8 @@ impl Cli {
             headless: false,
             bus_dir: None,
             bus_socket: None,
+            no_bus_attach: false,
+            bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
             entity: None,
@@ -846,20 +871,22 @@ impl Cli {
         self.bus_socket.clone().unwrap_or_else(default_bus_socket)
     }
 
-    /// The bus flags that only `--headless` acts on in this build, by name,
-    /// when one is set without it. The TUI does not host the bus yet.
-    pub fn bus_flag_needing_headless(&self) -> Option<&'static str> {
-        if self.headless {
-            return None;
+    /// The signal-bus settings for the TUI's own bus: memory only unless
+    /// `--record`/`--bus-dir` names a directory (the TUI never writes to the
+    /// default directory, which belongs to a headless host), with the
+    /// retention from `--bus-retain`.
+    pub fn tui_bus_config(&self) -> tt_toplike_bus::BusConfig {
+        let mut cfg = tt_toplike_bus::BusConfig {
+            dir: self.bus_dir.clone().or_else(|| self.record.clone()),
+            ..tt_toplike_bus::BusConfig::default()
+        };
+        if let Some(r) = self.bus_retain {
+            cfg.retain_secs = r.secs;
+            if let Some(b) = r.bytes {
+                cfg.retain_bytes = b;
+            }
         }
-        [
-            ("--record", self.record.is_some()),
-            ("--bus-dir", self.bus_dir.is_some()),
-            ("--bus-socket", self.bus_socket.is_some()),
-            ("--bus-retain", self.bus_retain.is_some()),
-        ]
-        .into_iter()
-        .find_map(|(name, set)| set.then_some(name))
+        cfg
     }
 
     /// Checks for the signal-bus flags (`--record`, `--replay`, `--speed`,
@@ -924,8 +951,8 @@ impl Cli {
             if !self.headless {
                 return Err(
                     "--replay needs --headless in this release: the TUI shows chips from a \
-                     live backend. Run `tt-toplike-tui --headless --replay PATH` and read it \
-                     on its socket (--bus-socket)"
+                     live backend. Run `tt-toplike-tui --headless --replay PATH --bus-socket \
+                     SOCKET` and read it in a TUI with `--bus-attach SOCKET`"
                         .to_string(),
                 );
             }
@@ -1039,6 +1066,8 @@ mod tests {
             headless: false,
             bus_dir: None,
             bus_socket: None,
+            no_bus_attach: false,
+            bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
             entity: None,
@@ -1087,6 +1116,8 @@ mod tests {
             headless: false,
             bus_dir: None,
             bus_socket: None,
+            no_bus_attach: false,
+            bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
             entity: None,
@@ -1130,6 +1161,8 @@ mod tests {
             headless: false,
             bus_dir: None,
             bus_socket: None,
+            no_bus_attach: false,
+            bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
             entity: None,
@@ -1173,6 +1206,8 @@ mod tests {
             headless: false,
             bus_dir: None,
             bus_socket: None,
+            no_bus_attach: false,
+            bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
             entity: None,
@@ -1220,6 +1255,8 @@ mod tests {
             headless: false,
             bus_dir: None,
             bus_socket: None,
+            no_bus_attach: false,
+            bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
             entity: None,
@@ -1260,6 +1297,8 @@ mod tests {
             headless: false,
             bus_dir: None,
             bus_socket: None,
+            no_bus_attach: false,
+            bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
             entity: None,
@@ -1303,6 +1342,8 @@ mod tests {
             headless: false,
             bus_dir: None,
             bus_socket: None,
+            no_bus_attach: false,
+            bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
             entity: None,
@@ -1355,6 +1396,8 @@ mod tests {
             headless: false,
             bus_dir: None,
             bus_socket: None,
+            no_bus_attach: false,
+            bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
             entity: None,
@@ -1395,6 +1438,8 @@ mod tests {
             headless: false,
             bus_dir: None,
             bus_socket: None,
+            no_bus_attach: false,
+            bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
             entity: None,
@@ -1437,6 +1482,8 @@ mod tests {
             headless: false,
             bus_dir: None,
             bus_socket: None,
+            no_bus_attach: false,
+            bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
             entity: None,
@@ -1879,7 +1926,9 @@ mod tests {
     fn replay_without_headless_points_at_the_headless_command() {
         let e = parse(&["--replay", "log"]).unwrap().validate().unwrap_err();
         assert!(
-            e.contains("tt-toplike-tui --headless --replay PATH") && e.contains("--bus-socket"),
+            e.contains("tt-toplike-tui --headless --replay PATH")
+                && e.contains("--bus-socket")
+                && e.contains("--bus-attach SOCKET"),
             "{e}"
         );
     }
@@ -1911,14 +1960,45 @@ mod tests {
             .is_ok());
     }
 
+    /// The TUI takes the bus flags. Its bus is memory only unless a
+    /// directory is named; it never takes the headless default directory.
     #[test]
-    fn bus_flags_without_headless_are_named_for_the_tui_refusal() {
-        let cli = parse(&["--record", "/a"]).unwrap();
-        assert_eq!(cli.bus_flag_needing_headless(), Some("--record"));
-        let cli = parse(&["--bus-socket", "/a/s"]).unwrap();
-        assert_eq!(cli.bus_flag_needing_headless(), Some("--bus-socket"));
-        let cli = parse(&["--headless", "--record", "/a"]).unwrap();
-        assert_eq!(cli.bus_flag_needing_headless(), None);
+    fn the_tui_takes_the_bus_flags() {
+        for args in [
+            &["--record", "/a"][..],
+            &["--bus-dir", "/a"],
+            &["--bus-socket", "/a/s"],
+            &["--bus-retain", "2,1"],
+            &["--no-bus-attach"],
+            &["--bus-attach", "/a/s"],
+        ] {
+            let cli = parse(args).unwrap();
+            assert!(cli.validate().is_ok(), "{args:?}");
+        }
+        assert_eq!(parse(&[]).unwrap().tui_bus_config().dir, None);
+        let cli = parse(&["--record", "/r"]).unwrap();
+        assert_eq!(cli.tui_bus_config().dir, Some(PathBuf::from("/r")));
+        let cli = parse(&["--bus-dir", "/d", "--bus-retain", "2,1"]).unwrap();
+        let c = cli.tui_bus_config();
+        assert_eq!(c.dir, Some(PathBuf::from("/d")));
+        assert_eq!(c.retain_secs, 7_200);
+    }
+
+    /// `--bus-attach` reads another host's bus, so it cannot be combined
+    /// with flags that make the TUI host its own.
+    #[test]
+    fn bus_attach_conflicts_with_hosting_flags() {
+        for other in [
+            &["--bus-socket", "/s"][..],
+            &["--record", "/r"],
+            &["--bus-dir", "/d"],
+            &["--headless"],
+            &["--no-bus-attach"],
+        ] {
+            let mut args = vec!["--bus-attach", "/a"];
+            args.extend_from_slice(other);
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
     }
 
     // ---- fix round 1 --------------------------------------------------------
