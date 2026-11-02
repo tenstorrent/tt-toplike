@@ -273,6 +273,10 @@ pub struct Cli {
     /// the events and each signal's sample count, min, max and last value.
     /// PATH is a segment file (plain or `.gz`) or a directory of segments.
     /// Narrow the output with `--entity` and `--signal`.
+    ///
+    /// Holes in the log (a deleted middle segment, an unreadable segment,
+    /// corrupt lines) are listed under `holes:`. A deleted LAST segment
+    /// cannot be detected; only an unreadable last segment is reported.
     #[arg(long, value_name = "PATH")]
     pub bus_inspect: Option<PathBuf>,
 

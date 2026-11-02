@@ -18,7 +18,8 @@
 //! A jump in sequence numbers between two records that were read (a deleted
 //! or unreadable segment) is a [`Hole`], listed by [`Replay::holes`]. `play`
 //! publishes a [`crate::Gap`] from source `replay` at each one, so a world
-//! built from a damaged log shows the gap.
+//! built from a damaged log shows the gap. A deleted last segment cannot be
+//! seen from sequence jumps and is not reported.
 //!
 //! # The play clock
 //!
@@ -167,6 +168,9 @@ impl Replay {
 
     /// Holes found so far, in order. Like [`Replay::bad_lines`] it fills as
     /// [`Replay::records`] is consumed, so read it after the iteration.
+    ///
+    /// Records lost from the END of a log (a deleted last segment) leave no
+    /// jump to see, so they are not reported. An unreadable last segment is.
     pub fn holes(&self) -> &[Hole] {
         &self.holes
     }
@@ -186,6 +190,10 @@ impl Replay {
             last: None,
             stash: None,
             failure: None,
+            cur_idx: 0,
+            cur_bad: 0,
+            last_idx: 0,
+            last_bad: 0,
         }
     }
 
@@ -269,36 +277,62 @@ fn list_dir(dir: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(found.into_values().map(|(_, p)| p).collect())
 }
 
-/// A discontinuity in the records actually read: the log is missing some.
+/// Why records are missing at a [`Hole`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoleKind {
+    /// No segment file holds the records (it was deleted).
+    MissingSegment,
+    /// A segment file exists but cannot be read, or is empty in the middle
+    /// of the log.
+    UnreadableSegment,
+    /// Lines that did not decode were skipped.
+    CorruptLines,
+}
+
+impl HoleKind {
+    /// Fixed text for [`Hole::describe`]. It never varies by platform.
+    pub fn text(self) -> &'static str {
+        match self {
+            HoleKind::MissingSegment => "no segment file holds them",
+            HoleKind::UnreadableSegment => "segment unreadable",
+            HoleKind::CorruptLines => "corrupt lines",
+        }
+    }
+}
+
+/// Records missing from the log.
 ///
-/// Only a jump between two records that were read counts. The first record
-/// is never a hole, so a log that starts at sequence 500 (older segments
-/// removed by retention) has none.
+/// Two things make a hole. A jump in sequence numbers between two records
+/// that were read (a deleted segment, or lines skipped as corrupt), and a
+/// segment file that exists but cannot be read, even before the first
+/// record. A log that merely starts at sequence 500 because retention
+/// removed older segments has no hole, since no file for the older ones was
+/// ever seen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hole {
-    /// The last record read before the hole.
-    pub after_seq: u64,
+    /// The last record read before the hole, or `None` at the head of the
+    /// log (the first segment could not be read).
+    pub after_seq: Option<u64>,
     /// The first record read after it, or `None` when the log ends here
     /// because the last segment could not be read.
     pub next_seq: Option<u64>,
-    /// Why: no segment file, or what went wrong reading one.
-    pub reason: String,
+    /// What happened.
+    pub kind: HoleKind,
+    /// The operating system's error text or similar. For `inspect`; it is
+    /// never put in the published [`crate::Gap`].
+    pub detail: Option<String>,
 }
 
 impl Hole {
     /// The text [`Replay::play`] publishes as a [`crate::Gap`] at this hole.
+    /// Built from fixed strings, so it is the same on every platform.
     pub fn describe(&self) -> String {
-        match self.next_seq {
-            Some(n) => format!(
-                "missing records {}..={} ({})",
-                self.after_seq + 1,
-                n - 1,
-                self.reason
-            ),
-            None => format!(
-                "log ends early after record {} ({})",
-                self.after_seq, self.reason
-            ),
+        let why = self.kind.text();
+        match (self.after_seq, self.next_seq) {
+            (Some(a), Some(n)) => format!("missing records {}..={}: {why}", a + 1, n - 1),
+            (None, Some(n)) => format!("missing records before {n}: {why}"),
+            (Some(a), None) => format!("log ends early after record {a}: {why}"),
+            (None, None) => format!("log unreadable: {why}"),
         }
     }
 }
@@ -319,35 +353,59 @@ struct Records<'a> {
     last: Option<u64>,
     /// A record read after a hole, held back until the hole is yielded.
     stash: Option<Record>,
-    /// Why the most recent segment gave nothing, to explain the next hole.
-    failure: Option<String>,
+    /// Why a segment gave nothing, to explain the next hole: the kind and
+    /// the detail.
+    failure: Option<(HoleKind, String)>,
+    /// Index of the segment now being read, and its bad-line count.
+    cur_idx: usize,
+    cur_bad: u64,
+    /// The same two for the segment the last returned record came from.
+    last_idx: usize,
+    last_bad: u64,
 }
 
 impl Records<'_> {
     fn next_record(&mut self) -> Option<Record> {
         loop {
             if let Some(r) = self.current.next() {
+                self.last_idx = self.cur_idx;
+                self.last_bad = self.cur_bad;
                 return Some(r);
             }
             let path = self.replay.files.get(self.next_file)?;
+            self.cur_idx = self.next_file;
             self.next_file += 1;
+            let is_newest = self.next_file == self.replay.files.len();
             let name = path
                 .file_name()
                 .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
             match segment::read_segment(path) {
                 Ok(read) => {
                     self.replay.bad_lines += read.bad_lines;
+                    self.cur_bad = read.bad_lines;
                     // A file with no header and no record is empty or cut
-                    // to nothing. A header-only file is a segment that
-                    // simply has no records yet, which is not damage.
-                    if read.header.is_none() && read.records.is_empty() && read.bad_lines == 0 {
-                        self.failure = Some(format!("segment {name} is empty"));
+                    // to nothing. In the middle of the log that is damage.
+                    // The newest segment can be empty because the writer
+                    // stopped after creating it, so there it is an empty
+                    // tail. A header-only file has simply no records yet.
+                    if read.header.is_none()
+                        && read.records.is_empty()
+                        && read.bad_lines == 0
+                        && !is_newest
+                    {
+                        self.fail(format!("segment {name} is empty"));
                     }
                     self.current = read.records.into_iter();
                 }
-                Err(e) => self.failure = Some(format!("cannot read segment {name}: {e}")),
+                Err(e) => self.fail(format!("cannot read segment {name}: {e}")),
             }
         }
+    }
+
+    /// Remember the first unreadable segment since the last record.
+    fn fail(&mut self, detail: String) {
+        self.failure
+            .get_or_insert((HoleKind::UnreadableSegment, detail));
     }
 
     fn note(&mut self, hole: Hole) -> Item {
@@ -366,23 +424,47 @@ impl Iterator for Records<'_> {
         let Some(r) = self.next_record() else {
             // The log ended. A segment that failed with nothing after it
             // is still a hole.
-            let reason = self.failure.take()?;
-            let after_seq = self.last?;
+            let (kind, detail) = self.failure.take()?;
             return Some(self.note(Hole {
-                after_seq,
+                after_seq: self.last,
                 next_seq: None,
-                reason,
+                kind,
+                detail: Some(detail),
             }));
         };
-        let reason = self.failure.take();
-        let Some(last) = self.last.replace(r.seq) else {
-            return Some(Item::Rec(r));
+        let failure = self.failure.take();
+        let last = self.last.replace(r.seq);
+        let hole = match (last, failure) {
+            // The first record, after a segment that could not be read.
+            (None, Some((kind, detail))) => Some((kind, Some(detail))),
+            // The first record, with every file readable: not a hole.
+            (None, None) => None,
+            (Some(last), failure) if r.seq > last + 1 => Some(match failure {
+                Some((kind, detail)) => (kind, Some(detail)),
+                None => {
+                    // Lines were skipped when the jump is inside one
+                    // segment that had bad lines, or follows a segment that
+                    // had them. Otherwise no file holds the records.
+                    let corrupt = if self.last_idx == self.cur_idx {
+                        self.cur_bad > 0
+                    } else {
+                        self.last_bad > 0
+                    };
+                    if corrupt {
+                        (HoleKind::CorruptLines, None)
+                    } else {
+                        (HoleKind::MissingSegment, None)
+                    }
+                }
+            }),
+            _ => None,
         };
-        if r.seq > last + 1 {
+        if let Some((kind, detail)) = hole {
             let hole = Hole {
                 after_seq: last,
                 next_seq: Some(r.seq),
-                reason: reason.unwrap_or_else(|| "no segment file holds them".to_string()),
+                kind,
+                detail,
             };
             self.stash = Some(r);
             return Some(self.note(hole));
@@ -900,8 +982,8 @@ mod tests {
         assert_eq!(r.records().count(), 74);
         assert_eq!(r.hole_count(), 1);
         let h = &r.holes()[0];
-        assert_eq!((h.after_seq, h.next_seq), (40, Some(81)));
-        assert!(h.reason.contains("no segment"), "{}", h.reason);
+        assert_eq!((h.after_seq, h.next_seq), (Some(40), Some(81)));
+        assert_eq!(h.kind, HoleKind::MissingSegment);
     }
 
     #[test]
@@ -926,7 +1008,10 @@ mod tests {
         let Payload::Gap(g) = &recs[at].payload else {
             unreachable!()
         };
-        assert!(g.reason.contains("missing records 41..=80"), "{}", g.reason);
+        assert_eq!(
+            g.reason,
+            "missing records 41..=80: no segment file holds them"
+        );
         assert_eq!(
             recs.iter()
                 .filter(|r| matches!(r.payload, Payload::Gap(_)))
@@ -943,9 +1028,10 @@ mod tests {
         assert_eq!(r.records().count(), 74);
         assert_eq!(r.hole_count(), 1);
         let h = &r.holes()[0];
-        assert_eq!((h.after_seq, h.next_seq), (40, Some(81)));
-        assert!(h.reason.contains("bus-41.jsonl"), "{}", h.reason);
-        assert!(h.reason.contains("empty"), "{}", h.reason);
+        assert_eq!((h.after_seq, h.next_seq), (Some(40), Some(81)));
+        assert_eq!(h.kind, HoleKind::UnreadableSegment);
+        let d = h.detail.as_deref().unwrap();
+        assert!(d.contains("bus-41.jsonl") && d.contains("empty"), "{d}");
     }
 
     #[cfg(unix)]
@@ -962,13 +1048,11 @@ mod tests {
         assert_eq!(r.records().count(), 74);
         assert_eq!(r.hole_count(), 1);
         let h = &r.holes()[0];
-        assert_eq!((h.after_seq, h.next_seq), (40, Some(81)));
-        assert!(h.reason.contains("bus-41.jsonl"), "{}", h.reason);
-        assert!(
-            h.reason.to_lowercase().contains("permission"),
-            "{}",
-            h.reason
-        );
+        assert_eq!((h.after_seq, h.next_seq), (Some(40), Some(81)));
+        assert_eq!(h.kind, HoleKind::UnreadableSegment);
+        let d = h.detail.as_deref().unwrap();
+        assert!(d.contains("bus-41.jsonl"), "{d}");
+        assert!(d.to_lowercase().contains("permission"), "{d}");
         assert_eq!(
             r.bad_lines(),
             0,
@@ -976,14 +1060,102 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_unreadable_last_segment_is_a_hole_with_no_next_record() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = three_segments("holes-tail");
-        fs::write(dir.path().join("bus-81.jsonl"), "").unwrap();
+        let p = dir.path().join("bus-81.jsonl");
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&p).is_ok() {
+            return; // running as root
+        }
         let mut r = Replay::open(dir.path()).unwrap();
         assert_eq!(r.records().count(), 80);
         let h = &r.holes()[0];
-        assert_eq!((h.after_seq, h.next_seq), (80, None));
+        assert_eq!((h.after_seq, h.next_seq), (Some(80), None));
+        assert_eq!(h.kind, HoleKind::UnreadableSegment);
+        assert_eq!(
+            h.describe(),
+            "log ends early after record 80: segment unreadable"
+        );
+    }
+
+    #[test]
+    fn a_zero_byte_newest_segment_is_an_empty_tail_not_a_hole() {
+        let dir = three_segments("holes-emptytail");
+        fs::write(dir.path().join("bus-81.jsonl"), "").unwrap();
+        let mut r = Replay::open(dir.path()).unwrap();
+        assert_eq!(r.records().count(), 80);
+        assert_eq!(r.hole_count(), 0);
+    }
+
+    #[test]
+    fn an_unreadable_first_segment_is_a_head_hole() {
+        let dir = three_segments("holes-head");
+        fs::write(dir.path().join("bus-1.jsonl"), "").unwrap();
+        let mut r = Replay::open(dir.path()).unwrap();
+        assert_eq!(r.records().count(), 74);
+        assert_eq!(r.hole_count(), 1);
+        let h = &r.holes()[0];
+        assert_eq!((h.after_seq, h.next_seq), (None, Some(41)));
+        assert_eq!(h.kind, HoleKind::UnreadableSegment);
+        assert_eq!(
+            h.describe(),
+            "missing records before 41: segment unreadable"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_line_jump_is_corrupt_lines_and_play_says_so() {
+        let dir = three_segments("holes-corrupt");
+        let p = dir.path().join("bus-1.jsonl");
+        let text = fs::read_to_string(&p).unwrap();
+        let mut lines: Vec<&str> = text.lines().collect();
+        lines[20] = "{\"q\":20,\"m\":garbage"; // record 20
+        fs::write(&p, lines.join("\n") + "\n").unwrap();
+        let mut r = Replay::open(dir.path()).unwrap();
+        assert_eq!(r.records().count(), 113);
+        assert_eq!(r.bad_lines(), 1);
+        let h = &r.holes()[0];
+        assert_eq!((h.after_seq, h.next_seq), (Some(19), Some(21)));
+        assert_eq!(h.kind, HoleKind::CorruptLines);
+        let (bus, clock) = replay_bus();
+        Replay::open(dir.path())
+            .unwrap()
+            .play(&bus, 1.0, &clock)
+            .unwrap();
+        let gap = bus
+            .read_from(1, usize::MAX)
+            .unwrap()
+            .into_iter()
+            .find_map(|r| match r.payload {
+                Payload::Gap(g) => Some(g.reason),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(gap, "missing records 20..=20: corrupt lines");
+    }
+
+    #[test]
+    fn the_gap_text_has_no_os_error_text() {
+        let dir = three_segments("holes-nodetail");
+        fs::write(dir.path().join("bus-41.jsonl"), "").unwrap();
+        let (bus, clock) = replay_bus();
+        Replay::open(dir.path())
+            .unwrap()
+            .play(&bus, 1.0, &clock)
+            .unwrap();
+        let gap = bus
+            .read_from(1, usize::MAX)
+            .unwrap()
+            .into_iter()
+            .find_map(|r| match r.payload {
+                Payload::Gap(g) => Some(g.reason),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(gap, "missing records 41..=80: segment unreadable");
     }
 
     #[test]

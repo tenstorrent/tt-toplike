@@ -10,6 +10,10 @@
 //! leaves out the event section, because an event is not a signal. An entity
 //! filter keeps the events that name that entity.
 //!
+//! Holes (see [`crate::replay::Hole`]) are listed under `holes:`. Records
+//! lost from the end of a log (a deleted last segment) cannot be seen from
+//! sequence jumps, so only an unreadable last segment is reported.
+//!
 //! The reader is [`Replay`], so the input can be a plain segment, a
 //! compressed segment or a directory, and damaged lines are skipped and
 //! counted in the output.
@@ -216,13 +220,13 @@ pub fn inspect(path: &Path, filter: &Filter, out: &mut impl Write) -> io::Result
         writeln!(out, "holes: 0 holes")?;
     }
     for h in replay.holes() {
+        let after = h.after_seq.map_or("start".to_string(), |n| format!("#{n}"));
         let next = h.next_seq.map_or("none".to_string(), |n| format!("#{n}"));
-        writeln!(
-            out,
-            "holes: after #{}, next {next}: {}",
-            h.after_seq,
-            h.describe()
-        )?;
+        write!(out, "holes: after {after}, next {next}: {}", h.describe())?;
+        if let Some(d) = &h.detail {
+            write!(out, " ({d})")?;
+        }
+        writeln!(out)?;
     }
     writeln!(
         out,
@@ -377,6 +381,26 @@ mod tests {
         assert!(text.contains("holes: after #10, next #21"), "{text}");
         assert!(text.contains("missing records 11..=20"), "{text}");
         assert!(!text.contains("0 holes"), "{text}");
+    }
+
+    #[test]
+    fn a_head_hole_is_printed_with_its_detail() {
+        let dir = crate::testutil::TempDir::new("inspect-head");
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let text = std::fs::read_to_string(FIXTURE).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        std::fs::write(dir.path().join("bus-1.jsonl"), "").unwrap();
+        std::fs::write(
+            dir.path().join("bus-21.jsonl"),
+            lines[21..].join("\n") + "\n",
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        inspect(dir.path(), &Filter::default(), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("holes: after start, next #21"), "{text}");
+        assert!(text.contains("segment unreadable"), "{text}");
+        assert!(text.contains("bus-1.jsonl is empty"), "{text}");
     }
 
     #[test]
