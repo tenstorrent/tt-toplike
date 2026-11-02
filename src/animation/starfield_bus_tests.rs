@@ -650,6 +650,9 @@ fn an_ecc_rise_flares_a_ddr_planet_and_the_first_sight_does_not() {
         // First sight of a count, however high, flares nothing.
         let (_, _, sf) = pair(&[(&a2, t0), (&a2, t0 + TICK)]);
         assert!(sf.bus_fx().is_empty(), "{:?}", sf.bus_fx());
+        // Nor does a count that first appears after the first update.
+        let (_, _, sf) = pair(&[(&Bus::new(), t0), (&a2, t0 + TICK)]);
+        assert!(sf.bus_fx().is_empty(), "{:?}", sf.bus_fx());
         // The flare ends.
         let (_, _, sf) = pair(&[(&a1, t0), (&a2, t0 + TICK), (&a2, t0 + TICK + FLASH_NS)]);
         assert!(sf.bus_fx().is_empty());

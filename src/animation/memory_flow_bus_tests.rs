@@ -393,6 +393,9 @@ fn an_ecc_rise_flashes_its_channel_and_the_first_sight_does_not() {
         // First sight.
         let (a, q, _) = pair(&[(&e2, t0), (&e2, t0 + TICK)]);
         assert_eq!(a, q);
+        // A count that first appears after the first update.
+        let (a, q, _) = pair(&[(&Bus::new(), t0), (&e2, t0 + TICK)]);
+        assert_eq!(a, q);
         // Over after the flash.
         let (a, q, _) = pair(&[(&e1, t0), (&e2, t0 + TICK), (&e2, t0 + TICK + FLASH_NS)]);
         assert_eq!(a, q);
