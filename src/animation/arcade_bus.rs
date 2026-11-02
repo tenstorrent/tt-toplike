@@ -599,7 +599,7 @@ fn draw_label(
         // No form fits. The gauge and the heartbeat still draw from this
         // model, so an estimate keeps its `~`, alone at the label's right
         // end, when that one column is free.
-        if flag.estimated && end >= 1 && end - 1 >= start_min {
+        if flag.estimated && end > start_min {
             crate::animation::ArcadeVisualization::splice_char(
                 lines,
                 stage.gauge_row,
