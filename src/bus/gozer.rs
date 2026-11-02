@@ -174,6 +174,27 @@ pub trait StatusRunner: Send + Sync {
     fn env_json(&self, lease: &str, timeout: Duration) -> Option<String> {
         self.run(&["env", lease, "--json"], timeout)
     }
+
+    /// `gozer env <lease> --json`, telling "gozer says there is no such lease"
+    /// (exit 13, `{"error": "not found"}`) from every other failure. The
+    /// default cannot tell them apart and reports `Failed`.
+    fn env_answer(&self, lease: &str, timeout: Duration) -> EnvAnswer {
+        match self.env_json(lease, timeout) {
+            Some(s) => EnvAnswer::Chips(s),
+            None => EnvAnswer::Failed,
+        }
+    }
+}
+
+/// The outcome of `gozer env <lease> --json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvAnswer {
+    /// Exit 0 with this stdout.
+    Chips(String),
+    /// gozer answered that the lease does not exist (released or reaped).
+    NotFound,
+    /// Not installed, timed out, other nonzero exit.
+    Failed,
 }
 
 /// Spawns the real `gozer`.
@@ -201,11 +222,12 @@ impl Default for CommandRunner {
     }
 }
 
-impl StatusRunner for CommandRunner {
-    /// `timeout` is a deadline for the whole child: spawn, output and exit.
-    /// On expiry the child is killed and reaped. Only `status` and `env` are
-    /// run; any other subcommand returns `None` without spawning.
-    fn run(&self, args: &[&str], timeout: Duration) -> Option<String> {
+impl CommandRunner {
+    /// Run `args` and return the exit code and stdout of a child that exited
+    /// before the deadline. `timeout` covers the whole child: spawn, output
+    /// and exit. On expiry the child is killed and reaped. Only `status` and
+    /// `env` are run; any other subcommand returns `None` without spawning.
+    fn exec(&self, args: &[&str], timeout: Duration) -> Option<(i32, String)> {
         if !matches!(args.first(), Some(&"status") | Some(&"env")) {
             return None;
         }
@@ -239,15 +261,39 @@ impl StatusRunner for CommandRunner {
                 }
             }
         };
-        if !status.success() {
-            return None;
-        }
         // The child is gone; its output is complete unless a grandchild holds
         // the pipe, so wait only for what is left of the deadline.
-        rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        let text = rx
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .ok()
-            .flatten()
+            .flatten()?;
+        Some((status.code()?, text))
     }
+}
+
+impl StatusRunner for CommandRunner {
+    fn run(&self, args: &[&str], timeout: Duration) -> Option<String> {
+        match self.exec(args, timeout)? {
+            (0, text) => Some(text),
+            _ => None,
+        }
+    }
+
+    fn env_answer(&self, lease: &str, timeout: Duration) -> EnvAnswer {
+        match self.exec(&["env", lease, "--json"], timeout) {
+            Some((0, text)) => EnvAnswer::Chips(text),
+            Some((13, text)) if is_not_found(&text) => EnvAnswer::NotFound,
+            _ => EnvAnswer::Failed,
+        }
+    }
+}
+
+/// True for gozer's `{"error": "not found"}`.
+fn is_not_found(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| v.get("error")?.as_str().map(|e| e == "not found"))
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -461,24 +507,20 @@ pub trait Governor {
     fn permit(&self, chip: &EntityKey) -> Permit;
 }
 
-/// What the governor knows from the last good refresh.
-#[derive(Clone)]
-struct Snapshot {
-    /// `gozer status --json`.
-    status: GozerStatus,
-    /// `gozer env <our lease> --json`: the chips of our lease.
-    lease_chips: ChipList,
-}
-
-/// Mutable cache state of the governor.
+/// What the governor knows. The two halves are cached separately, each with
+/// the time it was read.
 struct Cache {
     last_attempt: Option<Instant>,
-    /// The last snapshot that parsed, and when it was read.
-    good: Option<(Instant, Snapshot)>,
+    /// `gozer status --json`.
+    status: Option<(Instant, GozerStatus)>,
+    /// `gozer env <our lease> --json`: the chips of our lease. Cleared when
+    /// gozer says the lease does not exist.
+    lease_chips: Option<(Instant, ChipList)>,
 }
 
-/// A parsed `TT_VISIBLE_DEVICES`: gozer writes PCI addresses. A plain number
-/// is accepted as a `dev_index` when an entry has no `:`.
+/// A parsed chip list: gozer writes PCI addresses. In
+/// `TT_VISIBLE_DEVICES` (our environment) a plain number is also accepted as
+/// a `dev_index`, when an entry has no `:`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct ChipList {
     bdfs: Vec<String>,
@@ -486,10 +528,11 @@ struct ChipList {
 }
 
 impl ChipList {
-    /// `"0000:01:00.0,0000:02:00.0"`. Whitespace and one trailing comma are
-    /// ignored. `None` for an empty list or any other entry (a name, an empty
-    /// entry in the middle, a range).
-    fn parse(s: &str) -> Option<Self> {
+    /// `"0000:01:00.0,0000:02:00.0"`, plus plain numbers when `numbers` is
+    /// true. Whitespace and one trailing comma are ignored. `None` for an
+    /// empty list or any other entry (a name, an empty entry in the middle, a
+    /// range).
+    fn parse(s: &str, numbers: bool) -> Option<Self> {
         let s = s.trim();
         let s = s.strip_suffix(',').unwrap_or(s);
         let mut out = ChipList::default();
@@ -500,8 +543,10 @@ impl ChipList {
             }
             if p.contains(':') {
                 out.bdfs.push(p.to_ascii_lowercase());
-            } else {
+            } else if numbers {
                 out.indices.push(p.parse::<u32>().ok()?);
+            } else {
+                return None;
             }
         }
         Some(out)
@@ -516,12 +561,16 @@ impl ChipList {
 /// `{"TT_VISIBLE_DEVICES": "<bdf,...>"}` from `gozer env <lease> --json`.
 fn parse_env(json: &str) -> Option<ChipList> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    ChipList::parse(v.get(VISIBLE_ENV)?.as_str()?)
+    // gozer writes BDFs here, never bare numbers.
+    ChipList::parse(v.get(VISIBLE_ENV)?.as_str()?, false)
 }
 
 /// Permits a chip only when all of these hold:
 ///
-/// 1. `TT_TOPLIKE_LEASE_ID` is set and not empty.
+/// 1. `TT_TOPLIKE_LEASE_ID` is set and is a plain id: 1 to 64 characters of
+///    `[A-Za-z0-9_-]`, not starting with `-`. gozer builds a file path from
+///    the id, so anything else (`/tmp/x`, `../x`) is refused before any
+///    command runs.
 /// 2. `gozer env <lease> --json` succeeds and lists the chip's PCI address
 ///    (the chip belongs to our lease, as gozer says).
 /// 3. `TT_VISIBLE_DEVICES` in our own environment lists the chip (gozer
@@ -549,12 +598,17 @@ fn parse_env(json: &str) -> Option<ChipList> {
 /// # Caching, and what this is not
 ///
 /// Both commands are re-run at most once per [`GOVERNOR_REFRESH`] (30 s),
-/// counting failed attempts. A snapshot older than [`GOVERNOR_STALE`] (60 s)
-/// with a failed refresh denies. So this governor tolerates one failed
-/// refresh (up to 60 s of staleness). It is NOT the sidecar's rule "exit on
+/// counting failed attempts. The two answers are kept separately, each with
+/// its own time. A half that parses replaces its own older value. When
+/// `gozer env` says the lease does not exist (exit 13), our lease's chip list
+/// is dropped at once, so the next `permit` denies. A failed refresh of
+/// either half keeps its older value until [`GOVERNOR_STALE`] (60 s, counted
+/// per half) and then denies. So this governor tolerates one failed refresh
+/// (up to 60 s of staleness). It is NOT the sidecar's rule "exit on
 /// the first failed 30 s re-check"; the sidecar must implement that itself.
 ///
-/// `permit` can block for the runner's deadline (2 s) on a refresh, so call it
+/// `permit` can block for up to about 4 s on a refresh (two commands, 2 s
+/// each), so call it
 /// from the sidecar's own thread. The cache lock is never held while a
 /// command runs.
 pub struct GozerGovernor {
@@ -587,7 +641,8 @@ impl GozerGovernor {
             runner,
             cache: Mutex::new(Cache {
                 last_attempt: None,
-                good: None,
+                status: None,
+                lease_chips: None,
             }),
         }
     }
@@ -599,20 +654,22 @@ impl GozerGovernor {
             Some(l) if !l.is_empty() => l,
             _ => return deny("no lease id in TT_TOPLIKE_LEASE_ID"),
         };
+        if !valid_lease_id(lease) {
+            return deny("TT_TOPLIKE_LEASE_ID is not a valid lease id");
+        }
         let visible = match self.visible.as_deref() {
             Some(v) => v,
             None => return deny("TT_VISIBLE_DEVICES is not set"),
         };
-        let visible = match ChipList::parse(visible) {
+        let visible = match ChipList::parse(visible, true) {
             Some(v) => v,
             None => return deny("TT_VISIBLE_DEVICES is not a list of chips"),
         };
-        let snap = match self.snapshot(lease, now) {
+        let (status, lease_chips) = match self.snapshot(lease, now) {
             Some(s) => s,
             None => return deny("gozer status is unavailable"),
         };
-        let c = match snap
-            .status
+        let c = match status
             .chips
             .iter()
             .find(|c| EntityKey::chip(&c.bdf) == *chip)
@@ -626,15 +683,15 @@ impl GozerGovernor {
         if !visible.lists(c) {
             return deny("chip is not in TT_VISIBLE_DEVICES");
         }
-        if !snap.lease_chips.lists(c) {
+        if !lease_chips.lists(c) {
             return deny("chip is not in our lease");
         }
         Permit::Go
     }
 
-    /// The cached snapshot, refreshed when due. `None` when there is none
-    /// newer than [`GOVERNOR_STALE`].
-    fn snapshot(&self, lease: &str, now: Instant) -> Option<Snapshot> {
+    /// The cached halves, refreshed when due. `None` unless both are newer
+    /// than [`GOVERNOR_STALE`] (judged per half).
+    fn snapshot(&self, lease: &str, now: Instant) -> Option<(GozerStatus, ChipList)> {
         let due = {
             let mut c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             let due = c.last_attempt.map_or(true, |t| {
@@ -652,30 +709,45 @@ impl GozerGovernor {
                 .status_json(COMMAND_TIMEOUT)
                 .as_deref()
                 .and_then(parse_status);
-            let lease_chips = self
-                .runner
-                .env_json(lease, COMMAND_TIMEOUT)
-                .as_deref()
-                .and_then(parse_env);
-            if let (Some(status), Some(lease_chips)) = (status, lease_chips) {
-                let mut c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-                c.good = Some((
-                    now,
-                    Snapshot {
-                        status,
-                        lease_chips,
-                    },
-                ));
+            let env = self.runner.env_answer(lease, COMMAND_TIMEOUT);
+            let mut c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            // A result older than what is stored never replaces it.
+            if let Some(st) = status {
+                if c.status.as_ref().map_or(true, |(at, _)| *at <= now) {
+                    c.status = Some((now, st));
+                }
+            }
+            if c.lease_chips.as_ref().map_or(true, |(at, _)| *at <= now) {
+                match env {
+                    EnvAnswer::Chips(text) => {
+                        if let Some(list) = parse_env(&text) {
+                            c.lease_chips = Some((now, list));
+                        }
+                    }
+                    // The lease is gone: stop trusting its old chip list.
+                    EnvAnswer::NotFound => c.lease_chips = None,
+                    EnvAnswer::Failed => {}
+                }
             }
         }
         let c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        match &c.good {
-            Some((at, snap)) if now.saturating_duration_since(*at) <= GOVERNOR_STALE => {
-                Some(snap.clone())
-            }
+        let fresh = |at: &Instant| now.saturating_duration_since(*at) <= GOVERNOR_STALE;
+        match (&c.status, &c.lease_chips) {
+            (Some((a, st)), Some((b, l))) if fresh(a) && fresh(b) => Some((st.clone(), l.clone())),
             _ => None,
         }
     }
+}
+
+/// A lease id gozer can safely turn into a path: 1 to 64 characters of
+/// `[A-Za-z0-9_-]`, not starting with `-`.
+fn valid_lease_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && !id.starts_with('-')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 impl Governor for GozerGovernor {

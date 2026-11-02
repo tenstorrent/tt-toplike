@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::backend::mock::MockBackend;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// A real `gozer status --json` (board serials, who, reason and container
 /// ids replaced by placeholders). Four chips, all `HELD-FOREIGN` when
@@ -315,9 +315,22 @@ struct Counting {
     calls: Arc<AtomicUsize>,
     /// Calls of `gozer env`.
     env_calls: Arc<AtomicUsize>,
+    /// `gozer env` answers "not found" (exit 13).
+    env_not_found: Arc<AtomicBool>,
 }
 
 impl StatusRunner for Counting {
+    fn env_answer(&self, lease: &str, t: Duration) -> EnvAnswer {
+        if self.env_not_found.load(Ordering::SeqCst) {
+            self.env_calls.fetch_add(1, Ordering::SeqCst);
+            return EnvAnswer::NotFound;
+        }
+        match self.env_json(lease, t) {
+            Some(s) => EnvAnswer::Chips(s),
+            None => EnvAnswer::Failed,
+        }
+    }
+
     fn run(&self, args: &[&str], _t: Duration) -> Option<String> {
         match args {
             ["status", "--json"] => {
@@ -343,6 +356,7 @@ struct Handles {
     env: Arc<Mutex<Option<String>>>,
     calls: Arc<AtomicUsize>,
     env_calls: Arc<AtomicUsize>,
+    env_not_found: Arc<AtomicBool>,
 }
 
 fn gov_full(
@@ -355,6 +369,7 @@ fn gov_full(
         env: Arc::new(Mutex::new(env_json(&[A, B]))),
         calls: Arc::new(AtomicUsize::new(0)),
         env_calls: Arc::new(AtomicUsize::new(0)),
+        env_not_found: Arc::new(AtomicBool::new(false)),
     };
     let g = GozerGovernor::new(
         lease.map(str::to_string),
@@ -364,6 +379,7 @@ fn gov_full(
             env: h.env.clone(),
             calls: h.calls.clone(),
             env_calls: h.env_calls.clone(),
+            env_not_found: h.env_not_found.clone(),
         }),
     );
     (g, h)
@@ -760,6 +776,36 @@ mod command_runner {
     }
 
     #[test]
+    fn env_answer_tells_not_found_from_other_failures() {
+        let (_d, r) = script(r#"echo '{"error": "not found"}'; exit 13"#);
+        assert_eq!(
+            r.env_answer("L1", Duration::from_secs(5)),
+            EnvAnswer::NotFound
+        );
+        // Exit 13 without that body is not a definite answer.
+        let (_d, r) = script("echo oops; exit 13");
+        assert_eq!(
+            r.env_answer("L1", Duration::from_secs(5)),
+            EnvAnswer::Failed
+        );
+        let (_d, r) = script("exit 1");
+        assert_eq!(
+            r.env_answer("L1", Duration::from_secs(5)),
+            EnvAnswer::Failed
+        );
+        let (_d, r) = script(r#"echo '{"TT_VISIBLE_DEVICES": "0000:01:00.0"}'"#);
+        assert!(matches!(
+            r.env_answer("L1", Duration::from_secs(5)),
+            EnvAnswer::Chips(_)
+        ));
+        let r = CommandRunner::with_program("/nonexistent/gozer");
+        assert_eq!(
+            r.env_answer("L1", Duration::from_secs(1)),
+            EnvAnswer::Failed
+        );
+    }
+
+    #[test]
     fn missing_program_is_none() {
         let r = CommandRunner::with_program("/nonexistent/dir/gozer");
         assert!(r.status_json(Duration::from_secs(1)).is_none());
@@ -781,4 +827,102 @@ mod command_runner {
         assert!(src.inflight.is_some(), "a new command was started");
         assert!(src.pending.is_none());
     }
+}
+
+// ---- fix round 2 ----
+
+#[test]
+fn governor_rejects_bad_lease_ids_without_running_anything() {
+    let long = "a".repeat(65);
+    for id in [
+        "/tmp/x", "../x", "a/b", "-h", "--json", "a b", "", &long, "léase", "a.b",
+    ] {
+        let (g, h) = gov_full(Some(id), Some("0,1"), one("HELD", Some(OWNER)));
+        assert!(denied(&g.permit(&EntityKey::chip(A))), "{id:?}");
+        assert_eq!(h.calls.load(Ordering::SeqCst), 0, "{id:?} ran status");
+        assert_eq!(h.env_calls.load(Ordering::SeqCst), 0, "{id:?} ran env");
+    }
+    // 64 characters of the allowed set is fine.
+    let ok = format!("a-_{}", "9".repeat(61));
+    let (g, _) = gov_full(Some(&ok), Some("0,1"), one("HELD", Some(OWNER)));
+    assert_eq!(g.permit(&EntityKey::chip(A)), Permit::Go);
+}
+
+fn secs(n: u64) -> Duration {
+    Duration::from_secs(n)
+}
+
+#[test]
+fn released_lease_denies_at_the_next_refresh() {
+    let (g, h) = gov_full(Some("L1"), Some("0"), one("HELD", Some(OWNER)));
+    let chip = EntityKey::chip(A);
+    let t0 = Instant::now();
+    assert_eq!(g.permit_at(&chip, t0), Permit::Go);
+    // Released at t0+1: nobody else has the chip yet, so status still says
+    // HELD (as if another tenant already holds it). gozer env says not found.
+    h.env_not_found.store(true, Ordering::SeqCst);
+    assert_eq!(g.permit_at(&chip, t0 + secs(29)), Permit::Go, "cached");
+    assert!(denied(&g.permit_at(&chip, t0 + secs(31))));
+    // And it stays denied even when env fails afterwards (nothing to trust).
+    h.env_not_found.store(false, Ordering::SeqCst);
+    *h.env.lock().unwrap() = None;
+    assert!(denied(&g.permit_at(&chip, t0 + secs(62))));
+}
+
+#[test]
+fn env_half_survives_a_failed_refresh_until_its_own_60s() {
+    let (g, h) = gov_full(Some("L1"), Some("0"), one("HELD", Some(OWNER)));
+    let chip = EntityKey::chip(A);
+    let t0 = Instant::now();
+    assert_eq!(g.permit_at(&chip, t0), Permit::Go);
+    *h.env.lock().unwrap() = None; // env times out from now on
+                                   // Status keeps refreshing, env keeps its t0 value.
+    assert_eq!(g.permit_at(&chip, t0 + secs(30)), Permit::Go);
+    assert_eq!(
+        g.permit_at(&chip, t0 + secs(60)),
+        Permit::Go,
+        "exactly 60 s"
+    );
+    assert!(denied(
+        &g.permit_at(&chip, t0 + secs(60) + Duration::from_nanos(1))
+    ));
+}
+
+#[test]
+fn status_half_older_than_60s_denies_even_with_fresh_env() {
+    let (g, h) = gov_full(Some("L1"), Some("0"), one("HELD", Some(OWNER)));
+    let chip = EntityKey::chip(A);
+    let t0 = Instant::now();
+    assert_eq!(g.permit_at(&chip, t0), Permit::Go);
+    *h.status.lock().unwrap() = None; // status fails from now on
+    assert_eq!(g.permit_at(&chip, t0 + secs(30)), Permit::Go);
+    assert_eq!(
+        g.permit_at(&chip, t0 + secs(60)),
+        Permit::Go,
+        "exactly 60 s"
+    );
+    // Env was refreshed at t0+60; the status half is 60 s + 1 ns old.
+    assert!(denied(
+        &g.permit_at(&chip, t0 + secs(60) + Duration::from_nanos(1))
+    ));
+}
+
+#[test]
+fn an_older_result_never_replaces_a_newer_one() {
+    let (g, h) = gov_full(Some("L1"), Some("0"), one("HELD", Some(OWNER)));
+    let chip = EntityKey::chip(A);
+    let t0 = Instant::now();
+    assert_eq!(g.permit_at(&chip, t0 + secs(40)), Permit::Go);
+    // A call with an earlier clock (a slow thread) must not go back in time:
+    // its attempt is not due, so the 40 s snapshot stays.
+    *h.status.lock().unwrap() = one("FREE", None);
+    assert_eq!(g.permit_at(&chip, t0), Permit::Go);
+}
+
+#[test]
+fn env_chip_list_takes_bdfs_only() {
+    // gozer never writes bare numbers in `env` output.
+    let (g, h) = gov_full(Some("L1"), Some("0"), one("HELD", Some(OWNER)));
+    *h.env.lock().unwrap() = Some(r#"{"TT_VISIBLE_DEVICES": "0,1"}"#.into());
+    assert!(denied(&g.permit(&EntityKey::chip(A))));
 }
