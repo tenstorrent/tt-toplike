@@ -25,6 +25,8 @@ pub mod arcade_layout;
 pub mod atmosphere;
 pub mod backdrop;
 #[cfg(test)]
+mod backdrop_cost;
+#[cfg(test)]
 mod backdrop_pins;
 pub mod baseline;
 pub(crate) mod bus_intake;

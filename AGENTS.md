@@ -1535,6 +1535,26 @@ inference server as panels, a cloudfield switch, and no change with no config.
   every one. Rule labels and the hero's bands are made with the layout, so a frame builds
   neither. User-facing Die 3D strings take the display name (`◆ WAFER WAFFLER`).
 
+### Shared backdrop (Nov 2 2026, branch `backdrop`)
+
+Prompt: "there's a cloud-like background from signals in Training view and Inference view both.
+And now also 3d/waffler view too. I want that to be a shared feature. Not necessarily needing a
+black out bg, can just layer on top transparently too."
+- `src/animation/backdrop.rs` puts the three painters behind one `Backdrop`: scene (the Inference
+  atmosphere), sky (the Training aurora and stars), clouds (the Waffler cloud field, one band per
+  cell). `layer` (lines) and `layer_buffer` (a drawn ratatui buffer) fill blank cells only.
+  `BackdropSignals::gather` reads PCIe, power and the training step time from the world for this
+  TUI's chips, with the backend as the fallback, and marks estimates.
+- Defaults are byte-identical: the snake, the Training view and the Waffler keep their own
+  painters for their own kind and turn them off for another. Pins taken at d6560a27 before any
+  change (`backdrop_pins.rs`, `die3d/backdrop_pins.rs`) hold.
+- Settings: `[backdrop] default` and `[backdrop.views]` in config.toml, `/backdrop`, and `w` in
+  every view (`c` stays the arcade's scene switch; `arcade.cloudfield` is an alias with a note).
+  The Starfield refuses scene and sky (its stars are cores).
+- The sky and the clouds move on the clouds' 4 Hz step clock; the shared sky's aurora is coloured
+  in flat bands, which cut its cost on the arcade at 200x60 from 137 to 18 changed cells a frame.
+- Docs: `docs/backdrop.md`; the bus section is in `docs/bus.md`.
+
 ### Version history: 0.15.1 (Nov 2 2026)
 
 0.15.1 puts arcade (`src/animation/arcade_bus.rs`) and the `~` view (`src/ui/tui/hivemind_bus.rs`) on

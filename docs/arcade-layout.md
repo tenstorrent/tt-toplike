@@ -29,7 +29,7 @@ layout that will be used. It exits with status 1 when there is a problem and 0 o
 
 ```toml
 [arcade]
-cloudfield = false         # the atmosphere backdrop behind the whole arcade (default false)
+cloudfield = false         # deprecated: [backdrop.views] arcade = "scene" (docs/backdrop.md)
 
 [[arcade.row]]
 height = 2                 # a weight (default 1)
@@ -123,21 +123,23 @@ none of them is shown. Each chip gets an equal share of that panel's columns. Sp
 compiles rise in the starfield, so a layout with no starfield does not draw them. Request hits
 are drawn around the hero.
 
-## The cloudfield
+## The cloudfield (deprecated)
 
-The cloudfield shows only while an inference service is loading or serving. `cloudfield = true`
-lays the atmosphere backdrop (`src/animation/atmosphere.rs`, also drawn behind
-the `i` view's snake) behind the whole arcade. It follows the featured inference service: a forge
-while a model compiles or loads, a storm while requests wait for their first token, an aurora
-while tokens flow, a dream while a model is ready and idle. It fills blank cells only, so no
-view's drawing is covered. With no service up it draws nothing.
+The cloudfield is now the arcade's backdrop, one of the shared backdrops every view can draw
+(`docs/backdrop.md`). `cloudfield = true` still works: it is `[backdrop.views] arcade =
+"scene"`, and the status line and `--check-config` print a note saying so. A `[backdrop.views]
+arcade` entry wins over it. The scene follows the featured inference service: a forge while a
+model compiles or loads, a storm while requests wait for their first token, an aurora while
+tokens flow, a dream while a model is ready and idle. With no service up it draws nothing. The
+arcade can also draw the sky or the clouds, which follow the training step time and the PCIe
+traffic and chip load.
 
-It is off by default, because the arcade has never drawn a backdrop. Switch it while the arcade
-is on screen with `c`, or from the command bar with `/arcade cloudfield on`, `/arcade
-cloudfield off`, or `/arcade cloudfield` to flip it. The runtime switch lasts until you quit and
-holds across a resize.
+It is off by default, because the arcade has never drawn a backdrop. `w` cycles the arcade's
+backdrop like any view's, and `/backdrop` sets it. `c` (in the arcade only) and `/arcade
+cloudfield on|off` still switch the scene on or off; `/arcade cloudfield` alone flips it. The
+runtime setting lasts until you quit and holds across a resize.
 
-The cloudfield does not change the solid black canvas behind every view. That is set by
+The backdrop does not change the solid black canvas behind every view. That is set by
 `TT_TOPLIKE_TRANSPARENT` (any value except empty, `0` and `false` shows the terminal's own
 background).
 

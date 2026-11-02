@@ -112,7 +112,7 @@ pub struct Snake {
     atmosphere: crate::animation::atmosphere::Atmosphere,
     /// Whether the atmosphere is drawn: the view's backdrop is the scene
     /// (the default). With another backdrop chosen, the shared backdrop
-    /// draws it instead (`animation::backdrop`).
+    /// draws that one (`animation::backdrop`).
     show_atmosphere: bool,
 }
 

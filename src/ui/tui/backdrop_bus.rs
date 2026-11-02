@@ -12,9 +12,9 @@
 //! before the status bar, the command bar and the overlays.
 //!
 //! The update runs at the view's data rate, in the update block, after the
-//! view's own update ([`SharedBackdrop::update`]). A view that was not the
-//! one fed last time starts a fresh backdrop, so nothing that happened while
-//! it was away draws.
+//! view's own update ([`SharedBackdrop::update`]). A view the last update
+//! did not feed starts a fresh backdrop, so nothing that happened while it
+//! was away draws.
 
 use crate::animation::backdrop::{
     builtin, Backdrop, BackdropKind, BackdropSettings, BackdropSignals, Choice,

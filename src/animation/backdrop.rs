@@ -30,7 +30,8 @@
 //! Terminal traffic. The sky and the clouds move on the clouds' step clock
 //! (4 steps a second, `die3d::clouds::CloudClock`), so between steps they
 //! change no cell at all. The clouds also keep their three flat density bands
-//! and their brightness hysteresis. The scene keeps the atmosphere's own
+//! and their brightness hysteresis, and the sky's aurora is coloured in flat
+//! bands too (the Training view's own sky is not). The scene keeps the atmosphere's own
 //! clock (one frame per update), because its comets, rain and flares are the
 //! signals themselves; stepping them four times a second would hide the
 //! request rate it shows.
@@ -485,6 +486,28 @@ fn sky_pace(step_ms: Option<f32>) -> f32 {
     }
 }
 
+/// Aurora brightness bands of the shared sky: a lit value is shown at the
+/// middle of its band.
+const AURORA_BANDS: f32 = 4.0;
+/// Hue steps of the shared sky's aurora, in degrees.
+const AURORA_HUE_STEP: f32 = 30.0;
+
+/// The colour of an aurora cell of the shared sky: the Training view's
+/// formula (`train_sky::sky_cell`) with the brightness in
+/// [`AURORA_BANDS`] flat bands over its lit range (0.14 to 1) and the hue in
+/// steps of [`AURORA_HUE_STEP`], so a cell changes colour only when its
+/// value crosses a band.
+fn aurora_colour(lit: f32, hue: f32) -> Color {
+    let (lo, hi) = (0.14f32, 1.0f32);
+    let band = (((lit - lo) / (hi - lo)) * AURORA_BANDS)
+        .floor()
+        .clamp(0.0, AURORA_BANDS - 1.0);
+    let lit = lo + (band + 0.5) * (hi - lo) / AURORA_BANDS;
+    let hue = (hue / AURORA_HUE_STEP).round() * AURORA_HUE_STEP;
+    let (r, g, b) = super::common::hsv_to_rgb_bytes(hue.rem_euclid(360.0), 0.62, 0.10 + lit * 0.15);
+    Color::Rgb(r, g, b)
+}
+
 /// The glyph of each cloud band, thin to thick.
 const CLOUD_GLYPHS: [char; 3] = ['░', '▒', '▓'];
 
@@ -553,6 +576,12 @@ impl Backdrop {
         self.estimated
     }
 
+    /// Forget the cached canvas, so the cost measurement draws it afresh.
+    #[cfg(test)]
+    pub(crate) fn clear_cache(&self) {
+        *self.cache.borrow_mut() = None;
+    }
+
     /// The legend line for this backdrop.
     pub fn legend_line(&self) -> String {
         legend_line(self.kind, self.estimated)
@@ -604,13 +633,29 @@ impl Backdrop {
 
     /// The sky over the whole area, as the Training view draws it while
     /// scanning: `rel_y` runs from 0 at the top to 1 at the bottom.
+    ///
+    /// The stars are the Training view's, cell for cell. The aurora cells
+    /// are the same cells with the same glyphs, but their colour is taken in
+    /// flat bands ([`aurora_colour`]): the Training view's aurora changes the
+    /// colour of every aurora cell at every step, and here that would repaint
+    /// a third of the screen four times a second.
     fn sky_canvas(&self, w: usize, h: usize) -> Canvas {
         let frame = self.sky.frame();
         (0..h)
             .map(|y| {
                 let rel_y = y as f32 / h.max(1) as f32;
                 (0..w)
-                    .map(|x| sky_cell(x, y, rel_y, frame).map(|c| (c.ch, c.color)))
+                    .map(|x| {
+                        sky_cell(x, y, rel_y, frame).map(|c| {
+                            if super::train_sky::star_hash(x, y) > super::train_sky::STAR_THRESHOLD
+                            {
+                                (c.ch, c.color)
+                            } else {
+                                let (lit, hue) = super::train_sky::aurora(x, rel_y, frame);
+                                (c.ch, aurora_colour(lit, hue))
+                            }
+                        })
+                    })
                     .collect()
             })
             .collect()

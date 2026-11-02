@@ -299,7 +299,7 @@ pub struct TrainView {
     sky_seen: StdCell<u64>,
     /// Whether the aurora and stars are drawn: the view's backdrop is the
     /// sky (the default). With another backdrop chosen, the shared backdrop
-    /// draws it in the blank cells instead (`animation::backdrop`).
+    /// draws that one in the blank cells (`animation::backdrop`).
     show_sky: bool,
     /// The band rows this frame's `draw_tapestry` gave to the starfield and
     /// the weave, as `start..end`, reset to none at the start of each

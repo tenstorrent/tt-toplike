@@ -244,11 +244,11 @@ pub struct Cli {
     /// exit non-zero when there is one.
     ///
     /// Reads `~/.config/tt-toplike/config.toml`, the only config file. The
-    /// `[arcade]` section sets the arcade's layout and its cloudfield; see
-    /// docs/arcade-layout.md. In the arcade, `c` or `/arcade cloudfield
-    /// on|off` switches the cloudfield, which shows only while an inference
-    /// service is loading or serving. Does not enter the TUI and opens no
-    /// device.
+    /// `[arcade]` section sets the arcade's layout (docs/arcade-layout.md).
+    /// The `[backdrop]` section sets each view's backdrop: off, scene, sky or
+    /// clouds (docs/backdrop.md). In the TUI, `w` cycles the backdrop of the
+    /// view on screen and `/backdrop` shows or sets it. Does not enter the
+    /// TUI and opens no device.
     #[arg(long)]
     pub check_config: bool,
 

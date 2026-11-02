@@ -305,12 +305,25 @@ fn the_sky_is_the_training_sky_at_the_stepped_frame() {
         let frame = b.sky.frame();
         let (w, h) = (90, 25);
         let c = b.canvas(w, h);
+        let mut aurora = 0;
         for (y, row) in c.iter().enumerate() {
             for (x, cell) in row.iter().enumerate() {
-                let want = sky_cell(x, y, y as f32 / h as f32, frame).map(|s| (s.ch, s.color));
-                assert_eq!(*cell, want, "({x},{y})");
+                let rel_y = y as f32 / h as f32;
+                let want = sky_cell(x, y, rel_y, frame).map(|s| (s.ch, s.color));
+                // The same cells and glyphs; a star's colour too.
+                assert_eq!(cell.map(|c| c.0), want.map(|c| c.0), "({x},{y})");
+                let star = crate::animation::train_sky::star_hash(x, y)
+                    > crate::animation::train_sky::STAR_THRESHOLD;
+                if star {
+                    assert_eq!(*cell, want, "({x},{y})");
+                } else if let Some((_, colour)) = cell {
+                    let (lit, hue) = crate::animation::train_sky::aurora(x, rel_y, frame);
+                    assert_eq!(*colour, aurora_colour(lit, hue));
+                    aurora += 1;
+                }
             }
         }
+        assert!(aurora > 0);
     })
 }
 
@@ -423,7 +436,7 @@ fn world(prov: Provenance) -> Bus {
     bus.sample(&chip(0), sig::PCIE_IN_BPS, Value::F64(3e9), prov)
         .sample(&chip(0), sig::PCIE_OUT_BPS, Value::F64(1e9), prov)
         .sample(&chip(0), sig::TDP_W, Value::F64(80.0), prov)
-        // Chip 7 is the attached host's, not this TUI's.
+        // Chip 7 is the attached host's; this TUI does not have it.
         .sample(&chip(7), sig::PCIE_IN_BPS, Value::F64(9e12), prov)
         .sample(&chip(7), sig::TDP_W, Value::F64(500.0), prov);
     let run = tt_toplike_bus::EntityKey::training_run("nano_gpt:1@2");
