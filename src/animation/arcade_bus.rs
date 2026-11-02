@@ -161,6 +161,9 @@ pub struct ChipFx {
     /// The chip's position among the devices: its slot.
     pub slot: usize,
     pub flag: Option<ModelFlag>,
+    /// The flag's text forms (`ModelFlag::texts`), longest first, worked
+    /// out here so the frame path builds no strings for them.
+    pub label_texts: Vec<String>,
     pub gauge: Option<Gauge>,
     pub particles: Vec<Particle>,
     /// When the chip's last reset flash started.
@@ -353,7 +356,7 @@ impl ArcadeFx {
                 ..ChipFx::default()
             };
             if let Some(m) = world.model_on_chip(key).filter(|m| !m.chips.is_empty()) {
-                co.flag = Some(ModelFlag {
+                let flag = ModelFlag {
                     label: m.label.clone(),
                     phase: m.phase,
                     colour: phase_rgb(m.phase),
@@ -361,7 +364,9 @@ impl ArcadeFx {
                     waiting: m.waiting,
                     progress: m.progress,
                     estimated: model_text_is_estimated(world, &m),
-                });
+                };
+                co.label_texts = flag.texts();
+                co.flag = Some(flag);
                 co.gauge = gauge_of(&m, prev.phases.get(&m.key), now);
             }
             if let Some(p) = prev.particles.get_mut(key) {
@@ -509,7 +514,7 @@ pub fn draw(fx: &ArcadeFx, now: u64, stage: &Stage, lines: &mut [Line<'static>])
             });
         }
         if let Some(flag) = &co.flag {
-            draw_label(flag, cols.clone(), stage, lines);
+            draw_label(flag, &co.label_texts, cols.clone(), stage, lines);
         }
         for p in &co.particles {
             draw_particle(p, now, cols.clone(), &stage.sky, lines);
@@ -566,14 +571,21 @@ fn draw_gauge(co: &ChipFx, now: u64, cols: Range<usize>, row: usize, lines: &mut
 
 /// The model's label, right-aligned in the slot with one column to spare,
 /// clear of the gauge row's own label and of the `▓▒░` that ends the rule.
-/// The longest of the flag's texts that fits; none when none fits.
-fn draw_label(flag: &ModelFlag, cols: Range<usize>, stage: &Stage, lines: &mut [Line<'static>]) {
+/// The longest of `texts` (the flag's text forms) that fits; none when none
+/// fits.
+fn draw_label(
+    flag: &ModelFlag,
+    texts: &[String],
+    cols: Range<usize>,
+    stage: &Stage,
+    lines: &mut [Line<'static>],
+) {
     let start_min = cols.start.max(stage.label_cols + 1);
     let end = cols
         .end
         .min(stage.width.saturating_sub(3))
         .saturating_sub(1);
-    let Some(text) = flag.texts().into_iter().find(|t| {
+    let Some(text) = texts.iter().find(|t| {
         let w = UnicodeWidthStr::width(t.as_str());
         end >= w && end - w >= start_min
     }) else {
