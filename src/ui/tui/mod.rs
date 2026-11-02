@@ -466,11 +466,19 @@ fn next_rotation_mode_for(m: DisplayMode, training: bool, inference: bool) -> Di
 /// whether to go there.
 ///
 /// Training comes from the background scan worker (`note_trainer`), whose
-/// `/proc` walk stays off the render thread. Inference is a cheap read of the
-/// background monitor's snapshot, taken every [`ROTATE_PROBE_EVERY`].
+/// `/proc` walk stays off the render thread, and from a look at the bus's
+/// world every [`ROTATE_PROBE_EVERY`] for a training run (an attached host's
+/// trainer, which the local scan cannot see). Inference is a cheap read of the
+/// background monitor's snapshot (or the attached host's models), taken at the
+/// same probe.
 #[derive(Debug, Default)]
 struct RotationActivity {
+    /// A trainer found by the local scan.
     training: bool,
+    /// A training run in the bus's world (`train_bus::run_on_bus`), as of the
+    /// last probe. An attached TUI's local scan finds nothing on a headless
+    /// host, so this is how the rotation learns of the host's run.
+    training_on_bus: bool,
     inference: bool,
     probed: Option<Instant>,
 }
@@ -490,6 +498,28 @@ impl RotationActivity {
         if let Some(result) = found {
             self.training = result.is_some();
         }
+    }
+
+    /// The probe taken every [`ROTATE_PROBE_EVERY`]: whether the bus's
+    /// `world` holds a training run, and, unless the Inference Monitor is on
+    /// screen (it keeps its own flag), whether anything serves (`inference`,
+    /// asked only then).
+    fn probe(
+        &mut self,
+        mode: DisplayMode,
+        world: &dyn tt_toplike_bus::WorldRead,
+        inference: impl FnOnce() -> bool,
+    ) {
+        self.probed = Some(Instant::now());
+        if mode != DisplayMode::InferenceMonitor {
+            self.inference = inference();
+        }
+        self.training_on_bus = crate::animation::train_bus::run_on_bus(world);
+    }
+
+    /// Whether Training is worth a visit: a local trainer, or a run on the bus.
+    fn wants_training(&self) -> bool {
+        self.training || self.training_on_bus
     }
 }
 
@@ -1722,28 +1752,28 @@ fn run_app(
                     rotation_activity.training = true;
                 }
                 if rotation_activity.due() {
-                    rotation_activity.probed = Some(Instant::now());
-                    if display_mode != DisplayMode::InferenceMonitor {
-                        // Attached: the host's models; otherwise the local
-                        // monitor, which exists only on Linux.
-                        rotation_activity.inference =
-                            inference_bus::inference_active(tui_bus, backend.as_ref(), || {
-                                #[cfg(target_os = "linux")]
-                                {
-                                    peek_inference_active(
-                                        backend.as_ref(),
-                                        backend_type,
-                                        &inference_monitor,
-                                        mock_started,
-                                    )
-                                }
-                                // No inference monitor off Linux, so nothing to show.
-                                #[cfg(not(target_os = "linux"))]
-                                {
-                                    false
-                                }
-                            });
-                    }
+                    // Inference: attached, the host's models; otherwise the
+                    // local monitor, which exists only on Linux. Training: a
+                    // run in the bus's world, which is how an attached TUI
+                    // sees a headless host's trainer.
+                    rotation_activity.probe(display_mode, &tui_bus.read(), || {
+                        inference_bus::inference_active(tui_bus, backend.as_ref(), || {
+                            #[cfg(target_os = "linux")]
+                            {
+                                peek_inference_active(
+                                    backend.as_ref(),
+                                    backend_type,
+                                    &inference_monitor,
+                                    mock_started,
+                                )
+                            }
+                            // No inference monitor off Linux, so nothing to show.
+                            #[cfg(not(target_os = "linux"))]
+                            {
+                                false
+                            }
+                        })
+                    });
                 }
                 let active = match display_mode {
                     DisplayMode::Training => train_active,
@@ -1755,7 +1785,7 @@ fn run_app(
                 if rotate_since.elapsed() >= linger_for(display_mode, active) {
                     display_mode = next_rotation_mode_for(
                         display_mode,
-                        rotation_activity.training,
+                        rotation_activity.wants_training(),
                         rotation_activity.inference,
                     );
                     force_redraw = true;
@@ -9930,6 +9960,57 @@ mod display_mode_tests {
                 "{mode:?} rotating={rotating} {backend:?}"
             );
         }
+    }
+
+    /// Group D S1: an attached TUI with `--rotate` on a box with no trainer of
+    /// its own. The local scan finds nothing, but the host's run is in the
+    /// bus's world, so the probe taken from another view sends the rotation
+    /// to Training. A run whose step reading went stale does not.
+    #[test]
+    fn the_rotation_visits_training_for_a_run_seen_on_the_bus() {
+        use super::{next_rotation_mode_for, RotationActivity, ROTATION};
+        use tt_toplike_bus::{
+            EntityKey, HeaderKind, LocalView, Payload, Provenance, Record, Sample, Value, World,
+        };
+        const SEC: u64 = 1_000_000_000;
+        let mut world = World::new();
+        world.apply(&Record {
+            seq: 1,
+            t_mono_ns: 10 * SEC,
+            t_wall_ms: 1_790_000_000_000,
+            source: "test".into(),
+            payload: Payload::Sample(Sample {
+                entity: EntityKey::training_run("nano_gpt:4242@99"),
+                signal: crate::bus::signals::TRAIN_STEP.into(),
+                value: Value::U64(7),
+                prov: Provenance::Measured,
+            }),
+        });
+        let view = |now: u64| LocalView {
+            seq: world.seq(),
+            world: world.clone(),
+            now_mono_ns: now,
+            header_kind: HeaderKind::Live,
+        };
+        // The view before Training in the rotation.
+        let before = ROTATION[ROTATION.len() - 2];
+        assert_eq!(ROTATION[ROTATION.len() - 1], DisplayMode::Training);
+
+        let mut a = RotationActivity::default();
+        a.probe(before, &view(11 * SEC), || false);
+        assert!(!a.training, "the local scan found nothing");
+        assert_eq!(
+            next_rotation_mode_for(before, a.wants_training(), a.inference),
+            DisplayMode::Training,
+            "the host's run earns Training a visit"
+        );
+
+        // The same world a minute later: the run's step reading is stale.
+        a.probe(before, &view(71 * SEC), || false);
+        assert_ne!(
+            next_rotation_mode_for(before, a.wants_training(), a.inference),
+            DisplayMode::Training
+        );
     }
 
     /// A service that is `Down` is not something to look at: only a row that is

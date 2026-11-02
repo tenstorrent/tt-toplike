@@ -259,6 +259,34 @@ pub fn proc_of_key(run: &EntityKey) -> TrainProcess {
     }
 }
 
+/// The run the view shows: the one whose `toplike.train.step` reading is the
+/// newest, as long as that reading is at most [`RUN_STALE_MS`] old at
+/// `now_mono_ns`. Gives the run's key and its step.
+fn newest_run(world: &dyn WorldRead, now_mono_ns: u64) -> Option<(EntityKey, u64)> {
+    world
+        .entities(EntityKind::TrainingRun)
+        .into_iter()
+        .filter_map(|k| {
+            let r = world.reading(&k, sig::TRAIN_STEP)?;
+            let step = number(&r.value)?;
+            (world.age_ms(&r, now_mono_ns) <= RUN_STALE_MS && step >= 0.0).then_some((
+                r.seq,
+                k,
+                step as u64,
+            ))
+        })
+        .max_by_key(|(seq, _, _)| *seq)
+        .map(|(_, k, step)| (k, step))
+}
+
+/// Whether `world` holds a run the Training view would draw, at its own
+/// clock. The `v` rotation asks this while another view is on screen, so an
+/// attached TUI whose host sees a trainer still visits Training. It is the
+/// same choice [`TrainFx::from_world`] makes, without the bookkeeping.
+pub(crate) fn run_on_bus(world: &dyn WorldRead) -> bool {
+    newest_run(world, world.now_mono_ns()).is_some()
+}
+
 impl TrainFx {
     /// The effects for the chips `chips` (each a device index and its chip
     /// key, `EntityKey::chip(bus_id)`) from `world` at bus time
@@ -286,21 +314,7 @@ impl TrainFx {
         prev.pulses
             .retain(|p| now.saturating_sub(p.start_ns) < PULSE_NS);
 
-        // The run: the newest fresh step reading.
-        let run = world
-            .entities(EntityKind::TrainingRun)
-            .into_iter()
-            .filter_map(|k| {
-                let r = world.reading(&k, sig::TRAIN_STEP)?;
-                let step = number(&r.value)?;
-                (world.age_ms(&r, now) <= RUN_STALE_MS && step >= 0.0).then_some((
-                    r.seq,
-                    k,
-                    step as u64,
-                ))
-            })
-            .max_by_key(|(seq, _, _)| *seq);
-        let Some((_, key, step)) = run else {
+        let Some((key, step)) = newest_run(world, now) else {
             // No run: nothing is kept.
             prev.run = None;
             prev.last_step = None;
