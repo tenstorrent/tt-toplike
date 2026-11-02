@@ -71,6 +71,13 @@ pub const IDENTITY_SOURCE: &str = "identity";
 /// Source label on `ViewChanged` events.
 pub const VIEW_SOURCE: &str = "view";
 
+/// How many of the hivemind source's newest sequence numbers the host keeps
+/// for [`BusHost::from_hivemind_source`]. A view reads at most
+/// [`tt_toplike_bus::SUMMARY_EVENTS`] events, and every record the hivemind
+/// source publishes is an event, so an older number is outside any view's
+/// window. The margin covers events from other sources in between.
+pub const HIVEMIND_SEQS_KEPT: usize = 8 * tt_toplike_bus::SUMMARY_EVENTS;
+
 /// A replay playing on a background thread.
 struct ReplayThread {
     stop: Arc<AtomicBool>,
@@ -116,6 +123,10 @@ pub struct BusHost {
     maintenance_runs: u64,
     resends: u64,
     replay: Option<ReplayThread>,
+    /// Sequence numbers of the newest records published under
+    /// [`HivemindSource::NAME`], oldest first, at most
+    /// [`HIVEMIND_SEQS_KEPT`]. See [`BusHost::from_hivemind_source`].
+    hivemind_seqs: std::collections::VecDeque<u64>,
 }
 
 impl BusHost {
@@ -210,6 +221,7 @@ impl BusHost {
             maintenance_runs: 0,
             resends: 0,
             replay: None,
+            hivemind_seqs: std::collections::VecDeque::new(),
         }
     }
 
@@ -240,6 +252,7 @@ impl BusHost {
             let ctx = PollCtx { backend };
             let bus = self.bus.clone();
             let mut backend_raw = false;
+            let mut hivemind_seqs: Vec<u64> = Vec::new();
             for s in self.sources_mut() {
                 let name = s.name();
                 let is_backend = name == BackendSource::NAME;
@@ -254,8 +267,24 @@ impl BusHost {
                         }
                         _ => name.to_string(),
                     };
-                    bus.publish(&label, mark_synthetic(p, synthetic));
+                    if label == HivemindSource::NAME {
+                        // A payload the bus rejects returns the head it
+                        // already had: only a new number is this record's.
+                        let before = bus.head();
+                        let seq = bus.publish(&label, mark_synthetic(p, synthetic));
+                        if seq > before {
+                            hivemind_seqs.push(seq);
+                        }
+                    } else {
+                        bus.publish(&label, mark_synthetic(p, synthetic));
+                    }
                 });
+            }
+            for seq in hivemind_seqs {
+                if self.hivemind_seqs.len() == HIVEMIND_SEQS_KEPT {
+                    self.hivemind_seqs.pop_front();
+                }
+                self.hivemind_seqs.push_back(seq);
             }
             if backend_raw {
                 self.swap_pending = false;
@@ -400,6 +429,15 @@ impl BusHost {
             // Unreachable: the host always opens the bus with a World.
             None => (f.take().expect("not called"))(&World::new(), 0),
         }
+    }
+
+    /// Whether the record with sequence number `seq` was published by this
+    /// host's hivemind source (record source [`HivemindSource::NAME`]): an
+    /// event of the `~` view's own sweeper, fed in through
+    /// [`BusHost::feed_hivemind`]. Answers for the newest
+    /// [`HIVEMIND_SEQS_KEPT`] such records; older ones answer false.
+    pub fn from_hivemind_source(&self, seq: u64) -> bool {
+        self.hivemind_seqs.binary_search(&seq).is_ok()
     }
 
     /// Publish `Event::ViewChanged { view }`.

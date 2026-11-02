@@ -72,10 +72,15 @@
 //! last one and more than four times the usual gap between updates. A live
 //! event that coalesces into a history row makes it live again.
 //!
-//! A local bus: `Spark`, `KernelCompiled` and `Reset` on a bus this TUI
-//! hosts came from this sweeper's own collectors and reset detector, which
-//! already show them, so they are not shown again. Attached to a headless
-//! host, they are the host's sparks, and they are shown.
+//! The sweeper's own events: on a bus this TUI hosts, the sweeper's
+//! collectors and reset detector publish `Spark`, `KernelCompiled` and
+//! `Reset` records under the source name `hivemind`. The sweeper's feed
+//! already shows those, so the view skips a record when the host says that
+//! source published it (`BusHost::from_hivemind_source`). The same events
+//! from any other source show: gozer publishes a `Reset` on the same bus
+//! when it releases a lease and resets the chips, and the sweeper's
+//! detector may not have seen that reset. Attached to a headless host,
+//! nothing is the TUI's own, and every event shows.
 //!
 //! Chips this TUI does not have: an event that names chips is shown only
 //! when one of them is a local chip. An event that names no chip (a spark
@@ -357,19 +362,45 @@ impl HivemindBus {
         };
         let world = bus.read();
         let now = world.now_mono_ns();
-        self.read_world(&world, &chips, !bus.is_attached(), now, Instant::now());
+        let host = bus.host();
+        let own = |q: u64| host.is_some_and(|h| h.from_hivemind_source(q));
+        self.read_world_from(
+            &world,
+            &chips,
+            !bus.is_attached(),
+            &own,
+            now,
+            Instant::now(),
+        );
     }
 
-    /// Read `world` at bus time `now_ns`, with `chips` this TUI's chips
-    /// (device index and chip key). `local` is true when this TUI hosts the
-    /// bus. `at` is the frame clock's reading for the same moment: row
-    /// times and the surge are kept on it, so the frame path needs no bus
-    /// read. See the module doc.
+    /// [`HivemindBus::read_world_from`] for a world in which no record came
+    /// from this TUI's own sweeper. For tests.
+    #[cfg(test)]
     pub fn read_world(
         &mut self,
         world: &dyn WorldRead,
         chips: &[(usize, EntityKey)],
         local: bool,
+        now_ns: u64,
+        at: Instant,
+    ) {
+        self.read_world_from(world, chips, local, &|_| false, now_ns, at);
+    }
+
+    /// Read `world` at bus time `now_ns`, with `chips` this TUI's chips
+    /// (device index and chip key). `local` is true when this TUI hosts the
+    /// bus. `own` says whether the record with a given sequence number came
+    /// from this TUI's own sweeper (`BusHost::from_hivemind_source`). `at`
+    /// is the frame clock's reading for the same moment: row times and the
+    /// surge are kept on it, so the frame path needs no bus read. See the
+    /// module doc.
+    pub fn read_world_from(
+        &mut self,
+        world: &dyn WorldRead,
+        chips: &[(usize, EntityKey)],
+        local: bool,
+        own: &dyn Fn(u64) -> bool,
         now_ns: u64,
         at: Instant,
     ) {
@@ -477,10 +508,10 @@ impl HivemindBus {
                         requests = requests.saturating_add(n);
                     }
                 }
-                // This sweeper's own events on a local bus are already on
+                // What this TUI's own sweeper published is already on
                 // screen (see the module doc).
                 Event::KernelCompiled { .. } | Event::Spark { .. } | Event::Reset { .. }
-                    if local => {}
+                    if own(q) => {}
                 Event::KernelCompiled { chip, source } => {
                     if !ctx.chips_are_ours(chip.as_slice()) {
                         continue;

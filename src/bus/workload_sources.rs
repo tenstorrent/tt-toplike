@@ -790,6 +790,9 @@ pub struct HivemindSource {
 }
 
 impl HivemindSource {
+    /// The source name on the records this source publishes.
+    pub const NAME: &'static str = "hivemind";
+
     pub fn new(map: Arc<IdentityMap>) -> Self {
         Self {
             map,
@@ -832,7 +835,7 @@ fn kind_text(k: EventKind) -> &'static str {
 
 impl Source for HivemindSource {
     fn name(&self) -> &'static str {
-        "hivemind"
+        Self::NAME
     }
     fn poll(&mut self, _ctx: &PollCtx<'_>, _now: Instant, out: &mut dyn FnMut(Payload)) {
         while let Some((src, kind, device)) = self.queue.pop_front() {

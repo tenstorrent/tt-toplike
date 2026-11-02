@@ -765,9 +765,12 @@ Events already in the world when `~` first reads it, and events that arrived whi
 screen, are history. They appear dimmed under the live rows and give no surge. The rule and
 its constant are Die 3D's.
 
-On a bus this TUI hosts, `Spark`, `KernelCompiled` and `Reset` came from this sweeper's own
-collectors and reset detector, so they are not shown twice. Attached to a headless host, they
-are the host's sparks, and they show. Events that name only chips this TUI does not have show
+On a bus this TUI hosts, the view skips the `Spark`, `KernelCompiled` and `Reset` records that
+its own sweeper published (record source `hivemind`), because the sweeper's feed already shows
+them. The host keeps the sequence numbers of those records (`BusHost::from_hivemind_source`).
+The same events from another source show: gozer publishes a `Reset` when it releases a lease
+and resets the chips, and the sweeper's reset detector may not have seen it. Attached to a
+headless host, nothing is the TUI's own, and every event shows. Events that name only chips this TUI does not have show
 nothing. Attached to a host on another machine, no chip counts as local.
 
 The scanner's motion and the surge's shape are decoration that responds to measured rates.

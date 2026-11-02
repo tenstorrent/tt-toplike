@@ -555,35 +555,262 @@ fn a_re_announcement_adds_no_row() {
     assert_eq!(rows[0].count, 1);
 }
 
-/// On a local bus this sweeper's own events are already on the board and in
-/// the feed; the bus copies of them are not shown twice.
+/// On a local bus the view hides only the records its own sweeper
+/// published: the sweeper's feed already shows them. A reset another source
+/// published on the same bus (gozer's, when it releases a lease and resets
+/// the chips) is not on the sweeper's feed, and shows.
 #[test]
-fn a_local_bus_does_not_repeat_the_sweepers_own_events() {
+fn a_local_bus_hides_only_the_sweepers_own_events() {
     let mut f = Fx::new();
     f.label("llama", "Llama", Provenance::Measured);
     let at = Instant::now();
     let mut b = HivemindBus::default();
-    b.read_world(&f.view(5 * SEC_NS), &two_chips(), true, 5 * SEC_NS, at);
-    f.ready("llama", &[0])
-        .event(Event::Spark {
-            chip: Some(chip_key(0)),
-            kind: "metal.log".into(),
-        })
-        .event(Event::KernelCompiled {
-            chip: None,
-            source: "ttnn".into(),
-        })
-        .event(Event::Reset {
-            chips: vec![chip_key(0)],
-        });
+    let none = |_: u64| false;
+    b.read_world_from(
+        &f.view(5 * SEC_NS),
+        &two_chips(),
+        true,
+        &none,
+        5 * SEC_NS,
+        at,
+    );
+    f.ready("llama", &[0]);
+    // What the sweeper published.
+    let first_own = f.seq + 1;
+    f.event(Event::Spark {
+        chip: Some(chip_key(0)),
+        kind: "metal.log".into(),
+    })
+    .event(Event::KernelCompiled {
+        chip: None,
+        source: "ttnn".into(),
+    })
+    .event(Event::Reset {
+        chips: vec![chip_key(0)],
+    });
+    let last_own = f.seq;
+    // Gozer's reset of chip 1.
+    f.event(Event::Reset {
+        chips: vec![chip_key(1)],
+    });
+    let own = |q: u64| (first_own..=last_own).contains(&q);
     let now = 5 * SEC_NS + TICK_NS;
-    b.read_world(&f.view(now), &two_chips(), true, now, at);
+    b.read_world_from(&f.view(now), &two_chips(), true, &own, now, at);
+    let rows = b.rows(None, Severity::Trace);
+    let mut kinds: Vec<String> = rows.iter().map(|r| format!("{:?}", r.kind)).collect();
+    kinds.sort();
+    assert_eq!(kinds, vec!["ModelReady", "Reset"]);
+    let reset = rows.iter().find(|r| r.kind == BusKind::Reset).unwrap();
+    assert_eq!((reset.device, reset.count), (Some(1), 1));
+}
+
+/// A local TUI bus for `backend`: memory only, no gozer command.
+fn local_tui_bus(backend: &dyn crate::backend::TelemetryBackend) -> crate::bus::tui_bus::TuiBus {
+    use crate::bus::tui_bus::{Attach, TuiBus};
+    TuiBus::start(&tui_opts(Attach::Off), backend).unwrap()
+}
+
+/// Options for a TUI on this machine that attaches as `attach` says.
+fn tui_opts(attach: crate::bus::tui_bus::Attach) -> crate::bus::tui_bus::TuiBusOptions {
+    crate::bus::tui_bus::TuiBusOptions {
+        bus: tt_toplike_bus::BusConfig::default(),
+        serve_socket: None,
+        attach,
+        synthetic: false,
+        relay: false,
+        gozer: false,
+        local_workloads: false,
+        local_host: tt_toplike_bus::host_identity().to_string(),
+    }
+}
+
+/// A mock backend with `n` chips, read once.
+fn mock_backend(n: usize) -> crate::backend::mock::MockBackend {
+    use crate::backend::TelemetryBackend as _;
+    let mut b = crate::backend::mock::MockBackend::new(n);
+    b.init().unwrap();
+    b.update().unwrap();
+    b
+}
+
+/// The same rule through `update` and a real local bus. The sweeper's reset
+/// of chip 0 goes in through `TuiBus::feed_hivemind` and the host's tick,
+/// as in the TUI; gozer's reset of the same chip is published under its own
+/// source. The view shows one reset: gozer's.
+#[test]
+fn update_on_a_local_bus_shows_a_reset_the_sweeper_did_not_publish() {
+    let backend = mock_backend(2);
+    let mut bus = local_tui_bus(&backend);
+    bus.data_tick(&backend, Instant::now());
+    let mut b = HivemindBus::default();
+    b.update(&bus, &backend);
+
+    let mut hm = Hivemind::new();
+    hm.push_for_test(SniffEvent {
+        ts: Instant::now(),
+        source: Source::TtSmi,
+        device: Some(0),
+        severity: Severity::Warn,
+        kind: EventKind::Reset,
+        text: String::new(),
+        origin: "test".into(),
+    });
+    bus.feed_hivemind(&hm);
+    bus.data_tick(&backend, Instant::now());
+    let host = bus.host().unwrap();
+    let swept = host.with_world(|w, _| {
+        w.events()
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::Reset { .. }))
+            .count()
+    });
+    assert_eq!(swept, 1, "the sweeper's reset is on the bus");
+    host.bus().publish(
+        "gozer",
+        Payload::Event(Event::Reset {
+            chips: vec![chip_key(0)],
+        }),
+    );
+    b.update(&bus, &backend);
+    let resets: Vec<(Option<u8>, u64)> = b
+        .rows(None, Severity::Trace)
+        .iter()
+        .filter(|r| r.kind == BusKind::Reset)
+        .map(|r| (r.device, r.count))
+        .collect();
+    assert_eq!(resets, vec![(Some(0), 1)]);
+}
+
+/// `update`'s local-bus gate (`!TuiBus::is_attached`): on a bus this TUI
+/// hosts, every model is this machine's, also one announced with no chip.
+#[test]
+fn update_on_a_local_bus_counts_a_chipless_model_as_this_machines() {
+    let backend = mock_backend(2);
+    let mut bus = local_tui_bus(&backend);
+    bus.data_tick(&backend, Instant::now());
+    let mut b = HivemindBus::default();
+    b.update(&bus, &backend);
+    bus.host().unwrap().bus().publish(
+        "test",
+        Payload::Event(Event::ModelReady {
+            model: EntityKey::model("nowhere"),
+            chips: vec![],
+        }),
+    );
+    b.update(&bus, &backend);
     let kinds: Vec<BusKind> = b
         .rows(None, Severity::Trace)
         .iter()
         .map(|r| r.kind)
         .collect();
     assert_eq!(kinds, vec![BusKind::ModelReady]);
+}
+
+/// A headless-style host on `sock` that published `backend`'s chips and
+/// then `events`, and its socket server. Keep both alive for the test.
+#[cfg(unix)]
+fn host_serving(
+    sock: &std::path::Path,
+    backend: &dyn crate::backend::TelemetryBackend,
+    events: Vec<Event>,
+) -> (crate::bus::host::BusHost, tt_toplike_bus::SocketServer) {
+    let mut cfg = tt_toplike_bus::BusConfig::default();
+    cfg.header_tags.insert("mode".into(), "live".into());
+    cfg.header_tags.insert("backend".into(), "test".into());
+    let mut host =
+        crate::bus::host::BusHost::with_gozer(cfg, backend, crate::bus::gozer::GozerSource::fed())
+            .unwrap();
+    // One tick publishes the backend's chips: the origin a TUI checks.
+    host.tick(backend, Instant::now());
+    for e in events {
+        host.bus().publish("test", Payload::Event(e));
+    }
+    let server = tt_toplike_bus::SocketServer::spawn(host.bus().clone(), sock).unwrap();
+    (host, server)
+}
+
+/// `update`'s origin gate (`TuiBus::origin_is_local`): attached to a host on
+/// another machine, no chip is local, even where its PCI addresses equal
+/// this machine's. Its model on chip 0 gets no strip cell, and its model
+/// and spark on chip 0 get no row.
+#[cfg(unix)]
+#[test]
+fn update_attached_to_another_machine_counts_no_chip_as_local() {
+    use crate::bus::tui_bus::{Attach, TuiBus};
+    let tmp = tempfile::tempdir().unwrap();
+    let sock = tmp.path().join("run").join("bus.sock");
+    let backend = mock_backend(2);
+    let (_h, _s) = host_serving(
+        &sock,
+        &backend,
+        vec![
+            Event::ModelReady {
+                model: EntityKey::model("theirs"),
+                chips: vec![chip_key(0)],
+            },
+            Event::Spark {
+                chip: Some(chip_key(0)),
+                kind: "metal.log".into(),
+            },
+        ],
+    );
+    let o = crate::bus::tui_bus::TuiBusOptions {
+        local_host: "another-box/0123456789abcdef".into(),
+        ..tui_opts(Attach::Required(sock.clone()))
+    };
+    let mut bus = TuiBus::start(&o, &backend).unwrap();
+    bus.data_tick(&backend, Instant::now());
+    assert!(bus.is_attached() && !bus.origin_is_local());
+    assert_eq!(bus.read().models().len(), 1, "the host's model arrived");
+    let mut b = HivemindBus::default();
+    b.update(&bus, &backend);
+    assert!(b.strip().is_empty(), "{:?}", b.strip());
+    assert!(
+        b.rows(None, Severity::Trace).is_empty(),
+        "{:?}",
+        b.rows(None, Severity::Trace)
+    );
+}
+
+/// `update`'s local-bus gate when attached to a host on this machine: the
+/// host's model on a chip this TUI lacks is not this TUI's, so its
+/// requests get no row (on a local bus they would). The read view drops the
+/// announcement itself, since it names only that chip, and keeps the
+/// requests, which name no chip.
+#[cfg(unix)]
+#[test]
+fn update_attached_on_this_machine_skips_a_model_on_a_chip_it_lacks() {
+    use crate::bus::tui_bus::{Attach, TuiBus};
+    let tmp = tempfile::tempdir().unwrap();
+    let sock = tmp.path().join("run").join("bus.sock");
+    let host_backend = mock_backend(2);
+    let (_h, _s) = host_serving(
+        &sock,
+        &host_backend,
+        vec![
+            Event::ModelReady {
+                model: EntityKey::model("theirs"),
+                chips: vec![chip_key(1)],
+            },
+            Event::RequestsCompleted {
+                model: EntityKey::model("theirs"),
+                n: 3,
+            },
+        ],
+    );
+    // This TUI has only chip 0.
+    let backend = mock_backend(1);
+    let mut bus = TuiBus::start(&tui_opts(Attach::Probe(sock.clone())), &backend).unwrap();
+    bus.data_tick(&backend, Instant::now());
+    assert!(bus.is_attached() && bus.origin_is_local());
+    assert_eq!(bus.read().models().len(), 1, "the host's model arrived");
+    let mut b = HivemindBus::default();
+    b.update(&bus, &backend);
+    assert!(
+        b.rows(None, Severity::Trace).is_empty(),
+        "{:?}",
+        b.rows(None, Severity::Trace)
+    );
 }
 
 /// Contract rule 4, through the real attached read path: a world limited to
