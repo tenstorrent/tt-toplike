@@ -578,6 +578,7 @@ fn a_world_naming_a_chip_this_tui_lacks_draws_nothing_for_it() {
 /// unload.
 #[test]
 fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
+    use crate::animation::bus_test_support::Clocked;
     use crate::bus::host::BusHost;
     use crate::bus::view::{BusView, ReadCache};
     use std::collections::BTreeSet;
@@ -592,6 +593,13 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
         let cache = ReadCache::new();
         let local: Arc<BTreeSet<EntityKey>> = Arc::new([chip(0), chip(1)].into_iter().collect());
         let read = || view.read(&cache).only_chips(local.clone());
+        // Each read gets a fixed bus time a tick after the last, so a stall
+        // between two reads on a loaded machine cannot count as being away.
+        let mut t = 5 * SEC;
+        let mut at = || {
+            t += TICK;
+            t
+        };
         let p = |e: Event| {
             bus.publish("test", Payload::Event(e));
         };
@@ -604,7 +612,8 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
             d.update(&b);
         };
         for _ in 0..3 {
-            let w = read();
+            let r = read();
+            let w = Clocked(&r, at());
             att(&mut d, &w);
             att(&mut q, &Bus::new().view(w.now_mono_ns()));
         }
@@ -612,13 +621,15 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
             model: theirs.clone(),
             chips: vec![foreign.clone()],
         });
-        let w = read();
+        let r = read();
+        let w = Clocked(&r, at());
         att(&mut d, &w);
         att(&mut q, &Bus::new().view(w.now_mono_ns()));
         p(Event::ModelGone {
             model: theirs.clone(),
         });
-        let w = read();
+        let r = read();
+        let w = Clocked(&r, at());
         att(&mut d, &w);
         att(&mut q, &Bus::new().view(w.now_mono_ns()));
         assert_eq!(d.render(&b), q.render(&b));
@@ -627,13 +638,15 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
             model: theirs.clone(),
             chips: vec![foreign.clone(), chip(1)],
         });
-        att(&mut d, &read());
+        let r = read();
+        att(&mut d, &Clocked(&r, at()));
         assert_eq!(phase(&d, 1), Phase::Running);
         assert!(row_text(&d.render(&b), POWER_ROW).contains("theirs ready"));
         p(Event::ModelGone {
             model: theirs.clone(),
         });
-        att(&mut d, &read());
+        let r = read();
+        att(&mut d, &Clocked(&r, at()));
         assert_eq!(phase(&d, 1), Phase::Deconstructing);
         assert_ne!(phase(&d, 0), Phase::Deconstructing);
     })
