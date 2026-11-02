@@ -62,9 +62,10 @@ fn columns(line: &Line<'static>) -> Vec<char> {
     row
 }
 
-/// Characters that would be a right-side frame edge at the end of a row.
-/// The same set `arcade_panel_tests` uses.
-const RIGHT_BORDERS: &str = "│║▕┤╣";
+/// Characters that would be a right-side frame edge at the end of a row:
+/// the arcade's own guard set (`arcade::RIGHT_EDGE_GLYPHS`) and the set
+/// `arcade_panel_tests` uses.
+const RIGHT_BORDERS: &str = "│║┃▕▐┤╣┫╢╡┨┥╎╏┆┇┊┋";
 
 /// Every layout, the presets and a user one: config, then presets.
 fn every_layout() -> Vec<NamedLayout> {
@@ -134,18 +135,7 @@ fn every_layout_at_every_size_fits_and_draws_no_right_border() {
                         bad.push(format!("{} {w}x{h} row {y} is {width} wide", l.name));
                     }
                     let cols = columns(line);
-                    // One known exception: the defrag view's own status
-                    // line (`  DEFRAG │ 2 devices │ ...`) cut by a narrow
-                    // panel right after a field separator. That is the
-                    // view's text, drawn so in the pinned base frame
-                    // (classic at 24x8), and no frame edge.
-                    let defrag_cut = t.trim_end().ends_with("DEFRAG │");
-                    if w > 0
-                        && y < h
-                        && cols.len() >= w
-                        && RIGHT_BORDERS.contains(cols[w - 1])
-                        && !defrag_cut
-                    {
+                    if w > 0 && y < h && cols.len() >= w && RIGHT_BORDERS.contains(cols[w - 1]) {
                         bad.push(format!(
                             "{} {w}x{h} row {y} ends in {:?}: {t:?}",
                             l.name,
@@ -369,4 +359,67 @@ fn a_switch_to_the_same_layout_draws_the_same_scene_rows() {
         }
         assert_eq!(before.len(), after.len());
     })
+}
+
+/// Every width from 1 to 240 at several heights, every built-in layout
+/// idle and busy and a user layout with dividers: no row ends in a
+/// right-side border glyph (review S3; the user's rule is never to use
+/// one). The base grid samples fewer widths; this sweep found the cut
+/// separators at widths 18, 23, 24, 31, 32, 47, 48 and on.
+#[test]
+fn no_row_ends_in_a_right_border_at_any_width() {
+    let layouts = every_layout();
+    let bad: Vec<String> = tc(|| {
+        std::thread::scope(|s| {
+            let workers: Vec<_> = layouts
+                .iter()
+                .map(|l| {
+                    s.spawn(move || {
+                        crate::ui::colors::with_truecolor(true, || {
+                            let b = Fixed::new(2);
+                            let mut bad = Vec::new();
+                            for h in [3usize, 6, 8, 12, 24, 40] {
+                                for w in 1..=240usize {
+                                    for is_busy in [false, true] {
+                                        let mut a = arcade_of(l, w, h, &b);
+                                        if is_busy {
+                                            busy(&mut a, &b);
+                                        } else {
+                                            for _ in 0..3 {
+                                                a.update(&b);
+                                            }
+                                        }
+                                        for (y, line) in a.render(&b).iter().enumerate() {
+                                            let cols = columns(line);
+                                            if y < h
+                                                && cols.len() >= w
+                                                && RIGHT_BORDERS.contains(cols[w - 1])
+                                            {
+                                                bad.push(format!(
+                                                    "{} {w}x{h} busy={is_busy} row {y}: {:?}",
+                                                    l.name,
+                                                    text(line)
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            bad
+                        })
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|t| t.join().unwrap())
+                .collect()
+        })
+    });
+    assert!(
+        bad.is_empty(),
+        "{} rows end in a right border, the first: {:?}",
+        bad.len(),
+        &bad[..bad.len().min(10)]
+    );
 }

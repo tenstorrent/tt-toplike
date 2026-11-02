@@ -67,8 +67,13 @@ devices and services the old one had.
 Each sketch shows the rows from the top, with the panels of a row side by side; `│` is the
 divider between two panels. The title row and Row 1 are above every layout, and the status bar
 is below. Every layout is tested at 0x0, at several small sizes, at 80x24, 60x20, 120x40 and
-200x60: no row runs past the terminal and no row ends in a right-side border. At 120x40 and
-200x60 every layout shows every panel it names.
+200x60, and at every width from 1 to 240 at six heights: no row runs past the terminal and no
+row ends in a right-side border. At 120x40 and 200x60 every layout shows every panel it names.
+
+Changed from 0.15.3: when a cut leaves a `│` (or another right-edge glyph) in the terminal's last
+column, the arcade draws a space there. This happens to a panel divider at widths 1 and 2, to the
+title row's separator at width 18, and to the defrag view's field separators at widths such as
+23, 24, 52 and 53 in `classic`. Nothing else in those frames changed.
 
 A panel that does not fit is taken out of its row and named on the row's rule (see "How the
 space is shared"). The activity lanes need a starfield of 6 rows or more.

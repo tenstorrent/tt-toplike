@@ -1093,6 +1093,10 @@ impl ArcadeVisualization {
                 }
             }
         }
+        // No row ends in a right-side border, at any width.
+        for line in lines.iter_mut() {
+            clear_right_edge(line, self.width);
+        }
         lines
     }
 
@@ -1771,8 +1775,6 @@ impl ArcadeVisualization {
     }
 }
 
-/// Write `spans` over the columns `x .. x + w` of `line`, keeping what is
-/// left and right of them. The spans are clamped to `w` and padded to it.
 /// `line` cut to `w` display columns when it is wider; unchanged otherwise.
 fn fit_width(mut line: Line<'static>, w: usize) -> Line<'static> {
     let cols: usize = line
@@ -1786,6 +1788,46 @@ fn fit_width(mut line: Line<'static>, w: usize) -> Line<'static> {
     line
 }
 
+/// Glyphs that would read as a right-side border in a row's last column:
+/// box-drawing verticals and right-edge pieces. The user's rule is no
+/// right-side border characters, at any width.
+pub(crate) const RIGHT_EDGE_GLYPHS: &[char] = &[
+    '│', '║', '┃', '▕', '▐', '┤', '╣', '┫', '╢', '╡', '┨', '┥', '╎', '╏', '┆', '┇', '┊', '┋',
+];
+
+/// Put a space for the glyph in column `w - 1` of `line` when it is one of
+/// [`RIGHT_EDGE_GLYPHS`]: a divider, a field separator or a panel's wall
+/// that a cut has left at the terminal's right edge. Nothing else changes.
+fn clear_right_edge(line: &mut Line<'static>, w: usize) {
+    if w == 0 {
+        return;
+    }
+    let mut col = 0usize;
+    for span in line.spans.iter_mut() {
+        let mut out = String::with_capacity(span.content.len());
+        let mut changed = false;
+        for ch in span.content.chars() {
+            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if col == w - 1 && cw == 1 && RIGHT_EDGE_GLYPHS.contains(&ch) {
+                out.push(' ');
+                changed = true;
+            } else {
+                out.push(ch);
+            }
+            col += cw;
+        }
+        if changed {
+            span.content = out.into();
+            return;
+        }
+        if col >= w {
+            return;
+        }
+    }
+}
+
+/// Write `spans` over the columns `x .. x + w` of `line`, keeping what is
+/// left and right of them. The spans are clamped to `w` and padded to it.
 fn put_spans(line: &mut Line<'static>, x: usize, w: usize, spans: Vec<Span<'static>>) {
     let old = std::mem::take(&mut line.spans);
     let mut out = clamp_spans_to_width(old.clone(), x);
