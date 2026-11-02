@@ -23,6 +23,8 @@ pub mod arcade;
 pub mod arcade_bus;
 pub mod arcade_layout;
 pub mod atmosphere;
+#[cfg(test)]
+mod backdrop_pins;
 pub mod baseline;
 pub(crate) mod bus_intake;
 #[cfg(test)]

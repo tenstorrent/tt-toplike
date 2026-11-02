@@ -20,6 +20,8 @@
 //! Time is `now`, seconds since the view was created, passed in by the caller
 //! from one clock. Nothing here reads a clock, so the tests set time exactly.
 
+#[cfg(test)]
+mod backdrop_pins;
 pub mod bh_layout_data;
 mod busiest;
 pub mod camera;
