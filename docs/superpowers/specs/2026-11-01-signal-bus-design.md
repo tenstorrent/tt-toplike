@@ -110,7 +110,8 @@ for history. The world is rebuilt from the log, so a replayed log gives the same
   signals. A replayed stream is marked as replay in its header.
 - **Transports.** In-process channels for views. A Unix socket carrying JSON Lines for other local
   programs. For tt-station, the existing `/telemetry` WebSocket frames and the `tt_toplike`
-  `schema: 1` extension are produced from the bus unchanged, so `--remote` keeps working. A
+  `schema: 1` extension keep their format and are built from bus records (see decision 2), so
+  `--remote` keeps working. A
   WebSocket for remote consumers carries the same JSON Lines as the socket.
 - **Rates.** Views are drawn at the frame rate they have today. The log is not tied to the frame
   rate. Slow sources (the inference monitor at 5 s, tt-smi at 1.5 s) emit at their own cadence and
@@ -207,6 +208,55 @@ this is a new version number for the project.
 - Die 3D and `i` show the same phase and tokens/s for one `ServiceState` fixture.
 - A governor test per rule above, each seen failing first.
 
+## Decisions from the builder check
+
+A reviewer read this design cold and asked eight questions. The first is the product owner's
+answer. The rest are my calls.
+
+1. **Process model (the owner's answer).** The TUI hosts the bus in-process by default. The same
+   binary has a headless mode (`tt-toplike-tui --headless`) that records and serves the socket with
+   no screen, for running under systemd. The log directory is the shared place. A second TUI on the
+   same box reads the headless host's socket when one is running and otherwise hosts its own bus
+   with its own log directory.
+2. **tt-station frames (my call).** The bus carries each tt-smi snapshot as one opaque raw record,
+   next to the typed samples taken from it. The `/telemetry` frame is rebuilt from the raw record
+   and the `tt_toplike` extension, so it matches today's frame byte for byte on a fixed fixture.
+   This replaces the earlier wording "produced from the bus unchanged": the transport code stays
+   as it is and its input comes from the bus.
+3. **Chip identity (my call).** In the first release the key is the PCI address (`bus_id`), which
+   every backend already has. The ASIC unique ID is an attribute, filled in when a source supplies
+   it (gozer's topology and the tt-smi snapshot do). The mapping from `/dev/tenstorrent/N` index to
+   key is built from the backend's device list and refreshed on every discovery pass. Records from
+   sources that only know an index (processes, training, hivemind, `ServiceState.chips`) are
+   resolved through that map when they are written. An index that is not in the map yet is
+   held for one discovery pass and then dropped with a counter.
+4. **Which sources need the governor (my call).** The existing sources keep their present
+   behaviour and need no lease: hwmon, sysfs, the `tt-smi -s` poll, `/proc` scans and the metrics
+   scrapes. The governor applies to a source that opens a chip on its own account. In the first
+   release there is none. The tt-umd or exalens sidecar is the first. When a governor denies a
+   source, the source emits nothing for that tick and the world marks its values stale.
+5. **Replay deliverables (my call).** The first release includes `--record <dir>`,
+   `--replay <dir-or-file> [--speed N]` for the TUI, and `tt-toplike-tui bus inspect <log>`, which
+   prints a summary and filters by entity and signal. The checked-in bring-up fixture is played
+   into Die 3D by the replay mode in a test.
+6. **Pinned frame hashes (my call).** Bus-fed decorations (model flags, bring-up fill, pulses,
+   per-channel GDDR rows, sparks) draw only when the bus holds something to show. With no model,
+   no events and no per-channel data, the frame is the one pinned today, so the existing hashes
+   hold. New hashes are added for the decorated frames from a fixture.
+7. **Volume (my call).** Sources are recorded at their own rate with no downsampling. Fast-lane
+   readings are written as one record per chip per tick that holds all of that tick's values, not
+   one line per value. A slow-lane field that a source repeats unchanged is recorded when the
+   source updates it. My arithmetic puts the fast lane near 16 KB/s for four chips at 10 Hz before
+   compression, about 1.4 GB a day, and compression makes the 5 GB limit hold for more than the 24
+   hour default. The per-tile sidecar is far larger and is governed by its own settings.
+8. **Platforms (my call).** The recorder, world, log format and replay build everywhere the crate
+   builds today. The Unix socket is `cfg(unix)`. The gozer source is `cfg(target_os = "linux")`.
+   The workspace conversion keeps `cargo build` at the root producing the same binaries, and the
+   Debian packaging and CI are checked as part of the first task.
+9. **Privacy (my call).** Process command lines are recorded with the arguments that match common
+   secret patterns (tokens, keys, passwords, `HF_TOKEN=...`, `--api-key ...`) replaced by a
+   placeholder. The log directory is created with owner-only permissions.
+
 ## Left to the builder
 
 The exact field names beyond the ones above, the in-memory window size, the segment compression
@@ -220,5 +270,6 @@ captions.
 - No ECS crate in the first release.
 - The first release has no per-tile sidecar, no roguelike view and no tensixinet integration.
 - Die 3D and `i` are the first two views on the bus.
-- The tt-station frames are produced from the bus, and the existing transport stays in place.
+- The tt-station frames are built from the raw tt-smi record on the bus, and the existing transport stays in place.
+- The TUI hosts the bus by default and a headless mode runs it with no screen (the owner's answer).
 - Version numbers: bus 0.1.0, tt-toplike next minor, 1.0 when all three consumers use the bus.
