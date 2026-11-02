@@ -696,6 +696,47 @@ fn a_pulse_is_drawn_on_the_newest_step_columns() {
     });
 }
 
+/// Group D S3: the rows a pulse may use are the tapestry's rows of the frame
+/// being drawn. A frame that draws no tapestry (here the scanning screen)
+/// leaves no rows behind, so live pulses cannot be painted over other text
+/// from the rows an earlier frame used.
+#[test]
+fn a_frame_with_no_tapestry_gives_a_pulse_no_rows() {
+    tc(|| {
+        let (mut v, b, mut bus, now) = view_fed(30, Provenance::Measured);
+        bus.run(31, 2.0, 300.0, Provenance::Measured);
+        v.set_bus(Some(&bus.view(now + TICK)), &b);
+        let _ = v.render(&TrainState::new(), &b);
+        let (top, bottom) = v.pulse_rows.get();
+        assert!(bottom > top, "the tapestry frame gave the pulse rows");
+        assert!(!v.bus_fx.pulses.is_empty());
+
+        // The run leaves the view but the pulse is still live: the next
+        // frame is the scanning screen, which has no tapestry.
+        v.bus_state = TrainBusState::default();
+        let _ = v.render(&TrainState::new(), &b);
+        assert_eq!(v.pulse_rows.get(), (0, 0));
+        // Drawing the live pulse now changes no cell.
+        let mut buf = vec![
+            vec![
+                Cell {
+                    ch: 'x',
+                    fg: Color::Rgb(1, 2, 3),
+                    bold: false,
+                };
+                W
+            ];
+            H
+        ];
+        let before = buf.clone();
+        v.draw_bus(&mut buf, &v.bus_fx);
+        let cells = |b: &[Vec<Cell>]| -> Vec<(char, Color, bool)> {
+            b.iter().flatten().map(|c| (c.ch, c.fg, c.bold)).collect()
+        };
+        assert_eq!(cells(&buf), cells(&before), "a pulse was painted over text");
+    });
+}
+
 #[test]
 fn the_step_time_sets_the_sky_pace() {
     let pace = |ms: Option<f32>| {

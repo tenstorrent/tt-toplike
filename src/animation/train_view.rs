@@ -297,9 +297,10 @@ pub struct TrainView {
     sky_clock: StdCell<f64>,
     /// The `frame` the sky clock was last advanced to.
     sky_seen: StdCell<u64>,
-    /// The band rows the last `draw_tapestry` gave to the starfield and the
-    /// weave, as `start..end`. A step pulse is drawn only in these rows, so it
-    /// never covers the band's text rows.
+    /// The band rows this frame's `draw_tapestry` gave to the starfield and
+    /// the weave, as `start..end`, reset to none at the start of each
+    /// `render`. A step pulse is drawn only in these rows, so it never covers
+    /// the band's text rows or a frame that has no band.
     pulse_rows: StdCell<(usize, usize)>,
 }
 
@@ -415,6 +416,9 @@ impl TrainView {
     pub fn render(&self, st: &TrainState, backend: &dyn TelemetryBackend) -> Vec<Line<'static>> {
         let mut buf = vec![vec![Cell::default(); self.width]; self.height];
         self.draw_frame(&mut buf);
+        // A pulse may use only the rows this frame's tapestry gives it
+        // (`draw_tapestry` sets them). A frame with no tapestry leaves none.
+        self.pulse_rows.set((0, 0));
         // The bus run's effects (pulses, sky pace, chip marks, SAME CHIPS)
         // describe the bus run. They are drawn when that run is the one on
         // screen: with no local trainer, or when the bus run is the local
