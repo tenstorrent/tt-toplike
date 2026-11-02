@@ -563,6 +563,40 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
     })
 }
 
+/// Group B M4: the fleet grid's `~` goes in the label's pad column. A label
+/// as wide as its five columns (`BH100`) has no pad, so the `~` goes on the
+/// bar's first column and the label keeps its last character.
+#[test]
+fn the_estimate_mark_never_covers_a_label_character() {
+    tc(|| {
+        let flag = crate::animation::die3d::overlay::ModelFlag {
+            label: "mock".into(),
+            phase: tt_toplike_bus::ModelPhase::Loading,
+            colour: [200, 100, 255],
+            tokens_per_s: None,
+            waiting: None,
+            progress: None,
+            estimated: true,
+        };
+        let co = crate::animation::arcade_bus::ChipFx {
+            flag: Some(flag),
+            ..Default::default()
+        };
+        for (label, want) in [("BH0  ", "BH0 ~████"), ("BH100", "BH100~███")] {
+            let mut spans = vec![
+                ratatui::text::Span::raw("x"),
+                ratatui::text::Span::raw(label),
+                ratatui::text::Span::raw("████"),
+            ];
+            let w = label.chars().count();
+            crate::animation::castle_bus::draw_cell(&co, 5 * SEC, w..w + 4, &mut spans, 1);
+            let text: String = spans[1..].iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(text, want, "{label}");
+            assert_eq!(spans[0].content, "x", "spans before the cell are kept");
+        }
+    })
+}
+
 #[test]
 fn the_fleet_grid_shows_the_gauge_and_the_estimate_mark() {
     tc(|| {

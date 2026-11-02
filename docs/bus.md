@@ -758,8 +758,8 @@ canvas with one chip). It draws:
 | The tower shown reversed for 0.6 s | a new `reset_seq` for the chip | the reset is read |
 
 In the fleet-grid tier (too many chips for towers) each chip's cell shows the gauge on its power
-bar, the reset flash, and `~` in the label's last column for an estimate; the messengers,
-torches and cracks are not drawn there. The castle embedded in the arcade reads no bus of its
+bar, the reset flash, and `~` for an estimate in the label's pad column (the bar's first column
+when the label has no pad); the messengers, torches and cracks are not drawn there. The castle embedded in the arcade reads no bus of its
 own. With an empty world the castle draws the frames it drew before the bus; a test pins them.
 
 ### Defrag on the bus

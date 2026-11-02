@@ -104,6 +104,23 @@ fn put(lines: &mut [Line<'static>], col: usize, ch: char, style: Style) {
     splice_str(lines, 0, col, ch.encode_utf8(&mut buf), style);
 }
 
+/// The character at column `col` of row 0 of `lines`, if any.
+fn char_at(lines: &[Line<'static>], col: usize) -> Option<char> {
+    let mut at = 0usize;
+    for span in &lines.first()?.spans {
+        for ch in span.content.chars() {
+            if at == col {
+                return Some(ch);
+            }
+            at += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if at > col {
+                return None;
+            }
+        }
+    }
+    None
+}
+
 /// A bold style in `rgb` on the canvas background.
 fn glyph_style(rgb: [u8; 3]) -> Style {
     Style::default()
@@ -332,7 +349,8 @@ fn draw_banner(flag: &ModelFlag, texts: &[String], width: usize, lines: &mut [Li
 
 /// Draw `co` on one fleet-grid cell, whose spans are `spans[start..]`: the
 /// gauge on the power bar (`bar` columns of the cell), the reset flash, and
-/// a `~` in the label's last column for an estimate. Arithmetic on `co`
+/// a `~` for an estimate in the label's pad column (the bar's first column
+/// when the label has no pad). Arithmetic on `co`
 /// only.
 pub fn draw_cell(
     co: &ChipFx,
@@ -384,9 +402,16 @@ pub fn draw_cell(
                 s.add_modifier(Modifier::REVERSED)
             });
         }
+        // The `~` goes in the label's pad column. A label that fills its
+        // columns has no pad, so the `~` takes the bar's first column and
+        // the label keeps its last character.
         if let Some(flag) = &co.flag {
             if flag.estimated && bar.start > 0 {
-                put(lines, bar.start - 1, '~', glyph_style(flag.colour));
+                let col = match char_at(lines, bar.start - 1) {
+                    Some(' ') => bar.start - 1,
+                    _ => bar.start,
+                };
+                put(lines, col, '~', glyph_style(flag.colour));
             }
         }
     });

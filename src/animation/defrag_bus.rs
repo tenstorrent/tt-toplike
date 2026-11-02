@@ -191,7 +191,8 @@ pub fn draw(
 }
 
 /// The compile scan on one channel row: two purple blocks sweeping across,
-/// each channel a little behind the one above. Decoration.
+/// each channel's pair a little behind the pair on the row above.
+/// Decoration.
 fn draw_scan(ch: usize, now: u64, cells: std::ops::Range<usize>, lines: &mut [Line<'static>]) {
     let period = SWEEP_PERIOD_NS as f32 / NS_PER_S;
     let phase = (stepped_secs(0, now) / period + ch as f32 * 0.11).fract();
