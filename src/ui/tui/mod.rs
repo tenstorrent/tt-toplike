@@ -1308,6 +1308,9 @@ fn run_app(
                         memory_flow = Some(mf);
                     }
                     if let Some(ref mut mf) = memory_flow {
+                        // The bus: lane states, weight stream, pulses, ECC
+                        // flashes, model row (see `memory_flow_bus`).
+                        mf.set_bus(Some(&tui_bus.read()), backend.devices());
                         mf.update(backend);
                     }
                 }
@@ -4543,7 +4546,14 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     v.extend(crate::animation::defrag_bus::legend_lines(bar, bg, dim));
                     v
                 }
-                DisplayMode::MemoryFlow => flow_legend_lines(bar, bg, dim),
+                DisplayMode::MemoryFlow => {
+                    let mut v = flow_legend_lines(bar, bg, dim);
+                    v.push(sep!("◆ Signal bus"));
+                    v.extend(crate::animation::memory_flow_bus::legend_lines(
+                        bar, bg, dim,
+                    ));
+                    v
+                }
                 DisplayMode::InferenceMonitor => inference_legend_lines(bar, bg, dim),
                 DisplayMode::Insights => insights_legend_lines(bar, bg, dim),
                 DisplayMode::Grid => grid_legend_lines(bar, bg, dim),
@@ -4714,7 +4724,11 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "corresponding arc segment.",
                     "",
                     "Heat-map center encodes die temperature.",
-                ],
+                ]
+                .iter()
+                .chain(crate::animation::memory_flow_bus::EXPLAIN_TEXT)
+                .copied()
+                .collect::<Vec<&str>>(),
                 cols,
             ),
             DisplayMode::Arcade => explain_lines(
