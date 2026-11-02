@@ -8,53 +8,60 @@
 //! values the backend has already cached. It never calls `update()` (the host
 //! does that) and never blocks on I/O.
 //!
-//! Signature choice: the backend is not owned by the source, so the real work
-//! is [`BackendSource::poll_backend`], which takes `&dyn TelemetryBackend` per
-//! call. The [`Source::poll`] impl exists so the source fits the trait; with no
-//! backend in hand it emits nothing.
+//! The backend is not owned by the source. The host passes it on every poll
+//! in a [`PollCtx`]. Sources that own their input (the monitors) ignore it.
+//!
+//! Chips are keyed by `EntityKey::chip(&device.bus_id)`. `devices()` and
+//! `telemetry(idx)` come from the same backend snapshot, so that key always
+//! names the chip the data belongs to. The identity map is for sources that
+//! only know an index.
 
 use crate::backend::TelemetryBackend;
-use crate::bus::identity::IdentityMap;
 use crate::bus::signals as sig;
 use crate::models::telemetry::{real_fan_rpm, REGISTER_NO_READING};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::Instant;
 use tt_toplike_bus::{EntityKey, Event, Payload, Provenance, RawFrame, Sample, Sweep, Value};
+
+/// What the host hands every source on each poll.
+pub struct PollCtx<'a> {
+    /// The backend whose cached values `BackendSource` reads.
+    pub backend: &'a dyn TelemetryBackend,
+}
 
 /// Something that produces bus payloads.
 pub trait Source {
     /// Short stable name, used as the record's source label.
     fn name(&self) -> &'static str;
     /// Emit whatever is new. Return early to run slower than the host's tick.
-    fn poll(&mut self, now: Instant, out: &mut dyn FnMut(Payload));
+    /// Sources that own their input ignore `ctx`.
+    fn poll(&mut self, ctx: &PollCtx<'_>, now: Instant, out: &mut dyn FnMut(Payload));
 }
 
 /// Reads a backend's cached telemetry and emits chip, DRAM and link records.
 pub struct BackendSource {
-    identity: Arc<IdentityMap>,
     /// Last slow-lane value emitted per (entity, signal).
     last: HashMap<(EntityKey, &'static str), Value>,
     /// Last `snapshot_json()` text emitted.
     last_raw: Option<String>,
-    /// Chips skipped because the identity map disagreed with the device's
-    /// `bus_id` (a stale map between a reset and the next refresh).
-    stale_skipped: u64,
+    /// Devices skipped for having an empty `bus_id`, summed over all polls.
+    /// (The identity map only counts these in `refresh`; this source does not
+    /// use the map, so it keeps its own count.)
+    unkeyed: u64,
 }
 
 impl BackendSource {
-    pub fn new(identity: Arc<IdentityMap>) -> Self {
+    pub fn new() -> Self {
         Self {
-            identity,
             last: HashMap::new(),
             last_raw: None,
-            stale_skipped: 0,
+            unkeyed: 0,
         }
     }
 
-    /// Chip-polls skipped because the identity map did not match the device.
-    pub fn stale_skipped(&self) -> u64 {
-        self.stale_skipped
+    /// Device-polls skipped because the device had no `bus_id`.
+    pub fn unkeyed(&self) -> u64 {
+        self.unkeyed
     }
 
     /// Emit a slow-lane sample only if finite and different from the last one.
@@ -85,25 +92,16 @@ impl BackendSource {
     ///
     /// Per chip: one `Sweep` of fast-lane fields (fields the backend reports
     /// as `None` are left out), then slow-lane samples that changed. Then one
-    /// `Raw` record if `snapshot_json()` has new text. Chips are keyed through
-    /// the identity map by `device.index`; a device with no key emits nothing.
-    pub fn poll_backend(
-        &mut self,
-        backend: &dyn TelemetryBackend,
-        _now: Instant,
-        out: &mut dyn FnMut(Payload),
-    ) {
+    /// `Raw` record if `snapshot_json()` has new text. A device with an empty
+    /// `bus_id` emits nothing and is counted in [`unkeyed`](Self::unkeyed).
+    fn poll_backend(&mut self, backend: &dyn TelemetryBackend, out: &mut dyn FnMut(Payload)) {
         let mut seen: HashSet<EntityKey> = HashSet::new();
         for device in backend.devices() {
-            let Some(key) = self.identity.key_for_index(device.index) else {
-                continue;
-            };
-            // The map is rebuilt by the host. If it lags the device list, the
-            // key may belong to another chip; skip rather than misattribute.
-            if key != EntityKey::chip(&device.bus_id) {
-                self.stale_skipped += 1;
+            if device.bus_id.is_empty() {
+                self.unkeyed += 1;
                 continue;
             }
+            let key = EntityKey::chip(&device.bus_id);
             if !seen.insert(key.clone()) {
                 continue;
             }
@@ -256,13 +254,19 @@ impl BackendSource {
     }
 }
 
+impl Default for BackendSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Source for BackendSource {
     fn name(&self) -> &'static str {
         "backend"
     }
-    /// Emits nothing: this source needs a backend. Use
-    /// [`BackendSource::poll_backend`].
-    fn poll(&mut self, _now: Instant, _out: &mut dyn FnMut(Payload)) {}
+    fn poll(&mut self, ctx: &PollCtx<'_>, _now: Instant, out: &mut dyn FnMut(Payload)) {
+        self.poll_backend(ctx.backend, out);
+    }
 }
 
 #[cfg(test)]
@@ -325,19 +329,19 @@ mod tests {
         t.aiclk = Some(1000);
         t
     }
-    fn setup(devs: Vec<Device>) -> (Fake, Arc<IdentityMap>, BackendSource) {
-        let id = Arc::new(IdentityMap::new());
-        id.refresh(&devs);
+    fn setup(devs: Vec<Device>) -> (Fake, BackendSource) {
         let f = Fake {
             devices: devs,
             ..Default::default()
         };
-        let s = BackendSource::new(id.clone());
-        (f, id, s)
+        (f, BackendSource::new())
     }
     fn poll(s: &mut BackendSource, f: &Fake) -> Vec<Payload> {
+        poll_dyn(s, f)
+    }
+    fn poll_dyn(s: &mut dyn Source, b: &dyn TelemetryBackend) -> Vec<Payload> {
         let mut v = Vec::new();
-        s.poll_backend(f, Instant::now(), &mut |p| v.push(p));
+        s.poll(&PollCtx { backend: b }, Instant::now(), &mut |p| v.push(p));
         v
     }
     fn sweeps(v: &[Payload]) -> Vec<&Sweep> {
@@ -384,7 +388,7 @@ mod tests {
 
     #[test]
     fn one_sweep_per_chip_with_expected_signals_measured() {
-        let (mut f, _id, mut s) = setup(vec![dev(0, A), dev(1, B)]);
+        let (mut f, mut s) = setup(vec![dev(0, A), dev(1, B)]);
         f.telem.insert(0, full_telem(30.0));
         f.telem.insert(1, full_telem(40.0));
         for i in 0..2 {
@@ -422,7 +426,7 @@ mod tests {
 
     #[test]
     fn device_with_no_telemetry_emits_nothing() {
-        let (mut f, _id, mut s) = setup(vec![dev(0, A), dev(1, B)]);
+        let (mut f, mut s) = setup(vec![dev(0, A), dev(1, B)]);
         f.telem.insert(1, full_telem(40.0));
         let out = poll(&mut s, &f);
         assert_eq!(out.len(), 1);
@@ -431,7 +435,7 @@ mod tests {
 
     #[test]
     fn none_fields_are_absent_not_zero() {
-        let (mut f, _id, mut s) = setup(vec![dev(0, A)]);
+        let (mut f, mut s) = setup(vec![dev(0, A)]);
         let mut t = full_telem(30.0);
         t.voltage = None;
         t.aiclk = None;
@@ -446,7 +450,7 @@ mod tests {
 
     #[test]
     fn pcie_fields_absent_when_backend_has_no_counters() {
-        let (mut f, _id, mut s) = setup(vec![dev(0, A)]);
+        let (mut f, mut s) = setup(vec![dev(0, A)]);
         f.telem.insert(0, full_telem(30.0));
         let out = poll(&mut s, &f);
         let sw = sweeps(&out);
@@ -456,7 +460,7 @@ mod tests {
 
     #[test]
     fn non_finite_reading_is_not_emitted() {
-        let (mut f, _id, mut s) = setup(vec![dev(0, A)]);
+        let (mut f, mut s) = setup(vec![dev(0, A)]);
         let mut t = full_telem(f32::NAN);
         t.board_power = Some(f32::INFINITY);
         f.telem.insert(0, t);
@@ -467,7 +471,7 @@ mod tests {
 
     #[test]
     fn unchanged_slow_value_is_not_reemitted_and_changed_one_is() {
-        let (mut f, _id, mut s) = setup(vec![dev(0, A)]);
+        let (mut f, mut s) = setup(vec![dev(0, A)]);
         let mut t = full_telem(30.0);
         t.board_power = Some(55.0);
         f.telem.insert(0, t.clone());
@@ -486,7 +490,7 @@ mod tests {
 
     #[test]
     fn slow_chip_fields_are_emitted_with_parsed_values() {
-        let (mut f, _id, mut s) = setup(vec![dev(0, A)]);
+        let (mut f, mut s) = setup(vec![dev(0, A)]);
         f.smbus.insert(
             0,
             smbus_with(|m| {
@@ -511,7 +515,7 @@ mod tests {
 
     #[test]
     fn fan_and_trip_sentinels_are_not_emitted() {
-        let (mut f, _id, mut s) = setup(vec![dev(0, A)]);
+        let (mut f, mut s) = setup(vec![dev(0, A)]);
         f.smbus.insert(
             0,
             smbus_with(|m| {
@@ -525,7 +529,7 @@ mod tests {
 
     #[test]
     fn snapshot_json_emits_once_per_new_text() {
-        let (mut f, _id, mut s) = setup(vec![dev(0, A)]);
+        let (mut f, mut s) = setup(vec![dev(0, A)]);
         f.json = Some("{\"a\":1}".into());
         let raws = |o: &[Payload]| o.iter().filter(|p| matches!(p, Payload::Raw(_))).count();
         let out = poll(&mut s, &f);
@@ -544,7 +548,7 @@ mod tests {
 
     #[test]
     fn eth_mask_change_emits_exactly_one_link_changed() {
-        let (mut f, _id, mut s) = setup(vec![dev(0, A)]);
+        let (mut f, mut s) = setup(vec![dev(0, A)]);
         let links = |o: &[Payload]| -> Vec<(EntityKey, u16)> {
             o.iter()
                 .filter_map(|p| match p {
@@ -573,7 +577,7 @@ mod tests {
     fn gddr_channels_land_on_the_right_chips_dram_entities() {
         // List order is the reverse of index order, so loop position and
         // device index disagree.
-        let (mut f, _id, mut s) = setup(vec![dev(1, B), dev(0, A)]);
+        let (mut f, mut s) = setup(vec![dev(1, B), dev(0, A)]);
         f.smbus
             .insert(0, gddr(vec![chan(0, 40.0, 1), chan(1, 41.0, 2)]));
         f.smbus.insert(1, gddr(vec![chan(0, 60.0, 9)]));
@@ -616,52 +620,88 @@ mod tests {
 
     #[test]
     fn swapped_indexes_keep_data_on_the_right_chip() {
-        let (mut f, id, mut s) = setup(vec![dev(0, A), dev(1, B)]);
-        f.telem.insert(0, full_telem(10.0));
-        f.telem.insert(1, full_telem(20.0));
-        let out = poll(&mut s, &f);
-        let p = |o: &[Payload], bus: &str| {
-            sweeps(o)
-                .into_iter()
-                .find(|w| w.entity == EntityKey::chip(bus))
-                .unwrap()
-                .values[0]
-                .clone()
+        // Indexes are not zero-based or contiguous, telemetry exists only at
+        // 3 and 7, and the list order is the reverse of the index order. A
+        // lookup by loop position finds nothing or the wrong chip.
+        let (mut f, mut s) = setup(vec![dev(7, B), dev(3, A)]);
+        let mut ta = full_telem(10.0);
+        ta.voltage = Some(0.81);
+        ta.current = Some(11.0);
+        ta.asic_temperature = Some(41.0);
+        ta.aiclk = Some(1001);
+        let mut tb = full_telem(20.0);
+        tb.voltage = Some(0.92);
+        tb.current = Some(22.0);
+        tb.asic_temperature = Some(62.0);
+        tb.aiclk = Some(2002);
+        let pa = PcieBandwidth {
+            rx_bytes_per_sec: 111.0,
+            tx_bytes_per_sec: 112.0,
         };
-        assert_eq!(p(&out, A), Value::F64(10.0));
-        // After a reset the chips swap indexes. The backend now reports the
-        // old chip A data under index 1.
-        // The list order differs from the index order on purpose.
-        f.devices = vec![dev(1, A), dev(0, B)];
-        f.telem.insert(0, full_telem(20.0));
-        f.telem.insert(1, full_telem(10.0));
-        id.refresh(&f.devices);
-        let out = poll(&mut s, &f);
-        assert_eq!(p(&out, A), Value::F64(10.0));
-        assert_eq!(p(&out, B), Value::F64(20.0));
-    }
-
-    #[test]
-    fn stale_map_skips_the_chip_instead_of_misattributing() {
-        let (mut f, _id, mut s) = setup(vec![dev(0, A), dev(1, B)]);
-        f.telem.insert(0, full_telem(10.0));
-        f.telem.insert(1, full_telem(20.0));
-        // Devices swap but the map has not been refreshed yet.
-        f.devices = vec![dev(0, B), dev(1, A)];
-        let out = poll(&mut s, &f);
-        assert!(out.is_empty());
-        assert_eq!(s.stale_skipped(), 2);
+        let pb = PcieBandwidth {
+            rx_bytes_per_sec: 221.0,
+            tx_bytes_per_sec: 222.0,
+        };
+        // Before: A at index 3, B at index 7.
+        f.telem.insert(3, ta.clone());
+        f.telem.insert(7, tb.clone());
+        f.pcie.insert(3, pa);
+        f.pcie.insert(7, pb);
+        let expect_a = vec![
+            Value::F64(10.0),
+            Value::F64(0.81f32 as f64),
+            Value::F64(11.0),
+            Value::F64(41.0),
+            Value::U64(1001),
+            Value::F64(111.0),
+            Value::F64(112.0),
+        ];
+        let expect_b = vec![
+            Value::F64(20.0),
+            Value::F64(0.92f32 as f64),
+            Value::F64(22.0),
+            Value::F64(62.0),
+            Value::U64(2002),
+            Value::F64(221.0),
+            Value::F64(222.0),
+        ];
+        let check = |o: &[Payload]| {
+            let sw = sweeps(o);
+            assert_eq!(sw.len(), 2);
+            for w in sw {
+                let want = if w.entity == EntityKey::chip(A) {
+                    &expect_a
+                } else {
+                    assert_eq!(w.entity, EntityKey::chip(B));
+                    &expect_b
+                };
+                assert_eq!(&w.values, want, "wrong values under {}", w.entity);
+            }
+        };
+        check(&poll(&mut s, &f));
+        // After a reset the chips swap indexes: A is now 7 and B is 3. The
+        // backend reports each chip's data under its new index.
+        f.devices = vec![dev(3, B), dev(7, A)];
+        f.telem.clear();
+        f.pcie.clear();
+        f.telem.insert(7, ta);
+        f.telem.insert(3, tb);
+        f.pcie.insert(7, pa);
+        f.pcie.insert(3, pb);
+        check(&poll(&mut s, &f));
     }
 
     #[test]
     fn unkeyed_device_emits_nothing_and_is_counted() {
-        let (mut f, id, mut s) = setup(vec![dev(0, ""), dev(1, B)]);
+        let (mut f, mut s) = setup(vec![dev(0, ""), dev(1, B)]);
         f.telem.insert(0, full_telem(10.0));
         f.telem.insert(1, full_telem(20.0));
         let out = poll(&mut s, &f);
         assert_eq!(sweeps(&out).len(), 1);
         assert_eq!(sweeps(&out)[0].entity, EntityKey::chip(B));
-        assert_eq!(id.unkeyed(), 1);
+        assert_eq!(s.unkeyed(), 1);
+        poll(&mut s, &f);
+        assert_eq!(s.unkeyed(), 2);
     }
 
     #[test]
@@ -670,9 +710,7 @@ mod tests {
         let mut b = MockBackend::new(2);
         b.init().unwrap();
         b.update().unwrap();
-        let id = Arc::new(IdentityMap::new());
-        id.refresh(b.devices());
-        let mut s = BackendSource::new(id);
+        let mut s = BackendSource::new();
         let out = poll_dyn(&mut s, &b);
         assert_eq!(sweeps(&out).len(), 2);
         // Mock has 8 GDDR channels per chip.
@@ -687,18 +725,14 @@ mod tests {
         assert!(again.iter().all(|p| matches!(p, Payload::Sweep(_))));
     }
 
-    fn poll_dyn(s: &mut BackendSource, b: &dyn TelemetryBackend) -> Vec<Payload> {
-        let mut v = Vec::new();
-        s.poll_backend(b, Instant::now(), &mut |p| v.push(p));
-        v
-    }
-
     #[test]
-    fn trait_poll_emits_nothing_without_a_backend() {
-        let mut s = BackendSource::new(Arc::new(IdentityMap::new()));
-        let mut n = 0;
-        Source::poll(&mut s, Instant::now(), &mut |_| n += 1);
-        assert_eq!(n, 0);
-        assert_eq!(s.name(), "backend");
+    fn boxed_source_emits_sweeps_through_the_trait() {
+        let (mut f, _) = setup(vec![dev(0, A), dev(1, B)]);
+        f.telem.insert(0, full_telem(10.0));
+        f.telem.insert(1, full_telem(20.0));
+        let mut src: Box<dyn Source> = Box::new(BackendSource::new());
+        assert_eq!(src.name(), "backend");
+        let out = poll_dyn(src.as_mut(), &f);
+        assert_eq!(sweeps(&out).len(), 2);
     }
 }
