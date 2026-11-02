@@ -36,7 +36,10 @@
 //!   A change to `Ready` lights the whole slot in the serving teal and fades
 //!   it over [`SETTLE_NS`]; a change to `Down` does the same in grey.
 //! * **The model label**, right-aligned in the slot, in the phase's colour,
-//!   with `~` in front when the model's readings are estimates.
+//!   with `~` in front when the model's readings are estimates. When no
+//!   form of the label fits in the slot, an estimated model still gets a
+//!   bare `~` where the label would end, since its gauge and the heartbeat
+//!   still show.
 //! * **A reset flash**: the slot's cells shown reversed for [`FLASH_NS`]
 //!   after a new `reset_seq` on the chip.
 //!
@@ -585,15 +588,27 @@ fn draw_label(
         .end
         .min(stage.width.saturating_sub(3))
         .saturating_sub(1);
+    let style = Style::default()
+        .fg(colors::rgb(flag.colour[0], flag.colour[1], flag.colour[2]))
+        .add_modifier(Modifier::BOLD);
     let Some(text) = texts.iter().find(|t| {
         let w = UnicodeWidthStr::width(t.as_str());
         end >= w && end - w >= start_min
     }) else {
+        // No form fits. The gauge and the heartbeat still draw from this
+        // model, so an estimate keeps its `~`, alone at the label's right
+        // end, when that one column is free.
+        if flag.estimated && end >= 1 && end - 1 >= start_min {
+            crate::animation::ArcadeVisualization::splice_char(
+                lines,
+                stage.gauge_row,
+                end - 1,
+                '~',
+                style,
+            );
+        }
         return;
     };
-    let style = Style::default()
-        .fg(colors::rgb(flag.colour[0], flag.colour[1], flag.colour[2]))
-        .add_modifier(Modifier::BOLD);
     // One span for the whole label: the row is rebuilt once per frame.
     let col = end - UnicodeWidthStr::width(text.as_str());
     splice_str(lines, stage.gauge_row, col, text, style);

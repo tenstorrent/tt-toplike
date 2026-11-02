@@ -591,6 +591,56 @@ fn an_estimated_model_label_starts_with_a_tilde() {
     })
 }
 
+/// Contract rule 2 in a slot too narrow for any form of the label: the
+/// gauge and the heartbeat still draw from an estimated model, so a bare
+/// `~` at the slot's right edge says the numbers are estimates. A measured
+/// model in the same slot draws no `~`.
+#[test]
+fn a_slot_too_narrow_for_the_label_still_marks_an_estimate() {
+    tc(|| {
+        // Four chips across 80 columns: slots of 20. Slot 3 is columns
+        // 60..80, and its label would end at column 76 (clear of the
+        // rule's `▓▒░`), so 16 columns are free: too few for
+        // "~mock ready 20t/s".
+        let backend = Fixed::new(4);
+        let make = || {
+            let mut a = ArcadeVisualization::new(80, H);
+            a.initialize_from_devices(backend.devices());
+            a.initialize_topology(&backend);
+            a
+        };
+        let m = EntityKey::model("mock");
+        let mut f = Bus::new();
+        f.sample(
+            &m,
+            tt_toplike_bus::signals::MODEL_TOKENS_PER_S,
+            Value::F64(20.0),
+            Provenance::Estimated,
+        )
+        .event(Event::ModelReady {
+            model: m,
+            chips: vec![chip(3)],
+        });
+        let mut a = make();
+        step(&mut a, &backend, &f.view(5 * SEC));
+        let frame = a.render(&backend);
+        let row = &cells(&frame)[GAUGE_ROW];
+        assert!(!row_text(&frame, GAUGE_ROW).contains("mock"));
+        assert_eq!(row[75].0, '~', "{}", row_text(&frame, GAUGE_ROW));
+        assert_eq!(row[75].1.fg, fg(SERVE_TEAL), "in the phase colour");
+        assert_eq!(row.iter().filter(|(c, _)| *c == '~').count(), 1);
+
+        // Measured, with a label that does not fit either
+        // ("measured ready 20t/s"): no mark.
+        let mut f = Bus::new();
+        f.ready("measured", &[3], Some(20.0));
+        let mut a = make();
+        step(&mut a, &backend, &f.view(5 * SEC));
+        let text = row_text(&a.render(&backend), GAUGE_ROW);
+        assert!(!text.contains('~') && !text.contains("measured"), "{text}");
+    })
+}
+
 #[test]
 fn a_world_naming_a_chip_this_tui_lacks_draws_nothing_for_it() {
     tc(|| {
