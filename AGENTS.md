@@ -1555,6 +1555,28 @@ black out bg, can just layer on top transparently too."
   in flat bands, which cut its cost on the arcade at 200x60 from 137 to 18 changed cells a frame.
 - Docs: `docs/backdrop.md`; the bus section is in `docs/bus.md`.
 
+### Arcade layout presets and `{` `}` (Nov 2 2026, branch `arcade-presets`)
+
+Prompt: "can we add a variety of alternative arcade layouts to switch between. with `{` and `}`
+alternating between layouts?" Later: "now serving: top: 3 wide inference server, big bottom:
+left: 3d cube, right: defrag", then "this is not the default" (no starfield) and "clouds should
+go behind the whole arcade".
+- `src/animation/arcade_presets.rs`: eight built-in layouts (`classic` is the default rows and
+  is pinned by the base grid), `LayoutCycle` (config, then `[[arcade.layouts]]` in file order,
+  then the presets; wraps both ways), `/arcade layout next|prev|<name>|list`, the `{` `}` keys.
+- `ArcadeVisualization::relayout` builds the arcade again at a size from new rows and moves over
+  the hero (scaled), the cloudfield setting, the baseline, the duel, the lanes and the bus
+  state. The TUI calls it on the keypress, so the next draw is the new layout. That draw comes
+  before any update, which found a divide by zero in `MemoryFlowVis` drawn before its first
+  update (fixed: no heat map until the grid is known).
+- Config: `[[arcade.layouts]]` (with an `s`: TOML cannot have `[arcade] layout = "name"` and
+  `[[arcade.layout]]` in one file), `[arcade] layout`, `--arcade-layout`. A problem in one
+  layout drops only that layout; the old all-or-nothing rule stays for the rest of `[arcade]`.
+- A layout may carry `cloudfield = true|false`, applied when it is selected (`now-serving`
+  sets it). It is a thin setter over `set_cloudfield`, for the shared backdrop to take over.
+- The arcade's title and Row 1 are cut at the terminal's width (they ran past it below about
+  30 columns), and the hero is not drawn past the right edge (a 0-column arcade).
+
 ### Version history: 0.15.1 (Nov 2 2026)
 
 0.15.1 puts arcade (`src/animation/arcade_bus.rs`) and the `~` view (`src/ui/tui/hivemind_bus.rs`) on
