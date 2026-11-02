@@ -183,6 +183,32 @@ pub fn default_rows() -> Vec<RowSpec> {
     ]
 }
 
+/// The example layout in `docs/arcade-layout.md`: the starfield on top;
+/// defrag triple wide beside the castle and Die 3D double wide; then flow,
+/// training and the inference server. Every view, once. The bench and the
+/// tests draw it.
+pub fn example_rows() -> Vec<RowSpec> {
+    let p = |view, width| PanelSpec { view, width };
+    vec![
+        RowSpec {
+            height: 2,
+            panels: vec![p(View::Starfield, 1)],
+        },
+        RowSpec {
+            height: 3,
+            panels: vec![p(View::Defrag, 3), p(View::Castle, 1), p(View::Die3d, 2)],
+        },
+        RowSpec {
+            height: 2,
+            panels: vec![
+                p(View::Flow, 1),
+                p(View::Training, 1),
+                p(View::Inference, 1),
+            ],
+        },
+    ]
+}
+
 /// Rows above the first rule: the title and Row 1.
 pub const HEADER_ROWS: usize = 2;
 /// Rows below the last content row: the footer the status bar covers.

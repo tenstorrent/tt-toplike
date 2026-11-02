@@ -2179,3 +2179,7 @@ mod tests {
 #[cfg(test)]
 #[path = "arcade_bus_tests.rs"]
 mod bus_tests;
+
+#[cfg(test)]
+#[path = "arcade_panel_tests.rs"]
+mod panel_tests;
