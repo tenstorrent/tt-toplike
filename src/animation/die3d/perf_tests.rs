@@ -116,7 +116,7 @@ fn busy_fake(boards: &[&str]) -> Fake {
 fn golden_frames(braille: bool, clouds: bool) -> Vec<(f64, u64)> {
     let b = busy_fake(&["p300"; 4]);
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     v.director.set_auto(false);
     if !braille {
         v.handle_key(Die3dKey::ToggleBraille, 0.0);
@@ -128,7 +128,7 @@ fn golden_frames(braille: bool, clouds: bool) -> Vec<(f64, u64)> {
     v.handle_key(Die3dKey::ToggleHistory, 0.0);
     let mut out = Vec::new();
     let mut shot = |v: &Die3dView, t: f64| {
-        let lines = v.render(t);
+        let lines = v.render(None, t);
         out.push((t, frame_hash(above_the_footer(&lines))))
     };
     shot(&v, 0.0);
@@ -227,7 +227,7 @@ fn frames_with_clouds_are_pinned() {
 fn history_frames(braille: bool) -> Vec<(f64, u64, u64)> {
     let mut b = busy_fake(&["p300"; 4]);
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     v.director.set_auto(false);
     if !braille {
         v.handle_key(Die3dKey::ToggleBraille, 0.0);
@@ -244,9 +244,9 @@ fn history_frames(braille: bool) -> Vec<(f64, u64, u64)> {
             rx_bytes_per_sec: 2.0e7 * (1 + t % 3) as f64,
             tx_bytes_per_sec: 1.3e7,
         });
-        v.update(&b, now);
+        v.update(&b, None, now);
         let mut shot = |v: &Die3dView, at: f64| {
-            let lines = v.render(at);
+            let lines = v.render(None, at);
             // Not vacuous: the panel is in every pinned frame.
             assert!(
                 text(&lines).iter().any(|r| r.contains(history::TITLE)),
@@ -418,7 +418,7 @@ fn measure_at(case: Case, dt: f64) -> Cost {
     let b = busy_fake(case.boards);
     let (cols, rows) = case.size;
     let mut v = Die3dView::new(cols, rows);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     v.director.set_auto(false);
     if !case.braille {
         v.handle_key(Die3dKey::ToggleBraille, 0.0);
@@ -454,11 +454,11 @@ fn measure_at(case: Case, dt: f64) -> Cost {
         }
         // Outside the timed part: `update` is not `render`'s cost.
         if case.history.is_some() && now >= next_update {
-            v.update(&b, next_update);
+            v.update(&b, None, next_update);
             next_update += 1.0;
         }
         let t0 = Instant::now();
-        let lines = v.render(now);
+        let lines = v.render(None, now);
         times.push(t0.elapsed().as_secs_f64() * 1e3);
         let buf = to_buffer(lines, cols, rows);
         if let Some(p) = &prev {
@@ -494,7 +494,7 @@ fn mean_ms(n: usize, mut f: impl FnMut()) -> f64 {
 fn stage_report(scene: &str, boards: &[&str]) {
     let b = busy_fake(boards);
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     v.director.set_auto(false);
     let scene_rows = v.rows - FOOTER_ROWS;
     let (pw, ph) = (v.cols * 2, scene_rows * 4);
@@ -512,9 +512,9 @@ fn stage_report(scene: &str, boards: &[&str]) {
     // The raster includes the fit, as `scene_with` does it; the fit's own
     // time is subtracted in the printed line.
     let raster = mean_ms(n, || {
-        std::hint::black_box(v.scene_now(now));
+        std::hint::black_box(v.scene_now(now, &FxMap::new()));
     });
-    let (buf, shown, placed) = v.scene_now(now).unwrap();
+    let (buf, shown, placed) = v.scene_now(now, &FxMap::new()).unwrap();
     let cells = mean_ms(n, || {
         std::hint::black_box(cells::to_braille_lines(&buf));
     });
@@ -523,7 +523,7 @@ fn stage_report(scene: &str, boards: &[&str]) {
     let mut copies = copies.into_iter();
     let labels = mean_ms(n, || {
         let mut l = copies.next().unwrap();
-        let flags = v.flag_layout(&placed, scene_rows);
+        let flags = v.flag_layout(&placed, scene_rows, false);
         draw_flags(
             &mut l,
             scene_rows,
@@ -531,6 +531,7 @@ fn stage_report(scene: &str, boards: &[&str]) {
             &flags,
             v.label_style(),
             v.pole_style(),
+            &|c| v.accent_style(c),
         );
         std::hint::black_box(l);
     });
@@ -566,7 +567,7 @@ fn stage_report(scene: &str, boards: &[&str]) {
     let mut k = 0;
     let total = mean_ms(n, || {
         k += 1;
-        std::hint::black_box(v.render(now + k as f64 * 0.06));
+        std::hint::black_box(v.render(None, now + k as f64 * 0.06));
     });
     println!(
         "| {scene} | {fit:.3} | {:.3} | {clouds:.3} | {cells:.3} | {labels:.3} | {panel:.3} | {footer:.3} | {total:.3} |",
@@ -733,19 +734,19 @@ fn cached_fit_holds_across_scenes_of_different_grids() {
     let b = busy_fake(&["p300"; 4]);
     let fresh = |board: bool, t: f64| {
         let mut w = Die3dView::new(150, 42);
-        w.update(&b, 0.0);
+        w.update(&b, None, 0.0);
         if board {
             w.handle_key(Die3dKey::NextBoard, 0.0);
         }
-        frame_hash(&w.render(t))
+        frame_hash(&w.render(None, t))
     };
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
-    assert_eq!(frame_hash(&v.render(1.0)), fresh(false, 1.0));
+    v.update(&b, None, 0.0);
+    assert_eq!(frame_hash(&v.render(None, 1.0)), fresh(false, 1.0));
     v.handle_key(Die3dKey::NextBoard, 1.0);
-    assert_eq!(frame_hash(&v.render(2.0)), fresh(true, 2.0));
+    assert_eq!(frame_hash(&v.render(None, 2.0)), fresh(true, 2.0));
     v.handle_key(Die3dKey::ToggleScene, 2.0);
-    assert_eq!(frame_hash(&v.render(3.0)), fresh(false, 3.0));
+    assert_eq!(frame_hash(&v.render(None, 3.0)), fresh(false, 3.0));
 }
 
 #[test]
@@ -753,8 +754,8 @@ fn a_resize_rebuilds_the_fit_cache() {
     let b = busy_fake(&["p300"; 2]);
     let grid = board_grid(2);
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
-    v.render(1.0);
+    v.update(&b, None, 0.0);
+    v.render(None, 1.0);
     let keys = |v: &Die3dView| {
         let mut k: Vec<_> = v.cache.borrow().fits.keys().copied().collect();
         k.sort_unstable();
@@ -766,23 +767,23 @@ fn a_resize_rebuilds_the_fit_cache() {
     // that size only.
     let mut w = Die3dView::new(200, 56);
     assert!(keys(&w).is_empty());
-    w.update(&b, 0.0);
-    let want = text(&w.render(2.0));
+    w.update(&b, None, 0.0);
+    let want = text(&w.render(None, 2.0));
     assert_eq!(keys(&w), [(400, 216, grid)]);
     // A size change without `resize` is keyed by size too, so it can never
     // pick up the old size's fit: the frame is the new view's.
     let mut u = Die3dView::new(150, 42);
-    u.update(&b, 0.0);
-    u.render(1.0);
+    u.update(&b, None, 0.0);
+    u.render(None, 1.0);
     u.cols = 200;
     u.rows = 56;
-    assert_eq!(text(&u.render(2.0)), want);
+    assert_eq!(text(&u.render(None, 2.0)), want);
     assert_eq!(keys(&u), [(300, 160, grid), (400, 216, grid)]);
     // `resize`, as the TUI calls it, drops the old size's fit, and the frame
     // is again the new view's.
     v.resize(200, 56, 0);
     assert!(keys(&v).is_empty());
-    assert_eq!(text(&v.render(2.0)), want);
+    assert_eq!(text(&v.render(None, 2.0)), want);
     assert_eq!(keys(&v), [(400, 216, grid)]);
 }
 
@@ -790,7 +791,7 @@ fn a_resize_rebuilds_the_fit_cache() {
 fn steady_view() -> Die3dView {
     let b = busy_fake(&["p150"]);
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     v.director.set_auto(false);
     v
 }
@@ -798,19 +799,19 @@ fn steady_view() -> Die3dView {
 #[test]
 fn render_within_one_twentieth_of_a_second_returns_the_same_lines() {
     let v = steady_view();
-    let first = text(&v.render(1.0));
+    let first = text(&v.render(None, 1.0));
     // A fresh view shows that the picture does move in 0.04 s ...
-    assert_ne!(text(&steady_view().render(1.04)), first);
+    assert_ne!(text(&steady_view().render(None, 1.04)), first);
     // ... but this one returns the frame it drew at 1.0, up to the last
     // instant before the next frame is due (1/20 s, less the 5 ms a frame
     // may come early).
     let due = STEADY_FRAME_SECS - FRAME_EARLY_SECS;
-    assert_eq!(text(&v.render(1.04)), first);
-    assert_eq!(text(&v.render(1.0 + due - 1e-6)), first);
+    assert_eq!(text(&v.render(None, 1.04)), first);
+    assert_eq!(text(&v.render(None, 1.0 + due - 1e-6)), first);
     // A key is answered at once, whatever the time since the last frame.
     let mut v = v;
     v.handle_key(Die3dKey::ToggleLabels, 1.044);
-    assert_ne!(text(&v.render(1.044)), first);
+    assert_ne!(text(&v.render(None, 1.044)), first);
     // Time going backwards (a new clock) is never served from the cache.
     // Clouds off for this part: a view that has seen 5.0 has drifted its
     // clouds a step further than a fresh one, and they never drift back.
@@ -820,27 +821,30 @@ fn render_within_one_twentieth_of_a_second_returns_the_same_lines() {
         v
     };
     let w = clear();
-    w.render(5.0);
-    assert_eq!(text(&w.render(4.99)), text(&clear().render(4.99)));
+    w.render(None, 5.0);
+    assert_eq!(
+        text(&w.render(None, 4.99)),
+        text(&clear().render(None, 4.99))
+    );
 }
 
 #[test]
 fn render_after_one_twentieth_differs_in_a_steady_scene() {
     let v = steady_view();
-    let first = text(&v.render(1.0));
-    let next = text(&v.render(1.0 + 0.05));
+    let first = text(&v.render(None, 1.0));
+    let next = text(&v.render(None, 1.0 + 0.05));
     assert_ne!(next, first);
     // And it is the frame a fresh view draws at that time.
-    assert_eq!(next, text(&steady_view().render(1.05)));
+    assert_eq!(next, text(&steady_view().render(None, 1.05)));
 }
 
 /// How many times the output of `render` changes over `secs` of view time
 /// sampled 120 times a second from `start`: the frames actually drawn.
 fn redraws(v: &Die3dView, start: f64, secs: f64) -> usize {
-    let mut prev = text(&v.render(start));
+    let mut prev = text(&v.render(None, start));
     let mut n = 0;
     for i in 1..=(secs * 120.0) as usize {
-        let lines = text(&v.render(start + i as f64 / 120.0));
+        let lines = text(&v.render(None, start + i as f64 / 120.0));
         n += (lines != prev) as usize;
         prev = lines;
     }
@@ -880,10 +884,10 @@ fn transitions_render_at_thirty_frames_per_second() {
     }
     // A cut started by the director, not a key, also switches to 30 at once.
     let mut v = steady_view();
-    v.render(3.0);
+    v.render(None, 3.0);
     v.director.set_transition_mode(TransitionMode::Dissolve);
     v.director.cut_by_hand(3.01);
-    assert_ne!(text(&v.render(3.04)), text(&v.render(3.0)));
+    assert_ne!(text(&v.render(None, 3.04)), text(&v.render(None, 3.0)));
 }
 
 /// Allocation counter for this thread, read by the allocation test. Counts
@@ -958,7 +962,7 @@ fn braille_cells_are_converted_without_per_cell_allocation() {
 
     // The pixel buffer is reused from frame to frame, not allocated anew.
     let v = steady_view();
-    v.render(1.0);
+    v.render(None, 1.0);
     let ptr = |v: &Die3dView| {
         v.cache
             .borrow()
@@ -969,7 +973,7 @@ fn braille_cells_are_converted_without_per_cell_allocation() {
     };
     let first = ptr(&v);
     assert_eq!(first.len(), 1, "one buffer for a steady frame");
-    v.render(2.0);
+    v.render(None, 2.0);
     assert_eq!(ptr(&v), first);
 }
 
@@ -992,7 +996,7 @@ fn changed_over_a_second(smooth: bool) -> usize {
         let mut prev: Option<Buffer> = None;
         let mut n = 0;
         for i in 0..=20 {
-            let buf = to_buffer(v.render(1.0 + i as f64 * 0.05), 150, 42);
+            let buf = to_buffer(v.render(None, 1.0 + i as f64 * 0.05), 150, 42);
             if let Some(p) = &prev {
                 n += p.diff(&buf).len();
             }
@@ -1016,16 +1020,16 @@ fn quantised_wave_changes_fewer_cells_than_the_unquantised_one() {
         let quiet = || {
             let b = Fake::boards(&["p150"], Some(TDP));
             let mut v = Die3dView::new(150, 42);
-            v.update(&b, 0.0);
+            v.update(&b, None, 0.0);
             // Clouds off: the two times compared can fall in different
             // cloud clock steps.
             v.handle_key(Die3dKey::ToggleClouds, 0.0);
             v
         };
-        let stepped = frame_hash(&quiet().render(t));
+        let stepped = frame_hash(&quiet().render(None, t));
         let wave_t = scene::wave_time(t as f32) as f64;
         assert!(t - wave_t < 1.0 / 12.0 + 1e-6, "{t} -> {wave_t}");
-        let smooth = with_wave(true, || frame_hash(&quiet().render(wave_t)));
+        let smooth = with_wave(true, || frame_hash(&quiet().render(None, wave_t)));
         assert_eq!(stepped, smooth, "at {t}");
     }
 }
@@ -1057,7 +1061,7 @@ fn wave_report() {
             let mut v = steady_view();
             v.handle_key(Die3dKey::ToggleClouds, 0.0);
             (0..200)
-                .map(|i| to_buffer(v.render(1.0 + i as f64 * 0.05), 150, 42))
+                .map(|i| to_buffer(v.render(None, 1.0 + i as f64 * 0.05), 150, 42))
                 .collect::<Vec<_>>()
         })
     };
@@ -1125,7 +1129,7 @@ fn changed_in_two_seconds(boards: &[&str], clouds: bool) -> usize {
 fn changed_with_samples(boards: &[&str], clouds: bool, panel: Option<bool>) -> (usize, usize) {
     let b = busy_fake(boards);
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     v.director.set_auto(false);
     if !clouds {
         v.handle_key(Die3dKey::ToggleClouds, 0.0);
@@ -1146,9 +1150,9 @@ fn changed_with_samples(boards: &[&str], clouds: bool, panel: Option<bool>) -> (
         // scrolls fall between two frames that are counted (one on the very
         // first frame would not be).
         if panel.is_some() && i % 30 == 15 {
-            v.update(&b, now);
+            v.update(&b, None, now);
         }
-        let buf = to_buffer(v.render(now), 150, 42);
+        let buf = to_buffer(v.render(None, now), 150, 42);
         if let Some(p) = &prev {
             let diff = p.diff(&buf);
             n += diff.len();
@@ -1198,14 +1202,14 @@ fn fill_worst_case(v: &mut Die3dView) {
 fn changed_from(boards: &[&str], t0: f64) -> usize {
     let b = busy_fake(boards);
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     v.director.set_auto(false);
     v.handle_key(Die3dKey::ToggleClouds, 0.0);
     v.handle_key(Die3dKey::ToggleHistory, 0.0);
     let mut prev: Option<Buffer> = None;
     let mut n = 0;
     for i in 0..60 {
-        let buf = to_buffer(v.render(t0 + i as f64 * DT), 150, 42);
+        let buf = to_buffer(v.render(None, t0 + i as f64 * DT), 150, 42);
         if let Some(p) = &prev {
             n += p.diff(&buf).len();
         }
@@ -1384,7 +1388,7 @@ const SPARK: usize = history::SPARK_WIDTH;
 /// `history::MAX_CHIPS`, and two for PCIe.
 fn v_series(boards: &[&str]) -> usize {
     let mut v = Die3dView::new(150, 42);
-    v.update(&busy_fake(boards), 0.0);
+    v.update(&busy_fake(boards), None, 0.0);
     v.chips.iter().flatten().count().min(history::MAX_CHIPS) + 2
 }
 
@@ -1416,7 +1420,7 @@ fn line_width(line: &Line<'static>) -> usize {
 /// given cell mode (the `B` key), ready to render.
 fn sized_view(boards: &Fake, cols: usize, rows: usize, braille: bool) -> Die3dView {
     let mut v = Die3dView::new(cols, rows);
-    v.update(boards, 0.0);
+    v.update(boards, None, 0.0);
     v.director.set_auto(false);
     if !braille {
         v.handle_key(Die3dKey::ToggleBraille, 0.0);
@@ -1477,7 +1481,7 @@ fn every_size_draws_without_overflow() {
                         if k > 0 {
                             v.handle_key(Die3dKey::CutNow, now - 5.0);
                         }
-                        let lines = v.render(now);
+                        let lines = v.render(None, now);
                         renders += 1;
                         assert!(
                             lines.len() <= r,
@@ -1500,11 +1504,11 @@ fn every_size_draws_without_overflow() {
     for (c, r) in [(0, 0), (0, 30), (100, 0), (0, 1), (1, 0)] {
         for braille in [true, false] {
             let mut v = sized_view(&eight, c, r, braille);
-            let lines = v.render(0.0);
+            let lines = v.render(None, 0.0);
             assert!(lines.len() <= r, "{c}x{r}: {} lines", lines.len());
             assert!(lines.iter().all(|l| line_width(l) <= c), "{c}x{r}");
             v.handle_key(Die3dKey::CutNow, 5.0);
-            let _ = v.render(10.0);
+            let _ = v.render(None, 10.0);
         }
     }
     println!(
@@ -1544,9 +1548,9 @@ fn flags_never_cover_a_drawn_cell_at_any_size() {
                             v.handle_key(Die3dKey::CutNow, now - 5.0);
                         }
                         v.handle_key(Die3dKey::ToggleLabels, now);
-                        let off = text(&v.render(now));
+                        let off = text(&v.render(None, now));
                         v.handle_key(Die3dKey::ToggleLabels, now);
-                        let on = text(&v.render(now));
+                        let on = text(&v.render(None, now));
                         for (row, (a, b)) in off.iter().zip(&on).enumerate().take(scene_rows) {
                             for (col, (x, y)) in a.chars().zip(b.chars()).enumerate() {
                                 if x == y {
@@ -1576,7 +1580,7 @@ fn sizes_at_and_above_100_by_30_use_the_full_layout() {
     let b = busy_fake(&["p300"; 2]);
     for (c, r) in [(100, 30), (120, 36), (150, 42)] {
         let mut v = sized_view(&b, c, r, true);
-        let lines = v.render(0.0);
+        let lines = v.render(None, 0.0);
         assert_eq!(lines.len(), r, "{c}x{r}");
         assert_eq!(tiers::tier_for(c, r).footer_rows, 2, "{c}x{r}");
         // The footer is the last tier.footer_rows lines: the two lines hold
@@ -1609,13 +1613,13 @@ fn inset_changed_cells(cols: usize, rows: usize, boards: &[&str]) -> usize {
     // A read each second until 6 s, so that the busiest-board choice of a
     // many-board inset has settled (it needs five samples).
     for s in 0..=6 {
-        v.update(&b, s as f64);
+        v.update(&b, None, s as f64);
     }
     v.director.set_auto(false);
     let mut prev: Option<Buffer> = None;
     let mut n = 0;
     for i in 0..60 {
-        let buf = to_buffer(v.render(7.0 + i as f64 * DT), cols, rows);
+        let buf = to_buffer(v.render(None, 7.0 + i as f64 * DT), cols, rows);
         if let Some(p) = &prev {
             n += p.diff(&buf).len();
         }
@@ -1686,16 +1690,16 @@ fn inset_render_cost_report() {
         for (cols, rows) in sizes {
             let mut v = Die3dView::inset(cols, rows);
             for s in 0..=6 {
-                v.update(&b, s as f64);
+                v.update(&b, None, s as f64);
             }
             v.director.set_auto(false);
             // Warm the fit caches, then time frames DT apart.
             for i in 0..30 {
-                v.render(7.0 + i as f64 * DT);
+                v.render(None, 7.0 + i as f64 * DT);
             }
             let mut i = 0;
             let ms = mean_ms(600, || {
-                std::hint::black_box(v.render(8.0 + i as f64 * DT));
+                std::hint::black_box(v.render(None, 8.0 + i as f64 * DT));
                 i += 1;
             });
             println!(
@@ -1703,5 +1707,346 @@ fn inset_render_cost_report() {
                 inset_changed_cells(cols, rows, &boards)
             );
         }
+    }
+}
+
+// ---- The bus overlay (Task 11 of the signal bus) --------------------------
+
+use super::test_backend::{chip_key, BusFixture, SEC_NS};
+use tt_toplike_bus::{EntityKey, Event};
+
+/// A world with something on every drawn chip of `chips` chips: a model
+/// loading at 60% on chip 0, a model ready on the others serving 42 t/s,
+/// per-channel GDDR temperatures on chip 0 (two channels apart) and an ECC
+/// count on chip 0's channel 3.
+fn busy_world(chips: usize) -> BusFixture {
+    let mut f = BusFixture::new();
+    f.loading("load", &[0], Some(0.6));
+    if chips > 1 {
+        let rest: Vec<usize> = (1..chips).collect();
+        f.ready("serve", "Llama 3.1 8B", &rest, 42.0);
+    }
+    f.gddr_temp(0, 0, 82.0).gddr_temp(0, 5, 48.0);
+    f
+}
+
+/// The model whose requests pulse: the serving one, or with one chip the
+/// loading one.
+fn pulsing_model(chips: usize) -> EntityKey {
+    EntityKey::model(if chips > 1 { "serve" } else { "load" })
+}
+
+/// Bus time at view time `t`: the fixture's records are at about 1 s, so
+/// view time 0 is bus time 5 s.
+fn bus_ns(t: f64) -> u64 {
+    5 * SEC_NS + (t * 1e9) as u64
+}
+
+/// [`changed_from`] with the bus overlay active: [`busy_world`], and once a
+/// second of the run (at the run's start, then every 30 frames) a
+/// `RequestsCompleted` on the pulsing model, read by the overlay at once.
+/// So a pulse ring is crossing a die for the whole run. The overlay is read
+/// with `read_bus` alone, as the data tick would, so the load calibration
+/// and history (which `update` also feeds) are as in [`changed_from`].
+fn changed_from_with_bus(boards: &[&str], t0: f64) -> usize {
+    let b = busy_fake(boards);
+    let chips = boards.len();
+    let mut f = busy_world(chips);
+    let mut v = Die3dView::new(150, 42);
+    v.update(&b, Some(&f.view(bus_ns(0.0))), 0.0);
+    v.director.set_auto(false);
+    v.handle_key(Die3dKey::ToggleClouds, 0.0);
+    v.handle_key(Die3dKey::ToggleHistory, 0.0);
+    let mut prev: Option<Buffer> = None;
+    let mut n = 0;
+    for i in 0..60 {
+        let t = t0 + i as f64 * DT;
+        if i % 30 == 0 {
+            f.event(Event::RequestsCompleted {
+                model: pulsing_model(chips),
+                n: 4,
+            });
+            v.read_bus(Some(&f.view(bus_ns(t))));
+            // The instrument: the overlay is drawing, a pulse included.
+            assert!(v.overlay.chips.iter().any(|c| !c.pulses.is_empty()));
+            assert!(v.overlay.chips.iter().any(|c| c.fill.is_some()));
+        }
+        let buf = to_buffer(v.render(Some(&f.view(bus_ns(t))), t), 150, 42);
+        if let Some(p) = &prev {
+            n += p.diff(&buf).len();
+        }
+        prev = Some(buf);
+    }
+    n
+}
+
+#[test]
+fn traffic_fronts_with_an_active_overlay_cost_little_more_than_the_sideways_sweep() {
+    // The bound of `traffic_fronts_cost_little_more_than_the_sideways_sweep`
+    // with the overlay drawing (a fill, flags, GDDR rows and a pulse ring
+    // crossing a die all the time), against the sweep without it.
+    let mean = |with_bus: bool| -> usize {
+        let counts: Vec<usize> = (0..8)
+            .map(|k| {
+                let t0 = 1.0 + k as f64 * 3.0;
+                if with_bus {
+                    changed_from_with_bus(&["p150"], t0)
+                } else {
+                    changed_from(&["p150"], t0)
+                }
+            })
+            .collect();
+        counts.iter().sum::<usize>() / counts.len()
+    };
+    let with_bus = mean(true);
+    let sweep = {
+        let _guard = SidewaysSweep::on();
+        mean(false)
+    };
+    println!("one board, mean over the cycle: fronts and overlay {with_bus}, sweep {sweep}");
+    assert!(
+        with_bus as f64 <= sweep as f64 * 1.3,
+        "fronts and overlay {with_bus}, sideways sweep {sweep}"
+    );
+}
+
+#[test]
+fn changed_cells_with_an_active_overlay_stay_within_the_task_16_budget() {
+    // The Task 16 budget (`changed_cells_per_frame_are_at_most_half_of_before`)
+    // with the overlay drawing. The window is the same (two seconds from 1 s,
+    // the sideways sweep); a pulse ring crosses a die all the time.
+    let _sweep = SidewaysSweep::on();
+    for (what, boards, before) in [
+        ("one board", &["p150"][..], CHANGED_BEFORE_ONE_BOARD),
+        ("super 4 x 2", &["p300"; 8][..], CHANGED_BEFORE_SUPER),
+    ] {
+        let plain = changed_from(boards, 1.0);
+        let after = changed_from_with_bus(boards, 1.0);
+        println!(
+            "{what}: {after} cells changed with the overlay, {plain} without, {before} before ({:.3})",
+            after as f64 / before as f64
+        );
+        assert!(
+            after as f64 <= before as f64 * 0.52,
+            "{what}: {after} cells changed, {before} before"
+        );
+    }
+}
+
+/// [`inset_changed_cells`] with the overlay active as in
+/// [`changed_from_with_bus`]: the fill and a pulse ring, the inset's share.
+fn inset_changed_cells_with_bus(cols: usize, rows: usize, boards: &[&str]) -> usize {
+    let b = busy_fake(boards);
+    let chips = boards.len();
+    let mut f = busy_world(chips);
+    let mut v = Die3dView::inset(cols, rows);
+    for s in 0..=6 {
+        v.update(&b, Some(&f.view(bus_ns(s as f64))), s as f64);
+    }
+    v.director.set_auto(false);
+    let mut prev: Option<Buffer> = None;
+    let mut n = 0;
+    for i in 0..60 {
+        let t = 7.0 + i as f64 * DT;
+        if i % 30 == 0 {
+            f.event(Event::RequestsCompleted {
+                model: pulsing_model(chips),
+                n: 4,
+            });
+            v.read_bus(Some(&f.view(bus_ns(t))));
+        }
+        let buf = to_buffer(v.render(Some(&f.view(bus_ns(t))), t), cols, rows);
+        if let Some(p) = &prev {
+            n += p.diff(&buf).len();
+        }
+        prev = Some(buf);
+    }
+    n
+}
+
+#[test]
+fn inset_changed_cells_with_an_active_overlay_stay_within_budget() {
+    // The ceilings of `inset_changed_cells_stay_within_budget`.
+    for (boards, ceiling) in [(&["p150"][..], 1973), (&["p300"; 2][..], 3910)] {
+        let plain = inset_changed_cells(52, 16, boards);
+        let n = inset_changed_cells_with_bus(52, 16, boards);
+        println!("inset {boards:?}: {n} cells changed with the overlay, {plain} without");
+        assert!(
+            n != plain,
+            "{boards:?}: the overlay drew nothing in the inset"
+        );
+        assert!(
+            n <= ceiling,
+            "{boards:?}: {n} cells changed, ceiling {ceiling}"
+        );
+    }
+}
+
+#[test]
+fn flags_with_models_never_cover_a_drawn_cell_at_any_size() {
+    // `flags_never_cover_a_drawn_cell_at_any_size` over a world with models
+    // on several chips: a model's flag is longer and goes through the same
+    // placement, so it too lands only on blank cells (or is its pin and
+    // pole). Sizes from 60 x 16, where the flags start, to 150 x 42.
+    let boards = [
+        busy_fake(&["p300"; 2]),
+        busy_fake(&["p300", "p300", "p150", "p300"]),
+    ];
+    let cols_at = sweep_values(&[tiers::FLAGS_MIN.0, tiers::FOOTER_TWO.0], 150);
+    let rows_at = sweep_values(&[tiers::FLAGS_MIN.1, tiers::FOOTER_TWO.1], 42);
+    let (mut flagged, mut model_flags) = (0, 0);
+    for &c in cols_at.iter().filter(|&&c| (60..=150).contains(&c)) {
+        for &r in rows_at.iter().filter(|&&r| (16..=42).contains(&r)) {
+            let scene_rows = r - tiers::tier_for(c, r).footer_rows;
+            for b in &boards {
+                let f = busy_world(b.devices.len());
+                let w = f.view(bus_ns(0.0));
+                for braille in [true, false] {
+                    let mut v = Die3dView::new(c, r);
+                    v.update(b, Some(&w), 0.0);
+                    v.director.set_auto(false);
+                    if !braille {
+                        v.handle_key(Die3dKey::ToggleBraille, 0.0);
+                    }
+                    v.handle_key(Die3dKey::ToggleClouds, 0.0);
+                    v.handle_key(Die3dKey::ToggleHistory, 0.0);
+                    for k in 0..3 {
+                        let now = 10.0 * k as f64;
+                        if k > 0 {
+                            v.handle_key(Die3dKey::CutNow, now - 5.0);
+                        }
+                        v.handle_key(Die3dKey::ToggleLabels, now);
+                        let off = text(&v.render(Some(&w), now));
+                        v.handle_key(Die3dKey::ToggleLabels, now);
+                        let on = text(&v.render(Some(&w), now));
+                        model_flags += on
+                            .iter()
+                            .filter(|l| l.contains("t/s") || l.contains("60%"))
+                            .count();
+                        for (row, (a, b)) in off.iter().zip(&on).enumerate().take(scene_rows) {
+                            for (col, (x, y)) in a.chars().zip(b.chars()).enumerate() {
+                                if x == y {
+                                    continue;
+                                }
+                                flagged += 1;
+                                let blank = x == ' ' || x == '\u{2800}';
+                                assert!(
+                                    blank || y == '●' || y == '│',
+                                    "{c}x{r} braille={braille} cut {k}: {y:?} over {x:?} at {row},{col}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(flagged > 0, "no flag was ever drawn");
+    assert!(model_flags > 0, "no model flag was ever drawn");
+}
+
+/// The frame the decorated hashes pin, at `cols` x `rows`: two p300 boards
+/// (four chips, the super scene at 150 x 42 and one board at 100 x 30) under
+/// [`super::bus_tests::decorated`] (a model loading on chip 0, one ready on
+/// chip 1 with a pulse and a spark just begun, per-channel GDDR on chip 0),
+/// rendered 0.25 s of bus time after the events, clouds and the history
+/// panel off. Deterministic: the bus clock and the view time are set.
+fn decorated_frame(cols: usize, rows: usize) -> Vec<Line<'static>> {
+    let b = busy_fake(&["p300"; 4]);
+    let mut v = Die3dView::new(cols, rows);
+    let w = super::bus_tests::decorated(&mut v, &b, 5 * SEC_NS);
+    v.director.set_auto(false);
+    v.handle_key(Die3dKey::ToggleClouds, 0.0);
+    v.handle_key(Die3dKey::ToggleHistory, 0.0);
+    let mut at = w.clone();
+    at.now_mono_ns = 5 * SEC_NS + SEC_NS / 4;
+    v.render(Some(&at), 0.0)
+}
+
+/// The decorated frames' hashes (the rows above the footer), pinned when the
+/// overlay was added (signal bus Task 11).
+const GOLDEN_DECORATED_100X30: u64 = 0xa4780f41d3d2bccb;
+const GOLDEN_DECORATED_150X42: u64 = 0x99bc42cf623527cd;
+
+#[test]
+fn decorated_frames_are_pinned() {
+    let a = frame_hash(above_the_footer(&decorated_frame(100, 30)));
+    let b = frame_hash(above_the_footer(&decorated_frame(150, 42)));
+    assert_eq!(
+        (a, b),
+        (GOLDEN_DECORATED_100X30, GOLDEN_DECORATED_150X42),
+        "got {a:#x}, {b:#x}"
+    );
+}
+
+/// The overlay's cost. Prints; asserts nothing about time. Run in release:
+///
+/// `cargo test --release --locked --lib --features tui overlay_render_cost_report -- --ignored --nocapture`
+///
+/// For each case, the mean of a frame (`render`) with and without the
+/// overlay, and of one `Overlay::from_world` (the work `update` adds at the
+/// data rate). The inset budget is 0.3 ms a frame at 52 x 16.
+#[test]
+#[ignore = "benchmark: run by hand in release"]
+fn overlay_render_cost_report() {
+    println!();
+    println!("| view | boards | size | ms per frame, no bus | ms per frame, overlay | ms per from_world |");
+    println!("|---|---|---|---|---|---|");
+    for (label, inset, boards, (cols, rows)) in [
+        ("inset", true, vec!["p150"], (52usize, 16usize)),
+        ("inset", true, vec!["p300"; 2], (52, 16)),
+        ("full", false, vec!["p300"; 2], (100, 30)),
+        ("full", false, vec!["p300"; 8], (150, 42)),
+    ] {
+        let b = busy_fake(&boards);
+        let chips = boards.len();
+        let frame_ms = |with_bus: bool| -> f64 {
+            let mut f = busy_world(chips);
+            let mut v = if inset {
+                Die3dView::inset(cols, rows)
+            } else {
+                Die3dView::new(cols, rows)
+            };
+            for s in 0..=6 {
+                let w = f.view(bus_ns(s as f64));
+                v.update(&b, with_bus.then_some(&w as &dyn WorldRead), s as f64);
+            }
+            v.director.set_auto(false);
+            let mut i = 0;
+            // The world is copied only when an event lands (the app's read
+            // is a cached copy too); between events only its clock moves.
+            let mut w = f.view(bus_ns(8.0));
+            mean_ms(600, || {
+                let t = 8.0 + i as f64 * DT;
+                if with_bus && i % 30 == 0 {
+                    f.event(Event::RequestsCompleted {
+                        model: pulsing_model(chips),
+                        n: 4,
+                    });
+                    w = f.view(bus_ns(t));
+                    v.read_bus(Some(&w));
+                }
+                w.now_mono_ns = bus_ns(t);
+                std::hint::black_box(v.render(with_bus.then_some(&w as &dyn WorldRead), t));
+                i += 1;
+            })
+        };
+        let (plain, with) = (frame_ms(false), frame_ms(true));
+        let f = busy_world(chips);
+        let w = f.view(bus_ns(1.0));
+        let keys: Vec<(usize, EntityKey)> = (0..chips).map(|i| (i, chip_key(i))).collect();
+        let mut st = overlay::OverlayState::default();
+        let read = mean_ms(2000, || {
+            std::hint::black_box(overlay::Overlay::from_world(
+                &w,
+                &keys,
+                bus_ns(1.0),
+                &mut st,
+            ));
+        });
+        println!(
+            "| {label} | {} | {cols} x {rows} | {plain:.3} | {with:.3} | {read:.4} |",
+            boards.join("+")
+        );
     }
 }

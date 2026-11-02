@@ -10,6 +10,7 @@
 //! group of Tensix tiles is one block (see [`block_heat`]). A lone board has
 //! the room for full detail and is drawn exactly like `draw_board_scene`.
 
+use super::overlay::FxMap;
 use super::palette;
 use super::raster::PixelBuf;
 use super::scene::{
@@ -73,7 +74,7 @@ pub fn fit_super(cells_w: usize, cells_h: usize, boards: &[usize]) -> Option<Sce
 /// together, so a board in front covers the one behind it.
 #[cfg(test)]
 pub fn draw_super_scene(buf: &mut PixelBuf, boards: &[Vec<ChipInputs>], fit: &SceneFit, t: f32) {
-    draw_super_scene_in(palette::GRAYSKULL, buf, boards, fit, t)
+    draw_super_scene_in(palette::GRAYSKULL, buf, boards, fit, t, &FxMap::new())
 }
 
 /// [`draw_super_scene`] painted in `pal`.
@@ -83,6 +84,7 @@ pub fn draw_super_scene_in(
     boards: &[Vec<ChipInputs>],
     fit: &SceneFit,
     t: f32,
+    fx: &FxMap,
 ) {
     let dies: Vec<usize> = boards.iter().map(Vec::len).collect();
     let (grid, row_rows) = super_grid(&dies);
@@ -111,6 +113,7 @@ pub fn draw_super_scene_in(
             // Dies are numbered across boards; no board has more than
             // `row_rows` bands, so this is unique.
             slot: idx * row_rows + die,
+            fx: fx.get(&chip.index),
         };
         let local = (bx % BOARD_COLS, in_row % BOARD_BAND);
         draw_die_tile(buf, &ctx, &slot, grid, local, at, &mut visits);

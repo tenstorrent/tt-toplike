@@ -31,6 +31,7 @@ mod flags;
 pub mod history;
 pub mod layout;
 pub mod load;
+pub mod overlay;
 pub mod palette;
 #[cfg(test)]
 mod perf_tests;
@@ -55,6 +56,7 @@ use clouds::{CloudClock, Clouds};
 use flags::{DieFlag, Flag, Hull};
 use history::History;
 use load::LoadScale;
+use overlay::{FxMap, Overlay, OverlayState};
 use palette::GRAYSKULL;
 use raster::{Iso, PixelBuf};
 use ratatui::style::{Color, Modifier, Style};
@@ -73,6 +75,7 @@ use super_scene::{band_origin, draw_super_scene_in, super_grid};
 use switching::{Scene, Switcher};
 use tiers::{tier_for, Tier};
 use triggers::{ChipExtras, Trigger, TriggerDetector};
+use tt_toplike_bus::{EntityKey, WorldRead};
 
 /// Terminal rows the footer takes in the full layout (100 x 30 cells and
 /// up). The view itself reads the footer's rows from its [`Tier`]; the tests
@@ -302,7 +305,8 @@ const DIE_HALF: (f32, f32) = (8.5, 6.0);
 struct Placement {
     iso: Iso,
     grid: (usize, usize),
-    dies: Vec<((f32, f32), String)>,
+    /// Each die's centre, label and device index (`ChipInputs::index`).
+    dies: Vec<((f32, f32), String, usize)>,
     /// The pixels a terminal cell covers in this frame's buffer (wide, tall),
     /// which the labels are placed with.
     cell: (usize, usize),
@@ -374,6 +378,17 @@ pub struct Die3dView {
     /// update that changes which boards, chips or other devices there are.
     /// A frame drawn under another revision is never reused.
     revision: u64,
+    /// Each drawn chip's device index and chip key (from `Device.bus_id`),
+    /// read in the last `update`: what the bus overlay is keyed by.
+    chip_keys: Vec<(usize, EntityKey)>,
+    /// What the bus puts on the chips, from the last `update` that had a
+    /// world (see `overlay`). Empty without one.
+    overlay: Overlay,
+    /// What the overlay remembers between updates.
+    overlay_state: OverlayState,
+    /// The bus label the footer shows (`bus: replay`, `bus: <path> ...`),
+    /// or `None` for a plain local bus or no bus (see `set_bus_label`).
+    bus_label: Option<String>,
     /// What `render` keeps from one frame to the next; see [`RenderCache`].
     cache: RefCell<RenderCache>,
     /// True for the compact layout of the Insights screen's inset (see
@@ -559,6 +574,10 @@ impl Die3dView {
             undrawn: Vec::new(),
             scales: HashMap::new(),
             revision: 0,
+            chip_keys: Vec::new(),
+            overlay: Overlay::default(),
+            overlay_state: OverlayState::default(),
+            bus_label: None,
             cache: RefCell::new(RenderCache::default()),
             inset: false,
             busiest: BusiestBoard::new(),
@@ -616,7 +635,18 @@ impl Die3dView {
     ///
     /// Only Blackhole chips are drawn, so only they can trigger a cut; other
     /// devices are listed in the footer instead.
-    pub fn update(&mut self, backend: &dyn TelemetryBackend, now: f64) {
+    ///
+    /// `world` is the signal bus as the TUI reads it (`TuiBus::read`). With
+    /// one, the view works out what the bus puts on each drawn chip (model
+    /// flags, the bring-up fill, pulses, per-channel GDDR rows, sparks; see
+    /// `overlay`). With `None` the view draws what it drew before the bus,
+    /// and the next world is read as a first sight.
+    pub fn update(
+        &mut self,
+        backend: &dyn TelemetryBackend,
+        world: Option<&dyn WorldRead>,
+        now: f64,
+    ) {
         // Integrate the drift up to now at the speed read last time, before
         // this update's readings replace it.
         self.advance_clouds(now);
@@ -630,14 +660,18 @@ impl Die3dView {
             .collect();
         self.labels.clear();
         self.chips.clear();
+        self.chip_keys.clear();
         for board in &topology.boards {
-            let chips: Vec<ChipInputs> = board
+            let drawn: Vec<&crate::models::Device> = board
                 .chips
                 .iter()
                 .filter_map(|&i| devices.iter().find(|d| d.index == i))
                 .filter(|d| d.architecture == Architecture::Blackhole)
-                .map(|d| chip_inputs(backend, d))
                 .collect();
+            // The bus names a chip by its PCI address, never by position.
+            self.chip_keys
+                .extend(drawn.iter().map(|d| (d.index, EntityKey::chip(&d.bus_id))));
+            let chips: Vec<ChipInputs> = drawn.iter().map(|d| chip_inputs(backend, d)).collect();
             if !chips.is_empty() {
                 self.labels.push(board.label.clone());
                 self.chips.push(chips);
@@ -755,6 +789,37 @@ impl Die3dView {
         // restarts the wait.
         self.director.on_idle(now);
         self.switcher.expire(now);
+        self.read_bus(world);
+    }
+
+    /// Work out what the bus puts on the drawn chips (see `overlay`). A
+    /// changed overlay shows in the next frame. Without a world the overlay
+    /// is empty and its memory is dropped.
+    fn read_bus(&mut self, world: Option<&dyn WorldRead>) {
+        let overlay = match world {
+            Some(w) => {
+                Overlay::from_world(w, &self.chip_keys, w.now_mono_ns(), &mut self.overlay_state)
+            }
+            None => {
+                self.overlay_state = OverlayState::default();
+                Overlay::default()
+            }
+        };
+        if overlay != self.overlay {
+            self.overlay = overlay;
+            self.revision += 1;
+        }
+    }
+
+    /// The bus label for the footer: shown only when it is not the plain
+    /// `bus: local` (an attached bus, a replay, a mismatch warning). `None`
+    /// shows nothing. A change shows in the next frame.
+    pub fn set_bus_label(&mut self, label: Option<&str>) {
+        let label = label.filter(|l| *l != "bus: local");
+        if self.bus_label.as_deref() != label {
+            self.bus_label = label.map(str::to_string);
+            self.revision += 1;
+        }
     }
 
     /// What is drawn where: the board labels, the device index of every
@@ -929,7 +994,11 @@ impl Die3dView {
     /// The TUI calls it about 60 times a second. A key, a cut starting or
     /// ending, a scene switch or a change in the boards drawn always gets a
     /// fresh frame, and so does a `now` earlier than the last frame's.
-    pub fn render(&self, now: f64) -> Vec<Line<'static>> {
+    ///
+    /// `world` gives the bus clock the overlay's effects are timed by (a
+    /// pulse fades over a second of it). With `None` nothing from the bus
+    /// is drawn: the frame is the frame the view drew before the bus.
+    pub fn render(&self, world: Option<&dyn WorldRead>, now: f64) -> Vec<Line<'static>> {
         self.advance_clouds(now);
         let in_transition = self.director.progress(now).is_some();
         let key = (
@@ -951,7 +1020,13 @@ impl Die3dView {
                 return last.lines.clone();
             }
         }
-        let lines = self.draw(now);
+        // The effects at this frame: arithmetic on the overlay, no lookups.
+        let bus = world.is_some() && !self.overlay.is_empty();
+        let fx = match world {
+            Some(w) if bus => self.overlay.fx_at(w.now_mono_ns(), self.inset),
+            _ => FxMap::new(),
+        };
+        let lines = self.draw(now, &fx, bus);
         self.cache.borrow_mut().last = Some(LastFrame {
             at: now,
             key,
@@ -960,8 +1035,9 @@ impl Die3dView {
         lines
     }
 
-    /// A fresh frame at `now`, as [`render`](Self::render) describes it.
-    fn draw(&self, now: f64) -> Vec<Line<'static>> {
+    /// A fresh frame at `now`, as [`render`](Self::render) describes it,
+    /// with the bus effects `fx` and, when `bus` is set, the model flags.
+    fn draw(&self, now: f64, fx: &FxMap, bus: bool) -> Vec<Line<'static>> {
         if self.chips.is_empty() {
             if self.undrawn.is_empty() {
                 return vec![hint("Die 3D: no Tenstorrent device found.".into())];
@@ -975,7 +1051,7 @@ impl Die3dView {
         // The tier has no footer rows below 16 rows, so this never goes
         // below zero; the saturating subtraction guards it anyway.
         let scene_rows = self.rows.saturating_sub(tier.footer_rows);
-        let (mut lines, frame) = match self.frame(now) {
+        let (mut lines, frame) = match self.frame(now, fx) {
             Some((buf, shown, placed)) => {
                 let lines = self.style_at(now).lines(&buf);
                 self.give_back(buf);
@@ -1009,7 +1085,7 @@ impl Die3dView {
             let labels = self.show_labels && tier.flags && !clipped;
             let anchors = match placed {
                 Some(placed) if labels && self.director.progress(now).is_none() => {
-                    self.flag_layout(placed, scene_rows)
+                    self.flag_layout(placed, scene_rows, bus)
                 }
                 _ => Vec::new(),
             };
@@ -1042,6 +1118,7 @@ impl Die3dView {
             anchors,
             self.label_style(),
             self.pole_style(),
+            &|c| self.accent_style(c),
         );
     }
 
@@ -1112,14 +1189,14 @@ impl Die3dView {
     ///
     /// The placement is that of the one scene drawn; a dissolve mixes two and
     /// has none.
-    fn frame(&self, now: f64) -> Option<(PixelBuf, Shown, Option<Placement>)> {
+    fn frame(&self, now: f64, fx: &FxMap) -> Option<(PixelBuf, Shown, Option<Placement>)> {
         let progress = self.director.progress(now);
         match (self.director.transition_kind(), progress) {
             (Some(TransitionKind::Dissolve), Some(p)) => {
                 let (from, to) = self.director.cameras();
                 let (before, after) = self.transition_scenes(now);
-                let (old, old_shown, _) = self.scene_with(now, before, Aim::At(from))?;
-                let (new, new_shown, _) = self.scene_with(now, after, Aim::At(to))?;
+                let (old, old_shown, _) = self.scene_with(now, before, Aim::At(from), fx)?;
+                let (new, new_shown, _) = self.scene_with(now, after, Aim::At(to), fx)?;
                 let swapped = self.director.swapped_at().is_some_and(|at| now >= at);
                 let shown = if swapped { new_shown } else { old_shown };
                 // One pixel order for the whole dissolve, from the cut's start.
@@ -1134,11 +1211,11 @@ impl Die3dView {
                 let (from, to) = self.director.cameras();
                 let scene = self.scene_at(now);
                 let (buf, shown, placed) =
-                    self.scene_with(now, scene, Aim::Between(from, to, p))?;
+                    self.scene_with(now, scene, Aim::Between(from, to, p), fx)?;
                 Some((buf, shown, Some(placed)))
             }
             _ => {
-                let (mut buf, shown, placed) = self.scene_now(now)?;
+                let (mut buf, shown, placed) = self.scene_now(now, fx)?;
                 if let Some(intensity) = self.director.chaos(now) {
                     // A new noise pattern 60 times a second, the same for a
                     // given now.
@@ -1167,16 +1244,16 @@ impl Die3dView {
     /// The camera is `Director::camera_at(now)`: during a chaos or dissolve
     /// cut the old angle stays until the midpoint and the new one shows from
     /// there; during a spin the old angle stays until the end.
-    fn scene_now(&self, now: f64) -> Option<(PixelBuf, Shown, Placement)> {
+    fn scene_now(&self, now: f64, fx: &FxMap) -> Option<(PixelBuf, Shown, Placement)> {
         let scene = self.scene_at(now);
-        self.scene_with(now, scene, Aim::At(self.director.camera_at(now)))
+        self.scene_with(now, scene, Aim::At(self.director.camera_at(now)), fx)
     }
 
     /// [`scene_now`](Self::scene_now) without the placement: the bare scene
     /// the tests compare frames against.
     #[cfg(test)]
     fn scene_pixels(&self, now: f64) -> Option<(PixelBuf, Shown)> {
-        let (buf, shown, _) = self.scene_now(now)?;
+        let (buf, shown, _) = self.scene_now(now, &FxMap::new())?;
         Some((buf, shown))
     }
 
@@ -1190,6 +1267,7 @@ impl Die3dView {
         now: f64,
         scene: Scene,
         aim_by: Aim,
+        fx: &FxMap,
     ) -> Option<(PixelBuf, Shown, Placement)> {
         let scene_rows = self.rows.checked_sub(self.tier().footer_rows)?;
         // Braille cells hold 2 x 4 pixels, half-block cells 1 x 2.
@@ -1230,7 +1308,7 @@ impl Die3dView {
                 Some(fit) => {
                     let (_, row_rows) = super_grid(&dies);
                     let fit = aim(&fit, aim_by, grid);
-                    draw_super_scene_in(pal, &mut buf, &self.chips, &fit, t);
+                    draw_super_scene_in(pal, &mut buf, &self.chips, &fit, t, fx);
                     let placed = Placement {
                         iso: fit.iso,
                         grid,
@@ -1241,7 +1319,11 @@ impl Die3dView {
                             .enumerate()
                             .flat_map(|(b, chips)| {
                                 chips.iter().enumerate().map(move |(d, chip)| {
-                                    (die_centre(band_origin(b, d, row_rows)), chip_label(chip))
+                                    (
+                                        die_centre(band_origin(b, d, row_rows)),
+                                        chip_label(chip),
+                                        chip.index,
+                                    )
                                 })
                             })
                             .collect(),
@@ -1275,7 +1357,7 @@ impl Die3dView {
         };
         let base = self.panned(base, (pw as i32, ph as i32), cell);
         let fit = aim(&base, aim_by, grid);
-        draw_board_scene_in(pal, &mut buf, chips, &fit, t, Detail::Full);
+        draw_board_scene_in(pal, &mut buf, chips, &fit, t, Detail::Full, fx);
         let shown = match base.virtual_px {
             Some((vw, vh)) => {
                 // Cells of the whole picture, and the footer rows a window
@@ -1297,7 +1379,13 @@ impl Die3dView {
             dies: chips
                 .iter()
                 .enumerate()
-                .map(|(d, chip)| (die_centre(board_band_origin(d)), chip_label(chip)))
+                .map(|(d, chip)| {
+                    (
+                        die_centre(board_band_origin(d)),
+                        chip_label(chip),
+                        chip.index,
+                    )
+                })
                 .collect(),
         };
         Some((buf, shown, placed))
@@ -1422,6 +1510,11 @@ impl Die3dView {
         if !self.chips.iter().any(|board| has_per_tile_data(board)) {
             status.push(ESTIMATE_LABEL.to_string());
         }
+        // An attached bus, a replay or a mismatch says so; a plain local
+        // bus adds nothing.
+        if let Some(label) = &self.bus_label {
+            status.push(label.clone());
+        }
         let width = self.cols.saturating_sub(BAR_WIDTH);
         // Priority on a narrow row: the scene name, the estimate label, the
         // camera caption, then the note on devices not drawn. The caption
@@ -1538,7 +1631,11 @@ impl Die3dView {
     /// below) and a cell of margin; the slab fills the whole grid, so that
     /// hull is what the scene covers. A pin stands on the top or bottom
     /// corner of its die's top face.
-    fn flag_layout(&self, placed: &Placement, scene_rows: usize) -> Vec<Option<Flag>> {
+    ///
+    /// With `bus` set, a die whose chip runs a model (see `overlay`) offers
+    /// texts with the model's label, phase and tokens/s after its own label;
+    /// they are tried before the plain label (see `flags::place`).
+    fn flag_layout(&self, placed: &Placement, scene_rows: usize, bus: bool) -> Vec<Option<Flag>> {
         let (sx, sy) = (placed.cell.0 as f32, placed.cell.1 as f32);
         let iso = &placed.iso;
         let at = |gx: f32, gy: f32| {
@@ -1564,7 +1661,7 @@ impl Die3dView {
         let dies: Vec<DieFlag> = placed
             .dies
             .iter()
-            .map(|((gx, gy), label)| {
+            .map(|((gx, gy), label, index)| {
                 let corners = [
                     at(gx - DIE_HALF.0, gy - DIE_HALF.1),
                     at(gx + DIE_HALF.0, gy - DIE_HALF.1),
@@ -1579,14 +1676,34 @@ impl Die3dView {
                 if let Some((name, _)) = label.split_once(' ') {
                     texts.push(name.to_string());
                 }
+                // With a model: the label, then the name alone, before each
+                // of the model's texts, longest first.
+                let model = bus.then(|| self.overlay.flag(*index)).flatten();
+                let mut preferred: Vec<(String, usize)> = Vec::new();
+                for m in model.map(|m| m.texts()).unwrap_or_default() {
+                    for head in &texts {
+                        let lead = format!("{head}{SEP}");
+                        let entry = (format!("{lead}{m}"), lead.chars().count());
+                        if !preferred.contains(&entry) {
+                            preferred.push(entry);
+                        }
+                    }
+                }
                 DieFlag {
                     texts,
+                    preferred,
+                    accent: model.map_or([0; 3], |m| m.colour),
                     top: cell(top),
                     bottom: cell(bottom),
                 }
             })
             .collect();
         flags::place(&dies, &hull, self.cols, scene_rows)
+    }
+
+    /// A flag's model text: the phase colour, bold, on the label's background.
+    fn accent_style(&self, c: [u8; 3]) -> Style {
+        self.label_style().fg(rgb(c))
     }
 
     /// The pin, pole and corner of a flag: pale lavender, the Ethernet
@@ -1731,8 +1848,9 @@ fn chip_label(chip: &ChipInputs) -> String {
     }
 }
 
-/// Write each flag over `lines`: the text in `style`, the pin, the pole and
-/// the corner in `pole_style`.
+/// Write each flag over `lines`: the text in `style` (its model part, when
+/// it has one, in `accent` of the flag's colour), the pin, the pole and the
+/// corner in `pole_style`.
 ///
 /// Only the first `scene_rows` lines are written: the footer rows below them
 /// are never touched, whatever a flag's cells. A cell outside columns
@@ -1744,23 +1862,48 @@ fn draw_flags(
     flags: &[Option<Flag>],
     style: Style,
     pole_style: Style,
+    accent: &dyn Fn([u8; 3]) -> Style,
 ) {
     for flag in flags.iter().flatten() {
         let text_row = flag.pin.1 - flag.rise;
-        for ((col, row), ch) in flag.cells() {
-            if row < 0 || row as usize >= scene_rows || col < 0 {
-                continue;
-            }
-            let Some(line) = lines.get_mut(row as usize) else {
-                continue;
+        let start = flag.text_start();
+        let n = flag.text.chars().count() as i32;
+        let model_style = flag.accent.map(|(at, c)| (start + at as i32, accent(c)));
+        // Cells next to each other on one row in one style go over the line
+        // in one write: `write_over` rebuilds the whole line, and a model's
+        // flag text is long.
+        let mut run: Option<(i32, i32, String, Style)> = None;
+        let flush = |run: Option<(i32, i32, String, Style)>, lines: &mut [Line<'static>]| {
+            let Some((col, row, text, st)) = run else {
+                return;
             };
+            if row < 0 || row as usize >= scene_rows {
+                return;
+            }
+            if let Some(line) = lines.get_mut(row as usize) {
+                // A negative start drops the characters left of column 0.
+                write_over(line, col as i64, &text, cols, st);
+            }
+        };
+        for ((col, row), ch) in flag.cells() {
             let st = if row == text_row && !matches!(ch, '┌' | '┐' | '└' | '┘') {
-                style
+                match model_style {
+                    Some((from, st)) if col >= from && col < start + n => st,
+                    _ => style,
+                }
             } else {
                 pole_style
             };
-            write_over(line, col as i64, &ch.to_string(), cols, st);
+            match &mut run {
+                Some((c0, r0, text, s0))
+                    if *r0 == row && *s0 == st && *c0 + text.chars().count() as i32 == col =>
+                {
+                    text.push(ch)
+                }
+                _ => flush(run.replace((col, row, ch.to_string(), st)), lines),
+            }
         }
+        flush(run, lines);
     }
 }
 
@@ -1838,3 +1981,6 @@ fn note(text: String) -> Line<'static> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod bus_tests;

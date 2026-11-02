@@ -453,12 +453,12 @@ fn render_cost_with_the_host_ticking_is_within_a_third_of_a_millisecond() {
                         &mut b,
                         bus.as_mut(),
                     );
-                    if let Some(bus) = &bus {
-                        std::hint::black_box(bus.read().seq());
-                    }
+                    // With a bus, Die 3D reads it as the app does.
+                    let world = bus.as_ref().map(|bus| bus.read());
+                    let world = world.as_ref().map(|w| w as &dyn WorldRead);
                     let t = f64::from(f) * 0.016;
-                    view.update(&b, t);
-                    std::hint::black_box(view.render(t));
+                    view.update(&b, world, t);
+                    std::hint::black_box(view.render(world, t));
                 }
                 start.elapsed() / FRAMES
             })

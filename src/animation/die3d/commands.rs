@@ -279,7 +279,7 @@ mod tests {
     fn view() -> Die3dView {
         let b = Fake::boards(&["p300"; 4], Some("100"));
         let mut v = Die3dView::new(150, 42);
-        v.update(&b, 0.0);
+        v.update(&b, None, 0.0);
         v
     }
 

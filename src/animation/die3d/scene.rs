@@ -14,6 +14,7 @@
 //! reads its heat from it (see [`tile_value`]).
 
 use super::layout::{tensix_mask_to_die_cols, DieLayout, Tile, TileKind};
+use super::overlay::{ChipFx, FxMap};
 use super::palette;
 use super::raster::{draw_block, Iso, PixelBuf};
 use super::super_scene::mean_heat;
@@ -40,6 +41,14 @@ pub(super) const BOARD_BAND: usize = 12 + 2;
 const ETH_CAGES: usize = 12;
 /// Rows of GDDR blocks (die rows) on each side, two rows per memory chip.
 const GDDR_ROWS: [i32; 4] = [0, 3, 6, 9];
+
+/// The GDDR channel drawn at row `row` (an index into `GDDR_ROWS`) on the
+/// west (`east` false) or east side of a die: channels 0 to 3 down the west
+/// side, 4 to 7 down the east side, as the Blackhole DRAM columns hold them
+/// (die columns 0 and 16).
+pub(super) fn gddr_channel(east: bool, row: usize) -> usize {
+    usize::from(east) * GDDR_ROWS.len() + row
+}
 /// Size, in cells, at which the view's full layout starts (two footer rows,
 /// clouds and flags). [`fit`] draws nothing below it; the view itself draws
 /// smaller layouts below it (see `tiers`).
@@ -484,6 +493,36 @@ pub(super) fn fit_last_resort(pw: i32, ph: i32, grid: (usize, usize)) -> SceneFi
     }
 }
 
+/// A GDDR block's height (in block units) and colour: from the chip's
+/// hottest channel (`chip_heat`) as before the bus, or, with a per-channel
+/// row from the bus (`row`), from that channel, dim and flat when it is
+/// harvested or disabled, and blended toward the alarm red while its ECC
+/// flash lasts.
+pub(super) fn gddr_rgb(
+    pal: &palette::Palette,
+    chip_heat: Option<f32>,
+    row: Option<super::overlay::GddrFx>,
+) -> (f32, [u8; 3]) {
+    match row {
+        Some(g) if g.dim => (1.0, lerp_rgb(pal.tile, pal.dram, 0.12)),
+        Some(g) => {
+            let heat = g.heat.or(chip_heat).unwrap_or(0.0);
+            let colour = lerp_rgb(pal.tile, pal.dram, 0.35 + 0.55 * heat);
+            (
+                2.0 + 2.0 * heat,
+                lerp_rgb(colour, super::overlay::ALARM_RED, g.flash),
+            )
+        }
+        None => {
+            let heat = chip_heat.unwrap_or(0.0);
+            (
+                2.0 + 2.0 * heat,
+                lerp_rgb(pal.tile, pal.dram, 0.35 + 0.55 * heat),
+            )
+        }
+    }
+}
+
 /// Linear blend of two colours, rounded like the mockup's clamped byte array.
 fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
     let f = |i: usize| {
@@ -583,6 +622,9 @@ pub(super) struct DieSlot<'a> {
     /// die's cage row.
     pub(super) origin: (usize, usize),
     pub(super) slot: usize,
+    /// What the bus draws on this die (see `overlay`); `None` draws the die
+    /// as it was before the bus.
+    pub(super) fx: Option<&'a ChipFx>,
 }
 
 /// The grid position of the middle of a die whose band starts at `origin`
@@ -703,6 +745,11 @@ pub(super) fn draw_die_tile(
                     );
                     let (bx, by) = ctx.iso.project(mx, my, grid);
                     let side = (k + m) / 2.0;
+                    let mut colour = heat_rgb(&ctx.pal, h);
+                    if let Some(fx) = die.fx {
+                        // The group's middle column.
+                        colour = fx.tint(x0 as f32 + (k - 1.0) / 2.0, colour);
+                    }
                     draw_block(
                         buf,
                         bx,
@@ -710,7 +757,7 @@ pub(super) fn draw_die_tile(
                         (tw as f32 * side).round() as i32,
                         (th as f32 * side).round() as i32,
                         blocks(1.0 + h * 9.0),
-                        heat_rgb(&ctx.pal, h),
+                        colour,
                         true,
                     );
                 }
@@ -721,7 +768,11 @@ pub(super) fn draw_die_tile(
                     }
                     TileKind::Tensix => {
                         let h = tile_value(chip, tile, t).clamp(0.0, 1.0);
-                        cube(buf, blocks(1.0 + h * 9.0), heat_rgb(&ctx.pal, h));
+                        let mut colour = heat_rgb(&ctx.pal, h);
+                        if let Some(fx) = die.fx {
+                            colour = fx.tint(tile.die.0 as f32, colour);
+                        }
+                        cube(buf, blocks(1.0 + h * 9.0), colour);
                     }
                     TileKind::Dram => {
                         let h = tile_value(chip, tile, t).clamp(0.0, 1.0);
@@ -742,20 +793,36 @@ pub(super) fn draw_die_tile(
             }
         }
     }
-    // GDDR blocks, taller and brighter as the memory warms.
+    // GDDR blocks, taller and brighter as the memory warms. With the bus,
+    // each row takes its own channel's reading (see `gddr_channel`).
     let side = gx == -(MARGIN_X as i32) || gx == layout.cols as i32 + 1;
-    if side && GDDR_ROWS.iter().any(|&r| gy >= r && gy < r + 2) {
-        let heat = chip.gddr_heat.unwrap_or(0.0);
-        cube(
-            buf,
-            blocks(2.0 + 2.0 * heat),
-            lerp_rgb(ctx.pal.tile, ctx.pal.dram, 0.35 + 0.55 * heat),
+    if let Some(row) = GDDR_ROWS
+        .iter()
+        .position(|&r| gy >= r && gy < r + 2)
+        .filter(|_| side)
+    {
+        let channel = gddr_channel(gx >= 0, row);
+        let (h, colour) = gddr_rgb(
+            &ctx.pal,
+            chip.gddr_heat,
+            die.fx.and_then(|fx| fx.gddr[channel]),
         );
+        cube(buf, blocks(h), colour);
     }
     // PCIe connector on the front edge.
     let front = gy == layout.rows as i32;
     if front && (6..=10).contains(&gx) {
-        cube(buf, blocks(2.5), lerp_rgb(ctx.pal.tile, ctx.pal.noc1, 0.7));
+        let colour = lerp_rgb(ctx.pal.tile, ctx.pal.noc1, 0.7);
+        match die.fx.map_or(0.0, |fx| fx.pulse) {
+            // Requests completed: the connector glows serving teal and
+            // stands a little taller, fading over a second (see `overlay`).
+            p if p > 0.0 => cube(
+                buf,
+                blocks(2.5),
+                lerp_rgb(colour, super::overlay::SERVE_TEAL, p),
+            ),
+            _ => cube(buf, blocks(2.5), colour),
+        }
     }
     // Ethernet cages on the back edge, lit by the live-link bits.
     if gy == -1 && (1..=ETH_CAGES as i32).contains(&gx) {
@@ -763,6 +830,20 @@ pub(super) fn draw_die_tile(
             cube(buf, blocks(2.5), lerp_rgb(ctx.pal.tile, ctx.pal.eth, 0.7));
         } else {
             cube(buf, blocks(1.0), lerp_rgb(ctx.pal.tile, ctx.pal.eth, 0.15));
+        }
+        // A hivemind spark over this cage: a blob above it, fading out.
+        for &(col, rgb, w) in die.fx.map_or(&[][..], |fx| &fx.sparks[..]) {
+            if col as i32 == gx {
+                let m = (n + 1).max(2);
+                let c = lerp_rgb(ctx.pal.tile, rgb, w);
+                blob(
+                    buf,
+                    cx - m / 2,
+                    cy_top - blocks(2.5) - (3.0 * s).round() as i32,
+                    c,
+                    m,
+                );
+            }
         }
     }
     // Packet streams along the middle of the die, in from the connector
@@ -807,7 +888,15 @@ pub fn draw_board_scene(
     t: f32,
     detail: Detail,
 ) {
-    draw_board_scene_in(palette::GRAYSKULL, buf, chips, fit, t, detail)
+    draw_board_scene_in(
+        palette::GRAYSKULL,
+        buf,
+        chips,
+        fit,
+        t,
+        detail,
+        &FxMap::new(),
+    )
 }
 
 /// [`draw_board_scene`] painted in `pal`.
@@ -818,6 +907,7 @@ pub fn draw_board_scene_in(
     fit: &SceneFit,
     t: f32,
     detail: Detail,
+    fx: &FxMap,
 ) {
     let ctx = DrawCtx::in_palette(fit, t, detail, pal);
     let grid = board_grid(chips.len());
@@ -833,6 +923,7 @@ pub fn draw_board_scene_in(
             harvested: &harvested[die],
             origin: board_band_origin(die),
             slot: die,
+            fx: fx.get(&chip.index),
         };
         draw_die_tile(
             buf,

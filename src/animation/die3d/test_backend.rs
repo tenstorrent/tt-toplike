@@ -128,3 +128,132 @@ impl TelemetryBackend for Fake {
         &self.procs
     }
 }
+
+// ---- A bus world for the overlay tests -------------------------------------
+
+use tt_toplike_bus::{
+    EntityKey, Event, HeaderKind, LocalView, Payload, Provenance, Record, Sample, Value, World,
+};
+
+/// Nanoseconds in a second, for the bus clock.
+pub(super) const SEC_NS: u64 = 1_000_000_000;
+
+/// A bus world built record by record, read through a [`LocalView`] at a
+/// clock reading the test sets. Every record is a millisecond after the
+/// one before, from 1 s on the bus clock.
+pub(super) struct BusFixture {
+    pub(super) world: World,
+    seq: u64,
+    t: u64,
+    pub(super) kind: HeaderKind,
+}
+
+impl BusFixture {
+    pub(super) fn new() -> BusFixture {
+        BusFixture {
+            world: World::new(),
+            seq: 0,
+            t: SEC_NS,
+            kind: HeaderKind::Live,
+        }
+    }
+
+    fn push(&mut self, payload: Payload) {
+        self.seq += 1;
+        self.t += 1_000_000;
+        self.world.apply(&Record {
+            seq: self.seq,
+            t_mono_ns: self.t,
+            t_wall_ms: 1_790_000_000_000 + self.seq,
+            source: "test".into(),
+            payload,
+        });
+    }
+
+    /// Publish an event.
+    pub(super) fn event(&mut self, e: Event) -> &mut Self {
+        self.push(Payload::Event(e));
+        self
+    }
+
+    /// Publish a sample.
+    pub(super) fn sample(
+        &mut self,
+        entity: &EntityKey,
+        signal: &str,
+        value: Value,
+        prov: Provenance,
+    ) -> &mut Self {
+        self.push(Payload::Sample(Sample {
+            entity: entity.clone(),
+            signal: signal.into(),
+            value,
+            prov,
+        }));
+        self
+    }
+
+    /// A model `key` labelled `label` announced ready on `chips`, serving
+    /// `tps` tokens a second.
+    pub(super) fn ready(&mut self, key: &str, label: &str, chips: &[usize], tps: f64) -> &mut Self {
+        let m = EntityKey::model(key);
+        self.sample(
+            &m,
+            tt_toplike_bus::signals::MODEL_LABEL,
+            Value::Text(label.into()),
+            Provenance::Measured,
+        );
+        self.sample(
+            &m,
+            tt_toplike_bus::signals::MODEL_TOKENS_PER_S,
+            Value::F64(tps),
+            Provenance::Measured,
+        );
+        self.event(Event::ModelReady {
+            model: m,
+            chips: chips.iter().map(|&i| chip_key(i)).collect(),
+        })
+    }
+
+    /// A model `key` loading on `chips` at `progress`.
+    pub(super) fn loading(
+        &mut self,
+        key: &str,
+        chips: &[usize],
+        progress: Option<f32>,
+    ) -> &mut Self {
+        self.event(Event::ModelLoading {
+            model: EntityKey::model(key),
+            chips: chips.iter().map(|&i| chip_key(i)).collect(),
+            progress,
+        })
+    }
+
+    /// DRAM channel `ch` of chip `i` at `celsius`, top and bottom.
+    pub(super) fn gddr_temp(&mut self, i: usize, ch: u8, celsius: f64) -> &mut Self {
+        let e = EntityKey::dram_channel(&chip_key(i), ch);
+        for s in [
+            crate::bus::signals::DRAM_TEMP_TOP_C,
+            crate::bus::signals::DRAM_TEMP_BOTTOM_C,
+        ] {
+            self.sample(&e, s, Value::F64(celsius), Provenance::Measured);
+        }
+        self
+    }
+
+    /// The world as a view reads it, with the bus clock at `now_ns`.
+    pub(super) fn view(&self, now_ns: u64) -> LocalView {
+        LocalView {
+            seq: self.world.seq(),
+            world: self.world.clone(),
+            now_mono_ns: now_ns,
+            header_kind: self.kind,
+        }
+    }
+}
+
+/// The chip key of device `i` of a [`Fake`]: its PCI address
+/// (`0000:0{i+1}:00.0`), as `Fake::boards` sets `bus_id`.
+pub(super) fn chip_key(i: usize) -> EntityKey {
+    EntityKey::chip(&format!("0000:{:02x}:00.0", i + 1))
+}

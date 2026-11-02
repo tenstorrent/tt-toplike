@@ -1419,7 +1419,13 @@ fn run_app(
                         if let Some(view) = insights_inset.as_mut() {
                             // `/theme` may have changed since the last tick.
                             view.set_theme(colors::current_theme());
-                            view.update(backend, insights_inset_started.elapsed().as_secs_f64());
+                            // The inset draws the bus's fill and pulses, no text.
+                            let world = tui_bus.read();
+                            view.update(
+                                backend,
+                                Some(&world),
+                                insights_inset_started.elapsed().as_secs_f64(),
+                            );
                         }
                     }
                 }
@@ -1630,7 +1636,12 @@ fn run_app(
                         new_die3d_view(cols, rows, reserved)
                     });
                     dv.set_theme(colors::current_theme());
-                    dv.update(backend, die3d_started.elapsed().as_secs_f64());
+                    // Die 3D reads the bus: model flags, the bring-up fill,
+                    // pulses, per-channel GDDR rows and sparks, and the bus
+                    // label when it is not the plain local one.
+                    dv.set_bus_label(Some(tui_bus.bus_label_str()));
+                    let world = tui_bus.read();
+                    dv.update(backend, Some(&world), die3d_started.elapsed().as_secs_f64());
                 }
             }
 
@@ -1844,6 +1855,14 @@ fn run_app(
             // Status-bar reset segment for this frame (None once expired).
             let reset_seg = reset_status.text(Instant::now());
 
+            // The bus as Die 3D and the Insights inset read it this frame
+            // (their effects are timed by its clock). Taken only for those
+            // two screens.
+            let bus_world = matches!(display_mode, DisplayMode::Die3d | DisplayMode::Insights)
+                .then(|| tui_bus.read());
+            let bus_world = bus_world
+                .as_ref()
+                .map(|w| w as &dyn tt_toplike_bus::WorldRead);
             let draw_start = Instant::now();
             terminal
                 .draw(|f| {
@@ -1874,6 +1893,7 @@ fn run_app(
                                 // The inset, only while its rect exists (the
                                 // renderer checks again).
                                 insights_inset.as_ref(),
+                                bus_world,
                                 insights_inset_started.elapsed().as_secs_f64(),
                                 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                 &serving_metrics,
@@ -1934,7 +1954,7 @@ fn run_app(
                         }
                         DisplayMode::Die3d => {
                             if let Some(ref dv) = die3d {
-                                ui_die3d(f, dv, die3d_started.elapsed().as_secs_f64());
+                                ui_die3d(f, dv, bus_world, die3d_started.elapsed().as_secs_f64());
                             }
                         }
                         DisplayMode::Training => {
@@ -3616,13 +3636,18 @@ fn ui_train(
 /// Render the Die 3D view. It draws into the area above the global status
 /// bar's row (the view was sized for that, see the update arm), so its own
 /// footer is not covered.
-fn ui_die3d(f: &mut Frame, view: &crate::animation::Die3dView, now: f64) {
+fn ui_die3d(
+    f: &mut Frame,
+    view: &crate::animation::Die3dView,
+    world: Option<&dyn tt_toplike_bus::WorldRead>,
+    now: f64,
+) {
     let full = f.area();
     let area = Rect {
         height: full.height.saturating_sub(STATUS_BAR_ROWS as u16),
         ..full
     };
-    let lines = view.render(now);
+    let lines = view.render(world, now);
     // Reset, not black: the view leaves its background unpainted by default so
     // the terminal's own colour (and any translucency) shows through, and a
     // black base style here would paint over that in every unspanned cell.
@@ -6731,6 +6756,8 @@ fn render_insights(
     // clock of its own. `None`, or too little room (see
     // `insights_inset_rect`), leaves the screen as it was.
     inset: Option<&crate::animation::Die3dView>,
+    // The bus, for the inset's fill and pulses (`None`: none drawn).
+    inset_world: Option<&dyn tt_toplike_bus::WorldRead>,
     inset_now: f64,
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
@@ -6776,7 +6803,7 @@ fn render_insights(
     if let (Some(view), Some(rect)) = (inset, inset_rect) {
         // The fg and bg are Reset, as in `ui_die3d`, so the terminal's own
         // colour shows in the cells the view leaves unpainted.
-        let widget = Paragraph::new(view.render(inset_now)).style(
+        let widget = Paragraph::new(view.render(inset_world, inset_now)).style(
             Style::default()
                 .fg(ratatui::style::Color::Reset)
                 .bg(ratatui::style::Color::Reset),
@@ -9401,10 +9428,10 @@ mod display_mode_tests {
         let mut mock = crate::backend::mock::MockBackend::new(3);
         mock.init().expect("mock init");
         mock.update().expect("mock update");
-        die3d.as_mut().unwrap().update(&mock, 0.0);
-        assert_eq!(die3d.as_ref().unwrap().render(0.0).len(), 39);
+        die3d.as_mut().unwrap().update(&mock, None, 0.0);
+        assert_eq!(die3d.as_ref().unwrap().render(None, 0.0).len(), 39);
         resize_die3d(&mut die3d, 90, 25);
-        assert_eq!(die3d.as_ref().unwrap().render(0.1).len(), 24);
+        assert_eq!(die3d.as_ref().unwrap().render(None, 0.1).len(), 24);
         // No view (Die 3D not open): nothing is made.
         let mut none: Option<Die3dView> = None;
         resize_die3d(&mut none, 120, 40);
@@ -11139,6 +11166,7 @@ pub fn run_render_bench(
                     false,
                     None,
                     None,
+                    None,
                     0.0,
                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                     &std::collections::HashMap::new(),
@@ -12609,6 +12637,7 @@ mod insights_inset_tests {
                 false,
                 None,
                 inset,
+                None,
                 0.0,
                 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                 &std::collections::HashMap::new(),
@@ -12681,7 +12710,7 @@ mod insights_inset_tests {
         let backend = Fixed::new(n);
         let r = rect_for(w, h, n, zoom).expect("this state has an inset");
         let mut view = crate::animation::Die3dView::inset(r.width as usize, r.height as usize);
-        view.update(&backend, 0.0);
+        view.update(&backend, None, 0.0);
         let with = draw(w, h, n, zoom, Some(&view));
         let without = draw(w, h, n, zoom, None);
 
@@ -12695,7 +12724,7 @@ mod insights_inset_tests {
         }
         // Inside the rect, every cell is what the inset's lines draw there.
         let mut expect = Buffer::empty(Rect::new(0, 0, r.width, r.height));
-        Paragraph::new(view.render(0.0)).render(expect.area, &mut expect);
+        Paragraph::new(view.render(None, 0.0)).render(expect.area, &mut expect);
         let mut any_glyph = false;
         for dy in 0..r.height {
             for dx in 0..r.width {
@@ -12723,8 +12752,8 @@ mod insights_inset_tests {
     fn the_inset_size_draws_a_two_die_board_scene() {
         let backend = Fixed::new(2);
         let mut view = crate::animation::Die3dView::inset(INSET_W as usize, INSET_MIN_H as usize);
-        view.update(&backend, 0.0);
-        let rows = view.render(0.0);
+        view.update(&backend, None, 0.0);
+        let rows = view.render(None, 0.0);
         assert_eq!(rows.len(), INSET_MIN_H as usize);
         let scene_rows = &rows[..rows.len() - 1];
         let braille = scene_rows
@@ -12837,7 +12866,10 @@ mod insights_inset_tests {
         assert!(sync_inset(&mut inset, rect, blackhole));
         // Feed it so it has load calibration and a camera worth keeping.
         for k in 0..20 {
-            inset.as_mut().unwrap().update(&backend, k as f64 * 0.1);
+            inset
+                .as_mut()
+                .unwrap()
+                .update(&backend, None, k as f64 * 0.1);
         }
         let before = inset.as_ref().unwrap().kept_state();
         // Too narrow: hidden (not updated) but kept.

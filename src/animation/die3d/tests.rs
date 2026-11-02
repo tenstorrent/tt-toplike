@@ -41,9 +41,9 @@ fn two_boards() -> Fake {
 fn switched_by_chip_2() -> (Die3dView, Fake) {
     let mut b = two_boards();
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     b.set_power(2, 90.0);
-    v.update(&b, 1.0);
+    v.update(&b, None, 1.0);
     (v, b)
 }
 
@@ -63,8 +63,8 @@ fn render_gives_one_line_per_row_at_any_size() {
         (100, 30),
     ] {
         let mut v = Die3dView::new(c, r);
-        v.update(&b, 0.0);
-        let lines = v.render(0.0);
+        v.update(&b, None, 0.0);
+        let lines = v.render(None, 0.0);
         assert_eq!(lines.len(), r, "{c} x {r}: {:?}", text(&lines));
     }
 }
@@ -75,8 +75,8 @@ fn a_tiny_view_shows_the_summary() {
     // Below SCENE_MIN_CELLS in rows: a scene clipped to four rows would
     // show too little to be worth drawing.
     let mut v = Die3dView::new(30, SCENE_MIN_CELLS.1 - 2);
-    v.update(&b, 0.0);
-    let t = text(&v.render(0.0));
+    v.update(&b, None, 0.0);
+    let t = text(&v.render(None, 0.0));
     assert_eq!(t.len(), SCENE_MIN_CELLS.1 - 2);
     // The Fake backend's four chips (two boards) report 0 W and no PCIe
     // counters: the exact summary lines, then empty rows.
@@ -110,10 +110,10 @@ fn the_theme_changes_the_scene_palette_and_is_not_served_from_the_cache() {
             .unwrap()
     };
     let grey = most_colourful(&v, 1.0);
-    let first = text(&v.render(1.0));
+    let first = text(&v.render(None, 1.0));
     v.set_theme(Theme::Default);
     // Same view time, so only the revision tells the cache the frame is stale.
-    let second = text(&v.render(1.0));
+    let second = text(&v.render(None, 1.0));
     let rainbow = most_colourful(&v, 1.0);
     assert!(rainbow >= 150, "the default theme is colourful: {rainbow}");
     assert!(
@@ -135,7 +135,7 @@ fn the_theme_changes_the_scene_palette_and_is_not_served_from_the_cache() {
 fn two_die_view(cols: usize, rows: usize) -> Die3dView {
     let b = Fake::boards(&["p300"; 2], Some(TDP));
     let mut v = Die3dView::new(cols, rows);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     v
 }
 
@@ -146,7 +146,7 @@ fn two_die_view(cols: usize, rows: usize) -> Die3dView {
 #[test]
 fn a_narrow_tall_window_draws_the_scene_not_the_summary() {
     let v = two_die_view(50, 54);
-    let t = text(&v.render(0.0));
+    let t = text(&v.render(None, 0.0));
     assert_eq!(t.len(), 54);
     assert!(
         t.iter().any(|l| has_braille_dots(l)),
@@ -174,7 +174,7 @@ fn a_window_too_small_for_the_scene_shows_its_middle_and_says_so() {
         need_cols > 20 || need_rows > 10,
         "needs {need_cols}x{need_rows} but 20 x 10 was clipped"
     );
-    let t = text(&v.render(0.0));
+    let t = text(&v.render(None, 0.0));
     assert_eq!(t.len(), 10);
     assert!(t.iter().any(|l| has_braille_dots(l)), "no scene: {t:?}");
     // Under 16 rows there is no footer, so the note is over the last row.
@@ -194,7 +194,7 @@ fn a_clipped_view_with_a_footer_leads_with_the_note() {
     let Shown::Clipped(_, c, r) = shown else {
         panic!("expected a clipped scene at 24 x 17, got {shown:?}");
     };
-    let t = text(&v.render(0.0));
+    let t = text(&v.render(None, 0.0));
     assert_eq!(t.len(), 17);
     let note = clip_note(c, r);
     assert!(
@@ -347,7 +347,7 @@ fn panning_moves_the_window_over_the_whole_picture() {
 #[test]
 fn panning_a_scene_that_fits_changes_nothing() {
     let mut v = p150_view(120, 40);
-    let before = text(&v.render(0.0));
+    let before = text(&v.render(None, 0.0));
     for k in [
         Die3dKey::PanLeft,
         Die3dKey::PanRight,
@@ -357,7 +357,7 @@ fn panning_a_scene_that_fits_changes_nothing() {
         v.handle_key(k, 0.0);
     }
     assert_eq!(v.pan, (0, 0));
-    assert_eq!(text(&v.render(0.0)), before);
+    assert_eq!(text(&v.render(None, 0.0)), before);
 }
 
 /// Insets keep their own size rules: a scene that does not fit them is
@@ -366,7 +366,7 @@ fn panning_a_scene_that_fits_changes_nothing() {
 fn an_inset_is_never_clipped() {
     let b = Fake::boards(&["p300"; 2], Some(TDP));
     let mut v = Die3dView::inset(20, 8);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     assert!(
         v.scene_pixels(0.0).is_none(),
         "a 20 x 8 inset cannot hold the scene and must not clip it"
@@ -378,7 +378,7 @@ fn an_inset_is_never_clipped() {
 fn p150_view(cols: usize, rows: usize) -> Die3dView {
     let b = Fake::boards(&["p150"], Some(TDP));
     let mut v = Die3dView::new(cols, rows);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     v
 }
 
@@ -392,7 +392,7 @@ fn has_braille_dots(line: &str) -> bool {
 #[test]
 fn below_100_by_30_a_scene_is_drawn() {
     let v = p150_view(80, 24);
-    let t = text(&v.render(0.0));
+    let t = text(&v.render(None, 0.0));
     // One line per row: the scene and a one-row footer.
     assert_eq!(t.len(), 24, "{t:?}");
     assert!(
@@ -408,31 +408,31 @@ fn clouds_are_off_below_100_by_30() {
     // W changes the scene rows. Without it the check below could pass on
     // a scene with no clouds at any size.
     let mut v = p150_view(100, 30);
-    let on = text(&v.render(0.0));
+    let on = text(&v.render(None, 0.0));
     v.handle_key(Die3dKey::ToggleClouds, 0.0);
-    let off = text(&v.render(0.0));
+    let off = text(&v.render(None, 0.0));
     assert_ne!(on[..28], off[..28], "clouds not visible at 100 x 30");
     // One column narrower the tier turns them off: W on and W off draw
     // the same frame. The one-row footer has no switch strip, so the
     // footer is the same too.
     let mut v = p150_view(99, 40);
-    let on = text(&v.render(0.0));
+    let on = text(&v.render(None, 0.0));
     assert_eq!(on.len(), 40, "a scene is drawn: {on:?}");
     v.handle_key(Die3dKey::ToggleClouds, 0.0);
-    assert_eq!(text(&v.render(0.0)), on);
+    assert_eq!(text(&v.render(None, 0.0)), on);
 }
 
 #[test]
 fn the_footer_is_one_row_then_none() {
     // 99 x 40: one footer row, the status line, naming the scene.
-    let t = text(&p150_view(99, 40).render(0.0));
+    let t = text(&p150_view(99, 40).render(None, 0.0));
     assert_eq!(t.len(), 40, "{t:?}");
     let last = &t[39];
     assert!(last.starts_with("\u{2551} "), "{last}");
     assert!(last.contains("board 1/1"), "{last}");
     assert!(!t[38].starts_with("\u{2551} "), "{}", t[38]);
     // 59 x 40: no footer. The last line is a scene row.
-    let t = text(&p150_view(59, 40).render(0.0));
+    let t = text(&p150_view(59, 40).render(None, 0.0));
     assert_eq!(t.len(), 40, "{t:?}");
     assert!(
         t.iter()
@@ -445,13 +445,13 @@ fn the_footer_is_one_row_then_none() {
 #[test]
 fn flags_are_off_below_60_by_16() {
     // The control: at 60 x 40 a flag finds room, so its pin shows.
-    let t = text(&p150_view(60, 40).render(0.0));
+    let t = text(&p150_view(60, 40).render(None, 0.0));
     assert!(
         t.iter().any(|l| l.contains('●')),
         "no flag at 60 x 40: {t:?}"
     );
     // One column narrower: no flags at all.
-    let t = text(&p150_view(59, 40).render(0.0));
+    let t = text(&p150_view(59, 40).render(None, 0.0));
     assert_eq!(t.len(), 40, "a scene is drawn: {t:?}");
     assert!(t.iter().all(|l| !l.contains('●')), "{t:?}");
 }
@@ -461,8 +461,8 @@ fn render_with_no_devices_does_not_panic() {
     let b = Fake::boards(&[], Some(TDP));
     let mut v = Die3dView::new(150, 42);
     // Before any update, then after one with no devices.
-    assert_eq!(v.render(0.0).len(), 1);
-    v.update(&b, 0.0);
+    assert_eq!(v.render(None, 0.0).len(), 1);
+    v.update(&b, None, 0.0);
     for k in [
         Die3dKey::NextBoard,
         Die3dKey::PrevBoard,
@@ -473,7 +473,7 @@ fn render_with_no_devices_does_not_panic() {
     ] {
         v.handle_key(k, 0.5);
     }
-    let lines = v.render(0.6);
+    let lines = v.render(None, 0.6);
     assert_eq!(lines.len(), 1);
     assert!(text(&lines)[0].contains("no Tenstorrent device"));
 }
@@ -483,8 +483,8 @@ fn a_non_blackhole_device_is_named_in_the_footer() {
     // Two single-chip cards: a p150 (drawn) and an n150 (not drawn).
     let b = Fake::boards(&["p150", "n150"], Some(TDP));
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
-    let lines = v.render(0.0);
+    v.update(&b, None, 0.0);
+    let lines = v.render(None, 0.0);
     assert_eq!(lines.len(), 42);
     assert!(
         footer(&lines).contains("chip 1: Wormhole (not drawn)"),
@@ -494,8 +494,8 @@ fn a_non_blackhole_device_is_named_in_the_footer() {
     // With no Blackhole at all: the hint plus the same note, nothing else.
     let b = Fake::boards(&["n300", "n300"], Some(TDP));
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
-    let t = text(&v.render(0.0));
+    v.update(&b, None, 0.0);
+    let t = text(&v.render(None, 0.0));
     assert_eq!(t.len(), 2, "{t:?}");
     assert!(t[0].contains("Blackhole"));
     assert!(t[1].contains("chip 0: Wormhole (not drawn)"));
@@ -508,8 +508,8 @@ fn one_chip_without_telemetry_renders() {
     b.telem.clear();
     b.has_smbus = false;
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
-    let lines = v.render(0.0);
+    v.update(&b, None, 0.0);
+    let lines = v.render(None, 0.0);
     assert_eq!(lines.len(), 42);
     // One board: the super scene is that board's scene.
     assert!(footer(&lines).contains("board 1/1"), "{}", footer(&lines));
@@ -533,8 +533,8 @@ fn a_load_rise_in_the_super_scene_switches_to_that_chips_board_at_the_cut_midpoi
     // Still the super scene up to the midpoint, board 2 from it.
     assert_eq!(v.switcher.scene_at(at - 0.01), Scene::All);
     assert_eq!(v.switcher.scene_at(at), Scene::Board(1));
-    assert!(footer(&v.render(at - 0.01)).contains("all boards"));
-    let f = footer(&v.render(at + 0.01));
+    assert!(footer(&v.render(None, at - 0.01)).contains("all boards"));
+    let f = footer(&v.render(None, at + 0.01));
     assert!(f.contains("board 2/2 board-1"), "{f}");
     // A PCIe burst in the super scene cuts the angle but keeps the scene.
     let mut b = two_boards();
@@ -543,12 +543,12 @@ fn a_load_rise_in_the_super_scene_switches_to_that_chips_board_at_the_cut_midpoi
         tx_bytes_per_sec: 0.0,
     });
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     b.pcie = Some(PcieBandwidth {
         rx_bytes_per_sec: 3.0e9,
         tx_bytes_per_sec: 0.0,
     });
-    v.update(&b, 1.0);
+    v.update(&b, None, 1.0);
     assert!(
         v.director.swapped_at().is_some(),
         "the burst cut the camera"
@@ -560,19 +560,19 @@ fn a_load_rise_in_the_super_scene_switches_to_that_chips_board_at_the_cut_midpoi
 fn a_trigger_in_a_board_scene_cuts_only_for_that_boards_chips() {
     let mut b = two_boards();
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     // Show board 1 (chips 2 and 3) by hand.
     v.handle_key(Die3dKey::NextBoard, 0.0);
     v.handle_key(Die3dKey::NextBoard, 0.0);
     assert_eq!(v.switcher.scene_at(0.0), Scene::Board(1));
     // Chip 0 is on board 0: no cut, and no switch.
     b.set_power(0, 90.0);
-    v.update(&b, 1.0);
+    v.update(&b, None, 1.0);
     assert!(v.director.swapped_at().is_none());
     assert_eq!(v.switcher.scene_at(5.0), Scene::Board(1));
     // Chip 3 is on board 1: the camera cuts, the scene stays.
     b.set_power(3, 90.0);
-    v.update(&b, 2.0);
+    v.update(&b, None, 2.0);
     assert!(v.director.swapped_at().is_some());
     assert_eq!(v.switcher.scene_at(5.0), Scene::Board(1));
 }
@@ -606,7 +606,7 @@ fn the_view_feeds_relative_load_to_the_scene_and_the_triggers() {
     // 30 s of idle, ticked four times a second like the TUI might.
     let mut now = 0.0;
     while now < 30.0 {
-        v.update(&b, now);
+        v.update(&b, None, now);
         now += 0.25;
     }
     assert!(v.director.swapped_at().is_none(), "idle must not cut");
@@ -614,7 +614,7 @@ fn the_view_feeds_relative_load_to_the_scene_and_the_triggers() {
     assert_eq!(rest.load, 0.0, "idle is zero load against its own idle");
     // The rise to 68 W.
     b.set_power(0, 68.0);
-    v.update(&b, now);
+    v.update(&b, None, now);
     let busy = v.chips[0][0].clone();
     assert_eq!(busy.load, 1.0, "68 W is full load against a 37 W idle");
     assert!(
@@ -636,7 +636,7 @@ fn a_chip_with_no_power_reading_stays_at_zero_load_and_never_fires() {
     // A minute of quiet is not a cut: only an event is under test.
     v.director.set_idle_turn(false);
     for i in 0..120 {
-        v.update(&b, i as f64 * 0.5);
+        v.update(&b, None, i as f64 * 0.5);
         assert_eq!(v.chips[0][0].load, 0.0);
     }
     assert!(v.director.swapped_at().is_none());
@@ -649,10 +649,10 @@ fn a_busy_chip_that_loses_its_power_reading_reads_zero_load_at_once() {
     b.set_power(0, 37.0);
     let mut v = Die3dView::new(150, 42);
     for i in 0..30 {
-        v.update(&b, i as f64);
+        v.update(&b, None, i as f64);
     }
     b.set_power(0, 68.0);
-    v.update(&b, 30.0);
+    v.update(&b, None, 30.0);
     assert_eq!(v.chips[0][0].load, 1.0);
     let cut = v.director.cut_at();
     assert!(cut.is_some(), "the rise cut the camera");
@@ -661,7 +661,7 @@ fn a_busy_chip_that_loses_its_power_reading_reads_zero_load_at_once() {
     // same second as well as a second later, and no cut.
     b.telem[0].power = None;
     for now in [30.5, 31.0, 32.0, 40.0] {
-        v.update(&b, now);
+        v.update(&b, None, now);
         assert_eq!(v.chips[0][0].load, 0.0, "at {now}");
         assert_eq!(v.director.cut_at(), cut, "at {now}");
     }
@@ -669,10 +669,10 @@ fn a_busy_chip_that_loses_its_power_reading_reads_zero_load_at_once() {
     assert_eq!(v.cloud_intensity, Clouds::intensity(0.0));
     // A NaN reading is no reading either.
     b.set_power(0, 68.0);
-    v.update(&b, 41.0);
+    v.update(&b, None, 41.0);
     assert_eq!(v.chips[0][0].load, 1.0);
     b.telem[0].power = Some(f32::NAN);
-    v.update(&b, 42.0);
+    v.update(&b, None, 42.0);
     assert_eq!(v.chips[0][0].load, 0.0);
 }
 
@@ -680,13 +680,13 @@ fn a_busy_chip_that_loses_its_power_reading_reads_zero_load_at_once() {
 fn a_chip_that_disappears_loses_its_scale() {
     let mut b = two_boards();
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     let mut keys: Vec<usize> = v.scales.keys().copied().collect();
     keys.sort_unstable();
     assert_eq!(keys, [0, 1, 2, 3]);
     // Board 1 (chips 2 and 3) goes away.
     b.devices.truncate(2);
-    v.update(&b, 1.0);
+    v.update(&b, None, 1.0);
     let mut keys: Vec<usize> = v.scales.keys().copied().collect();
     keys.sort_unstable();
     assert_eq!(keys, [0, 1]);
@@ -695,13 +695,13 @@ fn a_chip_that_disappears_loses_its_scale() {
 #[test]
 fn the_view_returns_to_the_super_scene_after_20_seconds_without_triggers() {
     let (mut v, mut b) = switched_by_chip_2();
-    v.update(&b, 1.5);
+    v.update(&b, None, 1.5);
     assert_eq!(v.switcher.scene_at(1.5), Scene::Board(1));
     // 19.9 s after the load rise: still on the board.
-    v.update(&b, 20.9);
+    v.update(&b, None, 20.9);
     assert_eq!(v.switcher.scene_at(20.9), Scene::Board(1));
     // 20 s after it: back to every board.
-    v.update(&b, 21.0);
+    v.update(&b, None, 21.0);
     assert_eq!(v.switcher.scene_at(21.0), Scene::All);
 
     // A load rise on the board on show restarts the 20 s (see
@@ -713,7 +713,7 @@ fn the_view_returns_to_the_super_scene_after_20_seconds_without_triggers() {
 /// has passed its midpoint and chip 2 still draws 90 W.
 fn on_board_1_chosen_by_the_view() -> (Die3dView, Fake) {
     let (mut v, b) = switched_by_chip_2();
-    v.update(&b, 4.0);
+    v.update(&b, None, 4.0);
     assert_eq!(v.switcher.scene_at(4.0), Scene::Board(1));
     assert_eq!(v.director.cut_at(), Some(1.0));
     (v, b)
@@ -725,7 +725,7 @@ fn a_rise_on_another_board_returns_to_all_boards_when_on_an_auto_chosen_board() 
     // Chip 0, on board 0, rises 9 s after the last cut (past the 8 s
     // cooldown): a cut that goes back to every board at its midpoint.
     b.set_power(0, 90.0);
-    v.update(&b, 10.0);
+    v.update(&b, None, 10.0);
     assert_eq!(v.director.cut_at(), Some(10.0), "the rise cut the camera");
     let kind = v.director.transition_kind().unwrap();
     assert_ne!(kind, TransitionKind::Spin, "a scene change is never a spin");
@@ -733,20 +733,20 @@ fn a_rise_on_another_board_returns_to_all_boards_when_on_an_auto_chosen_board() 
     assert_eq!(v.switcher.scene_at(at - 0.01), Scene::Board(1));
     assert_eq!(v.switcher.scene_at(at), Scene::All);
     assert_eq!(v.transition_scenes(10.1), (Scene::Board(1), Scene::All));
-    v.update(&b, at + 0.1);
-    assert!(footer(&v.render(at + 0.1)).contains("all boards"));
+    v.update(&b, None, at + 0.1);
+    assert!(footer(&v.render(None, at + 0.1)).contains("all boards"));
     // Back on every board, the view stays there: no return pending.
-    v.update(&b, 60.0);
+    v.update(&b, None, 60.0);
     assert_eq!(v.switcher.scene_at(60.0), Scene::All);
 
     // Inside the cooldown the rise is ignored: no cut, no switch, and
     // nothing kept for later. The 20 s return still comes, at 21 s.
     let (mut v, mut b) = on_board_1_chosen_by_the_view();
     b.set_power(0, 90.0);
-    v.update(&b, 5.0);
+    v.update(&b, None, 5.0);
     assert_eq!(v.director.cut_at(), Some(1.0));
     assert_eq!(v.switcher.scene_at(5.0), Scene::Board(1));
-    v.update(&b, 12.0);
+    v.update(&b, None, 12.0);
     assert_eq!(v.director.cut_at(), Some(1.0));
     assert_eq!(v.switcher.scene_at(12.0), Scene::Board(1));
 }
@@ -758,15 +758,15 @@ fn a_rise_on_the_board_on_show_does_not_return() {
     // the detector re-armed): the camera cuts, the board stays, and the
     // 20 s return now counts from 10 s.
     b.set_power(2, 0.0);
-    v.update(&b, 6.0);
+    v.update(&b, None, 6.0);
     b.set_power(3, 90.0);
-    v.update(&b, 10.0);
+    v.update(&b, None, 10.0);
     assert_eq!(v.director.cut_at(), Some(10.0));
     for now in [10.5, 15.0, 21.0, 29.9] {
-        v.update(&b, now);
+        v.update(&b, None, now);
         assert_eq!(v.switcher.scene_at(now), Scene::Board(1), "{now}");
     }
-    v.update(&b, 30.0);
+    v.update(&b, None, 30.0);
     assert_eq!(v.switcher.scene_at(30.0), Scene::All);
 }
 
@@ -777,10 +777,10 @@ fn the_return_timer_ignores_rises_on_other_boards() {
     // that chose board 1 (at 1 s).
     let (mut v, mut b) = on_board_1_chosen_by_the_view();
     b.set_power(0, 90.0);
-    v.update(&b, 5.0);
-    v.update(&b, 20.9);
+    v.update(&b, None, 5.0);
+    v.update(&b, None, 20.9);
     assert_eq!(v.switcher.scene_at(20.9), Scene::Board(1));
-    v.update(&b, 21.0);
+    v.update(&b, None, 21.0);
     assert_eq!(v.switcher.scene_at(21.0), Scene::All);
 }
 
@@ -790,7 +790,7 @@ fn the_return_timer_ignores_rises_on_other_boards() {
 fn quiet_two_boards(b: &Fake) -> Die3dView {
     let mut v = Die3dView::new(150, 42);
     v.director.set_idle_turn(false);
-    v.update(b, 0.0);
+    v.update(b, None, 0.0);
     assert!(v.director.cut_at().is_none(), "a quiet start cuts nothing");
     v
 }
@@ -807,11 +807,11 @@ fn a_process_opening_a_device_cuts_with_chaos_and_opens_that_board() {
     let mut b = two_boards();
     let mut v = quiet_two_boards(&b);
     b.open_device(4242, 2); // chip 2 is on board 1
-    v.update(&b, 1.0);
+    v.update(&b, None, 1.0);
     assert_eq!(cut_by_event(&v, 1.0), (Some(Chaos), Scene::Board(1)));
     // The same process closing it is an event too, after the cooldown.
     b.close_device(4242, 2);
-    v.update(&b, 20.0);
+    v.update(&b, None, 20.0);
     assert_eq!(v.director.cut_at(), Some(20.0));
     assert_eq!(v.director.transition_kind(), Some(Chaos));
 }
@@ -821,8 +821,8 @@ fn a_process_already_there_at_the_start_is_not_an_event() {
     let mut b = two_boards();
     b.open_device(1, 0);
     let mut v = quiet_two_boards(&b);
-    v.update(&b, 1.0);
-    v.update(&b, 2.0);
+    v.update(&b, None, 1.0);
+    v.update(&b, None, 2.0);
     assert!(v.director.cut_at().is_none());
 }
 
@@ -833,10 +833,10 @@ fn a_temperature_rise_cuts_with_chaos() {
     b.telem[2].asic_temperature = Some(45.0);
     let mut v = quiet_two_boards(&b);
     b.telem[2].asic_temperature = Some(46.0);
-    v.update(&b, 1.0);
+    v.update(&b, None, 1.0);
     assert!(v.director.cut_at().is_none(), "a degree is not a rise");
     b.telem[2].asic_temperature = Some(52.0);
-    v.update(&b, 2.0);
+    v.update(&b, None, 2.0);
     assert_eq!(cut_by_event(&v, 2.0), (Some(Chaos), Scene::Board(1)));
 }
 
@@ -847,7 +847,7 @@ fn hot_memory_cuts_with_a_dissolve() {
     b.set_gddr_temp(45.0);
     let mut v = quiet_two_boards(&b);
     b.set_gddr_temp(70.0);
-    v.update(&b, 1.0);
+    v.update(&b, None, 1.0);
     let (kind, _) = cut_by_event(&v, 1.0);
     assert_eq!(kind, Some(Dissolve));
 }
@@ -858,13 +858,13 @@ fn an_ethernet_link_change_cuts_with_a_dissolve() {
     let mut b = two_boards();
     b.smbus.eth_live_status = Some(0b0011);
     let mut v = quiet_two_boards(&b);
-    v.update(&b, 1.0);
+    v.update(&b, None, 1.0);
     assert!(
         v.director.cut_at().is_none(),
         "the same links are not a change"
     );
     b.smbus.eth_live_status = Some(0b0111);
-    v.update(&b, 2.0);
+    v.update(&b, None, 2.0);
     let (kind, _) = cut_by_event(&v, 2.0);
     assert_eq!(kind, Some(Dissolve));
 }
@@ -885,7 +885,7 @@ fn a_pcie_burst_cuts_with_chaos_and_keeps_the_scene() {
         rx_bytes_per_sec: 2.0e9,
         tx_bytes_per_sec: 0.0,
     });
-    v.update(&b, 1.0);
+    v.update(&b, None, 1.0);
     assert_eq!(cut_by_event(&v, 1.0), (Some(Chaos), Scene::All));
 }
 
@@ -901,7 +901,7 @@ fn a_forced_transition_mode_beats_the_reason_in_the_view() {
     let mut v = quiet_two_boards(&b);
     v.command("transition", "spin", 0.5);
     b.open_device(7, 0);
-    v.update(&b, 1.0);
+    v.update(&b, None, 1.0);
     // A scene change cannot spin, so a forced spin dissolves it...
     assert_eq!(
         v.director.transition_kind(),
@@ -912,7 +912,7 @@ fn a_forced_transition_mode_beats_the_reason_in_the_view() {
         rx_bytes_per_sec: 2.0e9,
         tx_bytes_per_sec: 0.0,
     });
-    v.update(&b, 20.0);
+    v.update(&b, None, 20.0);
     assert_eq!(v.director.transition_kind(), Some(Spin));
 }
 
@@ -922,7 +922,7 @@ fn a_forced_transition_mode_beats_the_reason_in_the_view() {
 fn a_new_view_holds_braille_and_the_footer_says_so() {
     let v = two_die_view(150, 42);
     assert_eq!(v.cell_style(0.0), CellStyle::Braille);
-    assert!(footer(&v.render(0.0)).contains("/cells braille"));
+    assert!(footer(&v.render(None, 0.0)).contains("/cells braille"));
 }
 
 /// In auto the hardware picks the starting style, and a different hardware
@@ -935,7 +935,7 @@ fn auto_starts_in_a_style_the_hardware_picks() {
             b.set_power(i, watts + i as f32);
         }
         let mut v = Die3dView::new(150, 42).with_cell_mode(CellMode::Auto);
-        v.update(&b, 0.0);
+        v.update(&b, None, 0.0);
         v.cell_style(0.0)
     };
     assert_eq!(start(40.0), start(40.0), "same hardware, same start");
@@ -959,17 +959,17 @@ fn an_event_changes_the_cell_style_after_the_dwell_at_the_cut_swap() {
     });
     let mut v = Die3dView::new(150, 42).with_cell_mode(CellMode::Auto);
     v.director.set_idle_turn(false);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     let start = v.cell_style(0.0);
     // An event inside the dwell cuts the camera but keeps the style.
     b.open_device(1, 0);
-    v.update(&b, 10.0);
+    v.update(&b, None, 10.0);
     assert!(v.director.cut_at() == Some(10.0));
     assert_eq!(v.cell_style(20.0), start, "too soon after the start");
     // After the dwell, a second event changes it from the cut's swap.
     let at = cellmode::MIN_DWELL_SECS + 20.0;
     b.close_device(1, 0);
-    v.update(&b, at);
+    v.update(&b, None, at);
     assert_eq!(v.director.cut_at(), Some(at));
     let swap = v.director.swapped_at().unwrap();
     assert_ne!(
@@ -993,7 +993,7 @@ fn auto_never_picks_half_blocks_in_a_small_view_but_a_choice_is_kept() {
             b.set_power(i, watts + i as f32);
         }
         let mut v = Die3dView::new(cols, rows).with_cell_mode(CellMode::Auto);
-        v.update(&b, 0.0);
+        v.update(&b, None, 0.0);
         v.cell_style(0.0)
     };
     let big: std::collections::HashSet<_> = (0..60)
@@ -1029,7 +1029,7 @@ fn every_cell_style_draws_its_glyphs_and_keeps_the_flags() {
     ] {
         let mut v = two_die_view(150, 42);
         v.command("cells", mode.state(CellStyle::Braille).split(": ").last().unwrap(), 0.0);
-        let lines = v.render(0.0);
+        let lines = v.render(None, 0.0);
         let t = text(&lines);
         assert_eq!(t.len(), 42);
         assert!(
@@ -1058,7 +1058,7 @@ fn quarter_blocks_cover_the_cells_braille_covers() {
         v.command("labels", "off", 0.0);
         v.command("history", "off", 0.0);
         v.command("cells", style, 0.0);
-        v.render(0.0)[..40]
+        v.render(None, 0.0)[..40]
             .iter()
             .map(|l| {
                 l.spans
@@ -1102,13 +1102,13 @@ fn blocks_mode_stays_in_the_block_forms_through_many_events() {
     });
     let mut v = Die3dView::new(150, 42).with_cell_mode(CellMode::Blocks);
     v.director.set_idle_turn(false);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     let mut t = 0.0;
     let mut seen = std::collections::HashSet::new();
     for pid in 0..8 {
         t += cellmode::MIN_DWELL_SECS + 10.0;
         b.open_device(pid, 0);
-        v.update(&b, t);
+        v.update(&b, None, t);
         b.close_device(pid, 0);
         seen.insert(v.cell_style(t + 2.0));
         assert!(v.cell_style(t + 2.0).is_block(), "braille at {t}");
@@ -1122,11 +1122,11 @@ fn blocks_mode_stays_in_the_block_forms_through_many_events() {
 fn a_quiet_view_spins_once_after_the_idle_time() {
     let b = two_boards();
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
-    v.update(&b, camera::IDLE_ROTATE_SECS - 1.0);
+    v.update(&b, None, 0.0);
+    v.update(&b, None, camera::IDLE_ROTATE_SECS - 1.0);
     assert!(v.director.cut_at().is_none(), "not yet");
     let at = camera::IDLE_ROTATE_SECS + 1.0;
-    v.update(&b, at);
+    v.update(&b, None, at);
     assert_eq!(v.director.cut_at(), Some(at));
     assert_eq!(
         v.director.transition_kind(),
@@ -1138,7 +1138,7 @@ fn a_quiet_view_spins_once_after_the_idle_time() {
         "the scene did not change"
     );
     // Not again at once.
-    v.update(&b, at + 2.0);
+    v.update(&b, None, at + 2.0);
     assert_eq!(v.director.cut_at(), Some(at));
 }
 
@@ -1148,7 +1148,7 @@ fn a_hand_chosen_board_is_never_changed_by_activity() {
     let mut v = Die3dView::new(150, 42);
     // Over 40 s of quiet and events: only the events are under test.
     v.director.set_idle_turn(false);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     // Board 1 by hand: `]` opens the board shown last (0), `]` again 1.
     v.handle_key(Die3dKey::NextBoard, 0.0);
     v.handle_key(Die3dKey::NextBoard, 0.0);
@@ -1156,16 +1156,16 @@ fn a_hand_chosen_board_is_never_changed_by_activity() {
     // Rises on board 0, again and again, well apart: no cut, no switch.
     for (on, off) in [(1.0, 5.0), (20.0, 25.0), (40.0, 45.0)] {
         b.set_power(0, 90.0);
-        v.update(&b, on);
+        v.update(&b, None, on);
         b.set_power(0, 0.0);
-        v.update(&b, off);
+        v.update(&b, None, off);
     }
     assert!(v.director.cut_at().is_none());
     // A rise on board 1 cuts the angle only.
     b.set_power(3, 90.0);
-    v.update(&b, 50.0);
+    v.update(&b, None, 50.0);
     assert_eq!(v.director.cut_at(), Some(50.0));
-    v.update(&b, 120.0);
+    v.update(&b, None, 120.0);
     assert_eq!(v.switcher.scene_at(120.0), Scene::Board(1));
 }
 
@@ -1173,28 +1173,28 @@ fn a_hand_chosen_board_is_never_changed_by_activity() {
 fn a_manual_scene_choice_cancels_the_auto_return() {
     // `]` after the automatic switch: the user's board stays.
     let (mut v, b) = switched_by_chip_2();
-    v.update(&b, 1.5);
+    v.update(&b, None, 1.5);
     v.handle_key(Die3dKey::NextBoard, 2.0);
     assert_eq!(v.switcher.scene_at(2.0), Scene::Board(0));
-    v.update(&b, 60.0);
+    v.update(&b, None, 60.0);
     assert_eq!(v.switcher.scene_at(60.0), Scene::Board(0));
 
     // `m` twice: back on the board the view chose, now as the user's.
     let (mut v, b) = switched_by_chip_2();
-    v.update(&b, 1.5);
+    v.update(&b, None, 1.5);
     v.handle_key(Die3dKey::ToggleScene, 2.0);
     assert_eq!(v.switcher.scene_at(2.0), Scene::All);
     v.handle_key(Die3dKey::ToggleScene, 2.1);
     assert_eq!(v.switcher.scene_at(2.1), Scene::Board(1));
-    v.update(&b, 60.0);
+    v.update(&b, None, 60.0);
     assert_eq!(v.switcher.scene_at(60.0), Scene::Board(1));
 
     // `m` before the midpoint cancels the pending switch too.
     let (mut v, b) = switched_by_chip_2();
     v.handle_key(Die3dKey::ToggleScene, 1.1);
-    v.update(&b, 1.5);
+    v.update(&b, None, 1.5);
     assert_eq!(v.switcher.scene_at(1.5), Scene::Board(0));
-    v.update(&b, 60.0);
+    v.update(&b, None, 60.0);
     assert_eq!(v.switcher.scene_at(60.0), Scene::Board(0));
 }
 
@@ -1211,7 +1211,7 @@ fn frames_a_whole_number_of_days_apart_are_identical() {
         tx_bytes_per_sec: 5.0e8,
     });
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     let month = 86_400.0 * 30.0;
     for t0 in [1.3, 7.6, 1234.5678, 86_399.9] {
         let (now, _) = v.scene_pixels(t0).unwrap();
@@ -1232,7 +1232,7 @@ fn resize_keeps_switches_history_and_load_calibration() {
     let mut v = Die3dView::with_reserved_rows(150, 42, 1);
     for t in 0..8 {
         b.set_power(2, 30.0 + t as f32);
-        v.update(&b, t as f64);
+        v.update(&b, None, t as f64);
     }
     // Every switch away from its default, a board chosen by hand.
     for k in [
@@ -1274,8 +1274,8 @@ fn resize_keeps_switches_history_and_load_calibration() {
 fn resize_drops_the_fit_cache_and_redraws_at_once() {
     let b = two_boards();
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
-    assert_eq!(v.render(1.0).len(), 42);
+    v.update(&b, None, 0.0);
+    assert_eq!(v.render(None, 1.0).len(), 42);
     assert!(!v.cache.borrow().fits.is_empty());
     assert!(v.cache.borrow().last.is_some());
     v.resize(120, 36, 0);
@@ -1287,29 +1287,29 @@ fn resize_drops_the_fit_cache_and_redraws_at_once() {
     }
     // 0.01 s later, well inside the frame interval: a fresh frame at the
     // new size, never the old one again.
-    let lines = v.render(1.01);
+    let lines = v.render(None, 1.01);
     assert_eq!(lines.len(), 36);
     assert!(lines[0].width() <= 120);
     // Below 100 x 30 the smaller layout is drawn at once: one line per
     // row, the last the one-row footer. Growing again draws the full
     // layout.
     v.resize(80, 20, 1);
-    let small = text(&v.render(1.02));
+    let small = text(&v.render(None, 1.02));
     assert_eq!(small.len(), 20, "{small:?}");
     assert!(small[19].starts_with("\u{2551} "), "{small:?}");
     v.resize(150, 42, 0);
-    assert_eq!(v.render(1.03).len(), 42);
+    assert_eq!(v.render(None, 1.03).len(), 42);
 }
 
 #[test]
 fn render_during_a_cut_then_new_at_another_size_does_not_panic() {
     let b = two_boards();
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     v.director.set_transition_mode(TransitionMode::Chaos);
     v.handle_key(Die3dKey::CutNow, 5.0);
     assert!(v.director.chaos(5.3).is_some(), "mid-chaos");
-    assert_eq!(v.render(5.3).len(), 42);
+    assert_eq!(v.render(None, 5.3).len(), 42);
     // Every size must render, in every transition, at several points of
     // it: for a view made at that size, and for one resized to it in
     // the middle of the cut (as the TUI does on a terminal resize).
@@ -1321,7 +1321,7 @@ fn render_during_a_cut_then_new_at_another_size_does_not_panic() {
                 TransitionMode::Spin,
             ] {
                 let mut v = Die3dView::new(c, r);
-                v.update(&b, 5.0);
+                v.update(&b, None, 5.0);
                 v.director.set_transition_mode(mode);
                 if !braille {
                     v.handle_key(Die3dKey::ToggleBraille, 5.0);
@@ -1329,23 +1329,23 @@ fn render_during_a_cut_then_new_at_another_size_does_not_panic() {
                 v.handle_key(Die3dKey::CutNow, 5.0);
                 for dt in [0.0, 0.3, 0.7, 1.2, 1.7] {
                     assert_eq!(
-                        v.render(5.0 + dt).len(),
+                        v.render(None, 5.0 + dt).len(),
                         r,
                         "{c} x {r} braille={braille} {mode:?} +{dt}"
                     );
                 }
                 let mut w = Die3dView::new(150, 42);
-                w.update(&b, 5.0);
+                w.update(&b, None, 5.0);
                 w.director.set_transition_mode(mode);
                 if !braille {
                     w.handle_key(Die3dKey::ToggleBraille, 5.0);
                 }
                 w.handle_key(Die3dKey::CutNow, 5.0);
-                w.render(5.3);
+                w.render(None, 5.3);
                 w.resize(c, r, 0);
                 for dt in [0.31, 0.7, 1.2, 1.7] {
                     assert_eq!(
-                        w.render(5.0 + dt).len(),
+                        w.render(None, 5.0 + dt).len(),
                         r,
                         "resized to {c} x {r} braille={braille} {mode:?} +{dt}"
                     );
@@ -1370,16 +1370,16 @@ fn key_to_die3d_maps_only_the_keys_that_mean_the_same_everywhere() {
 fn the_footer_says_estimate_until_per_tile_data_exists() {
     let b = two_boards();
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     let all: Vec<ChipInputs> = v.chips.concat();
     assert!(!has_per_tile_data(&all));
-    assert!(footer(&v.render(0.0)).contains(ESTIMATE_LABEL));
+    assert!(footer(&v.render(None, 0.0)).contains(ESTIMATE_LABEL));
     // Measured data on one chip: the label goes. At 0.1, past the 1/20 s
     // for which `render` would return the frame it drew at 0.0: the data
     // is set here directly, not through a key or a change of boards.
     v.chips[1][0].tile_flow = Some(HashMap::new());
     assert!(has_per_tile_data(&v.chips.concat()));
-    assert!(!footer(&v.render(0.1)).contains(ESTIMATE_LABEL));
+    assert!(!footer(&v.render(None, 0.1)).contains(ESTIMATE_LABEL));
 }
 
 #[test]
@@ -1387,8 +1387,8 @@ fn the_footer_names_the_mode_and_auto_cuts() {
     let b = two_boards();
     // 180 columns: the action keys fit after the switches from 172.
     let mut v = Die3dView::new(180, 42);
-    v.update(&b, 0.0);
-    let f = footer(&v.render(0.0));
+    v.update(&b, None, 0.0);
+    let f = footer(&v.render(None, 0.0));
     for want in [
         "braille",
         "/autocut on",
@@ -1400,7 +1400,7 @@ fn the_footer_names_the_mode_and_auto_cuts() {
     }
     v.handle_key(Die3dKey::ToggleBraille, 0.0);
     v.handle_key(Die3dKey::ToggleAuto, 0.0);
-    let lines = v.render(0.0);
+    let lines = v.render(None, 0.0);
     assert_eq!(lines.len(), 42);
     let f = footer(&lines);
     assert!(
@@ -1417,7 +1417,7 @@ fn render_draws_the_frame_not_the_bare_scene() {
     // would skip the chaos noise, and this would fail.
     let b = Fake::boards(&["p150"], Some(TDP));
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     // Labels and the history panel off: they are drawn over the cells,
     // and the bare scene has neither.
     v.handle_key(Die3dKey::ToggleLabels, 0.0);
@@ -1430,10 +1430,10 @@ fn render_draws_the_frame_not_the_bare_scene() {
     let bare = |t: f64| text(&cells::to_braille_lines(&v.scene_pixels(t).unwrap().0));
     // Mid-cut the rendered rows are scrambled, so they differ from the
     // bare scene at the same instant.
-    assert_ne!(rows(&v.render(mid)), bare(mid));
+    assert_ne!(rows(&v.render(None, mid)), bare(mid));
     // After the transition the chaos is gone and render is the scene.
     let after = 10.0 + camera::CHAOS_SECS + 0.01;
-    assert_eq!(rows(&v.render(after)), bare(after));
+    assert_eq!(rows(&v.render(None, after)), bare(after));
 }
 
 #[test]
@@ -1442,15 +1442,15 @@ fn the_tiers_are_measured_on_the_views_own_area() {
     // A 100 x 30 terminal under a one-row status bar: a 100 x 29 area,
     // which is below the full layout. The footer is one row.
     let mut v = Die3dView::with_reserved_rows(100, 29, 1);
-    v.update(&b, 0.0);
-    let t = text(&v.render(0.0));
+    v.update(&b, None, 0.0);
+    let t = text(&v.render(None, 0.0));
     assert_eq!(t.len(), 29, "{t:?}");
     assert!(t[28].starts_with("\u{2551} "), "{}", t[28]);
     assert!(!t[27].starts_with("\u{2551} "), "{}", t[27]);
     // One more row and the full layout's two-row footer is drawn.
     let mut v = Die3dView::with_reserved_rows(100, 30, 1);
-    v.update(&b, 0.0);
-    let t = text(&v.render(0.0));
+    v.update(&b, None, 0.0);
+    let t = text(&v.render(None, 0.0));
     assert_eq!(t.len(), 30);
     assert!(t[28].starts_with("\u{2551} "), "{}", t[28]);
     assert!(t[29].starts_with("\u{255a}"), "{}", t[29]);
@@ -1461,10 +1461,10 @@ fn the_super_scene_falls_back_to_the_board_scene_when_it_does_not_fit() {
     // Four boards of two dies do not fit at the minimum size.
     let b = Fake::boards(&["p300"; 8], Some(TDP));
     let mut v = Die3dView::new(100, 30);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     let (_, shown) = v.scene_pixels(0.0).expect("the board scene fits");
     assert_eq!(shown, Shown::Fallback(0));
-    let lines = v.render(0.0);
+    let lines = v.render(None, 0.0);
     assert_eq!(lines.len(), 30);
     let f = footer(&lines);
     assert!(f.contains("board 1/4") && f.contains("do not fit"), "{f}");
@@ -1482,18 +1482,18 @@ fn the_super_scene_falls_back_to_the_board_scene_when_it_does_not_fit() {
     assert_eq!(fallback.rgb, board.rgb);
     // At the reference size they fit, and the footer says all boards.
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     assert_eq!(v.scene_pixels(0.0).unwrap().1, Shown::All);
-    assert!(footer(&v.render(0.0)).contains("all boards"));
+    assert!(footer(&v.render(None, 0.0)).contains("all boards"));
 }
 
 #[test]
 fn drawing_uses_the_camera_at_now_until_the_swap() {
     let b = Fake::boards(&["p150"], Some(TDP));
     let mut still = Die3dView::new(150, 42);
-    still.update(&b, 0.0);
+    still.update(&b, None, 0.0);
     let mut cut = Die3dView::new(150, 42);
-    cut.update(&b, 0.0);
+    cut.update(&b, None, 0.0);
     cut.director.set_transition_mode(TransitionMode::Chaos);
     cut.handle_key(Die3dKey::CutNow, 10.0);
     let at = cut.director.swapped_at().unwrap();
@@ -1516,23 +1516,23 @@ fn drawing_uses_the_camera_at_now_until_the_swap() {
 fn chaos_scrambles_the_frame_during_a_cut() {
     let b = Fake::boards(&["p150"], Some(TDP));
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     // No cut yet: the frame is the scene.
     assert_eq!(
-        v.frame(3.0).unwrap().0.rgb,
+        v.frame(3.0, &FxMap::new()).unwrap().0.rgb,
         v.scene_pixels(3.0).unwrap().0.rgb
     );
     v.director.set_transition_mode(TransitionMode::Chaos);
     v.handle_key(Die3dKey::CutNow, 10.0);
     let mid = v.director.swapped_at().unwrap();
     assert_ne!(
-        v.frame(mid).unwrap().0.rgb,
+        v.frame(mid, &FxMap::new()).unwrap().0.rgb,
         v.scene_pixels(mid).unwrap().0.rgb
     );
     // After the transition the frame is clean again.
     let after = 10.0 + camera::CHAOS_SECS + 0.01;
     assert_eq!(
-        v.frame(after).unwrap().0.rgb,
+        v.frame(after, &FxMap::new()).unwrap().0.rgb,
         v.scene_pixels(after).unwrap().0.rgb
     );
 }
@@ -1541,7 +1541,7 @@ fn chaos_scrambles_the_frame_during_a_cut() {
 fn opaque_mode_covers_every_pixel() {
     let b = two_boards();
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     // Transparent (the default): the corner pixel is not covered.
     let (buf, _) = v.scene_pixels(0.0).unwrap();
     assert!(!buf.covered(0, 0));
@@ -1554,14 +1554,14 @@ fn opaque_mode_covers_every_pixel() {
 fn t_toggles_transparency_and_the_footer_says_which() {
     let b = two_boards();
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     assert!(v.transparent);
-    let f = footer(&v.render(0.0));
+    let f = footer(&v.render(None, 0.0));
     assert!(f.contains("transparent") && !f.contains("black"), "{f}");
     assert!(f.contains("/bg transparent"), "key list: {f}");
     v.handle_key(Die3dKey::ToggleTransparent, 0.1);
     assert!(!v.transparent);
-    let f = footer(&v.render(0.2));
+    let f = footer(&v.render(None, 0.2));
     assert!(f.contains("/bg black"), "{f}");
     v.handle_key(Die3dKey::ToggleTransparent, 0.3);
     assert!(v.transparent);
@@ -1581,7 +1581,7 @@ fn strip(v: &Die3dView) -> String {
 fn wide_label_view(cols: usize) -> Die3dView {
     let b = two_boards();
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     v.labels[0] = "abcdefghijkl".to_string();
     v.cols = cols;
     v
@@ -1592,8 +1592,8 @@ fn the_footer_names_every_switch_and_its_state() {
     let b = two_boards();
     // Wide enough for the action keys after every switch.
     let mut v = Die3dView::new(190, 42);
-    v.update(&b, 0.0);
-    let f = footer(&v.render(0.0));
+    v.update(&b, None, 0.0);
+    let f = footer(&v.render(None, 0.0));
     for s in v.switches() {
         let pair = format!("{} {}", s.cmd, s.state);
         assert!(f.contains(&pair), "{pair}: {f}");
@@ -1668,7 +1668,7 @@ fn action_keys_are_dropped_before_switch_states() {
 fn switches_reflect_the_view_state() {
     let b = two_boards();
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     const CMDS: [&str; 8] = [
         "/cells",
         "/bg",
@@ -1797,11 +1797,11 @@ fn the_switch_strip_falls_back_to_bare_then_a_cut() {
 fn opaque_mode_fills_pure_black() {
     let b = two_boards();
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     v.handle_key(Die3dKey::ToggleTransparent, 0.0);
     // Clouds off: they sit on the black fill and would cover corners.
     v.handle_key(Die3dKey::ToggleClouds, 0.0);
-    let lines = v.render(0.0);
+    let lines = v.render(None, 0.0);
     let black = Some(Color::Rgb(0, 0, 0));
     // The scene corners are empty floor: a flat cell on pure black.
     let scene_rows = 42 - FOOTER_ROWS;
@@ -1817,7 +1817,7 @@ fn opaque_mode_fills_pure_black() {
     assert!(buf.covered(0, 0));
     // Half-block too.
     v.handle_key(Die3dKey::ToggleBraille, 0.0);
-    let lines = v.render(0.0);
+    let lines = v.render(None, 0.0);
     assert_eq!(lines[0].spans[0].style.bg, black, "{:?}", lines[0].spans[0]);
 }
 
@@ -1827,8 +1827,10 @@ fn endpoints(v: &Die3dView, now: f64) -> (PixelBuf, PixelBuf) {
     let (from, to) = v.director.cameras();
     let (s0, s1) = v.transition_scenes(now);
     (
-        v.scene_with(now, s0, Aim::At(from)).unwrap().0,
-        v.scene_with(now, s1, Aim::At(to)).unwrap().0,
+        v.scene_with(now, s0, Aim::At(from), &FxMap::new())
+            .unwrap()
+            .0,
+        v.scene_with(now, s1, Aim::At(to), &FxMap::new()).unwrap().0,
     )
 }
 
@@ -1836,7 +1838,7 @@ fn endpoints(v: &Die3dView, now: f64) -> (PixelBuf, PixelBuf) {
 fn a_spin_frame_midway_differs_from_both_endpoints_and_stays_inside() {
     let b = Fake::boards(&["p150"], Some(TDP));
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     v.handle_key(Die3dKey::CycleTransition, 0.0);
     v.handle_key(Die3dKey::CycleTransition, 0.0);
     v.handle_key(Die3dKey::CycleTransition, 0.0);
@@ -1854,7 +1856,7 @@ fn a_spin_frame_midway_differs_from_both_endpoints_and_stays_inside() {
     assert_eq!(v.director.transition_kind(), Some(TransitionKind::Spin));
     let mid = start + TransitionKind::Spin.secs() / 2.0;
     let (old, new) = endpoints(&v, mid);
-    let frame = v.frame(mid).unwrap().0;
+    let frame = v.frame(mid, &FxMap::new()).unwrap().0;
     assert_ne!(frame.rgb, old.rgb);
     assert_ne!(frame.rgb, new.rgb);
     // Pinned to `lerp_view`: the frame is the scene projected part way
@@ -1862,18 +1864,28 @@ fn a_spin_frame_midway_differs_from_both_endpoints_and_stays_inside() {
     let (from, to) = v.director.cameras();
     let p = v.director.progress(mid).unwrap();
     let between = v
-        .scene_with(mid, v.switcher.scene_at(mid), Aim::Between(from, to, p))
+        .scene_with(
+            mid,
+            v.switcher.scene_at(mid),
+            Aim::Between(from, to, p),
+            &FxMap::new(),
+        )
         .unwrap()
         .0;
     assert_eq!(frame.rgb, between.rgb);
     // The frames along the way move: a spin is animated, not a cut. 15
     // frames a tenth of a second apart are mostly distinct.
     let mut frames: Vec<Vec<[u8; 3]>> = (1..16)
-        .map(|k| v.frame(start + k as f64 * 0.1).unwrap().0.rgb)
+        .map(|k| {
+            v.frame(start + k as f64 * 0.1, &FxMap::new())
+                .unwrap()
+                .0
+                .rgb
+        })
         .collect();
     frames.dedup();
     assert!(frames.len() >= 10, "{} distinct of 15", frames.len());
-    assert_eq!(v.render(mid).len(), 42);
+    assert_eq!(v.render(None, mid).len(), 42);
 
     // Every preset to every other, part way along, stays inside the
     // view's own buffer (300 x 160 pixels: 40 braille rows above the
@@ -1966,43 +1978,48 @@ fn a_dissolve_frame_midway_contains_pixels_of_both_frames() {
     // A camera-only cut.
     let b = Fake::boards(&["p150"], Some(TDP));
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     v.director.set_transition_mode(TransitionMode::Dissolve);
     v.handle_key(Die3dKey::CutNow, 10.0);
     let mid = 10.0 + TransitionKind::Dissolve.secs() / 2.0;
     let (old, new) = endpoints(&v, mid);
-    let frame = v.frame(mid).unwrap().0;
+    let frame = v.frame(mid, &FxMap::new()).unwrap().0;
     assert!(only_from(&frame, &old, &new) > 500, "old pixels");
     assert!(only_from(&frame, &new, &old) > 500, "new pixels");
-    assert_eq!(v.render(mid).len(), 42);
+    assert_eq!(v.render(None, mid).len(), 42);
 
     // A scene change: the old frame is every board, the new one board 2.
     let mut b = two_boards();
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     v.director.set_transition_mode(TransitionMode::Dissolve);
     b.set_power(2, 90.0);
-    v.update(&b, 1.0);
+    v.update(&b, None, 1.0);
     assert_eq!(v.director.transition_kind(), Some(TransitionKind::Dissolve));
     // Past the midpoint, after the switch has been committed.
     let late = 1.0 + 0.7;
-    v.update(&b, late);
+    v.update(&b, None, late);
     assert_eq!(v.switcher.scene_at(late), Scene::Board(1));
     assert_eq!(v.transition_scenes(late), (Scene::All, Scene::Board(1)));
     let (old, new) = endpoints(&v, late);
     assert_eq!(
-        v.scene_with(late, Scene::All, Aim::At(v.director.cameras().0))
-            .unwrap()
-            .1,
+        v.scene_with(
+            late,
+            Scene::All,
+            Aim::At(v.director.cameras().0),
+            &FxMap::new()
+        )
+        .unwrap()
+        .1,
         Shown::All
     );
-    let frame = v.frame(late).unwrap().0;
+    let frame = v.frame(late, &FxMap::new()).unwrap().0;
     assert!(only_from(&frame, &old, &new) > 200, "old scene pixels");
     assert!(only_from(&frame, &new, &old) > 200, "new scene pixels");
     // Once it ends only the new scene is left.
     let after = 1.0 + TransitionKind::Dissolve.secs() + 0.01;
     assert_eq!(
-        v.frame(after).unwrap().0.rgb,
+        v.frame(after, &FxMap::new()).unwrap().0.rgb,
         v.scene_pixels(after).unwrap().0.rgb
     );
 }
@@ -2015,7 +2032,7 @@ fn status_row(lines: &[Line<'static>]) -> String {
 /// A view in a fixed transition mode (cut by hand at `at`).
 fn cut_view(b: &Fake, mode: TransitionMode, at: f64) -> Die3dView {
     let mut v = Die3dView::new(150, 42);
-    v.update(b, 0.0);
+    v.update(b, None, 0.0);
     v.director.set_transition_mode(mode);
     v.handle_key(Die3dKey::CutNow, at);
     v
@@ -2025,9 +2042,9 @@ fn cut_view(b: &Fake, mode: TransitionMode, at: f64) -> Die3dView {
 fn the_footer_shows_the_camera_caption() {
     let b = two_boards();
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     // The first camera is preset 0: quarter turn 0 at Iso pitch.
-    let row = status_row(&v.render(0.0));
+    let row = status_row(&v.render(None, 0.0));
     assert!(row.contains("view: front-right"), "{row}");
     // After the scene name and the estimate label.
     let scene = row.find("all boards").unwrap();
@@ -2037,7 +2054,7 @@ fn the_footer_shows_the_camera_caption() {
     // After a cut has finished, it names the new camera.
     v.director.set_transition_mode(TransitionMode::Chaos);
     v.handle_key(Die3dKey::CutNow, 10.0);
-    let row = status_row(&v.render(11.0));
+    let row = status_row(&v.render(None, 11.0));
     let want = format!("view: {}", v.director.camera().side_name());
     assert!(row.contains(&want), "{want}: {row}");
     assert!(!row.contains("->"), "{row}");
@@ -2060,10 +2077,10 @@ fn the_caption_shows_from_and_to_during_a_transition() {
             0.5,
             v.director.transition_kind().unwrap().secs() - 0.05,
         ] {
-            let row = status_row(&v.render(10.0 + dt));
+            let row = status_row(&v.render(None, 10.0 + dt));
             assert!(row.contains(&want), "{mode:?} +{dt}: {row}");
         }
-        let row = status_row(&v.render(12.0));
+        let row = status_row(&v.render(None, 12.0));
         assert!(row.contains(&format!("view: {}", to.side_name())), "{row}");
         assert!(!row.contains("->"), "{row}");
     }
@@ -2113,7 +2130,7 @@ fn the_caption_is_never_cut_and_the_note_never_left_as_a_stub() {
     // captions, short and long (`top-down, ...` is the longest name).
     let b = Fake::boards(&["e150", "n150", "p150"], Some(TDP));
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     let note = v.undrawn_note();
     let mut kinds = std::collections::HashSet::new();
     for k in 0..12 {
@@ -2189,14 +2206,14 @@ fn each_die_gets_a_flag_with_its_name_and_power() {
     b.set_power(1, 51.6);
     for braille in [true, false] {
         let mut v = Die3dView::new(150, 42);
-        v.update(&b, 0.0);
+        v.update(&b, None, 0.0);
         // The history panel lists the chip names too: off, so only the
         // flags are found.
         v.handle_key(Die3dKey::ToggleHistory, 0.0);
         if !braille {
             v.handle_key(Die3dKey::ToggleBraille, 0.0);
         }
-        let lines = v.render(0.0);
+        let lines = v.render(None, 0.0);
         let found = labels_in(&lines, 40);
         let texts: Vec<&str> = found.iter().map(|f| f.2.as_str()).collect();
         assert_eq!(texts, ["BH0 44W", "BH1 52W"], "braille={braille}");
@@ -2224,9 +2241,9 @@ fn each_die_gets_a_flag_with_its_name_and_power() {
     let mut b = Fake::boards(&["p150"], Some(TDP));
     b.telem[0].power = None;
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     v.handle_key(Die3dKey::ToggleHistory, 0.0);
-    let found = labels_in(&v.render(0.0), 40);
+    let found = labels_in(&v.render(None, 0.0), 40);
     assert_eq!(
         found.iter().map(|f| f.2.as_str()).collect::<Vec<_>>(),
         ["BH0"]
@@ -2245,14 +2262,17 @@ fn labels_are_hidden_during_a_transition() {
         // The history panel stays through a transition and lists the
         // chip names: off, so only the labels are found.
         v.handle_key(Die3dKey::ToggleHistory, 0.0);
-        assert!(!labels_in(&v.render(9.9), 40).is_empty(), "{mode:?} before");
+        assert!(
+            !labels_in(&v.render(None, 9.9), 40).is_empty(),
+            "{mode:?} before"
+        );
         let secs = v.director.transition_kind().unwrap().secs();
         for dt in [0.0, 0.2, secs / 2.0, secs - 0.01] {
-            let found = labels_in(&v.render(10.0 + dt), 40);
+            let found = labels_in(&v.render(None, 10.0 + dt), 40);
             assert!(found.is_empty(), "{mode:?} +{dt}: {found:?}");
         }
         assert!(
-            !labels_in(&v.render(10.0 + secs), 40).is_empty(),
+            !labels_in(&v.render(None, 10.0 + secs), 40).is_empty(),
             "{mode:?} after"
         );
     }
@@ -2270,7 +2290,7 @@ fn labels_never_overwrite_the_footer_rows_or_leave_the_view() {
         for b in [&one, &four] {
             for braille in [true, false] {
                 let mut v = Die3dView::new(c, r);
-                v.update(b, 0.0);
+                v.update(b, None, 0.0);
                 v.director.set_auto(false);
                 if !braille {
                     v.handle_key(Die3dKey::ToggleBraille, 0.0);
@@ -2281,7 +2301,7 @@ fn labels_never_overwrite_the_footer_rows_or_leave_the_view() {
                     if k > 0 {
                         v.handle_key(Die3dKey::CutNow, now - 5.0);
                     }
-                    let lines = v.render(now);
+                    let lines = v.render(None, now);
                     assert_eq!(lines.len(), r);
                     let t = text(&lines);
                     let scene_rows = r - FOOTER_ROWS;
@@ -2328,6 +2348,7 @@ fn labels_never_overwrite_the_footer_rows_or_leave_the_view() {
             rise,
             left,
             text: t.to_string(),
+            accent: None,
         })
     };
     let flags = vec![
@@ -2339,7 +2360,9 @@ fn labels_never_overwrite_the_footer_rows_or_leave_the_view() {
         flag((3, 2), 1, true, "BH0 123W"),
         None,
     ];
-    draw_flags(&mut lines, scene_rows, width, &flags, style, style);
+    draw_flags(&mut lines, scene_rows, width, &flags, style, style, &|_| {
+        style
+    });
     let after = text(&lines);
     assert_eq!(after[scene_rows..], before[scene_rows..], "footer rows");
     assert!(
@@ -2372,7 +2395,7 @@ fn flags_never_cover_a_drawn_cell_but_the_pin() {
         for b in [&one, &four] {
             for braille in [true, false] {
                 let mut v = Die3dView::new(c, r);
-                v.update(b, 0.0);
+                v.update(b, None, 0.0);
                 v.director.set_auto(false);
                 v.handle_key(Die3dKey::ToggleClouds, 0.0);
                 v.handle_key(Die3dKey::ToggleHistory, 0.0);
@@ -2385,9 +2408,9 @@ fn flags_never_cover_a_drawn_cell_but_the_pin() {
                         v.handle_key(Die3dKey::CutNow, now - 5.0);
                     }
                     v.handle_key(Die3dKey::ToggleLabels, now);
-                    let off = text(&v.render(now));
+                    let off = text(&v.render(None, now));
                     v.handle_key(Die3dKey::ToggleLabels, now);
-                    let on = text(&v.render(now));
+                    let on = text(&v.render(None, now));
                     for (row, (a, b)) in off.iter().zip(&on).enumerate().take(r - FOOTER_ROWS) {
                         for (col, (x, y)) in a.chars().zip(b.chars()).enumerate() {
                             if x == y {
@@ -2414,7 +2437,7 @@ fn flags_never_cover_a_drawn_cell_but_the_pin() {
 fn labels_stay_transparent_in_transparent_mode() {
     let b = Fake::boards(&["p150"], Some(TDP));
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     // The history panel's rows name the chip too, in its own style.
     v.handle_key(Die3dKey::ToggleHistory, 0.0);
     let label_span = |lines: &[Line<'static>]| {
@@ -2425,13 +2448,13 @@ fn labels_stay_transparent_in_transparent_mode() {
             .cloned()
             .expect("a label span")
     };
-    let s = label_span(&v.render(0.0));
+    let s = label_span(&v.render(None, 0.0));
     assert_eq!(s.style.bg, Some(Color::Reset), "{s:?}");
     assert_eq!(s.style.fg, Some(rgb(GRAYSKULL.white)), "{s:?}");
     assert!(s.style.add_modifier.contains(Modifier::BOLD), "{s:?}");
     // Opaque: the label stands on the black fill.
     v.handle_key(Die3dKey::ToggleTransparent, 0.0);
-    let s = label_span(&v.render(0.0));
+    let s = label_span(&v.render(None, 0.0));
     assert_eq!(s.style.bg, Some(rgb(OPAQUE_BG)), "{s:?}");
 }
 
@@ -2443,19 +2466,19 @@ fn the_labels_command_toggles_labels_and_the_footer_says_which() {
     assert!(Die3dKey::ToggleLabels.toggles());
     let b = two_boards();
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     // The history panel lists the chip names too: off, so only the
     // labels are found.
     v.command("history", "off", 0.0);
-    let lines = v.render(0.0);
+    let lines = v.render(None, 0.0);
     assert!(footer(&lines).contains("/labels on"), "{}", footer(&lines));
     assert!(!labels_in(&lines, 40).is_empty());
     v.command("labels", "", 0.0);
-    let lines = v.render(0.0);
+    let lines = v.render(None, 0.0);
     assert!(footer(&lines).contains("/labels off"), "{}", footer(&lines));
     assert!(labels_in(&lines, 40).is_empty());
     v.command("labels", "", 0.0);
-    assert!(!labels_in(&v.render(0.0), 40).is_empty());
+    assert!(!labels_in(&v.render(None, 0.0), 40).is_empty());
 }
 
 #[test]
@@ -2498,9 +2521,9 @@ fn a_hand_cut_while_a_scene_switch_is_pending_never_spins_or_jumps_mid_turn() {
         let mut b = two_boards();
         let mut v = Die3dView::new(150, 42);
         v.director = Director::new(seed);
-        v.update(&b, 0.0);
+        v.update(&b, None, 0.0);
         b.set_power(2, 90.0);
-        v.update(&b, 1.0);
+        v.update(&b, None, 1.0);
         // The load rise cut and scheduled the switch, still pending.
         assert_eq!(v.switcher.scene_at(1.1), Scene::All, "seed {seed}");
         assert_eq!(v.switcher.scene_at(5.0), Scene::Board(1), "seed {seed}");
@@ -2519,7 +2542,7 @@ fn the_caption_outranks_the_not_drawn_note_during_a_cut() {
     // and one Blackhole that it does.
     let b = Fake::boards(&["e150", "n150", "p150"], Some(TDP));
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     let note = v.undrawn_note();
     assert!(
         note.contains("Grayskull") && note.contains("Wormhole"),
@@ -2529,7 +2552,7 @@ fn the_caption_outranks_the_not_drawn_note_during_a_cut() {
     v.handle_key(Die3dKey::CutNow, 10.0);
     let (from, to) = v.director.cameras();
     let caption = format!("view: {} -> {}", from.side_name(), to.side_name());
-    let row = status_row(&v.render(10.3));
+    let row = status_row(&v.render(None, 10.3));
     assert!(row.chars().count() <= 150, "{row}");
     assert!(row.contains(&caption), "{row}");
     assert!(row.contains("view:") && row.contains("->"), "{row}");
@@ -2541,7 +2564,7 @@ fn the_caption_outranks_the_not_drawn_note_during_a_cut() {
     let at_note = row.find("chip 0: Grayskull").expect("the note's start");
     assert!(row.find(&caption).unwrap() < at_note, "{row}");
     // At rest the shorter caption and the whole note both fit.
-    let row = status_row(&v.render(20.0));
+    let row = status_row(&v.render(None, 20.0));
     assert!(row.contains("view: ") && row.contains(&note), "{row}");
 }
 
@@ -2551,7 +2574,7 @@ fn the_transition_command_cycles_the_mode_and_the_footer_says_which() {
     assert!(Die3dKey::CycleTransition.toggles());
     let b = two_boards();
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     for (want_state, want_mode) in [
         ("rotate", TransitionMode::Rotate),
         ("chaos", TransitionMode::Chaos),
@@ -2560,7 +2583,7 @@ fn the_transition_command_cycles_the_mode_and_the_footer_says_which() {
         ("rotate", TransitionMode::Rotate),
     ] {
         assert_eq!(v.director.transition_mode(), want_mode);
-        let f = footer(&v.render(0.0));
+        let f = footer(&v.render(None, 0.0));
         assert!(f.contains(&format!("/transition {want_state}")), "{f}");
         v.command("transition", "", 0.0);
     }
@@ -2570,7 +2593,7 @@ fn the_transition_command_cycles_the_mode_and_the_footer_says_which() {
 /// test moves the camera.
 fn cloud_view(b: &Fake) -> Die3dView {
     let mut v = Die3dView::new(150, 42);
-    v.update(b, 0.0);
+    v.update(b, None, 0.0);
     v.director.set_auto(false);
     v
 }
@@ -2590,8 +2613,8 @@ fn the_offset_integrates_speed_so_a_speed_change_never_jumps() {
                 tx_bytes_per_sec: 1.0e9,
             });
         }
-        v.update(&b, now);
-        v.render(now);
+        v.update(&b, None, now);
+        v.render(None, now);
         offsets.push((now, v.cloud_clock.get().offset_px()));
     }
     // Continuous: no tick moves the clouds more than one clock step at
@@ -2622,11 +2645,11 @@ fn the_view_brightens_the_clouds_with_chip_load() {
     // The busiest chip sets the brightness: 90 W of 100 W is a load of
     // 0.9 while the load scale is still filling, so an intensity of 0.7.
     b.set_power(1, 90.0);
-    v.update(&b, 0.5);
+    v.update(&b, None, 0.5);
     // Taken up at the clock's next step, a quarter second on.
-    v.render(0.6);
+    v.render(None, 0.6);
     assert_eq!(v.cloud_clock.get().intensity(), 0.25);
-    v.render(0.75);
+    v.render(None, 0.75);
     let shown = v.cloud_clock.get().intensity();
     assert!((shown - 0.7).abs() < 1e-6, "{shown}");
 }
@@ -2639,8 +2662,8 @@ fn clouds_never_paint_over_the_die() {
         if !transparent {
             v.handle_key(Die3dKey::ToggleTransparent, 0.0);
         }
-        v.render(0.0);
-        v.render(30.0);
+        v.render(None, 0.0);
+        v.render(None, 30.0);
         assert!(v.cloud_clock.get().offset_px() > 0.0);
         let (on, _) = v.scene_pixels(30.0).unwrap();
         v.handle_key(Die3dKey::ToggleClouds, 30.0);
@@ -2668,17 +2691,17 @@ fn the_clouds_command_toggles_clouds_and_the_footer_says_which() {
     let b = two_boards();
     let mut v = cloud_view(&b);
     assert!(v.show_clouds, "on by default");
-    let f = footer(&v.render(0.0));
+    let f = footer(&v.render(None, 0.0));
     assert!(f.contains("/clouds on"), "{f}");
     let with = v.scene_pixels(0.0).unwrap().0;
     v.command("clouds", "", 0.1);
-    let f = footer(&v.render(0.1));
+    let f = footer(&v.render(None, 0.1));
     assert!(f.contains("/clouds off"), "{f}");
     let without = v.scene_pixels(0.1).unwrap().0;
     let covered = |b: &PixelBuf| b.cover.iter().filter(|c| **c).count();
     assert!(covered(&with) > covered(&without) + 1000);
     v.command("clouds", "", 0.2);
-    assert!(footer(&v.render(0.2)).contains("/clouds on"));
+    assert!(footer(&v.render(None, 0.2)).contains("/clouds on"));
 }
 
 #[test]
@@ -2690,9 +2713,9 @@ fn chip_labels_stay_readable_over_clouds() {
             v.handle_key(Die3dKey::ToggleTransparent, 0.0);
         }
         let now = 12.0;
-        let lines = v.render(now);
-        let placed = v.frame(now).unwrap().2.unwrap();
-        let flags = v.flag_layout(&placed, v.rows - FOOTER_ROWS);
+        let lines = v.render(None, now);
+        let placed = v.frame(now, &FxMap::new()).unwrap().2.unwrap();
+        let flags = v.flag_layout(&placed, v.rows - FOOTER_ROWS, false);
         assert_eq!(flags.iter().flatten().count(), 4);
         let want = if transparent {
             Color::Reset
@@ -2724,11 +2747,11 @@ fn a_cloud_step_redraws_at_once_and_a_still_sky_does_not() {
     // and no packet moves. Frames 1/120 s apart for 5 s.
     let b = Fake::boards(&["p150"], Some(TDP));
     let v = cloud_view(&b);
-    let mut prev = (v.cloud_clock.get().offset_px(), text(&v.render(1.0)));
+    let mut prev = (v.cloud_clock.get().offset_px(), text(&v.render(None, 1.0)));
     let mut steps = 0;
     for i in 1..600 {
         let now = 1.0 + i as f64 / 120.0;
-        let lines = text(&v.render(now));
+        let lines = text(&v.render(None, now));
         let offset = v.cloud_clock.get().offset_px();
         if offset != prev.0 {
             // A step is shown in the very frame it happens, even when
@@ -2747,7 +2770,7 @@ fn a_cloud_step_redraws_at_once_and_a_still_sky_does_not() {
     let mut drawn = 0;
     let mut last = drawn_at(&v);
     for i in 0..120 {
-        v.render(10.0 + i as f64 / 120.0);
+        v.render(None, 10.0 + i as f64 / 120.0);
         drawn += (drawn_at(&v) != last) as usize;
         last = drawn_at(&v);
     }
@@ -2797,9 +2820,9 @@ fn the_panel_lists_each_blackhole_chip_with_its_latest_values() {
     for t in 0..5 {
         b.set_power(0, 40.0 + 2.5 * t as f32);
         b.telem[0].asic_temperature = Some(52.0 + t as f32);
-        v.update(&b, t as f64);
+        v.update(&b, None, t as f64);
     }
-    let rows = panel_text(&v.render(4.0), 5);
+    let rows = panel_text(&v.render(None, 4.0), 5);
     assert_eq!(rows[0], history::TITLE, "{rows:#?}");
     // The chip: its name, the rising power as a sparkline whose newest
     // sample is the highest block, then the latest watts and degrees.
@@ -2820,7 +2843,7 @@ fn the_panel_lists_each_blackhole_chip_with_its_latest_values() {
     // At most six chips: eight p300 chips list BH0 to BH5.
     let b = Fake::boards(&["p300"; 8], Some(TDP));
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     let rows = v.history.panel_rows();
     assert_eq!(rows.len(), 1 + 6 + 2, "{rows:#?}");
     for (i, row) in rows[1..7].iter().enumerate() {
@@ -2839,11 +2862,11 @@ fn the_panel_is_hidden_below_120_columns_or_36_rows_and_when_off() {
         (150, 42, true),
     ] {
         let mut v = Die3dView::new(c, r);
-        v.update(&b, 0.0);
-        assert_eq!(has_panel(&v.render(0.0)), shown, "{c} x {r}");
+        v.update(&b, None, 0.0);
+        assert_eq!(has_panel(&v.render(None, 0.0)), shown, "{c} x {r}");
         if shown {
             v.handle_key(Die3dKey::ToggleHistory, 0.0);
-            assert!(!has_panel(&v.render(0.0)), "{c} x {r} with H off");
+            assert!(!has_panel(&v.render(None, 0.0)), "{c} x {r} with H off");
         }
     }
 }
@@ -2880,8 +2903,8 @@ fn the_panel_never_touches_the_footer_rows_or_leaves_the_scene_area() {
                     .into_iter()
                     .map(|on| {
                         let mut v = Die3dView::new(c, r);
-                        v.update(b, 0.0);
-                        v.update(b, 1.0);
+                        v.update(b, None, 0.0);
+                        v.update(b, None, 1.0);
                         v.director.set_auto(false);
                         if !braille {
                             v.handle_key(Die3dKey::ToggleBraille, 1.0);
@@ -2917,7 +2940,7 @@ fn the_panel_never_touches_the_footer_rows_or_leaves_the_scene_area() {
                             }
                             assert!(views[0].director.progress(now).is_some());
                         }
-                        let frames: Vec<_> = views.iter().map(|v| v.render(now)).collect();
+                        let frames: Vec<_> = views.iter().map(|v| v.render(None, now)).collect();
                         let (on, off) = (cells(&frames[0]), cells(&frames[1]));
                         assert_eq!(on.len(), r);
                         for (row, (a, z)) in on.iter().zip(&off).enumerate() {
@@ -2981,7 +3004,7 @@ fn the_panel_never_touches_the_footer_rows_or_leaves_the_scene_area() {
 fn flags_win_over_the_panel_where_they_overlap() {
     let b = Fake::boards(&["p150"], Some(TDP));
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     let scene_rows = 40;
     let mut lines: Vec<Line<'static>> = (0..42)
         .map(|_| Line::from(Span::raw(" ".repeat(150))))
@@ -2994,6 +3017,7 @@ fn flags_win_over_the_panel_where_they_overlap() {
         rise: 3,
         left: false,
         text: label.to_string(),
+        accent: None,
     };
     v.overlay(&mut lines, scene_rows, &[Some(flag)]);
     let row: Vec<(char, Style)> = lines[PANEL_TOP]
@@ -3023,14 +3047,14 @@ fn the_panel_background_is_reset_when_transparent_and_black_when_opaque() {
         tx_bytes_per_sec: 1.3e7,
     });
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
-    v.update(&b, 1.0);
+    v.update(&b, None, 0.0);
+    v.update(&b, None, 1.0);
     let rows = v.history.panel_rows();
     for (transparent, bg) in [(true, Color::Reset), (false, rgb(OPAQUE_BG))] {
         if !transparent {
             v.handle_key(Die3dKey::ToggleTransparent, 1.0);
         }
-        let lines = v.render(1.0);
+        let lines = v.render(None, 1.0);
         for (i, want) in rows.iter().enumerate() {
             let row: Vec<(char, Style)> = lines[PANEL_TOP + i]
                 .spans
@@ -3058,13 +3082,13 @@ fn the_history_command_toggles_history_and_the_footer_says_which() {
     assert!(Die3dKey::ToggleHistory.toggles());
     let b = Fake::boards(&["p150"], Some(TDP));
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, 0.0);
+    v.update(&b, None, 0.0);
     assert!(v.show_history, "on by default");
-    let lines = v.render(0.0);
+    let lines = v.render(None, 0.0);
     assert!(footer(&lines).contains("/history on"), "{}", footer(&lines));
     assert!(has_panel(&lines));
     v.command("history", "", 0.0);
-    let lines = v.render(0.0);
+    let lines = v.render(None, 0.0);
     assert!(
         footer(&lines).contains("/history off"),
         "{}",
@@ -3072,7 +3096,7 @@ fn the_history_command_toggles_history_and_the_footer_says_which() {
     );
     assert!(!has_panel(&lines));
     v.command("history", "", 0.0);
-    assert!(has_panel(&v.render(0.0)));
+    assert!(has_panel(&v.render(None, 0.0)));
 }
 
 #[test]
@@ -3088,33 +3112,33 @@ fn a_new_sample_is_drawn_at_once_and_a_hidden_panel_forces_no_frame() {
     // Clouds off: their steps also force frames, and would blur this.
     let mut v = cloud_view(&b);
     v.handle_key(Die3dKey::ToggleClouds, 0.0);
-    v.update(&b, 1.0);
-    let before = v.render(1.98);
+    v.update(&b, None, 1.0);
+    let before = v.render(None, 1.98);
     assert!(panel_text(&before, 3)[2].ends_with("100 MB/s"));
     // A new sample 0.02 s after the last frame, well inside the 1/20 s
     // the throttle would otherwise hold that frame for.
     b.pcie = rate(1.2e8);
-    v.update(&b, 2.0);
-    let after = v.render(2.0);
+    v.update(&b, None, 2.0);
+    let after = v.render(None, 2.0);
     let rows = panel_text(&after, 3);
     assert!(rows[2].ends_with("120 MB/s"), "{rows:#?}");
     // An unchanged panel forces nothing: the same frame inside 1/20 s.
-    assert_eq!(text(&v.render(2.03)), text(&after));
+    assert_eq!(text(&v.render(None, 2.03)), text(&after));
     // With the panel off a sample is taken but forces no frame.
     v.handle_key(Die3dKey::ToggleHistory, 2.5);
-    let hidden = text(&v.render(2.97));
+    let hidden = text(&v.render(None, 2.97));
     let revision = v.history.revision();
     b.pcie = rate(1.4e8);
-    v.update(&b, 3.0);
+    v.update(&b, None, 3.0);
     assert_eq!(v.history.revision(), revision + 1, "the sample was taken");
-    assert_eq!(text(&v.render(3.0)), hidden);
+    assert_eq!(text(&v.render(None, 3.0)), hidden);
 }
 
 /// An inset over `b` that has read it once a second from 0 to `secs`.
 fn inset_over(b: &Fake, cols: usize, rows: usize, secs: u32) -> Die3dView {
     let mut v = Die3dView::inset(cols, rows);
     for s in 0..=secs {
-        v.update(b, s as f64);
+        v.update(b, None, s as f64);
     }
     v
 }
@@ -3164,7 +3188,7 @@ fn the_inset_draws_all_boards_when_they_fit() {
     assert_eq!(got.rgb, want.rgb);
     assert_eq!(got.cover, want.cover);
     // The frame is that scene, row for row, then the caption.
-    let t = text(&v.render(now));
+    let t = text(&v.render(None, now));
     assert_eq!(t.len(), rows);
     assert_eq!(t[..rows - 1], braille_text(&want)[..]);
 }
@@ -3180,7 +3204,7 @@ fn a_two_die_board_draws_a_scene_in_the_inset() {
     let (_, shown) = v.scene_pixels(3.0).expect("the scene fits");
     // One board: its own scene (no fallback from a bigger one).
     assert_eq!(shown, Shown::Board(0));
-    let t = text(&v.render(3.0));
+    let t = text(&v.render(None, 3.0));
     assert_eq!(t.len(), 16);
     let braille = t[..15]
         .iter()
@@ -3208,33 +3232,35 @@ fn the_inset_shows_the_busiest_board_when_all_do_not_fit() {
     let mut v = Die3dView::inset(42, 14);
     // Five idle seconds calibrate every chip's idle at 37 W.
     for s in 0..5 {
-        v.update(&b, s as f64);
+        v.update(&b, None, s as f64);
     }
     // Chip 0 (board 0) is busy first, so board 0 is the first strictly
     // busiest board and is shown at once.
     b.set_power(0, 90.0);
     for s in 5..=6 {
-        v.update(&b, s as f64);
+        v.update(&b, None, s as f64);
     }
     assert_eq!(v.scene_pixels(6.0).unwrap().1, Shown::Fallback(0));
     // Chip 3 (board 3) is busy from 7 s on.
     b.set_power(0, IDLE_W);
     b.set_power(3, 90.0);
     for s in 7..=16 {
-        v.update(&b, s as f64);
+        v.update(&b, None, s as f64);
     }
     // Busiest for 9 s: the board shown is still board 0.
     assert_eq!(v.scene_pixels(16.0).unwrap().1, Shown::Fallback(0));
     for s in 17..=18 {
-        v.update(&b, s as f64);
+        v.update(&b, None, s as f64);
     }
     let now = 18.0;
     let (got, shown) = v.scene_pixels(now).unwrap();
     assert_eq!(shown, Shown::Fallback(3));
     let camera = Aim::At(v.director.camera_at(now));
-    let (want, _, _) = v.scene_with(now, Scene::Board(3), camera).unwrap();
+    let (want, _, _) = v
+        .scene_with(now, Scene::Board(3), camera, &FxMap::new())
+        .unwrap();
     assert_eq!(got.rgb, want.rgb);
-    let t = text(&v.render(now));
+    let t = text(&v.render(None, now));
     assert_eq!(t[..13], braille_text(&want)[..]);
 }
 
@@ -3246,18 +3272,22 @@ fn the_inset_never_changes_scene_on_a_trigger() {
     let (cols, rows) = smallest_inset_for_all(&[2, 2]);
     let mut v = inset_over(&b, cols, rows, 0);
     b.set_power(2, 90.0);
-    v.update(&b, 1.0);
+    v.update(&b, None, 1.0);
     assert_eq!(v.director.cut_at(), Some(1.0), "the rise cut the camera");
     assert_eq!(v.switcher.scene_at(10.0), Scene::All);
     for now in [1.0, 1.5, 2.0, 5.0] {
-        assert_eq!(v.scene_now(now).unwrap().1, Shown::All, "at {now}");
+        assert_eq!(
+            v.scene_now(now, &FxMap::new()).unwrap().1,
+            Shown::All,
+            "at {now}"
+        );
     }
     // The inset reads its scene through `scene_at`, never from the
     // switcher. Nothing in an inset moves the switcher; moved here by
     // hand, it still leaves every board on show, still, mid-spin and
     // mid-dissolve.
     v.switcher.choose(Scene::Board(1));
-    assert_eq!(v.scene_now(6.0).unwrap().1, Shown::All);
+    assert_eq!(v.scene_now(6.0, &FxMap::new()).unwrap().1, Shown::All);
     for (mode, at) in [
         (TransitionMode::Spin, 10.0),
         (TransitionMode::Dissolve, 20.0),
@@ -3265,7 +3295,7 @@ fn the_inset_never_changes_scene_on_a_trigger() {
         v.director.set_transition_mode(mode);
         v.director.cut_by_hand(at);
         assert!(v.director.progress(at + 0.2).is_some());
-        let (_, shown, _) = v.frame(at + 0.2).unwrap();
+        let (_, shown, _) = v.frame(at + 0.2, &FxMap::new()).unwrap();
         assert_eq!(shown, Shown::All, "{mode:?}");
     }
     // Eight boards that do not fit: board 3's chip rises, so board 3 is
@@ -3273,10 +3303,13 @@ fn the_inset_never_changes_scene_on_a_trigger() {
     let mut b = Fake::boards(&["p150"; 8], Some(TDP));
     let mut v = inset_over(&b, 42, 14, 0);
     b.set_power(3, 90.0);
-    v.update(&b, 1.0);
+    v.update(&b, None, 1.0);
     assert_eq!(v.director.cut_at(), Some(1.0), "the rise cut the camera");
     assert_eq!(v.switcher.scene_at(10.0), Scene::All);
-    assert_eq!(v.scene_now(5.0).unwrap().1, Shown::Fallback(3));
+    assert_eq!(
+        v.scene_now(5.0, &FxMap::new()).unwrap().1,
+        Shown::Fallback(3)
+    );
 }
 
 #[test]
@@ -3287,20 +3320,29 @@ fn a_hidden_inset_does_not_promote_a_stale_board_when_it_shows_again() {
     }
     let mut v = inset_over(&b, 42, 14, 4);
     b.set_power(0, 90.0);
-    v.update(&b, 5.0);
-    assert_eq!(v.scene_now(5.0).unwrap().1, Shown::Fallback(0));
+    v.update(&b, None, 5.0);
+    assert_eq!(
+        v.scene_now(5.0, &FxMap::new()).unwrap().1,
+        Shown::Fallback(0)
+    );
     // Board 3 leads for 9 s while the inset is shown, then it is hidden.
     b.set_power(0, IDLE_W);
     b.set_power(3, 90.0);
     for s in 6..=14 {
-        v.update(&b, s as f64);
+        v.update(&b, None, s as f64);
     }
     v.clear_pending_board();
     // The first reading after it shows again starts the hold afresh.
-    v.update(&b, 40.0);
-    assert_eq!(v.scene_now(40.0).unwrap().1, Shown::Fallback(0));
-    v.update(&b, 50.0);
-    assert_eq!(v.scene_now(50.0).unwrap().1, Shown::Fallback(3));
+    v.update(&b, None, 40.0);
+    assert_eq!(
+        v.scene_now(40.0, &FxMap::new()).unwrap().1,
+        Shown::Fallback(0)
+    );
+    v.update(&b, None, 50.0);
+    assert_eq!(
+        v.scene_now(50.0, &FxMap::new()).unwrap().1,
+        Shown::Fallback(3)
+    );
 }
 
 #[test]
@@ -3310,14 +3352,20 @@ fn an_inset_showing_one_board_cuts_only_for_triggers_on_that_board() {
     let mut b = Fake::boards(&["p150"; 8], Some(TDP));
     let mut v = inset_over(&b, 42, 14, 0);
     b.set_power(0, 90.0);
-    v.update(&b, 1.0);
-    assert_eq!(v.scene_now(1.0).unwrap().1, Shown::Fallback(0));
+    v.update(&b, None, 1.0);
+    assert_eq!(
+        v.scene_now(1.0, &FxMap::new()).unwrap().1,
+        Shown::Fallback(0)
+    );
     assert_eq!(v.director.cut_at(), Some(1.0), "board 0 is on show");
     // Chip 3 rises on board 3, which is not shown, after the cut's
     // cooldown (`COOLDOWN_SECS`): no new cut.
     b.set_power(3, 90.0);
-    v.update(&b, 10.0);
-    assert_eq!(v.scene_now(10.0).unwrap().1, Shown::Fallback(0));
+    v.update(&b, None, 10.0);
+    assert_eq!(
+        v.scene_now(10.0, &FxMap::new()).unwrap().1,
+        Shown::Fallback(0)
+    );
     assert_eq!(v.director.cut_at(), Some(1.0), "board 3 is not on show");
 }
 
@@ -3329,7 +3377,7 @@ fn the_inset_has_a_caption_row_and_no_footer() {
         tx_bytes_per_sec: 1.0e6,
     });
     let v = inset_over(&b, 42, 14, 1);
-    let t = text(&v.render(1.0));
+    let t = text(&v.render(None, 1.0));
     assert_eq!(t.len(), 14, "{t:?}");
     let last = &t[13];
     assert!(last.contains("BH0"), "{last}");
@@ -3341,8 +3389,8 @@ fn the_inset_has_a_caption_row_and_no_footer() {
     assert!(t[..13].iter().any(|l| has_braille_dots(l)), "{t:?}");
     assert!(t.iter().all(|l| !l.contains('●')), "{t:?}");
     // One row: the caption alone. No rows: nothing.
-    let t = text(&inset_over(&b, 42, 1, 1).render(1.0));
+    let t = text(&inset_over(&b, 42, 1, 1).render(None, 1.0));
     assert_eq!(t.len(), 1, "{t:?}");
     assert!(t[0].contains("BH0"), "{t:?}");
-    assert!(inset_over(&b, 42, 0, 1).render(1.0).is_empty());
+    assert!(inset_over(&b, 42, 0, 1).render(None, 1.0).is_empty());
 }

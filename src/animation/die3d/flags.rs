@@ -29,9 +29,23 @@ pub(super) struct Flag {
     /// The text flies to the left of the pole when set, else to the right.
     pub left: bool,
     pub text: String,
+    /// From this character of `text` on, the text is drawn in this colour:
+    /// the model part of a flag that carries one (see `overlay`). `None`
+    /// for a plain chip label.
+    pub accent: Option<(usize, [u8; 3])>,
 }
 
 impl Flag {
+    /// The column of the text's first character.
+    pub(super) fn text_start(&self) -> i32 {
+        let n = self.text.chars().count() as i32;
+        if self.left {
+            self.pin.0 - 1 - n
+        } else {
+            self.pin.0 + 2
+        }
+    }
+
     /// Every cell of the flag with the character that goes in it: the pin,
     /// the pole, the corner, one space of padding on each side of the text
     /// and the text.
@@ -131,6 +145,13 @@ impl Hull {
 #[derive(Debug, Clone)]
 pub(super) struct DieFlag {
     pub texts: Vec<String>,
+    /// Texts that carry the die's model (see `overlay`), longest first, each
+    /// with the character its model part starts at. Tried at every pole
+    /// length before `texts`, so a longer pole is preferred to dropping
+    /// the model. Empty without a model.
+    pub preferred: Vec<(String, usize)>,
+    /// The colour of the model part of a `preferred` text.
+    pub accent: [u8; 3],
     pub top: (i32, i32),
     pub bottom: (i32, i32),
 }
@@ -147,20 +168,36 @@ pub(super) fn place(dies: &[DieFlag], hull: &Hull, cols: usize, rows: usize) -> 
     let mut used: HashSet<(i32, i32)> = HashSet::new();
     let mut flags = Vec::with_capacity(dies.len());
     for die in dies {
-        let found = (2..=rows as i32).find_map(|len| {
-            die.texts.iter().find_map(|text| {
-                [(len, die.top), (-len, die.bottom)]
-                    .into_iter()
-                    .flat_map(|(rise, pin)| [false, true].map(move |left| (rise, pin, left)))
-                    .map(|(rise, pin, left)| Flag {
-                        pin,
-                        rise,
-                        left,
-                        text: text.clone(),
-                    })
-                    .find(|f| fits(f, hull, &used, cols, rows))
+        // The texts of one pass, each with its accent.
+        let search = |texts: &[(String, Option<(usize, [u8; 3])>)]| {
+            (2..=rows as i32).find_map(|len| {
+                texts.iter().find_map(|(text, accent)| {
+                    [(len, die.top), (-len, die.bottom)]
+                        .into_iter()
+                        .flat_map(|(rise, pin)| [false, true].map(move |left| (rise, pin, left)))
+                        .map(|(rise, pin, left)| Flag {
+                            pin,
+                            rise,
+                            left,
+                            text: text.clone(),
+                            accent: *accent,
+                        })
+                        .find(|f| fits(f, hull, &used, cols, rows))
+                })
             })
-        });
+        };
+        let preferred: Vec<(String, Option<(usize, [u8; 3])>)> = die
+            .preferred
+            .iter()
+            .map(|(t, at)| (t.clone(), Some((*at, die.accent))))
+            .collect();
+        let plain: Vec<(String, Option<(usize, [u8; 3])>)> =
+            die.texts.iter().map(|t| (t.clone(), None)).collect();
+        let found = if preferred.is_empty() {
+            search(&plain)
+        } else {
+            search(&preferred).or_else(|| search(&plain))
+        };
         if let Some(f) = &found {
             used.extend(f.cells().into_iter().map(|(at, _)| at));
         }
@@ -198,6 +235,8 @@ mod tests {
     fn die(text: &str, top: (i32, i32), bottom: (i32, i32)) -> DieFlag {
         DieFlag {
             texts: vec![text.to_string()],
+            preferred: Vec::new(),
+            accent: [0; 3],
             top,
             bottom,
         }
@@ -286,6 +325,8 @@ mod tests {
         let hull = diamond(6.0, 20.0, 4.0, 4.0);
         let both = DieFlag {
             texts: vec!["BH0 44W".into(), "BH0".into()],
+            preferred: Vec::new(),
+            accent: [0; 3],
             top: (6, 18),
             bottom: (6, 22),
         };
@@ -295,6 +336,25 @@ mod tests {
         // 8 columns: neither side has room for the long text.
         let flags = place(&[both], &hull, 8, 40);
         assert_eq!(flags[0].as_ref().unwrap().text, "BH0");
+    }
+
+    #[test]
+    fn a_model_text_is_tried_before_the_plain_label() {
+        // Room for both: the model text wins, with its accent.
+        let hull = diamond(30.0, 20.0, 20.0, 8.0);
+        let d = DieFlag {
+            texts: vec!["BH0".into()],
+            preferred: vec![("BH0 \u{b7} Llama 3.1 70B Instruct ready 42t/s".into(), 6)],
+            accent: [1, 2, 3],
+            top: (30, 17),
+            bottom: (30, 23),
+        };
+        let f = place(&[d.clone()], &hull, 80, 40)[0].clone().unwrap();
+        assert!(f.text.contains("Llama"), "{f:?}");
+        assert_eq!(f.accent, Some((6, [1, 2, 3])));
+        // No room for the model text anywhere: the plain label, no accent.
+        let f = place(&[d], &hull, 34, 40)[0].clone().unwrap();
+        assert_eq!((f.text.as_str(), f.accent), ("BH0", None));
     }
 
     #[test]
@@ -312,6 +372,7 @@ mod tests {
             rise: 3,
             left: false,
             text: "BH0".into(),
+            accent: None,
         };
         let at = |f: &Flag, c: i32, r: i32| {
             f.cells()
