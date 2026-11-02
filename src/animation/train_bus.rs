@@ -510,38 +510,26 @@ fn add_pulse(list: &mut Vec<StepPulse>, now: u64, kind: PulseKind, size: f32) {
 
 /// The Training legend's section on what the bus draws.
 pub const LEGEND_TEXT: &[&str] = &[
-    "What the signal bus adds:",
-    "  ┊ pulse  a step landed: amber on the newest step",
-    "           column; mint and wider when the loss fell",
-    "           by more than 1%, dim coral when it rose",
-    "           (one column per percent, up to six)",
-    "  sky      moves faster for short steps and slower",
-    "           for long ones (decoration)",
+    "Signal bus:",
+    "  ┊ pulse  a step landed: amber; mint and wider when",
+    "           loss fell over 1%, dim coral when it rose",
+    "  sky      faster for short steps (decoration)",
     "  ▸ dev    a chip the training run uses",
     "  SAME CHIPS  a model served on the run's chips,",
-    "           with its phase and tokens/s; '~' marks",
-    "           an estimate such as mock data",
-    "  bus      in the title: the run is read from the",
-    "           bus (an attached host); '~bus' marks an",
-    "           estimate",
+    "           phase and tokens/s; '~' marks an estimate",
+    "  bus      in the title: the run comes from the bus",
+    "           (an attached host); '~bus' is an estimate",
 ];
 
 /// The Training explain text's paragraph on what the bus draws.
 pub const EXPLAIN_TEXT: &[&str] = &[
     "",
-    "Signal bus: each step that lands pulses (┊) on",
-    "the newest step column, brighter and wider when",
-    "the loss fell by more than 1% and dimmer when it",
-    "rose. Short steps make the sky move faster and",
-    "long ones slower; that speed is decoration. A",
-    "▸ marks the chips the run uses, and a model",
-    "served on the same chips is named in the SAME",
-    "CHIPS row with its phase and tokens/s. With no",
-    "trainer on this machine, a run seen on the bus",
-    "(an attached headless host) is drawn with the",
-    "same look and 'bus' in the title; '~' marks an",
-    "estimate such as mock data. Only this machine's",
-    "chips are drawn.",
+    "Signal bus: each step pulses ┊, wider when the loss fell",
+    "over 1% and dimmer when it rose. The sky's speed follows",
+    "step time (decoration). ▸ marks the run's chips; SAME",
+    "CHIPS names a model served on them, with tokens/s. A run",
+    "seen on the bus has 'bus' in the title; '~' marks an",
+    "estimate.",
 ];
 
 /// The legend lines for [`LEGEND_TEXT`], with the overlay's left bar.

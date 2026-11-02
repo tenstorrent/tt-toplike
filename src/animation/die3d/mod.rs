@@ -99,6 +99,13 @@ const KEYS_FG: Color = rgb(GRAYSKULL.mgmt);
 /// The opaque background (`T` off): plain black. A tinted fill drew the eye
 /// away from the scene; black lets the blocks stand out.
 const OPAQUE_BG: [u8; 3] = [0, 0, 0];
+/// The name a person reads for this view: the mode label in the status bar,
+/// the legend, explain and help titles, and the hints the view prints. The
+/// code keeps the `die3d` names; `3`, `--mode die3d` and `/mode die3d` still
+/// open it, and `waffler` is an alias for each. Provisional: the name is not
+/// final, so change it here and nowhere else.
+pub const DIE3D_DISPLAY_NAME: &str = "Wafer Waffler";
+
 /// The action keys the footer lists after the switches. `3` (leave) is
 /// handled by the TUI, not here. Keys that flip a state are not listed here:
 /// they come from `Die3dView::switches`.
@@ -1040,10 +1047,14 @@ impl Die3dView {
     fn draw(&self, now: f64, fx: &FxMap, bus: bool) -> Vec<Line<'static>> {
         if self.chips.is_empty() {
             if self.undrawn.is_empty() {
-                return vec![hint("Die 3D: no Tenstorrent device found.".into())];
+                return vec![hint(format!(
+                    "{DIE3D_DISPLAY_NAME}: no Tenstorrent device found."
+                ))];
             }
             return vec![
-                hint("Die 3D draws Blackhole chips only, and none was found.".into()),
+                hint(format!(
+                    "{DIE3D_DISPLAY_NAME} draws Blackhole chips only, and none was found."
+                )),
                 note(self.undrawn_note()),
             ];
         }

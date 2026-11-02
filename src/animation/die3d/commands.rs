@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! The Die 3D view's slash commands.
+//! The Die 3D view's slash commands (the view a person knows as the
+//! Wafer Waffler: see `DIE3D_DISPLAY_NAME`).
 //!
 //! The view used to take a letter key for each of its settings. Keys are kept
 //! for what is the same everywhere (`[` `]` change board, Space cuts, `3` opens
@@ -25,7 +26,8 @@ pub struct CommandInfo {
     pub name: &'static str,
     /// What follows the verb, as `[on|off]`. Empty when it takes nothing.
     pub args: &'static str,
-    /// One line: what it does.
+    /// One line: what it does. Short, because the Waffler's `/help` lists
+    /// all of them in a panel that fits 24 rows at 80 columns.
     pub help: &'static str,
 }
 
@@ -34,63 +36,62 @@ pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo {
         name: "board",
         args: "[next|prev|N]",
-        help: "show board N (1 is the first); next and prev step like [ and ]",
+        help: "board N (1 first), or next/prev",
     },
     CommandInfo {
         name: "scene",
         args: "[all|board]",
-        help: "every board together, or one board; bare flips",
+        help: "all boards or one; bare flips",
     },
     CommandInfo {
         name: "cut",
         args: "",
-        help: "cut the camera now (Space does the same)",
+        help: "cut the camera now (or Space)",
     },
     CommandInfo {
         name: "autocut",
         args: "[on|off]",
-        help: "cut the camera when something happens on a chip",
+        help: "cut when a chip does something",
     },
     CommandInfo {
         name: "transition",
         args: "[rotate|chaos|dissolve|spin]",
-        help: "rotate spins, and cuts for an event by its reason; bare steps to the next",
+        help: "how a cut looks; bare steps",
     },
     CommandInfo {
         name: "cells",
         args: "[auto|braille|blocks|quarter|half]",
-        help:
-            "how the picture is drawn; auto follows the hardware, blocks skips braille; bare steps",
+        help: "style; auto follows hardware",
     },
     CommandInfo {
         name: "blocks",
         args: "",
-        help: "block cells only (quarter and half), changing with the hardware; /cells blocks",
+        help: "quarter and half blocks only",
     },
     CommandInfo {
         name: "braille",
         args: "",
-        help: "braille dots, held; /cells braille",
+        help: "hold braille dots",
     },
     CommandInfo {
         name: "bg",
         args: "[black|transparent]",
-        help: "black or the terminal's own background; bare flips",
+        help: "black, or the terminal's own",
     },
     CommandInfo {
         name: "labels",
         args: "[on|off]",
-        help: "a flag on each chip: name, power, and its model's phase and tokens/s",
+        help: "chip flags: name, power, model",
     },
     CommandInfo {
         name: "clouds",
         args: "[on|off]",
-        help: "the clouds behind the board; their drift follows PCIe traffic",
+        help: "backdrop clouds (decoration)",
     },
     CommandInfo {
         name: "history",
         args: "[on|off]",
-        help: "the power and PCIe plot, top left",
+        help: "power and PCIe plot, top left",
     },
 ];
 
@@ -139,7 +140,10 @@ impl Die3dView {
         let arg = arg.trim().to_lowercase();
         let arg = arg.as_str();
         let Some(info) = COMMANDS.iter().find(|c| c.name == verb) else {
-            return (format!("unknown Die 3D command: /{verb}"), true);
+            return (
+                format!("unknown {} command: /{verb}", super::DIE3D_DISPLAY_NAME),
+                true,
+            );
         };
         let bad = || (format!("usage: {}", usage(info)), true);
         // Whatever a command does shows in the next frame.

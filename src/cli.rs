@@ -174,18 +174,19 @@ pub struct Cli {
     /// Launch directly into specific visualization mode
     ///
     /// Skip the normal table view and start in a specific mode.
-    /// Available modes: normal, starfield, castle, flow, arcade, hivemind, training
+    /// Available modes: normal, starfield, castle, flow, arcade, hivemind, training,
+    /// die3d (or waffler)
     #[arg(short = 'm', long, value_enum)]
     pub mode: Option<VisualizationMode>,
 
     /// Rotate through every view unattended (kiosk / wall-display mode)
     ///
-    /// Cycles all views — including the ones normally reachable only by their
-    /// own key (`i`, `~`, `t`) — dwelling 30s on each and 45s on arcade.
+    /// Cycles every view except Grid, including the ones reachable only by
+    /// their own key (`i`, `~`, `t`, `3`), 30s on each and 45s on arcade.
     /// Training and the inference monitor are visited only while a training
-    /// run exists or a model server is starting or running; with none they
-    /// are skipped. The Die 3D view (`3`) is not part of the rotation. Toggle
-    /// in-app with `R`. Combines with `--mode` to choose where the rotation
+    /// run exists or a model server is starting or running. The Wafer Waffler
+    /// (`3`) is visited only on a box with a Blackhole chip. Toggle in-app
+    /// with `R`. Combines with `--mode` to choose where the rotation
     /// starts.
     #[arg(long)]
     pub rotate: bool,
@@ -642,6 +643,11 @@ pub enum VisualizationMode {
     /// "start here" alias for scripted/kiosk launches.
     #[value(alias = "train", alias = "tt-train")]
     Training,
+
+    /// Wafer Waffler — each Blackhole board drawn in isometric 3D from live
+    /// telemetry. Also reachable in-app with `3`.
+    #[value(alias = "waffler")]
+    Die3d,
 }
 
 impl Cli {
@@ -1604,6 +1610,20 @@ mod tests {
                 cli.mode,
                 Some(VisualizationMode::Training),
                 "`--mode {spelling}` must select the Training view"
+            );
+        }
+    }
+
+    /// The Wafer Waffler answers to its code name and to its display name.
+    #[test]
+    fn mode_die3d_and_waffler_parse() {
+        for spelling in ["die3d", "waffler"] {
+            let cli = Cli::try_parse_from(["tt-toplike", "--mode", spelling])
+                .unwrap_or_else(|e| panic!("`--mode {spelling}` must parse: {e}"));
+            assert_eq!(
+                cli.mode,
+                Some(VisualizationMode::Die3d),
+                "--mode {spelling}"
             );
         }
     }

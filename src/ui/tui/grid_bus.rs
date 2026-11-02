@@ -860,46 +860,36 @@ fn draw_text(buf: &mut Buffer, g: &CellGeom, flag: &ModelFlag, forms: &[String])
 /// The Grid legend's section on what the bus draws.
 pub(crate) const GRID_LEGEND_TEXT: &[&str] = &[
     "What the signal bus puts on each chip's cell:",
-    "  label  the model on the chip, on the top row",
-    "  phase  its phase, progress and tokens/s on the",
-    "         bottom rule; '~' marks an estimate such",
-    "         as mock data",
-    "  ┃ bar  the left bar fills purple from the bottom",
-    "         as a model compiles or loads, as far as",
-    "         its progress; with no progress a band",
-    "         climbs (decoration). Teal when it becomes",
-    "         ready, grey when it goes down",
-    "  pulse  a teal light climbs the PCIe spine ╋ when",
-    "         requests complete (the left bar on a",
-    "         Wormhole)",
+    "  label  the chip's model, on the top row",
+    "  phase  phase, progress, tokens/s on the bottom",
+    "         rule; '~' marks an estimate",
+    "  ┃ bar  fills purple from the bottom as a model",
+    "         compiles or loads, to its progress (with",
+    "         none, a band climbs: decoration); teal at",
+    "         ready, grey when down",
+    "  pulse  a teal light up the PCIe spine ╋ when",
+    "         requests complete (left bar on Wormhole)",
     "  * cell a hivemind spark or a kernel compile",
-    "  flash  the portrait shows reversed for a moment",
-    "         after the chip is reset",
+    "  flash  the portrait reverses after a reset",
 ];
 
 /// The Grid explain text's paragraph on what the bus draws.
 pub(crate) const GRID_EXPLAIN_TEXT: &[&str] = &[
     "",
-    "Signal bus: the top row of a cell names the",
-    "model on that chip, and the bottom rule its",
-    "phase, progress and tokens/s ('~' marks an",
-    "estimate such as mock data). The left bar",
-    "fills purple from the bottom as the model",
-    "compiles or loads, as far as its reported",
-    "progress, then lights teal when it is ready.",
-    "A completed request sends a teal light up",
-    "the PCIe spine. Sparks and kernel compiles",
-    "light a core as *. A reset flashes the",
-    "portrait. Attached to a headless host, only",
-    "this machine's chips are drawn.",
+    "Signal bus: a cell's top row names the chip's model,",
+    "its bottom rule the phase, progress and tokens/s ('~'",
+    "marks an estimate). The left bar fills purple as the",
+    "model compiles or loads (with no figure, a climbing",
+    "band: decoration) and lights teal at ready. Requests",
+    "send a teal light up the PCIe spine; a spark or kernel",
+    "compile lights a core as *; a reset flashes the cell.",
 ];
 
 /// The Insights legend's section on what the bus draws.
 pub(crate) const INSIGHTS_LEGEND_TEXT: &[&str] = &[
     "Signal bus, on each chip panel's bottom rule:",
-    "  the model on the chip, its phase, progress",
-    "  and tokens/s; '~' marks an estimate. The",
-    "  rule turns purple as far as the progress",
+    "  model, phase, progress and tokens/s; '~' marks",
+    "  an estimate; purple as far as the progress",
     "  while the model compiles or loads",
 ];
 
@@ -907,12 +897,9 @@ pub(crate) const INSIGHTS_LEGEND_TEXT: &[&str] = &[
 /// near the top of the explain text, which is taller than most terminals,
 /// and ends with a blank line.
 pub(crate) const INSIGHTS_EXPLAIN_TEXT: &[&str] = &[
-    "Signal bus: the rule under each chip panel",
-    "names the model on that chip, its phase,",
-    "progress and tokens/s; '~' marks an",
-    "estimate such as mock data. The rule turns",
-    "purple as far as the progress. Attached to",
-    "a host, only this machine's chips show.",
+    "Signal bus: the rule under each chip panel names its",
+    "model, phase, progress and tokens/s ('~' marks an",
+    "estimate), and turns purple as far as the progress.",
     "",
 ];
 

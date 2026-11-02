@@ -957,28 +957,28 @@ pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'stati
         ln!(vec![
             Span::styled("░▒▓█   ", Style::default().fg(colors::rgb(120, 220, 200))),
             Span::styled(
-                "= decaying heat + a tiny recent-activity spark; pulses on new events",
+                "= heat that decays; pulses on a new event",
                 Style::default().fg(dim)
             ),
         ]),
         ln!(vec![
             Span::styled("feed   ", Style::default().fg(colors::rgb(200, 230, 255))),
             Span::styled(
-                "= coalesced events (count/rate/spark) for the selected cell",
+                "= repeated events folded, with count and rate",
                 Style::default().fg(dim)
             ),
         ]),
         ln!(vec![
             Span::styled("strip  ", Style::default().fg(colors::rgb(200, 230, 255))),
             Span::styled(
-                "= the model on each chip, from the bus: phase, progress bar (~ = estimated)",
+                "= each chip's model from the bus (~ = estimate)",
                 Style::default().fg(dim)
             ),
         ]),
         ln!(vec![
             Span::styled("bus:   ", Style::default().fg(colors::rgb(200, 230, 255))),
             Span::styled(
-                "= a feed row from the signal bus; model rows show with f; dim rows came before you opened ~",
+                "= a row from the bus; dim = before you opened ~",
                 Style::default().fg(dim)
             ),
         ]),
@@ -995,7 +995,7 @@ pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'stati
                 Style::default().fg(colors::rgb(200, 230, 255))
             ),
             Span::styled(
-                "= busiest cell, tracked automatically",
+                "= the busiest cell, tracked by itself",
                 Style::default().fg(dim)
             ),
         ]),
@@ -1029,7 +1029,7 @@ pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'stati
                 Style::default().fg(colors::rgb(200, 230, 255))
             ),
             Span::styled(
-                "= toggle unified feed (all cells vs. selected)",
+                "= one feed for all cells, or the selected one",
                 Style::default().fg(dim)
             ),
         ]),
@@ -1039,7 +1039,7 @@ pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'stati
                 Style::default().fg(colors::rgb(200, 230, 255))
             ),
             Span::styled(
-                "= cycle severity floor (trace→info→notice→warn→error)",
+                "= raise the severity floor (trace→…→error)",
                 Style::default().fg(dim)
             ),
         ]),
@@ -1059,7 +1059,7 @@ pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'stati
                 Style::default().fg(colors::rgb(200, 230, 255))
             ),
             Span::styled(
-                "= KITT scanner — dim/wide/brisk idle, bright/tight/slow when busy; bus requests count",
+                "= KITT scanner: dim and brisk idle, bright and slow busy",
                 Style::default().fg(dim)
             ),
         ]),
@@ -1071,58 +1071,29 @@ pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'stati
 pub(crate) const EXPLAIN_TEXT: &[&str] = &[
     "HivemindSweeper — Activity Sniffer",
     "",
-    "Opt-in, read-only sniffer that correlates driver",
-    "messages, compile-cache churn, log tails, and /proc",
-    "activity into one source × device/host heat board.",
+    "An opt-in, read-only sniffer. Driver messages, compile",
+    "cache churn, log tails and /proc activity land on one",
+    "source × device/host heat board.",
     "",
-    "Each cell's glyph (░▒▓█) decays over time — a cold",
-    "cell just hasn't seen activity recently. A cell also",
-    "shows a tiny recent-activity spark and briefly pulses",
-    "brighter right after a new event.",
+    "A cell's glyph (░▒▓█) decays over time, so a cold cell",
+    "has been quiet; it pulses bright on a new event. The",
+    "feed below folds repeated events into one row with a",
+    "count and rate, for the selected cell or all cells (f).",
+    "FOCUS names the busiest cell and tracks it by itself;",
+    "arrows (or h/j/k) pin it, Enter hands it back.",
     "",
-    "The feed pane below coalesces repeated/near-identical",
-    "events (e.g. device-poll open/close churn) into one",
-    "row with a running count and events/sec rate, for",
-    "whichever cell is selected (or every row, unified).",
+    "The line under the title is each chip's model from the",
+    "signal bus (~ marks an estimate). Feed rows starting",
+    "\"bus:\" come from the bus: models, requests, resets from",
+    "tools such as gozer, and an attached host's sparks.",
+    "A tt-smi -r run elsewhere shows as a magenta ⚡ row and",
+    "warms the cells of the chips it targets.",
     "",
-    "The line under the title shows the model on each chip,",
-    "read from the signal bus: its phase, its progress and a",
-    "bar. ~ marks estimated readings (a mock run). The line",
-    "is absent when no chip runs a model.",
-    "",
-    "Feed rows that start with \"bus:\" come from the signal",
-    "bus: models loading, ready or gone, completed requests,",
-    "resets published by other tools such as gozer, and,",
-    "when attached to a headless host, that host's sparks,",
-    "kernel compiles and resets. Model rows belong to no",
-    "cell, so they show in the unified feed (f). Rows from",
-    "before you opened this view are dimmed.",
-    "",
-    "A tt-smi -r run in another terminal appears as a magenta",
-    "⚡ row and warms the cell of each chip it targets (the",
-    "Host column when none could be resolved). It gets no",
-    "takeover animation here, only this row.",
-    "",
-    "The FOCUS pane names the busiest cell and describes it — heat, events,",
-    "rate, worst severity, age, and its top coalesced rows — and tracks that",
-    "cell on its own, so this screen explains itself without being driven.",
-    "Arrows (or vim h/j/k) pin the focus to a cell of your choosing; Enter",
-    "hands it back. f toggles the unified feed, s raises the severity floor,",
-    "l opens this legend.",
-    "",
-    "/watch <path> or /watch pid <n> points the sniffer at",
-    "a log file or a process's device fds + open logs.",
-    "/wrap <cmd…> spawns and captures a command — the one",
-    "side effect here, so it asks for confirmation first",
-    "(repeat the same /wrap to confirm).",
-    "",
-    "A red KITT-style scanner bar sweeps the bottom row,",
-    "grounding the view. It reflects TOTAL board activity,",
-    "or the bus's completed requests and tokens per second",
-    "when those are higher: idle is dim, wide, and brisk;",
-    "busy activity makes it slow down, focus into a tighter",
-    "beam, and brighten. A completed request gives it a",
-    "short surge.",
+    "/watch <path> or /watch pid <n> aims the sniffer.",
+    "/wrap <cmd…> runs a command, the only thing here that",
+    "changes anything, so repeat it to confirm. The red KITT",
+    "scanner at the bottom follows total activity: dim and",
+    "brisk when idle, bright and slow when busy.",
 ];
 
 #[cfg(test)]

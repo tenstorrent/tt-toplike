@@ -422,17 +422,13 @@ pub fn draw_cell(
 /// The castle legend's section on what the bus draws.
 pub const LEGEND_TEXT: &[&str] = &[
     "Each chip's tower shows what the signal bus says:",
-    "  wing    a model compiling or loading raises a",
-    "          purple wing from the bottom, as far as",
-    "          its reported progress; with no progress",
-    "          a purple band climbs (decoration)",
-    "  banner  the model's name, phase and tokens/s on",
-    "          the top row; ⚑ while it serves; '~'",
-    "          marks an estimate such as mock data",
-    "  ♞       climbs the tower when requests complete:",
-    "          one per request, up to eight",
-    "  ☼       flickers for a hivemind spark or a",
-    "          kernel compile on the chip",
+    "  wing    a purple wing climbs as a model compiles",
+    "          or loads, to its progress (with none, a",
+    "          climbing band: decoration)",
+    "  banner  model, phase and tokens/s on the top row;",
+    "          ⚑ while it serves; '~' marks an estimate",
+    "  ♞       climbs per completed request (8 max)",
+    "  ☼       a hivemind spark or kernel compile",
     "  ╳       an ECC tick; it heals over two seconds",
     "  flash   the tower shows reversed after a reset",
 ];
@@ -440,19 +436,14 @@ pub const LEGEND_TEXT: &[&str] = &[
 /// The castle explain text's paragraph on what the bus draws.
 pub const EXPLAIN_TEXT: &[&str] = &[
     "",
-    "Signal bus: a model compiling or loading on",
-    "a chip raises a purple wing in its tower, as",
-    "far as its reported progress (a climbing band,",
-    "which is decoration, when there is no figure).",
-    "The tower lights teal when the model becomes",
-    "ready and grey when it goes down. The top row",
-    "flies a banner with the model's name, phase",
-    "and tokens/s; '~' marks an estimate such as",
-    "mock data. Completed requests send ♞ up the",
-    "tower, sparks and compiles light ☼, an ECC",
-    "tick opens a ╳ that heals, and a reset",
-    "flashes the tower. Attached to a headless",
-    "host, only this machine's chips are drawn.",
+    "Signal bus: a model compiling or loading raises a",
+    "purple wing in its chip's tower, as far as its",
+    "progress (with no figure, a climbing band:",
+    "decoration). Teal at ready, grey when down. A banner",
+    "names the model, phase and tokens/s ('~' marks an",
+    "estimate). Requests send ♞ up the tower, sparks light",
+    "☼, an ECC tick opens a ╳ that heals, and a reset",
+    "flashes the tower.",
 ];
 
 /// The legend lines for [`LEGEND_TEXT`], with the overlay's left bar.

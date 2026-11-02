@@ -421,10 +421,7 @@ fn an_attached_tui_draws_the_hosts_models() {
     assert_eq!(rows[1].key, "vllm-8001");
     assert!(rows[1].chips.is_empty());
     let cut = bus.read().models();
-    assert!(
-        cut[1].chips.is_empty(),
-        "Die 3D's read keeps the chip limit"
-    );
+    assert!(cut[1].chips.is_empty(), "die3d's read keeps the chip limit");
 }
 
 /// An explicit attach to a host on another machine lists its models with no
@@ -685,7 +682,7 @@ fn die3d_i_and_the_helper_agree_on_the_estimate_marker() {
         let i = rows_from_world(&w, &mock_index)[0].label.starts_with('~');
         assert!(
             helper == flag && flag == i,
-            "{est:?}: helper {helper}, Die 3D {flag}, i {i}"
+            "{est:?}: helper {helper}, die3d {flag}, i {i}"
         );
         let want = est.is_some_and(|s| FLAG_TEXT_SIGNALS.contains(&s));
         assert_eq!(helper, want, "{est:?}");

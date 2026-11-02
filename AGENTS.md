@@ -1454,6 +1454,29 @@ Copilot's review, each claim checked against the code before acting:
 - Docs: the PR title said 0.14.2 while the code said 0.14.3 (release metadata is the version).
 - Tests that used 0 W as a chip's idle now use 37 W: no powered chip reads under a watt.
 
+### Copy pass and the Wafer Waffler name (Nov 2 2026, on 0.15.2, no version bump)
+
+Prompt: "review all our explainer, help, and legend copy and make sure it's short and direct and to
+the point (and still fun!)", plus renaming Die 3D to a fun name the user liked, "Wafer Waffler".
+- Every overlay now fits without scrolling at 80 columns: Help in 24 rows, Legend and Explain in 30.
+  `every_overlay_fits_its_row_target_at_80_columns` holds every mode to it (a line count against
+  `overlay_row_target`, then a real render). `overlay_inventory` (ignored) prints the table;
+  `OVERLAY_TEXT=1` prints the text too.
+- Help packs keys three to a line and commands two to a line. In the Waffler, Help lists its own
+  keys and all twelve commands (shortened `CommandInfo::help`) and two rows of global keys.
+- The Insights explain text was cut off at 44 rows and lost the ECC paragraph; it fits in 28 now.
+- The Waffler's explain text is a summary; the legend keeps every per-symbol phrase the old tests
+  required of both. The text tests now ask the legend for the detail and the explain text for the
+  summary (what is measured, estimated or decoration).
+- The name is one constant, `animation::die3d::DIE3D_DISPLAY_NAME` (provisional). Code identifiers
+  stay `die3d`. `--mode die3d|waffler`, `/mode die3d|waffler`, `/die3d` and `/waffler` open it
+  (none of these existed before). `no_user_facing_text_uses_the_old_die3d_name` scans source
+  strings, the clap `--help` text, README, QUICK_START, docs/*.md and the site.
+- Stale text fixed: the hero `%` threshold (Blackhole 0.65 V while busy), the rotation now visits
+  the Waffler (README, `--rotate` help), Esc quits only from the `v`-cycle views, Memory Flow's
+  speed and density drivers, docs/bus.md's "the other views read what they read before", README's
+  "the arcade hero duel reads the local monitor".
+
 ### Version history: 0.15.2 (Nov 2 2026)
 
 0.15.2 puts the remaining views on the signal bus (`src/animation/{starfield,memory_flow,castle,defrag,train}_bus.rs`,

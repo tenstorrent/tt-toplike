@@ -14,7 +14,7 @@ The Insights screen works on any machine — it shows each processor (CPU/GPU/AN
 
 ## How visualizations are grounded in hardware activity
 
-The visualizations aren't decorative. Every particle, star, color shift, and brightness change maps to a real signal coming off the hardware. Here's what you're actually looking at.
+Nearly every particle, star, colour shift and brightness change maps to a real signal off the hardware. The few that do not are named as decoration in each view's legend (`l`), and an estimate carries a `~`. Here's what you're actually looking at.
 
 ### The signals
 
@@ -24,10 +24,10 @@ tt-toplike reads a small set of telemetry values from the chip — through the t
 - **Temperature (°C)** — die temperature from the ASIC thermal sensor
 - **Current (A)** — current draw; a fast-moving proxy for compute intensity
 - **Clock frequencies** — AICLK, AXICLK and ARCCLK, straight from the driver
-- **Firmware limits** — the board's real TDP / TDC / thermal ceilings (a p300c reports 125 W, 500 A, 90 °C), so "how hot is hot" is calibrated to *your* card instead of a generic reference number
+- **Firmware limits** — the board's own TDP / TDC / thermal limits (a p300c reports 125 W, 500 A, 90 °C), so "how hot is hot" is calibrated to *your* card
 - **DDR training status** — per-channel bitmask from SMBUS: whether each DDR channel is idle, training, trained, or faulted
-- **GDDR ECC counters** — correctable and uncorrectable memory errors; the uncorrectable count is the one that means data corruption, so it's called out in red when it moves
-- **Thermal-trip count** — how many times the card has hit hardware thermal shutdown in its lifetime. Non-zero is a story
+- **GDDR ECC counters** — correctable and uncorrectable memory errors. The row shows amber for corrected errors and red once any is uncorrectable, which means corrupted data
+- **Thermal-trip count** — how many times the card has hit hardware thermal shutdown in its lifetime. Any count above zero deserves a look
 - **PCIe link traffic** — the driver keeps data-word counters for both directions of the PCIe link; differentiating them between ~1 Hz samples gives live bytes/sec into and out of the chip, next to the link's generation and width
 - **ARC heartbeat** — the RISC-V management firmware pulses this counter to signal it's alive. A frozen heartbeat is how the tool tells "busy" from "wedged"
 
@@ -37,10 +37,10 @@ There's also an **adaptive baseline**: for the first ~20 samples the tool learns
 
 ### Background
 
-Every screen has a solid black background. That includes the Die 3D view and its inset on the
+Every screen has a solid black background. That includes the Wafer Waffler view and its inset on the
 Insights screen. In a terminal without truecolor (tmux, macOS Terminal.app over SSH) black is the
 terminal's own default background, which those terminals need. Set `TT_TOPLIKE_TRANSPARENT=1` to
-draw on your terminal's own background in a truecolor terminal too; `/bg` in the Die 3D view
+draw on your terminal's own background in a truecolor terminal too; `/bg` in the Wafer Waffler view
 flips it for that view. The status bar has its own dark navy background either way.
 
 ### How colors are chosen
@@ -239,7 +239,7 @@ contract and the `tt-station-agentd` coordination notes.
 ## Signal bus: record, replay and share what tt-toplike sees
 
 Every source (chip telemetry, inference servers, training, hivemind, processes, gozer
-leases) writes to one ordered stream, the signal bus. Die 3D and, on an attached TUI, the `i` view read it, other programs can
+leases) writes to one ordered stream, the signal bus. Every view reads it, other programs can
 read it over a Unix socket, and it is recorded to disk so a run can be inspected and
 replayed later. Every sample says whether it is `measured`, `derived`, `estimated` or
 `decoration`. Full details: [docs/bus.md](docs/bus.md).
@@ -260,11 +260,10 @@ tt-toplike-tui --bus-attach /tmp/tt-toplike-$UID/replay.sock    # a TUI that rea
   example unit file.
 * Command lines in the log have common secret shapes (tokens, keys, passwords) replaced with
   `<redacted>`. The matcher has known gaps, listed in `docs/bus.md`.
-* Limits of this release: no hardware run yet, the Die 3D tile glow is still an estimate, the
+* Limits of this release: no hardware run yet, the Wafer Waffler tile glow is still an estimate, the
   per-tile counter sidecar is not included (a live reader on a chip blocks gozer reset and
   release), and the order of DRAM rows within a side is not documented. An attached TUI's `i`
-  view still has gaps: the arcade hero duel reads the local monitor, models show dashes for the
-  TTFT breakdowns and prefix hit rate, and the rotation keeps dwelling on a lost host's last
+  view still has gaps: models show dashes for the TTFT breakdowns and prefix hit rate, and the rotation keeps dwelling on a lost host's last
   rows. The list is in `docs/bus.md` section 13.
 
 ---
@@ -411,6 +410,7 @@ tt-toplike --mode castle      # Memory Castle — roguelike dungeon particles
 tt-toplike --mode starfield   # Starfield — Tensix cores as stars
 tt-toplike --mode flow        # Memory Flow — NoC DDR channel streams
 tt-toplike --mode hivemind    # HivemindSweeper — read-only activity sniffer (or press ~)
+tt-toplike --mode waffler     # Wafer Waffler — isometric Blackhole boards (or press 3)
 tt-toplike                    # then press d  — Defrag (no --mode flag; use keypress)
 
 # Filter to specific devices
@@ -429,8 +429,8 @@ tt-toplike --devices 0,2
 | `g` | Jump directly to Grid (Insights table) |
 | `i` | Open the Inference Server Monitor from **any** view; `i` while in it jumps to Insights (a quick back-and-forth), `Esc` backs out to where you came from. Also sits at the tail of the `v` cycle. |
 | `t` | Open the Training view from **any** view — auto-attaches to a running tt-train process with no further input; `Esc` backs out to where you came from. Deliberately excluded from the `v` cycle, like `i`. Scriptable as `--mode training`. |
-| `3` | Open the Die 3D view from **any** view — an isometric picture of each Blackhole board. `3` or `Esc` leaves. Not in the `v` cycle. Inside it: `[` `]` previous/next board and Space cuts the camera. Every other setting is a slash command: `/board`, `/scene`, `/cut`, `/autocut`, `/transition`, `/cells` (with `/blocks` and `/braille` as shortcuts), `/bg`, `/labels`, `/clouds`, `/history`. `/theme` sets the colours. `/help` lists them. |
-| `R` | Toggle the unattended rotation — cycles every view except Grid (the same chip portraits as Insights in another layout) and Die 3D, including the key-only ones (`i`, `~`, `t`) that `v` skips. 30s each, 45s on arcade. Training and the inference monitor are visited only while a training run exists or a model server is starting or running; with none they are skipped. Die 3D (`3`) is not in the rotation. Also `--rotate` at launch. |
+| `3` | Open the Wafer Waffler from **any** view: an isometric picture of each Blackhole board. `3` or `Esc` leaves. Not in the `v` cycle. Also `--mode waffler`, `/mode waffler` or `/waffler` (`die3d` works in each). Inside it: `[` `]` previous/next board and Space cuts the camera. Every other setting is a slash command: `/board`, `/scene`, `/cut`, `/autocut`, `/transition`, `/cells` (with `/blocks` and `/braille` as shortcuts), `/bg`, `/labels`, `/clouds`, `/history`. `/theme` sets the colours. `/help` lists them. |
+| `R` | Toggle the unattended rotation. It cycles every view except Grid (the same chip portraits as Insights in another layout), including the key-only ones (`i`, `~`, `t`, `3`) that `v` skips. 30s each, 45s on arcade. Training and the inference monitor are visited only while a training run exists or a model server is starting or running. The Wafer Waffler is visited only on a box with a Blackhole chip. Also `--rotate` at launch. |
 | `b` | Cycle backend (live switching): Hybrid → Sysfs → JSON → Mock → Host → Hybrid. Luwen and Remote are launch-only — the cycle never steps onto them. |
 | `/` | Command bar — type `/mode defrag`, `/fps 30`, `/theme grayskull`, `/quit`, etc. |
 | `l` | Toggle legend overlay (what each signal means in the current mode) |
@@ -515,9 +515,9 @@ The top-left band shows how each step went and what the hardware did about it. A
 
 **Honest about what it can't see.** tt-train only prints step number, loss, step time, and cache-entry count to stdout — no gradient norms, no MFU, no throughput counter live (those exist only in a run-end JSON summary). The view derives tokens/sec and ETA from what it can actually read, and shows nothing it can't source. If the trainer's stdout wasn't redirected to a file at launch (i.e. it's a pipe or a tty), the per-step stream is genuinely unreadable after the fact — that's an OS property, not a gap — and the view says so plainly instead of drawing a fake curve; relaunching with `> train.log` fixes it. Checkpoint saves are detected by mtime on the run's rolling checkpoint file, not by parsing a save-confirmation line (tt-train doesn't print one).
 
-### Die 3D — the board and its dies (`3`)
+### Wafer Waffler — the board and its dies (`3`)
 
-Press `3` for the **Die 3D view**. It draws each Blackhole board in isometric perspective, one block per die with the Tensix, GDDR, Ethernet and management tiles in place, in cells of one of three styles: braille dots (2 x 4 per cell, the finest), quarter blocks (the same picture, chunkier) or half blocks. `/cells` sets one. The default, `auto`, starts in a style picked from what the hardware reports when the view opens, and changes style when something happens on the hardware, at a camera cut, and never within two minutes of the last change. In a view under 100 x 30 it leaves half blocks out. `/blocks` (or `/cells blocks`) changes between the two block styles only. `/braille`, `/cells quarter` and `/cells half` hold one. The colours follow `/theme`: grayskull is greys with one hot pink, and the default theme is full colour (heat from blue through amber to red-pink, green memory, orange Ethernet).
+Press `3` for the **Wafer Waffler**. Each die is a slice of silicon wafer, its tiles make a waffle grid, and the camera waffles between them. It draws each Blackhole board in isometric perspective, one block per die with the Tensix, GDDR, Ethernet and management tiles in place, in cells of one of three styles: braille dots (2 x 4 per cell, the finest), quarter blocks (the same picture, chunkier) or half blocks. `/cells` sets one. The default, `auto`, starts in a style picked from what the hardware reports when the view opens, and changes style when something happens on the hardware, at a camera cut, and never within two minutes of the last change. In a view under 100 x 30 it leaves half blocks out. `/blocks` (or `/cells blocks`) changes between the two block styles only. `/braille`, `/cells quarter` and `/cells half` hold one. The colours follow `/theme`: grayskull is greys with one hot pink, and the default theme is full colour (heat from blue through amber to red-pink, green memory, orange Ethernet).
 
 **What is real and what is estimated.** The per-tile glow is an estimate from chip activity, and the footer says so: `per-tile glow: estimate from chip load`. The view does not read per-tile NoC counters; that is a separate, later and experimental plan (`docs/superpowers/plans/2026-10-29-die-3d-tier1-counters.md`). Activity is each chip's power measured against that chip's own idle over the last day, up to its highest draw in the last ten minutes. A view opened while a job is already running has no idle to measure against, so a chip at a steady draw shows no activity until its power changes. These are real readings: chip power, temperature, GDDR temperature and PCIe traffic in and out (from the tt-kmd counters), plus Ethernet and harvest data when the backend provides them. The clouds behind the dies are decoration. Their drift follows PCIe traffic and their brightness follows chip load. The history panel (`/history`, top left) plots the last 60 seconds of each chip's power and the box's PCIe traffic as sparklines, and shows each chip's latest temperature. Those are measured values, one sample a second. Each sparkline cell is the mean of two or three samples. A power line is scaled to at least 5 W and a PCIe line to at least 10 MB/s, so a small wobble stays near the bottom of its line.
 
@@ -527,7 +527,7 @@ Press `3` for the **Die 3D view**. It draws each Blackhole board in isometric pe
 
 **Size.** The view draws at any size and gives up detail as the area shrinks. At 100 x 30 it draws the full layout; 150 x 42 or larger looks best. The history panel needs 120 x 37. Below that, in this order: the clouds and the history panel go first, then the footer drops to one row, then the flags go, and the scene shrinks. It shrinks to a four pixel tile (about 40 x 12 for one p150 board; a two-die board needs 51 columns), then to a two pixel tile, which a two-die board fits whole in 25 x 8 cells. A window smaller than that shows the middle of the whole scene, and the last row (or the footer, when there is one) says `clipped, needs 25x8`, the size that shows all of it. Below 16 x 6 the view shows a text summary, one line per chip with its power and PCIe traffic. The arrow keys move the window over a clipped scene (four cells a key, stopping at the scene's edge), and the footer says `arrows pan`. The status bar takes a row of the terminal, so the view area is one row shorter than the terminal.
 
-**The Insights inset.** On the Insights screen, a small Die 3D scene appears at the right of the process table when the process area is at least 122 wide and 16 tall (the inset is 52 columns wide). It shows one board's scene, or every board when they fit in it. When they do not fit, it shows the busiest board (by the mean load of its chips) and changes boards only after another board has been the busiest for 10 seconds. `3` opens the full view. Limits: on a terminal where several rows of chip cards fill the screen, the process area is too short and the inset does not appear (four chips at 150 x 42 is an example). The inset's board change redraws at once, with no cut transition. A two-die board (p300) needs an inset at least 51 wide and 16 tall for its scene, so the 52 x 16 inset draws it. The text summary (one line per chip) appears in the full view below 16 x 6.
+**The Insights inset.** On the Insights screen, a small Wafer Waffler scene appears at the right of the process table when the process area is at least 122 wide and 16 tall (the inset is 52 columns wide). It shows one board's scene, or every board when they fit in it. When they do not fit, it shows the busiest board (by the mean load of its chips) and changes boards only after another board has been the busiest for 10 seconds. `3` opens the full view. Limits: on a terminal where several rows of chip cards fill the screen, the process area is too short and the inset does not appear (four chips at 150 x 42 is an example). The inset's board change redraws at once, with no cut transition. A two-die board (p300) needs an inset at least 51 wide and 16 tall for its scene, so the 52 x 16 inset draws it. The text summary (one line per chip) appears in the full view below 16 x 6.
 
 **Limits.** It is an isometric illusion; there is no 3D scene behind it. Only Blackhole chips are drawn; other chips are named in the footer. The view redraws at most 20 times a second at rest and 30 during a cut, and the tile wave steps 12 times a second. With PCIe counters the wave follows the traffic: inbound data sends fronts from the connector edge toward the back of the die, outbound data sends them toward the connector, and a chip with no traffic keeps a sideways sweep.
 
