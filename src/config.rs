@@ -700,8 +700,8 @@ struct ArcadeParsed {
     /// The `[[arcade.layouts]]` with no problem, in file order; `Some` when
     /// the key is there.
     layouts: Option<Vec<crate::animation::arcade_presets::NamedLayout>>,
-    /// `layout = "name"` and where it is, not yet checked against the
-    /// layouts.
+    /// `layout = "name"` and where it is. `load_from` checks the name
+    /// against the layouts afterwards.
     start: Option<(String, Option<std::ops::Range<usize>>)>,
     /// A problem outside the named layouts and the start name.
     core_bad: bool,

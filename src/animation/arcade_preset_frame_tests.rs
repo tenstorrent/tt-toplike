@@ -203,7 +203,7 @@ fn each_preset_draws_every_panel_it_names() {
                     assert!(drawn, "{}: {} draws nothing", l.name, p.view);
                 }
             }
-            // The sub-views the arcade built are the ones named.
+            // The arcade built a sub-view for each named panel and no other.
             let named: Vec<View> = l
                 .rows
                 .iter()

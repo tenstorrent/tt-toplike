@@ -195,7 +195,7 @@ pub fn preset(name: &str) -> Option<&'static NamedLayout> {
     presets().iter().find(|l| l.name.eq_ignore_ascii_case(name))
 }
 
-/// Every layout in cycle order, and the one on screen.
+/// Every layout in cycle order, and which is on screen.
 #[derive(Debug, Clone)]
 pub struct LayoutCycle {
     layouts: Vec<NamedLayout>,
