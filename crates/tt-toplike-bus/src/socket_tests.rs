@@ -1025,6 +1025,37 @@ fn remote_world_resnapshots_on_an_instance_change() {
     resnapshots_after("inst", vec![header_line(1, 8), rec_line(2, "old")]);
 }
 
+/// Hardening B5: a server that answers every subscription with `too_slow`
+/// (or has a sequence bug) used to get snapshot requests back to back with
+/// no delay. Consecutive snapshots are now at least 250 ms apart.
+#[test]
+fn remote_world_waits_250_ms_between_at_once_snapshots() {
+    let (_d, path) = sock("floor");
+    let fake = FakeServer::start(
+        &path,
+        vec![(
+            snap_line(1, 7, "x"),
+            vec![r#"{"error":"too_slow"}"#.to_string()],
+        )],
+    );
+    let clock = Arc::new(ManualPlayClock::new());
+    let rw =
+        RemoteWorld::connect_with_clock(&path, Duration::from_secs(10), clock.clone()).unwrap();
+    assert!(
+        wait_for(5, || fake.snapshots.load(Ordering::SeqCst) >= 6),
+        "{} snapshots",
+        fake.snapshots.load(Ordering::SeqCst)
+    );
+    drop(rw);
+    let n = fake.snapshots.load(Ordering::SeqCst);
+    // The first snapshot is the connect; each later one waited first.
+    assert!(
+        clock.now_ns() >= (n - 1) * 250_000_000,
+        "{n} snapshots in {} ns of clock time",
+        clock.now_ns()
+    );
+}
+
 #[test]
 fn replay_speed_out_of_range_is_bad_request() {
     let d = TempDir::new("speed");
@@ -1074,7 +1105,9 @@ fn closed_replay_clients_free_their_slots() {
     let mut held: Vec<Raw> = (0..64)
         .map(|_| {
             let mut c = Raw::connect(&path);
-            // 30 s of recorded time at speed 0.01 is a wait of 3000 s.
+            // 30 s of recorded time at speed 0.01 would be 3000 s; each
+            // wait is capped at 1 s, so a client stays about 2 s, longer
+            // than the 1.5 s this test allows for the slots to free.
             c.send("{\"op\":\"replay\",\"speed\":0.01}\n");
             c
         })
@@ -1122,6 +1155,31 @@ fn a_long_recorded_gap_is_compressed() {
     assert_eq!(read_replay(&mut c).len(), 3);
     // 1 s for the hour-long gap, then 500 ms / 2.
     assert_eq!(play.now_ns(), 1_000_000_000 + 250_000_000);
+}
+
+/// Hardening B4: every wait is capped at 1 s after the speed division. A
+/// 59 s gap (under the 60 s long-gap rule) at speed 0.01 was a 5900 s wait
+/// while the client stayed connected.
+#[test]
+fn each_replay_wait_is_capped_at_one_second_after_the_speed() {
+    let d = TempDir::new("rcap");
+    let bus = gap_bus(&d, Duration::from_secs(59));
+    let play = Arc::new(ManualPlayClock::new());
+    let path = d.path().join("s");
+    let _server = SocketServer::spawn_with(
+        bus,
+        &path,
+        ServerOptions {
+            play_clock: play.clone(),
+            ..ServerOptions::default()
+        },
+    )
+    .unwrap();
+    let mut c = Raw::connect(&path);
+    c.send("{\"op\":\"replay\",\"speed\":0.01}\n");
+    assert_eq!(read_replay(&mut c).len(), 3);
+    // 59 s / 0.01 capped at 1 s, then 500 ms / 0.01 = 50 s capped at 1 s.
+    assert_eq!(play.now_ns(), 2_000_000_000);
 }
 
 /// A server that sends a line longer than 16 MiB gets a decode error.

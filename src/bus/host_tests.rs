@@ -378,6 +378,57 @@ fn a_synthetic_backend_is_recorded_as_estimated() {
     assert!(n > 2, "only {n} backend records");
 }
 
+/// Hardening B3: a log directory keeps one backend and mode, but that never
+/// stops a replay. A replay reads the source files and does not open the
+/// source directory as a bus, so a live log replays into a directory of its
+/// own; a live bus is then refused on that replay directory.
+#[test]
+fn a_live_log_replays_into_its_own_directory_and_live_is_refused_there() {
+    let tmp = tempfile::tempdir().unwrap();
+    let live_dir = tmp.path().join("live");
+    let replay_dir = tmp.path().join("replay");
+    let tagged = |dir: &Path, mode: &str| {
+        let mut cfg = BusConfig {
+            dir: Some(dir.to_path_buf()),
+            ..BusConfig::default()
+        };
+        cfg.header_tags.insert("backend".into(), "sysfs".into());
+        cfg.header_tags.insert("mode".into(), mode.into());
+        cfg
+    };
+    {
+        let bus = tt_toplike_bus::Bus::open(tagged(&live_dir, "live")).unwrap();
+        bus.publish("t", Payload::Event(Event::ViewChanged { view: "x".into() }));
+        assert!(bus.flush(Duration::from_secs(5)));
+    }
+    let play = |into: Option<&Path>| {
+        let h = BusHost::replay(
+            &live_dir,
+            1000.0,
+            BusConfig {
+                dir: into.map(Path::to_path_buf),
+                ..BusConfig::default()
+            },
+        )
+        .unwrap();
+        let end = Instant::now() + Duration::from_secs(10);
+        while h.replay_result().is_none() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(h.replay_result(), Some(Ok(1)));
+        assert!(h.bus().flush(Duration::from_secs(5)));
+    };
+    play(None);
+    play(Some(&replay_dir));
+    // A second replay of the same log adds to the replay directory.
+    play(Some(&replay_dir));
+    let err = tt_toplike_bus::Bus::open(tagged(&replay_dir, "live")).unwrap_err();
+    assert!(
+        err.to_string().contains("holds a sysfs/replay log"),
+        "{err}"
+    );
+}
+
 /// A replay host says so in its header, and carries over the backend the
 /// log was recorded from (`unknown` for a log that does not name one).
 #[test]

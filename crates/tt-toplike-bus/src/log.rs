@@ -359,8 +359,9 @@ impl Bus {
     /// One process at a time writes a directory. `open` takes a
     /// non-blocking exclusive lock on `<dir>/.lock` and fails when it cannot:
     ///
-    /// * another holder: `WouldBlock`, `log directory is in use by another
-    ///   process: <dir>`;
+    /// * another holder: `WouldBlock`, `this log directory is already open
+    ///   (another process, or a bus in this process that is still shutting
+    ///   down): <dir>`;
     /// * the filesystem refuses to lock (`ENOLCK` on an NFS home mounted
     ///   `nolock`, for example): that error's kind, with the error and a
     ///   suggestion to use `--bus-dir` on a local filesystem. Running without
@@ -372,6 +373,15 @@ impl Bus {
     /// its first write, on every retry, and does not write, compress or
     /// delete anything until it holds it. Once held, it is kept until the
     /// writer thread exits (after the last `Bus` handle is dropped).
+    ///
+    /// # One backend and mode per directory
+    ///
+    /// When the newest segment's header names a `backend` or `mode` (see
+    /// [`BusConfig::header_tags`]) different from the one being opened, the
+    /// open fails with `InvalidInput`: `log directory holds a
+    /// <backend>/<mode> log; use another --bus-dir or remove it`. An empty
+    /// directory, a log with no tags, and a bus opened with no tags are
+    /// accepted. Replaying a log reads its files and is never refused.
     pub fn open_with(cfg: BusConfig, reducer: Box<dyn Reducer>) -> io::Result<Bus> {
         Bus::open_inner(cfg, reducer, Arc::new(lock_dir))
     }
@@ -419,6 +429,9 @@ impl Bus {
             // Without the lock, only read: never delete or create a file.
             match prepare(&dir, locked) {
                 Ok((closed, last)) => {
+                    // One backend and mode per directory. See
+                    // `check_same_log`. Returning here drops the lock.
+                    check_same_log(&dir, &closed, &cfg.header_tags)?;
                     head = last;
                     lock(&d.table).closed = closed;
                     if locked {
@@ -851,8 +864,9 @@ pub const LOCK_FILE: &str = ".lock";
 /// `<dir>/.lock` (mode 0600). The lock is `flock` on Unix and `LockFileEx`
 /// on Windows, through [`File::try_lock`]; it belongs to the returned file
 /// and is released when the file is closed, including when the process
-/// dies. Another holder gives `WouldBlock` with the message
-/// `log directory is in use by another process: <dir>`. The lock file is
+/// dies. Another holder gives `WouldBlock` with the message `this log
+/// directory is already open (another process, or a bus in this process that
+/// is still shutting down): <dir>`. The lock file is
 /// never deleted: deleting it would let a third opener lock a new file
 /// while the second still holds the old one.
 fn lock_dir(dir: &Path) -> Result<File, LockError> {
@@ -890,8 +904,12 @@ impl LockError {
         match self {
             LockError::Held(dir) => io::Error::new(
                 io::ErrorKind::WouldBlock,
+                // The holder can be this process's own detached writer (a
+                // bus dropped a moment ago whose writer thread is still
+                // finishing), so do not name another process alone.
                 format!(
-                    "log directory is in use by another process: {}",
+                    "this log directory is already open (another process, or a bus in this \
+                     process that is still shutting down): {}",
                     dir.display()
                 ),
             ),
@@ -956,6 +974,50 @@ fn prepare(dir: &Path, may_write: bool) -> io::Result<(Vec<SegInfo>, u64)> {
     Ok((closed, last))
 }
 
+/// Header tags that must match between a directory's newest segment and a
+/// bus opened on it.
+const SAME_LOG_TAGS: [&str; 2] = ["backend", "mode"];
+
+/// Refuse to add to a directory whose newest segment (`closed`, oldest
+/// first, as [`prepare`] lists them) names a different `backend` or `mode`
+/// in its header than `tags`, the bus being opened. Mixing them would make
+/// one log of two machines' or modes' data, and `bus inspect` prints only
+/// the first segment's header. A tag missing on either side is not
+/// compared: an empty directory, a log written before tags existed, and a
+/// bus opened with no tags are all accepted. A replay reads its source
+/// files directly and never opens the source directory as a bus, so this
+/// does not stop a replay of any log.
+fn check_same_log(
+    dir: &Path,
+    closed: &[SegInfo],
+    tags: &std::collections::BTreeMap<String, String>,
+) -> io::Result<()> {
+    let Some(newest) = closed.last() else {
+        return Ok(());
+    };
+    let p = segment::path(dir, newest.first_seq, newest.compressed);
+    let Ok(Some(header)) = segment::read_header(&p) else {
+        return Ok(());
+    };
+    let theirs = |k: &str| header.tool_versions.get(k);
+    let differs = SAME_LOG_TAGS
+        .iter()
+        .any(|k| matches!((tags.get(*k), theirs(k)), (Some(a), Some(b)) if a != b));
+    if !differs {
+        return Ok(());
+    }
+    let name = |k: &str| theirs(k).map_or("unknown", |s| s.as_str()).to_string();
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "log directory holds a {}/{} log; use another --bus-dir or remove it ({})",
+            name("backend"),
+            name("mode"),
+            dir.display()
+        ),
+    ))
+}
+
 /// The segment the writer appends to.
 struct OpenSeg {
     first_seq: u64,
@@ -1003,9 +1065,22 @@ struct Writer {
 impl Writer {
     /// Take the directory lock if it is not held yet. Every write, rotation,
     /// compression and deletion happens only after this succeeds.
+    ///
+    /// When the lock is taken late (it could not be taken at open), the
+    /// open only read the directory: it skipped a header-only last segment
+    /// without deleting it. That file would block the next segment with the
+    /// same first sequence number and retention never sees it. So the
+    /// cleanup in [`prepare`] runs again here, with the lock, and the
+    /// segment table is refreshed from the directory. Nothing was written
+    /// in this run before the lock was held, so the refresh loses nothing.
+    /// If the cleanup fails the lock is released and the next retry tries
+    /// both again.
     fn ensure_lock(&mut self) -> io::Result<()> {
         if self.dir_lock.is_none() {
-            self.dir_lock = Some((self.locker)(&self.disk.dir).map_err(LockError::into_io)?);
+            let f = (self.locker)(&self.disk.dir).map_err(LockError::into_io)?;
+            let (closed, _) = prepare(&self.disk.dir, true)?;
+            lock(&self.disk.table).closed = closed;
+            self.dir_lock = Some(f);
         }
         Ok(())
     }
@@ -1925,9 +2000,13 @@ mod tests {
         let first = Bus::open(disk_cfg(dir.path(), &clock)).unwrap();
         let err = Bus::open(disk_cfg(dir.path(), &clock)).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{err}");
+        // Hardening B6: the holder here is this process's own bus, so the
+        // message must not say only "another process".
         assert!(
-            err.to_string()
-                .contains("log directory is in use by another process"),
+            err.to_string().contains(
+                "this log directory is already open (another process, or a bus in \
+                 this process that is still shutting down)"
+            ),
             "{err}"
         );
         // A clone shares the lock; only dropping the last handle frees it.
@@ -2011,6 +2090,177 @@ mod tests {
         flush(&bus);
         assert!(!segment_files(dir.path()).is_empty());
         assert!(bus.stats().disk_on);
+    }
+
+    /// A locker that fails like a missing lock file on its first call (the
+    /// open) and takes the real lock on every later call (the writer).
+    fn fail_first_lock() -> Locker {
+        let calls = Arc::new(AtomicU64::new(0));
+        Arc::new(move |d: &Path| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(LockError::Open(io::Error::other("injected: no lock file")))
+            } else {
+                lock_dir(d)
+            }
+        })
+    }
+
+    /// Hardening B2: a header-only last segment (left by a run that
+    /// published nothing) is skipped, not deleted, when the lock cannot be
+    /// taken at open. Once a later retry takes the lock, the cleanup runs:
+    /// the file goes, and the next record can use its sequence number.
+    #[test]
+    fn a_header_only_segment_is_cleaned_up_once_a_late_lock_is_taken() {
+        let dir = TempDir::new("latelock");
+        let clock = ManualClock::new(T0);
+        {
+            let bus = Bus::open(disk_cfg(dir.path(), &clock)).unwrap();
+            bus.publish("t", sample(0));
+            bus.publish("t", sample(1));
+            flush(&bus);
+        }
+        // A run that published nothing leaves segment 3 with a header only.
+        drop(Bus::open(disk_cfg(dir.path(), &clock)).unwrap());
+        assert!(exists(dir.path(), 3, false));
+
+        let locker = fail_first_lock();
+        let bus =
+            Bus::open_inner(disk_cfg(dir.path(), &clock), Box::new(NoReducer), locker).unwrap();
+        assert!(!bus.stats().disk_on);
+        assert!(exists(dir.path(), 3, false), "left alone without the lock");
+        // The open published its outage Gap as seq 3. Writing it takes the
+        // lock (the second call succeeds) and opens segment 3.
+        assert_eq!(bus.publish("t", sample(2)), 4);
+        flush(&bus);
+        assert!(bus.stats().disk_on, "{:?}", bus.stats());
+        assert_eq!(bus.stats().dropped_to_disk_errors, 0);
+        let r = segment::read_segment(&dir.path().join(file_name(3, false))).unwrap();
+        assert_eq!(seqs(&r.records), vec![3, 4], "records 3 and 4 in segment 3");
+        assert_eq!(gaps(&r.records), 1);
+        // The table holds the old segment and the new one, nothing else.
+        let recs = bus.inner.read_disk(1, 10, u64::MAX).unwrap();
+        assert_eq!(seqs(&recs), vec![1, 2, 3, 4]);
+    }
+
+    /// The late lock also refreshes the segment table: a directory that
+    /// could not be listed at open (so the table started empty) is read
+    /// again, and its old segments become readable.
+    #[cfg(unix)]
+    #[test]
+    fn a_late_lock_refreshes_the_segment_table() {
+        let dir = TempDir::new("latetable");
+        let clock = ManualClock::new(T0);
+        {
+            let bus = Bus::open(disk_cfg(dir.path(), &clock)).unwrap();
+            bus.publish("t", sample(0));
+            bus.publish("t", sample(1));
+            flush(&bus);
+        }
+        // Unlistable at open, and the lock file cannot be made.
+        chmod(dir.path(), 0o000);
+        if fs::read_dir(dir.path()).is_ok() {
+            // Root ignores the mode; nothing to test here.
+            chmod(dir.path(), 0o700);
+            return;
+        }
+        let locker = fail_first_lock();
+        let opened = Bus::open_inner(
+            BusConfig {
+                window_records: 1,
+                ..disk_cfg(dir.path(), &clock)
+            },
+            Box::new(NoReducer),
+            locker,
+        );
+        chmod(dir.path(), 0o700);
+        let bus = opened.unwrap();
+        let table = |b: &Bus| -> Vec<u64> {
+            let t = lock(&b.inner.disk.as_ref().unwrap().table);
+            t.closed.iter().map(|g| g.first_seq).collect()
+        };
+        assert!(table(&bus).is_empty());
+        // The open published its outage Gap, and the writer may have tried
+        // it while the directory was still unreadable: go past the retry
+        // window.
+        clock.advance_secs(11);
+        bus.publish("t", sample(2));
+        flush(&bus);
+        // (The sequence restarted at 1 because the open could not list the
+        // directory, a separate known issue, so this write itself collides
+        // with segment 1. The table is what this test is about.)
+        assert_eq!(
+            table(&bus),
+            vec![1],
+            "old segment back in the table; {:?} {}",
+            bus.stats(),
+            lock(&bus.inner.disk.as_ref().unwrap().reason)
+        );
+    }
+
+    /// A disk config with `backend` and `mode` header tags.
+    fn tagged(dir: &Path, clock: &Arc<ManualClock>, backend: &str, mode: &str) -> BusConfig {
+        let mut cfg = disk_cfg(dir, clock);
+        cfg.header_tags.insert("backend".into(), backend.into());
+        cfg.header_tags.insert("mode".into(), mode.into());
+        cfg
+    }
+
+    /// Open `cfg`, publish one record, flush and drop.
+    fn record_one(cfg: BusConfig) {
+        let bus = Bus::open(cfg).unwrap();
+        bus.publish("t", sample(0));
+        flush(&bus);
+    }
+
+    /// Hardening B3: a directory whose newest segment was written for one
+    /// backend or mode is not reused for another.
+    #[test]
+    fn a_directory_of_another_backend_or_mode_is_refused() {
+        let dir = TempDir::new("mixmode");
+        let clock = ManualClock::new(T0);
+        record_one(tagged(dir.path(), &clock, "sysfs", "live"));
+        for (backend, mode) in [("mock", "mock"), ("hybrid", "live"), ("sysfs", "replay")] {
+            let err = Bus::open(tagged(dir.path(), &clock, backend, mode)).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(
+                    "log directory holds a sysfs/live log; use another --bus-dir or remove it"
+                ),
+                "{msg}"
+            );
+        }
+        // Nothing was written by the refused opens, and the same backend
+        // and mode still open.
+        assert_eq!(segment_files(dir.path()).len(), 1);
+        record_one(tagged(dir.path(), &clock, "sysfs", "live"));
+    }
+
+    /// An empty directory, a log with no tags (written before tags
+    /// existed) and an opener with no tags are all accepted.
+    #[test]
+    fn untagged_logs_and_empty_directories_are_accepted() {
+        let clock = ManualClock::new(T0);
+        let empty = TempDir::new("mixempty");
+        record_one(tagged(empty.path(), &clock, "mock", "mock"));
+        let old = TempDir::new("mixold");
+        record_one(disk_cfg(old.path(), &clock));
+        record_one(tagged(old.path(), &clock, "sysfs", "live"));
+        // An opener with no tags does not check.
+        record_one(disk_cfg(old.path(), &clock));
+    }
+
+    /// Only the newest segment counts: after an untagged run, a different
+    /// backend may continue, and then the older one is refused.
+    #[test]
+    fn the_newest_segment_decides() {
+        let dir = TempDir::new("mixnewest");
+        let clock = ManualClock::new(T0);
+        record_one(tagged(dir.path(), &clock, "sysfs", "live"));
+        record_one(disk_cfg(dir.path(), &clock));
+        record_one(tagged(dir.path(), &clock, "mock", "mock"));
+        let err = Bus::open(tagged(dir.path(), &clock, "sysfs", "live")).unwrap_err();
+        assert!(err.to_string().contains("holds a mock/mock log"), "{err}");
     }
 
     #[test]

@@ -403,6 +403,8 @@ fn a_second_stop_signal_exits_at_once_and_removes_the_socket() {
         drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
         assert!(sock.exists());
     };
+    // Stands for a socket this process bound through `serve_socket`.
+    let _mark = ServedMark::new(&sock);
     for (second, code) in [(StopSignal::Int, 130), (StopSignal::Term, 143)] {
         make_socket();
         let flag = AtomicBool::new(false);
@@ -431,6 +433,124 @@ fn a_second_stop_signal_exits_at_once_and_removes_the_socket() {
         &mut |_| {},
     );
     assert!(file.exists());
+}
+
+// ---- Hardening B1 ------------------------------------------------------------
+
+/// A mock backend whose first `devices()` call says so on `entered` and
+/// then blocks until `gate` is sent to: a backend that is slow to start.
+struct SlowInit {
+    inner: MockBackend,
+    hold: std::sync::Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+}
+
+impl TelemetryBackend for SlowInit {
+    fn init(&mut self) -> BackendResult<()> {
+        self.inner.init()
+    }
+    fn update(&mut self) -> BackendResult<()> {
+        self.inner.update()
+    }
+    fn devices(&self) -> &[Device] {
+        if let Some((entered, gate)) = self.hold.lock().unwrap().take() {
+            let _ = entered.send(());
+            let _ = gate.recv();
+        }
+        self.inner.devices()
+    }
+    fn telemetry(&self, i: usize) -> Option<&Telemetry> {
+        self.inner.telemetry(i)
+    }
+    fn smbus_telemetry(&self, i: usize) -> Option<&SmbusTelemetry> {
+        self.inner.smbus_telemetry(i)
+    }
+    fn backend_info(&self) -> String {
+        "slow-init".into()
+    }
+}
+
+/// A second instance started on the socket path of a live host, stopped by
+/// two signals while its backend is still starting, must leave the live
+/// host's socket alone: this process never bound it.
+#[cfg(unix)]
+#[test]
+fn two_signals_during_init_leave_another_hosts_socket_in_place() {
+    use std::os::unix::net::UnixStream;
+    let tmp = tempfile::tempdir().unwrap();
+    // The server creates its own 0700 directory.
+    let sock = tmp.path().join("run").join("bus.sock");
+    // The live host (in this test process, but not started through
+    // `serve_socket`, so it stands for another process).
+    let live = tt_toplike_bus::SocketServer::spawn(Bus::open(BusConfig::default()).unwrap(), &sock)
+        .unwrap();
+    assert!(UnixStream::connect(&sock).is_ok());
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (gate_tx, gate_rx) = std::sync::mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let s2 = stop.clone();
+    let path2 = sock.clone();
+    let second = thread::spawn(move || {
+        let mut b = SlowInit {
+            inner: mock(1),
+            hold: std::sync::Mutex::new(Some((entered_tx, gate_rx))),
+        };
+        run_headless(&mut b, &mut NoWorkloads, cfg(None, Some(path2)), None, &s2)
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("init started");
+    // Two signals while init is still running.
+    let mut exits = Vec::new();
+    watch_stop(
+        [StopSignal::Int, StopSignal::Int],
+        &stop,
+        Some(&sock),
+        &mut |c| exits.push(c),
+    );
+    assert_eq!(exits, vec![130]);
+    assert!(sock.exists(), "the live host's socket was removed");
+    assert!(UnixStream::connect(&sock).is_ok());
+    // Let init finish: the bind fails, and the socket is still not ours.
+    gate_tx.send(()).unwrap();
+    let err = second.join().unwrap().unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::AddrInUse, "{err}");
+    watch_stop(
+        [StopSignal::Int, StopSignal::Term],
+        &stop,
+        Some(&sock),
+        &mut |_| {},
+    );
+    assert!(UnixStream::connect(&sock).is_ok());
+    drop(live);
+}
+
+/// Once this process has bound its socket, a second signal does remove it.
+#[cfg(unix)]
+#[test]
+fn two_signals_after_the_bind_remove_this_hosts_socket() {
+    let tmp = tempfile::tempdir().unwrap();
+    // The server creates its own 0700 directory.
+    let sock = tmp.path().join("run").join("bus.sock");
+    let stop = Arc::new(AtomicBool::new(false));
+    let s2 = stop.clone();
+    let path2 = sock.clone();
+    let host = thread::spawn(move || {
+        let mut b = mock(1);
+        run_headless(&mut b, &mut NoWorkloads, cfg(None, Some(path2)), None, &s2)
+    });
+    assert!(wait_for(10, || serving_socket(&sock)), "bound and marked");
+    let mut exits = Vec::new();
+    watch_stop(
+        [StopSignal::Term, StopSignal::Term],
+        &stop,
+        Some(&sock),
+        &mut |c| exits.push((c, sock.exists())),
+    );
+    assert_eq!(exits, vec![(143, false)]);
+    host.join().unwrap().unwrap();
+    // The mark goes with the server.
+    assert!(!serving_socket(&sock));
 }
 
 #[test]

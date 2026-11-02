@@ -180,26 +180,72 @@ pub struct HeadlessReport {
     pub flushed: bool,
 }
 
-/// The socket server, or nothing where there is no Unix socket.
+/// The socket server and its [`ServedMark`], or nothing where there is no
+/// Unix socket. The server is dropped first (it removes its socket file),
+/// then the mark.
 #[cfg(unix)]
-type Server = tt_toplike_bus::SocketServer;
+struct Server {
+    _server: tt_toplike_bus::SocketServer,
+    _mark: ServedMark,
+}
 #[cfg(not(unix))]
 type Server = ();
 
-/// Serve `bus` on `path`, with the path in the error.
+/// Socket paths this process has bound through [`serve_socket`] and still
+/// serves. The second-signal exit in [`watch_stop`] removes a socket file
+/// only when its path is here: before the bind succeeds, the file at the
+/// path may belong to another running host (a second instance started on
+/// the same default path), and removing it would cut that host off.
+static SERVED_SOCKETS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Is `p` a socket this process bound and still serves?
+fn serving_socket(p: &Path) -> bool {
+    SERVED_SOCKETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|s| s == p)
+}
+
+/// Puts a path on [`SERVED_SOCKETS`] and takes it off again when dropped.
+struct ServedMark(PathBuf);
+
+impl ServedMark {
+    fn new(p: &Path) -> ServedMark {
+        SERVED_SOCKETS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(p.to_path_buf());
+        ServedMark(p.to_path_buf())
+    }
+}
+
+impl Drop for ServedMark {
+    fn drop(&mut self) {
+        let mut v = SERVED_SOCKETS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = v.iter().position(|s| *s == self.0) {
+            v.remove(i);
+        }
+    }
+}
+
+/// Serve `bus` on `path`, with the path in the error. The path is marked as
+/// this process's (see [`SERVED_SOCKETS`]) only after the bind succeeded.
 #[cfg(unix)]
 fn serve_socket(bus: &tt_toplike_bus::Bus, path: Option<&Path>) -> io::Result<Option<Server>> {
     let Some(path) = path else {
         return Ok(None);
     };
-    tt_toplike_bus::SocketServer::spawn(bus.clone(), path)
-        .map(Some)
-        .map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("cannot serve the bus socket at {}: {e}", path.display()),
-            )
-        })
+    let server = tt_toplike_bus::SocketServer::spawn(bus.clone(), path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("cannot serve the bus socket at {}: {e}", path.display()),
+        )
+    })?;
+    Ok(Some(Server {
+        _server: server,
+        _mark: ServedMark::new(path),
+    }))
 }
 
 #[cfg(not(unix))]
@@ -358,9 +404,14 @@ impl StopSignal {
 /// The first raises `flag`, and the loop is expected to notice it, flush
 /// and exit. The second means the loop did not get out (a hung
 /// `backend.update()`, a stalled flush): the socket file at `socket` is
-/// removed if it is a socket (best effort, so the next start does not find
-/// it), and `exit` is called with 128 + the signal number. `exit` is
-/// `std::process::exit` in normal use; tests record the code.
+/// removed if it is a socket AND this process bound it (best effort, so the
+/// next start does not find it), and `exit` is called with 128 + the signal
+/// number. `exit` is `std::process::exit` in normal use; tests record the
+/// code.
+///
+/// Before [`serve_socket`] has bound the path for this process (a slow
+/// backend start, or a bind that failed because another host serves
+/// there), the file is left alone: it may be another running host's.
 pub fn watch_stop(
     signals: impl IntoIterator<Item = StopSignal>,
     flag: &AtomicBool,
@@ -374,7 +425,7 @@ pub fn watch_stop(
             flag.store(true, Ordering::SeqCst);
             continue;
         }
-        if let Some(p) = socket {
+        if let Some(p) = socket.filter(|p| serving_socket(p)) {
             remove_if_socket(p);
         }
         exit(sig.exit_code());
@@ -397,7 +448,7 @@ fn remove_if_socket(p: &Path) {
 
 /// A flag raised by the first SIGTERM or SIGINT (Ctrl-C elsewhere). A
 /// second one exits the process at once (see [`watch_stop`]), removing the
-/// socket file at `socket`.
+/// socket file at `socket` if this process has bound it.
 ///
 /// The signals are caught on a small background thread running a
 /// single-threaded tokio runtime (tokio is already a dependency), so no

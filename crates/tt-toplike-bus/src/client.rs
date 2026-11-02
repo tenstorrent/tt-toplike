@@ -23,7 +23,9 @@
 //!   snapshot is taken at once. That covers `dropped`, `future`, `too_slow`,
 //!   a record that does not follow the view's sequence number by exactly
 //!   one (a gap or a repeat), and a `subscribed` header whose bus instance
-//!   differs from the snapshot's.
+//!   differs from the snapshot's. Consecutive snapshots are still at least
+//!   250 ms apart, so a server that keeps losing the position (or has a
+//!   sequence bug) gets at most four snapshot requests a second.
 //! * A line from the server longer than 16 MiB is a decode error and ends
 //!   the connection.
 //!
@@ -33,6 +35,7 @@
 //!   (see [`crate::summary`]); a reconnect with a snapshot does.
 
 use crate::record::{HeaderKind, Record};
+use crate::replay::{PlayClock, RealClock};
 use crate::socket::{ErrorLine, RawReply, SubscribedLine};
 use crate::summary::{EventSummary, ReadingSummary, RemoteSnapshot, WorldSummary};
 use crate::world::ModelView;
@@ -61,6 +64,12 @@ const BACKOFF_FIRST: Duration = Duration::from_secs(1);
 
 /// Longest reconnect delay.
 const BACKOFF_MAX: Duration = Duration::from_secs(10);
+
+/// Shortest time between the start of one snapshot request and the next.
+/// A server that keeps answering `too_slow`, `dropped` or `future`, or has
+/// a sequence bug, makes the follower take a new snapshot "at once" every
+/// time; this floor keeps that to at most four snapshots a second.
+const SNAPSHOT_FLOOR: Duration = Duration::from_millis(250);
 
 /// Why a remote read failed.
 #[derive(Debug)]
@@ -422,6 +431,9 @@ struct RemoteShared {
     /// lost (see [`Link`]).
     retry_failed: AtomicBool,
     stop: AtomicBool,
+    /// What [`RemoteShared::pause`] waits on: [`RealClock`] in normal use,
+    /// a [`crate::ManualPlayClock`] in tests.
+    clock: Arc<dyn PlayClock + Send + Sync>,
 }
 
 /// The state of a [`RemoteWorld`]'s connection.
@@ -445,16 +457,24 @@ impl RemoteShared {
         self.stop.load(Ordering::SeqCst)
     }
 
-    /// Wait `d`, waking every tick to check for stop. False when stopping.
+    /// Wait `d` on the clock, waking every tick to check for stop. False
+    /// when stopping.
     fn pause(&self, d: Duration) -> bool {
-        let end = Instant::now() + d;
-        while Instant::now() < end {
+        let tick = u64::try_from(TICK.as_nanos()).unwrap_or(u64::MAX);
+        let end = self
+            .clock
+            .now_ns()
+            .saturating_add(u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+        loop {
             if self.stopping() {
                 return false;
             }
-            thread::sleep(TICK.min(end.saturating_duration_since(Instant::now())));
+            let left = end.saturating_sub(self.clock.now_ns());
+            if left == 0 {
+                return true;
+            }
+            self.clock.sleep_ns(left.min(tick));
         }
-        !self.stopping()
     }
 }
 
@@ -494,6 +514,17 @@ impl RemoteWorld {
     /// not answer in time fails with `TimedOut`. Reconnects later use the
     /// normal reply timeout.
     pub fn connect_within(path: &Path, timeout: Duration) -> io::Result<RemoteWorld> {
+        RemoteWorld::connect_with_clock(path, timeout, Arc::new(RealClock))
+    }
+
+    /// [`RemoteWorld::connect_within`] with the clock the follower waits on
+    /// (reconnect backoff, the gap between snapshots). Tests pass a
+    /// [`crate::ManualPlayClock`].
+    pub(crate) fn connect_with_clock(
+        path: &Path,
+        timeout: Duration,
+        clock: Arc<dyn PlayClock + Send + Sync>,
+    ) -> io::Result<RemoteWorld> {
         let (snap, sub) = open(path, timeout)?;
         let shared = Arc::new(RemoteShared {
             path: path.to_path_buf(),
@@ -504,6 +535,7 @@ impl RemoteWorld {
             connected: AtomicBool::new(true),
             retry_failed: AtomicBool::new(false),
             stop: AtomicBool::new(false),
+            clock,
         });
         let s = shared.clone();
         let thread = thread::Builder::new()
@@ -633,6 +665,9 @@ impl Drop for RemoteWorld {
 fn follow(shared: &RemoteShared, first: RemoteSubscription) {
     let mut sub = Some(first);
     let mut backoff = BACKOFF_FIRST;
+    let floor = u64::try_from(SNAPSHOT_FLOOR.as_nanos()).unwrap_or(u64::MAX);
+    // Clock time of the last snapshot request: the connect's, at first.
+    let mut last_snapshot = shared.clock.now_ns();
     loop {
         if let Some(mut s) = sub.take() {
             shared.connected.store(true, Ordering::SeqCst);
@@ -655,6 +690,12 @@ fn follow(shared: &RemoteShared, first: RemoteSubscription) {
         if shared.stopping() {
             return;
         }
+        // Keep snapshots at least SNAPSHOT_FLOOR apart.
+        let since = shared.clock.now_ns().saturating_sub(last_snapshot);
+        if since < floor && !shared.pause(Duration::from_nanos(floor - since)) {
+            return;
+        }
+        last_snapshot = shared.clock.now_ns();
         match resnapshot(shared) {
             Ok(s) => {
                 sub = Some(s);

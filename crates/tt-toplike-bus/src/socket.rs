@@ -50,10 +50,12 @@
 //!   this client only. Nothing is published back into the bus, and records
 //!   keep their recorded sequence numbers and timestamps. Records whose
 //!   `t_wall_ms` is below `from_ts_ms` are skipped. The pause before a
-//!   record is its `t_mono_ns` minus the first sent record's, divided by
-//!   `speed`, except that a pause of more than 60 s of recorded time is
-//!   replayed as a 1 s wait, so a log with an overnight hole does not stall
-//!   the stream. `speed` must be between 0.01 and 1000; anything else
+//!   record is the recorded time since the previous record (`t_mono_ns`)
+//!   divided by `speed`, and then capped at 1 s. A log with an overnight
+//!   hole, or a slow speed (a 59 s gap at 0.01 would be 5900 s), therefore
+//!   never stalls the stream for more than 1 s between two records; pauses
+//!   longer than 1 s at the chosen speed are shortened to 1 s. `speed` must
+//!   be between 0.01 and 1000; anything else
 //!   (including 0, negative numbers and values too large or too small to
 //!   pace) gets `bad_request "bad speed"`. A client that closes during a
 //!   pause is noticed within 100 ms and its slot is freed.
@@ -158,12 +160,11 @@ const ACCEPT_POLL: Duration = Duration::from_millis(25);
 const MIN_SPEED: f64 = 0.01;
 const MAX_SPEED: f64 = 1000.0;
 
-/// A pause of more than this much recorded time (ns) between two replayed
-/// records is replayed as [`LONG_GAP_WAIT_NS`].
-const LONG_GAP_NS: u64 = 60 * 1_000_000_000;
-
-/// The real wait (ns) a long recorded gap is compressed to.
-const LONG_GAP_WAIT_NS: u64 = 1_000_000_000;
+/// Longest real wait (ns) between two replayed records, applied after the
+/// recorded gap is divided by the speed. A long recorded hole (overnight)
+/// and a slow speed (0.01) both end up as at most this wait, so a client
+/// that stays connected is never held for minutes between two lines.
+const MAX_WAIT_NS: u64 = 1_000_000_000;
 
 /// How long `Drop` waits for client threads before detaching them.
 const DROP_WAIT: Duration = Duration::from_millis(900);
@@ -1049,11 +1050,8 @@ fn replay(c: &Conn<'_>, from_ts_ms: u64, speed: f64, filter: &ReplayFilter) {
         };
         if let Some(p) = prev_t {
             let gap = rec.t_mono_ns.saturating_sub(p);
-            due = due.saturating_add(if gap > LONG_GAP_NS {
-                LONG_GAP_WAIT_NS
-            } else {
-                (gap as f64 / speed) as u64
-            });
+            // Divide by the speed first, then cap (see `MAX_WAIT_NS`).
+            due = due.saturating_add(((gap as f64 / speed) as u64).min(MAX_WAIT_NS));
         }
         prev_t = Some(rec.t_mono_ns);
         let target = play0

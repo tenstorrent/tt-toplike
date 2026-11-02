@@ -64,6 +64,28 @@ pub fn read_segment(path: &Path) -> io::Result<SegmentRead> {
     read_segment_from(path, 0, usize::MAX)
 }
 
+/// Read only the header line of a segment, plain or compressed. `None` when
+/// the first line is not a valid header (or the file is empty).
+pub(crate) fn read_header(path: &Path) -> io::Result<Option<Header>> {
+    let file = File::open(path)?;
+    let compressed = path
+        .extension()
+        .is_some_and(|e| e == std::ffi::OsStr::new(COMPRESSED_EXT));
+    let reader: Box<dyn Read> = if compressed {
+        Box::new(MultiGzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+    let mut line = Vec::new();
+    // A damaged stream reads as "no header".
+    if BufReader::new(reader).read_until(b'\n', &mut line).is_err() {
+        return Ok(None);
+    }
+    Ok(std::str::from_utf8(&line)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Header>(t.trim_end_matches(['\n', '\r'])).ok()))
+}
+
 /// Read the records of a segment whose `seq` is at least `from_seq`,
 /// stopping after `max` of them. Bad lines before the stopping point are
 /// skipped and counted.
