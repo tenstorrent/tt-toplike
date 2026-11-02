@@ -86,7 +86,7 @@ impl BackdropKind {
         match self {
             BackdropKind::Scene => "model phase, tokens/s, KV cache and requests",
             BackdropKind::Sky => "training step time; its stars are decoration",
-            BackdropKind::Clouds => "PCIe traffic (drift) and chip load (light)",
+            BackdropKind::Clouds => "PCIe (drift) and chip load (light); decoration",
         }
     }
 }

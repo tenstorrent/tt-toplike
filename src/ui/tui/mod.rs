@@ -39,6 +39,7 @@ pub(crate) mod proc_scan;
 pub(crate) mod reset_status;
 pub mod throttle;
 pub use throttle::ThrottleState;
+mod backdrop_bus;
 mod grid_bus;
 mod hivemind_bus;
 mod hivemind_view;
@@ -810,7 +811,13 @@ fn run_app(
         log::warn!("config: {p}");
     }
     let arcade_config = loaded_config.arcade.clone();
-    let mut arcade_cloudfield = arcade_config.cloudfield;
+    // Each view's backdrop (`[backdrop]`, `/backdrop`, the `w` key) and the
+    // one the TUI lays over the view on screen (see `backdrop_bus`). The
+    // settings live here, so they hold across a resize.
+    let mut backdrop_settings =
+        crate::animation::backdrop::BackdropSettings::new(loaded_config.backdrop.clone());
+    let mut shared_backdrop = backdrop_bus::SharedBackdrop::default();
+    let backdrop_started = Instant::now();
     let anim_cfg = {
         use crate::config::AnimConfig;
         AnimConfig::from_profile(cli.profile).merge(crate::config::AnimConfigOverrides {
@@ -1047,8 +1054,7 @@ fn run_app(
     // so it works from every mode without mode-specific plumbing.
     let mut cmd_mode = false;
     let mut cmd_buf = String::new();
-    let mut cmd_message: Option<(String, bool)> =
-        crate::config::problem_summary(&loaded_config.problems).map(|m| (m, true)); // (text, is_error)
+    let mut cmd_message: Option<(String, bool)> = crate::config::status_message(loaded_config); // (text, is_error)
 
     // `/remote` discovery picker: boxes from the most recent `/remote` (no-arg)
     // discovery, retained so `/remote <n>` can select by list position. Empty
@@ -1397,7 +1403,7 @@ fn run_app(
                             size.height as usize,
                             &arcade_config,
                         );
-                        arc.set_cloudfield(arcade_cloudfield);
+                        arc.set_backdrop(backdrop_settings.choice("arcade"));
                         arc.initialize_from_devices(backend.devices());
                         // Forward sensitivity so --profile paranoid (or any non-default profile)
                         // takes effect inside Arcade just like it does in the standalone modes.
@@ -1774,6 +1780,53 @@ fn run_app(
                 }
             }
 
+            // The backdrops (see `backdrop_bus`): the views' own painters
+            // follow their settings, and the TUI's layer is fed for the view
+            // on screen.
+            snake.set_atmosphere(backdrop_bus::own_painter(&backdrop_settings, "inference"));
+            if let Some(tv) = train_view.as_mut() {
+                tv.set_sky(backdrop_bus::own_painter(&backdrop_settings, "training"));
+            }
+            if let Some(dv) = die3d.as_mut() {
+                dv.set_clouds(backdrop_bus::own_painter(&backdrop_settings, "die3d"));
+            }
+            if let Some(arc) = arcade.as_mut() {
+                arc.set_backdrop(backdrop_settings.choice("arcade"));
+            }
+            shared_backdrop.update(
+                &backdrop_settings,
+                view_name(display_mode),
+                overlay == Some(OverlayPanel::Legend),
+                |want_rows| {
+                    // The scene follows the rows the arcade and `i` use.
+                    #[cfg(target_os = "linux")]
+                    let local_rows = || inference_monitor.snapshot();
+                    #[cfg(not(target_os = "linux"))]
+                    let local_rows = Vec::new;
+                    let rows = if !want_rows {
+                        Vec::new()
+                    } else if let Some(r) = inference_bus::attached_rows(tui_bus, backend.as_ref())
+                    {
+                        r
+                    } else if backend_type == BackendType::Mock {
+                        crate::workload::inference_server::mock::mock_services(
+                            mock_started.elapsed().as_secs_f32(),
+                        )
+                    } else if backend_type == BackendType::Remote {
+                        Vec::new()
+                    } else {
+                        local_rows()
+                    };
+                    crate::animation::backdrop::BackdropSignals::gather(
+                        Some(&tui_bus.read()),
+                        backend.as_ref(),
+                        rows,
+                        backdrop_started.elapsed().as_secs_f64(),
+                        backend_type == BackendType::Mock,
+                    )
+                },
+            );
+
             // Unattended rotation: advance once this view has had its dwell.
             // Placed after the per-mode update so the activity flags reflect
             // the tick just processed, and inside `should_tick` so the
@@ -2003,6 +2056,15 @@ fn run_app(
             let bus_world = bus_world
                 .as_ref()
                 .map(|w| w as &dyn tt_toplike_bus::WorldRead);
+            // The legend's backdrop line: the view's setting, and whether its
+            // signals are estimates (the arcade keeps its own).
+            let backdrop_legend = (
+                backdrop_settings.choice(view_name(display_mode)),
+                match (display_mode, arcade.as_ref()) {
+                    (DisplayMode::Arcade, Some(arc)) => arc.backdrop().estimated(),
+                    _ => shared_backdrop.estimated(),
+                },
+            );
             let draw_start = Instant::now();
             terminal
                 .draw(|f| {
@@ -2121,6 +2183,10 @@ fn run_app(
                         }
                     }
 
+                    // The shared backdrop, in the blank cells the view left.
+                    let backdrop_area = backdrop_bus::area(f.area(), STATUS_BAR_ROWS as u16);
+                    shared_backdrop.draw(f.buffer_mut(), backdrop_area);
+
                     // ── Global status bar (all modes) ─────────────────────────
                     render_global_statusbar(
                         f,
@@ -2141,7 +2207,7 @@ fn run_app(
 
                     // ── Floating overlay panel (legend / help / explain) ───────
                     if let Some(kind) = overlay {
-                        render_overlay_panel(f, kind, display_mode);
+                        render_overlay_panel_with(f, kind, display_mode, backdrop_legend);
                     }
 
                     // ── Reset takeover (full-screen, drawn over everything) ──
@@ -2559,22 +2625,43 @@ fn run_app(
                                         }
                                     }
                                 } else if verb == "arcade" {
-                                    // `/arcade cloudfield on|off`: the setting lives
-                                    // here, so it holds across a resize.
+                                    // `/arcade cloudfield on|off`: the old name for
+                                    // the arcade's scene backdrop.
                                     let arg = cmd_buf
                                         .trim()
                                         .trim_start_matches('/')
                                         .split_once(char::is_whitespace)
                                         .map(|(_, rest)| rest)
                                         .unwrap_or("");
-                                    let (msg, err) = crate::animation::arcade_layout::command(
-                                        arg,
-                                        &mut arcade_cloudfield,
+                                    let mut on = backdrop_settings.choice("arcade")
+                                        == Some(crate::animation::backdrop::BackdropKind::Scene);
+                                    let (msg, err) =
+                                        crate::animation::arcade_layout::command(arg, &mut on);
+                                    let _ = backdrop_settings.set(
+                                        "arcade",
+                                        on.then_some(
+                                            crate::animation::backdrop::BackdropKind::Scene,
+                                        ),
                                     );
                                     if let Some(arc) = arcade.as_mut() {
-                                        arc.set_cloudfield(arcade_cloudfield);
+                                        arc.set_backdrop(backdrop_settings.choice("arcade"));
                                     }
                                     cmd_message = Some((msg, err));
+                                    force_redraw = true;
+                                } else if verb == "backdrop" {
+                                    // `/backdrop [off|scene|sky|clouds]` for the view
+                                    // on screen; the next update applies it.
+                                    let arg = cmd_buf
+                                        .trim()
+                                        .trim_start_matches('/')
+                                        .split_once(char::is_whitespace)
+                                        .map(|(_, rest)| rest)
+                                        .unwrap_or("");
+                                    cmd_message = Some(crate::animation::backdrop::command(
+                                        arg,
+                                        view_name(display_mode),
+                                        &mut backdrop_settings,
+                                    ));
                                     force_redraw = true;
                                 } else if crate::animation::die3d::commands::is_command(&verb) {
                                     // A Die 3D setting. It belongs to the open view, so it
@@ -2589,11 +2676,24 @@ fn run_app(
                                         .trim()
                                         .to_string();
                                     cmd_message = Some(match (display_mode, die3d.as_mut()) {
-                                        (DisplayMode::Die3d, Some(dv)) => dv.command(
-                                            &verb,
-                                            &arg,
-                                            die3d_started.elapsed().as_secs_f64(),
-                                        ),
+                                        (DisplayMode::Die3d, Some(dv)) => {
+                                            let out = dv.command(
+                                                &verb,
+                                                &arg,
+                                                die3d_started.elapsed().as_secs_f64(),
+                                            );
+                                            // `/clouds` is the view's backdrop
+                                            // setting: clouds or off.
+                                            if verb == "clouds" {
+                                                let _ = backdrop_settings.set(
+                                                    "die3d",
+                                                    dv.clouds_on().then_some(
+                                                        crate::animation::backdrop::BackdropKind::Clouds,
+                                                    ),
+                                                );
+                                            }
+                                            out
+                                        }
                                         _ => (
                                             format!(
                                                 "/{verb} is a {} command (press 3 to open it)",
@@ -2940,15 +3040,34 @@ fn run_app(
                             KeyCode::Char(crate::animation::arcade_layout::CLOUDFIELD_KEY)
                                 if display_mode == DisplayMode::Arcade =>
                             {
-                                // Flip the arcade's cloudfield (the atmosphere
-                                // backdrop). The key does nothing in other views.
-                                arcade_cloudfield = !arcade_cloudfield;
+                                // The old cloudfield key: the arcade's scene
+                                // backdrop on or off. Only in the arcade.
+                                use crate::animation::backdrop::BackdropKind;
+                                let on =
+                                    backdrop_settings.choice("arcade") != Some(BackdropKind::Scene);
+                                let _ = backdrop_settings
+                                    .set("arcade", on.then_some(BackdropKind::Scene));
                                 if let Some(arc) = arcade.as_mut() {
-                                    arc.set_cloudfield(arcade_cloudfield);
+                                    arc.set_backdrop(backdrop_settings.choice("arcade"));
                                 }
                                 cmd_message = Some((
-                                    crate::animation::arcade_layout::cloudfield_message(
-                                        arcade_cloudfield,
+                                    crate::animation::arcade_layout::cloudfield_message(on),
+                                    false,
+                                ));
+                            }
+                            KeyCode::Char(crate::animation::backdrop::KEY) => {
+                                // The next backdrop for the view on screen, in
+                                // every view (see `backdrop::next_choice`).
+                                let view = view_name(display_mode);
+                                let next = crate::animation::backdrop::next_choice(
+                                    view,
+                                    backdrop_settings.choice(view),
+                                );
+                                let _ = backdrop_settings.set(view, next);
+                                cmd_message = Some((
+                                    format!(
+                                        "backdrop ({view}): {}",
+                                        crate::animation::backdrop::choice_name(next)
                                     ),
                                     false,
                                 ));
@@ -4421,6 +4540,26 @@ fn overlay_row_target(kind: OverlayPanel) -> usize {
 /// any layout rows.  Width adapts to the widest content line (clamped to the
 /// terminal) so legend/help text is never clipped; height grows with content.
 fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
+    render_overlay_panel_with(f, kind, mode, default_backdrop_legend(mode));
+}
+
+/// The legend's backdrop line for `mode` with no setting changed: its
+/// default backdrop, no estimate.
+fn default_backdrop_legend(mode: DisplayMode) -> (crate::animation::backdrop::Choice, bool) {
+    (
+        crate::animation::backdrop::BackdropConfig::default().choice(view_name(mode)),
+        false,
+    )
+}
+
+/// [`render_overlay_panel`] with the view's backdrop as it is now (its
+/// choice and whether its signals are estimates), for the legend's line.
+fn render_overlay_panel_with(
+    f: &mut Frame,
+    kind: OverlayPanel,
+    mode: DisplayMode,
+    backdrop: (crate::animation::backdrop::Choice, bool),
+) {
     let area = f.area();
     // Enforce minimum terminal size — skip if it would leave no room.
     if area.width < 24 || area.height < 6 {
@@ -4428,7 +4567,7 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
     }
 
     // Prose panels wrap to the budget `overlay_wrap_cols` sets for this width.
-    let lines = overlay_lines(kind, mode, overlay_wrap_cols(area.width));
+    let lines = overlay_lines_with(kind, mode, overlay_wrap_cols(area.width), backdrop);
 
     // Title + accent per panel kind (used for the header and to size the panel).
     let (title, border_color) = match kind {
@@ -4514,6 +4653,17 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
 /// Lines must fit within PANEL_W - 2 visible columns (no right border means content
 /// needs to respect the panel width itself).  Each line is prefixed with `║ ` (2 cols).
 fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line<'static>> {
+    overlay_lines_with(kind, mode, cols, default_backdrop_legend(mode))
+}
+
+/// [`overlay_lines`] with the view's backdrop as it is now: the legend ends
+/// with its line.
+fn overlay_lines_with(
+    kind: OverlayPanel,
+    mode: DisplayMode,
+    cols: usize,
+    backdrop: (crate::animation::backdrop::Choice, bool),
+) -> Vec<Line<'static>> {
     let bg = colors::rgb(8, 14, 22);
     let bar = colors::rgb(40, 55, 70);
     let dim = colors::rgb(90, 100, 120);
@@ -4605,11 +4755,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                         kc,
                     ),
                     cells(
-                        &[
-                            ("3", waffler),
-                            ("R", "rotate (kiosk)"),
-                            ("c", "Arcade clouds"),
-                        ],
+                        &[("3", waffler), ("R", "rotate (kiosk)"), ("w", "backdrop")],
                         5,
                         18,
                         kc,
@@ -4695,11 +4841,11 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     ("/watch <path>", "tail a log in ~"),
                     ("/watch pid <n>", "sniff a process"),
                 ]),
-                // Narrower descriptions, so the long /arcade usage fits.
+                // Narrower descriptions, so the /backdrop usage fits.
                 cells(
                     &[
                         ("/legend /explain /help", "l ! ? panels"),
-                        ("/arcade cloudfield on|off", "Arcade clouds"),
+                        ("/backdrop [kind]", "off sky scene clouds"),
                     ],
                     19,
                     13,
@@ -4727,8 +4873,9 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
         }
 
         OverlayPanel::Legend => {
-            // Per-view symbol legend — Arcade shows all four combined.
-            match mode {
+            // Per-view symbol legend — Arcade shows all four combined. The
+            // last line is the view's backdrop.
+            let mut v = match mode {
                 DisplayMode::Starfield => {
                     let mut v = starfield_legend_lines(bar, bg, dim, key);
                     v.extend(crate::animation::starfield_bus::legend_lines(bar, bg, dim));
@@ -4780,7 +4927,15 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 }
                 DisplayMode::Die3d => die3d_legend_lines(bar, bg, dim),
                 DisplayMode::Arcade => arcade_legend_lines(bar, bg, dim),
-            }
+            };
+            v.push(ln!(vec![Span::styled(
+                format!(
+                    "  {}",
+                    crate::animation::backdrop::legend_line(backdrop.0, backdrop.1)
+                ),
+                Style::default().fg(dim)
+            )]));
+            v
         }
 
         // Each mode's `!` text: what the screen is and what moves it, then
@@ -5903,8 +6058,7 @@ fn die3d_legend_lines(
         "  fill       purple from the DRAM edges inward while a model",
         "             loads, by its phase and progress; with no",
         "             progress, a sweep (decoration)",
-        "  pulse      the PCIe connector glows teal on requests",
-        "             completed, fading over a second",
+        "  pulse      PCIe connector glows teal on requests completed, 1 s",
         "  GDDR       each block in its channel's own temperature; dim",
         "             when harvested; a red flash when its ECC count",
         "             rises. Rows: channels 0-3 west, 4-7 east, in",

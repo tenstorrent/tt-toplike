@@ -541,25 +541,27 @@ pub fn command(arg: &str, cloudfield: &mut bool) -> (String, bool) {
 }
 
 /// The usage line for `/arcade`.
-pub const USAGE: &str = "/arcade cloudfield on|off   the atmosphere behind the arcade, shown only while an inference service is loading or serving";
+pub const USAGE: &str =
+    "/arcade cloudfield on|off   the old name for /backdrop scene|off in the arcade";
 
 /// The status-line message for a cloudfield change.
 pub fn cloudfield_message(on: bool) -> String {
     format!("arcade cloudfield: {}", if on { "on" } else { "off" })
 }
 
-/// The key that flips the cloudfield while the arcade is on screen.
+/// The key that flips the cloudfield (the scene backdrop) while the arcade
+/// is on screen. `w` cycles every backdrop in every view.
 pub const CLOUDFIELD_KEY: char = 'c';
 
 // ---- Legend and explain text --------------------------------------------------
 
-/// The text after the `▦ Layout` heading of the arcade legend.
-pub const LEGEND_HEAD: &str = "rows and panels from [arcade] in config.toml";
+/// The text after the `▦ Layout` heading of the arcade legend. The
+/// backdrop has its own line at the end of the legend.
+pub const LEGEND_HEAD: &str = "[arcade] in config.toml   ◌ NAME  a panel too small";
 
-/// The arcade legend's lines on the layout and the cloudfield, under
-/// [`LEGEND_HEAD`]. Short, so the legend fits 30 rows at 80 columns.
-pub const LEGEND_TEXT: &[&str] =
-    &["  ◌ NAME  a panel too small   c  cloudfield, while a model serves"];
+/// The arcade legend's lines on the layout, under [`LEGEND_HEAD`]: none,
+/// so the legend fits 30 rows at 80 columns with the backdrop line.
+pub const LEGEND_TEXT: &[&str] = &[];
 
 /// The arcade explain text's line on the layout. The detail is in the docs.
 pub const EXPLAIN_TEXT: &[&str] = &[
