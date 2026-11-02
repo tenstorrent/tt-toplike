@@ -78,12 +78,20 @@ fn media(gen_per_min: f32, jobs: u32) -> MediaStats {
 
 /// The world after the host has published `rows` once, as a view reads it.
 pub(crate) fn world_from(rows: &[ServiceState], synthetic: bool) -> LocalView {
+    world_after(&[rows], synthetic)
+}
+
+/// The world after the host has published each snapshot in `feeds`, one
+/// tick each, in order.
+fn world_after(feeds: &[&[ServiceState]], synthetic: bool) -> LocalView {
     let b = mock();
     // A fed gozer source never runs the `gozer` command.
     let mut host = BusHost::with_gozer(BusConfig::default(), &b, GozerSource::fed()).unwrap();
     host.set_synthetic(synthetic);
-    host.feed_inference(rows);
-    host.tick(&b, Instant::now());
+    for rows in feeds {
+        host.feed_inference(rows);
+        host.tick(&b, Instant::now());
+    }
     let (seq, world) = host.with_world(|w, seq| (seq, w.clone()));
     LocalView {
         seq,
@@ -166,6 +174,35 @@ fn a_loading_service_keeps_its_phase_and_progress() {
 }
 
 #[test]
+fn a_compiling_service_round_trips_through_the_bus() {
+    let mut s = state("vllm-8000", Phase::Compiling, &[0, 1]);
+    s.progress = Some(0.1);
+    let w = world_from(std::slice::from_ref(&s), false);
+    let back = world_to_service_states_with(&w, &mock_index);
+    assert_eq!(back.len(), 1);
+    assert_eq!(carried(&back[0]), carried(&s));
+    assert_eq!(back[0].readiness, Readiness::NotReady);
+}
+
+/// A service is announced only once it compiles, loads or is ready; a
+/// later `Down` is a phase sample on the model the world already has.
+#[test]
+fn a_service_that_goes_down_round_trips_through_the_bus() {
+    let mut up = state("vllm-8000", Phase::Ready, &[0]);
+    up.serving = Some(serving(42.0, 2, 3, 0.25));
+    let mut down = state("vllm-8000", Phase::Down, &[0]);
+    down.serving = Some(serving(0.0, 0, 0, 0.0));
+    let w = world_after(
+        &[std::slice::from_ref(&up), std::slice::from_ref(&down)],
+        false,
+    );
+    let back = world_to_service_states_with(&w, &mock_index);
+    assert_eq!(back.len(), 1);
+    assert_eq!(carried(&back[0]), carried(&down));
+    assert_eq!(back[0].readiness, Readiness::Down);
+}
+
+#[test]
 fn without_a_resolver_the_chips_are_empty() {
     let mut s = state("vllm-8000", Phase::Ready, &[0, 1]);
     s.serving = Some(serving(42.0, 2, 3, 0.25));
@@ -185,9 +222,9 @@ fn a_world_with_no_models_gives_no_rows() {
 fn estimated_readings_are_reported_per_model() {
     let mut s = state("vllm-8000", Phase::Ready, &[0]);
     s.serving = Some(serving(42.0, 2, 3, 0.25));
-    let model = EntityKey::model("vllm-8000");
+    use crate::animation::die3d::overlay::model_text_is_estimated;
     let real = world_from(std::slice::from_ref(&s), false);
-    assert!(!model_is_estimated(&real, &model));
+    assert!(!model_text_is_estimated(&real, &real.models()[0]));
     let mock = world_from(&[s], true);
-    assert!(model_is_estimated(&mock, &model));
+    assert!(model_text_is_estimated(&mock, &mock.models()[0]));
 }

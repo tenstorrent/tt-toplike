@@ -451,3 +451,260 @@ fn another_hosts_models_get_no_local_chip_indexes() {
         carried_all(&rows)
     );
 }
+
+// ---- fix round 1: the rotation ------------------------------------------------
+
+/// An attached TUI on a box with no models of its own: the rotation sees
+/// the host's live model, and does not ask the local monitor.
+#[cfg(unix)]
+#[test]
+fn the_rotation_sees_an_attached_hosts_live_model() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock = tmp.path().join("run").join("bus.sock");
+    let b = mock();
+    let (_h, _s) = serving_host(&sock, &b, &ready_fixture());
+    let bus = TuiBus::start(&opts(Attach::Probe(sock.clone())), &b).unwrap();
+    assert!(bus.is_attached());
+    let mut asked = false;
+    assert!(inference_active(&bus, &b, || {
+        asked = true;
+        false
+    }));
+    assert!(!asked, "an attached TUI does not ask the local monitor");
+}
+
+/// An attached host with no models is idle, even when the local monitor
+/// would say otherwise.
+#[cfg(unix)]
+#[test]
+fn the_rotation_sees_an_attached_host_without_models_as_idle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock = tmp.path().join("run").join("bus.sock");
+    let b = mock();
+    let (_h, _s) = serving_host(&sock, &b, &[]);
+    let bus = TuiBus::start(&opts(Attach::Probe(sock.clone())), &b).unwrap();
+    assert!(bus.is_attached());
+    assert!(!inference_active(&bus, &b, || true));
+}
+
+/// A TUI that hosts its own bus asks the local monitor, whatever its own
+/// world holds.
+#[test]
+fn the_rotation_with_a_local_bus_asks_the_local_monitor() {
+    let b = mock();
+    let mut bus = TuiBus::start(&opts(Attach::Off), &b).unwrap();
+    bus.feed_workloads(&[], Some(&ready_fixture()), None);
+    bus.data_tick(&b, Instant::now());
+    let mut asked = false;
+    assert!(!inference_active(&bus, &b, || {
+        asked = true;
+        false
+    }));
+    assert!(asked);
+    assert!(inference_active(&bus, &b, || true));
+}
+
+// ---- fix round 1: a lost host ---------------------------------------------------
+
+/// The note for each link state.
+#[cfg(unix)]
+#[test]
+fn a_lost_link_gets_a_note() {
+    use tt_toplike_bus::Link;
+    assert_eq!(stale_note_for(Link::Connected), None);
+    assert_eq!(stale_note_for(Link::Reconnecting), Some("(reconnecting)"));
+    assert_eq!(
+        stale_note_for(Link::Disconnected),
+        Some("(host disconnected)")
+    );
+}
+
+/// The text of `line`.
+fn line_text(line: &ratatui::text::Line<'_>) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+/// A stale roster gets the note on top and every line drawn dim; a lone
+/// service with no roster still gets the note.
+#[test]
+fn a_stale_roster_is_dimmed_under_the_note() {
+    use ratatui::style::Modifier;
+    let rows = ready_fixture();
+    let mut roster = super::super::inference_roster_lines(&rows, 80);
+    let n = roster.len();
+    assert!(n > 1);
+    mark_stale(&mut roster, "(host disconnected)");
+    assert_eq!(roster.len(), n + 1);
+    assert_eq!(line_text(&roster[0]), "(host disconnected)");
+    for l in &roster {
+        for s in &l.spans {
+            assert!(
+                s.style.add_modifier.contains(Modifier::DIM),
+                "{:?} in {:?}",
+                s.content,
+                line_text(l)
+            );
+        }
+    }
+    // The model names are still there.
+    assert!(line_text(&roster[2]).contains("vllm-8000-model"));
+
+    let mut none: Vec<ratatui::text::Line<'static>> = Vec::new();
+    mark_stale(&mut none, "(reconnecting)");
+    assert_eq!(none.len(), 1);
+    assert_eq!(line_text(&none[0]), "(reconnecting)");
+}
+
+/// The real path: the host goes away, and the note goes from reconnecting
+/// to host disconnected. A local bus never has a note.
+#[cfg(unix)]
+#[test]
+fn a_dead_host_marks_the_i_view() {
+    use std::time::Duration;
+    let tmp = tempfile::tempdir().unwrap();
+    let sock = tmp.path().join("run").join("bus.sock");
+    let mut b = mock();
+    let (host, server) = serving_host(&sock, &b, &ready_fixture());
+    let mut bus = TuiBus::start(&opts(Attach::Required(sock.clone())), &b).unwrap();
+    assert_eq!(stale_note(&bus), None);
+    drop(server);
+    drop(host);
+    let end = Instant::now() + Duration::from_secs(6);
+    let mut seen = Vec::new();
+    while Instant::now() < end {
+        bus.data_tick(&b, Instant::now());
+        let n = stale_note(&bus);
+        if seen.last() != Some(&n) {
+            seen.push(n);
+        }
+        if n == Some("(host disconnected)") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        b.update().unwrap();
+    }
+    assert!(seen.contains(&Some("(reconnecting)")), "{seen:?}");
+    assert_eq!(seen.last(), Some(&Some("(host disconnected)")), "{seen:?}");
+    // The models stay listed, from the last world received.
+    assert_eq!(attached_rows(&bus, &b).unwrap().len(), 2);
+
+    let local = TuiBus::start(&opts(Attach::Off), &b).unwrap();
+    assert_eq!(stale_note(&local), None);
+}
+
+// ---- fix round 1: one estimate helper --------------------------------------------
+
+/// Every model signal the world reads into a `ModelView`.
+const MODEL_SIGNALS: [&str; 7] = [
+    tt_toplike_bus::signals::MODEL_LABEL,
+    tt_toplike_bus::signals::MODEL_PHASE,
+    tt_toplike_bus::signals::MODEL_PROGRESS,
+    tt_toplike_bus::signals::MODEL_TOKENS_PER_S,
+    tt_toplike_bus::signals::MODEL_RUNNING,
+    tt_toplike_bus::signals::MODEL_WAITING,
+    tt_toplike_bus::signals::MODEL_KV_CACHE,
+];
+
+/// The value of model signal `sig`: the base one, or another when `alt`.
+fn signal_value(sig: &str, alt: bool) -> tt_toplike_bus::Value {
+    use tt_toplike_bus::signals as s;
+    use tt_toplike_bus::Value;
+    let pick = |a: f64, b: f64| if alt { b } else { a };
+    if sig == s::MODEL_LABEL {
+        Value::Text(if alt { "other" } else { "m-model" }.into())
+    } else if sig == s::MODEL_PHASE {
+        Value::Text(if alt { "compiling" } else { "loading" }.into())
+    } else if sig == s::MODEL_PROGRESS {
+        Value::F64(pick(0.4, 0.7))
+    } else if sig == s::MODEL_TOKENS_PER_S {
+        Value::F64(pick(42.0, 7.0))
+    } else if sig == s::MODEL_RUNNING {
+        Value::U64(if alt { 5 } else { 2 })
+    } else if sig == s::MODEL_WAITING {
+        Value::U64(if alt { 9 } else { 3 })
+    } else {
+        Value::F64(pick(0.25, 0.9))
+    }
+}
+
+/// A loading model on chip A with every model signal set, built from
+/// records on a real bus. The signal `estimated` names is marked
+/// `Estimated` and the rest `Measured`. The signal `changed` names gets
+/// another value.
+fn signal_world(estimated: Option<&str>, changed: Option<&str>) -> LocalView {
+    use tt_toplike_bus::{Bus, Event, Payload, Provenance, Sample};
+    let bus = Bus::open_with_world(BusConfig::default()).unwrap();
+    let model = EntityKey::model("m");
+    bus.publish(
+        "test",
+        Payload::Event(Event::ModelLoading {
+            model: model.clone(),
+            chips: vec![EntityKey::chip(A)],
+            progress: Some(0.4),
+        }),
+    );
+    for sig in MODEL_SIGNALS {
+        let prov = if estimated == Some(sig) {
+            Provenance::Estimated
+        } else {
+            Provenance::Measured
+        };
+        bus.publish(
+            "test",
+            Payload::Sample(Sample {
+                entity: model.clone(),
+                signal: sig.into(),
+                value: signal_value(sig, changed == Some(sig)),
+                prov,
+            }),
+        );
+    }
+    let snap = bus.snapshot().unwrap();
+    LocalView {
+        seq: bus.head(),
+        world: snap.world,
+        now_mono_ns: 0,
+        header_kind: HeaderKind::Live,
+    }
+}
+
+/// For each model signal marked `Estimated` alone, and for none: Die 3D's
+/// flag, the `i` view's label and the shared helper all agree on `~`, and
+/// the marker is set exactly when the signal feeds the flag text.
+#[test]
+fn die3d_i_and_the_helper_agree_on_the_estimate_marker() {
+    use crate::animation::die3d::overlay::{model_text_is_estimated, FLAG_TEXT_SIGNALS};
+    let cases: Vec<Option<&str>> = std::iter::once(None)
+        .chain(MODEL_SIGNALS.iter().map(|s| Some(*s)))
+        .collect();
+    for est in cases {
+        let w = signal_world(est, None);
+        let m = w.models().remove(0);
+        let helper = model_text_is_estimated(&w, &m);
+        let flag = die3d_flag(&w).starts_with('~');
+        let i = rows_from_world(&w, &mock_index)[0].label.starts_with('~');
+        assert!(
+            helper == flag && flag == i,
+            "{est:?}: helper {helper}, Die 3D {flag}, i {i}"
+        );
+        let want = est.is_some_and(|s| FLAG_TEXT_SIGNALS.contains(&s));
+        assert_eq!(helper, want, "{est:?}");
+    }
+}
+
+/// The helper's signal list is exactly the signals that change Die 3D's
+/// flag text: change one signal's value and the text changes if and only
+/// if the signal is on the list.
+#[test]
+fn the_estimate_list_is_the_flag_texts_inputs() {
+    use crate::animation::die3d::overlay::FLAG_TEXT_SIGNALS;
+    let base = die3d_flag(&signal_world(None, None));
+    for sig in MODEL_SIGNALS {
+        let changed = die3d_flag(&signal_world(None, Some(sig)));
+        assert_eq!(
+            changed != base,
+            FLAG_TEXT_SIGNALS.contains(&sig),
+            "{sig}: {base:?} -> {changed:?}"
+        );
+    }
+}

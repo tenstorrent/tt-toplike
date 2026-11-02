@@ -32,10 +32,9 @@ use crate::bus::signals as sig;
 use crate::workload::inference_server::{
     MediaCounters, MediaStats, Phase, Readiness, ServiceState, ServingStats, VllmCounters,
 };
-use tt_toplike_bus::signals as bsig;
 #[cfg(feature = "remote")]
 use tt_toplike_bus::World;
-use tt_toplike_bus::{EntityKey, ModelPhase, ModelView, Provenance, Value, WorldRead};
+use tt_toplike_bus::{EntityKey, ModelPhase, ModelView, Value, WorldRead};
 
 /// The frame to broadcast for a box that reads its own chips.
 ///
@@ -87,10 +86,12 @@ pub fn world_to_service_states(world: &dyn WorldRead) -> Vec<ServiceState> {
 ///   `safe_key` (redacted and clipped; a key that needed that carries a
 ///   hash suffix and does not match the monitor's raw key).
 /// * `label`, `phase`, `progress`: the [`ModelView`]. The label is as
-///   written: the estimate marker `~` is added by the caller (see
-///   [`model_is_estimated`]).
+///   written: the estimate marker `~` is added by the `i` view (see
+///   `ui::tui::inference_bus`).
 /// * `chips`: each chip key through `chip_index`, sorted, without repeats.
-///   A key that does not resolve is left out. A chip that a read view cut
+///   A key that does not resolve is left out, so a model on two chips of
+///   which the local box has only one shows the shorter list (`chip 0`
+///   where the host says chips 0 and 5). A chip that a read view cut
 ///   (`ReadView::only_chips`) is not in the model view and cannot come back.
 /// * `serving`: present when the model has any of tokens/s, running,
 ///   waiting or KV cache. `generation_tps`, `requests_running`,
@@ -127,29 +128,6 @@ pub fn world_to_service_states_with(
         .iter()
         .map(|m| service_state_of(world, m, chip_index))
         .collect()
-}
-
-/// Whether the model's readings that the `i` view and Die 3D's flag show
-/// as text (label, phase, progress, tokens/s, running, waiting, KV cache)
-/// include one marked `Estimated` or `Decoration`. Every reading of a
-/// synthetic (`--mock`) host is; on a real host the progress figure is (the
-/// inference source writes it as `Estimated`). Die 3D's flag starts with
-/// `~` then, and so does the `i` view's label for an attached world. This
-/// checks Die 3D's signals plus running and KV cache, which the `i` view
-/// also prints; no source marks those two differently from the rest.
-pub fn model_is_estimated(world: &dyn WorldRead, model: &EntityKey) -> bool {
-    [
-        bsig::MODEL_LABEL,
-        bsig::MODEL_PHASE,
-        bsig::MODEL_PROGRESS,
-        bsig::MODEL_TOKENS_PER_S,
-        bsig::MODEL_RUNNING,
-        bsig::MODEL_WAITING,
-        bsig::MODEL_KV_CACHE,
-    ]
-    .iter()
-    .filter_map(|s| world.reading(model, s))
-    .any(|r| matches!(r.prov, Provenance::Estimated | Provenance::Decoration))
 }
 
 /// A reading as a number, when it is one.

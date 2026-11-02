@@ -1374,8 +1374,13 @@ fn run_app(
                             train_watch.update(latest_trainer.take());
                             train_watch.state().cloned()
                         };
+                    // Attached to a headless host: the host's models, as the
+                    // `i` view draws them.
+                    let world_rows = inference_bus::attached_rows(tui_bus, backend.as_ref());
                     #[cfg(target_os = "linux")]
-                    let service_rows = if backend_type == BackendType::Mock {
+                    let service_rows = if let Some(r) = world_rows {
+                        r
+                    } else if backend_type == BackendType::Mock {
                         crate::workload::inference_server::mock::mock_services(
                             mock_started.elapsed().as_secs_f32(),
                         )
@@ -1387,7 +1392,7 @@ fn run_app(
                     #[cfg(not(target_os = "linux"))]
                     let service_rows: Vec<
                         crate::workload::inference_server::ServiceState,
-                    > = Vec::new();
+                    > = world_rows.unwrap_or_default();
                     let activities = activity_tracker.update(
                         train_state.as_ref(),
                         &service_rows,
@@ -1444,8 +1449,14 @@ fn run_app(
                     // state. Substitute a synthetic roster that walks the
                     // real lifecycle; every label carries a `(mock)` suffix
                     // so its serving numbers can't read as real ones.
+                    // Attached to a headless host: the rows come from its
+                    // world (see `inference_bus`), so the local rows below
+                    // are not computed.
+                    let world_rows = inference_bus::attached_rows(tui_bus, backend.as_ref());
                     #[cfg(target_os = "linux")]
-                    let local_rows = if backend_type == BackendType::Mock {
+                    let local_rows = if world_rows.is_some() {
+                        Vec::new()
+                    } else if backend_type == BackendType::Mock {
                         crate::workload::inference_server::mock::mock_services(
                             mock_started.elapsed().as_secs_f32(),
                         )
@@ -1490,11 +1501,10 @@ fn run_app(
                     // from its world (see `inference_bus`). A local bus keeps
                     // the rows above. The host's rows are not a local probe,
                     // so they count as remote data for the fallback note.
-                    let (rows, has_remote_rows) =
-                        match inference_bus::attached_rows(tui_bus, backend.as_ref()) {
-                            Some(world_rows) => (world_rows, true),
-                            None => (rows, has_remote_rows),
-                        };
+                    let (rows, has_remote_rows) = match world_rows {
+                        Some(world_rows) => (world_rows, true),
+                        None => (rows, has_remote_rows),
+                    };
                     let catalog = catalog_refresher.snapshot();
                     let arch = backend
                         .devices()
@@ -1548,6 +1558,10 @@ fn run_app(
                                     .add_modifier(Modifier::DIM),
                             )),
                         );
+                    }
+                    // A lost host: its last models stay, marked stale.
+                    if let Some(note) = inference_bus::stale_note(tui_bus) {
+                        inference_bus::mark_stale(&mut inference_roster, note);
                     }
                     let roster_h = inference_roster.len();
                     // Drives the rotation's dwell (see `train_active`): a
@@ -1677,20 +1691,25 @@ fn run_app(
                 if rotation_activity.due() {
                     rotation_activity.probed = Some(Instant::now());
                     if display_mode != DisplayMode::InferenceMonitor {
-                        #[cfg(target_os = "linux")]
-                        {
-                            rotation_activity.inference = peek_inference_active(
-                                &*backend,
-                                backend_type,
-                                &inference_monitor,
-                                mock_started,
-                            );
-                        }
-                        // No inference monitor off Linux, so nothing to show.
-                        #[cfg(not(target_os = "linux"))]
-                        {
-                            rotation_activity.inference = false;
-                        }
+                        // Attached: the host's models; otherwise the local
+                        // monitor, which exists only on Linux.
+                        rotation_activity.inference =
+                            inference_bus::inference_active(tui_bus, backend.as_ref(), || {
+                                #[cfg(target_os = "linux")]
+                                {
+                                    peek_inference_active(
+                                        backend.as_ref(),
+                                        backend_type,
+                                        &inference_monitor,
+                                        mock_started,
+                                    )
+                                }
+                                // No inference monitor off Linux, so nothing to show.
+                                #[cfg(not(target_os = "linux"))]
+                                {
+                                    false
+                                }
+                            });
                     }
                 }
                 let active = match display_mode {

@@ -464,20 +464,31 @@ fn add_spark(prev: &mut OverlayState, chip: EntityKey, now: u64, seq: u64, rgb: 
     });
 }
 
+/// Every model reading that puts text in the flag: the label, the phase,
+/// the progress, tokens/s and the waiting count. The `i` view marks a model
+/// from the same list (see [`model_text_is_estimated`]).
+pub(crate) const FLAG_TEXT_SIGNALS: [&str; 5] = [
+    tt_toplike_bus::signals::MODEL_LABEL,
+    tt_toplike_bus::signals::MODEL_PHASE,
+    tt_toplike_bus::signals::MODEL_PROGRESS,
+    tt_toplike_bus::signals::MODEL_TOKENS_PER_S,
+    tt_toplike_bus::signals::MODEL_WAITING,
+];
+
+/// Whether any reading in [`FLAG_TEXT_SIGNALS`] of model `m` is marked
+/// `Estimated` or `Decoration`. Die 3D's flag then starts with `~`, and the
+/// `i` view puts `~` before the model's label. Both call this one function,
+/// so the two views mark the same models.
+pub(crate) fn model_text_is_estimated(world: &dyn WorldRead, m: &ModelView) -> bool {
+    FLAG_TEXT_SIGNALS
+        .iter()
+        .filter_map(|s| world.reading(&m.key, s))
+        .any(|r| matches!(r.prov, Provenance::Estimated | Provenance::Decoration))
+}
+
 /// The flag of model `m`.
 fn flag_of(world: &dyn WorldRead, m: &ModelView) -> ModelFlag {
-    // Every reading that puts text in the flag: the label, the phase, the
-    // progress, tokens/s and the waiting count.
-    let estimated = [
-        tt_toplike_bus::signals::MODEL_LABEL,
-        tt_toplike_bus::signals::MODEL_PHASE,
-        tt_toplike_bus::signals::MODEL_PROGRESS,
-        tt_toplike_bus::signals::MODEL_TOKENS_PER_S,
-        tt_toplike_bus::signals::MODEL_WAITING,
-    ]
-    .iter()
-    .filter_map(|s| world.reading(&m.key, s))
-    .any(|r| matches!(r.prov, Provenance::Estimated | Provenance::Decoration));
+    let estimated = model_text_is_estimated(world, m);
     ModelFlag {
         label: m.label.clone(),
         phase: m.phase,

@@ -639,6 +639,16 @@ impl TuiBus {
         }
     }
 
+    /// The attached host's link state as of the last data tick (the state
+    /// the label shows), or `None` for a local bus.
+    #[cfg(unix)]
+    pub fn attached_link(&self) -> Option<tt_toplike_bus::Link> {
+        match &self.label_key {
+            Some(LabelKey::Attached(link, _)) => Some(*link),
+            _ => None,
+        }
+    }
+
     /// The local chip keys an attached world is read for (empty for a local
     /// bus, whose world is built from the local backend).
     pub fn local_chips(&self) -> &BTreeSet<EntityKey> {
