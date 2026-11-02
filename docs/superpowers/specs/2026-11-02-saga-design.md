@@ -69,9 +69,9 @@ bus records ──► intake/query (shared) ──► Saga core (pure, determini
 ```
 
 - **Saga core** is a library crate with no I/O, no clock and no terminal. It takes bus records in
-  order and returns saga events and a world state. Time is bus time (`t_mono_ns` of the records), never
-  the local clock. Its random numbers come from a generator seeded from record contents and consumed in a
-  fixed order, so a replay repeats exactly.
+  order and returns saga events and a world state. Its random numbers come from a generator seeded from
+  record contents and consumed in a fixed order, so a replay repeats exactly. See 3.5 for what "the same"
+  means.
 - **The view** draws the world state, takes keys, and publishes the saga events. Drawing and key
   handling do not feed back into the core while the hero is on autopilot.
 - **Shared intake and query** (phase 0) is the module that replaces the three copies of the
@@ -81,9 +81,10 @@ bus records ──► intake/query (shared) ──► Saga core (pure, determini
 ### 3.1 Where randomness comes from
 
 The machine. At the moment a world is born, the core hashes a window of recent record contents (the
-low bits of temperatures, power, counter deltas, request counts, the sequence number) into the world's
-seed. A quiet box still wobbles, so seeds differ. No part of the seed depends on the host clock or on
-the process's random state. Tests can inject a fixed window.
+low bits of temperatures, power, counter deltas and request counts) into the world's seed. A quiet box
+still wobbles, so seeds differ. No part of the seed depends on the host clock, the process's random
+state, or a record's sequence number or timestamp (a replay host assigns its own, see 3.5). Tests can
+inject a fixed window.
 
 ### 3.2 World lifecycle
 
@@ -137,6 +138,75 @@ chronicle credits the hero if the hero was there. Combat is resolved by simple d
 the two measured magnitudes involved. The rules are data, in the pack (section 7), with defaults built
 in.
 
+### 3.5 What "the same saga" means
+
+The contract: **the same ordered stream of record contents gives the same saga.** The core ignores
+sequence numbers and timestamps, because a replay host assigns its own. Two things follow.
+- **Time is counted in sweeps.** The bus records one `Sweep` per backend tick. The core's clock is
+  the number of sweeps it has seen. A season is a number of sweeps (default 12,000, which is 20 minutes
+  at the default 10 Hz; the config states minutes and converts using the interval the log's header
+  records, else 10 Hz). A replay at any speed has the same sweeps in the same order, so it tells the same
+  story.
+- **Causes cite the stream.** Each beat's cause is the entity, the signal and the record's ordinal
+  position in the stream the core was fed. The bus sequence number rides along as a note when it
+  exists. It is not part of the seed.
+
+The core's input is a stream of `Record`s from `Bus::read_from` locally or the socket's `subscribe`
+op when attached. It never uses `events_since`, which keeps only the newest 64 events. The core
+skips records whose source is `saga` (its own output), so a replayed recording that carries saga events
+never makes duplicates.
+
+A TUI that starts mid-run begins its saga from the world snapshot plus the records after it. Two TUIs
+started at different times can therefore tell different stories. When a headless host runs the core,
+that host's saga is the canonical one: attached TUIs, tensixinet and tt-station all read the host's
+`saga.*` events and run no core of their own. A TUI with no host that runs one (including one reading
+`--replay`) runs its own core.
+
+### 3.6 Where the core runs
+
+Whenever its process runs, whether or not the Saga view is on screen, so the story has no gaps. A small
+driver thread in the process reads the bus and steps the core; the view reads a shared snapshot of the
+state. The pure core knows nothing of the thread. A headless host can run the same driver (`[saga]
+host = true`), which makes the host's saga the canonical one.
+
+### 3.7 Multi-chip and chip types
+
+One dungeon floor per chip, joined by Ethernet portals. A model on several chips is one dungeon
+spanning those floors. The view shows the floor the hero is on, and a small depth indicator shows the
+others. Only floors with activity or the hero on them are simulated in full, which bounds the cost at 4,
+8 or 32 chips. Blackhole first: its grid comes from the same board model Die 3D already draws. Wormhole
+and Grayskull use a generic Tensix floor until someone supplies their layouts, because the bus carries
+no tile data.
+
+### 3.8 Signals the story can use today, and signals it cannot
+
+Each beat names a signal that exists on the bus now. Phase 2 ships only the cast whose signals exist:
+- ECC counters (`toplike.dram.ecc_*`), link changes (`LinkChanged`), resets (`Reset`), thermal trips
+  (`therm_trip_count`), heartbeat stalls (`heartbeat`), harvesting (`harvesting_state`), temperature,
+  clock, power, model phases and progress, request completions, kernel compiles, training step and loss,
+  processes, leases.
+- **The frost wyrm** is derived from the chip's own temperature rising and its AI clock falling under
+  90% of its own trailing maximum. It is labelled derived, because the throttler register is not on the
+  bus.
+- **Not available yet:** the throttler register, tile and board entities, training checkpoints and token
+  milestones. They are listed as bus follow-ups. None is a blocker. Chests come from `Ready` models until
+  checkpoints exist.
+
+### 3.9 Mock and replay labelling
+
+On `--mock` every reading is `Estimated`, and Saga prints "(mock)" in its title and the first
+chronicle line. Estimated faults still produce monsters, since development and CI need them, but each
+carries the `~` mark. On a replay the title says "(replay)". The rule against inventing a fault applies to
+measured signals: a monster from a measured signal always has a real cause.
+
+### 3.10 Pace
+
+Targets on an idle box, to tune with a simulator over the fixture log: a world lasts about one season
+(20 minutes), a hero lives 8 to 15 minutes, so a world has one or two heroes. Vitality comes from the
+chip's own heartbeat, uncorrected errors, temperature margin and clock relative to its own trailing
+maximum, and link count, so no absolute thermal limit is needed. On a healthy loaded box deaths come
+from real signals (a reset, a trip) and are rare.
+
 ## 4. The hero
 
 - **Autopilot.** The hero picks a quest from the world's hooks and walks it, using pathfinding over
@@ -162,7 +232,13 @@ richer voice. The grammar stays the default and the fallback.
 
 ## 6. Events the saga publishes
 
-Source name `saga`, provenance `Derived`, a new payload family `saga.*` carried as ordinary bus events:
+Source name `saga`, provenance `Derived`. They enter the log as one new additive event variant,
+`Event::Saga { kind, world, intensity, pos, cause }`, with the `kind` strings below, and the bus crate
+moves to 0.2.0. The change must be additive: an older reader skips an event variant it does not know
+and still reads the rest (the builder checks how the reader treats an unknown `t` today and adds a
+tolerant path in a bus crate patch first if it fails). Only the process that hosts the bus publishes. An
+attached TUI is a read-only client, so a headless host that runs the core (3.6) is how `saga.*` reaches the
+socket. The kinds:
 `saga.world_born`, `saga.world_ended`, `saga.hero_born`, `saga.hero_died`, `saga.quest_started`,
 `saga.quest_done`, `saga.monster_born`, `saga.monster_slain`, `saga.treasure_found`, `saga.beat`.
 Each carries a world id, an intensity from 0 to 1, a position, and its cause (entity key, signal name,
@@ -224,8 +300,11 @@ Phase 4 may also add a **glitch mode** after the manual's idea: terrain drawn fr
 
 ## 12. Phases
 
-- **0. Shared intake and query.** One module for the history and away rules and a small query call. The
-  arcade, Die 3D and `bus_intake` move onto it with their pinned frames unchanged.
+- **0. Shared intake and query.** One module for the history and away rules (the ECC difference between
+  the copies stays a parameter) and a query helper over the `WorldRead` trait (`entities(kind)` exists;
+  the helper adds "entities of kind K with signals A and B"). The arcade, Die 3D and `bus_intake` move onto
+  it with their pinned frames unchanged. Saga itself reads the record stream (3.5), so the helper serves
+  the views.
 - **1. Saga core and a watch-only view.** Seed, maze from topology, hero autopilot, a first chronicle,
   world lifecycle, the view, determinism tests. The first minute on a live box shows a world, a hero
   walking, and a few beats.
@@ -243,12 +322,18 @@ grammar's shape. Glyph choices. The entry key. How the chronicle and map share a
 
 ## 14. Open items and my guesses
 
+Calls made while writing this, so they can be checked (see sections 3.5 to 3.10):
+- Determinism means the same ordered contents, not the same sequence numbers or times. Time is sweeps.
+- The core runs always. A headless host can run it, and then its saga is the canonical one.
+- The log gets one new additive `Event::Saga` variant, and the bus crate goes to 0.2.0.
+- One dungeon floor per chip. Blackhole first.
+- Mock and replay stories are labelled.
+
+Still the user's:
 - Working title "Saga". Alternatives: Silicon Saga, Rogue Tensix, Tensix Tales, Dungeon Die. The user
-  likes a fun name (the Wafer Waffler), so this is theirs to pick.
-- **Names in the story:** my guess is real model and process names by default, with `generated` as an
-  opt-in, because the `i` view already shows them.
-- **Where the core lives:** my guess is a separate crate (`tt-toplike-saga`) beside `tt-toplike-bus`,
-  so tensixinet and tt-station can use it. The view lives in `tt-toplike`.
-- **The local-model narrator** is a later, optional step. The grammar is the baseline.
-- **The first thing to show:** my guess is a world born when a model reaches `Ready`, with the hero
-  walking to the sage and a handful of beats.
+  likes a fun name (the Wafer Waffler).
+- Real model and process names in the story by default, with `names = "generated"` as an opt-in. My
+  guess is real names, since the `i` view already shows them.
+- The core as a separate crate (`tt-toplike-saga`) beside the bus crate. My guess is yes, so tensixinet
+  and tt-station can depend on it.
+- The local-model narrator is a later, optional step. The grammar is the baseline.
