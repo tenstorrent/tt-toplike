@@ -793,7 +793,7 @@ the bus; a test pins them.
 
 ### The Starfield on the bus
 
-The Starfield (view `starfield`) reads the bus once per update, before it reads the telemetry, through
+The Starfield (view `starfield`) reads the bus once per tick, before it reads the telemetry, through
 `StarfieldFx::from_world` (`src/animation/starfield_bus.rs`). Each device has an equal share of
 the width, as the stars are laid out, and the field draws only on the TUI's own chips. It
 draws:
@@ -816,26 +816,30 @@ is unchanged.
 
 ### MemoryFlow on the bus
 
-MemoryFlow (view `flow`) reads the bus once per update through `MemoryFlowFx::from_world`
+MemoryFlow (view `flow`) reads the bus once per tick through `MemoryFlowFx::from_world`
 (`src/animation/memory_flow_bus.rs`). Its DDR bars are one segment per channel of the first
 device, as before. It draws:
 
 | What | Signal | Measured, derived or decoration |
 |---|---|---|
-| A DDR segment's state (idle, trained, error) | `toplike.dram.harvested`, `enabled`, `training_pass`, `bist_pass` of `dram:<chip>/<n>` of the first device; a channel with none of them keeps the SMBUS state | measured |
+| A DDR segment's state (idle, trained, error) | `toplike.dram.harvested`, `enabled`, `training_pass`, `bist_pass` of `dram:<chip>/<n>` of the first device. Trained needs a training or BIST result; a channel with only a temperature, or none of these, keeps the SMBUS state | measured |
 | A DDR segment tinted toward red as the channel gets hotter (40 to 90 C) | `toplike.dram.temp_top_c`, `temp_bottom_c` | the temperature is measured; how strongly it tints is decoration |
 | `▸` filling each DDR IN segment from its left edge as far as the progress, while a model loads | the first loading model on one of the TUI's chips, its `model.progress` | derived from the reported progress |
 | A short run of `▸` travelling along each DDR IN segment when the loading model has no progress figure | the phase | decoration |
 | Both lanes brighten toward teal, fading over 1 s | `RequestsCompleted` for a model on one of the TUI's chips | the count sets the strength (Die 3D's pulse strength); the fade is decoration |
-| A channel's segments shown reversed in red for 0.6 s | a rise of the summed ECC counters of `dram:<chip>/<n>` of any of the TUI's chips, or `EccTick` | the rise is read |
+| A channel's segments shown reversed in red for 0.6 s | a rise of the summed ECC counters of `dram:<chip>/<n>` of the first device, or `EccTick` for it; another chip's rise draws nothing here, since the segments are the first device's channels | the rise is read |
 | The model row (the blank line under DDR IN): each chip's model, phase, progress and tokens/s, right-aligned in its share, with a `▸` gauge while it compiles or loads and a teal or grey rule fading after `Ready` or `Down` | the model's readings and phase | as reported; `~` through `model_text_is_estimated`; the travelling band shown with no figure is decoration |
 | The chip's share of the model row shown reversed for 0.6 s | a new `reset_seq` | the reset is read |
 | A `✦` in the chip's share of the core grid, in the `spark_rgb` colours | `Spark` and `KernelCompiled` naming the chip | the event is read; where it lands is decoration |
 
 For both modes, events already in the world when the mode first reads it, and events that
 arrived while it was off screen, draw nothing. An ECC count or `reset_seq` seen for the first
-time is recorded and draws nothing. The rule and its constants are Die 3D's, shared through
-`src/animation/bus_intake.rs`. Attached to a headless host, only the TUI's own chips are drawn.
+time, or first seen again after being away, is recorded and draws nothing. The rules and
+constants are copied from the arcade's, which copies Die 3D's, into
+`src/animation/bus_intake.rs`; the arcade and Die 3D keep their own code, and a test feeds one
+sequence of worlds to `bus_intake` and to the arcade and checks they decide alike. ECC is where
+the copies differ: Die 3D flashes any rise, including one first seen after being away, and the
+arcade draws no counter rises. Attached to a headless host, only the TUI's own chips are drawn.
 With an empty world both modes draw the frames they drew before the bus; tests pin them by
 hash.
 

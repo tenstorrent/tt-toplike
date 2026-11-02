@@ -45,16 +45,18 @@
 //! * **Request pulses.** A `RequestsCompleted` for a model on one of this
 //!   view's chips brightens both lanes toward teal, by Die 3D's pulse
 //!   strength for the count, fading over [`PULSE_NS`].
-//! * **ECC flashes.** An ECC counter of `dram:<chip>/<n>` of any drawn chip
-//!   that rose since the last update, or an `EccTick` event, shows channel
-//!   `n`'s segments reversed in red for [`FLASH_NS`].
+//! * **ECC flashes.** An ECC counter of `dram:<chip>/<n>` of the device in
+//!   slot 0 (whose channels the lanes show) that rose since the last
+//!   update, or an `EccTick` event for that chip, shows channel `n`'s
+//!   segments reversed in red for [`FLASH_NS`]. Another chip's rise draws
+//!   nothing here, since it would show on the wrong chip's channel.
 //! * **The model row** (the blank line under DDR IN). Each device has an
 //!   equal share of the width. A chip's model gets a gauge there (`▸` as far
 //!   as the progress while compiling or loading, a travelling band with no
 //!   figure, a teal rule fading over [`SETTLE_NS`] when it becomes ready, a
 //!   grey one when it goes down) and its label right-aligned, in the phase
 //!   colour, with `~` for estimates (`model_text_is_estimated`). The label
-//!   carries the tokens per second. A new `reset_seq` shows the share
+//!   shows the tokens per second. A new `reset_seq` shows the share
 //!   reversed for [`FLASH_NS`].
 //! * **Sparks and compiles.** A `Spark` naming a chip puts a `✦` in
 //!   `spark_rgb` colours in the chip's share of the core grid for
@@ -177,8 +179,8 @@ pub struct MemoryFlowBusState {
     flashes: HashMap<EntityKey, u64>,
     /// The last ECC total, by DRAM channel key.
     ecc: HashMap<EntityKey, u64>,
-    /// When each channel's ECC flash started, by channel number (the lanes
-    /// are shared by every chip).
+    /// When each channel's ECC flash started, by channel number of the
+    /// device in slot 0 (the device whose channels the lanes show).
     ecc_flashes: HashMap<u8, u64>,
 }
 
@@ -213,6 +215,9 @@ impl MemoryFlowFx {
         let ours = |m: &tt_toplike_bus::ModelView| m.chips.iter().any(&drawn);
         let models = world.models();
         let intake = prev.intake.take(world, now);
+        // The lanes are the channels of the device in slot 0, so only that
+        // chip's ECC rises flash them.
+        let lane_chip = chips.iter().find(|c| c.slot == 0).map(|c| &c.key);
 
         for (q, e) in &intake.events {
             match e {
@@ -228,7 +233,7 @@ impl MemoryFlowFx {
                 Event::KernelCompiled { chip: Some(c), .. } if drawn(c) => {
                     add_spark(prev, c, now, *q, LOAD_PURPLE)
                 }
-                Event::EccTick { chip, channel } if drawn(chip) => {
+                Event::EccTick { chip, channel } if lane_chip == Some(chip) => {
                     prev.ecc_flashes.insert(*channel, now);
                 }
                 // Model events are announcements: the phase is read from the
@@ -243,7 +248,11 @@ impl MemoryFlowFx {
             if before.is_some_and(|b| latest.is_some() && latest != b) && intake.live {
                 prev.flashes.insert(c.key.clone(), now);
             }
-            // ECC rises on any drawn chip flash the channel's lane.
+            // ECC rises flash the channel's lane, which shows slot 0's
+            // channels: another chip's rise would show on the wrong chip.
+            if c.slot != 0 {
+                continue;
+            }
             for ch in 0..c.channels {
                 let dk = EntityKey::dram_channel(&c.key, ch);
                 if ecc_rose(world, &dk, &mut prev.ecc) && intake.live {
@@ -325,14 +334,14 @@ fn lane_of(world: &dyn WorldRead, chip: &EntityKey, ch: u8, flash_ns: Option<u64
         .filter_map(|s| num(s))
         .fold(None, |m: Option<f64>, t| Some(m.map_or(t, |m| m.max(t))));
     // The order of `MemoryFlowVis::channel_status_from_gddr_telemetry`.
+    // Only a training or BIST result says a channel trained. A temperature
+    // (or a harvested or enabled flag) alone gives no state, so the SMBUS
+    // state of the channel, an error for one, stays.
     let status = if harvested == Some(1.0) || enabled == Some(0.0) {
         Some(0)
     } else if training == Some(0.0) || bist == Some(0.0) {
         Some(3)
-    } else if [harvested, enabled, training, bist, temp]
-        .iter()
-        .any(Option::is_some)
-    {
+    } else if training.is_some() || bist.is_some() {
         Some(2)
     } else {
         None

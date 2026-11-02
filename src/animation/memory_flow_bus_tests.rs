@@ -229,6 +229,46 @@ fn dram_readings_set_a_lanes_state() {
     })
 }
 
+/// Group A S2: a temperature alone says nothing about a channel's training,
+/// so it gives heat and no state, and the SMBUS state of that channel (an
+/// error, say) stays.
+#[test]
+fn a_temperature_alone_sets_no_lane_state() {
+    use crate::bus::signals as sig;
+    let mut f = Bus::new();
+    dram(&mut f, 0, 4, sig::DRAM_TEMP_TOP_C, Value::F64(70.0));
+    let b = Fixed::new(2);
+    let fx = crate::animation::memory_flow_bus::MemoryFlowFx::from_world(
+        &f.view(5 * SEC),
+        &crate::animation::starfield_bus::FieldChip::of(b.devices()),
+        2,
+        5 * SEC,
+        &mut crate::animation::memory_flow_bus::MemoryFlowBusState::default(),
+    );
+    assert_eq!(
+        fx.lane_status(4),
+        None,
+        "a temperature is no training state"
+    );
+    assert!(fx.lanes.iter().any(|l| l.channel == 4 && l.heat.is_some()));
+    // Drawn: the segment keeps the state the SMBUS side gave it (the fixed
+    // backend has no GDDR block, so the idle `─`), tinted by the heat.
+    tc(|| {
+        let (a, _, _) = pair(&[(&f, 5 * SEC)]);
+        assert_eq!(text_at(&a, LANE_IN, seg(4)), "─".repeat(CW));
+    });
+    // A training result does set the state.
+    dram(&mut f, 0, 4, sig::DRAM_TRAINING_PASS, Value::U64(1));
+    let fx = crate::animation::memory_flow_bus::MemoryFlowFx::from_world(
+        &f.view(5 * SEC),
+        &crate::animation::starfield_bus::FieldChip::of(b.devices()),
+        2,
+        5 * SEC,
+        &mut crate::animation::memory_flow_bus::MemoryFlowBusState::default(),
+    );
+    assert_eq!(fx.lane_status(4), Some(2));
+}
+
 #[test]
 fn a_hot_channel_tints_its_segments_red() {
     use crate::bus::signals as sig;
@@ -372,10 +412,11 @@ fn a_request_pulses_both_lanes_and_history_does_not() {
 fn an_ecc_rise_flashes_its_channel_and_the_first_sight_does_not() {
     tc(|| {
         let t0 = 5 * SEC;
+        // The lanes are the first device's channels, so its rise flashes.
         let mut e1 = Bus::new();
-        e1.ecc(1, 6, 5);
+        e1.ecc(0, 6, 5);
         let mut e2 = e1.clone();
-        e2.ecc(1, 6, 9);
+        e2.ecc(0, 6, 9);
         let (a, _, _) = pair(&[(&e1, t0), (&e2, t0 + TICK)]);
         let red = Some(crate::ui::colors::rgb(
             ALARM_RED[0],
@@ -415,6 +456,29 @@ fn an_ecc_rise_flashes_its_channel_and_the_first_sight_does_not() {
             .1
             .add_modifier
             .contains(Modifier::REVERSED));
+    })
+}
+
+/// Group A S1: the lane segments are the first device's channels. A rise
+/// or an `EccTick` on another chip's channel must not flash the segment of
+/// the same number, which would show the fault on the wrong chip.
+#[test]
+fn an_ecc_rise_on_another_chip_flashes_no_lane() {
+    tc(|| {
+        let t0 = 5 * SEC;
+        let mut e1 = Bus::new();
+        e1.ecc(1, 6, 5);
+        let mut e2 = e1.clone();
+        e2.ecc(1, 6, 9);
+        let (a, q, _) = pair(&[(&e1, t0), (&e2, t0 + TICK)]);
+        assert_eq!(a, q, "chip 1's rise flashed chip 0's segment 6");
+        let mut t2 = e1.clone();
+        t2.event(Event::EccTick {
+            chip: chip(1),
+            channel: 2,
+        });
+        let (a, q, _) = pair(&[(&e1, t0), (&t2, t0 + TICK)]);
+        assert_eq!(a, q, "chip 1's EccTick flashed chip 0's segment 2");
     })
 }
 
