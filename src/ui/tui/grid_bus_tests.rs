@@ -864,6 +864,7 @@ fn sparks_and_compiles_light_a_tensix_cell_of_their_chip() {
 /// chip 0.
 #[test]
 fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
+    use crate::animation::bus_test_support::Clocked;
     use crate::bus::host::BusHost;
     use crate::bus::view::{BusView, ReadCache};
     use std::collections::BTreeSet;
@@ -877,6 +878,13 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
         let cache = ReadCache::new();
         let local: Arc<BTreeSet<EntityKey>> = Arc::new([chip(0), chip(1)].into_iter().collect());
         let read = || view.read(&cache).only_chips(local.clone());
+        // Each read gets a fixed bus time a tick after the last, so a stall
+        // between two reads on a loaded machine cannot count as being away.
+        let mut t = 5 * SEC;
+        let mut at = || {
+            t += TICK;
+            t
+        };
         let p = |e: Event| {
             bus.publish("test", Payload::Event(e));
         };
@@ -884,7 +892,8 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
         let foreign = EntityKey::chip("0000:ee:00.0");
 
         let mut g = GridBus::default();
-        g.update(&read(), b.devices());
+        let r = read();
+        g.update(&Clocked(&r, at()), b.devices());
         p(Event::ModelReady {
             model: theirs.clone(),
             chips: vec![foreign.clone()],
@@ -900,7 +909,8 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
         p(Event::Reset {
             chips: vec![foreign.clone()],
         });
-        let w = read();
+        let r = read();
+        let w = Clocked(&r, at());
         g.update(&w, b.devices());
         assert_eq!(g.fx().chips, vec![], "nothing on the Grid");
         assert_eq!(
@@ -922,7 +932,8 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
             model: theirs.clone(),
             n: 2,
         });
-        let w = read();
+        let r = read();
+        let w = Clocked(&r, at());
         g.update(&w, b.devices());
         let cells: Vec<(usize, usize)> = g
             .fx()

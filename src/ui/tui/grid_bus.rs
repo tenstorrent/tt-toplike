@@ -34,8 +34,8 @@
 //!   loads, the bar fills from the bottom up as far as the reported
 //!   progress. With no progress figure a band climbs the bar (decoration).
 //!   A change to `Ready` lights the bar in the serving teal and fades it; a
-//!   change to `Down` does the same in grey. This is the arcade's gauge,
-//!   stood on end.
+//!   change to `Down` does the same in grey. It is the arcade's gauge,
+//!   drawn vertically.
 //! * **A pulse per request event.** A `RequestsCompleted` event for the
 //!   model on this chip sends a teal light up the PCIe spine (`╋`) of a
 //!   Blackhole portrait. A Wormhole portrait has no PCIe cell, so the pulse
@@ -48,7 +48,7 @@
 //!
 //! # Insights
 //!
-//! The footer rule under each chip panel carries the model on that chip:
+//! The footer rule under each chip panel shows the model on that chip:
 //! label, phase word, progress while loading, tokens per second and waiting
 //! requests, in the phase's colour, with `~` for estimates. While the model
 //! compiles or loads, the dashes after the text are a progress bar, purple
