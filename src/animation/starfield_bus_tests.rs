@@ -505,7 +505,7 @@ fn loading_with_no_progress_sweeps_a_ring() {
         assert!(!first.is_empty() && !later.is_empty());
         assert!(
             first.len() < 150,
-            "a ring, not the whole grid: {}",
+            "the ring covers part of the grid: {}",
             first.len()
         );
         assert_ne!(first, later, "the ring moves");

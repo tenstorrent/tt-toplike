@@ -37,7 +37,7 @@
 //! * **The cluster.** While a model compiles or loads, the chip's stars
 //!   within a radius of the grid's centre turn to `●` in the load purple.
 //!   The radius is the reported progress: 0 lights none, 1 lights the whole
-//!   grid. The distance is the one the star's `depth` already encodes (0 at
+//!   grid. The star's `depth` already encodes the distance (0 at
 //!   the centre, 1 at a corner). With no progress figure, a ring of stars
 //!   sweeps out from the centre (decoration). A change to `Ready` tints all
 //!   the chip's stars teal and fades over [`SETTLE_NS`]; a change to `Down`

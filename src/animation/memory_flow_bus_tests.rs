@@ -315,7 +315,10 @@ fn loading_with_no_progress_runs_along_the_lane() {
         let r2 = text_at(&a2, LANE_IN, seg(0));
         assert!(r1.contains('▸') || r2.contains('▸'), "{r1} {r2}");
         assert_ne!(r1, r2, "the run moves");
-        assert!(!r1.starts_with(&"▸".repeat(CW)), "a run, not a full bar");
+        assert!(
+            !r1.starts_with(&"▸".repeat(CW)),
+            "the run is shorter than the segment"
+        );
     })
 }
 
