@@ -226,6 +226,11 @@ struct Disk {
     gap_pending: AtomicBool,
     reason: Mutex<String>,
     dropped: AtomicU64,
+    /// Set by the writer when a late lock finds records on disk numbered at
+    /// or above records already published in memory: the newest sequence
+    /// number on disk. The next `publish` moves the head past it (see
+    /// `Writer::ensure_lock`). 0 when nothing is pending.
+    skip_to: AtomicU64,
     /// Written into the header line of every new segment.
     kind: HeaderKind,
     /// Extra `tool_versions` entries for the header (see `BusConfig`).
@@ -425,6 +430,7 @@ impl Bus {
                 gap_pending: AtomicBool::new(false),
                 reason: Mutex::new(String::new()),
                 dropped: AtomicU64::new(0),
+                skip_to: AtomicU64::new(0),
                 kind: cfg.header_kind,
                 tags: cfg.header_tags.clone(),
                 #[cfg(test)]
@@ -479,6 +485,8 @@ impl Bus {
                 dir_lock,
                 locker,
                 refused: false,
+                floor: 0,
+                floor_announced: false,
             };
             let (done_tx, done_rx) = mpsc::sync_channel::<()>(0);
             thread_handle = Some(
@@ -542,6 +550,13 @@ impl Bus {
         };
         let mut st = lock(&inner.state);
         if let Some(d) = &inner.disk {
+            // A late lock found newer records on disk: continue numbering
+            // after them, so sequence numbers stay unique in the directory.
+            // The Gap that follows says why the numbers jump.
+            let skip = d.skip_to.swap(0, Ordering::SeqCst);
+            if skip > st.head {
+                st.head = skip;
+            }
             if d.gap_pending.swap(false, Ordering::SeqCst) {
                 let reason = lock(&d.reason).clone();
                 inner.append(&mut st, BUS_SOURCE, Payload::Gap(Gap { reason }));
@@ -1083,6 +1098,14 @@ struct Writer {
     /// The directory holds a log of another class or mode (found when the
     /// lock was taken late). Nothing more is written in this run.
     refused: bool,
+    /// The newest sequence number on disk when the lock was taken late.
+    /// Records numbered at or below it were published before the lock and
+    /// would collide with records already in the directory, so they are not
+    /// written (they are counted as dropped). 0 when the lock was taken at
+    /// open, when the head already continues after the disk.
+    floor: u64,
+    /// The jump past `floor` has been asked for (once per run).
+    floor_announced: bool,
 }
 
 impl Writer {
@@ -1104,10 +1127,17 @@ impl Writer {
     /// runs again here. On a refusal the lock is released and the disk is
     /// switched off for the rest of this run (see [`Writer::refuse`]), so
     /// two logs are never mixed.
+    ///
+    /// The newest sequence number on disk ([`prepare`]'s `last`) becomes
+    /// [`Writer::floor`]. When the open could not list the directory, the
+    /// bus started numbering at 1, so records already published in memory
+    /// may carry numbers the directory already holds. Those records keep
+    /// their numbers (subscribers and the reducer have seen them) and are
+    /// not written; see [`Writer::try_write`] for how the head moves on.
     fn ensure_lock(&mut self) -> io::Result<()> {
         if self.dir_lock.is_none() {
             let f = (self.locker)(&self.disk.dir).map_err(LockError::into_io)?;
-            let (closed, _) = prepare(&self.disk.dir, true)?;
+            let (closed, last) = prepare(&self.disk.dir, true)?;
             if let Err(e) = check_same_log(&self.disk.dir, &closed, &self.disk.tags) {
                 drop(f);
                 self.refuse(e.to_string());
@@ -1115,6 +1145,7 @@ impl Writer {
             }
             lock(&self.disk.table).closed = closed;
             self.dir_lock = Some(f);
+            self.floor = last;
         }
         Ok(())
     }
@@ -1220,6 +1251,27 @@ impl Writer {
     fn try_write(&mut self, rec: &Record) -> io::Result<()> {
         // A disk that recovers is not written without the lock.
         self.ensure_lock()?;
+        if rec.seq <= self.floor {
+            // Published before a late lock, and the directory already holds
+            // this number: writing it would give the log two records with
+            // one sequence number. Drop it, and the first time ask the
+            // publisher to move the head past the disk's newest record and
+            // publish a Gap that says so. Numbers stay strictly increasing
+            // in the directory.
+            if !self.floor_announced {
+                self.floor_announced = true;
+                let n = self.floor;
+                *lock(&self.disk.reason) = format!(
+                    "the log directory already held records up to {n}; records numbered up to \
+                     {n} that were published before the lock was taken are not on disk, and \
+                     numbering continues after {n}"
+                );
+                self.disk.skip_to.fetch_max(self.floor, Ordering::SeqCst);
+                self.disk.gap_pending.store(true, Ordering::SeqCst);
+            }
+            self.disk.dropped.fetch_add(1, Ordering::SeqCst);
+            return Ok(());
+        }
         let now = rec.t_wall_ms;
         let due = self
             .open
@@ -2235,8 +2287,9 @@ mod tests {
         bus.publish("t", sample(2));
         flush(&bus);
         // (The sequence restarted at 1 because the open could not list the
-        // directory, a separate known issue, so this write itself collides
-        // with segment 1. The table is what this test is about.)
+        // directory; `a_late_lock_continues_numbering_after_the_disk` covers
+        // what happens to those numbers. The table is what this test is
+        // about.)
         assert_eq!(
             table(&bus),
             vec![1],
@@ -2244,6 +2297,71 @@ mod tests {
             bus.stats(),
             lock(&bus.inner.disk.as_ref().unwrap().reason)
         );
+    }
+
+    /// Final fix wave S1: the open could not list the directory (here the
+    /// path was a plain file at open, so no root-only trick is needed), so
+    /// the bus numbered from 1. When the lock is taken late on a directory
+    /// that holds records 1 to 5, the records published before the lock
+    /// keep their numbers in memory but are not written, the head jumps
+    /// past 5 with a Gap saying why, and the directory's numbers stay
+    /// unique and increasing.
+    #[test]
+    fn a_late_lock_continues_numbering_after_the_disk() {
+        let root = TempDir::new("lateseq");
+        let clock = ManualClock::new(T0);
+        // A log of records 1..=5 in another directory, moved in later.
+        let other = root.path().join("other");
+        {
+            let bus = Bus::open(disk_cfg(&other, &clock)).unwrap();
+            for i in 0..5 {
+                bus.publish("t", sample(i));
+            }
+            flush(&bus);
+        }
+        let log = root.path().join("log");
+        fs::write(&log, b"not a directory").unwrap();
+        let bus = Bus::open_inner(
+            disk_cfg(&log, &clock),
+            Box::new(NoReducer),
+            fail_first_lock(),
+        )
+        .unwrap();
+        assert!(!bus.stats().disk_on);
+        assert_eq!(bus.head(), 1, "the open's Gap is record 1");
+        flush(&bus);
+        fs::remove_file(&log).unwrap();
+        fs::rename(&other, &log).unwrap();
+        // Past the retry window. This record may be the one that takes the
+        // lock (then it is dropped as an overlap) or may come after it.
+        clock.advance_secs(11);
+        let a = bus.publish("t", sample(10));
+        flush(&bus);
+        let b = bus.publish("t", sample(11));
+        flush(&bus);
+        assert!(b > 5, "numbering continues after the disk: a={a} b={b}");
+        assert!(bus.stats().disk_on, "{:?}", bus.stats());
+        let recs = bus.inner.read_disk(1, 100, u64::MAX).unwrap();
+        let got = seqs(&recs);
+        assert!(
+            got.windows(2).all(|w| w[0] < w[1]),
+            "strictly increasing: {got:?}"
+        );
+        assert_eq!(&got[..5], &[1, 2, 3, 4, 5], "the old records: {got:?}");
+        assert!(got.contains(&b), "{got:?}");
+        let gap = recs
+            .iter()
+            .find_map(|r| match &r.payload {
+                Payload::Gap(g) if r.seq > 5 => Some(g.reason.clone()),
+                _ => None,
+            })
+            .expect("a Gap after the jump");
+        assert!(gap.contains("already held records up to 5"), "{gap}");
+        // The replay of the directory finds no repeated numbers.
+        let mut seen = std::collections::BTreeSet::new();
+        for r in crate::Replay::open(&log).unwrap().records() {
+            assert!(seen.insert(r.seq), "sequence {} twice on disk", r.seq);
+        }
     }
 
     /// A disk config with `backend` and `mode` header tags.

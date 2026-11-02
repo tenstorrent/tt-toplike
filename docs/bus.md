@@ -687,8 +687,10 @@ The `i` view keeps the local monitor when the TUI hosts its own bus. Section 13 
 attached `i` view does not show.
 
 A TUI that records (`--record`) or serves (`--bus-socket`) refuses a backend switch (the `b`
-key and `/remote`), because the log header names one backend and mode for the whole run. A
-memory-only bus follows the switch.
+key and `/remote`), because the log header names one backend and mode for the whole run. An
+attached TUI refuses it too (`backend switch is disabled while attached to a bus host`): a mock
+backend would put mock chips at the PCI addresses real boards use, under the host's measured
+readings. A memory-only bus follows the switch.
 
 ---
 
@@ -953,11 +955,14 @@ Until the sidecar exists, the Die 3D tile glow stays an estimate and says so.
 * Records lost from the end of a log (a deleted last segment) cannot be detected.
 * A compress error repeats at every rotation. Retention does not run on a segment whose
   metadata cannot be read.
-* The sequence restarts at 1 if the open cannot list the log directory.
+* If the open cannot list the log directory, the bus numbers from 1 in memory. When the lock is
+  taken later, records whose numbers the directory already holds are not written; the head
+  jumps past the newest record on disk and a gap record says so.
 * `events_since` returns at most the newest 64 events, with no overflow indicator.
 * Process entities are never retired by an event. The world drops them after 15 minutes
-  without a reading. Process names, command lines and model announcements are sent when they
-  change and again every 5 minutes, so segment retention cannot remove the only copy.
+  without a reading. Process names, command lines, model announcements and model samples are
+  sent when they change and again every 5 minutes, so segment retention cannot remove the only
+  copy.
 * The first poll after start emits no `LinkChanged`, so a change that happened while the bus
   was down is not reported. `LinkChanged` carries 16 bits of a 64-bit mask. The sample
   `toplike.eth.live_mask` has all of it.
@@ -990,8 +995,6 @@ Until the sidecar exists, the Die 3D tile glow stays an estimate and says so.
 
 * A TUI inside a container does not attach to a host outside it (different host name).
 * The host identity is an unsalted FNV-1a hash of the machine id.
-* An attached TUI that switches to the mock backend with `b` gets mock chip keys that can
-  collide with real PCI addresses.
 * The hero duel in the arcade view still reads the local monitor's serving stats when the TUI is
   attached.
 * When the host is lost, the rotation keeps dwelling on the host's last rows.
@@ -1008,7 +1011,6 @@ Until the sidecar exists, the Die 3D tile glow stays an estimate and says so.
   past the old one, because `WorldRead` carries no instance id.
 * After a memory-only backend switch, readings for signals the new backend no longer emits keep
   the old provenance until they age out.
-* Re-entering Die 3D after a long absence can show up to 64 old events as fresh pulses or sparks.
 * A model whose chips are all foreign (in an attached world) appears with an empty chip list.
   Views skip it.
 

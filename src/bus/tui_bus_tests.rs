@@ -977,6 +977,23 @@ fn a_switch_while_recording_or_serving_is_refused_with_a_message() {
     );
 }
 
+/// Final fix wave S2: an attached TUI refuses every backend switch, so `b`
+/// cannot put mock chips under the host's measured readings.
+#[cfg(unix)]
+#[test]
+fn a_switch_while_attached_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock = tmp.path().join("run").join("bus.sock");
+    let b = mock(2);
+    let (_host, _server) = serving_host(&sock, &b);
+    let bus = TuiBus::start(&probe_opts(Attach::Probe(sock.clone())), &b).unwrap();
+    assert!(bus.is_attached());
+    assert_eq!(
+        bus.switch_refusal().as_deref(),
+        Some("backend switch is disabled while attached to a bus host")
+    );
+}
+
 /// In a memory-only bus, a switch into mock makes the next readings
 /// `Estimated`, and a switch back makes them `Measured` again.
 #[test]

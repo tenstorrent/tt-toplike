@@ -35,7 +35,10 @@
 //!   so a model already `Ready` when the view opens gets no settle.
 //! * **Pulses** come from `RequestsCompleted` events seen since the last
 //!   update (`events_since`). Events already in the world when the view first
-//!   reads it are history and make no pulse.
+//!   reads it are history and make no pulse. So are events that arrived
+//!   while the view was away: an update more than a pulse lifetime after the
+//!   last one, and more than four times the usual gap between updates,
+//!   records the newest event and draws no pulse or spark for it.
 //! * **GDDR rows** read the `dram:<chip>/<n>` entities. An ECC counter that
 //!   rose since the last update, or an `EccTick` event, flashes its row.
 //! * **Sparks** come from `Spark` events naming a drawn chip and from
@@ -252,6 +255,12 @@ pub struct OverlayState {
     /// The highest event sequence number handled. `None` before the first
     /// world.
     seen_seq: Option<u64>,
+    /// Bus time of the last update. See `Overlay::from_world` for when a
+    /// gap after it makes the next update a first sight.
+    last_now: Option<u64>,
+    /// The time between the last two updates: the usual spacing (the data
+    /// tick, 100 ms by default).
+    last_gap: Option<u64>,
     /// By model key.
     phases: HashMap<EntityKey, PhaseMemo>,
     /// By chip key.
@@ -324,11 +333,27 @@ impl Overlay {
         let drawn = |c: &EntityKey| chips.iter().any(|(_, k)| k == c);
         let models = world.models();
 
-        // Events since the last update. The first world, and a world whose
-        // head went backwards (a restarted host), are a first sight: their
-        // events are history.
+        // Events since the last update. The first world, a world whose head
+        // went backwards (a restarted host), and an update after the view
+        // was away (off screen, or another view shown) are a first sight:
+        // their events are history, and a pulse or spark for them would
+        // show something that is over. "Away" is a gap since the last
+        // update longer than the pulse lifetime and longer than four times
+        // the gap before it, so a slow data tick (`--interval 2000`) still
+        // pulses on every update.
         let head = world.seq();
-        let since = prev.seen_seq.filter(|s| *s <= head);
+        let gap = prev.last_now.map(|t| now.saturating_sub(t));
+        let away = gap.is_some_and(|g| {
+            g > PULSE_NS
+                && prev
+                    .last_gap
+                    .is_none_or(|usual| g > usual.saturating_mul(4))
+        });
+        prev.last_now = Some(now);
+        if gap.is_some() {
+            prev.last_gap = gap;
+        }
+        let since = prev.seen_seq.filter(|s| *s <= head && !away);
         let mut seen = head;
         if let Some(s) = since {
             for (q, e) in world.events_since(s) {

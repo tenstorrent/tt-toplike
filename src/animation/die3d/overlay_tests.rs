@@ -476,6 +476,70 @@ fn the_inset_gets_the_fill_and_the_pulses_only() {
     assert!(inset.gddr.iter().all(Option::is_none) && inset.sparks.is_empty());
 }
 
+/// Final fix wave S3: events that piled up while the view was not updated
+/// (off screen for 10 s) make no pulses or sparks on the first update back.
+/// A fresh event after that does.
+#[test]
+fn coming_back_after_ten_seconds_away_replays_nothing() {
+    let mut f = BusFixture::new();
+    f.ready("m", "M", &[0, 1], 30.0);
+    let mut st = OverlayState::default();
+    let t0 = 5 * SEC_NS;
+    Overlay::from_world(&f.view(t0), &two_chips(), t0, &mut st);
+    for _ in 0..40 {
+        f.event(Event::RequestsCompleted {
+            model: EntityKey::model("m"),
+            n: 2,
+        });
+    }
+    f.event(Event::Spark {
+        chip: Some(chip_key(0)),
+        kind: "vllm".into(),
+    });
+    let back = t0 + 10 * SEC_NS;
+    let o = Overlay::from_world(&f.view(back), &two_chips(), back, &mut st);
+    assert!(
+        o.chips
+            .iter()
+            .all(|c| c.pulses.is_empty() && c.sparks.is_empty()),
+        "{o:?}"
+    );
+    assert_eq!(st.seen_seq, Some(f.world.seq()));
+    // One new event, one frame later: it pulses.
+    f.event(Event::RequestsCompleted {
+        model: EntityKey::model("m"),
+        n: 2,
+    });
+    let next = back + SEC_NS / 30;
+    let o = Overlay::from_world(&f.view(next), &two_chips(), next, &mut st);
+    assert!(o.chips.iter().all(|c| c.pulses.len() == 1), "{o:?}");
+}
+
+/// With a slow data tick (`--interval 2000`) every update is 2 s after the
+/// last one. That is the usual spacing, so each update's events still
+/// pulse.
+#[test]
+fn a_slow_data_tick_still_pulses_every_update() {
+    let mut f = BusFixture::new();
+    f.ready("m", "M", &[0], 30.0);
+    let mut st = OverlayState::default();
+    let mut t = 5 * SEC_NS;
+    Overlay::from_world(&f.view(t), &two_chips(), t, &mut st);
+    // The first 2 s gap has no usual spacing to compare with yet: it is
+    // longer than a pulse, so it counts as time away.
+    t += 2 * SEC_NS;
+    Overlay::from_world(&f.view(t), &two_chips(), t, &mut st);
+    for _ in 0..5 {
+        f.event(Event::RequestsCompleted {
+            model: EntityKey::model("m"),
+            n: 1,
+        });
+        t += 2 * SEC_NS;
+        let o = Overlay::from_world(&f.view(t), &two_chips(), t, &mut st);
+        assert_eq!(o.chips[0].pulses.len(), 1, "at {t}");
+    }
+}
+
 #[test]
 fn a_world_that_went_back_is_a_first_sight() {
     // A restarted host starts its sequence numbers again: its events are

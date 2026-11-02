@@ -655,7 +655,16 @@ impl TuiBus {
     /// Why a backend switch must be refused, as one status line, or `None`
     /// when it may go ahead. A bus that records or serves names one backend
     /// and mode in its log header for the whole run.
+    ///
+    /// A TUI attached to a bus host is refused too: the world it shows is
+    /// the host's, keyed by the host's chip addresses. A switch to the mock
+    /// backend would give this TUI mock chips at the PCI addresses real
+    /// boards use (`0000:01:00.0`, ...), and the host's measured readings
+    /// would then be drawn on mock chips without the `~` mark.
     pub fn switch_refusal(&self) -> Option<String> {
+        if self.is_attached() {
+            return Some("backend switch is disabled while attached to a bus host".to_string());
+        }
         if let Some(d) = &self.records {
             return Some(format!(
                 "backend switch refused: the bus is recording to {} for this backend; \

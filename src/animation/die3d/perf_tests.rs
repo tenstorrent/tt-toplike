@@ -1753,7 +1753,10 @@ fn changed_from_with_bus(boards: &[&str], t0: f64) -> usize {
     let chips = boards.len();
     let mut f = busy_world(chips);
     let mut v = Die3dView::new(150, 42);
-    v.update(&b, Some(&f.view(bus_ns(0.0))), 0.0);
+    // The first world is read at the run's start in bus time, so the first
+    // read below is not taken for a return after time away (which would
+    // show no pulse; see `Overlay::from_world`).
+    v.update(&b, Some(&f.view(bus_ns(t0))), 0.0);
     v.director.set_auto(false);
     v.handle_key(Die3dKey::ToggleClouds, 0.0);
     v.handle_key(Die3dKey::ToggleHistory, 0.0);
