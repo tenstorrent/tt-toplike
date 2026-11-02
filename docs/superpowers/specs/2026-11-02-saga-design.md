@@ -323,7 +323,7 @@ grammar's shape. Glyph choices. The entry key. How the chronicle and map share a
 ## 14. Open items and my guesses
 
 Calls made while writing this, so they can be checked (see sections 3.5 to 3.10):
-- Determinism means the same ordered contents, not the same sequence numbers or times. Time is sweeps.
+- Determinism means the same ordered contents give the same saga. Sequence numbers and timestamps play no part. Time is counted in sweeps.
 - The core runs always. A headless host can run it, and then its saga is the canonical one.
 - The log gets one new additive `Event::Saga` variant, and the bus crate goes to 0.2.0.
 - One dungeon floor per chip. Blackhole first.
