@@ -85,7 +85,21 @@ fn recorded_fixture_parses() {
     assert_eq!(s.chips[0].state, "HELD-FOREIGN");
     assert_eq!(s.chips[0].dev_index, Some(0));
     assert_eq!(s.chips[0].pid, Some(OWNER));
-    assert!(!RECORDED.contains("0000046131924"), "serials replaced");
+    // Scrub check by pattern: every board, who, reason and container value
+    // is a placeholder, so nothing real is in the checked-in fixture.
+    let v: serde_json::Value = serde_json::from_str(RECORDED).unwrap();
+    for c in v["chips"].as_array().unwrap() {
+        let board = c["board"].as_str().unwrap();
+        assert!(
+            board.starts_with("BOARD-SERIAL-") && board[13..].chars().all(|d| d.is_ascii_digit()),
+            "board {board}"
+        );
+        assert_eq!(c["who"], "WHO-PLACEHOLDER");
+        assert_eq!(c["reason"], "REASON-PLACEHOLDER");
+        for (_, name) in c["holder_containers"].as_object().unwrap() {
+            assert_eq!(name, "CONTAINER-PLACEHOLDER");
+        }
+    }
 }
 
 #[test]
@@ -198,7 +212,7 @@ struct Stub {
 }
 
 impl StatusRunner for Stub {
-    fn status_json(&self, _t: Duration) -> Option<String> {
+    fn run(&self, _args: &[&str], _t: Duration) -> Option<String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         std::thread::sleep(self.delay);
         self.answer.clone()
@@ -295,33 +309,74 @@ fn failed_poll_keeps_the_last_snapshot() {
 // ---- governor ----
 
 struct Counting {
-    answer: Arc<Mutex<Option<String>>>,
+    status: Arc<Mutex<Option<String>>>,
+    env: Arc<Mutex<Option<String>>>,
+    /// Calls of `gozer status`.
     calls: Arc<AtomicUsize>,
+    /// Calls of `gozer env`.
+    env_calls: Arc<AtomicUsize>,
 }
 
 impl StatusRunner for Counting {
-    fn status_json(&self, _t: Duration) -> Option<String> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.answer.lock().unwrap().clone()
+    fn run(&self, args: &[&str], _t: Duration) -> Option<String> {
+        match args {
+            ["status", "--json"] => {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.status.lock().unwrap().clone()
+            }
+            ["env", _lease, "--json"] => {
+                self.env_calls.fetch_add(1, Ordering::SeqCst);
+                self.env.lock().unwrap().clone()
+            }
+            other => panic!("unexpected gozer command {other:?}"),
+        }
     }
 }
 
+/// `gozer env <lease> --json` output for the given chips.
+fn env_json(bdfs: &[&str]) -> Option<String> {
+    Some(format!(r#"{{"TT_VISIBLE_DEVICES": "{}"}}"#, bdfs.join(",")))
+}
+
+struct Handles {
+    status: Arc<Mutex<Option<String>>>,
+    env: Arc<Mutex<Option<String>>>,
+    calls: Arc<AtomicUsize>,
+    env_calls: Arc<AtomicUsize>,
+}
+
+fn gov_full(
+    lease: Option<&str>,
+    visible: Option<&str>,
+    json: Option<String>,
+) -> (GozerGovernor, Handles) {
+    let h = Handles {
+        status: Arc::new(Mutex::new(json)),
+        env: Arc::new(Mutex::new(env_json(&[A, B]))),
+        calls: Arc::new(AtomicUsize::new(0)),
+        env_calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let g = GozerGovernor::new(
+        lease.map(str::to_string),
+        visible.map(str::to_string),
+        Box::new(Counting {
+            status: h.status.clone(),
+            env: h.env.clone(),
+            calls: h.calls.clone(),
+            env_calls: h.env_calls.clone(),
+        }),
+    );
+    (g, h)
+}
+
+/// Our lease (`L1`) owns chips A and B; visible devices default to numbers.
 fn gov(
     lease: Option<&str>,
     visible: Option<&str>,
     json: Option<String>,
 ) -> (GozerGovernor, Arc<AtomicUsize>) {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let g = GozerGovernor::new(
-        lease.map(str::to_string),
-        visible.map(str::to_string),
-        Box::new(Counting {
-            answer: Arc::new(Mutex::new(json)),
-            calls: calls.clone(),
-        }),
-    )
-    .with_owner_lookup(Box::new(|id| (id == "L1").then_some(OWNER)));
-    (g, calls)
+    let (g, h) = gov_full(lease, visible, json);
+    (g, h.calls)
 }
 
 fn denied(p: &Permit) -> bool {
@@ -351,6 +406,8 @@ fn governor_denies_without_visible_devices() {
     let (g, _) = gov(Some("L1"), None, one("HELD", Some(OWNER)));
     assert!(denied(&g.permit(&EntityKey::chip(A))));
     let (g, _) = gov(Some("L1"), Some("zero,one"), one("HELD", Some(OWNER)));
+    assert!(denied(&g.permit(&EntityKey::chip(A))));
+    let (g, _) = gov(Some("L1"), Some("0,,1"), one("HELD", Some(OWNER)));
     assert!(denied(&g.permit(&EntityKey::chip(A))));
     let (g, _) = gov(Some("L1"), Some(""), one("HELD", Some(OWNER)));
     assert!(denied(&g.permit(&EntityKey::chip(A))));
@@ -382,14 +439,37 @@ fn governor_denies_foreign_held_state_by_name() {
 }
 
 #[test]
-fn governor_denies_held_by_another_lease() {
-    let (g, _) = gov(Some("L1"), Some("0,1"), one("HELD", Some(OWNER + 1)));
-    assert!(denied(&g.permit(&EntityKey::chip(A))));
+fn governor_denies_chip_not_in_our_lease() {
+    // Chip A is HELD, but `gozer env` for our lease lists only chip B.
+    let (g, h) = gov_full(Some("L1"), Some("0,1"), one("HELD", Some(OWNER)));
+    *h.env.lock().unwrap() = env_json(&[B]);
+    assert_eq!(
+        g.permit(&EntityKey::chip(A)),
+        Permit::Deny("chip is not in our lease".into())
+    );
 }
 
 #[test]
-fn governor_denies_when_our_lease_record_is_unreadable() {
-    let (g, _) = gov(Some("L2"), Some("0,1"), one("HELD", Some(OWNER)));
+fn governor_denies_when_gozer_env_fails() {
+    // A lease gozer does not know exits nonzero: the runner gives None.
+    let (g, h) = gov_full(Some("L2"), Some("0,1"), one("HELD", Some(OWNER)));
+    *h.env.lock().unwrap() = None;
+    assert!(denied(&g.permit(&EntityKey::chip(A))));
+    // Unparsable env output also denies.
+    *h.env.lock().unwrap() = Some("garbage".into());
+    let g2 = gov_full(Some("L2"), Some("0,1"), one("HELD", Some(OWNER)));
+    *g2.1.env.lock().unwrap() = Some("{}".into());
+    assert!(denied(&g2.0.permit(&EntityKey::chip(A))));
+}
+
+#[test]
+fn governor_does_not_depend_on_owner_pid() {
+    // Detached lease: pid null, HELD because something has the chip open.
+    let (g, _) = gov(Some("L1"), Some("0,1"), one("HELD", None));
+    assert_eq!(g.permit(&EntityKey::chip(A)), Permit::Go);
+    // Same pid on a chip our lease does not list is still denied.
+    let (g, h) = gov_full(Some("L1"), Some("0,1"), one("HELD", Some(OWNER)));
+    *h.env.lock().unwrap() = env_json(&[]);
     assert!(denied(&g.permit(&EntityKey::chip(A))));
 }
 
@@ -411,46 +491,294 @@ fn governor_denies_unknown_chip_and_bad_status() {
 }
 
 #[test]
-fn governor_prefers_a_lease_id_in_status() {
-    let mut v: serde_json::Value =
-        serde_json::from_str(&status_json(&[(A, "HELD", Some("w"), Some(1))])).unwrap();
-    v["chips"][0]["lease_id"] = "L9".into();
-    let (g, _) = gov(Some("L9"), Some("0"), Some(v.to_string()));
-    assert_eq!(g.permit(&EntityKey::chip(A)), Permit::Go);
-    let (g, _) = gov(Some("L1"), Some("0"), Some(v.to_string()));
-    assert!(denied(&g.permit(&EntityKey::chip(A))));
-}
-
-#[test]
 fn governor_caches_for_30s_and_denies_when_stale() {
-    let (g, calls) = gov(Some("L1"), Some("0"), one("HELD", Some(OWNER)));
+    let (g, h) = gov_full(Some("L1"), Some("0"), one("HELD", Some(OWNER)));
     let chip = EntityKey::chip(A);
     let t = Instant::now();
     assert_eq!(g.permit_at(&chip, t), Permit::Go);
     assert_eq!(g.permit_at(&chip, t + Duration::from_secs(29)), Permit::Go);
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "cached within 30 s");
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1, "cached within 30 s");
+    assert_eq!(h.env_calls.load(Ordering::SeqCst), 1, "env cached too");
     assert_eq!(g.permit_at(&chip, t + Duration::from_secs(30)), Permit::Go);
-    assert_eq!(calls.load(Ordering::SeqCst), 2, "refreshed after 30 s");
+    assert_eq!(h.calls.load(Ordering::SeqCst), 2, "refreshed after 30 s");
+    assert_eq!(h.env_calls.load(Ordering::SeqCst), 2);
 }
 
 #[test]
 fn governor_failed_refresh_uses_cache_until_60s_then_denies() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let answer = Arc::new(Mutex::new(one("HELD", Some(OWNER))));
-    let runner = Counting {
-        answer: answer.clone(),
-        calls: calls.clone(),
-    };
-    let g = GozerGovernor::new(Some("L1".into()), Some("0".into()), Box::new(runner))
-        .with_owner_lookup(Box::new(|_| Some(OWNER)));
+    let (g, h) = gov_full(Some("L1"), Some("0"), one("HELD", Some(OWNER)));
     let chip = EntityKey::chip(A);
     let t = Instant::now();
     assert_eq!(g.permit_at(&chip, t), Permit::Go);
-    *answer.lock().unwrap() = None; // gozer goes away
-                                    // 45 s: refresh fails, 45 s old cache still fine.
+    *h.status.lock().unwrap() = None; // gozer goes away
+                                      // 45 s: refresh fails, the 45 s old snapshot still counts.
     assert_eq!(g.permit_at(&chip, t + Duration::from_secs(45)), Permit::Go);
-    // 76 s: the refresh fails again (31 s since the 45 s attempt) and the
-    // cache is 76 s old, past 60 s.
+    // 76 s: refresh fails again, snapshot is 76 s old, past 60 s.
     assert!(denied(&g.permit_at(&chip, t + Duration::from_secs(76))));
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(h.calls.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn governor_does_not_hold_the_cache_lock_while_running_a_command() {
+    // A runner that calls back into the governor's cache would deadlock if
+    // the lock were held. Here: a slow runner on one thread must not stop a
+    // second permit (served from cache or by its own attempt) from returning.
+    struct Slow(Arc<AtomicUsize>);
+    impl StatusRunner for Slow {
+        fn run(&self, _a: &[&str], _t: Duration) -> Option<String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(500));
+            None
+        }
+    }
+    let n = Arc::new(AtomicUsize::new(0));
+    let g = Arc::new(GozerGovernor::new(
+        Some("L1".into()),
+        Some("0".into()),
+        Box::new(Slow(n.clone())),
+    ));
+    let g2 = g.clone();
+    let t = Instant::now();
+    let h = std::thread::spawn(move || g2.permit_at(&EntityKey::chip(A), t));
+    std::thread::sleep(Duration::from_millis(100));
+    let t0 = Instant::now();
+    assert!(denied(&g.permit_at(&EntityKey::chip(A), t)));
+    assert!(
+        t0.elapsed() < Duration::from_millis(300),
+        "{:?}",
+        t0.elapsed()
+    );
+    assert!(denied(&h.join().unwrap()));
+}
+
+// ---- fix round 1 ----
+
+#[test]
+fn governor_accepts_gozer_format_bdf_visible_devices() {
+    let (g, _) = gov(
+        Some("L1"),
+        Some("0000:01:00.0,0000:02:00.0"),
+        one("HELD", Some(OWNER)),
+    );
+    assert_eq!(g.permit(&EntityKey::chip(A)), Permit::Go);
+    // Whitespace and a trailing comma are tolerated.
+    let (g, _) = gov(
+        Some("L1"),
+        Some(" 0000:01:00.0 , 0000:02:00.0, "),
+        one("HELD", Some(OWNER)),
+    );
+    assert_eq!(g.permit(&EntityKey::chip(A)), Permit::Go);
+    // A chip whose BDF is not listed is denied.
+    let (g, _) = gov(Some("L1"), Some("0000:02:00.0"), one("HELD", Some(OWNER)));
+    assert!(denied(&g.permit(&EntityKey::chip(A))));
+    // An entry that is neither a BDF nor a number denies the whole list.
+    let (g, _) = gov(
+        Some("L1"),
+        Some("0000:01:00.0,GPU0"),
+        one("HELD", Some(OWNER)),
+    );
+    assert!(denied(&g.permit(&EntityKey::chip(A))));
+    // Numbers still work as dev_index (A is index 0), but a range does not.
+    let (g, _) = gov(Some("L1"), Some("0-1"), one("HELD", Some(OWNER)));
+    assert!(denied(&g.permit(&EntityKey::chip(A))));
+}
+
+#[test]
+fn detached_lease_grants_and_releases() {
+    // A bare `gozer acquire` records pid null; the who string identifies it.
+    let detached = |state: &'static str| {
+        vec![
+            (A, state, Some("alice:job"), None),
+            (B, state, Some("alice:job"), None),
+        ]
+    };
+    let mut src = GozerSource::fed();
+    src.feed(status(&[]));
+    ctx_poll(&mut src, Instant::now());
+    src.feed(status(&detached("CLAIMED")));
+    let out = ctx_poll(&mut src, Instant::now());
+    assert!(
+        matches!(events(&out)[..], [Event::LeaseGranted { .. }]),
+        "{out:?}"
+    );
+    src.feed(status(&[]));
+    let out = ctx_poll(&mut src, Instant::now());
+    let ev = events(&out);
+    assert!(matches!(
+        ev[..],
+        [Event::LeaseReleased { .. }, Event::Reset { .. }]
+    ));
+    assert_eq!(
+        out.iter().filter(|p| matches!(p, Payload::Gap(_))).count(),
+        1
+    );
+}
+
+#[test]
+fn unreadable_flapping_emits_no_release() {
+    let mut src = GozerSource::fed();
+    src.feed(status(&held("w")));
+    ctx_poll(&mut src, Instant::now());
+    for _ in 0..3 {
+        // gozer reports pid null for an UNREADABLE chip.
+        src.feed(status(&[
+            (A, "UNREADABLE", None, None),
+            (B, "HELD", Some("w"), Some(OWNER)),
+        ]));
+        let out = ctx_poll(&mut src, Instant::now());
+        assert!(events(&out).is_empty() && !out.iter().any(|p| matches!(p, Payload::Gap(_))));
+        src.feed(status(&held("w")));
+        let out = ctx_poll(&mut src, Instant::now());
+        assert!(events(&out).is_empty(), "no grant spam either: {out:?}");
+    }
+    // A real release still works afterwards.
+    src.feed(status(&[]));
+    assert_eq!(events(&ctx_poll(&mut src, Instant::now())).len(), 2);
+}
+
+#[test]
+fn deny_reason_does_not_echo_unknown_state() {
+    let (g, _) = gov(Some("L1"), Some("0"), one("sk-secret-state", Some(OWNER)));
+    assert_eq!(
+        g.permit(&EntityKey::chip(A)),
+        Permit::Deny("chip state is other, not HELD".into())
+    );
+}
+
+// ---- the real runner, against scripts ----
+
+mod command_runner {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Write an executable script into its own directory and return the
+    /// runner for it. The TempDir must outlive the run.
+    fn script(body: &str) -> (tempfile::TempDir, CommandRunner) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fake-gozer");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\n{body}\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Another test thread can fork while the file was open for writing,
+        // and exec then fails with "text file busy". Probe until it does not.
+        for _ in 0..200 {
+            match std::process::Command::new(&path).arg("--probe").status() {
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                _ => break,
+            }
+        }
+        let r = CommandRunner::with_program(&path);
+        (dir, r)
+    }
+
+    const DEADLINE: Duration = Duration::from_millis(600);
+
+    #[test]
+    fn prints_json_and_exits() {
+        let (_d, r) = script(r#"echo '{"chips": []}'"#);
+        let out = r.status_json(Duration::from_secs(5)).unwrap();
+        assert!(parse_status(&out).is_some());
+    }
+
+    #[test]
+    fn passes_the_arguments_through() {
+        let (_d, r) = script(r#"echo "$@""#);
+        assert_eq!(
+            r.status_json(Duration::from_secs(5)).unwrap().trim(),
+            "status --json"
+        );
+        assert_eq!(
+            r.env_json("L1", Duration::from_secs(5)).unwrap().trim(),
+            "env L1 --json"
+        );
+    }
+
+    #[test]
+    fn refuses_other_subcommands_without_spawning() {
+        let dir = tempfile::tempdir().unwrap();
+        let mark = dir.path().join("ran");
+        let (_d, r) = script(&format!("touch {}", mark.display()));
+        for args in [&["release", "x"][..], &["reset", "x"], &["acquire"], &[]] {
+            assert!(r.run(args, Duration::from_secs(1)).is_none());
+        }
+        assert!(!mark.exists(), "a forbidden subcommand was spawned");
+    }
+
+    /// The pid in `file` must be gone (reaped) once the runner returned.
+    fn assert_reaped(file: &Path) {
+        let pid = std::fs::read_to_string(file).unwrap();
+        let pid = pid.trim();
+        assert!(!pid.is_empty());
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "child {pid} is still there (running or zombie)"
+        );
+    }
+
+    #[test]
+    fn sleeping_child_is_killed_at_the_deadline_and_reaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let (_d, r) = script(&format!("echo $$ > {}\nexec sleep 30", pidfile.display()));
+        let t = Instant::now();
+        assert!(r.status_json(DEADLINE).is_none());
+        let took = t.elapsed();
+        assert!(
+            took >= DEADLINE && took < DEADLINE + Duration::from_millis(500),
+            "{took:?}"
+        );
+        assert_reaped(&pidfile);
+    }
+
+    #[test]
+    fn child_that_closes_stdout_then_hangs_is_killed_at_the_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let (_d, r) = script(&format!(
+            "echo $$ > {}\nexec 1>&-\nexec sleep 30",
+            pidfile.display()
+        ));
+        let t = Instant::now();
+        assert!(r.status_json(DEADLINE).is_none());
+        let took = t.elapsed();
+        assert!(
+            took >= DEADLINE && took < DEADLINE + Duration::from_millis(500),
+            "{took:?}"
+        );
+        assert_reaped(&pidfile);
+    }
+
+    #[test]
+    fn nonzero_exit_is_none() {
+        let (_d, r) = script(r#"echo '{"error": "not found"}'; exit 13"#);
+        assert!(r.env_json("nope", Duration::from_secs(5)).is_none());
+    }
+
+    #[test]
+    fn missing_program_is_none() {
+        let r = CommandRunner::with_program("/nonexistent/dir/gozer");
+        assert!(r.status_json(Duration::from_secs(1)).is_none());
+    }
+
+    #[test]
+    fn source_keeps_polling_after_a_hung_command() {
+        // The command hangs past the deadline. The worker must finish (None)
+        // so `inflight` clears and the next interval starts a new command.
+        let (d, _r) = script("exec sleep 30");
+        let mut src = GozerSource::new(Arc::new(CommandRunner::with_program(
+            d.path().join("fake-gozer"),
+        )));
+        let t = Instant::now();
+        ctx_poll(&mut src, t);
+        assert!(src.inflight.is_some());
+        std::thread::sleep(COMMAND_TIMEOUT + Duration::from_millis(500));
+        ctx_poll(&mut src, t + POLL_INTERVAL); // collects the None, starts again
+        assert!(src.inflight.is_some(), "a new command was started");
+        assert!(src.pending.is_none());
+    }
 }

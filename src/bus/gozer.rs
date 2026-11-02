@@ -1,9 +1,10 @@
 //! Gozer: the lease source and the governor.
 //!
-//! `gozer` (tt-gozer) is the box's chip lease manager. This module reads its
-//! `gozer status --json` and nothing else. It never runs `acquire`, `run`,
-//! `release`, `reset` or any command that touches a chip. `gozer status` itself
-//! never opens `/dev/tenstorrent/*`.
+//! `gozer` (tt-gozer) is the box's chip lease manager. This module runs two
+//! read-only commands: `gozer status --json` and `gozer env <lease> --json`.
+//! It never runs `acquire`, `run`, `release`, `reset` or anything that touches
+//! a chip, and it never reads gozer's own files. The real runner refuses any
+//! other subcommand. Neither command opens `/dev/tenstorrent/*`.
 //!
 //! # What `gozer status --json` exposes
 //!
@@ -12,7 +13,9 @@
 //! `reason`, `pid` (the lease's owner pid), `pids_holding`, `owner_dead` and
 //! `overstayed`. It does **not** expose the lease id. This module therefore
 //! names a lease by the owner pid (`pid-<pid>`) unless a future gozer adds a
-//! `lease_id` field to the chip, which it then prefers.
+//! `lease_id` field to the chip, which it then prefers. A detached lease (a
+//! bare `gozer acquire`) has `pid: null`; it is named `who-<who>` instead
+//! (redacted and clipped). A chip with neither is treated as unheld.
 //!
 //! # [`GozerSource`]
 //!
@@ -25,7 +28,9 @@
 //! * Later, a holder that appears on a chip gives one `LeaseGranted`. A holder
 //!   that goes away gives one `LeaseReleased`, an `Event::Reset` and a
 //!   `Payload::Gap`: gozer resets the chips on release, so readings taken just
-//!   after may be garbage.
+//!   after may be garbage. A chip that turns `UNREADABLE` or `DEGRADED`
+//!   (gozer reports `pid: null` for those) keeps its previous holder, so a
+//!   flapping chip gives no release and no second grant.
 //! * A changed state gives one `toplike.gozer.state` sample. A changed `who`
 //!   gives one `toplike.gozer.who` sample (empty text when it clears).
 //! * When gozer is absent or fails, nothing is emitted and the last snapshot
@@ -44,13 +49,14 @@
 //!
 //! The sidecar launcher sets `TT_TOPLIKE_LEASE_ID` (the lease id it was
 //! given). Gozer sets no variable for it: `gozer env <lease>` exports only
-//! `TT_VISIBLE_DEVICES`.
+//! `TT_VISIBLE_DEVICES`, a comma list of PCI addresses.
 
 use crate::bus::redact::redact_cmdline;
 use crate::bus::signals as sig;
 use crate::bus::source::{PollCtx, Source};
 use std::collections::BTreeMap;
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -97,14 +103,22 @@ pub struct ChipStatus {
 
 impl ChipStatus {
     /// Name of whoever holds the chip: the lease id when exposed, else
-    /// `pid-<owner pid>`. `None` when no lease covers the chip.
+    /// `pid-<owner pid>`, else `who-<who>` for a detached lease. `None` when
+    /// no lease covers the chip.
     fn holder(&self) -> Option<String> {
-        match (&self.lease_id, self.pid) {
-            (Some(id), _) if !id.is_empty() => Some(id.clone()),
-            (_, Some(pid)) => Some(format!("pid-{pid}")),
+        match (&self.lease_id, self.pid, self.who.as_deref()) {
+            (Some(id), _, _) if !id.is_empty() => Some(id.clone()),
+            (_, Some(pid), _) => Some(format!("pid-{pid}")),
+            // Detached lease: no owner pid. The who string is all there is.
+            (_, None, Some(who)) if !who.is_empty() => Some(format!("who-{}", clean_who(who))),
             _ => None,
         }
     }
+}
+
+/// A `who` string safe to store: redacted, then clipped to [`MAX_WHO`].
+fn clean_who(who: &str) -> String {
+    redact_cmdline(who).chars().take(MAX_WHO).collect()
 }
 
 /// A parsed `gozer status --json`.
@@ -142,27 +156,68 @@ pub fn parse_status(json: &str) -> Option<GozerStatus> {
 // Runner
 // ---------------------------------------------------------------------------
 
-/// Runs `gozer status --json`. Injectable so tests supply JSON.
+/// Runs a read-only gozer command. Injectable so tests supply JSON.
+///
+/// One generic method, `run`, serves both `status --json` and
+/// `env <lease> --json`.
 pub trait StatusRunner: Send + Sync {
-    /// The command's stdout, or `None` when gozer is not installed, fails or
-    /// does not finish within `timeout`.
-    fn status_json(&self, timeout: Duration) -> Option<String>;
+    /// The command's stdout, or `None` when gozer is not installed, exits
+    /// nonzero or does not finish within `timeout`.
+    fn run(&self, args: &[&str], timeout: Duration) -> Option<String>;
+
+    /// `gozer status --json`.
+    fn status_json(&self, timeout: Duration) -> Option<String> {
+        self.run(&["status", "--json"], timeout)
+    }
+
+    /// `gozer env <lease> --json`.
+    fn env_json(&self, lease: &str, timeout: Duration) -> Option<String> {
+        self.run(&["env", lease, "--json"], timeout)
+    }
 }
 
-/// Spawns the real `gozer status --json`.
-pub struct CommandRunner;
+/// Spawns the real `gozer`.
+pub struct CommandRunner {
+    program: PathBuf,
+}
+
+impl CommandRunner {
+    /// Runs `gozer` found on PATH.
+    pub fn new() -> Self {
+        Self::with_program("gozer")
+    }
+
+    /// Runs the given program instead of `gozer` (tests use a script).
+    pub fn with_program(program: impl AsRef<Path>) -> Self {
+        Self {
+            program: program.as_ref().to_path_buf(),
+        }
+    }
+}
+
+impl Default for CommandRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl StatusRunner for CommandRunner {
-    fn status_json(&self, timeout: Duration) -> Option<String> {
-        let mut child = Command::new("gozer")
-            .args(["status", "--json"])
+    /// `timeout` is a deadline for the whole child: spawn, output and exit.
+    /// On expiry the child is killed and reaped. Only `status` and `env` are
+    /// run; any other subcommand returns `None` without spawning.
+    fn run(&self, args: &[&str], timeout: Duration) -> Option<String> {
+        if !matches!(args.first(), Some(&"status") | Some(&"env")) {
+            return None;
+        }
+        let deadline = Instant::now() + timeout;
+        let mut child = Command::new(&self.program)
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .ok()?;
-        // Read stdout on its own thread so a full pipe cannot stall the child
-        // while we wait for it.
+        // Read stdout on its own thread so a full pipe cannot stall the child.
         let mut out = child.stdout.take()?;
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -170,20 +225,28 @@ impl StatusRunner for CommandRunner {
             let ok = out.read_to_string(&mut s).is_ok();
             let _ = tx.send(ok.then_some(s));
         });
-        let text = match rx.recv_timeout(timeout) {
-            Ok(t) => t,
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
+        // Wait for the child to exit, up to the deadline.
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(st)) => break st,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
             }
         };
-        let status = child.wait().ok()?;
-        if status.success() {
-            text
-        } else {
-            None
+        if !status.success() {
+            return None;
         }
+        // The child is gone; its output is complete unless a grandchild holds
+        // the pipe, so wait only for what is left of the deadline.
+        rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .ok()
+            .flatten()
     }
 }
 
@@ -226,7 +289,7 @@ impl GozerSource {
 
     /// A source with the real `gozer status --json` runner.
     pub fn with_command() -> Self {
-        Self::new(Arc::new(CommandRunner))
+        Self::new(Arc::new(CommandRunner::new()))
     }
 
     /// A source that only reads what [`feed`](Self::feed) gives it.
@@ -280,23 +343,31 @@ impl GozerSource {
 
     /// Compare `status` with the previous snapshot and emit.
     fn process(&mut self, status: &GozerStatus, out: &mut dyn FnMut(Payload)) {
+        let prev = self.prev.take();
         let cur: BTreeMap<String, View> = status
             .chips
             .iter()
             .map(|c| {
-                let who = c.who.as_deref().map(redact_cmdline).unwrap_or_default();
-                let who: String = who.chars().take(MAX_WHO).collect();
+                let who = c.who.as_deref().map(clean_who).unwrap_or_default();
+                let mut holder = c.holder();
+                // gozer reports pid null for these, whatever the lease: keep
+                // the holder we saw, so a flapping chip is not a release.
+                if holder.is_none() && matches!(c.state.as_str(), "UNREADABLE" | "DEGRADED") {
+                    holder = prev
+                        .as_ref()
+                        .and_then(|p| p.get(&c.bdf))
+                        .and_then(|o| o.holder.clone());
+                }
                 (
                     c.bdf.clone(),
                     View {
                         state: c.state.clone(),
                         who,
-                        holder: c.holder(),
+                        holder,
                     },
                 )
             })
             .collect();
-        let prev = self.prev.take();
 
         // State and who samples.
         for (bdf, v) in &cur {
@@ -390,63 +461,121 @@ pub trait Governor {
     fn permit(&self, chip: &EntityKey) -> Permit;
 }
 
-/// Looks up the owner pid of a lease id.
-type OwnerLookup = Box<dyn Fn(&str) -> Option<u64> + Send + Sync>;
+/// What the governor knows from the last good refresh.
+#[derive(Clone)]
+struct Snapshot {
+    /// `gozer status --json`.
+    status: GozerStatus,
+    /// `gozer env <our lease> --json`: the chips of our lease.
+    lease_chips: ChipList,
+}
 
 /// Mutable cache state of the governor.
 struct Cache {
     last_attempt: Option<Instant>,
-    /// The last status that parsed, and when it was read.
-    good: Option<(Instant, GozerStatus)>,
+    /// The last snapshot that parsed, and when it was read.
+    good: Option<(Instant, Snapshot)>,
 }
 
-/// Permits a chip only when `gozer status --json` shows it `HELD` under our
-/// own lease and the chip is in `TT_VISIBLE_DEVICES`.
+/// A parsed `TT_VISIBLE_DEVICES`: gozer writes PCI addresses. A plain number
+/// is accepted as a `dev_index` when an entry has no `:`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct ChipList {
+    bdfs: Vec<String>,
+    indices: Vec<u32>,
+}
+
+impl ChipList {
+    /// `"0000:01:00.0,0000:02:00.0"`. Whitespace and one trailing comma are
+    /// ignored. `None` for an empty list or any other entry (a name, an empty
+    /// entry in the middle, a range).
+    fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        let s = s.strip_suffix(',').unwrap_or(s);
+        let mut out = ChipList::default();
+        for part in s.split(',') {
+            let p = part.trim();
+            if p.is_empty() {
+                return None;
+            }
+            if p.contains(':') {
+                out.bdfs.push(p.to_ascii_lowercase());
+            } else {
+                out.indices.push(p.parse::<u32>().ok()?);
+            }
+        }
+        Some(out)
+    }
+
+    fn lists(&self, chip: &ChipStatus) -> bool {
+        self.bdfs.iter().any(|b| b.eq_ignore_ascii_case(&chip.bdf))
+            || chip.dev_index.is_some_and(|i| self.indices.contains(&i))
+    }
+}
+
+/// `{"TT_VISIBLE_DEVICES": "<bdf,...>"}` from `gozer env <lease> --json`.
+fn parse_env(json: &str) -> Option<ChipList> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    ChipList::parse(v.get(VISIBLE_ENV)?.as_str()?)
+}
+
+/// Permits a chip only when all of these hold:
 ///
-/// # How our lease is matched
+/// 1. `TT_TOPLIKE_LEASE_ID` is set and not empty.
+/// 2. `gozer env <lease> --json` succeeds and lists the chip's PCI address
+///    (the chip belongs to our lease, as gozer says).
+/// 3. `TT_VISIBLE_DEVICES` in our own environment lists the chip (gozer
+///    writes PCI addresses; a plain number is taken as a `dev_index`).
+/// 4. `gozer status --json` shows the chip in state exactly `HELD`.
 ///
-/// Status does not expose a lease id. Each chip carries `pid`, the lease's
-/// owner pid. The governor reads the owner pid of our lease id from gozer's
-/// own record, `<root>/leases/<id>.json` field `pid`, where `<root>` is
-/// `$GOZER_ROOT` or `/tmp/tt-gozer` (a read of a plain file; no chip is
-/// touched). A chip matches when its status `pid` equals that pid. If a
-/// later gozer adds `lease_id` to the chip, that is compared first.
+/// Anything else denies. No file of gozer's is read.
 ///
-/// Limits: two leases with the same owner pid look the same (an `adopt` or
-/// `--owner-pid` on one supervisor for several leases). A lease file that
-/// cannot be read (another user's `/tmp`, a different `GOZER_ROOT`) denies.
-/// A reused pid is not distinguished.
+/// # What `HELD` proves
 ///
-/// Only `HELD` permits. `CLAIMED` (lease taken, nothing open yet), `STALE`,
-/// `HELD-FOREIGN`, `BUSY-UNTRACKED`, `FREE`, `DEGRADED` and `UNREADABLE` deny.
+/// For a lease with an owner pid (`gozer run`, or `acquire --owner-pid`),
+/// `HELD` means a device is open by the owner or its descendants. Rule 2
+/// says the chip is in our lease, so the chip is ours and in use by our
+/// lease's process tree.
 ///
-/// # Caching
+/// For a detached lease (a bare `gozer acquire`), gozer reports `HELD` when
+/// any process has the chip open, including another tenant's, since gozer
+/// cannot tell whose it is. Rules 2 and 3 still say the chip is ours, but
+/// `HELD` there only means "something has it open". Do not read it as "our
+/// workload is running".
 ///
-/// Status is re-read at most once per [`GOVERNOR_REFRESH`] (30 s), counting
-/// failed attempts. A status older than [`GOVERNOR_STALE`] (60 s) with a
-/// failed refresh denies. `permit` can block up to the runner's 2 s timeout
-/// when it refreshes, so call it from the sidecar's own thread.
+/// `CLAIMED` (lease taken, nothing open yet) denies: there is no workload to
+/// observe, and a sidecar that opens a chip first would be the first opener.
+///
+/// # Caching, and what this is not
+///
+/// Both commands are re-run at most once per [`GOVERNOR_REFRESH`] (30 s),
+/// counting failed attempts. A snapshot older than [`GOVERNOR_STALE`] (60 s)
+/// with a failed refresh denies. So this governor tolerates one failed
+/// refresh (up to 60 s of staleness). It is NOT the sidecar's rule "exit on
+/// the first failed 30 s re-check"; the sidecar must implement that itself.
+///
+/// `permit` can block for the runner's deadline (2 s) on a refresh, so call it
+/// from the sidecar's own thread. The cache lock is never held while a
+/// command runs.
 pub struct GozerGovernor {
     lease_id: Option<String>,
     visible: Option<String>,
     runner: Box<dyn StatusRunner>,
-    owner_of: OwnerLookup,
     cache: Mutex<Cache>,
 }
 
 impl GozerGovernor {
     /// From `TT_TOPLIKE_LEASE_ID` and `TT_VISIBLE_DEVICES`, with the real
-    /// `gozer` runner and the lease file lookup.
+    /// `gozer` runner.
     pub fn from_env() -> Self {
         Self::new(
             std::env::var(LEASE_ENV).ok(),
             std::env::var(VISIBLE_ENV).ok(),
-            Box::new(CommandRunner),
+            Box::new(CommandRunner::new()),
         )
     }
 
-    /// For tests and callers that supply their own runner. The owner pid
-    /// comes from the lease file.
+    /// For tests and callers that supply their own runner.
     pub fn new(
         lease_id: Option<String>,
         visible: Option<String>,
@@ -456,18 +585,11 @@ impl GozerGovernor {
             lease_id,
             visible,
             runner,
-            owner_of: Box::new(owner_pid_from_lease_file),
             cache: Mutex::new(Cache {
                 last_attempt: None,
                 good: None,
             }),
         }
-    }
-
-    /// Replace the lease owner lookup (tests).
-    pub fn with_owner_lookup(mut self, f: OwnerLookup) -> Self {
-        self.owner_of = f;
-        self
     }
 
     /// `permit` at an explicit time, so tests can move the clock.
@@ -481,15 +603,16 @@ impl GozerGovernor {
             Some(v) => v,
             None => return deny("TT_VISIBLE_DEVICES is not set"),
         };
-        let visible = match parse_visible(visible) {
+        let visible = match ChipList::parse(visible) {
             Some(v) => v,
-            None => return deny("TT_VISIBLE_DEVICES is not a list of chip numbers"),
+            None => return deny("TT_VISIBLE_DEVICES is not a list of chips"),
         };
-        let status = match self.status(now) {
+        let snap = match self.snapshot(lease, now) {
             Some(s) => s,
             None => return deny("gozer status is unavailable"),
         };
-        let c = match status
+        let c = match snap
+            .status
             .chips
             .iter()
             .find(|c| EntityKey::chip(&c.bdf) == *chip)
@@ -498,48 +621,57 @@ impl GozerGovernor {
             None => return deny("chip is not in gozer status"),
         };
         if c.state != "HELD" {
-            return Permit::Deny(format!("chip state is {}, not HELD", c.state));
+            return Permit::Deny(format!("chip state is {}, not HELD", state_label(&c.state)));
         }
-        match c.dev_index {
-            Some(i) if visible.contains(&i) => {}
-            _ => return deny("chip is not in TT_VISIBLE_DEVICES"),
+        if !visible.lists(c) {
+            return deny("chip is not in TT_VISIBLE_DEVICES");
         }
-        let ours = match &c.lease_id {
-            Some(id) => id == lease,
-            None => match (c.pid, (self.owner_of)(lease)) {
-                (Some(p), Some(o)) => p == o,
-                (_, None) => return deny("our lease record cannot be read"),
-                (None, _) => false,
-            },
-        };
-        if ours {
-            Permit::Go
-        } else {
-            deny("chip is held by another lease")
+        if !snap.lease_chips.lists(c) {
+            return deny("chip is not in our lease");
         }
+        Permit::Go
     }
 
-    /// The cached status, refreshed when due. `None` when there is no status
+    /// The cached snapshot, refreshed when due. `None` when there is none
     /// newer than [`GOVERNOR_STALE`].
-    fn status(&self, now: Instant) -> Option<GozerStatus> {
-        let mut c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        let due = c.last_attempt.map_or(true, |t| {
-            now.saturating_duration_since(t) >= GOVERNOR_REFRESH
-        });
+    fn snapshot(&self, lease: &str, now: Instant) -> Option<Snapshot> {
+        let due = {
+            let mut c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            let due = c.last_attempt.map_or(true, |t| {
+                now.saturating_duration_since(t) >= GOVERNOR_REFRESH
+            });
+            if due {
+                c.last_attempt = Some(now);
+            }
+            due
+        };
         if due {
-            c.last_attempt = Some(now);
-            let parsed = self
+            // No lock held while the commands run.
+            let status = self
                 .runner
                 .status_json(COMMAND_TIMEOUT)
                 .as_deref()
                 .and_then(parse_status);
-            if let Some(st) = parsed {
-                c.good = Some((now, st));
+            let lease_chips = self
+                .runner
+                .env_json(lease, COMMAND_TIMEOUT)
+                .as_deref()
+                .and_then(parse_env);
+            if let (Some(status), Some(lease_chips)) = (status, lease_chips) {
+                let mut c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+                c.good = Some((
+                    now,
+                    Snapshot {
+                        status,
+                        lease_chips,
+                    },
+                ));
             }
         }
+        let c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         match &c.good {
-            Some((at, st)) if now.saturating_duration_since(*at) <= GOVERNOR_STALE => {
-                Some(st.clone())
+            Some((at, snap)) if now.saturating_duration_since(*at) <= GOVERNOR_STALE => {
+                Some(snap.clone())
             }
             _ => None,
         }
@@ -552,31 +684,24 @@ impl Governor for GozerGovernor {
     }
 }
 
-/// `"0,1"` to `[0, 1]`. `None` for anything that is not a comma list of
-/// numbers (an empty value, a stray name, a trailing comma).
-fn parse_visible(s: &str) -> Option<Vec<u32>> {
-    s.split(',')
-        .map(|p| p.trim().parse::<u32>().ok())
-        .collect::<Option<Vec<_>>>()
-        .filter(|v| !v.is_empty())
-}
-
-/// Owner pid from gozer's lease record. `None` when the id is not a plain
-/// token or the file is missing or unreadable.
-fn owner_pid_from_lease_file(lease_id: &str) -> Option<u64> {
-    if lease_id.is_empty()
-        || !lease_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return None;
-    }
-    let root = std::env::var("GOZER_ROOT").unwrap_or_else(|_| "/tmp/tt-gozer".into());
-    let text = std::fs::read_to_string(format!("{root}/leases/{lease_id}.json")).ok()?;
-    serde_json::from_str::<serde_json::Value>(&text)
-        .ok()?
-        .get("pid")?
-        .as_u64()
+/// Gozer's state name for a deny reason. A name this code does not know
+/// becomes `other`, so a reason never carries text from outside.
+fn state_label(state: &str) -> &'static str {
+    const KNOWN: [&str; 8] = [
+        "FREE",
+        "HELD",
+        "HELD-FOREIGN",
+        "CLAIMED",
+        "STALE",
+        "BUSY-UNTRACKED",
+        "DEGRADED",
+        "UNREADABLE",
+    ];
+    KNOWN
+        .iter()
+        .find(|k| **k == state)
+        .copied()
+        .unwrap_or("other")
 }
 
 #[cfg(test)]
