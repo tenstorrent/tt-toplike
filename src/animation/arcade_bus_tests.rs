@@ -694,6 +694,7 @@ fn a_world_naming_a_chip_this_tui_lacks_draws_nothing_for_it() {
 /// once it also runs on chip 0 draws its label and its hits.
 #[test]
 fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
+    use crate::animation::bus_test_support::Clocked;
     use crate::bus::host::BusHost;
     use crate::bus::view::{BusView, ReadCache};
     use std::collections::BTreeSet;
@@ -708,6 +709,13 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
         let cache = ReadCache::new();
         let local: Arc<BTreeSet<EntityKey>> = Arc::new([chip(0), chip(1)].into_iter().collect());
         let read = || view.read(&cache).only_chips(local.clone());
+        // Each read gets a fixed bus time a tick after the last, so a stall
+        // between two reads on a loaded machine cannot count as being away.
+        let mut t = 5 * SEC;
+        let mut at = || {
+            t += TICK;
+            t
+        };
         let p = |e: Event| {
             bus.publish("test", Payload::Event(e));
         };
@@ -715,7 +723,8 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
         let foreign = EntityKey::chip("0000:ee:00.0");
 
         // First sight: an empty world.
-        let w = read();
+        let r = read();
+        let w = Clocked(&r, at());
         step(&mut a, &b, &w);
         step(&mut q, &b, &Bus::new().view(w.now_mono_ns()));
 
@@ -747,7 +756,8 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
         p(Event::Reset {
             chips: vec![foreign.clone()],
         });
-        let w = read();
+        let r = read();
+        let w = Clocked(&r, at());
         // What the view hands the arcade: the model with its chip cut away,
         // and of the events only the requests.
         let models = w.models();
@@ -779,7 +789,8 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
             model: theirs.clone(),
             n: 2,
         });
-        let w = read();
+        let r = read();
+        let w = Clocked(&r, at());
         assert_eq!(w.models()[0].chips, vec![chip(0)]);
         step(&mut a, &b, &w);
         // `update` hands `new_requests` to the duel, so the hit is checked.
