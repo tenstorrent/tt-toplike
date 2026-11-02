@@ -155,13 +155,28 @@ pub(crate) fn tool_versions() -> BTreeMap<String, String> {
 
 /// The header line written at the top of every segment. `kind` is `Live`
 /// for a normal run and `Replay` for a bus that republishes a recorded log.
+#[cfg(test)]
 pub(crate) fn header_line(kind: HeaderKind) -> String {
-    let h = Header {
+    header_line_tagged(kind, &BTreeMap::new())
+}
+
+/// The header with `tags` added to `tool_versions`. A tag never replaces an
+/// entry [`tool_versions`] already has.
+pub(crate) fn header(kind: HeaderKind, tags: &BTreeMap<String, String>) -> Header {
+    let mut tools = tool_versions();
+    for (k, v) in tags {
+        tools.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+    Header {
         schema: SCHEMA_VERSION,
         kind,
-        tool_versions: tool_versions(),
-    };
-    serde_json::to_string(&h).expect("header encodes as JSON")
+        tool_versions: tools,
+    }
+}
+
+/// [`header_line`] with `tags` (see [`header`]).
+pub(crate) fn header_line_tagged(kind: HeaderKind, tags: &BTreeMap<String, String>) -> String {
+    serde_json::to_string(&header(kind, tags)).expect("header encodes as JSON")
 }
 
 /// Create `dir` (and missing parents) with mode 0700. A directory that
@@ -278,8 +293,12 @@ pub(crate) fn list(dir: &Path) -> io::Result<Vec<Found>> {
 }
 
 /// Write the header line to a freshly created segment file.
-pub(crate) fn write_header(w: &mut impl Write, kind: HeaderKind) -> io::Result<u64> {
-    let h = header_line(kind);
+pub(crate) fn write_header(
+    w: &mut impl Write,
+    kind: HeaderKind,
+    tags: &BTreeMap<String, String>,
+) -> io::Result<u64> {
+    let h = header_line_tagged(kind, tags);
     w.write_all(h.as_bytes())?;
     w.write_all(b"\n")?;
     Ok(h.len() as u64 + 1)

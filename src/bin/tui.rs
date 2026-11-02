@@ -378,22 +378,27 @@ fn run_headless_main(cli: &Cli, config: BackendConfig) {
         NoWorkloads, Workloads,
     };
 
-    let stop = match install_stop_signals() {
+    #[cfg(unix)]
+    let socket = cli.headless.then(|| cli.bus_socket_path());
+    #[cfg(not(unix))]
+    let socket: Option<std::path::PathBuf> = None;
+    // First signal: stop the loop. Second: remove the socket and exit now.
+    let stop = match install_stop_signals(socket.clone()) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("Error: cannot watch for SIGTERM/SIGINT: {e}");
             std::process::exit(1);
         }
     };
-    #[cfg(unix)]
-    let socket = cli.headless.then(|| cli.bus_socket_path());
-    #[cfg(not(unix))]
-    let socket: Option<std::path::PathBuf> = None;
-    let bus = if cli.headless {
-        cli.headless_bus_config()
-    } else {
-        // The no-TTY `--serve` keeps its old footprint: nothing on disk.
-        tt_toplike_bus::BusConfig::default()
+    // `synthetic`: the backend makes its values up (mock). Such a run
+    // writes to disk only into a directory named on the command line.
+    let bus_for = |synthetic: bool| {
+        if cli.headless {
+            cli.headless_bus_config(synthetic)
+        } else {
+            // The no-TTY `--serve` keeps its old footprint: nothing on disk.
+            tt_toplike_bus::BusConfig::default()
+        }
     };
     let describe = |bus: &tt_toplike_bus::BusConfig| {
         let log = bus
@@ -409,6 +414,7 @@ fn run_headless_main(cli: &Cli, config: BackendConfig) {
 
     // --replay: play a recorded log and serve it. No backend.
     if let Some(path) = &cli.replay {
+        let bus = bus_for(false);
         println!(
             "Headless replay of {} at speed {} ({}). Stop with SIGTERM or Ctrl-C.",
             path.display(),
@@ -421,6 +427,8 @@ fn run_headless_main(cli: &Cli, config: BackendConfig) {
             interval,
             relay: false,
             gozer: false,
+            synthetic: false,
+            backend_name: "replay".into(),
         };
         let done = |r: &Result<u64, String>| match r {
             Ok(n) => println!("replay: played {n} records; serving until stopped"),
@@ -455,6 +463,10 @@ fn run_headless_main(cli: &Cli, config: BackendConfig) {
         std::process::exit(1);
     }
     let relay = backend_type == BackendType::Remote;
+    // Auto-detect can fall back to mock: name what was actually built.
+    let backend_name = tt_toplike::cli::backend_tag(backend_type, &backend.backend_info());
+    let synthetic = backend_name == "mock";
+    let bus = bus_for(synthetic);
 
     // `--serve`: only a backend that hands back verbatim `tt-smi -s` JSON
     // (JSON, Hybrid, Ws) can be broadcast, because the wire format IS that
@@ -503,10 +515,13 @@ fn run_headless_main(cli: &Cli, config: BackendConfig) {
 
     // A relay's processes and models come from the remote frame; local
     // monitors would name this box's processes against the remote chips.
-    let mut workloads: Box<dyn Workloads> = if relay {
-        Box::new(NoWorkloads)
-    } else {
+    // A mock run scans nothing real unless --mock-workloads asks for it.
+    let local =
+        tt_toplike::bus::headless::uses_local_workloads(relay, synthetic, cli.mock_workloads);
+    let mut workloads: Box<dyn Workloads> = if local {
         Box::new(LocalWorkloads::new())
+    } else {
+        Box::new(NoWorkloads)
     };
     // gozer describes this box's real chips: not for mock, host or remote.
     let gozer = cli.headless
@@ -520,6 +535,8 @@ fn run_headless_main(cli: &Cli, config: BackendConfig) {
         interval,
         relay,
         gozer,
+        synthetic,
+        backend_name,
     };
 
     #[cfg(feature = "remote")]

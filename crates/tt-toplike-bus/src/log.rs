@@ -55,7 +55,7 @@
 //! sequence number. Records are never silently skipped.
 
 use crate::config::{BusConfig, Clock};
-use crate::record::{Gap, Header, HeaderKind, Payload, Record, SCHEMA_VERSION};
+use crate::record::{Gap, Header, HeaderKind, Payload, Record};
 use crate::segment;
 use std::any::Any;
 use std::collections::VecDeque;
@@ -228,6 +228,8 @@ struct Disk {
     dropped: AtomicU64,
     /// Written into the header line of every new segment.
     kind: HeaderKind,
+    /// Extra `tool_versions` entries for the header (see `BusConfig`).
+    tags: std::collections::BTreeMap<String, String>,
     #[cfg(test)]
     hooks: TestHooks,
 }
@@ -278,6 +280,7 @@ struct Inner {
     clock: Arc<dyn Clock>,
     disk: Option<Arc<Disk>>,
     header_kind: HeaderKind,
+    header_tags: std::collections::BTreeMap<String, String>,
     /// Random id chosen when the bus was opened. See [`Bus::instance`].
     instance: u64,
 }
@@ -295,10 +298,6 @@ struct WriterGuard {
     /// Disconnects when the writer thread returns. In a `Mutex` only
     /// because `Receiver` is not `Sync` and `Bus` must be.
     done: Mutex<Option<Receiver<()>>>,
-    /// The open `<dir>/.lock` file holding the directory's exclusive lock.
-    /// Closing it (when this guard drops, after the writer has finished)
-    /// releases the lock. `None` for a memory-only bus.
-    _dir_lock: Option<File>,
 }
 
 impl Drop for WriterGuard {
@@ -354,7 +353,31 @@ impl Bus {
     /// directory cannot be created or written, the bus still opens: it runs
     /// from memory, publishes a [`Gap`] saying why, and keeps retrying the
     /// disk. The only error is failing to start the writer thread.
+    ///
+    /// # The directory lock
+    ///
+    /// One process at a time writes a directory. `open` takes a
+    /// non-blocking exclusive lock on `<dir>/.lock` and fails when it cannot:
+    ///
+    /// * another holder: `WouldBlock`, `log directory is in use by another
+    ///   process: <dir>`;
+    /// * the filesystem refuses to lock (`ENOLCK` on an NFS home mounted
+    ///   `nolock`, for example): that error's kind, with the error and a
+    ///   suggestion to use `--bus-dir` on a local filesystem. Running without
+    ///   the lock would let two hosts write one directory.
+    ///
+    /// When the lock file itself cannot be created (the directory is missing
+    /// and cannot be made, or is not writable) the bus opens with the disk
+    /// off, as for any other disk outage. The writer takes the lock before
+    /// its first write, on every retry, and does not write, compress or
+    /// delete anything until it holds it. Once held, it is kept until the
+    /// writer thread exits (after the last `Bus` handle is dropped).
     pub fn open_with(cfg: BusConfig, reducer: Box<dyn Reducer>) -> io::Result<Bus> {
+        Bus::open_inner(cfg, reducer, Arc::new(lock_dir))
+    }
+
+    /// `open_with` with the lock function passed in (tests inject failures).
+    fn open_inner(cfg: BusConfig, reducer: Box<dyn Reducer>, locker: Locker) -> io::Result<Bus> {
         let window_records = cfg.window_records.max(1);
         let mut head = 0;
         let mut tx = None;
@@ -362,22 +385,24 @@ impl Bus {
         let mut done = None;
         let mut disk = None;
         let mut startup_failure = None;
-        let mut dir_lock = None;
 
         if let Some(dir) = cfg.dir.clone() {
-            // One writer per directory, across processes. A held lock is the
-            // only error `open` returns for a directory problem: two writers
-            // would corrupt each other's segments. A lock that cannot be
-            // taken for another reason (the directory cannot be created or
-            // is not writable) is a disk outage like any other, below.
-            let lock_failure = match lock_dir(&dir) {
+            // One writer per directory, across processes. See "The
+            // directory lock" above.
+            let mut dir_lock = None;
+            let lock_failure = match locker(&dir) {
                 Ok(f) => {
                     dir_lock = Some(f);
                     None
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(e),
-                Err(e) => Some(format!("cannot lock log directory {dir:?}: {e}")),
+                Err(e @ LockError::Held(_)) | Err(e @ LockError::Lock(..)) => {
+                    return Err(e.into_io())
+                }
+                Err(LockError::Open(e)) => {
+                    Some(format!("cannot create the lock file in {dir:?}: {e}"))
+                }
             };
+            let locked = dir_lock.is_some();
             let d = Arc::new(Disk {
                 dir: dir.clone(),
                 table: Mutex::new(SegTable::default()),
@@ -386,17 +411,23 @@ impl Bus {
                 reason: Mutex::new(String::new()),
                 dropped: AtomicU64::new(0),
                 kind: cfg.header_kind,
+                tags: cfg.header_tags.clone(),
                 #[cfg(test)]
                 hooks: TestHooks::default(),
             });
             let mut first = None;
-            match prepare(&dir) {
+            // Without the lock, only read: never delete or create a file.
+            match prepare(&dir, locked) {
                 Ok((closed, last)) => {
                     head = last;
                     lock(&d.table).closed = closed;
-                    match open_segment(&dir, head + 1, cfg.header_kind) {
-                        Ok(seg) => first = Some(seg),
-                        Err(e) => startup_failure = Some(format!("cannot open log segment: {e}")),
+                    if locked {
+                        match open_segment(&dir, head + 1, cfg.header_kind, &cfg.header_tags) {
+                            Ok(seg) => first = Some(seg),
+                            Err(e) => {
+                                startup_failure = Some(format!("cannot open log segment: {e}"))
+                            }
+                        }
                     }
                 }
                 Err(e) => startup_failure = Some(format!("cannot use log directory {dir:?}: {e}")),
@@ -427,6 +458,8 @@ impl Bus {
                     ..s
                 }),
                 last_attempt_ms: None,
+                dir_lock,
+                locker,
             };
             let (done_tx, done_rx) = mpsc::sync_channel::<()>(0);
             thread_handle = Some(
@@ -457,6 +490,7 @@ impl Bus {
             clock: cfg.clock,
             disk,
             header_kind: cfg.header_kind,
+            header_tags: cfg.header_tags,
             instance: new_instance(),
         });
         let bus = Bus {
@@ -464,7 +498,6 @@ impl Bus {
                 inner: inner.clone(),
                 thread: thread_handle,
                 done: Mutex::new(done),
-                _dir_lock: dir_lock,
             }),
             inner,
         };
@@ -506,11 +539,7 @@ impl Bus {
     /// recorded log. Consumers (the TUI status line, `bus inspect`) read it
     /// to label what they show.
     pub fn header(&self) -> Header {
-        Header {
-            schema: SCHEMA_VERSION,
-            kind: self.inner.header_kind,
-            tool_versions: segment::tool_versions(),
-        }
+        segment::header(self.inner.header_kind, &self.inner.header_tags)
     }
 
     /// A random id chosen when this bus was opened, shared by its clones.
@@ -826,8 +855,8 @@ pub const LOCK_FILE: &str = ".lock";
 /// `log directory is in use by another process: <dir>`. The lock file is
 /// never deleted: deleting it would let a third opener lock a new file
 /// while the second still holds the old one.
-fn lock_dir(dir: &Path) -> io::Result<File> {
-    segment::create_dir_secure(dir)?;
+fn lock_dir(dir: &Path) -> Result<File, LockError> {
+    segment::create_dir_secure(dir).map_err(LockError::Open)?;
     let mut o = std::fs::OpenOptions::new();
     o.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
@@ -835,25 +864,64 @@ fn lock_dir(dir: &Path) -> io::Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         o.mode(0o600);
     }
-    let f = o.open(dir.join(LOCK_FILE))?;
+    let f = o.open(dir.join(LOCK_FILE)).map_err(LockError::Open)?;
     match f.try_lock() {
         Ok(()) => Ok(f),
-        Err(std::fs::TryLockError::WouldBlock) => Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            format!(
-                "log directory is in use by another process: {}",
-                dir.display()
-            ),
-        )),
-        Err(std::fs::TryLockError::Error(e)) => Err(e),
+        Err(std::fs::TryLockError::WouldBlock) => Err(LockError::Held(dir.to_path_buf())),
+        Err(std::fs::TryLockError::Error(e)) => Err(LockError::Lock(dir.to_path_buf(), e)),
     }
 }
+
+/// Why the directory lock was not taken.
+#[derive(Debug)]
+enum LockError {
+    /// Another holder has it.
+    Held(PathBuf),
+    /// The directory or the lock file could not be created or opened: a
+    /// disk problem, handled as a disk outage.
+    Open(io::Error),
+    /// The lock call itself failed (`ENOLCK`, `EOPNOTSUPP`): the filesystem
+    /// cannot lock.
+    Lock(PathBuf, io::Error),
+}
+
+impl LockError {
+    fn into_io(self) -> io::Error {
+        match self {
+            LockError::Held(dir) => io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "log directory is in use by another process: {}",
+                    dir.display()
+                ),
+            ),
+            LockError::Lock(dir, e) => io::Error::new(
+                e.kind(),
+                format!(
+                    "cannot lock log directory {}: {e}. The filesystem does not support \
+                     file locks (an NFS home mounted nolock, for example); use --bus-dir \
+                     on a local filesystem",
+                    dir.display()
+                ),
+            ),
+            LockError::Open(e) => e,
+        }
+    }
+}
+
+/// Takes the directory lock. `lock_dir` in normal use; tests inject one.
+type Locker = Arc<dyn Fn(&Path) -> Result<File, LockError> + Send + Sync>;
 
 /// Create the directory, list existing segments and find the newest
 /// sequence number on disk. A header-only plain segment at the end (opened
 /// by a run that published nothing) is removed so its name can be reused.
-fn prepare(dir: &Path) -> io::Result<(Vec<SegInfo>, u64)> {
-    segment::create_dir_secure(dir)?;
+///
+/// `may_write` is false when the directory lock is not held: the directory
+/// is then only read: a header-only segment is skipped and left on disk.
+fn prepare(dir: &Path, may_write: bool) -> io::Result<(Vec<SegInfo>, u64)> {
+    if may_write {
+        segment::create_dir_secure(dir)?;
+    }
     let mut found = segment::list(dir)?;
     let mut last = 0;
     while let Some(newest) = found.last().cloned() {
@@ -865,7 +933,9 @@ fn prepare(dir: &Path) -> io::Result<(Vec<SegInfo>, u64)> {
                 break;
             }
             None if !newest.compressed => {
-                std::fs::remove_file(&p)?;
+                if may_write {
+                    std::fs::remove_file(&p)?;
+                }
                 found.pop();
             }
             None => {
@@ -895,12 +965,17 @@ struct OpenSeg {
 }
 
 /// Create segment `first_seq` with its header line.
-fn open_segment(dir: &Path, first_seq: u64, kind: HeaderKind) -> io::Result<OpenSeg> {
+fn open_segment(
+    dir: &Path,
+    first_seq: u64,
+    kind: HeaderKind,
+    tags: &std::collections::BTreeMap<String, String>,
+) -> io::Result<OpenSeg> {
     segment::create_dir_secure(dir)?;
     let mut file = BufWriter::new(segment::create_file_secure(&segment::path(
         dir, first_seq, false,
     ))?);
-    let bytes = segment::write_header(&mut file, kind)?;
+    let bytes = segment::write_header(&mut file, kind, tags)?;
     file.flush()?;
     Ok(OpenSeg {
         first_seq,
@@ -919,15 +994,30 @@ struct Writer {
     clock: Arc<dyn Clock>,
     open: Option<OpenSeg>,
     last_attempt_ms: Option<u64>,
+    /// The open `<dir>/.lock` file. `None` until the lock is taken. Kept
+    /// until the writer exits; closing it releases the lock.
+    dir_lock: Option<File>,
+    locker: Locker,
 }
 
 impl Writer {
+    /// Take the directory lock if it is not held yet. Every write, rotation,
+    /// compression and deletion happens only after this succeeds.
+    fn ensure_lock(&mut self) -> io::Result<()> {
+        if self.dir_lock.is_none() {
+            self.dir_lock = Some((self.locker)(&self.disk.dir).map_err(LockError::into_io)?);
+        }
+        Ok(())
+    }
+
     fn run(mut self, rx: Receiver<Msg>) {
         // Segments left plain by an earlier run that stopped: compress them
-        // and apply retention before taking new records.
+        // and apply retention before taking new records. Only with the lock.
         let now = self.clock.wall_ms();
-        let _ = self.compress_closed();
-        self.retain(now);
+        if self.dir_lock.is_some() {
+            let _ = self.compress_closed();
+            self.retain(now);
+        }
         while let Ok(msg) = rx.recv() {
             #[cfg(test)]
             thread::sleep(Duration::from_millis(
@@ -951,8 +1041,10 @@ impl Writer {
             }
             Msg::Maintain(ack) => {
                 self.flush_open();
-                let now = self.clock.wall_ms();
-                self.retain(now);
+                if self.dir_lock.is_some() {
+                    let now = self.clock.wall_ms();
+                    self.retain(now);
+                }
                 let _ = ack.send(());
             }
         }
@@ -1002,6 +1094,8 @@ impl Writer {
     }
 
     fn try_write(&mut self, rec: &Record) -> io::Result<()> {
+        // A disk that recovers is not written without the lock.
+        self.ensure_lock()?;
         let now = rec.t_wall_ms;
         let due = self
             .open
@@ -1011,7 +1105,7 @@ impl Writer {
             self.rotate(now)?;
         }
         if self.open.is_none() {
-            let mut seg = open_segment(&self.disk.dir, rec.seq, self.disk.kind)?;
+            let mut seg = open_segment(&self.disk.dir, rec.seq, self.disk.kind, &self.disk.tags)?;
             seg.start_ms = now;
             lock(&self.disk.table).open = Some(SegInfo {
                 first_seq: seg.first_seq,
@@ -1843,6 +1937,101 @@ mod tests {
         drop(clone);
         let again = Bus::open(disk_cfg(dir.path(), &clock)).unwrap();
         assert!(again.stats().disk_on);
+    }
+
+    fn segment_files(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .map(|rd| {
+                rd.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                    .filter(|n| n.starts_with("bus-"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A filesystem that cannot lock (ENOLCK, as on an NFS home mounted
+    /// `nolock`) refuses the open. Running unlocked would let two hosts write.
+    #[test]
+    fn a_filesystem_that_cannot_lock_refuses_to_open() {
+        let dir = TempDir::new("enolck");
+        let clock = ManualClock::new(T0);
+        #[cfg(unix)]
+        let enolck = || io::Error::from_raw_os_error(libc::ENOLCK);
+        #[cfg(not(unix))]
+        let enolck = || io::Error::other("No locks available");
+        let locker: Locker =
+            Arc::new(move |d: &Path| Err(LockError::Lock(d.to_path_buf(), enolck())));
+        let err =
+            Bus::open_inner(disk_cfg(dir.path(), &clock), Box::new(NoReducer), locker).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cannot lock log directory"), "{msg}");
+        #[cfg(unix)]
+        assert!(msg.contains(&format!("os error {}", libc::ENOLCK)), "{msg}");
+        assert!(msg.contains("--bus-dir on a local filesystem"), "{msg}");
+        assert!(segment_files(dir.path()).is_empty());
+    }
+
+    /// The lock file cannot be created at open (a disk outage). When the
+    /// writer retries later it must take the lock first: while the lock still
+    /// cannot be taken nothing is written, and once it can, writing resumes.
+    #[test]
+    fn a_recovered_disk_is_not_written_without_the_lock() {
+        let dir = TempDir::new("relock");
+        fs::create_dir_all(dir.path()).unwrap();
+        let clock = ManualClock::new(T0);
+        let allow = Arc::new(AtomicBool::new(false));
+        let a = allow.clone();
+        let locker: Locker = Arc::new(move |d: &Path| {
+            if a.load(Ordering::SeqCst) {
+                lock_dir(d)
+            } else {
+                Err(LockError::Open(io::Error::other("injected: no lock file")))
+            }
+        });
+        let bus =
+            Bus::open_inner(disk_cfg(dir.path(), &clock), Box::new(NoReducer), locker).unwrap();
+        assert!(!bus.stats().disk_on);
+        bus.publish("t", sample(0));
+        // Past the 10 s retry: the directory is writable, the lock is not.
+        clock.advance_secs(11);
+        bus.publish("t", sample(1));
+        clock.advance_secs(11);
+        bus.publish("t", sample(2));
+        flush(&bus);
+        assert!(
+            segment_files(dir.path()).is_empty(),
+            "written without the lock: {:?}",
+            segment_files(dir.path())
+        );
+        assert!(bus.stats().dropped_to_disk_errors > 0);
+        // The lock can be taken now: the next retry writes.
+        allow.store(true, Ordering::SeqCst);
+        clock.advance_secs(11);
+        bus.publish("t", sample(3));
+        flush(&bus);
+        assert!(!segment_files(dir.path()).is_empty());
+        assert!(bus.stats().disk_on);
+    }
+
+    #[test]
+    fn header_tags_are_in_the_header_and_every_segment() {
+        let dir = TempDir::new("tags");
+        let clock = ManualClock::new(T0);
+        let mut cfg = disk_cfg(dir.path(), &clock);
+        cfg.header_tags.insert("backend".into(), "mock".into());
+        cfg.header_tags.insert("mode".into(), "mock".into());
+        // A tag never replaces the crate's own entry.
+        cfg.header_tags
+            .insert("tt-toplike-bus".into(), "9.9.9".into());
+        let bus = Bus::open(cfg).unwrap();
+        let h = bus.header();
+        assert_eq!(h.tool_versions["backend"], "mock");
+        assert_eq!(h.tool_versions["mode"], "mock");
+        assert_eq!(h.tool_versions["tt-toplike-bus"], env!("CARGO_PKG_VERSION"));
+        bus.publish("t", sample(0));
+        flush(&bus);
+        let r = segment::read_segment(&dir.path().join(file_name(1, false))).unwrap();
+        assert_eq!(r.header.unwrap(), h);
     }
 
     #[test]

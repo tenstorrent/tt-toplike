@@ -67,6 +67,12 @@ pub struct HeadlessConfig {
     /// Run the real `gozer status --json` source. Off for `--mock` and
     /// `--remote` (gozer describes this box's real chips) and in tests.
     pub gozer: bool,
+    /// The backend makes its values up (`--mock`). Its readings are
+    /// recorded as `Estimated` and the header's `mode` is `mock`.
+    pub synthetic: bool,
+    /// Short backend name for the header's `backend` entry (`hybrid`,
+    /// `sysfs`, `mock`, ...; see `crate::cli::backend_tag`).
+    pub backend_name: String,
 }
 
 /// What the workload monitors saw this tick.
@@ -152,6 +158,15 @@ impl Workloads for LocalWorkloads {
     }
 }
 
+/// Whether a headless host scans this box's processes and model servers.
+/// A `--remote` relay never does (its processes come from the remote
+/// frame). A synthetic (mock) backend does only with `--mock-workloads`:
+/// otherwise this box's real processes would be recorded against made-up
+/// chips.
+pub fn uses_local_workloads(relay: bool, synthetic: bool, mock_workloads: bool) -> bool {
+    !relay && (!synthetic || mock_workloads)
+}
+
 /// What a headless run did, for the exit message and tests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HeadlessReport {
@@ -223,7 +238,18 @@ pub fn run_headless(
     } else {
         GozerSource::fed()
     };
-    let mut host = BusHost::with_gozer(cfg.bus, backend, gozer)?;
+    // Say in the log what produced it, so a mock run is never mistaken for
+    // a recording of real chips.
+    let mut bus_cfg = cfg.bus;
+    let mode = if cfg.synthetic { "mock" } else { "live" };
+    bus_cfg
+        .header_tags
+        .insert("backend".into(), cfg.backend_name.clone());
+    bus_cfg.header_tags.insert("mode".into(), mode.into());
+    let mut host = BusHost::with_gozer(bus_cfg, backend, gozer)?;
+    if cfg.synthetic {
+        host.set_backend_provenance(tt_toplike_bus::Provenance::Estimated);
+    }
     let server = serve_socket(host.bus(), cfg.socket.as_deref())?;
     let mut report = HeadlessReport::default();
 
@@ -312,18 +338,78 @@ pub fn run_headless_replay(
     Ok(report)
 }
 
-/// A flag raised by the first SIGTERM or SIGINT (Ctrl-C elsewhere).
+/// A stop request: SIGINT (Ctrl-C) or SIGTERM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopSignal {
+    Int,
+    Term,
+}
+
+impl StopSignal {
+    /// The shell's exit status for a process killed by this signal.
+    pub fn exit_code(self) -> i32 {
+        match self {
+            StopSignal::Int => 130,
+            StopSignal::Term => 143,
+        }
+    }
+}
+
+/// Act on stop signals as they arrive.
+///
+/// The first raises `flag`, and the loop is expected to notice it, flush
+/// and exit. The second means the loop did not get out (a hung
+/// `backend.update()`, a stalled flush): the socket file at `socket` is
+/// removed if it is a socket (best effort, so the next start does not find
+/// it), and `exit` is called with 128 + the signal number. `exit` is
+/// `std::process::exit` in normal use; tests record the code.
+pub fn watch_stop(
+    signals: impl IntoIterator<Item = StopSignal>,
+    flag: &AtomicBool,
+    socket: Option<&Path>,
+    exit: &mut dyn FnMut(i32),
+) {
+    let mut seen = false;
+    for sig in signals {
+        if !seen {
+            seen = true;
+            flag.store(true, Ordering::SeqCst);
+            continue;
+        }
+        if let Some(p) = socket {
+            remove_if_socket(p);
+        }
+        exit(sig.exit_code());
+        return;
+    }
+}
+
+/// Remove `p` if it is a Unix socket. Anything else is left alone.
+fn remove_if_socket(p: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_socket()) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = p;
+}
+
+/// A flag raised by the first SIGTERM or SIGINT (Ctrl-C elsewhere). A
+/// second one exits the process at once (see [`watch_stop`]), removing the
+/// socket file at `socket`.
 ///
 /// The signals are caught on a small background thread running a
 /// single-threaded tokio runtime (tokio is already a dependency), so no
 /// `unsafe` signal handler is written here. The handlers are registered
-/// before this returns. They stay for the life of the process, so a second
-/// signal does not kill it either; the loop is expected to notice the flag
-/// within one stop-poll and exit.
-pub fn install_stop_signals() -> io::Result<Arc<AtomicBool>> {
+/// before this returns and stay for the life of the process.
+pub fn install_stop_signals(socket: Option<PathBuf>) -> io::Result<Arc<AtomicBool>> {
     let flag = Arc::new(AtomicBool::new(false));
     let f = flag.clone();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<io::Result<()>>();
+    let (sig_tx, sig_rx) = std::sync::mpsc::channel::<StopSignal>();
     std::thread::Builder::new()
         .name("tt-toplike-signals".into())
         .spawn(move || {
@@ -351,22 +437,37 @@ pub fn install_stop_signals() -> io::Result<Arc<AtomicBool>> {
                         }
                     };
                     let _ = ready_tx.send(Ok(()));
-                    tokio::select! {
-                        _ = term.recv() => {}
-                        _ = int.recv() => {}
+                    loop {
+                        let sig = tokio::select! {
+                            _ = term.recv() => StopSignal::Term,
+                            _ = int.recv() => StopSignal::Int,
+                        };
+                        if sig_tx.send(sig).is_err() {
+                            return;
+                        }
                     }
                 }
                 #[cfg(not(unix))]
                 {
                     let _ = ready_tx.send(Ok(()));
-                    let _ = tokio::signal::ctrl_c().await;
+                    while tokio::signal::ctrl_c().await.is_ok() {
+                        if sig_tx.send(StopSignal::Int).is_err() {
+                            return;
+                        }
+                    }
                 }
-                f.store(true, Ordering::SeqCst);
             });
         })?;
     ready_rx
         .recv()
         .map_err(|_| io::Error::other("the signal thread stopped before it was ready"))??;
+    std::thread::Builder::new()
+        .name("tt-toplike-stop".into())
+        .spawn(move || {
+            watch_stop(sig_rx, &f, socket.as_deref(), &mut |code| {
+                std::process::exit(code)
+            })
+        })?;
     Ok(flag)
 }
 

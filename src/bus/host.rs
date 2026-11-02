@@ -56,7 +56,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use tt_toplike_bus::{Bus, BusConfig, Event, Payload, RealClock, Replay, World};
+use tt_toplike_bus::{Bus, BusConfig, Event, Payload, Provenance, RealClock, Replay, World};
 
 /// How often `tick` asks the bus to apply retention.
 pub const MAINTAIN_EVERY: Duration = Duration::from_secs(60);
@@ -146,11 +146,20 @@ impl BusHost {
     /// Play the recorded log at `path` (a segment file or a directory) into
     /// a new bus, `speed` times faster than recorded, on a background
     /// thread. The bus's header kind is `Replay`; `cfg.header_kind` is
-    /// overridden. Fails at once when the speed is not above zero, the log
+    /// overridden; the header's `mode` is `replay` and its `backend` the
+    /// recorded log's (or `unknown`). Fails at once when the speed is not above zero, the log
     /// cannot be opened, or the bus cannot be opened.
     pub fn replay(path: &Path, speed: f64, cfg: BusConfig) -> io::Result<BusHost> {
         tt_toplike_bus::replay::check_speed(speed)?;
         let mut log = Replay::open(path)?;
+        // The header says this is a replay, and of what backend's log.
+        let mut cfg = cfg;
+        let recorded = log
+            .header()
+            .and_then(|h| h.tool_versions.get("backend").cloned())
+            .unwrap_or_else(|| "unknown".to_string());
+        cfg.header_tags.insert("mode".into(), "replay".into());
+        cfg.header_tags.entry("backend".into()).or_insert(recorded);
         let bus = Bus::open_with_world(Replay::configure(cfg))?;
         let mut host = BusHost::empty(bus, GozerSource::fed());
         host.live = false;
@@ -255,6 +264,13 @@ impl BusHost {
             &mut self.remote,
             &mut self.gozer,
         ]
+    }
+
+    /// Tag every reading of the backend source with `prov`: `Estimated`
+    /// for a simulated backend (`--mock`). Call before the first tick; it
+    /// replaces the backend source and its change cache.
+    pub fn set_backend_provenance(&mut self, prov: Provenance) {
+        self.backend = BackendSource::with_provenance(prov);
     }
 
     /// The inference monitor's latest snapshot.

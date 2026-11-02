@@ -107,6 +107,12 @@ pub struct BusConfig {
     /// Written into each segment header and returned by [`crate::Bus::header`].
     /// `Live` by default. [`crate::Replay::bus_config`] sets `Replay`.
     pub header_kind: HeaderKind,
+    /// Extra entries for the header's `tool_versions` map, written into each
+    /// segment header and returned by [`crate::Bus::header`]. A host records
+    /// what produced the log here: `backend` (`hybrid`, `sysfs`, `mock`, ...)
+    /// and `mode` (`live`, `replay`, `mock`). `bus inspect` prints both. An
+    /// entry never replaces the crate's own version entry.
+    pub header_tags: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for BusConfig {
@@ -122,6 +128,7 @@ impl Default for BusConfig {
             writer_queue: 16_384,
             clock: Arc::new(SystemClock),
             header_kind: HeaderKind::Live,
+            header_tags: Default::default(),
         }
     }
 }
@@ -136,6 +143,7 @@ impl fmt::Debug for BusConfig {
             .field("retain_bytes", &self.retain_bytes)
             .field("writer_queue", &self.writer_queue)
             .field("header_kind", &self.header_kind)
+            .field("header_tags", &self.header_tags)
             .finish_non_exhaustive()
     }
 }

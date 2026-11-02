@@ -12,7 +12,9 @@ repository = "https://github.com/tenstorrent/tt-toplike"
 serde = { version = "1.0", features = ["derive"] }
 # `float_roundtrip`: a recorded F64 must read back bit for bit. Without it
 # serde_json may parse the shortest form it wrote one ulp off, and a replayed
-# world differs from the recorded world.
+# world differs from the recorded world. Cargo unifies features, so this also
+# turns it on for the main crate: its tt-smi JSON floats are then parsed
+# exactly, slightly slower, and may differ from before in the last bit.
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 # Compression for closed segments. See the module doc of src/segment.rs.
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }

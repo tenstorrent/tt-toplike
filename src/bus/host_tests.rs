@@ -299,7 +299,20 @@ fn a_second_host_on_one_log_directory_is_refused() {
     };
     assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
     drop(first);
-    BusHost::with_gozer(cfg(), &b, GozerSource::fed()).unwrap();
+    // Other tests in this binary spawn processes. A child between fork and
+    // exec briefly shares every open file, the lock file included, so the
+    // lock can outlive `drop` by that instant. Allow it a moment.
+    let end = Instant::now() + Duration::from_secs(2);
+    loop {
+        match BusHost::with_gozer(cfg(), &b, GozerSource::fed()) {
+            Ok(_) => break,
+            Err(e) if Instant::now() < end => {
+                assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => panic!("the lock was never released: {e}"),
+        }
+    }
 }
 
 /// The maintenance timer reaches the disk: on an idle bus a closed segment
@@ -341,4 +354,36 @@ fn the_maintenance_tick_ages_out_an_old_segment_on_an_idle_bus() {
     h.tick(&b, t0 + MAINTAIN_EVERY);
     assert!(h.bus().flush(Duration::from_secs(5)));
     assert!(!seg1.exists(), "the 60 s tick deleted the old segment");
+}
+
+// ---- Fix round 1 -------------------------------------------------------------
+
+/// A simulated backend's readings are tagged `Estimated`, never `Measured`.
+#[test]
+fn a_synthetic_backend_is_recorded_as_estimated() {
+    let b = mock(2);
+    let mut h = host(&b);
+    h.set_backend_provenance(tt_toplike_bus::Provenance::Estimated);
+    h.tick(&b, Instant::now());
+    let mut n = 0;
+    for r in records(&h).iter().filter(|r| r.source == "backend") {
+        let prov = match &r.payload {
+            Payload::Sweep(s) => s.prov,
+            Payload::Sample(s) => s.prov,
+            _ => continue,
+        };
+        assert_eq!(prov, tt_toplike_bus::Provenance::Estimated, "{r:?}");
+        n += 1;
+    }
+    assert!(n > 2, "only {n} backend records");
+}
+
+/// A replay host says so in its header, and carries over the backend the
+/// log was recorded from (`unknown` for a log that does not name one).
+#[test]
+fn a_replay_host_header_says_replay_and_names_the_recorded_backend() {
+    let h = BusHost::replay(Path::new(FIXTURE), 1000.0, BusConfig::default()).unwrap();
+    let t = h.bus().header().tool_versions;
+    assert_eq!(t.get("mode").map(String::as_str), Some("replay"));
+    assert_eq!(t.get("backend").map(String::as_str), Some("unknown"));
 }

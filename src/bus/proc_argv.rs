@@ -8,7 +8,8 @@
 //!
 //! Only the rows it is given are read: the process panel's rows, which are
 //! the processes that hold a `/dev/tenstorrent` device or matched an
-//! inference runtime. At most [`MAX_ENRICHED`] are read per call.
+//! inference runtime. At most [`MAX_ENRICHED`] are read per call, and at
+//! most [`MAX_CMDLINE_BYTES`] of each command line (whole arguments only).
 //!
 //! # Redaction and argument boundaries
 //!
@@ -61,6 +62,10 @@ pub fn parse_stat_start_ticks(stat: &str) -> Option<u64> {
     rest.split_whitespace().nth(19)?.parse().ok()
 }
 
+/// Most bytes of `/proc/<pid>/cmdline` read per process. A command line can
+/// be as long as `ARG_MAX` (megabytes); this bounds the read cost per tick.
+pub const MAX_CMDLINE_BYTES: usize = 64 * 1024;
+
 /// Build the process source's snapshots from the panel's rows, with the
 /// command line and start time read from `/proc` on Linux.
 ///
@@ -69,24 +74,58 @@ pub fn parse_stat_start_ticks(stat: &str) -> Option<u64> {
 /// command line and start time 0 that `ProcSnapshot::from` gives. On other
 /// platforms nothing is read.
 pub fn snapshots_from_rows(rows: &[ProcRow]) -> Vec<ProcSnapshot> {
+    #[cfg(target_os = "linux")]
+    {
+        snapshots_from_rows_in(std::path::Path::new("/proc"), rows)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        rows.iter().map(ProcSnapshot::from).collect()
+    }
+}
+
+/// [`snapshots_from_rows`] reading `<root>/<pid>/{stat,cmdline}`. Tests
+/// pass a directory of fixture files.
+pub fn snapshots_from_rows_in(root: &std::path::Path, rows: &[ProcRow]) -> Vec<ProcSnapshot> {
     rows.iter()
         .enumerate()
         .map(|(i, r)| {
             let mut s = ProcSnapshot::from(r);
             if i < MAX_ENRICHED {
-                enrich(&mut s);
+                enrich(root, &mut s);
             }
             s
         })
         .collect()
 }
 
-#[cfg(target_os = "linux")]
-fn enrich(s: &mut ProcSnapshot) {
+/// Read at most [`MAX_CMDLINE_BYTES`] of a `cmdline` file. When the file
+/// is longer, the argument cut at the limit is dropped (the text is cut
+/// after the last NUL), so every argument kept is whole.
+fn read_cmdline(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    read_bounded(std::fs::File::open(path)?)
+}
+
+/// The body of [`read_cmdline`]: pulls at most `MAX_CMDLINE_BYTES + 1`
+/// bytes from `r` (one more than kept, to tell a cut line from one that
+/// fits exactly).
+fn read_bounded(r: impl std::io::Read) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    r.take(MAX_CMDLINE_BYTES as u64 + 1).read_to_end(&mut buf)?;
+    if buf.len() > MAX_CMDLINE_BYTES {
+        buf.truncate(MAX_CMDLINE_BYTES);
+        let keep = buf.iter().rposition(|b| *b == 0).map_or(0, |i| i + 1);
+        buf.truncate(keep);
+    }
+    Ok(buf)
+}
+
+fn enrich(root: &std::path::Path, s: &mut ProcSnapshot) {
     if s.pid == 0 {
         return;
     }
-    let dir = std::path::PathBuf::from(format!("/proc/{}", s.pid));
+    let dir = root.join(s.pid.to_string());
     // Read the start time first and again after the command line: if the
     // pid was recycled in between, the two differ and nothing is kept.
     let start = std::fs::read_to_string(dir.join("stat"))
@@ -95,7 +134,7 @@ fn enrich(s: &mut ProcSnapshot) {
     let Some(start) = start else {
         return;
     };
-    let argv = std::fs::read(dir.join("cmdline"))
+    let argv = read_cmdline(&dir.join("cmdline"))
         .map(|b| parse_cmdline(&b))
         .unwrap_or_default();
     let again = std::fs::read_to_string(dir.join("stat"))
@@ -109,9 +148,6 @@ fn enrich(s: &mut ProcSnapshot) {
         s.cmdline = argv.join(" ");
     }
 }
-
-#[cfg(not(target_os = "linux"))]
-fn enrich(_s: &mut ProcSnapshot) {}
 
 #[cfg(test)]
 mod tests {
@@ -195,5 +231,64 @@ mod tests {
         assert_eq!(snaps.len(), MAX_ENRICHED + 1);
         assert!(snaps[MAX_ENRICHED].cmdline.is_empty());
         assert_eq!(snaps[MAX_ENRICHED].start_ticks, 0);
+    }
+
+    /// A 1 MiB command line is read only up to 64 KiB, and the argument cut
+    /// in half at the limit is dropped, so every argument kept is whole.
+    #[test]
+    fn a_huge_command_line_is_read_only_up_to_the_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let pid = 4242u32;
+        let dir = root.path().join(pid.to_string());
+        std::fs::create_dir(&dir).unwrap();
+        let stat = "4242 (big) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 777 0 0";
+        std::fs::write(dir.join("stat"), stat).unwrap();
+        let arg = "x".repeat(99);
+        let mut cmd = Vec::new();
+        while cmd.len() < 1 << 20 {
+            cmd.extend_from_slice(arg.as_bytes());
+            cmd.push(0);
+        }
+        std::fs::write(dir.join("cmdline"), &cmd).unwrap();
+        let row = ProcRow {
+            pid: pid as i32,
+            name: "big".into(),
+            cpu_pct: 0.0,
+            mem_bytes: 0,
+            inference: None,
+            active: false,
+            tt: None,
+        };
+        let s = &snapshots_from_rows_in(root.path(), &[row])[0];
+        assert_eq!(s.start_ticks, 777);
+        assert!(s.cmdline.len() <= MAX_CMDLINE_BYTES, "{}", s.cmdline.len());
+        let args: Vec<&str> = s.cmdline.split(' ').collect();
+        assert_eq!(args.len(), MAX_CMDLINE_BYTES / 100);
+        assert!(
+            args.iter().all(|a| *a == arg),
+            "a partial argument was kept"
+        );
+    }
+
+    /// The read itself is bounded: no more than the limit plus one byte is
+    /// pulled from a 1 MiB command line.
+    #[test]
+    fn the_cmdline_read_pulls_at_most_the_limit_plus_one_byte() {
+        struct Counting<R>(R, usize);
+        impl<R: std::io::Read> std::io::Read for Counting<R> {
+            fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.0.read(b)?;
+                self.1 += n;
+                Ok(n)
+            }
+        }
+        let big = vec![b'a'; 1 << 20];
+        let mut c = Counting(std::io::Cursor::new(big), 0);
+        let got = read_bounded(&mut c).unwrap();
+        assert!(c.1 <= MAX_CMDLINE_BYTES + 1, "pulled {} bytes", c.1);
+        // No NUL at all within the limit: nothing whole to keep.
+        assert!(got.is_empty());
+        // A line that fits is kept whole.
+        assert_eq!(read_bounded(&b"a\0b\0"[..]).unwrap(), b"a\0b\0");
     }
 }

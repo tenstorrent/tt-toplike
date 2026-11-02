@@ -33,6 +33,8 @@ fn cfg(dir: Option<PathBuf>, socket: Option<PathBuf>) -> HeadlessConfig {
         interval: Duration::from_millis(20),
         relay: false,
         gozer: false,
+        synthetic: false,
+        backend_name: "test".into(),
     }
 }
 
@@ -96,14 +98,17 @@ fn headless_loop_records_serves_and_stops_cleanly() {
         "{report:?}"
     );
     assert!(!sock.exists(), "the socket file was left behind");
-    // The lock is free again, and the log reads back with chip sweeps.
-    drop(
+    // The lock is free again (allowing a moment for a child process of
+    // another test that shares the lock file between fork and exec), and
+    // the log reads back with chip sweeps.
+    let reopened = wait_for(2, || {
         Bus::open(BusConfig {
             dir: Some(log.clone()),
             ..BusConfig::default()
         })
-        .expect("the directory lock was released"),
-    );
+        .is_ok()
+    });
+    assert!(reopened, "the directory lock was released");
     let mut replay = Replay::open(&log).unwrap();
     let sweeps = replay
         .records()
@@ -308,7 +313,7 @@ fn relay_frames_are_the_origin_frame_verbatim() {
 #[cfg(unix)]
 #[test]
 fn sigterm_raises_the_stop_flag() {
-    let flag = install_stop_signals().unwrap();
+    let flag = install_stop_signals(None).unwrap();
     assert!(!flag.load(Ordering::SeqCst));
     let status = std::process::Command::new("kill")
         .args(["-TERM", &std::process::id().to_string()])
@@ -316,4 +321,125 @@ fn sigterm_raises_the_stop_flag() {
         .unwrap();
     assert!(status.success());
     assert!(wait_for(5, || flag.load(Ordering::SeqCst)));
+}
+
+// ---- Fix round 1 -------------------------------------------------------------
+
+/// Raises the stop flag on its first poll, so the loop runs one tick.
+struct StopAfterPoll(Arc<AtomicBool>);
+
+impl Workloads for StopAfterPoll {
+    fn poll(&mut self) -> WorkloadSnapshot {
+        self.0.store(true, Ordering::SeqCst);
+        WorkloadSnapshot::default()
+    }
+}
+
+/// Run one tick into `log` and return the recorded header and every backend
+/// sample's provenance.
+fn one_tick(
+    log: &Path,
+    synthetic: bool,
+    backend_name: &str,
+) -> (tt_toplike_bus::Header, Vec<tt_toplike_bus::Provenance>) {
+    let stop = Arc::new(AtomicBool::new(false));
+    let c = HeadlessConfig {
+        synthetic,
+        backend_name: backend_name.into(),
+        ..cfg(Some(log.to_path_buf()), None)
+    };
+    let mut b = mock(2);
+    run_headless(&mut b, &mut StopAfterPoll(stop.clone()), c, None, &stop).unwrap();
+    let mut replay = Replay::open(log).unwrap();
+    let header = replay.header().cloned().unwrap();
+    let provs = replay
+        .records()
+        .filter(|r| r.source == "backend")
+        .filter_map(|r| match r.payload {
+            tt_toplike_bus::Payload::Sweep(s) => Some(s.prov),
+            tt_toplike_bus::Payload::Sample(s) => Some(s.prov),
+            _ => None,
+        })
+        .collect();
+    (header, provs)
+}
+
+#[test]
+fn a_mock_run_records_backend_mock_mode_mock_and_no_measured_values() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (h, provs) = one_tick(&tmp.path().join("bus"), true, "mock");
+    assert_eq!(h.tool_versions["backend"], "mock");
+    assert_eq!(h.tool_versions["mode"], "mock");
+    assert!(!provs.is_empty());
+    assert!(
+        provs
+            .iter()
+            .all(|p| *p == tt_toplike_bus::Provenance::Estimated),
+        "{provs:?}"
+    );
+}
+
+#[test]
+fn a_live_run_records_its_backend_and_mode_live() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (h, provs) = one_tick(&tmp.path().join("bus"), false, "sysfs");
+    assert_eq!(h.tool_versions["backend"], "sysfs");
+    assert_eq!(h.tool_versions["mode"], "live");
+    assert!(provs
+        .iter()
+        .all(|p| *p == tt_toplike_bus::Provenance::Measured));
+}
+
+/// The first SIGTERM/SIGINT raises the flag; the second exits at once with
+/// 128 + the signal number, after removing the socket file.
+#[cfg(unix)]
+#[test]
+fn a_second_stop_signal_exits_at_once_and_removes_the_socket() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock = tmp.path().join("s.sock");
+    // A socket file nobody listens on, as a crashed server leaves.
+    let make_socket = || {
+        let _ = std::fs::remove_file(&sock);
+        drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
+        assert!(sock.exists());
+    };
+    for (second, code) in [(StopSignal::Int, 130), (StopSignal::Term, 143)] {
+        make_socket();
+        let flag = AtomicBool::new(false);
+        let mut exits = Vec::new();
+        watch_stop([StopSignal::Term, second], &flag, Some(&sock), &mut |c| {
+            exits.push((c, sock.exists()))
+        });
+        assert!(flag.load(Ordering::SeqCst));
+        assert_eq!(exits, vec![(code, false)], "socket removed before exit");
+    }
+    // One signal only: the flag, no exit, the socket left for the loop.
+    make_socket();
+    let flag = AtomicBool::new(false);
+    let mut exits = Vec::new();
+    watch_stop([StopSignal::Int], &flag, Some(&sock), &mut |c| {
+        exits.push(c)
+    });
+    assert!(flag.load(Ordering::SeqCst) && exits.is_empty() && sock.exists());
+    // A path that is not a socket is never removed.
+    let file = tmp.path().join("plain");
+    std::fs::write(&file, b"keep").unwrap();
+    watch_stop(
+        [StopSignal::Int, StopSignal::Int],
+        &AtomicBool::new(false),
+        Some(&file),
+        &mut |_| {},
+    );
+    assert!(file.exists());
+}
+
+#[test]
+fn local_workloads_only_for_real_backends_or_on_request() {
+    assert!(uses_local_workloads(false, false, false), "real backend");
+    assert!(!uses_local_workloads(false, true, false), "mock");
+    assert!(
+        uses_local_workloads(false, true, true),
+        "mock + --mock-workloads"
+    );
+    assert!(!uses_local_workloads(true, false, false), "relay");
 }

@@ -374,6 +374,7 @@ mod tests {
             bus_dir: None,
             bus_socket: None,
             bus_retain: None,
+            mock_workloads: false,
             entity: None,
             signal: None,
         };

@@ -58,14 +58,25 @@ pub struct BackendSource {
     /// (The identity map only counts these in `refresh`; this source does not
     /// use the map, so it keeps its own count.)
     unkeyed: u64,
+    /// Provenance of every sample and sweep this source emits.
+    prov: Provenance,
 }
 
 impl BackendSource {
+    /// A source for a real backend: its readings are `Measured`.
     pub fn new() -> Self {
+        Self::with_provenance(Provenance::Measured)
+    }
+
+    /// A source whose samples and sweeps carry `prov`. A simulated backend
+    /// (`--mock`) uses `Estimated`: its values are made up, and a log or a
+    /// view must be able to tell them from readings of real chips.
+    pub fn with_provenance(prov: Provenance) -> Self {
         Self {
             last: HashMap::new(),
             last_raw: None,
             unkeyed: 0,
+            prov,
         }
     }
 
@@ -94,7 +105,7 @@ impl BackendSource {
             entity: entity.clone(),
             signal: signal.to_string(),
             value,
-            prov: Provenance::Measured,
+            prov: self.prov,
         }));
     }
 
@@ -171,7 +182,7 @@ impl BackendSource {
                 entity: key.clone(),
                 signals,
                 values,
-                prov: Provenance::Measured,
+                prov: self.prov,
             }));
         }
     }

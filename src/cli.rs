@@ -315,6 +315,16 @@ pub struct Cli {
     #[arg(long, value_name = "HOURS[,GB]", value_parser = parse_bus_retain)]
     pub bus_retain: Option<BusRetain>,
 
+    /// With `--headless --mock`: also scan this box's real processes and
+    /// model servers and record them against the mock chips.
+    ///
+    /// Off by default, so a mock run records only simulated data. A mock
+    /// run records nothing to disk unless `--bus-dir` (or `--record`) is
+    /// given, and its log says `backend mock, mode mock`, with the
+    /// simulated readings marked `Estimated`.
+    #[arg(long, requires = "mock")]
+    pub mock_workloads: bool,
+
     /// With `--bus-inspect`: show only this entity, for example `chip:0000:01:00.0`.
     #[arg(long, value_name = "KEY", requires = "bus_inspect")]
     pub entity: Option<String>,
@@ -757,6 +767,7 @@ impl Cli {
             bus_dir: None,
             bus_socket: None,
             bus_retain: None,
+            mock_workloads: false,
             entity: None,
             signal: None,
         }
@@ -805,12 +816,13 @@ impl Cli {
 
     /// The signal-bus settings for a headless host: the log directory
     /// (`--bus-dir`, `--record`, else [`default_bus_dir`]) and the retention
-    /// from `--bus-retain`. A replay records only into a directory given on
-    /// the command line, never the default one, so a replay is not mixed
-    /// into the live log.
-    pub fn headless_bus_config(&self) -> tt_toplike_bus::BusConfig {
+    /// from `--bus-retain`. A replay, and a `synthetic` backend (`--mock`,
+    /// or auto-detect falling back to mock), record only into a directory
+    /// given on the command line, never the default one, so neither is
+    /// mixed into the log of the real chips.
+    pub fn headless_bus_config(&self, synthetic: bool) -> tt_toplike_bus::BusConfig {
         let explicit = self.bus_dir.clone().or_else(|| self.record.clone());
-        let dir = if self.replay.is_some() {
+        let dir = if self.replay.is_some() || synthetic {
             explicit
         } else {
             explicit.or_else(default_bus_dir)
@@ -921,10 +933,11 @@ impl Cli {
                 &self.replay,
                 &self.bus_dir.as_ref().or(self.record.as_ref()),
             ) {
-                if same_path(rep, dir) {
+                if is_within(rep, dir) {
                     return Err(
-                        "--replay and --bus-dir/--record name the same directory: a replay \
-                         cannot record into the log it reads"
+                        "--replay names the --bus-dir/--record directory or a file inside it: \
+                         a replay cannot record into the log it reads (retention there could \
+                         delete the file being played)"
                             .to_string(),
                     );
                 }
@@ -940,6 +953,41 @@ impl Cli {
             }
         }
         Ok(())
+    }
+}
+
+/// True when `path` is `dir` or inside it, comparing canonical paths (so
+/// `..`, `.` and symlinks are resolved). A path that does not exist yet is
+/// compared as written.
+fn is_within(path: &std::path::Path, dir: &std::path::Path) -> bool {
+    let p = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let d = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    p.starts_with(&d)
+}
+
+/// Short backend name for a log header's `backend` entry. For auto-detect,
+/// the first word of `info` (the resolved backend's `backend_info()`),
+/// lower-cased: `Mock (3 devices)` gives `mock`.
+pub fn backend_tag(bt: BackendType, info: &str) -> String {
+    let fixed = match bt {
+        BackendType::Auto => None,
+        BackendType::Mock => Some("mock"),
+        BackendType::Json => Some("json"),
+        BackendType::Luwen => Some("luwen"),
+        #[cfg(target_os = "linux")]
+        BackendType::Sysfs => Some("sysfs"),
+        #[cfg(target_os = "linux")]
+        BackendType::Hybrid => Some("hybrid"),
+        BackendType::Host => Some("host"),
+        BackendType::Remote => Some("remote"),
+    };
+    match fixed {
+        Some(n) => n.to_string(),
+        None => info
+            .split_whitespace()
+            .next()
+            .unwrap_or("unknown")
+            .to_lowercase(),
     }
 }
 
@@ -992,6 +1040,7 @@ mod tests {
             bus_dir: None,
             bus_socket: None,
             bus_retain: None,
+            mock_workloads: false,
             entity: None,
             signal: None,
         };
@@ -1039,6 +1088,7 @@ mod tests {
             bus_dir: None,
             bus_socket: None,
             bus_retain: None,
+            mock_workloads: false,
             entity: None,
             signal: None,
         };
@@ -1081,6 +1131,7 @@ mod tests {
             bus_dir: None,
             bus_socket: None,
             bus_retain: None,
+            mock_workloads: false,
             entity: None,
             signal: None,
         };
@@ -1123,6 +1174,7 @@ mod tests {
             bus_dir: None,
             bus_socket: None,
             bus_retain: None,
+            mock_workloads: false,
             entity: None,
             signal: None,
         };
@@ -1169,6 +1221,7 @@ mod tests {
             bus_dir: None,
             bus_socket: None,
             bus_retain: None,
+            mock_workloads: false,
             entity: None,
             signal: None,
         };
@@ -1208,6 +1261,7 @@ mod tests {
             bus_dir: None,
             bus_socket: None,
             bus_retain: None,
+            mock_workloads: false,
             entity: None,
             signal: None,
         };
@@ -1250,6 +1304,7 @@ mod tests {
             bus_dir: None,
             bus_socket: None,
             bus_retain: None,
+            mock_workloads: false,
             entity: None,
             signal: None,
         };
@@ -1301,6 +1356,7 @@ mod tests {
             bus_dir: None,
             bus_socket: None,
             bus_retain: None,
+            mock_workloads: false,
             entity: None,
             signal: None,
         };
@@ -1340,6 +1396,7 @@ mod tests {
             bus_dir: None,
             bus_socket: None,
             bus_retain: None,
+            mock_workloads: false,
             entity: None,
             signal: None,
         };
@@ -1381,6 +1438,7 @@ mod tests {
             bus_dir: None,
             bus_socket: None,
             bus_retain: None,
+            mock_workloads: false,
             entity: None,
             signal: None,
         }
@@ -1757,14 +1815,20 @@ mod tests {
     #[test]
     fn headless_bus_config_takes_bus_dir_record_or_the_default() {
         let cli = parse(&["--headless", "--bus-dir", "/d"]).unwrap();
-        assert_eq!(cli.headless_bus_config().dir, Some(PathBuf::from("/d")));
+        assert_eq!(
+            cli.headless_bus_config(false).dir,
+            Some(PathBuf::from("/d"))
+        );
         let cli = parse(&["--headless", "--record", "/r"]).unwrap();
-        assert_eq!(cli.headless_bus_config().dir, Some(PathBuf::from("/r")));
+        assert_eq!(
+            cli.headless_bus_config(false).dir,
+            Some(PathBuf::from("/r"))
+        );
         let cli = parse(&["--headless"]).unwrap();
-        assert_eq!(cli.headless_bus_config().dir, default_bus_dir());
+        assert_eq!(cli.headless_bus_config(false).dir, default_bus_dir());
         // A replay never records into the default live log.
         let cli = parse(&["--headless", "--replay", "/log"]).unwrap();
-        assert_eq!(cli.headless_bus_config().dir, None);
+        assert_eq!(cli.headless_bus_config(false).dir, None);
     }
 
     #[test]
@@ -1777,10 +1841,10 @@ mod tests {
                 bytes: None
             })
         );
-        let c = cli.headless_bus_config();
+        let c = cli.headless_bus_config(false);
         assert_eq!((c.retain_secs, c.retain_bytes), (7200, 5_000_000_000));
         let cli = parse(&["--headless", "--bus-retain", "0.5,1.5"]).unwrap();
-        let c = cli.headless_bus_config();
+        let c = cli.headless_bus_config(false);
         assert_eq!((c.retain_secs, c.retain_bytes), (1800, 1_500_000_000));
         for bad in ["0", "x", "1,", "1,0", "-3", "nan", "1,2,3"] {
             assert!(parse_bus_retain(bad).is_err(), "{bad}");
@@ -1826,7 +1890,7 @@ mod tests {
             .unwrap()
             .validate()
             .unwrap_err();
-        assert!(e.contains("same directory"), "{e}");
+        assert!(e.contains("inside it"), "{e}");
         assert!(
             parse(&["--headless", "--replay", "/log", "--bus-dir", "/other"])
                 .unwrap()
@@ -1855,5 +1919,81 @@ mod tests {
         assert_eq!(cli.bus_flag_needing_headless(), Some("--bus-socket"));
         let cli = parse(&["--headless", "--record", "/a"]).unwrap();
         assert_eq!(cli.bus_flag_needing_headless(), None);
+    }
+
+    // ---- fix round 1 --------------------------------------------------------
+
+    #[test]
+    fn a_synthetic_headless_run_is_memory_only_unless_a_dir_is_given() {
+        let cli = parse(&["--headless", "--mock", "2"]).unwrap();
+        assert_eq!(cli.headless_bus_config(true).dir, None);
+        let cli = parse(&["--headless", "--mock", "--bus-dir", "/m"]).unwrap();
+        assert_eq!(cli.headless_bus_config(true).dir, Some(PathBuf::from("/m")));
+        let cli = parse(&["--headless", "--mock", "--record", "/r"]).unwrap();
+        assert_eq!(cli.headless_bus_config(true).dir, Some(PathBuf::from("/r")));
+        // A real backend still gets the default directory.
+        let cli = parse(&["--headless"]).unwrap();
+        assert_eq!(cli.headless_bus_config(false).dir, default_bus_dir());
+    }
+
+    #[test]
+    fn mock_workloads_is_parsed_and_opt_in() {
+        let cli = parse(&["--headless", "--mock"]).unwrap();
+        assert!(!cli.mock_workloads);
+        let cli = parse(&["--headless", "--mock", "--mock-workloads"]).unwrap();
+        assert!(cli.mock_workloads);
+        assert!(
+            parse(&["--headless", "--mock-workloads"]).is_err(),
+            "needs --mock"
+        );
+    }
+
+    #[test]
+    fn backend_tag_names_the_backend() {
+        assert_eq!(backend_tag(BackendType::Mock, "Mock (2 devices)"), "mock");
+        assert_eq!(backend_tag(BackendType::Json, "whatever"), "json");
+        // Auto names what it resolved to.
+        assert_eq!(backend_tag(BackendType::Auto, "Mock (3 devices)"), "mock");
+        assert_eq!(
+            backend_tag(BackendType::Auto, "Hybrid (sysfs + tt-smi)"),
+            "hybrid"
+        );
+    }
+
+    /// A replay of one segment inside the bus directory is refused too:
+    /// retention there could delete the file being read.
+    #[test]
+    fn replay_of_a_file_inside_the_bus_dir_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("bus");
+        std::fs::create_dir(&dir).unwrap();
+        let seg = dir.join("bus-3.jsonl");
+        std::fs::write(&seg, b"").unwrap();
+        let d = dir.to_str().unwrap();
+        let dotted = format!("{}/../bus", d);
+        for bus_dir in [d, dotted.as_str()] {
+            let e = parse(&[
+                "--headless",
+                "--replay",
+                seg.to_str().unwrap(),
+                "--bus-dir",
+                bus_dir,
+            ])
+            .unwrap()
+            .validate()
+            .unwrap_err();
+            assert!(e.contains("inside it"), "{e}");
+        }
+        let other = tmp.path().join("other");
+        assert!(parse(&[
+            "--headless",
+            "--replay",
+            seg.to_str().unwrap(),
+            "--bus-dir",
+            other.to_str().unwrap()
+        ])
+        .unwrap()
+        .validate()
+        .is_ok());
     }
 }

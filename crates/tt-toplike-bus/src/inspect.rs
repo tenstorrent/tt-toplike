@@ -195,9 +195,12 @@ pub fn inspect(path: &Path, filter: &Filter, out: &mut impl Write) -> io::Result
 
     match &header {
         Some(h) => {
+            // `backend` and `mode` are what the host recorded the log from
+            // (see `BusConfig::header_tags`). They are printed on their own line.
             let tools: Vec<String> = h
                 .tool_versions
                 .iter()
+                .filter(|(k, _)| !matches!(k.as_str(), "backend" | "mode"))
                 .map(|(k, v)| format!("{k} {v}"))
                 .collect();
             writeln!(
@@ -206,6 +209,13 @@ pub fn inspect(path: &Path, filter: &Filter, out: &mut impl Write) -> io::Result
                 h.schema,
                 h.kind,
                 tools.join(", ")
+            )?;
+            let tag = |k: &str| h.tool_versions.get(k).map_or("unknown", String::as_str);
+            writeln!(
+                out,
+                "recorded by: backend {}, mode {}",
+                tag("backend"),
+                tag("mode")
             )?;
         }
         None => writeln!(out, "header: none (the first line was not a header)")?,
@@ -300,6 +310,31 @@ mod tests {
         let mut out = Vec::new();
         inspect(Path::new(FIXTURE), filter, &mut out).unwrap();
         String::from_utf8(out).unwrap()
+    }
+
+    /// The backend and mode a host recorded in the header are printed on
+    /// their own line; a log without them says so.
+    #[test]
+    fn prints_the_recording_backend_and_mode() {
+        let dir = crate::testutil::TempDir::new("inspect-tags");
+        let mut cfg = crate::BusConfig {
+            dir: Some(dir.path().to_path_buf()),
+            ..crate::BusConfig::default()
+        };
+        cfg.header_tags.insert("backend".into(), "mock".into());
+        cfg.header_tags.insert("mode".into(), "mock".into());
+        let bus = crate::Bus::open(cfg).unwrap();
+        bus.publish("t", crate::Payload::Gap(crate::Gap { reason: "x".into() }));
+        drop(bus);
+        let mut out = Vec::new();
+        inspect(dir.path(), &Filter::default(), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("recorded by: backend mock, mode mock"),
+            "{text}"
+        );
+        assert!(!text.contains("written by backend"), "{text}");
+        assert!(run(&Filter::default()).contains("recorded by: backend unknown, mode unknown"));
     }
 
     #[test]
