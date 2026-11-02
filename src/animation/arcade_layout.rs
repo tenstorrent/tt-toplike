@@ -565,10 +565,7 @@ pub const LEGEND_HEAD: &str = "{ } layouts  c backdrop  ◌ NAME too small  [arc
 pub const LEGEND_TEXT: &[&str] = &[];
 
 /// The arcade explain text's line on the layout. The detail is in the docs.
-pub const EXPLAIN_TEXT: &[&str] = &[
-    "",
-    "Layouts: { } step through them (docs/arcade-layout.md).",
-];
+pub const EXPLAIN_TEXT: &[&str] = &["", "Keys: { } layouts, c backdrop on/off, w backdrop kind."];
 
 /// The legend lines for [`LEGEND_TEXT`], with the overlay's left bar.
 pub fn legend_lines(

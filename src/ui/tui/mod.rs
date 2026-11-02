@@ -12059,6 +12059,17 @@ mod host_default_screen_tests {
                 .collect::<Vec<_>>()
                 .join("\n");
             assert!(text.contains("{ }"), "{kind:?}: {text}");
+            // The arcade's backdrop key and the global one (review M7).
+            let words: Vec<&str> = text.split_whitespace().collect();
+            let pair = |a: &str, b: &str| words.windows(2).any(|p| p[0] == a && p[1] == b);
+            assert!(
+                pair("c", "{") || pair("c", "backdrop"),
+                "{kind:?}: c: {text}"
+            );
+            assert!(
+                pair("w", "backdrop") || text.contains("Backdrop: off (w"),
+                "{kind:?}: w: {text}"
+            );
         }
     }
 

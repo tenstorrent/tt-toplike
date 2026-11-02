@@ -2438,6 +2438,36 @@ panels = [{ view = "starfield" }]
         );
     }
 
+    /// A broken layout does not take its name from a good one after it, a
+    /// typed name is echoed with its control characters escaped, and a
+    /// description refuses invisible format characters (review M3, M9).
+    #[test]
+    fn names_are_echoed_safely_and_only_a_kept_layout_takes_its_name() {
+        let text = "[[arcade.layouts]]\nname = \"a\"\n[[arcade.layouts.row]]\npanels = [{ view = \"castel\" }]\n[[arcade.layouts]]\nname = \"a\"\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n";
+        let l = load(&[("c.toml", text)]);
+        assert_eq!(l.problems.len(), 1, "{:?}", l.problems);
+        assert_eq!(layout_names(&l), vec!["a"], "the good `a` is kept");
+        let p = problems(&[(
+            "c.toml",
+            "[[arcade.layouts]]\nname = \"a\\u001b[2J\"\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
+        )]);
+        assert_eq!(p.len(), 1);
+        assert!(
+            !p[0].contains('\u{1b}') && p[0].contains("\\u{1b}"),
+            "{p:?}"
+        );
+        let p = problems(&[("c.toml", "[arcade]\nlayout = \"x\\u001b[2J\"\n")]);
+        assert!(!p[0].contains('\u{1b}'), "{p:?}");
+        let p = problems(&[(
+            "c.toml",
+            "[[arcade.layouts]]\nname = \"a\"\ndescription = \"abc\\u202Edef\"\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
+        )]);
+        assert_eq!(
+            p,
+            vec!["c.toml:3: layout `a`: the description has a control character"]
+        );
+    }
+
     #[test]
     fn an_unknown_start_layout_falls_back_to_the_first() {
         let l = load(&[("c.toml", "[arcade]\nlayout = \"nope\"\ncloudfield = true\n")]);
