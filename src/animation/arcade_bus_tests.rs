@@ -621,6 +621,164 @@ fn a_world_naming_a_chip_this_tui_lacks_draws_nothing_for_it() {
     })
 }
 
+/// Contract rule 4 through the read path an attached TUI uses: a real
+/// `ReadView` limited to this TUI's two chips (`ReadView::only_chips`).
+/// The view cuts the model's chip list and the chip-keyed events, and keeps
+/// `RequestsCompleted`, which names no chip. A model, requests, a spark, a
+/// compile and a reset on the host's own chip draw nothing; the same model
+/// once it also runs on chip 0 draws its label and its hits.
+#[test]
+fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
+    use crate::bus::host::BusHost;
+    use crate::bus::view::{BusView, ReadCache};
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    tc(|| {
+        let (mut a, b) = arcade();
+        let (mut q, _) = arcade();
+        let host = BusHost::new(tt_toplike_bus::BusConfig::default(), &b).unwrap();
+        let bus = host.bus().clone();
+        let view = BusView::Local(Box::new(host));
+        let cache = ReadCache::new();
+        let local: Arc<BTreeSet<EntityKey>> = Arc::new([chip(0), chip(1)].into_iter().collect());
+        let read = || view.read(&cache).only_chips(local.clone());
+        let p = |e: Event| {
+            bus.publish("test", Payload::Event(e));
+        };
+        let theirs = EntityKey::model("theirs");
+        let foreign = EntityKey::chip("0000:ee:00.0");
+
+        // First sight: an empty world.
+        let w = read();
+        step(&mut a, &b, &w);
+        step(&mut q, &b, &Bus::new().view(w.now_mono_ns()));
+
+        bus.publish(
+            "test",
+            Payload::Sample(Sample {
+                entity: theirs.clone(),
+                signal: tt_toplike_bus::signals::MODEL_TOKENS_PER_S.into(),
+                value: Value::F64(120.0),
+                prov: Provenance::Measured,
+            }),
+        );
+        p(Event::ModelReady {
+            model: theirs.clone(),
+            chips: vec![foreign.clone()],
+        });
+        p(Event::RequestsCompleted {
+            model: theirs.clone(),
+            n: 4,
+        });
+        p(Event::Spark {
+            chip: Some(foreign.clone()),
+            kind: "vLLM.log".into(),
+        });
+        p(Event::KernelCompiled {
+            chip: Some(foreign.clone()),
+            source: "ttnn".into(),
+        });
+        p(Event::Reset {
+            chips: vec![foreign.clone()],
+        });
+        let w = read();
+        // What the view hands the arcade: the model with its chip cut away,
+        // and of the events only the requests.
+        let models = w.models();
+        assert_eq!(models.len(), 1);
+        assert!(models[0].chips.is_empty(), "{:?}", models[0].chips);
+        let kinds: Vec<&str> = w
+            .events_since(0)
+            .iter()
+            .map(|(_, e)| match e {
+                Event::RequestsCompleted { .. } => "requests",
+                Event::ModelReady { .. } => "ready",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["requests"]);
+        step(&mut a, &b, &w);
+        step(&mut q, &b, &Bus::new().view(w.now_mono_ns()));
+        // No hit, no tokens per second, nothing on either chip.
+        assert!(a.bus_fx.is_empty(), "{:?}", a.bus_fx);
+        assert_eq!(a.render(&b), q.render(&b));
+
+        // The same model also on chip 0: the view keeps chip 0, so the
+        // label and the hits show there.
+        p(Event::ModelReady {
+            model: theirs.clone(),
+            chips: vec![foreign.clone(), chip(0)],
+        });
+        p(Event::RequestsCompleted {
+            model: theirs.clone(),
+            n: 2,
+        });
+        let w = read();
+        assert_eq!(w.models()[0].chips, vec![chip(0)]);
+        step(&mut a, &b, &w);
+        // `update` hands `new_requests` to the duel, so the hit is checked.
+        assert_eq!(a.bus_fx.hits.len(), 1);
+        assert_eq!(a.bus_fx.hits[0].glyphs, 2);
+        assert_eq!(a.bus_fx.chips.len(), 1);
+        assert_eq!(a.bus_fx.chips[0].slot, 0);
+        assert!(row_text(&a.render(&b), GAUGE_ROW).contains("theirs ready"));
+    })
+}
+
+/// A world that hands out models whose chip lists are empty, as an attached
+/// world does for another machine's models once `ReadView::only_chips` has
+/// cut them. Die 3D's `Foreign` double, for the arcade.
+struct Foreign(LocalView);
+
+impl WorldRead for Foreign {
+    fn seq(&self) -> u64 {
+        self.0.seq()
+    }
+    fn models(&self) -> Vec<ModelView> {
+        let mut m = self.0.models();
+        m.iter_mut().for_each(|m| m.chips.clear());
+        m
+    }
+    fn model_on_chip(&self, chip: &EntityKey) -> Option<ModelView> {
+        self.0.model_on_chip(chip).map(|mut m| {
+            m.chips.clear();
+            m
+        })
+    }
+    fn reading(&self, entity: &EntityKey, signal: &str) -> Option<Reading> {
+        self.0.reading(entity, signal)
+    }
+    fn events_since(&self, seq: u64) -> Vec<(u64, Event)> {
+        self.0.events_since(seq)
+    }
+    fn reset_seq(&self, chip: &EntityKey) -> Option<u64> {
+        self.0.reset_seq(chip)
+    }
+    fn header_kind(&self) -> HeaderKind {
+        self.0.header_kind()
+    }
+    fn now_mono_ns(&self) -> u64 {
+        self.0.now_mono_ns()
+    }
+}
+
+/// `model_on_chip` can hand back a model whose chip list has been cut to
+/// nothing; the arcade draws no label and no gauge for it.
+#[test]
+fn a_model_whose_chip_list_was_cut_away_draws_no_label() {
+    tc(|| {
+        let mut f = Bus::new();
+        f.loading("far", &[0], Some(0.5));
+        let (mut a, b) = arcade();
+        let (mut q, _) = arcade();
+        step(&mut a, &b, &Foreign(f.view(5 * SEC)));
+        step(&mut q, &b, &Bus::new().view(5 * SEC));
+        assert!(a.bus_fx.chips.is_empty(), "{:?}", a.bus_fx.chips);
+        assert_eq!(a.render(&b), q.render(&b));
+    })
+}
+
 /// A world that counts every call made through it.
 struct Counting {
     inner: LocalView,
