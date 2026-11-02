@@ -241,7 +241,7 @@ answer. The rest are my calls.
    into Die 3D by the replay mode in a test.
 6. **Pinned frame hashes (my call).** Bus-fed decorations (model flags, bring-up fill, pulses,
    per-channel GDDR rows, sparks) draw only when the bus holds something to show. With no model,
-   no events and no per-channel data, the frame is the one pinned today, so the existing hashes
+   no events and no per-channel data, the frame is the frame pinned today, so the existing hashes
    hold. New hashes are added for the decorated frames from a fixture.
 7. **Volume (my call).** Sources are recorded at their own rate with no downsampling. Fast-lane
    readings are written as one record per chip per tick that holds all of that tick's values, not
