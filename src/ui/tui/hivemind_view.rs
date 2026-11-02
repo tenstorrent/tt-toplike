@@ -983,6 +983,13 @@ pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'stati
             ),
         ]),
         ln!(vec![
+            Span::styled("       ", Style::default().fg(dim)),
+            Span::styled(
+                "  model rows belong to no cell: f shows them",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
             Span::styled("⚡     ", Style::default().fg(reset_accent())),
             Span::styled(
                 "= a tt-smi -r reset; warms the chips it targets",

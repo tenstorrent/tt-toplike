@@ -22,6 +22,20 @@ pub const DISSOLVE_SECS: f64 = 0.9;
 /// turns, and a quick turn would look like a jump.
 pub const SPIN_SECS: f64 = 1.6;
 
+/// The transition the default `Rotate` mode picks for a cut: something on a
+/// chip or a process opening or closing a device is chaos; memory heating or
+/// a board's links changing is a dissolve; no reason (the idle turn, a hand
+/// cut) is a spin, or a dissolve when the scene changes with it. Public so the
+/// view's explain text can be tested against it.
+pub fn rotate_kind(reason: Option<Reason>, changes_scene: bool) -> TransitionKind {
+    match reason {
+        Some(Reason::Chip) | Some(Reason::Process) => TransitionKind::Chaos,
+        Some(Reason::Memory) | Some(Reason::Board) => TransitionKind::Dissolve,
+        None if changes_scene => TransitionKind::Dissolve,
+        None => TransitionKind::Spin,
+    }
+}
+
 /// How a cut changes from the old camera to the new one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransitionKind {
@@ -502,12 +516,7 @@ impl Director {
             TransitionMode::Dissolve => TransitionKind::Dissolve,
             TransitionMode::Spin if changes_scene => TransitionKind::Dissolve,
             TransitionMode::Spin => TransitionKind::Spin,
-            TransitionMode::Rotate => match reason {
-                Some(Reason::Chip) | Some(Reason::Process) => TransitionKind::Chaos,
-                Some(Reason::Memory) | Some(Reason::Board) => TransitionKind::Dissolve,
-                None if changes_scene => TransitionKind::Dissolve,
-                None => TransitionKind::Spin,
-            },
+            TransitionMode::Rotate => rotate_kind(reason, changes_scene),
         }
     }
 

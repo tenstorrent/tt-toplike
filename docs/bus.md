@@ -32,7 +32,7 @@ Contents
 
 ## 1. Why there is a bus
 
-Before the bus, each view pulled its own data. Wafer Waffler read power, temperature and PCIe rates.
+Before the bus, each view pulled its own data. The Wafer Waffler read power, temperature and PCIe rates.
 The `i` view read the inference monitor. Arcade, hivemind and training read other things. A
 person switching between views saw several unrelated pictures of one machine.
 
@@ -186,7 +186,7 @@ An event is a discrete thing that happened. The `t` field names the type.
 | `LeaseGranted`, `LeaseReleased` | `lease`, `chips` | gozer |
 | `Spark` | `chip`, `kind` (a fixed string such as `metal.log`) | hivemind |
 | `ViewChanged` | `view` | the TUI, when the displayed view changes |
-| `EccTick` | `chip`, `channel` | defined, but no source emits it in this release. Wafer Waffler flashes a GDDR row when an ECC counter rises. |
+| `EccTick` | `chip`, `channel` | defined, but no source emits it in this release. The Wafer Waffler flashes a GDDR row when an ECC counter rises. |
 
 The `ViewChanged` view names are `insights`, `grid`, `starfield`, `castle`, `flow`, `arcade`,
 `defrag`, `inference`, `hivemind`, `training` and `die3d`.
@@ -658,7 +658,7 @@ broadcasts the `/telemetry` frames that tt-station and `--remote` consume (secti
 
 At start-up a TUI tries the default socket path once, with a 250 ms timeout. When a `--headless`
 host answers and its world describes this machine's chips, the TUI reads that host's bus and
-hosts none of its own. Chip telemetry still comes from the TUI's own backend. Wafer Waffler reads the attached world,
+hosts none of its own. Chip telemetry still comes from the TUI's own backend. The Wafer Waffler reads the attached world,
 limited to the chips the TUI has. The `i` view draws the host's models.
 
 The probe attaches only when all of these hold:
@@ -698,7 +698,7 @@ creature under the roster is not dimmed.
 
 A model gets `~` in front of its label when one of its label, phase, progress, tokens per
 second or waiting readings is `estimated` or `decoration`. One helper makes this decision for both
-the `i` view and Wafer Waffler, so both mark the same models. Every model of a `--mock` host is marked.
+the `i` view and the Wafer Waffler, so both mark the same models. Every model of a `--mock` host is marked.
 A real host's model is marked while it compiles or loads with a progress figure.
 
 The `i` view keeps the local monitor when the TUI hosts its own bus. Section 13 lists what an
@@ -706,7 +706,7 @@ attached `i` view does not show.
 
 ### The arcade on the bus
 
-The arcade (`a`) reads the bus on every update, as Wafer Waffler does, through `ArcadeFx::from_world`
+The arcade (`a`) reads the bus on every update, as the Wafer Waffler does, through `ArcadeFx::from_world`
 (`src/animation/arcade_bus.rs`). Each device gets an equal share of the screen's width, in
 device order, and the arcade draws only on the TUI's own chips. It draws:
 
@@ -715,7 +715,7 @@ device order, and the arcade draws only on the TUI's own chips. It draws:
 | A gauge on the `✧ STARFIELD` rule, purple from the left of the chip's share, while a model compiles or loads | `model_on_chip`, the model's phase and `model.progress` | the length is derived from the reported progress |
 | A purple band sweeping across the chip's share when a loading model has no progress figure | the phase | decoration: it says the model is busy and does not say how far |
 | The share lit teal on a change to `Ready`, grey on a change to `Down`, fading over 2 s | the phase, against the phase the arcade saw last | the phase change is read; the fade is decoration |
-| The model's name, phase, progress and tokens/s at the right of the rule, `~` first for an estimate. When no form of the label fits in the chip's share, an estimate still shows a bare `~` there | `model.label`, `model.phase`, `model.progress`, `model.tokens_per_s`, `model.waiting` | as the source reports them; `~` through `model_text_is_estimated`, the helper Wafer Waffler and the `i` view use |
+| The model's name, phase, progress and tokens/s at the right of the rule, `~` first for an estimate. When no form of the label fits in the chip's share, an estimate still shows a bare `~` there | `model.label`, `model.phase`, `model.progress`, `model.tokens_per_s`, `model.waiting` | as the source reports them; `~` through `model_text_is_estimated`, the helper the Wafer Waffler and the `i` view use |
 | A ring of `✦` growing from the hero, one glyph per request up to eight | `RequestsCompleted` for a model on one of the TUI's chips | the event is read; the ring's shape, growth and fade are decoration |
 | The snake in the hero duel lunges | the same `RequestsCompleted` events | the event is read |
 | A `*` rising in the chip's share of the starfield, in the `spark_rgb` colours (purple for a compile) | `Spark` and `KernelCompiled` naming one of the TUI's chips | the event is read; where it starts and how it rises are decoration |
@@ -723,9 +723,9 @@ device order, and the arcade draws only on the TUI's own chips. It draws:
 | A faster hero heartbeat | the sum of `model.tokens_per_s` over the ready models on the TUI's chips, when at most 10 s old, smoothed over 2 s | derived from the reported rate |
 
 Events already in the world when the arcade first reads it draw nothing, and so do events that
-arrived while the arcade was off screen. The arcade uses Wafer Waffler's rule and constants for this.
+arrived while the arcade was off screen. The arcade uses the Wafer Waffler's rule and constants for this.
 A model re-announced with an unchanged phase changes nothing. Events with no chip (a `Spark`
-or `KernelCompiled` with `chip: None`) draw nothing, as in Wafer Waffler. With an empty world the
+or `KernelCompiled` with `chip: None`) draw nothing, as in the Wafer Waffler. With an empty world the
 arcade draws the frames it drew before the bus; a test pins them by hash.
 
 When the TUI is attached to a headless host, the hero duel's serving stats come from the
@@ -827,7 +827,7 @@ device, as before. It draws:
 | A DDR segment tinted toward red as the channel gets hotter (40 to 90 C) | `toplike.dram.temp_top_c`, `temp_bottom_c` | the temperature is measured; how strongly it tints is decoration |
 | `▸` filling each DDR IN segment from its left edge as far as the progress, while a model loads | the first loading model on one of the TUI's chips, its `model.progress` | derived from the reported progress |
 | A short run of `▸` travelling along each DDR IN segment when the loading model has no progress figure | the phase | decoration |
-| Both lanes brighten toward teal, fading over 1 s | `RequestsCompleted` for a model on one of the TUI's chips | the count sets the strength (Wafer Waffler's pulse strength); the fade is decoration |
+| Both lanes brighten toward teal, fading over 1 s | `RequestsCompleted` for a model on one of the TUI's chips | the count sets the strength (the Wafer Waffler's pulse strength); the fade is decoration |
 | A channel's segments shown reversed in red for 0.6 s | a rise of the summed ECC counters of `dram:<chip>/<n>` of the first device, or `EccTick` for it; another chip's rise draws nothing here, since the segments are the first device's channels | the rise is read |
 | The model row (the blank line under DDR IN): each chip's model, phase, progress and tokens/s, right-aligned in its share, with a `▸` gauge while it compiles or loads and a teal or grey rule fading after `Ready` or `Down` | the model's readings and phase | as reported; `~` through `model_text_is_estimated`; the travelling band shown with no figure is decoration |
 | The chip's share of the model row shown reversed for 0.6 s | a new `reset_seq` | the reset is read |
@@ -836,10 +836,10 @@ device, as before. It draws:
 For both modes, events already in the world when the mode first reads it, and events that
 arrived while it was off screen, draw nothing. An ECC count or `reset_seq` seen for the first
 time, or first seen again after being away, is recorded and draws nothing. The rules and
-constants are copied from the arcade's, which copies Wafer Waffler's, into
-`src/animation/bus_intake.rs`; the arcade and Wafer Waffler keep their own code, and a test feeds one
+constants are copied from the arcade's, which copies the Wafer Waffler's, into
+`src/animation/bus_intake.rs`; the arcade and the Wafer Waffler keep their own code, and a test feeds one
 sequence of worlds to `bus_intake` and to the arcade and checks they decide alike. ECC is where
-the copies differ: Wafer Waffler flashes any rise, including one first seen after being away, and the
+the copies differ: the Wafer Waffler flashes any rise, including one first seen after being away, and the
 arcade draws no counter rises. Attached to a headless host, only the TUI's own chips are drawn.
 With an empty world both modes draw the frames they drew before the bus; tests pin them by
 hash.
@@ -864,7 +864,7 @@ draws on each chip's cell:
 The rule under each Insights chip panel names the model on that chip: label, phase, progress
 while loading, tokens/s and waiting requests, `~` first for an estimate (the same text as Die
 3D's flag). While the model compiles or loads, the dashes after the text are a progress bar,
-purple as far as the reported progress. The Wafer Waffler inset on the Insights screen is Wafer Waffler's
+purple as far as the reported progress. The Wafer Waffler inset on the Insights screen is the Wafer Waffler's
 own drawing and shows the events.
 
 In the Insights process table, a process on chips that serve a model has a serving row under
@@ -874,18 +874,18 @@ waiting requests). On a local bus, and for a process whose chips have no model i
 it is the local monitor's row (port, health, model and tokens/s from the server's metrics), as
 before.
 
-Grid uses Wafer Waffler's rule for history: events already in the world when Grid first reads it, and
+Grid uses the Wafer Waffler's rule for history: events already in the world when Grid first reads it, and
 events that arrived while Grid was off screen, draw nothing. Leaving Grid clears its memory.
 Both views draw at the data rate (about ten times a second), so a pulse takes about ten frames.
 With an empty world both draw what they drew before the bus; a test pins the screens by hash.
 
 ### The `~` view (HivemindSweeper)
 
-The `~` view reads the bus the way Wafer Waffler does (`TuiBus::read`, limited to local chips when
+The `~` view reads the bus the way the Wafer Waffler does (`TuiBus::read`, limited to local chips when
 attached), at the data rate, in `src/ui/tui/hivemind_bus.rs`. It draws three things from it.
 
 * **A strip under the title.** One cell per local chip that runs a model (`model_on_chip`):
-  `D<n>`, Wafer Waffler's flag text (label, phase word, progress, tokens per second, waiting count),
+  `D<n>`, the Wafer Waffler's flag text (label, phase word, progress, tokens per second, waiting count),
   and an eight-cell bar. The bar follows the reported progress while the model compiles or
   loads and is full once it is ready. The cell takes the phase colour (`phase_rgb`). An
   estimated model starts with `~` (`model_text_is_estimated`). With no model on any chip the
@@ -903,7 +903,7 @@ attached), at the data rate, in `src/ui/tui/hivemind_bus.rs`. It draws three thi
 
 Events already in the world when `~` first reads it, and events that arrived while it was off
 screen, are history. They appear dimmed under the live rows and give no surge. The rule and
-its constant are Wafer Waffler's.
+its constant are the Wafer Waffler's.
 
 On a bus this TUI hosts, the view skips the `Spark`, `KernelCompiled` and `Reset` records that
 its own sweeper published (record source `hivemind`), because the sweeper's feed already shows
@@ -944,7 +944,7 @@ checkpoints, which the bus does not carry. The pulses, the sky's pace, the `▸`
 the bus run is that trainer (the same pid and start time). The `v` rotation also asks the bus
 for a fresh run, so an attached TUI visits Training while the host sees a trainer. A step already in the world when the view first
 reads it makes no pulse, and neither does a step that landed while the view was off screen.
-The rule and its constants are Wafer Waffler's. With an empty world the view draws the frames it drew
+The rule and its constants are the Wafer Waffler's. With an empty world the view draws the frames it drew
 before the bus; a test pins them by hash.
 
 ---
@@ -1189,15 +1189,15 @@ Until the sidecar exists, the Wafer Waffler tile glow stays an estimate and says
   fixtures. The headless host, recording, inspect, replay and the socket were exercised against
   `--mock`. The tt-smi, gozer and inference-server code paths were tested against recorded
   output and test doubles.
-* The tile glow in Wafer Waffler is an estimate and is labelled as one.
-* The GDDR row layout in Wafer Waffler follows channel order (channels 0 to 3 on the west side, 4 to 7
+* The tile glow in the Wafer Waffler is an estimate and is labelled as one.
+* The GDDR row layout in the Wafer Waffler follows channel order (channels 0 to 3 on the west side, 4 to 7
   on the east side). It is not a measured die position. The sides are documented (tt-metal and
   tt-umd Blackhole descriptors place channels 0 to 3 on the west NoC column and 4 to 7 on the
   east). The order of rows within a side is not documented. Each channel is a bank of three
   NoC tiles spread over its column. That the tt-smi channel index equals the bank index is
   inferred. It is not documented. A hardware check would settle it: read DRAM tile NIU counters
   at the bank endpoints during a workload pinned to one bank. That check has not been run.
-* Training amber is not reachable in Wafer Waffler: the model phases have no training phase, and a
+* Training amber is not reachable in the Wafer Waffler: the model phases have no training phase, and a
   training run is a `run:` entity.
 
 ### Log and world
@@ -1268,11 +1268,11 @@ Until the sidecar exists, the Wafer Waffler tile glow stays an estimate and says
 * The `i` view keeps the local monitor when the TUI hosts its own bus.
 * The TUI's bus label can be dropped at very narrow widths (the label is dropped when fewer than
   5 characters remain after the camera caption), so a mismatch warning such as `(other host)` can go silent.
-* After the second update at a slow `--interval` (for example 2000 ms), Wafer Waffler treats the first
+* After the second update at a slow `--interval` (for example 2000 ms), the Wafer Waffler treats the first
   2 s gap as "away" once and drops that update's events. A data stall longer than 1 second at a
   100 ms tick does the same.
 * The Wafer Waffler legend and explain text list three phase colours and omit Down (grey).
-* Wafer Waffler cannot tell a restarted host from the old one when the new sequence number is already
+* The Wafer Waffler cannot tell a restarted host from the old one when the new sequence number is already
   past the old one, because `WorldRead` carries no instance id.
 * After a memory-only backend switch, readings for signals the new backend no longer emits keep
   the old provenance until they age out.

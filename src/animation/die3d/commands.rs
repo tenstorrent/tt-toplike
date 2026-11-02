@@ -56,12 +56,12 @@ pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo {
         name: "transition",
         args: "[rotate|chaos|dissolve|spin]",
-        help: "how a cut looks; bare steps",
+        help: "how a cut looks, or the next one",
     },
     CommandInfo {
         name: "cells",
         args: "[auto|braille|blocks|quarter|half]",
-        help: "style; auto follows hardware",
+        help: "dots or blocks; auto switches",
     },
     CommandInfo {
         name: "blocks",
@@ -71,7 +71,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo {
         name: "braille",
         args: "",
-        help: "hold braille dots",
+        help: "braille dots, and stay there",
     },
     CommandInfo {
         name: "bg",

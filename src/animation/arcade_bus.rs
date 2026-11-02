@@ -872,10 +872,10 @@ pub(crate) fn restyle(
 /// The arcade legend's section on what the bus draws.
 pub const LEGEND_TEXT: &[&str] = &[
     "Each chip has an equal share of the width, chip 0 left:",
-    "  gauge   the ✧ STARFIELD rule turns purple to the",
-    "          progress as a model compiles or loads (with",
-    "          none, a band sweeps: decoration); teal at",
-    "          ready, grey when it goes down",
+    "  gauge   the ✧ STARFIELD rule fills purple as a model",
+    "          compiles or loads, as far as its progress;",
+    "          with no figure a band sweeps (decoration).",
+    "          Teal at ready, grey when it goes down",
     "  label   model, phase and tokens/s right of the rule;",
     "          '~' marks an estimate",
     "  ✦ ring  from the hero, one per request completed (8 max)",
@@ -888,14 +888,14 @@ pub const LEGEND_TEXT: &[&str] = &[
 pub const EXPLAIN_TEXT: &[&str] = &[
     "",
     "Signal bus: each chip owns an equal share of the width,",
-    "chip 0 on the left. The STARFIELD rule is a gauge:",
-    "purple to the progress as a model compiles or loads",
-    "(with no figure, a sweep: decoration), teal at ready,",
-    "grey when down. Model, phase and tokens/s sit at its",
-    "right ('~' marks an estimate). Each request completed",
-    "adds a ✦ to a ring round the hero, sparks and compiles",
-    "rise as *, a reset flashes the rule, and the hero beats",
-    "faster as tokens/s rise.",
+    "chip 0 on the left. The STARFIELD rule is a gauge that",
+    "fills purple as a model compiles or loads, as far as its",
+    "progress (with no figure a band sweeps: decoration). It",
+    "goes teal at ready and grey when down. Model, phase and",
+    "tokens/s sit at its right ('~' marks an estimate). Each",
+    "request completed adds a ✦ to a ring round the hero,",
+    "sparks and compiles rise as *, a reset flashes the rule,",
+    "and the hero's heart beats faster as tokens/s rise.",
 ];
 
 /// The legend lines for [`LEGEND_TEXT`], with the overlay's left bar.

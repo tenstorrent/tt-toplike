@@ -422,9 +422,9 @@ pub fn draw_cell(
 /// The castle legend's section on what the bus draws.
 pub const LEGEND_TEXT: &[&str] = &[
     "Each chip's tower shows what the signal bus says:",
-    "  wing    a purple wing climbs as a model compiles",
-    "          or loads, to its progress (with none, a",
-    "          climbing band: decoration)",
+    "  wing    a purple wing climbs the tower as a model",
+    "          compiles or loads, as far as its progress;",
+    "          with no figure a band climbs (decoration)",
     "  banner  model, phase and tokens/s on the top row;",
     "          ⚑ while it serves; '~' marks an estimate",
     "  ♞       climbs per completed request (8 max)",
@@ -437,13 +437,13 @@ pub const LEGEND_TEXT: &[&str] = &[
 pub const EXPLAIN_TEXT: &[&str] = &[
     "",
     "Signal bus: a model compiling or loading raises a",
-    "purple wing in its chip's tower, as far as its",
-    "progress (with no figure, a climbing band:",
-    "decoration). Teal at ready, grey when down. A banner",
-    "names the model, phase and tokens/s ('~' marks an",
-    "estimate). Requests send ♞ up the tower, sparks light",
-    "☼, an ECC tick opens a ╳ that heals, and a reset",
-    "flashes the tower.",
+    "purple wing up its chip's tower, as far as its",
+    "progress. With no figure a band climbs instead, which",
+    "is decoration. The tower lights teal at ready and grey",
+    "when the model goes down. A banner names the model,",
+    "phase and tokens/s ('~' marks an estimate). Requests",
+    "send ♞ knights up the tower, sparks light ☼, an ECC",
+    "tick opens a ╳ that heals, and a reset flashes it all.",
 ];
 
 /// The legend lines for [`LEGEND_TEXT`], with the overlay's left bar.

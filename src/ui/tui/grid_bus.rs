@@ -864,9 +864,9 @@ pub(crate) const GRID_LEGEND_TEXT: &[&str] = &[
     "  phase  phase, progress, tokens/s on the bottom",
     "         rule; '~' marks an estimate",
     "  ┃ bar  fills purple from the bottom as a model",
-    "         compiles or loads, to its progress (with",
-    "         none, a band climbs: decoration); teal at",
-    "         ready, grey when down",
+    "         compiles or loads, up to its progress.",
+    "         With no figure a band climbs, which is",
+    "         decoration. Teal at ready, grey when down",
     "  pulse  a teal light up the PCIe spine ╋ when",
     "         requests complete (left bar on Wormhole)",
     "  * cell a hivemind spark or a kernel compile",
@@ -879,10 +879,11 @@ pub(crate) const GRID_EXPLAIN_TEXT: &[&str] = &[
     "Signal bus: a cell's top row names the chip's model,",
     "its bottom rule the phase, progress and tokens/s ('~'",
     "marks an estimate). The left bar fills purple as the",
-    "model compiles or loads (with no figure, a climbing",
-    "band: decoration) and lights teal at ready. Requests",
-    "send a teal light up the PCIe spine; a spark or kernel",
-    "compile lights a core as *; a reset flashes the cell.",
+    "model compiles or loads, as far as its progress; with",
+    "no figure a band climbs, which is decoration. It lights",
+    "teal at ready. Requests send a teal light up the PCIe",
+    "spine, a spark or compile lights a core as *, and a",
+    "reset flashes the cell.",
 ];
 
 /// The Insights legend's section on what the bus draws.

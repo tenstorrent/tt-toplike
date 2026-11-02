@@ -252,10 +252,11 @@ fn draw_label(
 pub const LEGEND_TEXT: &[&str] = &[
     "When the signal bus names a model on a chip:",
     "  COMPILE  blocks hold under a purple scan (decoration)",
-    "  DMA      channels fill to the reported progress; with",
-    "           none the head sets its own pace (decoration)",
-    "  RUN      every channel full; a teal wash at ready",
-    "  EVICT    blocks drain when the model goes away",
+    "  DMA      channels fill as far as the reported progress;",
+    "           with no figure the head sets its own pace",
+    "           (decoration)",
+    "  RUN      every channel full, and a teal wash at ready",
+    "  EVICT    blocks drain when the model goes down or away",
     "  burst    completed requests flash the blocks",
     "  █        a hivemind spark or kernel compile",
     "  label    model, phase, tokens/s by the power bar;",
@@ -267,12 +268,12 @@ pub const LEGEND_TEXT: &[&str] = &[
 pub const EXPLAIN_TEXT: &[&str] = &[
     "",
     "Signal bus: compiling holds the blocks under a purple",
-    "scan (decoration). Loading fills each channel to the",
-    "reported progress; ready fills them and washes teal; a",
-    "model that goes away evicts. Requests flash the blocks,",
-    "and a spark or compile lights one. Model, phase and",
-    "tokens/s sit right of the power bar ('~' marks an",
-    "estimate). A reset flashes the label row.",
+    "scan (decoration). Loading fills each channel as far as",
+    "the reported progress, ready fills them all and washes",
+    "them teal, and a model that goes down or away evicts.",
+    "Requests flash the blocks, and a spark or compile lights",
+    "one. Model, phase and tokens/s sit right of the power",
+    "bar ('~' marks an estimate). A reset flashes the label.",
 ];
 
 /// The legend lines for [`LEGEND_TEXT`], with the overlay's left bar.

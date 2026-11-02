@@ -4576,7 +4576,15 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 // The global keys most used here; the full list is `?` in
                 // any other view, which keeps this panel inside 24 rows.
                 help.push(sep!("Everywhere  (every key: ? in another view)"));
-                help.extend(keys(key).into_iter().take(2));
+                // Rows 0, 1 and 4: the panels and quit, then the other
+                // key-only views.
+                help.extend(
+                    keys(key)
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(i, _)| [0, 1, 4].contains(i))
+                        .map(|(_, l)| l),
+                );
                 return help;
             }
             let cmd = |items: &[(&str, &str)]| cells(items, 19, 18, lbl);
@@ -4602,7 +4610,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     ("/hivemind", "start the sniffer"),
                 ]),
                 cmd(&[
-                    ("/remote [n|box]", "find + join a box"),
+                    ("/remote [n|box]", "join a box on LAN"),
                     ("/serve [bind:port]", "share (plaintext)"),
                 ]),
                 cmd(&[
@@ -4611,7 +4619,7 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 ]),
                 cmd(&[
                     ("/watch <path>", "tail a log in ~"),
-                    ("/watch pid <n>", "a PID's fds + logs"),
+                    ("/watch pid <n>", "sniff a process"),
                 ]),
                 cmd(&[("/legend /explain /help", "the l ! ? panels")]),
                 cmd(&[("/board /scene /cells …", &settings)]),
@@ -4706,12 +4714,14 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     &[
                         "Hardware-Responsive Starfield",
                         "",
-                        "Each star is a Tensix core. Brightness is power draw;",
-                        "hue runs cyan (cool) to red (hot) with die temperature.",
-                        "Twinkle speeds up with current draw, and a sparkle",
-                        "marks a power spike above the learned baseline.",
-                        "Planets (○) are DDR, L2 and L1; orbit radius tracks",
-                        "memory bandwidth.",
+                        "Each star is a Tensix core. Stars brighten as power",
+                        "rises above the chip's idle, and their hue runs from",
+                        "cyan (cool) to red (hot) with die temperature. Twinkle",
+                        "speeds up with current draw, and a sparkle marks a",
+                        "power spike above the learned baseline.",
+                        "Planets (○) are L1, L2 and DDR. They orbit faster and",
+                        "glow brighter with activity: L1 follows power, L2",
+                        "current draw, DDR its channels.",
                     ],
                     crate::animation::starfield_bus::EXPLAIN_TEXT,
                 ),
@@ -4763,8 +4773,8 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     &[
                         "Arcade Mode — Unified View",
                         "",
-                        "Every view on one screen: Starfield on top, Memory",
-                        "Castle and Defrag in the middle, Memory Flow below.",
+                        "Starfield, Memory Castle, Defrag and Memory Flow on one",
+                        "screen.",
                         "The @ hero roams on live telemetry: x is current draw",
                         "(0–100 A), y is power, colour is die temperature. The",
                         "glyph is its health: @ healthy, ! throttled or faulted,",
@@ -4786,6 +4796,14 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                         "A portrait per chip, with live power, temperature,",
                         "clock and DDR, beside the processes holding a device.",
                         "",
+                        // First after the intro, so an 80 x 24 terminal
+                        // still shows it (see
+                        // `the_insights_ecc_sentence_shows_on_a_24_row_terminal`).
+                        "ECC and thermal-trip rows appear only when non-zero,",
+                        "because zero is healthy. ECC is amber for corrected",
+                        "errors and red once any is uncorrectable, which means",
+                        "corrupted data.",
+                        "",
                     ],
                     &[
                         grid_bus::INSIGHTS_EXPLAIN_TEXT,
@@ -4798,10 +4816,6 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                             "GDDR n/m trn counts trained channels; hv is harvested,",
                             "flt a BIST fault (tt-smi 6.3+). Amber when any are",
                             "harvested, red on a fault.",
-                            "ECC and thermal-trip rows appear only when non-zero:",
-                            "zero is healthy, so a quiet sidebar stays quiet. ECC",
-                            "is amber for corrected errors and red once any is",
-                            "uncorrectable, which means corrupted data.",
                             "",
                             "↑↓ select a process · k SIGTERM · K SIGKILL",
                             "At 32+ devices a fleet heatmap shows; Enter zooms.",
@@ -4870,7 +4884,8 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                         "",
                         "It attaches by itself to a tt-train example or a ttml",
                         "script and reads its log. If stdout was not redirected,",
-                        "relaunch with '> train.log'. l has every symbol.",
+                        "relaunch with '> train.log'. The ETA shows only when",
+                        "the run's step budget is known. l has every symbol.",
                     ],
                     crate::animation::train_bus::EXPLAIN_TEXT,
                 ),
@@ -5374,29 +5389,26 @@ const DIE3D_EXPLAIN_TEXT: &[&str] = &[
     crate::animation::DIE3D_DISPLAY_NAME,
     "",
     "Each Blackhole board in isometric 3D, one block per die,",
-    "from live telemetry. Each die is a slice of silicon",
-    "wafer, its tiles make a waffle grid, and the camera",
-    "waffles between them.",
+    "from live telemetry; other chips are not drawn.",
+    crate::animation::DIE3D_NAME_STORY,
     "",
-    "Tiles glow with activity above a quiet wave. Activity is",
-    "relative to each chip's own idle over the last day: the",
-    "lowest power that day is zero, and the highest in the",
-    "most recent ten minutes (at least idle + 25 W) is full.",
-    "Per tile where the driver reports it, otherwise an",
-    "estimate from chip load, and the footer says 'estimate'.",
+    "Tiles glow with activity, relative to each chip's own",
+    "idle over the last day: the day's lowest power is zero,",
+    "and the highest in the most recent 10 minutes (at least",
+    "idle + 25 W) is full. Measured per tile where the driver",
+    "reports it, else an estimate, and the footer says so.",
     "",
     "The camera turns every 15 s or so. When something",
     "happens it cuts: chaos for a chip event, a dissolve for",
     "memory or an Ethernet link. A board you choose stays.",
     "",
-    "From the signal bus: model flags, a bring-up fill,",
-    "request pulses, per-channel GDDR heat, ECC flashes and",
-    "hivemind sparks; '~' marks an estimate. The fill's",
-    "sweep, the pulse's fade, the sparks' look and the clouds",
-    "are decoration. The history panel plots power and PCIe",
-    "traffic from real readings.",
-    "Only Blackhole chips are drawn. l lists every symbol,",
-    "/help every command; 3 leaves.",
+    "The signal bus adds a flag per model, a purple fill while",
+    "it loads, a teal pulse per batch of requests, GDDR heat",
+    "per channel, red ECC flashes and hivemind sparks; '~'",
+    "marks an estimate. The fill's sweep, the pulse's fade,",
+    "the sparks' look and the clouds are decoration. The",
+    "history panel plots power and PCIe traffic from real",
+    "readings. l lists every symbol, /help every command.",
 ];
 
 /// The view's display name is one constant, `DIE3D_DISPLAY_NAME`. Its old
@@ -5429,8 +5441,11 @@ mod display_name_tests {
         // Source: a code identifier cannot hold a space, so the old name on a
         // line that is not a comment is inside a string literal.
         let mut files = Vec::new();
-        rust_files(&root.join("src"), &mut files);
-        rust_files(&root.join("crates"), &mut files);
+        for dir in ["src", "crates", "tests", "examples"] {
+            if root.join(dir).is_dir() {
+                rust_files(&root.join(dir), &mut files);
+            }
+        }
         for f in &files {
             let text = std::fs::read_to_string(f).expect("read source");
             for (n, line) in text.lines().enumerate() {
@@ -5440,7 +5455,7 @@ mod display_name_tests {
                 }
                 // A trailing comment after code is still a comment.
                 let code = code.split(" // ").next().unwrap_or(code);
-                if code.to_lowercase().contains(old) {
+                if code.replace('\u{a0}', " ").to_lowercase().contains(old) {
                     hits.push(format!("{}:{}: {line}", f.display(), n + 1));
                 }
             }
@@ -5458,7 +5473,20 @@ mod display_name_tests {
             root.join("README.md"),
             root.join("QUICK_START.md"),
             root.join("site/index.html"),
+            root.join("test-modes.sh"),
+            root.join("debian/control"),
         ];
+        for dir in ["demo", "scripts"] {
+            for e in std::fs::read_dir(root.join(dir))
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                if e.path().is_file() {
+                    docs.push(e.path());
+                }
+            }
+        }
         for e in std::fs::read_dir(root.join("docs"))
             .expect("docs")
             .flatten()
@@ -5470,7 +5498,7 @@ mod display_name_tests {
         for d in &docs {
             let text = std::fs::read_to_string(d).unwrap_or_default();
             for (n, line) in text.lines().enumerate() {
-                if line.to_lowercase().contains(old) {
+                if line.replace('\u{a0}', " ").to_lowercase().contains(old) {
                     hits.push(format!("{}:{}: {line}", d.display(), n + 1));
                 }
             }
@@ -5479,6 +5507,27 @@ mod display_name_tests {
             hits.is_empty(),
             "old name still shown:\n{}",
             hits.join("\n")
+        );
+    }
+
+    /// README, docs/bus.md and the site cannot read a Rust constant, so they
+    /// spell the name out. They must spell the current one: change
+    /// `die3d_display_name!` and this fails until the prose follows. The
+    /// `--help` text is built from the macro, and is checked here too.
+    #[test]
+    fn docs_name_the_view_by_its_current_name() {
+        use clap::CommandFactory;
+        let name = crate::animation::DIE3D_DISPLAY_NAME;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for doc in ["README.md", "docs/bus.md", "site/index.html"] {
+            let text = std::fs::read_to_string(root.join(doc)).expect("read doc");
+            assert!(text.contains(name), "{doc} never says {name:?}");
+        }
+        let help = crate::cli::Cli::command().render_long_help().to_string();
+        assert!(help.contains(name), "--help never says {name:?}:\n{help}");
+        assert!(
+            help.contains(crate::animation::DIE3D_MODE_ALIAS),
+            "--help never names the alias:\n{help}"
         );
     }
 }
@@ -5605,18 +5654,29 @@ mod die3d_text_tests {
         // The summary names each bus effect and says which parts are
         // decoration.
         for phrase in [
-            "model flags",
-            "fill",
-            "pulse",
-            "GDDR",
-            "ECC",
+            "a flag per model",
+            "a purple fill while it loads",
+            "a teal pulse per batch of requests",
+            "GDDR heat per channel",
+            "red ECC flashes",
             "hivemind sparks",
             "'~' marks an estimate",
-            "fill's sweep, the pulse's fade, the sparks' look and the clouds are decoration",
         ] {
             assert!(
                 explain.contains(phrase),
                 "explain lacks {phrase:?}: {explain}"
+            );
+        }
+        // The parts with no reading behind them are named in the sentence
+        // that calls them decoration, whatever its wording.
+        let decoration = explain
+            .split(". ")
+            .find(|s| s.contains("decoration"))
+            .unwrap_or_else(|| panic!("no sentence names decoration: {explain}"));
+        for part in ["fill's sweep", "pulse's fade", "sparks' look", "clouds"] {
+            assert!(
+                decoration.contains(part),
+                "{part:?} not called decoration: {decoration}"
             );
         }
         for (what, text) in [("legend", &legend), ("explain", &explain)] {
@@ -5633,16 +5693,66 @@ mod die3d_text_tests {
         assert!(labels.help.contains("model"), "{}", labels.help);
     }
 
+    /// The numbers the explain text states come from the code that decides
+    /// them, so changing the code fails here until the text is changed too:
+    /// the idle turn (`IDLE_ROTATE_SECS`), the smallest idle-to-full span
+    /// (`MIN_SPAN_W`), the peak window (`WINDOW_SAMPLES` one-second samples),
+    /// the day the idle is kept (`DAY_MINUTES`), and which cut each kind of
+    /// event gets (`camera::rotate_kind`).
+    #[test]
+    fn the_waffler_numbers_follow_the_code() {
+        use crate::animation::die3d::camera::{rotate_kind, TransitionKind, IDLE_ROTATE_SECS};
+        use crate::animation::die3d::load::{
+            DAY_MINUTES, MIN_SPAN_W, SAMPLE_INTERVAL_S, WINDOW_SAMPLES,
+        };
+        use crate::animation::die3d::triggers::Reason;
+        let explain = flat(DIE3D_EXPLAIN_TEXT.iter().map(|s| s.to_string()));
+
+        assert_eq!(IDLE_ROTATE_SECS.fract(), 0.0, "the text says whole seconds");
+        let turn = format!("every {} s", IDLE_ROTATE_SECS as u32);
+        assert!(explain.contains(&turn), "lacks {turn:?}: {explain}");
+
+        assert_eq!(MIN_SPAN_W.fract(), 0.0, "the text says whole watts");
+        let span = format!("idle + {} W", MIN_SPAN_W as u32);
+        assert!(explain.contains(&span), "lacks {span:?}: {explain}");
+
+        let minutes = (WINDOW_SAMPLES as f64 * SAMPLE_INTERVAL_S / 60.0).round() as u32;
+        let window = format!("most recent {minutes} minutes");
+        assert!(explain.contains(&window), "lacks {window:?}: {explain}");
+
+        assert_eq!(DAY_MINUTES, 24 * 60, "the text says the last day");
+        assert!(explain.contains("over the last day"), "{explain}");
+
+        let name = |k: TransitionKind| format!("{k:?}").to_lowercase();
+        let chip = format!(
+            "{} for a chip event",
+            name(rotate_kind(Some(Reason::Chip), false))
+        );
+        assert!(explain.contains(&chip), "lacks {chip:?}: {explain}");
+        // Memory and an Ethernet link share one sentence, so they must
+        // share one kind of cut.
+        let mem = rotate_kind(Some(Reason::Memory), false);
+        assert_eq!(mem, rotate_kind(Some(Reason::Board), false));
+        let memory = format!("{} for memory or an Ethernet link", name(mem));
+        assert!(explain.contains(&memory), "lacks {memory:?}: {explain}");
+    }
+
     /// The name is explained where it is shown: what is waffled is the
     /// wafer-shaped die and its tiles.
     #[test]
     fn the_explain_text_says_where_the_name_comes_from() {
-        let explain = flat(DIE3D_EXPLAIN_TEXT.iter().map(|s| s.to_string()));
         assert_eq!(DIE3D_EXPLAIN_TEXT[0], crate::animation::DIE3D_DISPLAY_NAME);
+        assert!(DIE3D_EXPLAIN_TEXT.contains(&crate::animation::DIE3D_NAME_STORY));
+        let story = crate::animation::DIE3D_NAME_STORY;
+        assert!(
+            story.contains(crate::animation::DIE3D_DISPLAY_NAME),
+            "{story}"
+        );
+        // The pun: what is waffled is the wafer-shaped die and its tiles.
         for phrase in ["wafer", "tiles", "waffle"] {
             assert!(
-                explain.contains(phrase),
-                "explain lacks {phrase:?}: {explain}"
+                story.contains(phrase),
+                "the story lacks {phrase:?}: {story}"
             );
         }
     }
@@ -5701,9 +5811,9 @@ fn die3d_legend_lines(
         "  packets    dots in from and out to the PCIe edge; their",
         "             count follows the measured PCIe rate on a log",
         "             scale (none below 1 kB/s)",
-        "  labels     a flag per chip: name, power, and its model's",
-        "             phase and tokens/s (purple loading, teal ready,",
-        "             red alarm); '~' marks an estimate such as mock",
+        "  labels     a flag per chip: name, power, its model's phase,",
+        "             tokens/s and waiting requests ('~' = estimate), in",
+        "             the phase colour: purple loading, teal ready, red alarm",
         "  fill       purple from the DRAM edges inward while a model",
         "             loads, by its phase and progress; with no",
         "             progress, a sweep (decoration)",
@@ -6278,7 +6388,7 @@ fn execute_command(
             }
             // The view itself is made where the loop draws it, on the first
             // frame in the mode, as for the `3` key.
-            "die3d" | "waffler" => {
+            "die3d" | crate::animation::DIE3D_MODE_ALIAS => {
                 *display_mode = DisplayMode::Die3d;
                 (
                     format!("→ {}", crate::animation::DIE3D_DISPLAY_NAME),
@@ -6287,8 +6397,10 @@ fn execute_command(
                 )
             }
             _ => (
-                "mode: insights|grid|starfield|castle|flow|arcade|defrag|hivemind|training|waffler"
-                    .to_string(),
+                format!(
+                    "mode: insights|grid|starfield|castle|flow|arcade|defrag|hivemind|training|die3d|{}",
+                    crate::animation::DIE3D_MODE_ALIAS
+                ),
                 true,
                 false,
             ),
@@ -6326,7 +6438,7 @@ fn execute_command(
             ),
         },
         // Shorthand for `/mode die3d`, the way `/hivemind` opens its view.
-        "die3d" | "waffler" => {
+        "die3d" | crate::animation::DIE3D_MODE_ALIAS => {
             *display_mode = DisplayMode::Die3d;
             (
                 format!("→ {}", crate::animation::DIE3D_DISPLAY_NAME),
@@ -10977,6 +11089,65 @@ mod host_default_screen_tests {
         }
     }
 
+    /// The planets' orbit radius is set once from the layout
+    /// (`starfield.rs`, where the planets are built) and never changes;
+    /// activity moves their speed and brightness. The text said the radius
+    /// tracked bandwidth.
+    #[test]
+    fn the_starfield_text_says_what_moves_the_planets() {
+        use super::{DisplayMode as M, OverlayPanel as P};
+        for panel in [P::Legend, P::Explain] {
+            let text = overlay_text(panel, M::Starfield).to_lowercase();
+            assert!(!text.contains("radius"), "Starfield {panel:?}:\n{text}");
+        }
+        let explain = overlay_text(P::Explain, M::Starfield);
+        let flat = explain
+            .replace('║', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(flat.contains("orbit faster and glow brighter"), "{flat}");
+    }
+
+    /// The ECC sentence (red for uncorrectable, the row absent at zero
+    /// because zero is healthy) was lost below row 44 once. It must be in
+    /// the Insights `!` text and inside the 20 content lines an 80 x 24
+    /// terminal shows (24 rows less two borders, the command bar and the
+    /// margin).
+    #[test]
+    fn the_insights_ecc_sentence_shows_on_a_24_row_terminal() {
+        use super::{overlay_lines, overlay_wrap_cols, DisplayMode, OverlayPanel};
+        let shown: String = overlay_lines(
+            OverlayPanel::Explain,
+            DisplayMode::Insights,
+            overlay_wrap_cols(80),
+        )
+        .iter()
+        .take(24 - 4)
+        .map(|l| {
+            l.spans
+                .iter()
+                .skip(1)
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+        for phrase in [
+            "zero is healthy",
+            "red once any is uncorrectable",
+            "corrupted data",
+        ] {
+            assert!(
+                shown.contains(phrase),
+                "{phrase:?} not in rows 1-20: {shown}"
+            );
+        }
+    }
+
     #[test]
     fn the_help_card_lists_key_3() {
         let help = overlay_text(super::OverlayPanel::Help, super::DisplayMode::Insights);
@@ -10995,7 +11166,7 @@ mod host_default_screen_tests {
         let help = overlay_text(P::Help, M::Insights);
         for (label, desc) in [
             ("/serve [bind:port]", "share"),
-            ("/remote [n|box]", "find"),
+            ("/remote [n|box]", "join"),
             ("⟳ tt-smi -r", "a reset"),
             ("--tt-smi-reset-behavior", "ignore"),
         ] {
@@ -11020,18 +11191,7 @@ mod host_default_screen_tests {
     #[test]
     fn explain_text_never_exceeds_its_wrap_budget() {
         use super::{line_cols, overlay_lines, wrap_overlay_text, DisplayMode, OverlayPanel};
-        for mode in [
-            DisplayMode::Insights,
-            DisplayMode::Grid,
-            DisplayMode::Starfield,
-            DisplayMode::MemoryCastle,
-            DisplayMode::MemoryFlow,
-            DisplayMode::Arcade,
-            DisplayMode::Defrag,
-            DisplayMode::InferenceMonitor,
-            DisplayMode::HivemindSweeper,
-            DisplayMode::Training,
-        ] {
+        for mode in ALL_MODES {
             for cols in [24usize, 40, 56] {
                 for line in overlay_lines(OverlayPanel::Explain, mode, cols) {
                     // +2 for the "║ " border prefix each line carries.

@@ -171,24 +171,41 @@ pub struct Cli {
     #[arg(long, default_value = "5000")]
     pub timeout: u64,
 
-    /// Launch directly into specific visualization mode
-    ///
-    /// Skip the normal table view and start in a specific mode.
-    /// Available modes: normal, starfield, castle, flow, arcade, hivemind, training,
-    /// die3d (or waffler)
-    #[arg(short = 'm', long, value_enum)]
+    // Help text built with `concat!` so it carries the view's current display
+    // name and alias (see `crate::die3d_display_name!`).
+    #[arg(
+        short = 'm',
+        long,
+        value_enum,
+        help = "Launch directly into specific visualization mode",
+        long_help = concat!(
+            "Launch directly into specific visualization mode\n\n",
+            "Skip the normal table view and start in a specific mode. ",
+            "Available modes: normal, starfield, castle, flow, arcade, hivemind, ",
+            "training, die3d (or ",
+            crate::die3d_mode_alias!(),
+            ", the ",
+            crate::die3d_display_name!(),
+            ")"
+        )
+    )]
     pub mode: Option<VisualizationMode>,
 
-    /// Rotate through every view unattended (kiosk / wall-display mode)
-    ///
-    /// Cycles every view except Grid, including the ones reachable only by
-    /// their own key (`i`, `~`, `t`, `3`), 30s on each and 45s on arcade.
-    /// Training and the inference monitor are visited only while a training
-    /// run exists or a model server is starting or running. The Wafer Waffler
-    /// (`3`) is visited only on a box with a Blackhole chip. Toggle in-app
-    /// with `R`. Combines with `--mode` to choose where the rotation
-    /// starts.
-    #[arg(long)]
+    // Help text built with `concat!` so it carries the view's display name.
+    #[arg(
+        long,
+        help = "Rotate through every view unattended (kiosk / wall-display mode)",
+        long_help = concat!(
+            "Rotate through every view unattended (kiosk / wall-display mode)\n\n",
+            "Cycles every view except Grid, including the ones reachable only by ",
+            "their own key (`i`, `~`, `t`, `3`), 30s on each and 45s on arcade. ",
+            "Training and the inference monitor are visited only while a training ",
+            "run exists or a model server is starting or running. The ",
+            crate::die3d_display_name!(),
+            " (`3`) is visited only on a box with a Blackhole chip. Toggle in-app ",
+            "with `R`. Combines with `--mode` to choose where the rotation starts."
+        )
+    )]
     pub rotate: bool,
 
     /// Animation sensitivity preset
@@ -644,9 +661,18 @@ pub enum VisualizationMode {
     #[value(alias = "train", alias = "tt-train")]
     Training,
 
-    /// Wafer Waffler — each Blackhole board drawn in isometric 3D from live
-    /// telemetry. Also reachable in-app with `3`.
-    #[value(alias = "waffler")]
+    // The display name and alias come from `crate::die3d_display_name!` and
+    // `crate::die3d_mode_alias!`, so a rename reaches `--help`.
+    #[value(
+        alias = crate::die3d_mode_alias!(),
+        help = concat!(
+            crate::die3d_display_name!(),
+            " (or ",
+            crate::die3d_mode_alias!(),
+            "): each Blackhole board in isometric 3D from live telemetry. ",
+            "Also reachable in-app with `3`."
+        )
+    )]
     Die3d,
 }
 
@@ -1617,7 +1643,7 @@ mod tests {
     /// The Wafer Waffler answers to its code name and to its display name.
     #[test]
     fn mode_die3d_and_waffler_parse() {
-        for spelling in ["die3d", "waffler"] {
+        for spelling in ["die3d", crate::animation::DIE3D_MODE_ALIAS] {
             let cli = Cli::try_parse_from(["tt-toplike", "--mode", spelling])
                 .unwrap_or_else(|e| panic!("`--mode {spelling}` must parse: {e}"));
             assert_eq!(

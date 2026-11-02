@@ -1468,7 +1468,15 @@ the point (and still fun!)", plus renaming Die 3D to a fun name the user liked, 
 - The Waffler's explain text is a summary; the legend keeps every per-symbol phrase the old tests
   required of both. The text tests now ask the legend for the detail and the explain text for the
   summary (what is measured, estimated or decoration).
-- The name is one constant, `animation::die3d::DIE3D_DISPLAY_NAME` (provisional). Code identifiers
+- Review fix wave: the Starfield text said orbit radius tracks bandwidth (the radius is fixed; speed
+  and brightness follow activity); the Insights ECC sentence moved up so 80 x 24 shows it, with a
+  test; the Waffler explain text's numbers (15 s, idle + 25 W, 10 minutes, chaos vs dissolve) are
+  tested against `IDLE_ROTATE_SECS`, `MIN_SPAN_W`, `WINDOW_SAMPLES` and `camera::rotate_kind`; the
+  name is a macro (`crate::die3d_display_name!`) so `--help` and constant strings follow it, and
+  `docs_name_the_view_by_its_current_name` fails until README, docs/bus.md and the site follow a
+  rename; `host_cpu_and_rss_are_sampled_from_a_real_process` freezes its child with SIGSTOP and
+  passes its own timestamps, so load cannot change the 25% it expects.
+- The name is `animation::die3d::DIE3D_DISPLAY_NAME` (provisional), from that macro. Code identifiers
   stay `die3d`. `--mode die3d|waffler`, `/mode die3d|waffler`, `/die3d` and `/waffler` open it
   (none of these existed before). `no_user_facing_text_uses_the_old_die3d_name` scans source
   strings, the clap `--help` text, README, QUICK_START, docs/*.md and the site.

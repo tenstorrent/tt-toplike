@@ -99,12 +99,53 @@ const KEYS_FG: Color = rgb(GRAYSKULL.mgmt);
 /// The opaque background (`T` off): plain black. A tinted fill drew the eye
 /// away from the scene; black lets the blocks stand out.
 const OPAQUE_BG: [u8; 3] = [0, 0, 0];
+/// The name a person reads for this view, as a macro so `concat!` can build
+/// `--help` text and constant strings from it. Use [`DIE3D_DISPLAY_NAME`]
+/// everywhere else. Provisional: the name is not final.
+///
+/// To rename the view, change this value, then:
+/// - [`DIE3D_NAME_STORY`], the sentence that explains the name (a pun on
+///   this one, so it must be rewritten with it);
+/// - [`DIE3D_MODE_ALIAS`], the short spelling `--mode` and `/mode` accept;
+/// - README.md, docs/bus.md and site/index.html, which cannot read a Rust
+///   constant. `docs_name_the_view_by_its_current_name` fails until they
+///   say the new name.
+///
+/// The code keeps the `die3d` names: `3`, `--mode die3d` and `/mode die3d`
+/// still open the view.
+#[macro_export]
+macro_rules! die3d_display_name {
+    () => {
+        "Wafer Waffler"
+    };
+}
+
 /// The name a person reads for this view: the mode label in the status bar,
-/// the legend, explain and help titles, and the hints the view prints. The
-/// code keeps the `die3d` names; `3`, `--mode die3d` and `/mode die3d` still
-/// open it, and `waffler` is an alias for each. Provisional: the name is not
-/// final, so change it here and nowhere else.
-pub const DIE3D_DISPLAY_NAME: &str = "Wafer Waffler";
+/// the legend, explain and help titles, `--help`, and the hints the view
+/// prints. See [`die3d_display_name!`](crate::die3d_display_name) for how to
+/// rename it.
+pub const DIE3D_DISPLAY_NAME: &str = crate::die3d_display_name!();
+
+/// The short spelling of the name that `--mode`, `/mode` and the bare verb
+/// accept next to `die3d`, as a macro for `concat!`. Change it with the name.
+#[macro_export]
+macro_rules! die3d_mode_alias {
+    () => {
+        "waffler"
+    };
+}
+
+/// [`die3d_mode_alias!`](crate::die3d_mode_alias) as a constant.
+pub const DIE3D_MODE_ALIAS: &str = crate::die3d_mode_alias!();
+
+/// What the name means, for the explain text. It is a pun on the current
+/// name, so a rename rewrites it.
+pub const DIE3D_NAME_STORY: &str = concat!(
+    "Why ",
+    crate::die3d_display_name!(),
+    "? Each die is a slice of silicon wafer, its tiles make a waffle ",
+    "grid, and the camera waffles between them."
+);
 
 /// The action keys the footer lists after the switches. `3` (leave) is
 /// handled by the TUI, not here. Keys that flip a state are not listed here:

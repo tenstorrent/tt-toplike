@@ -56,7 +56,7 @@ pub use arcade::ArcadeVisualization;
 pub use baseline::AdaptiveBaseline;
 pub use common::*;
 pub use defrag::DefragVis;
-pub use die3d::{Die3dView, DIE3D_DISPLAY_NAME};
+pub use die3d::{Die3dView, DIE3D_DISPLAY_NAME, DIE3D_MODE_ALIAS, DIE3D_NAME_STORY};
 pub use duel::{duel_balance, DuelState};
 pub use inference_load::LoadSnake;
 pub use memory_castle::MemoryCastle;

@@ -658,10 +658,10 @@ fn draw_label(
 /// The Starfield legend's section on what the bus draws.
 pub const LEGEND_TEXT: &[&str] = &[
     "Signal bus (each chip has its share of the width):",
-    "  ● cluster  stars light purple from the centre out",
-    "             as a model compiles or loads, to its",
-    "             progress (with none, a ring sweeps out:",
-    "             decoration); teal at ready, grey when down",
+    "  ● cluster  while a model compiles or loads, its stars",
+    "             light purple from the centre out, as far as",
+    "             its progress; with no figure a ring sweeps",
+    "             out (decoration). Teal at ready, grey when down",
     "  label      model, phase and tokens/s on the top row;",
     "             '~' marks an estimate",
     "  ✦── comet  completed requests, a tail cell each (8 max)",
@@ -676,12 +676,13 @@ pub const EXPLAIN_TEXT: &[&str] = &[
     "",
     "Signal bus: each chip owns a share of the width. While",
     "a model compiles or loads, its stars light purple from",
-    "the centre out to the reported progress (with no",
-    "figure, a sweeping ring: decoration). Teal at ready,",
-    "grey when down. The top row names the model, phase and",
-    "tokens/s; '~' marks an estimate. Requests send comets,",
-    "tokens/s speed the twinkle and orbits, ECC flares a",
-    "planet red, and a reset turns the chip's stars white.",
+    "the centre out, as far as its progress. With no figure",
+    "a ring sweeps out instead, which is decoration. They go",
+    "teal when it is ready and grey when it goes down. The",
+    "top row names the model, phase and tokens/s; '~' marks",
+    "an estimate. Requests send comets, tokens/s speed the",
+    "twinkle and orbits, ECC flares a planet red, and a",
+    "reset turns the chip's stars white.",
 ];
 
 /// The legend lines for [`LEGEND_TEXT`], with the overlay's left bar.
