@@ -817,6 +817,8 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
         );
         v.set_bus(Some(&read()), &b);
         assert_eq!(v.bus_fx.run_devices, vec![1]);
+        // The host's model is still on the host's chip only: no neighbour.
+        assert!(v.bus_fx.neighbours.is_empty());
     });
 }
 
