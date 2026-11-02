@@ -1274,3 +1274,121 @@ fn arcade_bus_smoke_frame() {
         }
     })
 }
+
+// ---- Frames pinned before the configurable layout ----------------------------
+
+/// More sizes for the default layout, taken from the commit before the
+/// layout engine (f9ebf418), so the default layout drawn through the engine
+/// must hash to exactly these values.
+const LAYOUT_SIZES: [(usize, usize); 4] = [(40, 12), (80, 24), (120, 40), (200, 60)];
+
+/// The frames at [`LAYOUT_SIZES`] with no bus, as drawn at f9ebf418.
+const LAYOUT_GOLDEN: [[u64; 3]; 4] = [
+    [
+        16405903045868402890,
+        348949444799598575,
+        17758899892730667701,
+    ],
+    [
+        12504372272606325408,
+        12462495840730416799,
+        17359970104331777380,
+    ],
+    [
+        10058453730770147578,
+        12209255261273412595,
+        11553880141151839571,
+    ],
+    [
+        2131948977754792761,
+        13513267271374092933,
+        4571970079251868778,
+    ],
+];
+
+/// A busy arcade at `w` x `h`: a model loading at 40% on chip 0, one ready
+/// on chip 1 with requests, a spark and a compile, and two activity lanes.
+/// The hashes after three updates and after six. Every bus effect, the
+/// lanes and the hero are in these frames.
+fn busy_hashes(w: usize, h: usize) -> Vec<u64> {
+    tc(|| {
+        let t0 = 5 * SEC;
+        let backend = Fixed::new(2);
+        let mut a = ArcadeVisualization::new(w, h);
+        a.initialize_from_devices(backend.devices());
+        a.initialize_topology(&backend);
+        let lane = |id: &str, kind| crate::animation::Activity {
+            id: id.into(),
+            kind,
+            label: id.into(),
+            stalled: false,
+            fields: vec!["step 1/10".into()],
+            pulse_seq: Some(1),
+            key_hint: 't',
+        };
+        a.set_activities(vec![
+            lane("train:7", crate::animation::ActivityKind::Train),
+            lane("svc:serve", crate::animation::ActivityKind::Serve),
+        ]);
+        let mut f = Bus::new();
+        f.loading("load", &[0], Some(0.4))
+            .ready("serve", &[1], Some(42.0));
+        let mut out = Vec::new();
+        let mut now = t0;
+        for i in 0..6 {
+            if i == 1 {
+                f.requests("serve", 5)
+                    .event(Event::Spark {
+                        chip: Some(chip(1)),
+                        kind: "vLLM.log".into(),
+                    })
+                    .event(Event::KernelCompiled {
+                        chip: Some(chip(0)),
+                        source: "ttnn".into(),
+                    });
+            }
+            let v = f.view(now);
+            a.set_bus(Some(&v), &backend);
+            a.update(&backend);
+            if i == 2 || i == 5 {
+                out.push(frame_hash(&a.render(&backend)));
+            }
+            now += TICK;
+        }
+        out
+    })
+}
+
+/// [`busy_hashes`] at 60x18, 120x40 and 200x60, as drawn at f9ebf418.
+const BUSY_GOLDEN: [[u64; 2]; 3] = [
+    [6926133645160357105, 14361061777142784915],
+    [486681346888478306, 6463703216560181227],
+    [17678925567211405084, 10309374953790955074],
+];
+const BUSY_SIZES: [(usize, usize); 3] = [(60, 18), (120, 40), (200, 60)];
+
+/// Prints the hashes for [`LAYOUT_GOLDEN`] and [`BUSY_GOLDEN`].
+#[test]
+#[ignore = "prints the hashes to pin"]
+fn layout_golden_hashes() {
+    for (w, h) in LAYOUT_SIZES {
+        println!("plain {w}x{h}: {:?}", hashes_with(w, h, |_, _, _| {}));
+    }
+    for (w, h) in BUSY_SIZES {
+        println!("busy {w}x{h}: {:?}", busy_hashes(w, h));
+    }
+}
+
+#[test]
+fn the_default_layout_draws_the_frames_pinned_before_the_layout_engine() {
+    for (i, (w, h)) in LAYOUT_SIZES.into_iter().enumerate() {
+        assert_eq!(
+            hashes_with(w, h, |_, _, _| {}),
+            LAYOUT_GOLDEN[i].to_vec(),
+            "{w}x{h}"
+        );
+    }
+    for (i, (w, h)) in BUSY_SIZES.into_iter().enumerate() {
+        assert_eq!(busy_hashes(w, h), BUSY_GOLDEN[i].to_vec(), "busy {w}x{h}");
+    }
+}
