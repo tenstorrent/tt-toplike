@@ -830,6 +830,87 @@ impl WorldRead for Counting {
     }
 }
 
+/// Contract rule 5: a steady model label costs one row rebuild per frame.
+/// The label goes into the gauge row as one span. Placed one character at a
+/// time, it showed as one span per character, and each of those placements
+/// rebuilt the whole row on every frame.
+#[test]
+fn the_model_label_goes_into_the_row_as_one_span() {
+    tc(|| {
+        let mut f = Bus::new();
+        f.ready("real", &[0], Some(20.0))
+            .loading("next", &[1], Some(0.5));
+        let (mut a, b) = arcade();
+        let (mut q, _) = arcade();
+        step(&mut a, &b, &f.view(5 * SEC));
+        q.update(&b);
+        let (fa, fq) = (a.render(&b), q.render(&b));
+        let spans: Vec<&str> = fa[GAUGE_ROW]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(spans.contains(&"real ready 20t/s"), "{spans:?}");
+        assert!(spans.contains(&"next loading 50%"), "{spans:?}");
+        // The two labels add at most two spans each around them (the cut
+        // ends of the span they land in) and the gauge's own splits.
+        assert!(
+            spans.len() <= fq[GAUGE_ROW].spans.len() + 12,
+            "{} spans: {spans:?}",
+            spans.len()
+        );
+        // The row keeps its width.
+        assert_eq!(
+            UnicodeWidthStr::width(row_text(&fa, GAUGE_ROW).as_str()),
+            UnicodeWidthStr::width(row_text(&fq, GAUGE_ROW).as_str())
+        );
+    })
+}
+
+/// `splice_str` replaces exactly the columns the text covers, across span
+/// boundaries and around a wide glyph, and keeps every other cell's style.
+#[test]
+fn splice_str_replaces_the_columns_the_text_covers() {
+    use crate::animation::arcade_bus::splice_str;
+    let red = Style::default().fg(Color::Red);
+    let blue = Style::default().fg(Color::Blue);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("abc", red),
+        Span::styled("d✦ef", blue),
+    ])];
+    // Columns: a0 b1 c2 d3 ✦4 e5 f6 (✦ is one column wide).
+    splice_str(&mut lines, 0, 2, "XYZ", Style::default());
+    let got: Vec<(String, Style)> = lines[0]
+        .spans
+        .iter()
+        .map(|s| (s.content.to_string(), s.style))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("ab".to_string(), red),
+            ("XYZ".to_string(), Style::default()),
+            ("ef".to_string(), blue),
+        ]
+    );
+
+    // A wide glyph cut by the text's edges leaves spaces for its halves.
+    let mut lines = vec![Line::from("a漢b漢c")];
+    // Columns: a0 漢1-2 b3 漢4-5 c6. "XY" covers columns 2 and 3.
+    splice_str(&mut lines, 0, 2, "XY", Style::default());
+    let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(text, "a XY漢c");
+
+    // Past the end of the row: padded with spaces.
+    let mut lines = vec![Line::from("ab")];
+    splice_str(&mut lines, 0, 4, "Z", Style::default());
+    let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(text, "ab  Z");
+
+    // A row that does not exist: nothing happens.
+    splice_str(&mut lines, 5, 0, "Z", Style::default());
+}
+
 #[test]
 fn the_frame_path_never_reads_the_world() {
     tc(|| {

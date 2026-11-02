@@ -594,11 +594,84 @@ fn draw_label(
     let style = Style::default()
         .fg(colors::rgb(flag.colour[0], flag.colour[1], flag.colour[2]))
         .add_modifier(Modifier::BOLD);
-    let mut col = end - UnicodeWidthStr::width(text.as_str());
-    for ch in text.chars() {
-        crate::animation::ArcadeVisualization::splice_char(lines, stage.gauge_row, col, ch, style);
-        col += ch.width().unwrap_or(1);
+    // One span for the whole label: the row is rebuilt once per frame.
+    let col = end - UnicodeWidthStr::width(text.as_str());
+    splice_str(lines, stage.gauge_row, col, text, style);
+}
+
+/// Write `text` in `style` over row `row` from display column `col`, as one
+/// span, keeping every other cell and its style. The row is rebuilt once,
+/// whatever the text's length. A wide character that `text` covers only in
+/// part leaves a space for its other half, so later columns do not move. A
+/// row shorter than `col` is padded with spaces; a row that does not exist
+/// is left alone.
+pub(crate) fn splice_str(
+    lines: &mut [Line<'static>],
+    row: usize,
+    col: usize,
+    text: &str,
+    style: Style,
+) {
+    let Some(line) = lines.get_mut(row) else {
+        return;
+    };
+    let end = col + UnicodeWidthStr::width(text);
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 3);
+    let mut at = 0usize;
+    let mut placed = false;
+    for span in std::mem::take(&mut line.spans) {
+        let w = UnicodeWidthStr::width(span.content.as_ref());
+        if at + w <= col || at >= end {
+            // Wholly before or after the text.
+            if at >= end && !placed {
+                out.push(Span::styled(text.to_string(), style));
+                placed = true;
+            }
+            at += w;
+            out.push(span);
+            continue;
+        }
+        // The span meets the text: keep what lies before and after it.
+        let mut before = String::new();
+        let mut after = String::new();
+        for ch in span.content.chars() {
+            let cw = ch.width().unwrap_or(1);
+            let (lo, hi) = (at, at + cw);
+            if hi <= col {
+                before.push(ch);
+            } else if lo >= end {
+                after.push(ch);
+            } else {
+                // Covered, or cut by an edge: the uncovered columns of a
+                // cut wide character become spaces.
+                for c in lo..hi {
+                    if c < col {
+                        before.push(' ');
+                    } else if c >= end {
+                        after.push(' ');
+                    }
+                }
+            }
+            at = hi;
+        }
+        if !before.is_empty() {
+            out.push(Span::styled(before, span.style));
+        }
+        if !placed {
+            out.push(Span::styled(text.to_string(), style));
+            placed = true;
+        }
+        if !after.is_empty() {
+            out.push(Span::styled(after, span.style));
+        }
     }
+    if !placed {
+        if at < col {
+            out.push(Span::raw(" ".repeat(col - at)));
+        }
+        out.push(Span::styled(text.to_string(), style));
+    }
+    line.spans = out;
 }
 
 /// A particle rising in the sky rows of the slot `cols`.
