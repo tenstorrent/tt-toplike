@@ -266,6 +266,11 @@ struct State {
     window: VecDeque<Record>,
     reducer: Box<dyn Reducer>,
     dropped_non_finite: u64,
+    /// The lowest sequence number a read may return after a late lock moved
+    /// the head forward. Numbers below it were assigned before the jump:
+    /// the window no longer holds them and the disk holds other records
+    /// under the same numbers, so a read there is refused.
+    floor: u64,
     /// Queue to the disk writer. `None` with no log directory, and after the
     /// last `Bus` handle is dropped (that disconnect stops the writer).
     tx: Option<SyncSender<Msg>>,
@@ -510,6 +515,7 @@ impl Bus {
                 window: VecDeque::new(),
                 reducer,
                 dropped_non_finite: 0,
+                floor: 0,
                 tx,
             }),
             cond: Condvar::new(),
@@ -556,6 +562,10 @@ impl Bus {
             let skip = d.skip_to.swap(0, Ordering::SeqCst);
             if skip > st.head {
                 st.head = skip;
+                // The window holds numbers on the other side of the jump;
+                // `copy_window` indexes by offset, so it must not span it.
+                st.window.clear();
+                st.floor = skip + 1;
             }
             if d.gap_pending.swap(false, Ordering::SeqCst) {
                 let reason = lock(&d.reason).clone();
@@ -725,6 +735,9 @@ impl Inner {
             let st = lock(&self.state);
             if seq > st.head + 1 {
                 return Err(ReadError::Future { head: st.head });
+            }
+            if seq < st.floor {
+                return Err(ReadError::Dropped { oldest: st.floor });
             }
             let mem_oldest = st.window.front().map_or(st.head + 1, |r| r.seq);
             if seq >= mem_oldest {
@@ -2379,6 +2392,68 @@ mod tests {
         for r in crate::Replay::open(&log).unwrap().records() {
             assert!(seen.insert(r.seq), "sequence {} twice on disk", r.seq);
         }
+    }
+
+    /// After a late lock moves the head forward, the in-memory window must
+    /// not answer a read with records whose numbers differ from the ones
+    /// asked for. Before the fix `copy_window` indexed by `seq - front.seq`
+    /// across the jump and returned the wrong records or none.
+    #[test]
+    fn reads_across_a_late_lock_jump_never_return_the_wrong_records() {
+        let root = TempDir::new("lateread");
+        let clock = ManualClock::new(T0);
+        let other = root.path().join("other");
+        {
+            let bus = Bus::open(disk_cfg(&other, &clock)).unwrap();
+            for i in 0..50 {
+                bus.publish("t", sample(i));
+            }
+            flush(&bus);
+        }
+        let log = root.path().join("log");
+        fs::write(&log, b"not a directory").unwrap();
+        let bus = Bus::open_inner(
+            disk_cfg(&log, &clock),
+            Box::new(NoReducer),
+            fail_first_lock(),
+        )
+        .unwrap();
+        for i in 0..3 {
+            bus.publish("t", sample(i));
+        }
+        flush(&bus);
+        fs::remove_file(&log).unwrap();
+        fs::rename(&other, &log).unwrap();
+        clock.advance_secs(11);
+        for i in 0..6 {
+            bus.publish("t", sample(100 + i));
+            flush(&bus);
+        }
+        let head = bus.head();
+        assert!(head > 50, "the head jumped past the disk: {head}");
+        for s in 1..=head {
+            match bus.read_from(s, 20) {
+                Ok(recs) => {
+                    for (i, r) in recs.iter().enumerate() {
+                        assert_eq!(
+                            r.seq,
+                            s + i as u64,
+                            "read_from({s}) returned {:?}",
+                            seqs(&recs)
+                        );
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        // A reader behind the jump is told, not served the other run's records.
+        match bus.read_from(4, 10) {
+            Err(ReadError::Dropped { oldest }) => assert!(oldest > 50, "oldest {oldest}"),
+            other => panic!("a read behind the jump must be Dropped, got {other:?}"),
+        }
+        // A reader at the first number after the jump still gets records.
+        let tail = bus.read_from(head, 5).unwrap();
+        assert_eq!(seqs(&tail), vec![head]);
     }
 
     /// A disk config with `backend` and `mode` header tags.
