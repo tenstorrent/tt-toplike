@@ -331,6 +331,40 @@ impl Bus {
     }
 }
 
+/// A world read through `0` with the bus clock replaced by `1`. The
+/// attached tests read a real bus host, whose clock is the machine's: two
+/// reads more than a second apart (a loaded machine can stall that long)
+/// would count as being away and drop the events under test. A fixed clock
+/// a tick apart keeps those tests independent of timing.
+pub(crate) struct Clocked<'a>(pub(crate) &'a dyn WorldRead, pub(crate) u64);
+
+impl WorldRead for Clocked<'_> {
+    fn seq(&self) -> u64 {
+        self.0.seq()
+    }
+    fn models(&self) -> Vec<tt_toplike_bus::ModelView> {
+        self.0.models()
+    }
+    fn model_on_chip(&self, chip: &EntityKey) -> Option<tt_toplike_bus::ModelView> {
+        self.0.model_on_chip(chip)
+    }
+    fn reading(&self, entity: &EntityKey, signal: &str) -> Option<tt_toplike_bus::Reading> {
+        self.0.reading(entity, signal)
+    }
+    fn events_since(&self, seq: u64) -> Vec<(u64, Event)> {
+        self.0.events_since(seq)
+    }
+    fn reset_seq(&self, chip: &EntityKey) -> Option<u64> {
+        self.0.reset_seq(chip)
+    }
+    fn header_kind(&self) -> HeaderKind {
+        self.0.header_kind()
+    }
+    fn now_mono_ns(&self) -> u64 {
+        self.1
+    }
+}
+
 /// A field at [`W`] x [`H`] over two fixed chips.
 fn field() -> (HardwareStarfield, Fixed) {
     let backend = Fixed::new(2);
@@ -753,7 +787,8 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
         let foreign = EntityKey::chip("0000:ee:00.0");
 
         ecc(1);
-        let w = read();
+        let r = read();
+        let w = Clocked(&r, 5 * SEC + 1 * TICK);
         step(&mut a, &b, &w);
         step(&mut q, &b, &Bus::new().view(w.now_mono_ns()));
 
@@ -778,7 +813,8 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
             channel: 1,
         });
         ecc(2);
-        let w = read();
+        let r = read();
+        let w = Clocked(&r, 5 * SEC + 2 * TICK);
         step(&mut a, &b, &w);
         step(&mut q, &b, &Bus::new().view(w.now_mono_ns()));
         assert!(a.bus_fx().is_empty(), "{:?}", a.bus_fx());
@@ -793,7 +829,8 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
             model: theirs.clone(),
             n: 2,
         });
-        let w = read();
+        let r = read();
+        let w = Clocked(&r, 5 * SEC + 3 * TICK);
         step(&mut a, &b, &w);
         assert_eq!(a.bus_fx().comets.len(), 1);
         assert_eq!(a.bus_fx().chips.len(), 1);

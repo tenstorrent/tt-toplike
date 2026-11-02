@@ -74,7 +74,7 @@ fn the_frames_with_no_bus_are_the_pinned_frames() {
 
 use crate::animation::die3d::overlay::{ALARM_RED, FLASH_NS, LOAD_PURPLE, PULSE_NS};
 use crate::animation::memory_flow_bus::{EXPLAIN_TEXT, LANE_LABEL_COLS, LEGEND_TEXT};
-use crate::animation::starfield_bus::tests::{chip, row_text, Bus, SEC, TICK};
+use crate::animation::starfield_bus::tests::{chip, row_text, Bus, Clocked, SEC, TICK};
 use crate::backend::TelemetryBackend;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
@@ -532,7 +532,8 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
         };
         let theirs = EntityKey::model("theirs");
         ecc(1);
-        let w = read();
+        let r = read();
+        let w = Clocked(&r, 5 * SEC + 1 * TICK);
         step(&mut a, &b, &w);
         step(&mut q, &b, &Bus::new().view(w.now_mono_ns()));
 
@@ -557,7 +558,8 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
             channel: 1,
         });
         ecc(2);
-        let w = read();
+        let r = read();
+        let w = Clocked(&r, 5 * SEC + 2 * TICK);
         step(&mut a, &b, &w);
         step(&mut q, &b, &Bus::new().view(w.now_mono_ns()));
         assert!(a.bus_fx().is_empty(), "{:?}", a.bus_fx());
@@ -568,7 +570,8 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
             chips: vec![foreign.clone(), chip(0)],
             progress: Some(0.5),
         });
-        let w = read();
+        let r = read();
+        let w = Clocked(&r, 5 * SEC + 3 * TICK);
         step(&mut a, &b, &w);
         assert!(a.bus_fx().stream.is_some());
         assert!(row_text(&a.render(&b), MODEL_ROW).contains("theirs loading 50%"));
