@@ -44,14 +44,15 @@ fn there_are_eight_presets_with_valid_unique_names_and_a_description() {
         p.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(),
         vec![
             "classic",
+            "now-serving",
             "defrag-wide",
             "waffler",
             "workload",
             "deck",
             "skyline",
-            "memory-lane",
-            "now-serving"
-        ]
+            "memory-lane"
+        ],
+        "the user's order: now-serving right after classic"
     );
     for l in p {
         assert!(name_problem(&l.name).is_none(), "{}", l.name);
@@ -84,7 +85,7 @@ fn classic_is_the_default_layout() {
 fn the_waffler_preset_names_the_view_by_its_display_name() {
     let d = &preset("waffler").unwrap().description;
     assert!(d.contains(crate::animation::DIE3D_DISPLAY_NAME), "{d}");
-    let d = &preset("deck").unwrap().description;
+    let d = &preset("now-serving").unwrap().description;
     assert!(d.contains(crate::animation::DIE3D_DISPLAY_NAME), "{d}");
     // `no_user_facing_text_uses_the_old_die3d_name` checks that no
     // description uses the old name.
@@ -127,7 +128,7 @@ fn next_then_prev_returns_to_the_start_and_both_ends_wrap() {
     // Back from the first is the last.
     c.prev();
     assert_eq!(c.index(), n - 1);
-    assert_eq!(c.current().name, "now-serving");
+    assert_eq!(c.current().name, "memory-lane");
     // On from the last is the first.
     c.next();
     assert_eq!(c.index(), 0);
@@ -165,8 +166,15 @@ fn select_finds_a_layout_by_name() {
 fn the_status_line_names_the_layout_its_place_and_its_description() {
     let mut c = LayoutCycle::new(&[], None);
     c.next();
+    c.next();
     let d = &preset("defrag-wide").unwrap().description;
-    assert_eq!(c.status(), format!("layout: defrag-wide (2/8) — {d}"));
+    assert_eq!(c.status(), format!("layout: defrag-wide (3/8) — {d}"));
+    // A layout that sets a backdrop names it before the description.
+    c.prev();
+    assert_eq!(
+        c.status(),
+        "layout: now-serving (2/8), clouds — inference over Wafer Waffler and defrag"
+    );
     let mut c = LayoutCycle::new(
         &[NamedLayout {
             name: "bare".into(),
@@ -186,7 +194,7 @@ fn the_layout_command_steps_selects_and_lists() {
     let mut cf = BackdropSettings::default();
     let mut c = LayoutCycle::new(&[], None);
     let r = command("layout next", &mut cf, &mut c);
-    assert_eq!(c.current().name, "defrag-wide");
+    assert_eq!(c.current().name, "now-serving");
     assert!(!r.error && r.relayout);
     assert_eq!(r.message, c.status());
     let r = command("layout prev", &mut cf, &mut c);
@@ -199,17 +207,18 @@ fn the_layout_command_steps_selects_and_lists() {
     assert!(!r.relayout && !r.error);
     assert_eq!(
         r.message,
-        "layouts (now memory-lane): classic, defrag-wide, waffler, workload, deck, skyline, memory-lane, now-serving"
+        "layouts, now memory-lane (8/8):\n  classic, now-serving, defrag-wide, waffler, workload, deck, skyline,\n  memory-lane"
     );
     assert_eq!(command("layout", &mut cf, &mut c).message, r.message);
     let r = command("layout castel", &mut cf, &mut c);
     assert!(r.error && !r.relayout);
-    assert!(
-        r.message
-            .starts_with("unknown arcade layout `castel` (expected one of classic, "),
-        "{}",
-        r.message
+    assert_eq!(
+        r.message,
+        "no arcade layout `castel`; /arcade layout list names them"
     );
+    // A typed control character is shown escaped.
+    let r = command("layout a\u{1b}[2J", &mut cf, &mut c);
+    assert!(r.error && !r.message.contains('\u{1b}'), "{:?}", r.message);
     assert_eq!(
         c.current().name,
         "memory-lane",
@@ -402,22 +411,24 @@ fn a_layouts_backdrop_applies_on_selection_and_none_leaves_it() {
     let clouds = Some(BackdropKind::Clouds);
     let mut cf = BackdropSettings::default();
     let mut c = LayoutCycle::new(&[], None);
-    // classic -> ... -> memory-lane: none of them set it.
+    // Back from classic is memory-lane, then the others down to
+    // defrag-wide: none of them set it.
     for _ in 0..6 {
-        step_and_apply(&mut c, Step::Next, &mut cf);
+        step_and_apply(&mut c, Step::Prev, &mut cf);
         assert_eq!(arcade(&cf), None, "{}", c.current().name);
     }
-    step_and_apply(&mut c, Step::Next, &mut cf);
+    assert_eq!(c.current().name, "defrag-wide");
+    step_and_apply(&mut c, Step::Prev, &mut cf);
     assert_eq!(c.current().name, "now-serving");
     assert_eq!(arcade(&cf), clouds, "now-serving sets the clouds");
     // The user picks the sky (`w`); a switch to a layout with no backdrop
     // keeps that.
     cf.set("arcade", Some(BackdropKind::Sky)).unwrap();
-    step_and_apply(&mut c, Step::Next, &mut cf);
+    step_and_apply(&mut c, Step::Prev, &mut cf);
     assert_eq!(c.current().name, "classic");
     assert_eq!(arcade(&cf), Some(BackdropKind::Sky));
     // Back to now-serving applies its backdrop again, by key and by command.
-    step_and_apply(&mut c, Step::Prev, &mut cf);
+    step_and_apply(&mut c, Step::Next, &mut cf);
     assert_eq!(arcade(&cf), clouds);
     cf.set("arcade", None).unwrap();
     command("layout classic", &mut cf, &mut c);
@@ -426,9 +437,9 @@ fn a_layouts_backdrop_applies_on_selection_and_none_leaves_it() {
     assert!(r.relayout);
     assert_eq!(arcade(&cf), clouds);
     cf.set("arcade", None).unwrap();
-    command("layout prev", &mut cf, &mut c);
     command("layout next", &mut cf, &mut c);
-    assert_eq!(arcade(&cf), clouds, "next to now-serving");
+    command("layout prev", &mut cf, &mut c);
+    assert_eq!(arcade(&cf), clouds, "prev to now-serving");
     // A layout that turns it off.
     let off = NamedLayout {
         backdrop: Some(None),
@@ -455,4 +466,39 @@ fn the_c_key_turns_the_layouts_backdrop_on_and_off() {
         ..named("dark", flow_only())
     };
     assert_eq!(toggled_backdrop(&off, None), Some(BackdropKind::Scene));
+}
+
+/// Every built-in layout's status line fits an 80-column status bar
+/// whole (S2 of the review), and a long user description is cut with `…`.
+#[test]
+fn every_status_line_fits_80_columns() {
+    let mut c = LayoutCycle::new(&[], None);
+    for _ in 0..c.len() {
+        let s = c.status();
+        assert!(
+            s.chars().count() <= STATUS_MAX,
+            "{s}: {}",
+            s.chars().count()
+        );
+        assert!(!s.ends_with('…'), "{s}");
+        assert!(s.contains(&c.current().description), "{s}");
+        c.next();
+    }
+    let long = NamedLayout {
+        name: "n".repeat(MAX_NAME),
+        description: "d".repeat(MAX_DESCRIPTION),
+        rows: flow_only(),
+        backdrop: Some(Some(BackdropKind::Clouds)),
+    };
+    let c = LayoutCycle::new(&[long], None);
+    let s = c.status();
+    assert_eq!(s.chars().count(), STATUS_MAX, "{s}");
+    assert!(s.ends_with('…') && s.contains(", clouds — "), "{s}");
+    // The list and the usage are lines of at most 78 characters.
+    let c = LayoutCycle::new(&[], None);
+    for text in [c.wrapped_names(), USAGE.to_string()] {
+        for line in text.lines() {
+            assert!(line.chars().count() <= STATUS_MAX, "{line}");
+        }
+    }
 }

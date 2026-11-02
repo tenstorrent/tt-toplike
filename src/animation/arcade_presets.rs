@@ -101,15 +101,40 @@ pub fn presets() -> &'static [NamedLayout] {
             rows,
             backdrop: None,
         };
+        // The cycle order. The user asked for `now-serving` right after
+        // `classic` "for now": the set of defaults is still being thought
+        // through, so the order lives here and nowhere else.
         vec![
             named(
                 "classic",
-                "starfield; castle and defrag; flow. The arcade's own layout",
+                "starfield; castle and defrag; flow (the default)",
                 arcade_layout::default_rows(),
             ),
+            // The user's words: "now serving: top: 3 wide inference
+            // server, big bottom: left: 3d cube, right: defrag", and "this is
+            // not the default" (no starfield) and "clouds should go behind
+            // the whole arcade" (the layout sets the clouds backdrop, which
+            // draws with or without an inference service). Heights 3:4
+            // keep the inference panel at its 8 rows at 80x24 with the
+            // bottom row the bigger one.
+            NamedLayout {
+                backdrop: Some(Some(crate::animation::backdrop::BackdropKind::Clouds)),
+                ..named(
+                    "now-serving",
+                    concat!(
+                        "inference over ",
+                        crate::die3d_display_name!(),
+                        " and defrag"
+                    ),
+                    vec![
+                        row(3, vec![p(Inference, 1)]),
+                        row(4, vec![p(Die3d, 1), p(Defrag, 1)]),
+                    ],
+                )
+            },
             named(
                 "defrag-wide",
-                "starfield; the castle beside a triple-wide defrag; flow",
+                "starfield; castle beside a wide defrag; flow",
                 vec![
                     row(3, vec![p(Starfield, 1)]),
                     row(4, vec![p(Castle, 1), p(Defrag, 3)]),
@@ -119,7 +144,7 @@ pub fn presets() -> &'static [NamedLayout] {
             named(
                 "waffler",
                 concat!(
-                    "starfield; the castle beside a large ",
+                    "starfield; castle beside a big ",
                     crate::die3d_display_name!(),
                     "; flow"
                 ),
@@ -131,7 +156,7 @@ pub fn presets() -> &'static [NamedLayout] {
             ),
             named(
                 "workload",
-                "training and inference over defrag: what the box is doing",
+                "training and inference over defrag",
                 vec![
                     row(2, vec![p(Training, 1), p(Inference, 1)]),
                     row(1, vec![p(Defrag, 1)]),
@@ -139,11 +164,7 @@ pub fn presets() -> &'static [NamedLayout] {
             ),
             named(
                 "deck",
-                concat!(
-                    "every view: starfield; castle, defrag, ",
-                    crate::die3d_display_name!(),
-                    "; flow, training, inference"
-                ),
+                "all seven views; best at 120x40 and up",
                 vec![
                     row(2, vec![p(Starfield, 1)]),
                     row(4, vec![p(Castle, 1), p(Defrag, 1), p(Die3d, 1)]),
@@ -157,34 +178,12 @@ pub fn presets() -> &'static [NamedLayout] {
             ),
             named(
                 "memory-lane",
-                "memory only: a big flow over a small castle and a wide defrag",
+                "memory only: flow over castle and a wide defrag",
                 vec![
                     row(3, vec![p(Flow, 1)]),
                     row(2, vec![p(Castle, 1), p(Defrag, 3)]),
                 ],
             ),
-            // The user's words: "now serving: top: 3 wide inference
-            // server, big bottom: left: 3d cube, right: defrag", and "this is
-            // not the default" (no starfield) and "clouds should go behind
-            // the whole arcade" (the layout sets the clouds backdrop,
-            // which draws with or without an inference service).
-            // Heights 3:4 keep the inference panel at its 8 rows at 80x24
-            // with the bottom row the bigger one.
-            NamedLayout {
-                backdrop: Some(Some(crate::animation::backdrop::BackdropKind::Clouds)),
-                ..named(
-                    "now-serving",
-                    concat!(
-                        "the inference server across the top; ",
-                        crate::die3d_display_name!(),
-                        " beside defrag; clouds on"
-                    ),
-                    vec![
-                        row(3, vec![p(Inference, 1)]),
-                        row(4, vec![p(Die3d, 1), p(Defrag, 1)]),
-                    ],
-                )
-            },
         ]
     });
     &PRESETS
@@ -281,22 +280,54 @@ impl LayoutCycle {
     }
 
     /// The status line for the layout on screen:
-    /// `layout: <name> (<i>/<n>) — <description>`, without the dash and the
-    /// description when it has none.
+    /// `layout: <name> (<i>/<n>), <backdrop> — <description>`. The backdrop
+    /// part is there only for a layout that sets one, and the dash only
+    /// with a description. The line is at most [`STATUS_MAX`] characters,
+    /// so it fits an 80-column status bar with its two-column indent: the
+    /// name, the place and the backdrop come first, and a description that
+    /// does not fit is cut with `…`.
     pub fn status(&self) -> String {
         let l = self.current();
-        let head = format!("layout: {} ({}/{})", l.name, self.index + 1, self.len());
-        if l.description.is_empty() {
-            head
-        } else {
-            format!("{head} — {}", l.description)
+        let mut line = format!("layout: {} ({}/{})", l.name, self.index + 1, self.len());
+        if let Some(c) = l.backdrop {
+            match c {
+                Some(k) => line.push_str(&format!(", {}", k.name())),
+                None => line.push_str(", backdrop off"),
+            }
         }
+        if !l.description.is_empty() {
+            line.push_str(" — ");
+            line.push_str(&l.description);
+        }
+        cut(&line, STATUS_MAX)
     }
 
-    /// The message for an unknown layout name.
+    /// The names of every layout, in cycle order, wrapped to lines of at
+    /// most [`STATUS_MAX`] characters, each indented by two spaces.
+    pub fn wrapped_names(&self) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        let mut cur = String::from(" ");
+        for (i, l) in self.layouts.iter().enumerate() {
+            let word = if i + 1 < self.layouts.len() {
+                format!(" {},", l.name)
+            } else {
+                format!(" {}", l.name)
+            };
+            if cur.chars().count() + word.chars().count() > STATUS_MAX && cur.trim() != "" {
+                lines.push(cur);
+                cur = String::from(" ");
+            }
+            cur.push_str(&word);
+        }
+        lines.push(cur);
+        lines.join("\n")
+    }
+
+    /// The message for an unknown layout name, for the config report.
     pub fn unknown(&self, name: &str) -> String {
         format!(
-            "unknown arcade layout `{name}` (expected one of {})",
+            "unknown arcade layout `{}` (expected one of {})",
+            shown(name),
             self.names()
         )
     }
@@ -311,8 +342,28 @@ pub struct Reply {
     pub relayout: bool,
 }
 
-/// The usage line for `/arcade`.
-pub const USAGE: &str = "/arcade layout next|prev|<name>|list   switch the arcade's layout ({ and } step);   /arcade cloudfield on|off   the old name for /backdrop scene|off in the arcade";
+/// The longest status-line message this module gives, in characters: an
+/// 80-column status bar less its two-column indent.
+pub const STATUS_MAX: usize = 78;
+
+/// `text` cut to `max` characters, with `…` as the last one when cut.
+fn cut(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// A name a person typed, as it can be shown: control characters escaped
+/// and cut to 40 characters, so a message cannot carry a terminal escape.
+pub fn shown(name: &str) -> String {
+    cut(&name.escape_debug().to_string(), 40)
+}
+
+/// The usage text for `/arcade`, one line per verb.
+pub const USAGE: &str = "/arcade layout next|prev|<name>|list   switch the layout ({ } step)\n/arcade cloudfield on|off   the old name for /backdrop scene|off here";
 
 /// The view name the arcade's backdrop setting is kept under.
 const ARCADE: &str = "arcade";
@@ -356,7 +407,13 @@ pub fn command(
     };
     match (words.next(), words.next()) {
         (None, _) | (Some("list"), None) => reply(
-            format!("layouts (now {}): {}", cycle.current().name, cycle.names()),
+            format!(
+                "layouts, now {} ({}/{}):\n{}",
+                cycle.current().name,
+                cycle.index() + 1,
+                cycle.len(),
+                cycle.wrapped_names()
+            ),
             false,
             false,
         ),
@@ -367,7 +424,14 @@ pub fn command(
                 apply_backdrop(cycle.current(), settings);
                 reply(cycle.status(), false, true)
             } else {
-                reply(cycle.unknown(name), true, false)
+                reply(
+                    format!(
+                        "no arcade layout `{}`; /arcade layout list names them",
+                        shown(name)
+                    ),
+                    true,
+                    false,
+                )
             }
         }
         (Some(_), Some(_)) => reply(USAGE.to_string(), true, false),

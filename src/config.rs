@@ -227,11 +227,23 @@ pub fn write_check_report(loaded: &LoadedConfig, out: &mut dyn std::io::Write) -
             if a.rows.len() == 1 { "" } else { "s" },
             if a.cloudfield { "on" } else { "off" }
         )?;
-        // Every layout `{` and `}` step through, with its rows.
+        // Every layout `{` and `}` step through, with its rows, after the
+        // one the arcade starts with (it may set another backdrop than the
+        // line above says).
         let cycle = crate::animation::arcade_presets::LayoutCycle::new(
             &loaded.layouts,
             loaded.start_layout.as_deref(),
         );
+        let start = cycle.current();
+        match start.backdrop {
+            Some(c) => writeln!(
+                out,
+                "arcade starts with {}, backdrop {}",
+                start.name,
+                crate::animation::backdrop::choice_name(c)
+            )?,
+            None => writeln!(out, "arcade starts with {}", start.name)?,
+        }
         writeln!(
             out,
             "layouts, in the order }} steps through them (* starts):"
@@ -841,10 +853,15 @@ fn parse_layouts(
                     } else {
                         None
                     };
-                    names.push(name.to_string());
                     match problem {
                         Some(p) => {
-                            probs.push((v.span(), format!("layout {n}: the name `{name}` {p}")));
+                            probs.push((
+                                v.span(),
+                                format!(
+                                    "layout {n}: the name `{}` {p}",
+                                    crate::animation::arcade_presets::shown(name)
+                                ),
+                            ));
                             None
                         }
                         None => Some(name.to_string()),
@@ -872,7 +889,7 @@ fn parse_layouts(
                                 "{ctx}: the description is longer than {MAX_DESCRIPTION} characters"
                             ),
                         ));
-                    } else if d.chars().any(char::is_control) {
+                    } else if d.chars().any(|c| c.is_control() || is_format_char(c)) {
                         probs.push((
                             v.span(),
                             format!("{ctx}: the description has a control character"),
@@ -949,6 +966,7 @@ fn parse_layouts(
         };
         if probs.len() == before {
             if let (Some(name), Some(rows)) = (name, rows) {
+                let name_kept = name.clone();
                 out.push(NamedLayout {
                     name,
                     description,
@@ -956,10 +974,31 @@ fn parse_layouts(
                     backdrop,
                 });
                 notes.extend(cloudfield_note);
+                // Only a kept layout takes its name, so a broken layout
+                // cannot make a good one with the same name a duplicate.
+                names.push(name_kept);
             }
         }
     }
     out
+}
+
+/// Whether `c` is an invisible format character (Unicode category Cf),
+/// such as a bidirectional override, which can make a description show
+/// text in another order than it is written.
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+    )
 }
 
 /// A table and where it is.
@@ -2317,7 +2356,7 @@ panels = [{ view = "starfield" }]
             ),
             (
                 "[arcade]\nlayout = \"nope\"\n",
-                "c.toml:2: unknown arcade layout `nope` (expected one of classic, defrag-wide, waffler, workload, deck, skyline, memory-lane, now-serving); the arcade starts with `classic`",
+                "c.toml:2: unknown arcade layout `nope` (expected one of classic, now-serving, defrag-wide, waffler, workload, deck, skyline, memory-lane); the arcade starts with `classic`",
             ),
         ];
         for (text, want) in cases {
@@ -2391,6 +2430,17 @@ panels = [{ view = "starfield" }]
         let mut out = Vec::new();
         assert_eq!(write_check_report(&l, &mut out), 0);
         let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("\narcade starts with tall\n"), "{out}");
+        // With a start layout that sets a backdrop, the line says so.
+        let mut ns = load(&[]);
+        choose_layout(&mut ns, Some("now-serving"));
+        let mut o = Vec::new();
+        write_check_report(&ns, &mut o);
+        let o = String::from_utf8(o).unwrap();
+        assert!(
+            o.contains("\narcade starts with now-serving, backdrop clouds\n"),
+            "{o}"
+        );
         assert!(
             out.contains("layouts, in the order } steps through them (* starts):"),
             "{out}"

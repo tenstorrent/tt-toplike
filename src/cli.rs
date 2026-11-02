@@ -256,13 +256,13 @@ pub struct Cli {
 
     /// Start the arcade with the layout NAME.
     ///
-    /// A built-in layout (classic, defrag-wide, waffler, workload, deck,
-    /// skyline, memory-lane, now-serving) or one from the config file (`config` for its
+    /// A built-in layout (classic, now-serving, defrag-wide, waffler,
+    /// workload, deck, skyline, memory-lane) or one from the config file (`config` for its
     /// `[[arcade.row]]` tables, or the name of an `[[arcade.layouts]]`
     /// table). Wins over `[arcade] layout` in the config. An unknown name is
     /// reported on the status line and the arcade starts with the first
-    /// layout. A layout can turn the cloudfield on when it is selected
-    /// (now-serving does). In the arcade, `}` and `{` step to the next and previous
+    /// layout. A layout can set the arcade's backdrop when it is selected
+    /// (now-serving sets the clouds). In the arcade, `}` and `{` step to the next and previous
     /// layout, and `/arcade layout next|prev|<name>|list` does the same from
     /// the command bar. See docs/arcade-layout.md.
     #[arg(long, value_name = "NAME")]

@@ -258,6 +258,71 @@ fn arcade_step_for(mode: DisplayMode, c: char) -> Option<crate::animation::arcad
     }
 }
 
+/// What asks the arcade to change its layout: the `{` or `}` key, or the
+/// argument of an `/arcade` command.
+#[derive(Debug, Clone, Copy)]
+enum ArcadeInput<'a> {
+    Key(char),
+    Command(&'a str),
+}
+
+/// The arcade's state that `{`, `}` and `/arcade` change, as `run_app`
+/// holds it.
+struct ArcadeSwitch<'a> {
+    arcade: &'a mut Option<ArcadeVisualization>,
+    config: &'a mut crate::animation::arcade_layout::ArcadeConfig,
+    cycle: &'a mut crate::animation::arcade_presets::LayoutCycle,
+    settings: &'a mut crate::animation::backdrop::BackdropSettings,
+}
+
+/// The body of the `{` `}` key arm and of `/arcade`: step or select the
+/// layout, apply its backdrop, and lay the arcade out again. Returns the
+/// status-line message and whether it is an error, or `None` for a key
+/// that is not a layout key in `mode`.
+///
+/// After a relayout the new arcade gets one update from the state it
+/// carried over (services, training run, devices) before it is drawn, as
+/// a resize builds and updates in one tick. Without it, the first frame
+/// after a switch shows "no Tenstorrent device found" and "0 of 0 models"
+/// in the new panels.
+fn arcade_switch(
+    input: ArcadeInput<'_>,
+    mode: DisplayMode,
+    s: ArcadeSwitch<'_>,
+    backend: &dyn TelemetryBackend,
+) -> Option<(String, bool)> {
+    use crate::animation::arcade_presets as presets;
+    let (message, error, relayout) = match input {
+        ArcadeInput::Key(c) => {
+            let step = arcade_step_for(mode, c)?;
+            (
+                presets::step_and_apply(s.cycle, step, s.settings),
+                false,
+                true,
+            )
+        }
+        ArcadeInput::Command(arg) => {
+            let r = presets::command(arg, s.settings, s.cycle);
+            (r.message, r.error, r.relayout)
+        }
+    };
+    if relayout {
+        s.config.rows = s.cycle.current().rows.clone();
+        let config = &*s.config;
+        *s.arcade = s.arcade.take().map(|a| {
+            let (w, h) = (a.width(), a.height());
+            a.relayout(w, h, config, backend)
+        });
+    }
+    if let Some(a) = s.arcade.as_mut() {
+        a.set_backdrop(s.settings.choice("arcade"));
+        if relayout {
+            a.update(backend);
+        }
+    }
+    Some((message, error))
+}
+
 /// The Die 3D pan key `code` stands for in `mode`: an arrow key in the Die 3D
 /// view, `None` anywhere else so the arrows keep their other uses.
 fn die3d_pan_for(mode: DisplayMode, code: KeyCode) -> Option<crate::animation::die3d::Die3dKey> {
@@ -2659,24 +2724,17 @@ fn run_app(
                                         .split_once(char::is_whitespace)
                                         .map(|(_, rest)| rest)
                                         .unwrap_or("");
-                                    let reply = crate::animation::arcade_presets::command(
-                                        arg,
-                                        &mut backdrop_settings,
-                                        &mut arcade_cycle,
+                                    cmd_message = arcade_switch(
+                                        ArcadeInput::Command(arg),
+                                        display_mode,
+                                        ArcadeSwitch {
+                                            arcade: &mut arcade,
+                                            config: &mut arcade_config,
+                                            cycle: &mut arcade_cycle,
+                                            settings: &mut backdrop_settings,
+                                        },
+                                        backend.as_ref(),
                                     );
-                                    if reply.relayout {
-                                        arcade_config.rows = arcade_cycle.current().rows.clone();
-                                        arcade = arcade.take().map(|a| {
-                                            let (w, h) = (a.width(), a.height());
-                                            a.relayout(w, h, &arcade_config, backend.as_ref())
-                                        });
-                                    }
-                                    // After the relayout, which keeps the old
-                                    // setting: the layout's own may differ.
-                                    if let Some(arc) = arcade.as_mut() {
-                                        arc.set_backdrop(backdrop_settings.choice("arcade"));
-                                    }
-                                    cmd_message = Some((reply.message, reply.error));
                                     force_redraw = true;
                                 } else if verb == "backdrop" {
                                     // `/backdrop [off|scene|sky|clouds]` for the view
@@ -3113,24 +3171,17 @@ fn run_app(
                             // arcade is laid out again at once, so the next
                             // draw shows the new layout.
                             KeyCode::Char(c) if arcade_step_for(display_mode, c).is_some() => {
-                                if let Some(step) = arcade_step_for(display_mode, c) {
-                                    // The new layout's own backdrop, if it has
-                                    // one, replaces the session's.
-                                    let status = crate::animation::arcade_presets::step_and_apply(
-                                        &mut arcade_cycle,
-                                        step,
-                                        &mut backdrop_settings,
-                                    );
-                                    arcade_config.rows = arcade_cycle.current().rows.clone();
-                                    arcade = arcade.take().map(|a| {
-                                        let (w, h) = (a.width(), a.height());
-                                        let mut a =
-                                            a.relayout(w, h, &arcade_config, backend.as_ref());
-                                        a.set_backdrop(backdrop_settings.choice("arcade"));
-                                        a
-                                    });
-                                    cmd_message = Some((status, false));
-                                }
+                                cmd_message = arcade_switch(
+                                    ArcadeInput::Key(c),
+                                    display_mode,
+                                    ArcadeSwitch {
+                                        arcade: &mut arcade,
+                                        config: &mut arcade_config,
+                                        cycle: &mut arcade_cycle,
+                                        settings: &mut backdrop_settings,
+                                    },
+                                    backend.as_ref(),
+                                );
                                 force_redraw = true;
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {

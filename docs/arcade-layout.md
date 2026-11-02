@@ -40,9 +40,12 @@ device. `tt-toplike --check-config --arcade-layout NAME` checks a start-up choic
 | `/arcade layout list` | names every layout on the status line (`/arcade layout` alone does too) |
 
 The keys work only while the arcade is on screen. After a switch the status line shows
-`layout: <name> (<i>/<n>) — <description>`, for example
-`layout: deck (5/7) — every view: starfield; castle, defrag, Wafer Waffler; flow, training,
-inference`.
+`layout: <name> (<i>/<n>), <backdrop> — <description>`, for example
+`layout: now-serving (2/8), clouds — inference over Wafer Waffler and defrag`. The backdrop part
+is there only for a layout that sets one (see "A layout's backdrop"). The line is at most 78
+characters, so it fits an 80-column terminal; a longer user description is cut with `…`.
+`/arcade layout list` names every layout on as many lines as it needs. The message goes away
+after about 4 seconds, and when you leave the arcade.
 
 The order is: `config` when the file has `[[arcade.row]]` tables, then the file's
 `[[arcade.layouts]]` tables in file order, then the built-in layouts in the order of the next
@@ -53,10 +56,11 @@ layout.
 
 The choice lasts until you quit. It holds across a resize, and when you leave the arcade and
 come back. A switch lays the arcade out again at the same size, as a resize does. The hero keeps
-its place and its trail, and the cloudfield setting, the power baseline, the activity lanes,
+its place and its trail, and the backdrop, the power baseline, the activity lanes,
 the duel and what the arcade has read from the bus are kept, so events seen before the switch
 make no new pulse after it. The panels start fresh: a new starfield, castle and so on, at their
-new sizes.
+new sizes. The new arcade is updated once before it is drawn, so its first frame shows the
+devices and services the old one had.
 
 ## The built-in layouts
 
@@ -87,6 +91,41 @@ every size.
 ```
 
 At 80x24: everything; the starfield is 80x7, so the lanes show. At 60x20: everything.
+
+### `now-serving`
+
+The user's words for it: "now serving: top: 3 wide inference server, big bottom: left: 3d cube,
+right: defrag", with no starfield ("this is not the default") and the clouds behind the whole
+arcade. The top row is the inference server alone, across the whole width. The bottom row is the
+bigger one (heights 3 and 4), with the Wafer Waffler on the left and defrag on the right at equal
+widths. Selecting this layout sets the arcade's backdrop to `clouds` (see "A layout's
+backdrop").
+
+```text
+║ ≈ inference
+║ · · · · · · · · · · · · · · · · · ·
+║ · · · · · · · · · · · · · · · · · ·
+╠ ◆ Wafer Waffler    │ ▓ defrag
+║ · · · · · · · · ·  │ · · · · · · · ·
+║ · · · · · · · · ·  │ · · · · · · · ·
+║ · · · · · · · · ·  │ · · · · · · · ·
+╚═════════════════════════════════════
+```
+
+At 80x24: everything (inference 80x8, Wafer Waffler 40x11, defrag 39x11). The inference panel
+needs 24x8, so it stays at any terminal of at least 24 columns and about 23 rows. At 60x20 the
+top row is 6 rows high: the inference panel is taken out and named on its rule (`◌ INFERENCE
+needs 24x8`), and its rows go to the Wafer Waffler and defrag. Heights 1 and 2 would make the
+bottom row twice as big, but the top row would then be 6 rows at 80x24 and the inference panel
+would be taken out there too.
+
+With nothing running, the inference panel shows its one-line note, ` no inference server`. The
+clouds draw anyway: they follow the PCIe traffic and chip load of this TUI's chips, so they move
+with or without an inference service (the scene, the old cloudfield, draws nothing until a
+service loads). On an idle box this layout is the note over the Wafer Waffler beside defrag,
+with dim clouds in the blank cells.
+
+It has no starfield, so it draws no activity lanes and no sparks.
 
 ### `defrag-wide`
 
@@ -120,8 +159,8 @@ A large Wafer Waffler panel beside the castle, a short starfield above and the f
 ╚═════════════════════════════════════
 ```
 
-At 80x24: everything; the Wafer Waffler panel is 47x10. At 60x20: everything; the Wafer Waffler
-panel is 35x7. Below 16x6 the Wafer Waffler panel is taken out and the castle takes the row. The
+At 80x24: everything; the Wafer Waffler panel is 47x10. At 60x20: every panel shows, and the
+Wafer Waffler panel (35x7) is clipped and says so (`clipped, needs 25x8`). Below 16x6 the Wafer Waffler panel is taken out and the castle takes the row. The
 starfield is 4 rows at 80x24, so no lanes.
 
 ### `workload`
@@ -141,12 +180,12 @@ defrag map. It has no starfield, so no lanes and no sparks.
 
 At 80x24: everything (training 40x12, inference 39x12). At 60x20: everything (training 30x10,
 inference 29x10). Below that the inference panel goes first, then training, and defrag takes
-their rows.
+their rows. With nothing running both panels are a one-line note over blank rows.
 
 ### `deck`
 
-Every view: the starfield; castle, defrag and the Wafer Waffler; flow, training and inference.
-It needs a large terminal to show everything.
+All seven views: the starfield; castle, defrag and the Wafer Waffler; flow, training and
+inference. It needs a large terminal to show them all; at 80x24 it shows five.
 
 ```text
 ║ ✧ starfield
@@ -194,39 +233,6 @@ sparks.
 
 At 80x24: everything (flow 80x11, castle 20x8, defrag 59x8). At 60x20: everything.
 
-### `now-serving`
-
-The user's words for it: "now serving: top: 3 wide inference server, big bottom: left: 3d cube,
-right: defrag", with no starfield ("this is not the default") and the clouds behind the whole
-arcade. The top row is the inference server alone, across the whole width. The bottom row is the
-bigger one (heights 3 and 4), with the Wafer Waffler on the left and defrag on the right at equal
-widths. Selecting this layout turns the cloudfield on (see "A layout's cloudfield").
-
-```text
-║ ≈ inference
-║ · · · · · · · · · · · · · · · · · ·
-║ · · · · · · · · · · · · · · · · · ·
-╠ ◆ Wafer Waffler    │ ▓ defrag
-║ · · · · · · · · ·  │ · · · · · · · ·
-║ · · · · · · · · ·  │ · · · · · · · ·
-║ · · · · · · · · ·  │ · · · · · · · ·
-╚═════════════════════════════════════
-```
-
-At 80x24: everything (inference 80x8, Wafer Waffler 40x11, defrag 39x11). The inference panel
-needs 24x8, so it stays at any terminal of at least 24 columns and about 23 rows. At 60x20 the
-top row is 6 rows high: the inference panel is taken out and named on its rule (`◌ INFERENCE
-needs 24x8`), and its rows go to the Wafer Waffler and defrag. Heights 1 and 2 would make the
-bottom row twice as big, but the top row would then be 6 rows at 80x24 and the inference panel
-would be taken out there too.
-
-With nothing running, the inference panel shows its one-line note, ` no inference server`, and
-no clouds show: the cloudfield draws only while an inference service is loading or serving. So
-on an idle box this layout is the note, then the Wafer Waffler beside defrag. The clouds come
-in when a model starts to load.
-
-It has no starfield, so it draws no activity lanes and no sparks.
-
 `each_preset_degrades_as_the_docs_say` (`src/animation/arcade_presets_tests.rs`) checks what
 each layout shows at 80x24 and 60x20.
 
@@ -243,7 +249,7 @@ layout = "big-castle"      # start with this layout (optional)
 [[arcade.layouts]]
 name = "big-castle"
 description = "the castle, large, beside the Wafer Waffler; flow below"
-cloudfield = true          # turn the cloudfield on when this layout is selected (optional)
+backdrop = "sky"           # the arcade's backdrop when this layout is selected (optional)
 
 [[arcade.layouts.row]]
 height = 3
@@ -269,16 +275,17 @@ arcade starts with `big-castle`.
 * A name is 1 to 32 characters: ASCII letters, digits, `-` and `_`. Names are unique, ignoring
   letter case. A name cannot be a built-in layout's name, `config` (kept for the
   `[[arcade.row]]` tables), or `next`, `prev` or `list` (words of `/arcade layout`).
-* A description is at most 80 characters with no control character. Without one, the status
+* A description is at most 80 characters with no control character and no invisible format
+  character (such as a right-to-left override). Without one, the status
   line shows only the name and the place.
-* `cloudfield = true` (or `false`) sets the cloudfield when the layout is selected; see "A
-  layout's cloudfield".
+* `backdrop = "off"`, `"scene"`, `"sky"` or `"clouds"` sets the arcade's backdrop when the
+  layout is selected; see "A layout's backdrop".
 * Each view can be shown once in a layout; two layouts can show the same view.
 * `[arcade] layout` names the layout to start with. Your own layouts go in
   `[[arcade.layouts]]`, with an `s`; TOML does not let one key be both.
 
 A problem in one `[[arcade.layouts]]` table drops only that layout. The other layouts, the
-`[[arcade.row]]` tables and the cloudfield still work. For `[[arcade.row]]`, `cloudfield` and
+`[[arcade.row]]` tables and `[arcade] cloudfield` still work. For `[[arcade.row]]`, `cloudfield` and
 the other keys of `[arcade]` the old rule holds: any problem there gives the default arcade with
 the cloudfield off, and no `config` layout. A start name that is not known does not count as a
 problem of `[arcade]`: the arcade starts with the first layout and everything else is used.
@@ -395,27 +402,33 @@ arcade can also draw the sky or the clouds, which follow the training step time 
 traffic and chip load.
 
 It is off by default, because the arcade has never drawn a backdrop. `w` cycles the arcade's
-backdrop like any view's, and `/backdrop` sets it. `c` (in the arcade only) and `/arcade
-cloudfield on|off` still switch the scene on or off; `/arcade cloudfield` alone flips it. The
-runtime setting lasts until you quit and holds across a resize.
+backdrop like any view's, and `/backdrop` sets it. `/arcade cloudfield on|off` still switches the
+scene on or off; `/arcade cloudfield` alone flips it. `c` (in the arcade only) turns the
+arcade's backdrop off, or back on as the layout's kind (see "A layout's backdrop"). The runtime
+setting lasts until you quit and holds across a resize and a layout switch, until a layout with
+its own backdrop is selected.
 
 The backdrop does not change the solid black canvas behind every view. That is set by
 `TT_TOPLIKE_TRANSPARENT` (any value except empty, `0` and `false` shows the terminal's own
 background).
 
-## A layout's cloudfield
+## A layout's backdrop
 
-A layout can carry its own cloudfield setting: `cloudfield = true` or `cloudfield = false` in its
-`[[arcade.layouts]]` table. `now-serving` sets it to true; the other built-in layouts have none.
-When a layout with a setting is selected (at start-up, with `{` or `}`, or with `/arcade
-layout`), the arcade's cloudfield takes that setting. A layout without one leaves the current
-setting alone. `c` and `/arcade cloudfield` still change it for the session, and the next switch
-to a layout with a setting applies that setting again. `--check-config` shows the setting under
-the layout's name as `cloudfield on when selected`.
+A layout can set the arcade's backdrop: `backdrop = "off"`, `"scene"`, `"sky"` or `"clouds"` in
+its `[[arcade.layouts]]` table. `now-serving` sets `clouds`; the other built-in layouts set none.
+When a layout with a backdrop is selected (at start-up, with `{` or `}`, or with `/arcade
+layout`), the arcade's backdrop becomes that kind. A layout without one leaves the current
+backdrop alone. `w`, `c`, `/backdrop` and `/arcade cloudfield` still change it for the session,
+and the next switch to a layout with a backdrop applies that backdrop again. `--check-config`
+shows it under the layout's name as `backdrop clouds when selected`, and says which layout the
+arcade starts with.
 
-The setting switches the existing cloudfield on or off and nothing more. A shared backdrop with
-the kinds `scene`, `sky` and `clouds` is planned to replace the cloudfield; a layout's setting is
-meant to become a backdrop kind then.
+`c` turns the arcade's backdrop off when one is drawn, and back on as the layout's own kind, or
+the scene when the layout sets none. `w` steps through every kind.
+
+The older `cloudfield = true` (or `false`) in a layout still works. It is `backdrop = "scene"`
+(or `"off"`), and `--check-config` and the status line print a note saying so. When a layout has
+both, `backdrop` wins.
 
 ## Error messages
 
@@ -447,7 +460,7 @@ read, makes the TUI ignore the whole file.
 | a view twice | ``view `flow` appears twice; each view can be shown once`` |
 | a bad cloudfield | `` `arcade.cloudfield` must be true or false `` |
 | a wrong type for an existing key | the TOML parser's message, for example `invalid type: string "high", expected f32` |
-| an unknown start layout | ``unknown arcade layout `nope` (expected one of classic, defrag-wide, waffler, workload, deck, skyline, memory-lane, now-serving); the arcade starts with `classic` `` |
+| an unknown start layout | ``unknown arcade layout `nope` (expected one of classic, now-serving, defrag-wide, waffler, workload, deck, skyline, memory-lane); the arcade starts with `classic` `` |
 | a start layout that is not a string | `` `arcade.layout` must be a layout name, such as layout = "deck" `` |
 | `[[arcade.layout]]` written for `[[arcade.layouts]]` | `` `arcade.layout` names the layout to start with, such as layout = "deck"; write your own layouts as [[arcade.layouts]] `` |
 | `arcade.layouts` is not a list of tables | `` `arcade.layouts` must be a list of layouts: [[arcade.layouts]] `` |
@@ -459,18 +472,19 @@ read, makes the TUI ignore the whole file.
 | a built-in name | ``layout 1: the name `deck` is a built-in layout; choose another`` |
 | the name `config` | ``layout 1: the name `config` is kept for the [[arcade.row]] tables`` |
 | the name `next`, `prev` or `list` | ``layout 1: the name `next` is a word of /arcade layout; choose another`` |
-| a name used twice | ``layout 2: the name `A` is used twice; each layout needs its own name`` |
-| an unknown key in a layout | ``unknown key `rows` in layout 1 (expected name, description, cloudfield or row)`` |
+| a name used twice | ``layout 2: the name `A` is used twice; each layout needs its own name`` (only a kept layout takes its name) |
+| an unknown key in a layout | ``unknown key `rows` in layout 1 (expected name, description, backdrop or row)`` |
+| a layout's backdrop that is not a kind | ``layout `a`: `backdrop` must be off, scene, sky or clouds, got "fog"`` |
 | a layout's cloudfield that is not true or false | ``layout `a`: `cloudfield` must be true or false`` |
 | a description that is not a string | ``layout `a`: `description` must be a string`` |
 | a description too long | ``layout `a`: the description is longer than 80 characters`` |
-| a control character in a description | ``layout `a`: the description has a control character`` |
+| a control or format character in a description | ``layout `a`: the description has a control character`` |
 | a layout with no rows | ``layout `a` has no rows: give it at least one [[arcade.layouts.row]]`` |
 | any row or panel problem in a layout | the message above, after the layout: ``layout `a`: row 1 is empty: give it at least one panel`` |
 | an unknown `--arcade-layout` | ``--arcade-layout: unknown arcade layout `nope` (expected one of ...); the arcade starts with `classic` `` |
 
 A layout's problems name it by its name when the name is good, and by its place (`layout 2`)
-when it is not.
+when it is not. A name is shown with control characters escaped and cut at 40 characters.
 
 Each message is prefixed with the file and, where the parser gives a position, the line:
 ``/home/me/.config/tt-toplike/config.toml:12: unknown view `castel` ...``.
