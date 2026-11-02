@@ -222,7 +222,7 @@ pub struct ArcadeFx {
     pub fresh: bool,
 }
 
-/// The phase this arcade last saw a model in, and when it changed to it
+/// The phase a view last saw a model in, and when it changed to it
 /// (`None` for the phase the model had when first seen).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct PhaseMemo {

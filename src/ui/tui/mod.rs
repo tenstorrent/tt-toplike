@@ -891,6 +891,10 @@ fn run_app(
     // once there is room and a Blackhole chip; it is hidden but kept while
     // the terminal is too small, and dropped on leaving Insights.
     let mut insights_inset: Option<crate::animation::Die3dView> = None;
+    // What the bus puts on the Grid cells and the Insights panel rules
+    // (`grid_bus`), read at the data rate.
+    let mut grid_bus = grid_bus::GridBus::default();
+    let mut insights_flags = grid_bus::ChipFlags::default();
     let mut insights_inset_started = Instant::now();
     let mut train_monitor: Option<TrainMonitor> = None;
     // Arcade's activity lanes. A training run is found by the background scan
@@ -1422,7 +1426,9 @@ fn run_app(
                 }
                 DisplayMode::Insights => {
                     // Ingestion now happens in the backend update block (runs at ~10 Hz,
-                    // not 60 FPS). Only the Die 3D inset is fed here.
+                    // not 60 FPS). The Die 3D inset and the panels' model rules are fed here.
+                    insights_flags =
+                        grid_bus::ChipFlags::from_world(&tui_bus.read(), backend.devices());
                     let rect = inset_rect_for(
                         size.width,
                         size.height,
@@ -1451,7 +1457,8 @@ fn run_app(
                     }
                 }
                 DisplayMode::Grid => {
-                    // Grid mode doesn't need special init
+                    // The bus: model text, bring-up bar, pulses, sparks, resets.
+                    grid_bus.update(&tui_bus.read(), backend.devices());
                 }
                 DisplayMode::InferenceMonitor => {
                     // Feed the unified snake a fresh view of the world; it owns
@@ -1799,6 +1806,11 @@ fn run_app(
             // The Insights inset is dropped the same way.
             if leaves_insights(prev_display_mode, display_mode) {
                 insights_inset = None;
+                insights_flags = Default::default();
+            }
+            // Grid's bus memory too, so the next entry is a first sight.
+            if prev_display_mode == DisplayMode::Grid {
+                grid_bus = Default::default();
             }
             // Any arrival at a new view — rotated to or navigated to — starts
             // its dwell fresh, so pressing a mode key never lands you on a
@@ -1950,12 +1962,20 @@ fn run_app(
                                 insights_inset.as_ref(),
                                 bus_world,
                                 insights_inset_started.elapsed().as_secs_f64(),
+                                &insights_flags,
                                 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                 &serving_metrics,
                             );
                         }
                         DisplayMode::Grid => {
                             render_grid_mode(f, backend);
+                            let area = f.area();
+                            grid_bus::draw_grid(
+                                f.buffer_mut(),
+                                area,
+                                backend.devices(),
+                                grid_bus.fx(),
+                            );
                         }
                         DisplayMode::InferenceMonitor => {
                             render_snake_view(f, &snake, &inference_roster, &inference_band);
@@ -4556,8 +4576,26 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     v
                 }
                 DisplayMode::InferenceMonitor => inference_legend_lines(bar, bg, dim),
-                DisplayMode::Insights => insights_legend_lines(bar, bg, dim),
-                DisplayMode::Grid => grid_legend_lines(bar, bg, dim),
+                DisplayMode::Insights => {
+                    let mut v = insights_legend_lines(bar, bg, dim);
+                    v.extend(grid_bus::legend_lines(
+                        grid_bus::INSIGHTS_LEGEND_TEXT,
+                        bar,
+                        bg,
+                        dim,
+                    ));
+                    v
+                }
+                DisplayMode::Grid => {
+                    let mut v = grid_legend_lines(bar, bg, dim);
+                    v.extend(grid_bus::legend_lines(
+                        grid_bus::GRID_LEGEND_TEXT,
+                        bar,
+                        bg,
+                        dim,
+                    ));
+                    v
+                }
                 DisplayMode::HivemindSweeper => hivemind_view::legend_lines(bar, bg, dim),
                 DisplayMode::Training => {
                     let mut v = train_legend_lines(bar, bg, dim);
@@ -4797,6 +4835,10 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "Animated particles in each portrait",
                     "reflect the current compute activity.",
                     "",
+                ]
+                .iter()
+                .chain(grid_bus::INSIGHTS_EXPLAIN_TEXT)
+                .chain(&[
                     "The sidebar reads the driver directly, so",
                     "power and temperature are compared against",
                     "each board's real firmware limits (a p300c",
@@ -4828,7 +4870,9 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "k = SIGTERM,  K = SIGKILL.",
                     "At 32+ devices a compact fleet heatmap",
                     "is shown — Enter to zoom in.",
-                ],
+                ])
+                .copied()
+                .collect::<Vec<&str>>(),
                 cols,
             ),
             DisplayMode::Grid => explain_lines(
@@ -4846,7 +4890,11 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "encode Tensix core temperature and power.",
                     "",
                     "Press v to continue cycling modes.",
-                ],
+                ]
+                .iter()
+                .chain(grid_bus::GRID_EXPLAIN_TEXT)
+                .copied()
+                .collect::<Vec<&str>>(),
                 cols,
             ),
             DisplayMode::InferenceMonitor => explain_lines(
@@ -6952,6 +7000,8 @@ fn render_insights(
     // The bus, for the inset's fill and pulses (`None`: none drawn).
     inset_world: Option<&dyn tt_toplike_bus::WorldRead>,
     inset_now: f64,
+    // The model on each chip, for the panels' bottom rules (`grid_bus`).
+    chip_flags: &grid_bus::ChipFlags,
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
 ) {
@@ -6972,6 +7022,7 @@ fn render_insights(
         &portrait_baseline,
         fleet_cursor,
         fleet_zoom_start,
+        chip_flags,
     );
     // With an inset and room for it, the table gives up the rect's columns.
     let inset_rect = inset.and_then(|_| insights_inset_rect(area, panel_devices));
@@ -8599,6 +8650,7 @@ fn render_device_panels(
     portrait_baseline: &crate::animation::baseline::AdaptiveBaseline,
     fleet_cursor: usize,
     fleet_zoom_start: Option<usize>,
+    chip_flags: &grid_bus::ChipFlags,
 ) {
     use crate::ui::tui::chip_portrait::{portrait_dims, render_chip_portrait, tensix_temp_rgb};
     use ratatui::style::{Color, Modifier, Style};
@@ -8788,12 +8840,17 @@ fn render_device_panels(
             );
         }
 
-        // ── Footer hairline ───────────────────────────────────────────────────
+        // ── Footer hairline (the model on the chip, from the bus, when one is) ─
+        let footer = chip_flags
+            .footer_line(idx, panel_w as usize)
+            .unwrap_or_else(|| {
+                Line::from(Span::styled(
+                    "─".repeat(panel_w as usize),
+                    Style::default().fg(Color::DarkGray),
+                ))
+            });
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "─".repeat(panel_w as usize),
-                Style::default().fg(Color::DarkGray),
-            ))),
+            Paragraph::new(footer),
             Rect {
                 x: panel_rect.x,
                 y: panel_rect.y + panel_h - 1,
@@ -11361,6 +11418,7 @@ pub fn run_render_bench(
                     None,
                     None,
                     0.0,
+                    &grid_bus::ChipFlags::default(),
                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                     &std::collections::HashMap::new(),
                 );
@@ -12832,6 +12890,7 @@ mod insights_inset_tests {
                 inset,
                 None,
                 0.0,
+                &grid_bus::ChipFlags::default(),
                 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                 &std::collections::HashMap::new(),
             );

@@ -47,7 +47,7 @@ The rule for the data is to record the full stream at the rate each source produ
 and tools read parts of it, and data that was not recorded cannot be recovered later.
 
 In this release Die 3D reads the bus (model flags, bring-up fill, request pulses, per-channel
-GDDR rows, hivemind sparks). The arcade reads it too (section 8, "The arcade on the bus"). The
+GDDR rows, hivemind sparks). The arcade reads it too (section 8, "The arcade on the bus"). So do Grid and the Insights chip panels (section 8). The
 `i` view reads it when the TUI is attached to a `--headless` host (section 8). The other views
 read what they read before.
 
@@ -836,6 +836,34 @@ time is recorded and draws nothing. The rule and its constants are Die 3D's, sha
 `src/animation/bus_intake.rs`. Attached to a headless host, only the TUI's own chips are drawn.
 With an empty world both modes draw the frames they drew before the bus; tests pin them by
 hash.
+
+### Grid and the Insights chip panels on the bus
+
+Grid (`g`) and the chip panels of the Insights screen read the bus at the data rate, in
+`src/ui/tui/grid_bus.rs`, through `TuiBus::read` (limited to local chips when attached). Grid
+draws on each chip's cell:
+
+| What | Signal | Measured, derived or decoration |
+|---|---|---|
+| The model's label on the cell's top row, after the device label, cut with `…` to fit | `model_on_chip`, `model.label` | as the source reports it |
+| The phase on the bottom rule, with progress while loading and tokens/s when they fit, `~` first for an estimate | `model.phase`, `model.progress`, `model.tokens_per_s` | as the source reports them; `~` through `model_text_is_estimated` |
+| The left bar filling purple from the bottom while a model compiles or loads | the phase and `model.progress` | the height is derived from the reported progress |
+| A purple band climbing the left bar when a loading model has no progress figure | the phase | decoration: it says the model is busy and does not say how far |
+| The left bar lit teal on a change to `Ready`, grey on a change to `Down`, fading over 2 s | the phase, against the phase Grid saw last | the phase change is read; the fade is decoration |
+| A teal light climbing the PCIe spine (`╋`) of a Blackhole portrait, or the left bar of a Wormhole one, once per event | `RequestsCompleted` for the model on the chip | the event is read; the travel and fade are decoration |
+| A `*` on one Tensix cell, in the `spark_rgb` colours (purple for a compile) | `Spark` and `KernelCompiled` naming the chip | the event is read; which cell is decoration |
+| The portrait shown reversed for 0.6 s | a new `reset_seq` for the chip | the reset is read; the flash length is decoration |
+
+The rule under each Insights chip panel names the model on that chip: label, phase, progress
+while loading, tokens/s and waiting requests, `~` first for an estimate (the same text as Die
+3D's flag). While the model compiles or loads, the dashes after the text are a progress bar,
+purple as far as the reported progress. The Die 3D inset on the Insights screen is Die 3D's
+own drawing and shows the events.
+
+Grid uses Die 3D's rule for history: events already in the world when Grid first reads it, and
+events that arrived while Grid was off screen, draw nothing. Leaving Grid clears its memory.
+Both views draw at the data rate (about ten times a second), so a pulse takes about ten frames.
+With an empty world both draw what they drew before the bus; a test pins the screens by hash.
 
 ### The `~` view (HivemindSweeper)
 
