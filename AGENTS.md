@@ -1555,6 +1555,26 @@ black out bg, can just layer on top transparently too."
   in flat bands, which cut its cost on the arcade at 200x60 from 137 to 18 changed cells a frame.
 - Docs: `docs/backdrop.md`; the bus section is in `docs/bus.md`.
 
+### Backdrop and arcade presets together (Nov 2 2026, branch `preview`)
+
+The two branches above, cherry-picked onto one branch and made one whole, then one fix wave from
+both reviews.
+- A layout's `cloudfield` became `backdrop = "off"|"scene"|"sky"|"clouds"`, applied to the
+  arcade's backdrop setting when the layout is selected; `cloudfield = true` in a layout is an
+  alias of `backdrop = "scene"` with a note. `now-serving` sets `clouds` and is second in the
+  cycle, after `classic` (the user's order "for now"; it lives in `arcade_presets::presets`).
+- `c` turns the arcade's backdrop off, or on as the layout's kind; `w` cycles the kind. Help packs
+  the global keys four to a line to fit both. Status messages from these keys go with their view
+  and after 4 s of animation time.
+- `{` `}` and `/arcade` share `arcade_switch` (mod.rs), which updates the new arcade before it is
+  drawn. The status line is at most 78 characters.
+- The shared scene steps 4 times a second with banded colours (about 74 KB/s on a blank 200x60
+  view while serving, from 1.17 MB/s); the shared clouds use the Waffler's `LoadScale`; a
+  default a view refuses leaves it off with a note; dialogs and the command bar keep the
+  backdrop out.
+- No arcade row ends in a right-side border at any width; 377 base-grid sizes changed, only in
+  their last column.
+
 ### Arcade layout presets and `{` `}` (Nov 2 2026, branch `arcade-presets`)
 
 Prompt: "can we add a variety of alternative arcade layouts to switch between. with `{` and `}`
