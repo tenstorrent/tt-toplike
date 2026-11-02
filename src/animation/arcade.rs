@@ -18,6 +18,7 @@
 //! - Trail effect showing recent positions
 //! - BOLD white character for maximum visibility
 
+use crate::animation::arcade_bus::{self, ArcadeBusState, ArcadeFx};
 use crate::animation::{
     bbs_rule, hsv_to_rgb, lerp, temp_to_hue, AdaptiveBaseline, BoardTopology, DefragVis, DuelState,
     HardwareStarfield, MemoryCastle, MemoryFlowVis,
@@ -101,6 +102,15 @@ pub struct ArcadeVisualization {
     /// Running peak of observed device power (W), floored at 1.0. Normalizes the
     /// hardware-headroom signal so the duel is sensitive on any hardware.
     power_peak: f32,
+
+    // ── Signal bus (see `arcade_bus`) ─────────────────────────────────────
+    /// What the bus puts on the arcade, as of the last `set_bus`. Empty
+    /// without a bus, and then the arcade draws what it drew before the bus.
+    bus_fx: ArcadeFx,
+    /// What `ArcadeFx::from_world` remembers between updates.
+    bus_state: ArcadeBusState,
+    /// The bus time of the last `set_bus`: the time the frames are drawn at.
+    bus_now: u64,
 }
 
 impl ArcadeVisualization {
@@ -187,6 +197,43 @@ impl ArcadeVisualization {
             last_pulse: std::collections::HashMap::new(),
             duel: DuelState::new(),
             power_peak: 1.0,
+            bus_fx: ArcadeFx::default(),
+            bus_state: ArcadeBusState::default(),
+            bus_now: 0,
+        }
+    }
+
+    /// Hand the arcade the signal bus's world (`TuiBus::read`), once per
+    /// update, before `update`. It works out what the bus puts on the arcade
+    /// (see `arcade_bus`): bring-up gauges and model labels, request hits,
+    /// the hero's heartbeat from tokens per second, spark and compile
+    /// particles, and reset flashes. Only `backend`'s chips are drawn on.
+    /// With `None` the arcade draws what it drew before the bus, and the next
+    /// world is read as a first sight.
+    pub fn set_bus(
+        &mut self,
+        world: Option<&dyn tt_toplike_bus::WorldRead>,
+        backend: &dyn TelemetryBackend,
+    ) {
+        match world {
+            Some(w) => {
+                let devices = backend.devices();
+                // The bus names a chip by its PCI address, never by position.
+                let chips: Vec<(usize, tt_toplike_bus::EntityKey)> = devices
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, d)| !d.bus_id.is_empty())
+                    .map(|(slot, d)| (slot, tt_toplike_bus::EntityKey::chip(&d.bus_id)))
+                    .collect();
+                let now = w.now_mono_ns();
+                self.bus_fx =
+                    ArcadeFx::from_world(w, &chips, devices.len(), now, &mut self.bus_state);
+                self.bus_now = now;
+            }
+            None => {
+                self.bus_fx = ArcadeFx::default();
+                self.bus_state = ArcadeBusState::default();
+            }
         }
     }
 
@@ -623,13 +670,16 @@ impl ArcadeVisualization {
         // serve blends token throughput (weighted 0.7) with queue depth (0.3);
         // snake_lunge fires when a request actually completed this tick; kv is
         // the KV-cache usage that colors the snake's heat.
+        // Requests the bus saw complete since the last update also make the
+        // snake lunge: an attached host's stats carry no completion delta.
+        let bus_requests = std::mem::take(&mut self.bus_fx.new_requests);
         let (serve, snake_lunge, kv) = match self.serving {
             Some(s) => {
                 let tps = (s.generation_tps / 200.0).min(1.0);
                 let load = ((s.requests_running + s.requests_waiting) as f32 / 8.0).min(1.0);
                 (
                     0.7 * tps + 0.3 * load,
-                    s.completed_delta > 0,
+                    s.completed_delta > 0 || bus_requests > 0,
                     s.kv_cache_usage,
                 )
             }
@@ -749,6 +799,10 @@ impl ArcadeVisualization {
             lines.push(line);
         }
 
+        // The bus effects (see `arcade_bus`), under the hero and the lanes.
+        // With no bus this does nothing.
+        self.draw_bus(&mut lines);
+
         // Overlay hero character and trail on the composite canvas, then lay
         // the activity lanes over the first starfield rows so nothing covers
         // them. With no activities `lane_rows()` is 0 and this does nothing.
@@ -764,6 +818,26 @@ impl ArcadeVisualization {
             }
         }
         lines
+    }
+
+    /// Draw the bus effects at the bus time of the last `set_bus`.
+    fn draw_bus(&self, lines: &mut [Line<'static>]) {
+        if self.bus_fx.is_empty() {
+            return;
+        }
+        // Header (0), Row 1 (1), the starfield separator (2), then the
+        // starfield rows, the first of them under the lanes.
+        let sky_rows = self.starfield_end - self.starfield_start;
+        let lanes = self.lane_rows();
+        let stage = arcade_bus::Stage {
+            width: self.width,
+            gauge_row: 2,
+            label_cols: UnicodeWidthStr::width("╔══[ ✧ STARFIELD ]"),
+            sky: (3 + lanes)..(3 + sky_rows),
+            hero: (self.hero_x, self.hero_y),
+            top_row: self.lanes_end_row(),
+        };
+        arcade_bus::draw(&self.bus_fx, self.bus_now, &stage, lines);
     }
 
     /// Build the single shared per-device telemetry strip.
@@ -1010,7 +1084,13 @@ impl ArcadeVisualization {
     /// Replace the character at display column `col` in `lines[row]` without
     /// disturbing the rest of the row's spans.  Works span-by-span so the
     /// surrounding colors (defrag blocks, castle particles, etc.) are untouched.
-    fn splice_char(lines: &mut Vec<Line<'static>>, row: usize, col: usize, ch: char, style: Style) {
+    pub(crate) fn splice_char(
+        lines: &mut [Line<'static>],
+        row: usize,
+        col: usize,
+        ch: char,
+        style: Style,
+    ) {
         if row >= lines.len() {
             return;
         }
@@ -1167,7 +1247,9 @@ impl ArcadeVisualization {
         } else if self.hero_arc_stalled {
             (10u32, 0.40_f32) // very fast strobe — "something is wrong"
         } else {
-            (60u32, 0.15_f32) // gentle heartbeat
+            // Gentle heartbeat, faster while the bus reports tokens per
+            // second (60 frames without one, as before the bus).
+            (self.bus_fx.heartbeat_frames(), 0.15_f32)
         };
         let pulse =
             ((self.frame % pulse_period) as f32 / pulse_period as f32 * std::f32::consts::PI * 2.0)

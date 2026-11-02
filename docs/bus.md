@@ -47,8 +47,9 @@ The rule for the data is to record the full stream at the rate each source produ
 and tools read parts of it, and data that was not recorded cannot be recovered later.
 
 In this release Die 3D reads the bus (model flags, bring-up fill, request pulses, per-channel
-GDDR rows, hivemind sparks). The `i` view reads it when the TUI is attached to a `--headless`
-host (section 8). The other views read what they read before.
+GDDR rows, hivemind sparks). The arcade reads it too (section 8, "The arcade on the bus"). The
+`i` view reads it when the TUI is attached to a `--headless` host (section 8). The other views
+read what they read before.
 
 ```
   sources                         the bus                       readers
@@ -702,6 +703,34 @@ A real host's model is marked while it compiles or loads with a progress figure.
 The `i` view keeps the local monitor when the TUI hosts its own bus. Section 13 lists what an
 attached `i` view does not show.
 
+### The arcade on the bus
+
+The arcade (`a`) reads the bus on every update, as Die 3D does, through `ArcadeFx::from_world`
+(`src/animation/arcade_bus.rs`). Each device gets an equal share of the screen's width, in
+device order, and the arcade draws only on the TUI's own chips. It draws:
+
+| What | Signal | Measured, derived or decoration |
+|---|---|---|
+| A gauge on the `✧ STARFIELD` rule, purple from the left of the chip's share, while a model compiles or loads | `model_on_chip`, the model's phase and `model.progress` | the length is derived from the reported progress |
+| A purple band sweeping across the chip's share when a loading model has no progress figure | the phase | decoration: it says the model is busy and does not say how far |
+| The share lit teal on a change to `Ready`, grey on a change to `Down`, fading over 2 s | the phase, against the phase the arcade saw last | the phase change is read; the fade is decoration |
+| The model's name, phase, progress and tokens/s at the right of the rule, `~` first for an estimate | `model.label`, `model.phase`, `model.progress`, `model.tokens_per_s`, `model.waiting` | as the source reports them; `~` through `model_text_is_estimated`, the helper Die 3D and the `i` view use |
+| A ring of `✦` growing from the hero, one glyph per request up to eight | `RequestsCompleted` for a model on one of the TUI's chips | the event is read; the ring's shape, growth and fade are decoration |
+| The snake in the hero duel lunges | the same `RequestsCompleted` events | the event is read |
+| A `*` rising in the chip's share of the starfield, in the `spark_rgb` colours (purple for a compile) | `Spark` and `KernelCompiled` naming one of the TUI's chips | the event is read; where it starts and how it rises are decoration |
+| The chip's share of the rule shown reversed for 0.6 s | a new `reset_seq` for the chip | the reset is read; the flash length is decoration |
+| A faster hero heartbeat | the sum of `model.tokens_per_s` over the ready models on the TUI's chips, when at most 10 s old, smoothed over 2 s | derived from the reported rate |
+
+Events already in the world when the arcade first reads it draw nothing, and so do events that
+arrived while the arcade was off screen. The arcade uses Die 3D's rule and constants for this.
+A model re-announced with an unchanged phase changes nothing. Events with no chip (a `Spark`
+or `KernelCompiled` with `chip: None`) draw nothing, as in Die 3D. With an empty world the
+arcade draws the frames it drew before the bus; a test pins them by hash.
+
+When the TUI is attached to a headless host, the hero duel's serving stats come from the
+host's world (the first ready row of the rows the activity lanes use). Those rows carry no
+completion count, so the snake's lunge comes from the bus's `RequestsCompleted` events.
+
 A TUI that records (`--record`) or serves (`--bus-socket`) refuses a backend switch (the `b`
 key and `/remote`), because the log header names one backend and mode for the whole run. An
 attached TUI refuses it too (`backend switch is disabled while attached to a bus host`): a mock
@@ -1020,8 +1049,6 @@ Until the sidecar exists, the Die 3D tile glow stays an estimate and says so.
 
 * A TUI inside a container does not attach to a host outside it (different host name).
 * The host identity is an unsalted FNV-1a hash of the machine id.
-* The hero duel in the arcade view still reads the local monitor's serving stats when the TUI is
-  attached.
 * When the host is lost, the rotation keeps dwelling on the host's last rows.
 * An attached model shows dashes for the TTFT breakdowns (queue, prefill, decode, per-token) and
   for the prefix hit rate. The bus carries only the mean time to first token.

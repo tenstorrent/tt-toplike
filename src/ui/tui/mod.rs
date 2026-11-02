@@ -1377,6 +1377,7 @@ fn run_app(
                     // Attached to a headless host: the host's models, as the
                     // `i` view draws them.
                     let world_rows = inference_bus::attached_rows(tui_bus, backend.as_ref());
+                    let attached = world_rows.is_some();
                     #[cfg(target_os = "linux")]
                     let service_rows = if let Some(r) = world_rows {
                         r
@@ -1393,6 +1394,13 @@ fn run_app(
                     let service_rows: Vec<
                         crate::workload::inference_server::ServiceState,
                     > = world_rows.unwrap_or_default();
+                    // Attached: the hero duel's serving stats are the host's,
+                    // from the same rows as the lanes.
+                    let serving = if attached {
+                        crate::animation::arcade_bus::attached_serving(&service_rows)
+                    } else {
+                        serving
+                    };
                     let activities = activity_tracker.update(
                         train_state.as_ref(),
                         &service_rows,
@@ -1402,6 +1410,9 @@ fn run_app(
                     if let Some(ref mut arc) = arcade {
                         arc.set_serving(serving);
                         arc.set_activities(activities);
+                        // The bus: gauges, labels, hits, heartbeat, sparks
+                        // and reset flashes (see `arcade_bus`).
+                        arc.set_bus(Some(&tui_bus.read()), backend);
                         arc.update(backend);
                     }
                 }
@@ -4558,6 +4569,8 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     )]));
                     v.push(sep!("▶ Activity lanes"));
                     v.extend(activity_legend_lines(bar, bg, dim));
+                    v.push(sep!("◆ Signal bus"));
+                    v.extend(crate::animation::arcade_bus::legend_lines(bar, bg, dim));
                     v
                 }
             }
@@ -4711,7 +4724,11 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "serving, red = stalled) and a flare marks each",
                     "step or request. Nothing running, nothing",
                     "changes. Not shown under --remote.",
-                ],
+                ]
+                .iter()
+                .chain(crate::animation::arcade_bus::EXPLAIN_TEXT)
+                .copied()
+                .collect::<Vec<&str>>(),
                 cols,
             ),
             DisplayMode::Insights => explain_lines(
