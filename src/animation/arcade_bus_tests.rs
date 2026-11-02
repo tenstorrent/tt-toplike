@@ -459,6 +459,21 @@ fn a_hit_has_one_glyph_per_request_up_to_the_cap() {
     })
 }
 
+/// A `RequestsCompleted` with a count of 0 completed nothing: no hit.
+#[test]
+fn a_request_count_of_zero_draws_no_hit() {
+    tc(|| {
+        let mut base = Bus::new();
+        base.ready("m", &[0], None);
+        let mut with = base.clone();
+        with.requests("m", 0);
+        let (mut a, b) = arcade();
+        step(&mut a, &b, &base.view(5 * SEC));
+        step(&mut a, &b, &with.view(5 * SEC + TICK));
+        assert!(a.bus_fx.hits.is_empty(), "{:?}", a.bus_fx.hits);
+    })
+}
+
 /// The gauge-row columns of `a`'s frame, within `cols`, whose character is
 /// the same as in the frame of an arcade given the same updates with no bus
 /// but whose style differs: the gauge's cells (the label's cells change
@@ -961,6 +976,10 @@ fn splice_str_replaces_the_columns_the_text_covers() {
     splice_str(&mut lines, 5, 0, "Z", Style::default());
 }
 
+/// Documents contract rule 5: `update` and `render` take no world. It
+/// cannot fail on its own, since `set_bus` keeps no reference to the world
+/// it is handed; the guard is the type signature. The per-frame cost of
+/// the label is checked by `the_model_label_goes_into_the_row_as_one_span`.
 #[test]
 fn the_frame_path_never_reads_the_world() {
     tc(|| {

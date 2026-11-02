@@ -275,7 +275,8 @@ impl ArcadeFx {
                 seen = seen.max(q);
                 match e {
                     Event::RequestsCompleted { model, n } => {
-                        if models.iter().any(|m| m.key == model && ours(m)) {
+                        // A count of 0 completed nothing and draws nothing.
+                        if n > 0 && models.iter().any(|m| m.key == model && ours(m)) {
                             new_requests = new_requests.saturating_add(n);
                             add_hit(&mut prev.hits, now, n, q);
                         }
