@@ -219,7 +219,7 @@ pub(crate) fn blank_view_bytes_per_s(kind: Choice, busy: bool, fps: u32, secs: u
         },
     )
     .expect("terminal");
-    let settle = fps as usize; // one second, not counted
+    let settle = fps as usize; // the first second is left out of the count
     let frames = (fps * secs) as usize;
     let mut counted_from = 0usize;
     for i in 0..settle + frames {

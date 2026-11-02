@@ -244,7 +244,7 @@ pub struct Cli {
     /// exit non-zero when there is one.
     ///
     /// Reads `~/.config/tt-toplike/config.toml`, the only config file. The
-    /// `[arcade]` section sets the arcade's own layouts and the one to start
+    /// `[arcade]` section sets the arcade's own layouts and the layout to start
     /// with (docs/arcade-layout.md); the report lists every arcade layout with
     /// its panels. The `[backdrop]` section sets each view's backdrop: off,
     /// scene, sky or clouds (docs/backdrop.md). In the TUI, `w` cycles the
