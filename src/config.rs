@@ -145,9 +145,14 @@ pub struct LoadedConfig {
     /// The arcade's settings. The default layout when no file sets one, and
     /// also when any `[arcade]` setting has a problem.
     pub arcade: crate::animation::arcade_layout::ArcadeConfig,
+    /// The backdrop of each view (`[backdrop]`, and `arcade.cloudfield`).
+    pub backdrop: crate::animation::backdrop::BackdropConfig,
     /// Every problem, in line order. A file that cannot be read gives one
     /// problem with no line.
     pub problems: Vec<ConfigProblem>,
+    /// Notes that are not problems: a deprecated key that still works. They
+    /// are shown, and `--check-config` still passes.
+    pub notes: Vec<ConfigProblem>,
     /// The files that were read (none, or the shared config file).
     pub files: Vec<PathBuf>,
 }
@@ -163,6 +168,18 @@ pub fn problem_summary(problems: &[ConfigProblem]) -> Option<String> {
     } else {
         format!("config: {first} (and {more} more; run --check-config)")
     })
+}
+
+/// The status line's message at start-up: the first problem as an error,
+/// else the first note, else `None`.
+pub fn status_message(loaded: &LoadedConfig) -> Option<(String, bool)> {
+    if let Some(m) = problem_summary(&loaded.problems) {
+        return Some((m, true));
+    }
+    loaded
+        .notes
+        .first()
+        .map(|n| (format!("config: {n}"), false))
 }
 
 /// Write the `--check-config` report for `loaded` to `out` and return the
@@ -187,6 +204,9 @@ pub fn write_check_report(loaded: &LoadedConfig, out: &mut dyn std::io::Write) -
         for p in &loaded.problems {
             writeln!(out, "{p}")?;
         }
+        for n in &loaded.notes {
+            writeln!(out, "note: {n}")?;
+        }
         let a = &loaded.arcade;
         let default = a.rows == crate::animation::arcade_layout::default_rows();
         writeln!(
@@ -210,6 +230,27 @@ pub fn write_check_report(loaded: &LoadedConfig, out: &mut dyn std::io::Write) -
                 r.height,
                 panels.join(", ")
             )?;
+        }
+        // The backdrops: the default, each view set, and the views that
+        // have one of their own.
+        {
+            use crate::animation::backdrop::{builtin, choice_name, VIEWS};
+            let b = &loaded.backdrop;
+            let mut line = format!("backdrop: default {}", choice_name(b.default.flatten()));
+            if !b.views.is_empty() {
+                let set: Vec<String> = b
+                    .views
+                    .iter()
+                    .map(|(v, c)| format!("{v} {}", choice_name(*c)))
+                    .collect();
+                line.push_str(&format!("; {}", set.join(", ")));
+            }
+            writeln!(out, "{line}")?;
+            let own: Vec<String> = VIEWS
+                .iter()
+                .filter_map(|v| builtin(v).map(|k| format!("{v} {}", k.name())))
+                .collect();
+            writeln!(out, "  built in: {} (unless set above)", own.join(", "))?;
         }
         match loaded.problems.len() {
             0 => writeln!(out, "ok")?,
@@ -372,11 +413,12 @@ fn one_line(message: &str) -> String {
 }
 
 /// The keys allowed at the top of a config file.
-const TOP_KEYS: [&str; 4] = [
+const TOP_KEYS: [&str; 5] = [
     "sensitivity",
     "max_particles_scale",
     "tt_smi_reset_behavior",
     "arcade",
+    "backdrop",
 ];
 
 /// Merge config `sources` (each a path and its text), later ones winning per
@@ -387,6 +429,9 @@ pub fn load_from(sources: &[(PathBuf, String)]) -> LoadedConfig {
     use crate::animation::arcade_layout::ArcadeConfig;
     let mut out = LoadedConfig::default();
     let mut cloudfield: Option<bool> = None;
+    // Where `arcade.cloudfield` was set, for its deprecation note.
+    let mut cloudfield_at: Option<(PathBuf, Option<usize>)> = None;
+    let mut backdrop = crate::animation::backdrop::BackdropConfig::default();
     let mut rows: Option<Vec<crate::animation::arcade_layout::RowSpec>> = None;
     let mut arcade_bad = false;
     for (path, text) in sources {
@@ -459,14 +504,47 @@ pub fn load_from(sources: &[(PathBuf, String)]) -> LoadedConfig {
             }
             if let Some(c) = parsed.0 {
                 cloudfield = Some(c);
+                let line = item
+                    .as_table_like()
+                    .and_then(|t| t.get("cloudfield"))
+                    .and_then(|v| v.span())
+                    .map(|sp| line_of(text, sp.start));
+                cloudfield_at = Some((path.clone(), line));
             }
             if let Some(r) = parsed.1 {
                 rows = Some(r);
             }
         }
+        if let Some(item) = top.get("backdrop") {
+            let mut backdrop_report = |span: Option<std::ops::Range<usize>>, message: String| {
+                out.problems.push(ConfigProblem {
+                    file: path.clone(),
+                    line: span.map(|s| line_of(text, s.start)),
+                    message,
+                });
+            };
+            parse_backdrop(item, &mut backdrop, &mut backdrop_report);
+        }
         // This file's problems in line order.
         out.problems[first_problem..].sort_by_key(|p| p.line.unwrap_or(0));
     }
+    // `arcade.cloudfield` still works: `true` is `[backdrop.views] arcade =
+    // "scene"`, `false` is off, and a `[backdrop.views] arcade` entry wins.
+    if let (Some(on), Some((file, line))) = (cloudfield.filter(|_| !arcade_bad), cloudfield_at) {
+        if !backdrop.views.iter().any(|(v, _)| *v == "arcade") {
+            backdrop.views.push((
+                "arcade",
+                on.then_some(crate::animation::backdrop::BackdropKind::Scene),
+            ));
+        }
+        out.notes.push(ConfigProblem {
+            file,
+            line,
+            message: "`arcade.cloudfield` is deprecated; write [backdrop.views] arcade = \"scene\""
+                .into(),
+        });
+    }
+    out.backdrop = backdrop;
     let mut arcade = ArcadeConfig::default();
     if !arcade_bad {
         if let Some(c) = cloudfield {
@@ -677,6 +755,98 @@ fn parse_arcade(
         }
     }
     (cloudfield, Some(rows))
+}
+
+/// The `[backdrop]` table: `default` and `[backdrop.views]`, into `cfg`. A
+/// bad entry is reported and left out, so it keeps its default; the other
+/// entries are used.
+fn parse_backdrop(
+    item: &toml_edit::Item,
+    cfg: &mut crate::animation::backdrop::BackdropConfig,
+    report: &mut Report<'_>,
+) {
+    use crate::animation::backdrop::{
+        canonical_view, parse_choice, refusal, Choice, CHOICES, VIEWS,
+    };
+    let Some(table) = item.as_table_like() else {
+        report(item.span(), "`backdrop` must be a table: [backdrop]".into());
+        return;
+    };
+    // A string value that names a choice, or a report saying why not.
+    let choice = |v: &toml_edit::Item, what: &str, report: &mut Report<'_>| -> Option<Choice> {
+        match v.as_str() {
+            None => {
+                report(v.span(), format!("`{what}` must be {CHOICES}"));
+                None
+            }
+            Some(s) => {
+                let c = parse_choice(s);
+                if c.is_none() {
+                    report(v.span(), format!("`{what}` must be {CHOICES}, got {s:?}"));
+                }
+                c
+            }
+        }
+    };
+    for (k, v) in table.iter() {
+        match k {
+            "default" => {
+                if let Some(c) = choice(v, "backdrop.default", report) {
+                    cfg.default = Some(c);
+                }
+            }
+            "views" => {
+                let Some(views) = v.as_table_like() else {
+                    report(
+                        v.span(),
+                        "`backdrop.views` must be a table: [backdrop.views]".into(),
+                    );
+                    continue;
+                };
+                for (name, value) in views.iter() {
+                    let key_span = views.get_key_value(name).and_then(|(key, _)| key.span());
+                    let Some(view) = canonical_view(name) else {
+                        report(
+                            key_span,
+                            format!(
+                                "unknown view `{name}` in [backdrop.views] (expected one of {})",
+                                VIEWS.join(", ")
+                            ),
+                        );
+                        continue;
+                    };
+                    let Some(c) = choice(value, &format!("backdrop.views.{name}"), report) else {
+                        continue;
+                    };
+                    if let Some(why) = c.and_then(|kind| refusal(view, kind)) {
+                        report(
+                            value.span(),
+                            format!(
+                                "{view} refuses {}: {why}",
+                                crate::animation::backdrop::choice_name(c)
+                            ),
+                        );
+                        continue;
+                    }
+                    if cfg.views.iter().any(|(v, _)| *v == view) {
+                        report(
+                            key_span,
+                            format!("view `{view}` is set twice in [backdrop.views]"),
+                        );
+                        continue;
+                    }
+                    cfg.views.push((view, c));
+                }
+            }
+            _ => {
+                let span = table.get_key_value(k).and_then(|(key, _)| key.span());
+                report(
+                    span,
+                    format!("unknown key `backdrop.{k}` (expected default or views)"),
+                );
+            }
+        }
+    }
 }
 
 /// A height or width weight: a whole number of at least 1, 1 when absent.
@@ -1349,5 +1519,140 @@ panels = [{ view = "flow" }, { view = "training" }, { view = "inference" }]
             "{text}{}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    // ---- [backdrop] -------------------------------------------------------
+
+    use crate::animation::backdrop::BackdropKind;
+
+    const SCENE: crate::animation::backdrop::Choice = Some(BackdropKind::Scene);
+    const SKY: crate::animation::backdrop::Choice = Some(BackdropKind::Sky);
+    const CLOUDS: crate::animation::backdrop::Choice = Some(BackdropKind::Clouds);
+
+    #[test]
+    fn the_backdrop_table_from_the_brief_loads() {
+        let text = "[backdrop]\ndefault = \"off\"\n[backdrop.views]\narcade = \"scene\"\ncastle = \"clouds\"\n";
+        let l = load(&[("c.toml", text)]);
+        assert!(
+            l.problems.is_empty() && l.notes.is_empty(),
+            "{:?}",
+            l.problems
+        );
+        assert_eq!(l.backdrop.default, Some(None));
+        assert_eq!(
+            l.backdrop.views,
+            vec![("arcade", SCENE), ("castle", CLOUDS)]
+        );
+        assert_eq!(l.backdrop.choice("arcade"), SCENE);
+        assert_eq!(
+            l.backdrop.choice("training"),
+            SKY,
+            "the view's own backdrop stays"
+        );
+        // No file: every view keeps its own look.
+        let none = load(&[]);
+        assert_eq!(none.backdrop, Default::default());
+        assert_eq!(none.backdrop.choice("die3d"), CLOUDS);
+    }
+
+    #[test]
+    fn view_names_take_their_other_spellings() {
+        let text = "[backdrop.views]\nwaffler = \"off\"\n\"~\" = \"sky\"\n";
+        let l = load(&[("c.toml", text)]);
+        assert!(l.problems.is_empty(), "{:?}", l.problems);
+        assert_eq!(l.backdrop.views, vec![("die3d", None), ("hivemind", SKY)]);
+    }
+
+    #[test]
+    fn every_bad_backdrop_value_is_reported_with_its_line() {
+        let text = "[backdrop]\ndefault = \"fog\"\nfast = true\n[backdrop.views]\ncastel = \"sky\"\ngrid = 3\nstarfield = \"sky\"\ndie3d = \"off\"\nwaffler = \"clouds\"\nflow = \"clouds\"\n";
+        let l = load(&[("c.toml", text)]);
+        let p: Vec<String> = l.problems.iter().map(|p| p.to_string()).collect();
+        assert_eq!(
+            p,
+            vec![
+                "c.toml:2: `backdrop.default` must be off, scene, sky or clouds, got \"fog\"",
+                "c.toml:3: unknown key `backdrop.fast` (expected default or views)",
+                "c.toml:5: unknown view `castel` in [backdrop.views] (expected one of insights, grid, starfield, castle, flow, arcade, defrag, inference, hivemind, training, die3d)",
+                "c.toml:6: `backdrop.views.grid` must be off, scene, sky or clouds",
+                "c.toml:7: starfield refuses sky: its stars are Tensix cores, and this backdrop draws stars too",
+                "c.toml:9: view `die3d` is set twice in [backdrop.views]",
+            ]
+        );
+        // Each bad entry keeps the default; the good ones are used.
+        assert_eq!(l.backdrop.default, None);
+        assert_eq!(l.backdrop.views, vec![("die3d", None), ("flow", CLOUDS)]);
+        let mut out = Vec::new();
+        assert_eq!(write_check_report(&l, &mut out), 1, "--check-config fails");
+        let p = problems(&[("c.toml", "backdrop = \"sky\"\n")]);
+        assert_eq!(p, vec!["c.toml:1: `backdrop` must be a table: [backdrop]"]);
+        let p = problems(&[("c.toml", "[backdrop]\nviews = 2\n")]);
+        assert_eq!(
+            p,
+            vec!["c.toml:2: `backdrop.views` must be a table: [backdrop.views]"]
+        );
+    }
+
+    #[test]
+    fn cloudfield_still_turns_on_the_arcade_scene_with_a_note() {
+        let l = load(&[("c.toml", "[arcade]\ncloudfield = true\n")]);
+        assert!(l.problems.is_empty(), "{:?}", l.problems);
+        assert_eq!(l.backdrop.choice("arcade"), SCENE);
+        let n: Vec<String> = l.notes.iter().map(|p| p.to_string()).collect();
+        assert_eq!(
+            n,
+            vec!["c.toml:2: `arcade.cloudfield` is deprecated; write [backdrop.views] arcade = \"scene\""]
+        );
+        // `[backdrop.views] arcade` wins over it.
+        let text = "[arcade]\ncloudfield = true\n[backdrop.views]\narcade = \"clouds\"\n";
+        let l = load(&[("c.toml", text)]);
+        assert_eq!(l.backdrop.choice("arcade"), CLOUDS);
+        assert_eq!(l.notes.len(), 1);
+        // `false` is the default: the arcade has no backdrop.
+        let l = load(&[("c.toml", "[arcade]\ncloudfield = false\n")]);
+        assert_eq!(l.backdrop.choice("arcade"), None);
+    }
+
+    #[test]
+    fn check_config_reports_the_backdrops_and_a_note_does_not_fail_it() {
+        let l = load(&[(
+            "c.toml",
+            "[arcade]\ncloudfield = true\n[backdrop.views]\ncastle = \"sky\"\n",
+        )]);
+        let mut out = Vec::new();
+        assert_eq!(write_check_report(&l, &mut out), 0);
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("note: c.toml:2: `arcade.cloudfield` is deprecated"),
+            "{out}"
+        );
+        assert!(
+            out.contains("backdrop: default off; castle sky, arcade scene"),
+            "{out}"
+        );
+        assert!(
+            out.contains("built in: inference scene, training sky, die3d clouds"),
+            "{out}"
+        );
+        assert!(out.ends_with("ok\n"), "{out}");
+    }
+
+    #[test]
+    fn the_status_line_shows_a_note_when_there_is_no_problem() {
+        let l = load(&[("c.toml", "[arcade]\ncloudfield = true\n")]);
+        assert_eq!(
+            status_message(&l),
+            Some((
+                "config: c.toml:2: `arcade.cloudfield` is deprecated; write [backdrop.views] arcade = \"scene\"".to_string(),
+                false
+            ))
+        );
+        let l = load(&[("c.toml", "a = 1\n[arcade]\ncloudfield = true\n")]);
+        assert_eq!(
+            status_message(&l).map(|m| m.1),
+            Some(true),
+            "a problem first"
+        );
+        assert_eq!(status_message(&load(&[])), None);
     }
 }

@@ -297,6 +297,10 @@ pub struct TrainView {
     sky_clock: StdCell<f64>,
     /// The `frame` the sky clock was last advanced to.
     sky_seen: StdCell<u64>,
+    /// Whether the aurora and stars are drawn: the view's backdrop is the
+    /// sky (the default). With another backdrop chosen, the shared backdrop
+    /// draws it in the blank cells instead (`animation::backdrop`).
+    show_sky: bool,
     /// The band rows this frame's `draw_tapestry` gave to the starfield and
     /// the weave, as `start..end`, reset to none at the start of each
     /// `render`. A step pulse is drawn only in these rows, so it never covers
@@ -355,7 +359,22 @@ impl TrainView {
             sky_clock: StdCell::new(0.0),
             sky_seen: StdCell::new(0),
             pulse_rows: StdCell::new((0, 0)),
+            show_sky: true,
         }
+    }
+
+    /// Draw the aurora and stars, or leave those cells blank. The sky's clock
+    /// runs either way.
+    pub fn set_sky(&mut self, on: bool) {
+        self.show_sky = on;
+    }
+
+    /// The sky cell at (`x`, `y`), or none when the sky is off.
+    fn sky_at(&self, x: usize, y: usize, rel_y: f32) -> Option<crate::animation::SkyCell> {
+        if !self.show_sky {
+            return None;
+        }
+        sky_cell(x, y, rel_y, self.sky_frame())
     }
 
     /// Hand the view the signal bus's world (`TuiBus::read`), once per
@@ -654,7 +673,7 @@ impl TrainView {
         for y in top..bottom {
             let rel_y = (y - top) as f32 / span as f32;
             for x in 1..self.width {
-                if let Some(sc) = sky_cell(x, y, rel_y, self.sky_frame()) {
+                if let Some(sc) = self.sky_at(x, y, rel_y) {
                     self.put(buf, x, y, sc.ch, sc.color, false);
                 }
             }
@@ -1695,7 +1714,7 @@ impl TrainView {
             for x in 1..self.width {
                 for y in river_top..river_bottom {
                     let rel_y = (y - river_top) as f32 / sky_rows.max(1) as f32;
-                    if let Some(sc) = sky_cell(x, y, rel_y, self.sky_frame()) {
+                    if let Some(sc) = self.sky_at(x, y, rel_y) {
                         self.put(buf, x, y, sc.ch, sc.color, false);
                     }
                 }
@@ -1777,7 +1796,7 @@ impl TrainView {
                     // top of the band, 1 at the mountain line, so it's the
                     // inverse of `row_from_bottom`.
                     let rel_y = 1.0 - (row_from_bottom as f32 / sky_rows.max(1) as f32);
-                    if let Some(sc) = sky_cell(x, y, rel_y, self.sky_frame()) {
+                    if let Some(sc) = self.sky_at(x, y, rel_y) {
                         self.put(buf, x, y, sc.ch, sc.color, false);
                     }
                 }

@@ -88,7 +88,7 @@ const FOOTER_ROWS: usize = 2;
 /// times cuts to the same angles; tests depend on that.
 const CAMERA_SEED: u64 = 0x3D;
 /// Seed of the cloud field. Fixed, so the sky is the same on every run.
-const CLOUD_SEED: u64 = 0xC10D;
+pub(crate) const CLOUD_SEED: u64 = 0xC10D;
 /// An RGB triple as a ratatui colour (`const`, so the footer colours can come
 /// straight from the palette).
 const fn rgb(c: [u8; 3]) -> Color {
@@ -1231,6 +1231,17 @@ impl Die3dView {
         } else {
             self.switcher.scene_at(now)
         }
+    }
+
+    /// Whether the clouds are switched on (`/clouds`, or the view's
+    /// backdrop setting).
+    pub fn clouds_on(&self) -> bool {
+        self.show_clouds
+    }
+
+    /// Switch the clouds on or off, as `/clouds on|off` does.
+    pub fn set_clouds(&mut self, on: bool) {
+        self.show_clouds = on;
     }
 
     /// Whether the cloud layer is drawn: switched on (`W`) and the view large

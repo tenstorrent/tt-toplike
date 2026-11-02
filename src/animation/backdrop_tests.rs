@@ -1,0 +1,549 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+//! Tests of the shared backdrop: the settings, the transparency of both
+//! layers, each kind through `Backdrop` against its painter, the step clock,
+//! and the signals read from a fake world.
+
+use super::*;
+use crate::animation::atmosphere::composite;
+use crate::animation::backdrop_pins::{foreground, scene_rosters};
+use crate::animation::bus_test_support::{chip, frame_hash, tc, Bus, Fixed, SEC};
+use crate::bus::signals as sig;
+use ratatui::style::Style;
+use ratatui::text::Span;
+use tt_toplike_bus::{Provenance, Value};
+
+const SCENE: Choice = Some(BackdropKind::Scene);
+const SKY: Choice = Some(BackdropKind::Sky);
+const CLOUDS: Choice = Some(BackdropKind::Clouds);
+
+// ---- Names and settings ---------------------------------------------------
+
+#[test]
+fn every_choice_parses_from_its_name_and_nothing_else_does() {
+    for c in [None, SCENE, SKY, CLOUDS] {
+        assert_eq!(parse_choice(choice_name(c)), Some(c));
+        assert_eq!(
+            parse_choice(&format!(" {} ", choice_name(c).to_uppercase())),
+            Some(c)
+        );
+    }
+    for bad in ["", "cloud", "on", "true", "aurora", "scenes"] {
+        assert_eq!(parse_choice(bad), None, "{bad:?}");
+    }
+}
+
+#[test]
+fn the_defaults_are_the_looks_each_view_had() {
+    let s = BackdropSettings::new(BackdropConfig::default());
+    for v in VIEWS {
+        let want = match v {
+            "inference" => SCENE,
+            "training" => SKY,
+            "die3d" => CLOUDS,
+            _ => None,
+        };
+        assert_eq!(s.choice(v), want, "{v}");
+        assert_eq!(builtin(v), want, "{v}");
+    }
+}
+
+#[test]
+fn a_view_entry_wins_over_the_views_own_backdrop_and_the_default_fills_the_rest() {
+    let cfg = BackdropConfig {
+        default: Some(CLOUDS),
+        views: vec![("castle", SKY), ("training", None), ("arcade", SCENE)],
+    };
+    assert_eq!(cfg.choice("castle"), SKY);
+    assert_eq!(cfg.choice("training"), None, "the sky turned off");
+    assert_eq!(cfg.choice("arcade"), SCENE);
+    // `default` is for views with no backdrop of their own.
+    assert_eq!(cfg.choice("grid"), CLOUDS);
+    assert_eq!(cfg.choice("inference"), SCENE);
+    assert_eq!(cfg.choice("die3d"), CLOUDS);
+    // `default = "off"` is the same as not setting it.
+    let off = BackdropConfig {
+        default: Some(None),
+        views: vec![],
+    };
+    assert_eq!(off.choice("inference"), SCENE);
+    assert_eq!(off.choice("grid"), None);
+}
+
+#[test]
+fn the_starfield_refuses_the_kinds_that_draw_stars() {
+    assert!(refusal("starfield", BackdropKind::Scene).is_some());
+    assert!(refusal("starfield", BackdropKind::Sky).is_some());
+    assert!(refusal("starfield", BackdropKind::Clouds).is_none());
+    for v in VIEWS.iter().filter(|v| **v != "starfield") {
+        for k in BackdropKind::ALL {
+            assert!(refusal(v, k).is_none(), "{v} {k:?}");
+        }
+    }
+    let mut s = BackdropSettings::new(BackdropConfig::default());
+    let err = s.set("starfield", SKY).unwrap_err();
+    assert!(err.contains("starfield refuses sky"), "{err}");
+    assert_eq!(
+        s.choice("starfield"),
+        None,
+        "a refused setting changes nothing"
+    );
+    s.set("starfield", CLOUDS).unwrap();
+    assert_eq!(s.choice("starfield"), CLOUDS);
+}
+
+#[test]
+fn the_key_cycles_off_scene_sky_clouds_and_skips_what_a_view_refuses() {
+    let mut c = None;
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        c = next_choice("castle", c);
+        seen.push(c);
+    }
+    assert_eq!(seen, vec![SCENE, SKY, CLOUDS, None]);
+    assert_eq!(next_choice("starfield", None), CLOUDS);
+    assert_eq!(next_choice("starfield", CLOUDS), None);
+}
+
+#[test]
+fn the_command_shows_sets_and_refuses() {
+    let mut s = BackdropSettings::new(BackdropConfig::default());
+    let (msg, err) = command("", "training", &mut s);
+    assert!(!err && msg.starts_with("backdrop (training): sky"), "{msg}");
+    assert_eq!(
+        command("clouds", "training", &mut s),
+        ("backdrop (training): clouds".into(), false)
+    );
+    assert_eq!(s.choice("training"), CLOUDS);
+    let (msg, err) = command("fog", "training", &mut s);
+    assert!(
+        err && msg.contains("expected off, scene, sky or clouds"),
+        "{msg}"
+    );
+    let (_, err) = command("scene", "starfield", &mut s);
+    assert!(err);
+    // The views' other names.
+    assert_eq!(canonical_view("waffler"), Some("die3d"));
+    assert_eq!(canonical_view("~"), Some("hivemind"));
+    assert_eq!(canonical_view("nope"), None);
+}
+
+#[test]
+fn the_legend_line_names_the_kind_its_signals_and_marks_an_estimate() {
+    for c in [None, SCENE, SKY, CLOUDS] {
+        for est in [false, true] {
+            let l = legend_line(c, est);
+            assert!(
+                l.starts_with(&format!("Backdrop: {}", choice_name(c))),
+                "{l}"
+            );
+            // The overlay draws "║ " and two spaces before it, in 78 columns.
+            assert!(l.chars().count() + 4 <= 78, "{l}");
+            assert_eq!(l.contains('~'), est && c.is_some(), "{l}");
+        }
+    }
+    assert!(legend_line(CLOUDS, false).contains("PCIe"));
+}
+
+// ---- Transparency ---------------------------------------------------------
+
+/// A backdrop of `kind` that has seen `n` updates of busy signals.
+fn busy(kind: Choice, n: u64) -> Backdrop {
+    let (_, rows) = scene_rosters()
+        .into_iter()
+        .find(|(n, _)| *n == "aurora")
+        .unwrap();
+    let mut b = Backdrop::new(kind);
+    for i in 1..=n {
+        b.observe(&BackdropSignals {
+            now_s: i as f64 / 60.0,
+            services: rows(i),
+            pcie_bps: Some(2e9),
+            load: Some(0.8),
+            step_ms: Some(200.0),
+            estimated: false,
+        });
+    }
+    b
+}
+
+/// Each cell of `lines` as (char, style), wide characters taking their
+/// columns.
+fn cells(lines: &[Line<'static>]) -> Vec<Vec<(char, Style)>> {
+    crate::animation::bus_test_support::cells(lines)
+}
+
+#[test]
+fn a_backdrop_never_overwrites_a_cell_the_view_drew() {
+    tc(|| {
+        for kind in [SCENE, SKY, CLOUDS] {
+            let b = busy(kind, 120);
+            let (w, h) = (100, 30);
+            let mut fg = foreground(w, h);
+            // A panel: blanks with their own background belong to the view.
+            fg[5] = Line::from(vec![Span::styled(
+                " ".repeat(w),
+                Style::default().bg(Color::Blue),
+            )]);
+            let before = cells(&fg);
+            let out = b.layer(fg, w, h);
+            let after = cells(&out);
+            let mut filled = 0;
+            for (y, (ra, rb)) in before.iter().zip(&after).enumerate() {
+                for (x, (ca, cb)) in ra.iter().zip(rb).enumerate() {
+                    if ca != cb {
+                        assert!(
+                            ca.0 == ' ' && ca.1.bg.is_none(),
+                            "{kind:?} ({x},{y}) {ca:?} -> {cb:?}"
+                        );
+                        filled += 1;
+                    }
+                }
+            }
+            assert!(filled > 0, "{kind:?} drew nothing");
+            assert!(
+                after[5].iter().all(|c| c.0 == ' '),
+                "{kind:?} drew on the panel"
+            );
+        }
+    })
+}
+
+#[test]
+fn off_leaves_the_lines_and_the_buffer_as_they_were() {
+    tc(|| {
+        let b = busy(None, 60);
+        assert!(!b.active());
+        let fg = foreground(80, 24);
+        assert_eq!(b.layer(fg.clone(), 80, 24), fg);
+        assert!(b.canvas(80, 24).iter().flatten().all(|c| c.is_none()));
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        buf.set_string(3, 3, "text", Style::default());
+        let copy = buf.clone();
+        b.layer_buffer(&mut buf, area);
+        assert_eq!(buf, copy);
+    })
+}
+
+#[test]
+fn the_buffer_layer_fills_only_blank_cells() {
+    tc(|| {
+        for kind in [SCENE, SKY, CLOUDS] {
+            let b = busy(kind, 120);
+            let area = Rect::new(2, 1, 100, 30);
+            let mut buf = Buffer::empty(Rect::new(0, 0, 110, 35));
+            // The canvas fill every view paints, then a view's drawing.
+            for y in 0..35 {
+                for x in 0..110 {
+                    buf[(x, y)].set_bg(Color::Rgb(0, 0, 0));
+                }
+            }
+            for y in (1..31).step_by(3) {
+                buf.set_string(2, y, "drawn by the view", Style::default().fg(Color::Red));
+            }
+            for x in 2..102 {
+                buf[(x, 10)].set_bg(Color::Blue); // a panel
+                buf[(x, 12)].set_style(Style::default().add_modifier(Modifier::REVERSED));
+            }
+            let before = buf.clone();
+            b.layer_buffer(&mut buf, area);
+            let mut filled = 0;
+            for y in 0..35u16 {
+                for x in 0..110u16 {
+                    let (a, c) = (&before[(x, y)], &buf[(x, y)]);
+                    if a != c {
+                        assert!(is_blank(a), "{kind:?} ({x},{y}) was {a:?}");
+                        assert!(area.contains((x, y).into()), "{kind:?} outside the area");
+                        assert_eq!(a.bg, c.bg, "the background is kept");
+                        filled += 1;
+                    }
+                }
+            }
+            assert!(filled > 0, "{kind:?} drew nothing");
+        }
+    })
+}
+
+// ---- Each kind is its painter --------------------------------------------
+
+#[test]
+fn the_scene_is_the_atmosphere_composited_as_the_inference_view_does() {
+    tc(|| {
+        for (name, rows) in scene_rosters() {
+            let mut a = crate::animation::atmosphere::Atmosphere::new();
+            let mut b = Backdrop::new(SCENE);
+            for i in 1..=40 {
+                a.observe(&rows(i));
+                b.observe(&BackdropSignals {
+                    services: rows(i),
+                    ..Default::default()
+                });
+                for (w, h) in [(40, 12), (120, 40)] {
+                    let fg = foreground(w, h);
+                    let want = if a.active() {
+                        composite(&a.render_backdrop(w, h), fg.clone(), w)
+                    } else {
+                        fg.clone()
+                    };
+                    assert_eq!(
+                        frame_hash(&b.layer(fg, w, h)),
+                        frame_hash(&want),
+                        "{name} {i}"
+                    );
+                }
+            }
+        }
+    })
+}
+
+#[test]
+fn the_sky_is_the_training_sky_at_the_stepped_frame() {
+    tc(|| {
+        let b = busy(SKY, 200);
+        let frame = b.sky.frame();
+        let (w, h) = (90, 25);
+        let c = b.canvas(w, h);
+        for (y, row) in c.iter().enumerate() {
+            for (x, cell) in row.iter().enumerate() {
+                let want = sky_cell(x, y, y as f32 / h as f32, frame).map(|s| (s.ch, s.color));
+                assert_eq!(*cell, want, "({x},{y})");
+            }
+        }
+    })
+}
+
+#[test]
+fn the_clouds_are_the_die3d_cloud_bands_one_per_cell() {
+    tc(|| {
+        let b = busy(CLOUDS, 200);
+        let clouds = Clouds::new(super::super::die3d::CLOUD_SEED);
+        let offset = b.cloud_clock.offset_px();
+        let c = b.canvas(80, 20);
+        let mut lit = 0;
+        for (y, row) in c.iter().enumerate() {
+            for (x, cell) in row.iter().enumerate() {
+                let band = clouds.band_at((2 * x) as f64 + 0.5, (4 * y) as f64 + 0.5, offset);
+                assert_eq!(cell.is_some(), band > 0, "({x},{y})");
+                if let Some((ch, _)) = cell {
+                    assert_eq!(*ch, CLOUD_GLYPHS[band as usize - 1]);
+                    lit += 1;
+                }
+            }
+        }
+        assert!(lit > 0 && lit < 80 * 20, "{lit}");
+    })
+}
+
+// ---- Motion follows signals, on the step clock ---------------------------
+
+/// How many times the canvas of `b` changes over `frames` updates at 60 a
+/// second with `signals` (its `now_s` is set per frame).
+fn canvas_changes(b: &mut Backdrop, signals: &BackdropSignals, frames: u64) -> usize {
+    let mut last = b.canvas(120, 40);
+    let mut n = 0;
+    for i in 1..=frames {
+        b.observe(&BackdropSignals {
+            now_s: 10.0 + i as f64 / 60.0,
+            ..signals.clone()
+        });
+        let c = b.canvas(120, 40);
+        n += usize::from(c != last);
+        last = c;
+    }
+    n
+}
+
+#[test]
+fn the_sky_and_the_clouds_change_at_most_four_times_a_second() {
+    tc(|| {
+        let s = BackdropSignals {
+            pcie_bps: Some(1e10),
+            load: Some(1.0),
+            step_ms: Some(100.0),
+            ..Default::default()
+        };
+        for kind in [SKY, CLOUDS] {
+            let mut b = Backdrop::new(kind);
+            b.observe(&BackdropSignals {
+                now_s: 10.0,
+                ..s.clone()
+            });
+            let n = canvas_changes(&mut b, &s, 120);
+            assert!(n > 0 && n <= 8, "{kind:?}: {n} changes in 2 s");
+        }
+    })
+}
+
+#[test]
+fn the_clouds_drift_faster_with_pcie_traffic_and_brighten_with_load() {
+    let after = |pcie: Option<f64>, load: Option<f32>| {
+        let mut b = Backdrop::new(CLOUDS);
+        for i in 0..=400 {
+            b.observe(&BackdropSignals {
+                now_s: i as f64 / 60.0,
+                pcie_bps: pcie,
+                load,
+                ..Default::default()
+            });
+        }
+        (b.cloud_clock.offset_px(), b.cloud_clock.intensity())
+    };
+    let (slow, dim) = after(None, None);
+    let (fast, bright) = after(Some(5e9), Some(1.0));
+    assert!(fast > 4.0 * slow, "drift {slow} -> {fast}");
+    assert!(bright > dim, "intensity {dim} -> {bright}");
+}
+
+#[test]
+fn the_sky_runs_faster_for_a_quicker_training_step() {
+    let frames = |step_ms: Option<f32>| {
+        let mut b = Backdrop::new(SKY);
+        for i in 0..=240 {
+            b.observe(&BackdropSignals {
+                now_s: i as f64 / 60.0,
+                step_ms,
+                ..Default::default()
+            });
+        }
+        b.sky.frame()
+    };
+    let (none, slow, quick) = (frames(None), frames(Some(1000.0)), frames(Some(250.0)));
+    assert_eq!(none, 240, "4 s at 60 frames a second, on whole steps");
+    assert!(slow < none && none < quick, "{slow} {none} {quick}");
+}
+
+// ---- Signals --------------------------------------------------------------
+
+/// A world with PCIe and power on chip 0, a reading on a chip the backend
+/// does not have, and a training run, at bus time `now`.
+fn world(prov: Provenance) -> Bus {
+    let mut bus = Bus::new();
+    bus.sample(&chip(0), sig::PCIE_IN_BPS, Value::F64(3e9), prov)
+        .sample(&chip(0), sig::PCIE_OUT_BPS, Value::F64(1e9), prov)
+        .sample(&chip(0), sig::TDP_W, Value::F64(80.0), prov)
+        // Chip 7 is the attached host's, not this TUI's.
+        .sample(&chip(7), sig::PCIE_IN_BPS, Value::F64(9e12), prov)
+        .sample(&chip(7), sig::TDP_W, Value::F64(500.0), prov);
+    let run = tt_toplike_bus::EntityKey::training_run("nano_gpt:1@2");
+    bus.sample(&run, sig::TRAIN_STEP, Value::U64(10), prov)
+        .sample(&run, sig::TRAIN_STEP_MS, Value::F64(250.0), prov);
+    bus
+}
+
+#[test]
+fn the_signals_come_from_the_world_for_this_tuis_chips_only() {
+    let backend = Fixed::new(2);
+    let w = world(Provenance::Measured).view(2 * SEC);
+    let s = BackdropSignals::gather(Some(&w), &backend, Vec::new(), 1.0, false);
+    assert_eq!(
+        s.pcie_bps,
+        Some(4e9),
+        "chip 0 in and out; chip 7 is not ours"
+    );
+    // Chip 0: 80 W of its 100 W limit. Chip 1 has no world reading: the
+    // backend's 54 W.
+    assert!((s.load.unwrap() - 0.8).abs() < 1e-6, "{:?}", s.load);
+    assert_eq!(s.step_ms, Some(250.0));
+    assert!(!s.estimated);
+    assert_eq!(s.now_s, 1.0);
+}
+
+#[test]
+fn estimated_readings_mark_the_signals() {
+    let backend = Fixed::new(2);
+    let w = world(Provenance::Estimated).view(2 * SEC);
+    let s = BackdropSignals::gather(Some(&w), &backend, Vec::new(), 0.0, false);
+    assert!(s.estimated);
+    // Mock services are estimates too.
+    let rows = crate::workload::inference_server::mock::mock_services(5.0);
+    let s = BackdropSignals::gather(None, &backend, rows, 0.0, false);
+    assert!(s.estimated);
+}
+
+#[test]
+fn stale_readings_are_not_used_and_no_world_falls_back_to_the_backend() {
+    let backend = Fixed::new(2);
+    // Two minutes later every reading is stale.
+    let w = world(Provenance::Measured).view(121 * SEC);
+    let s = BackdropSignals::gather(Some(&w), &backend, Vec::new(), 0.0, true);
+    assert_eq!(s.pcie_bps, None, "the fixed backend has no PCIe counters");
+    assert_eq!(s.step_ms, None);
+    // The backend's power: 45 and 54 W of 100.
+    assert!((s.load.unwrap() - 0.54).abs() < 1e-6, "{:?}", s.load);
+    assert!(s.estimated, "the backend's values are estimates here");
+    let none = BackdropSignals::gather(None, &backend, Vec::new(), 0.0, false);
+    assert!((none.load.unwrap() - 0.54).abs() < 1e-6);
+    assert!(!none.estimated);
+}
+
+// ---- The views' own painters ----------------------------------------------
+
+/// The Inference view's snake draws the atmosphere as it did (the scene is
+/// its default), and draws only its foreground when another backdrop is
+/// chosen.
+#[test]
+fn the_snake_draws_its_atmosphere_unless_told_not_to() {
+    tc(|| {
+        let (_, rows) = scene_rosters()
+            .into_iter()
+            .find(|(n, _)| *n == "aurora")
+            .unwrap();
+        let mut snake = crate::animation::Snake::new();
+        let mut atm = crate::animation::atmosphere::Atmosphere::new();
+        let (w, h) = (100, 30);
+        for i in 1..=30 {
+            let r = rows(i);
+            snake.update(&crate::animation::SnakeWorld {
+                rows: &r,
+                catalog: &[],
+                arch: "Blackhole",
+                chips: &[],
+                cadence_secs: 5,
+                width: w,
+                height: h,
+            });
+            atm.observe(&r);
+        }
+        let fg = snake.render_foreground(w, h);
+        assert!(atm.active());
+        let want = composite(&atm.render_backdrop(w, h), fg.clone(), w);
+        assert_eq!(frame_hash(&snake.render(w, h)), frame_hash(&want));
+        snake.set_atmosphere(false);
+        assert_eq!(frame_hash(&snake.render(w, h)), frame_hash(&fg));
+    })
+}
+
+/// With the sky off the Training view draws no aurora or star, and every
+/// other cell is the same: the pinned frames see the sky.
+#[test]
+fn the_training_view_leaves_the_sky_blank_when_told_to() {
+    tc(|| {
+        let backend = Fixed::new(2);
+        for (_, st) in crate::animation::backdrop_pins::train_states() {
+            let mut on = crate::animation::TrainView::new(120, 40);
+            let mut off = crate::animation::TrainView::new(120, 40);
+            off.set_sky(false);
+            for _ in 0..25 {
+                on.update();
+                off.update();
+            }
+            let (a, b) = (
+                cells(&on.render(&st, &backend)),
+                cells(&off.render(&st, &backend)),
+            );
+            let mut blanked = 0;
+            for (ra, rb) in a.iter().zip(&b) {
+                for (ca, cb) in ra.iter().zip(rb) {
+                    if ca != cb {
+                        assert!("✦∙·▒░".contains(ca.0), "{ca:?} -> {cb:?}");
+                        assert_eq!(cb.0, ' ');
+                        blanked += 1;
+                    }
+                }
+            }
+            assert!(blanked > 0);
+        }
+    })
+}

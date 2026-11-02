@@ -23,6 +23,7 @@ pub mod arcade;
 pub mod arcade_bus;
 pub mod arcade_layout;
 pub mod atmosphere;
+pub mod backdrop;
 #[cfg(test)]
 mod backdrop_pins;
 pub mod baseline;

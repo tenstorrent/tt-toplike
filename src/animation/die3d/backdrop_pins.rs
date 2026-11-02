@@ -159,3 +159,26 @@ fn the_pins_see_the_clouds() {
         }
     })
 }
+
+/// `set_clouds`, which the backdrop setting uses, is the `/clouds` switch:
+/// off gives the frames the old toggle gives, on gives the pinned ones.
+#[test]
+fn set_clouds_is_the_clouds_switch() {
+    tc(|| {
+        let (w, h) = (120, 40);
+        let toggled = die3d_hashes_with(true, w, h, |v| v.handle_key(Die3dKey::ToggleClouds, 0.0));
+        let off = die3d_hashes_with(true, w, h, |v| v.set_clouds(false));
+        assert_eq!(off, toggled);
+        let on = die3d_hashes_with(true, w, h, |v| {
+            v.set_clouds(false);
+            v.set_clouds(true);
+            assert!(v.clouds_on());
+        });
+        let pinned = PINS
+            .iter()
+            .find(|(n, _)| *n == "die3d busy true 120x40")
+            .unwrap()
+            .1;
+        assert_eq!(on, pinned.to_vec());
+    })
+}
