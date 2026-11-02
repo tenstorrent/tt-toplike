@@ -329,6 +329,14 @@ fn spawn_bursts(ds: &mut DeviceState, frame: u64, intensity: f32) {
 /// trained channels are filled first so there is a full drain to watch.
 /// A device with no trained channels is left alone. `update` holds
 /// `Deconstructing` until the channels drain, then returns to `Idle`.
+///
+/// `DefragVis::set_bus` calls this on a model unload read from the bus. The
+/// power-EMA heuristic in `update()` cannot be relied on for that: on
+/// Blackhole `aiclk` is always 200 MHz or more, so the chip jumps from the
+/// initial Idle straight to Running and never returns to Idle, leaving
+/// `idle_power` at its 0.0 start value. That pins the evict threshold to
+/// `POWER_IDLE_W` (8 W), which real Blackhole idle power (above 8 W) never
+/// falls to, so EVICT is otherwise unreachable there.
 fn evict_device(ds: &mut DeviceState, refill: bool) {
     if !ds.channels.iter().any(|c| c.enabled && c.trained) {
         return;
@@ -367,8 +375,11 @@ pub struct DefragVis {
     /// `set_bus`, `None` for no model. A model that was up and is now down
     /// or gone evicts the device.
     bus_seen: HashMap<usize, Option<ModelPhase>>,
-    /// The ready models that name no chip, at the last `set_bus`.
-    bus_unplaced: HashSet<EntityKey>,
+    /// The models that name no chip and have been ready, with their phase at
+    /// the last `set_bus`. A model stays here through a restart of its load
+    /// and leaves when it goes down, is gone (both evict every device) or
+    /// names a chip (the per-device rule then covers it).
+    bus_unplaced: HashMap<EntityKey, ModelPhase>,
 }
 
 impl DefragVis {
@@ -382,7 +393,7 @@ impl DefragVis {
             bus_state: ArcadeBusState::default(),
             bus_now: 0,
             bus_seen: HashMap::new(),
-            bus_unplaced: HashSet::new(),
+            bus_unplaced: HashMap::new(),
         }
     }
 
@@ -391,11 +402,15 @@ impl DefragVis {
     /// sight.
     ///
     /// A device whose model was up at the last read and is now down or gone
-    /// is evicted, and completed requests on a running device throw a
-    /// scatter burst. Both act only on a fresh update (not the first, not
-    /// after the view was away). With `unplaced_evicts_all` (a local bus), a
-    /// ready model that names no chip evicts every device when it goes down
-    /// or away, as the local inference monitor's unload signal did; an
+    /// is evicted. This compares two phase snapshots and reads no event, so
+    /// it acts on every update but the first sight of a device, also after
+    /// a gap (a return from another view, a stalled update) or a reconnect,
+    /// as the inference monitor's unload signal did while Defrag existed.
+    /// Completed requests on a running device throw a scatter burst, only on
+    /// a fresh update (not the first, not after the view was away), since
+    /// they are events. With `unplaced_evicts_all` (a local bus), a model
+    /// that names no chip and has been ready evicts every device when it
+    /// goes down or is gone, as the local monitor's unload signal did; an
     /// attached TUI passes `false`, since there a model with no chips is one
     /// on the host's own chips.
     pub fn set_bus(
@@ -431,7 +446,7 @@ impl DefragVis {
             let phase = co.and_then(|c| c.flag.as_ref()).map(|f| f.phase);
             let before = self.bus_seen.insert(d.index, phase);
             let up = |p: &Option<ModelPhase>| p.is_some_and(|p| p != ModelPhase::Down);
-            if fresh && before.as_ref().is_some_and(up) && !up(&phase) {
+            if before.as_ref().is_some_and(up) && !up(&phase) {
                 // Refill first when the model was serving, as the monitor's
                 // signal did, so there is a full drain to watch; a model
                 // that went down while loading drains what it had.
@@ -452,19 +467,37 @@ impl DefragVis {
         let known: HashSet<usize> = devices.iter().map(|d| d.index).collect();
         self.bus_seen.retain(|k, _| known.contains(k));
 
-        let unplaced: HashSet<EntityKey> = if unplaced_evicts_all {
-            w.models()
-                .into_iter()
-                .filter(|m| m.phase == ModelPhase::Ready && m.chips.is_empty())
-                .map(|m| m.key)
-                .collect()
-        } else {
-            HashSet::new()
-        };
-        let unloaded = self.bus_unplaced.iter().any(|k| !unplaced.contains(k));
+        // Models that name no chip, on a local bus: one that has been ready
+        // stays tracked until it goes down or is gone, which evicts every
+        // device (refilled first if it was serving), or until it names a
+        // chip. The first read finds nothing tracked, so evicts nothing.
+        let mut unloaded: Option<bool> = None;
+        let mut unplaced: HashMap<EntityKey, ModelPhase> = HashMap::new();
+        if unplaced_evicts_all {
+            let models = w.models();
+            for (key, was) in &self.bus_unplaced {
+                match models.iter().find(|m| &m.key == key) {
+                    Some(m) if m.phase != ModelPhase::Down => {
+                        if m.chips.is_empty() {
+                            unplaced.insert(key.clone(), m.phase);
+                        }
+                    }
+                    // Down or gone.
+                    _ => {
+                        let refill = *was == ModelPhase::Ready;
+                        unloaded = Some(unloaded.unwrap_or(false) || refill);
+                    }
+                }
+            }
+            for m in &models {
+                if m.phase == ModelPhase::Ready && m.chips.is_empty() {
+                    unplaced.insert(m.key.clone(), m.phase);
+                }
+            }
+        }
         self.bus_unplaced = unplaced;
-        if fresh && unloaded {
-            evict = devices.iter().map(|d| (d.index, true)).collect();
+        if let Some(refill) = unloaded {
+            evict = devices.iter().map(|d| (d.index, refill)).collect();
         }
 
         for (idx, refill) in evict {
@@ -995,27 +1028,6 @@ impl DefragVis {
                     }
                 }
             }
-        }
-    }
-
-    /// Force every loaded device into the EVICT (Deconstructing) animation.
-    ///
-    /// Driven by an explicit model-unload signal from the inference monitor — a
-    /// reliable discrete event. The power-EMA heuristic in `update()` can't be
-    /// relied on for this: on Blackhole `aiclk` is always ≥200, so the chip jumps
-    /// straight from the initial Idle to Running and never returns to Idle, leaving
-    /// `idle_power` at its 0.0 init value; that pins the evict threshold to
-    /// `POWER_IDLE_W` (8 W), which real BH idle power (>8 W) never falls to — so
-    /// EVICT is otherwise unreachable there.
-    ///
-    /// Fills each device's trained channels then hands them to `Deconstructing`, so
-    /// there's a full→empty drain to watch (mirrors the Running→Deconstructing
-    /// side-effects in `update()`). Devices with no trained channels are skipped.
-    /// `update()` respects the forced phase — it holds `Deconstructing` until the
-    /// channels drain, then returns to `Idle`.
-    pub fn trigger_evict(&mut self) {
-        for ds in self.devices.values_mut() {
-            evict_device(ds, true);
         }
     }
 
@@ -2019,7 +2031,7 @@ mod tests {
     }
 
     #[test]
-    fn trigger_evict_forces_deconstructing_on_trained_devices() {
+    fn evict_device_forces_deconstructing_on_trained_devices() {
         let mut dv = DefragVis::new(120, 40);
         let mut ds = DeviceState::new(0);
         ds.phase = Phase::Running;
@@ -2034,7 +2046,9 @@ mod tests {
         idle.phase = Phase::Idle;
         dv.devices.insert(1, idle);
 
-        dv.trigger_evict();
+        for ds in dv.devices.values_mut() {
+            evict_device(ds, true);
+        }
 
         let evicting = &dv.devices[&0];
         assert_eq!(

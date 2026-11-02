@@ -3322,10 +3322,9 @@ fn run_app(
             // frame dozens of times a second for no visible benefit.
             // `proc_rows` is current as of just above; the inference snapshot
             // is re-read here (cheap: an `ArcSwap` load + clone, see
-            // `InferenceServerMonitor::snapshot`) rather than threaded out of
-            // the `#[cfg(target_os = "linux")]` block above, since that block
-            // computes it only to detect the model-unload edge and doesn't
-            // otherwise need to survive past that check.
+            // `InferenceServerMonitor::snapshot`), as the bus feed above
+            // reads its own copy inside a `#[cfg(target_os = "linux")]`
+            // binding.
             //
             // The frame is built from the bus (`serve_frame`): the newest
             // raw `tt-smi` record in the world, which the data tick

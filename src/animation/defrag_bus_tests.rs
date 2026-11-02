@@ -255,7 +255,7 @@ fn ready_fills_the_blocks_and_washes_them_teal_on_the_change() {
 }
 
 #[test]
-fn a_model_that_goes_down_or_away_evicts_its_chip_only() {
+fn a_model_that_goes_down_or_is_gone_evicts_its_chip_only() {
     tc(|| {
         let t0 = 5 * SEC;
         let (_, b) = defrag();
@@ -273,14 +273,58 @@ fn a_model_that_goes_down_or_away_evicts_its_chip_only() {
             assert_ne!(phase(&d, 1), Phase::Deconstructing);
             assert!(row_text(&d.render(&b), LABEL_ROW).contains("EVICT"));
         }
-        // First sight of a down model, and an unload while away: no evict.
+        // First sight of a down model: no evict.
         let mut d = warmed(&b, t0);
         step(&mut d, &b, &down.view(t0 + SEC));
         assert_ne!(phase(&d, 0), Phase::Deconstructing, "first sight");
+    })
+}
+
+/// Group B S2: eviction compares two phase snapshots and reads no event, so
+/// the event history's away rule does not apply to it. The old monitor
+/// evicted on every scan while Defrag existed. An unload seen after a return
+/// from another view (Defrag kept, a long gap), after one stalled update (a
+/// gap over a second at the usual 30 a second), or in a world whose head
+/// went backwards (a reconnect) still evicts the chip.
+#[test]
+fn an_unload_seen_after_a_gap_or_a_reconnect_still_evicts() {
+    tc(|| {
+        let t0 = 5 * SEC;
+        let (_, b) = defrag();
+        let mut up = Bus::new();
+        up.ready("m", &[0], None);
+        let mut down = up.clone();
+        down.phase("m", "down");
+        for (why, gap) in [
+            ("return from another view", 20 * SEC),
+            ("stall", 3 * SEC / 2),
+        ] {
+            let mut d = warmed(&b, t0);
+            step(&mut d, &b, &up.view(t0 + 4 * TICK));
+            step(&mut d, &b, &up.view(t0 + 5 * TICK));
+            step(&mut d, &b, &down.view(t0 + 5 * TICK + gap));
+            assert_eq!(phase(&d, 0), Phase::Deconstructing, "{why}");
+            assert_ne!(phase(&d, 1), Phase::Deconstructing, "{why}");
+        }
+        // A reconnect: the new world's head is behind the old one's, and the
+        // model is down in it.
+        let mut long = Bus::new();
+        for _ in 0..20 {
+            long.sample(
+                &chip(1),
+                crate::bus::signals::ASIC_TEMPERATURE_C,
+                Value::F64(50.0),
+                Provenance::Measured,
+            );
+        }
+        long.ready("m", &[0], None);
+        let mut back = Bus::new();
+        back.ready("m", &[0], None).phase("m", "down");
+        assert!(back.world.seq() < long.world.seq());
         let mut d = warmed(&b, t0);
-        step(&mut d, &b, &up.view(t0 + 4 * TICK));
-        step(&mut d, &b, &down.view(t0 + 20 * SEC));
-        assert_ne!(phase(&d, 0), Phase::Deconstructing, "away");
+        step(&mut d, &b, &long.view(t0 + 4 * TICK));
+        step(&mut d, &b, &back.view(t0 + 5 * TICK));
+        assert_eq!(phase(&d, 0), Phase::Deconstructing, "head went backwards");
     })
 }
 
@@ -298,6 +342,61 @@ fn a_model_that_goes_down_while_loading_drains_what_it_had() {
         step(&mut d, &b, &down.view(t0 + SEC + TICK));
         assert_eq!(phase(&d, 1), Phase::Deconstructing);
         assert!(fills(&d, 1).iter().all(|x| *x <= 0.3), "{:?}", fills(&d, 1));
+    })
+}
+
+/// Group B S1 and S2: a ready model that names no chip evicts every chip on
+/// a local bus only when it goes `Down` or is gone, in step with a placed
+/// model. A restart of its load (Ready to Compiling or Loading) evicts
+/// nothing, nor does it gaining chips. Its unload still evicts after a gap.
+#[test]
+fn a_chipless_model_evicts_every_chip_only_on_down_or_gone() {
+    tc(|| {
+        let t0 = 5 * SEC;
+        let (_, b) = defrag();
+        let mut up = Bus::new();
+        up.ready("m", &[], None);
+        let mut compiling = up.clone();
+        compiling.phase("m", "compiling");
+        let mut down = compiling.clone();
+        down.phase("m", "down");
+        let mut placed = up.clone();
+        placed.ready("m", &[1], None);
+        let evicted = |d: &DefragVis| [0, 1].map(|i| phase(d, i) == Phase::Deconstructing);
+
+        // Ready, then its load restarts: nothing drains.
+        let mut d = warmed(&b, t0);
+        step(&mut d, &b, &up.view(t0 + 4 * TICK));
+        step(&mut d, &b, &compiling.view(t0 + 5 * TICK));
+        assert_eq!(evicted(&d), [false, false], "a restart is no unload");
+        // Then it goes down: every chip drains.
+        step(&mut d, &b, &down.view(t0 + 6 * TICK));
+        assert_eq!(evicted(&d), [true, true], "down after a restart");
+
+        // Ready, then it names a chip: no drain of every chip.
+        let mut d = warmed(&b, t0);
+        step(&mut d, &b, &up.view(t0 + 4 * TICK));
+        step(&mut d, &b, &placed.view(t0 + 5 * TICK));
+        assert_eq!(evicted(&d), [false, false], "gaining chips is no unload");
+
+        // Gone after a return from another view, and after a stall.
+        let mut gone = up.clone();
+        gone.gone("m");
+        for (why, gap) in [
+            ("return from another view", 20 * SEC),
+            ("stall", 3 * SEC / 2),
+        ] {
+            let mut d = warmed(&b, t0);
+            step(&mut d, &b, &up.view(t0 + 4 * TICK));
+            step(&mut d, &b, &up.view(t0 + 5 * TICK));
+            step(&mut d, &b, &gone.view(t0 + 5 * TICK + gap));
+            assert_eq!(evicted(&d), [true, true], "{why}");
+        }
+
+        // The first read evicts nothing, even for a model already gone.
+        let mut d = warmed(&b, t0);
+        step(&mut d, &b, &gone.view(t0 + 4 * TICK));
+        assert_eq!(evicted(&d), [false, false], "first read");
     })
 }
 

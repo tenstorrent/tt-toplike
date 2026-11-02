@@ -34,8 +34,10 @@
 //! * **`Down`, or the model gone**: a chip whose model was up and is now
 //!   down or gone is evicted: its blocks drain right to left. This replaces
 //!   the local inference monitor's unload signal, so an attached TUI sees
-//!   the host's unloads too. Locally, a ready model that names no chip
-//!   evicts every chip when it unloads, as the monitor's signal did.
+//!   the host's unloads too. Locally, a model that names no chip and has
+//!   been ready evicts every chip when it goes down or is gone, as the
+//!   monitor's signal did. An eviction compares two phase snapshots, so it
+//!   is not held back by the away rule; only the first read evicts nothing.
 //! * **Requests**: completed requests for a model on a running chip throw a
 //!   scatter burst across its blocks, brighter for more requests (the size
 //!   follows the count; the cells it lights are decoration).

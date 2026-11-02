@@ -783,9 +783,11 @@ the rules and the drawing.
 A chip with no model keeps the phase its power and clock readings give, as before. The EVICT on
 an unload used to come from the local inference monitor; it now comes from the bus, which the
 monitor feeds, so an attached TUI sees the host's unloads on its own chips. On a local bus a
-ready model that names no chip evicts every chip when it unloads, as the monitor's signal did.
-An attached TUI does not do this, since there such a model runs on the host's chips. Unloads
-seen across a gap (the first read, or a return from another view) evict nothing. The model's
+model that names no chip and has been ready evicts every chip when it goes `Down` or is gone,
+as the monitor's signal did; a restart of its load evicts nothing. An attached TUI does not do
+this, since there such a model runs on the host's chips. An eviction compares the phase at two
+reads and reads no event, so it also happens after a gap (a return from another view or a
+stalled update) and after a reconnect; only the first read evicts nothing. The model's
 `model.kernel_count` is not used. With an empty world Defrag draws the frames it drew before
 the bus; a test pins them.
 
