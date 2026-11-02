@@ -4701,3 +4701,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "train_bus_tests.rs"]
+mod bus_tests;
